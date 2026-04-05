@@ -224,9 +224,11 @@ export default async function handler(
 			const deploymentHash = extractHash(req.headers, req.body);
 			const owner = getGithubRepositoryOwner(githubBody);
 			const normalizedCommits =
-				githubBody?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				) || [];
+				githubBody?.commits?.flatMap((commit: any) => [
+						...(commit.modified || []),
+						...(commit.added || []),
+						...(commit.removed || []),
+					]).filter(Boolean) || [];
 
 			const apps = await db.query.applications.findMany({
 				where: and(
