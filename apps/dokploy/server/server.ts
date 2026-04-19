@@ -73,6 +73,48 @@ void app.prepare().then(async () => {
 			console.log("Starting Deployment Worker");
 			const { deploymentWorker } = await import("./queues/deployments-queue");
 			await deploymentWorker.run();
+
+			// Graceful shutdown: abort in-flight deployments so no rows are left
+			// stuck in "running". `initCancelDeployments` sweeps on the *next*
+			// boot — this closes the current process's window cleanly.
+			//
+			// We bound the drain to DEPLOYMENT_SHUTDOWN_GRACE_MS so a build that
+			// ignores its abort signal can't prevent the process from exiting
+			// (systemd / Docker will SIGKILL us after their own grace window;
+			// we want to exit before that and let initCancelDeployments pick up
+			// anything still marked running).
+			const DRAIN_GRACE_MS = Number.parseInt(
+				process.env.DEPLOYMENT_SHUTDOWN_GRACE_MS ?? "8000",
+				10,
+			);
+			const shutdown = async (signal: string) => {
+				console.log(`Received ${signal}, draining deployment queue…`);
+				try {
+					await Promise.race([
+						deploymentWorker.close(`${signal} received`),
+						new Promise<void>((_, reject) =>
+							setTimeout(
+								() => reject(new Error("drain timeout")),
+								Number.isFinite(DRAIN_GRACE_MS)
+									? Math.max(1000, DRAIN_GRACE_MS)
+									: 8000,
+							).unref?.(),
+						),
+					]);
+				} catch (error) {
+					console.error(
+						"Deployment drain exceeded grace window or failed; exiting anyway.",
+						error,
+					);
+				}
+				process.exit(0);
+			};
+			process.once("SIGTERM", () => {
+				void shutdown("SIGTERM");
+			});
+			process.once("SIGINT", () => {
+				void shutdown("SIGINT");
+			});
 		}
 	} catch (e) {
 		console.error("Main Server Error", e);

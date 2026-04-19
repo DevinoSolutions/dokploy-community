@@ -40,6 +40,7 @@ import {
 import { api } from "@/utils/api";
 import { ShowNodesModal } from "../cluster/nodes/show-nodes-modal";
 import { TerminalModal } from "../web-server/terminal-modal";
+import { ChangeConcurrencyModal } from "./actions/change-concurrency-modal";
 import { ShowServerActions } from "./actions/show-server-actions";
 import { HandleServers } from "./handle-servers";
 import { SetupServer } from "./setup-server";
@@ -344,6 +345,22 @@ export const ShowServers = () => {
 																						<p>Edit Server</p>
 																					</TooltipContent>
 																				</Tooltip>
+
+																				{!isBuildServer && (
+																					<Tooltip>
+																						<TooltipTrigger asChild>
+																							<div>
+																								<ChangeConcurrencyModal
+																									serverId={server.serverId}
+																									asButton={true}
+																								/>
+																							</div>
+																						</TooltipTrigger>
+																						<TooltipContent>
+																							<p>Deployment Concurrency</p>
+																						</TooltipContent>
+																					</Tooltip>
+																				)}
 
 																				{server.sshKeyId && !isBuildServer && (
 																					<Tooltip>
