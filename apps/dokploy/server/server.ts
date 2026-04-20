@@ -16,6 +16,7 @@ import {
 import { config } from "dotenv";
 import next from "next";
 import packageInfo from "../package.json";
+import { deploymentWorker } from "./queues/deployments-queue";
 import { setupDockerContainerLogsWebSocketServer } from "./wss/docker-container-logs";
 import { setupDockerContainerTerminalWebSocketServer } from "./wss/docker-container-terminal";
 import { setupDockerStatsMonitoringSocketServer } from "./wss/docker-stats";
@@ -71,7 +72,6 @@ void app.prepare().then(async () => {
 
 		if (!IS_CLOUD) {
 			console.log("Starting Deployment Worker");
-			const { deploymentWorker } = await import("./queues/deployments-queue");
 			await deploymentWorker.run();
 
 			// Graceful shutdown: abort in-flight deployments so no rows are left

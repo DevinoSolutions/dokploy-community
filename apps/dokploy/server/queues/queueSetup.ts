@@ -44,12 +44,38 @@ const concurrencyProvider = async (
 
 const noopProvider = () => undefined;
 
-export const deploymentQueueManager = new DeploymentQueueManager({
-	defaultConcurrency: Number.isFinite(DEFAULT_CONCURRENCY)
-		? Math.max(1, DEFAULT_CONCURRENCY)
-		: 1,
-	concurrencyProvider: IS_CLOUD ? noopProvider : concurrencyProvider,
-});
+/**
+ * The queue manager MUST be a process-wide singleton. In a Next.js + tsx/esbuild
+ * setup this module is compiled into BOTH the custom server bundle (server.ts
+ * and everything statically reachable from it) AND Next.js's own bundle (where
+ * the tRPC routers live). Without this guard we'd get one instance per bundle,
+ * and `deploymentWorker.run()` would set the handler on the server-side copy
+ * while tRPC deploy mutations would enqueue onto the (handler-less) Next.js
+ * copy — jobs would sit in pending forever.
+ *
+ * Pinning to `globalThis` via a registered `Symbol.for` key makes every copy
+ * of this module converge on a single instance.
+ */
+const SINGLETON_KEY = Symbol.for("dokploy.deploymentQueueManager");
+type WithSingleton = {
+	[SINGLETON_KEY]?: DeploymentQueueManager;
+};
+const globalRef = globalThis as WithSingleton;
+
+function resolveSingleton(): DeploymentQueueManager {
+	const existing = globalRef[SINGLETON_KEY];
+	if (existing) return existing;
+	const created = new DeploymentQueueManager({
+		defaultConcurrency: Number.isFinite(DEFAULT_CONCURRENCY)
+			? Math.max(1, DEFAULT_CONCURRENCY)
+			: 1,
+		concurrencyProvider: IS_CLOUD ? noopProvider : concurrencyProvider,
+	});
+	globalRef[SINGLETON_KEY] = created;
+	return created;
+}
+
+export const deploymentQueueManager = resolveSingleton();
 
 /**
  * Populate `serverId` + `buildServerId` on a job from the underlying entity.
