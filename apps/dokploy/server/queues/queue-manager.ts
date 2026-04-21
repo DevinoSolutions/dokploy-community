@@ -61,9 +61,15 @@ export class DeploymentQueueManager {
 			queue.setHandler((data, signal) => handler(data, signal));
 		}
 		for (const pending of this.creating.values()) {
-			pending.then((queue) => {
-				queue.setHandler((data, signal) => handler(data, signal));
-			});
+			// Swallow rejection: a failed creation already unregisters itself
+			// from `this.creating` via getOrCreate's catch, so the next enqueue
+			// retries cleanly. Without `.catch`, a rejected pending here would
+			// surface as an unhandled rejection under Node's default policy.
+			pending
+				.then((queue) => {
+					queue.setHandler((data, signal) => handler(data, signal));
+				})
+				.catch(() => {});
 		}
 	}
 
