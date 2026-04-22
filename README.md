@@ -2,8 +2,17 @@
   <a href="https://dokploy.com">
     <img src=".github/sponsors/logo.png" alt="Dokploy - Open Source Alternative to Vercel, Heroku and Netlify." width="100%"  />
   </a>
-  </br>
-  </br>
+</div>
+
+## Dokploy Community Fork
+
+This is an unofficial community fork of [Dokploy](https://github.com/Dokploy/dokploy), maintained by [Devino Solutions](https://github.com/DevinoSolutions). It is not affiliated with or endorsed by the official Dokploy project.
+
+This fork exists to make highly requested community features available while they await merging upstream. It stays in sync with the official repository.
+
+---
+
+<div align="center">
   <p>Join us on Discord for help, feedback, and discussions!</p>
   <a href="https://discord.gg/2tBnJ3jDJc">
     <img src="https://discordapp.com/api/guilds/1234073262418563112/widget.png?style=banner2" alt="Discord Shield"/>
