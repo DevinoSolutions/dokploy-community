@@ -7,6 +7,7 @@ import {
 	CardTitle,
 } from "@/components/ui/card";
 import { api } from "@/utils/api";
+import { ChangeConcurrencyModal } from "./servers/actions/change-concurrency-modal";
 import { ShowDokployActions } from "./servers/actions/show-dokploy-actions";
 import { ShowStorageActions } from "./servers/actions/show-storage-actions";
 import { ShowTraefikActions } from "./servers/actions/show-traefik-actions";
@@ -46,6 +47,20 @@ export const WebServer = () => {
 							<ShowStorageActions />
 
 							<UpdateServer />
+						</div>
+
+						<div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 pt-4 border-t">
+							<div className="min-w-0">
+								<div className="text-sm font-medium">
+									Deployment concurrency
+								</div>
+								<div className="text-xs text-muted-foreground">
+									Number of deployments the Dokploy host can run in parallel.
+								</div>
+							</div>
+							<div className="self-end md:self-auto shrink-0">
+								<ChangeConcurrencyModal serverId={null} asButton />
+							</div>
 						</div>
 
 						<div className="flex items-center flex-wrap justify-between gap-4">

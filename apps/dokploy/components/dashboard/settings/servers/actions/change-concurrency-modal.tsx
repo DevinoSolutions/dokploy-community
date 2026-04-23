@@ -20,14 +20,19 @@ const MIN = 1;
 const MAX = 10;
 
 interface Props {
-	serverId: string;
+	/**
+	 * Target of the concurrency change.
+	 * - A `serverId` string: configures a remote server.
+	 * - `null`: configures the local Dokploy host (persisted on `webServerSettings`).
+	 */
+	serverId: string | null;
 	/** When true, render as a small icon button matching the other card actions. */
 	asButton?: boolean;
 }
 
 /**
  * Lets operators raise or lower the number of deployments that can run in
- * parallel on a given remote server. The change lands in the DB and is
+ * parallel on a given deployment target. The change lands in the DB and is
  * pushed into the live in-memory queue the same tick — no restart needed.
  *
  * In-flight jobs keep running; pending jobs stay queued. Lowering the value
@@ -37,19 +42,33 @@ export const ChangeConcurrencyModal = ({
 	serverId,
 	asButton = false,
 }: Props) => {
+	const isLocal = serverId === null;
 	const [open, setOpen] = useState(false);
-	const { data: server, refetch } = api.server.one.useQuery({ serverId });
-	const update = api.server.updateDeploymentConcurrency.useMutation();
-	const [value, setValue] = useState<number>(
-		server?.deploymentConcurrency ?? 1,
+
+	const serverQuery = api.server.one.useQuery(
+		{ serverId: serverId ?? "" },
+		{ enabled: !isLocal },
 	);
+	const webServerQuery = api.settings.getWebServerSettings.useQuery(undefined, {
+		enabled: isLocal,
+	});
+
+	const updateRemote = api.server.updateDeploymentConcurrency.useMutation();
+	const updateLocal = api.settings.updateDeploymentConcurrency.useMutation();
+	const update = isLocal ? updateLocal : updateRemote;
+
+	const currentConcurrency = isLocal
+		? webServerQuery.data?.deploymentConcurrency
+		: serverQuery.data?.deploymentConcurrency;
+
+	const [value, setValue] = useState<number>(currentConcurrency ?? 1);
 
 	// Keep the input in sync when the query resolves / dialog opens.
 	useEffect(() => {
-		if (open && typeof server?.deploymentConcurrency === "number") {
-			setValue(server.deploymentConcurrency);
+		if (open && typeof currentConcurrency === "number") {
+			setValue(currentConcurrency);
 		}
-	}, [open, server?.deploymentConcurrency]);
+	}, [open, currentConcurrency]);
 
 	const save = async () => {
 		if (!Number.isInteger(value) || value < MIN || value > MAX) {
@@ -57,11 +76,16 @@ export const ChangeConcurrencyModal = ({
 			return;
 		}
 		try {
-			await update.mutateAsync({
-				serverId,
-				deploymentConcurrency: value,
-			});
-			await refetch();
+			if (isLocal) {
+				await updateLocal.mutateAsync({ deploymentConcurrency: value });
+				await webServerQuery.refetch();
+			} else {
+				await updateRemote.mutateAsync({
+					serverId: serverId as string,
+					deploymentConcurrency: value,
+				});
+				await serverQuery.refetch();
+			}
 			toast.success("Deployment concurrency updated");
 			setOpen(false);
 		} catch (error) {
@@ -70,6 +94,10 @@ export const ChangeConcurrencyModal = ({
 			);
 		}
 	};
+
+	const description = isLocal
+		? "Number of deployments the Dokploy host can run in parallel. Remote servers are unaffected."
+		: "Number of deployments this server may run in parallel. Other servers are unaffected.";
 
 	return (
 		<Dialog open={open} onOpenChange={setOpen}>
@@ -88,10 +116,7 @@ export const ChangeConcurrencyModal = ({
 			<DialogContent className="sm:max-w-md">
 				<DialogHeader>
 					<DialogTitle>Deployment concurrency</DialogTitle>
-					<DialogDescription>
-						Number of deployments this server may run in parallel. Other servers
-						are unaffected.
-					</DialogDescription>
+					<DialogDescription>{description}</DialogDescription>
 				</DialogHeader>
 
 				<div className="flex flex-col gap-3 py-2">

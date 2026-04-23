@@ -2,6 +2,7 @@ import { IS_CLOUD } from "@dokploy/server";
 import { findApplicationById } from "@dokploy/server/services/application";
 import { findComposeById } from "@dokploy/server/services/compose";
 import { findServerById } from "@dokploy/server/services/server";
+import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { killDockerBuild } from "./kill-docker-build";
 import { DeploymentQueueManager } from "./queue-manager";
 import {
@@ -33,7 +34,17 @@ const DEFAULT_CONCURRENCY = Number.parseInt(
 const concurrencyProvider = async (
 	targetKey: string,
 ): Promise<number | undefined> => {
-	if (targetKey === LOCAL_TARGET) return undefined;
+	if (targetKey === LOCAL_TARGET) {
+		// Read the operator-tunable value persisted on `webServerSettings`.
+		// If no row exists yet (fresh install pre-setup) fall back to the
+		// DEPLOYMENT_QUEUE_CONCURRENCY env var via the caller's default.
+		try {
+			const settings = await getWebServerSettings();
+			return settings?.deploymentConcurrency ?? undefined;
+		} catch {
+			return undefined;
+		}
+	}
 	try {
 		const server = await findServerById(targetKey);
 		return server.deploymentConcurrency ?? undefined;
