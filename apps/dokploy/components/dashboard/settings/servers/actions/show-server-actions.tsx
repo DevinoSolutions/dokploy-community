@@ -9,7 +9,6 @@ import {
 	DialogTrigger,
 } from "@/components/ui/dialog";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
-import { ChangeConcurrencyModal } from "./change-concurrency-modal";
 import { ShowStorageActions } from "./show-storage-actions";
 import { ShowTraefikActions } from "./show-traefik-actions";
 import { ToggleDockerCleanup } from "./toggle-docker-cleanup";
@@ -50,7 +49,6 @@ export const ShowServerActions = ({ serverId, asButton = false }: Props) => {
 					<ShowTraefikActions serverId={serverId} />
 					<ShowStorageActions serverId={serverId} />
 					<ToggleDockerCleanup serverId={serverId} />
-					<ChangeConcurrencyModal serverId={serverId} />
 				</div>
 			</DialogContent>
 		</Dialog>

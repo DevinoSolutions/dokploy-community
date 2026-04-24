@@ -1,4 +1,4 @@
-import { Info, Loader2, Workflow } from "lucide-react";
+import { Info, Loader2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -12,6 +12,7 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@/components/ui/dialog";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/utils/api";
@@ -26,8 +27,6 @@ interface Props {
 	 * - `null`: configures the local Dokploy host (persisted on `webServerSettings`).
 	 */
 	serverId: string | null;
-	/** When true, render as a small icon button matching the other card actions. */
-	asButton?: boolean;
 }
 
 /**
@@ -38,10 +37,7 @@ interface Props {
  * In-flight jobs keep running; pending jobs stay queued. Lowering the value
  * does NOT kill anything currently executing.
  */
-export const ChangeConcurrencyModal = ({
-	serverId,
-	asButton = false,
-}: Props) => {
+export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 	const isLocal = serverId === null;
 	const [open, setOpen] = useState(false);
 
@@ -102,16 +98,12 @@ export const ChangeConcurrencyModal = ({
 	return (
 		<Dialog open={open} onOpenChange={setOpen}>
 			<DialogTrigger asChild>
-				{asButton ? (
-					<Button variant="outline" size="icon" className="h-9 w-9">
-						<Workflow className="h-4 w-4" />
-					</Button>
-				) : (
-					<Button variant="outline" className="w-full justify-start gap-2">
-						<Workflow className="h-4 w-4" />
-						Deployment concurrency
-					</Button>
-				)}
+				<DropdownMenuItem
+					className="w-full cursor-pointer"
+					onSelect={(e) => e.preventDefault()}
+				>
+					<span>Deployment Concurrency</span>
+				</DropdownMenuItem>
 			</DialogTrigger>
 			<DialogContent className="sm:max-w-md">
 				<DialogHeader>
