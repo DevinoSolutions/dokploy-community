@@ -535,8 +535,35 @@ export const calculateResources = ({
 	};
 };
 
+/**
+ * Merge the base Swarm Networks list with user-selected custom networks.
+ * Preserves any user-supplied networkSwarm (advanced setting) and falls back
+ * to dokploy-network so Traefik can always route. Extras are resolved names
+ * from a resource's networkIds (see resolveNetworkNamesForResource). The
+ * final list is deduplicated by Target.
+ */
+const mergeNetworks = (
+	networkSwarm: Array<{ Target?: string }> | null,
+	extras: string[],
+): Array<{ Target?: string }> => {
+	const base =
+		networkSwarm && networkSwarm.length > 0
+			? networkSwarm
+			: [{ Target: "dokploy-network" }];
+	const seen = new Set(base.map((n) => n.Target).filter(Boolean));
+	const merged: Array<{ Target?: string }> = [...base];
+	for (const name of extras) {
+		if (!seen.has(name)) {
+			seen.add(name);
+			merged.push({ Target: name });
+		}
+	}
+	return merged;
+};
+
 export const generateConfigContainer = (
 	application: Partial<ApplicationNested>,
+	extraNetworks: string[] = [],
 ) => {
 	const {
 		healthCheckSwarm,
@@ -611,13 +638,7 @@ export const generateConfigContainer = (
 			stopGracePeriodSwarm !== undefined && {
 				StopGracePeriod: stopGracePeriodSwarm,
 			}),
-		...(networkSwarm
-			? {
-					Networks: networkSwarm,
-				}
-			: {
-					Networks: [{ Target: "dokploy-network" }],
-				}),
+		Networks: mergeNetworks(networkSwarm ?? null, extraNetworks),
 		...(endpointSpecSwarm && {
 			EndpointSpec: {
 				...(endpointSpecSwarm.Mode && { Mode: endpointSpecSwarm.Mode }),

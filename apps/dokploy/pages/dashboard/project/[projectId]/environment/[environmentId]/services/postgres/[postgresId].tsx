@@ -21,6 +21,7 @@ import { ShowGeneralPostgres } from "@/components/dashboard/postgres/general/sho
 import { ShowInternalPostgresCredentials } from "@/components/dashboard/postgres/general/show-internal-postgres-credentials";
 import { UpdatePostgres } from "@/components/dashboard/postgres/update-postgres";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
+import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { PostgresqlIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -292,6 +293,12 @@ const Postgresql = (
 												<ShowDatabaseAdvancedSettings
 													id={postgresId}
 													type="postgres"
+												/>
+												<ResourceNetworksCard
+													resourceType="postgres"
+													resourceId={postgresId}
+													value={data?.networkIds ?? []}
+													serverId={data?.serverId}
 												/>
 											</div>
 										</TabsContent>

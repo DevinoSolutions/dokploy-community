@@ -21,6 +21,7 @@ import { ShowGeneralMysql } from "@/components/dashboard/mysql/general/show-gene
 import { ShowInternalMysqlCredentials } from "@/components/dashboard/mysql/general/show-internal-mysql-credentials";
 import { UpdateMysql } from "@/components/dashboard/mysql/update-mysql";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
+import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { MysqlIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -285,6 +286,12 @@ const MySql = (
 														id={mysqlId}
 														type="mysql"
 													/>
+												<ResourceNetworksCard
+													resourceType="mysql"
+													resourceId={mysqlId}
+													value={data?.networkIds ?? []}
+													serverId={data?.serverId}
+												/>
 												</div>
 											</TabsContent>
 										)}

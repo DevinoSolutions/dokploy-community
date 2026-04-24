@@ -8,6 +8,7 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
+import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 export type MariadbNested = InferResultType<
@@ -49,7 +50,10 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(mariadb);
+	} = generateConfigContainer(
+		mariadb,
+		await resolveNetworkNamesForResource(mariadb.networkIds, mariadb.serverId),
+	);
 	const resources = calculateResources({
 		memoryLimit,
 		memoryReservation,

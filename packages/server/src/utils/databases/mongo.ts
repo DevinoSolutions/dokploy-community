@@ -8,6 +8,7 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
+import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 export type MongoNested = InferResultType<
@@ -95,7 +96,10 @@ ${command ?? "wait $MONGOD_PID"}`;
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(mongo);
+	} = generateConfigContainer(
+		mongo,
+		await resolveNetworkNamesForResource(mongo.networkIds, mongo.serverId),
+	);
 
 	const resources = calculateResources({
 		memoryLimit,

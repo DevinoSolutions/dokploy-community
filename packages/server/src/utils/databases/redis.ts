@@ -8,6 +8,7 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
+import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 export type RedisNested = InferResultType<
@@ -46,7 +47,10 @@ export const buildRedis = async (redis: RedisNested) => {
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(redis);
+	} = generateConfigContainer(
+		redis,
+		await resolveNetworkNamesForResource(redis.networkIds, redis.serverId),
+	);
 	const resources = calculateResources({
 		memoryLimit,
 		memoryReservation,

@@ -21,6 +21,7 @@ import { UpdateLibsql } from "@/components/dashboard/libsql/update-libsql";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
+import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { LibsqlIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -276,6 +277,12 @@ const Libsql = (
 												id={libsqlId}
 												type="libsql"
 											/>
+												<ResourceNetworksCard
+													resourceType="libsql"
+													resourceId={libsqlId}
+													value={data?.networkIds ?? []}
+													serverId={data?.serverId}
+												/>
 										</div>
 									</TabsContent>
 								</Tabs>

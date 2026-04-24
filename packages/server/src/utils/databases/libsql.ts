@@ -8,6 +8,7 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
+import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 export type LibsqlNested = InferResultType<
@@ -55,7 +56,10 @@ export const buildLibsql = async (libsql: LibsqlNested) => {
 		RollbackConfig,
 		UpdateConfig,
 		Networks,
-	} = generateConfigContainer(libsql);
+	} = generateConfigContainer(
+		libsql,
+		await resolveNetworkNamesForResource(libsql.networkIds, libsql.serverId),
+	);
 	const resources = calculateResources({
 		memoryLimit,
 		memoryReservation,

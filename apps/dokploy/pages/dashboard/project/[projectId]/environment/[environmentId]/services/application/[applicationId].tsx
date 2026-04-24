@@ -13,6 +13,7 @@ import { type ReactElement, useEffect, useState } from "react";
 import { toast } from "sonner";
 import superjson from "superjson";
 import { ShowClusterSettings } from "@/components/dashboard/application/advanced/cluster/show-cluster-settings";
+import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { AddCommand } from "@/components/dashboard/application/advanced/general/add-command";
 import { ShowPorts } from "@/components/dashboard/application/advanced/ports/show-port";
 import { ShowRedirects } from "@/components/dashboard/application/advanced/redirects/show-redirects";
@@ -411,6 +412,12 @@ const Service = (
 												<ShowClusterSettings
 													id={applicationId}
 													type="application"
+												/>
+												<ResourceNetworksCard
+													resourceType="application"
+													resourceId={applicationId}
+													value={data?.networkIds ?? []}
+													serverId={data?.serverId}
 												/>
 												<ShowBuildServer applicationId={applicationId} />
 												<ShowResources id={applicationId} type="application" />

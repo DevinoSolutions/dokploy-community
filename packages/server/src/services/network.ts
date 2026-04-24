@@ -4,7 +4,7 @@ import {
 	network,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
 import { IS_CLOUD } from "../constants";
 import { getRemoteDocker } from "../utils/servers/remote-docker";
@@ -28,6 +28,36 @@ export const findNetworksByOrganizationId = async (organizationId: string) =>
 		.from(network)
 		.where(eq(network.organizationId, organizationId))
 		.orderBy(desc(network.createdAt));
+
+/**
+ * Resolve a list of networkIds to Docker network names for use in a Swarm
+ * service spec. Silently drops any id that no longer exists — a deploy should
+ * not hard-fail on a stale reference (e.g. the network was deleted after the
+ * user attached it). Organization scoping is enforced at write time (the
+ * mutation that saves networkIds on a resource verifies ownership), so this
+ * read path stays simple.
+ *
+ * When the resource has a `serverId`, only networks scoped to that same
+ * server (or unscoped/local networks) are returned — a network belonging to
+ * a different server can't be attached to a service running on this one.
+ */
+export const resolveNetworkNamesForResource = async (
+	networkIds: string[] | null | undefined,
+	serverId?: string | null,
+): Promise<string[]> => {
+	if (!networkIds || networkIds.length === 0) return [];
+	const rows = await db
+		.select({
+			name: network.name,
+			serverId: network.serverId,
+		})
+		.from(network)
+		.where(inArray(network.networkId, networkIds));
+	const target = serverId ?? null;
+	return rows
+		.filter((row) => (row.serverId ?? null) === target)
+		.map((row) => row.name);
+};
 
 export const createNetwork = async (
 	input: z.infer<typeof apiCreateNetwork>,

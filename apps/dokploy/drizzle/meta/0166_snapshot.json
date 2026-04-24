@@ -1,5 +1,5 @@
 {
-  "id": "b44b16db-6420-4fe0-996e-ff65958077a6",
+  "id": "d59ebe16-02c8-4e36-a915-c78dfc9eed12",
   "prevId": "ef484e78-f78d-4c3f-ae4b-aa123dc77e61",
   "version": "7",
   "dialect": "postgresql",
@@ -3855,6 +3855,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "networkIds": {
+          "name": "networkIds",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'{}'"
         }
       },
       "indexes": {},

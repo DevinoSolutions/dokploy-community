@@ -20,6 +20,7 @@ import { ShowGeneralRedis } from "@/components/dashboard/redis/general/show-gene
 import { ShowInternalRedisCredentials } from "@/components/dashboard/redis/general/show-internal-redis-credentials";
 import { UpdateRedis } from "@/components/dashboard/redis/update-redis";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
+import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { RedisIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -296,6 +297,12 @@ const Redis = (
 												<ShowDatabaseAdvancedSettings
 													id={redisId}
 													type="redis"
+												/>
+												<ResourceNetworksCard
+													resourceType="redis"
+													resourceId={redisId}
+													value={data?.networkIds ?? []}
+													serverId={data?.serverId}
 												/>
 											</div>
 										</TabsContent>
