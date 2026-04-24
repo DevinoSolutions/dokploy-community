@@ -108,6 +108,7 @@ export const compose = pgTable("compose", {
 	serverId: text("serverId").references(() => server.serverId, {
 		onDelete: "cascade",
 	}),
+	networkIds: text("networkIds").array().default([]),
 });
 
 export const composeRelations = relations(compose, ({ one, many }) => ({
@@ -169,6 +170,7 @@ const createSchema = createInsertSchema(compose, {
 		.optional(),
 	triggerType: z.enum(["push", "tag"]).optional(),
 	composeStatus: z.enum(["idle", "running", "done", "error"]).optional(),
+	networkIds: z.array(z.string()).optional(),
 });
 
 export const apiCreateCompose = createSchema.pick({

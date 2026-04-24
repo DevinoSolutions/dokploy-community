@@ -227,6 +227,7 @@ export const applications = pgTable("application", {
 			onDelete: "set null",
 		},
 	),
+	networkIds: text("networkIds").array().default([]),
 });
 
 export const applicationsRelations = relations(
@@ -378,6 +379,7 @@ const createSchema = createInsertSchema(applications, {
 		.max(2 * 1024 * 1024, "Icon must be less than 2MB")
 		.nullable()
 		.optional(),
+	networkIds: z.array(z.string()).optional(),
 });
 
 export const apiCreateApplication = createSchema.pick({
