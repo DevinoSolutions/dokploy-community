@@ -62,7 +62,7 @@ export const ShowDokployActions = () => {
 						</DropdownMenuItem>
 					</ShowModalLogs>
 					<GPUSupportModal />
-					<ChangeConcurrencyModal serverId={null} asDropdownItem />
+					<ChangeConcurrencyModal serverId={null} />
 					<UpdateServerIp>
 						<DropdownMenuItem
 							className="cursor-pointer"

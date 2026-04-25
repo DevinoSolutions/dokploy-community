@@ -21,22 +21,10 @@ const MIN = 1;
 const MAX = 10;
 
 interface Props {
-	/**
-	 * Target of the concurrency change.
-	 * - A `serverId` string: configures a remote server.
-	 * - `null`: configures the local Dokploy host (persisted on `webServerSettings`).
-	 */
+	// `null` targets the local Dokploy host (persisted on webServerSettings).
 	serverId: string | null;
 }
 
-/**
- * Lets operators raise or lower the number of deployments that can run in
- * parallel on a given deployment target. The change lands in the DB and is
- * pushed into the live in-memory queue the same tick — no restart needed.
- *
- * In-flight jobs keep running; pending jobs stay queued. Lowering the value
- * does NOT kill anything currently executing.
- */
 export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 	const isLocal = serverId === null;
 	const [open, setOpen] = useState(false);
@@ -59,7 +47,6 @@ export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 
 	const [value, setValue] = useState<number>(currentConcurrency ?? 1);
 
-	// Keep the input in sync when the query resolves / dialog opens.
 	useEffect(() => {
 		if (open && typeof currentConcurrency === "number") {
 			setValue(currentConcurrency);
