@@ -12,20 +12,6 @@ import {
 } from "./queue-router";
 import type { DeploymentJob } from "./queue-types";
 
-/**
- * Single process-wide facade over the deployment queue. Public surface is
- * backward-compatible with the BullMQ era:
- *   - `myQueue.add("deployments", jobData, opts?)` — enqueue (opts ignored).
- *   - `getJobsByApplicationId`, `getJobsByComposeId` — read jobs for UI.
- *   - `cleanAllDeploymentQueue`, `cleanQueuesByApplication`,
- *     `cleanQueuesByCompose` — cancel paths.
- *   - `killDockerBuild` — the SIGINT escape hatch (re-exported).
- *
- * Implementation: a `DeploymentQueueManager` that keeps one in-memory grouped
- * queue per deployment target (local + each remote server). Redis is not
- * required for deployments.
- */
-
 const DEFAULT_CONCURRENCY = Number.parseInt(
 	process.env.DEPLOYMENT_QUEUE_CONCURRENCY ?? "1",
 	10,
@@ -35,9 +21,6 @@ const concurrencyProvider = async (
 	targetKey: string,
 ): Promise<number | undefined> => {
 	if (targetKey === LOCAL_TARGET) {
-		// Read the operator-tunable value persisted on `webServerSettings`.
-		// If no row exists yet (fresh install pre-setup) fall back to the
-		// DEPLOYMENT_QUEUE_CONCURRENCY env var via the caller's default.
 		try {
 			const settings = await getWebServerSettings();
 			return settings?.deploymentConcurrency ?? undefined;
@@ -55,18 +38,7 @@ const concurrencyProvider = async (
 
 const noopProvider = () => undefined;
 
-/**
- * The queue manager MUST be a process-wide singleton. In a Next.js + tsx/esbuild
- * setup this module is compiled into BOTH the custom server bundle (server.ts
- * and everything statically reachable from it) AND Next.js's own bundle (where
- * the tRPC routers live). Without this guard we'd get one instance per bundle,
- * and `deploymentWorker.run()` would set the handler on the server-side copy
- * while tRPC deploy mutations would enqueue onto the (handler-less) Next.js
- * copy — jobs would sit in pending forever.
- *
- * Pinning to `globalThis` via a registered `Symbol.for` key makes every copy
- * of this module converge on a single instance.
- */
+// Two bundles (server + Next.js) share this module; Symbol.for pins a single instance across both.
 const SINGLETON_KEY = Symbol.for("dokploy.deploymentQueueManager");
 type WithSingleton = {
 	[SINGLETON_KEY]?: DeploymentQueueManager;
@@ -88,17 +60,7 @@ function resolveSingleton(): DeploymentQueueManager {
 
 export const deploymentQueueManager = resolveSingleton();
 
-/**
- * Populate `serverId` + `buildServerId` on a job from the underlying entity.
- * Existing enqueue call sites set only a `server: boolean` flag and leave the
- * ids off the payload; the router needs them to pick the right target pool,
- * so we enrich here — one DB hit per enqueue, trivial vs. the build itself.
- *
- * Failure mode is strict: if the entity can't be loaded we throw, because a
- * silent fallback to the local pool could run a build targeted at remote
- * server X on the Dokploy host — a security/isolation violation. Callers
- * (webhooks, tRPC) will surface this to the user as a failed enqueue.
- */
+// Routing requires real serverIds; missing entity must fail loudly to avoid running a remote-targeted build on the local host.
 async function enrichJob(job: DeploymentJob): Promise<DeploymentJob> {
 	if (
 		job.applicationType === "application" ||
@@ -122,13 +84,7 @@ async function enrichJob(job: DeploymentJob): Promise<DeploymentJob> {
 
 type LegacyAddReturn = { id: string; remove: () => Promise<void> };
 
-/**
- * Backward-compatible view of a queued job. Exists only to feed the legacy
- * BullMQ-shaped consumer in `server/api/routers/deployment.ts`, which awaits
- * `job.getState()`, and various `.timestamp`, `.data` accessors. Fields we
- * don't track in-memory (`processedOn`, `finishedOn`, `failedReason`) are
- * left undefined — the UI handles undefined gracefully.
- */
+// BullMQ-shaped view; consumer in deployment router relies on getState/timestamp.
 export interface LegacyQueueJob {
 	id: string;
 	name: string;
@@ -155,12 +111,7 @@ const toLegacyJob = (snapshot: {
 	getState: async () => (snapshot.state === "active" ? "active" : "waiting"),
 });
 
-/**
- * Backward-compatible wrapper around the queue manager. The first positional
- * parameter (`name`) and third (`opts`) exist only to match the old BullMQ
- * signature still used throughout the app; in the in-memory implementation
- * neither carries semantics.
- */
+// `_name` and `_opts` are unused; kept to match the old BullMQ call sites.
 export const myQueue = {
 	async add(
 		_name: string,

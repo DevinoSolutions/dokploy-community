@@ -2,6 +2,7 @@ import {
 	type GroupedJob,
 	GroupedQueue,
 	type JobSnapshot,
+	MAX_CONCURRENCY,
 } from "./grouped-queue";
 import { resolveServiceKey, resolveTargetKey } from "./queue-router";
 import type { DeploymentJob } from "./queue-types";
@@ -10,34 +11,16 @@ export type DeploymentSnapshot = JobSnapshot<DeploymentJob> & {
 	readonly state: "active" | "pending";
 };
 
-/**
- * Reads the initial concurrency for a target key from persistent config.
- * Returning `undefined` means "fall back to the default".
- */
+// Returning `undefined` falls back to the default concurrency.
 export type ConcurrencyProvider = (
 	targetKey: string,
 ) => Promise<number | undefined> | number | undefined;
 
 type Handler = (job: DeploymentJob, signal: AbortSignal) => Promise<void>;
 
-/**
- * Owns one `GroupedQueue<DeploymentJob>` per deployment target (local host +
- * each remote server). Responsibilities:
- *   - Lazy creation of per-target pools on first enqueue.
- *   - Cross-target cancellation / iteration.
- *   - Funnelling concurrency changes to the right pool.
- *
- * The handler is registered once and applied to every pool as it's created.
- */
 export class DeploymentQueueManager {
-	// Fully-created queues, keyed by target. Synchronous reads are always
-	// safe against this map.
 	private readonly queues = new Map<string, GroupedQueue<DeploymentJob>>();
-	// Queues whose creation is currently in flight. De-duplicates first-time
-	// `add()`s for the same target so concurrent callers never race to
-	// instantiate separate `GroupedQueue`s for the same key (which would
-	// orphan whichever was overwritten). Always emptied into `queues` on
-	// settlement.
+	// Guards concurrent first-enqueue races for the same target.
 	private readonly creating = new Map<
 		string,
 		Promise<GroupedQueue<DeploymentJob>>
@@ -61,10 +44,7 @@ export class DeploymentQueueManager {
 			queue.setHandler((data, signal) => handler(data, signal));
 		}
 		for (const pending of this.creating.values()) {
-			// Swallow rejection: a failed creation already unregisters itself
-			// from `this.creating` via getOrCreate's catch, so the next enqueue
-			// retries cleanly. Without `.catch`, a rejected pending here would
-			// surface as an unhandled rejection under Node's default policy.
+			// `.catch` keeps a failed creation from surfacing as an unhandled rejection.
 			pending
 				.then((queue) => {
 					queue.setHandler((data, signal) => handler(data, signal));
@@ -87,8 +67,8 @@ export class DeploymentQueueManager {
 		targetKey: string,
 		concurrency: number,
 	): Promise<void> {
-		if (concurrency < 1 || concurrency > 10) {
-			throw new Error("concurrency must be between 1 and 10");
+		if (concurrency < 1 || concurrency > MAX_CONCURRENCY) {
+			throw new Error(`concurrency must be between 1 and ${MAX_CONCURRENCY}`);
 		}
 		const queue = await this.getOrCreate(targetKey);
 		queue.setConcurrency(concurrency);
@@ -98,10 +78,6 @@ export class DeploymentQueueManager {
 		return this.queues.get(targetKey)?.getConcurrency();
 	}
 
-	/**
-	 * Cancel a job by id. We don't know which target owns it, so iterate.
-	 * Returns true if the job was found in any target's queue.
-	 */
 	cancelJob(jobId: string, reason?: string): boolean {
 		for (const queue of this.queues.values()) {
 			if (queue.cancel(jobId, reason)) return true;
@@ -109,17 +85,12 @@ export class DeploymentQueueManager {
 		return false;
 	}
 
-	/** Abort every active job and reject every pending job across all targets. */
 	cancelAllJobs(reason?: string): void {
 		for (const queue of this.queues.values()) {
 			queue.cancelAll(reason);
 		}
 	}
 
-	/**
-	 * Cancel jobs matching a predicate, fanned out across every target queue.
-	 * Used by `cleanQueuesByApplication` / `cleanQueuesByCompose`.
-	 */
 	cancelWhere(
 		predicate: (job: DeploymentJob) => boolean,
 		reason?: string,
@@ -131,12 +102,10 @@ export class DeploymentQueueManager {
 		return removed;
 	}
 
-	/** Active + pending job payloads across every target. */
 	listJobs(): DeploymentJob[] {
 		return this.listSnapshots().map((snapshot) => snapshot.data);
 	}
 
-	/** Active + pending snapshots (with timing + state) across every target. */
 	listSnapshots(): DeploymentSnapshot[] {
 		const out: DeploymentSnapshot[] = [];
 		for (const queue of this.queues.values()) {
@@ -150,7 +119,6 @@ export class DeploymentQueueManager {
 		return out;
 	}
 
-	/** Split view for the queue-summary UI. */
 	summarize(): { active: DeploymentJob[]; pending: DeploymentJob[] } {
 		const active: DeploymentJob[] = [];
 		const pending: DeploymentJob[] = [];
@@ -169,9 +137,7 @@ export class DeploymentQueueManager {
 
 	async close(reason = "shutdown"): Promise<void> {
 		this.closed = true;
-		// Drain any in-flight creation first so their GroupedQueues are in
-		// `this.queues` and get closed too — otherwise a job whose target
-		// was being created at the moment of shutdown would race past us.
+		// Drain in-flight creations so their queues land in `this.queues` and get closed too.
 		const inflight = [...this.creating.values()];
 		if (inflight.length > 0) {
 			await Promise.allSettled(inflight);
@@ -183,22 +149,27 @@ export class DeploymentQueueManager {
 		this.creating.clear();
 	}
 
-	// --- internals ------------------------------------------------------------
-
 	private getOrCreate(targetKey: string): Promise<GroupedQueue<DeploymentJob>> {
+		if (this.closed) {
+			return Promise.reject(new Error("DeploymentQueueManager is closed"));
+		}
 		const existing = this.queues.get(targetKey);
 		if (existing) return Promise.resolve(existing);
 		const inflight = this.creating.get(targetKey);
 		if (inflight) return inflight;
 		const pending = this.createQueue(targetKey)
-			.then((queue) => {
+			.then(async (queue) => {
+				if (this.closed) {
+					await queue.close("shutdown");
+					this.creating.delete(targetKey);
+					throw new Error("DeploymentQueueManager is closed");
+				}
 				this.queues.set(targetKey, queue);
 				this.creating.delete(targetKey);
 				return queue;
 			})
 			.catch((error) => {
-				// Don't poison the slot on transient failure (e.g. DB blip in
-				// provider). Next enqueue retries cleanly.
+				// Transient provider failure leaves the slot empty so next enqueue retries.
 				this.creating.delete(targetKey);
 				throw error;
 			});

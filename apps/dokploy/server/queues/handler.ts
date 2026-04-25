@@ -12,20 +12,7 @@ import {
 import { killDockerBuild } from "./kill-docker-build";
 import type { DeploymentJob } from "./queue-types";
 
-/**
- * Single place that dispatches a `DeploymentJob` to the right service call.
- *
- * The `signal` is plumbed through so callers (queue-manager) can cancel a
- * running deployment. The underlying `deployApplication` / `deployCompose`
- * functions don't yet accept an `AbortSignal` — they predate this queue — so
- * we listen here and shell out to `killDockerBuild` on abort, which is the
- * same mechanism the "Kill build" UI button uses.
- *
- * When a cancellation lands while the handler is awaiting the service call,
- * the service call still resolves/rejects on its own; we swallow any error
- * that occurs *after* the abort, since the abort is the causal failure the
- * caller cares about.
- */
+// Underlying deploy functions predate AbortSignal — cancel via killDockerBuild instead.
 export async function handleDeploymentJob(
 	job: DeploymentJob,
 	signal: AbortSignal,
@@ -39,11 +26,6 @@ export async function handleDeploymentJob(
 	}
 }
 
-/**
- * If the signal is already aborted, throw the reason immediately so the
- * queue's `done` promise rejects without running any more DB writes or
- * subprocesses.
- */
 function throwIfAborted(signal: AbortSignal): void {
 	if (!signal.aborted) return;
 	throw signal.reason instanceof Error
@@ -58,8 +40,7 @@ function registerAbortHandler(
 	const onAbort = () => {
 		const type: "application" | "compose" =
 			job.applicationType === "compose" ? "compose" : "application";
-		// Build happens on buildServerId when set, otherwise on the deploy
-		// target — that's the host where docker build is actually running.
+		// `buildServerId` is the host where the build actually runs (falls back to deploy target).
 		const buildHost =
 			job.applicationType === "compose"
 				? (job.serverId ?? null)
@@ -136,7 +117,6 @@ async function dispatch(
 			});
 		}
 	} catch (error) {
-		// Log and rethrow so the queue's `done` promise settles correctly.
 		console.error("Deployment handler error", error);
 		throw error;
 	}

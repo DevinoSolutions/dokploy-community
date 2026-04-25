@@ -1,25 +1,11 @@
 import { nanoid } from "nanoid";
 
-/**
- * In-memory grouped task queue.
- *
- * Contract:
- * - Tasks are enqueued under a `groupId`. Tasks within a group run one at a
- *   time in FIFO order (the "per-service FIFO" guarantee).
- * - Tasks in different groups can run in parallel, up to `concurrency` groups
- *   at once.
- * - Every running task receives an `AbortSignal`. `cancel(jobId)` trips that
- *   signal and rejects the task's promise; the handler is expected to
- *   propagate the abort into any child process.
- * - No persistence. Queued tasks are discarded on process exit (by design —
- *   see the plan's §6.7, matches Dokploy maintainer's stated tradeoff).
- */
+export const MAX_CONCURRENCY = 10;
+
+// No persistence — tasks are discarded on process exit by design.
 export interface GroupedJob<T> {
-	/** Stable, unique id the caller uses for cancellation. */
 	readonly jobId: string;
-	/** Which group this job belongs to (FIFO scope). */
 	readonly groupId: string;
-	/** Resolves when the handler finishes; rejects on handler error or abort. */
 	readonly done: Promise<void>;
 }
 
@@ -34,13 +20,13 @@ export interface JobSnapshot<T> {
 type Handler<T> = (data: T, signal: AbortSignal) => Promise<void>;
 
 interface Task<T> {
-	readonly jobId: string;
-	readonly data: T;
-	readonly controller: AbortController;
-	readonly enqueuedAt: number;
+	jobId: string;
+	data: T;
+	controller: AbortController;
+	enqueuedAt: number;
 	startedAt?: number;
-	readonly resolve: () => void;
-	readonly reject: (error: Error) => void;
+	resolve: () => void;
+	reject: (error: Error) => void;
 }
 
 interface Group<T> {
@@ -56,7 +42,7 @@ export class GroupedQueue<T> {
 	private closed = false;
 
 	constructor(concurrency: number) {
-		this.concurrency = Math.max(1, concurrency);
+		this.concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, concurrency));
 	}
 
 	setHandler(handler: Handler<T>): void {
@@ -64,13 +50,11 @@ export class GroupedQueue<T> {
 		this.schedule();
 	}
 
-	/**
-	 * Change the parallelism cap. In-flight tasks keep running; pending tasks
-	 * stay queued — we deliberately do NOT flush pending jobs here (contrast
-	 * with upstream #3744, which does).
-	 */
 	setConcurrency(concurrency: number): void {
-		this.concurrency = Math.max(1, concurrency);
+		this.concurrency = Math.min(
+			MAX_CONCURRENCY,
+			Math.max(1, concurrency),
+		);
 		this.schedule();
 	}
 
@@ -78,10 +62,6 @@ export class GroupedQueue<T> {
 		return this.concurrency;
 	}
 
-	/**
-	 * Enqueue a task. Returns the job handle; `done` settles when the handler
-	 * finishes, rejects on handler error or `cancel`.
-	 */
 	add(groupId: string, data: T): GroupedJob<T> {
 		if (this.closed) {
 			throw new Error("Queue is closed");
@@ -107,11 +87,6 @@ export class GroupedQueue<T> {
 		return { jobId, groupId, done };
 	}
 
-	/**
-	 * Cancel a specific job. If it's active, aborts its signal (the handler
-	 * is expected to unwind promptly); if it's pending, removes it from its
-	 * group's queue. Returns true if the job was found.
-	 */
 	cancel(jobId: string, reason = "Cancelled"): boolean {
 		for (const [groupId, group] of this.groups) {
 			if (group.active && group.active.jobId === jobId) {
@@ -131,10 +106,6 @@ export class GroupedQueue<T> {
 		return false;
 	}
 
-	/**
-	 * Cancel every active job and reject every pending job across all groups.
-	 * Active handlers receive the abort signal; pending tasks never run.
-	 */
 	cancelAll(reason = "Cancelled"): void {
 		for (const [groupId, group] of this.groups) {
 			if (group.active) {
@@ -148,10 +119,6 @@ export class GroupedQueue<T> {
 		}
 	}
 
-	/**
-	 * Predicate-based cancellation — used by the facade to scope cancels to a
-	 * single application / compose.
-	 */
 	cancelWhere(predicate: (data: T) => boolean, reason = "Cancelled"): number {
 		let removed = 0;
 		for (const [groupId, group] of this.groups) {
@@ -205,7 +172,6 @@ export class GroupedQueue<T> {
 		return out;
 	}
 
-	/** Number of tasks (active + pending) across all groups. */
 	size(): number {
 		let n = 0;
 		for (const group of this.groups.values()) {
@@ -214,30 +180,22 @@ export class GroupedQueue<T> {
 		return n;
 	}
 
-	/**
-	 * Abort all in-flight jobs and reject all pending ones. Subsequent `add`
-	 * calls throw. The returned promise settles when every handler has
-	 * unwound.
-	 */
 	async close(reason = "Queue closed"): Promise<void> {
 		this.closed = true;
 		const waiting: Promise<void>[] = [];
 		for (const [, group] of this.groups) {
 			if (group.active) {
-				// The active task's `done` promise will settle; collect it via a
-				// reject-safe wrapper so Promise.all doesn't short-circuit.
 				const active = group.active;
 				waiting.push(
 					new Promise<void>((resolve) => {
 						const settled = () => resolve();
-						// monkey-patch resolve/reject to also resolve our waiter
 						const origResolve = active.resolve;
 						const origReject = active.reject;
-						(active as { resolve: () => void }).resolve = () => {
+						active.resolve = () => {
 							origResolve();
 							settled();
 						};
-						(active as { reject: (e: Error) => void }).reject = (e) => {
+						active.reject = (e) => {
 							origReject(e);
 							settled();
 						};
@@ -308,9 +266,12 @@ export class GroupedQueue<T> {
 		} catch (e) {
 			error = e instanceof Error ? e : new Error(String(e));
 		}
-		// Perform bookkeeping BEFORE settling the caller's promise so that an
-		// `await job.done` observes the queue in a consistent post-run state
-		// (no leaked group entries, concurrency slot freed).
+		// Cancel must reject `done` even when the handler swallows the abort.
+		if (!error && task.controller.signal.aborted) {
+			const reason = task.controller.signal.reason;
+			error = reason instanceof Error ? reason : new Error("Cancelled");
+		}
+		// Bookkeeping before settling so `await job.done` sees a consistent state.
 		group.active = null;
 		this.activeGroups.delete(groupId);
 		this.maybeCleanupGroup(groupId);
