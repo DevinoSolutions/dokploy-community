@@ -51,10 +51,7 @@ export class GroupedQueue<T> {
 	}
 
 	setConcurrency(concurrency: number): void {
-		this.concurrency = Math.min(
-			MAX_CONCURRENCY,
-			Math.max(1, concurrency),
-		);
+		this.concurrency = Math.min(MAX_CONCURRENCY, Math.max(1, concurrency));
 		this.schedule();
 	}
 
