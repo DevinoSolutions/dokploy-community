@@ -40,9 +40,9 @@ describe("removeNetworkById", () => {
 	});
 
 	it("throws NOT_FOUND when the row doesn't exist for the organization", async () => {
-		await expect(
-			removeNetworkById("missing", "org_1"),
-		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		await expect(removeNetworkById("missing", "org_1")).rejects.toMatchObject({
+			code: "NOT_FOUND",
+		});
 		// Docker should never be touched when the DB row is missing.
 		expect(fakeDocker.listNetworks).not.toHaveBeenCalled();
 	});

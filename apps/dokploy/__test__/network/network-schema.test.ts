@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
 import {
 	apiCreateNetwork,
 	apiFindOneNetwork,
 	apiRemoveNetwork,
 } from "@dokploy/server/db/schema";
+import { describe, expect, it } from "vitest";
 
 describe("apiCreateNetwork", () => {
 	it("accepts a minimal create payload (just name)", () => {
@@ -17,7 +17,14 @@ describe("apiCreateNetwork", () => {
 	});
 
 	it("accepts all supported drivers", () => {
-		for (const driver of ["bridge", "host", "overlay", "macvlan", "none", "ipvlan"] as const) {
+		for (const driver of [
+			"bridge",
+			"host",
+			"overlay",
+			"macvlan",
+			"none",
+			"ipvlan",
+		] as const) {
 			const result = apiCreateNetwork.safeParse({ name: "net", driver });
 			expect(result.success, `driver=${driver}`).toBe(true);
 		}
@@ -77,7 +84,9 @@ describe("apiCreateNetwork", () => {
 describe("apiFindOneNetwork / apiRemoveNetwork", () => {
 	it("requires a non-empty networkId on lookup", () => {
 		expect(apiFindOneNetwork.safeParse({ networkId: "" }).success).toBe(false);
-		expect(apiFindOneNetwork.safeParse({ networkId: "n_1" }).success).toBe(true);
+		expect(apiFindOneNetwork.safeParse({ networkId: "n_1" }).success).toBe(
+			true,
+		);
 	});
 
 	it("requires a non-empty networkId on remove", () => {

@@ -23,11 +23,7 @@ import {
 import { api } from "@/utils/api";
 
 export const ShowNetworks = () => {
-	const {
-		data: networks,
-		isLoading,
-		refetch,
-	} = api.network.all.useQuery();
+	const { data: networks, isLoading, refetch } = api.network.all.useQuery();
 	const { mutateAsync: removeNetwork, isPending: isRemoving } =
 		api.network.remove.useMutation();
 
@@ -108,9 +104,7 @@ export const ShowNetworks = () => {
 														<TableCell>{n.driver}</TableCell>
 														<TableCell>{n.scope ?? "—"}</TableCell>
 														<TableCell>{n.internal ? "Yes" : "No"}</TableCell>
-														<TableCell>
-															{n.attachable ? "Yes" : "No"}
-														</TableCell>
+														<TableCell>{n.attachable ? "Yes" : "No"}</TableCell>
 														<TableCell>
 															{n.serverId ?? "Dokploy server"}
 														</TableCell>
