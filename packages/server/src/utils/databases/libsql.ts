@@ -61,7 +61,7 @@ export const buildLibsql = async (libsql: LibsqlNested) => {
 		await resolveNetworkNamesForResource(
 			libsql.networkIds,
 			libsql.serverId,
-			libsql.organizationId,
+			libsql.environment.project.organizationId,
 		),
 	);
 	const resources = calculateResources({

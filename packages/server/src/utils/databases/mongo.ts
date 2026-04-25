@@ -101,7 +101,7 @@ ${command ?? "wait $MONGOD_PID"}`;
 		await resolveNetworkNamesForResource(
 			mongo.networkIds,
 			mongo.serverId,
-			mongo.organizationId,
+			mongo.environment.project.organizationId,
 		),
 	);
 

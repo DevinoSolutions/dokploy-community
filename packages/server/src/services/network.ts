@@ -1,8 +1,5 @@
 import { db } from "@dokploy/server/db";
-import {
-	type apiCreateNetwork,
-	network,
-} from "@dokploy/server/db/schema";
+import { type apiCreateNetwork, network } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";

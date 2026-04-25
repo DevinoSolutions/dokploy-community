@@ -61,7 +61,7 @@ export const buildMysql = async (mysql: MysqlNested) => {
 		await resolveNetworkNamesForResource(
 			mysql.networkIds,
 			mysql.serverId,
-			mysql.organizationId,
+			mysql.environment.project.organizationId,
 		),
 	);
 	const resources = calculateResources({

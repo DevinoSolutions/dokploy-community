@@ -52,7 +52,7 @@ export const buildRedis = async (redis: RedisNested) => {
 		await resolveNetworkNamesForResource(
 			redis.networkIds,
 			redis.serverId,
-			redis.organizationId,
+			redis.environment.project.organizationId,
 		),
 	);
 	const resources = calculateResources({

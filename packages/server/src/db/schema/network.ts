@@ -123,4 +123,3 @@ export const apiRemoveNetwork = createSchema
 		networkId: true,
 	})
 	.required();
-

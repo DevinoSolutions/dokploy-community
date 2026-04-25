@@ -55,7 +55,7 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 		await resolveNetworkNamesForResource(
 			mariadb.networkIds,
 			mariadb.serverId,
-			mariadb.organizationId,
+			mariadb.environment.project.organizationId,
 		),
 	);
 	const resources = calculateResources({

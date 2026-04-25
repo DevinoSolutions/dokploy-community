@@ -54,7 +54,7 @@ export const buildPostgres = async (postgres: PostgresNested) => {
 		await resolveNetworkNamesForResource(
 			postgres.networkIds,
 			postgres.serverId,
-			postgres.organizationId,
+			postgres.environment.project.organizationId,
 		),
 	);
 	const resources = calculateResources({
