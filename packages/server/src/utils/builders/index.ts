@@ -117,6 +117,7 @@ export const mechanizeDockerContainer = async (
 		await resolveNetworkNamesForResource(
 			application.networkIds,
 			application.serverId,
+			application.organizationId,
 		),
 	);
 

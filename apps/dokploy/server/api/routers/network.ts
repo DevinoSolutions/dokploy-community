@@ -59,22 +59,18 @@ export const networkRouter = createTRPCRouter({
 	remove: withPermission("network", "delete")
 		.input(apiRemoveNetwork)
 		.mutation(async ({ ctx, input }) => {
-			const target = await findNetworkById(input.networkId);
-			if (target.organizationId !== ctx.session.activeOrganizationId) {
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to delete this network",
-				});
-			}
-			await audit(ctx, {
-				action: "delete",
-				resourceType: "network",
-				resourceId: target.networkId,
-				resourceName: target.name,
-			});
-			return removeNetworkById(
+			const deleted = await removeNetworkById(
 				input.networkId,
 				ctx.session.activeOrganizationId,
 			);
+			if (deleted) {
+				await audit(ctx, {
+					action: "delete",
+					resourceType: "network",
+					resourceId: deleted.networkId,
+					resourceName: deleted.name,
+				});
+			}
+			return deleted;
 		}),
 });

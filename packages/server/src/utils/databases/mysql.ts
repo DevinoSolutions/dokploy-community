@@ -58,7 +58,11 @@ export const buildMysql = async (mysql: MysqlNested) => {
 		Ulimits,
 	} = generateConfigContainer(
 		mysql,
-		await resolveNetworkNamesForResource(mysql.networkIds, mysql.serverId),
+		await resolveNetworkNamesForResource(
+			mysql.networkIds,
+			mysql.serverId,
+			mysql.organizationId,
+		),
 	);
 	const resources = calculateResources({
 		memoryLimit,

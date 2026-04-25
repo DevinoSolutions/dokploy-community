@@ -49,7 +49,11 @@ export const buildRedis = async (redis: RedisNested) => {
 		Ulimits,
 	} = generateConfigContainer(
 		redis,
-		await resolveNetworkNamesForResource(redis.networkIds, redis.serverId),
+		await resolveNetworkNamesForResource(
+			redis.networkIds,
+			redis.serverId,
+			redis.organizationId,
+		),
 	);
 	const resources = calculateResources({
 		memoryLimit,

@@ -15,13 +15,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { api } from "@/utils/api";
 
-/**
- * Resource types that can be attached to custom Docker networks. Keep in sync
- * with the `networkIds` columns across the schema.
- */
-// Compose is intentionally omitted: compose services attach to networks via
-// their compose YAML, not via a Dokploy-managed Swarm service spec. Adding it
-// here would surface a picker that didn't actually affect the deployed stack.
+// Compose omitted: attaches networks via compose YAML, not Swarm service spec.
 export type NetworkAttachableResource =
 	| "application"
 	| "libsql"
@@ -48,10 +42,7 @@ export const ResourceNetworksCard = ({
 }: Props) => {
 	const { data: networks, isLoading } = api.network.all.useQuery();
 
-	// Each resource has its own update mutation; pick at call site.
-	// We pipe through `any` locally because the shape of the payload differs
-	// per resource (different id field name) — the server-side zod schema
-	// enforces correctness.
+	// Payload shape differs per resource; server-side zod enforces correctness.
 	const applicationUpdate = api.application.update.useMutation();
 	const libsqlUpdate = api.libsql.update.useMutation();
 	const mariadbUpdate = api.mariadb.update.useMutation();

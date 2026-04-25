@@ -51,7 +51,11 @@ export const buildPostgres = async (postgres: PostgresNested) => {
 		Ulimits,
 	} = generateConfigContainer(
 		postgres,
-		await resolveNetworkNamesForResource(postgres.networkIds, postgres.serverId),
+		await resolveNetworkNamesForResource(
+			postgres.networkIds,
+			postgres.serverId,
+			postgres.organizationId,
+		),
 	);
 	const resources = calculateResources({
 		memoryLimit,

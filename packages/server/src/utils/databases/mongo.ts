@@ -98,7 +98,11 @@ ${command ?? "wait $MONGOD_PID"}`;
 		Ulimits,
 	} = generateConfigContainer(
 		mongo,
-		await resolveNetworkNamesForResource(mongo.networkIds, mongo.serverId),
+		await resolveNetworkNamesForResource(
+			mongo.networkIds,
+			mongo.serverId,
+			mongo.organizationId,
+		),
 	);
 
 	const resources = calculateResources({

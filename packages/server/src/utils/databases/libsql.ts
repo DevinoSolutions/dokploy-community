@@ -58,7 +58,11 @@ export const buildLibsql = async (libsql: LibsqlNested) => {
 		Networks,
 	} = generateConfigContainer(
 		libsql,
-		await resolveNetworkNamesForResource(libsql.networkIds, libsql.serverId),
+		await resolveNetworkNamesForResource(
+			libsql.networkIds,
+			libsql.serverId,
+			libsql.organizationId,
+		),
 	);
 	const resources = calculateResources({
 		memoryLimit,

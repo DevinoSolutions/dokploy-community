@@ -52,7 +52,11 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 		Ulimits,
 	} = generateConfigContainer(
 		mariadb,
-		await resolveNetworkNamesForResource(mariadb.networkIds, mariadb.serverId),
+		await resolveNetworkNamesForResource(
+			mariadb.networkIds,
+			mariadb.serverId,
+			mariadb.organizationId,
+		),
 	);
 	const resources = calculateResources({
 		memoryLimit,

@@ -535,13 +535,7 @@ export const calculateResources = ({
 	};
 };
 
-/**
- * Merge the base Swarm Networks list with user-selected custom networks.
- * Preserves any user-supplied networkSwarm (advanced setting) and falls back
- * to dokploy-network so Traefik can always route. Extras are resolved names
- * from a resource's networkIds (see resolveNetworkNamesForResource). The
- * final list is deduplicated by Target.
- */
+// Falls back to dokploy-network so Traefik routing is always preserved.
 const mergeNetworks = (
 	networkSwarm: Array<{ Target?: string }> | null,
 	extras: string[],

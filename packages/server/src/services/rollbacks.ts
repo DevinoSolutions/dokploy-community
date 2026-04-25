@@ -252,6 +252,7 @@ const rollbackApplication = async (
 		await resolveNetworkNamesForResource(
 			(fullContext as ApplicationNested).networkIds,
 			(fullContext as ApplicationNested).serverId,
+			(fullContext as ApplicationNested).organizationId,
 		),
 	);
 

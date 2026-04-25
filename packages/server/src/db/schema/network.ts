@@ -6,7 +6,6 @@ import { z } from "zod";
 import { organization } from "./account";
 import { server } from "./server";
 
-/** Docker network driver types */
 export const networkDriver = pgEnum("networkDriver", [
 	"bridge",
 	"host",
@@ -23,7 +22,7 @@ export const network = pgTable("network", {
 		.$defaultFn(() => nanoid()),
 	name: text("name").notNull(),
 	driver: networkDriver("driver").notNull().default("bridge"),
-	scope: text("scope"), // e.g. "local", "swarm"
+	scope: text("scope"),
 	internal: boolean("internal").notNull().default(false),
 	attachable: boolean("attachable").notNull().default(false),
 	ingress: boolean("ingress").notNull().default(false),
@@ -60,7 +59,14 @@ export const networkRelations = relations(network, ({ one }) => ({
 
 const createSchema = createInsertSchema(network, {
 	networkId: z.string().min(1),
-	name: z.string().min(1),
+	name: z
+		.string()
+		.min(1)
+		.max(64)
+		.regex(
+			/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
+			"Network name must start with a letter or digit and contain only letters, digits, '_', '.' or '-'",
+		),
 	driver: z
 		.enum(["bridge", "host", "overlay", "macvlan", "none", "ipvlan"])
 		.optional(),
@@ -118,20 +124,3 @@ export const apiRemoveNetwork = createSchema
 	})
 	.required();
 
-export const apiUpdateNetwork = createSchema
-	.pick({
-		networkId: true,
-		name: true,
-		driver: true,
-		scope: true,
-		internal: true,
-		attachable: true,
-		ingress: true,
-		configOnly: true,
-		enableIPv4: true,
-		enableIPv6: true,
-		ipam: true,
-		serverId: true,
-	})
-	.partial()
-	.required({ networkId: true });

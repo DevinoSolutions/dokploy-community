@@ -29,21 +29,10 @@ export const findNetworksByOrganizationId = async (organizationId: string) =>
 		.where(eq(network.organizationId, organizationId))
 		.orderBy(desc(network.createdAt));
 
-/**
- * Resolve a list of networkIds to Docker network names for use in a Swarm
- * service spec. Silently drops any id that no longer exists — a deploy should
- * not hard-fail on a stale reference (e.g. the network was deleted after the
- * user attached it). Organization scoping is enforced at write time (the
- * mutation that saves networkIds on a resource verifies ownership), so this
- * read path stays simple.
- *
- * When the resource has a `serverId`, only networks scoped to that same
- * server (or unscoped/local networks) are returned — a network belonging to
- * a different server can't be attached to a service running on this one.
- */
 export const resolveNetworkNamesForResource = async (
 	networkIds: string[] | null | undefined,
-	serverId?: string | null,
+	serverId: string | null | undefined,
+	organizationId: string,
 ): Promise<string[]> => {
 	if (!networkIds || networkIds.length === 0) return [];
 	const rows = await db
@@ -52,11 +41,39 @@ export const resolveNetworkNamesForResource = async (
 			serverId: network.serverId,
 		})
 		.from(network)
-		.where(inArray(network.networkId, networkIds));
+		.where(
+			and(
+				inArray(network.networkId, networkIds),
+				eq(network.organizationId, organizationId),
+			),
+		);
 	const target = serverId ?? null;
 	return rows
 		.filter((row) => (row.serverId ?? null) === target)
 		.map((row) => row.name);
+};
+
+export const assertNetworkIdsBelongToOrg = async (
+	networkIds: string[] | null | undefined,
+	organizationId: string,
+): Promise<void> => {
+	if (!networkIds || networkIds.length === 0) return;
+	const unique = Array.from(new Set(networkIds));
+	const rows = await db
+		.select({ id: network.networkId })
+		.from(network)
+		.where(
+			and(
+				inArray(network.networkId, unique),
+				eq(network.organizationId, organizationId),
+			),
+		);
+	if (rows.length !== unique.length) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "One or more networks do not belong to this organization",
+		});
+	}
 };
 
 export const createNetwork = async (
@@ -70,8 +87,7 @@ export const createNetwork = async (
 		});
 	}
 
-	// Transactional: insert DB row, then create Docker network. If Docker fails,
-	// the transaction rolls back the DB row so we never persist a ghost record.
+	// Docker failure rolls back the row so we never persist a ghost record.
 	return db.transaction(async (tx) => {
 		const [row] = await tx
 			.insert(network)
@@ -125,11 +141,6 @@ export const createNetwork = async (
 	});
 };
 
-/**
- * Remove a network. Attempts Docker removal first; only deletes the DB row on
- * Docker success (or when the network is already absent on the daemon).
- * Surfaces "network in use" as a structured error so the UI can explain.
- */
 export const removeNetworkById = async (
 	networkId: string,
 	organizationId: string,
@@ -149,8 +160,7 @@ export const removeNetworkById = async (
 
 	const docker = await getRemoteDocker(target.serverId ?? null);
 	try {
-		// Look up the Docker network by name. We don't persist Docker's network
-		// ID to stay resilient against drift (e.g. manual `docker network rm`).
+		// Match by name; Docker's network ID is not persisted (resilient to manual `docker network rm`).
 		const dockerNetworks = await docker.listNetworks();
 		const match = dockerNetworks.find((n) => n.Name === target.name);
 		if (match) {
