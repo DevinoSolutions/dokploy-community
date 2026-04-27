@@ -1,5 +1,5 @@
 import { Info, Loader2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,30 @@ export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 	const currentConcurrency = isLocal
 		? webServerQuery.data?.deploymentConcurrency
 		: serverQuery.data?.deploymentConcurrency;
+
+	const queueQuery = api.deployment.queueList.useQuery(undefined, {
+		enabled: open,
+		refetchInterval: open ? 3000 : false,
+	});
+
+	const liveCounts = useMemo(() => {
+		const snapshots = queueQuery.data ?? [];
+		const matchesTarget = (job: {
+			serverId?: string | null;
+			buildServerId?: string | null;
+		}) => {
+			const target = job.buildServerId ?? job.serverId ?? null;
+			return (target ?? null) === (serverId ?? null);
+		};
+		let active = 0;
+		let pending = 0;
+		for (const s of snapshots) {
+			if (!matchesTarget(s.data)) continue;
+			if (s.state === "active") active++;
+			else pending++;
+		}
+		return { active, pending };
+	}, [queueQuery.data, serverId]);
 
 	const [value, setValue] = useState<number>(currentConcurrency ?? 1);
 
@@ -99,7 +123,14 @@ export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 				</DialogHeader>
 
 				<div className="flex flex-col gap-3 py-2">
-					<Label htmlFor="deployment-concurrency">Concurrent deployments</Label>
+					<div className="flex items-center justify-between">
+						<Label htmlFor="deployment-concurrency">
+							Concurrent deployments
+						</Label>
+						<span className="text-xs text-muted-foreground">
+							Live: {liveCounts.active} active · {liveCounts.pending} queued
+						</span>
+					</div>
 					<Input
 						id="deployment-concurrency"
 						type="number"
@@ -109,11 +140,16 @@ export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 						value={value}
 						onChange={(event) => setValue(Number(event.target.value))}
 					/>
+					<p className="text-xs text-muted-foreground">
+						<span className="font-medium">1</span> = one deploy at a time
+						(safest). <span className="font-medium">2–{MAX}</span> = run that
+						many side-by-side; only raise if the host has spare CPU/RAM.
+					</p>
 					<Alert>
 						<Info className="h-4 w-4" />
 						<AlertDescription>
 							Each concurrent build uses roughly one CPU core and 2&nbsp;GB of
-							RAM while active. The value is applied immediately; in-flight
+							RAM while active. Saved value applies immediately; in-flight
 							deployments are not interrupted.
 						</AlertDescription>
 					</Alert>
