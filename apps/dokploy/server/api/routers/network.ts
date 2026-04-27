@@ -2,6 +2,7 @@ import {
 	createNetwork,
 	findNetworkById,
 	findNetworksByOrganizationId,
+	findResourcesUsingNetwork,
 	removeNetworkById,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
@@ -55,6 +56,15 @@ export const networkRouter = createTRPCRouter({
 				});
 			}
 		}),
+
+	usage: withPermission("network", "read")
+		.input(apiFindOneNetwork)
+		.query(async ({ ctx, input }) =>
+			findResourcesUsingNetwork(
+				input.networkId,
+				ctx.session.activeOrganizationId,
+			),
+		),
 
 	remove: withPermission("network", "delete")
 		.input(apiRemoveNetwork)

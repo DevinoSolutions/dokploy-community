@@ -1,6 +1,6 @@
 "use client";
 
-import { Loader2, Network } from "lucide-react";
+import { AlertTriangle, Loader2, Network } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
 import { toast } from "sonner";
@@ -41,6 +41,10 @@ export const ResourceNetworksCard = ({
 	serverId,
 }: Props) => {
 	const { data: networks, isLoading } = api.network.all.useQuery();
+	const { data: servers } = api.server.withSSHKey.useQuery();
+	const serverName = serverId
+		? (servers?.find((s) => s.serverId === serverId)?.name ?? "this server")
+		: "Dokploy host";
 
 	// Payload shape differs per resource; server-side zod enforces correctness.
 	const applicationUpdate = api.application.update.useMutation();
@@ -63,40 +67,52 @@ export const ResourceNetworksCard = ({
 
 	const utils = api.useUtils();
 
-	// Only networks scoped to the same server as this resource (or unscoped/local
-	// when both are local). Mirrors the backend resolver's filter.
+	// Only networks scoped to the same server as this resource. Mirrors backend resolver.
 	const availableNetworks = useMemo(() => {
 		const target = serverId ?? null;
 		return (networks ?? []).filter((n) => (n.serverId ?? null) === target);
 	}, [networks, serverId]);
 
+	// Saved IDs that don't apply: deleted networks or attached to a different server.
+	const orphanIds = useMemo(() => {
+		if (!networks) return [] as string[];
+		const availableSet = new Set(availableNetworks.map((n) => n.networkId));
+		return value.filter((id) => !availableSet.has(id));
+	}, [networks, availableNetworks, value]);
+
+	const persist = async (nextIds: string[]) => {
+		const idKey = `${resourceType}Id` as const;
+		const payload = { [idKey]: resourceId, networkIds: nextIds };
+		await (update.mutateAsync as (p: unknown) => Promise<unknown>)(payload);
+		const invalidate = (
+			utils[resourceType] as unknown as {
+				one: { invalidate: (args?: unknown) => Promise<void> };
+			}
+		).one.invalidate;
+		await invalidate({ [idKey]: resourceId });
+	};
+
 	const toggle = async (networkId: string, checked: boolean) => {
 		const nextIds = checked
 			? [...value, networkId]
 			: value.filter((id) => id !== networkId);
-
 		try {
-			const idKey = `${resourceType}Id` as const;
-			const payload = {
-				[idKey]: resourceId,
-				networkIds: nextIds,
-			};
-			// The 7 resource-specific mutations share an identical shape for this
-			// partial update (id + networkIds), but TS can't narrow across the
-			// union of mutation types. Runtime zod on the router enforces the
-			// contract, so an unknown-cast here is appropriate.
-			await (update.mutateAsync as (p: unknown) => Promise<unknown>)(payload);
-			// Invalidate the matching `one` query so the parent re-renders with new ids
-			const invalidate = (
-				utils[resourceType] as unknown as {
-					one: { invalidate: (args?: unknown) => Promise<void> };
-				}
-			).one.invalidate;
-			await invalidate({ [idKey]: resourceId });
+			await persist(nextIds);
 			toast.success("Networks updated");
 		} catch (error) {
 			toast.error(
 				error instanceof Error ? error.message : "Failed to update networks",
+			);
+		}
+	};
+
+	const cleanOrphans = async () => {
+		try {
+			await persist(value.filter((id) => !orphanIds.includes(id)));
+			toast.success(`Removed ${orphanIds.length} stale attachment(s)`);
+		} catch (error) {
+			toast.error(
+				error instanceof Error ? error.message : "Failed to clean attachments",
 			);
 		}
 	};
@@ -107,13 +123,44 @@ export const ResourceNetworksCard = ({
 				<CardTitle className="text-xl flex items-center gap-2">
 					<Network className="size-5 text-muted-foreground" />
 					Custom Networks
+					<span className="text-sm font-normal text-muted-foreground">
+						· on {serverName}
+					</span>
 				</CardTitle>
 				<CardDescription>
-					Attach this service to additional Docker networks. The built-in{" "}
-					<code>dokploy-network</code> stays attached for Traefik routing.
+					Attach this service to additional Docker networks on{" "}
+					<span className="font-medium">{serverName}</span>. Networks on other
+					servers are filtered out — Docker networks don't span hosts. The
+					built-in <code>dokploy-network</code> stays attached for Traefik
+					routing.
 				</CardDescription>
 			</CardHeader>
-			<CardContent>
+			<CardContent className="space-y-3">
+				{orphanIds.length > 0 && (
+					<div className="flex flex-col gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+						<div className="flex items-start gap-2">
+							<AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" />
+							<div className="flex-1">
+								<p className="font-medium text-amber-900 dark:text-amber-200">
+									{orphanIds.length} attachment(s) won't apply
+								</p>
+								<p className="text-amber-800/90 dark:text-amber-200/80">
+									These networks were deleted or belong to another server.
+									Deploys silently skip them — clean them up to remove the
+									stale references.
+								</p>
+							</div>
+							<Button
+								variant="outline"
+								size="sm"
+								onClick={cleanOrphans}
+								disabled={update.isPending}
+							>
+								Remove stale
+							</Button>
+						</div>
+					</div>
+				)}
 				{isLoading ? (
 					<div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
 						<Loader2 className="size-4 animate-spin" /> Loading networks…
@@ -121,13 +168,11 @@ export const ResourceNetworksCard = ({
 				) : availableNetworks.length === 0 ? (
 					<div className="flex flex-col gap-3 py-2 text-sm text-muted-foreground">
 						<p>
-							No networks available for this{" "}
-							{serverId ? "server" : "Dokploy host"}.
+							No networks defined for{" "}
+							<span className="font-medium">{serverName}</span> yet. Create
+							one on the Networks page and pick this server in the form.
 						</p>
-						<Link
-							href="/dashboard/networks"
-							className="text-primary hover:underline"
-						>
+						<Link href="/dashboard/networks">
 							<Button variant="outline" size="sm">
 								Manage networks
 							</Button>

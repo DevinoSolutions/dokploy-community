@@ -1,6 +1,7 @@
 "use client";
 
 import { Loader2, Network, Trash2 } from "lucide-react";
+import { useMemo } from "react";
 import { toast } from "sonner";
 import { HandleNetwork } from "@/components/dashboard/networks/handle-network";
 import { DialogAction } from "@/components/shared/dialog-action";
@@ -20,12 +21,54 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+
+const UsedByCell = ({ networkId }: { networkId: string }) => {
+	const { data, isLoading } = api.network.usage.useQuery(
+		{ networkId },
+		{ staleTime: 30_000 },
+	);
+	if (isLoading) return <span className="text-muted-foreground">…</span>;
+	const count = data?.length ?? 0;
+	if (count === 0) return <span className="text-muted-foreground">—</span>;
+	const summary = (data ?? [])
+		.slice(0, 8)
+		.map((r) => `${r.type}: ${r.name}`)
+		.join("\n");
+	const more = count > 8 ? `\n…and ${count - 8} more` : "";
+	return (
+		<TooltipProvider>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span className="cursor-help underline decoration-dotted">
+						{count}
+					</span>
+				</TooltipTrigger>
+				<TooltipContent className="whitespace-pre">
+					{summary}
+					{more}
+				</TooltipContent>
+			</Tooltip>
+		</TooltipProvider>
+	);
+};
 
 export const ShowNetworks = () => {
 	const { data: networks, isLoading, refetch } = api.network.all.useQuery();
+	const { data: servers } = api.server.withSSHKey.useQuery();
 	const { mutateAsync: removeNetwork, isPending: isRemoving } =
 		api.network.remove.useMutation();
+	const serverNameById = useMemo(() => {
+		const m = new Map<string, string>();
+		for (const s of servers ?? []) m.set(s.serverId, s.name);
+		return m;
+	}, [servers]);
 
 	const handleDelete = async (networkId: string, name: string) => {
 		try {
@@ -50,8 +93,9 @@ export const ShowNetworks = () => {
 								Networks
 							</CardTitle>
 							<CardDescription>
-								Manage Docker networks for your organization. Networks can be
-								scoped to a server (optional).
+								Manage Docker networks for your organization. Each network
+								lives on a single Docker host — apps on different servers
+								can't share one. Networks can be scoped to a server (optional).
 							</CardDescription>
 						</CardHeader>
 						{networks && networks.length > 0 && <HandleNetwork />}
@@ -91,6 +135,7 @@ export const ShowNetworks = () => {
 													<TableHead>Internal</TableHead>
 													<TableHead>Attachable</TableHead>
 													<TableHead>Server</TableHead>
+													<TableHead>Used by</TableHead>
 													<TableHead>Created</TableHead>
 													<TableHead className="w-[80px]">Actions</TableHead>
 												</TableRow>
@@ -106,7 +151,12 @@ export const ShowNetworks = () => {
 														<TableCell>{n.internal ? "Yes" : "No"}</TableCell>
 														<TableCell>{n.attachable ? "Yes" : "No"}</TableCell>
 														<TableCell>
-															{n.serverId ?? "Dokploy server"}
+															{n.serverId
+																? (serverNameById.get(n.serverId) ?? n.serverId)
+																: "Dokploy host"}
+														</TableCell>
+														<TableCell>
+															<UsedByCell networkId={n.networkId} />
 														</TableCell>
 														<TableCell className="text-muted-foreground">
 															{new Date(n.createdAt).toLocaleDateString()}

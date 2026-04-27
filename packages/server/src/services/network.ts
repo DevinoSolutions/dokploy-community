@@ -1,10 +1,26 @@
 import { db } from "@dokploy/server/db";
-import { type apiCreateNetwork, network } from "@dokploy/server/db/schema";
+import {
+	type apiCreateNetwork,
+	application,
+	libsql,
+	mariadb,
+	mongo,
+	mysql,
+	network,
+	postgres,
+	redis,
+} from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, arrayContains, desc, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
 import { IS_CLOUD } from "../constants";
 import { getRemoteDocker } from "../utils/servers/remote-docker";
+
+export type NetworkUsage = {
+	type: "application" | "libsql" | "mariadb" | "mongo" | "mysql" | "postgres" | "redis";
+	id: string;
+	name: string;
+}[];
 
 export const findNetworkById = async (networkId: string) => {
 	const row = await db.query.network.findFirst({
@@ -136,6 +152,39 @@ export const createNetwork = async (
 
 		return row;
 	});
+};
+
+export const findResourcesUsingNetwork = async (
+	networkId: string,
+	organizationId: string,
+): Promise<NetworkUsage> => {
+	const target = await db.query.network.findFirst({
+		where: and(
+			eq(network.networkId, networkId),
+			eq(network.organizationId, organizationId),
+		),
+	});
+	if (!target) {
+		throw new TRPCError({ code: "NOT_FOUND", message: "Network not found" });
+	}
+	const probes = [
+		{ type: "application" as const, table: application, idCol: application.applicationId },
+		{ type: "libsql" as const, table: libsql, idCol: libsql.libsqlId },
+		{ type: "mariadb" as const, table: mariadb, idCol: mariadb.mariadbId },
+		{ type: "mongo" as const, table: mongo, idCol: mongo.mongoId },
+		{ type: "mysql" as const, table: mysql, idCol: mysql.mysqlId },
+		{ type: "postgres" as const, table: postgres, idCol: postgres.postgresId },
+		{ type: "redis" as const, table: redis, idCol: redis.redisId },
+	];
+	const results: NetworkUsage = [];
+	for (const { type, table, idCol } of probes) {
+		const rows = await db
+			.select({ id: idCol, name: table.name })
+			.from(table)
+			.where(arrayContains(table.networkIds, [networkId]));
+		for (const r of rows) results.push({ type, id: r.id, name: r.name });
+	}
+	return results;
 };
 
 export const removeNetworkById = async (
