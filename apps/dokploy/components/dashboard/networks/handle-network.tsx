@@ -45,7 +45,10 @@ const formSchema = z.object({
 		.regex(
 			/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
 			"Only letters, digits, dot, underscore and dash. Must start with a letter or digit.",
-		),
+		)
+		.refine((n) => n !== "dokploy-network", {
+			message: "'dokploy-network' is reserved for Traefik routing.",
+		}),
 	driver: z.enum(["bridge", "overlay", "macvlan", "ipvlan"]),
 	serverId: z.string().optional(),
 	internal: z.boolean(),
