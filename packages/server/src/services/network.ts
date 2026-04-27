@@ -1,7 +1,7 @@
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreateNetwork,
-	application,
+	applications,
 	libsql,
 	mariadb,
 	mongo,
@@ -168,7 +168,7 @@ export const findResourcesUsingNetwork = async (
 		throw new TRPCError({ code: "NOT_FOUND", message: "Network not found" });
 	}
 	const probes = [
-		{ type: "application" as const, table: application, idCol: application.applicationId },
+		{ type: "application" as const, table: applications, idCol: applications.applicationId },
 		{ type: "libsql" as const, table: libsql, idCol: libsql.libsqlId },
 		{ type: "mariadb" as const, table: mariadb, idCol: mariadb.mariadbId },
 		{ type: "mongo" as const, table: mongo, idCol: mongo.mongoId },
