@@ -34,8 +34,15 @@ export const DeploymentConcurrencySection = ({ serverId }: Props) => {
 	const update = api.server.updateDeploymentConcurrency.useMutation();
 
 	const currentConcurrency = serverQuery.data?.deploymentConcurrency;
+	// Only poll while the section is actually mounted; stops the moment a parent unmounts the tab.
+	const [isMounted, setIsMounted] = useState(false);
+	useEffect(() => {
+		setIsMounted(true);
+		return () => setIsMounted(false);
+	}, []);
 	const queueQuery = api.deployment.queueList.useQuery(undefined, {
-		refetchInterval: 3000,
+		enabled: isMounted,
+		refetchInterval: isMounted ? 3000 : false,
 	});
 	const liveCounts = useMemo(() => {
 		const snapshots = queueQuery.data ?? [];

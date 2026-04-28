@@ -57,7 +57,7 @@ export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 			buildServerId?: string | null;
 		}) => {
 			const target = job.buildServerId ?? job.serverId ?? null;
-			return (target ?? null) === (serverId ?? null);
+			return target === (serverId ?? null);
 		};
 		let active = 0;
 		let pending = 0;
