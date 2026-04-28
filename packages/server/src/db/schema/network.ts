@@ -67,9 +67,14 @@ const createSchema = createInsertSchema(network, {
 			/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
 			"Network name must start with a letter or digit and contain only letters, digits, '_', '.' or '-'",
 		)
-		.refine((n) => n !== "dokploy-network", {
-			message: "'dokploy-network' is reserved for Traefik routing",
-		}),
+		.refine(
+			(n) =>
+				!["dokploy-network", "host", "bridge", "none"].includes(n),
+			{
+				message:
+					"This name is reserved (dokploy-network, host, bridge, none).",
+			},
+		),
 	driver: z
 		.enum(["bridge", "host", "overlay", "macvlan", "none", "ipvlan"])
 		.optional(),
