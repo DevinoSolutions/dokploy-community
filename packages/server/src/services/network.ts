@@ -19,7 +19,14 @@ import { IS_CLOUD } from "../constants";
 import { getRemoteDocker } from "../utils/servers/remote-docker";
 
 export type NetworkUsage = {
-	type: "application" | "libsql" | "mariadb" | "mongo" | "mysql" | "postgres" | "redis";
+	type:
+		| "application"
+		| "libsql"
+		| "mariadb"
+		| "mongo"
+		| "mysql"
+		| "postgres"
+		| "redis";
 	id: string;
 	name: string;
 }[];
@@ -176,13 +183,48 @@ export const findResourcesUsingNetwork = async (
 		.innerJoin(projects, eq(environments.projectId, projects.projectId))
 		.where(eq(projects.organizationId, organizationId));
 	const probes = [
-		{ type: "application" as const, table: applications, idCol: applications.applicationId, envCol: applications.environmentId },
-		{ type: "libsql" as const, table: libsql, idCol: libsql.libsqlId, envCol: libsql.environmentId },
-		{ type: "mariadb" as const, table: mariadb, idCol: mariadb.mariadbId, envCol: mariadb.environmentId },
-		{ type: "mongo" as const, table: mongo, idCol: mongo.mongoId, envCol: mongo.environmentId },
-		{ type: "mysql" as const, table: mysql, idCol: mysql.mysqlId, envCol: mysql.environmentId },
-		{ type: "postgres" as const, table: postgres, idCol: postgres.postgresId, envCol: postgres.environmentId },
-		{ type: "redis" as const, table: redis, idCol: redis.redisId, envCol: redis.environmentId },
+		{
+			type: "application" as const,
+			table: applications,
+			idCol: applications.applicationId,
+			envCol: applications.environmentId,
+		},
+		{
+			type: "libsql" as const,
+			table: libsql,
+			idCol: libsql.libsqlId,
+			envCol: libsql.environmentId,
+		},
+		{
+			type: "mariadb" as const,
+			table: mariadb,
+			idCol: mariadb.mariadbId,
+			envCol: mariadb.environmentId,
+		},
+		{
+			type: "mongo" as const,
+			table: mongo,
+			idCol: mongo.mongoId,
+			envCol: mongo.environmentId,
+		},
+		{
+			type: "mysql" as const,
+			table: mysql,
+			idCol: mysql.mysqlId,
+			envCol: mysql.environmentId,
+		},
+		{
+			type: "postgres" as const,
+			table: postgres,
+			idCol: postgres.postgresId,
+			envCol: postgres.environmentId,
+		},
+		{
+			type: "redis" as const,
+			table: redis,
+			idCol: redis.redisId,
+			envCol: redis.environmentId,
+		},
 	];
 	const results: NetworkUsage = [];
 	for (const { type, table, idCol, envCol } of probes) {

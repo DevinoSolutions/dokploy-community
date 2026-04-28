@@ -46,14 +46,9 @@ const formSchema = z.object({
 			/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
 			"Only letters, digits, dot, underscore and dash. Must start with a letter or digit.",
 		)
-		.refine(
-			(n) =>
-				!["dokploy-network", "host", "bridge", "none"].includes(n),
-			{
-				message:
-					"This name is reserved (dokploy-network, host, bridge, none).",
-			},
-		),
+		.refine((n) => !["dokploy-network", "host", "bridge", "none"].includes(n), {
+			message: "This name is reserved (dokploy-network, host, bridge, none).",
+		}),
 	driver: z.enum(["bridge", "overlay", "macvlan", "ipvlan"]),
 	serverId: z.string().optional(),
 	internal: z.boolean(),
