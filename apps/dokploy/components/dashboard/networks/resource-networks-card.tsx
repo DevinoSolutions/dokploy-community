@@ -146,8 +146,8 @@ export const ResourceNetworksCard = ({
 								</p>
 								<p className="text-amber-800/90 dark:text-amber-200/80">
 									These networks were deleted or belong to another server.
-									Deploys silently skip them — clean them up to remove the
-									stale references.
+									Deploys silently skip them — clean them up to remove the stale
+									references.
 								</p>
 							</div>
 							<Button
@@ -169,8 +169,8 @@ export const ResourceNetworksCard = ({
 					<div className="flex flex-col gap-3 py-2 text-sm text-muted-foreground">
 						<p>
 							No networks defined for{" "}
-							<span className="font-medium">{serverName}</span> yet. Create
-							one on the Networks page and pick this server in the form.
+							<span className="font-medium">{serverName}</span> yet. Create one
+							on the Networks page and pick this server in the form.
 						</p>
 						<Link href="/dashboard/networks">
 							<Button variant="outline" size="sm">

@@ -93,9 +93,9 @@ export const ShowNetworks = () => {
 								Networks
 							</CardTitle>
 							<CardDescription>
-								Manage Docker networks for your organization. Each network
-								lives on a single Docker host — apps on different servers
-								can't share one. Networks can be scoped to a server (optional).
+								Manage Docker networks for your organization. Each network lives
+								on a single Docker host — apps on different servers can't share
+								one. Networks can be scoped to a server (optional).
 							</CardDescription>
 						</CardHeader>
 						{networks && networks.length > 0 && <HandleNetwork />}
