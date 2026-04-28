@@ -99,9 +99,7 @@ export const DeploymentConcurrencySection = ({ serverId }: Props) => {
 			</CardHeader>
 			<CardContent className="flex flex-col gap-3">
 				<div className="flex items-center justify-between">
-					<Label htmlFor="deployment-concurrency">
-						Concurrent deployments
-					</Label>
+					<Label htmlFor="deployment-concurrency">Concurrent deployments</Label>
 					<span className="text-xs text-muted-foreground">
 						Live: {liveCounts.active} active · {liveCounts.pending} queued
 					</span>
@@ -118,15 +116,15 @@ export const DeploymentConcurrencySection = ({ serverId }: Props) => {
 				/>
 				<p className="text-xs text-muted-foreground">
 					<span className="font-medium">1</span> = one deploy at a time
-					(safest). <span className="font-medium">2–{MAX}</span> = run that
-					many side-by-side; only raise if the host has spare CPU/RAM.
+					(safest). <span className="font-medium">2–{MAX}</span> = run that many
+					side-by-side; only raise if the host has spare CPU/RAM.
 				</p>
 				<Alert>
 					<Info className="h-4 w-4" />
 					<AlertDescription>
-						Each concurrent build uses roughly one CPU core and 2&nbsp;GB of
-						RAM while active. Saved value applies immediately; in-flight
-						deployments are not interrupted.
+						Each concurrent build uses roughly one CPU core and 2&nbsp;GB of RAM
+						while active. Saved value applies immediately; in-flight deployments
+						are not interrupted.
 					</AlertDescription>
 				</Alert>
 				<div>
