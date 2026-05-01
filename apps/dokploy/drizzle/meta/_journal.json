@@ -1170,6 +1170,13 @@
       "when": 1777039297185,
       "tag": "0166_network_management",
       "breakpoints": true
+    },
+    {
+      "idx": 167,
+      "version": "7",
+      "when": 1777643500000,
+      "tag": "0167_drop_compose_networkids",
+      "breakpoints": true
     }
   ]
 }
