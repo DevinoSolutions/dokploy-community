@@ -979,49 +979,46 @@ export const composeRouter = createTRPCRouter({
 			});
 			const compose = await findComposeById(input.composeId);
 
-			if (IS_CLOUD && compose.serverId) {
-				try {
-					await updateCompose(input.composeId, {
-						composeStatus: "idle",
-					});
+			try {
+				await updateCompose(input.composeId, {
+					composeStatus: "idle",
+				});
+				if (compose.deployments[0]) {
+					await updateDeploymentStatus(
+						compose.deployments[0].deploymentId,
+						"error",
+					);
+				}
 
-					if (compose.deployments[0]) {
-						await updateDeploymentStatus(
-							compose.deployments[0].deploymentId,
-							"done",
-						);
-					}
-
+				if (IS_CLOUD && compose.serverId) {
 					await cancelDeployment({
 						composeId: input.composeId,
 						applicationType: "compose",
 					});
-
-					await audit(ctx, {
-						action: "stop",
-						resourceType: "compose",
-						resourceId: input.composeId,
-						resourceName: compose.name,
-					});
-					return {
-						success: true,
-						message: "Deployment cancellation requested",
-					};
-				} catch (error) {
-					throw new TRPCError({
-						code: "INTERNAL_SERVER_ERROR",
-						message:
-							error instanceof Error
-								? error.message
-								: "Failed to cancel deployment",
-					});
+				} else {
+					// Self-hosted: in-memory queue manager handles abort + kill.
+					await cleanQueuesByCompose(input.composeId);
 				}
-			}
 
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Deployment cancellation only available in cloud version",
-			});
+				await audit(ctx, {
+					action: "stop",
+					resourceType: "compose",
+					resourceId: input.composeId,
+					resourceName: compose.name,
+				});
+				return {
+					success: true,
+					message: "Deployment cancellation requested",
+				};
+			} catch (error) {
+				throw new TRPCError({
+					code: "INTERNAL_SERVER_ERROR",
+					message:
+						error instanceof Error
+							? error.message
+							: "Failed to cancel deployment",
+				});
+			}
 		}),
 
 	search: protectedProcedure
