@@ -2582,6 +2582,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "networkIds": {
+          "name": "networkIds",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'{}'"
         }
       },
       "indexes": {},
