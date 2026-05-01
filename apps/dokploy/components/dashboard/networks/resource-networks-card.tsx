@@ -68,9 +68,14 @@ export const ResourceNetworksCard = ({
 	const utils = api.useUtils();
 
 	// Only networks scoped to the same server as this resource. Mirrors backend resolver.
+	// Apps + DBs run as Docker Swarm services (`docker service create`), and Swarm
+	// rejects bridge networks at deploy time with HTTP 403. Hide non-overlay so users
+	// don't pick something that will fail later.
 	const availableNetworks = useMemo(() => {
 		const target = serverId ?? null;
-		return (networks ?? []).filter((n) => (n.serverId ?? null) === target);
+		return (networks ?? []).filter(
+			(n) => (n.serverId ?? null) === target && n.driver === "overlay",
+		);
 	}, [networks, serverId]);
 
 	// Saved IDs that don't apply: deleted networks or attached to a different server.
@@ -129,10 +134,11 @@ export const ResourceNetworksCard = ({
 				</CardTitle>
 				<CardDescription>
 					Attach this service to additional Docker networks on{" "}
-					<span className="font-medium">{serverName}</span>. Networks on other
-					servers are filtered out — Docker networks don't span hosts. The
-					built-in <code>dokploy-network</code> stays attached for Traefik
-					routing.
+					<span className="font-medium">{serverName}</span>. Only{" "}
+					<code>overlay</code> networks scoped to this server are listed — Swarm
+					services (which Apps and DBs deploy as) refuse <code>bridge</code>{" "}
+					networks at deploy. The built-in <code>dokploy-network</code> stays
+					attached for Traefik routing.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-3">
@@ -168,9 +174,11 @@ export const ResourceNetworksCard = ({
 				) : availableNetworks.length === 0 ? (
 					<div className="flex flex-col gap-3 py-2 text-sm text-muted-foreground">
 						<p>
-							No networks defined for{" "}
-							<span className="font-medium">{serverName}</span> yet. Create one
-							on the Networks page and pick this server in the form.
+							No <span className="font-medium">overlay</span> networks defined
+							for <span className="font-medium">{serverName}</span> yet. Apps
+							and databases run as Swarm services and only accept overlay
+							networks — create one on the Networks page with driver{" "}
+							<code>overlay</code> and pick this server.
 						</p>
 						<Link href="/dashboard/networks">
 							<Button variant="outline" size="sm">

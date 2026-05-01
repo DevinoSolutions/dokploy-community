@@ -61,6 +61,7 @@ export const resolveNetworkNamesForResource = async (
 		.select({
 			name: network.name,
 			serverId: network.serverId,
+			driver: network.driver,
 		})
 		.from(network)
 		.where(
@@ -70,8 +71,14 @@ export const resolveNetworkNamesForResource = async (
 			),
 		);
 	const target = serverId ?? null;
+	// Apps + DBs deploy as Docker Swarm services. Swarm rejects bridge networks
+	// at deploy with HTTP 403 ("only networks scoped to the swarm can be used").
+	// Drop non-overlay here so a bad attachment fails open (skipped) rather than
+	// breaking every deploy of the resource.
 	return rows
-		.filter((row) => (row.serverId ?? null) === target)
+		.filter(
+			(row) => (row.serverId ?? null) === target && row.driver === "overlay",
+		)
 		.map((row) => row.name);
 };
 
