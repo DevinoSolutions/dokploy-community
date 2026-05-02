@@ -70,6 +70,7 @@ import {
 import { deploymentWorker } from "@/server/queues/deployments-queue";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
+	cancelDeploymentsByApplication,
 	cleanQueuesByApplication,
 	getJobsByApplicationId,
 	killDockerBuild,
@@ -338,8 +339,11 @@ export const applicationRouter = createTRPCRouter({
 				server: !!application.serverId,
 			};
 
-			if (IS_CLOUD && application.serverId) {
+			if (application.serverId) {
 				jobData.serverId = application.serverId;
+			}
+
+			if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -705,8 +709,11 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 			};
-			if (IS_CLOUD && application.serverId) {
+			if (application.serverId) {
 				jobData.serverId = application.serverId;
+			}
+
+			if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -824,8 +831,11 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!app.serverId,
 			};
-			if (IS_CLOUD && app.serverId) {
+			if (app.serverId) {
 				jobData.serverId = app.serverId;
+			}
+
+			if (IS_CLOUD && app.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -944,8 +954,10 @@ export const applicationRouter = createTRPCRouter({
 						applicationType: "application",
 					});
 				} else {
-					// Self-hosted: in-memory queue manager handles abort + kill.
-					await cleanQueuesByApplication(input.applicationId);
+					// Self-hosted: abort in-flight job (AbortController) + drop
+					// queued + SIGINT the docker build subprocess.
+					await cancelDeploymentsByApplication(input.applicationId);
+					await killDockerBuild("application", application.serverId);
 				}
 
 				await audit(ctx, {

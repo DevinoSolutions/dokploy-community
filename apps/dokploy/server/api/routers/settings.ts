@@ -71,10 +71,10 @@ import {
 	projects,
 	server,
 } from "@/server/db/schema";
-import { LOCAL_TARGET } from "@/server/queues/queue-router";
 import {
 	cleanAllDeploymentQueue,
 	deploymentQueueManager,
+	LOCAL_TARGET,
 } from "@/server/queues/queueSetup";
 import { removeJob, schedule } from "@/server/utils/backup";
 import packageInfo from "../../../package.json";

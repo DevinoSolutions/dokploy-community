@@ -287,6 +287,9 @@ importers:
       boxen:
         specifier: ^7.1.1
         version: 7.1.1
+      bullmq:
+        specifier: 5.67.3
+        version: 5.67.3
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -8017,6 +8020,7 @@ packages:
 
   uuid@9.0.1:
     resolution: {integrity: sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   valibot@1.2.0:

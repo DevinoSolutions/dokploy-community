@@ -1,193 +1,303 @@
-import { IS_CLOUD } from "@dokploy/server";
-import { findApplicationById } from "@dokploy/server/services/application";
-import { findComposeById } from "@dokploy/server/services/compose";
-import { findServerById } from "@dokploy/server/services/server";
-import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
-import { killDockerBuild } from "./kill-docker-build";
-import { DeploymentQueueManager } from "./queue-manager";
 import {
-	isJobForApplication,
-	isJobForCompose,
+	findServerById,
+	getAllServers,
+	getWebServerSettings,
+	IS_CLOUD,
+} from "@dokploy/server";
+import {
+	execAsync,
+	execAsyncRemote,
+} from "@dokploy/server/utils/process/execAsync";
+import {
+	type Job,
+	type JobsOptions,
+	type JobType,
+	Queue,
+} from "bullmq";
+import {
+	CANCEL_CHANNEL,
+	deploymentWorker,
+	getQueueName,
+	getTargetKey,
 	LOCAL_TARGET,
-} from "./queue-router";
+} from "./deployments-queue";
 import type { DeploymentJob } from "./queue-types";
+import { redisConfig } from "./redis-connection";
 
-const DEFAULT_CONCURRENCY = Number.parseInt(
-	process.env.DEPLOYMENT_QUEUE_CONCURRENCY ?? "1",
-	10,
-);
+export { LOCAL_TARGET, getTargetKey };
 
-const concurrencyProvider = async (
+const queues = new Map<string, Queue<DeploymentJob>>();
+
+const createNoopQueue = () =>
+	({
+		getJobs: () => Promise.resolve([] as Job[]),
+		getJob: () => Promise.resolve(undefined),
+		add: () =>
+			Promise.resolve({ id: "noop", remove: () => Promise.resolve() } as Job),
+		client: Promise.resolve(undefined as unknown as never),
+		close: () => Promise.resolve(),
+		on: () => {},
+	}) as unknown as Queue<DeploymentJob>;
+
+const getOrCreateQueue = (targetKey: string): Queue<DeploymentJob> => {
+	let q = queues.get(targetKey);
+	if (q) return q;
+	if (IS_CLOUD) {
+		q = createNoopQueue();
+	} else {
+		q = new Queue<DeploymentJob>(getQueueName(targetKey), {
+			connection: redisConfig,
+		});
+		q.on("error", (err) => {
+			if ((err as { code?: string })?.code === "ECONNREFUSED") {
+				console.error(
+					"Make sure you have installed Redis and it is running.",
+					err,
+				);
+			}
+		});
+	}
+	queues.set(targetKey, q);
+	return q;
+};
+
+const getAllQueues = (): Queue<DeploymentJob>[] => Array.from(queues.values());
+
+const aggregateJobs = async (states?: JobType[]): Promise<Job[]> => {
+	const all: Job[] = [];
+	for (const q of getAllQueues()) {
+		all.push(...((await q.getJobs(states)) as Job[]));
+	}
+	return all;
+};
+
+/**
+ * Look up the persisted deploymentConcurrency for a target. Falls back to 1
+ * when the row is missing (e.g. a server was deleted between enqueue and
+ * worker spin-up). Errors are swallowed — concurrency is a tuning knob, not
+ * a correctness boundary.
+ */
+const resolveConcurrencyForTarget = async (
 	targetKey: string,
-): Promise<number | undefined> => {
-	if (targetKey === LOCAL_TARGET) {
-		try {
-			const settings = await getWebServerSettings();
-			return settings?.deploymentConcurrency ?? undefined;
-		} catch {
-			return undefined;
-		}
-	}
+): Promise<number> => {
+	if (IS_CLOUD) return 1;
 	try {
-		const server = await findServerById(targetKey);
-		return server.deploymentConcurrency ?? undefined;
-	} catch {
-		return undefined;
-	}
-};
-
-const noopProvider = () => undefined;
-
-// Two bundles (server + Next.js) share this module; Symbol.for pins a single instance across both.
-const SINGLETON_KEY = Symbol.for("dokploy.deploymentQueueManager");
-type WithSingleton = {
-	[SINGLETON_KEY]?: DeploymentQueueManager;
-};
-const globalRef = globalThis as WithSingleton;
-
-function resolveSingleton(): DeploymentQueueManager {
-	const existing = globalRef[SINGLETON_KEY];
-	if (existing) return existing;
-	const created = new DeploymentQueueManager({
-		defaultConcurrency: Number.isFinite(DEFAULT_CONCURRENCY)
-			? Math.max(1, DEFAULT_CONCURRENCY)
-			: 1,
-		concurrencyProvider: IS_CLOUD ? noopProvider : concurrencyProvider,
-	});
-	globalRef[SINGLETON_KEY] = created;
-	return created;
-}
-
-export const deploymentQueueManager = resolveSingleton();
-
-// Routing requires real serverIds; missing entity must fail loudly to avoid running a remote-targeted build on the local host.
-async function enrichJob(job: DeploymentJob): Promise<DeploymentJob> {
-	if (
-		job.applicationType === "application" ||
-		job.applicationType === "application-preview"
-	) {
-		if (job.buildServerId && job.serverId) return job;
-		const app = await findApplicationById(job.applicationId);
-		return {
-			...job,
-			serverId: job.serverId ?? app.serverId ?? undefined,
-			buildServerId: job.buildServerId ?? app.buildServerId ?? undefined,
-		};
-	}
-	if (job.serverId) return job;
-	const compose = await findComposeById(job.composeId);
-	return {
-		...job,
-		serverId: job.serverId ?? compose.serverId ?? undefined,
-	};
-}
-
-type LegacyAddReturn = { id: string; remove: () => Promise<void> };
-
-// BullMQ-shaped view; consumer in deployment router relies on getState/timestamp.
-export interface LegacyQueueJob {
-	id: string;
-	name: string;
-	data: DeploymentJob;
-	timestamp?: number;
-	processedOn?: number;
-	finishedOn?: number;
-	failedReason?: string;
-	getState: () => Promise<string>;
-}
-
-const toLegacyJob = (snapshot: {
-	jobId: string;
-	data: DeploymentJob;
-	enqueuedAt: number;
-	startedAt?: number;
-	state: "active" | "pending";
-}): LegacyQueueJob => ({
-	id: snapshot.jobId,
-	name: "deployments",
-	data: snapshot.data,
-	timestamp: snapshot.enqueuedAt,
-	processedOn: snapshot.startedAt,
-	getState: async () => (snapshot.state === "active" ? "active" : "waiting"),
-});
-
-// `_name` and `_opts` are unused; kept to match the old BullMQ call sites.
-export const myQueue = {
-	async add(
-		_name: string,
-		data: DeploymentJob,
-		_opts?: unknown,
-	): Promise<LegacyAddReturn> {
-		if (IS_CLOUD) {
-			return { id: "cloud-noop", remove: async () => {} };
+		if (targetKey === LOCAL_TARGET) {
+			const settings = await getWebServerSettings();
+			return settings?.deploymentConcurrency ?? 1;
 		}
-		const enriched = await enrichJob(data);
-		const job = await deploymentQueueManager.add(enriched);
-		// Avoid unhandled rejection on the done promise — the handler logs
-		// errors, and the UI surfaces status via the deployments table.
-		job.done.catch(() => {});
-		return {
-			id: job.jobId,
-			remove: async () => {
-				deploymentQueueManager.cancelJob(job.jobId, "User removed queued job");
-			},
-		};
+		const server = await findServerById(targetKey);
+		return server?.deploymentConcurrency ?? 1;
+	} catch {
+		return 1;
+	}
+};
+
+const ensureWorkerForTarget = async (targetKey: string): Promise<void> => {
+	if (IS_CLOUD) return;
+	const concurrency = await resolveConcurrencyForTarget(targetKey);
+	deploymentWorker.ensureWorker(targetKey, concurrency);
+	deploymentWorker.setConcurrency(targetKey, concurrency);
+};
+
+/**
+ * Legacy facade preserved for webhook callers (pages/api/deploy/*) that still
+ * `myQueue.add(...)`. Routes by `serverId` to the correct per-target queue;
+ * `getJobs` aggregates across all known per-target queues.
+ */
+export const myQueue = {
+	add: async (name: string, data: DeploymentJob, opts?: JobsOptions) => {
+		const targetKey = getTargetKey(data);
+		const q = getOrCreateQueue(targetKey);
+		await ensureWorkerForTarget(targetKey);
+		return q.add(name, data, opts);
 	},
+	getJobs: (states?: JobType[]) => aggregateJobs(states),
+	close: async () => {
+		await Promise.all(getAllQueues().map((q) => q.close()));
+		queues.clear();
+	},
+	on: () => {},
+} as unknown as Queue<DeploymentJob>;
 
-	async getJobs(): Promise<LegacyQueueJob[]> {
-		return deploymentQueueManager.listSnapshots().map(toLegacyJob);
+const publishCancel = async (
+	jobId: string,
+	targetKey: string,
+): Promise<void> => {
+	const q = getOrCreateQueue(targetKey);
+	const client = await (q as unknown as { client: Promise<unknown> }).client;
+	const publisher = client as {
+		publish: (channel: string, payload: string) => Promise<unknown>;
+	};
+	await publisher.publish(
+		CANCEL_CHANNEL,
+		JSON.stringify({ jobId, targetKey }),
+	);
+};
+
+export const deploymentQueueManager = {
+	enqueue: async (data: DeploymentJob, opts?: JobsOptions) => {
+		const targetKey = getTargetKey(data);
+		const q = getOrCreateQueue(targetKey);
+		await ensureWorkerForTarget(targetKey);
+		return q.add("deploy", data, opts);
+	},
+	updateConcurrency: async (
+		targetKey: string,
+		concurrency: number,
+	): Promise<void> => {
+		if (IS_CLOUD) return;
+		deploymentWorker.setConcurrency(targetKey, concurrency);
+	},
+	cancel: async (
+		jobId: string,
+		targetKey: string,
+	): Promise<{ canceled: boolean; wasActive: boolean }> => {
+		if (IS_CLOUD) return { canceled: false, wasActive: false };
+		const q = queues.get(targetKey);
+		if (q) {
+			const job = await q.getJob(jobId);
+			if (job) {
+				const state = await job.getState();
+				if (state === "waiting" || state === "delayed") {
+					await job.remove();
+					return { canceled: true, wasActive: false };
+				}
+			}
+		}
+		await deploymentWorker.cancelJob(jobId);
+		await publishCancel(jobId, targetKey);
+		return { canceled: true, wasActive: true };
+	},
+	/**
+	 * Pre-warm queues + workers at boot. LOCAL is always warmed. Each server
+	 * is also warmed so that any jobs persisted in `deployments:<serverId>`
+	 * Redis queues from a previous process get picked up by their target's
+	 * worker — without this, per-server queues stay orphaned until the user
+	 * triggers a fresh deploy on that server.
+	 */
+	bootstrap: async (): Promise<void> => {
+		if (IS_CLOUD) return;
+		getOrCreateQueue(LOCAL_TARGET);
+		await ensureWorkerForTarget(LOCAL_TARGET);
+		try {
+			const servers = await getAllServers();
+			for (const s of servers) {
+				if (!s?.serverId) continue;
+				getOrCreateQueue(s.serverId);
+				await ensureWorkerForTarget(s.serverId);
+			}
+			console.log(
+				`Deployment queue ready (LOCAL + ${servers.length} server queue(s))`,
+			);
+		} catch (error) {
+			console.error("Failed to pre-warm per-server deployment workers", error);
+		}
 	},
 };
 
-export const getJobsByApplicationId = async (
-	applicationId: string,
-): Promise<LegacyQueueJob[]> => {
-	return deploymentQueueManager
-		.listSnapshots()
-		.filter((snapshot) => isJobForApplication(snapshot.data, applicationId))
-		.map(toLegacyJob);
+export const getJobsByApplicationId = async (applicationId: string) => {
+	const jobs = await aggregateJobs();
+	return jobs.filter((job) => job?.data?.applicationId === applicationId);
 };
 
-export const getJobsByComposeId = async (
-	composeId: string,
-): Promise<LegacyQueueJob[]> => {
-	return deploymentQueueManager
-		.listSnapshots()
-		.filter((snapshot) => isJobForCompose(snapshot.data, composeId))
-		.map(toLegacyJob);
+export const getJobsByComposeId = async (composeId: string) => {
+	const jobs = await aggregateJobs();
+	return jobs.filter((job) => job?.data?.composeId === composeId);
 };
 
-export const cleanAllDeploymentQueue = async (): Promise<boolean> => {
-	deploymentQueueManager.cancelAllJobs("User requested cancellation");
+export const cleanQueuesByApplication = async (applicationId: string) => {
+	const jobs = await aggregateJobs(["waiting", "delayed"]);
+	for (const job of jobs) {
+		if (job?.data?.applicationId === applicationId) {
+			await job.remove();
+			console.log(`Removed job ${job.id} for application ${applicationId}`);
+		}
+	}
+};
+
+export const cleanQueuesByCompose = async (composeId: string) => {
+	const jobs = await aggregateJobs(["waiting", "delayed"]);
+	for (const job of jobs) {
+		if (job?.data?.composeId === composeId) {
+			await job.remove();
+			console.log(`Removed job ${job.id} for compose ${composeId}`);
+		}
+	}
+};
+
+/**
+ * Self-hosted cancel: abort any in-flight job for this application AND drop
+ * pending ones. Pair with `killDockerBuild` from the router to SIGINT the
+ * underlying docker subprocess.
+ */
+export const cancelDeploymentsByApplication = async (applicationId: string) => {
+	const jobs = await aggregateJobs([
+		"active",
+		"waiting",
+		"delayed",
+		"prioritized",
+	]);
+	let canceled = 0;
+	for (const job of jobs) {
+		if (job?.data?.applicationId !== applicationId) continue;
+		if (!job.id) continue;
+		const targetKey = getTargetKey(job.data);
+		await deploymentQueueManager.cancel(job.id, targetKey);
+		canceled++;
+	}
+	return canceled;
+};
+
+export const cancelDeploymentsByCompose = async (composeId: string) => {
+	const jobs = await aggregateJobs([
+		"active",
+		"waiting",
+		"delayed",
+		"prioritized",
+	]);
+	let canceled = 0;
+	for (const job of jobs) {
+		if (job?.data?.composeId !== composeId) continue;
+		if (!job.id) continue;
+		const targetKey = getTargetKey(job.data);
+		await deploymentQueueManager.cancel(job.id, targetKey);
+		canceled++;
+	}
+	return canceled;
+};
+
+export const cleanAllDeploymentQueue = async () => {
+	await deploymentWorker.cancelAllJobs("User requested cancellation");
+	for (const q of getAllQueues()) {
+		const jobs = await q.getJobs(["waiting", "delayed"]);
+		for (const job of jobs) await job.remove();
+	}
 	return true;
 };
 
-export const cleanQueuesByApplication = async (
-	applicationId: string,
-): Promise<void> => {
-	const removed = deploymentQueueManager.cancelWhere(
-		(job) => isJobForApplication(job, applicationId),
-		"User requested cancellation",
-	);
-	if (removed > 0) {
-		console.log(
-			`Cancelled ${removed} deployment job(s) for application ${applicationId}`,
-		);
+export const killDockerBuild = async (
+	type: "application" | "compose",
+	serverId: string | null,
+) => {
+	const command =
+		type === "application"
+			? `pkill -2 -f "docker build"`
+			: `pkill -2 -f "docker compose"`;
+	try {
+		if (serverId) {
+			await execAsyncRemote(serverId, command);
+		} else {
+			await execAsync(command);
+		}
+	} catch (error) {
+		console.error(error);
 	}
 };
 
-export const cleanQueuesByCompose = async (
-	composeId: string,
-): Promise<void> => {
-	const removed = deploymentQueueManager.cancelWhere(
-		(job) => isJobForCompose(job, composeId),
-		"User requested cancellation",
-	);
-	if (removed > 0) {
-		console.log(
-			`Cancelled ${removed} deployment job(s) for compose ${composeId}`,
-		);
-	}
-};
-
-export { killDockerBuild };
+if (!IS_CLOUD) {
+	process.on("SIGTERM", () => {
+		void myQueue.close();
+		process.exit(0);
+	});
+}

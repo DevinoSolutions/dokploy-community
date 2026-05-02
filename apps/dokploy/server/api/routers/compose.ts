@@ -71,6 +71,7 @@ import {
 import { deploymentWorker } from "@/server/queues/deployments-queue";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
+	cancelDeploymentsByCompose,
 	cleanQueuesByCompose,
 	getJobsByComposeId,
 	killDockerBuild,
@@ -430,8 +431,11 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 			};
 
-			if (IS_CLOUD && compose.serverId) {
+			if (compose.serverId) {
 				jobData.serverId = compose.serverId;
+			}
+
+			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -478,8 +482,11 @@ export const composeRouter = createTRPCRouter({
 				descriptionLog: input.description || "",
 				server: !!compose.serverId,
 			};
-			if (IS_CLOUD && compose.serverId) {
+			if (compose.serverId) {
 				jobData.serverId = compose.serverId;
+			}
+
+			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -996,8 +1003,10 @@ export const composeRouter = createTRPCRouter({
 						applicationType: "compose",
 					});
 				} else {
-					// Self-hosted: in-memory queue manager handles abort + kill.
-					await cleanQueuesByCompose(input.composeId);
+					// Self-hosted: abort in-flight job (AbortController) + drop
+					// queued + SIGINT the docker compose subprocess.
+					await cancelDeploymentsByCompose(input.composeId);
+					await killDockerBuild("compose", compose.serverId);
 				}
 
 				await audit(ctx, {

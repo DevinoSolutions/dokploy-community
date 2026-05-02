@@ -73,6 +73,10 @@ void app.prepare().then(async () => {
 		if (!IS_CLOUD) {
 			console.log("Starting Deployment Worker");
 			await deploymentWorker.run();
+			const { deploymentQueueManager } = await import(
+				"./queues/queueSetup"
+			);
+			await deploymentQueueManager.bootstrap();
 
 			// Graceful shutdown: abort in-flight deployments so no rows are left
 			// stuck in "running". `initCancelDeployments` sweeps on the *next*
