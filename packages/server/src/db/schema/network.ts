@@ -1,5 +1,12 @@
-import { relations } from "drizzle-orm";
-import { boolean, jsonb, pgEnum, pgTable, text } from "drizzle-orm/pg-core";
+import { relations, sql } from "drizzle-orm";
+import {
+	boolean,
+	jsonb,
+	pgEnum,
+	pgTable,
+	text,
+	uniqueIndex,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -44,7 +51,19 @@ export const network = pgTable("network", {
 	serverId: text("serverId").references(() => server.serverId, {
 		onDelete: "cascade",
 	}),
-});
+}, (t) => [
+	// Docker enforces unique network names per daemon (per server). Mirror
+	// that at the DB layer so two concurrent creates of the same name on the
+	// same server fail with a clean SQL constraint instead of an opaque
+	// Docker error after the row is already inserted. We COALESCE serverId
+	// to '' so host-level networks (serverId IS NULL) collapse into a single
+	// bucket — Drizzle 0.45 doesn't expose `nullsNotDistinct()` on
+	// uniqueIndex, so this is the equivalent.
+	uniqueIndex("network_name_serverId_idx").on(
+		t.name,
+		sql`COALESCE(${t.serverId}, '')`,
+	),
+]);
 
 export const networkRelations = relations(network, ({ one }) => ({
 	organization: one(organization, {
@@ -67,9 +86,16 @@ const createSchema = createInsertSchema(network, {
 			/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
 			"Network name must start with a letter or digit and contain only letters, digits, '_', '.' or '-'",
 		)
-		.refine((n) => !["dokploy-network", "host", "bridge", "none"].includes(n), {
-			message: "This name is reserved (dokploy-network, host, bridge, none).",
-		}),
+		.refine(
+			(n) =>
+				!["dokploy-network", "host", "bridge", "none", "ingress", "docker_gwbridge"].includes(
+					n,
+				),
+			{
+				message:
+					"This name is reserved (dokploy-network, host, bridge, none, ingress, docker_gwbridge).",
+			},
+		),
 	driver: z
 		.enum(["bridge", "host", "overlay", "macvlan", "none", "ipvlan"])
 		.optional(),

@@ -21,16 +21,9 @@ export const networkRouter = createTRPCRouter({
 
 	one: withPermission("network", "read")
 		.input(apiFindOneNetwork)
-		.query(async ({ ctx, input }) => {
-			const row = await findNetworkById(input.networkId);
-			if (row.organizationId !== ctx.session.activeOrganizationId) {
-				throw new TRPCError({
-					code: "NOT_FOUND",
-					message: "Network not found",
-				});
-			}
-			return row;
-		}),
+		.query(async ({ ctx, input }) =>
+			findNetworkById(input.networkId, ctx.session.activeOrganizationId),
+		),
 
 	create: withPermission("network", "create")
 		.input(apiCreateNetwork)

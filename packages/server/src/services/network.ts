@@ -31,9 +31,17 @@ export type NetworkUsage = {
 	name: string;
 }[];
 
-export const findNetworkById = async (networkId: string) => {
+export const findNetworkById = async (
+	networkId: string,
+	organizationId?: string,
+) => {
 	const row = await db.query.network.findFirst({
-		where: eq(network.networkId, networkId),
+		where: organizationId
+			? and(
+					eq(network.networkId, networkId),
+					eq(network.organizationId, organizationId),
+				)
+			: eq(network.networkId, networkId),
 	});
 	if (!row) {
 		throw new TRPCError({
@@ -153,6 +161,14 @@ export const createNetwork = async (
 				IPAM: {
 					Driver: ipam.driver ?? "default",
 					Config: ipamConfig.length > 0 ? ipamConfig : undefined,
+				},
+				// Tag networks Dokploy created so `docker network prune` (no
+				// filter) cannot quietly delete them between deploys when no
+				// service is currently attached. Operators can also identify
+				// org ownership from `docker network inspect`.
+				Labels: {
+					"dokploy.managed": "true",
+					"dokploy.organizationId": organizationId,
 				},
 			});
 		} catch (error) {
