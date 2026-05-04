@@ -162,10 +162,11 @@ export const createNetwork = async (
 					Driver: ipam.driver ?? "default",
 					Config: ipamConfig.length > 0 ? ipamConfig : undefined,
 				},
-				// Tag networks Dokploy created so `docker network prune` (no
-				// filter) cannot quietly delete them between deploys when no
-				// service is currently attached. Operators can also identify
-				// org ownership from `docker network inspect`.
+				// Ownership tag. Operators wanting to spare these on host
+				// cleanup should use:
+				//   docker network prune --filter "label!=dokploy.managed=true"
+				// Plain `docker network prune` (no filter) still removes them
+				// — Docker does not auto-protect by label.
 				Labels: {
 					"dokploy.managed": "true",
 					"dokploy.organizationId": organizationId,
