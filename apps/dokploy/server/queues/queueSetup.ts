@@ -5,10 +5,6 @@ import {
 	IS_CLOUD,
 } from "@dokploy/server";
 import {
-	execAsync,
-	execAsyncRemote,
-} from "@dokploy/server/utils/process/execAsync";
-import {
 	type Job,
 	type JobsOptions,
 	type JobType,
@@ -26,7 +22,14 @@ import { redisConfig } from "./redis-connection";
 
 export { LOCAL_TARGET, getTargetKey };
 
-const queues = new Map<string, Queue<DeploymentJob>>();
+// Pin to globalThis: see deployments-queue.ts QUEUE_STATE_KEY for rationale.
+// Without pinning, Next.js loading this module twice produces two `queues`
+// Maps + double the Redis connections per target.
+const QUEUES_KEY = Symbol.for("dokploy.deploymentQueue.queues");
+const queues: Map<string, Queue<DeploymentJob>> =
+	(globalThis as { [QUEUES_KEY]?: Map<string, Queue<DeploymentJob>> })[QUEUES_KEY] ??
+	((globalThis as { [QUEUES_KEY]?: Map<string, Queue<DeploymentJob>> })[QUEUES_KEY] =
+		new Map<string, Queue<DeploymentJob>>());
 
 const createNoopQueue = () =>
 	({
@@ -170,6 +173,50 @@ export const deploymentQueueManager = {
 		return { canceled: true, wasActive: true };
 	},
 	/**
+	 * Drop the in-process Worker + Queue for `targetKey` (called when a
+	 * server is deleted). Cancels any active/pending jobs so cleanup work
+	 * stops, then closes and removes the BullMQ handles. Without this the
+	 * Worker keeps running forever pointed at an orphaned Redis queue.
+	 */
+	removeTarget: async (targetKey: string): Promise<void> => {
+		if (IS_CLOUD) return;
+		if (targetKey === LOCAL_TARGET) return;
+		const q = queues.get(targetKey);
+		if (q) {
+			try {
+				const jobs = await q.getJobs([
+					"active",
+					"waiting",
+					"delayed",
+					"prioritized",
+				]);
+				for (const job of jobs) {
+					if (!job?.id) continue;
+					try {
+						await deploymentQueueManager.cancel(job.id, targetKey);
+					} catch {}
+				}
+				await q.close();
+			} catch (error) {
+				console.error(
+					"[deployments] failed to drain queue for removed target",
+					targetKey,
+					error,
+				);
+			}
+			queues.delete(targetKey);
+		}
+		try {
+			await deploymentWorker.removeWorker(targetKey);
+		} catch (error) {
+			console.error(
+				"[deployments] failed to close worker for removed target",
+				targetKey,
+				error,
+			);
+		}
+	},
+	/**
 	 * Pre-warm queues + workers at boot. LOCAL is always warmed. Each server
 	 * is also warmed so that any jobs persisted in `deployments:<serverId>`
 	 * Redis queues from a previous process get picked up by their target's
@@ -211,7 +258,6 @@ export const cleanQueuesByApplication = async (applicationId: string) => {
 	for (const job of jobs) {
 		if (job?.data?.applicationId === applicationId) {
 			await job.remove();
-			console.log(`Removed job ${job.id} for application ${applicationId}`);
 		}
 	}
 };
@@ -221,15 +267,15 @@ export const cleanQueuesByCompose = async (composeId: string) => {
 	for (const job of jobs) {
 		if (job?.data?.composeId === composeId) {
 			await job.remove();
-			console.log(`Removed job ${job.id} for compose ${composeId}`);
 		}
 	}
 };
 
 /**
  * Self-hosted cancel: abort any in-flight job for this application AND drop
- * pending ones. Pair with `killDockerBuild` from the router to SIGINT the
- * underlying docker subprocess.
+ * pending ones. The worker's abort listener tears down only this job's
+ * process group (LOCAL) or SSH session (REMOTE), so concurrent builds for
+ * other resources on the same host are untouched.
  */
 export const cancelDeploymentsByApplication = async (applicationId: string) => {
 	const jobs = await aggregateJobs([
@@ -275,29 +321,3 @@ export const cleanAllDeploymentQueue = async () => {
 	}
 	return true;
 };
-
-export const killDockerBuild = async (
-	type: "application" | "compose",
-	serverId: string | null,
-) => {
-	const command =
-		type === "application"
-			? `pkill -2 -f "docker build"`
-			: `pkill -2 -f "docker compose"`;
-	try {
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
-	} catch (error) {
-		console.error(error);
-	}
-};
-
-if (!IS_CLOUD) {
-	process.on("SIGTERM", () => {
-		void myQueue.close();
-		process.exit(0);
-	});
-}

@@ -74,7 +74,6 @@ import {
 	cancelDeploymentsByCompose,
 	cleanQueuesByCompose,
 	getJobsByComposeId,
-	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
@@ -310,8 +309,8 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["cancel"],
 			});
-			const compose = await findComposeById(input.composeId);
-			await killDockerBuild("compose", compose.serverId);
+			await findComposeById(input.composeId);
+			await cancelDeploymentsByCompose(input.composeId);
 		}),
 
 	loadServices: protectedProcedure
@@ -1006,10 +1005,7 @@ export const composeRouter = createTRPCRouter({
 						applicationType: "compose",
 					});
 				} else {
-					// Self-hosted: abort in-flight job (AbortController) + drop
-					// queued + SIGINT the docker compose subprocess.
 					await cancelDeploymentsByCompose(input.composeId);
-					await killDockerBuild("compose", compose.serverId);
 				}
 
 				await audit(ctx, {

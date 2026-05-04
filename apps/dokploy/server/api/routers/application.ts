@@ -73,7 +73,6 @@ import {
 	cancelDeploymentsByApplication,
 	cleanQueuesByApplication,
 	getJobsByApplicationId,
-	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
@@ -772,7 +771,7 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const application = await findApplicationById(input.applicationId);
-			await killDockerBuild("application", application.serverId);
+			await cancelDeploymentsByApplication(input.applicationId);
 			await audit(ctx, {
 				action: "stop",
 				resourceType: "application",
@@ -954,10 +953,7 @@ export const applicationRouter = createTRPCRouter({
 						applicationType: "application",
 					});
 				} else {
-					// Self-hosted: abort in-flight job (AbortController) + drop
-					// queued + SIGINT the docker build subprocess.
 					await cancelDeploymentsByApplication(input.applicationId);
-					await killDockerBuild("application", application.serverId);
 				}
 
 				await audit(ctx, {
