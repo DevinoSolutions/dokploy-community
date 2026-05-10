@@ -126,16 +126,29 @@ export const createNetwork = async (
 
 	// Docker failure rolls back the row so we never persist a ghost record.
 	return db.transaction(async (tx) => {
-		const [row] = await tx
-			.insert(network)
-			.values({ ...input, organizationId })
-			.returning();
-
-		if (!row) {
-			throw new TRPCError({
-				code: "INTERNAL_SERVER_ERROR",
-				message: "Failed to insert network",
-			});
+		let row: typeof network.$inferSelect;
+		try {
+			const [inserted] = await tx
+				.insert(network)
+				.values({ ...input, organizationId })
+				.returning();
+			if (!inserted) {
+				throw new TRPCError({
+					code: "INTERNAL_SERVER_ERROR",
+					message: "Failed to insert network",
+				});
+			}
+			row = inserted;
+		} catch (error) {
+			if (error instanceof TRPCError) throw error;
+			const msg = error instanceof Error ? error.message : "";
+			if (/unique|duplicate/i.test(msg)) {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: `A network named "${input.name}" already exists on this server`,
+				});
+			}
+			throw error;
 		}
 
 		const ipam = row.ipam ?? {};
