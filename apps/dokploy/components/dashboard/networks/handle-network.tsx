@@ -48,9 +48,14 @@ const formSchema = z.object({
 		)
 		.refine(
 			(n) =>
-				!["dokploy-network", "host", "bridge", "none", "ingress", "docker_gwbridge"].includes(
-					n,
-				),
+				![
+					"dokploy-network",
+					"host",
+					"bridge",
+					"none",
+					"ingress",
+					"docker_gwbridge",
+				].includes(n),
 			{
 				message:
 					"This name is reserved (dokploy-network, host, bridge, none, ingress, docker_gwbridge).",
