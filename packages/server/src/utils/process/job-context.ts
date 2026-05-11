@@ -36,11 +36,11 @@ const g = globalThis as GlobalShared;
 export const dokployJobContext: AsyncLocalStorage<JobContext> =
 	g[STORE_KEY] ?? (g[STORE_KEY] = new AsyncLocalStorage<JobContext>());
 
-const localChildren: Map<string, Set<ChildProcess>> =
-	g[LOCAL_KEY] ?? (g[LOCAL_KEY] = new Map());
+const localChildren: Map<string, Set<ChildProcess>> = g[LOCAL_KEY] ??
+(g[LOCAL_KEY] = new Map());
 
-const remoteSshClients: Map<string, Set<Client>> =
-	g[REMOTE_KEY] ?? (g[REMOTE_KEY] = new Map());
+const remoteSshClients: Map<string, Set<Client>> = g[REMOTE_KEY] ??
+(g[REMOTE_KEY] = new Map());
 
 export const getCurrentJob = (): JobContext | undefined =>
 	dokployJobContext.getStore();
@@ -48,10 +48,7 @@ export const getCurrentJob = (): JobContext | undefined =>
 /** Marker injected into the deploy command line for `pkill -f` matching. */
 export const jobMarker = (jobId: string): string => `DOKPLOY_JOB_ID=${jobId}`;
 
-export const trackLocalChild = (
-	jobId: string,
-	child: ChildProcess,
-): void => {
+export const trackLocalChild = (jobId: string, child: ChildProcess): void => {
 	let set = localChildren.get(jobId);
 	if (!set) {
 		set = new Set();

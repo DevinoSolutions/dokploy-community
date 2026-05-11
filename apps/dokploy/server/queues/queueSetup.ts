@@ -4,12 +4,7 @@ import {
 	getWebServerSettings,
 	IS_CLOUD,
 } from "@dokploy/server";
-import {
-	type Job,
-	type JobsOptions,
-	type JobType,
-	Queue,
-} from "bullmq";
+import { type Job, type JobsOptions, type JobType, Queue } from "bullmq";
 import {
 	CANCEL_CHANNEL,
 	deploymentWorker,
@@ -26,10 +21,12 @@ export { LOCAL_TARGET, getTargetKey };
 // Without pinning, Next.js loading this module twice produces two `queues`
 // Maps + double the Redis connections per target.
 const QUEUES_KEY = Symbol.for("dokploy.deploymentQueue.queues");
-const queues: Map<string, Queue<DeploymentJob>> =
-	(globalThis as { [QUEUES_KEY]?: Map<string, Queue<DeploymentJob>> })[QUEUES_KEY] ??
-	((globalThis as { [QUEUES_KEY]?: Map<string, Queue<DeploymentJob>> })[QUEUES_KEY] =
-		new Map<string, Queue<DeploymentJob>>());
+const queues: Map<string, Queue<DeploymentJob>> = (
+	globalThis as { [QUEUES_KEY]?: Map<string, Queue<DeploymentJob>> }
+)[QUEUES_KEY] ??
+((globalThis as { [QUEUES_KEY]?: Map<string, Queue<DeploymentJob>> })[
+	QUEUES_KEY
+] = new Map<string, Queue<DeploymentJob>>());
 
 const createNoopQueue = () =>
 	({
@@ -132,10 +129,7 @@ const publishCancel = async (
 	const publisher = client as {
 		publish: (channel: string, payload: string) => Promise<unknown>;
 	};
-	await publisher.publish(
-		CANCEL_CHANNEL,
-		JSON.stringify({ jobId, targetKey }),
-	);
+	await publisher.publish(CANCEL_CHANNEL, JSON.stringify({ jobId, targetKey }));
 };
 
 export const deploymentQueueManager = {

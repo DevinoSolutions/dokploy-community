@@ -224,9 +224,14 @@ const startCancelSubscriber = async (): Promise<void> => {
 	if (queueState.cancelSubscriber) return;
 	const seedWorker = workers.get(LOCAL_TARGET) ?? createWorker(LOCAL_TARGET, 1);
 	const client = await seedWorker.client;
-	const sub = (client as unknown as { duplicate: () => unknown }).duplicate() as {
+	const sub = (
+		client as unknown as { duplicate: () => unknown }
+	).duplicate() as {
 		subscribe: (channel: string) => Promise<unknown>;
-		on: (event: "message", cb: (channel: string, payload: string) => void) => void;
+		on: (
+			event: "message",
+			cb: (channel: string, payload: string) => void,
+		) => void;
 		quit: () => Promise<unknown>;
 	};
 	await sub.subscribe(CANCEL_CHANNEL);

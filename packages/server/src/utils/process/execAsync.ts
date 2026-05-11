@@ -41,8 +41,7 @@ export const execAsync = (
 			(error, stdout, stderr) => {
 				if (error) {
 					const codeRaw = (error as { code?: unknown }).code;
-					const exitCode =
-						typeof codeRaw === "number" ? codeRaw : undefined;
+					const exitCode = typeof codeRaw === "number" ? codeRaw : undefined;
 					reject(
 						new ExecError(`Command execution failed: ${error.message}`, {
 							command,
