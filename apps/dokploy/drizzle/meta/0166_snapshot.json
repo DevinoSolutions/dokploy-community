@@ -1,5 +1,5 @@
 {
-  "id": "929b0d7f-2c62-4172-b6c3-36128e8a484c",
+  "id": "887c0c81-4af9-477a-ab29-b3ad16f08451",
   "prevId": "ef484e78-f78d-4c3f-ae4b-aa123dc77e61",
   "version": "7",
   "dialect": "postgresql",
@@ -6714,6 +6714,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "cronExpression": {
           "name": "cronExpression",
           "type": "text",
@@ -6984,13 +6990,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
-        },
-        "deploymentConcurrency": {
-          "name": "deploymentConcurrency",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
         },
         "createdAt": {
           "name": "createdAt",
