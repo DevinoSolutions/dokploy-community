@@ -138,6 +138,11 @@ const handleJob = async (
 				}
 			}
 		});
+	} catch (error) {
+		if (signal.aborted) {
+			throw new Error("Deployment aborted by user");
+		}
+		throw error;
 	} finally {
 		signal.removeEventListener("abort", onAbort);
 	}
