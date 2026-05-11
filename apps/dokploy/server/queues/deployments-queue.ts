@@ -140,6 +140,17 @@ const handleJob = async (
 		});
 	} catch (error) {
 		if (signal.aborted) {
+			try {
+				if (data.applicationType === "application") {
+					await updateApplicationStatus(data.applicationId, "error");
+				} else if (data.applicationType === "compose") {
+					await updateCompose(data.composeId, { composeStatus: "error" });
+				} else if (data.applicationType === "application-preview") {
+					await updatePreviewDeployment(data.previewDeploymentId, {
+						previewStatus: "error",
+					});
+				}
+			} catch {}
 			throw new Error("Deployment aborted by user");
 		}
 		throw error;
