@@ -1,3 +1,4 @@
+import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import { relations } from "drizzle-orm";
 import {
 	bigint,
@@ -434,17 +435,22 @@ export const apiSaveBuildType = createSchema
 	.required()
 	.merge(createSchema.pick({ publishDirectory: true, isStaticSpa: true }));
 
+const branchField = z
+	.string()
+	.min(1)
+	.regex(VALID_BRANCH_REGEX, "Invalid branch name");
+
 export const apiSaveGithubProvider = createSchema
 	.pick({
 		applicationId: true,
 		repository: true,
-		branch: true,
 		owner: true,
 		buildPath: true,
 		githubId: true,
 	})
 	.required()
 	.extend({
+		branch: branchField,
 		triggerType: z.enum(["push", "tag"]).default("push"),
 	})
 	.required()
@@ -453,7 +459,6 @@ export const apiSaveGithubProvider = createSchema
 export const apiSaveGitlabProvider = createSchema
 	.pick({
 		applicationId: true,
-		gitlabBranch: true,
 		gitlabBuildPath: true,
 		gitlabOwner: true,
 		gitlabRepository: true,
@@ -462,11 +467,11 @@ export const apiSaveGitlabProvider = createSchema
 		gitlabPathNamespace: true,
 	})
 	.required()
+	.extend({ gitlabBranch: branchField })
 	.merge(createSchema.pick({ enableSubmodules: true, watchPaths: true }));
 
 export const apiSaveBitbucketProvider = createSchema
 	.pick({
-		bitbucketBranch: true,
 		bitbucketBuildPath: true,
 		bitbucketOwner: true,
 		bitbucketRepository: true,
@@ -475,18 +480,19 @@ export const apiSaveBitbucketProvider = createSchema
 		applicationId: true,
 	})
 	.required()
+	.extend({ bitbucketBranch: branchField })
 	.merge(createSchema.pick({ enableSubmodules: true, watchPaths: true }));
 
 export const apiSaveGiteaProvider = createSchema
 	.pick({
 		applicationId: true,
-		giteaBranch: true,
 		giteaBuildPath: true,
 		giteaOwner: true,
 		giteaRepository: true,
 		giteaId: true,
 	})
 	.required()
+	.extend({ giteaBranch: branchField })
 	.merge(createSchema.pick({ enableSubmodules: true, watchPaths: true }));
 
 export const apiSaveDockerProvider = createSchema
@@ -501,7 +507,6 @@ export const apiSaveDockerProvider = createSchema
 
 export const apiSaveGitProvider = createSchema
 	.pick({
-		customGitBranch: true,
 		applicationId: true,
 		customGitBuildPath: true,
 		customGitUrl: true,
@@ -509,6 +514,7 @@ export const apiSaveGitProvider = createSchema
 		enableSubmodules: true,
 	})
 	.required()
+	.extend({ customGitBranch: branchField })
 	.merge(
 		createSchema.pick({
 			customGitSSHKeyId: true,

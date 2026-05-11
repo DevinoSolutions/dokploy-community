@@ -1,5 +1,5 @@
 {
-  "id": "d59ebe16-02c8-4e36-a915-c78dfc9eed12",
+  "id": "887c0c81-4af9-477a-ab29-b3ad16f08451",
   "prevId": "ef484e78-f78d-4c3f-ae4b-aa123dc77e61",
   "version": "7",
   "dialect": "postgresql",
@@ -1563,13 +1563,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -2582,13 +2575,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -3855,13 +3841,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -4111,13 +4090,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -4363,13 +4335,6 @@
           "primaryKey": false,
           "notNull": false,
           "default": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -4632,139 +4597,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.network": {
-      "name": "network",
-      "schema": "",
-      "columns": {
-        "networkId": {
-          "name": "networkId",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "driver": {
-          "name": "driver",
-          "type": "networkDriver",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'bridge'"
-        },
-        "scope": {
-          "name": "scope",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "internal": {
-          "name": "internal",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "attachable": {
-          "name": "attachable",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "ingress": {
-          "name": "ingress",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "configOnly": {
-          "name": "configOnly",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "enableIPv4": {
-          "name": "enableIPv4",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": true
-        },
-        "enableIPv6": {
-          "name": "enableIPv6",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "ipam": {
-          "name": "ipam",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'::jsonb"
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "serverId": {
-          "name": "serverId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "network_organizationId_organization_id_fk": {
-          "name": "network_organizationId_organization_id_fk",
-          "tableFrom": "network",
-          "tableTo": "organization",
-          "columnsFrom": [
-            "organizationId"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "network_serverId_server_serverId_fk": {
-          "name": "network_serverId_server_serverId_fk",
-          "tableFrom": "network",
-          "tableTo": "server",
-          "columnsFrom": [
-            "serverId"
-          ],
-          "columnsTo": [
-            "serverId"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.mysql": {
       "name": "mysql",
       "schema": "",
@@ -4969,13 +4801,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -6188,13 +6013,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -6688,13 +6506,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -6902,6 +6713,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "cronExpression": {
           "name": "cronExpression",
@@ -8365,18 +8182,6 @@
         "redis",
         "compose",
         "libsql"
-      ]
-    },
-    "public.networkDriver": {
-      "name": "networkDriver",
-      "schema": "public",
-      "values": [
-        "bridge",
-        "host",
-        "overlay",
-        "macvlan",
-        "none",
-        "ipvlan"
       ]
     },
     "public.notificationType": {
