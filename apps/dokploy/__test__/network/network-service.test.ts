@@ -22,7 +22,11 @@ vi.mock("@dokploy/server/constants", async (importOriginal) => {
 // Tests here target error paths that don't require a live DB transaction.
 // The global DB mock in __test__/setup.ts already makes `db.query.network`
 // return `undefined` for findFirst, which is exactly the not-found path.
-import { findNetworkById, removeNetworkById } from "@dokploy/server";
+import {
+	assertNetworkIdsAttachableToResource,
+	findNetworkById,
+	removeNetworkById,
+} from "@dokploy/server";
 
 describe("findNetworkById", () => {
 	it("throws NOT_FOUND when the row doesn't exist", async () => {
@@ -45,6 +49,22 @@ describe("removeNetworkById", () => {
 		});
 		// Docker should never be touched when the DB row is missing.
 		expect(fakeDocker.listNetworks).not.toHaveBeenCalled();
+	});
+});
+
+describe("assertNetworkIdsAttachableToResource", () => {
+	it("allows empty attachment lists without querying", async () => {
+		await expect(
+			assertNetworkIdsAttachableToResource([], "org_1", "srv_1"),
+		).resolves.toBeUndefined();
+	});
+
+	it("rejects network IDs that cannot be resolved for the organization", async () => {
+		await expect(
+			assertNetworkIdsAttachableToResource(["net_missing"], "org_1", "srv_1"),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+		});
 	});
 });
 

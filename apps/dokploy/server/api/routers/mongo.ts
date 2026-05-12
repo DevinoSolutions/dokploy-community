@@ -1,4 +1,5 @@
 import {
+	assertNetworkIdsAttachableToResource,
 	checkPortInUse,
 	createMongo,
 	createMount,
@@ -389,6 +390,14 @@ export const mongoRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, mongoId, {
 				service: ["create"],
 			});
+			if (input.networkIds !== undefined) {
+				const mongo = await findMongoById(mongoId);
+				await assertNetworkIdsAttachableToResource(
+					input.networkIds,
+					ctx.session.activeOrganizationId,
+					mongo.serverId,
+				);
+			}
 			const service = await updateMongoById(mongoId, {
 				...rest,
 			});

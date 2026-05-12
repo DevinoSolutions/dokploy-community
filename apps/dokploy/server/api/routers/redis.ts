@@ -1,4 +1,5 @@
 import {
+	assertNetworkIdsAttachableToResource,
 	checkPortInUse,
 	createMount,
 	createRedis,
@@ -376,6 +377,14 @@ export const redisRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, redisId, {
 				service: ["create"],
 			});
+			if (input.networkIds !== undefined) {
+				const redis = await findRedisById(redisId);
+				await assertNetworkIdsAttachableToResource(
+					input.networkIds,
+					ctx.session.activeOrganizationId,
+					redis.serverId,
+				);
+			}
 			const redis = await updateRedisById(redisId, {
 				...rest,
 			});

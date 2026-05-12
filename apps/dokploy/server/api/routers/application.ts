@@ -9,6 +9,7 @@ import {
 	getAccessibleServerIds,
 	getApplicationStats,
 	getContainerLogs,
+	assertNetworkIdsAttachableToResource,
 	IS_CLOUD,
 	mechanizeDockerContainer,
 	readConfig,
@@ -651,6 +652,14 @@ export const applicationRouter = createTRPCRouter({
 						message: "You are not authorized to access this build server",
 					});
 				}
+			}
+			if (input.networkIds !== undefined) {
+				const application = await findApplicationById(input.applicationId);
+				await assertNetworkIdsAttachableToResource(
+					input.networkIds,
+					ctx.session.activeOrganizationId,
+					application.serverId,
+				);
 			}
 
 			const { applicationId, ...rest } = input;

@@ -1,6 +1,6 @@
 {
-  "id": "d59ebe16-02c8-4e36-a915-c78dfc9eed12",
-  "prevId": "ef484e78-f78d-4c3f-ae4b-aa123dc77e61",
+  "id": "5f4bd9a5-9b2e-4c24-b7f9-8cc2b3b9d1bd",
+  "prevId": "9a1f4c67-2e8b-4b41-9d32-c0e0a6f1d501",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2582,13 +2582,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "networkIds": {
-          "name": "networkIds",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'{}'"
         }
       },
       "indexes": {},
@@ -4730,7 +4723,29 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "network_name_serverId_idx": {
+          "name": "network_name_serverId_idx",
+          "columns": [
+            {
+              "expression": "name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "COALESCE(\"serverId\", '')",
+              "isExpression": true,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "network_organizationId_organization_id_fk": {
           "name": "network_organizationId_organization_id_fk",

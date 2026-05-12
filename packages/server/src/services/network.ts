@@ -90,14 +90,19 @@ export const resolveNetworkNamesForResource = async (
 		.map((row) => row.name);
 };
 
-export const assertNetworkIdsBelongToOrg = async (
+export const assertNetworkIdsAttachableToResource = async (
 	networkIds: string[] | null | undefined,
 	organizationId: string,
+	serverId: string | null | undefined,
 ): Promise<void> => {
 	if (!networkIds || networkIds.length === 0) return;
 	const unique = Array.from(new Set(networkIds));
 	const rows = await db
-		.select({ id: network.networkId })
+		.select({
+			id: network.networkId,
+			serverId: network.serverId,
+			driver: network.driver,
+		})
 		.from(network)
 		.where(
 			and(
@@ -105,10 +110,14 @@ export const assertNetworkIdsBelongToOrg = async (
 				eq(network.organizationId, organizationId),
 			),
 		);
-	if (rows.length !== unique.length) {
+	const target = serverId ?? null;
+	const invalidTarget = rows.some(
+		(row) => (row.serverId ?? null) !== target || row.driver !== "overlay",
+	);
+	if (rows.length !== unique.length || invalidTarget) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "One or more networks do not belong to this organization",
+			message: "One or more networks cannot be attached to this resource",
 		});
 	}
 };

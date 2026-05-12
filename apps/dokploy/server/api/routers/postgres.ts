@@ -1,4 +1,5 @@
 import {
+	assertNetworkIdsAttachableToResource,
 	checkPortInUse,
 	createMount,
 	createPostgres,
@@ -394,6 +395,14 @@ export const postgresRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, postgresId, {
 				service: ["create"],
 			});
+			if (input.networkIds !== undefined) {
+				const postgres = await findPostgresById(postgresId);
+				await assertNetworkIdsAttachableToResource(
+					input.networkIds,
+					ctx.session.activeOrganizationId,
+					postgres.serverId,
+				);
+			}
 
 			const service = await updatePostgresById(postgresId, {
 				...rest,
