@@ -281,6 +281,7 @@ export const cancelDeploymentsByApplication = async (applicationId: string) => {
 	let canceled = 0;
 	for (const job of jobs) {
 		if (job?.data?.applicationId !== applicationId) continue;
+		if (job.data.applicationType !== "application") continue;
 		if (!job.id) continue;
 		const targetKey = getTargetKey(job.data);
 		await deploymentQueueManager.cancel(job.id, targetKey);

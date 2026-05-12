@@ -1,6 +1,6 @@
 {
-  "id": "929b0d7f-2c62-4172-b6c3-36128e8a484c",
-  "prevId": "ef484e78-f78d-4c3f-ae4b-aa123dc77e61",
+  "id": "fb9f274a-55b9-4104-a9e3-d292955b3d48",
+  "prevId": "929b0d7f-2c62-4172-b6c3-36128e8a484c",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -8042,6 +8042,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "deploymentConcurrency": {
+          "name": "deploymentConcurrency",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
         },
         "created_at": {
           "name": "created_at",

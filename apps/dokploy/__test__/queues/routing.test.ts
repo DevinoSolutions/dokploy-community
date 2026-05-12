@@ -16,6 +16,12 @@ describe("queue routing", () => {
 		expect(getTargetKey({ serverId: "srv-abc" })).toBe("srv-abc");
 	});
 
+	it("routes application jobs by buildServerId when present", () => {
+		expect(
+			getTargetKey({ serverId: "deploy-srv", buildServerId: "build-srv" }),
+		).toBe("build-srv");
+	});
+
 	it("preserves canary's 'deployments' queue name for LOCAL_TARGET (upgrade-safe)", () => {
 		expect(getQueueName(LOCAL_TARGET)).toBe("deployments");
 	});

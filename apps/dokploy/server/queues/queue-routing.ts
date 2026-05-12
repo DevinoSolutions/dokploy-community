@@ -1,10 +1,10 @@
-import type { DeploymentJob } from "./queue-types";
-
 export const LOCAL_TARGET = "__local__";
 export const CANCEL_CHANNEL = "dokploy:deployments:cancel";
 
-export const getTargetKey = (data: Pick<DeploymentJob, "serverId">): string =>
-	data.serverId ?? LOCAL_TARGET;
+export const getTargetKey = (data: {
+	buildServerId?: string | null;
+	serverId?: string | null;
+}): string => data.buildServerId ?? data.serverId ?? LOCAL_TARGET;
 
 /**
  * LOCAL_TARGET keeps canary's queue name `deployments` so an upgrade from a
