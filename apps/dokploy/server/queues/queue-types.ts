@@ -7,6 +7,7 @@ type DeployJob =
 			type: "deploy" | "redeploy";
 			applicationType: "application";
 			serverId?: string;
+			buildServerId?: string;
 	  }
 	| {
 			composeId: string;
@@ -26,6 +27,7 @@ type DeployJob =
 			applicationType: "application-preview";
 			previewDeploymentId: string;
 			serverId?: string;
+			buildServerId?: string;
 	  };
 
 export type DeploymentJob = DeployJob;

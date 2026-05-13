@@ -68,12 +68,13 @@ import {
 	environments,
 	projects,
 } from "@/server/db/schema";
-import { deploymentWorker } from "@/server/queues/deployments-queue";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
+	cancelDeploymentsByCompose,
 	cleanQueuesByCompose,
+	deploymentQueueManager,
 	getJobsByComposeId,
-	killDockerBuild,
+	getTargetKey,
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
@@ -253,7 +254,7 @@ export const composeRouter = createTRPCRouter({
 				const queueJobs = await getJobsByComposeId(input.composeId);
 				for (const job of queueJobs) {
 					if (job.id) {
-						deploymentWorker.cancelJob(job.id, "User requested cancellation");
+						await deploymentQueueManager.cancel(job.id, getTargetKey(job.data));
 					}
 				}
 			}
@@ -309,8 +310,8 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["cancel"],
 			});
-			const compose = await findComposeById(input.composeId);
-			await killDockerBuild("compose", compose.serverId);
+			await findComposeById(input.composeId);
+			await cancelDeploymentsByCompose(input.composeId);
 		}),
 
 	loadServices: protectedProcedure
@@ -430,8 +431,11 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 			};
 
-			if (IS_CLOUD && compose.serverId) {
+			if (compose.serverId) {
 				jobData.serverId = compose.serverId;
+			}
+
+			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -478,8 +482,11 @@ export const composeRouter = createTRPCRouter({
 				descriptionLog: input.description || "",
 				server: !!compose.serverId,
 			};
-			if (IS_CLOUD && compose.serverId) {
+			if (compose.serverId) {
 				jobData.serverId = compose.serverId;
+			}
+
+			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -982,49 +989,45 @@ export const composeRouter = createTRPCRouter({
 			});
 			const compose = await findComposeById(input.composeId);
 
-			if (IS_CLOUD && compose.serverId) {
-				try {
-					await updateCompose(input.composeId, {
-						composeStatus: "idle",
-					});
+			try {
+				await updateCompose(input.composeId, {
+					composeStatus: "idle",
+				});
+				if (compose.deployments[0]) {
+					await updateDeploymentStatus(
+						compose.deployments[0].deploymentId,
+						"error",
+					);
+				}
 
-					if (compose.deployments[0]) {
-						await updateDeploymentStatus(
-							compose.deployments[0].deploymentId,
-							"done",
-						);
-					}
-
+				if (IS_CLOUD && compose.serverId) {
 					await cancelDeployment({
 						composeId: input.composeId,
 						applicationType: "compose",
 					});
-
-					await audit(ctx, {
-						action: "stop",
-						resourceType: "compose",
-						resourceId: input.composeId,
-						resourceName: compose.name,
-					});
-					return {
-						success: true,
-						message: "Deployment cancellation requested",
-					};
-				} catch (error) {
-					throw new TRPCError({
-						code: "INTERNAL_SERVER_ERROR",
-						message:
-							error instanceof Error
-								? error.message
-								: "Failed to cancel deployment",
-					});
+				} else {
+					await cancelDeploymentsByCompose(input.composeId);
 				}
-			}
 
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Deployment cancellation only available in cloud version",
-			});
+				await audit(ctx, {
+					action: "stop",
+					resourceType: "compose",
+					resourceId: input.composeId,
+					resourceName: compose.name,
+				});
+				return {
+					success: true,
+					message: "Deployment cancellation requested",
+				};
+			} catch (error) {
+				throw new TRPCError({
+					code: "INTERNAL_SERVER_ERROR",
+					message:
+						error instanceof Error
+							? error.message
+							: "Failed to cancel deployment",
+				});
+			}
 		}),
 
 	search: protectedProcedure

@@ -1,4 +1,5 @@
 import {
+	assertNetworkIdsAttachableToResource,
 	clearOldDeployments,
 	createApplication,
 	deleteAllMiddlewares,
@@ -9,7 +10,6 @@ import {
 	getAccessibleServerIds,
 	getApplicationStats,
 	getContainerLogs,
-	assertNetworkIdsAttachableToResource,
 	IS_CLOUD,
 	mechanizeDockerContainer,
 	readConfig,
@@ -68,12 +68,13 @@ import {
 	environments,
 	projects,
 } from "@/server/db/schema";
-import { deploymentWorker } from "@/server/queues/deployments-queue";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
+	cancelDeploymentsByApplication,
 	cleanQueuesByApplication,
+	deploymentQueueManager,
 	getJobsByApplicationId,
-	killDockerBuild,
+	getTargetKey,
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
@@ -243,7 +244,7 @@ export const applicationRouter = createTRPCRouter({
 				const queueJobs = await getJobsByApplicationId(input.applicationId);
 				for (const job of queueJobs) {
 					if (job.id) {
-						deploymentWorker.cancelJob(job.id, "User requested cancellation");
+						await deploymentQueueManager.cancel(job.id, getTargetKey(job.data));
 					}
 				}
 			}
@@ -339,8 +340,14 @@ export const applicationRouter = createTRPCRouter({
 				server: !!application.serverId,
 			};
 
-			if (IS_CLOUD && application.serverId) {
+			if (application.serverId) {
 				jobData.serverId = application.serverId;
+			}
+			if (application.buildServerId) {
+				jobData.buildServerId = application.buildServerId;
+			}
+
+			if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -714,8 +721,14 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 			};
-			if (IS_CLOUD && application.serverId) {
+			if (application.serverId) {
 				jobData.serverId = application.serverId;
+			}
+			if (application.buildServerId) {
+				jobData.buildServerId = application.buildServerId;
+			}
+
+			if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -774,7 +787,7 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const application = await findApplicationById(input.applicationId);
-			await killDockerBuild("application", application.serverId);
+			await cancelDeploymentsByApplication(input.applicationId);
 			await audit(ctx, {
 				action: "stop",
 				resourceType: "application",
@@ -833,8 +846,14 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!app.serverId,
 			};
-			if (IS_CLOUD && app.serverId) {
+			if (app.serverId) {
 				jobData.serverId = app.serverId;
+			}
+			if (app.buildServerId) {
+				jobData.buildServerId = app.buildServerId;
+			}
+
+			if (IS_CLOUD && app.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});
@@ -938,46 +957,43 @@ export const applicationRouter = createTRPCRouter({
 			});
 			const application = await findApplicationById(input.applicationId);
 
-			if (IS_CLOUD && application.serverId) {
-				try {
-					await updateApplicationStatus(input.applicationId, "idle");
+			try {
+				await updateApplicationStatus(input.applicationId, "idle");
+				if (application.deployments[0]) {
+					await updateDeploymentStatus(
+						application.deployments[0].deploymentId,
+						"error",
+					);
+				}
 
-					if (application.deployments[0]) {
-						await updateDeploymentStatus(
-							application.deployments[0].deploymentId,
-							"done",
-						);
-					}
-
+				if (IS_CLOUD && application.serverId) {
 					await cancelDeployment({
 						applicationId: input.applicationId,
 						applicationType: "application",
 					});
-					await audit(ctx, {
-						action: "stop",
-						resourceType: "application",
-						resourceId: application.applicationId,
-						resourceName: application.appName,
-					});
-					return {
-						success: true,
-						message: "Deployment cancellation requested",
-					};
-				} catch (error) {
-					throw new TRPCError({
-						code: "INTERNAL_SERVER_ERROR",
-						message:
-							error instanceof Error
-								? error.message
-								: "Failed to cancel deployment",
-					});
+				} else {
+					await cancelDeploymentsByApplication(input.applicationId);
 				}
-			}
 
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Deployment cancellation only available in cloud version",
-			});
+				await audit(ctx, {
+					action: "stop",
+					resourceType: "application",
+					resourceId: application.applicationId,
+					resourceName: application.appName,
+				});
+				return {
+					success: true,
+					message: "Deployment cancellation requested",
+				};
+			} catch (error) {
+				throw new TRPCError({
+					code: "INTERNAL_SERVER_ERROR",
+					message:
+						error instanceof Error
+							? error.message
+							: "Failed to cancel deployment",
+				});
+			}
 		}),
 
 	search: protectedProcedure
