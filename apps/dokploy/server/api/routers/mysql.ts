@@ -388,7 +388,7 @@ export const mysqlRouter = createTRPCRouter({
 			});
 			if (input.networkIds !== undefined) {
 				const mysql = await findMySqlById(mysqlId);
-				await assertNetworkIdsAttachableToResource(
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
 					input.networkIds,
 					ctx.session.activeOrganizationId,
 					mysql.serverId,

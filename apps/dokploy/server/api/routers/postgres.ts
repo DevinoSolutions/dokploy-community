@@ -397,7 +397,7 @@ export const postgresRouter = createTRPCRouter({
 			});
 			if (input.networkIds !== undefined) {
 				const postgres = await findPostgresById(postgresId);
-				await assertNetworkIdsAttachableToResource(
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
 					input.networkIds,
 					ctx.session.activeOrganizationId,
 					postgres.serverId,

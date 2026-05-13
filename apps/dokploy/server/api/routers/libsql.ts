@@ -400,7 +400,7 @@ export const libsqlRouter = createTRPCRouter({
 			});
 			if (input.networkIds !== undefined) {
 				const libsql = await findLibsqlById(libsqlId);
-				await assertNetworkIdsAttachableToResource(
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
 					input.networkIds,
 					ctx.session.activeOrganizationId,
 					libsql.serverId,

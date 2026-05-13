@@ -392,7 +392,7 @@ export const mongoRouter = createTRPCRouter({
 			});
 			if (input.networkIds !== undefined) {
 				const mongo = await findMongoById(mongoId);
-				await assertNetworkIdsAttachableToResource(
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
 					input.networkIds,
 					ctx.session.activeOrganizationId,
 					mongo.serverId,
