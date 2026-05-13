@@ -51,6 +51,44 @@ describe("removeNetworkById", () => {
 		// Docker should never be touched when the DB row is missing.
 		expect(fakeDocker.listNetworks).not.toHaveBeenCalled();
 	});
+
+	it("rejects attached networks before touching Docker", async () => {
+		const target = {
+			networkId: "net_1",
+			name: "shared-net",
+			serverId: "srv_1",
+			organizationId: "org_1",
+		};
+		const orgEnvSubquery = {
+			from: () => ({
+				innerJoin: () => ({
+					where: () => ({}),
+				}),
+			}),
+		};
+		const usageRows = (rows: Array<{ id: string; name: string }>) => ({
+			from: () => ({
+				where: () => Promise.resolve(rows),
+			}),
+		});
+
+		vi.mocked(db.query.network.findFirst)
+			.mockResolvedValueOnce(target as never)
+			.mockResolvedValueOnce(target as never);
+		vi.mocked(db.select)
+			.mockReturnValueOnce(orgEnvSubquery as never)
+			.mockReturnValueOnce(
+				usageRows([{ id: "app_1", name: "Alpha" }]) as never,
+			);
+		for (let i = 0; i < 6; i++) {
+			vi.mocked(db.select).mockReturnValueOnce(usageRows([]) as never);
+		}
+
+		await expect(removeNetworkById("net_1", "org_1")).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+		expect(fakeDocker.listNetworks).not.toHaveBeenCalled();
+	});
 });
 
 describe("assertNetworkIdsAttachableToResource", () => {

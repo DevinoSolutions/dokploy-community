@@ -306,6 +306,14 @@ export const removeNetworkById = async (
 		});
 	}
 
+	const usage = await findResourcesUsingNetwork(networkId, organizationId);
+	if (usage.length > 0) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message: `Network "${target.name}" is attached to ${usage.length} resource(s). Detach it before deleting.`,
+		});
+	}
+
 	const docker = await getRemoteDocker(target.serverId ?? null);
 	try {
 		// Match by name; Docker's network ID is not persisted (resilient to manual `docker network rm`).
