@@ -31,6 +31,11 @@ export type NetworkUsage = {
 	name: string;
 }[];
 
+const isDuplicateNetworkNameError = (message: string): boolean =>
+	/unique|duplicate|already exists|is already in use|network_name_serverId_idx/i.test(
+		message,
+	);
+
 export const findNetworkById = async (
 	networkId: string,
 	organizationId?: string,
@@ -152,7 +157,7 @@ export const createNetwork = async (
 		} catch (error) {
 			if (error instanceof TRPCError) throw error;
 			const msg = error instanceof Error ? error.message : "";
-			if (/unique|duplicate/i.test(msg)) {
+			if (isDuplicateNetworkNameError(msg)) {
 				throw new TRPCError({
 					code: "CONFLICT",
 					message: `A network named "${input.name}" already exists on this server`,
@@ -196,6 +201,14 @@ export const createNetwork = async (
 				},
 			});
 		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (isDuplicateNetworkNameError(message)) {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: `A network named "${input.name}" already exists on this server`,
+					cause: error,
+				});
+			}
 			throw new TRPCError({
 				code: "BAD_REQUEST",
 				message:
