@@ -3,6 +3,8 @@ import {
 	findNetworkById,
 	findNetworksByOrganizationId,
 	findResourcesUsingNetwork,
+	getNetworkErrorMessage,
+	isDuplicateNetworkNameError,
 	removeNetworkById,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
@@ -42,15 +44,21 @@ export const networkRouter = createTRPCRouter({
 				return created;
 			} catch (error) {
 				if (error instanceof TRPCError) throw error;
-				const message = error instanceof Error ? error.message : String(error);
-				if (
-					/unique|duplicate|already exists|is already in use|network_name_serverId_idx/i.test(
-						message,
-					)
-				) {
+				const message = getNetworkErrorMessage(error);
+				if (isDuplicateNetworkNameError(error)) {
 					throw new TRPCError({
 						code: "CONFLICT",
 						message: `A network named "${input.name}" already exists on this server`,
+						cause: error,
+					});
+				}
+				if (
+					typeof (error as { code?: unknown }).code === "string" &&
+					(error as { code: string }).code === "BAD_REQUEST"
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: message || "Error creating the network",
 						cause: error,
 					});
 				}

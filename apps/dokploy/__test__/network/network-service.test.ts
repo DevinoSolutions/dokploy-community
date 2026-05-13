@@ -22,6 +22,8 @@ vi.mock("@dokploy/server/constants", async (importOriginal) => {
 import {
 	assertNetworkIdsAttachableToResource,
 	findNetworkById,
+	getNetworkErrorMessage,
+	isDuplicateNetworkNameError,
 	removeNetworkById,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -128,6 +130,36 @@ describe("assertNetworkIdsAttachableToResource", () => {
 });
 
 describe("error classification", () => {
+	it("recognises nested Docker duplicate-name errors", () => {
+		const dockerodeError = {
+			statusCode: 403,
+			json: {
+				message:
+					"network with name codex-e2e-test already exists on this server",
+			},
+		};
+		const wrapped = new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Docker rejected network creation",
+			cause: dockerodeError,
+		});
+
+		expect(getNetworkErrorMessage(wrapped)).toContain(
+			"network with name codex-e2e-test already exists",
+		);
+		expect(isDuplicateNetworkNameError(wrapped)).toBe(true);
+	});
+
+	it("recognises DB unique constraint errors", () => {
+		expect(
+			isDuplicateNetworkNameError({
+				code: "23505",
+				constraint: "network_name_serverId_idx",
+				message: "duplicate key value violates unique constraint",
+			}),
+		).toBe(true);
+	});
+
 	it("recognises Docker 'in use' errors as CONFLICT (regex shape)", () => {
 		// Mirrors the runtime check in removeNetworkById — if this pattern ever
 		// diverges from Docker's wording we'll notice via this guardrail.
