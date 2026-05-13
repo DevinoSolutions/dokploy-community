@@ -11,20 +11,6 @@
 </div>
 <br />
 
-## Dokploy Community Fork
-
-This is an unofficial community fork of [Dokploy](https://github.com/Dokploy/dokploy), maintained by [Devino Solutions](https://github.com/DevinoSolutions). It is not affiliated with or endorsed by the official Dokploy project.
-
-This fork exists to make highly requested community features available while they await merging upstream. It stays in sync with the official repository.
-
-### Additional Features
-
-| Feature | Upstream PR |
-|---------|-------------|
-| Concurrent Builds | [#3744](https://github.com/Dokploy/dokploy/pull/3744) / [#2127](https://github.com/Dokploy/dokploy/pull/2127) |
-| Network Management | [#3774](https://github.com/Dokploy/dokploy/pull/3774) / [#2811](https://github.com/Dokploy/dokploy/pull/2811) |
-
----
 
 Dokploy is a free, self-hostable Platform as a Service (PaaS) that simplifies the deployment and management of applications and databases.
 
