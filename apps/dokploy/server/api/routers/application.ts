@@ -653,16 +653,16 @@ export const applicationRouter = createTRPCRouter({
 					});
 				}
 			}
+			const { applicationId, ...rest } = input;
 			if (input.networkIds !== undefined) {
-				const application = await findApplicationById(input.applicationId);
-				await assertNetworkIdsAttachableToResource(
+				const application = await findApplicationById(applicationId);
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
 					input.networkIds,
 					ctx.session.activeOrganizationId,
 					application.serverId,
 				);
 			}
 
-			const { applicationId, ...rest } = input;
 			const updateApp = await updateApplication(applicationId, {
 				...rest,
 			});

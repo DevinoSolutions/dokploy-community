@@ -19,15 +19,16 @@ vi.mock("@dokploy/server/constants", async (importOriginal) => {
 	return { ...actual, IS_CLOUD: false };
 });
 
-// Tests here target error paths that don't require a live DB transaction.
-// The global DB mock in __test__/setup.ts already makes `db.query.network`
-// return `undefined` for findFirst, which is exactly the not-found path.
 import {
 	assertNetworkIdsAttachableToResource,
 	findNetworkById,
 	removeNetworkById,
 } from "@dokploy/server";
+import { db } from "@dokploy/server/db";
 
+// Tests here target error paths that don't require a live DB transaction.
+// The global DB mock in __test__/setup.ts already makes `db.query.network`
+// return `undefined` for findFirst, which is exactly the not-found path.
 describe("findNetworkById", () => {
 	it("throws NOT_FOUND when the row doesn't exist", async () => {
 		await expect(findNetworkById("missing")).rejects.toMatchObject({
@@ -56,7 +57,27 @@ describe("assertNetworkIdsAttachableToResource", () => {
 	it("allows empty attachment lists without querying", async () => {
 		await expect(
 			assertNetworkIdsAttachableToResource([], "org_1", "srv_1"),
-		).resolves.toBeUndefined();
+		).resolves.toEqual([]);
+	});
+
+	it("returns unique network IDs after successful validation", async () => {
+		vi.mocked(db.select).mockReturnValueOnce({
+			from: () => ({
+				where: () =>
+					Promise.resolve([
+						{ id: "net_1", serverId: "srv_1", driver: "overlay" },
+						{ id: "net_2", serverId: "srv_1", driver: "overlay" },
+					]),
+			}),
+		} as never);
+
+		await expect(
+			assertNetworkIdsAttachableToResource(
+				["net_1", "net_1", "net_2"],
+				"org_1",
+				"srv_1",
+			),
+		).resolves.toEqual(["net_1", "net_2"]);
 	});
 
 	it("rejects network IDs that cannot be resolved for the organization", async () => {

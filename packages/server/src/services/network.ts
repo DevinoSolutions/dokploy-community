@@ -94,8 +94,8 @@ export const assertNetworkIdsAttachableToResource = async (
 	networkIds: string[] | null | undefined,
 	organizationId: string,
 	serverId: string | null | undefined,
-): Promise<void> => {
-	if (!networkIds || networkIds.length === 0) return;
+): Promise<string[]> => {
+	if (!networkIds || networkIds.length === 0) return [];
 	const unique = Array.from(new Set(networkIds));
 	const rows = await db
 		.select({
@@ -120,6 +120,7 @@ export const assertNetworkIdsAttachableToResource = async (
 			message: "One or more networks cannot be attached to this resource",
 		});
 	}
+	return unique;
 };
 
 export const createNetwork = async (

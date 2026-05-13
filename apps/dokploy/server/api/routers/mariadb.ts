@@ -370,7 +370,7 @@ export const mariadbRouter = createTRPCRouter({
 			});
 			if (input.networkIds !== undefined) {
 				const mariadb = await findMariadbById(mariadbId);
-				await assertNetworkIdsAttachableToResource(
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
 					input.networkIds,
 					ctx.session.activeOrganizationId,
 					mariadb.serverId,

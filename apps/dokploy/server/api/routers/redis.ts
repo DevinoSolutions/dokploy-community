@@ -379,7 +379,7 @@ export const redisRouter = createTRPCRouter({
 			});
 			if (input.networkIds !== undefined) {
 				const redis = await findRedisById(redisId);
-				await assertNetworkIdsAttachableToResource(
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
 					input.networkIds,
 					ctx.session.activeOrganizationId,
 					redis.serverId,
