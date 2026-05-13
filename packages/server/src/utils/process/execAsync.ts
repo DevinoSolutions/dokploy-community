@@ -176,6 +176,20 @@ export const execAsyncRemote = async (
 	const ctx = getCurrentJob();
 	return new Promise((resolve, reject) => {
 		const conn = new Client();
+		let settled = false;
+
+		const resolveOnce = (result: { stdout: string; stderr: string }) => {
+			if (settled) return;
+			settled = true;
+			resolve(result);
+		};
+
+		const rejectOnce = (error: Error) => {
+			if (settled) return;
+			settled = true;
+			reject(error);
+		};
+
 		if (ctx) trackSshClient(ctx.jobId, conn);
 
 		conn
@@ -183,7 +197,7 @@ export const execAsyncRemote = async (
 				conn.exec(tagged, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
-						reject(
+						rejectOnce(
 							new ExecError(`Remote command execution failed: ${err.message}`, {
 								command,
 								serverId,
@@ -196,9 +210,9 @@ export const execAsyncRemote = async (
 						.on("close", (code: number, _signal: string) => {
 							conn.end();
 							if (code === 0) {
-								resolve({ stdout, stderr });
+								resolveOnce({ stdout, stderr });
 							} else {
-								reject(
+								rejectOnce(
 									new ExecError(
 										`Remote command failed with exit code ${code}`,
 										{
@@ -241,7 +255,7 @@ export const execAsyncRemote = async (
 					].join("\n");
 					const errorMsg = `Authentication failed: Invalid SSH private key. ❌ Error: ${err.message} ${err.level}`;
 					onData?.(friendlyMessage);
-					reject(
+					rejectOnce(
 						new ExecError(
 							`Authentication failed: Invalid SSH private key. ${friendlyMessage}`,
 							{
@@ -262,6 +276,16 @@ export const execAsyncRemote = async (
 						}),
 					);
 				}
+			})
+			.on("close", () => {
+				rejectOnce(
+					new ExecError("SSH connection closed before command completed", {
+						command,
+						stdout,
+						stderr,
+						serverId,
+					}),
+				);
 			})
 			.connect({
 				host: server.ipAddress,
