@@ -31,9 +31,51 @@ export type NetworkUsage = {
 	name: string;
 }[];
 
-const isDuplicateNetworkNameError = (message: string): boolean =>
-	/unique|duplicate|already exists|is already in use|network_name_serverId_idx/i.test(
-		message,
+const collectErrorText = (
+	value: unknown,
+	seen = new WeakSet<object>(),
+): string[] => {
+	if (value == null) return [];
+	if (typeof value === "string") return [value];
+	if (typeof value === "number" || typeof value === "boolean") {
+		return [String(value)];
+	}
+	if (typeof value !== "object") return [String(value)];
+	if (seen.has(value)) return [];
+	seen.add(value);
+
+	const record = value as Record<string, unknown>;
+	const parts: string[] = [];
+	for (const key of [
+		"name",
+		"message",
+		"reason",
+		"statusMessage",
+		"code",
+		"detail",
+		"constraint",
+	]) {
+		parts.push(...collectErrorText(record[key], seen));
+	}
+	for (const key of ["cause", "error", "errors", "json", "body", "data"]) {
+		parts.push(...collectErrorText(record[key], seen));
+	}
+	if (parts.length === 0) {
+		try {
+			parts.push(JSON.stringify(value));
+		} catch {
+			parts.push(String(value));
+		}
+	}
+	return parts;
+};
+
+export const getNetworkErrorMessage = (error: unknown): string =>
+	Array.from(new Set(collectErrorText(error).filter(Boolean))).join(" ");
+
+export const isDuplicateNetworkNameError = (error: unknown): boolean =>
+	/unique|duplicate|already exist|already in use|is already in use|network_name_serverId_idx|network .*exists/i.test(
+		getNetworkErrorMessage(error),
 	);
 
 export const findNetworkById = async (
@@ -156,8 +198,7 @@ export const createNetwork = async (
 			row = inserted;
 		} catch (error) {
 			if (error instanceof TRPCError) throw error;
-			const msg = error instanceof Error ? error.message : "";
-			if (isDuplicateNetworkNameError(msg)) {
+			if (isDuplicateNetworkNameError(error)) {
 				throw new TRPCError({
 					code: "CONFLICT",
 					message: `A network named "${input.name}" already exists on this server`,
@@ -201,8 +242,8 @@ export const createNetwork = async (
 				},
 			});
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			if (isDuplicateNetworkNameError(message)) {
+			const message = getNetworkErrorMessage(error);
+			if (isDuplicateNetworkNameError(error)) {
 				throw new TRPCError({
 					code: "CONFLICT",
 					message: `A network named "${input.name}" already exists on this server`,
