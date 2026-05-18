@@ -1,4 +1,5 @@
 import {
+	assertNetworkIdsAttachableToResource,
 	checkPortInUse,
 	createMount,
 	createMysql,
@@ -385,6 +386,14 @@ export const mysqlRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, mysqlId, {
 				service: ["create"],
 			});
+			if (input.networkIds !== undefined) {
+				const mysql = await findMySqlById(mysqlId);
+				rest.networkIds = await assertNetworkIdsAttachableToResource(
+					input.networkIds,
+					ctx.session.activeOrganizationId,
+					mysql.serverId,
+				);
+			}
 			const service = await updateMySqlById(mysqlId, {
 				...rest,
 			});

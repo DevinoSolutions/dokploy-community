@@ -18,6 +18,7 @@ import {
 } from "../utils/docker/utils";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
 import { getRemoteDocker } from "../utils/servers/remote-docker";
+import { resolveNetworkNamesForResource } from "./network";
 import { type Application, findApplicationById } from "./application";
 import { findDeploymentById } from "./deployment";
 import type { Mount } from "./mount";
@@ -246,7 +247,14 @@ const rollbackApplication = async (
 		UpdateConfig,
 		Networks,
 		Ulimits,
-	} = generateConfigContainer(fullContext as ApplicationNested);
+	} = generateConfigContainer(
+		fullContext as ApplicationNested,
+		await resolveNetworkNamesForResource(
+			(fullContext as ApplicationNested).networkIds,
+			(fullContext as ApplicationNested).serverId,
+			(fullContext as ApplicationNested).environment.project.organizationId,
+		),
+	);
 
 	const bindsMount = generateBindMounts(mounts);
 	const envVariables = prepareEnvironmentVariables(
