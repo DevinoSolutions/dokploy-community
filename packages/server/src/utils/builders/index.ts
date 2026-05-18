@@ -9,6 +9,7 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
+import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 import { getDockerCommand } from "./docker-file";
 import { getHerokuCommand } from "./heroku";
@@ -111,7 +112,14 @@ export const mechanizeDockerContainer = async (
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(application);
+	} = generateConfigContainer(
+		application,
+		await resolveNetworkNamesForResource(
+			application.networkIds,
+			application.serverId,
+			application.environment.project.organizationId,
+		),
+	);
 
 	const bindsMount = generateBindMounts(mounts);
 	const filesMount = generateFileMounts(appName, application);
