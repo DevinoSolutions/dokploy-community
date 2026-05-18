@@ -1,0 +1,1 @@
+ALTER TABLE "server" ADD COLUMN "deploymentConcurrency" integer DEFAULT 1 NOT NULL;

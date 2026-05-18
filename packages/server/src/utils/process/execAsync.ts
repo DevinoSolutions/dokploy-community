@@ -1,43 +1,66 @@
 import { exec, execFile } from "node:child_process";
-import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";
 import { Client } from "ssh2";
 import { ExecError } from "./ExecError";
+import {
+	getCurrentJob,
+	jobMarker,
+	trackLocalChild,
+	trackSshClient,
+} from "./job-context";
 
 // Re-export ExecError for easier imports
 export { ExecError } from "./ExecError";
 
-const execAsyncBase = util.promisify(exec);
+/**
+ * When we're inside a deployment job, prepend a marker (`: DOKPLOY_JOB_ID=…`)
+ * so the spawned shell's argv carries an identifier we can grep for, and
+ * spawn the child detached (own process group) so cancel can `kill -PGID`
+ * the entire build tree — shell, docker compose, docker build — in one shot.
+ */
+const tagCommand = (command: string): string => {
+	const ctx = getCurrentJob();
+	if (!ctx) return command;
+	return `: ${jobMarker(ctx.jobId)};\n${command}`;
+};
 
-export const execAsync = async (
+export const execAsync = (
 	command: string,
 	options?: { cwd?: string; env?: NodeJS.ProcessEnv; shell?: string },
 ): Promise<{ stdout: string; stderr: string }> => {
-	try {
-		const result = await execAsyncBase(command, options);
-		return {
-			stdout: result.stdout.toString(),
-			stderr: result.stderr.toString(),
-		};
-	} catch (error) {
-		if (error instanceof Error) {
-			// @ts-ignore - exec error has these properties
-			const exitCode = error.code;
-			// @ts-ignore
-			const stdout = error.stdout?.toString() || "";
-			// @ts-ignore
-			const stderr = error.stderr?.toString() || "";
-
-			throw new ExecError(`Command execution failed: ${error.message}`, {
-				command,
-				stdout,
-				stderr,
-				exitCode,
-				originalError: error,
-			});
-		}
-		throw error;
-	}
+	const ctx = getCurrentJob();
+	const tagged = tagCommand(command);
+	return new Promise((resolve, reject) => {
+		const child = exec(
+			tagged,
+			{
+				...options,
+				// Own process group so cancel can `kill -PGID` the whole tree.
+				detached: !!ctx,
+			} as Parameters<typeof exec>[1],
+			(error, stdout, stderr) => {
+				if (error) {
+					const codeRaw = (error as { code?: unknown }).code;
+					const exitCode = typeof codeRaw === "number" ? codeRaw : undefined;
+					reject(
+						new ExecError(`Command execution failed: ${error.message}`, {
+							command,
+							stdout: typeof stdout === "string" ? stdout : stdout.toString(),
+							stderr: typeof stderr === "string" ? stderr : stderr.toString(),
+							exitCode,
+							originalError: error,
+						}),
+					);
+					return;
+				}
+				resolve({
+					stdout: typeof stdout === "string" ? stdout : stdout.toString(),
+					stderr: typeof stderr === "string" ? stderr : stderr.toString(),
+				});
+			},
+		);
+		if (ctx) trackLocalChild(ctx.jobId, child);
+	});
 };
 
 interface ExecOptions {
@@ -61,8 +84,7 @@ export const execAsyncStream = (
 						command,
 						stdout: stdoutComplete,
 						stderr: stderrComplete,
-						// @ts-ignore
-						exitCode: error.code,
+						exitCode: (error as { code?: number }).code,
 						originalError: error,
 					}),
 				);
@@ -88,7 +110,7 @@ export const execAsyncStream = (
 		});
 
 		childProcess.on("error", (error) => {
-			console.log(error);
+			console.error("execAsyncStream error", error);
 			reject(
 				new ExecError(`Command execution error: ${error.message}`, {
 					command,
@@ -150,13 +172,15 @@ export const execAsyncRemote = async (
 
 	let stdout = "";
 	let stderr = "";
+	const tagged = tagCommand(command);
+	const ctx = getCurrentJob();
 	return new Promise((resolve, reject) => {
 		const conn = new Client();
+		if (ctx) trackSshClient(ctx.jobId, conn);
 
-		sleep(1000);
 		conn
 			.once("ready", () => {
-				conn.exec(command, (err, stream) => {
+				conn.exec(tagged, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
 						reject(

@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 {
+=======
+﻿{
+>>>>>>> feat/concurrent-deployments
     "version":  "5",
     "dialect":  "pg",
     "entries":  [
@@ -1190,6 +1194,20 @@
                         "version":  "6",
                         "when":  1746100200000,
                         "tag":  "0171_network_unique_name_server",
+                        "breakpoints":  true
+                    },
+                    {
+                        "idx":  172,
+                        "version":  "6",
+                        "when":  1746100300000,
+                        "tag":  "0172_concurrent_deployments",
+                        "breakpoints":  true
+                    },
+                    {
+                        "idx":  173,
+                        "version":  "6",
+                        "when":  1746100400000,
+                        "tag":  "0173_local_deployment_concurrency",
                         "breakpoints":  true
                     }
                 ]
