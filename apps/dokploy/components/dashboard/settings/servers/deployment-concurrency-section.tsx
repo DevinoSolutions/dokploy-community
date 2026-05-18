@@ -49,7 +49,7 @@ export const DeploymentConcurrencySection = ({ serverId }: Props) => {
 		let active = 0;
 		let pending = 0;
 		for (const s of snapshots) {
-			const target = s.data.buildServerId ?? s.data.serverId ?? null;
+			const target = s.data.serverId ?? null;
 			if (target !== serverId) continue;
 			if (s.state === "active") active++;
 			else pending++;

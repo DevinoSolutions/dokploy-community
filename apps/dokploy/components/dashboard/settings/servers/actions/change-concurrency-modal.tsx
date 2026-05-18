@@ -54,9 +54,8 @@ export const ChangeConcurrencyModal = ({ serverId }: Props) => {
 		const snapshots = queueQuery.data ?? [];
 		const matchesTarget = (job: {
 			serverId?: string | null;
-			buildServerId?: string | null;
 		}) => {
-			const target = job.buildServerId ?? job.serverId ?? null;
+			const target = job.serverId ?? null;
 			return target === (serverId ?? null);
 		};
 		let active = 0;
