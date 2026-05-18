@@ -65,6 +65,7 @@ const baseSettings: WebServerSettings = {
 	cleanupCacheApplications: false,
 	cleanupCacheOnCompose: false,
 	cleanupCacheOnPreviews: false,
+	deploymentConcurrency: 1,
 	createdAt: null,
 	updatedAt: new Date(),
 };

@@ -41,6 +41,7 @@ export const server = pgTable("server", {
 		.notNull()
 		.$defaultFn(() => generateAppName("server")),
 	enableDockerCleanup: boolean("enableDockerCleanup").notNull().default(false),
+	deploymentConcurrency: integer("deploymentConcurrency").notNull().default(1),
 	createdAt: text("createdAt").notNull(),
 	organizationId: text("organizationId")
 		.notNull()
@@ -175,6 +176,11 @@ export const apiUpdateServer = createSchema
 	.extend({
 		command: z.string().optional(),
 	});
+
+export const apiUpdateServerDeploymentConcurrency = z.object({
+	serverId: z.string().min(1),
+	deploymentConcurrency: z.number().int().min(1).max(10),
+});
 
 export const apiUpdateServerMonitoring = createSchema
 	.pick({
