@@ -1,0 +1,1 @@
+ALTER TABLE "compose" DROP COLUMN IF EXISTS "networkIds";
