@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 {
-=======
-﻿{
->>>>>>> feat/concurrent-deployments
     "version":  "5",
     "dialect":  "pg",
     "entries":  [
