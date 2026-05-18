@@ -26,7 +26,7 @@ import { redisConfig } from "./redis-connection";
 
 export { CANCEL_CHANNEL, getQueueName, getTargetKey, LOCAL_TARGET };
 
-const MAX_CONCURRENCY = 32;
+const MAX_CONCURRENCY = 10;
 const DEFAULT_CONCURRENCY = 1;
 
 const clampConcurrency = (n: number): number =>
