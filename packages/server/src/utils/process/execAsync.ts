@@ -212,6 +212,14 @@ export const execAsyncRemote = async (
 								);
 							}
 						})
+						.on("error", (err: Error) => {
+							reject(
+								new ExecError(
+									`Remote stream error: ${err.message}`,
+									{ command, stdout, stderr, serverId, originalError: err },
+								),
+							);
+						})
 						.on("data", (data: string) => {
 							stdout += data.toString();
 							onData?.(data.toString());

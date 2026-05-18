@@ -87,9 +87,9 @@ export const trackSshClient = (jobId: string, client: Client): void => {
  * spawned with `detached: true`), tearing down sh, `docker compose`
  * and `docker build` in one shot.
  *
- * REMOTE: close the ssh client; sshd hangs up the session, taking
- * the remote command tree with it. Best-effort — some sshd configs
- * don't signal exec-mode children.
+ * REMOTE: destroy the ssh client (force-close the socket); the
+ * stream error triggers promise rejection in execAsyncRemote,
+ * propagating cancellation through the handler.
  *
  * Limitation: BuildKit RUN-step containers are owned by dockerd and
  * live outside our process group, so an in-flight RUN step runs to
@@ -128,7 +128,7 @@ export const killJobProcesses = (
 	if (sshSet) {
 		for (const client of sshSet) {
 			try {
-				client.end();
+				client.destroy();
 				remote++;
 			} catch {}
 		}
