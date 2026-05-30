@@ -42,6 +42,8 @@ describe("Host rule format regression tests", () => {
 		cloudflareTunnelId: null,
 		cloudflareDnsRecordId: null,
 		cloudflareIngressApplied: false,
+		enableCloudflareAccess: false,
+		cloudflareAccessApplicationId: null,
 	};
 
 	describe("Host rule format validation", () => {

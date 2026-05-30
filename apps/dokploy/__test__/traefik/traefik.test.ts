@@ -157,6 +157,8 @@ const baseDomain: Domain = {
 	cloudflareTunnelId: null,
 	cloudflareDnsRecordId: null,
 	cloudflareIngressApplied: false,
+	enableCloudflareAccess: false,
+	cloudflareAccessApplicationId: null,
 };
 
 const baseRedirect: Redirect = {
