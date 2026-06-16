@@ -17,7 +17,6 @@ CREATE TABLE "network" (
 );
 --> statement-breakpoint
 ALTER TABLE "application" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-breakpoint
-ALTER TABLE "compose" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-breakpoint
 ALTER TABLE "libsql" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-breakpoint
 ALTER TABLE "mariadb" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-breakpoint
 ALTER TABLE "mongo" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-breakpoint
@@ -25,4 +24,5 @@ ALTER TABLE "mysql" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-br
 ALTER TABLE "postgres" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-breakpoint
 ALTER TABLE "redis" ADD COLUMN "networkIds" text[] DEFAULT '{}';--> statement-breakpoint
 ALTER TABLE "network" ADD CONSTRAINT "network_organizationId_organization_id_fk" FOREIGN KEY ("organizationId") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "network" ADD CONSTRAINT "network_serverId_server_serverId_fk" FOREIGN KEY ("serverId") REFERENCES "public"."server"("serverId") ON DELETE cascade ON UPDATE no action;
+ALTER TABLE "network" ADD CONSTRAINT "network_serverId_server_serverId_fk" FOREIGN KEY ("serverId") REFERENCES "public"."server"("serverId") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE UNIQUE INDEX "network_name_serverId_idx" ON "network" USING btree ("name",COALESCE("serverId", ''));
