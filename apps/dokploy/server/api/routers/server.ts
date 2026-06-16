@@ -430,6 +430,11 @@ export const serverRouter = createTRPCRouter({
 				});
 				await removeDeploymentsByServerId(currentServer);
 				await deleteServer(input.serverId);
+				// Tear down the deleted server's in-process deployment queue + worker
+				// so it doesn't keep polling an orphaned Redis queue. Best-effort.
+				try {
+					await deploymentQueueManager.removeTarget(input.serverId);
+				} catch (_) {}
 
 				if (IS_CLOUD) {
 					const admin = await findUserById(ctx.user.ownerId);

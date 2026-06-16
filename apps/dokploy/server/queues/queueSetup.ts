@@ -133,12 +133,6 @@ const publishCancel = async (
 };
 
 export const deploymentQueueManager = {
-	enqueue: async (data: DeploymentJob, opts?: JobsOptions) => {
-		const targetKey = getTargetKey(data);
-		const q = getOrCreateQueue(targetKey);
-		await ensureWorkerForTarget(targetKey);
-		return q.add("deploy", data, opts);
-	},
 	updateConcurrency: async (
 		targetKey: string,
 		concurrency: number,
@@ -235,16 +229,6 @@ export const deploymentQueueManager = {
 			console.error("Failed to pre-warm per-server deployment workers", error);
 		}
 	},
-};
-
-export const getJobsByApplicationId = async (applicationId: string) => {
-	const jobs = await aggregateJobs();
-	return jobs.filter((job) => job?.data?.applicationId === applicationId);
-};
-
-export const getJobsByComposeId = async (composeId: string) => {
-	const jobs = await aggregateJobs();
-	return jobs.filter((job) => job?.data?.composeId === composeId);
 };
 
 export const cleanQueuesByApplication = async (applicationId: string) => {

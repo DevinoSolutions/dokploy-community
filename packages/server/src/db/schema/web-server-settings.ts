@@ -119,8 +119,7 @@ export const webServerSettings = pgTable("webServerSettings", {
 		.default(false),
 	// How many deployments can run in parallel on the local Dokploy host.
 	// Kept in the DB so operators can tune it from the Web Server settings
-	// UI without a rebuild or service restart. The DEPLOYMENT_QUEUE_CONCURRENCY
-	// env var still acts as a cold-boot default on a fresh install.
+	// UI without a rebuild or service restart.
 	deploymentConcurrency: integer("deploymentConcurrency").notNull().default(1),
 	createdAt: timestamp("created_at").defaultNow(),
 	updatedAt: timestamp("updated_at").notNull().defaultNow(),

@@ -8,7 +8,6 @@ const result = dotenv.config({ path: ".env.production" });
 // docker-compose env / systemd unit / shell without rebuilding the bundle.
 const RUNTIME_ONLY_ENV_KEYS = new Set([
 	"DATABASE_URL",
-	"DEPLOYMENT_QUEUE_CONCURRENCY",
 	"DEPLOYMENT_SHUTDOWN_GRACE_MS",
 ]);
 
