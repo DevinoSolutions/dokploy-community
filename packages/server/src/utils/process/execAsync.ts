@@ -1,4 +1,4 @@
-import { exec, execFile } from "node:child_process";
+import { exec, execFile, spawn } from "node:child_process";
 import { findServerById } from "@dokploy/server/services/server";
 import { Client } from "ssh2";
 import { ExecError } from "./ExecError";
@@ -30,15 +30,12 @@ export const execAsync = (
 ): Promise<{ stdout: string; stderr: string }> => {
 	const ctx = getCurrentJob();
 	const tagged = tagCommand(command);
-	return new Promise((resolve, reject) => {
-		const child = exec(
-			tagged,
-			{
-				...options,
-				// Own process group so cancel can `kill -PGID` the whole tree.
-				detached: !!ctx,
-			} as Parameters<typeof exec>[1],
-			(error, stdout, stderr) => {
+
+	// Outside a deployment job: plain exec — behaviour is unchanged for the
+	// many non-deployment callers (git, docker inspect, etc.).
+	if (!ctx) {
+		return new Promise((resolve, reject) => {
+			exec(tagged, options, (error, stdout, stderr) => {
 				if (error) {
 					const codeRaw = (error as { code?: unknown }).code;
 					const exitCode = typeof codeRaw === "number" ? codeRaw : undefined;
@@ -57,9 +54,66 @@ export const execAsync = (
 					stdout: typeof stdout === "string" ? stdout : stdout.toString(),
 					stderr: typeof stderr === "string" ? stderr : stderr.toString(),
 				});
-			},
-		);
-		if (ctx) trackLocalChild(ctx.jobId, child);
+			});
+		});
+	}
+
+	// Inside a deployment job: spawn the shell DETACHED so it leads its own
+	// process group (PGID = pid). Node's exec() silently ignores `detached`
+	// (it's a spawn-only option), so the build tree (sh → nixpacks → docker
+	// buildx) would otherwise stay in dokploy's own process group and the
+	// cancel path's `kill(-PGID)` would have no group to hit. spawn() with
+	// detached:true runs setsid, giving cancel a real group leader to signal.
+	// Streaming stdout/stderr also avoids exec()'s 1 MB maxBuffer cap, which
+	// a verbose build can blow right past.
+	return new Promise((resolve, reject) => {
+		const shell = options?.shell ?? "/bin/sh";
+		const child = spawn(shell, ["-c", tagged], {
+			cwd: options?.cwd,
+			env: options?.env,
+			detached: true,
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.on("data", (data: Buffer | string) => {
+			stdout += data.toString();
+		});
+		child.stderr?.on("data", (data: Buffer | string) => {
+			stderr += data.toString();
+		});
+		child.on("error", (error) => {
+			reject(
+				new ExecError(`Command execution failed: ${error.message}`, {
+					command,
+					stdout,
+					stderr,
+					originalError: error,
+				}),
+			);
+		});
+		child.on("close", (code, signal) => {
+			if (code === 0) {
+				resolve({ stdout, stderr });
+				return;
+			}
+			reject(
+				new ExecError(
+					signal
+						? `Command execution terminated by signal ${signal}`
+						: `Command execution failed with exit code ${code}`,
+					{
+						command,
+						stdout,
+						stderr,
+						exitCode: typeof code === "number" ? code : undefined,
+						originalError: new Error(
+							signal ? `Killed by ${signal}` : `Exit code ${code}`,
+						),
+					},
+				),
+			);
+		});
+		trackLocalChild(ctx.jobId, child);
 	});
 };
 

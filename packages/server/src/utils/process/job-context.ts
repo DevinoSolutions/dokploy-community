@@ -81,21 +81,28 @@ export const trackSshClient = (jobId: string, client: Client): void => {
 };
 
 /**
+ * Grace period between the initial SIGINT and the SIGKILL cleanup sweep.
+ * SIGINT lets `docker buildx` forward a cancel to BuildKit and tear down
+ * the dockerd-owned RUN-step container; the SIGKILL afterwards reaps
+ * anything (shell, nixpacks, a wedged CLI) that ignored the interrupt.
+ */
+const BUILD_CANCEL_GRACE_MS = 4000;
+
+/**
  * Kill every process this job spawned.
  *
- * LOCAL: SIGKILL the process group (PGID = child.pid; the shell was
- * spawned with `detached: true`), tearing down sh, `docker compose`
- * and `docker build` in one shot.
+ * LOCAL: signal the whole process group (PGID = child.pid; the shell was
+ * spawned with `detached: true`, so it leads its own group). We send
+ * SIGINT first, wait a grace period, then SIGKILL — this tears down sh,
+ * `docker compose`, `docker build`/buildx and, crucially, lets buildx
+ * relay the cancel to BuildKit so the in-flight RUN-step container dies
+ * too. A bare SIGKILL would skip buildx's signal handler and orphan that
+ * RUN step, letting it run to natural completion. Falls back to the bare
+ * pid when the group is already gone (ESRCH).
  *
  * REMOTE: destroy the ssh client (force-close the socket); the
  * stream error triggers promise rejection in execAsyncRemote,
  * propagating cancellation through the handler.
- *
- * Limitation: BuildKit RUN-step containers are owned by dockerd and
- * live outside our process group, so an in-flight RUN step runs to
- * natural completion before the build aborts. Sub-second RUN-step
- * cancel requires BuildKit's gRPC Cancel API with session-ID
- * tracking, which is out of scope.
  */
 export const killJobProcesses = (
 	jobId: string,
@@ -107,21 +114,28 @@ export const killJobProcesses = (
 	if (localSet) {
 		for (const child of localSet) {
 			if (!child.pid) continue;
-			try {
-				// Try the process group first (works when the child was
-				// spawned with detached:true so PGID = child.pid). If the
-				// group doesn't exist (ESRCH), fall back to killing the
-				// shell's PID — that closes its stdio, which docker
-				// compose / docker build CLIs treat as a cancel signal.
+			const pid = child.pid;
+			// Signal the whole process group (PGID = pid, since the shell was
+			// spawned detached). Fall back to the bare pid if the group is
+			// already gone (ESRCH) — that still closes the shell's stdio,
+			// which the docker CLIs treat as a cancel.
+			const signalGroup = (sig: NodeJS.Signals) => {
 				try {
-					process.kill(-child.pid, "SIGKILL");
+					process.kill(-pid, sig);
 				} catch {
-					child.kill("SIGKILL");
+					try {
+						child.kill(sig);
+					} catch {
+						// Already gone — nothing more to do.
+					}
 				}
-				local++;
-			} catch {
-				// Process already gone — nothing more to do.
-			}
+			};
+			// SIGINT first so buildx can relay the cancel to BuildKit and tear
+			// down the RUN-step container, then SIGKILL after a grace period to
+			// reap anything that ignored the interrupt.
+			signalGroup("SIGINT");
+			setTimeout(() => signalGroup("SIGKILL"), BUILD_CANCEL_GRACE_MS).unref();
+			local++;
 		}
 		localChildren.delete(jobId);
 	}
