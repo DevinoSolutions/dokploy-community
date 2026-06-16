@@ -130,11 +130,15 @@ export const resolveNetworkNamesForResource = async (
 	// at deploy with HTTP 403 ("only networks scoped to the swarm can be used").
 	// Drop non-overlay here so a bad attachment fails open (skipped) rather than
 	// breaking every deploy of the resource.
-	return rows
-		.filter(
-			(row) => (row.serverId ?? null) === target && row.driver === "overlay",
-		)
-		.map((row) => row.name);
+	const usable = rows.filter(
+		(row) => (row.serverId ?? null) === target && row.driver === "overlay",
+	);
+	if (usable.length < rows.length) {
+		console.warn(
+			`[networks] skipped ${rows.length - usable.length} attached network(s) not usable by this resource (non-overlay or different server); deploy continues without them`,
+		);
+	}
+	return usable.map((row) => row.name);
 };
 
 export const assertNetworkIdsAttachableToResource = async (
@@ -242,7 +246,6 @@ export const createNetwork = async (
 				},
 			});
 		} catch (error) {
-			const message = getNetworkErrorMessage(error);
 			if (isDuplicateNetworkNameError(error)) {
 				throw new TRPCError({
 					code: "CONFLICT",
