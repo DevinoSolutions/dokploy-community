@@ -68,12 +68,10 @@ import {
 	environments,
 	projects,
 } from "@/server/db/schema";
-import { deploymentWorker } from "@/server/queues/deployments-queue";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
 	cancelDeploymentsByCompose,
 	cleanQueuesByCompose,
-	getJobsByComposeId,
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
@@ -252,12 +250,16 @@ export const composeRouter = createTRPCRouter({
 				.returning();
 
 			if (!IS_CLOUD) {
-				const queueJobs = await getJobsByComposeId(input.composeId);
-				for (const job of queueJobs) {
-					if (job.id) {
-						deploymentWorker.cancelJob(job.id, "User requested cancellation");
-					}
-				}
+				// Cancel in-flight AND queued deploy jobs for this compose.
+				// Routing through cancelDeploymentsByCompose (rather than
+				// deploymentWorker.cancelJob, which only aborts an *active* job)
+				// ensures a *waiting* job is removed from the queue too —
+				// otherwise it would later run deployCompose() for a now-deleted
+				// compose. Best-effort, like the cleanup steps below — a queue
+				// hiccup must not abort the delete.
+				try {
+					await cancelDeploymentsByCompose(input.composeId);
+				} catch (_) {}
 			}
 
 			const cleanupOperations = [

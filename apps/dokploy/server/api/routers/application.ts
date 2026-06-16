@@ -68,12 +68,10 @@ import {
 	environments,
 	projects,
 } from "@/server/db/schema";
-import { deploymentWorker } from "@/server/queues/deployments-queue";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
 	cancelDeploymentsByApplication,
 	cleanQueuesByApplication,
-	getJobsByApplicationId,
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
@@ -242,12 +240,16 @@ export const applicationRouter = createTRPCRouter({
 				.returning();
 
 			if (!IS_CLOUD) {
-				const queueJobs = await getJobsByApplicationId(input.applicationId);
-				for (const job of queueJobs) {
-					if (job.id) {
-						deploymentWorker.cancelJob(job.id, "User requested cancellation");
-					}
-				}
+				// Cancel in-flight AND queued deploy jobs for this app. Routing
+				// through cancelDeploymentsByApplication (rather than
+				// deploymentWorker.cancelJob, which only aborts an *active* job)
+				// ensures a *waiting* job is removed from the queue too —
+				// otherwise it would later run deployApplication() for a
+				// now-deleted application. Best-effort, like the cleanup steps
+				// below — a queue hiccup must not abort the delete.
+				try {
+					await cancelDeploymentsByApplication(input.applicationId);
+				} catch (_) {}
 			}
 
 			const cleanupOperations = [
