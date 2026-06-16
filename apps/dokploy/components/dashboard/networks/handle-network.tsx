@@ -74,7 +74,10 @@ type FormValues = z.infer<typeof formSchema>;
 
 const defaultValues: FormValues = {
 	name: "",
-	driver: "bridge",
+	// Default to overlay: only overlay networks can be attached to Dokploy's
+	// Swarm services. Bridge/macvlan/ipvlan remain selectable for host-level
+	// network management but won't appear in resource attachment pickers.
+	driver: "overlay",
 	serverId: LOCAL_SERVER,
 	internal: false,
 	attachable: false,
