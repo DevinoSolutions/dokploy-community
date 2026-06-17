@@ -135,7 +135,7 @@ describe("error classification", () => {
 			statusCode: 403,
 			json: {
 				message:
-					"network with name codex-e2e-test already exists on this server",
+					"network with name test-network already exists on this server",
 			},
 		};
 		const wrapped = new TRPCError({
@@ -145,7 +145,7 @@ describe("error classification", () => {
 		});
 
 		expect(getNetworkErrorMessage(wrapped)).toContain(
-			"network with name codex-e2e-test already exists",
+			"network with name test-network already exists",
 		);
 		expect(isDuplicateNetworkNameError(wrapped)).toBe(true);
 	});
