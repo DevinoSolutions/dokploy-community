@@ -37,7 +37,8 @@ if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
 	console.log("✅ initialization complete");
 }
 
-const app = next({ dev, turbopack: process.env.TURBOPACK === "1" });
+const useTurbopack = process.env.TURBOPACK === "1";
+const app = next({ dev, ...(useTurbopack ? { turbopack: true } : { webpack: true }) });
 const handle = app.getRequestHandler();
 void app.prepare().then(async () => {
 	try {
