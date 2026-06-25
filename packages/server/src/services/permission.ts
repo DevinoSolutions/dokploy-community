@@ -1,6 +1,5 @@
 import { db } from "@dokploy/server/db";
 import { member, organizationRole } from "@dokploy/server/db/schema";
-import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
 import {
@@ -44,11 +43,8 @@ const resolveRole = async (
 		return staticRoles[roleName];
 	}
 
-	const licensed = await hasValidLicense(organizationId);
-	if (!licensed) {
-		return null;
-	}
-
+	// ponytail: custom roles require enterprise license (removed). Still resolve from DB so
+	// existing custom-role assignments don't break — they just can't be created/edited.
 	const customRoles = await db.query.organizationRole.findMany({
 		where: and(
 			eq(organizationRole.organizationId, organizationId),

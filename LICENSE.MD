@@ -1,9 +1,6 @@
 Copyright 2026-present Dokploy Technology, Inc.
 
-Portions of this software are licensed as follows:
-
-* All content that resides under a "/proprietary" directory of this repository, if that directory exists, is licensed under the license defined in "LICENSE_PROPRIETARY".
-* Content outside of the above mentioned directories or restrictions above is available under the "Apache License 2.0" license as defined below.
+This software is available under the "Apache License 2.0" license as defined below.
 
 ## Apache License 2.0
 

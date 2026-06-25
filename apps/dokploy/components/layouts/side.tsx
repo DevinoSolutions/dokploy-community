@@ -11,7 +11,6 @@ import {
 	ChevronRight,
 	ChevronsUpDown,
 	CircleHelp,
-	ClipboardList,
 	Clock,
 	CreditCard,
 	Database,
@@ -20,14 +19,11 @@ import {
 	GalleryVerticalEnd,
 	GitBranch,
 	House,
-	Key,
 	KeyRound,
 	Loader2,
-	LogIn,
 	type LucideIcon,
 	Network,
 	Package,
-	Palette,
 	PieChart,
 	Rocket,
 	Server,
@@ -318,13 +314,6 @@ const MENU: Menu = {
 		},
 		{
 			isSingle: true,
-			title: "Audit Logs",
-			icon: ClipboardList,
-			url: "/dashboard/settings/audit-logs",
-			isEnabled: ({ permissions }) => !!permissions?.auditLog.read,
-		},
-		{
-			isSingle: true,
 			title: "SSH Keys",
 			icon: KeyRound,
 			url: "/dashboard/settings/ssh-keys",
@@ -399,30 +388,6 @@ const MENU: Menu = {
 			// Only enabled for owners in cloud environments
 			isEnabled: ({ auth, isCloud }) => !!(auth?.role === "owner" && isCloud),
 		},
-		{
-			isSingle: true,
-			title: "License",
-			url: "/dashboard/settings/license",
-			icon: Key,
-			// Only enabled for owners
-			isEnabled: ({ auth }) => !!(auth?.role === "owner"),
-		},
-		{
-			isSingle: true,
-			title: "SSO",
-			url: "/dashboard/settings/sso",
-			icon: LogIn,
-			// Enabled for admins in both cloud and self-hosted (enterprise)
-			isEnabled: ({ permissions }) => !!permissions?.organization.update,
-		},
-		{
-			isSingle: true,
-			title: "Whitelabeling",
-			url: "/dashboard/settings/whitelabeling",
-			icon: Palette,
-			// Only enabled for owners in non-cloud environments (enterprise)
-			isEnabled: ({ auth, isCloud }) => !!(auth?.role === "owner" && !isCloud),
-		},
 	],
 
 	help: [
@@ -447,10 +412,6 @@ function createMenuForAuthUser(opts: {
 	auth?: AuthQueryOutput;
 	permissions?: PermissionsOutput;
 	isCloud: boolean;
-	whitelabeling?: {
-		docsUrl?: string | null;
-		supportUrl?: string | null;
-	} | null;
 }): Menu {
 	const filterEnabled = <
 		T extends {
@@ -469,21 +430,10 @@ function createMenuForAuthUser(opts: {
 					}),
 		) as T[];
 
-	// Apply whitelabeling URL overrides to help items
-	const helpItems = filterEnabled(MENU.help).map((item) => {
-		if (opts.whitelabeling?.docsUrl && item.name === "Documentation") {
-			return { ...item, url: opts.whitelabeling.docsUrl };
-		}
-		if (opts.whitelabeling?.supportUrl && item.name === "Support") {
-			return { ...item, url: opts.whitelabeling.supportUrl };
-		}
-		return item;
-	});
-
 	return {
 		home: filterEnabled(MENU.home),
 		settings: filterEnabled(MENU.settings),
-		help: helpItems,
+		help: filterEnabled(MENU.help),
 	};
 }
 
@@ -905,11 +855,6 @@ export default function Page({ children }: Props) {
 	const { data: auth } = api.user.get.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const { data: dokployVersion } = api.settings.getDokployVersion.useQuery();
-	const { data: whitelabeling } = api.whitelabeling.get.useQuery(undefined, {
-		staleTime: 5 * 60 * 1000,
-		refetchOnWindowFocus: false,
-	});
-
 	const includesProjects = pathname?.includes("/dashboard/project");
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 
@@ -921,7 +866,6 @@ export default function Page({ children }: Props) {
 		auth,
 		permissions,
 		isCloud: !!isCloud,
-		whitelabeling,
 	});
 
 	const activeItem = findActiveNavItem(
@@ -1172,11 +1116,6 @@ export default function Page({ children }: Props) {
 						<SidebarMenuItem>
 							<UserNav />
 						</SidebarMenuItem>
-						{whitelabeling?.footerText && (
-							<div className="px-3 text-xs text-muted-foreground text-center group-data-[collapsible=icon]:hidden">
-								{whitelabeling.footerText}
-							</div>
-						)}
 						{dokployVersion && (
 							<div className="px-3 text-xs text-muted-foreground text-center group-data-[collapsible=icon]:hidden">
 								Version {dokployVersion}

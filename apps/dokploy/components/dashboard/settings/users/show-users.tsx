@@ -37,18 +37,8 @@ export const ShowUsers = () => {
 	const { data, isPending, refetch } = api.user.all.useQuery();
 	const { mutateAsync } = api.user.remove.useMutation();
 	const { data: permissions } = api.user.getPermissions.useQuery();
-	const { data: hasValidLicense } =
-		api.licenseKey.haveValidLicenseKey.useQuery();
-
 	const utils = api.useUtils();
 	const { data: session } = api.user.session.useQuery();
-
-	const FREE_ROLES = ["owner", "admin", "member"];
-	const membersWithCustomRoles = data?.filter(
-		(member) => !FREE_ROLES.includes(member.role),
-	);
-	const hasCustomRolesWithoutLicense =
-		!hasValidLicense && (membersWithCustomRoles?.length ?? 0) > 0;
 
 	return (
 		<div className="w-full">
@@ -80,18 +70,6 @@ export const ShowUsers = () => {
 									</div>
 								) : (
 									<div className="flex flex-col gap-4  min-h-[25vh]">
-										{hasCustomRolesWithoutLicense && (
-											<AlertBlock type="warning">
-												You have{" "}
-												{membersWithCustomRoles?.length === 1
-													? "1 user"
-													: `${membersWithCustomRoles?.length} users`}{" "}
-												assigned to custom roles. Custom roles will not work
-												without a valid Enterprise license. Please activate your
-												license or change these users to a free role (Admin or
-												Member).
-											</AlertBlock>
-										)}
 										<Table>
 											<TableHeader>
 												<TableRow>
