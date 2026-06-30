@@ -389,6 +389,7 @@ export const apiCreateApplication = createSchema.pick({
 	description: true,
 	environmentId: true,
 	serverId: true,
+	sourceType: true,
 });
 
 export const apiFindOneApplication = z.object({
