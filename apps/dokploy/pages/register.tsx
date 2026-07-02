@@ -8,6 +8,10 @@ import { type ReactElement, useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
+import {
+	type EnabledSocialProviders,
+	SocialLoginButtons,
+} from "@/components/auth/social-login";
 import { OnboardingLayout } from "@/components/layouts/onboarding-layout";
 import { SignInWithGithub } from "@/components/proprietary/auth/sign-in-with-github";
 import { SignInWithGoogle } from "@/components/proprietary/auth/sign-in-with-google";
@@ -74,9 +78,10 @@ type Register = z.infer<typeof registerSchema>;
 interface Props {
 	hasAdmin: boolean;
 	isCloud: boolean;
+	socialProviders?: EnabledSocialProviders;
 }
 
-const Register = ({ isCloud }: Props) => {
+const Register = ({ isCloud, socialProviders = {} }: Props) => {
 	const router = useRouter();
 	const { config: whitelabeling } = useWhitelabelingPublic();
 	const [isError, setIsError] = useState(false);
@@ -170,6 +175,15 @@ const Register = ({ isCloud }: Props) => {
 									Or register with email
 								</p>
 							)}
+							{!isCloud &&
+								(socialProviders.github || socialProviders.google) && (
+									<>
+										<SocialLoginButtons providers={socialProviders} />
+										<p className="mb-4 text-center text-xs text-muted-foreground">
+											Or register with email
+										</p>
+									</>
+								)}
 							<Form {...form}>
 								<form
 									onSubmit={form.handleSubmit(onSubmit)}
@@ -326,6 +340,14 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 	return {
 		props: {
 			isCloud: false,
+			socialProviders: {
+				github: Boolean(
+					process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET,
+				),
+				google: Boolean(
+					process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
+				),
+			},
 		},
 	};
 }

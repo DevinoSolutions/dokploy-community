@@ -13,6 +13,10 @@ import { type ReactElement, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
+import {
+	type EnabledSocialProviders,
+	SocialLoginButtons,
+} from "@/components/auth/social-login";
 import { OnboardingLayout } from "@/components/layouts/onboarding-layout";
 import { SignInWithGithub } from "@/components/proprietary/auth/sign-in-with-github";
 import { SignInWithGoogle } from "@/components/proprietary/auth/sign-in-with-google";
@@ -57,8 +61,13 @@ type LoginForm = z.infer<typeof LoginSchema>;
 interface Props {
 	IS_CLOUD: boolean;
 	enforceSSO: boolean;
+	socialProviders?: EnabledSocialProviders;
 }
-export default function Home({ IS_CLOUD, enforceSSO }: Props) {
+export default function Home({
+	IS_CLOUD,
+	enforceSSO,
+	socialProviders = {},
+}: Props) {
 	const router = useRouter();
 	const { config: whitelabeling } = useWhitelabelingPublic();
 	const { data: showSignInWithSSO } = api.sso.showSignInWithSSO.useQuery();
@@ -180,6 +189,7 @@ export default function Home({ IS_CLOUD, enforceSSO }: Props) {
 		<>
 			{IS_CLOUD && <SignInWithGithub />}
 			{IS_CLOUD && <SignInWithGoogle />}
+			{!IS_CLOUD && <SocialLoginButtons providers={socialProviders} />}
 			<Form {...loginForm}>
 				<form
 					onSubmit={loginForm.handleSubmit(onSubmit)}
@@ -456,6 +466,14 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 		props: {
 			hasAdmin,
 			enforceSSO: webServerSettings?.enforceSSO ?? false,
+			socialProviders: {
+				github: Boolean(
+					process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET,
+				),
+				google: Boolean(
+					process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
+				),
+			},
 		},
 	};
 }
