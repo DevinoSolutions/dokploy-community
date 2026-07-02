@@ -163,7 +163,7 @@ export const createPreviewDeployment = async (
 		domainTemplate.includes("${branchName}") ||
 		domainTemplate.includes("${uniqueId}");
 
-	let appName: string;
+	const appName: string = `preview-${application.appName}-${uniqueId}`;
 	let generateDomain: string;
 
 	if (hasIdentifier) {
@@ -174,9 +174,7 @@ export const createPreviewDeployment = async (
 			uniqueId,
 		});
 		generateDomain = interpolated.replace("*", application.appName);
-		appName = `preview-${application.appName}-${uniqueId}`;
 	} else {
-		appName = `preview-${application.appName}-${uniqueId}`;
 		const org = await db.query.organization.findFirst({
 			where: eq(
 				organization.id,
