@@ -553,8 +553,20 @@ export const organizationRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			// Permission is only ever checked against the active organization
+			// (checkPermission scopes to ctx.session.activeOrganizationId), so we
+			// must scope the write to it too — otherwise an admin of one org could
+			// overwrite any other org's metadata by passing its id (cross-tenant IDOR).
+			const orgId = ctx.session.activeOrganizationId;
+			if (input.organizationId !== orgId) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "You can only update the active organization",
+				});
+			}
+
 			const org = await db.query.organization.findFirst({
-				where: eq(organization.id, input.organizationId),
+				where: eq(organization.id, orgId),
 			});
 
 			if (!org) {
@@ -567,12 +579,12 @@ export const organizationRouter = createTRPCRouter({
 			await db
 				.update(organization)
 				.set({ metadata: updatedMeta })
-				.where(eq(organization.id, input.organizationId));
+				.where(eq(organization.id, orgId));
 
 			await audit(ctx, {
 				action: "update",
 				resourceType: "organization",
-				resourceId: input.organizationId,
+				resourceId: orgId,
 				resourceName: org.name,
 				metadata: { type: "updateDescription" },
 			});
