@@ -63,14 +63,15 @@ const serializeHooks = (values: DeployHooks): string | null => {
 };
 
 export const DeployHooks = ({ applicationId }: Props) => {
-	const { data } = api.application.one.useQuery(
+	const { data } = api.application.getDeployHooks.useQuery(
 		{ applicationId },
 		{ enabled: !!applicationId },
 	);
 
 	const utils = api.useUtils();
 
-	const { mutateAsync, isPending } = api.application.update.useMutation();
+	const { mutateAsync, isPending } =
+		api.application.saveDeployHooks.useMutation();
 
 	const form = useForm<DeployHooks>({
 		defaultValues: {
@@ -94,7 +95,7 @@ export const DeployHooks = ({ applicationId }: Props) => {
 		})
 			.then(async () => {
 				toast.success("Deployment hooks updated");
-				await utils.application.one.invalidate({ applicationId });
+				await utils.application.getDeployHooks.invalidate({ applicationId });
 			})
 			.catch(() => {
 				toast.error("Error updating deployment hooks");

@@ -116,7 +116,6 @@ export const applications = pgTable("application", {
 	subtitle: text("subtitle"),
 	command: text("command"),
 	args: text("args").array(),
-	deployHooks: text("deployHooks"),
 	icon: text("icon"),
 	refreshToken: text("refreshToken").$defaultFn(() => nanoid()),
 	sourceType: sourceType("sourceType").notNull().default("github"),

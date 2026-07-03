@@ -48,7 +48,6 @@ const createApplication = (
 		memoryReservation: null,
 		cpuReservation: null,
 		command: null,
-		deployHooks: null,
 		ports: [],
 		sourceType: "docker",
 		dockerImage: "example:latest",

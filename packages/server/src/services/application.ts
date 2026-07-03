@@ -30,6 +30,7 @@ import { createTraefikConfig } from "@dokploy/server/utils/traefik/application";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
+import { deployHook } from "../db/schema";
 import {
 	parseDeployHooks,
 	runDeployHook,
@@ -222,7 +223,10 @@ export const deployApplication = async ({
 			await execAsync(commandWithLog);
 		}
 
-		const deployHooks = parseDeployHooks(application.deployHooks);
+		const hookRow = await db.query.deployHook.findFirst({
+			where: eq(deployHook.applicationId, application.applicationId),
+		});
+		const deployHooks = parseDeployHooks(hookRow?.hooks);
 
 		await runDeployHook({
 			kind: "pre",
@@ -336,7 +340,10 @@ export const rebuildApplication = async ({
 			await execAsync(commandWithLog);
 		}
 
-		const deployHooks = parseDeployHooks(application.deployHooks);
+		const hookRow = await db.query.deployHook.findFirst({
+			where: eq(deployHook.applicationId, application.applicationId),
+		});
+		const deployHooks = parseDeployHooks(hookRow?.hooks);
 
 		await runDeployHook({
 			kind: "pre",

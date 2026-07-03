@@ -1,5 +1,5 @@
 {
-  "id": "19d24ac7-5be7-4aa5-8c71-be4a64452855",
+  "id": "b85eb4d9-9ce6-4138-adec-466e6da5bfa0",
   "prevId": "7bc350cb-176f-4093-b280-e264cd18b9a9",
   "version": "7",
   "dialect": "postgresql",
@@ -1134,12 +1134,6 @@
         "args": {
           "name": "args",
           "type": "text[]",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "deployHooks": {
-          "name": "deployHooks",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
@@ -2686,6 +2680,59 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.deploy_hook": {
+      "name": "deploy_hook",
+      "schema": "",
+      "columns": {
+        "deployHookId": {
+          "name": "deployHookId",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "applicationId": {
+          "name": "applicationId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "hooks": {
+          "name": "hooks",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "deploy_hook_applicationId_application_applicationId_fk": {
+          "name": "deploy_hook_applicationId_application_applicationId_fk",
+          "tableFrom": "deploy_hook",
+          "tableTo": "application",
+          "columnsFrom": [
+            "applicationId"
+          ],
+          "columnsTo": [
+            "applicationId"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "deploy_hook_applicationId_unique": {
+          "name": "deploy_hook_applicationId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "applicationId"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

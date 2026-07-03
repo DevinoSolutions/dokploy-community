@@ -35,6 +35,9 @@ vi.mock("@dokploy/server/db", () => {
 				applications: {
 					findFirst: vi.fn(),
 				},
+				deployHook: {
+					findFirst: vi.fn(),
+				},
 				patch: {
 					findMany: vi.fn().mockResolvedValue([]),
 				},
@@ -158,6 +161,13 @@ const primeMocks = (app = createMockApplication()) => {
 	vi.mocked(db.query.applications.findFirst).mockResolvedValue(app as any);
 	vi.mocked(applicationService.findApplicationById).mockResolvedValue(
 		app as any,
+	);
+	// Hooks are stored in the deploy_hook side table (not an application column),
+	// so route the mock application's deployHooks value through that query.
+	vi.mocked(db.query.deployHook.findFirst).mockResolvedValue(
+		(app as any).deployHooks != null
+			? ({ hooks: (app as any).deployHooks } as any)
+			: (undefined as any),
 	);
 	vi.mocked(adminService.getDokployUrl).mockResolvedValue(
 		"http://localhost:3000",
