@@ -3,7 +3,15 @@ import {
 	ADDITIONAL_FLAG_REGEX,
 } from "@dokploy/server/db/validations/destination";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
-import { PenBoxIcon, PlusIcon, Trash2 } from "lucide-react";
+import {
+	ExternalLink,
+	KeyRound,
+	PenBoxIcon,
+	PlusIcon,
+	RefreshCw,
+	Shield,
+	Trash2,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { useFieldArray, useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -22,6 +30,7 @@ import {
 import {
 	Form,
 	FormControl,
+	FormDescription,
 	FormField,
 	FormItem,
 	FormLabel,
@@ -37,32 +46,79 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import { S3_PROVIDERS } from "./constants";
 
-const addDestination = z.object({
-	name: z.string().min(1, "Name is required"),
-	provider: z.string().min(1, "Provider is required"),
-	accessKeyId: z.string().min(1, "Access Key Id is required"),
-	secretAccessKey: z.string().min(1, "Secret Access Key is required"),
-	bucket: z.string().min(1, "Bucket is required"),
-	region: z.string(),
-	endpoint: z.string().min(1, "Endpoint is required"),
-	serverId: z.string().optional(),
-	additionalFlags: z
-		.array(
-			z.object({
-				value: z
-					.string()
-					.min(1, "Flag cannot be empty")
-					.regex(ADDITIONAL_FLAG_REGEX, ADDITIONAL_FLAG_ERROR),
-			}),
-		)
-		.optional(),
-});
+// Rclone crypt filename encryption options
+const FILENAME_ENCRYPTION_OPTIONS = [
+	{
+		key: "off",
+		name: "Off",
+		description: "Don't encrypt filenames (recommended for easier management)",
+	},
+	{
+		key: "standard",
+		name: "Standard",
+		description: "Encrypt filenames using EME encryption",
+	},
+	{
+		key: "obfuscate",
+		name: "Obfuscate",
+		description: "Simple filename obfuscation (not secure, but hides names)",
+	},
+] as const;
+
+const addDestination = z
+	.object({
+		name: z.string().min(1, "Name is required"),
+		provider: z.string().min(1, "Provider is required"),
+		accessKeyId: z.string().min(1, "Access Key Id is required"),
+		secretAccessKey: z.string().min(1, "Secret Access Key is required"),
+		bucket: z.string().min(1, "Bucket is required"),
+		region: z.string(),
+		endpoint: z.string().min(1, "Endpoint is required"),
+		serverId: z.string().optional(),
+		additionalFlags: z
+			.array(
+				z.object({
+					value: z
+						.string()
+						.min(1, "Flag cannot be empty")
+						.regex(ADDITIONAL_FLAG_REGEX, ADDITIONAL_FLAG_ERROR),
+				}),
+			)
+			.optional(),
+		// Encryption settings (rclone crypt)
+		encryptionEnabled: z.boolean().optional(),
+		encryptionKey: z.string().optional(),
+		encryptionPassword2: z.string().optional(),
+		filenameEncryption: z.enum(["standard", "obfuscate", "off"]).optional(),
+		directoryNameEncryption: z.boolean().optional(),
+	})
+	.refine(
+		(data) => {
+			if (data.encryptionEnabled) {
+				return !!data.encryptionKey;
+			}
+			return true;
+		},
+		{
+			message: "Encryption key is required when encryption is enabled",
+			path: ["encryptionKey"],
+		},
+	);
 
 type AddDestination = z.infer<typeof addDestination>;
+
+const generateEncryptionKey = (): string => {
+	const array = new Uint8Array(32);
+	crypto.getRandomValues(array);
+	return Array.from(array, (byte) => byte.toString(16).padStart(2, "0")).join(
+		"",
+	);
+};
 
 interface Props {
 	destinationId?: string;
@@ -104,6 +160,11 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 			secretAccessKey: "",
 			endpoint: "",
 			additionalFlags: [],
+			encryptionEnabled: false,
+			encryptionKey: "",
+			encryptionPassword2: "",
+			filenameEncryption: "off",
+			directoryNameEncryption: false,
 		},
 		resolver: zodResolver(addDestination),
 	});
@@ -112,6 +173,9 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 		control: form.control,
 		name: "additionalFlags",
 	});
+
+	const encryptionEnabled = form.watch("encryptionEnabled");
+	const filenameEncryption = form.watch("filenameEncryption");
 
 	useEffect(() => {
 		if (destination) {
@@ -125,6 +189,15 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 				endpoint: destination.endpoint,
 				additionalFlags:
 					destination.additionalFlags?.map((f) => ({ value: f })) ?? [],
+				encryptionEnabled: destination.encryptionEnabled ?? false,
+				encryptionKey: destination.encryptionKey ?? "",
+				encryptionPassword2: destination.encryptionPassword2 ?? "",
+				filenameEncryption:
+					(destination.filenameEncryption as
+						| "standard"
+						| "obfuscate"
+						| "off") ?? "off",
+				directoryNameEncryption: destination.directoryNameEncryption ?? false,
 			});
 		} else {
 			form.reset();
@@ -142,6 +215,11 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 			secretAccessKey: data.secretAccessKey,
 			destinationId: destinationId || "",
 			additionalFlags: data.additionalFlags?.map((f) => f.value) ?? [],
+			encryptionEnabled: data.encryptionEnabled,
+			encryptionKey: data.encryptionKey,
+			encryptionPassword2: data.encryptionPassword2,
+			filenameEncryption: data.filenameEncryption,
+			directoryNameEncryption: data.directoryNameEncryption,
 		})
 			.then(async () => {
 				toast.success(`Destination ${destinationId ? "Updated" : "Created"}`);
@@ -429,6 +507,195 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 									)}
 								/>
 							))}
+						</div>
+
+						{/* Encryption Settings - Rclone Crypt */}
+						<div className="space-y-4 rounded-lg border p-4">
+							<div className="flex items-center justify-between">
+								<div className="flex items-center gap-2">
+									<Shield className="h-4 w-4 text-muted-foreground" />
+									<span className="text-sm font-medium">
+										Backup Encryption (At Rest)
+									</span>
+								</div>
+								<a
+									href="https://rclone.org/crypt/"
+									target="_blank"
+									rel="noopener noreferrer"
+									className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary"
+								>
+									<ExternalLink className="h-3 w-3" />
+									Rclone Crypt Docs
+								</a>
+							</div>
+
+							<FormField
+								control={form.control}
+								name="encryptionEnabled"
+								render={({ field }) => (
+									<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3">
+										<div className="space-y-0.5">
+											<FormLabel>Enable Encryption</FormLabel>
+											<FormDescription>
+												Encrypt backups using NaCl SecretBox (XSalsa20 +
+												Poly1305)
+											</FormDescription>
+										</div>
+										<FormControl>
+											<Switch
+												checked={field.value}
+												onCheckedChange={field.onChange}
+											/>
+										</FormControl>
+									</FormItem>
+								)}
+							/>
+
+							{encryptionEnabled && (
+								<>
+									{/* Main Password */}
+									<FormField
+										control={form.control}
+										name="encryptionKey"
+										render={({ field }) => (
+											<FormItem>
+												<FormLabel>Password (Required)</FormLabel>
+												<div className="flex gap-2">
+													<FormControl>
+														<Input
+															type="password"
+															placeholder="Enter or generate a password"
+															{...field}
+														/>
+													</FormControl>
+													<Button
+														type="button"
+														variant="outline"
+														size="icon"
+														onClick={() => {
+															const key = generateEncryptionKey();
+															form.setValue("encryptionKey", key);
+															toast.success("Password generated", {
+																description:
+																	"Make sure to save this password securely.",
+															});
+														}}
+													>
+														<RefreshCw className="h-4 w-4" />
+													</Button>
+												</div>
+												<FormDescription>
+													<KeyRound className="mr-1 inline h-3 w-3" />
+													Main encryption password. Store securely - lost
+													passwords cannot be recovered.
+												</FormDescription>
+												<FormMessage />
+											</FormItem>
+										)}
+									/>
+
+									{/* Salt Password (Password2) */}
+									<FormField
+										control={form.control}
+										name="encryptionPassword2"
+										render={({ field }) => (
+											<FormItem>
+												<FormLabel>Salt Password (Recommended)</FormLabel>
+												<div className="flex gap-2">
+													<FormControl>
+														<Input
+															type="password"
+															placeholder="Optional but recommended"
+															{...field}
+														/>
+													</FormControl>
+													<Button
+														type="button"
+														variant="outline"
+														size="icon"
+														onClick={() => {
+															const key = generateEncryptionKey();
+															form.setValue("encryptionPassword2", key);
+															toast.success("Salt password generated", {
+																description:
+																	"Make sure to save this password securely.",
+															});
+														}}
+													>
+														<RefreshCw className="h-4 w-4" />
+													</Button>
+												</div>
+												<FormDescription>
+													Additional salt for extra security. Should be
+													different from the main password.
+												</FormDescription>
+												<FormMessage />
+											</FormItem>
+										)}
+									/>
+
+									{/* Filename Encryption */}
+									<FormField
+										control={form.control}
+										name="filenameEncryption"
+										render={({ field }) => (
+											<FormItem>
+												<FormLabel>Filename Encryption</FormLabel>
+												<FormControl>
+													<Select
+														onValueChange={field.onChange}
+														value={field.value}
+													>
+														<SelectTrigger>
+															<SelectValue placeholder="Select filename encryption" />
+														</SelectTrigger>
+														<SelectContent>
+															{FILENAME_ENCRYPTION_OPTIONS.map((option) => (
+																<SelectItem key={option.key} value={option.key}>
+																	<div className="flex flex-col">
+																		<span>{option.name}</span>
+																		<span className="text-xs text-muted-foreground">
+																			{option.description}
+																		</span>
+																	</div>
+																</SelectItem>
+															))}
+														</SelectContent>
+													</Select>
+												</FormControl>
+												<FormDescription>
+													Choose how backup filenames should be encrypted.
+												</FormDescription>
+												<FormMessage />
+											</FormItem>
+										)}
+									/>
+
+									{/* Directory Name Encryption (only shown when filename encryption is not off) */}
+									{filenameEncryption && filenameEncryption !== "off" && (
+										<FormField
+											control={form.control}
+											name="directoryNameEncryption"
+											render={({ field }) => (
+												<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3">
+													<div className="space-y-0.5">
+														<FormLabel>Encrypt Directory Names</FormLabel>
+														<FormDescription>
+															Also encrypt directory/folder names
+														</FormDescription>
+													</div>
+													<FormControl>
+														<Switch
+															checked={field.value}
+															onCheckedChange={field.onChange}
+														/>
+													</FormControl>
+												</FormItem>
+											)}
+										/>
+									)}
+								</>
+							)}
 						</div>
 					</form>
 

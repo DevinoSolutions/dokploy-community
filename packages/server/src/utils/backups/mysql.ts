@@ -10,9 +10,10 @@ import { findProjectById } from "@dokploy/server/services/project";
 import { sendDatabaseBackupNotifications } from "../notifications/database-backup";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
+	buildRcloneCommand,
 	getBackupCommand,
 	getBackupTimestamp,
-	getS3Credentials,
+	getRcloneS3Remote,
 	normalizeS3Path,
 } from "./utils";
 
@@ -31,10 +32,13 @@ export const runMySqlBackup = async (mysql: MySql, backup: BackupSchedule) => {
 	});
 
 	try {
-		const rcloneFlags = getS3Credentials(destination);
-		const rcloneDestination = `:s3:${destination.bucket}/${bucketDestination}`;
-
-		const rcloneCommand = `rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
+		// Get rclone remote (encryption is handled transparently if enabled)
+		const { remote, envVars } = getRcloneS3Remote(destination);
+		const rcloneDestination = `${remote}/${bucketDestination}`;
+		const rcloneCommand = buildRcloneCommand(
+			`rclone rcat "${rcloneDestination}"`,
+			envVars,
+		);
 
 		const backupCommand = getBackupCommand(
 			backup,
