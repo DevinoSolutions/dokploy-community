@@ -161,7 +161,14 @@ const createSchema = createInsertSchema(backups, {
 	libsqlId: z.string().optional(),
 	userId: z.string().optional(),
 	metadata: z.any().optional(),
-}).superRefine((data, ctx) => {
+});
+
+// Applied to the API input schemas (not the base createSchema) because in Zod
+// v4 .pick()/.omit() cannot be called on a schema that carries a refinement.
+const requireDatabaseForNonMongo = (
+	data: { database?: string | null; databaseType?: string | null },
+	ctx: z.RefinementCtx,
+) => {
 	if (!data.database && data.databaseType !== "mongo") {
 		ctx.addIssue({
 			code: z.ZodIssueCode.custom,
@@ -169,27 +176,29 @@ const createSchema = createInsertSchema(backups, {
 			path: ["database"],
 		});
 	}
-});
+};
 
-export const apiCreateBackup = createSchema.pick({
-	schedule: true,
-	enabled: true,
-	prefix: true,
-	destinationId: true,
-	keepLatestCount: true,
-	database: true,
-	mariadbId: true,
-	mysqlId: true,
-	postgresId: true,
-	mongoId: true,
-	libsqlId: true,
-	databaseType: true,
-	userId: true,
-	backupType: true,
-	composeId: true,
-	serviceName: true,
-	metadata: true,
-});
+export const apiCreateBackup = createSchema
+	.pick({
+		schedule: true,
+		enabled: true,
+		prefix: true,
+		destinationId: true,
+		keepLatestCount: true,
+		database: true,
+		mariadbId: true,
+		mysqlId: true,
+		postgresId: true,
+		mongoId: true,
+		libsqlId: true,
+		databaseType: true,
+		userId: true,
+		backupType: true,
+		composeId: true,
+		serviceName: true,
+		metadata: true,
+	})
+	.superRefine(requireDatabaseForNonMongo);
 
 export const apiFindOneBackup = z.object({
 	backupId: z.string().min(1),
@@ -214,7 +223,8 @@ export const apiUpdateBackup = createSchema
 		metadata: true,
 		databaseType: true,
 	})
-	.required();
+	.required()
+	.superRefine(requireDatabaseForNonMongo);
 
 export const apiRestoreBackup = z.object({
 	databaseId: z.string(),
