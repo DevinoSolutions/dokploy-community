@@ -1226,6 +1226,13 @@
       "when": 1783795384580,
       "tag": "0174_fantastic_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 176,
+      "version": "7",
+      "when": 1783842255022,
+      "tag": "0176_striped_stephen_strange",
+      "breakpoints": true
     }
   ]
 }
