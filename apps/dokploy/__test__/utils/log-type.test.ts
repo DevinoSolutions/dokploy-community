@@ -1,5 +1,5 @@
-import { getLogType } from "@/components/dashboard/docker/logs/utils";
 import { describe, expect, test } from "vitest";
+import { getLogType } from "@/components/dashboard/docker/logs/utils";
 
 describe("getLogType", () => {
 	test("does not classify ofelia success summary as error", () => {
