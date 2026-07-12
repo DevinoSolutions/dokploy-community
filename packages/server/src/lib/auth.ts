@@ -194,8 +194,8 @@ const createBetterAuth = () =>
 									});
 								}
 							} else {
-								const isSSORequest = context?.path.includes("/sso");
-								const isSCIMRequest = context?.path.includes("/scim");
+								const isSSORequest = context?.path?.includes("/sso");
+								const isSCIMRequest = context?.path?.includes("/scim");
 								if (isSSORequest || isSCIMRequest) {
 									return;
 								}
@@ -211,8 +211,8 @@ const createBetterAuth = () =>
 						}
 					},
 					after: async (user, context) => {
-						const isSSORequest = context?.path.includes("/sso");
-						const isSCIMRequest = context?.path.includes("/scim");
+						const isSSORequest = context?.path?.includes("/sso");
+						const isSCIMRequest = context?.path?.includes("/scim");
 						const isAdminPresent = await db.query.member.findFirst({
 							where: eq(schema.member.role, "owner"),
 						});
@@ -318,7 +318,7 @@ const createBetterAuth = () =>
 						return {
 							data: {
 								...session,
-								activeOrganizationId: member?.organization.id,
+								activeOrganizationId: member?.organization?.id,
 							},
 						};
 					},
@@ -456,7 +456,11 @@ const createBetterAuth = () =>
 			// adminRoles: [] keeps every /admin/* endpoint locked on self-hosted.
 			admin(
 				IS_CLOUD
-					? { adminUserIds: [process.env.USER_ADMIN_ID as string] }
+					? {
+							adminUserIds: [process.env.USER_ADMIN_ID as string].filter(
+								Boolean,
+							),
+						}
 					: { adminRoles: [] },
 			),
 		],
@@ -464,30 +468,65 @@ const createBetterAuth = () =>
 
 // Una sola instancia de better-auth por proceso aunque el módulo esté
 // duplicado en varios bundles.
+type AuthInstance = ReturnType<typeof createBetterAuth>;
+
 const globalForAuth = globalThis as unknown as {
-	betterAuthInstance?: ReturnType<typeof createBetterAuth>;
+	betterAuthInstance?: AuthInstance;
 };
 
-if (!globalForAuth.betterAuthInstance) {
-	globalForAuth.betterAuthInstance = createBetterAuth();
+// Lazily initialize better-auth on first use instead of at module import
+// time, so importing this module (or anything that re-exports it) no longer
+// requires a reachable database.
+function getAuthInstance(): AuthInstance {
+	if (globalForAuth.betterAuthInstance) {
+		return globalForAuth.betterAuthInstance;
+	}
+
+	try {
+		globalForAuth.betterAuthInstance = createBetterAuth();
+		return globalForAuth.betterAuthInstance;
+	} catch (error) {
+		console.error("Failed to initialize auth instance:", error);
+		throw error;
+	}
 }
 
-const { handler, api } = globalForAuth.betterAuthInstance;
-
+// Export properly typed lazy-loaded auth: each property defers to the
+// singleton created on first access.
 const _auth = {
-	handler,
-	createApiKey: api.createApiKey,
-	registerSSOProvider: api.registerSSOProvider,
-	updateSSOProvider: api.updateSSOProvider,
-	generateSCIMToken: api.generateSCIMToken,
-	listSCIMProviderConnections: api.listSCIMProviderConnections,
-	deleteSCIMProviderConnection: api.deleteSCIMProviderConnection,
+	get handler() {
+		return getAuthInstance().handler;
+	},
+	get createApiKey() {
+		return getAuthInstance().api.createApiKey;
+	},
+	get registerSSOProvider() {
+		return getAuthInstance().api.registerSSOProvider;
+	},
+	get updateSSOProvider() {
+		return getAuthInstance().api.updateSSOProvider;
+	},
+	get generateSCIMToken() {
+		return getAuthInstance().api.generateSCIMToken;
+	},
+	get listSCIMProviderConnections() {
+		return getAuthInstance().api.listSCIMProviderConnections;
+	},
+	get deleteSCIMProviderConnection() {
+		return getAuthInstance().api.deleteSCIMProviderConnection;
+	},
 };
 
 export type AuthType = typeof _auth;
 export const auth: AuthType = _auth;
 
+// Access the underlying better-auth api lazily (used by validateRequest).
+function getApi() {
+	return getAuthInstance().api;
+}
+
 export const validateRequest = async (request: IncomingMessage) => {
+	const api = getApi();
 	const apiKey = request.headers["x-api-key"] as string;
 	if (apiKey) {
 		try {
