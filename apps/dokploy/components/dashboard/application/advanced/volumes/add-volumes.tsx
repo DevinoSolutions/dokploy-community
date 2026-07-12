@@ -2,7 +2,7 @@ import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/stand
 import { PlusIcon } from "lucide-react";
 import type React from "react";
 import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
+import { type Resolver, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
@@ -122,7 +122,7 @@ export const AddVolumes = ({
 			gid: undefined,
 			mode: "",
 		},
-		resolver: zodResolver(mySchema),
+		resolver: zodResolver(mySchema) as unknown as Resolver<AddMount>,
 	});
 	const type = form.watch("type");
 
