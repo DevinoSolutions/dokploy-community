@@ -1226,6 +1226,13 @@
       "when": 1783795384580,
       "tag": "0174_fantastic_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 175,
+      "version": "7",
+      "when": 1783842273217,
+      "tag": "0175_last_spyke",
+      "breakpoints": true
     }
   ]
 }
