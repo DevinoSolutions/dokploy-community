@@ -1,4 +1,8 @@
+import { GENERIC_RCLONE_PROVIDER } from "@dokploy/server/db/validations/destination";
 import { logger } from "@dokploy/server/lib/logger";
+
+export { GENERIC_RCLONE_PROVIDER };
+
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
@@ -67,10 +71,39 @@ export const normalizeS3Path = (prefix: string) => {
 	return normalizedPrefix ? `${normalizedPrefix}/` : "";
 };
 
-export const getS3Credentials = (destination: Destination) => {
+// The rclone helpers only read S3 config fields, so they accept either a full
+// Destination row or the create-input (which lacks DB-generated metadata).
+type RcloneDestination = Pick<
+	Destination,
+	| "provider"
+	| "bucket"
+	| "accessKey"
+	| "secretAccessKey"
+	| "region"
+	| "endpoint"
+	| "additionalFlags"
+>;
+
+export const isGenericRcloneDestination = (destination: RcloneDestination) =>
+	destination.provider === GENERIC_RCLONE_PROVIDER;
+
+export const getRcloneDestination = (destination: RcloneDestination) =>
+	isGenericRcloneDestination(destination)
+		? destination.bucket
+		: `:s3:${destination.bucket}`;
+
+export const getRcloneCredentials = (destination: RcloneDestination) => {
 	const { accessKey, secretAccessKey, region, endpoint, provider } =
 		destination;
+
+	if (isGenericRcloneDestination(destination)) {
+		return destination.additionalFlags?.length
+			? [...destination.additionalFlags]
+			: [];
+	}
+
 	const rcloneFlags = [
+		`--s3-provider="${provider}"`,
 		`--s3-access-key-id="${accessKey}"`,
 		`--s3-secret-access-key="${secretAccessKey}"`,
 		`--s3-region="${region}"`,
@@ -79,16 +112,22 @@ export const getS3Credentials = (destination: Destination) => {
 		"--s3-force-path-style",
 	];
 
-	if (provider) {
-		rcloneFlags.unshift(`--s3-provider="${provider}"`);
-	}
-
 	if (destination.additionalFlags?.length) {
 		rcloneFlags.push(...destination.additionalFlags);
 	}
 
 	return rcloneFlags;
 };
+
+export const getRcloneTestFlags = (destination: RcloneDestination) => [
+	...getRcloneCredentials(destination),
+	"--retries 1",
+	"--low-level-retries 1",
+	"--timeout 10s",
+	"--contimeout 5s",
+];
+
+export const getS3Credentials = getRcloneCredentials;
 
 export const getPostgresBackupCommand = (
 	database: string,
@@ -290,16 +329,16 @@ export const getBackupCommand = (
 	}
 
 	echo "[$(date)] ✅ backup completed successfully" >> ${logPath};
-	echo "[$(date)] Starting upload to S3..." >> ${logPath};
+	echo "[$(date)] Starting upload to destination..." >> ${logPath};
 
 	# Run the upload command and capture the exit status
 	UPLOAD_OUTPUT=$(${backupCommand} | ${rcloneCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Upload to S3 failed" >> ${logPath};
+		echo "[$(date)] ❌ Error: Upload to destination failed" >> ${logPath};
 		echo "Error: $UPLOAD_OUTPUT" >> ${logPath};
 		exit 1;
 	}
 
-	echo "[$(date)] ✅ Upload to S3 completed successfully" >> ${logPath};
+	echo "[$(date)] ✅ Upload to destination completed successfully" >> ${logPath};
 	echo "Backup done ✅" >> ${logPath};
 	`;
 };
