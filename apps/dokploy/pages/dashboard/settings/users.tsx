@@ -6,7 +6,6 @@ import superjson from "superjson";
 import { BulkInvite } from "@/components/dashboard/settings/users/bulk-invite";
 import { ShowInvitations } from "@/components/dashboard/settings/users/show-invitations";
 import { ShowUsers } from "@/components/dashboard/settings/users/show-users";
-import { UpdateOrgDescription } from "@/components/dashboard/settings/organization/update-description";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { ManageCustomRoles } from "@/components/proprietary/roles/manage-custom-roles";
 import { appRouter } from "@/server/api/root";
@@ -29,12 +28,7 @@ const Page = () => {
 					<ShowInvitations />
 				</div>
 			)}
-			{isOwnerOrAdmin && (
-				<>
-					<UpdateOrgDescription />
-					<ManageCustomRoles />
-				</>
-			)}
+			{isOwnerOrAdmin && <ManageCustomRoles />}
 		</div>
 	);
 };

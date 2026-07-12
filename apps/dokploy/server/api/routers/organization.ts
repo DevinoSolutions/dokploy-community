@@ -558,41 +558,6 @@ export const organizationRouter = createTRPCRouter({
 		});
 	}),
 
-	updateDescription: withPermission("organization", "update")
-		.input(
-			z.object({
-				organizationId: z.string(),
-				description: z.string().max(500),
-			}),
-		)
-		.mutation(async ({ ctx, input }) => {
-			const org = await db.query.organization.findFirst({
-				where: eq(organization.id, input.organizationId),
-			});
-
-			if (!org) {
-				throw new TRPCError({ code: "NOT_FOUND", message: "Organization not found" });
-			}
-
-			const existingMeta = org.metadata ? JSON.parse(org.metadata) : {};
-			const updatedMeta = JSON.stringify({ ...existingMeta, description: input.description });
-
-			await db
-				.update(organization)
-				.set({ metadata: updatedMeta })
-				.where(eq(organization.id, input.organizationId));
-
-			await audit(ctx, {
-				action: "update",
-				resourceType: "organization",
-				resourceId: input.organizationId,
-				resourceName: org.name,
-				metadata: { type: "updateDescription" },
-			});
-
-			return { success: true };
-		}),
-
 	bulkInviteMembers: withPermission("member", "create")
 		.input(
 			z.object({
