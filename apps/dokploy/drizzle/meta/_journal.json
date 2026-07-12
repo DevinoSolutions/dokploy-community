@@ -1226,6 +1226,13 @@
       "when": 1783795384580,
       "tag": "0174_fantastic_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 191,
+      "version": "7",
+      "when": 1784014000000,
+      "tag": "0191_add_isolated_network_mtu",
+      "breakpoints": true
     }
   ]
 }
