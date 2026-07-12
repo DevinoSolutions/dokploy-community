@@ -450,6 +450,110 @@ export const prepareEnvironmentVariables = (
 	return resolvedVars;
 };
 
+export interface PredefinedEnvApplication {
+	applicationId: string;
+	appName: string;
+	name: string;
+	branch?: string | null;
+	sourceType?: string | null;
+	dockerImage?: string | null;
+	environment: {
+		name: string;
+		project: {
+			name: string;
+		};
+	};
+}
+
+export interface PredefinedEnvDomain {
+	host: string;
+	https?: boolean | null;
+	port?: number | null;
+}
+
+/**
+ * Extracts the tag portion of a docker image reference, ignoring any registry
+ * host[:port]/ prefix and digest (`@sha256:...`) suffix. Falls back to
+ * `latest` when no explicit tag is present (matching Docker's own default).
+ */
+const getDockerImageTag = (dockerImage: string): string => {
+	const lastSlash = dockerImage.lastIndexOf("/");
+	const nameAndTag =
+		lastSlash === -1 ? dockerImage : dockerImage.slice(lastSlash + 1);
+	const atIndex = nameAndTag.indexOf("@");
+	const withoutDigest =
+		atIndex === -1 ? nameAndTag : nameAndTag.slice(0, atIndex);
+	const colon = withoutDigest.lastIndexOf(":");
+	if (colon === -1) {
+		return "latest";
+	}
+	return withoutDigest.slice(colon + 1) || "latest";
+};
+
+/**
+ * Computes the Dokploy-provided predefined environment variables (`DOKPLOY_*`)
+ * for an application. Every value is derived from data already persisted on the
+ * application, its environment/project and its primary domain — so this needs
+ * no schema changes. Injected at deploy time (see `mechanizeDockerContainer`),
+ * they let an app read its own domain/identity without the user duplicating it,
+ * and can be referenced from user env, e.g. `NEXTAUTH_URL=${{DOKPLOY_URL}}`.
+ *
+ * Implements a subset of Dokploy/dokploy#3829. Vars that would require data the
+ * fork does not persist (commit SHA, image digest) or a new schema column
+ * (user-selectable primary domain) are intentionally omitted — see PR notes.
+ */
+export const getPredefinedEnvVariables = (
+	application: PredefinedEnvApplication,
+	domain?: PredefinedEnvDomain | null,
+): Record<string, string> => {
+	const variables: Record<string, string> = {
+		DOKPLOY_APPLICATION_ID: application.applicationId,
+		DOKPLOY_CONTAINER_NAME: application.appName,
+		DOKPLOY_APP_NAME: application.name,
+		DOKPLOY_PROJECT_NAME: application.environment.project.name,
+		DOKPLOY_ENVIRONMENT_NAME: application.environment.name,
+	};
+
+	if (application.branch && application.sourceType !== "docker") {
+		variables.DOKPLOY_BRANCH = application.branch;
+	}
+
+	if (application.sourceType === "docker" && application.dockerImage) {
+		variables.DOKPLOY_IMAGE_TAG = getDockerImageTag(application.dockerImage);
+	}
+
+	if (domain?.host) {
+		const scheme = domain.https ? "https" : "http";
+		variables.DOKPLOY_FQDN = domain.host;
+		variables.DOKPLOY_URL = `${scheme}://${domain.host}`;
+		if (domain.port !== null && domain.port !== undefined) {
+			variables.DOKPLOY_PORT = String(domain.port);
+		}
+	}
+
+	return variables;
+};
+
+/**
+ * Prepends the predefined `DOKPLOY_*` variables to a service's raw env string,
+ * skipping any key the user has already defined so an explicit user value always
+ * wins. The result is fed to `prepareEnvironmentVariables`, so predefined vars
+ * are both present in the container env and available for `${{...}}` references.
+ */
+export const mergePredefinedEnvVariables = (
+	predefined: Record<string, string>,
+	serviceEnv: string | null,
+): string => {
+	const userVars = parse(serviceEnv ?? "");
+	const lines = Object.entries(predefined)
+		.filter(([key]) => !(key in userVars))
+		.map(([key, value]) => `${key}=${value}`);
+	if (serviceEnv && serviceEnv.length > 0) {
+		lines.push(serviceEnv);
+	}
+	return lines.join("\n");
+};
+
 export const prepareEnvironmentVariablesForShell = (
 	serviceEnv: string | null,
 	projectEnv?: string | null,
