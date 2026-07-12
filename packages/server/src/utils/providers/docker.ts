@@ -1,20 +1,35 @@
-import { safeDockerLoginCommand } from "@dokploy/server/services/registry";
+import {
+	findRegistryByIdWithCredentials,
+	safeDockerLoginCommand,
+} from "@dokploy/server/services/registry";
 import type { ApplicationNested } from "../builders";
 
 export const buildRemoteDocker = async (application: ApplicationNested) => {
-	const { registryUrl, dockerImage, username, password } = application;
+	const { registry, registryUrl, dockerImage, username, password } =
+		application;
 
 	try {
 		if (!dockerImage) {
 			throw new Error("Docker image not found");
 		}
+
+		let loginUsername = username;
+		let loginPassword = password;
+		let loginRegistryUrl = registryUrl;
+		if (registry) {
+			const r = await findRegistryByIdWithCredentials(registry.registryId);
+			loginUsername = r.username;
+			loginPassword = r.password;
+			loginRegistryUrl = r.registryUrl;
+		}
+
 		let command = `
-echo "Pulling ${dockerImage}";		
+echo "Pulling ${dockerImage}";
 		`;
 
-		if (username && password) {
+		if (loginUsername && loginPassword) {
 			command += `
-if ! ${safeDockerLoginCommand(registryUrl || "", username, password)} 2>&1; then
+if ! ${safeDockerLoginCommand(loginRegistryUrl || "", loginUsername, loginPassword)} 2>&1; then
 	echo "❌ Login failed";
 	exit 1;
 fi
