@@ -1226,6 +1226,13 @@
       "when": 1783795384580,
       "tag": "0174_fantastic_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1784005000000,
+      "tag": "0182_sturdy_vision",
+      "breakpoints": true
     }
   ]
 }
