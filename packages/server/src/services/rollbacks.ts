@@ -1,3 +1,4 @@
+import { getSafeRegistryLoginCommand } from "@dokploy/server/db/schema";
 import type { CreateServiceOptions } from "dockerode";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
@@ -7,6 +8,8 @@ import {
 	deployments as deploymentsSchema,
 	rollbacks,
 } from "../db/schema";
+import { getECRAuthToken } from "../utils/aws/ecr";
+import type { ApplicationNested } from "../utils/builders";
 import { getRegistryTag } from "../utils/cluster/upload";
 import {
 	calculateResources,
@@ -15,20 +18,15 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../utils/docker/utils";
-import type { ApplicationNested } from "../utils/builders";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
 import { getRemoteDocker } from "../utils/servers/remote-docker";
-import { resolveNetworkNamesForResource } from "./network";
 import { type Application, findApplicationById } from "./application";
 import { findDeploymentById } from "./deployment";
 import type { Mount } from "./mount";
+import { resolveNetworkNamesForResource } from "./network";
 import type { Port } from "./port";
 import type { Project } from "./project";
-import {
-	findRegistryByIdWithCredentials,
-	type Registry,
-	safeDockerLoginCommand,
-} from "./registry";
+import { findRegistryByIdWithCredentials, type Registry } from "./registry";
 
 export const createRollback = async (
 	input: z.infer<typeof createRollbackSchema>,
@@ -196,18 +194,32 @@ export const rollback = async (rollbackId: string) => {
 const dockerLoginForRegistry = async (
 	registry: Registry,
 	serverId?: string | null,
-) => {
-	const loginCommand = safeDockerLoginCommand(
-		registry.registryUrl,
-		registry.username,
-		registry.password,
-	);
+): Promise<string | undefined> => {
+	let ecrAuthPassword: string | undefined;
+	if (registry.registryType === "awsEcr") {
+		const token = await getECRAuthToken({
+			awsAccessKeyId: registry.awsAccessKeyId || "",
+			awsSecretAccessKey: registry.awsSecretAccessKey || "",
+			awsRegion: registry.awsRegion || "",
+		});
+		ecrAuthPassword = token.password;
+	}
+
+	const loginCommand = getSafeRegistryLoginCommand({
+		registryType: registry.registryType,
+		registryUrl: registry.registryUrl,
+		username: registry.username,
+		password: registry.password,
+		ecrAuthPassword,
+	});
 
 	if (serverId) {
 		await execAsyncRemote(serverId, loginCommand);
 	} else {
 		await execAsync(loginCommand);
 	}
+
+	return ecrAuthPassword;
 };
 
 const rollbackApplication = async (
@@ -233,8 +245,12 @@ const rollbackApplication = async (
 	// before updating the swarm service. The authconfig in CreateServiceOptions
 	// alone is not sufficient — Docker Swarm also relies on the daemon's
 	// cached credentials (~/.docker/config.json) to distribute auth to nodes.
-	if (rollbackRegistry) {
-		await dockerLoginForRegistry(rollbackRegistry, serverId);
+	let ecrAuthPassword: string | undefined;
+	if (fullContext.rollbackRegistry) {
+		ecrAuthPassword = await dockerLoginForRegistry(
+			fullContext.rollbackRegistry,
+			serverId,
+		);
 	}
 
 	const docker = await getRemoteDocker(serverId);
@@ -289,11 +305,16 @@ const rollbackApplication = async (
 		rollbackImage = getRegistryTag(rollbackRegistry, image);
 	}
 
+	const isEcrRollback = fullContext.rollbackRegistry?.registryType === "awsEcr";
 	const settings: CreateServiceOptions = {
 		authconfig: {
-			password: rollbackRegistry?.password || "",
-			username: rollbackRegistry?.username || "",
-			serveraddress: rollbackRegistry?.registryUrl || "",
+			password: isEcrRollback
+				? ecrAuthPassword || ""
+				: fullContext.rollbackRegistry?.password || "",
+			username: isEcrRollback
+				? "AWS"
+				: fullContext.rollbackRegistry?.username || "",
+			serveraddress: fullContext.rollbackRegistry?.registryUrl || "",
 		},
 		Name: appName,
 		TaskTemplate: {

@@ -503,7 +503,10 @@ export const apiSaveDockerProvider = createSchema
 		password: true,
 		registryUrl: true,
 	})
-	.required();
+	.required()
+	.extend({
+		registryId: z.string().nullable().optional(),
+	});
 
 export const apiSaveGitProvider = createSchema
 	.pick({
