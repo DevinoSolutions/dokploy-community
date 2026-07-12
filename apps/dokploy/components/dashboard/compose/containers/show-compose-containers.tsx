@@ -3,6 +3,7 @@ import dynamic from "next/dynamic";
 import { useState } from "react";
 import { toast } from "sonner";
 import { ShowContainerConfig } from "@/components/dashboard/docker/config/show-container-config";
+import { ContainerHealthBadge } from "@/components/dashboard/docker/container-health-badge";
 import { ShowContainerMounts } from "@/components/dashboard/docker/mounts/show-container-mounts";
 import { ShowContainerNetworks } from "@/components/dashboard/docker/networks/show-container-networks";
 import { DockerTerminalModal } from "@/components/dashboard/docker/terminal/docker-terminal-modal";
@@ -195,7 +196,12 @@ const ContainerRow = ({
 					{container.state}
 				</Badge>
 			</TableCell>
-			<TableCell>{container.status}</TableCell>
+			<TableCell>
+				<div className="flex items-center gap-2">
+					<span>{container.status}</span>
+					<ContainerHealthBadge status={container.status} />
+				</div>
+			</TableCell>
 			<TableCell className="font-mono text-sm text-muted-foreground">
 				{container.containerId}
 			</TableCell>
