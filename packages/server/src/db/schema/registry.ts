@@ -85,7 +85,7 @@ export const apiCreateRegistry = createSchema
 	.pick({})
 	.extend({
 		registryName: z.string().min(1),
-		username: z.string().optional(),
+		username: z.string().trim().optional(),
 		password: z.string().optional(),
 		registryUrl: registryUrlSchema,
 		registryType: z.enum(["cloud", "awsEcr"]),
@@ -97,7 +97,7 @@ export const apiCreateRegistry = createSchema
 	})
 	.required({ registryName: true, registryUrl: true, registryType: true })
 	.extend({
-		username: z.string().optional(),
+		username: z.string().trim().optional(),
 		password: z.string().optional(),
 		awsAccessKeyId: z.string().optional(),
 		awsSecretAccessKey: z.string().optional(),
@@ -160,7 +160,7 @@ export const apiTestRegistry = createSchema
 	.pick({})
 	.extend({
 		registryName: z.string().optional(),
-		username: z.string().optional(),
+		username: z.string().trim().optional(),
 		password: z.string().optional(),
 		registryUrl: registryUrlSchema,
 		registryType: z.enum(["cloud", "awsEcr"]),

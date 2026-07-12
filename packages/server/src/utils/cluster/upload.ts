@@ -115,11 +115,13 @@ export const getRegistryTag = (registry: Registry, imageName: string) => {
 		return `${finalRegistry}/${withoutHost}`;
 	}
 
-	// For non-ECR registries, use the last path segment with username/prefix
+	// For non-ECR registries, keep the fork's layout: lowercased username/prefix
+	// and a trailing slash preserved for empty image names.
 	const repositoryName = extractRepositoryName(imageName);
-	const targetPrefix = imagePrefix || username || "";
-	const parts = [finalRegistry, targetPrefix, repositoryName].filter(Boolean);
-	return parts.join("/");
+	const targetPrefix = (imagePrefix || username).toLowerCase();
+	return finalRegistry
+		? `${finalRegistry}/${targetPrefix}/${repositoryName}`
+		: `${targetPrefix}/${repositoryName}`;
 };
 
 const getRegistryCommands = async (
