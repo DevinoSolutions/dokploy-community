@@ -57,6 +57,7 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import _ from "lodash";
 import { nanoid } from "nanoid";
+import { quote } from "shell-quote";
 import { parse } from "toml";
 import { stringify } from "yaml";
 import { z } from "zod";
@@ -614,8 +615,8 @@ export const composeRouter = createTRPCRouter({
 			const composeDir = dirname(compose.composePath || "./docker-compose.yml");
 			const templatePath = join(tempPath, composeDir, "template.toml");
 
-			const readCommand = `cat ${templatePath}`;
-			const cleanCommand = `rm -rf ${join(COMPOSE_PATH, tempAppName)}`;
+			const readCommand = quote(["cat", templatePath]);
+			const cleanCommand = quote(["rm", "-rf", join(COMPOSE_PATH, tempAppName)]);
 
 			try {
 				if (compose.serverId) {
