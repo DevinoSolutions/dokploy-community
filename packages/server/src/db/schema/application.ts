@@ -403,6 +403,10 @@ export const apiDeployApplication = createSchema
 		applicationId: z.string().min(1),
 		title: z.string().optional(),
 		description: z.string().optional(),
+		// Optional Docker image/tag override applied at deploy time for
+		// Docker-source applications (e.g. deploy a freshly built tag from CI
+		// without a separate "save Docker provider" call).
+		dockerImage: z.string().optional(),
 	});
 
 export const apiRedeployApplication = createSchema
