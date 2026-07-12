@@ -21,6 +21,7 @@ import {
 	getUpdateData,
 	getWebServerSettings,
 	IS_CLOUD,
+	isResponseCompressionEnabled,
 	parseRawConfig,
 	paths,
 	prepareEnvironmentVariables,
@@ -40,6 +41,7 @@ import {
 	startLogCleanup,
 	stopLogCleanup,
 	updateLetsEncryptEmail,
+	updateResponseCompression,
 	updateServerById,
 	updateServerTraefik,
 	updateWebServerSettings,
@@ -577,6 +579,33 @@ export const settingsRouter = createTRPCRouter({
 				action: "update",
 				resourceType: "settings",
 				resourceName: "middleware-traefik-config",
+			});
+			return true;
+		}),
+
+	haveResponseCompressionEnabled: adminProcedure.query(() => {
+		if (IS_CLOUD) {
+			return false;
+		}
+		return isResponseCompressionEnabled();
+	}),
+
+	toggleResponseCompression: adminProcedure
+		.input(z.object({ enable: z.boolean() }))
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				return true;
+			}
+			updateResponseCompression(input.enable);
+			// Run in background so the request returns immediately; client polls /api/health.
+			// The main Traefik config only reloads on restart.
+			void reloadDockerResource("dokploy-traefik").catch((err) => {
+				console.error("toggleResponseCompression background reload:", err);
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "response-compression",
 			});
 			return true;
 		}),
