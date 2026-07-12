@@ -454,6 +454,7 @@ export const applicationRouter = createTRPCRouter({
 				gitlabPathNamespace: input.gitlabPathNamespace,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -481,6 +482,7 @@ export const applicationRouter = createTRPCRouter({
 				bitbucketId: input.bitbucketId,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -507,6 +509,7 @@ export const applicationRouter = createTRPCRouter({
 				giteaId: input.giteaId,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -530,6 +533,7 @@ export const applicationRouter = createTRPCRouter({
 				sourceType: "docker",
 				applicationStatus: "idle",
 				registryUrl: input.registryUrl,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -555,6 +559,7 @@ export const applicationRouter = createTRPCRouter({
 				applicationStatus: "idle",
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -820,6 +825,7 @@ export const applicationRouter = createTRPCRouter({
 			await updateApplication(applicationId, {
 				sourceType: "drop",
 				dropBuildPath: dropBuildPath || "",
+				isPreviewDeploymentsActive: false,
 			});
 
 			await unzipDrop(zipFile, app);
