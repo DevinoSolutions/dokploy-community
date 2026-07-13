@@ -142,27 +142,35 @@ export const createPreviewDeployment = async (
 		org?.ownerId || "",
 	);
 
-	const octokit = authGithub(application?.github as Github);
+	// The initializing comment is GitHub-specific (posted via the GitHub App).
+	// GitLab previews (application.sourceType === "gitlab") have no GitHub
+	// provider, so authGithub would throw; they surface status via MR notes
+	// posted from the GitLab webhook handler instead.
+	let pullRequestCommentId = "";
+	if (application.sourceType === "github") {
+		const octokit = authGithub(application?.github as Github);
 
-	const runningComment = getIssueComment(
-		application.name,
-		"initializing",
-		`${application.previewHttps ? "https" : "http"}://${generateDomain}`,
-	);
+		const runningComment = getIssueComment(
+			application.name,
+			"initializing",
+			`${application.previewHttps ? "https" : "http"}://${generateDomain}`,
+		);
 
-	const issue = await octokit.rest.issues.createComment({
-		owner: application?.owner || "",
-		repo: application?.repository || "",
-		issue_number: Number.parseInt(schema.pullRequestNumber),
-		body: `### Dokploy Preview Deployment\n\n${runningComment}`,
-	});
+		const issue = await octokit.rest.issues.createComment({
+			owner: application?.owner || "",
+			repo: application?.repository || "",
+			issue_number: Number.parseInt(schema.pullRequestNumber),
+			body: `### Dokploy Preview Deployment\n\n${runningComment}`,
+		});
+		pullRequestCommentId = `${issue.data.id}`;
+	}
 
 	const previewDeployment = await db
 		.insert(previewDeployments)
 		.values({
 			...schema,
 			appName: appName,
-			pullRequestCommentId: `${issue.data.id}`,
+			pullRequestCommentId,
 		})
 		.returning()
 		.then((value) => value[0]);
