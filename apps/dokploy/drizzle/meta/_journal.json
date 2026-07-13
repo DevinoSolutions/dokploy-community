@@ -1226,6 +1226,13 @@
       "when": 1783795384580,
       "tag": "0174_fantastic_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1784015000000,
+      "tag": "0192_cloudflare_foundation",
+      "breakpoints": true
     }
   ]
 }
