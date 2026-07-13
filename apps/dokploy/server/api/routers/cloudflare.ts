@@ -137,11 +137,14 @@ export const cloudflareRouter = createTRPCRouter({
 			return redactCloudflare(integration);
 		}),
 	all: adminProcedure.query(async ({ ctx }) => {
-		const rows = await db.query.cloudflare.findMany({
+		// Never load the secret token for a list read (fork registry-password
+		// convention): exclude it at the query level so it is neither fetched
+		// nor returned — no post-hoc redaction needed.
+		return db.query.cloudflare.findMany({
+			columns: { apiToken: false },
 			where: eq(cloudflare.organizationId, ctx.session.activeOrganizationId),
 			orderBy: [desc(cloudflare.createdAt)],
 		});
-		return rows.map(redactCloudflare);
 	}),
 	tunnels: adminProcedure
 		.input(apiFindOneCloudflare)
