@@ -28,6 +28,7 @@ const baseDomain: Domain = {
 	internalPath: "/",
 	stripPath: false,
 	middlewares: null,
+	forwardAuthEnabled: false,
 	publishToCloudflare: false,
 	cloudflareTunnelMode: null,
 	cloudflareId: null,
