@@ -1233,6 +1233,13 @@
       "when": 1784015000000,
       "tag": "0192_cloudflare_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 193,
+      "version": "7",
+      "when": 1784016000000,
+      "tag": "0193_cloudflare_tunnel",
+      "breakpoints": true
     }
   ]
 }
