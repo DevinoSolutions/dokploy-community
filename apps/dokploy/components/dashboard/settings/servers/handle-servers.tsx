@@ -55,6 +55,7 @@ const Schema = z.object({
 	}),
 	serverType: z.enum(["deploy", "build"]).default("deploy"),
 	enableDockerCleanup: z.boolean().default(true),
+	defaultDomain: z.string().optional(),
 });
 
 type Schema = z.infer<typeof Schema>;
@@ -93,6 +94,7 @@ export const HandleServers = ({ serverId, asButton = false }: Props) => {
 			sshKeyId: "",
 			serverType: "deploy",
 			enableDockerCleanup: true,
+			defaultDomain: "",
 		},
 		resolver: zodResolver(Schema),
 	});
@@ -107,6 +109,7 @@ export const HandleServers = ({ serverId, asButton = false }: Props) => {
 			sshKeyId: data?.sshKeyId || "",
 			serverType: data?.serverType || "deploy",
 			enableDockerCleanup: data?.enableDockerCleanup ?? true,
+			defaultDomain: data?.defaultDomain || "",
 		});
 	}, [form, form.reset, form.formState.isSubmitSuccessful, data]);
 
@@ -124,6 +127,7 @@ export const HandleServers = ({ serverId, asButton = false }: Props) => {
 			sshKeyId: data.sshKeyId || "",
 			serverType: data.serverType || "deploy",
 			enableDockerCleanup: data.enableDockerCleanup,
+			defaultDomain: data.defaultDomain?.trim() || null,
 			serverId: serverId || "",
 		})
 			.then(async (_data) => {
@@ -418,6 +422,29 @@ export const HandleServers = ({ serverId, asButton = false }: Props) => {
 									<FormDescription>
 										Use &quot;root&quot; or a non-root user with passwordless
 										sudo access.
+									</FormDescription>
+									<FormMessage />
+								</FormItem>
+							)}
+						/>
+						<FormField
+							control={form.control}
+							name="defaultDomain"
+							render={({ field }) => (
+								<FormItem>
+									<FormLabel>Default Domain</FormLabel>
+									<FormControl>
+										<Input
+											placeholder="ex: apps.example.com"
+											{...field}
+											value={field.value ?? ""}
+										/>
+									</FormControl>
+									<FormDescription>
+										Optional. Wildcard base domain used to auto-generate
+										application domains for this server (e.g.
+										&quot;abc123.apps.example.com&quot;). If empty, falls back
+										to sslip.io.
 									</FormDescription>
 									<FormMessage />
 								</FormItem>

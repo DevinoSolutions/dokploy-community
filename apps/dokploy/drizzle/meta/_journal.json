@@ -1226,6 +1226,13 @@
       "when": 1783795384580,
       "tag": "0174_fantastic_shriek",
       "breakpoints": true
+    },
+    {
+      "idx": 198,
+      "version": "7",
+      "when": 1784021000000,
+      "tag": "0198_moaning_vermin",
+      "breakpoints": true
     }
   ]
 }
