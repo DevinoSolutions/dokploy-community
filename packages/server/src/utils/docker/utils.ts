@@ -400,6 +400,7 @@ export const prepareEnvironmentVariables = (
 	serviceEnv: string | null,
 	projectEnv?: string | null,
 	environmentEnv?: string | null,
+	serviceFqdns?: Record<string, string> | null,
 ) => {
 	const projectVars = parse(projectEnv ?? "");
 	const environmentVars = parse(environmentEnv ?? "");
@@ -435,6 +436,20 @@ export const prepareEnvironmentVariables = (
 				},
 			);
 		}
+
+		// Replace cross-service references: ${{service.<name>.fqdn}}
+		// Resolves to the public URL of another service in the same environment.
+		// The name->fqdn map is precomputed by the caller (it requires a DB
+		// lookup); this keeps the function pure and synchronous.
+		resolvedValue = resolvedValue.replace(
+			/\$\{\{service\.(.*?)\.fqdn\}\}/g,
+			(_, name) => {
+				if (serviceFqdns && serviceFqdns[name] !== undefined) {
+					return serviceFqdns[name];
+				}
+				throw new Error(`Invalid service reference: service.${name}.fqdn`);
+			},
+		);
 
 		// Replace self-references (service variables)
 		resolvedValue = resolvedValue.replace(/\$\{\{(.*?)\}\}/g, (_, ref) => {
@@ -552,6 +567,24 @@ export const mergePredefinedEnvVariables = (
 		lines.push(serviceEnv);
 	}
 	return lines.join("\n");
+};
+
+const DOTENV_ESCAPE_MAP: Record<string, string> = {
+	"\\": "\\\\",
+	'"': '\\"',
+	"\n": "\\n",
+	"\r": "\\r",
+	$: "\\$",
+};
+
+export const quoteDotenvValue = (pair: string): string => {
+	const eqIndex = pair.indexOf("=");
+	if (eqIndex === -1) return pair;
+	const key = pair.substring(0, eqIndex);
+	const value = pair
+		.substring(eqIndex + 1)
+		.replace(/[\\"$\n\r]/g, (ch) => DOTENV_ESCAPE_MAP[ch] ?? ch);
+	return `${key}="${value}"`;
 };
 
 export const prepareEnvironmentVariablesForShell = (
@@ -971,6 +1004,89 @@ const getSwarmServiceContainerId = async (
 	} catch {
 		return null;
 	}
+};
+
+export type SwarmStabilityResult =
+	| { stable: true }
+	| { stable: false; reason: string };
+
+export const waitForSwarmServiceStable = async (
+	appName: string,
+	{
+		serverId,
+		windowMs = 60_000,
+		pollMs = 5_000,
+	}: { serverId?: string | null; windowMs?: number; pollMs?: number } = {},
+): Promise<SwarmStabilityResult> => {
+	const remoteDocker = await getRemoteDocker(serverId);
+	const deadline = Date.now() + windowMs;
+	let everRunning = false;
+	let lastReason = "Service did not reach running state";
+
+	while (Date.now() < deadline) {
+		try {
+			const tasks = await remoteDocker.listTasks({
+				filters: JSON.stringify({ service: [appName] }),
+			});
+
+			const sorted = [...tasks].sort((a, b) => {
+				const at = new Date(a.UpdatedAt ?? 0).getTime();
+				const bt = new Date(b.UpdatedAt ?? 0).getTime();
+				return bt - at;
+			});
+			const latest = sorted[0];
+			const state = latest?.Status?.State;
+			const message = latest?.Status?.Err || latest?.Status?.Message || "";
+
+			if (state === "failed" || state === "rejected") {
+				return {
+					stable: false,
+					reason: message
+						? `Task ${state}: ${message}`
+						: `Task entered ${state} state`,
+				};
+			}
+
+			const runningCount = sorted.filter(
+				(t) => t.Status?.State === "running",
+			).length;
+			const startingCount = sorted.filter((t) =>
+				[
+					"new",
+					"pending",
+					"assigned",
+					"accepted",
+					"preparing",
+					"starting",
+				].includes(t.Status?.State ?? ""),
+			).length;
+
+			if (runningCount > 0) {
+				everRunning = true;
+			} else if (everRunning && startingCount > 0) {
+				return {
+					stable: false,
+					reason: message
+						? `Container restarted after running: ${message}`
+						: "Container restarted after reaching running state",
+				};
+			}
+
+			lastReason = message
+				? `Latest task state: ${state ?? "unknown"} (${message})`
+				: `Latest task state: ${state ?? "unknown"}`;
+		} catch (error) {
+			lastReason =
+				error instanceof Error ? error.message : "Failed to inspect service";
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, pollMs));
+	}
+
+	if (everRunning) {
+		return { stable: true };
+	}
+	return { stable: false, reason: lastReason };
 };
 
 export const checkPostgresHealth = async (): Promise<ServiceHealthStatus> => {
