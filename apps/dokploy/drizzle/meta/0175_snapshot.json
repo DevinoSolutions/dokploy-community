@@ -1,6 +1,6 @@
 {
-  "id": "db454143-a43e-4840-8c0b-ab84e1dadbf9",
-  "prevId": "37b55a62-bd80-4aa2-b8d7-c16831abef89",
+  "id": "e38630af-6741-4f63-a2f3-220afe2bd26d",
+  "prevId": "daaa9837-09f3-452c-b5ba-232c3d6eeca2",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1963,6 +1963,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "includeEncryptionKey": {
+          "name": "includeEncryptionKey",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "backupType": {
           "name": "backupType",
           "type": "backupType",
@@ -2700,59 +2707,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.deploy_hook": {
-      "name": "deploy_hook",
-      "schema": "",
-      "columns": {
-        "deployHookId": {
-          "name": "deployHookId",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "applicationId": {
-          "name": "applicationId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "hooks": {
-          "name": "hooks",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "deploy_hook_applicationId_application_applicationId_fk": {
-          "name": "deploy_hook_applicationId_application_applicationId_fk",
-          "tableFrom": "deploy_hook",
-          "tableTo": "application",
-          "columnsFrom": [
-            "applicationId"
-          ],
-          "columnsTo": [
-            "applicationId"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "deploy_hook_applicationId_unique": {
-          "name": "deploy_hook_applicationId_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "applicationId"
-          ]
-        }
-      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
