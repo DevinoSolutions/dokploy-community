@@ -1,4 +1,8 @@
-import { IS_CLOUD, shouldDeploy } from "@dokploy/server";
+import {
+	IS_CLOUD,
+	normalizeChangedFilesFromCommits,
+	shouldDeploy,
+} from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
@@ -15,6 +19,15 @@ import {
 	getProviderByHeader,
 	logWebhookError,
 } from "../[refreshToken]";
+
+function isGitProviderWebhook(headers: NextApiRequest["headers"]): boolean {
+	return (
+		!!headers["x-github-event"] ||
+		!!headers["x-gitlab-event"] ||
+		!!headers["x-gitea-event"] ||
+		!!headers["x-event-key"] // Bitbucket
+	);
+}
 
 export default async function handler(
 	req: NextApiRequest,
@@ -42,7 +55,9 @@ export default async function handler(
 			res.status(404).json({ message: "Compose Not Found" });
 			return;
 		}
-		if (!composeResult?.autoDeploy) {
+		const fromGitProvider = isGitProviderWebhook(req.headers);
+
+		if (fromGitProvider && !composeResult?.autoDeploy) {
 			res.status(400).json({
 				message: "Automatic deployments are disabled for this compose",
 			});
@@ -76,8 +91,8 @@ export default async function handler(
 				}
 
 				const branchName = extractBranchName(req.headers, req.body);
-				const normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
+				const normalizedCommits = normalizeChangedFilesFromCommits(
+					req.body?.commits,
 				);
 
 				const shouldDeployPaths = shouldDeploy(
@@ -97,8 +112,8 @@ export default async function handler(
 			}
 		} else if (sourceType === "gitlab") {
 			const branchName = extractBranchName(req.headers, req.body);
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(
@@ -148,17 +163,11 @@ export default async function handler(
 			let normalizedCommits: string[] = [];
 
 			if (provider === "github") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitlab") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitea") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			}
 
 			const shouldDeployPaths = shouldDeploy(
@@ -173,8 +182,8 @@ export default async function handler(
 		} else if (sourceType === "gitea") {
 			const branchName = extractBranchName(req.headers, req.body);
 
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(

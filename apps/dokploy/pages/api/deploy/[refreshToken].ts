@@ -2,6 +2,7 @@ import {
 	type Bitbucket,
 	getBitbucketHeaders,
 	IS_CLOUD,
+	normalizeChangedFilesFromCommits,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -140,8 +141,8 @@ export default async function handler(
 					return;
 				}
 
-				const normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
+				const normalizedCommits = normalizeChangedFilesFromCommits(
+					req.body?.commits,
 				);
 
 				const shouldDeployPaths = shouldDeploy(
@@ -172,21 +173,13 @@ export default async function handler(
 			let normalizedCommits: string[] = [];
 
 			if (provider === "github") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitlab") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitea") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "soft-serve") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			}
 
 			const shouldDeployPaths = shouldDeploy(
@@ -201,8 +194,8 @@ export default async function handler(
 		} else if (sourceType === "gitlab") {
 			const branchName = extractBranchName(req.headers, req.body);
 
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(
@@ -247,8 +240,8 @@ export default async function handler(
 		} else if (sourceType === "gitea") {
 			const branchName = extractBranchName(req.headers, req.body);
 
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(

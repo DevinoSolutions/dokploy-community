@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
+import { ConfirmableProviderSave } from "./confirmable-provider-save";
 
 const BitbucketProviderSchema = z.object({
 	buildPath: z.string().min(1, "Path is required").default("/"),
@@ -74,9 +75,10 @@ interface Props {
 }
 
 export const SaveBitbucketProvider = ({ applicationId }: Props) => {
+	const utils = api.useUtils();
 	const { data: bitbucketProviders } =
 		api.bitbucket.bitbucketProviders.useQuery();
-	const { data, refetch } = api.application.one.useQuery({ applicationId });
+	const { data } = api.application.one.useQuery({ applicationId });
 
 	const { mutateAsync, isPending: isSavingBitbucketProvider } =
 		api.application.saveBitbucketProvider.useMutation();
@@ -162,7 +164,7 @@ export const SaveBitbucketProvider = ({ applicationId }: Props) => {
 		})
 			.then(async () => {
 				toast.success("Service Provider Saved");
-				await refetch();
+				await utils.application.one.invalidate({ applicationId });
 			})
 			.catch(() => {
 				toast.error("Error saving the Bitbucket provider");
@@ -438,14 +440,18 @@ export const SaveBitbucketProvider = ({ applicationId }: Props) => {
 										{field.value?.map((path, index) => (
 											<Badge key={index} variant="secondary">
 												{path}
-												<X
-													className="ml-1 size-3 cursor-pointer"
+												<button
+													type="button"
+													aria-label="Remove watch path"
+													className="inline-flex items-center focus-visible:ring-2"
 													onClick={() => {
 														const newPaths = [...(field.value || [])];
 														newPaths.splice(index, 1);
 														form.setValue("watchPaths", newPaths);
 													}}
-												/>
+												>
+													<X className="ml-1 size-3 cursor-pointer" />
+												</button>
 											</Badge>
 										))}
 									</div>
@@ -493,26 +499,30 @@ export const SaveBitbucketProvider = ({ applicationId }: Props) => {
 							control={form.control}
 							name="enableSubmodules"
 							render={({ field }) => (
-								<FormItem className="flex items-center space-x-2">
+								<FormItem className="flex flex-row items-center space-x-2 space-y-0">
 									<FormControl>
 										<Switch
 											checked={field.value}
 											onCheckedChange={field.onChange}
 										/>
 									</FormControl>
-									<FormLabel className="mt-0!">Enable Submodules</FormLabel>
+									<FormLabel>Enable Submodules</FormLabel>
 								</FormItem>
 							)}
 						/>
 					</div>
 					<div className="flex w-full justify-end">
-						<Button
+						<ConfirmableProviderSave
+							needsConfirmation={
+								data?.sourceType === "github" &&
+								data?.isPreviewDeploymentsActive === true
+							}
 							isLoading={isSavingBitbucketProvider}
-							type="submit"
-							className="w-fit"
+							onValidate={() => form.trigger()}
+							onConfirm={form.handleSubmit(onSubmit)}
 						>
 							Save
-						</Button>
+						</ConfirmableProviderSave>
 					</div>
 				</form>
 			</Form>
