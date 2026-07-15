@@ -15,6 +15,7 @@ import {
 	extractCommitMessage,
 	extractCommittedPaths,
 	extractHash,
+	extractTagName,
 	getProviderByHeader,
 	logWebhookError,
 } from "../[refreshToken]";
@@ -63,29 +64,51 @@ export default async function handler(
 			return;
 		}
 
-		const deploymentTitle = extractCommitMessage(req.headers, req.body);
+		let deploymentTitle = extractCommitMessage(req.headers, req.body);
 		const deploymentHash = extractHash(req.headers, req.body);
 		const sourceType = composeResult.sourceType;
 
 		if (sourceType === "github") {
-			const branchName = extractBranchName(req.headers, req.body);
-			const normalizedCommits = normalizeChangedFilesFromCommits(
-				req.body?.commits,
-			);
+			const tagName = extractTagName(req.headers, req.body);
+			const isTagEvent = !!tagName;
 
-			const shouldDeployPaths = shouldDeploy(
-				composeResult.watchPaths,
-				normalizedCommits,
-			);
+			if (composeResult.triggerType === "tag") {
+				if (!isTagEvent) {
+					res.status(301).json({
+						message: "Trigger type is 'tag'; ignoring non-tag push",
+					});
+					return;
+				}
+				// Tag event: deploy without branch/watchPaths checks (tags are not
+				// branch-scoped and the UI hides watchPaths for the tag trigger).
+				deploymentTitle = `Tag created: ${tagName}`;
+			} else {
+				if (isTagEvent) {
+					res.status(301).json({
+						message: "Trigger type is 'push'; ignoring tag event",
+					});
+					return;
+				}
 
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
+				const branchName = extractBranchName(req.headers, req.body);
+				const normalizedCommits = normalizeChangedFilesFromCommits(
+					req.body?.commits,
+				);
 
-			if (!branchName || branchName !== composeResult.branch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
+				const shouldDeployPaths = shouldDeploy(
+					composeResult.watchPaths,
+					normalizedCommits,
+				);
+
+				if (!shouldDeployPaths) {
+					res.status(301).json({ message: "Watch Paths Not Match" });
+					return;
+				}
+
+				if (!branchName || branchName !== composeResult.branch) {
+					res.status(301).json({ message: "Branch Not Match" });
+					return;
+				}
 			}
 		} else if (sourceType === "gitlab") {
 			const branchName = extractBranchName(req.headers, req.body);
