@@ -23,6 +23,12 @@ vi.mock("@dokploy/server/utils/backups/utils", () => ({
 	getS3Credentials: () => ["--s3-flag"],
 }));
 
+vi.mock("node:fs/promises", () => ({
+	mkdir: vi.fn().mockResolvedValue(undefined),
+	mkdtemp: vi.fn().mockResolvedValue("/tmp/dokploy-restore-test"),
+	stat: vi.fn().mockResolvedValue({ isFile: () => true }),
+}));
+
 const destination = {
 	bucket: "my-bucket",
 } as any;
