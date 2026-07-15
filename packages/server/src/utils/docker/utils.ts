@@ -450,6 +450,24 @@ export const prepareEnvironmentVariables = (
 	return resolvedVars;
 };
 
+const DOTENV_ESCAPE_MAP: Record<string, string> = {
+	"\\": "\\\\",
+	'"': '\\"',
+	"\n": "\\n",
+	"\r": "\\r",
+	$: "\\$",
+};
+
+export const quoteDotenvValue = (pair: string): string => {
+	const eqIndex = pair.indexOf("=");
+	if (eqIndex === -1) return pair;
+	const key = pair.substring(0, eqIndex);
+	const value = pair
+		.substring(eqIndex + 1)
+		.replace(/[\\"$\n\r]/g, (ch) => DOTENV_ESCAPE_MAP[ch] ?? ch);
+	return `${key}="${value}"`;
+};
+
 export const prepareEnvironmentVariablesForShell = (
 	serviceEnv: string | null,
 	projectEnv?: string | null,
