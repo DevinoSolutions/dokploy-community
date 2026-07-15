@@ -475,14 +475,14 @@ export const RestoreBackup = ({
 																	value={file.Path}
 																	key={file.Path}
 																	onSelect={() => {
-																		form.setValue("backupFile", file.Path);
 																		if (file.IsDir) {
 																			setSearch(`${file.Path}/`);
 																			setDebouncedSearchTerm(`${file.Path}/`);
-																		} else {
-																			setSearch(file.Path);
-																			setDebouncedSearchTerm(file.Path);
+																			return;
 																		}
+																		form.setValue("backupFile", file.Path);
+																		setSearch(file.Path);
+																		setDebouncedSearchTerm(file.Path);
 																	}}
 																>
 																	<div className="flex w-full flex-col gap-1">
@@ -791,19 +791,19 @@ export const RestoreBackup = ({
 								)}
 							</>
 						)}
-
-						<DialogFooter>
-							<Button
-								isLoading={isDeploying}
-								form="hook-form-restore-backup"
-								type="submit"
-								disabled={disabled}
-							>
-								Restore
-							</Button>
-						</DialogFooter>
 					</form>
 				</Form>
+
+				<DialogFooter>
+					<Button
+						isLoading={isDeploying}
+						form="hook-form-restore-backup"
+						type="submit"
+						disabled={disabled}
+					>
+						Restore
+					</Button>
+				</DialogFooter>
 
 				<DrawerLogs
 					isOpen={isDrawerOpen}

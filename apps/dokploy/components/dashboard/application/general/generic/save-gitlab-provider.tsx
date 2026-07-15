@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
+import { ConfirmableProviderSave } from "./confirmable-provider-save";
 
 const GitlabProviderSchema = z.object({
 	buildPath: z.string().min(1, "Path is required").default("/"),
@@ -75,8 +76,9 @@ interface Props {
 }
 
 export const SaveGitlabProvider = ({ applicationId }: Props) => {
+	const utils = api.useUtils();
 	const { data: gitlabProviders } = api.gitlab.gitlabProviders.useQuery();
-	const { data, refetch } = api.application.one.useQuery({ applicationId });
+	const { data } = api.application.one.useQuery({ applicationId });
 
 	const { mutateAsync, isPending: isSavingGitlabProvider } =
 		api.application.saveGitlabProvider.useMutation();
@@ -172,7 +174,7 @@ export const SaveGitlabProvider = ({ applicationId }: Props) => {
 		})
 			.then(async () => {
 				toast.success("Service Provider Saved");
-				await refetch();
+				await utils.application.one.invalidate({ applicationId });
 			})
 			.catch(() => {
 				toast.error("Error saving the gitlab provider");
@@ -459,14 +461,18 @@ export const SaveGitlabProvider = ({ applicationId }: Props) => {
 												className="flex items-center gap-1"
 											>
 												{path}
-												<X
-													className="size-3 cursor-pointer hover:text-destructive"
+												<button
+													type="button"
+													aria-label="Remove watch path"
+													className="inline-flex items-center focus-visible:ring-2"
 													onClick={() => {
 														const newPaths = [...(field.value || [])];
 														newPaths.splice(index, 1);
 														field.onChange(newPaths);
 													}}
-												/>
+												>
+													<X className="size-3 cursor-pointer hover:text-destructive" />
+												</button>
 											</Badge>
 										))}
 									</div>
@@ -513,26 +519,30 @@ export const SaveGitlabProvider = ({ applicationId }: Props) => {
 							control={form.control}
 							name="enableSubmodules"
 							render={({ field }) => (
-								<FormItem className="flex items-center space-x-2">
+								<FormItem className="flex flex-row items-center space-x-2 space-y-0">
 									<FormControl>
 										<Switch
 											checked={field.value}
 											onCheckedChange={field.onChange}
 										/>
 									</FormControl>
-									<FormLabel className="mt-0!">Enable Submodules</FormLabel>
+									<FormLabel>Enable Submodules</FormLabel>
 								</FormItem>
 							)}
 						/>
 					</div>
 					<div className="flex w-full justify-end">
-						<Button
+						<ConfirmableProviderSave
+							needsConfirmation={
+								data?.sourceType === "github" &&
+								data?.isPreviewDeploymentsActive === true
+							}
 							isLoading={isSavingGitlabProvider}
-							type="submit"
-							className="w-fit"
+							onValidate={() => form.trigger()}
+							onConfirm={form.handleSubmit(onSubmit)}
 						>
 							Save
-						</Button>
+						</ConfirmableProviderSave>
 					</div>
 				</form>
 			</Form>
