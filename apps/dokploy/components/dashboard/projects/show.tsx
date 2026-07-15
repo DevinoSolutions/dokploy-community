@@ -53,6 +53,7 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/utils/api";
 import { useDebounce } from "@/utils/hooks/use-debounce";
+import { ExportProject } from "./export-project";
 import { HandleProject } from "./handle-project";
 import { ProjectEnvironment } from "./project-environment";
 
@@ -412,6 +413,15 @@ export const ShowProjects = () => {
 																				>
 																					<HandleProject
 																						projectId={project.projectId}
+																					/>
+																				</div>
+
+																				<div
+																					onClick={(e) => e.stopPropagation()}
+																				>
+																					<ExportProject
+																						projectId={project.projectId}
+																						projectName={project.name}
 																					/>
 																				</div>
 
