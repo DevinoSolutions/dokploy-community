@@ -63,6 +63,14 @@ vi.mock("@dokploy/server/db", () => ({
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
 	shouldDeploy: mocks.shouldDeploy,
+	normalizeChangedFilesFromCommits: (commits: any) =>
+		(commits ?? [])
+			.flatMap((commit: any) => [
+				...(commit?.added ?? []),
+				...(commit?.modified ?? []),
+				...(commit?.removed ?? []),
+			])
+			.filter((path: any) => typeof path === "string" && path.length > 0),
 	checkUserRepositoryPermissions: vi.fn(),
 	createPreviewDeployment: vi.fn(),
 	createSecurityBlockedComment: vi.fn(),

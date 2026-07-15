@@ -12,11 +12,22 @@ export const findVolumeBackupById = async (volumeBackupId: string) => {
 	const volumeBackup = await db.query.volumeBackups.findFirst({
 		where: eq(volumeBackups.volumeBackupId, volumeBackupId),
 		with: {
+			// `application` has 100 columns (incl. the fork's `networkIds`). Drizzle
+			// packs every selected column of a joined resource plus one entry per
+			// nested relation into a single json_build_array(...), which Postgres caps
+			// at 100 arguments (error 54023). Selecting all of `application` emits
+			// json_build_array(100 columns + environment) = 101 args and throws, so we
+			// project it down to only the fields consumers read. The other joined
+			// resources are far narrower and left intact. See services/mount.ts.
 			application: {
+				columns: { appName: true, serverId: true },
 				with: {
 					environment: {
+						columns: {},
 						with: {
-							project: true,
+							project: {
+								columns: { name: true, organizationId: true },
+							},
 						},
 					},
 				},
