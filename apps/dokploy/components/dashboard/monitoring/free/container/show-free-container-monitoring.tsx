@@ -230,7 +230,7 @@ export const ContainerFreeMonitoring = ({
 									String(currentData.cpu.value ?? "0%").replace("%", ""),
 									10,
 								)}
-								className="w-[100%]"
+								className="w-full"
 							/>
 							<DockerCpuChart accumulativeData={accumulativeData.cpu} />
 						</div>
@@ -253,7 +253,7 @@ export const ContainerFreeMonitoring = ({
 										convertMemoryToBytes(currentData.memory.value.total)) *
 									100
 								}
-								className="w-[100%]"
+								className="w-full"
 							/>
 							<DockerMemoryChart
 								accumulativeData={accumulativeData.memory}
@@ -278,7 +278,7 @@ export const ContainerFreeMonitoring = ({
 								</span>
 								<Progress
 									value={currentData.disk.value.diskUsedPercentage}
-									className="w-[100%]"
+									className="w-full"
 								/>
 								<DockerDiskChart
 									accumulativeData={accumulativeData.disk}
