@@ -1,7 +1,12 @@
+import {
+	getMonitoringAppName,
+	LOCAL_SERVER_ID,
+} from "@dokploy/server/monitoring/constants";
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/utils/api";
+import { ContainerResourceUsage } from "../../container-resource-usage/container-resource-usage";
 import { DockerBlockChart } from "./docker-block-chart";
 import { DockerCpuChart } from "./docker-cpu-chart";
 import { DockerDiskChart } from "./docker-disk-chart";
@@ -16,8 +21,8 @@ const defaultData = {
 	},
 	memory: {
 		value: {
-			used: 0,
-			total: 0,
+			used: "0B",
+			total: "0B",
 		},
 		time: "",
 	},
@@ -44,17 +49,31 @@ const defaultData = {
 interface Props {
 	appName: string;
 	appType?: "application" | "stack" | "docker-compose";
+	/**
+	 * When set (and not `LOCAL_SERVER_ID`), the WebSocket appends
+	 * `serverId=<id>` so the backend collects stats from that remote server.
+	 * Only meaningful when `appName === "dokploy"` (host-level monitoring).
+	 */
+	serverId?: string;
 }
+
+type MemorySize = number | string;
+type MemoryUsageValue = {
+	used: MemorySize;
+	total: MemorySize;
+	swap?: {
+		used: MemorySize;
+		total: MemorySize;
+	};
+};
+
 export interface DockerStats {
 	cpu: {
 		value: string;
 		time: string;
 	};
 	memory: {
-		value: {
-			used: number;
-			total: number;
-		};
+		value: MemoryUsageValue;
 		time: string;
 	};
 	block: {
@@ -92,8 +111,12 @@ export type DockerStatsJSON = {
 };
 
 export const convertMemoryToBytes = (
-	memoryString: string | undefined,
+	memoryString: MemorySize | undefined,
 ): number => {
+	if (typeof memoryString === "number") {
+		return memoryString;
+	}
+
 	if (!memoryString || typeof memoryString !== "string") {
 		return 0;
 	}
@@ -115,12 +138,32 @@ export const convertMemoryToBytes = (
 	}
 };
 
+const getMemoryUsagePercentage = (
+	used: MemorySize | undefined,
+	total: MemorySize | undefined,
+): number => {
+	const totalBytes = convertMemoryToBytes(total);
+
+	if (totalBytes <= 0) {
+		return 0;
+	}
+
+	return Math.min((convertMemoryToBytes(used) / totalBytes) * 100, 100);
+};
+
 export const ContainerFreeMonitoring = ({
 	appName,
 	appType = "application",
+	serverId,
 }: Props) => {
+	// For host-level monitoring (`appName === "dokploy"`), redirect to the
+	// remote bucket `dokploy-<serverId>` when a remote server is selected;
+	// helper returns the local "dokploy" bucket for `LOCAL_SERVER_ID`/missing.
+	// For container-level monitoring, `appName` stays as-is.
+	const effectiveAppName =
+		appName === "dokploy" ? getMonitoringAppName(serverId) : appName;
 	const { data } = api.application.readAppMonitoring.useQuery(
-		{ appName },
+		{ appName: effectiveAppName },
 		{
 			refetchOnWindowFocus: false,
 		},
@@ -144,7 +187,7 @@ export const ContainerFreeMonitoring = ({
 			network: [],
 			disk: [],
 		});
-	}, [appName]);
+	}, [appName, serverId]);
 
 	useEffect(() => {
 		if (!data) return;
@@ -167,7 +210,11 @@ export const ContainerFreeMonitoring = ({
 
 	useEffect(() => {
 		const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-		const wsUrl = `${protocol}//${window.location.host}/listen-docker-stats-monitoring?appName=${appName}&appType=${appType}`;
+		const params = new URLSearchParams({ appName, appType });
+		if (serverId && serverId !== LOCAL_SERVER_ID) {
+			params.set("serverId", serverId);
+		}
+		const wsUrl = `${protocol}//${window.location.host}/listen-docker-stats-monitoring?${params.toString()}`;
 		const ws = new WebSocket(wsUrl);
 
 		ws.onmessage = (e) => {
@@ -199,7 +246,11 @@ export const ContainerFreeMonitoring = ({
 		};
 
 		return () => ws.close();
-	}, [appName]);
+	}, [appName, appType, serverId]);
+
+	const memoryValue = currentData.memory.value;
+	const swapValue = memoryValue.swap;
+	const showSwapUsage = convertMemoryToBytes(swapValue?.total) > 0;
 
 	return (
 		<div className="rounded-xl bg-background flex flex-col gap-4">
@@ -211,6 +262,8 @@ export const ContainerFreeMonitoring = ({
 					</p>
 				</div>
 			</header>
+
+			{appName === "dokploy" && <ContainerResourceUsage />}
 
 			<div className="grid gap-6 lg:grid-cols-2">
 				<Card className="bg-background">
@@ -240,24 +293,33 @@ export const ContainerFreeMonitoring = ({
 					<CardContent>
 						<div className="flex flex-col gap-2 w-full">
 							<span className="text-sm text-muted-foreground">
-								{`Used:  ${currentData.memory.value.used} / Limit: ${currentData.memory.value.total} `}
+								{`Used:  ${memoryValue.used} / Limit: ${memoryValue.total} `}
 							</span>
 							<Progress
-								value={
-									// @ts-ignore
-									(convertMemoryToBytes(currentData.memory.value.used) /
-										// @ts-ignore
-										convertMemoryToBytes(currentData.memory.value.total)) *
-									100
-								}
+								value={getMemoryUsagePercentage(
+									memoryValue.used,
+									memoryValue.total,
+								)}
 								className="w-full"
 							/>
+							{showSwapUsage && swapValue && (
+								<div className="mt-1 flex flex-col gap-2">
+									<span className="text-sm text-muted-foreground">
+										{`Swap:  ${swapValue.used} / Limit: ${swapValue.total} `}
+									</span>
+									<Progress
+										value={getMemoryUsagePercentage(
+											swapValue.used,
+											swapValue.total,
+										)}
+										className="w-[100%]"
+									/>
+								</div>
+							)}
 							<DockerMemoryChart
 								accumulativeData={accumulativeData.memory}
 								memoryLimitGB={
-									// @ts-ignore
-									convertMemoryToBytes(currentData.memory.value.total) /
-									1024 ** 3
+									convertMemoryToBytes(memoryValue.total) / 1024 ** 3
 								}
 							/>
 						</div>

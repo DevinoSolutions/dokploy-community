@@ -73,8 +73,9 @@ interface Props {
 }
 
 export const SaveGithubProvider = ({ applicationId }: Props) => {
+	const utils = api.useUtils();
 	const { data: githubProviders } = api.github.githubProviders.useQuery();
-	const { data, refetch } = api.application.one.useQuery({ applicationId });
+	const { data } = api.application.one.useQuery({ applicationId });
 
 	const { mutateAsync, isPending: isSavingGithubProvider } =
 		api.application.saveGithubProvider.useMutation();
@@ -154,7 +155,7 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 		})
 			.then(async () => {
 				toast.success("Service Provider Saved");
-				await refetch();
+				await utils.application.one.invalidate({ applicationId });
 			})
 			.catch(() => {
 				toast.error("Error saving the github provider");
@@ -478,14 +479,18 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 													className="flex items-center gap-1"
 												>
 													{path}
-													<X
-														className="size-3 cursor-pointer hover:text-destructive"
+													<button
+														type="button"
+														aria-label="Remove watch path"
+														className="inline-flex items-center focus-visible:ring-2"
 														onClick={() => {
 															const newPaths = [...(field.value || [])];
 															newPaths.splice(index, 1);
 															field.onChange(newPaths);
 														}}
-													/>
+													>
+														<X className="size-3 cursor-pointer hover:text-destructive" />
+													</button>
 												</Badge>
 											))}
 										</div>
@@ -534,14 +539,14 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 							control={form.control}
 							name="enableSubmodules"
 							render={({ field }) => (
-								<FormItem className="flex items-center space-x-2">
+								<FormItem className="flex flex-row items-center space-x-2 space-y-0">
 									<FormControl>
 										<Switch
 											checked={field.value}
 											onCheckedChange={field.onChange}
 										/>
 									</FormControl>
-									<FormLabel className="mt-0!">Enable Submodules</FormLabel>
+									<FormLabel>Enable Submodules</FormLabel>
 								</FormItem>
 							)}
 						/>
