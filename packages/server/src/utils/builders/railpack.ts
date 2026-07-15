@@ -8,6 +8,7 @@ import {
 } from "../docker/utils";
 import { getBuildAppDirectory } from "../filesystem/directory";
 import type { ApplicationNested } from ".";
+import { getCommitInfoBuildArgs, getGitCommitInfoCommands } from "./utils";
 
 const calculateSecretsHash = (envVariables: string[]): string => {
 	const hash = createHash("sha256");
@@ -101,7 +102,8 @@ echo "✅ Railpack prepare completed." ;
 echo "Building with Railpack frontend..." ;
 # Export environment variables for secrets
 ${exportEnvs.join("\n")}
-docker ${buildArgs.join(" ")} || {
+${getGitCommitInfoCommands()}
+docker ${buildArgs.join(" ")} ${getCommitInfoBuildArgs()} || {
 	echo "❌ Railpack build failed" ;
 	docker buildx rm ${builderName} || true
 	exit 1;
