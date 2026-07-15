@@ -1,5 +1,5 @@
 import { db } from "@dokploy/server/db";
-import { applications } from "@dokploy/server/db/schema";
+import { applications, domains } from "@dokploy/server/db/schema";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
@@ -11,6 +11,8 @@ import {
 	generateConfigContainer,
 	generateFileMounts,
 	generateVolumeMounts,
+	getPredefinedEnvVariables,
+	mergePredefinedEnvVariables,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { resolveNetworkNamesForResource } from "../../services/network";
@@ -153,9 +155,21 @@ export const mechanizeDockerContainer = async (
 
 	const bindsMount = generateBindMounts(mounts);
 	const filesMount = generateFileMounts(appName, application);
+
+	// Inject Dokploy-provided predefined variables (DOKPLOY_FQDN, DOKPLOY_URL,
+	// ...) derived from the app's primary domain and identity. When an app has
+	// multiple domains the first is used as its primary. Implements
+	// Dokploy/dokploy#3829 (backend-only, no schema change).
+	const applicationDomains = await db.query.domains.findMany({
+		where: eq(domains.applicationId, application.applicationId),
+	});
+	const predefinedEnv = getPredefinedEnvVariables(
+		application,
+		applicationDomains[0] ?? null,
+	);
 	const serviceFqdns = await buildServiceFqdnMap(application);
 	const envVariables = prepareEnvironmentVariables(
-		env,
+		mergePredefinedEnvVariables(predefinedEnv, env),
 		application.environment.project.env,
 		application.environment.env,
 		serviceFqdns,
