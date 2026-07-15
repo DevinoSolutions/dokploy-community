@@ -35,6 +35,7 @@ import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
 import { and, asc, eq, gt, ne } from "drizzle-orm";
 import { z } from "zod";
+import { apiKeyNameSchema } from "@/lib/api-keys";
 import { audit } from "@/server/api/utils/audit";
 import {
 	adminProcedure,
@@ -58,7 +59,7 @@ const apiKeyPrefixSchema = z
 	.optional();
 
 const apiCreateApiKey = z.object({
-	name: z.string().min(1),
+	name: apiKeyNameSchema,
 	prefix: apiKeyPrefixSchema,
 	expiresIn: z.number().optional(),
 	metadata: z.object({
