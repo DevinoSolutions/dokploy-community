@@ -704,6 +704,15 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const application = await findApplicationById(input.applicationId);
+			// Allow overriding the Docker image/tag at deploy time for
+			// Docker-source applications. This mirrors the manual "save Docker
+			// provider then deploy" workaround as a single call so external
+			// pipelines can push a specific tag to deploy.
+			if (input.dockerImage?.trim() && application.sourceType === "docker") {
+				await updateApplication(input.applicationId, {
+					dockerImage: input.dockerImage.trim(),
+				});
+			}
 			const jobData: DeploymentJob = {
 				applicationId: input.applicationId,
 				titleLog: input.title || "Manual deployment",
