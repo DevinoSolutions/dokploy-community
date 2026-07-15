@@ -1,3 +1,7 @@
+import {
+	getMonitoringAppName,
+	LOCAL_SERVER_ID,
+} from "@dokploy/server/monitoring/constants";
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -45,6 +49,12 @@ const defaultData = {
 interface Props {
 	appName: string;
 	appType?: "application" | "stack" | "docker-compose";
+	/**
+	 * When set (and not `LOCAL_SERVER_ID`), the WebSocket appends
+	 * `serverId=<id>` so the backend collects stats from that remote server.
+	 * Only meaningful when `appName === "dokploy"` (host-level monitoring).
+	 */
+	serverId?: string;
 }
 export interface DockerStats {
 	cpu: {
@@ -119,9 +129,16 @@ export const convertMemoryToBytes = (
 export const ContainerFreeMonitoring = ({
 	appName,
 	appType = "application",
+	serverId,
 }: Props) => {
+	// For host-level monitoring (`appName === "dokploy"`), redirect to the
+	// remote bucket `dokploy-<serverId>` when a remote server is selected;
+	// helper returns the local "dokploy" bucket for `LOCAL_SERVER_ID`/missing.
+	// For container-level monitoring, `appName` stays as-is.
+	const effectiveAppName =
+		appName === "dokploy" ? getMonitoringAppName(serverId) : appName;
 	const { data } = api.application.readAppMonitoring.useQuery(
-		{ appName },
+		{ appName: effectiveAppName },
 		{
 			refetchOnWindowFocus: false,
 		},
@@ -145,7 +162,7 @@ export const ContainerFreeMonitoring = ({
 			network: [],
 			disk: [],
 		});
-	}, [appName]);
+	}, [appName, serverId]);
 
 	useEffect(() => {
 		if (!data) return;
@@ -168,7 +185,11 @@ export const ContainerFreeMonitoring = ({
 
 	useEffect(() => {
 		const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-		const wsUrl = `${protocol}//${window.location.host}/listen-docker-stats-monitoring?appName=${appName}&appType=${appType}`;
+		const params = new URLSearchParams({ appName, appType });
+		if (serverId && serverId !== LOCAL_SERVER_ID) {
+			params.set("serverId", serverId);
+		}
+		const wsUrl = `${protocol}//${window.location.host}/listen-docker-stats-monitoring?${params.toString()}`;
 		const ws = new WebSocket(wsUrl);
 
 		ws.onmessage = (e) => {
@@ -200,7 +221,7 @@ export const ContainerFreeMonitoring = ({
 		};
 
 		return () => ws.close();
-	}, [appName]);
+	}, [appName, appType, serverId]);
 
 	return (
 		<div className="rounded-xl bg-background flex flex-col gap-4">
