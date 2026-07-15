@@ -621,11 +621,27 @@ export const organizationRouter = createTRPCRouter({
 			const orgId = ctx.session.activeOrganizationId;
 			const results: { email: string; status: "invited" | "skipped"; reason?: string }[] = [];
 
+			const callerMember = await db.query.member.findFirst({
+				where: and(
+					eq(member.organizationId, orgId),
+					eq(member.userId, ctx.user.id),
+				),
+			});
+
 			for (const invite of input.invitations) {
 				const email = invite.email.toLowerCase();
 
 				if (invite.role === "owner") {
 					results.push({ email, status: "skipped", reason: "Cannot invite as owner" });
+					continue;
+				}
+
+				if (
+					invite.role === "admin" &&
+					callerMember?.role !== "owner" &&
+					callerMember?.role !== "admin"
+				) {
+					results.push({ email, status: "skipped", reason: "Only owners and admins can invite admins" });
 					continue;
 				}
 
@@ -720,6 +736,22 @@ export const organizationRouter = createTRPCRouter({
 					code: "FORBIDDEN",
 					message: "You are not allowed to move this member",
 				});
+			}
+
+			if (input.teamId) {
+				const teamMember = await db.query.member.findFirst({
+					where: and(
+						eq(member.teamId, input.teamId),
+						eq(member.organizationId, ctx.session.activeOrganizationId),
+					),
+				});
+
+				if (!teamMember) {
+					throw new TRPCError({
+						code: "NOT_FOUND",
+						message: "Team not found",
+					});
+				}
 			}
 
 			await db
