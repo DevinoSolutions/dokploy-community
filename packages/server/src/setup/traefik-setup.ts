@@ -20,7 +20,7 @@ export const TRAEFIK_PORT =
 	Number.parseInt(process.env.TRAEFIK_PORT!, 10) || 80;
 export const TRAEFIK_HTTP3_PORT =
 	Number.parseInt(process.env.TRAEFIK_HTTP3_PORT!, 10) || 443;
-export const TRAEFIK_VERSION = process.env.TRAEFIK_VERSION || "3.6.7";
+export const TRAEFIK_VERSION = process.env.TRAEFIK_VERSION || "3.6.20";
 
 export interface TraefikOptions {
 	env?: string[];
@@ -285,6 +285,9 @@ export const getDefaultTraefikConfig = () => {
 			},
 			websecure: {
 				address: `:${TRAEFIK_SSL_PORT}`,
+				http2: {
+					maxConcurrentStreams: 0,
+				},
 				http3: {
 					advertisedPort: TRAEFIK_HTTP3_PORT,
 				},
@@ -298,7 +301,7 @@ export const getDefaultTraefikConfig = () => {
 			},
 		},
 		api: {
-			insecure: true,
+			insecure: false,
 		},
 		...(process.env.NODE_ENV === "production" && {
 			certificatesResolvers: {
@@ -354,7 +357,7 @@ export const getDefaultServerTraefikConfig = () => {
 			},
 		},
 		api: {
-			insecure: true,
+			insecure: false,
 		},
 		certificatesResolvers: {
 			letsencrypt: {
