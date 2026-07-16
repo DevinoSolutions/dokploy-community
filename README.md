@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.3**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.4**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.3 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.4 \
   --with-registry-auth \
   dokploy
 ```
@@ -105,6 +105,10 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.4
+
+**Backend error reporting (opt-out).** The fork now reports unhandled backend errors — crashes and internal server errors, i.e. the stack trace, message, and fork version — to a Devino-hosted Sentry instance, so we catch regressions across installs without waiting on bug reports. No environment variables, secrets, deployment logs, request data, or personal information are ever sent, and the reporting server's hostname is stripped before the event leaves your machine. Opt out with `DOKPLOY_DISABLE_SENTRY=true` (or `DO_NOT_TRACK=1`) — see [Error reporting & privacy](#error-reporting--privacy).
+
 ### New in v0.29.12-community.3
 
 **Preview Deployments for Docker Compose** — upstream Dokploy's most-requested unbuilt feature, now live for GitHub PRs and GitLab MRs. Isolated per-PR stack copies with per-service domains, automatic redeploy on update, and full teardown (volumes included) on close. One additive migration (0189) applies automatically on startup.
@@ -122,7 +126,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.3
+export DOKPLOY_VERSION=v0.29.12-community.4
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -135,7 +139,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.3   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.4   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -162,6 +166,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 1st release | `v0.29.12-community.1` |
 | v0.29.12 | 2nd release | `v0.29.12-community.2` |
 | v0.29.12 | 3rd release | `v0.29.12-community.3` |
+| v0.29.12 | 4th release | `v0.29.12-community.4` |
 
 ## Contributing
 
