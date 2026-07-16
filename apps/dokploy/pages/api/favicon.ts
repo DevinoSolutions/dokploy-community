@@ -2,14 +2,21 @@ import { db } from "@dokploy/server/db";
 import { validateRequest } from "@dokploy/server/lib/auth";
 import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
-import { findIconUrl } from "@/lib/favicon-resolver";
+import {
+	findIconUrl,
+	isSafeImageContentType,
+	isSameOrigin,
+} from "@/lib/favicon-resolver";
 import { domains } from "@/server/db/schema";
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_ICON_BYTES = 1024 * 1024; // 1 MB
 const MAX_REDIRECTS = 3;
-const SUCCESS_CACHE = "public, max-age=86400, stale-while-revalidate=604800";
-const FAILURE_CACHE = "public, max-age=3600";
+// Auth-gated, per-session response: keep it out of shared/CDN caches so one
+// user's favicon (and the 200-vs-404 signal of which hosts an instance manages)
+// is never served to another.
+const SUCCESS_CACHE = "private, max-age=86400, stale-while-revalidate=604800";
+const FAILURE_CACHE = "private, max-age=3600";
 
 const parseHttps = (value: unknown): boolean => {
 	const raw = Array.isArray(value) ? value[0] : value;
@@ -20,42 +27,22 @@ const getStringParam = (value: unknown): string | null =>
 	typeof value === "string" && value.length > 0 ? value : null;
 
 /**
- * True when `url` is an http(s) URL whose hostname equals `host`
- * (case-insensitive). The SSRF guard on this route validates only the
- * originally-requested host against the domains table; every subsequent URL we
- * fetch — a `<link rel="icon">` href parsed from attacker-influenceable page
- * HTML, or a redirect `Location` — must be re-checked against that same host so
- * it can never be pivoted to `169.254.169.254`, `localhost`, or any other
- * internal target the guard never approved.
- */
-const isSameHost = (url: string, host: string): boolean => {
-	try {
-		const parsed = new URL(url);
-		return (
-			(parsed.protocol === "http:" || parsed.protocol === "https:") &&
-			parsed.hostname.toLowerCase() === host.toLowerCase()
-		);
-	} catch {
-		return false;
-	}
-};
-
-/**
  * Fetch a URL with a hard timeout and a byte cap enforced while streaming the
  * body, so a hostile or oversized response cannot exhaust memory. Redirects are
  * followed manually (`redirect: "manual"`) and every hop is re-validated to
- * stay on `host`, closing the redirect-based SSRF pivot. Returns the buffered
- * body plus its content-type, or `null` on any failure (off-host hop, non-ok
- * status, timeout, network error, too many redirects, or exceeding the cap).
+ * stay on `baseOrigin` (scheme + host + port), closing the redirect-based SSRF
+ * pivot. Returns the buffered body plus its content-type, or `null` on any
+ * failure (off-origin hop, non-ok status, timeout, network error, too many
+ * redirects, or exceeding the cap).
  */
 const fetchCapped = async (
 	url: string,
 	accept: string,
-	host: string,
+	baseOrigin: string,
 ): Promise<{ body: Buffer; contentType: string } | null> => {
 	let currentUrl = url;
 	for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect++) {
-		if (!isSameHost(currentUrl, host)) {
+		if (!isSameOrigin(currentUrl, baseOrigin)) {
 			return null;
 		}
 		const controller = new AbortController();
@@ -157,15 +144,17 @@ export default async function handler(
 
 	const scheme = https ? "https" : "http";
 	const base = `${scheme}://${host}/`;
+	// Canonical origin (scheme + host + port) every fetched URL is pinned to.
+	const baseOrigin = new URL(base).origin;
 
 	let iconUrl: string | null = null;
-	const page = await fetchCapped(base, "text/html", host);
+	const page = await fetchCapped(base, "text/html", baseOrigin);
 	if (page && /text\/html/i.test(page.contentType)) {
 		const parsed = findIconUrl(page.body.toString("utf8"), base);
 		// The page HTML is attacker-influenceable, so only trust an icon href
-		// that resolves back to the same managed host; anything else falls
+		// that resolves back to the same managed origin; anything else falls
 		// through to the /favicon.ico default below.
-		if (parsed && isSameHost(parsed, host)) {
+		if (parsed && isSameOrigin(parsed, baseOrigin)) {
 			iconUrl = parsed;
 		}
 	}
@@ -173,13 +162,18 @@ export default async function handler(
 		iconUrl = `${scheme}://${host}/favicon.ico`;
 	}
 
-	const icon = await fetchCapped(iconUrl, "image/*", host);
-	if (!icon || !/^image\//i.test(icon.contentType)) {
+	const icon = await fetchCapped(iconUrl, "image/*", baseOrigin);
+	// Reject non-images and, critically, image/svg+xml (executable on direct
+	// navigation) so an attacker-controlled favicon can't run script in our
+	// origin. Defense-in-depth CSP neutralizes anything that slips the check.
+	if (!icon || !isSafeImageContentType(icon.contentType)) {
 		notFound(res);
 		return;
 	}
 
 	res.setHeader("Content-Type", icon.contentType);
+	res.setHeader("X-Content-Type-Options", "nosniff");
+	res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
 	res.setHeader("Cache-Control", SUCCESS_CACHE);
 	res.status(200).send(icon.body);
 }

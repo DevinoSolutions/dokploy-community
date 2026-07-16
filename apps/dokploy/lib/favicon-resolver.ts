@@ -87,3 +87,40 @@ export const findIconUrl = (html: string, pageUrl: string): string | null => {
 	if (!href) return null;
 	return resolveIconUrl(href, pageUrl);
 };
+
+/**
+ * True when `url` is an http(s) URL whose ENTIRE origin (scheme + host + port)
+ * equals `baseOrigin`. The SSRF guard on the favicon route validates only the
+ * originally-requested host against the domains table; every subsequent URL we
+ * fetch — a `<link rel="icon">` href parsed from attacker-influenceable page
+ * HTML, or a redirect `Location` — must match the full origin so it can never
+ * be pivoted to a different scheme, a different host (`169.254.169.254`,
+ * `localhost`), or, critically, a different PORT on the same resolved IP
+ * (`:2375` Docker, `:5432`, `:6379`, …) which a host-only check would allow.
+ * `baseOrigin` must be a canonical origin string (e.g. `new URL(base).origin`).
+ */
+export const isSameOrigin = (url: string, baseOrigin: string): boolean => {
+	try {
+		const parsed = new URL(url);
+		return (
+			(parsed.protocol === "http:" || parsed.protocol === "https:") &&
+			parsed.origin === baseOrigin
+		);
+	} catch {
+		return false;
+	}
+};
+
+/**
+ * True when `contentType` is a raster/vector-free image type we can safely
+ * stream back from the same origin as the dashboard. `image/svg+xml` is
+ * REJECTED: an SVG served with its genuine content-type executes inline
+ * `<script>` on direct navigation (the global CSP only sets
+ * `frame-ancestors 'none'`, and `nosniff` does not stop a correctly-typed SVG),
+ * so an attacker-controlled favicon on a managed host would be a stored-XSS
+ * vector in the Dokploy origin. Any `image/*` except svg is allowed.
+ */
+export const isSafeImageContentType = (contentType: string): boolean => {
+	const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+	return type.startsWith("image/") && type !== "image/svg+xml";
+};
