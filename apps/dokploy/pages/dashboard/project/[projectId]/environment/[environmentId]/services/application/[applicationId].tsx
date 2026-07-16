@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import superjson from "superjson";
 import { ShowClusterSettings } from "@/components/dashboard/application/advanced/cluster/show-cluster-settings";
 import { AddCommand } from "@/components/dashboard/application/advanced/general/add-command";
+import { DeployHooks } from "@/components/dashboard/application/advanced/general/deploy-hooks";
 import { ShowPorts } from "@/components/dashboard/application/advanced/ports/show-port";
 import { ShowRedirects } from "@/components/dashboard/application/advanced/redirects/show-redirects";
 import { ShowSecurity } from "@/components/dashboard/application/advanced/security/show-security";
@@ -248,11 +249,12 @@ const Service = (
 													Deployments
 												</TabsTrigger>
 											)}
-											{permissions?.deployment.read && (
-												<TabsTrigger value="preview-deployments">
-													Preview Deployments
-												</TabsTrigger>
-											)}
+											{permissions?.deployment.read &&
+												data?.sourceType === "github" && (
+													<TabsTrigger value="preview-deployments">
+														Preview Deployments
+													</TabsTrigger>
+												)}
 											{permissions?.schedule.read && (
 												<TabsTrigger value="schedules">Schedules</TabsTrigger>
 											)}
@@ -388,13 +390,19 @@ const Service = (
 											</div>
 										</TabsContent>
 									)}
-									{permissions?.deployment.read && (
-										<TabsContent value="preview-deployments" className="w-full">
-											<div className="flex flex-col gap-4 pt-2.5">
-												<ShowPreviewDeployments applicationId={applicationId} />
-											</div>
-										</TabsContent>
-									)}
+									{permissions?.deployment.read &&
+										data?.sourceType === "github" && (
+											<TabsContent
+												value="preview-deployments"
+												className="w-full"
+											>
+												<div className="flex flex-col gap-4 pt-2.5">
+													<ShowPreviewDeployments
+														applicationId={applicationId}
+													/>
+												</div>
+											</TabsContent>
+										)}
 									{permissions?.domain.read && (
 										<TabsContent value="domains" className="w-full">
 											<div className="flex flex-col gap-4 pt-2.5">
@@ -411,6 +419,7 @@ const Service = (
 										<TabsContent value="advanced">
 											<div className="flex flex-col gap-4 pt-2.5">
 												<AddCommand applicationId={applicationId} />
+												<DeployHooks applicationId={applicationId} />
 												<ShowClusterSettings
 													id={applicationId}
 													type="application"

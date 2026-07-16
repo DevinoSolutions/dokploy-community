@@ -16,7 +16,12 @@ import { findDestinationById } from "@dokploy/server/services/destination";
 import { sendDokployBackupNotifications } from "../notifications/dokploy-backup";
 import { execAsync } from "../process/execAsync";
 import { redactRcloneCredentials } from "./redact";
-import { getBackupTimestamp, getS3Credentials, normalizeS3Path } from "./utils";
+import {
+	buildRcloneCommand,
+	getBackupTimestamp,
+	getRclonePathAndFlags,
+	normalizeS3Path,
+} from "./utils";
 
 function formatBytes(bytes?: number) {
 	if (bytes === undefined) return "Unknown size";
@@ -41,12 +46,18 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 	let computedBackupSize: number | undefined;
 	try {
 		const destination = await findDestinationById(backup.destinationId);
-		const rcloneFlags = getS3Credentials(destination);
 		const timestamp = getBackupTimestamp();
 		const { BASE_PATH } = paths();
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-backup-"));
 		const backupFileName = `webserver-backup-${timestamp}.zip`;
-		const s3Path = `:s3:${destination.bucket}/${backup.appName}/${normalizeS3Path(backup.prefix)}${backupFileName}`;
+		const {
+			flags: rcloneFlags,
+			path: s3Path,
+			envVars,
+		} = await getRclonePathAndFlags(
+			destination,
+			`${normalizeS3Path(backup.prefix)}${backupFileName}`,
+		);
 
 		try {
 			await execAsync(`mkdir -p ${tempDir}/filesystem`);
@@ -114,10 +125,20 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 				// If stat fails, keep undefined
 			}
 
-			const uploadCommand = `rclone copyto ${rcloneFlags.join(" ")} "${zipPath}" "${s3Path}"`;
-			writeStream.write("Running command to upload backup to S3\n");
+			const uploadCommand = buildRcloneCommand(
+				`rclone copyto ${rcloneFlags.join(" ")} "${zipPath}" "${s3Path}"`,
+				envVars,
+			);
+			const destinationType = ["sftp", "ftp"].includes(
+				destination.provider || "",
+			)
+				? destination.provider?.toUpperCase() || "remote"
+				: "S3";
+			writeStream.write(
+				`Running command to upload backup to ${destinationType}\n`,
+			);
 			await execAsync(uploadCommand);
-			writeStream.write("Uploaded backup to S3 ✅\n");
+			writeStream.write(`Uploaded backup to ${destinationType} ✅\n`);
 			writeStream.end();
 			await sendDokployBackupNotifications({
 				type: "success",

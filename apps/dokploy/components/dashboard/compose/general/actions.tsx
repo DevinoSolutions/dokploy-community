@@ -1,4 +1,12 @@
-import { Ban, CheckCircle2, RefreshCcw, Rocket, Terminal } from "lucide-react";
+import {
+	Ban,
+	CheckCircle2,
+	HardDriveDownload,
+	Puzzle,
+	RefreshCcw,
+	Rocket,
+	Terminal,
+} from "lucide-react";
 import { useRouter } from "next/router";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { toast } from "sonner";
@@ -35,6 +43,18 @@ export const ComposeActions = ({ composeId }: Props) => {
 		api.compose.start.useMutation();
 	const { mutateAsync: stop, isPending: isStopping } =
 		api.compose.stop.useMutation();
+
+	const { mutateAsync: loadTemplate, isPending: isLoadingTemplate } =
+		api.compose.loadTemplateFromGit.useMutation();
+
+	const isGitSource = [
+		"github",
+		"gitlab",
+		"bitbucket",
+		"gitea",
+		"git",
+	].includes(data?.sourceType || "");
+
 	return (
 		<div className="flex flex-row gap-4 w-full flex-wrap ">
 			<TooltipProvider delayDuration={0} disableHoverableContent={false}>
@@ -82,6 +102,55 @@ export const ComposeActions = ({ composeId }: Props) => {
 						</Button>
 					</DialogAction>
 				)}
+				{canDeploy &&
+					data?.composeType === "docker-compose" && (
+						<DialogAction
+							title="Deploy with Fresh Volumes"
+							description="This will remove all volumes and redeploy with a clean state. All persistent data will be permanently deleted."
+							type="destructive"
+							onClick={async () => {
+								await deploy({
+									composeId: composeId,
+									freshVolumes: true,
+								})
+									.then(() => {
+										toast.success(
+											"Compose deployed with fresh volumes",
+										);
+										refetch();
+										router.push(
+											`/dashboard/project/${data?.environment.projectId}/environment/${data?.environmentId}/services/compose/${composeId}?tab=deployments`,
+										);
+									})
+									.catch(() => {
+										toast.error("Error deploying compose");
+									});
+							}}
+						>
+							<Button
+								variant="outline"
+								isLoading={data?.composeStatus === "running"}
+								className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+							>
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<div className="flex items-center">
+											<HardDriveDownload className="size-4 mr-1" />
+											Fresh Volumes
+										</div>
+									</TooltipTrigger>
+									<TooltipPrimitive.Portal>
+										<TooltipContent sideOffset={5} className="z-[60]">
+											<p>
+												Deploy with fresh volumes (removes all persistent
+													data)
+											</p>
+										</TooltipContent>
+									</TooltipPrimitive.Portal>
+									</Tooltip>
+								</Button>
+						</DialogAction>
+					)}
 				{canDeploy && (
 					<DialogAction
 						title="Reload Compose"
@@ -115,6 +184,44 @@ export const ComposeActions = ({ composeId }: Props) => {
 								<TooltipPrimitive.Portal>
 									<TooltipContent sideOffset={5} className="z-60">
 										<p>Reload the compose without rebuilding it</p>
+									</TooltipContent>
+								</TooltipPrimitive.Portal>
+							</Tooltip>
+						</Button>
+					</DialogAction>
+				)}
+				{isGitSource && canDeploy && (
+					<DialogAction
+						title="Load Template"
+						description="This will clone the repository, parse template.toml, and update your configuration (Environment Variables, Mounts, Domains). Existing configurations might be overwritten."
+						onClick={async () => {
+							await loadTemplate({ composeId })
+								.then(() => {
+									toast.success("Template loaded and applied successfully");
+									refetch();
+								})
+								.catch((err) => {
+									toast.error("Error loading template: " + err.message);
+								});
+						}}
+					>
+						<Button
+							variant="secondary"
+							isLoading={isLoadingTemplate}
+							className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+						>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<div className="flex items-center">
+										<Puzzle className="size-4 mr-1" />
+										Load Template
+									</div>
+								</TooltipTrigger>
+								<TooltipPrimitive.Portal>
+									<TooltipContent sideOffset={5} className="z-[60]">
+										<p>
+											Load configuration from template.toml in the repository
+										</p>
 									</TooltipContent>
 								</TooltipPrimitive.Portal>
 							</Tooltip>
