@@ -3,6 +3,7 @@ import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
 import superjson from "superjson";
+import { BulkInvite } from "@/components/dashboard/settings/users/bulk-invite";
 import { ShowInvitations } from "@/components/dashboard/settings/users/show-invitations";
 import { ShowUsers } from "@/components/dashboard/settings/users/show-users";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -19,7 +20,14 @@ const Page = () => {
 	return (
 		<div className="flex flex-col gap-4 w-full">
 			<ShowUsers />
-			{canCreateMembers && <ShowInvitations />}
+			{canCreateMembers && (
+				<div className="flex flex-col gap-4 max-w-5xl mx-auto w-full">
+					<div className="flex justify-end">
+						<BulkInvite />
+					</div>
+					<ShowInvitations />
+				</div>
+			)}
 			{isOwnerOrAdmin && <ManageCustomRoles />}
 		</div>
 	);

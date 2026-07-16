@@ -51,6 +51,7 @@ export type AuditAction =
 	| "deploy"
 	| "cancel"
 	| "redeploy"
+	| "export"
 	| "login"
 	| "logout"
 	| "restore"
