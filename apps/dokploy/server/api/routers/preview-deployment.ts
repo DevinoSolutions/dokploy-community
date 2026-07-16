@@ -1,14 +1,20 @@
 import {
+	createPreviewDeployment,
 	findApplicationById,
+	findPreviewDeploymentByApplicationId,
 	findPreviewDeploymentById,
 	findPreviewDeploymentsByApplicationId,
 	IS_CLOUD,
 	removePreviewDeployment,
 } from "@dokploy/server";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
-import { apiFindAllByApplication } from "@/server/db/schema";
+import {
+	apiCreatePreviewDeployment,
+	apiFindAllByApplication,
+} from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
@@ -56,6 +62,91 @@ export const previewDeploymentRouter = createTRPCRouter({
 				resourceId: input.previewDeploymentId,
 			});
 			return true;
+		}),
+
+	create: protectedProcedure
+		.input(apiCreatePreviewDeployment)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.applicationId, {
+				deployment: ["create"],
+			});
+			const application = await findApplicationById(input.applicationId);
+
+			if (application.sourceType !== "github") {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						"Preview deployments can only be created for applications using a GitHub provider",
+				});
+			}
+
+			if (!application.isPreviewDeploymentsActive) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Preview deployments are not enabled for this application",
+				});
+			}
+
+			// Reuse the preview deployment of the same pull request if it
+			// already exists, mirroring the GitHub webhook flow.
+			const existingPreviewDeployment =
+				await findPreviewDeploymentByApplicationId(
+					input.applicationId,
+					input.pullRequestId,
+				);
+
+			let previewDeploymentId =
+				existingPreviewDeployment?.previewDeploymentId || "";
+
+			if (!existingPreviewDeployment) {
+				const previewLimit = application.previewLimit || 0;
+				if ((application.previewDeployments?.length ?? 0) > previewLimit) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "Preview deployments limit reached",
+					});
+				}
+				const previewDeployment = await createPreviewDeployment(input);
+				previewDeploymentId = previewDeployment.previewDeploymentId;
+			}
+
+			const jobData: DeploymentJob = {
+				applicationId: input.applicationId,
+				titleLog: "Preview Deployment",
+				descriptionLog: `Triggered via API for PR #${input.pullRequestNumber}`,
+				type: "deploy",
+				applicationType: "application-preview",
+				previewDeploymentId,
+				server: !!application.serverId,
+			};
+
+			if (IS_CLOUD && application.serverId) {
+				jobData.serverId = application.serverId;
+				deploy(jobData).catch((error) => {
+					console.error("Background deployment failed:", error);
+				});
+				await audit(ctx, {
+					action: "create",
+					resourceType: "previewDeployment",
+					resourceId: previewDeploymentId,
+				});
+				return findPreviewDeploymentById(previewDeploymentId);
+			}
+
+			await myQueue.add(
+				"deployments",
+				{ ...jobData },
+				{
+					removeOnComplete: true,
+					removeOnFail: true,
+				},
+			);
+			await audit(ctx, {
+				action: "create",
+				resourceType: "previewDeployment",
+				resourceId: previewDeploymentId,
+			});
+			return findPreviewDeploymentById(previewDeploymentId);
 		}),
 
 	redeploy: protectedProcedure

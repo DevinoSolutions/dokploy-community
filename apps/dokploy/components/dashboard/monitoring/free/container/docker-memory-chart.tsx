@@ -30,7 +30,6 @@ export const DockerMemoryChart = ({
 	const transformedData = accumulativeData.map((item, index) => ({
 		time: item.time,
 		name: `Point ${index + 1}`,
-		// @ts-ignore
 		usage: (convertMemoryToBytes(item.value.used) / 1024 ** 3).toFixed(2),
 	}));
 
@@ -74,7 +73,8 @@ export const DockerMemoryChart = ({
 					}
 				/>
 				<Area
-					type="monotone"
+					type="linear"
+					isAnimationActive={false}
 					dataKey="usage"
 					stroke="var(--color-usage)"
 					fill="url(#fillMemory)"
