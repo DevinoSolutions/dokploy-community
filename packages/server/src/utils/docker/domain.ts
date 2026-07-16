@@ -4,6 +4,7 @@ import { paths } from "@dokploy/server/constants";
 import type { Compose } from "@dokploy/server/services/compose";
 import type { Domain } from "@dokploy/server/services/domain";
 import { parse, stringify } from "yaml";
+import { wildcardHostRegexp } from "../hostname-validation";
 import { execAsyncRemote } from "../process/execAsync";
 import { cloneBitbucketRepository } from "../providers/bitbucket";
 import { cloneGitRepository } from "../providers/git";
@@ -274,9 +275,10 @@ export const createDomainLabels = (
 		internalPath,
 	} = domain;
 	const routerName = `${appName}-${uniqueConfigKey}-${entrypoint}`;
-	// Generate the Host rule - support wildcards
-	const hostRule = host.includes("*")
-		? `HostRegexp(\`${host.replace("*", "{subdomain:[a-zA-Z0-9-]+}")}\`)`
+	// Generate the Host rule - support wildcards. Traefik v3 HostRegexp takes
+	// a plain Go regexp (the v2 "{subdomain:...}" syntax is invalid in v3).
+	const hostRule = host.startsWith("*.")
+		? `HostRegexp(\`${wildcardHostRegexp(host)}\`)`
 		: `Host(\`${host}\`)`;
 
 	const labels = [

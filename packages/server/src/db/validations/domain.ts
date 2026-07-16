@@ -1,8 +1,5 @@
 import { z } from "zod";
-import {
-	INVALID_HOSTNAME_MESSAGE,
-	VALID_HOSTNAME_REGEX,
-} from "../../utils/hostname-validation";
+import { getDomainHostError } from "../../utils/hostname-validation";
 
 export const domain = z
 	.object({
@@ -13,8 +10,17 @@ export const domain = z
 				message: "Domain name cannot have leading or trailing spaces",
 			})
 			.transform((val) => val.trim())
-			.refine((val) => VALID_HOSTNAME_REGEX.test(val), {
-				message: INVALID_HOSTNAME_MESSAGE,
+			// Wildcard-aware hostname validation ("*.example.com" is valid, the
+			// wildcard placement rules reject "bad*.x.com", "*.*.com", etc.).
+			// Kept at field level so apiCreateDomain/apiUpdateDomain inherit it.
+			.superRefine((val, ctx) => {
+				const error = getDomainHostError(val);
+				if (error) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: error,
+					});
+				}
 			}),
 		path: z.string().min(1).optional(),
 		internalPath: z.string().optional(),
@@ -69,35 +75,9 @@ export const domain = z
 			});
 		}
 
-		// Validate wildcard domain format
-		if (input.host.includes("*")) {
-			// Check if wildcard is only at the beginning of a subdomain
-			if (!input.host.match(/^\*\./)) {
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					path: ["host"],
-					message:
-						"Wildcard domains must start with '*.' (e.g., '*.example.com' or '*.sub.example.com')",
-				});
-			}
-			// Check if there are multiple wildcards
-			if ((input.host.match(/\*/g) || []).length > 1) {
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					path: ["host"],
-					message: "Only one wildcard is allowed per domain",
-				});
-			}
-			// Check if wildcard is in the middle or end (not at start of subdomain)
-			if (input.host.includes("*") && !input.host.match(/^\*\./)) {
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					path: ["host"],
-					message:
-						"Wildcard must be at the beginning of a subdomain (e.g., '*.example.com' or '*.sub.example.com')",
-				});
-			}
-		}
+		// Wildcard placement rules are enforced in the field-level host check
+		// (getDomainHostError), so they also apply to schemas that only inherit
+		// the field via .shape/.pick (e.g. apiCreateDomain).
 	});
 
 export const domainCompose = z
@@ -109,8 +89,17 @@ export const domainCompose = z
 				message: "Domain name cannot have leading or trailing spaces",
 			})
 			.transform((val) => val.trim())
-			.refine((val) => VALID_HOSTNAME_REGEX.test(val), {
-				message: INVALID_HOSTNAME_MESSAGE,
+			// Wildcard-aware hostname validation ("*.example.com" is valid, the
+			// wildcard placement rules reject "bad*.x.com", "*.*.com", etc.).
+			// Kept at field level so apiCreateDomain/apiUpdateDomain inherit it.
+			.superRefine((val, ctx) => {
+				const error = getDomainHostError(val);
+				if (error) {
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: error,
+					});
+				}
 			}),
 		path: z.string().min(1).optional(),
 		internalPath: z.string().optional(),
@@ -166,33 +155,7 @@ export const domainCompose = z
 			});
 		}
 
-		// Validate wildcard domain format
-		if (input.host.includes("*")) {
-			// Check if wildcard is only at the beginning of a subdomain
-			if (!input.host.match(/^\*\./)) {
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					path: ["host"],
-					message:
-						"Wildcard domains must start with '*.' (e.g., '*.example.com' or '*.sub.example.com')",
-				});
-			}
-			// Check if there are multiple wildcards
-			if ((input.host.match(/\*/g) || []).length > 1) {
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					path: ["host"],
-					message: "Only one wildcard is allowed per domain",
-				});
-			}
-			// Check if wildcard is in the middle or end (not at start of subdomain)
-			if (input.host.includes("*") && !input.host.match(/^\*\./)) {
-				ctx.addIssue({
-					code: z.ZodIssueCode.custom,
-					path: ["host"],
-					message:
-						"Wildcard must be at the beginning of a subdomain (e.g., '*.example.com' or '*.sub.example.com')",
-				});
-			}
-		}
+		// Wildcard placement rules are enforced in the field-level host check
+		// (getDomainHostError), so they also apply to schemas that only inherit
+		// the field via .shape/.pick (e.g. apiCreateDomain).
 	});
