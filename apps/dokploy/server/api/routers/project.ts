@@ -1067,6 +1067,7 @@ export const projectRouter = createTRPCRouter({
 									await createPreviewDeployment({
 										...rest,
 										applicationId: newApplication.applicationId,
+										composeId: undefined,
 										domainId: undefined,
 									});
 								}

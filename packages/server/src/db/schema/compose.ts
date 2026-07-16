@@ -13,9 +13,10 @@ import { github } from "./github";
 import { gitlab } from "./gitlab";
 import { mounts } from "./mount";
 import { patch } from "./patch";
+import { previewDeployments } from "./preview-deployments";
 import { schedules } from "./schedule";
 import { server } from "./server";
-import { applicationStatus, triggerType } from "./shared";
+import { applicationStatus, certificateType, triggerType } from "./shared";
 import { sshKeys } from "./ssh-key";
 import {
 	APP_NAME_MESSAGE,
@@ -91,6 +92,28 @@ export const compose = pgTable("compose", {
 	isolatedDeploymentsVolume: boolean("isolatedDeploymentsVolume")
 		.notNull()
 		.default(false),
+	// --- Preview deployments (per-PR isolated stack copies) ---
+	// Names mirror the equivalent application.ts fields. Compose previews derive
+	// per-service domains from the compose's existing domains, so there is no
+	// previewPort / previewBuildArgs / previewBuildSecrets here.
+	previewEnv: encryptedText("previewEnv"),
+	previewLabels: text("previewLabels").array(),
+	previewWildcard: text("previewWildcard"),
+	previewLimit: integer("previewLimit").default(3),
+	previewHttps: boolean("previewHttps").notNull().default(false),
+	previewPath: text("previewPath").default("/"),
+	previewCertificateType: certificateType("previewCertificateType")
+		.notNull()
+		.default("none"),
+	previewCustomCertResolver: text("previewCustomCertResolver"),
+	isPreviewDeploymentsActive: boolean("isPreviewDeploymentsActive")
+		.notNull()
+		.default(false),
+	previewRequireCollaboratorPermissions: boolean(
+		"previewRequireCollaboratorPermissions",
+	)
+		.notNull()
+		.default(true),
 	triggerType: triggerType("triggerType").default("push"),
 	composeStatus: applicationStatus("composeStatus").notNull().default("idle"),
 	environmentId: text("environmentId")
@@ -152,6 +175,7 @@ export const composeRelations = relations(compose, ({ one, many }) => ({
 	backups: many(backups),
 	schedules: many(schedules),
 	patches: many(patch),
+	previewDeployments: many(previewDeployments),
 }));
 
 const createSchema = createInsertSchema(compose, {
@@ -176,6 +200,11 @@ const createSchema = createInsertSchema(compose, {
 		.optional(),
 	triggerType: z.enum(["push", "tag"]).optional(),
 	composeStatus: z.enum(["idle", "running", "done", "error"]).optional(),
+	previewEnv: z.string().optional(),
+	previewLabels: z.array(z.string()).optional(),
+	previewWildcard: z.string().optional(),
+	previewCertificateType: z.enum(["letsencrypt", "none", "custom"]).optional(),
+	previewCustomCertResolver: z.string().optional(),
 });
 
 export const apiCreateCompose = createSchema.pick({

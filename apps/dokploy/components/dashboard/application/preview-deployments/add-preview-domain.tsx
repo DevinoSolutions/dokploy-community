@@ -123,7 +123,7 @@ export const AddPreviewDomain = ({
 			.then(async () => {
 				toast.success(dictionary.success);
 				await utils.previewDeployment.all.invalidate({
-					applicationId: previewDeployment?.applicationId,
+					applicationId: previewDeployment?.applicationId ?? undefined,
 				});
 
 				if (domainId) {

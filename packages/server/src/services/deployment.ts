@@ -239,7 +239,8 @@ export const createDeploymentPreview = async (
 	);
 	const buildServerId =
 		previewDeployment?.application?.buildServerId ||
-		previewDeployment?.application?.serverId;
+		previewDeployment?.application?.serverId ||
+		previewDeployment?.compose?.serverId;
 	await removeLastTenDeployments(
 		deployment.previewDeploymentId,
 		"previewDeployment",
@@ -276,7 +277,9 @@ export const createDeploymentPreview = async (
 				logPath: logFilePath,
 				description: deployment.description || "",
 				previewDeploymentId: deployment.previewDeploymentId,
-				serverId: previewDeployment?.application?.serverId,
+				serverId:
+					previewDeployment?.application?.serverId ??
+					previewDeployment?.compose?.serverId,
 				startedAt: new Date().toISOString(),
 			})
 			.returning();
@@ -292,7 +295,9 @@ export const createDeploymentPreview = async (
 			.insert(deployments)
 			.values({
 				previewDeploymentId: deployment.previewDeploymentId,
-				serverId: previewDeployment?.application?.serverId,
+				serverId:
+					previewDeployment?.application?.serverId ??
+					previewDeployment?.compose?.serverId,
 				title: deployment.title || "Deployment",
 				status: "error",
 				logPath: "",
