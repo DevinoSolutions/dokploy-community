@@ -140,6 +140,18 @@ ghcr.io/devinosolutions/dokploy-community:latest                  # latest relea
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
 
+## Error reporting & privacy
+
+The fork reports **unhandled backend errors** — crashes and internal server errors, i.e. the stack trace, error message, and fork version — to a Devino-hosted Sentry instance so we can catch regressions across installs without waiting on bug reports. No environment variables, secrets, deployment logs, request data, or personal information are ever sent, and the reporting server's hostname is stripped before the event leaves your machine.
+
+Opting out is one environment variable on the `dokploy` service:
+
+```bash
+docker service update --env-add DOKPLOY_DISABLE_SENTRY=true dokploy
+```
+
+The standard [`DO_NOT_TRACK=1`](https://consoledonottrack.com) convention is also respected.
+
 ## Versioning
 
 We follow the scheme `v<upstream-version>-community.<release>`:

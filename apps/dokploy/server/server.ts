@@ -16,6 +16,7 @@ import {
 import { config } from "dotenv";
 import next from "next";
 import packageInfo from "../package.json";
+import { captureError, flushSentry } from "./sentry";
 import { setupDockerContainerLogsWebSocketServer } from "./wss/docker-container-logs";
 import { setupDockerContainerTerminalWebSocketServer } from "./wss/docker-container-terminal";
 import { setupDockerStatsMonitoringSocketServer } from "./wss/docker-stats";
@@ -41,7 +42,8 @@ let isServerListening = false;
 // but log the cause first so the failure point is never silent.
 process.on("uncaughtException", (error) => {
 	console.error("Uncaught exception:", error);
-	process.exit(1);
+	captureError(error, { handler: "uncaughtException" });
+	void flushSentry().finally(() => process.exit(1));
 });
 
 // A stray unhandled rejection BEFORE the server is listening means startup has
@@ -49,8 +51,9 @@ process.on("uncaughtException", (error) => {
 // requests we only log, to avoid crashing an otherwise-healthy instance.
 process.on("unhandledRejection", (reason) => {
 	console.error("Unhandled rejection:", reason);
+	captureError(reason, { handler: "unhandledRejection" });
 	if (!isServerListening) {
-		process.exit(1);
+		void flushSentry().finally(() => process.exit(1));
 	}
 });
 
@@ -120,14 +123,16 @@ void app
 			}
 		} catch (e) {
 			console.error("Main Server Error", e);
+			captureError(e, { handler: "mainServer" });
 			// If we failed before binding, the process can never serve traffic —
 			// exit so the orchestrator restarts us instead of leaving it spinning.
 			if (!isServerListening) {
-				process.exit(1);
+				void flushSentry().finally(() => process.exit(1));
 			}
 		}
 	})
 	.catch((error) => {
 		console.error("Failed to prepare Next.js app server:", error);
-		process.exit(1);
+		captureError(error, { handler: "nextPrepare" });
+		void flushSentry().finally(() => process.exit(1));
 	});
