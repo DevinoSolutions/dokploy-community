@@ -2,6 +2,9 @@ import { logger } from "@dokploy/server/lib/logger";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+const execPromise = promisify(exec);
 import { keepLatestNBackups } from ".";
 import { runComposeBackup } from "./compose";
 import { runLibsqlBackup } from "./libsql";
@@ -258,6 +261,11 @@ export const getBackupCommand = (
 ) => {
 	const containerSearch = getContainerSearchCommand(backup);
 	const backupCommand = generateBackupCommand(backup);
+	const destinationType = ["sftp", "ftp"].includes(
+		backup.destination?.provider || "",
+	)
+		? backup.destination?.provider?.toUpperCase() || "remote"
+		: "S3";
 
 	logger.info(
 		{
@@ -281,25 +289,47 @@ export const getBackupCommand = (
 	fi
 
 	echo "[$(date)] Container Up: $CONTAINER_ID" >> ${logPath};
+	echo "[$(date)] Streaming backup to ${destinationType}..." >> ${logPath};
 
-	# Run the backup command and capture the exit status
-	BACKUP_OUTPUT=$(${backupCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Backup failed" >> ${logPath};
-		echo "Error: $BACKUP_OUTPUT" >> ${logPath};
-		exit 1;
-	}
-
-	echo "[$(date)] ✅ backup completed successfully" >> ${logPath};
-	echo "[$(date)] Starting upload to S3..." >> ${logPath};
-
-	# Run the upload command and capture the exit status
+	# Stream the dump straight to the destination. The dump runs ONCE; "set -o pipefail"
+	# makes the pipeline fail if the dump (not just rclone) fails, so a broken
+	# backup never reports success. Running the dump a second time to "validate"
+	# it would double the load on the database and risk an inconsistent copy.
 	UPLOAD_OUTPUT=$(${backupCommand} | ${rcloneCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Upload to S3 failed" >> ${logPath};
+		echo "[$(date)] ❌ Error: Backup/upload to ${destinationType} failed" >> ${logPath};
 		echo "Error: $UPLOAD_OUTPUT" >> ${logPath};
 		exit 1;
 	}
 
-	echo "[$(date)] ✅ Upload to S3 completed successfully" >> ${logPath};
+	echo "[$(date)] ✅ Upload to ${destinationType} completed successfully" >> ${logPath};
 	echo "Backup done ✅" >> ${logPath};
 	`;
+};
+
+export const obscurePassword = async (password: string) => {
+	try {
+		const { stdout } = await execPromise(
+			`rclone obscure "${password.replace(/"/g, '\\"')}"`,
+		);
+		return stdout.trim();
+	} catch (error) {
+		logger.error("Error obscuring password with rclone", error);
+		return password;
+	}
+};
+
+export const getRclonePathAndFlags = async (
+	destination: Destination,
+	subPath: string,
+) => {
+	const isS3 = !["sftp", "ftp"].includes(destination.provider || "");
+	if (isS3) {
+		const flags = getS3Credentials(destination);
+		const path = `:s3:${destination.bucket}/${subPath}`;
+		return { flags, path };
+	}
+	const provider = destination.provider;
+	const obscuredPass = await obscurePassword(destination.secretAccessKey);
+	const path = `:${provider},host="${destination.endpoint}",port="${destination.region}",user="${destination.accessKey}",pass="${obscuredPass}":${destination.bucket}/${subPath}`;
+	return { flags: [], path };
 };

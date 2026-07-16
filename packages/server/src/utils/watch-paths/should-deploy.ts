@@ -2,11 +2,16 @@ import micromatch from "micromatch";
 
 export const shouldDeploy = (
 	watchPaths: string[] | null,
-	modifiedFiles: (string | null | undefined)[] | null | undefined,
+	modifiedFiles: Array<string | null | undefined> | null | undefined,
 ): boolean => {
 	if (!watchPaths || watchPaths?.length === 0) return true;
-	const files = (modifiedFiles ?? []).filter(
-		(file): file is string => typeof file === "string",
+	const normalizedModifiedFiles = (modifiedFiles || []).filter(
+		(path): path is string => typeof path === "string" && path.length > 0,
 	);
-	return micromatch.some(files, watchPaths);
+
+	if (normalizedModifiedFiles.length === 0) {
+		return false;
+	}
+
+	return micromatch.some(normalizedModifiedFiles, watchPaths);
 };

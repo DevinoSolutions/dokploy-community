@@ -139,7 +139,11 @@ export const addDomainToCompose = async (
 
 	let result: ComposeSpecification | null;
 
-	if (compose.serverId) {
+	if (compose.sourceType === "raw") {
+		result = parse(compose.composeFile, {
+			maxAliasCount: 10000,
+		}) as ComposeSpecification;
+	} else if (compose.serverId) {
 		result = await loadDockerComposeRemote(compose);
 	} else {
 		result = await loadDockerCompose(compose);
@@ -270,8 +274,13 @@ export const createDomainLabels = (
 		internalPath,
 	} = domain;
 	const routerName = `${appName}-${uniqueConfigKey}-${entrypoint}`;
+	// Generate the Host rule - support wildcards
+	const hostRule = host.includes("*")
+		? `HostRegexp(\`${host.replace("*", "{subdomain:[a-zA-Z0-9-]+}")}\`)`
+		: `Host(\`${host}\`)`;
+
 	const labels = [
-		`traefik.http.routers.${routerName}.rule=Host(\`${host}\`)${path && path !== "/" ? ` && PathPrefix(\`${path}\`)` : ""}`,
+		`traefik.http.routers.${routerName}.rule=${hostRule}${path && path !== "/" ? ` && PathPrefix(\`${path}\`)` : ""}`,
 		`traefik.http.routers.${routerName}.entrypoints=${entrypoint}`,
 		`traefik.http.services.${routerName}.loadbalancer.server.port=${port}`,
 		`traefik.http.routers.${routerName}.service=${routerName}`,
@@ -353,6 +362,12 @@ export const addDokployNetworkToService = (
 	let networks = networkService;
 	const network = "dokploy-network";
 	const defaultNetwork = "default";
+	// If the service had no `networks` key it was relying on Compose's implicit
+	// `default` network, so we preserve that by adding it back. If it declared
+	// explicit networks (even an empty list/object), we must NOT force `default`
+	// onto it, otherwise Compose creates a new per-project default network on
+	// every deploy and eventually exhausts Docker's address pools.
+	const hadExplicitNetworks = networkService !== undefined;
 	if (!networks) {
 		networks = [];
 	}
@@ -361,14 +376,14 @@ export const addDokployNetworkToService = (
 		if (!networks.includes(network)) {
 			networks.push(network);
 		}
-		if (!networks.includes(defaultNetwork)) {
+		if (!hadExplicitNetworks && !networks.includes(defaultNetwork)) {
 			networks.push(defaultNetwork);
 		}
 	} else if (networks && typeof networks === "object") {
 		if (!(network in networks)) {
 			networks[network] = {};
 		}
-		if (!(defaultNetwork in networks)) {
+		if (!hadExplicitNetworks && !(defaultNetwork in networks)) {
 			networks[defaultNetwork] = {};
 		}
 	}
