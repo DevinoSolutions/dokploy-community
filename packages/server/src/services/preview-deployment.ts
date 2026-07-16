@@ -17,6 +17,8 @@ import { manageDomain } from "../utils/traefik/domain";
 import { findApplicationById } from "./application";
 import { removeDeploymentsByPreviewDeploymentId } from "./deployment";
 import { createDomain } from "./domain";
+import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
+import { getPublicIpWithFallback } from "../wss/utils";
 import { type Github, getIssueComment } from "./github";
 import { getWebServerSettings } from "./web-server-settings";
 
@@ -187,6 +189,7 @@ export const createPreviewDeployment = async (
 			appName,
 			application.server?.ipAddress || "",
 			org?.ownerId || "",
+			application.server?.serverId,
 		);
 	}
 
@@ -281,6 +284,7 @@ const generateWildcardDomain = async (
 	appName: string,
 	serverIp: string,
 	_userId: string,
+	serverId?: string,
 ): Promise<string> => {
 	if (!baseDomain.startsWith("*.")) {
 		throw new Error('The base domain must start with "*."');
@@ -302,7 +306,13 @@ const generateWildcardDomain = async (
 			ip = settings?.serverIp || "";
 		}
 
-		const slugIp = ip.replaceAll(".", "-");
+		if (process.env.NODE_ENV !== "development" && isPrivateIp(ip)) {
+			ip = serverId
+				? (await getRemotePublicIp(serverId)) ?? ip
+				: (await getPublicIpWithFallback()) || ip;
+		}
+
+		const slugIp = ip.replaceAll(".", "-").replaceAll(":", "-");
 		return baseDomain.replace(
 			"*",
 			`${hash}${slugIp === "" ? "" : `-${slugIp}`}`,

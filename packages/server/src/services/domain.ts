@@ -4,7 +4,9 @@ import { db } from "@dokploy/server/db";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { generateRandomDomain } from "@dokploy/server/templates";
 import { manageDomain } from "@dokploy/server/utils/traefik/domain";
+import { getRemotePublicIp, isPrivateIp } from "@dokploy/server/utils/ip";
 import { validateDomainRestriction } from "@dokploy/server/utils/wildcard-restriction";
+import { getPublicIpWithFallback } from "@dokploy/server/wss/utils";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
@@ -60,8 +62,12 @@ export const generateTraefikMeDomain = async (
 ) => {
 	if (serverId) {
 		const server = await findServerById(serverId);
+		let serverIp = server.ipAddress;
+		if (process.env.NODE_ENV !== "development" && isPrivateIp(serverIp)) {
+			serverIp = (await getRemotePublicIp(serverId)) ?? serverIp;
+		}
 		return generateRandomDomain({
-			serverIp: server.ipAddress,
+			serverIp,
 			projectName: appName,
 		});
 	}
@@ -73,8 +79,12 @@ export const generateTraefikMeDomain = async (
 		});
 	}
 	const settings = await getWebServerSettings();
+	let serverIp = settings?.serverIp || "";
+	if (isPrivateIp(serverIp)) {
+		serverIp = (await getPublicIpWithFallback()) || serverIp;
+	}
 	return generateRandomDomain({
-		serverIp: settings?.serverIp || "",
+		serverIp,
 		projectName: appName,
 	});
 };
