@@ -1,7 +1,13 @@
+import { dirname, join } from "node:path";
 import {
 	addDomainToCompose,
 	clearOldDeployments,
+	cloneBitbucketRepository,
 	cloneCompose,
+	cloneGiteaRepository,
+	cloneGithubRepository,
+	cloneGitlabRepository,
+	cloneGitRepository,
 	createCommand,
 	createCompose,
 	createComposeByTemplate,
@@ -22,6 +28,8 @@ import {
 	getWebServerSettings,
 	IS_CLOUD,
 	loadServices,
+	paths,
+	processTemplate,
 	randomizeComposeFile,
 	randomizeIsolatedDeploymentComposeFile,
 	removeCompose,
@@ -46,11 +54,11 @@ import {
 	fetchTemplateFiles,
 	fetchTemplatesList,
 } from "@dokploy/server/templates/github";
-import { processTemplate } from "@dokploy/server/templates/processors";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import _ from "lodash";
 import { nanoid } from "nanoid";
+import { quote } from "shell-quote";
 import { parse } from "toml";
 import { stringify } from "yaml";
 import { z } from "zod";
@@ -75,6 +83,7 @@ import {
 	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
+import { applyTemplateToCompose } from "@/server/utils/apply-template";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
 import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
@@ -295,7 +304,7 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const compose = await findComposeById(input.composeId);
-			await clearOldDeployments(compose.appName, compose.serverId);
+			await clearOldDeployments(compose.composeId, "compose");
 			await audit(ctx, {
 				action: "update",
 				resourceType: "compose",
@@ -430,6 +439,7 @@ export const composeRouter = createTRPCRouter({
 				descriptionLog: input.description || "",
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
+				freshVolumes: input.freshVolumes,
 			};
 
 			if (IS_CLOUD && compose.serverId) {
@@ -479,6 +489,7 @@ export const composeRouter = createTRPCRouter({
 				descriptionLog: input.description || "",
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
+				freshVolumes: input.freshVolumes,
 			};
 			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
@@ -571,6 +582,136 @@ export const composeRouter = createTRPCRouter({
 				resourceName: composeForToken.name,
 			});
 			return true;
+		}),
+	loadTemplateFromGit: protectedProcedure
+		.input(z.object({ composeId: z.string().min(1) }))
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["create"],
+			});
+			const compose = await findComposeById(input.composeId);
+			if (
+				compose.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to update this compose",
+				});
+			}
+
+			const tempAppName = `${compose.appName}-temp-template-${nanoid()}`;
+
+			const entity = {
+				...compose,
+				appName: tempAppName,
+				type: "compose" as const,
+			};
+
+			let command = "set -e;";
+			if (compose.sourceType === "github") {
+				command += await cloneGithubRepository(entity);
+			} else if (compose.sourceType === "gitlab") {
+				command += await cloneGitlabRepository(entity);
+			} else if (compose.sourceType === "bitbucket") {
+				command += await cloneBitbucketRepository(entity);
+			} else if (compose.sourceType === "git") {
+				command += await cloneGitRepository(entity);
+			} else if (compose.sourceType === "gitea") {
+				command += await cloneGiteaRepository(entity);
+			}
+
+			const { COMPOSE_PATH } = paths(!!compose.serverId);
+			const tempPath = join(COMPOSE_PATH, tempAppName, "code");
+			const composeDir = dirname(compose.composePath || "./docker-compose.yml");
+			const templatePath = join(tempPath, composeDir, "template.toml");
+
+			const readCommand = quote(["cat", templatePath]);
+			const cleanCommand = quote(["rm", "-rf", join(COMPOSE_PATH, tempAppName)]);
+
+			try {
+				if (compose.serverId) {
+					await execAsyncRemote(compose.serverId, command);
+				} else {
+					await execAsync(command);
+				}
+
+				let templateContent = "";
+				try {
+					if (compose.serverId) {
+						const { stdout } = await execAsyncRemote(
+							compose.serverId,
+							readCommand,
+						);
+						templateContent = stdout;
+					} else {
+						const { stdout } = await execAsync(readCommand);
+						templateContent = stdout;
+					}
+				} catch (e) {
+					if (compose.serverId) {
+						await execAsyncRemote(compose.serverId, cleanCommand);
+					} else {
+						await execAsync(cleanCommand);
+					}
+					return null;
+				}
+
+				if (compose.serverId) {
+					await execAsyncRemote(compose.serverId, cleanCommand);
+				} else {
+					await execAsync(cleanCommand);
+				}
+
+				const config = parse(templateContent) as CompleteTemplate;
+
+				let serverIp = "127.0.0.1";
+
+				if (compose.serverId) {
+					const server = await findServerById(compose.serverId);
+					serverIp = server.ipAddress;
+				} else if (process.env.NODE_ENV === "development") {
+					serverIp = "127.0.0.1";
+				} else {
+					const settings = await getWebServerSettings();
+					serverIp = settings?.serverIp || "127.0.0.1";
+				}
+
+				const configModified = {
+					...config,
+					variables: {
+						APP_NAME: compose.appName,
+						...config.variables,
+					},
+				};
+
+				const processedTemplate = processTemplate(configModified, {
+					serverIp: serverIp,
+					projectName: compose.appName,
+				});
+
+				await applyTemplateToCompose(compose, processedTemplate);
+
+				return {
+					success: true,
+					message: "Template loaded and applied successfully",
+				};
+			} catch (error) {
+				try {
+					if (compose.serverId) {
+						await execAsyncRemote(compose.serverId, cleanCommand);
+					} else {
+						await execAsync(cleanCommand);
+					}
+				} catch {}
+
+				throw new TRPCError({
+					code: "INTERNAL_SERVER_ERROR",
+					message: `Error loading template from git: ${
+						error instanceof Error ? error.message : "Unknown error"
+					}`,
+				});
+			}
 		}),
 	deployTemplate: protectedProcedure
 		.input(
@@ -862,7 +1003,9 @@ export const composeRouter = createTRPCRouter({
 			} catch (error) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
-					message: `Error processing template: ${error instanceof Error ? error.message : error}`,
+					message: `Error processing template: ${
+						error instanceof Error ? error.message : error
+					}`,
 				});
 			}
 		}),
@@ -1001,12 +1144,9 @@ export const composeRouter = createTRPCRouter({
 					serverIp: serverIp,
 					projectName: compose.appName,
 				});
-
-				await updateCompose(input.composeId, {
+				await applyTemplateToCompose(compose, processedTemplate, {
 					composeFile: templateData.compose,
 					sourceType: "raw",
-					env: processedTemplate.envs?.join("\n"),
-					isolatedDeployment: true,
 				});
 
 				if (processedTemplate.mounts && processedTemplate.mounts.length > 0) {
@@ -1047,7 +1187,9 @@ export const composeRouter = createTRPCRouter({
 			} catch (error) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
-					message: `Error importing template: ${error instanceof Error ? error.message : error}`,
+					message: `Error importing template: ${
+						error instanceof Error ? error.message : error
+					}`,
 				});
 			}
 		}),

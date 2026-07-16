@@ -1,6 +1,6 @@
 {
-  "id": "593c1d30-bc47-4a94-a28f-6509419335e9",
-  "prevId": "50e9ec69-6997-484b-b468-82759f94785c",
+  "id": "6f025f7a-db22-4708-b87e-5aab07efc172",
+  "prevId": "6ff797f8-2edc-41eb-a4c1-ca2c58d436e5",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1963,6 +1963,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "includeEncryptionKey": {
+          "name": "includeEncryptionKey",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "backupType": {
           "name": "backupType",
           "type": "backupType",
@@ -2313,227 +2320,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.cloudflare": {
-      "name": "cloudflare",
-      "schema": "",
-      "columns": {
-        "cloudflareId": {
-          "name": "cloudflareId",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "apiToken": {
-          "name": "apiToken",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "accountId": {
-          "name": "accountId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "defaultTunnelId": {
-          "name": "defaultTunnelId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "cloudflare_organizationId_organization_id_fk": {
-          "name": "cloudflare_organizationId_organization_id_fk",
-          "tableFrom": "cloudflare",
-          "tableTo": "organization",
-          "columnsFrom": [
-            "organizationId"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.cloudflare_tunnel_runtime": {
-      "name": "cloudflare_tunnel_runtime",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "cloudflareId": {
-          "name": "cloudflareId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "serverId": {
-          "name": "serverId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "tunnelId": {
-          "name": "tunnelId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "tunnelName": {
-          "name": "tunnelName",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "dockerResourceName": {
-          "name": "dockerResourceName",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "runtimeMode": {
-          "name": "runtimeMode",
-          "type": "cloudflareTunnelRuntimeMode",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'shared-managed'"
-        },
-        "status": {
-          "name": "status",
-          "type": "cloudflareTunnelRuntimeStatus",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "lastError": {
-          "name": "lastError",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "lastStartedAt": {
-          "name": "lastStartedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "lastSeenAt": {
-          "name": "lastSeenAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "cloudflare_tunnel_runtime_org_server_cf_unique": {
-          "name": "cloudflare_tunnel_runtime_org_server_cf_unique",
-          "columns": [
-            {
-              "expression": "organizationId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "serverId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "cloudflareId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "cloudflare_tunnel_runtime_organizationId_organization_id_fk": {
-          "name": "cloudflare_tunnel_runtime_organizationId_organization_id_fk",
-          "tableFrom": "cloudflare_tunnel_runtime",
-          "tableTo": "organization",
-          "columnsFrom": [
-            "organizationId"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "cloudflare_tunnel_runtime_cloudflareId_cloudflare_cloudflareId_fk": {
-          "name": "cloudflare_tunnel_runtime_cloudflareId_cloudflare_cloudflareId_fk",
-          "tableFrom": "cloudflare_tunnel_runtime",
-          "tableTo": "cloudflare",
-          "columnsFrom": [
-            "cloudflareId"
-          ],
-          "columnsTo": [
-            "cloudflareId"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.compose": {
       "name": "compose",
       "schema": "",
@@ -2620,6 +2406,13 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": false
+        },
+        "pullImagesOnDeploy": {
+          "name": "pullImagesOnDeploy",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "gitlabProjectId": {
           "name": "gitlabProjectId",
@@ -2921,6 +2714,59 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.deploy_hook": {
+      "name": "deploy_hook",
+      "schema": "",
+      "columns": {
+        "deployHookId": {
+          "name": "deployHookId",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "applicationId": {
+          "name": "applicationId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "hooks": {
+          "name": "hooks",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "deploy_hook_applicationId_application_applicationId_fk": {
+          "name": "deploy_hook_applicationId_application_applicationId_fk",
+          "tableFrom": "deploy_hook",
+          "tableTo": "application",
+          "columnsFrom": [
+            "applicationId"
+          ],
+          "columnsTo": [
+            "applicationId"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "deploy_hook_applicationId_unique": {
+          "name": "deploy_hook_applicationId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "applicationId"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -3401,51 +3247,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
-        },
-        "publishToCloudflare": {
-          "name": "publishToCloudflare",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "cloudflareTunnelMode": {
-          "name": "cloudflareTunnelMode",
-          "type": "cloudflareTunnelMode",
-          "typeSchema": "public",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cloudflareId": {
-          "name": "cloudflareId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cloudflareZoneId": {
-          "name": "cloudflareZoneId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cloudflareTunnelId": {
-          "name": "cloudflareTunnelId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cloudflareDnsRecordId": {
-          "name": "cloudflareDnsRecordId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cloudflareIngressApplied": {
-          "name": "cloudflareIngressApplied",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         }
       },
       "indexes": {},
@@ -3487,19 +3288,6 @@
             "previewDeploymentId"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "domain_cloudflareId_cloudflare_cloudflareId_fk": {
-          "name": "domain_cloudflareId_cloudflare_cloudflareId_fk",
-          "tableFrom": "domain",
-          "tableTo": "cloudflare",
-          "columnsFrom": [
-            "cloudflareId"
-          ],
-          "columnsTo": [
-            "cloudflareId"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -8821,23 +8609,6 @@
         "libsql"
       ]
     },
-    "public.cloudflareTunnelRuntimeMode": {
-      "name": "cloudflareTunnelRuntimeMode",
-      "schema": "public",
-      "values": [
-        "shared-managed"
-      ]
-    },
-    "public.cloudflareTunnelRuntimeStatus": {
-      "name": "cloudflareTunnelRuntimeStatus",
-      "schema": "public",
-      "values": [
-        "pending",
-        "running",
-        "error",
-        "stopped"
-      ]
-    },
     "public.composeType": {
       "name": "composeType",
       "schema": "public",
@@ -8866,14 +8637,6 @@
         "done",
         "error",
         "cancelled"
-      ]
-    },
-    "public.cloudflareTunnelMode": {
-      "name": "cloudflareTunnelMode",
-      "schema": "public",
-      "values": [
-        "existing-instance",
-        "shared-managed"
       ]
     },
     "public.domainType": {

@@ -47,4 +47,14 @@ describe("redactRcloneCredentials (#4621)", () => {
 		expect(redacted).not.toContain("MYSECRET");
 		expect(redacted).toContain("[REDACTED]");
 	});
+
+	it("should redact rclone crypt passwords passed via env vars", () => {
+		const cmd =
+			"RCLONE_CRYPT_PASSWORD='superpass' RCLONE_CRYPT_PASSWORD2='saltpass' rclone lsf remote:";
+		const redacted = redactRcloneCredentials(cmd);
+		expect(redacted).not.toContain("superpass");
+		expect(redacted).not.toContain("saltpass");
+		expect(redacted).toContain("RCLONE_CRYPT_PASSWORD='[REDACTED]'");
+		expect(redacted).toContain("RCLONE_CRYPT_PASSWORD2='[REDACTED]'");
+	});
 });

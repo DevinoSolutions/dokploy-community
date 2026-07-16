@@ -177,10 +177,23 @@ interface Props {
 	children: React.ReactNode;
 }
 
+const extractBaseDomain = (wildcardPattern: string): string => {
+	const normalized = wildcardPattern.toLowerCase().trim();
+	if (normalized.startsWith("**.")) {
+		return normalized.slice(3);
+	}
+	if (normalized.startsWith("*.")) {
+		return normalized.slice(2);
+	}
+	return normalized;
+};
+
 export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const [cacheType, setCacheType] = useState<CacheType>("cache");
 	const [isManualInput, setIsManualInput] = useState(false);
+	const [subdomain, setSubdomain] = useState("");
+	const [selectedBaseDomain, setSelectedBaseDomain] = useState("");
 
 	const utils = api.useUtils();
 	const { data, refetch } = api.domain.one.useQuery(
@@ -226,6 +239,25 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			serverId: application?.serverId || "",
 		});
 
+	const { data: restrictionConfig } =
+		api.settings.getDomainRestrictionConfig.useQuery();
+
+	const isRestrictionEnabled =
+		restrictionConfig?.enabled &&
+		(restrictionConfig?.allowedWildcards?.length ?? 0) > 0;
+	const baseDomains =
+		restrictionConfig?.allowedWildcards?.map(extractBaseDomain) ?? [];
+
+	const { data: certificateResolvers } =
+		api.domain.certificateResolvers.useQuery(
+			{
+				serverId: application?.serverId || undefined,
+			},
+			{
+				enabled: isOpen,
+			},
+		);
+
 	const {
 		data: services,
 		isFetching: isLoadingServices,
@@ -268,6 +300,7 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 	});
 
 	const certificateType = form.watch("certificateType");
+	const customCertResolver = form.watch("customCertResolver");
 	const useCustomEntrypoint = form.watch("useCustomEntrypoint");
 	const https = form.watch("https");
 	const domainType = form.watch("domainType");
@@ -326,6 +359,16 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			{ enabled: cloudflareCheckEnabled, retry: false },
 		);
 
+	// Synthetic value for the certificate provider Select: detected resolvers
+	// from traefik.yml are stored as certificateType="custom" +
+	// customCertResolver=<name>, but displayed as their own option.
+	const certSelectValue =
+		certificateType === "custom" &&
+		customCertResolver &&
+		certificateResolvers?.includes(customCertResolver)
+			? `resolver:${customCertResolver}`
+			: (certificateType ?? "");
+
 	useEffect(() => {
 		if (data) {
 			form.reset({
@@ -373,6 +416,25 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			form.trigger("customCertResolver");
 		}
 	}, [certificateType, form]);
+
+	// Initialize selected base domain when restriction config loads
+	useEffect(() => {
+		if (baseDomains.length > 0 && !selectedBaseDomain) {
+			setSelectedBaseDomain(baseDomains[0] ?? "");
+		}
+	}, [baseDomains, selectedBaseDomain]);
+
+	useEffect(() => {
+		if (isRestrictionEnabled && selectedBaseDomain) {
+			if (subdomain) {
+				form.setValue("host", `${subdomain}.${selectedBaseDomain}`);
+				form.clearErrors("host");
+			} else {
+				form.setValue("host", "");
+				form.setError("host", { message: "Subdomain is required" });
+			}
+		}
+	}, [subdomain, selectedBaseDomain, isRestrictionEnabled, form]);
 
 	const dictionary = {
 		success: domainId ? "Domain Updated" : "Domain Created",
@@ -612,7 +674,8 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 									name="host"
 									render={({ field }) => (
 										<FormItem>
-											{!canGenerateTraefikMeDomains &&
+											{!isRestrictionEnabled &&
+												!canGenerateTraefikMeDomains &&
 												field.value.includes("sslip.io") && (
 													<AlertBlock type="warning">
 														You need to set an IP address in your{" "}
@@ -627,53 +690,158 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 														to make your sslip.io domain work.
 													</AlertBlock>
 												)}
-											{isTraefikMeDomain && (
+											{!isRestrictionEnabled && isTraefikMeDomain && (
 												<AlertBlock type="info">
 													<strong>Note:</strong> sslip.io is a public HTTP
 													service and does not support SSL/HTTPS. HTTPS and
 													certificate options will not have any effect.
 												</AlertBlock>
 											)}
-											<FormLabel>Host</FormLabel>
-											<div className="flex gap-2">
-												<FormControl>
-													<Input placeholder="api.dokploy.com" {...field} />
-												</FormControl>
-												<TooltipProvider delayDuration={0}>
-													<Tooltip>
-														<TooltipTrigger asChild>
-															<Button
-																variant="secondary"
-																type="button"
-																isLoading={isLoadingGenerate}
-																onClick={() => {
-																	generateDomain({
-																		appName: application?.appName || "",
-																		serverId: application?.serverId || "",
-																	})
-																		.then((domain) => {
-																			field.onChange(domain);
-																		})
-																		.catch((err) => {
-																			toast.error(err.message);
-																		});
-																}}
-															>
-																<Dices className="size-4 text-muted-foreground" />
-															</Button>
-														</TooltipTrigger>
-														<TooltipContent
-															side="left"
-															sideOffset={5}
-															className="max-w-40"
-														>
-															<p>Generate sslip.io domain</p>
-														</TooltipContent>
-													</Tooltip>
-												</TooltipProvider>
-											</div>
+
+											{isRestrictionEnabled ? (
+												<>
+													<div className="space-y-4">
+														<div>
+															<FormLabel>Subdomain</FormLabel>
+															<div className="flex gap-2">
+																<Input
+																	placeholder="my-app"
+																	value={subdomain}
+																	onChange={(e) =>
+																		setSubdomain(
+																			e.target.value.toLowerCase().trim(),
+																		)
+																	}
+																/>
+																<TooltipProvider delayDuration={0}>
+																	<Tooltip>
+																		<TooltipTrigger asChild>
+																			<Button
+																				variant="secondary"
+																				type="button"
+																				onClick={() => {
+																					const randomSubdomain = `${application?.appName || "app"}-${Math.random().toString(36).substring(2, 8)}`;
+																					setSubdomain(randomSubdomain);
+																				}}
+																			>
+																				<Dices className="size-4 text-muted-foreground" />
+																			</Button>
+																		</TooltipTrigger>
+																		<TooltipContent
+																			side="left"
+																			sideOffset={5}
+																			className="max-w-[10rem]"
+																		>
+																			<p>Generate random subdomain</p>
+																		</TooltipContent>
+																	</Tooltip>
+																</TooltipProvider>
+															</div>
+														</div>
+
+														{baseDomains.length > 1 ? (
+															<div>
+																<FormLabel>Domain</FormLabel>
+																<Select
+																	value={selectedBaseDomain}
+																	onValueChange={setSelectedBaseDomain}
+																>
+																	<SelectTrigger>
+																		<SelectValue placeholder="Select a domain" />
+																	</SelectTrigger>
+																	<SelectContent>
+																		{baseDomains.map((domain) => (
+																			<SelectItem key={domain} value={domain}>
+																				{domain}
+																			</SelectItem>
+																		))}
+																	</SelectContent>
+																</Select>
+															</div>
+														) : (
+															<div>
+																<FormLabel>Domain</FormLabel>
+																<Input
+																	value={selectedBaseDomain}
+																	disabled
+																	className="bg-muted"
+																/>
+															</div>
+														)}
+
+														{subdomain && selectedBaseDomain && (
+															<div className="p-3 bg-muted rounded-lg">
+																<span className="text-sm text-muted-foreground">
+																	Preview:{" "}
+																</span>
+																<span className="font-mono">
+																	{subdomain}.{selectedBaseDomain}
+																</span>
+															</div>
+														)}
+													</div>
+													<input type="hidden" {...field} />
+												</>
+											) : (
+												<>
+													<FormLabel>Host</FormLabel>
+													<div className="flex gap-2">
+														<FormControl>
+															<Input
+																placeholder="example.com, *.example.com, or *.sub.example.com"
+																{...field}
+															/>
+														</FormControl>
+														<TooltipProvider delayDuration={0}>
+															<Tooltip>
+																<TooltipTrigger asChild>
+																	<Button
+																		variant="secondary"
+																		type="button"
+																		isLoading={isLoadingGenerate}
+																		onClick={() => {
+																			generateDomain({
+																				appName: application?.appName || "",
+																				serverId: application?.serverId || "",
+																			})
+																				.then((domain) => {
+																					field.onChange(domain);
+																				})
+																				.catch((err) => {
+																					toast.error(err.message);
+																				});
+																		}}
+																	>
+																		<Dices className="size-4 text-muted-foreground" />
+																	</Button>
+																</TooltipTrigger>
+																<TooltipContent
+																	side="left"
+																	sideOffset={5}
+																	className="max-w-40"
+																>
+																	<p>Generate sslip.io domain</p>
+																</TooltipContent>
+															</Tooltip>
+														</TooltipProvider>
+													</div>
+												</>
+											)}
 
 											<FormMessage />
+											{field.value && field.value.includes("*") && (
+												<div className="text-sm text-muted-foreground mt-1">
+													<p>
+														Wildcard subdomains will match any subdomain at the
+														specified level
+													</p>
+													<div>
+														<code>*.example.com</code> will match{" "}
+														<code>api.example.com</code>,{" "}
+														<code>app.example.com</code>, etc.
+													</div>
+												</div>
+											)}
 										</FormItem>
 									)}
 								/>
@@ -840,15 +1008,29 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 														<FormLabel>Certificate Provider</FormLabel>
 														<Select
 															onValueChange={(value) => {
-																field.onChange(value);
-																if (value !== "custom") {
+																if (value.startsWith("resolver:")) {
+																	field.onChange("custom");
 																	form.setValue(
 																		"customCertResolver",
-																		undefined,
+																		value.slice("resolver:".length),
 																	);
+																} else {
+																	field.onChange(value);
+																	if (
+																		value !== "custom" ||
+																		(customCertResolver &&
+																			certificateResolvers?.includes(
+																				customCertResolver,
+																			))
+																	) {
+																		form.setValue(
+																			"customCertResolver",
+																			undefined,
+																		);
+																	}
 																}
 															}}
-															value={field.value}
+															value={certSelectValue}
 														>
 															<FormControl>
 																<SelectTrigger>
@@ -861,6 +1043,18 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 																	Let's Encrypt
 																</SelectItem>
 																<SelectItem value={"custom"}>Custom</SelectItem>
+																{certificateResolvers
+																	?.filter(
+																		(resolver) => resolver !== "letsencrypt",
+																	)
+																	.map((resolver) => (
+																		<SelectItem
+																			key={resolver}
+																			value={`resolver:${resolver}`}
+																		>
+																			{resolver}
+																		</SelectItem>
+																	))}
 															</SelectContent>
 														</Select>
 														<FormDescription>
@@ -900,7 +1094,7 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 											}}
 										/>
 
-										{certificateType === "custom" && (
+										{certSelectValue === "custom" && (
 											<FormField
 												control={form.control}
 												name="customCertResolver"

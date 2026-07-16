@@ -12,7 +12,9 @@ import {
 	findPreviewDeploymentById,
 	findServerById,
 	generateTraefikMeDomain,
+	getCertificateResolvers,
 	getWebServerSettings,
+	IS_CLOUD,
 	isCloudflarePublished,
 	manageDomain,
 	provisionCloudflareAccessForDomain,
@@ -322,6 +324,25 @@ export const domainRouter = createTRPCRouter({
 			}
 			const settings = await getWebServerSettings();
 			return settings?.serverIp || "";
+		}),
+
+	certificateResolvers: withPermission("domain", "read")
+		.input(z.object({ serverId: z.string().optional() }))
+		.query(async ({ input, ctx }) => {
+			if (input.serverId) {
+				const server = await findServerById(input.serverId);
+				if (server.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server",
+					});
+				}
+				return getCertificateResolvers(input.serverId);
+			}
+			if (IS_CLOUD) {
+				return [];
+			}
+			return getCertificateResolvers();
 		}),
 
 	update: protectedProcedure

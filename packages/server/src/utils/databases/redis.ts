@@ -1,5 +1,6 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveNetworkNamesForResource } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -8,7 +9,6 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
-import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 export type RedisNested = InferResultType<
@@ -93,8 +93,7 @@ export const buildRedis = async (redis: RedisNested) => {
 								}),
 						}
 					: {
-							Command: ["/bin/sh"],
-							Args: ["-c", `redis-server --requirepass ${databasePassword}`],
+							Args: ["redis-server", "--requirepass", databasePassword],
 						}),
 				...(Ulimits && { Ulimits }),
 				Labels,

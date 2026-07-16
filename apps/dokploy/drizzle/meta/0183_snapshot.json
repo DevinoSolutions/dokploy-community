@@ -1,6 +1,6 @@
 {
-  "id": "50e9ec69-6997-484b-b468-82759f94785c",
-  "prevId": "37b55a62-bd80-4aa2-b8d7-c16831abef89",
+  "id": "376651fb-6d94-471b-b73b-41c7feed6da4",
+  "prevId": "c2ceddf0-8f5c-4107-9d6c-e8bcb79d03a1",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1963,6 +1963,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "includeEncryptionKey": {
+          "name": "includeEncryptionKey",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "backupType": {
           "name": "backupType",
           "type": "backupType",
@@ -2313,76 +2320,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.cloudflare": {
-      "name": "cloudflare",
-      "schema": "",
-      "columns": {
-        "cloudflareId": {
-          "name": "cloudflareId",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "apiToken": {
-          "name": "apiToken",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "accountId": {
-          "name": "accountId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "defaultTunnelId": {
-          "name": "defaultTunnelId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "cloudflare_organizationId_organization_id_fk": {
-          "name": "cloudflare_organizationId_organization_id_fk",
-          "tableFrom": "cloudflare",
-          "tableTo": "organization",
-          "columnsFrom": [
-            "organizationId"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.compose": {
       "name": "compose",
       "schema": "",
@@ -2469,6 +2406,13 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": false
+        },
+        "pullImagesOnDeploy": {
+          "name": "pullImagesOnDeploy",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "gitlabProjectId": {
           "name": "gitlabProjectId",
@@ -2601,6 +2545,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "isolatedNetworkMtu": {
+          "name": "isolatedNetworkMtu",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
         },
         "isolatedDeploymentsVolume": {
           "name": "isolatedDeploymentsVolume",
@@ -2770,6 +2720,59 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.deploy_hook": {
+      "name": "deploy_hook",
+      "schema": "",
+      "columns": {
+        "deployHookId": {
+          "name": "deployHookId",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "applicationId": {
+          "name": "applicationId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "hooks": {
+          "name": "hooks",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "deploy_hook_applicationId_application_applicationId_fk": {
+          "name": "deploy_hook_applicationId_application_applicationId_fk",
+          "tableFrom": "deploy_hook",
+          "tableTo": "application",
+          "columnsFrom": [
+            "applicationId"
+          ],
+          "columnsTo": [
+            "applicationId"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "deploy_hook_applicationId_unique": {
+          "name": "deploy_hook_applicationId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "applicationId"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -3098,6 +3101,39 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "encryptionEnabled": {
+          "name": "encryptionEnabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "encryptionKey": {
+          "name": "encryptionKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "encryptionPassword2": {
+          "name": "encryptionPassword2",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "filenameEncryption": {
+          "name": "filenameEncryption",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'off'"
+        },
+        "directoryNameEncryption": {
+          "name": "directoryNameEncryption",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {},
@@ -4647,6 +4683,24 @@
         },
         "content": {
           "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "uid": {
+          "name": "uid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "gid": {
+          "name": "gid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mode": {
+          "name": "mode",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -6998,6 +7052,24 @@
           "notNull": true,
           "default": "''"
         },
+        "awsAccessKeyId": {
+          "name": "awsAccessKeyId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "awsSecretAccessKey": {
+          "name": "awsSecretAccessKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "awsRegion": {
+          "name": "awsRegion",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "createdAt": {
           "name": "createdAt",
           "type": "text",
@@ -7461,7 +7533,7 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": false
+          "default": true
         },
         "buildsConcurrency": {
           "name": "buildsConcurrency",
@@ -8521,6 +8593,13 @@
           "notNull": true,
           "default": false
         },
+        "domainRestrictionConfig": {
+          "name": "domainRestrictionConfig",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'{\"enabled\":false,\"allowedWildcards\":[]}'::jsonb"
+        },
         "cleanupCacheApplications": {
           "name": "cleanupCacheApplications",
           "type": "boolean",
@@ -8744,7 +8823,8 @@
       "schema": "public",
       "values": [
         "selfHosted",
-        "cloud"
+        "cloud",
+        "awsEcr"
       ]
     },
     "public.scheduleType": {

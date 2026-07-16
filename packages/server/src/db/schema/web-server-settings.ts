@@ -109,6 +109,16 @@ export const webServerSettings = pgTable("webServerSettings", {
 	buildsConcurrency: integer("buildsConcurrency").notNull().default(1),
 	// Auth Configuration (self-hosted only)
 	enforceSSO: boolean("enforceSSO").notNull().default(false),
+	// Domain Restriction Configuration
+	domainRestrictionConfig: jsonb("domainRestrictionConfig")
+		.$type<{
+			enabled: boolean;
+			allowedWildcards: string[];
+		}>()
+		.default({
+			enabled: false,
+			allowedWildcards: [],
+		}),
 	// Cache Cleanup Configuration
 	cleanupCacheApplications: boolean("cleanupCacheApplications")
 		.notNull()
@@ -255,4 +265,21 @@ export const apiUpdateWebServerMonitoring = z.object({
 			}),
 		})
 		.required(),
+});
+
+// Domain Restriction validation schemas
+export const domainRestrictionConfigSchema = z.object({
+	enabled: z.boolean(),
+	allowedWildcards: z.array(
+		z
+			.string()
+			.min(1)
+			.refine((s) => s.startsWith("*.") || s.startsWith("**."), {
+				message: "Pattern must start with '*.' or '**.' (e.g. *.example.com)",
+			}),
+	),
+});
+
+export const apiUpdateDomainRestriction = z.object({
+	domainRestrictionConfig: domainRestrictionConfigSchema,
 });
