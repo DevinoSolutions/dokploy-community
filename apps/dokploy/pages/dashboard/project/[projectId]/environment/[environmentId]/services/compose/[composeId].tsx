@@ -27,6 +27,7 @@ import { ShowComposeContainers } from "@/components/dashboard/compose/containers
 import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ShowGeneralCompose } from "@/components/dashboard/compose/general/show";
 import { ShowDockerLogsCompose } from "@/components/dashboard/compose/logs/show";
+import { ShowPreviewDeploymentsCompose } from "@/components/dashboard/compose/preview-deployments/show-preview-deployments";
 import { ShowDockerLogsStack } from "@/components/dashboard/compose/logs/show-stack";
 import { UpdateCompose } from "@/components/dashboard/compose/update-compose";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
@@ -61,6 +62,7 @@ type TabState =
 	| "settings"
 	| "advanced"
 	| "deployments"
+	| "preview-deployments"
 	| "domains"
 	| "containers"
 	| "monitoring"
@@ -236,6 +238,13 @@ const Service = (
 													Deployments
 												</TabsTrigger>
 											)}
+											{permissions?.deployment.read &&
+												(data?.sourceType === "github" ||
+													data?.sourceType === "gitlab") && (
+													<TabsTrigger value="preview-deployments">
+														Preview Deployments
+													</TabsTrigger>
+												)}
 											{permissions?.service.read && (
 												<TabsTrigger value="containers">Containers</TabsTrigger>
 											)}
@@ -404,6 +413,19 @@ const Service = (
 											</div>
 										</TabsContent>
 									)}
+
+									{permissions?.deployment.read &&
+										(data?.sourceType === "github" ||
+											data?.sourceType === "gitlab") && (
+											<TabsContent
+												value="preview-deployments"
+												className="w-full"
+											>
+												<div className="flex flex-col gap-4 pt-2.5">
+													<ShowPreviewDeploymentsCompose composeId={composeId} />
+												</div>
+											</TabsContent>
+										)}
 
 									{permissions?.domain.read && (
 										<TabsContent value="domains">
