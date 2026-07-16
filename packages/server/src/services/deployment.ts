@@ -44,6 +44,40 @@ import { findVolumeBackupById } from "./volume-backups";
 
 export type ServicePath = { href: string | null; label: string };
 
+export const getDeploymentErrorMessage = async ({
+	logPath,
+	serverId,
+	fallback,
+	maxLines = 50,
+}: {
+	logPath: string;
+	serverId: string | null;
+	fallback: string;
+	maxLines?: number;
+}): Promise<string> => {
+	try {
+		if (!logPath || logPath === ".") return fallback;
+
+		let content = "";
+		if (serverId) {
+			const { stdout } = await execAsyncRemote(
+				serverId,
+				`tail -n ${maxLines} ${logPath}`,
+			);
+			content = stdout;
+		} else {
+			if (!existsSync(logPath)) return fallback;
+			const fileContent = await fsPromises.readFile(logPath, "utf-8");
+			content = fileContent.trim().split("\n").slice(-maxLines).join("\n");
+		}
+
+		const trimmed = content.trim();
+		return trimmed.length > 0 ? trimmed : fallback;
+	} catch {
+		return fallback;
+	}
+};
+
 export async function resolveServicePath(
 	orgId: string,
 	data: Record<string, unknown>,
@@ -152,6 +186,7 @@ export const createDeployment = async (
 			.insert(deployments)
 			.values({
 				applicationId: deployment.applicationId,
+				serverId: application.serverId,
 				title: deployment.title || "Deployment",
 				status: "running",
 				logPath: logFilePath,
@@ -174,6 +209,7 @@ export const createDeployment = async (
 			.insert(deployments)
 			.values({
 				applicationId: deployment.applicationId,
+				serverId: application.serverId,
 				title: deployment.title || "Deployment",
 				status: "error",
 				logPath: "",
@@ -239,6 +275,7 @@ export const createDeploymentPreview = async (
 				logPath: logFilePath,
 				description: deployment.description || "",
 				previewDeploymentId: deployment.previewDeploymentId,
+				serverId: previewDeployment?.application?.serverId,
 				startedAt: new Date().toISOString(),
 			})
 			.returning();
@@ -254,6 +291,7 @@ export const createDeploymentPreview = async (
 			.insert(deployments)
 			.values({
 				previewDeploymentId: deployment.previewDeploymentId,
+				serverId: previewDeployment?.application?.serverId,
 				title: deployment.title || "Deployment",
 				status: "error",
 				logPath: "",
@@ -312,6 +350,7 @@ echo "Initializing deployment\n" >> ${logFilePath};
 			.insert(deployments)
 			.values({
 				composeId: deployment.composeId,
+				serverId: compose.serverId,
 				title: deployment.title || "Deployment",
 				description: deployment.description || "",
 				status: "running",
@@ -331,6 +370,7 @@ echo "Initializing deployment\n" >> ${logFilePath};
 			.insert(deployments)
 			.values({
 				composeId: deployment.composeId,
+				serverId: compose.serverId,
 				title: deployment.title || "Deployment",
 				status: "error",
 				logPath: "",
@@ -396,6 +436,7 @@ echo "Initializing backup\n" >> ${logFilePath};
 			.insert(deployments)
 			.values({
 				backupId: deployment.backupId,
+				serverId: serverId,
 				title: deployment.title || "Backup",
 				description: deployment.description || "",
 				status: "running",
@@ -415,6 +456,7 @@ echo "Initializing backup\n" >> ${logFilePath};
 			.insert(deployments)
 			.values({
 				backupId: deployment.backupId,
+				serverId: serverId,
 				title: deployment.title || "Backup",
 				status: "error",
 				logPath: "",
@@ -470,6 +512,7 @@ export const createDeploymentSchedule = async (
 			.insert(deployments)
 			.values({
 				scheduleId: deployment.scheduleId,
+				serverId: serverId,
 				title: deployment.title || "Deployment",
 				status: "running",
 				logPath: logFilePath,
@@ -490,6 +533,7 @@ export const createDeploymentSchedule = async (
 			.insert(deployments)
 			.values({
 				scheduleId: deployment.scheduleId,
+				serverId: serverId,
 				title: deployment.title || "Deployment",
 				status: "error",
 				logPath: "",
@@ -555,6 +599,7 @@ export const createDeploymentVolumeBackup = async (
 			.insert(deployments)
 			.values({
 				volumeBackupId: deployment.volumeBackupId,
+				serverId: serverId,
 				title: deployment.title || "Deployment",
 				status: "running",
 				logPath: logFilePath,
@@ -575,6 +620,7 @@ export const createDeploymentVolumeBackup = async (
 			.insert(deployments)
 			.values({
 				volumeBackupId: deployment.volumeBackupId,
+				serverId: serverId,
 				title: deployment.title || "Deployment",
 				status: "error",
 				logPath: "",
