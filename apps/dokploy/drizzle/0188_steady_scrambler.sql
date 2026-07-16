@@ -1,0 +1,1 @@
+ALTER TABLE "server" ADD COLUMN IF NOT EXISTS "default_domain" text;

@@ -72,13 +72,17 @@ export const generateTraefikMeDomain = async (
 		return generateRandomDomain({
 			serverIp,
 			projectName: appName,
+			baseDomain: server.defaultDomain,
 		});
 	}
+
+	const managerBaseDomain = process.env.DEFAULT_DOMAIN || null;
 
 	if (process.env.NODE_ENV === "development") {
 		return generateRandomDomain({
 			serverIp: "",
 			projectName: appName,
+			baseDomain: managerBaseDomain,
 		});
 	}
 	const settings = await getWebServerSettings();
@@ -89,6 +93,7 @@ export const generateTraefikMeDomain = async (
 	return generateRandomDomain({
 		serverIp,
 		projectName: appName,
+		baseDomain: managerBaseDomain,
 	});
 };
 

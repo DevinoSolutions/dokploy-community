@@ -50,6 +50,7 @@ export const server = pgTable("server", {
 	serverStatus: serverStatus("serverStatus").notNull().default("active"),
 	serverType: serverType("serverType").notNull().default("deploy"),
 	command: text("command").notNull().default(""),
+	defaultDomain: text("default_domain"),
 	sshKeyId: text("sshKeyId").references(() => sshKeys.sshKeyId, {
 		onDelete: "set null",
 	}),
@@ -155,6 +156,7 @@ export const apiCreateServer = createSchema
 	.required()
 	.extend({
 		enableDockerCleanup: z.boolean().default(true),
+		defaultDomain: z.string().optional().nullable(),
 	});
 
 export const apiFindOneServer = z.object({
@@ -183,6 +185,7 @@ export const apiUpdateServer = createSchema
 	.extend({
 		command: z.string().optional(),
 		enableDockerCleanup: z.boolean().default(true),
+		defaultDomain: z.string().optional().nullable(),
 	});
 
 export const apiUpdateServerBuildsConcurrency = z.object({
