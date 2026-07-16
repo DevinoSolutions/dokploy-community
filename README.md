@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.2**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.3**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.2 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.3 \
   --with-registry-auth \
   dokploy
 ```
@@ -53,7 +53,8 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 
 ### Preview deployments, supercharged
 
-- **GitLab merge-request previews** via webhook (in addition to GitHub)
+- **Docker Compose preview deployments** — the most-requested unbuilt feature in upstream Dokploy ([#2028](https://github.com/Dokploy/dokploy/issues/2028)): a PR or MR spins up an **isolated copy of your entire compose stack** (own volumes, networks, and per-service preview domains), redeploys on update, and fully tears down on close
+- **GitLab merge-request previews** via webhook (in addition to GitHub) — for both applications and compose stacks
 - **API-triggered previews** — spin up a preview deployment programmatically
 - **Deterministic per-PR domains** using a `${prNumber}` template variable
 - **Custom preview templates** so previews match your production topology
@@ -104,9 +105,11 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
-### New in v0.29.12-community.2
+### New in v0.29.12-community.3
 
-This release rolls up the full port train since `v0.29.12-community.1`: 100+ upstream fixes and features ported 1:1, plus the fork-side security hardening above. Flagship additions this release include native **Cloudflare integration**, **GitLab MR previews**, **AWS ECR** support, **S3 backup encryption at rest**, **per-server default domains**, and **remote-server monitoring stats**. Schema migrations **0176 → 0188** apply automatically on startup.
+**Preview Deployments for Docker Compose** — upstream Dokploy's most-requested unbuilt feature, now live for GitHub PRs and GitLab MRs. Isolated per-PR stack copies with per-service domains, automatic redeploy on update, and full teardown (volumes included) on close. One additive migration (0189) applies automatically on startup.
+
+The previous release, [v0.29.12-community.2](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2), rolled up the full port train: 100+ upstream fixes and features ported 1:1 (native **Cloudflare integration**, **AWS ECR**, **S3 backup encryption at rest**, **per-server default domains**, **remote-server monitoring stats**, and more), plus the fork-side security hardening above.
 
 ## Fresh install
 
@@ -119,7 +122,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.2
+export DOKPLOY_VERSION=v0.29.12-community.3
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -132,7 +135,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.2   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.3   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -146,6 +149,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.11 | 1st release | `v0.29.11-community.1` |
 | v0.29.12 | 1st release | `v0.29.12-community.1` |
 | v0.29.12 | 2nd release | `v0.29.12-community.2` |
+| v0.29.12 | 3rd release | `v0.29.12-community.3` |
 
 ## Contributing
 
