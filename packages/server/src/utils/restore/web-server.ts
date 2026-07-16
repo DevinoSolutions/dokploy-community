@@ -1,10 +1,34 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Destination } from "@dokploy/server/services/destination";
-import { buildRcloneCommand, getRcloneS3Remote } from "../backups/utils";
+import { updateWebServerSettings } from "@dokploy/server/services/web-server-settings";
+import { getPublicIpWithFallback } from "@dokploy/server/wss/utils";
+import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
+import { ExecError } from "../process/ExecError";
 import { execAsync } from "../process/execAsync";
+
+function assertWebServerBackupArchivePath(remoteRelativePath: string): void {
+	const path = remoteRelativePath.trim();
+	if (!path) {
+		throw new Error("Backup file path is empty");
+	}
+	if (path.includes("..")) {
+		throw new Error("Invalid backup path");
+	}
+	if (path.endsWith("/")) {
+		throw new Error(
+			"Backup selection must be a .zip file, not a folder. Open the folder and choose the archive.",
+		);
+	}
+	const lower = path.toLowerCase();
+	if (!lower.endsWith(".zip")) {
+		throw new Error(
+			"Web server backups must be a .zip archive produced by Dokploy.",
+		);
+	}
+}
 
 export const restoreWebServerBackup = async (
 	destination: Destination,
@@ -15,39 +39,64 @@ export const restoreWebServerBackup = async (
 		return;
 	}
 	try {
-		// Get rclone remote (decryption is handled transparently if encryption is enabled)
-		const { remote, envVars } = getRcloneS3Remote(destination);
-		const backupPath = `${remote}/${backupFile}`;
+		assertWebServerBackupArchivePath(backupFile);
+
+		const { flags: rcloneFlags, path: backupPath, envVars } =
+			await getRclonePathAndFlags(destination, backupFile);
 		const { BASE_PATH } = paths();
 
 		// Create a temporary directory outside of BASE_PATH
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-restore-"));
+		const localArchivePath = join(tempDir, backupFile);
 
 		try {
 			emit("Starting restore...");
-			emit(`Backup file: ${backupFile}`);
+			emit(`Backup path: ${backupPath}`);
 			emit(`Temp directory: ${tempDir}`);
 
 			// Create temp directory
 			emit("Creating temporary directory...");
 			await execAsync(`mkdir -p ${tempDir}`);
 
-			// Download backup from S3 (with rclone crypt, decryption happens automatically)
-			emit("Downloading backup from S3...");
-			const downloadCommand = buildRcloneCommand(
-				`rclone copyto "${backupPath}" "${tempDir}/${backupFile}"`,
-				envVars,
+			await mkdir(dirname(localArchivePath), { recursive: true });
+
+			// Download backup from S3
+			emit("Downloading backup from destination...");
+			await execAsync(
+				buildRcloneCommand(
+					`rclone copyto ${rcloneFlags.join(" ")} ${JSON.stringify(backupPath)} ${JSON.stringify(localArchivePath)}`,
+					envVars,
+				),
 			);
-			await execAsync(downloadCommand);
+
+			const archiveStat = await stat(localArchivePath);
+			if (!archiveStat.isFile()) {
+				throw new Error(
+					`Backup path is not a file (directories cannot be restored). Got: ${backupFile}`,
+				);
+			}
 
 			// List files before extraction
 			emit("Listing files before extraction...");
 			const { stdout: beforeFiles } = await execAsync(`ls -la ${tempDir}`);
 			emit(`Files before extraction: ${beforeFiles}`);
 
-			// Extract backup
+			// Extract backup (do not swallow unzip diagnostics or non-zero exits)
 			emit("Extracting backup...");
-			await execAsync(`cd ${tempDir} && unzip ${backupFile} > /dev/null 2>&1`);
+			try {
+				const { stderr: unzipStderr } = await execAsync(
+					`unzip -o ${JSON.stringify(localArchivePath)}`,
+					{ cwd: tempDir },
+				);
+				if (unzipStderr.trim()) {
+					emit(unzipStderr.trim());
+				}
+			} catch (unzipErr) {
+				if (unzipErr instanceof ExecError && unzipErr.stderr?.trim()) {
+					emit(unzipErr.stderr.trim());
+				}
+				throw unzipErr;
+			}
 
 			// Restore filesystem first
 			emit("Restoring filesystem...");
@@ -135,6 +184,20 @@ export const restoreWebServerBackup = async (
 				`docker exec ${postgresContainerId} rm /tmp/database.sql`,
 			);
 
+			// The restored database contains the server IP from the machine the
+			// backup was taken on. Re-detect the current host's public IP so the
+			// dashboard reflects this server instead of the old one.
+			emit("Refreshing server IP...");
+			const serverIp = await getPublicIpWithFallback();
+			if (serverIp) {
+				await updateWebServerSettings({ serverIp });
+				emit(`Server IP updated to: ${serverIp}`);
+			} else {
+				emit(
+					"Warning: could not detect the public IP, the server IP was left unchanged. Update it manually in Web Server settings if needed.",
+				);
+			}
+
 			emit("Restore completed successfully!");
 		} finally {
 			// Cleanup
@@ -145,9 +208,11 @@ export const restoreWebServerBackup = async (
 		console.error(error);
 		emit(
 			`Error: ${
-				error instanceof Error
-					? error.message
-					: "Error restoring web server backup"
+				error instanceof ExecError
+					? error.getDetailedMessage()
+					: error instanceof Error
+						? error.message
+						: "Error restoring web server backup"
 			}`,
 		);
 		throw error;

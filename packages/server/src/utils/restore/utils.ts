@@ -7,7 +7,9 @@ export const getPostgresRestoreCommand = (
 	database: string,
 	databaseUser: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID sh -c "pg_restore -U '${databaseUser}' -d ${database} -O --clean --if-exists"`;
+	const tmpFile = "/tmp/dokploy_restore.dump";
+	const pgArgs = `-U '${databaseUser}' -d ${database} -O`;
+	return `docker exec -i $CONTAINER_ID sh -c "cat > ${tmpFile} && pg_restore ${pgArgs} --clean --if-exists --section=pre-data ${tmpFile} && pg_restore ${pgArgs} --section=data ${tmpFile} && pg_restore ${pgArgs} --section=post-data ${tmpFile}; rm -f ${tmpFile}"`;
 };
 
 export const getMariadbRestoreCommand = (
@@ -81,16 +83,25 @@ const getMongoSpecificCommand = (
 	backupFile: string,
 ): string => {
 	const tempDir = "/tmp/dokploy-restore";
-	const fileName = backupFile.split("/").pop() || "backup.archive.gz";
-	// With rclone crypt, decryption happens automatically when reading from the crypt remote
-	const decompressedName = fileName.replace(".gz", "");
+	const fileName = backupFile
+		.split("/")
+		.filter((segment) => Boolean(segment))
+		.pop();
 	return `
 rm -rf ${tempDir} && \
 mkdir -p ${tempDir} && \
 ${rcloneCommand} ${tempDir} && \
 cd ${tempDir} && \
-gunzip -f "${fileName}" && \
-${restoreCommand} < "${decompressedName}" && \
+ARCHIVE_FILE="${fileName || ""}" && \
+if [ -z "$ARCHIVE_FILE" ] || [ ! -f "$ARCHIVE_FILE" ]; then \
+	ARCHIVE_FILE=$(find . -maxdepth 1 -type f -name "*.gz" | head -n 1); \
+fi && \
+if [ -z "$ARCHIVE_FILE" ] || [ ! -f "$ARCHIVE_FILE" ]; then \
+	echo "Mongo backup archive not found in ${tempDir}" >&2; exit 1; \
+fi && \
+DECOMPRESSED_FILE="\${ARCHIVE_FILE%.gz}" && \
+gunzip -f "$ARCHIVE_FILE" && \
+${restoreCommand} < "$DECOMPRESSED_FILE" && \
 rm -rf ${tempDir}
 	`;
 };
@@ -122,9 +133,7 @@ export const getRestoreCommand = ({
 	const restoreCommand = generateRestoreCommand(type, credentials);
 	let cmd = `CONTAINER_ID=$(${containerSearch})`;
 
-	// With rclone crypt, decryption happens automatically when reading from the crypt remote
 	if (type !== "mongo") {
-		// For non-mongo databases: rclone cat | gunzip | restore
 		cmd += ` && ${rcloneCommand} | ${restoreCommand}`;
 	} else {
 		cmd += ` && ${getMongoSpecificCommand(rcloneCommand, restoreCommand, backupFile || "")}`;

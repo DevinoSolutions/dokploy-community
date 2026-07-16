@@ -2,7 +2,7 @@ import type { apiRestoreBackup } from "@dokploy/server/db/schema";
 import type { Compose } from "@dokploy/server/services/compose";
 import type { Destination } from "@dokploy/server/services/destination";
 import type { z } from "zod";
-import { buildRcloneCommand, getRcloneS3Remote } from "../backups/utils";
+import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { getRestoreCommand } from "./utils";
 
@@ -23,21 +23,16 @@ export const restoreComposeBackup = async (
 		}
 		const { serverId, appName, composeType } = compose;
 
-		// Get rclone remote (decryption is handled transparently if encryption is enabled)
-		const { remote, envVars } = getRcloneS3Remote(destination);
-		const backupPath = `${remote}/${backupInput.backupFile}`;
+		const { flags: rcloneFlags, path: backupPath, envVars } =
+			await getRclonePathAndFlags(destination, backupInput.backupFile);
+		let rcloneCommand = buildRcloneCommand(
+			`rclone cat ${rcloneFlags.join(" ")} "${backupPath}" | gunzip`,
+			envVars,
+		);
 
-		let rcloneCommand: string;
 		if (backupInput.metadata?.mongo) {
-			// Mongo uses rclone copy
 			rcloneCommand = buildRcloneCommand(
-				`rclone copy "${backupPath}"`,
-				envVars,
-			);
-		} else {
-			// With rclone crypt, decryption happens automatically when reading from the crypt remote
-			rcloneCommand = buildRcloneCommand(
-				`rclone cat "${backupPath}" | gunzip`,
+				`rclone copy ${rcloneFlags.join(" ")} "${backupPath}"`,
 				envVars,
 			);
 		}

@@ -2,7 +2,7 @@ import type { apiRestoreBackup } from "@dokploy/server/db/schema";
 import type { Destination } from "@dokploy/server/services/destination";
 import type { Mariadb } from "@dokploy/server/services/mariadb";
 import type { z } from "zod";
-import { buildRcloneCommand, getRcloneS3Remote } from "../backups/utils";
+import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { getRestoreCommand } from "./utils";
 
@@ -15,13 +15,11 @@ export const restoreMariadbBackup = async (
 	try {
 		const { appName, serverId, databaseUser, databasePassword } = mariadb;
 
-		// Get rclone remote (decryption is handled transparently if encryption is enabled)
-		const { remote, envVars } = getRcloneS3Remote(destination);
-		const backupPath = `${remote}/${backupInput.backupFile}`;
+		const { flags: rcloneFlags, path: backupPath, envVars } =
+			await getRclonePathAndFlags(destination, backupInput.backupFile);
 
-		// With rclone crypt, decryption happens automatically when reading from the crypt remote
 		const rcloneCommand = buildRcloneCommand(
-			`rclone cat "${backupPath}" | gunzip`,
+			`rclone cat ${rcloneFlags.join(" ")} "${backupPath}" | gunzip`,
 			envVars,
 		);
 
@@ -35,7 +33,6 @@ export const restoreMariadbBackup = async (
 			type: "mariadb",
 			rcloneCommand,
 			restoreType: "database",
-			backupFile: backupInput.backupFile,
 		});
 
 		emit("Starting restore...");

@@ -48,17 +48,6 @@ describe("redactRcloneCredentials (#4621)", () => {
 		expect(redacted).toContain("[REDACTED]");
 	});
 
-	it("should redact connection-string S3 credentials (getRcloneS3Remote form)", () => {
-		const cmd =
-			'rclone lsjson ":s3,access_key_id="AKIA123",secret_access_key="topsecret",region="us-east-1":bucket"';
-		const redacted = redactRcloneCredentials(cmd);
-		expect(redacted).not.toContain("AKIA123");
-		expect(redacted).not.toContain("topsecret");
-		expect(redacted).toContain('access_key_id="[REDACTED]"');
-		expect(redacted).toContain('secret_access_key="[REDACTED]"');
-		expect(redacted).toContain('region="us-east-1"');
-	});
-
 	it("should redact rclone crypt passwords passed via env vars", () => {
 		const cmd =
 			"RCLONE_CRYPT_PASSWORD='superpass' RCLONE_CRYPT_PASSWORD2='saltpass' rclone lsf remote:";

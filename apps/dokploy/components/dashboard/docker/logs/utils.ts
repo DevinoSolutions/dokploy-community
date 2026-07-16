@@ -72,8 +72,68 @@ export function parseLogs(logString: string): LogLine[] {
 		.filter((log) => log !== null);
 }
 
+const LEVEL_NAME_TO_TYPE: Record<string, LogType> = {
+	trace: "debug",
+	debug: "debug",
+	info: "info",
+	information: "info",
+	notice: "info",
+	warn: "warning",
+	warning: "warning",
+	error: "error",
+	err: "error",
+	fatal: "error",
+	critical: "error",
+	panic: "error",
+	alert: "error",
+	emergency: "error",
+};
+
+const numericLevelToType = (level: number): LogType => {
+	// pino/bunyan scale: 10=trace 20=debug 30=info 40=warn 50=error 60=fatal
+	if (level >= 50) return "error";
+	if (level >= 40) return "warning";
+	if (level >= 30) return "info";
+	if (level >= 10) return "debug";
+	// syslog/GELF scale: 0=emergency ... 7=debug
+	if (level <= 3) return "error";
+	if (level === 4) return "warning";
+	if (level <= 6) return "info";
+	return "debug";
+};
+
+// Extract the log level explicitly declared by structured loggers
+// (pino, bunyan, winston, zap, slog, logfmt, GCP severity)
+const getExplicitLevelType = (message: string): LogType | null => {
+	// JSON string levels: {"level":"error"} / {"severity":"ERROR"} / {"log.level":"warn"}
+	const jsonStringMatch = message.match(
+		/"(?:level|severity|log\.level|loglevel)"\s*:\s*"([a-z]+)"/i,
+	);
+	if (jsonStringMatch?.[1]) {
+		return LEVEL_NAME_TO_TYPE[jsonStringMatch[1].toLowerCase()] ?? null;
+	}
+
+	// JSON numeric levels: {"level":50}
+	const jsonNumericMatch = message.match(/"level"\s*:\s*(\d{1,2})\b/);
+	if (jsonNumericMatch?.[1]) {
+		return numericLevelToType(Number(jsonNumericMatch[1]));
+	}
+
+	// logfmt: level=error
+	const logfmtMatch = message.match(/(?:^|\s)(?:level|severity)=([a-z]+)\b/i);
+	if (logfmtMatch?.[1]) {
+		return LEVEL_NAME_TO_TYPE[logfmtMatch[1].toLowerCase()] ?? null;
+	}
+
+	return null;
+};
+
 // Detect log type based on message content
 export const getLogType = (message: string): LogStyle => {
+	// A level explicitly declared by the logger wins over any inference
+	const explicitType = getExplicitLevelType(message);
+	if (explicitType) return LOG_STYLES[explicitType];
+
 	// Detect HTTP statusCode
 	const statusMatch = message.match(/"statusCode"\s*:\s*"?(\d{3})"?/);
 
@@ -97,9 +157,34 @@ export const getLogType = (message: string): LogStyle => {
 		return LOG_STYLES.info;
 	}
 
+	// Strip "no-error" key/value pairs so success lines that merely contain the
+	// words "error" or "failed" (e.g. ofelia's "failed: false, error: none")
+	// are not misclassified as errors based on the key alone.
+	// Only strip when the no-error value is the COMPLETE value of the pair
+	// (terminated by end-of-line, comma or semicolon) — never when it is merely
+	// the prefix of a longer phrase, otherwise genuine errors like
+	// "failed: no route to host" or "error: none of the nodes responded" would
+	// be wrongly cleared.
+	const noErrorTerminator = "(?=\\s*(?:$|[,;]))";
+	const withoutNoErrorPairs = lowerMessage
+		.replace(
+			new RegExp(
+				`\\berror:?\\s*(?:none|null|nil|false|0|-|""|'')${noErrorTerminator}`,
+				"gi",
+			),
+			"",
+		)
+		.replace(
+			new RegExp(
+				`\\bfail(?:ed|ure)?:?\\s*(?:none|false|no|0)${noErrorTerminator}`,
+				"gi",
+			),
+			"",
+		);
+
 	if (
-		/(?:^|\s)(?:error|err):?\s/i.test(lowerMessage) ||
-		/\b(?:exception|failed|failure)\b/i.test(lowerMessage) ||
+		/(?:^|\s)(?:error|err):?\s/i.test(withoutNoErrorPairs) ||
+		/\b(?:exception|failed|failure)\b/i.test(withoutNoErrorPairs) ||
 		/(?:stack\s?trace):\s*$/i.test(lowerMessage) ||
 		/^\s*at\s+[\w.]+\s*\(?.+:\d+:\d+\)?/.test(lowerMessage) ||
 		/\b(?:uncaught|unhandled)\s+(?:exception|error)\b/i.test(lowerMessage) ||
@@ -107,7 +192,7 @@ export const getLogType = (message: string): LogStyle => {
 		/\b(?:errno|code):\s*(?:\d+|[A-Z_]+)\b/i.test(lowerMessage) ||
 		/\[(?:error|err|fatal)\]/i.test(lowerMessage) ||
 		/\b(?:crash|critical|fatal)\b/i.test(lowerMessage) ||
-		/\b(?:fail(?:ed|ure)?|broken|dead)\b/i.test(lowerMessage)
+		/\b(?:fail(?:ed|ure)?|broken|dead)\b/i.test(withoutNoErrorPairs)
 	) {
 		return LOG_STYLES.error;
 	}

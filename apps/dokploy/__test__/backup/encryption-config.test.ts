@@ -1,17 +1,32 @@
-import { describe, expect, it } from "vitest";
+import type { Destination } from "@dokploy/server/services/destination";
+import { redactRcloneCredentials } from "@dokploy/server/utils/backups/redact";
 import {
 	buildRcloneCommand,
-	getBackupRemotePath,
-	getRcloneS3Remote,
+	getRclonePathAndFlags,
 } from "@dokploy/server/utils/backups/utils";
-import type { Destination } from "@dokploy/server/services/destination";
+import { describe, expect, it, vi } from "vitest";
+
+// obscurePassword shells out to `rclone obscure`; mock it for determinism.
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:child_process")>();
+	return {
+		...actual,
+		execFile: (file: string, args: string[], cb: any) => {
+			if (file === "rclone" && args[0] === "obscure") {
+				cb(null, { stdout: "obscured_pass" });
+			} else {
+				cb(null, { stdout: "" });
+			}
+		},
+	};
+});
 
 const createDestination = (
 	overrides: Partial<Destination> = {},
 ): Destination => ({
 	destinationId: "dest-1",
 	name: "Encrypted bucket",
-	provider: "",
+	provider: "aws",
 	accessKey: "ACCESS_KEY",
 	secretAccessKey: "SECRET_KEY",
 	bucket: "my-bucket",
@@ -28,18 +43,8 @@ const createDestination = (
 	...overrides,
 });
 
-describe("rclone encryption helpers", () => {
-	it("builds a plain S3 remote without encryption", () => {
-		const destination = createDestination();
-
-		const { remote, envVars } = getRcloneS3Remote(destination);
-
-		expect(envVars).toBe("");
-		expect(remote).toContain(":s3,");
-		expect(remote).toContain("my-bucket");
-	});
-
-	it("builds a crypt remote and env vars when encryption is enabled", () => {
+describe("rclone crypt command composition", () => {
+	it("builds a runnable, redactable encrypted upload command", async () => {
 		const destination = createDestination({
 			encryptionEnabled: true,
 			encryptionKey: "primary-pass",
@@ -48,29 +53,44 @@ describe("rclone encryption helpers", () => {
 			directoryNameEncryption: true,
 		});
 
-		const { remote, envVars } = getRcloneS3Remote(destination);
+		const { flags, path, envVars } = await getRclonePathAndFlags(
+			destination,
+			"daily/db.sql.gz",
+		);
 
-		expect(remote.startsWith(":crypt")).toBe(true);
-		expect(remote).toContain('remote=":s3,');
-		expect(remote.endsWith(":")).toBe(true);
-		expect(envVars).toContain("RCLONE_CRYPT_PASSWORD='primary-pass'");
-		expect(envVars).toContain("RCLONE_CRYPT_PASSWORD2='salt-pass'");
+		const command = buildRcloneCommand(
+			`rclone rcat ${flags.join(" ")} "${path}"`,
+			envVars,
+		);
+
+		// Env vars are prepended; the rclone path is a plain :crypt: remote.
+		expect(command.startsWith("RCLONE_CRYPT_REMOTE=':s3:my-bucket'")).toBe(true);
+		expect(command).toContain("RCLONE_CRYPT_FILENAME_ENCRYPTION=standard");
+		expect(command).toContain("RCLONE_CRYPT_DIRECTORY_NAME_ENCRYPTION=true");
+		expect(command).toContain("RCLONE_CRYPT_PASSWORD='obscured_pass'");
+		expect(command).toContain("RCLONE_CRYPT_PASSWORD2='obscured_pass'");
+		expect(command).toContain('":crypt:daily/db.sql.gz"');
+
+		// The crypt passwords and s3 secret must be redacted before logging.
+		const redacted = redactRcloneCredentials(command);
+		expect(redacted).not.toContain("obscured_pass");
+		expect(redacted).not.toContain("SECRET_KEY");
+		expect(redacted).toContain("RCLONE_CRYPT_PASSWORD='[REDACTED]'");
+		expect(redacted).toContain("RCLONE_CRYPT_PASSWORD2='[REDACTED]'");
+		expect(redacted).toContain('--s3-secret-access-key="[REDACTED]"');
 	});
 
-	it("returns the correct remote path for nested prefixes", () => {
+	it("leaves plain (unencrypted) destinations without env vars", async () => {
 		const destination = createDestination();
-		const { remote } = getRcloneS3Remote(destination);
+		const { path, envVars } = await getRclonePathAndFlags(
+			destination,
+			"daily/db.sql.gz",
+		);
 
-		const remotePath = getBackupRemotePath(remote, "daily/db");
-
-		expect(remotePath).toBe(`${remote}/daily/db/`);
-	});
-
-	it("adds encryption env vars to commands only when provided", () => {
-		expect(buildRcloneCommand("rclone lsf remote")).toBe("rclone lsf remote");
-
-		expect(
-			buildRcloneCommand("rclone lsf remote", "RCLONE_CRYPT_PASSWORD='secret'"),
-		).toBe("RCLONE_CRYPT_PASSWORD='secret' rclone lsf remote");
+		expect(envVars).toBe("");
+		expect(path).toBe(":s3:my-bucket/daily/db.sql.gz");
+		expect(buildRcloneCommand(`rclone rcat "${path}"`, envVars)).toBe(
+			`rclone rcat ":s3:my-bucket/daily/db.sql.gz"`,
+		);
 	});
 });

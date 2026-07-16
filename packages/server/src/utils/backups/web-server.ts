@@ -19,7 +19,7 @@ import { redactRcloneCredentials } from "./redact";
 import {
 	buildRcloneCommand,
 	getBackupTimestamp,
-	getRcloneS3Remote,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
 
@@ -50,9 +50,14 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 		const { BASE_PATH } = paths();
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-backup-"));
 		const backupFileName = `webserver-backup-${timestamp}.zip`;
-		// Get rclone remote (encryption is handled transparently if enabled)
-		const { remote, envVars } = getRcloneS3Remote(destination);
-		const s3Path = `${remote}/${backup.appName}/${normalizeS3Path(backup.prefix)}${backupFileName}`;
+		const {
+			flags: rcloneFlags,
+			path: s3Path,
+			envVars,
+		} = await getRclonePathAndFlags(
+			destination,
+			`${normalizeS3Path(backup.prefix)}${backupFileName}`,
+		);
 
 		try {
 			await execAsync(`mkdir -p ${tempDir}/filesystem`);
@@ -120,14 +125,20 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 				// If stat fails, keep undefined
 			}
 
-			// Upload with rclone (encryption is handled transparently by the crypt remote if enabled)
 			const uploadCommand = buildRcloneCommand(
-				`rclone copyto "${zipPath}" "${s3Path}"`,
+				`rclone copyto ${rcloneFlags.join(" ")} "${zipPath}" "${s3Path}"`,
 				envVars,
 			);
-			writeStream.write("Running command to upload backup to S3\n");
+			const destinationType = ["sftp", "ftp"].includes(
+				destination.provider || "",
+			)
+				? destination.provider?.toUpperCase() || "remote"
+				: "S3";
+			writeStream.write(
+				`Running command to upload backup to ${destinationType}\n`,
+			);
 			await execAsync(uploadCommand);
-			writeStream.write("Uploaded backup to S3 ✅\n");
+			writeStream.write(`Uploaded backup to ${destinationType} ✅\n`);
 			writeStream.end();
 			await sendDokployBackupNotifications({
 				type: "success",

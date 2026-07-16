@@ -1,6 +1,7 @@
 import {
 	ADDITIONAL_FLAG_ERROR,
 	ADDITIONAL_FLAG_REGEX,
+	GENERIC_RCLONE_PROVIDER,
 } from "@dokploy/server/db/validations/destination";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import {
@@ -51,34 +52,15 @@ import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import { S3_PROVIDERS } from "./constants";
 
-// Rclone crypt filename encryption options
-const FILENAME_ENCRYPTION_OPTIONS = [
-	{
-		key: "off",
-		name: "Off",
-		description: "Don't encrypt filenames (recommended for easier management)",
-	},
-	{
-		key: "standard",
-		name: "Standard",
-		description: "Encrypt filenames using EME encryption",
-	},
-	{
-		key: "obfuscate",
-		name: "Obfuscate",
-		description: "Simple filename obfuscation (not secure, but hides names)",
-	},
-] as const;
-
 const addDestination = z
 	.object({
 		name: z.string().min(1, "Name is required"),
 		provider: z.string().min(1, "Provider is required"),
-		accessKeyId: z.string().min(1, "Access Key Id is required"),
-		secretAccessKey: z.string().min(1, "Secret Access Key is required"),
+		accessKeyId: z.string(),
+		secretAccessKey: z.string(),
 		bucket: z.string().min(1, "Bucket is required"),
 		region: z.string(),
-		endpoint: z.string().min(1, "Endpoint is required"),
+		endpoint: z.string(),
 		serverId: z.string().optional(),
 		additionalFlags: z
 			.array(
@@ -97,20 +79,62 @@ const addDestination = z
 		filenameEncryption: z.enum(["standard", "obfuscate", "off"]).optional(),
 		directoryNameEncryption: z.boolean().optional(),
 	})
-	.refine(
-		(data) => {
-			if (data.encryptionEnabled) {
-				return !!data.encryptionKey;
-			}
-			return true;
-		},
-		{
-			message: "Encryption key is required when encryption is enabled",
-			path: ["encryptionKey"],
-		},
-	);
+	.superRefine((data, ctx) => {
+		const isGenericRclone = data.provider === GENERIC_RCLONE_PROVIDER;
+
+		if (data.encryptionEnabled && !data.encryptionKey?.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["encryptionKey"],
+				message: "Encryption key is required when encryption is enabled",
+			});
+		}
+
+		if (!isGenericRclone && !data.accessKeyId.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["accessKeyId"],
+				message: "Access Key Id is required",
+			});
+		}
+
+		if (!isGenericRclone && !data.secretAccessKey.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["secretAccessKey"],
+				message: "Secret Access Key is required",
+			});
+		}
+
+		if (!isGenericRclone && !data.endpoint.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["endpoint"],
+				message: "Endpoint is required",
+			});
+		}
+	});
 
 type AddDestination = z.infer<typeof addDestination>;
+
+// Rclone crypt filename encryption options
+const FILENAME_ENCRYPTION_OPTIONS = [
+	{
+		key: "off",
+		name: "Off",
+		description: "Don't encrypt filenames (recommended for easier management)",
+	},
+	{
+		key: "standard",
+		name: "Standard",
+		description: "Encrypt filenames using EME encryption",
+	},
+	{
+		key: "obfuscate",
+		name: "Obfuscate",
+		description: "Simple filename obfuscation (not secure, but hides names)",
+	},
+] as const;
 
 const generateEncryptionKey = (): string => {
 	const array = new Uint8Array(32);
@@ -168,14 +192,17 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 		},
 		resolver: zodResolver(addDestination),
 	});
+	const selectedProvider = form.watch("provider");
+	const encryptionEnabled = form.watch("encryptionEnabled");
+	const filenameEncryption = form.watch("filenameEncryption");
 
 	const { fields, append, remove } = useFieldArray({
 		control: form.control,
 		name: "additionalFlags",
 	});
 
-	const encryptionEnabled = form.watch("encryptionEnabled");
-	const filenameEncryption = form.watch("filenameEncryption");
+	const currentProvider = form.watch("provider");
+	const isSftpOrFtp = ["sftp", "ftp"].includes(currentProvider || "");
 
 	useEffect(() => {
 		if (destination) {
@@ -274,7 +301,12 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 		const endpoint = form.getValues("endpoint");
 		const region = form.getValues("region");
 
-		const connectionString = `:s3,provider=${provider},access_key_id=${accessKey},secret_access_key=${secretKey},endpoint=${endpoint}${region ? `,region=${region}` : ""}:${bucket}`;
+		const connectionString =
+			provider === GENERIC_RCLONE_PROVIDER
+				? bucket
+				: isSftpOrFtp
+					? `:${provider},host=${endpoint},port=${region || (provider === "sftp" ? "22" : "21")},user=${accessKey},pass=XXX:${bucket}`
+					: `:s3,provider=${provider},access_key_id=${accessKey},secret_access_key=${secretKey},endpoint=${endpoint}${region ? `,region=${region}` : ""}:${bucket}`;
 
 		await testConnection({
 			provider,
@@ -369,7 +401,7 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 											>
 												<FormControl>
 													<SelectTrigger>
-														<SelectValue placeholder="Select a S3 Provider" />
+														<SelectValue placeholder="Select a Provider" />
 													</SelectTrigger>
 												</FormControl>
 												<SelectContent>
@@ -385,6 +417,13 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 											</Select>
 										</FormControl>
 										<FormMessage />
+										{selectedProvider === GENERIC_RCLONE_PROVIDER && (
+											<p className="text-xs text-muted-foreground">
+												Use a preconfigured rclone remote such as{" "}
+												<code>gdrive:backups</code> or <code>ftp:archives</code>
+												. Leave S3 credentials blank for this mode.
+											</p>
+										)}
 									</FormItem>
 								);
 							}}
@@ -396,9 +435,18 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							render={({ field }) => {
 								return (
 									<FormItem>
-										<FormLabel>Access Key Id</FormLabel>
+										<FormLabel>
+											{isSftpOrFtp
+												? "Username"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Access Key Id (optional)"
+													: "Access Key Id"}
+										</FormLabel>
 										<FormControl>
-											<Input placeholder={"xcas41dasde"} {...field} />
+											<Input
+												placeholder={isSftpOrFtp ? "username" : "Access Key ID"}
+												{...field}
+											/>
 										</FormControl>
 										<FormMessage />
 									</FormItem>
@@ -411,10 +459,22 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							render={({ field }) => (
 								<FormItem>
 									<div className="space-y-0.5">
-										<FormLabel>Secret Access Key</FormLabel>
+										<FormLabel>
+											{isSftpOrFtp
+												? "Password"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Secret Access Key (optional)"
+													: "Secret Access Key"}
+										</FormLabel>
 									</div>
 									<FormControl>
-										<Input placeholder={"asd123asdasw"} {...field} />
+										<Input
+											type={isSftpOrFtp ? "password" : "text"}
+											placeholder={
+												isSftpOrFtp ? "password" : "Secret Access Key"
+											}
+											{...field}
+										/>
 									</FormControl>
 									<FormMessage />
 								</FormItem>
@@ -426,10 +486,25 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							render={({ field }) => (
 								<FormItem>
 									<div className="space-y-0.5">
-										<FormLabel>Bucket</FormLabel>
+										<FormLabel>
+											{isSftpOrFtp
+												? "Path / Directory"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Remote path"
+													: "Bucket"}
+										</FormLabel>
 									</div>
 									<FormControl>
-										<Input placeholder={"dokploy-bucket"} {...field} />
+										<Input
+											placeholder={
+												isSftpOrFtp
+													? "/backups/dokploy"
+													: selectedProvider === GENERIC_RCLONE_PROVIDER
+														? "gdrive:backups"
+														: "dokploy-bucket"
+											}
+											{...field}
+										/>
 									</FormControl>
 									<FormMessage />
 								</FormItem>
@@ -441,10 +516,19 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							render={({ field }) => (
 								<FormItem>
 									<div className="space-y-0.5">
-										<FormLabel>Region</FormLabel>
+										<FormLabel>{isSftpOrFtp ? "Port" : "Region"}</FormLabel>
 									</div>
 									<FormControl>
-										<Input placeholder={"us-east-1"} {...field} />
+										<Input
+											placeholder={
+												isSftpOrFtp
+													? currentProvider === "sftp"
+														? "22"
+														: "21"
+													: "us-east-1"
+											}
+											{...field}
+										/>
 									</FormControl>
 									<FormMessage />
 								</FormItem>
@@ -455,10 +539,20 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							name="endpoint"
 							render={({ field }) => (
 								<FormItem>
-									<FormLabel>Endpoint</FormLabel>
+									<FormLabel>
+										{isSftpOrFtp
+											? "Host"
+											: selectedProvider === GENERIC_RCLONE_PROVIDER
+												? "Endpoint (optional)"
+												: "Endpoint"}
+									</FormLabel>
 									<FormControl>
 										<Input
-											placeholder={"https://us.bucket.aws/s3"}
+											placeholder={
+												isSftpOrFtp
+													? "sftp.example.com"
+													: "https://us.bucket.aws/s3"
+											}
 											{...field}
 										/>
 									</FormControl>
@@ -538,7 +632,8 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 											<FormLabel>Enable Encryption</FormLabel>
 											<FormDescription>
 												Encrypt backups using NaCl SecretBox (XSalsa20 +
-												Poly1305)
+												Poly1305). Supported for S3 and generic rclone
+												destinations.
 											</FormDescription>
 										</div>
 										<FormControl>

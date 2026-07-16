@@ -33,8 +33,7 @@ import { checkServicePermissionAndAccess } from "@dokploy/server/services/permis
 import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
 import {
 	buildRcloneCommand,
-	getBackupRemotePath,
-	getRcloneS3Remote,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "@dokploy/server/utils/backups/utils";
 import {
@@ -498,9 +497,6 @@ export const backupRouter = createTRPCRouter({
 						});
 					}
 				}
-				// Get rclone remote (encryption is handled transparently if enabled)
-				const { remote, envVars } = getRcloneS3Remote(destination);
-
 				const lastSlashIndex = input.search.lastIndexOf("/");
 				const baseDir =
 					lastSlashIndex !== -1
@@ -511,9 +507,15 @@ export const backupRouter = createTRPCRouter({
 						? input.search.slice(lastSlashIndex + 1)
 						: input.search;
 
-				const searchPath = getBackupRemotePath(remote, baseDir);
+				// Encryption-aware: when the destination has rclone crypt enabled the
+				// listing runs through the crypt remote so filenames come back decrypted.
+				const {
+					flags: rcloneFlags,
+					path: searchPath,
+					envVars,
+				} = await getRclonePathAndFlags(destination, baseDir);
 				const listCommand = buildRcloneCommand(
-					`rclone lsjson "${searchPath}" --no-mimetype --no-modtime 2>/dev/null`,
+					`rclone lsjson ${rcloneFlags.join(" ")} "${searchPath}" --no-mimetype --no-modtime 2>/dev/null`,
 					envVars,
 				);
 
