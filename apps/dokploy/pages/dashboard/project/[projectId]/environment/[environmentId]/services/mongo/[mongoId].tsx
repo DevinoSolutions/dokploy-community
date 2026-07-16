@@ -319,6 +319,7 @@ const Mongo = (
 												<ShowDatabaseAdvancedSettings
 													id={mongoId}
 													type="mongo"
+													serverId={data?.serverId}
 												/>
 												<ResourceNetworksCard
 													resourceType="mongo"

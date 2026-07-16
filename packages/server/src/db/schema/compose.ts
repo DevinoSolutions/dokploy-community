@@ -279,3 +279,9 @@ export const apiRandomizeCompose = createSchema
 		suffix: z.string().optional(),
 		composeId: z.string().min(1),
 	});
+
+// Schema for transferring compose to another server
+export const apiTransferCompose = z.object({
+	composeId: z.string().min(1),
+	targetServerId: z.string().trim().nullable(),
+});

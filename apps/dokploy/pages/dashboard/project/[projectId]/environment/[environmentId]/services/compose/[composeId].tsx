@@ -27,12 +27,13 @@ import { ShowComposeContainers } from "@/components/dashboard/compose/containers
 import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ShowGeneralCompose } from "@/components/dashboard/compose/general/show";
 import { ShowDockerLogsCompose } from "@/components/dashboard/compose/logs/show";
-import { ShowPreviewDeploymentsCompose } from "@/components/dashboard/compose/preview-deployments/show-preview-deployments";
 import { ShowDockerLogsStack } from "@/components/dashboard/compose/logs/show-stack";
+import { ShowPreviewDeploymentsCompose } from "@/components/dashboard/compose/preview-deployments/show-preview-deployments";
 import { UpdateCompose } from "@/components/dashboard/compose/update-compose";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
 import { ComposeFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-compose-monitoring";
 import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-compose-monitoring";
+import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -422,7 +423,9 @@ const Service = (
 												className="w-full"
 											>
 												<div className="flex flex-col gap-4 pt-2.5">
-													<ShowPreviewDeploymentsCompose composeId={composeId} />
+													<ShowPreviewDeploymentsCompose
+														composeId={composeId}
+													/>
 												</div>
 											</TabsContent>
 										)}
@@ -448,6 +451,11 @@ const Service = (
 												<ShowVolumes id={composeId} type="compose" />
 												<ShowImport composeId={composeId} />
 												<IsolatedDeploymentTab composeId={composeId} />
+												<TransferService
+													id={composeId}
+													type="compose"
+													currentServerId={data?.serverId}
+												/>
 												<PullImagesCompose composeId={composeId} />
 											</div>
 										</TabsContent>

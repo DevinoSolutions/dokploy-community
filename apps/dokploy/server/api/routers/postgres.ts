@@ -6,6 +6,7 @@ import {
 	deployPostgres,
 	execAsync,
 	execAsyncRemote,
+	executeTransfer,
 	findBackupsByDbId,
 	findEnvironmentById,
 	findPostgresById,
@@ -19,6 +20,7 @@ import {
 	rebuildDatabase,
 	removePostgresById,
 	removeService,
+	scanServiceForTransfer,
 	startService,
 	startServiceRemote,
 	stopService,
@@ -33,6 +35,7 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
+import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
@@ -46,6 +49,7 @@ import {
 	apiResetPostgres,
 	apiSaveEnvironmentVariablesPostgres,
 	apiSaveExternalPortPostgres,
+	apiTransferPostgres,
 	apiUpdatePostgres,
 	DATABASE_PASSWORD_MESSAGE,
 	DATABASE_PASSWORD_REGEX,
@@ -54,6 +58,12 @@ import {
 	projects,
 } from "@/server/db/schema";
 import { cancelJobs } from "@/server/utils/backup";
+import {
+	runTransferWithDowntime,
+	startSourceDockerService,
+	stopSourceDockerService,
+	validateTransferTargetServer,
+} from "@/server/utils/transfer";
 
 export const postgresRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -663,5 +673,181 @@ export const postgresRouter = createTRPCRouter({
 				input.search,
 				postgres.serverId,
 			);
+		}),
+
+	// Scan postgres for transfer — pre-flight check
+	transferScan: protectedProcedure
+		.input(apiTransferPostgres)
+		.mutation(async ({ input, ctx }) => {
+			const postgres = await findPostgresById(input.postgresId);
+
+			if (
+				postgres.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to transfer this Postgres",
+				});
+			}
+
+			await checkServiceAccess(ctx, input.postgresId, "delete");
+
+			const targetServerId = await validateTransferTargetServer({
+				targetServerId: input.targetServerId,
+				sourceServerId: postgres.serverId,
+				organizationId: ctx.session.activeOrganizationId,
+			});
+
+			return scanServiceForTransfer({
+				serviceId: input.postgresId,
+				serviceType: "postgres",
+				appName: postgres.appName,
+				sourceServerId: postgres.serverId,
+				targetServerId,
+			});
+		}),
+
+	// Transfer postgres to a different server (node)
+	transfer: protectedProcedure
+		.input(
+			apiTransferPostgres.extend({
+				decisions: z
+					.record(z.string(), z.enum(["skip", "overwrite"]))
+					.optional(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			const postgres = await findPostgresById(input.postgresId);
+
+			if (
+				postgres.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to transfer this Postgres",
+				});
+			}
+
+			await checkServiceAccess(ctx, input.postgresId, "delete");
+
+			const targetServerId = await validateTransferTargetServer({
+				targetServerId: input.targetServerId,
+				sourceServerId: postgres.serverId,
+				organizationId: ctx.session.activeOrganizationId,
+			});
+
+			const result = await runTransferWithDowntime({
+				stopSource: async () => {
+					await stopSourceDockerService(postgres.serverId, postgres.appName);
+				},
+				startSource: async () => {
+					await startSourceDockerService(postgres.serverId, postgres.appName);
+				},
+				executeTransfer: async () =>
+					executeTransfer(
+						{
+							serviceId: input.postgresId,
+							serviceType: "postgres",
+							appName: postgres.appName,
+							sourceServerId: postgres.serverId,
+							targetServerId,
+						},
+						input.decisions || {},
+						(_progress) => {},
+					),
+				commitTransfer: async () => {
+					await db
+						.update(postgresTable)
+						.set({ serverId: targetServerId })
+						.where(eq(postgresTable.postgresId, input.postgresId));
+				},
+			});
+
+			if (!result.success) {
+				throw new TRPCError({
+					code: "INTERNAL_SERVER_ERROR",
+					message: `Transfer failed: ${result.errors.join(", ")}`,
+				});
+			}
+
+			return { success: true };
+		}),
+
+	transferWithLogs: protectedProcedure
+		.input(
+			apiTransferPostgres.extend({
+				decisions: z
+					.record(z.string(), z.enum(["skip", "overwrite"]))
+					.optional(),
+			}),
+		)
+		.subscription(async ({ input, ctx }) => {
+			const postgres = await findPostgresById(input.postgresId);
+
+			if (
+				postgres.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to transfer this Postgres",
+				});
+			}
+
+			await checkServiceAccess(ctx, input.postgresId, "delete");
+
+			const targetServerId = await validateTransferTargetServer({
+				targetServerId: input.targetServerId,
+				sourceServerId: postgres.serverId,
+				organizationId: ctx.session.activeOrganizationId,
+			});
+
+			return observable<string>((emit) => {
+				runTransferWithDowntime({
+					stopSource: async () => {
+						await stopSourceDockerService(postgres.serverId, postgres.appName);
+					},
+					startSource: async () => {
+						await startSourceDockerService(postgres.serverId, postgres.appName);
+					},
+					executeTransfer: async () =>
+						executeTransfer(
+							{
+								serviceId: input.postgresId,
+								serviceType: "postgres",
+								appName: postgres.appName,
+								sourceServerId: postgres.serverId,
+								targetServerId,
+							},
+							input.decisions || {},
+							(progress) => {
+								emit.next(JSON.stringify(progress));
+							},
+						),
+					commitTransfer: async () => {
+						await db
+							.update(postgresTable)
+							.set({ serverId: targetServerId })
+							.where(eq(postgresTable.postgresId, input.postgresId));
+					},
+				})
+					.then((result) => {
+						if (result.success) {
+							emit.next("Transfer completed successfully!");
+						} else {
+							const errorMessage = result.errors.join(", ") || "Unknown error";
+							emit.next(`Transfer failed: ${errorMessage}`);
+						}
+						emit.complete();
+					})
+					.catch((error) => {
+						const message =
+							error instanceof Error ? error.message : "Unknown transfer error";
+						emit.next(`Transfer failed: ${message}`);
+						emit.complete();
+					});
+			});
 		}),
 });

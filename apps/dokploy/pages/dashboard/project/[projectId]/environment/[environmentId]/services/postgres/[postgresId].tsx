@@ -304,6 +304,7 @@ const Postgresql = (
 												<ShowDatabaseAdvancedSettings
 													id={postgresId}
 													type="postgres"
+													serverId={data?.serverId}
 												/>
 												<ResourceNetworksCard
 													resourceType="postgres"
