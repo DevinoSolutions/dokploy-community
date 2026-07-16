@@ -396,6 +396,53 @@ export const checkGitlabMemberPermissions = async (
 	};
 };
 
+/**
+ * Authorize by the MR author's numeric GitLab user id (from
+ * `object_attributes.author_id`). Prefer this over the username-based check when
+ * handling Merge Request webhooks: `body.user` is the event *actor* (the member
+ * who labeled/updated/reopened the MR), not the MR author, so a username-based
+ * check can be bypassed by having any privileged member interact with an
+ * untrusted MR. The author id identifies whose code would actually be deployed.
+ */
+export const checkGitlabMemberPermissionsByUserId = async (
+	gitlabId: string,
+	projectId: number,
+	userId: number,
+): Promise<{
+	hasWriteAccess: boolean;
+	accessLevel: number | null;
+	username?: string | null;
+}> => {
+	await refreshGitlabToken(gitlabId);
+	const gitlabProvider = await findGitlabById(gitlabId);
+	const baseUrl = (
+		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
+	).replace(/\/+$/, "");
+
+	const memberResponse = await fetch(
+		`${baseUrl}/api/v4/projects/${projectId}/members/all/${userId}`,
+		{ headers: { Authorization: `Bearer ${gitlabProvider.accessToken}` } },
+	);
+
+	if (memberResponse.status === 404) {
+		return { hasWriteAccess: false, accessLevel: null, username: null };
+	}
+
+	if (!memberResponse.ok) {
+		throw new Error(
+			`Failed to fetch project member: ${memberResponse.statusText}`,
+		);
+	}
+
+	const member = await memberResponse.json();
+	// Developer (30) is the minimum access level for write access
+	return {
+		hasWriteAccess: member.access_level >= 30,
+		accessLevel: member.access_level,
+		username: (member.username as string | undefined) ?? null,
+	};
+};
+
 export const mrNoteExists = async (
 	gitlabId: string,
 	projectId: number,
@@ -535,7 +582,7 @@ export const createSecurityBlockedMRNote = async (
 	const body = [
 		`### ${SECURITY_SENTINEL}`,
 		"",
-		`**@${mrAuthor}** does not have the required access to trigger preview deployments on **${repositoryName}**.`,
+		`**${mrAuthor}** does not have the required access to trigger preview deployments on **${repositoryName}**.`,
 		"",
 		`Access level: \`${accessLevelLabel}\``,
 		"",

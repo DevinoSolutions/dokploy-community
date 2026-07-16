@@ -37,7 +37,7 @@ vi.mock("@dokploy/server/utils/providers/gitlab", async (importOriginal) => {
 	return {
 		...mod,
 		refreshGitlabToken: vi.fn().mockResolvedValue(undefined),
-		checkGitlabMemberPermissions: vi.fn(),
+		checkGitlabMemberPermissionsByUserId: vi.fn(),
 		createSecurityBlockedMRNote: vi.fn().mockResolvedValue(undefined),
 	};
 });
@@ -57,7 +57,7 @@ import {
 	removePreviewDeployment,
 } from "@dokploy/server/services/preview-deployment";
 import {
-	checkGitlabMemberPermissions,
+	checkGitlabMemberPermissionsByUserId,
 	createSecurityBlockedMRNote,
 } from "@dokploy/server/utils/providers/gitlab";
 import handler from "@/pages/api/deploy/gitlab";
@@ -94,7 +94,8 @@ const makeMrPayload = (
 	overrides: Record<string, unknown> = {},
 ) => ({
 	object_kind: "merge_request",
-	user: { username: "mrauthor" },
+	// body.user is the event ACTOR (labeler/pusher), NOT the MR author.
+	user: { username: "event-actor" },
 	project: {
 		id: 99,
 		name: "myrepo",
@@ -104,6 +105,7 @@ const makeMrPayload = (
 		id: 12345,
 		iid: 42,
 		action,
+		author_id: 555,
 		source_branch: "feature-branch",
 		target_branch: "main",
 		title: "My MR Title",
@@ -273,12 +275,11 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 	});
 	afterEach(() => vi.clearAllMocks());
 
-	it("returns 400 when mrAuthor is missing from the payload", async () => {
-		const payloadWithoutAuthor = {
-			...makeMrPayload("open"),
-			user: null,
-		};
-		const req = makeReq("Merge Request Hook", payloadWithoutAuthor);
+	it("returns 400 when the MR author id is missing from the payload", async () => {
+		const req = makeReq(
+			"Merge Request Hook",
+			makeMrPayload("open", { author_id: undefined }),
+		);
 		const res = makeRes();
 
 		await handler(req, res);
@@ -286,8 +287,33 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 		expect(res.status).toHaveBeenCalledWith(400);
 	});
 
+	it("authorizes the MR author (object_attributes.author_id), not the event actor", async () => {
+		// Regression for the actor-vs-author auth bypass: an untrusted MR can be
+		// labeled/updated by a privileged member, making body.user privileged. The
+		// permission check must run against the author_id, never the actor.
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
+			hasWriteAccess: true,
+			accessLevel: 30,
+			username: "authoruser",
+		});
+
+		const payload = makeMrPayload("labeled", { author_id: 555 });
+		// Actor is a privileged maintainer; must NOT influence authorization.
+		(payload as { user: unknown }).user = { username: "privileged-labeler" };
+		const req = makeReq("Merge Request Hook", payload);
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(checkGitlabMemberPermissionsByUserId).toHaveBeenCalledWith(
+			"gitlab-id-1",
+			99,
+			555,
+		);
+	});
+
 	it("blocks deploy and posts security note when user lacks write access", async () => {
-		vi.mocked(checkGitlabMemberPermissions).mockResolvedValue({
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
 			hasWriteAccess: false,
 			accessLevel: 20,
 		});
@@ -297,13 +323,13 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 
 		await handler(req, res);
 
-		expect(checkGitlabMemberPermissions).toHaveBeenCalled();
+		expect(checkGitlabMemberPermissionsByUserId).toHaveBeenCalled();
 		expect(createSecurityBlockedMRNote).toHaveBeenCalled();
 		expect(myQueue.add).not.toHaveBeenCalled();
 	});
 
 	it("enqueues job with applicationType='application-preview' when user has write access", async () => {
-		vi.mocked(checkGitlabMemberPermissions).mockResolvedValue({
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
 			hasWriteAccess: true,
 			accessLevel: 30,
 		});
@@ -321,7 +347,7 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 	});
 
 	it("skips app when required label is not present on the MR", async () => {
-		vi.mocked(checkGitlabMemberPermissions).mockResolvedValue({
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
 			hasWriteAccess: true,
 			accessLevel: 40,
 		});
@@ -340,7 +366,7 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 	});
 
 	it("does not exceed preview limit — skips app when deployments are at limit", async () => {
-		vi.mocked(checkGitlabMemberPermissions).mockResolvedValue({
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
 			hasWriteAccess: true,
 			accessLevel: 30,
 		});
@@ -369,7 +395,7 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 	it("blocks all apps and posts one security note when MR author lacks permissions", async () => {
 		// Permission check is hoisted — one call covers all apps for the same MR author.
 		// If access is denied, every app in the list is blocked (access is per-author, not per-app).
-		vi.mocked(checkGitlabMemberPermissions).mockResolvedValue({
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
 			hasWriteAccess: false,
 			accessLevel: 20,
 		});
@@ -386,7 +412,7 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 		await handler(req, res);
 
 		// Permission checked exactly once (hoisted before the app loop)
-		expect(checkGitlabMemberPermissions).toHaveBeenCalledTimes(1);
+		expect(checkGitlabMemberPermissionsByUserId).toHaveBeenCalledTimes(1);
 		// Security note posted once, reporting the blocked access level
 		expect(createSecurityBlockedMRNote).toHaveBeenCalledTimes(1);
 		// Both apps blocked — no jobs queued

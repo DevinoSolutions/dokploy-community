@@ -13,6 +13,7 @@ vi.mock("@dokploy/server/services/gitlab", async (importOriginal) => {
 import { findGitlabById } from "@dokploy/server/services/gitlab";
 import {
 	checkGitlabMemberPermissions,
+	checkGitlabMemberPermissionsByUserId,
 	hasExistingSecurityMRNote,
 	mrNoteExists,
 } from "@dokploy/server/utils/providers/gitlab";
@@ -193,6 +194,88 @@ describe("checkGitlabMemberPermissions", () => {
 		await expect(
 			checkGitlabMemberPermissions(FAKE_GITLAB_ID, 123, "someuser"),
 		).rejects.toThrow();
+	});
+});
+
+describe("checkGitlabMemberPermissionsByUserId", () => {
+	beforeEach(() => {
+		vi.mocked(findGitlabById).mockResolvedValue(FAKE_PROVIDER as any);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("authorizes by numeric user id with a single members lookup (no username resolution)", async () => {
+		const fetchMock = vi.fn().mockResolvedValueOnce({
+			ok: true,
+			status: 200,
+			json: async () => ({ id: 555, username: "authoruser", access_level: 30 }),
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await checkGitlabMemberPermissionsByUserId(
+			FAKE_GITLAB_ID,
+			123,
+			555,
+		);
+
+		expect(result).toEqual({
+			hasWriteAccess: true,
+			accessLevel: 30,
+			username: "authoruser",
+		});
+		// Exactly one call — the members lookup — no /users?username= resolution step.
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0]?.[0]).toContain(
+			"/api/v4/projects/123/members/all/555",
+		);
+	});
+
+	it("returns no access with null username when the author is not a project member (404)", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValueOnce({
+				ok: false,
+				status: 404,
+				statusText: "Not Found",
+			}),
+		);
+
+		const result = await checkGitlabMemberPermissionsByUserId(
+			FAKE_GITLAB_ID,
+			123,
+			999,
+		);
+
+		expect(result).toEqual({
+			hasWriteAccess: false,
+			accessLevel: null,
+			username: null,
+		});
+	});
+
+	it("returns hasWriteAccess=false for a Reporter (20) member", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				json: async () => ({ id: 6, username: "reporter", access_level: 20 }),
+			}),
+		);
+
+		const result = await checkGitlabMemberPermissionsByUserId(
+			FAKE_GITLAB_ID,
+			123,
+			6,
+		);
+
+		expect(result).toEqual({
+			hasWriteAccess: false,
+			accessLevel: 20,
+			username: "reporter",
+		});
 	});
 });
 

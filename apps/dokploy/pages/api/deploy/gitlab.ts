@@ -1,5 +1,5 @@
 import {
-	checkGitlabMemberPermissions,
+	checkGitlabMemberPermissionsByUserId,
 	createPreviewDeployment,
 	createSecurityBlockedMRNote,
 	findGitlabByWebhookSecret,
@@ -251,8 +251,8 @@ export default async function handler(
 		const projectId = body?.project?.id as number;
 		const pathNamespace = body?.project?.path_with_namespace as string;
 
-		// Teardown BEFORE the mrAuthor null-guard: close/merge must clean up
-		// even if the payload is missing user information.
+		// Teardown BEFORE the author-id null-guard: close/merge must clean up
+		// even if the payload is missing author information.
 		if (action === "close" || action === "merge") {
 			const previewDeployments =
 				await findPreviewDeploymentsByPullRequestId(mrId);
@@ -268,11 +268,14 @@ export default async function handler(
 			return;
 		}
 
-		const mrAuthor = body?.user?.username as string | undefined;
+		// Authorize the MR AUTHOR (whose code is deployed), never body.user — that
+		// is the event actor (labeler/pusher) and using it lets any privileged
+		// member's interaction unblock an untrusted MR. author_id is authoritative.
+		const authorId = body?.object_attributes?.author_id as number | undefined;
 
-		if (!mrAuthor) {
+		if (!authorId) {
 			console.warn(
-				"⚠️ SECURITY: MR author information missing in webhook payload",
+				"⚠️ SECURITY: MR author id (object_attributes.author_id) missing in webhook payload",
 			);
 			res.status(400).json({ message: "MR author information missing" });
 			return;
@@ -309,22 +312,29 @@ export default async function handler(
 				(app) => app.previewRequireCollaboratorPermissions !== false,
 			);
 			let permissionResult: Awaited<
-				ReturnType<typeof checkGitlabMemberPermissions>
+				ReturnType<typeof checkGitlabMemberPermissionsByUserId>
 			> | null = null;
 			let permissionError: unknown = null;
 
 			if (requiresPermissionCheck) {
 				try {
-					permissionResult = await checkGitlabMemberPermissions(
+					permissionResult = await checkGitlabMemberPermissionsByUserId(
 						gitlabProvider.gitlabId,
 						projectId,
-						mrAuthor,
+						authorId,
 					);
 				} catch (error) {
 					permissionError = error;
 					console.error("Error validating MR author permissions:", error);
 				}
 			}
+
+			// Human-readable author reference for the security note/log. The webhook
+			// payload carries only author_id; the members lookup returns the username
+			// when the author is a project member (the common "below Developer" block).
+			const authorDisplay = permissionResult?.username
+				? `@${permissionResult.username}`
+				: `the merge request author (id ${authorId})`;
 
 			const secureApps: typeof apps = [];
 			let blockedAccessLevel: number | null = null;
@@ -338,7 +348,7 @@ export default async function handler(
 					const { hasWriteAccess, accessLevel } = permissionResult!;
 					if (!hasWriteAccess) {
 						console.warn(
-							`🚨 SECURITY: Blocked preview deployment for ${app.name} from ${mrAuthor}. Access level: ${accessLevel}`,
+							`🚨 SECURITY: Blocked preview deployment for ${app.name} from ${authorDisplay}. Access level: ${accessLevel}`,
 						);
 						if (!blocked) {
 							blockedAccessLevel = accessLevel;
@@ -356,7 +366,7 @@ export default async function handler(
 						gitlabProvider.gitlabId,
 						projectId,
 						mrIid,
-						mrAuthor,
+						authorDisplay,
 						pathNamespace,
 						blockedAccessLevel,
 					);
