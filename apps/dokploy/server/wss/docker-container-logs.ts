@@ -166,9 +166,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 					rows: 30,
 				});
 
-				const attachCommand = `docker attach ${containerId}`;
-
-				const attachPty = spawn(shell, ["-c", attachCommand], {
+				const attachPty = spawn("docker", ["attach", containerId], {
 					name: "xterm-256color",
 					cwd: process.env.HOME,
 					env: process.env,
@@ -183,6 +181,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 				ws.on("close", () => {
 					clearInterval(pingInterval);
 					ptyProcess.kill();
+					attachPty.kill();
 				});
 				ws.on("message", (message) => {
 					try {
