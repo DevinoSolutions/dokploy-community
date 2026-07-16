@@ -12,8 +12,7 @@ import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
 	getBackupCommand,
 	getBackupTimestamp,
-	getRcloneCredentials,
-	getRcloneDestination,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
 
@@ -35,8 +34,8 @@ export const runLibsqlBackup = async (
 	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
 	const bucketDestination = `${appName}/${normalizeS3Path(prefix)}${backupFileName}`;
 	try {
-		const rcloneFlags = getRcloneCredentials(destination);
-		const rcloneDestination = `${getRcloneDestination(destination)}/${bucketDestination}`;
+		const { flags: rcloneFlags, path: rcloneDestination } =
+			await getRclonePathAndFlags(destination, bucketDestination);
 
 		const rcloneCommand = `rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
 

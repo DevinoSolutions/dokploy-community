@@ -12,8 +12,7 @@ import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
 	getBackupCommand,
 	getBackupTimestamp,
-	getRcloneCredentials,
-	getRcloneDestination,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
 
@@ -32,8 +31,8 @@ export const runMySqlBackup = async (mysql: MySql, backup: BackupSchedule) => {
 	});
 
 	try {
-		const rcloneFlags = getRcloneCredentials(destination);
-		const rcloneDestination = `${getRcloneDestination(destination)}/${bucketDestination}`;
+		const { flags: rcloneFlags, path: rcloneDestination } =
+			await getRclonePathAndFlags(destination, bucketDestination);
 
 		const rcloneCommand = `rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
 

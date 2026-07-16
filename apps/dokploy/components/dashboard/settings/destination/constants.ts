@@ -134,4 +134,12 @@ export const S3_PROVIDERS: Array<{
 		key: "Other",
 		name: "Any other S3 compatible provider",
 	},
+	{
+		key: "sftp",
+		name: "SFTP (SSH File Transfer Protocol)",
+	},
+	{
+		key: "ftp",
+		name: "FTP (File Transfer Protocol)",
+	},
 ];

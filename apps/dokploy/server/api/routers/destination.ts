@@ -6,12 +6,9 @@ import {
 	IS_CLOUD,
 	removeDestinationById,
 	updateDestinationById,
+	getRclonePathAndFlags,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
-import {
-	getRcloneDestination,
-	getRcloneTestFlags,
-} from "@dokploy/server/utils/backups/utils";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
@@ -51,9 +48,39 @@ export const destinationRouter = createTRPCRouter({
 	testConnection: withPermission("destination", "create")
 		.input(apiCreateDestination)
 		.mutation(async ({ input }) => {
+			const {
+				secretAccessKey,
+				bucket,
+				region,
+				endpoint,
+				accessKey,
+				provider,
+				additionalFlags,
+			} = input;
 			try {
-				const rcloneFlags = getRcloneTestFlags(input);
-				const rcloneDestination = getRcloneDestination(input);
+				const { flags: rcloneFlags, path: rcloneDestination } =
+					await getRclonePathAndFlags(
+						{
+							secretAccessKey,
+							bucket,
+							region,
+							endpoint,
+							accessKey,
+							provider,
+						} as any,
+						"",
+					);
+
+				rcloneFlags.push(
+					"--retries 1",
+					"--low-level-retries 1",
+					"--timeout 10s",
+					"--contimeout 5s",
+				);
+
+				if (additionalFlags?.length) {
+					rcloneFlags.push(...additionalFlags);
+				}
 				const rcloneCommand = `rclone ls ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
 
 				if (IS_CLOUD && !input.serverId) {

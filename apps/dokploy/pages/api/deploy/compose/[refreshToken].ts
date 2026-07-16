@@ -1,4 +1,8 @@
-import { IS_CLOUD, shouldDeploy } from "@dokploy/server";
+import {
+	IS_CLOUD,
+	normalizeChangedFilesFromCommits,
+	shouldDeploy,
+} from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
@@ -11,9 +15,19 @@ import {
 	extractCommitMessage,
 	extractCommittedPaths,
 	extractHash,
+	extractTagName,
 	getProviderByHeader,
 	logWebhookError,
 } from "../[refreshToken]";
+
+function isGitProviderWebhook(headers: NextApiRequest["headers"]): boolean {
+	return (
+		!!headers["x-github-event"] ||
+		!!headers["x-gitlab-event"] ||
+		!!headers["x-gitea-event"] ||
+		!!headers["x-event-key"] // Bitbucket
+	);
+}
 
 export default async function handler(
 	req: NextApiRequest,
@@ -41,41 +55,65 @@ export default async function handler(
 			res.status(404).json({ message: "Compose Not Found" });
 			return;
 		}
-		if (!composeResult?.autoDeploy) {
+		const fromGitProvider = isGitProviderWebhook(req.headers);
+
+		if (fromGitProvider && !composeResult?.autoDeploy) {
 			res.status(400).json({
 				message: "Automatic deployments are disabled for this compose",
 			});
 			return;
 		}
 
-		const deploymentTitle = extractCommitMessage(req.headers, req.body);
+		let deploymentTitle = extractCommitMessage(req.headers, req.body);
 		const deploymentHash = extractHash(req.headers, req.body);
 		const sourceType = composeResult.sourceType;
 
 		if (sourceType === "github") {
-			const branchName = extractBranchName(req.headers, req.body);
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
-			);
+			const tagName = extractTagName(req.headers, req.body);
+			const isTagEvent = !!tagName;
 
-			const shouldDeployPaths = shouldDeploy(
-				composeResult.watchPaths,
-				normalizedCommits,
-			);
+			if (composeResult.triggerType === "tag") {
+				if (!isTagEvent) {
+					res.status(301).json({
+						message: "Trigger type is 'tag'; ignoring non-tag push",
+					});
+					return;
+				}
+				// Tag event: deploy without branch/watchPaths checks (tags are not
+				// branch-scoped and the UI hides watchPaths for the tag trigger).
+				deploymentTitle = `Tag created: ${tagName}`;
+			} else {
+				if (isTagEvent) {
+					res.status(301).json({
+						message: "Trigger type is 'push'; ignoring tag event",
+					});
+					return;
+				}
 
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
+				const branchName = extractBranchName(req.headers, req.body);
+				const normalizedCommits = normalizeChangedFilesFromCommits(
+					req.body?.commits,
+				);
 
-			if (!branchName || branchName !== composeResult.branch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
+				const shouldDeployPaths = shouldDeploy(
+					composeResult.watchPaths,
+					normalizedCommits,
+				);
+
+				if (!shouldDeployPaths) {
+					res.status(301).json({ message: "Watch Paths Not Match" });
+					return;
+				}
+
+				if (!branchName || branchName !== composeResult.branch) {
+					res.status(301).json({ message: "Branch Not Match" });
+					return;
+				}
 			}
 		} else if (sourceType === "gitlab") {
 			const branchName = extractBranchName(req.headers, req.body);
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(
@@ -125,17 +163,11 @@ export default async function handler(
 			let normalizedCommits: string[] = [];
 
 			if (provider === "github") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitlab") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitea") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			}
 
 			const shouldDeployPaths = shouldDeploy(
@@ -150,8 +182,8 @@ export default async function handler(
 		} else if (sourceType === "gitea") {
 			const branchName = extractBranchName(req.headers, req.body);
 
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(

@@ -35,6 +35,7 @@ import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
 import { and, asc, eq, gt, ne } from "drizzle-orm";
 import { z } from "zod";
+import { apiKeyNameSchema } from "@/lib/api-keys";
 import { audit } from "@/server/api/utils/audit";
 import {
 	adminProcedure,
@@ -44,9 +45,22 @@ import {
 	withPermission,
 } from "../trpc";
 
+const apiKeyPrefixRegex = /^[A-Za-z0-9_-]+$/;
+const apiKeyPrefixErrorMessage =
+	"Prefix can only contain ASCII letters, numbers, underscores, and hyphens";
+
+const apiKeyPrefixSchema = z
+	.string()
+	.trim()
+	.transform((value) => (value === "" ? undefined : value))
+	.refine((value) => value === undefined || apiKeyPrefixRegex.test(value), {
+		message: apiKeyPrefixErrorMessage,
+	})
+	.optional();
+
 const apiCreateApiKey = z.object({
-	name: z.string().min(1),
-	prefix: z.string().optional(),
+	name: apiKeyNameSchema,
+	prefix: apiKeyPrefixSchema,
 	expiresIn: z.number().optional(),
 	metadata: z.object({
 		organizationId: z.string(),

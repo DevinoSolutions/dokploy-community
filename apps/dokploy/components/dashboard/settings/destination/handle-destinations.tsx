@@ -143,6 +143,9 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 		name: "additionalFlags",
 	});
 
+	const currentProvider = form.watch("provider");
+	const isSftpOrFtp = ["sftp", "ftp"].includes(currentProvider || "");
+
 	useEffect(() => {
 		if (destination) {
 			form.reset({
@@ -229,7 +232,9 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 		const connectionString =
 			provider === GENERIC_RCLONE_PROVIDER
 				? bucket
-				: `:s3,provider=${provider},access_key_id=${accessKey},secret_access_key=${secretKey},endpoint=${endpoint}${region ? `,region=${region}` : ""}:${bucket}`;
+				: isSftpOrFtp
+					? `:${provider},host=${endpoint},port=${region || (provider === "sftp" ? "22" : "21")},user=${accessKey},pass=XXX:${bucket}`
+					: `:s3,provider=${provider},access_key_id=${accessKey},secret_access_key=${secretKey},endpoint=${endpoint}${region ? `,region=${region}` : ""}:${bucket}`;
 
 		await testConnection({
 			provider,
@@ -324,7 +329,7 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 											>
 												<FormControl>
 													<SelectTrigger>
-														<SelectValue placeholder="Select a provider" />
+														<SelectValue placeholder="Select a Provider" />
 													</SelectTrigger>
 												</FormControl>
 												<SelectContent>
@@ -359,13 +364,17 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 								return (
 									<FormItem>
 										<FormLabel>
-											Access Key Id
-											{selectedProvider === GENERIC_RCLONE_PROVIDER
-												? " (optional)"
-												: ""}
+											{isSftpOrFtp
+												? "Username"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Access Key Id (optional)"
+													: "Access Key Id"}
 										</FormLabel>
 										<FormControl>
-											<Input placeholder={"xcas41dasde"} {...field} />
+											<Input
+												placeholder={isSftpOrFtp ? "username" : "Access Key ID"}
+												{...field}
+											/>
 										</FormControl>
 										<FormMessage />
 									</FormItem>
@@ -379,14 +388,21 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 								<FormItem>
 									<div className="space-y-0.5">
 										<FormLabel>
-											Secret Access Key
-											{selectedProvider === GENERIC_RCLONE_PROVIDER
-												? " (optional)"
-												: ""}
+											{isSftpOrFtp
+												? "Password"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Secret Access Key (optional)"
+													: "Secret Access Key"}
 										</FormLabel>
 									</div>
 									<FormControl>
-										<Input placeholder={"asd123asdasw"} {...field} />
+										<Input
+											type={isSftpOrFtp ? "password" : "text"}
+											placeholder={
+												isSftpOrFtp ? "password" : "Secret Access Key"
+											}
+											{...field}
+										/>
 									</FormControl>
 									<FormMessage />
 								</FormItem>
@@ -399,17 +415,21 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 								<FormItem>
 									<div className="space-y-0.5">
 										<FormLabel>
-											{selectedProvider === GENERIC_RCLONE_PROVIDER
-												? "Remote path"
-												: "Bucket"}
+											{isSftpOrFtp
+												? "Path / Directory"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Remote path"
+													: "Bucket"}
 										</FormLabel>
 									</div>
 									<FormControl>
 										<Input
 											placeholder={
-												selectedProvider === GENERIC_RCLONE_PROVIDER
-													? "gdrive:backups"
-													: "dokploy-bucket"
+												isSftpOrFtp
+													? "/backups/dokploy"
+													: selectedProvider === GENERIC_RCLONE_PROVIDER
+														? "gdrive:backups"
+														: "dokploy-bucket"
 											}
 											{...field}
 										/>
@@ -424,10 +444,19 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							render={({ field }) => (
 								<FormItem>
 									<div className="space-y-0.5">
-										<FormLabel>Region</FormLabel>
+										<FormLabel>{isSftpOrFtp ? "Port" : "Region"}</FormLabel>
 									</div>
 									<FormControl>
-										<Input placeholder={"us-east-1"} {...field} />
+										<Input
+											placeholder={
+												isSftpOrFtp
+													? currentProvider === "sftp"
+														? "22"
+														: "21"
+													: "us-east-1"
+											}
+											{...field}
+										/>
 									</FormControl>
 									<FormMessage />
 								</FormItem>
@@ -439,14 +468,19 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							render={({ field }) => (
 								<FormItem>
 									<FormLabel>
-										Endpoint
-										{selectedProvider === GENERIC_RCLONE_PROVIDER
-											? " (optional)"
-											: ""}
+										{isSftpOrFtp
+											? "Host"
+											: selectedProvider === GENERIC_RCLONE_PROVIDER
+												? "Endpoint (optional)"
+												: "Endpoint"}
 									</FormLabel>
 									<FormControl>
 										<Input
-											placeholder={"https://us.bucket.aws/s3"}
+											placeholder={
+												isSftpOrFtp
+													? "sftp.example.com"
+													: "https://us.bucket.aws/s3"
+											}
 											{...field}
 										/>
 									</FormControl>

@@ -38,6 +38,7 @@ import { encodeBase64 } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 import {
 	createDeploymentCompose,
+	getDeploymentErrorMessage,
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
@@ -214,10 +215,12 @@ export const deployCompose = async ({
 	composeId,
 	titleLog = "Manual deployment",
 	descriptionLog = "",
+	freshVolumes = false,
 }: {
 	composeId: string;
 	titleLog: string;
 	descriptionLog: string;
+	freshVolumes?: boolean;
 }) => {
 	const compose = await findComposeById(composeId);
 
@@ -271,6 +274,16 @@ export const deployCompose = async ({
 			}
 		}
 
+		if (freshVolumes && compose.composeType === "docker-compose") {
+			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
+			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;
+			if (compose.serverId) {
+				await execAsyncRemote(compose.serverId, downWithLog);
+			} else {
+				await execAsync(downWithLog);
+			}
+		}
+
 		command = "set -e;";
 		command += await getBuildComposeCommand(entity);
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
@@ -314,12 +327,17 @@ export const deployCompose = async ({
 		await updateCompose(composeId, {
 			composeStatus: "error",
 		});
+		const errorMessage = await getDeploymentErrorMessage({
+			logPath: deployment.logPath,
+			serverId: compose.serverId,
+			fallback: "Error building, check the logs for details.",
+		});
+
 		await sendBuildErrorNotifications({
 			projectName: compose.environment.project.name,
 			applicationName: compose.name,
 			applicationType: "compose",
-			// @ts-ignore
-			errorMessage: error?.message || "Error building",
+			errorMessage,
 			buildLink,
 			organizationId: compose.environment.project.organizationId,
 		});
@@ -344,10 +362,12 @@ export const rebuildCompose = async ({
 	composeId,
 	titleLog = "Rebuild deployment",
 	descriptionLog = "",
+	freshVolumes = false,
 }: {
 	composeId: string;
 	titleLog: string;
 	descriptionLog: string;
+	freshVolumes?: boolean;
 }) => {
 	const compose = await findComposeById(composeId);
 
@@ -382,6 +402,16 @@ export const rebuildCompose = async ({
 				await execAsyncRemote(compose.serverId, commandWithLog);
 			} else {
 				await execAsync(commandWithLog);
+			}
+		}
+
+		if (freshVolumes && compose.composeType === "docker-compose") {
+			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
+			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;
+			if (compose.serverId) {
+				await execAsyncRemote(compose.serverId, downWithLog);
+			} else {
+				await execAsync(downWithLog);
 			}
 		}
 

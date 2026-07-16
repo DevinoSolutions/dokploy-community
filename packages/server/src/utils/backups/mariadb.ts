@@ -12,8 +12,7 @@ import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
 	getBackupCommand,
 	getBackupTimestamp,
-	getRcloneCredentials,
-	getRcloneDestination,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
 
@@ -34,8 +33,8 @@ export const runMariadbBackup = async (
 		description: "MariaDB Backup",
 	});
 	try {
-		const rcloneFlags = getRcloneCredentials(destination);
-		const rcloneDestination = `${getRcloneDestination(destination)}/${bucketDestination}`;
+		const { flags: rcloneFlags, path: rcloneDestination } =
+			await getRclonePathAndFlags(destination, bucketDestination);
 		const rcloneCommand = `rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
 
 		const backupCommand = getBackupCommand(

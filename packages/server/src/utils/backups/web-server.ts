@@ -18,8 +18,7 @@ import { execAsync } from "../process/execAsync";
 import { redactRcloneCredentials } from "./redact";
 import {
 	getBackupTimestamp,
-	getRcloneCredentials,
-	getRcloneDestination,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
 
@@ -46,12 +45,14 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 	let computedBackupSize: number | undefined;
 	try {
 		const destination = await findDestinationById(backup.destinationId);
-		const rcloneFlags = getRcloneCredentials(destination);
 		const timestamp = getBackupTimestamp();
 		const { BASE_PATH } = paths();
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-backup-"));
 		const backupFileName = `webserver-backup-${timestamp}.zip`;
-		const s3Path = `${getRcloneDestination(destination)}/${backup.appName}/${normalizeS3Path(backup.prefix)}${backupFileName}`;
+		const { flags: rcloneFlags, path: s3Path } = await getRclonePathAndFlags(
+			destination,
+			`${backup.appName}/${normalizeS3Path(backup.prefix)}${backupFileName}`,
+		);
 
 		try {
 			await execAsync(`mkdir -p ${tempDir}/filesystem`);
@@ -120,9 +121,16 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 			}
 
 			const uploadCommand = `rclone copyto ${rcloneFlags.join(" ")} "${zipPath}" "${s3Path}"`;
-			writeStream.write("Running command to upload backup to destination\n");
+			const destinationType = ["sftp", "ftp"].includes(
+				destination.provider || "",
+			)
+				? destination.provider?.toUpperCase() || "remote"
+				: "S3";
+			writeStream.write(
+				`Running command to upload backup to ${destinationType}\n`,
+			);
 			await execAsync(uploadCommand);
-			writeStream.write("Uploaded backup to destination ✅\n");
+			writeStream.write(`Uploaded backup to ${destinationType} ✅\n`);
 			writeStream.end();
 			await sendDokployBackupNotifications({
 				type: "success",
