@@ -7,15 +7,19 @@ import {
 } from "@dokploy/server/utils/backups/utils";
 import { describe, expect, test, vi } from "vitest";
 
-vi.mock("node:child_process", () => ({
-	exec: (cmd: string, cb: any) => {
-		if (cmd.startsWith("rclone obscure")) {
-			cb(null, { stdout: "obscured_pass" });
-		} else {
-			cb(null, { stdout: "" });
-		}
-	},
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:child_process")>();
+	return {
+		...actual,
+		exec: (cmd: string, cb: any) => {
+			if (cmd.startsWith("rclone obscure")) {
+				cb(null, { stdout: "obscured_pass" });
+			} else {
+				cb(null, { stdout: "" });
+			}
+		},
+	};
+});
 
 describe("normalizeS3Path", () => {
 	test("should handle empty and whitespace-only prefix", () => {
