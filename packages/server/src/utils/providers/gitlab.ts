@@ -8,6 +8,7 @@ import {
 } from "@dokploy/server/services/gitlab";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { TRPCError } from "@trpc/server";
+import { quote } from "shell-quote";
 import type { z } from "zod";
 
 export const refreshGitlabToken = async (gitlabProviderId: string) => {
@@ -24,11 +25,13 @@ export const refreshGitlabToken = async (gitlabProviderId: string) => {
 
 	// Use internal URL for token refresh when GitLab is on same instance as Dokploy
 	const baseUrl = gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl;
-	const response = await fetch(`${baseUrl}/oauth/token`, {
+	const tokenUrl = new URL(baseUrl);
+	const response = await fetch(`${tokenUrl.origin}${tokenUrl.pathname.replace(/\/$/, "")}/oauth/token`, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/x-www-form-urlencoded",
 		},
+		redirect: "manual",
 		body: new URLSearchParams({
 			grant_type: "refresh_token",
 			refresh_token: gitlabProvider.refreshToken as string,
@@ -152,7 +155,7 @@ export const cloneGitlabRepository = async ({
 	const repoClone = getGitlabRepoClone(gitlab, gitlabPathNamespace);
 	const cloneUrl = getGitlabCloneUrl(gitlab, repoClone);
 	command += `echo "Cloning Repo ${repoClone} to ${outputPath}: ✅";`;
-	command += `git clone --branch ${gitlabBranch} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${cloneUrl} ${outputPath} --progress;`;
+	command += `git clone --branch ${quote([gitlabBranch ?? ""])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${cloneUrl} ${outputPath} --progress;`;
 	return command;
 };
 

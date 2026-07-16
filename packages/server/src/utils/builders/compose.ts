@@ -8,6 +8,7 @@ import {
 	encodeBase64,
 	getEnvironmentVariablesObject,
 	prepareEnvironmentVariables,
+	quoteDotenvValue,
 } from "../docker/utils";
 
 export type ComposeNested = InferResultType<
@@ -53,7 +54,12 @@ Compose Type: ${composeType} ✅`;
 
 		cd "${projectPath}";
 
-		${compose.isolatedDeployment ? `docker network inspect ${compose.appName} >/dev/null 2>&1 || docker network create ${compose.composeType === "stack" ? "--driver overlay" : ""} --attachable ${compose.appName}` : ""}
+		${compose.isolatedDeployment ? `
+			if docker network inspect ${compose.appName} >/dev/null 2>&1; then
+				${compose.composeType !== "stack" && compose.isolatedNetworkMtu ? `CURRENT_MTU=$(docker network inspect ${compose.appName} --format '{{index .Options "com.docker.network.driver.mtu"}}'); if [ "$CURRENT_MTU" != "${compose.isolatedNetworkMtu}" ]; then echo "Info: Network ${compose.appName} has MTU $CURRENT_MTU but configured MTU is ${compose.isolatedNetworkMtu}. The network must be recreated for the new MTU to take effect."; fi` : "true"}
+			else
+				docker network create ${compose.composeType === "stack" ? "--driver overlay" : ""} --attachable ${compose.composeType !== "stack" && compose.isolatedNetworkMtu ? `--opt com.docker.network.driver.mtu=${compose.isolatedNetworkMtu}` : ""} ${compose.appName}
+			fi` : ""}
 		env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${command.split(" ").join(" ")} 2>&1 || { echo "Error: ❌ Docker command failed"; exit 1; }
 		${compose.isolatedDeployment ? `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1` : ""}
 
@@ -88,7 +94,11 @@ export const createCommand = (compose: ComposeNested) => {
 	let command = "";
 
 	if (composeType === "docker-compose") {
-		command = `compose -p ${appName} -f ${path} up -d --build --remove-orphans`;
+		// When enabled, force-pull the latest images before (re)deploying so a
+		// redeploy picks up updated tags instead of reusing the local cache.
+		// (`stack deploy` already resolves+pulls, so this only applies here.)
+		const pullFlag = compose.pullImagesOnDeploy ? " --pull always" : "";
+		command = `compose -p ${appName} -f ${path} up -d${pullFlag} --build --remove-orphans`;
 	} else if (composeType === "stack") {
 		command = `stack deploy -c ${path} ${appName} --prune --with-registry-auth`;
 	}
@@ -120,7 +130,9 @@ export const getCreateEnvFileCommand = (compose: ComposeNested) => {
 		envContent,
 		compose.environment.project.env,
 		compose.environment.env,
-	).join("\n");
+	)
+		.map(quoteDotenvValue)
+		.join("\n");
 
 	const encodedContent = encodeBase64(envFileContent);
 	return `

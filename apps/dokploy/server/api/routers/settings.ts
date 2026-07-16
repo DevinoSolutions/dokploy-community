@@ -6,7 +6,6 @@ import {
 	checkRedisHealth,
 	checkTraefikHealth,
 	cleanupAll,
-	cleanupAllBackground,
 	cleanupBuilders,
 	cleanupContainers,
 	cleanupImages,
@@ -22,6 +21,7 @@ import {
 	getUpdateData,
 	getWebServerSettings,
 	IS_CLOUD,
+	isResponseCompressionEnabled,
 	parseRawConfig,
 	paths,
 	prepareEnvironmentVariables,
@@ -41,6 +41,7 @@ import {
 	startLogCleanup,
 	stopLogCleanup,
 	updateLetsEncryptEmail,
+	updateResponseCompression,
 	updateServerById,
 	updateServerTraefik,
 	updateWebServerSettings,
@@ -68,6 +69,7 @@ import {
 	apiServerSchema,
 	apiTraefikConfig,
 	apiUpdateDockerCleanup,
+	apiUpdateDomainRestriction,
 	apiUpdateWebServerBuildsConcurrency,
 	projects,
 	server,
@@ -274,13 +276,16 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.mutation(async ({ input, ctx }) => {
 			// Execute cleanup in background and return immediately to avoid gateway timeouts
-			const result = await cleanupAllBackground(input?.serverId);
+			void cleanupAll(input?.serverId);
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "settings",
 				resourceName: "clean-all",
 			});
-			return result;
+			return {
+				status: "scheduled",
+				message: "Docker cleanup has been initiated in the background",
+			};
 		}),
 	cleanMonitoring: adminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
@@ -578,6 +583,33 @@ export const settingsRouter = createTRPCRouter({
 				action: "update",
 				resourceType: "settings",
 				resourceName: "middleware-traefik-config",
+			});
+			return true;
+		}),
+
+	haveResponseCompressionEnabled: adminProcedure.query(() => {
+		if (IS_CLOUD) {
+			return false;
+		}
+		return isResponseCompressionEnabled();
+	}),
+
+	toggleResponseCompression: adminProcedure
+		.input(z.object({ enable: z.boolean() }))
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				return true;
+			}
+			updateResponseCompression(input.enable);
+			// Run in background so the request returns immediately; client polls /api/health.
+			// The main Traefik config only reloads on restart.
+			void reloadDockerResource("dokploy-traefik").catch((err) => {
+				console.error("toggleResponseCompression background reload:", err);
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "response-compression",
 			});
 			return true;
 		}),
@@ -1149,4 +1181,34 @@ export const settingsRouter = createTRPCRouter({
 		const ips = process.env.DOKPLOY_CLOUD_IPS?.split(",");
 		return ips;
 	}),
+
+	getDomainRestrictionConfig: protectedProcedure.query(async () => {
+		if (IS_CLOUD) {
+			return { enabled: false, allowedWildcards: [] };
+		}
+		const settings = await getWebServerSettings();
+		return (
+			settings?.domainRestrictionConfig ?? {
+				enabled: false,
+				allowedWildcards: [],
+			}
+		);
+	}),
+
+	updateDomainRestriction: adminProcedure
+		.input(apiUpdateDomainRestriction)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				return true;
+			}
+			await updateWebServerSettings({
+				domainRestrictionConfig: input.domainRestrictionConfig,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "domain-restriction",
+			});
+			return true;
+		}),
 });

@@ -1,11 +1,12 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import {
 	ADDITIONAL_FLAG_ERROR,
 	ADDITIONAL_FLAG_REGEX,
+	GENERIC_RCLONE_PROVIDER,
 } from "../validations/destination";
 import { organization } from "./account";
 import { backups } from "./backups";
@@ -27,6 +28,17 @@ export const destinations = pgTable("destination", {
 		.notNull()
 		.references(() => organization.id, { onDelete: "cascade" }),
 	createdAt: timestamp("createdAt").notNull().defaultNow(),
+	// Encryption settings (rclone crypt) — destination-side encryption at rest.
+	encryptionEnabled: boolean("encryptionEnabled").notNull().default(false),
+	encryptionKey: text("encryptionKey"),
+	// Optional salt password for additional security (recommended by rclone)
+	encryptionPassword2: text("encryptionPassword2"),
+	// Filename encryption: "standard" (encrypt), "obfuscate", or "off"
+	filenameEncryption: text("filenameEncryption").notNull().default("off"),
+	// Whether to encrypt directory names (only applies if filenameEncryption is not "off")
+	directoryNameEncryption: boolean("directoryNameEncryption")
+		.notNull()
+		.default(false),
 });
 
 export const destinationsRelations = relations(
@@ -68,6 +80,55 @@ export const apiCreateDestination = createSchema
 	.required()
 	.extend({
 		serverId: z.string().optional(),
+		// Encryption settings (rclone crypt) are optional at the API layer.
+		encryptionEnabled: z.boolean().optional(),
+		encryptionKey: z.string().optional(),
+		encryptionPassword2: z.string().optional(),
+		filenameEncryption: z.enum(["standard", "obfuscate", "off"]).optional(),
+		directoryNameEncryption: z.boolean().optional(),
+	})
+	.superRefine((data, ctx) => {
+		const isGenericRclone = data.provider === GENERIC_RCLONE_PROVIDER;
+
+		if (!data.provider?.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["provider"],
+				message: "Provider is required",
+			});
+		}
+
+		if (!data.bucket?.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["bucket"],
+				message: "Bucket is required",
+			});
+		}
+
+		if (!isGenericRclone && !data.accessKey?.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["accessKey"],
+				message: "Access Key Id is required",
+			});
+		}
+
+		if (!isGenericRclone && !data.secretAccessKey?.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["secretAccessKey"],
+				message: "Secret Access Key is required",
+			});
+		}
+
+		if (!isGenericRclone && !data.endpoint?.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["endpoint"],
+				message: "Endpoint is required",
+			});
+		}
 	});
 
 export const apiFindOneDestination = z.object({
@@ -95,4 +156,10 @@ export const apiUpdateDestination = createSchema
 	.required()
 	.extend({
 		serverId: z.string().optional(),
+		// Encryption settings (rclone crypt) are optional at the API layer.
+		encryptionEnabled: z.boolean().optional(),
+		encryptionKey: z.string().optional(),
+		encryptionPassword2: z.string().optional(),
+		filenameEncryption: z.enum(["standard", "obfuscate", "off"]).optional(),
+		directoryNameEncryption: z.boolean().optional(),
 	});

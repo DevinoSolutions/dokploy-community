@@ -146,14 +146,27 @@ export const createRouterConfig = async (
 		customEntrypoint,
 	} = domain;
 	const punycodeHost = toPunycode(host);
+	// Generate the Host rule — support wildcard subdomains via HostRegexp.
+	// Wildcards are ASCII in practice, so keep the raw host there and reserve
+	// punycode (IDN support) for the regular Host() rule.
+	const hostRule = host.includes("*")
+		? `HostRegexp(\`${host.replace("*", "{subdomain:[a-zA-Z0-9-]+}")}\`)`
+		: `Host(\`${punycodeHost}\`)`;
 	const routerConfig: HttpRouter = {
-		rule: `Host(\`${punycodeHost}\`)${path !== null && path !== "/" ? ` && PathPrefix(\`${path}\`)` : ""}`,
+		rule: `${hostRule}${path !== null && path !== "/" ? ` && PathPrefix(\`${path}\`)` : ""}`,
 		service: `${appName}-service-${uniqueConfigKey}`,
 		middlewares: [],
 		entryPoints: [entryPoint],
 	};
 
-	const isRedirectRouter = entryPoint === "web" && https && !customEntrypoint;
+	// Cloudflare-published domains terminate TLS at the Cloudflare edge and reach
+	// Traefik over plain HTTP via cloudflared, so the web->websecure redirect must
+	// NOT be applied — otherwise the connector hits a 301 loop / 502s.
+	const isRedirectRouter =
+		entryPoint === "web" &&
+		https &&
+		!customEntrypoint &&
+		!domain.publishToCloudflare;
 
 	// Web router with HTTPS only needs redirect — all other middlewares
 	// run on the websecure router where the request actually lands.

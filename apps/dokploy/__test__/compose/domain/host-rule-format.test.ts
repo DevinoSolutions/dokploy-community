@@ -35,6 +35,15 @@ describe("Host rule format regression tests", () => {
 		customEntrypoint: null,
 		middlewares: null,
 		forwardAuthEnabled: false,
+		publishToCloudflare: false,
+		cloudflareTunnelMode: null,
+		cloudflareId: null,
+		cloudflareZoneId: null,
+		cloudflareTunnelId: null,
+		cloudflareDnsRecordId: null,
+		cloudflareIngressApplied: false,
+		enableCloudflareAccess: false,
+		cloudflareAccessApplicationId: null,
 	};
 
 	describe("Host rule format validation", () => {
