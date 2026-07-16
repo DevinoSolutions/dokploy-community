@@ -5,6 +5,7 @@ import {
 	type apiCreateMount,
 	mounts,
 	type ServiceType,
+	shEscape,
 } from "@dokploy/server/db/schema";
 import {
 	createFile,
@@ -27,7 +28,45 @@ const hasOwnership = (m: Partial<Mount>) =>
 	m.gid !== undefined ||
 	(m.mode !== undefined && m.mode !== null && m.mode !== "");
 
+const assertValidId = (value: number, label: "uid" | "gid") => {
+	if (!Number.isInteger(value) || value < 0) {
+		throw new Error(`Invalid ${label}: must be a non-negative integer`);
+	}
+};
+
+const assertValidMode = (mode: string) => {
+	if (!/^[0-7]{3,4}$/.test(mode)) {
+		throw new Error(
+			"Invalid mode: must be a 3 or 4 digit octal permission string (e.g. 755)",
+		);
+	}
+};
+
+const SAFE_PATH_REGEX = /^[A-Za-z0-9_.\/ -]+$/;
+
+const assertValidTargetPath = (target: string, label: string) => {
+	if (!SAFE_PATH_REGEX.test(target)) {
+		throw new Error(
+			`Invalid ${label}: only letters, digits, spaces, and "_ . / -" are allowed`,
+		);
+	}
+};
+
+const assertValidVolumeName = (volumeName: string) => {
+	if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(volumeName)) {
+		throw new Error(
+			"Invalid volume name: must start with an alphanumeric character and contain only alphanumerics, '_', '.', or '-'",
+		);
+	}
+};
+
 const buildChownArg = (uid?: number | null, gid?: number | null) => {
+	if (uid !== undefined && uid !== null) {
+		assertValidId(uid, "uid");
+	}
+	if (gid !== undefined && gid !== null) {
+		assertValidId(gid, "gid");
+	}
 	if (uid !== undefined && uid !== null && gid !== undefined && gid !== null) {
 		return `${uid}:${gid}`;
 	}
@@ -48,6 +87,10 @@ export const applyMountPermissions = async (mountId: string) => {
 	const haveChmod = !!mount.mode;
 	if (!haveChown && !haveChmod) return;
 
+	if (haveChmod) {
+		assertValidMode(mount.mode as string);
+	}
+
 	const run = async (command: string) => {
 		if (serverId) {
 			await execAsyncRemote(serverId, command);
@@ -56,26 +99,35 @@ export const applyMountPermissions = async (mountId: string) => {
 		}
 	};
 
+	const buildPermissionCommand = (target: string) => {
+		const escapedTarget = shEscape(target);
+		return `if [ -e ${escapedTarget} ]; then ${haveChown ? `chown -R ${chownArg} ${escapedTarget};` : ""} ${haveChmod ? `chmod -R ${mount.mode} ${escapedTarget};` : ""} fi`;
+	};
+
 	if (mount.type === "bind") {
 		const target = mount.hostPath;
 		if (!target) return;
-		const cmd = `if [ -e "${target}" ]; then ${haveChown ? `chown -R ${chownArg} "${target}";` : ""} ${haveChmod ? `chmod -R ${mount.mode} "${target}";` : ""} fi`;
-		await run(cmd);
+		assertValidTargetPath(target, "hostPath");
+		await run(buildPermissionCommand(target));
 		return;
 	}
 
 	if (mount.type === "file") {
 		if (!mount.filePath) return;
+		assertValidTargetPath(mount.filePath, "filePath");
+		if (mount.filePath.includes("..")) {
+			throw new Error("Invalid filePath: path traversal is not allowed");
+		}
 		const basePath = await getBaseFilesPath(mountId);
 		const fullPath = path.join(basePath, mount.filePath);
-		const cmd = `if [ -e "${fullPath}" ]; then ${haveChown ? `chown -R ${chownArg} "${fullPath}";` : ""} ${haveChmod ? `chmod -R ${mount.mode} "${fullPath}";` : ""} fi`;
-		await run(cmd);
+		await run(buildPermissionCommand(fullPath));
 		return;
 	}
 
 	if (mount.type === "volume") {
 		const vol = mount.volumeName;
 		if (!vol) return;
+		assertValidVolumeName(vol);
 		const inner = [
 			haveChown ? `chown -R ${chownArg} /mnt` : "",
 			haveChmod ? `chmod -R ${mount.mode} /mnt` : "",
@@ -83,7 +135,8 @@ export const applyMountPermissions = async (mountId: string) => {
 			.filter(Boolean)
 			.join(" && ");
 		if (inner === "") return;
-		const cmd = `docker volume inspect "${vol}" >/dev/null 2>&1 || docker volume create "${vol}"; docker run --rm -v "${vol}":/mnt alpine sh -lc '${inner}'`;
+		const escapedVol = shEscape(vol);
+		const cmd = `docker volume inspect ${escapedVol} >/dev/null 2>&1 || docker volume create ${escapedVol}; docker run --rm -v ${escapedVol}:/mnt alpine sh -lc '${inner}'`;
 		await run(cmd);
 		return;
 	}
