@@ -1,6 +1,7 @@
 import {
 	prepareEnvironmentVariables,
 	prepareEnvironmentVariablesForShell,
+	quoteDotenvValue,
 } from "@dokploy/server/index";
 import { describe, expect, it } from "vitest";
 
@@ -363,6 +364,50 @@ SIMPLE=\${{environment.SIMPLE_VAR}}
 	});
 });
 
+describe("quoteDotenvValue (dotenv value quoting)", () => {
+	it("wraps a simple value in double quotes", () => {
+		expect(quoteDotenvValue("KEY=value")).toBe('KEY="value"');
+	});
+
+	it("returns pair unchanged when no = present", () => {
+		expect(quoteDotenvValue("NOEQUALS")).toBe("NOEQUALS");
+	});
+
+	it("handles empty value", () => {
+		expect(quoteDotenvValue("KEY=")).toBe('KEY=""');
+	});
+
+	it("escapes backslashes", () => {
+		expect(quoteDotenvValue("PATH=C:\\Users\\docs")).toBe(
+			'PATH="C:\\\\Users\\\\docs"',
+		);
+	});
+
+	it("escapes double quotes in values", () => {
+		expect(quoteDotenvValue('MSG=say "hello"')).toBe(
+			'MSG="say \\"hello\\""',
+		);
+	});
+
+	it("escapes literal newlines from dotenv expansion", () => {
+		expect(quoteDotenvValue("MSG=line1\nline2")).toBe('MSG="line1\\nline2"');
+	});
+
+	it("escapes carriage returns", () => {
+		expect(quoteDotenvValue("MSG=line1\rline2")).toBe('MSG="line1\\rline2"');
+	});
+
+	it("escapes dollar signs to prevent variable expansion", () => {
+		expect(quoteDotenvValue("PRICE=$100")).toBe('PRICE="\\$100"');
+	});
+
+	it("handles value with multiple special characters", () => {
+		expect(quoteDotenvValue('COMPLEX=a\\b"c\n$d')).toBe(
+			'COMPLEX="a\\\\b\\"c\\n\\$d"',
+		);
+	});
+});
+
 describe("prepareEnvironmentVariablesForShell (shell escaping)", () => {
 	it("escapes single quotes in environment variable values", () => {
 		const serviceEnv = `
@@ -640,5 +685,109 @@ SPECIAL=café résumé naïve
 		expect(resolved[0]).toContain("🌍");
 		expect(resolved[1]).toContain("你好");
 		expect(resolved[2]).toContain("café");
+	});
+});
+
+describe("prepareEnvironmentVariables (cross-service references)", () => {
+	const serviceFqdns = {
+		backend: "https://api.example.com",
+		database: "http://db.internal.example.com",
+	};
+
+	it("resolves ${{service.<name>.fqdn}} from the provided map", () => {
+		const serviceEnv = `
+API_URL=\${{service.backend.fqdn}}
+DB_URL=\${{service.database.fqdn}}
+PORT=4000
+`;
+
+		const resolved = prepareEnvironmentVariables(
+			serviceEnv,
+			"",
+			"",
+			serviceFqdns,
+		);
+
+		expect(resolved).toEqual([
+			"API_URL=https://api.example.com",
+			"DB_URL=http://db.internal.example.com",
+			"PORT=4000",
+		]);
+	});
+
+	it("composes service references with surrounding text", () => {
+		const serviceEnv = `
+HEALTHCHECK=\${{service.backend.fqdn}}/health
+`;
+
+		const resolved = prepareEnvironmentVariables(
+			serviceEnv,
+			"",
+			"",
+			serviceFqdns,
+		);
+
+		expect(resolved).toEqual(["HEALTHCHECK=https://api.example.com/health"]);
+	});
+
+	it("resolves service references alongside project, environment and self refs", () => {
+		const serviceEnv = `
+ENVIRONMENT=\${{project.ENVIRONMENT}}
+NODE_ENV=\${{environment.NODE_ENV}}
+API_URL=\${{service.backend.fqdn}}
+REGION=eu-west-1
+SELF=\${{REGION}}
+`;
+
+		const resolved = prepareEnvironmentVariables(
+			serviceEnv,
+			projectEnv,
+			environmentEnv,
+			serviceFqdns,
+		);
+
+		expect(resolved).toEqual([
+			"ENVIRONMENT=staging",
+			"NODE_ENV=development",
+			"API_URL=https://api.example.com",
+			"REGION=eu-west-1",
+			"SELF=eu-west-1",
+		]);
+	});
+
+	it("throws when the referenced service is not in the map", () => {
+		const serviceEnv = `
+API_URL=\${{service.unknown.fqdn}}
+`;
+
+		expect(() =>
+			prepareEnvironmentVariables(serviceEnv, "", "", serviceFqdns),
+		).toThrow("Invalid service reference: service.unknown.fqdn");
+	});
+
+	it("throws when no service map is provided", () => {
+		const serviceEnv = `
+API_URL=\${{service.backend.fqdn}}
+`;
+
+		expect(() => prepareEnvironmentVariables(serviceEnv, "", "")).toThrow(
+			"Invalid service reference: service.backend.fqdn",
+		);
+	});
+
+	it("does not affect env vars without service references", () => {
+		const serviceEnv = `
+NODE_ENV=production
+PORT=3000
+`;
+
+		const resolved = prepareEnvironmentVariables(
+			serviceEnv,
+			"",
+			"",
+			serviceFqdns,
+		);
+
+		expect(resolved).toEqual(["NODE_ENV=production", "PORT=3000"]);
 	});
 });

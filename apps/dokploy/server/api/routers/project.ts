@@ -1,4 +1,5 @@
 import {
+	assembleProjectExport,
 	createApplication,
 	createBackup,
 	createCompose,
@@ -192,6 +193,136 @@ export const projectRouter = createTRPCRouter({
 				});
 			}
 			return project;
+		}),
+	export: protectedProcedure
+		.input(
+			z.object({
+				projectId: z.string().min(1),
+				includeSecrets: z.boolean().default(false),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			// Mirror the read-access semantics of `project.one`.
+			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
+				const { accessedProjects } = await findMemberByUserId(
+					ctx.user.id,
+					ctx.session.activeOrganizationId,
+				);
+				if (!accessedProjects.includes(input.projectId)) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this project",
+					});
+				}
+			}
+
+			const project = await findProjectById(input.projectId);
+
+			if (project.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to access this project",
+				});
+			}
+
+			// Load every service's full nested configuration through its own
+			// top-level finder. Calling the finders individually (rather than a
+			// single deeply-nested query) mirrors `project.duplicate` and avoids
+			// the Postgres 54023 error triggered by nesting the 100-column
+			// `applications` row inside another relation.
+			const environments = await Promise.all(
+				project.environments.map(async (environment) => {
+					const [
+						applications,
+						compose,
+						postgres,
+						mysql,
+						mariadb,
+						mongo,
+						redis,
+						libsql,
+					] = await Promise.all([
+						Promise.all(
+							environment.applications.map((service) =>
+								findApplicationById(service.applicationId),
+							),
+						),
+						Promise.all(
+							environment.compose.map((service) =>
+								findComposeById(service.composeId),
+							),
+						),
+						Promise.all(
+							environment.postgres.map((service) =>
+								findPostgresById(service.postgresId),
+							),
+						),
+						Promise.all(
+							environment.mysql.map((service) =>
+								findMySqlById(service.mysqlId),
+							),
+						),
+						Promise.all(
+							environment.mariadb.map((service) =>
+								findMariadbById(service.mariadbId),
+							),
+						),
+						Promise.all(
+							environment.mongo.map((service) =>
+								findMongoById(service.mongoId),
+							),
+						),
+						Promise.all(
+							environment.redis.map((service) =>
+								findRedisById(service.redisId),
+							),
+						),
+						Promise.all(
+							environment.libsql.map((service) =>
+								findLibsqlById(service.libsqlId),
+							),
+						),
+					]);
+
+					return {
+						name: environment.name,
+						description: environment.description,
+						env: environment.env ?? null,
+						services: {
+							applications,
+							compose,
+							postgres,
+							mysql,
+							mariadb,
+							mongo,
+							redis,
+							libsql,
+						},
+					};
+				}),
+			);
+
+			const result = assembleProjectExport(
+				{
+					project: {
+						name: project.name,
+						description: project.description,
+						env: project.env ?? null,
+					},
+					environments,
+				},
+				input.includeSecrets,
+			);
+
+			await audit(ctx, {
+				action: "export",
+				resourceType: "project",
+				resourceId: project.projectId,
+				resourceName: project.name,
+				metadata: { includeSecrets: input.includeSecrets },
+			});
+
+			return result;
 		}),
 	all: protectedProcedure.query(async ({ ctx }) => {
 		if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {

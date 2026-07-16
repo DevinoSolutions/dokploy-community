@@ -77,6 +77,12 @@ export const domain = z
 		serviceName: z.string().optional(),
 		domainType: z.enum(["application", "compose", "preview"]).optional(),
 		middlewares: z.array(z.string()).optional(),
+		publishToCloudflare: z.boolean().optional(),
+		cloudflareId: z.string().optional(),
+		cloudflareTunnelMode: z
+			.enum(["existing-instance", "shared-managed"])
+			.optional(),
+		cloudflareTunnelId: z.string().optional(),
 	})
 	.superRefine((input, ctx) => {
 		if (input.https && !input.certificateType) {
@@ -133,6 +139,33 @@ export const domain = z
 				message: "Custom entry point must be specified",
 			});
 		}
+
+		if (input.publishToCloudflare) {
+			if (!input.cloudflareId) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["cloudflareId"],
+					message: "Select a Cloudflare integration",
+				});
+			}
+			if (!input.cloudflareTunnelMode) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["cloudflareTunnelMode"],
+					message: "Select a tunnel mode",
+				});
+			}
+			if (
+				input.cloudflareTunnelMode === "existing-instance" &&
+				!input.cloudflareTunnelId
+			) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["cloudflareTunnelId"],
+					message: "Select an existing tunnel",
+				});
+			}
+		}
 	});
 
 type Domain = z.infer<typeof domain>;
@@ -144,10 +177,23 @@ interface Props {
 	children: React.ReactNode;
 }
 
+const extractBaseDomain = (wildcardPattern: string): string => {
+	const normalized = wildcardPattern.toLowerCase().trim();
+	if (normalized.startsWith("**.")) {
+		return normalized.slice(3);
+	}
+	if (normalized.startsWith("*.")) {
+		return normalized.slice(2);
+	}
+	return normalized;
+};
+
 export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const [cacheType, setCacheType] = useState<CacheType>("cache");
 	const [isManualInput, setIsManualInput] = useState(false);
+	const [subdomain, setSubdomain] = useState("");
+	const [selectedBaseDomain, setSelectedBaseDomain] = useState("");
 
 	const utils = api.useUtils();
 	const { data, refetch } = api.domain.one.useQuery(
@@ -178,6 +224,9 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 					},
 				);
 
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const canPublishCloudflare = !!permissions?.cloudflare.read;
+
 	const { mutateAsync, isError, error, isPending } = domainId
 		? api.domain.update.useMutation()
 		: api.domain.create.useMutation();
@@ -189,6 +238,25 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 		api.domain.canGenerateTraefikMeDomains.useQuery({
 			serverId: application?.serverId || "",
 		});
+
+	const { data: restrictionConfig } =
+		api.settings.getDomainRestrictionConfig.useQuery();
+
+	const isRestrictionEnabled =
+		restrictionConfig?.enabled &&
+		(restrictionConfig?.allowedWildcards?.length ?? 0) > 0;
+	const baseDomains =
+		restrictionConfig?.allowedWildcards?.map(extractBaseDomain) ?? [];
+
+	const { data: certificateResolvers } =
+		api.domain.certificateResolvers.useQuery(
+			{
+				serverId: application?.serverId || undefined,
+			},
+			{
+				enabled: isOpen,
+			},
+		);
 
 	const {
 		data: services,
@@ -223,16 +291,83 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			serviceName: undefined,
 			domainType: type,
 			middlewares: [],
+			publishToCloudflare: false,
+			cloudflareId: undefined,
+			cloudflareTunnelMode: undefined,
+			cloudflareTunnelId: undefined,
 		},
 		mode: "onChange",
 	});
 
 	const certificateType = form.watch("certificateType");
+	const customCertResolver = form.watch("customCertResolver");
 	const useCustomEntrypoint = form.watch("useCustomEntrypoint");
 	const https = form.watch("https");
 	const domainType = form.watch("domainType");
 	const host = form.watch("host");
 	const isTraefikMeDomain = host?.includes("sslip.io") || false;
+
+	const publishToCloudflare = form.watch("publishToCloudflare");
+	const cloudflareId = form.watch("cloudflareId");
+	const cloudflareTunnelMode = form.watch("cloudflareTunnelMode");
+	const cloudflareTunnelId = form.watch("cloudflareTunnelId");
+
+	const { data: cloudflareIntegrations } = api.cloudflare.all.useQuery(
+		undefined,
+		{ enabled: canPublishCloudflare },
+	);
+	const { data: cloudflareTunnels } = api.cloudflare.tunnels.useQuery(
+		{ cloudflareId: cloudflareId || "" },
+		{
+			enabled:
+				canPublishCloudflare &&
+				!!cloudflareId &&
+				cloudflareTunnelMode === "existing-instance",
+		},
+	);
+	// Non-secret booleans every member may read, so we can tell a member their
+	// new domain will be auto-protected by org policy (the publish/Access controls
+	// below are admin-only and hidden for members).
+	const { data: domainProtectionPolicy } =
+		api.cloudflare.domainProtectionPolicy.useQuery();
+
+	// Debounce the host so the advisory availability pre-check fires once the
+	// user pauses typing, not on every keystroke.
+	const [debouncedHost, setDebouncedHost] = useState("");
+	useEffect(() => {
+		const timer = setTimeout(() => setDebouncedHost(host ?? ""), 500);
+		return () => clearTimeout(timer);
+	}, [host]);
+
+	const cloudflareCheckEnabled =
+		canPublishCloudflare &&
+		!!publishToCloudflare &&
+		!!cloudflareId &&
+		debouncedHost.length > 0 &&
+		(cloudflareTunnelMode !== "existing-instance" || !!cloudflareTunnelId);
+
+	const { data: cloudflareAvailability } =
+		api.cloudflare.checkDomainAvailability.useQuery(
+			{
+				cloudflareId: cloudflareId || "",
+				host: debouncedHost,
+				tunnelId:
+					cloudflareTunnelMode === "existing-instance"
+						? cloudflareTunnelId || undefined
+						: undefined,
+			},
+			{ enabled: cloudflareCheckEnabled, retry: false },
+		);
+
+	// Synthetic value for the certificate provider Select: detected resolvers
+	// from traefik.yml are stored as certificateType="custom" +
+	// customCertResolver=<name>, but displayed as their own option.
+	const certSelectValue =
+		certificateType === "custom" &&
+		customCertResolver &&
+		certificateResolvers?.includes(customCertResolver)
+			? `resolver:${customCertResolver}`
+			: (certificateType ?? "");
 
 	useEffect(() => {
 		if (data) {
@@ -250,6 +385,10 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 				serviceName: data?.serviceName || undefined,
 				domainType: data?.domainType || type,
 				middlewares: data?.middlewares || [],
+				publishToCloudflare: data?.publishToCloudflare || false,
+				cloudflareId: data?.cloudflareId || undefined,
+				cloudflareTunnelMode: data?.cloudflareTunnelMode || undefined,
+				cloudflareTunnelId: data?.cloudflareTunnelId || undefined,
 			});
 		}
 
@@ -277,6 +416,25 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			form.trigger("customCertResolver");
 		}
 	}, [certificateType, form]);
+
+	// Initialize selected base domain when restriction config loads
+	useEffect(() => {
+		if (baseDomains.length > 0 && !selectedBaseDomain) {
+			setSelectedBaseDomain(baseDomains[0] ?? "");
+		}
+	}, [baseDomains, selectedBaseDomain]);
+
+	useEffect(() => {
+		if (isRestrictionEnabled && selectedBaseDomain) {
+			if (subdomain) {
+				form.setValue("host", `${subdomain}.${selectedBaseDomain}`);
+				form.clearErrors("host");
+			} else {
+				form.setValue("host", "");
+				form.setError("host", { message: "Subdomain is required" });
+			}
+		}
+	}, [subdomain, selectedBaseDomain, isRestrictionEnabled, form]);
 
 	const dictionary = {
 		success: domainId ? "Domain Updated" : "Domain Created",
@@ -516,7 +674,8 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 									name="host"
 									render={({ field }) => (
 										<FormItem>
-											{!canGenerateTraefikMeDomains &&
+											{!isRestrictionEnabled &&
+												!canGenerateTraefikMeDomains &&
 												field.value.includes("sslip.io") && (
 													<AlertBlock type="warning">
 														You need to set an IP address in your{" "}
@@ -531,53 +690,158 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 														to make your sslip.io domain work.
 													</AlertBlock>
 												)}
-											{isTraefikMeDomain && (
+											{!isRestrictionEnabled && isTraefikMeDomain && (
 												<AlertBlock type="info">
 													<strong>Note:</strong> sslip.io is a public HTTP
 													service and does not support SSL/HTTPS. HTTPS and
 													certificate options will not have any effect.
 												</AlertBlock>
 											)}
-											<FormLabel>Host</FormLabel>
-											<div className="flex gap-2">
-												<FormControl>
-													<Input placeholder="api.dokploy.com" {...field} />
-												</FormControl>
-												<TooltipProvider delayDuration={0}>
-													<Tooltip>
-														<TooltipTrigger asChild>
-															<Button
-																variant="secondary"
-																type="button"
-																isLoading={isLoadingGenerate}
-																onClick={() => {
-																	generateDomain({
-																		appName: application?.appName || "",
-																		serverId: application?.serverId || "",
-																	})
-																		.then((domain) => {
-																			field.onChange(domain);
-																		})
-																		.catch((err) => {
-																			toast.error(err.message);
-																		});
-																}}
-															>
-																<Dices className="size-4 text-muted-foreground" />
-															</Button>
-														</TooltipTrigger>
-														<TooltipContent
-															side="left"
-															sideOffset={5}
-															className="max-w-40"
-														>
-															<p>Generate sslip.io domain</p>
-														</TooltipContent>
-													</Tooltip>
-												</TooltipProvider>
-											</div>
+
+											{isRestrictionEnabled ? (
+												<>
+													<div className="space-y-4">
+														<div>
+															<FormLabel>Subdomain</FormLabel>
+															<div className="flex gap-2">
+																<Input
+																	placeholder="my-app"
+																	value={subdomain}
+																	onChange={(e) =>
+																		setSubdomain(
+																			e.target.value.toLowerCase().trim(),
+																		)
+																	}
+																/>
+																<TooltipProvider delayDuration={0}>
+																	<Tooltip>
+																		<TooltipTrigger asChild>
+																			<Button
+																				variant="secondary"
+																				type="button"
+																				onClick={() => {
+																					const randomSubdomain = `${application?.appName || "app"}-${Math.random().toString(36).substring(2, 8)}`;
+																					setSubdomain(randomSubdomain);
+																				}}
+																			>
+																				<Dices className="size-4 text-muted-foreground" />
+																			</Button>
+																		</TooltipTrigger>
+																		<TooltipContent
+																			side="left"
+																			sideOffset={5}
+																			className="max-w-[10rem]"
+																		>
+																			<p>Generate random subdomain</p>
+																		</TooltipContent>
+																	</Tooltip>
+																</TooltipProvider>
+															</div>
+														</div>
+
+														{baseDomains.length > 1 ? (
+															<div>
+																<FormLabel>Domain</FormLabel>
+																<Select
+																	value={selectedBaseDomain}
+																	onValueChange={setSelectedBaseDomain}
+																>
+																	<SelectTrigger>
+																		<SelectValue placeholder="Select a domain" />
+																	</SelectTrigger>
+																	<SelectContent>
+																		{baseDomains.map((domain) => (
+																			<SelectItem key={domain} value={domain}>
+																				{domain}
+																			</SelectItem>
+																		))}
+																	</SelectContent>
+																</Select>
+															</div>
+														) : (
+															<div>
+																<FormLabel>Domain</FormLabel>
+																<Input
+																	value={selectedBaseDomain}
+																	disabled
+																	className="bg-muted"
+																/>
+															</div>
+														)}
+
+														{subdomain && selectedBaseDomain && (
+															<div className="p-3 bg-muted rounded-lg">
+																<span className="text-sm text-muted-foreground">
+																	Preview:{" "}
+																</span>
+																<span className="font-mono">
+																	{subdomain}.{selectedBaseDomain}
+																</span>
+															</div>
+														)}
+													</div>
+													<input type="hidden" {...field} />
+												</>
+											) : (
+												<>
+													<FormLabel>Host</FormLabel>
+													<div className="flex gap-2">
+														<FormControl>
+															<Input
+																placeholder="example.com, *.example.com, or *.sub.example.com"
+																{...field}
+															/>
+														</FormControl>
+														<TooltipProvider delayDuration={0}>
+															<Tooltip>
+																<TooltipTrigger asChild>
+																	<Button
+																		variant="secondary"
+																		type="button"
+																		isLoading={isLoadingGenerate}
+																		onClick={() => {
+																			generateDomain({
+																				appName: application?.appName || "",
+																				serverId: application?.serverId || "",
+																			})
+																				.then((domain) => {
+																					field.onChange(domain);
+																				})
+																				.catch((err) => {
+																					toast.error(err.message);
+																				});
+																		}}
+																	>
+																		<Dices className="size-4 text-muted-foreground" />
+																	</Button>
+																</TooltipTrigger>
+																<TooltipContent
+																	side="left"
+																	sideOffset={5}
+																	className="max-w-40"
+																>
+																	<p>Generate sslip.io domain</p>
+																</TooltipContent>
+															</Tooltip>
+														</TooltipProvider>
+													</div>
+												</>
+											)}
 
 											<FormMessage />
+											{field.value && field.value.includes("*") && (
+												<div className="text-sm text-muted-foreground mt-1">
+													<p>
+														Wildcard subdomains will match any subdomain at the
+														specified level
+													</p>
+													<div>
+														<code>*.example.com</code> will match{" "}
+														<code>api.example.com</code>,{" "}
+														<code>app.example.com</code>, etc.
+													</div>
+												</div>
+											)}
 										</FormItem>
 									)}
 								/>
@@ -744,15 +1008,29 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 														<FormLabel>Certificate Provider</FormLabel>
 														<Select
 															onValueChange={(value) => {
-																field.onChange(value);
-																if (value !== "custom") {
+																if (value.startsWith("resolver:")) {
+																	field.onChange("custom");
 																	form.setValue(
 																		"customCertResolver",
-																		undefined,
+																		value.slice("resolver:".length),
 																	);
+																} else {
+																	field.onChange(value);
+																	if (
+																		value !== "custom" ||
+																		(customCertResolver &&
+																			certificateResolvers?.includes(
+																				customCertResolver,
+																			))
+																	) {
+																		form.setValue(
+																			"customCertResolver",
+																			undefined,
+																		);
+																	}
 																}
 															}}
-															value={field.value}
+															value={certSelectValue}
 														>
 															<FormControl>
 																<SelectTrigger>
@@ -765,6 +1043,18 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 																	Let's Encrypt
 																</SelectItem>
 																<SelectItem value={"custom"}>Custom</SelectItem>
+																{certificateResolvers
+																	?.filter(
+																		(resolver) => resolver !== "letsencrypt",
+																	)
+																	.map((resolver) => (
+																		<SelectItem
+																			key={resolver}
+																			value={`resolver:${resolver}`}
+																		>
+																			{resolver}
+																		</SelectItem>
+																	))}
 															</SelectContent>
 														</Select>
 														<FormDescription>
@@ -804,7 +1094,7 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 											}}
 										/>
 
-										{certificateType === "custom" && (
+										{certSelectValue === "custom" && (
 											<FormField
 												control={form.control}
 												name="customCertResolver"
@@ -841,6 +1131,180 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 										)}
 									</>
 								)}
+
+								{!canPublishCloudflare &&
+									(domainProtectionPolicy?.protectDomainsByDefault ||
+										domainProtectionPolicy?.requireProtectedDomains) && (
+										<div className="mt-4 border-t pt-4">
+											<AlertBlock type="info">
+												New domains are automatically protected with Cloudflare
+												Access per your organization's policy.
+											</AlertBlock>
+										</div>
+									)}
+
+								{canPublishCloudflare && (
+									<div className="flex flex-col gap-4 mt-4 border-t pt-4">
+										<FormField
+											control={form.control}
+											name="publishToCloudflare"
+											render={({ field }) => (
+												<FormItem className="flex flex-row items-center justify-between p-3 border rounded-lg shadow-sm">
+													<div className="space-y-0.5">
+														<FormLabel>Publish via Cloudflare Tunnel</FormLabel>
+														<FormDescription>
+															Expose this domain through Cloudflare Tunnel — no
+															open origin ports, with TLS terminated at
+															Cloudflare's edge.
+														</FormDescription>
+														<FormMessage />
+													</div>
+													<FormControl>
+														<Switch
+															checked={field.value}
+															onCheckedChange={field.onChange}
+														/>
+													</FormControl>
+												</FormItem>
+											)}
+										/>
+
+										{publishToCloudflare && (
+											<>
+												<AlertBlock type="info">
+													Cloudflare terminates TLS at the edge and forwards to
+													your app over HTTP. Set your Cloudflare SSL/TLS mode
+													to <strong>Full</strong>; the HTTP→HTTPS redirect is
+													skipped automatically for published domains.
+												</AlertBlock>
+
+												{(cloudflareIntegrations?.length ?? 0) === 0 ? (
+													<AlertBlock type="warning">
+														No Cloudflare integration found. Add one in{" "}
+														<Link
+															href="/dashboard/settings/cloudflare"
+															className="text-primary"
+														>
+															Settings → Cloudflare Tunnel & Access
+														</Link>
+														.
+													</AlertBlock>
+												) : (
+													<>
+														<FormField
+															control={form.control}
+															name="cloudflareId"
+															render={({ field }) => (
+																<FormItem>
+																	<FormLabel>Cloudflare Integration</FormLabel>
+																	<Select
+																		onValueChange={field.onChange}
+																		value={field.value || ""}
+																	>
+																		<FormControl>
+																			<SelectTrigger>
+																				<SelectValue placeholder="Select an integration" />
+																			</SelectTrigger>
+																		</FormControl>
+																		<SelectContent>
+																			{cloudflareIntegrations?.map(
+																				(integration) => (
+																					<SelectItem
+																						key={integration.cloudflareId}
+																						value={integration.cloudflareId}
+																					>
+																						{integration.name}
+																					</SelectItem>
+																				),
+																			)}
+																		</SelectContent>
+																	</Select>
+																	<FormMessage />
+																</FormItem>
+															)}
+														/>
+
+														<FormField
+															control={form.control}
+															name="cloudflareTunnelMode"
+															render={({ field }) => (
+																<FormItem>
+																	<FormLabel>Tunnel Mode</FormLabel>
+																	<Select
+																		onValueChange={field.onChange}
+																		value={field.value || ""}
+																	>
+																		<FormControl>
+																			<SelectTrigger>
+																				<SelectValue placeholder="Select a mode" />
+																			</SelectTrigger>
+																		</FormControl>
+																		<SelectContent>
+																			<SelectItem value="shared-managed">
+																				Shared (Dokploy-managed connector)
+																			</SelectItem>
+																			<SelectItem value="existing-instance">
+																				Existing tunnel
+																			</SelectItem>
+																		</SelectContent>
+																	</Select>
+																	<FormDescription>
+																		Shared lets Dokploy create and run the
+																		connector. Existing routes through one of
+																		your remotely-managed tunnels.
+																	</FormDescription>
+																	<FormMessage />
+																</FormItem>
+															)}
+														/>
+
+														{cloudflareTunnelMode === "existing-instance" && (
+															<FormField
+																control={form.control}
+																name="cloudflareTunnelId"
+																render={({ field }) => (
+																	<FormItem>
+																		<FormLabel>Existing Tunnel</FormLabel>
+																		<Select
+																			onValueChange={field.onChange}
+																			value={field.value || ""}
+																		>
+																			<FormControl>
+																				<SelectTrigger>
+																					<SelectValue placeholder="Select a tunnel" />
+																				</SelectTrigger>
+																			</FormControl>
+																			<SelectContent>
+																				{cloudflareTunnels?.map((tunnel) => (
+																					<SelectItem
+																						key={tunnel.id}
+																						value={tunnel.id}
+																					>
+																						{tunnel.name}
+																					</SelectItem>
+																				))}
+																			</SelectContent>
+																		</Select>
+																		<FormMessage />
+																	</FormItem>
+																)}
+															/>
+														)}
+
+														{cloudflareAvailability &&
+															!cloudflareAvailability.available && (
+																<AlertBlock type="warning">
+																	{cloudflareAvailability.reason ??
+																		"This host can't be published through Cloudflare."}
+																</AlertBlock>
+															)}
+													</>
+												)}
+											</>
+										)}
+									</div>
+								)}
+
 								<FormField
 									control={form.control}
 									name="middlewares"

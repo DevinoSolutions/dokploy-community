@@ -1,6 +1,6 @@
 {
-  "id": "47272680-456f-446e-a1c5-ad4e6d086b31",
-  "prevId": "37b55a62-bd80-4aa2-b8d7-c16831abef89",
+  "id": "6f025f7a-db22-4708-b87e-5aab07efc172",
+  "prevId": "6ff797f8-2edc-41eb-a4c1-ca2c58d436e5",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1963,6 +1963,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "includeEncryptionKey": {
+          "name": "includeEncryptionKey",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "backupType": {
           "name": "backupType",
           "type": "backupType",
@@ -2400,6 +2407,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "pullImagesOnDeploy": {
+          "name": "pullImagesOnDeploy",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "gitlabProjectId": {
           "name": "gitlabProjectId",
           "type": "integer",
@@ -2700,6 +2714,59 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.deploy_hook": {
+      "name": "deploy_hook",
+      "schema": "",
+      "columns": {
+        "deployHookId": {
+          "name": "deployHookId",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "applicationId": {
+          "name": "applicationId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "hooks": {
+          "name": "hooks",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "deploy_hook_applicationId_application_applicationId_fk": {
+          "name": "deploy_hook_applicationId_application_applicationId_fk",
+          "tableFrom": "deploy_hook",
+          "tableTo": "application",
+          "columnsFrom": [
+            "applicationId"
+          ],
+          "columnsTo": [
+            "applicationId"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "deploy_hook_applicationId_unique": {
+          "name": "deploy_hook_applicationId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "applicationId"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -5458,13 +5525,6 @@
         },
         "serverThreshold": {
           "name": "serverThreshold",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "scheduleFailure": {
-          "name": "scheduleFailure",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
