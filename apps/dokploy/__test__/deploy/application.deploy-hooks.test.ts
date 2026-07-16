@@ -4,6 +4,7 @@ import { deployApplication } from "@dokploy/server/services/application";
 import * as deploymentService from "@dokploy/server/services/deployment";
 import * as builders from "@dokploy/server/utils/builders";
 import * as hooks from "@dokploy/server/utils/docker/hooks";
+import * as dockerUtils from "@dokploy/server/utils/docker/utils";
 import * as notifications from "@dokploy/server/utils/notifications/build-error";
 import * as successNotifications from "@dokploy/server/utils/notifications/build-success";
 import * as execProcess from "@dokploy/server/utils/process/execAsync";
@@ -68,6 +69,7 @@ vi.mock("@dokploy/server/services/deployment", () => ({
 	createDeployment: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
 	updateDeployment: vi.fn(),
+	getDeploymentErrorMessage: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/utils/providers/git", async () => {
@@ -104,7 +106,16 @@ vi.mock("@dokploy/server/utils/docker/hooks", async () => {
 	return {
 		...actual,
 		runDeployHook: vi.fn(),
-		waitForSwarmServiceRunning: vi.fn(),
+	};
+});
+
+vi.mock("@dokploy/server/utils/docker/utils", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/utils/docker/utils")
+	>("@dokploy/server/utils/docker/utils");
+	return {
+		...actual,
+		waitForSwarmServiceStable: vi.fn(),
 	};
 });
 
@@ -204,10 +215,13 @@ const primeMocks = (app = createMockApplication()) => {
 		hash: "abc123",
 	});
 	vi.mocked(deploymentService.updateDeployment).mockResolvedValue({} as any);
-	vi.mocked(hooks.runDeployHook).mockResolvedValue(undefined as any);
-	vi.mocked(hooks.waitForSwarmServiceRunning).mockResolvedValue(
-		undefined as any,
+	vi.mocked(deploymentService.getDeploymentErrorMessage).mockResolvedValue(
+		"error message",
 	);
+	vi.mocked(hooks.runDeployHook).mockResolvedValue(undefined as any);
+	vi.mocked(dockerUtils.waitForSwarmServiceStable).mockResolvedValue({
+		stable: true,
+	} as any);
 };
 
 describe("deployApplication - Deploy Hooks", () => {
@@ -250,7 +264,7 @@ describe("deployApplication - Deploy Hooks", () => {
 		expect(order[1]).toBe("mechanize");
 	});
 
-	it("invokes post-deploy hook after mechanizeDockerContainer and after waitForSwarmServiceRunning", async () => {
+	it("invokes post-deploy hook after mechanizeDockerContainer and after the swarm stability gate", async () => {
 		const order: string[] = [];
 		primeMocks(
 			createMockApplication({
@@ -262,9 +276,12 @@ describe("deployApplication - Deploy Hooks", () => {
 				order.push("mechanize");
 			},
 		);
-		vi.mocked(hooks.waitForSwarmServiceRunning).mockImplementation(async () => {
-			order.push("wait");
-		});
+		vi.mocked(dockerUtils.waitForSwarmServiceStable).mockImplementation(
+			async () => {
+				order.push("wait");
+				return { stable: true } as any;
+			},
+		);
 		vi.mocked(hooks.runDeployHook).mockImplementation(async ({ kind }) => {
 			order.push(`hook:${kind}`);
 		});
@@ -284,7 +301,7 @@ describe("deployApplication - Deploy Hooks", () => {
 		);
 	});
 
-	it("skips waitForSwarmServiceRunning when postDeployCommand is empty", async () => {
+	it("skips the post-deploy hook when postDeployCommand is empty (stability gate still runs)", async () => {
 		primeMocks(
 			createMockApplication({
 				deployHooks: null,
@@ -297,7 +314,8 @@ describe("deployApplication - Deploy Hooks", () => {
 			descriptionLog: "",
 		});
 
-		expect(hooks.waitForSwarmServiceRunning).not.toHaveBeenCalled();
+		// The swarm stability gate always runs after mechanize, regardless of hooks.
+		expect(dockerUtils.waitForSwarmServiceStable).toHaveBeenCalled();
 		const postCalls = vi
 			.mocked(hooks.runDeployHook)
 			.mock.calls.filter(([arg]) => arg.kind === "post");
@@ -392,9 +410,9 @@ describe("deployApplication - Deploy Hooks", () => {
 				serverId: "remote-server-id",
 			}),
 		);
-		expect(hooks.waitForSwarmServiceRunning).toHaveBeenCalledWith(
+		expect(dockerUtils.waitForSwarmServiceStable).toHaveBeenCalledWith(
 			"test-app",
-			"remote-server-id",
+			{ serverId: "remote-server-id" },
 		);
 		expect(hooks.runDeployHook).toHaveBeenCalledWith(
 			expect.objectContaining({
