@@ -2,7 +2,7 @@ import type { apiRestoreBackup } from "@dokploy/server/db/schema";
 import type { Destination } from "@dokploy/server/services/destination";
 import type { Postgres } from "@dokploy/server/services/postgres";
 import type { z } from "zod";
-import { getRcloneCredentials, getRcloneDestination } from "../backups/utils";
+import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { getRestoreCommand } from "./utils";
 
@@ -15,12 +15,13 @@ export const restorePostgresBackup = async (
 	try {
 		const { appName, databaseUser, serverId } = postgres;
 
-		const rcloneFlags = getRcloneCredentials(destination);
-		const bucketPath = getRcloneDestination(destination);
+		const { flags: rcloneFlags, path: backupPath, envVars } =
+			await getRclonePathAndFlags(destination, backupInput.backupFile);
 
-		const backupPath = `${bucketPath}/${backupInput.backupFile}`;
-
-		const rcloneCommand = `rclone cat ${rcloneFlags.join(" ")} "${backupPath}" | gunzip`;
+		const rcloneCommand = buildRcloneCommand(
+			`rclone cat ${rcloneFlags.join(" ")} "${backupPath}" | gunzip`,
+			envVars,
+		);
 
 		const command = getRestoreCommand({
 			appName,

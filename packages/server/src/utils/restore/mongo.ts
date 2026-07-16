@@ -2,7 +2,7 @@ import type { apiRestoreBackup } from "@dokploy/server/db/schema";
 import type { Destination } from "@dokploy/server/services/destination";
 import type { Mongo } from "@dokploy/server/services/mongo";
 import type { z } from "zod";
-import { getRcloneCredentials, getRcloneDestination } from "../backups/utils";
+import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { getRestoreCommand } from "./utils";
 
@@ -15,10 +15,12 @@ export const restoreMongoBackup = async (
 	try {
 		const { appName, databasePassword, databaseUser, serverId } = mongo;
 
-		const rcloneFlags = getRcloneCredentials(destination);
-		const bucketPath = getRcloneDestination(destination);
-		const backupPath = `${bucketPath}/${backupInput.backupFile}`;
-		const rcloneCommand = `rclone copy ${rcloneFlags.join(" ")} "${backupPath}"`;
+		const { flags: rcloneFlags, path: backupPath, envVars } =
+			await getRclonePathAndFlags(destination, backupInput.backupFile);
+		const rcloneCommand = buildRcloneCommand(
+			`rclone copy ${rcloneFlags.join(" ")} "${backupPath}"`,
+			envVars,
+		);
 
 		const command = getRestoreCommand({
 			appName,

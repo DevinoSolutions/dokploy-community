@@ -20,8 +20,13 @@ vi.mock("@dokploy/server/wss/utils", () => ({
 }));
 
 vi.mock("@dokploy/server/utils/backups/utils", () => ({
-	getRcloneCredentials: () => ["--s3-flag"],
-	getRcloneDestination: () => ":s3:my-bucket",
+	getRclonePathAndFlags: (_destination: unknown, subPath: string) => ({
+		flags: ["--s3-flag"],
+		path: `:s3:my-bucket/${subPath}`,
+		envVars: "",
+	}),
+	buildRcloneCommand: (command: string, envVars?: string) =>
+		envVars ? `${envVars} ${command}` : command,
 }));
 
 vi.mock("node:fs/promises", () => ({

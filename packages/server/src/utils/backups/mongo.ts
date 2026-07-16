@@ -10,6 +10,7 @@ import { findProjectById } from "@dokploy/server/services/project";
 import { sendDatabaseBackupNotifications } from "../notifications/database-backup";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
+	buildRcloneCommand,
 	getBackupCommand,
 	getBackupTimestamp,
 	getRclonePathAndFlags,
@@ -30,9 +31,12 @@ export const runMongoBackup = async (mongo: Mongo, backup: BackupSchedule) => {
 		description: "MongoDB Backup",
 	});
 	try {
-		const { flags: rcloneFlags, path: rcloneDestination } =
+		const { flags: rcloneFlags, path: rcloneDestination, envVars } =
 			await getRclonePathAndFlags(destination, bucketDestination);
-		const rcloneCommand = `rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
+		const rcloneCommand = buildRcloneCommand(
+			`rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`,
+			envVars,
+		);
 
 		const backupCommand = getBackupCommand(
 			backup,

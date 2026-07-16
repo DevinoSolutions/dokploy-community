@@ -17,6 +17,7 @@ import { sendDokployBackupNotifications } from "../notifications/dokploy-backup"
 import { execAsync } from "../process/execAsync";
 import { redactRcloneCredentials } from "./redact";
 import {
+	buildRcloneCommand,
 	getBackupTimestamp,
 	getRclonePathAndFlags,
 	normalizeS3Path,
@@ -49,7 +50,11 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 		const { BASE_PATH } = paths();
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-backup-"));
 		const backupFileName = `webserver-backup-${timestamp}.zip`;
-		const { flags: rcloneFlags, path: s3Path } = await getRclonePathAndFlags(
+		const {
+			flags: rcloneFlags,
+			path: s3Path,
+			envVars,
+		} = await getRclonePathAndFlags(
 			destination,
 			`${normalizeS3Path(backup.prefix)}${backupFileName}`,
 		);
@@ -120,7 +125,10 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 				// If stat fails, keep undefined
 			}
 
-			const uploadCommand = `rclone copyto ${rcloneFlags.join(" ")} "${zipPath}" "${s3Path}"`;
+			const uploadCommand = buildRcloneCommand(
+				`rclone copyto ${rcloneFlags.join(" ")} "${zipPath}" "${s3Path}"`,
+				envVars,
+			);
 			const destinationType = ["sftp", "ftp"].includes(
 				destination.provider || "",
 			)

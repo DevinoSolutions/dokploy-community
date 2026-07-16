@@ -5,7 +5,7 @@ import {
 	findDestinationById,
 	paths,
 } from "../..";
-import { getRcloneCredentials, getRcloneDestination } from "../backups/utils";
+import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 
 export const restoreVolume = async (
 	id: string,
@@ -18,12 +18,17 @@ export const restoreVolume = async (
 	const destination = await findDestinationById(destinationId);
 	const { VOLUME_BACKUPS_PATH } = paths(!!serverId);
 	const volumeBackupPath = path.join(VOLUME_BACKUPS_PATH, volumeName);
-	const rcloneFlags = getRcloneCredentials(destination);
-	const bucketPath = getRcloneDestination(destination);
-	const backupPath = `${bucketPath}/${backupFileName}`;
+	const {
+		flags: rcloneFlags,
+		path: backupPath,
+		envVars,
+	} = await getRclonePathAndFlags(destination, backupFileName);
 
 	// Command to download backup file from the configured destination
-	const downloadCommand = `rclone copyto ${rcloneFlags.join(" ")} "${backupPath}" "${volumeBackupPath}/${backupFileName}"`;
+	const downloadCommand = buildRcloneCommand(
+		`rclone copyto ${rcloneFlags.join(" ")} "${backupPath}" "${volumeBackupPath}/${backupFileName}"`,
+		envVars,
+	);
 
 	// Base restore command that creates the volume and restores data
 	const baseRestoreCommand = `

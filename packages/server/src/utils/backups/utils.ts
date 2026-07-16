@@ -132,6 +132,71 @@ export const getRcloneTestFlags = (destination: RcloneDestination) => [
 
 export const getS3Credentials = getRcloneCredentials;
 
+// Rclone crypt (destination-side encryption at rest) helpers.
+// When a destination has encryption enabled, backups are wrapped in rclone's
+// native crypt backend (NaCl SecretBox: XSalsa20 + Poly1305) and filenames are
+// optionally encrypted too.
+//
+// The crypt backend is configured entirely through backend-specific ENVIRONMENT
+// VARIABLES (RCLONE_CRYPT_*) rather than an on-the-fly connection string. That
+// matters: a connection string has to quote the wrapped remote (e.g.
+// remote=":s3:bucket") because it contains colons, but that inner quoting does
+// NOT survive the extra shell parse that execAsync/execAsyncRemote performs — the
+// shell strips the quotes and rclone then mis-parses the remote. Passing the
+// wrapped remote via RCLONE_CRYPT_REMOTE keeps the rclone path a plain `:crypt:`
+// remote with no quoting to lose, and the passwords never appear in argv.
+//
+// Passwords are obscured with `rclone obscure` (like the SFTP/FTP branch) because
+// the crypt backend expects obscured passwords. Crypt wraps the S3 and generic
+// rclone remotes only (SFTP/FTP is out of scope).
+// @see https://rclone.org/crypt/  @see https://rclone.org/docs/#backend-specific-environment-variables
+const FILENAME_ENCRYPTION_VALUES = ["off", "standard", "obfuscate"] as const;
+
+export const isDestinationEncrypted = (
+	destination: Pick<Destination, "encryptionEnabled" | "encryptionKey">,
+) => Boolean(destination.encryptionEnabled && destination.encryptionKey);
+
+// Build the RCLONE_CRYPT_* environment variable prefix for a crypt-wrapped
+// remote. `remoteRoot` is the underlying remote (e.g. `:s3:bucket` or a generic
+// remote spec) that crypt should encrypt into.
+const getCryptEnvVars = async (
+	destination: Destination,
+	remoteRoot: string,
+): Promise<string> => {
+	const filenameEncryption = FILENAME_ENCRYPTION_VALUES.includes(
+		destination.filenameEncryption as (typeof FILENAME_ENCRYPTION_VALUES)[number],
+	)
+		? destination.filenameEncryption
+		: "off";
+	const directoryNameEncryption = destination.directoryNameEncryption ?? false;
+
+	// Single-quote each value for the shell and escape embedded single quotes
+	// (' -> '\''). Callers must prepend these via buildRcloneCommand.
+	const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+	const obscuredKey = await obscurePassword(destination.encryptionKey || "");
+	let envVars =
+		`RCLONE_CRYPT_REMOTE=${shellQuote(remoteRoot)}` +
+		` RCLONE_CRYPT_FILENAME_ENCRYPTION=${filenameEncryption}` +
+		` RCLONE_CRYPT_DIRECTORY_NAME_ENCRYPTION=${directoryNameEncryption}` +
+		` RCLONE_CRYPT_PASSWORD=${shellQuote(obscuredKey)}`;
+	if (destination.encryptionPassword2) {
+		const obscuredPassword2 = await obscurePassword(
+			destination.encryptionPassword2,
+		);
+		envVars += ` RCLONE_CRYPT_PASSWORD2=${shellQuote(obscuredPassword2)}`;
+	}
+	return envVars;
+};
+
+/**
+ * Prepend rclone crypt password environment variables to a command when the
+ * destination has encryption enabled. `envVars` comes from getRclonePathAndFlags
+ * (empty string when the destination is not encrypted).
+ */
+export const buildRcloneCommand = (command: string, envVars?: string): string =>
+	envVars ? `${envVars} ${command}` : command;
+
 export const getPostgresBackupCommand = (
 	database: string,
 	databaseUser: string,
@@ -384,15 +449,29 @@ export const getRclonePathAndFlags = async (
 		const flags = destination.additionalFlags?.length
 			? [...destination.additionalFlags]
 			: [];
+		if (isDestinationEncrypted(destination)) {
+			return {
+				flags,
+				path: `:crypt:${subPath}`,
+				envVars: await getCryptEnvVars(destination, destination.bucket),
+			};
+		}
 		const path = `${destination.bucket}/${subPath}`;
-		return { flags, path };
+		return { flags, path, envVars: "" };
 	}
 
 	const isS3 = !["sftp", "ftp"].includes(destination.provider || "");
 	if (isS3) {
 		const flags = getS3Credentials(destination);
+		if (isDestinationEncrypted(destination)) {
+			return {
+				flags,
+				path: `:crypt:${subPath}`,
+				envVars: await getCryptEnvVars(destination, `:s3:${destination.bucket}`),
+			};
+		}
 		const path = `:s3:${destination.bucket}/${subPath}`;
-		return { flags, path };
+		return { flags, path, envVars: "" };
 	}
 	const provider = destination.provider;
 	// The SFTP/FTP connection string below is interpolated into a shell command.
@@ -432,5 +511,7 @@ export const getRclonePathAndFlags = async (
 
 	const obscuredPass = await obscurePassword(destination.secretAccessKey);
 	const path = `:${provider},host="${destination.endpoint}",port="${destination.region}",user="${destination.accessKey}",pass="${obscuredPass}":${destination.bucket}/${subPath}`;
-	return { flags: [], path };
+	// SFTP/FTP crypt is not supported (see wrapWithCrypt note); encryption fields
+	// are ignored for these providers.
+	return { flags: [], path, envVars: "" };
 };

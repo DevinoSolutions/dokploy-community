@@ -123,7 +123,7 @@ export const keepLatestNBackups = async (
 
 	try {
 		const destination = await findDestinationById(backup.destinationId);
-		const { flags: rcloneFlags, path: backupFilesPath } =
+		const { flags: rcloneFlags, path: backupFilesPath, envVars } =
 			await getRclonePathAndFlags(
 				destination,
 				normalizeS3Path(backup.prefix),
@@ -137,7 +137,11 @@ export const keepLatestNBackups = async (
 		// to test the deletion before actually deleting we can add --dry-run before ${backupFilesPath}{}
 		const rcloneDelete = `rclone delete ${rcloneFlags.join(" ")} "${backupFilesPath}{}"`;
 
-		const rcloneCommand = `${rcloneList} | ${sortAndPickUnwantedBackups} ${rcloneDelete}`;
+		// When encryption is enabled we export the crypt passwords so every rclone
+		// invocation in the pipeline inherits them — including the `rclone delete`
+		// that xargs spawns without a shell, where an inline env prefix would not apply.
+		const envPrefix = envVars ? `export ${envVars}; ` : "";
+		const rcloneCommand = `${envPrefix}${rcloneList} | ${sortAndPickUnwantedBackups} ${rcloneDelete}`;
 
 		if (serverId) {
 			await execAsyncRemote(serverId, rcloneCommand);

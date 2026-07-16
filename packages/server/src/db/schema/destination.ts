@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -28,6 +28,17 @@ export const destinations = pgTable("destination", {
 		.notNull()
 		.references(() => organization.id, { onDelete: "cascade" }),
 	createdAt: timestamp("createdAt").notNull().defaultNow(),
+	// Encryption settings (rclone crypt) — destination-side encryption at rest.
+	encryptionEnabled: boolean("encryptionEnabled").notNull().default(false),
+	encryptionKey: text("encryptionKey"),
+	// Optional salt password for additional security (recommended by rclone)
+	encryptionPassword2: text("encryptionPassword2"),
+	// Filename encryption: "standard" (encrypt), "obfuscate", or "off"
+	filenameEncryption: text("filenameEncryption").notNull().default("off"),
+	// Whether to encrypt directory names (only applies if filenameEncryption is not "off")
+	directoryNameEncryption: boolean("directoryNameEncryption")
+		.notNull()
+		.default(false),
 });
 
 export const destinationsRelations = relations(
@@ -69,6 +80,12 @@ export const apiCreateDestination = createSchema
 	.required()
 	.extend({
 		serverId: z.string().optional(),
+		// Encryption settings (rclone crypt) are optional at the API layer.
+		encryptionEnabled: z.boolean().optional(),
+		encryptionKey: z.string().optional(),
+		encryptionPassword2: z.string().optional(),
+		filenameEncryption: z.enum(["standard", "obfuscate", "off"]).optional(),
+		directoryNameEncryption: z.boolean().optional(),
 	})
 	.superRefine((data, ctx) => {
 		const isGenericRclone = data.provider === GENERIC_RCLONE_PROVIDER;
@@ -139,4 +156,10 @@ export const apiUpdateDestination = createSchema
 	.required()
 	.extend({
 		serverId: z.string().optional(),
+		// Encryption settings (rclone crypt) are optional at the API layer.
+		encryptionEnabled: z.boolean().optional(),
+		encryptionKey: z.string().optional(),
+		encryptionPassword2: z.string().optional(),
+		filenameEncryption: z.enum(["standard", "obfuscate", "off"]).optional(),
+		directoryNameEncryption: z.boolean().optional(),
 	});

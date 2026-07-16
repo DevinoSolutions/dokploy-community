@@ -5,7 +5,7 @@ import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Destination } from "@dokploy/server/services/destination";
 import { updateWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { getPublicIpWithFallback } from "@dokploy/server/wss/utils";
-import { getRcloneCredentials, getRcloneDestination } from "../backups/utils";
+import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 import { ExecError } from "../process/ExecError";
 import { execAsync } from "../process/execAsync";
 
@@ -41,9 +41,8 @@ export const restoreWebServerBackup = async (
 	try {
 		assertWebServerBackupArchivePath(backupFile);
 
-		const rcloneFlags = getRcloneCredentials(destination);
-		const bucketPath = getRcloneDestination(destination);
-		const backupPath = `${bucketPath}/${backupFile}`;
+		const { flags: rcloneFlags, path: backupPath, envVars } =
+			await getRclonePathAndFlags(destination, backupFile);
 		const { BASE_PATH } = paths();
 
 		// Create a temporary directory outside of BASE_PATH
@@ -64,7 +63,10 @@ export const restoreWebServerBackup = async (
 			// Download backup from S3
 			emit("Downloading backup from destination...");
 			await execAsync(
-				`rclone copyto ${rcloneFlags.join(" ")} ${JSON.stringify(backupPath)} ${JSON.stringify(localArchivePath)}`,
+				buildRcloneCommand(
+					`rclone copyto ${rcloneFlags.join(" ")} ${JSON.stringify(backupPath)} ${JSON.stringify(localArchivePath)}`,
+					envVars,
+				),
 			);
 
 			const archiveStat = await stat(localArchivePath);
