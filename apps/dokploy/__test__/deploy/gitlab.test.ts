@@ -25,6 +25,8 @@ vi.mock(
 			removePreviewDeployment: vi.fn(),
 			findPreviewDeploymentByApplicationId: vi.fn(),
 			createPreviewDeployment: vi.fn(),
+			findPreviewDeploymentByComposeId: vi.fn(),
+			createComposePreview: vi.fn(),
 		};
 	},
 );
@@ -51,8 +53,10 @@ vi.mock("@/server/queues/queueSetup", () => ({
 import { db } from "@dokploy/server/db";
 import { findGitlabByWebhookSecret } from "@dokploy/server/services/gitlab";
 import {
+	createComposePreview,
 	createPreviewDeployment,
 	findPreviewDeploymentByApplicationId,
+	findPreviewDeploymentByComposeId,
 	findPreviewDeploymentsByPullRequestId,
 	removePreviewDeployment,
 } from "@dokploy/server/services/preview-deployment";
@@ -87,6 +91,23 @@ const FAKE_APP = {
 	previewLimit: 3,
 	serverId: null,
 	previewDeployments: [],
+};
+
+const FAKE_COMPOSE = {
+	composeId: "compose-id-1",
+	name: "My Compose",
+	appName: "my-compose",
+	sourceType: "gitlab" as const,
+	gitlabId: "gitlab-id-1",
+	gitlabPathNamespace: "mygroup/myrepo",
+	gitlabBranch: "main",
+	isPreviewDeploymentsActive: true,
+	previewRequireCollaboratorPermissions: true,
+	previewLabels: [],
+	previewLimit: 3,
+	serverId: null,
+	previewDeployments: [],
+	domains: [],
 };
 
 const makeMrPayload = (
@@ -262,6 +283,10 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 		vi.mocked(findGitlabByWebhookSecret).mockResolvedValue(
 			FAKE_GITLAB_PROVIDER as any,
 		);
+		// The setup.ts Proxy shares one findMany mock across tables, so the compose
+		// query in the MR branch returns FAKE_APP too. Its preview gates mirror the
+		// app's, so every assertion below holds; the compose service mocks keep the
+		// extra loop iteration from throwing.
 		vi.mocked(db.query.applications.findMany).mockResolvedValue([
 			FAKE_APP as any,
 		]);
@@ -271,6 +296,12 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 		);
 		vi.mocked(createPreviewDeployment).mockResolvedValue({
 			previewDeploymentId: "new-preview-id",
+		} as any);
+		vi.mocked(findPreviewDeploymentByComposeId).mockResolvedValue(
+			undefined as any,
+		);
+		vi.mocked(createComposePreview).mockResolvedValue({
+			previewDeploymentId: "new-compose-preview-id",
 		} as any);
 	});
 	afterEach(() => vi.clearAllMocks());
@@ -417,6 +448,202 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 		expect(createSecurityBlockedMRNote).toHaveBeenCalledTimes(1);
 		// Both apps blocked — no jobs queued
 		expect(myQueue.add).not.toHaveBeenCalled();
+	});
+});
+
+describe("GitLab webhook handler — Merge Request Hook compose previews", () => {
+	// The MR branch runs two findMany queries (applications first, compose
+	// second) against the shared setup.ts Proxy mock — prime both explicitly.
+	const primeMrQueries = (
+		composeRows: unknown[],
+		appRows: unknown[] = [],
+	) => {
+		vi.mocked(db.query.applications.findMany).mockResolvedValueOnce(
+			appRows as any,
+		);
+		vi.mocked(db.query.applications.findMany).mockResolvedValueOnce(
+			composeRows as any,
+		);
+	};
+
+	beforeEach(() => {
+		vi.mocked(findGitlabByWebhookSecret).mockResolvedValue(
+			FAKE_GITLAB_PROVIDER as any,
+		);
+		vi.mocked(findPreviewDeploymentsByPullRequestId).mockResolvedValue([]);
+		vi.mocked(findPreviewDeploymentByComposeId).mockResolvedValue(
+			undefined as any,
+		);
+		vi.mocked(createComposePreview).mockResolvedValue({
+			previewDeploymentId: "new-compose-preview-id",
+		} as any);
+	});
+	afterEach(() => vi.clearAllMocks());
+
+	it("creates a compose preview from the MR source branch and enqueues a compose-preview job on open", async () => {
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
+			hasWriteAccess: true,
+			accessLevel: 30,
+		});
+		primeMrQueries([FAKE_COMPOSE]);
+
+		const req = makeReq("Merge Request Hook", makeMrPayload("open"));
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(createComposePreview).toHaveBeenCalledWith({
+			composeId: "compose-id-1",
+			branch: "feature-branch",
+			pullRequestId: "12345",
+			pullRequestNumber: "42",
+			pullRequestTitle: "My MR Title",
+			pullRequestURL:
+				"https://gitlab.example.com/mygroup/myrepo/-/merge_requests/42",
+		});
+		expect(myQueue.add).toHaveBeenCalledWith(
+			"deployments",
+			expect.objectContaining({
+				composeId: "compose-id-1",
+				applicationType: "compose-preview",
+				type: "deploy",
+				previewDeploymentId: "new-compose-preview-id",
+			}),
+			expect.objectContaining({
+				removeOnComplete: true,
+				removeOnFail: true,
+			}),
+		);
+		expect(res.status).toHaveBeenCalledWith(200);
+	});
+
+	it("authorizes the compose preview against the MR author, not the privileged event actor", async () => {
+		// Actor≠author regression: a privileged member labeling/updating an
+		// untrusted author's MR must NOT unblock the compose preview. The check
+		// runs against object_attributes.author_id, and the author lacks access.
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
+			hasWriteAccess: false,
+			accessLevel: 20,
+		});
+		primeMrQueries([FAKE_COMPOSE]);
+
+		const payload = makeMrPayload("update", { author_id: 555 });
+		(payload as { user: unknown }).user = { username: "privileged-labeler" };
+		const req = makeReq("Merge Request Hook", payload);
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(checkGitlabMemberPermissionsByUserId).toHaveBeenCalledWith(
+			"gitlab-id-1",
+			99,
+			555,
+		);
+		expect(createComposePreview).not.toHaveBeenCalled();
+		expect(myQueue.add).not.toHaveBeenCalled();
+		expect(createSecurityBlockedMRNote).toHaveBeenCalledTimes(1);
+	});
+
+	it("reuses the existing compose preview on update instead of creating a duplicate", async () => {
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
+			hasWriteAccess: true,
+			accessLevel: 30,
+		});
+		vi.mocked(findPreviewDeploymentByComposeId).mockResolvedValue({
+			previewDeploymentId: "existing-compose-preview",
+		} as any);
+		primeMrQueries([FAKE_COMPOSE]);
+
+		const req = makeReq("Merge Request Hook", makeMrPayload("update"));
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(findPreviewDeploymentByComposeId).toHaveBeenCalledWith(
+			"compose-id-1",
+			"12345",
+		);
+		expect(createComposePreview).not.toHaveBeenCalled();
+		expect(myQueue.add).toHaveBeenCalledWith(
+			"deployments",
+			expect.objectContaining({
+				applicationType: "compose-preview",
+				previewDeploymentId: "existing-compose-preview",
+			}),
+			expect.any(Object),
+		);
+	});
+
+	it("does not create a compose preview once the preview limit is reached", async () => {
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
+			hasWriteAccess: true,
+			accessLevel: 30,
+		});
+		primeMrQueries([
+			{
+				...FAKE_COMPOSE,
+				previewLimit: 1,
+				previewDeployments: [{ previewDeploymentId: "already-there" }],
+			},
+		]);
+
+		const req = makeReq("Merge Request Hook", makeMrPayload("open"));
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(createComposePreview).not.toHaveBeenCalled();
+		expect(myQueue.add).not.toHaveBeenCalled();
+	});
+
+	it("skips composes whose preview labels do not match the MR labels", async () => {
+		vi.mocked(checkGitlabMemberPermissionsByUserId).mockResolvedValue({
+			hasWriteAccess: true,
+			accessLevel: 30,
+		});
+		primeMrQueries([{ ...FAKE_COMPOSE, previewLabels: ["needs-review"] }]);
+
+		const req = makeReq("Merge Request Hook", makeMrPayload("open"));
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(createComposePreview).not.toHaveBeenCalled();
+		expect(myQueue.add).not.toHaveBeenCalled();
+	});
+
+	it("skips the permission check when previewRequireCollaboratorPermissions is disabled on the compose", async () => {
+		primeMrQueries([
+			{ ...FAKE_COMPOSE, previewRequireCollaboratorPermissions: false },
+		]);
+
+		const req = makeReq("Merge Request Hook", makeMrPayload("open"));
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(checkGitlabMemberPermissionsByUserId).not.toHaveBeenCalled();
+		expect(createComposePreview).toHaveBeenCalledTimes(1);
+	});
+
+	it("tears down compose preview rows on close via the shared PR finder", async () => {
+		vi.mocked(findPreviewDeploymentsByPullRequestId).mockResolvedValue([
+			{ previewDeploymentId: "app-preview-row" },
+			{
+				previewDeploymentId: "compose-preview-row",
+				composeId: "compose-id-1",
+			},
+		] as any);
+
+		const req = makeReq("Merge Request Hook", makeMrPayload("merge"));
+		const res = makeRes();
+
+		await handler(req, res);
+
+		expect(findPreviewDeploymentsByPullRequestId).toHaveBeenCalledWith("12345");
+		expect(removePreviewDeployment).toHaveBeenCalledTimes(2);
+		expect(removePreviewDeployment).toHaveBeenCalledWith("compose-preview-row");
+		expect(res.status).toHaveBeenCalledWith(200);
 	});
 });
 

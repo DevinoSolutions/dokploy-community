@@ -1,9 +1,11 @@
 import {
 	checkGitlabMemberPermissionsByUserId,
+	createComposePreview,
 	createPreviewDeployment,
 	createSecurityBlockedMRNote,
 	findGitlabByWebhookSecret,
 	findPreviewDeploymentByApplicationId,
+	findPreviewDeploymentByComposeId,
 	findPreviewDeploymentsByPullRequestId,
 	IS_CLOUD,
 	removePreviewDeployment,
@@ -252,7 +254,9 @@ export default async function handler(
 		const pathNamespace = body?.project?.path_with_namespace as string;
 
 		// Teardown BEFORE the author-id null-guard: close/merge must clean up
-		// even if the payload is missing author information.
+		// even if the payload is missing author information. The finder returns
+		// application AND compose preview rows for the MR; removePreviewDeployment
+		// dispatches compose rows to the compose-specific teardown internally.
 		if (action === "close" || action === "merge") {
 			const previewDeployments =
 				await findPreviewDeploymentsByPullRequestId(mrId);
@@ -307,10 +311,29 @@ export default async function handler(
 				},
 			});
 
+			const composeApps = await db.query.compose.findMany({
+				where: and(
+					eq(compose.sourceType, "gitlab"),
+					eq(compose.gitlabPathNamespace, pathNamespace),
+					eq(compose.gitlabBranch, targetBranch),
+					eq(compose.isPreviewDeploymentsActive, true),
+					eq(compose.gitlabId, gitlabProvider.gitlabId),
+				),
+				with: {
+					previewDeployments: true,
+					domains: true,
+				},
+			});
+
 			// Permission check is per-MR-author, not per-app — check once before the loop
-			const requiresPermissionCheck = apps.some(
-				(app) => app.previewRequireCollaboratorPermissions !== false,
-			);
+			const requiresPermissionCheck =
+				apps.some(
+					(app) => app.previewRequireCollaboratorPermissions !== false,
+				) ||
+				composeApps.some(
+					(composeApp) =>
+						composeApp.previewRequireCollaboratorPermissions !== false,
+				);
 			let permissionResult: Awaited<
 				ReturnType<typeof checkGitlabMemberPermissionsByUserId>
 			> | null = null;
@@ -358,6 +381,30 @@ export default async function handler(
 					}
 				}
 				secureApps.push(app);
+			}
+
+			// SECURITY: same MR-author gate for compose services, honoring each
+			// compose's previewRequireCollaboratorPermissions flag.
+			const secureComposeApps: typeof composeApps = [];
+
+			for (const composeApp of composeApps) {
+				if (composeApp.previewRequireCollaboratorPermissions !== false) {
+					if (permissionError) {
+						continue;
+					}
+					const { hasWriteAccess, accessLevel } = permissionResult!;
+					if (!hasWriteAccess) {
+						console.warn(
+							`🚨 SECURITY: Blocked compose preview deployment for ${composeApp.name} from ${authorDisplay}. Access level: ${accessLevel}`,
+						);
+						if (!blocked) {
+							blockedAccessLevel = accessLevel;
+							blocked = true;
+						}
+						continue;
+					}
+				}
+				secureComposeApps.push(composeApp);
 			}
 
 			if (blocked) {
@@ -423,6 +470,72 @@ export default async function handler(
 				if (previewDeploymentId) {
 					if (IS_CLOUD && app.serverId) {
 						jobData.serverId = app.serverId;
+						deploy(jobData).catch((error) => {
+							console.error("Background deployment failed:", error);
+						});
+						continue;
+					}
+					await myQueue.add(
+						"deployments",
+						{ ...jobData },
+						{
+							removeOnComplete: true,
+							removeOnFail: true,
+						},
+					);
+				}
+			}
+
+			// --- Compose preview deployments (mirrors the application flow) ---
+			for (const composeApp of secureComposeApps) {
+				// Label filtering
+				if (composeApp.previewLabels && composeApp.previewLabels.length > 0) {
+					const mrLabels: { title: string }[] =
+						body?.object_attributes?.labels ?? [];
+					const hasLabel = mrLabels.some((l) =>
+						composeApp.previewLabels!.includes(l.title),
+					);
+					if (!hasLabel) continue;
+				}
+
+				const existingComposePreview = await findPreviewDeploymentByComposeId(
+					composeApp.composeId,
+					mrId,
+				);
+
+				let previewDeploymentId =
+					existingComposePreview?.previewDeploymentId ?? "";
+
+				if (!existingComposePreview) {
+					// Only enforce the limit for new previews, not updates to existing ones
+					const previewLimit = composeApp.previewLimit ?? 3;
+					if (composeApp.previewDeployments.length >= previewLimit) {
+						continue;
+					}
+					const newComposePreview = await createComposePreview({
+						composeId: composeApp.composeId,
+						branch: sourceBranch,
+						pullRequestId: mrId,
+						pullRequestNumber: mrNumber,
+						pullRequestTitle: mrTitle,
+						pullRequestURL: mrUrl,
+					});
+					previewDeploymentId = newComposePreview.previewDeploymentId;
+				}
+
+				const jobData: DeploymentJob = {
+					composeId: composeApp.composeId,
+					titleLog: "Preview Deployment",
+					descriptionLog: `Hash: ${deploymentHash}`,
+					type: "deploy",
+					applicationType: "compose-preview",
+					server: !!composeApp.serverId,
+					previewDeploymentId,
+				};
+
+				if (previewDeploymentId) {
+					if (IS_CLOUD && composeApp.serverId) {
+						jobData.serverId = composeApp.serverId;
 						deploy(jobData).catch((error) => {
 							console.error("Background deployment failed:", error);
 						});
