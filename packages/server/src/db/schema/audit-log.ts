@@ -76,6 +76,7 @@ export type AuditResourceType =
 	| "sshKey"
 	| "gitProvider"
 	| "destination"
+	| "cloudflare"
 	| "notification"
 	| "settings"
 	| "session"

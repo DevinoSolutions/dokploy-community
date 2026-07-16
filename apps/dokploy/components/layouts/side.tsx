@@ -13,6 +13,7 @@ import {
 	CircleHelp,
 	ClipboardList,
 	Clock,
+	Cloud,
 	CreditCard,
 	Database,
 	Folder,
@@ -377,6 +378,13 @@ const MENU: Menu = {
 			url: "/dashboard/settings/destinations",
 			icon: Database,
 			isEnabled: ({ permissions }) => !!permissions?.destination.read,
+		},
+		{
+			isSingle: true,
+			title: "Cloudflare Tunnel & Access",
+			url: "/dashboard/settings/cloudflare",
+			icon: Cloud,
+			isEnabled: ({ permissions }) => !!permissions?.cloudflare.read,
 		},
 
 		{
