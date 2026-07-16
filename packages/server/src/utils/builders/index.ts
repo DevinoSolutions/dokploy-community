@@ -4,6 +4,8 @@ import { findRegistryByIdWithCredentials } from "@dokploy/server/services/regist
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
 import { eq } from "drizzle-orm";
+import { resolveNetworkNamesForResource } from "../../services/network";
+import { getECRAuthToken } from "../aws/ecr";
 import { getRegistryTag, uploadImageRemoteCommand } from "../cluster/upload";
 import {
 	calculateResources,
@@ -15,7 +17,6 @@ import {
 	mergePredefinedEnvVariables,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
-import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 import { getDockerCommand } from "./docker-file";
 import { getHerokuCommand } from "./heroku";
@@ -279,6 +280,18 @@ export const getAuthConfig = async (application: ApplicationNested) => {
 			return { password, username, serveraddress: registryUrl || "" };
 		}
 	} else if (registry) {
+		if (registry.registryType === "awsEcr") {
+			const token = await getECRAuthToken({
+				awsAccessKeyId: registry.awsAccessKeyId || "",
+				awsSecretAccessKey: registry.awsSecretAccessKey || "",
+				awsRegion: registry.awsRegion || "",
+			});
+			return {
+				password: token.password,
+				username: "AWS",
+				serveraddress: registry.registryUrl || "",
+			};
+		}
 		const r = await findRegistryByIdWithCredentials(registry.registryId);
 		return {
 			password: r.password,
@@ -286,6 +299,18 @@ export const getAuthConfig = async (application: ApplicationNested) => {
 			serveraddress: r.registryUrl,
 		};
 	} else if (buildRegistry) {
+		if (buildRegistry.registryType === "awsEcr") {
+			const token = await getECRAuthToken({
+				awsAccessKeyId: buildRegistry.awsAccessKeyId || "",
+				awsSecretAccessKey: buildRegistry.awsSecretAccessKey || "",
+				awsRegion: buildRegistry.awsRegion || "",
+			});
+			return {
+				password: token.password,
+				username: "AWS",
+				serveraddress: buildRegistry.registryUrl || "",
+			};
+		}
 		const r = await findRegistryByIdWithCredentials(buildRegistry.registryId);
 		return {
 			password: r.password,

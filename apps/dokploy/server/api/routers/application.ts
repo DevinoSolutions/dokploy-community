@@ -78,6 +78,35 @@ import {
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
 
+function resolveDockerProviderFields(
+	input: z.infer<typeof apiSaveDockerProvider>,
+) {
+	const base = {
+		dockerImage: input.dockerImage,
+		sourceType: "docker" as const,
+		applicationStatus: "idle" as const,
+		isPreviewDeploymentsActive: false,
+	};
+
+	if (input.registryId && input.registryId !== "none") {
+		return {
+			...base,
+			registryId: input.registryId,
+			username: null,
+			password: null,
+			registryUrl: null,
+		};
+	}
+
+	return {
+		...base,
+		registryId: null,
+		username: input.username,
+		password: input.password,
+		registryUrl: input.registryUrl,
+	};
+}
+
 const RAILPACK_VERSIONS_CACHE_TTL = 1000 * 60 * 60 * 24;
 let railpackVersionsCache:
 	| { versions: string[]; fetchedAt: number }
@@ -532,15 +561,10 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
-			await updateApplication(input.applicationId, {
-				dockerImage: input.dockerImage,
-				username: input.username,
-				password: input.password,
-				sourceType: "docker",
-				applicationStatus: "idle",
-				registryUrl: input.registryUrl,
-				isPreviewDeploymentsActive: false,
-			});
+			await updateApplication(
+				input.applicationId,
+				resolveDockerProviderFields(input),
+			);
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
 				action: "update",
