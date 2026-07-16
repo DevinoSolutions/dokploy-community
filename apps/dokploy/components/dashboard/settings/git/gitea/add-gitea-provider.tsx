@@ -26,12 +26,24 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import {
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/utils/api";
 import {
 	type GiteaProviderResponse,
 	getGiteaOAuthUrl,
 } from "@/utils/gitea-utils";
 import { useUrl } from "@/utils/hooks/use-url";
+
+const GITEA_URL_PRESETS = [
+	{ name: "Gitea Cloud (gitea.com)", giteaUrl: "https://gitea.com" },
+	{ name: "Codeberg (codeberg.org)", giteaUrl: "https://codeberg.org" },
+];
 
 const Schema = z.object({
 	name: z.string().min(1, {
@@ -217,6 +229,38 @@ export const AddGiteaProvider = () => {
 									)}
 								/>
 
+								<div className="space-y-1">
+									<FormLabel>Provider</FormLabel>
+									<Select
+										onValueChange={(value) => {
+											const preset = GITEA_URL_PRESETS.find(
+												(p) => p.giteaUrl === value,
+											);
+											if (preset) {
+												form.setValue("giteaUrl", preset.giteaUrl);
+											}
+										}}
+									>
+										<SelectTrigger>
+											<SelectValue placeholder="Select a provider preset..." />
+										</SelectTrigger>
+										<SelectContent>
+											{GITEA_URL_PRESETS.map((preset) => (
+												<SelectItem
+													key={preset.giteaUrl}
+													value={preset.giteaUrl}
+												>
+													{preset.name}
+												</SelectItem>
+											))}
+										</SelectContent>
+									</Select>
+									<p className="text-[0.8rem] text-muted-foreground">
+										Quick-fill the URL for Gitea Cloud or Codeberg, or enter any
+										self-hosted Gitea / Forgejo URL below
+									</p>
+								</div>
+
 								<FormField
 									control={form.control}
 									name="giteaUrl"
@@ -226,6 +270,10 @@ export const AddGiteaProvider = () => {
 											<FormControl>
 												<Input placeholder="https://gitea.com/" {...field} />
 											</FormControl>
+											<FormDescription>
+												Codeberg and Forgejo instances are fully compatible with
+												the Gitea provider.
+											</FormDescription>
 											<FormMessage />
 										</FormItem>
 									)}

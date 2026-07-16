@@ -41,7 +41,7 @@ export const server = pgTable("server", {
 	appName: text("appName")
 		.notNull()
 		.$defaultFn(() => generateAppName("server")),
-	enableDockerCleanup: boolean("enableDockerCleanup").notNull().default(false),
+	enableDockerCleanup: boolean("enableDockerCleanup").notNull().default(true),
 	buildsConcurrency: integer("buildsConcurrency").notNull().default(1),
 	createdAt: text("createdAt").notNull(),
 	organizationId: text("organizationId")

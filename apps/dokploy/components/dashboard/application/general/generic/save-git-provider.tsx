@@ -36,6 +36,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+import { ConfirmableProviderSave } from "./confirmable-provider-save";
 
 const GitProviderSchema = z.object({
 	buildPath: z.string().min(1, "Path is required").default("/"),
@@ -58,7 +59,8 @@ interface Props {
 }
 
 export const SaveGitProvider = ({ applicationId }: Props) => {
-	const { data, refetch } = api.application.one.useQuery({ applicationId });
+	const utils = api.useUtils();
+	const { data } = api.application.one.useQuery({ applicationId });
 	const { data: sshKeys } = api.sshKey.allForApps.useQuery();
 	const router = useRouter();
 
@@ -102,7 +104,7 @@ export const SaveGitProvider = ({ applicationId }: Props) => {
 		})
 			.then(async () => {
 				toast.success("Git Provider Saved");
-				await refetch();
+				await utils.application.one.invalidate({ applicationId });
 			})
 			.catch(() => {
 				toast.error("Error saving the Git provider");
@@ -242,14 +244,18 @@ export const SaveGitProvider = ({ applicationId }: Props) => {
 									{field.value?.map((path, index) => (
 										<Badge key={index} variant="secondary">
 											{path}
-											<X
-												className="ml-1 size-3 cursor-pointer"
+											<button
+												type="button"
+												aria-label="Remove watch path"
+												className="inline-flex items-center focus-visible:ring-2"
 												onClick={() => {
 													const newPaths = [...(field.value || [])];
 													newPaths.splice(index, 1);
 													form.setValue("watchPaths", newPaths);
 												}}
-											/>
+											>
+												<X className="ml-1 size-3 cursor-pointer" />
+											</button>
 										</Badge>
 									))}
 								</div>
@@ -298,23 +304,31 @@ export const SaveGitProvider = ({ applicationId }: Props) => {
 						control={form.control}
 						name="enableSubmodules"
 						render={({ field }) => (
-							<FormItem className="flex items-center space-x-2">
+							<FormItem className="flex flex-row items-center space-x-2 space-y-0">
 								<FormControl>
 									<Switch
 										checked={field.value}
 										onCheckedChange={field.onChange}
 									/>
 								</FormControl>
-								<FormLabel className="mt-0!">Enable Submodules</FormLabel>
+								<FormLabel>Enable Submodules</FormLabel>
 							</FormItem>
 						)}
 					/>
 				</div>
 
 				<div className="flex flex-row justify-end">
-					<Button type="submit" className="w-fit" isLoading={isPending}>
+					<ConfirmableProviderSave
+						needsConfirmation={
+							data?.sourceType === "github" &&
+							data?.isPreviewDeploymentsActive === true
+						}
+						isLoading={isPending}
+						onValidate={() => form.trigger()}
+						onConfirm={form.handleSubmit(onSubmit)}
+					>
 						Save
-					</Button>
+					</ConfirmableProviderSave>
 				</div>
 			</form>
 		</Form>

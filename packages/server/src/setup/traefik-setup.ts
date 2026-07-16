@@ -20,7 +20,8 @@ export const TRAEFIK_PORT =
 	Number.parseInt(process.env.TRAEFIK_PORT!, 10) || 80;
 export const TRAEFIK_HTTP3_PORT =
 	Number.parseInt(process.env.TRAEFIK_HTTP3_PORT!, 10) || 443;
-export const TRAEFIK_VERSION = process.env.TRAEFIK_VERSION || "3.6.7";
+export const TRAEFIK_BIND_IP = process.env.TRAEFIK_BIND_IP || "0.0.0.0";
+export const TRAEFIK_VERSION = process.env.TRAEFIK_VERSION || "3.6.20";
 
 export interface TraefikOptions {
 	env?: string[];
@@ -47,11 +48,18 @@ export const initializeStandaloneTraefik = async ({
 		[`${TRAEFIK_HTTP3_PORT}/udp`]: {},
 	};
 
-	const portBindings: Record<string, Array<{ HostPort: string }>> = {
-		[`${TRAEFIK_PORT}/tcp`]: [{ HostPort: TRAEFIK_PORT.toString() }],
-		[`${TRAEFIK_SSL_PORT}/tcp`]: [{ HostPort: TRAEFIK_SSL_PORT.toString() }],
+	const portBindings: Record<
+		string,
+		Array<{ HostPort: string; HostIp: string }>
+	> = {
+		[`${TRAEFIK_PORT}/tcp`]: [
+			{ HostPort: TRAEFIK_PORT.toString(), HostIp: TRAEFIK_BIND_IP },
+		],
+		[`${TRAEFIK_SSL_PORT}/tcp`]: [
+			{ HostPort: TRAEFIK_SSL_PORT.toString(), HostIp: TRAEFIK_BIND_IP },
+		],
 		[`${TRAEFIK_HTTP3_PORT}/udp`]: [
-			{ HostPort: TRAEFIK_HTTP3_PORT.toString() },
+			{ HostPort: TRAEFIK_HTTP3_PORT.toString(), HostIp: TRAEFIK_BIND_IP },
 		],
 	};
 
@@ -61,13 +69,17 @@ export const initializeStandaloneTraefik = async ({
 
 	if (enableDashboard) {
 		exposedPorts["8080/tcp"] = {};
-		portBindings["8080/tcp"] = [{ HostPort: "8080" }];
+		portBindings["8080/tcp"] = [
+			{ HostPort: "8080", HostIp: TRAEFIK_BIND_IP },
+		];
 	}
 
 	for (const port of additionalPorts) {
 		const portKey = `${port.targetPort}/${port.protocol ?? "tcp"}`;
 		exposedPorts[portKey] = {};
-		portBindings[portKey] = [{ HostPort: port.publishedPort.toString() }];
+		portBindings[portKey] = [
+			{ HostPort: port.publishedPort.toString(), HostIp: TRAEFIK_BIND_IP },
+		];
 	}
 
 	const settings: ContainerCreateOptions = {
@@ -285,6 +297,9 @@ export const getDefaultTraefikConfig = () => {
 			},
 			websecure: {
 				address: `:${TRAEFIK_SSL_PORT}`,
+				http2: {
+					maxConcurrentStreams: 0,
+				},
 				http3: {
 					advertisedPort: TRAEFIK_HTTP3_PORT,
 				},
@@ -298,7 +313,7 @@ export const getDefaultTraefikConfig = () => {
 			},
 		},
 		api: {
-			insecure: true,
+			insecure: false,
 		},
 		...(process.env.NODE_ENV === "production" && {
 			certificatesResolvers: {
@@ -354,7 +369,7 @@ export const getDefaultServerTraefikConfig = () => {
 			},
 		},
 		api: {
-			insecure: true,
+			insecure: false,
 		},
 		certificatesResolvers: {
 			letsencrypt: {

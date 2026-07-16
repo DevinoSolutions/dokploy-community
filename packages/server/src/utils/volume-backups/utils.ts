@@ -11,7 +11,10 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { scheduledJobs, scheduleJob } from "node-schedule";
-import { getS3Credentials, normalizeS3Path } from "../backups/utils";
+import {
+	getRclonePathAndFlags,
+	normalizeS3Path,
+} from "../backups/utils";
 import { sendVolumeBackupNotifications } from "../notifications/volume-backup";
 import { backupVolume, getVolumeServiceAppName } from "./backup";
 
@@ -84,13 +87,20 @@ const cleanupOldVolumeBackups = async (
 	if (!keepLatestCount) return;
 
 	try {
-		const rcloneFlags = getS3Credentials(destination);
-		const s3AppName = getVolumeServiceAppName(volumeBackup);
-		const backupFilesPath = `:s3:${destination.bucket}/${s3AppName}/${normalizeS3Path(prefix || "")}`;
+		const effectivePrefix = prefix
+			? normalizeS3Path(prefix)
+			: `${getVolumeServiceAppName(volumeBackup)}/`;
+		const {
+			flags: rcloneFlags,
+			path: backupFilesPath,
+			envVars,
+		} = await getRclonePathAndFlags(destination, effectivePrefix);
 		const listCommand = `rclone lsf ${rcloneFlags.join(" ")} --include \"${volumeName}-*.tar\" ${backupFilesPath}`;
 		const sortAndPick = `sort -r | tail -n +$((${keepLatestCount}+1)) | xargs -I{}`;
 		const deleteCommand = `rclone delete ${rcloneFlags.join(" ")} ${backupFilesPath}{}`;
-		const fullCommand = `${listCommand} | ${sortAndPick} ${deleteCommand}`;
+		// Export crypt passwords so the xargs-spawned `rclone delete` inherits them.
+		const envPrefix = envVars ? `export ${envVars}; ` : "";
+		const fullCommand = `${envPrefix}${listCommand} | ${sortAndPick} ${deleteCommand}`;
 
 		if (serverId) {
 			await execAsyncRemote(serverId, fullCommand);

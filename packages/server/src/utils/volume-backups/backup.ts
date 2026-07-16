@@ -4,8 +4,9 @@ import { findComposeById } from "@dokploy/server/services/compose";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import type { findVolumeBackupById } from "@dokploy/server/services/volume-backups";
 import {
+	buildRcloneCommand,
 	getBackupTimestamp,
-	getS3Credentials,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "../backups/utils";
 
@@ -36,14 +37,22 @@ export const backupVolume = async (
 	const serverId =
 		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
 	const { VOLUME_BACKUPS_PATH, VOLUME_BACKUP_LOCK_PATH } = paths(!!serverId);
-	const s3AppName = getVolumeServiceAppName(volumeBackup);
 	const backupFileName = `${volumeName}-${getBackupTimestamp()}.tar`;
-	const bucketDestination = `${s3AppName}/${normalizeS3Path(prefix || "")}${backupFileName}`;
-	const rcloneFlags = getS3Credentials(destination);
-	const rcloneDestination = `:s3:${destination.bucket}/${bucketDestination}`;
+	const effectivePrefix = prefix
+		? normalizeS3Path(prefix)
+		: `${getVolumeServiceAppName(volumeBackup)}/`;
+	const bucketDestination = `${effectivePrefix}${backupFileName}`;
+	const {
+		flags: rcloneFlags,
+		path: rcloneDestination,
+		envVars,
+	} = await getRclonePathAndFlags(destination, bucketDestination);
 	const volumeBackupPath = path.join(VOLUME_BACKUPS_PATH, volumeBackup.appName);
 
-	const rcloneCommand = `rclone copyto ${rcloneFlags.join(" ")} "${volumeBackupPath}/${backupFileName}" "${rcloneDestination}"`;
+	const rcloneCommand = buildRcloneCommand(
+		`rclone copyto ${rcloneFlags.join(" ")} "${volumeBackupPath}/${backupFileName}" "${rcloneDestination}"`,
+		envVars,
+	);
 
 	const backupCommand = `
 	set -e
@@ -61,9 +70,9 @@ export const backupVolume = async (
   `;
 
 	const uploadCommand = `
-  echo "Starting upload to S3..."
+  echo "Starting upload to destination..."
   ${rcloneCommand}
-  echo "Upload to S3 done ✅"
+  echo "Upload to destination done ✅"
   echo "Cleaning up local backup file..."
   rm "${volumeBackupPath}/${backupFileName}"
   echo "Local backup file cleaned up ✅"
@@ -109,24 +118,49 @@ export const backupVolume = async (
 		echo "Volume backup lock released"
 	`;
 
-	console.log(
+	// Run the backup between a stop and a start step, guaranteeing the start
+	// step always executes — even if the backup fails (e.g. the ubuntu image
+	// can't be pulled). The backup runs in a standalone subshell with `set +e`
+	// in the parent so a failure is captured into BACKUP_EXIT instead of
+	// aborting the script before the service is brought back up.
+	//
+	// The subshell must NOT be the left side of `||` (e.g. `( ... ) || x=$?`):
+	// in that "tested" context bash disables the subshell's own `set -e`, so a
+	// mid-backup failure would be swallowed and reported as success. A plain
+	// subshell followed by `$?` preserves `set -e` inside it.
+	const guardedBackup = (stopCommand: string, startCommand: string) =>
 		lockWrapper(`
-		echo "Volume backup lock acquired"
-		echo "Volume backup lock released"
-	`),
-	);
+		${stopCommand}
 
-	if (serviceType === "application") {
-		return lockWrapper(`
-		echo "Stopping application to 0 replicas"
-		ACTUAL_REPLICAS=$(docker service inspect ${volumeBackup.application?.appName} --format "{{.Spec.Mode.Replicated.Replicas}}")
-		echo "Actual replicas: $ACTUAL_REPLICAS"
-		docker service update --replicas=0 ${volumeBackup.application?.appName}
-        ${backupCommand}
-		echo "Starting application to $ACTUAL_REPLICAS replicas"
-        docker service update --replicas=$ACTUAL_REPLICAS --with-registry-auth ${volumeBackup.application?.appName}
+		set +e
+		(
+		${backupCommand}
+		)
+		BACKUP_EXIT=$?
+		set -e
+
+		${startCommand}
+
+		if [ "$BACKUP_EXIT" -ne 0 ]; then
+			echo "Volume backup failed with exit code $BACKUP_EXIT ❌"
+			exit "$BACKUP_EXIT"
+		fi
+
 		${uploadCommand}
   `);
+
+	if (serviceType === "application") {
+		const appName = volumeBackup.application?.appName;
+		return guardedBackup(
+			`
+		echo "Stopping application to 0 replicas"
+		ACTUAL_REPLICAS=$(docker service inspect ${appName} --format "{{.Spec.Mode.Replicated.Replicas}}")
+		echo "Actual replicas: $ACTUAL_REPLICAS"
+		docker service update --replicas=0 ${appName}`,
+			`
+		echo "Starting application to $ACTUAL_REPLICAS replicas"
+		docker service update --replicas=$ACTUAL_REPLICAS --with-registry-auth ${appName}`,
+		);
 	}
 	if (serviceType === "compose") {
 		const compose = await findComposeById(
@@ -158,11 +192,6 @@ export const backupVolume = async (
 			echo "Compose container started"
 			`;
 		}
-		return lockWrapper(`
-        ${stopCommand}
-        ${backupCommand}
-        ${startCommand}
-		${uploadCommand}
-  `);
+		return guardedBackup(stopCommand, startCommand);
 	}
 };

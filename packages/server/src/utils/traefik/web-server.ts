@@ -3,13 +3,19 @@ import { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { webServerSettings } from "@dokploy/server/db/schema/web-server-settings";
 import { parse, stringify } from "yaml";
+import { execAsyncRemote } from "../process/execAsync";
 import {
 	loadOrCreateConfig,
 	removeTraefikConfig,
 	writeTraefikConfig,
 } from "./application";
 import type { FileConfig } from "./file-types";
+import { loadMiddlewares, writeMiddleware } from "./middleware";
 import type { MainTraefikConfig } from "./types";
+
+export const RESPONSE_COMPRESSION_MIDDLEWARE = "compress";
+const RESPONSE_COMPRESSION_MIDDLEWARE_REF = `${RESPONSE_COMPRESSION_MIDDLEWARE}@file`;
+const RESPONSE_COMPRESSION_ENTRYPOINTS = ["web", "websecure"];
 
 export const updateServerTraefik = (
 	settings: typeof webServerSettings.$inferSelect | null,
@@ -109,6 +115,33 @@ export const readMainConfig = () => {
 	return null;
 };
 
+export const getCertificateResolvers = async (
+	serverId?: string | null,
+): Promise<string[]> => {
+	try {
+		let yamlStr: string | null = null;
+		if (serverId) {
+			const { MAIN_TRAEFIK_PATH } = paths(true);
+			const configPath = join(MAIN_TRAEFIK_PATH, "traefik.yml");
+			const { stdout } = await execAsyncRemote(serverId, `cat ${configPath}`);
+			yamlStr = stdout || null;
+		} else {
+			yamlStr = readMainConfig();
+		}
+		if (!yamlStr) return [];
+		const config = parse(yamlStr) as MainTraefikConfig;
+		if (
+			!config?.certificatesResolvers ||
+			typeof config.certificatesResolvers !== "object"
+		) {
+			return [];
+		}
+		return Object.keys(config.certificatesResolvers);
+	} catch {
+		return [];
+	}
+};
+
 export const writeMainConfig = (traefikConfig: string) => {
 	try {
 		const { MAIN_TRAEFIK_PATH } = paths();
@@ -117,4 +150,100 @@ export const writeMainConfig = (traefikConfig: string) => {
 	} catch (e) {
 		console.error("Error saving the YAML config file:", e);
 	}
+};
+
+export const isResponseCompressionEnabledInConfig = (
+	config: MainTraefikConfig | null,
+) => {
+	if (!config?.entryPoints) {
+		return false;
+	}
+	return RESPONSE_COMPRESSION_ENTRYPOINTS.some((entryPointName) =>
+		config.entryPoints?.[entryPointName]?.http?.middlewares?.includes(
+			RESPONSE_COMPRESSION_MIDDLEWARE_REF,
+		),
+	);
+};
+
+export const applyResponseCompressionToMainConfig = (
+	config: MainTraefikConfig,
+	enabled: boolean,
+) => {
+	for (const entryPointName of RESPONSE_COMPRESSION_ENTRYPOINTS) {
+		const entryPoint = config?.entryPoints?.[entryPointName];
+		if (!entryPoint) {
+			continue;
+		}
+		const middlewares = (entryPoint.http?.middlewares || []).filter(
+			(middleware) => middleware !== RESPONSE_COMPRESSION_MIDDLEWARE_REF,
+		);
+
+		if (enabled) {
+			middlewares.push(RESPONSE_COMPRESSION_MIDDLEWARE_REF);
+		}
+
+		if (middlewares.length > 0) {
+			entryPoint.http = {
+				...entryPoint.http,
+				middlewares,
+			};
+		} else if (entryPoint.http?.middlewares) {
+			delete entryPoint.http.middlewares;
+			if (Object.keys(entryPoint.http).length === 0) {
+				delete entryPoint.http;
+			}
+		}
+	}
+	return config;
+};
+
+export const applyResponseCompressionToMiddlewaresConfig = (
+	config: FileConfig,
+	enabled: boolean,
+) => {
+	config.http = config.http || {};
+	config.http.middlewares = config.http.middlewares || {};
+
+	if (enabled) {
+		config.http.middlewares[RESPONSE_COMPRESSION_MIDDLEWARE] = {
+			compress: {},
+		};
+	} else {
+		delete config.http.middlewares[RESPONSE_COMPRESSION_MIDDLEWARE];
+	}
+	return config;
+};
+
+export const isResponseCompressionEnabled = () => {
+	const yamlStr = readMainConfig();
+	if (!yamlStr) {
+		return false;
+	}
+	const config = parse(yamlStr) as MainTraefikConfig;
+	return isResponseCompressionEnabledInConfig(config);
+};
+
+export const updateResponseCompression = (enabled: boolean) => {
+	// 1. Define (or remove) the compress middleware in the shared dynamic
+	// middlewares file, the same file used by redirect-to-https.
+	let middlewaresConfig: FileConfig;
+	try {
+		middlewaresConfig = loadMiddlewares<FileConfig>();
+	} catch {
+		middlewaresConfig = { http: { middlewares: {} } };
+	}
+	writeMiddleware(
+		applyResponseCompressionToMiddlewaresConfig(middlewaresConfig, enabled),
+	);
+
+	// 2. Attach (or detach) the middleware globally on the web/websecure
+	// entry points of the main Traefik config. Requires a Traefik reload.
+	const yamlStr = readMainConfig();
+	if (!yamlStr) {
+		throw new Error("Main Traefik config (traefik.yml) not found");
+	}
+	const config = parse(yamlStr) as MainTraefikConfig;
+	writeMainConfig(
+		stringify(applyResponseCompressionToMainConfig(config, enabled)),
+	);
 };
