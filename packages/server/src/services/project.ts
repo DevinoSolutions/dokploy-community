@@ -85,13 +85,27 @@ export const deleteProject = async (projectId: string) => {
 	// when the project is removed, with no per-row hook. Gather every
 	// Cloudflare-published domain under the project and tear down its external
 	// Cloudflare state (DNS/ingress/connector) BEFORE the cascade drops the rows.
+	// Only `domains` is consumed below, so project the parent rows down to their
+	// primary keys. Drizzle's relational queries pack every selected column plus
+	// one entry per nested relation into a single json_build_array(...), and
+	// Postgres caps function calls at 100 arguments (error 54023). `application`
+	// has exactly 100 columns, so selecting it in full alongside the nested
+	// `domains` relation emits 101 args and breaks project deletion (see
+	// findMountById / findScheduleById for the same projection pattern).
 	const projectTree = await db.query.projects.findFirst({
 		where: eq(projects.projectId, projectId),
 		with: {
 			environments: {
+				columns: { environmentId: true },
 				with: {
-					applications: { with: { domains: true } },
-					compose: { with: { domains: true } },
+					applications: {
+						columns: { applicationId: true },
+						with: { domains: true },
+					},
+					compose: {
+						columns: { composeId: true },
+						with: { domains: true },
+					},
 				},
 			},
 		},
