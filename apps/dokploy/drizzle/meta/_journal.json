@@ -1317,6 +1317,13 @@
       "when": 1784183099047,
       "tag": "0187_amusing_molten_man",
       "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1784184278666,
+      "tag": "0188_steady_scrambler",
+      "breakpoints": true
     }
   ]
 }
