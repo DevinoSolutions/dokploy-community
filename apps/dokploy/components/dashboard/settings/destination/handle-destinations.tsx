@@ -1,6 +1,7 @@
 import {
 	ADDITIONAL_FLAG_ERROR,
 	ADDITIONAL_FLAG_REGEX,
+	GENERIC_RCLONE_PROVIDER,
 } from "@dokploy/server/db/validations/destination";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import { PenBoxIcon, PlusIcon, Trash2 } from "lucide-react";
@@ -41,26 +42,54 @@ import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import { S3_PROVIDERS } from "./constants";
 
-const addDestination = z.object({
-	name: z.string().min(1, "Name is required"),
-	provider: z.string().min(1, "Provider is required"),
-	accessKeyId: z.string().min(1, "Access Key Id is required"),
-	secretAccessKey: z.string().min(1, "Secret Access Key is required"),
-	bucket: z.string().min(1, "Bucket is required"),
-	region: z.string(),
-	endpoint: z.string().min(1, "Endpoint is required"),
-	serverId: z.string().optional(),
-	additionalFlags: z
-		.array(
-			z.object({
-				value: z
-					.string()
-					.min(1, "Flag cannot be empty")
-					.regex(ADDITIONAL_FLAG_REGEX, ADDITIONAL_FLAG_ERROR),
-			}),
-		)
-		.optional(),
-});
+const addDestination = z
+	.object({
+		name: z.string().min(1, "Name is required"),
+		provider: z.string().min(1, "Provider is required"),
+		accessKeyId: z.string(),
+		secretAccessKey: z.string(),
+		bucket: z.string().min(1, "Bucket is required"),
+		region: z.string(),
+		endpoint: z.string(),
+		serverId: z.string().optional(),
+		additionalFlags: z
+			.array(
+				z.object({
+					value: z
+						.string()
+						.min(1, "Flag cannot be empty")
+						.regex(ADDITIONAL_FLAG_REGEX, ADDITIONAL_FLAG_ERROR),
+				}),
+			)
+			.optional(),
+	})
+	.superRefine((data, ctx) => {
+		const isGenericRclone = data.provider === GENERIC_RCLONE_PROVIDER;
+
+		if (!isGenericRclone && !data.accessKeyId.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["accessKeyId"],
+				message: "Access Key Id is required",
+			});
+		}
+
+		if (!isGenericRclone && !data.secretAccessKey.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["secretAccessKey"],
+				message: "Secret Access Key is required",
+			});
+		}
+
+		if (!isGenericRclone && !data.endpoint.trim()) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["endpoint"],
+				message: "Endpoint is required",
+			});
+		}
+	});
 
 type AddDestination = z.infer<typeof addDestination>;
 
@@ -107,6 +136,7 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 		},
 		resolver: zodResolver(addDestination),
 	});
+	const selectedProvider = form.watch("provider");
 
 	const { fields, append, remove } = useFieldArray({
 		control: form.control,
@@ -199,9 +229,12 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 		const endpoint = form.getValues("endpoint");
 		const region = form.getValues("region");
 
-		const connectionString = isSftpOrFtp
-			? `:${provider},host=${endpoint},port=${region || (provider === "sftp" ? "22" : "21")},user=${accessKey},pass=XXX:${bucket}`
-			: `:s3,provider=${provider},access_key_id=${accessKey},secret_access_key=${secretKey},endpoint=${endpoint}${region ? `,region=${region}` : ""}:${bucket}`;
+		const connectionString =
+			provider === GENERIC_RCLONE_PROVIDER
+				? bucket
+				: isSftpOrFtp
+					? `:${provider},host=${endpoint},port=${region || (provider === "sftp" ? "22" : "21")},user=${accessKey},pass=XXX:${bucket}`
+					: `:s3,provider=${provider},access_key_id=${accessKey},secret_access_key=${secretKey},endpoint=${endpoint}${region ? `,region=${region}` : ""}:${bucket}`;
 
 		await testConnection({
 			provider,
@@ -312,6 +345,13 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 											</Select>
 										</FormControl>
 										<FormMessage />
+										{selectedProvider === GENERIC_RCLONE_PROVIDER && (
+											<p className="text-xs text-muted-foreground">
+												Use a preconfigured rclone remote such as{" "}
+												<code>gdrive:backups</code> or <code>ftp:archives</code>
+												. Leave S3 credentials blank for this mode.
+											</p>
+										)}
 									</FormItem>
 								);
 							}}
@@ -324,7 +364,11 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 								return (
 									<FormItem>
 										<FormLabel>
-											{isSftpOrFtp ? "Username" : "Access Key Id"}
+											{isSftpOrFtp
+												? "Username"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Access Key Id (optional)"
+													: "Access Key Id"}
 										</FormLabel>
 										<FormControl>
 											<Input
@@ -344,7 +388,11 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 								<FormItem>
 									<div className="space-y-0.5">
 										<FormLabel>
-											{isSftpOrFtp ? "Password" : "Secret Access Key"}
+											{isSftpOrFtp
+												? "Password"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Secret Access Key (optional)"
+													: "Secret Access Key"}
 										</FormLabel>
 									</div>
 									<FormControl>
@@ -367,13 +415,21 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 								<FormItem>
 									<div className="space-y-0.5">
 										<FormLabel>
-											{isSftpOrFtp ? "Path / Directory" : "Bucket"}
+											{isSftpOrFtp
+												? "Path / Directory"
+												: selectedProvider === GENERIC_RCLONE_PROVIDER
+													? "Remote path"
+													: "Bucket"}
 										</FormLabel>
 									</div>
 									<FormControl>
 										<Input
 											placeholder={
-												isSftpOrFtp ? "/backups/dokploy" : "dokploy-bucket"
+												isSftpOrFtp
+													? "/backups/dokploy"
+													: selectedProvider === GENERIC_RCLONE_PROVIDER
+														? "gdrive:backups"
+														: "dokploy-bucket"
 											}
 											{...field}
 										/>
@@ -411,7 +467,13 @@ export const HandleDestinations = ({ destinationId }: Props) => {
 							name="endpoint"
 							render={({ field }) => (
 								<FormItem>
-									<FormLabel>{isSftpOrFtp ? "Host" : "Endpoint"}</FormLabel>
+									<FormLabel>
+										{isSftpOrFtp
+											? "Host"
+											: selectedProvider === GENERIC_RCLONE_PROVIDER
+												? "Endpoint (optional)"
+												: "Endpoint"}
+									</FormLabel>
 									<FormControl>
 										<Input
 											placeholder={

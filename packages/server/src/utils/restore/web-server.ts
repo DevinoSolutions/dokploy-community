@@ -5,7 +5,7 @@ import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Destination } from "@dokploy/server/services/destination";
 import { updateWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { getPublicIpWithFallback } from "@dokploy/server/wss/utils";
-import { getS3Credentials } from "../backups/utils";
+import { getRcloneCredentials, getRcloneDestination } from "../backups/utils";
 import { ExecError } from "../process/ExecError";
 import { execAsync } from "../process/execAsync";
 
@@ -41,8 +41,8 @@ export const restoreWebServerBackup = async (
 	try {
 		assertWebServerBackupArchivePath(backupFile);
 
-		const rcloneFlags = getS3Credentials(destination);
-		const bucketPath = `:s3:${destination.bucket}`;
+		const rcloneFlags = getRcloneCredentials(destination);
+		const bucketPath = getRcloneDestination(destination);
 		const backupPath = `${bucketPath}/${backupFile}`;
 		const { BASE_PATH } = paths();
 
@@ -62,7 +62,7 @@ export const restoreWebServerBackup = async (
 			await mkdir(dirname(localArchivePath), { recursive: true });
 
 			// Download backup from S3
-			emit("Downloading backup from S3...");
+			emit("Downloading backup from destination...");
 			await execAsync(
 				`rclone copyto ${rcloneFlags.join(" ")} ${JSON.stringify(backupPath)} ${JSON.stringify(localArchivePath)}`,
 			);

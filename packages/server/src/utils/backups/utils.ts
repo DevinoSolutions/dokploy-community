@@ -1,4 +1,8 @@
+import { GENERIC_RCLONE_PROVIDER } from "@dokploy/server/db/validations/destination";
 import { logger } from "@dokploy/server/lib/logger";
+
+export { GENERIC_RCLONE_PROVIDER };
+
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
@@ -70,10 +74,39 @@ export const normalizeS3Path = (prefix: string) => {
 	return normalizedPrefix ? `${normalizedPrefix}/` : "";
 };
 
-export const getS3Credentials = (destination: Destination) => {
+// The rclone helpers only read S3 config fields, so they accept either a full
+// Destination row or the create-input (which lacks DB-generated metadata).
+type RcloneDestination = Pick<
+	Destination,
+	| "provider"
+	| "bucket"
+	| "accessKey"
+	| "secretAccessKey"
+	| "region"
+	| "endpoint"
+	| "additionalFlags"
+>;
+
+export const isGenericRcloneDestination = (destination: RcloneDestination) =>
+	destination.provider === GENERIC_RCLONE_PROVIDER;
+
+export const getRcloneDestination = (destination: RcloneDestination) =>
+	isGenericRcloneDestination(destination)
+		? destination.bucket
+		: `:s3:${destination.bucket}`;
+
+export const getRcloneCredentials = (destination: RcloneDestination) => {
 	const { accessKey, secretAccessKey, region, endpoint, provider } =
 		destination;
+
+	if (isGenericRcloneDestination(destination)) {
+		return destination.additionalFlags?.length
+			? [...destination.additionalFlags]
+			: [];
+	}
+
 	const rcloneFlags = [
+		`--s3-provider="${provider}"`,
 		`--s3-access-key-id="${accessKey}"`,
 		`--s3-secret-access-key="${secretAccessKey}"`,
 		`--s3-region="${region}"`,
@@ -82,16 +115,22 @@ export const getS3Credentials = (destination: Destination) => {
 		"--s3-force-path-style",
 	];
 
-	if (provider) {
-		rcloneFlags.unshift(`--s3-provider="${provider}"`);
-	}
-
 	if (destination.additionalFlags?.length) {
 		rcloneFlags.push(...destination.additionalFlags);
 	}
 
 	return rcloneFlags;
 };
+
+export const getRcloneTestFlags = (destination: RcloneDestination) => [
+	...getRcloneCredentials(destination),
+	"--retries 1",
+	"--low-level-retries 1",
+	"--timeout 10s",
+	"--contimeout 5s",
+];
+
+export const getS3Credentials = getRcloneCredentials;
 
 export const getPostgresBackupCommand = (
 	database: string,
@@ -321,6 +360,34 @@ export const getRclonePathAndFlags = async (
 	destination: Destination,
 	subPath: string,
 ) => {
+	// Generic rclone remote: the user supplies a full remote spec (in `bucket`)
+	// plus their own rclone flags (additionalFlags, already validated against
+	// ADDITIONAL_FLAG_REGEX at the schema layer). We don't build an S3/SFTP
+	// connection string for it, but the remote spec and subPath are still
+	// interpolated into a shell command, so validate them the same way the
+	// SFTP/FTP branch validates its path segments to prevent shell injection.
+	if (isGenericRcloneDestination(destination)) {
+		// Charset safe to embed inside the quoted shell command; rclone remote
+		// specs legitimately contain ":" and "/", so allow those but forbid
+		// shell metacharacters, quotes and whitespace.
+		const genericPathSafe = /^[^"'$\\`;|&<>()\s]*$/;
+		if (!genericPathSafe.test(destination.bucket)) {
+			throw new Error(
+				"Invalid rclone remote: contains forbidden characters",
+			);
+		}
+		if (!genericPathSafe.test(subPath)) {
+			throw new Error(
+				"Invalid rclone backup path: contains forbidden characters",
+			);
+		}
+		const flags = destination.additionalFlags?.length
+			? [...destination.additionalFlags]
+			: [];
+		const path = `${destination.bucket}/${subPath}`;
+		return { flags, path };
+	}
+
 	const isS3 = !["sftp", "ftp"].includes(destination.provider || "");
 	if (isS3) {
 		const flags = getS3Credentials(destination);

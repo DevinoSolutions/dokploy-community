@@ -20,7 +20,8 @@ vi.mock("@dokploy/server/wss/utils", () => ({
 }));
 
 vi.mock("@dokploy/server/utils/backups/utils", () => ({
-	getS3Credentials: () => ["--s3-flag"],
+	getRcloneCredentials: () => ["--s3-flag"],
+	getRcloneDestination: () => ":s3:my-bucket",
 }));
 
 vi.mock("node:fs/promises", () => ({
