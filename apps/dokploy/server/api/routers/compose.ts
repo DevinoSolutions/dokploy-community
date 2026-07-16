@@ -580,6 +580,9 @@ export const composeRouter = createTRPCRouter({
 	loadTemplateFromGit: protectedProcedure
 		.input(z.object({ composeId: z.string().min(1) }))
 		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["create"],
+			});
 			const compose = await findComposeById(input.composeId);
 			if (
 				compose.environment.project.organizationId !==
