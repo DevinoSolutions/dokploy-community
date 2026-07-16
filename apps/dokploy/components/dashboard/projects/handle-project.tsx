@@ -1,6 +1,6 @@
 import { standardSchemaResolver } from "@hookform/resolvers/standard-schema";
 
-import { PlusIcon, SquarePen } from "lucide-react";
+import { GlobeIcon, PlusIcon, SquarePen, X } from "lucide-react";
 import { useRouter } from "next/router";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
@@ -19,6 +19,7 @@ import {
 	DialogTrigger,
 } from "@/components/ui/dialog";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Dropzone } from "@/components/ui/dropzone";
 import {
 	Form,
 	FormControl,
@@ -29,6 +30,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { processImageUpload } from "@/lib/image-upload";
 import { api } from "@/utils/api";
 
 const AddProjectSchema = z.object({
@@ -52,6 +54,7 @@ const AddProjectSchema = z.object({
 		})
 		.transform((name) => name.trim()),
 	description: z.string().optional(),
+	logo: z.string().optional(),
 });
 
 type AddProject = z.infer<typeof AddProjectSchema>;
@@ -64,6 +67,7 @@ export const HandleProject = ({ projectId }: Props) => {
 	const utils = api.useUtils();
 	const [isOpen, setIsOpen] = useState(false);
 	const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
+	const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
 
 	const { mutateAsync, error, isError } = projectId
 		? api.project.update.useMutation()
@@ -86,6 +90,7 @@ export const HandleProject = ({ projectId }: Props) => {
 		defaultValues: {
 			description: "",
 			name: "",
+			logo: "",
 		},
 		resolver: standardSchemaResolver(AddProjectSchema),
 	});
@@ -94,7 +99,9 @@ export const HandleProject = ({ projectId }: Props) => {
 		form.reset({
 			description: data?.description ?? "",
 			name: data?.name ?? "",
+			logo: data?.logo ?? "",
 		});
+		setUploadedFileName(null);
 		// Load existing tags when editing a project
 		if (data?.projectTags) {
 			const tagIds = data.projectTags.map((pt) => pt.tagId);
@@ -108,6 +115,7 @@ export const HandleProject = ({ projectId }: Props) => {
 		await mutateAsync({
 			name: data.name,
 			description: data.description,
+			logo: data.logo,
 			projectId: projectId || "",
 		})
 			.then(async (data) => {
@@ -150,6 +158,22 @@ export const HandleProject = ({ projectId }: Props) => {
 					projectId ? "Error updating a project" : "Error creating a project",
 				);
 			});
+	};
+
+	const handleFileUpload = async (files: FileList | null) => {
+		if (!files || files.length === 0) return;
+		const file = files[0];
+		if (!file) return;
+
+		const result = await processImageUpload(file);
+		if (!result.ok) {
+			toast.error(result.error);
+			return;
+		}
+
+		form.setValue("logo", result.dataUrl);
+		form.trigger("logo");
+		setUploadedFileName(file.name);
 	};
 
 	return (
@@ -216,6 +240,74 @@ export const HandleProject = ({ projectId }: Props) => {
 									<FormMessage />
 								</FormItem>
 							)}
+						/>
+
+						<FormField
+							control={form.control}
+							name="logo"
+							render={({ field }) => {
+								const isDataUrl = field.value?.startsWith("data:");
+								const displayValue = isDataUrl
+									? uploadedFileName || "Uploaded image"
+									: field.value || "";
+
+								return (
+									<FormItem>
+										<FormLabel>Icon URL or Upload</FormLabel>
+										<FormControl>
+											<div className="flex flex-col gap-3">
+												<div className="flex items-center gap-3">
+													<div className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-muted/50 p-1">
+														{field.value ? (
+															// biome-ignore lint/performance/noImgElement: user uploaded icon preview
+															<img
+																src={field.value}
+																alt="Icon preview"
+																className="size-full object-contain"
+															/>
+														) : (
+															<GlobeIcon className="size-5 text-muted-foreground" />
+														)}
+													</div>
+													<div className="relative flex-1">
+														<Input
+															placeholder="https://example.com/logo.png"
+															{...field}
+															value={displayValue}
+															readOnly={isDataUrl}
+															onChange={(e) => {
+																field.onChange(e);
+																if (isDataUrl) setUploadedFileName(null);
+															}}
+															className="w-full pr-8"
+														/>
+														{field.value && (
+															<button
+																type="button"
+																onClick={() => {
+																	form.setValue("logo", "");
+																	setUploadedFileName(null);
+																}}
+																className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+															>
+																<X className="size-4" />
+															</button>
+														)}
+													</div>
+												</div>
+												<Dropzone
+													dropMessage="Drag & drop an icon or click to upload"
+													accept=".jpg,.jpeg,.png,.svg,.webp,image/jpeg,image/png,image/svg+xml,image/webp"
+													onChange={handleFileUpload}
+													classNameWrapper="border-2 border-dashed border-border hover:border-primary bg-muted/30 hover:bg-muted/50 transition-all rounded-lg"
+													classNameContent="h-32"
+												/>
+											</div>
+										</FormControl>
+										<FormMessage />
+									</FormItem>
+								);
+							}}
 						/>
 
 						<div className="space-y-2">

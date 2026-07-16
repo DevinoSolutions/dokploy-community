@@ -15,6 +15,7 @@ export const projects = pgTable("project", {
 		.$defaultFn(() => nanoid()),
 	name: text("name").notNull(),
 	description: text("description"),
+	logo: text("logo"),
 	createdAt: text("createdAt")
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
@@ -38,12 +39,14 @@ const createSchema = createInsertSchema(projects, {
 	projectId: z.string().min(1),
 	name: z.string().min(1),
 	description: z.string().optional(),
+	logo: z.string().optional(),
 	env: z.string().optional(),
 });
 
 export const apiCreateProject = createSchema.pick({
 	name: true,
 	description: true,
+	logo: true,
 	env: true,
 });
 

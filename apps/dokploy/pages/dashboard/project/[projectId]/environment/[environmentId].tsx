@@ -1038,7 +1038,16 @@ const EnvironmentPage = (
 						<div className="flex justify-between gap-4 w-full items-center flex-wrap p-6">
 							<CardHeader className="p-0">
 								<CardTitle className="text-xl flex flex-row gap-2 items-center">
-									<FolderInput className="size-6 text-muted-foreground self-center" />
+									{currentEnvironment.project.logo ? (
+										// biome-ignore lint/performance/noImgElement: user uploaded project icon
+										<img
+											src={currentEnvironment.project.logo}
+											alt=""
+											className="size-6 rounded-sm object-contain self-center"
+										/>
+									) : (
+										<FolderInput className="size-6 text-muted-foreground self-center" />
+									)}
 									<p className="text-base font-medium max-w-[250px] truncate">
 										{currentEnvironment.project.name}
 									</p>

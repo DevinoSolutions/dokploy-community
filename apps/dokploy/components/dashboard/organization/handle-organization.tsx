@@ -1,5 +1,4 @@
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
-import DOMPurify from "dompurify";
 import { GlobeIcon, PenBoxIcon, Plus, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
@@ -26,6 +25,7 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { processImageUpload } from "@/lib/image-upload";
 import { api } from "@/utils/api";
 
 const organizationSchema = z.object({
@@ -57,53 +57,6 @@ interface Props {
 	open?: boolean;
 	onOpenChange?: (open: boolean) => void;
 }
-
-const sanitizeSvg = (svgContent: string): string | null => {
-	const clean = DOMPurify.sanitize(svgContent, {
-		USE_PROFILES: { svg: true, svgFilters: true },
-		ADD_TAGS: ["use"],
-	});
-	if (!clean) return null;
-	return `data:image/svg+xml;base64,${btoa(clean)}`;
-};
-
-const resizeImage = (file: File, maxSize: number): Promise<string> => {
-	return new Promise((resolve, reject) => {
-		const reader = new FileReader();
-		reader.onload = (event) => {
-			const img = new Image();
-			img.onload = () => {
-				let { width, height } = img;
-
-				if (width > maxSize || height > maxSize) {
-					if (width > height) {
-						height = Math.round((height * maxSize) / width);
-						width = maxSize;
-					} else {
-						width = Math.round((width * maxSize) / height);
-						height = maxSize;
-					}
-				}
-
-				const canvas = document.createElement("canvas");
-				canvas.width = width;
-				canvas.height = height;
-				const ctx = canvas.getContext("2d");
-				if (!ctx) {
-					resolve(event.target?.result as string);
-					return;
-				}
-
-				ctx.drawImage(img, 0, 0, width, height);
-				resolve(canvas.toDataURL("image/webp", 0.8));
-			};
-			img.onerror = reject;
-			img.src = event.target?.result as string;
-		};
-		reader.onerror = reject;
-		reader.readAsDataURL(file);
-	});
-};
 
 export function AddOrganization({
 	organizationId,
@@ -182,53 +135,15 @@ export function AddOrganization({
 		const file = files[0];
 		if (!file) return;
 
-		const allowedTypes = [
-			"image/jpeg",
-			"image/jpg",
-			"image/png",
-			"image/svg+xml",
-			"image/webp",
-		];
-		const fileExtension = file.name.split(".").pop()?.toLowerCase();
-		const allowedExtensions = ["jpg", "jpeg", "png", "svg", "webp"];
-
-		if (
-			!allowedTypes.includes(file.type) &&
-			!allowedExtensions.includes(fileExtension || "")
-		) {
-			toast.error("Only JPG, JPEG, PNG, WEBP, and SVG files are allowed");
+		const result = await processImageUpload(file);
+		if (!result.ok) {
+			toast.error(result.error);
 			return;
 		}
 
-		if (file.size > 2 * 1024 * 1024) {
-			toast.error("Image size must be less than 2MB");
-			return;
-		}
-
-		const isSvg = file.type === "image/svg+xml" || fileExtension === "svg";
-
-		if (isSvg) {
-			const text = await file.text();
-			const sanitizedDataUrl = sanitizeSvg(text);
-			if (!sanitizedDataUrl) {
-				toast.error("Invalid SVG file");
-				return;
-			}
-			form.setValue("logo", sanitizedDataUrl);
-			form.trigger("logo");
-			setUploadedFileName(file.name);
-			return;
-		}
-
-		// Resize raster images to max 256x256 and convert to WebP to save space
-		try {
-			const resizedDataUrl = await resizeImage(file, 256);
-			form.setValue("logo", resizedDataUrl);
-			form.trigger("logo");
-			setUploadedFileName(file.name);
-		} catch (error) {
-			toast.error("Error processing image");
-		}
+		form.setValue("logo", result.dataUrl);
+		form.trigger("logo");
+		setUploadedFileName(file.name);
 	};
 
 	return (
