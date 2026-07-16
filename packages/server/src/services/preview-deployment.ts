@@ -9,13 +9,24 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { generatePassword } from "../templates";
+import { removeComposeDirectory } from "../utils/filesystem/directory";
 import { removeService } from "../utils/docker/utils";
 import { removeDirectoryCode } from "../utils/filesystem/directory";
+import {
+	ExecError,
+	execAsync,
+	execAsyncRemote,
+} from "../utils/process/execAsync";
 import { authGithub } from "../utils/providers/github";
 import { removeTraefikConfig } from "../utils/traefik/application";
 import { manageDomain } from "../utils/traefik/domain";
 import { findApplicationById } from "./application";
-import { removeDeploymentsByPreviewDeploymentId } from "./deployment";
+import { findComposeById, runComposeBuild } from "./compose";
+import {
+	createDeploymentPreview,
+	removeDeploymentsByPreviewDeploymentId,
+	updateDeploymentStatus,
+} from "./deployment";
 import { createDomain } from "./domain";
 import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
 import { getPublicIpWithFallback } from "../wss/utils";
@@ -31,11 +42,18 @@ export const findPreviewDeploymentById = async (
 		where: eq(previewDeployments.previewDeploymentId, previewDeploymentId),
 		with: {
 			domain: true,
+			domains: true,
 			application: {
 				columns: {
 					applicationId: true,
 					serverId: true,
 					buildServerId: true,
+				},
+			},
+			compose: {
+				columns: {
+					composeId: true,
+					serverId: true,
 				},
 			},
 		},
@@ -53,8 +71,16 @@ export const removePreviewDeployment = async (previewDeploymentId: string) => {
 	try {
 		const previewDeployment =
 			await findPreviewDeploymentById(previewDeploymentId);
+
+		// A single row belongs to either an application or a compose service.
+		// The webhook's close loop calls this for every row of a PR, so dispatch
+		// compose rows to the compose-specific teardown.
+		if (previewDeployment.composeId) {
+			return await removeComposePreview(previewDeploymentId);
+		}
+
 		const application = await findApplicationById(
-			previewDeployment.applicationId,
+			previewDeployment.applicationId as string,
 		);
 
 		application.appName = previewDeployment.appName;
@@ -124,6 +150,7 @@ export const findPreviewDeploymentsByApplicationId = async (
 				orderBy: desc(deployments.createdAt),
 			},
 			domain: true,
+			domains: true,
 		},
 	});
 	return deploymentsList;
@@ -172,7 +199,14 @@ export const interpolateSubdomainTemplate = (
 export const createPreviewDeployment = async (
 	schema: z.infer<typeof apiCreatePreviewDeployment>,
 ) => {
-	const application = await findApplicationById(schema.applicationId);
+	if (!schema.applicationId) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "applicationId is required to create an application preview",
+		});
+	}
+	const applicationId = schema.applicationId;
+	const application = await findApplicationById(applicationId);
 	const uniqueId = generatePassword(6);
 	const domainTemplate = application.previewWildcard || "*.sslip.io";
 
@@ -228,7 +262,7 @@ export const createPreviewDeployment = async (
 	} catch (error) {
 		if (isUniqueViolation(error)) {
 			const existing = await findPreviewDeploymentByApplicationId(
-				schema.applicationId,
+				applicationId,
 				schema.pullRequestId,
 			);
 			if (existing) {
@@ -386,4 +420,480 @@ const generateWildcardDomain = async (
 	}
 
 	return baseDomain.replace("*", hash);
+};
+
+// ---------------------------------------------------------------------------
+// Compose preview deployments
+//
+// A compose preview mirrors the application preview flow but isolates an entire
+// stack per PR instead of a single container. Isolation is layered:
+//   1. A unique docker project name (`preview-<compose.appName>-<uniqueId>`),
+//      passed as `-p` so containers/volumes/networks are namespaced by Docker.
+//   2. A deterministic per-PR compose suffix that renames every service, volume
+//      and network in the spec (`randomize`), so hard-coded container_names and
+//      explicitly-named volumes cannot collide across previews or with the base
+//      stack. Preview volumes are therefore never shared with the base stack.
+// Per-service domains are cloned from the compose's existing domains with a
+// templated host and injected as Traefik labels at build time.
+// ---------------------------------------------------------------------------
+
+type ComposeWithRelations = Awaited<ReturnType<typeof findComposeById>>;
+
+// `${{preview.prNumber}}` interpolation, shared shape with the application flow.
+const resolvePreviewTemplateVariables = (
+	value: string,
+	pullRequestNumber: string,
+) => value.replaceAll("${{preview.prNumber}}", pullRequestNumber);
+
+// Deterministic, DNS/compose-safe suffix stable across create → deploy →
+// teardown (derived only from immutable row fields). Used as the compose
+// `randomize` suffix so every service/volume/network name is unique per PR.
+export const buildComposePreviewSuffix = (previewDeployment: {
+	pullRequestNumber: string;
+	previewDeploymentId: string;
+}) =>
+	slugify(
+		`pr${previewDeployment.pullRequestNumber}-${previewDeployment.previewDeploymentId.slice(0, 8)}`,
+	);
+
+// A stored preview-domain serviceName is the base service name (which itself may
+// already carry the base compose's own suffix when the base uses `randomize`).
+// The preview build re-randomizes the freshly-cloned (original-named) spec with
+// the preview suffix, so strip any base suffix before re-appending the preview
+// suffix to land the Traefik labels on the correct suffixed service key.
+const stripComposeSuffix = (serviceName: string, baseSuffix: string) =>
+	baseSuffix && serviceName.endsWith(`-${baseSuffix}`)
+		? serviceName.slice(0, serviceName.length - baseSuffix.length - 1)
+		: serviceName;
+
+// Re-point preview domains at the service keys the preview's `randomize` pass
+// will produce, so `writeDomainsToCompose` resolves the Traefik labels onto the
+// renamed services instead of throwing (the suffix-ordering guarantee).
+// `baseSuffix` must only be passed when the base compose itself randomizes —
+// otherwise stored serviceNames are original and must not be stripped.
+export const mapPreviewDomainsToSuffixedServices = <
+	T extends { serviceName: string | null },
+>(
+	previewDomains: T[],
+	baseSuffix: string,
+	previewSuffix: string,
+): T[] =>
+	previewDomains.map((previewDomain) => ({
+		...previewDomain,
+		serviceName: `${stripComposeSuffix(
+			previewDomain.serviceName || "",
+			baseSuffix,
+		)}-${previewSuffix}`,
+	}));
+
+const postComposePreviewComment = async (
+	compose: ComposeWithRelations,
+	previewDeployment: PreviewDeployment,
+	status: "initializing" | "running" | "success" | "error",
+	previewUrl: string,
+) => {
+	// GitHub-only: GitLab/other providers surface status via MR notes instead of
+	// the GitHub App comment API (compose preview is GitHub-first).
+	if (compose.sourceType !== "github" || !compose.github) {
+		return;
+	}
+	try {
+		const octokit = authGithub(compose.github as Github);
+		const body = getIssueComment(compose.name, status, previewUrl);
+		const commentId = Number.parseInt(previewDeployment.pullRequestCommentId);
+		if (previewDeployment.pullRequestCommentId && !Number.isNaN(commentId)) {
+			await octokit.rest.issues.updateComment({
+				owner: compose.owner || "",
+				repo: compose.repository || "",
+				comment_id: commentId,
+				body: `### Dokploy Preview Deployment\n\n${body}`,
+			});
+		} else {
+			await octokit.rest.issues.createComment({
+				owner: compose.owner || "",
+				repo: compose.repository || "",
+				issue_number: Number.parseInt(previewDeployment.pullRequestNumber),
+				body: `### Dokploy Preview Deployment\n\n${body}`,
+			});
+		}
+	} catch (error) {
+		console.error(
+			`Failed to post compose preview PR comment for compose=${compose.composeId} pr=${previewDeployment.pullRequestId}:`,
+			error,
+		);
+	}
+};
+
+export const findPreviewDeploymentsByComposeId = async (composeId: string) => {
+	const deploymentsList = await db.query.previewDeployments.findMany({
+		where: eq(previewDeployments.composeId, composeId),
+		orderBy: desc(previewDeployments.createdAt),
+		with: {
+			deployments: {
+				orderBy: desc(deployments.createdAt),
+			},
+			domain: true,
+			domains: true,
+		},
+	});
+	return deploymentsList;
+};
+
+export const findPreviewDeploymentByComposeId = async (
+	composeId: string,
+	pullRequestId: string,
+) => {
+	const previewDeploymentResult = await db.query.previewDeployments.findFirst({
+		where: and(
+			eq(previewDeployments.composeId, composeId),
+			eq(previewDeployments.pullRequestId, pullRequestId),
+		),
+	});
+
+	return previewDeploymentResult;
+};
+
+export const createComposePreview = async (
+	schema: z.infer<typeof apiCreatePreviewDeployment>,
+) => {
+	if (!schema.composeId) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "composeId is required to create a compose preview",
+		});
+	}
+	const composeId = schema.composeId;
+	const compose = await findComposeById(composeId);
+	const uniqueId = generatePassword(6);
+	const appName = `preview-${compose.appName}-${uniqueId}`;
+
+	// Insert-first dedupe on (composeId, pullRequestId) — same race-close as the
+	// application flow: two concurrent webhooks both pass the "exists?" check and
+	// each try to insert; the unique index makes the loser reuse the winner's row.
+	let previewDeployment: typeof previewDeployments.$inferSelect | undefined;
+	try {
+		previewDeployment = await db
+			.insert(previewDeployments)
+			.values({
+				composeId,
+				branch: schema.branch,
+				pullRequestId: schema.pullRequestId,
+				pullRequestNumber: schema.pullRequestNumber,
+				pullRequestURL: schema.pullRequestURL,
+				pullRequestTitle: schema.pullRequestTitle,
+				appName,
+				pullRequestCommentId: "",
+			})
+			.returning()
+			.then((value) => value[0]);
+	} catch (error) {
+		if (isUniqueViolation(error)) {
+			const existing = await findPreviewDeploymentByComposeId(
+				composeId,
+				schema.pullRequestId,
+			);
+			if (existing) {
+				console.log(
+					`Compose preview already exists for compose=${composeId} pr=${schema.pullRequestId}; reusing ${existing.previewDeploymentId}`,
+				);
+				return existing;
+			}
+			console.error(
+				"Compose preview unique-violation without an existing row — this should not happen",
+				error,
+			);
+		}
+		throw error;
+	}
+
+	if (!previewDeployment) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Error creating the compose preview deployment",
+		});
+	}
+
+	// Post the initializing PR comment (GitHub only) now that we hold the row.
+	if (compose.sourceType === "github" && compose.github) {
+		try {
+			const octokit = authGithub(compose.github as Github);
+			const runningComment = getIssueComment(compose.name, "initializing", "");
+			const issue = await octokit.rest.issues.createComment({
+				owner: compose.owner || "",
+				repo: compose.repository || "",
+				issue_number: Number.parseInt(schema.pullRequestNumber),
+				body: `### Dokploy Preview Deployment\n\n${runningComment}`,
+			});
+			await db
+				.update(previewDeployments)
+				.set({ pullRequestCommentId: `${issue.data.id}` })
+				.where(
+					eq(
+						previewDeployments.previewDeploymentId,
+						previewDeployment.previewDeploymentId,
+					),
+				);
+			previewDeployment.pullRequestCommentId = `${issue.data.id}`;
+		} catch (error) {
+			console.error(
+				`Failed to create compose preview PR comment for compose=${composeId} pr=${schema.pullRequestId}:`,
+				error,
+			);
+		}
+	}
+
+	// Clone the compose's existing per-service domains into templated preview
+	// domains (one Traefik host per service). Each service gets a distinct host so
+	// multi-service stacks route correctly.
+	const domainTemplate = compose.previewWildcard || "*.sslip.io";
+	const hasIdentifier =
+		domainTemplate.includes("${prNumber}") ||
+		domainTemplate.includes("${branchName}") ||
+		domainTemplate.includes("${uniqueId}");
+
+	let ownerId = "";
+	if (!hasIdentifier) {
+		const org = await db.query.organization.findFirst({
+			where: eq(organization.id, compose.environment.project.organizationId),
+		});
+		ownerId = org?.ownerId || "";
+	}
+
+	for (const baseDomain of compose.domains) {
+		const serviceName = baseDomain.serviceName || "";
+		const serviceSlug = slugify(serviceName || "app");
+		const hostAppName = `${compose.appName}-${serviceSlug}`;
+		let host: string;
+		if (hasIdentifier) {
+			const interpolated = interpolateSubdomainTemplate(domainTemplate, {
+				appName: hostAppName,
+				prNumber: schema.pullRequestNumber,
+				branchName: schema.branch,
+				uniqueId,
+			});
+			host = interpolated.replace("*", hostAppName);
+		} else {
+			host = await generateWildcardDomain(
+				domainTemplate,
+				`${appName}-${serviceSlug}`,
+				compose.server?.ipAddress || "",
+				ownerId,
+				compose.serverId ?? undefined,
+			);
+		}
+
+		await createDomain({
+			host,
+			path: baseDomain.path || compose.previewPath || "/",
+			port: baseDomain.port || 3000,
+			https: compose.previewHttps,
+			certificateType: compose.previewCertificateType,
+			customCertResolver: compose.previewCustomCertResolver,
+			domainType: "preview",
+			serviceName,
+			composeId,
+			previewDeploymentId: previewDeployment.previewDeploymentId,
+			internalPath: baseDomain.internalPath,
+			stripPath: baseDomain.stripPath,
+		});
+	}
+
+	return previewDeployment;
+};
+
+const executeComposePreview = async ({
+	composeId,
+	previewDeploymentId,
+	titleLog,
+	descriptionLog,
+}: {
+	composeId: string;
+	previewDeploymentId: string;
+	titleLog: string;
+	descriptionLog: string;
+}) => {
+	const compose = await findComposeById(composeId);
+	const previewDeployment =
+		await findPreviewDeploymentById(previewDeploymentId);
+
+	const deployment = await createDeploymentPreview({
+		title: titleLog,
+		description: descriptionLog,
+		previewDeploymentId,
+	});
+
+	await updatePreviewDeployment(previewDeploymentId, {
+		createdAt: new Date().toISOString(),
+	});
+
+	const previewSuffix = buildComposePreviewSuffix(previewDeployment);
+	const previewDomains = previewDeployment.domains ?? [];
+	const firstHost = previewDomains[0]?.host;
+	const previewUrl = firstHost
+		? `${compose.previewHttps ? "https" : "http"}://${firstHost}`
+		: "";
+
+	try {
+		await postComposePreviewComment(
+			compose,
+			previewDeployment,
+			"running",
+			previewUrl,
+		);
+
+		const transformedDomains = mapPreviewDomainsToSuffixedServices(
+			previewDomains,
+			compose.randomize ? compose.suffix : "",
+			previewSuffix,
+		);
+
+		const entity = {
+			...compose,
+			type: "compose" as const,
+			appName: previewDeployment.appName,
+			branch: previewDeployment.branch,
+			gitlabBranch: previewDeployment.branch,
+			suffix: previewSuffix,
+			randomize: true,
+			isolatedDeployment: false,
+			isolatedDeploymentsVolume: false,
+			env: resolvePreviewTemplateVariables(
+				`${compose.previewEnv || ""}${
+					previewUrl ? `\nDOKPLOY_DEPLOY_URL=${previewUrl}` : ""
+				}`,
+				previewDeployment.pullRequestNumber,
+			),
+			domains: transformedDomains,
+		};
+
+		// Previews always re-clone (latest PR tip on every synchronize) and never
+		// apply patches (patch paths key off the base compose appName).
+		await runComposeBuild(entity, deployment, { applyPatches: false });
+
+		await postComposePreviewComment(
+			compose,
+			previewDeployment,
+			"success",
+			previewUrl,
+		);
+		await updateDeploymentStatus(deployment.deploymentId, "done");
+		await updatePreviewDeployment(previewDeploymentId, {
+			previewStatus: "done",
+		});
+	} catch (error) {
+		let command = "";
+		if (!(error instanceof ExecError)) {
+			const message = error instanceof Error ? error.message : String(error);
+			command += `echo "${message.replace(/"/g, '\\"')}" >> "${deployment.logPath}";`;
+		}
+		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
+		try {
+			if (compose.serverId) {
+				await execAsyncRemote(compose.serverId, command);
+			} else {
+				await execAsync(command);
+			}
+		} catch (logError) {
+			console.error(logError);
+		}
+
+		await postComposePreviewComment(
+			compose,
+			previewDeployment,
+			"error",
+			previewUrl,
+		);
+		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await updatePreviewDeployment(previewDeploymentId, {
+			previewStatus: "error",
+		});
+		throw error;
+	}
+
+	return true;
+};
+
+export const deployComposePreview = async (args: {
+	composeId: string;
+	previewDeploymentId: string;
+	titleLog: string;
+	descriptionLog: string;
+}) => executeComposePreview(args);
+
+export const rebuildComposePreview = async (args: {
+	composeId: string;
+	previewDeploymentId: string;
+	titleLog: string;
+	descriptionLog: string;
+}) => executeComposePreview(args);
+
+export const removeComposePreview = async (previewDeploymentId: string) => {
+	try {
+		const previewDeployment =
+			await findPreviewDeploymentById(previewDeploymentId);
+
+		if (!previewDeployment.composeId) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Preview deployment is not a compose preview",
+			});
+		}
+
+		const compose = await findComposeById(previewDeployment.composeId);
+		const appName = previewDeployment.appName;
+		const serverId = compose.serverId;
+
+		const runQuiet = async (rawCommand: string) => {
+			if (serverId) {
+				await execAsyncRemote(serverId, rawCommand);
+			} else {
+				await execAsync(rawCommand);
+			}
+		};
+
+		// Each op is individually try/caught so a partial failure (e.g. the stack
+		// is already gone) still lets the rest of the teardown proceed.
+		const cleanupOperations = [
+			async () => {
+				if (compose.composeType === "stack") {
+					await runQuiet(`docker stack rm ${appName} 2>&1 || true;`);
+				} else {
+					await runQuiet(
+						`env -i PATH="$PATH" docker compose -p ${appName} down --volumes 2>&1 || true;`,
+					);
+				}
+			},
+			async () => {
+				await runQuiet(`docker network rm ${appName} 2>&1 || true;`);
+			},
+			async () =>
+				await removeDeploymentsByPreviewDeploymentId(previewDeployment, serverId),
+			async () => await removeComposeDirectory(appName, serverId),
+			async () =>
+				await db
+					.delete(previewDeployments)
+					.where(
+						eq(previewDeployments.previewDeploymentId, previewDeploymentId),
+					)
+					.returning(),
+		];
+
+		for (const operation of cleanupOperations) {
+			try {
+				await operation();
+			} catch (error) {
+				console.error(error);
+			}
+		}
+		return previewDeployment;
+	} catch (error) {
+		const message =
+			error instanceof Error
+				? error.message
+				: "Error deleting this compose preview deployment";
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message,
+		});
+	}
 };

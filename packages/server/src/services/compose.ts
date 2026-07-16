@@ -47,6 +47,74 @@ import { validUniqueServerAppName } from "./project";
 
 export type Compose = typeof compose.$inferSelect;
 
+type ComposeBuildEntity = Awaited<ReturnType<typeof findComposeById>> & {
+	type: "compose";
+};
+
+/**
+ * Shared clone → patches → (optional fresh-volumes down) → build pipeline used
+ * by both `deployCompose` and the compose-preview deploy path. Extracting it
+ * keeps `deployCompose` behavior identical while letting a preview run the same
+ * steps against an in-memory entity whose `appName`, `branch`, `suffix`,
+ * `domains` and `env` have been overridden for isolation.
+ *
+ * `applyPatches` is skipped for previews because `generateApplyPatchesCommand`
+ * resolves the code directory from the base compose's appName, which does not
+ * match the preview's isolated appName.
+ */
+export const runComposeBuild = async (
+	entity: ComposeBuildEntity,
+	deployment: { logPath: string },
+	options: { freshVolumes?: boolean; applyPatches?: boolean } = {},
+) => {
+	const { freshVolumes = false, applyPatches = true } = options;
+	const serverId = entity.serverId;
+
+	const runStep = async (rawCommand: string) => {
+		const commandWithLog = `(${rawCommand}) >> ${deployment.logPath} 2>&1`;
+		if (serverId) {
+			await execAsyncRemote(serverId, commandWithLog);
+		} else {
+			await execAsync(commandWithLog);
+		}
+	};
+
+	let command = "set -e;";
+	if (entity.sourceType === "github") {
+		command += await cloneGithubRepository(entity);
+	} else if (entity.sourceType === "gitlab") {
+		command += await cloneGitlabRepository(entity);
+	} else if (entity.sourceType === "bitbucket") {
+		command += await cloneBitbucketRepository(entity);
+	} else if (entity.sourceType === "git") {
+		command += await cloneGitRepository(entity);
+	} else if (entity.sourceType === "gitea") {
+		command += await cloneGiteaRepository(entity);
+	} else if (entity.sourceType === "raw") {
+		command += getCreateComposeFileCommand(entity);
+	}
+	await runStep(command);
+
+	if (applyPatches && entity.sourceType !== "raw") {
+		command = "set -e;";
+		command += await generateApplyPatchesCommand({
+			id: entity.composeId,
+			type: "compose",
+			serverId: entity.serverId,
+		});
+		await runStep(command);
+	}
+
+	if (freshVolumes && entity.composeType === "docker-compose") {
+		const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
+		await runStep(downCommand);
+	}
+
+	command = "set -e;";
+	command += await getBuildComposeCommand(entity);
+	await runStep(command);
+};
+
 export const createCompose = async (
 	input: z.infer<typeof apiCreateCompose>,
 ) => {
@@ -238,60 +306,8 @@ export const deployCompose = async ({
 			...compose,
 			type: "compose" as const,
 		};
-		let command = "set -e;";
-		if (compose.sourceType === "github") {
-			command += await cloneGithubRepository(entity);
-		} else if (compose.sourceType === "gitlab") {
-			command += await cloneGitlabRepository(entity);
-		} else if (compose.sourceType === "bitbucket") {
-			command += await cloneBitbucketRepository(entity);
-		} else if (compose.sourceType === "git") {
-			command += await cloneGitRepository(entity);
-		} else if (compose.sourceType === "gitea") {
-			command += await cloneGiteaRepository(entity);
-		} else if (compose.sourceType === "raw") {
-			command += getCreateComposeFileCommand(entity);
-		}
 
-		let commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
-		if (compose.sourceType !== "raw") {
-			command = "set -e;";
-			command += await generateApplyPatchesCommand({
-				id: compose.composeId,
-				type: "compose",
-				serverId: compose.serverId,
-			});
-			commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-			if (compose.serverId) {
-				await execAsyncRemote(compose.serverId, commandWithLog);
-			} else {
-				await execAsync(commandWithLog);
-			}
-		}
-
-		if (freshVolumes && compose.composeType === "docker-compose") {
-			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
-			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;
-			if (compose.serverId) {
-				await execAsyncRemote(compose.serverId, downWithLog);
-			} else {
-				await execAsync(downWithLog);
-			}
-		}
-
-		command = "set -e;";
-		command += await getBuildComposeCommand(entity);
-		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
+		await runComposeBuild(entity, deployment, { freshVolumes });
 
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateCompose(composeId, {
