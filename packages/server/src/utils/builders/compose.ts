@@ -89,7 +89,11 @@ export const createCommand = (compose: ComposeNested) => {
 	let command = "";
 
 	if (composeType === "docker-compose") {
-		command = `compose -p ${appName} -f ${path} up -d --build --remove-orphans`;
+		// When enabled, force-pull the latest images before (re)deploying so a
+		// redeploy picks up updated tags instead of reusing the local cache.
+		// (`stack deploy` already resolves+pulls, so this only applies here.)
+		const pullFlag = compose.pullImagesOnDeploy ? " --pull always" : "";
+		command = `compose -p ${appName} -f ${path} up -d${pullFlag} --build --remove-orphans`;
 	} else if (composeType === "stack") {
 		command = `stack deploy -c ${path} ${appName} --prune --with-registry-auth`;
 	}
