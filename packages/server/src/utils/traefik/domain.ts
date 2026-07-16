@@ -1,5 +1,6 @@
 import type { Domain } from "@dokploy/server/services/domain";
 import type { ApplicationNested } from "../builders";
+import { wildcardHostRegexp } from "../hostname-validation";
 import {
 	createServiceConfig,
 	loadOrCreateConfig,
@@ -147,10 +148,11 @@ export const createRouterConfig = async (
 	} = domain;
 	const punycodeHost = toPunycode(host);
 	// Generate the Host rule — support wildcard subdomains via HostRegexp.
-	// Wildcards are ASCII in practice, so keep the raw host there and reserve
-	// punycode (IDN support) for the regular Host() rule.
-	const hostRule = host.includes("*")
-		? `HostRegexp(\`${host.replace("*", "{subdomain:[a-zA-Z0-9-]+}")}\`)`
+	// Traefik v3 HostRegexp takes a plain Go regexp (the v2 "{subdomain:...}"
+	// syntax is invalid in v3), built from the raw host since wildcards are
+	// ASCII in practice; punycode (IDN support) stays on the Host() rule.
+	const hostRule = host.startsWith("*.")
+		? `HostRegexp(\`${wildcardHostRegexp(host)}\`)`
 		: `Host(\`${punycodeHost}\`)`;
 	const routerConfig: HttpRouter = {
 		rule: `${hostRule}${path !== null && path !== "/" ? ` && PathPrefix(\`${path}\`)` : ""}`,
