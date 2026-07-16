@@ -42,12 +42,14 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 					composeId: job.data.composeId,
 					titleLog: job.data.titleLog,
 					descriptionLog: job.data.descriptionLog,
+					freshVolumes: job.data.freshVolumes,
 				});
 			} else if (job.data.type === "redeploy") {
 				await rebuildCompose({
 					composeId: job.data.composeId,
 					titleLog: job.data.titleLog,
 					descriptionLog: job.data.descriptionLog,
+					freshVolumes: job.data.freshVolumes,
 				});
 			}
 		} else if (job.data.applicationType === "application-preview") {
@@ -73,5 +75,20 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 		}
 	} catch (error) {
 		console.log("Error", error);
+		// Roll back the status set at the start of the job so a failed deployment
+		// does not leave the service stuck in "running".
+		if (job.data.applicationType === "application") {
+			await updateApplicationStatus(job.data.applicationId, "error").catch(
+				() => {},
+			);
+		} else if (job.data.applicationType === "compose") {
+			await updateCompose(job.data.composeId, {
+				composeStatus: "error",
+			}).catch(() => {});
+		} else if (job.data.applicationType === "application-preview") {
+			await updatePreviewDeployment(job.data.previewDeploymentId, {
+				previewStatus: "error",
+			}).catch(() => {});
+		}
 	}
 };

@@ -19,6 +19,10 @@ pkg.exports = {
 		import: "./dist/db/index.js",
 		require: "./dist/db/index.cjs.js",
 	},
+	"./setup/*": {
+		import: "./dist/setup/*.js",
+		require: "./dist/setup/*.cjs.js",
+	},
 	"./*": {
 		import: "./dist/*",
 		require: "./dist/*.cjs",
