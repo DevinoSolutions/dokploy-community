@@ -24,7 +24,7 @@ const baseSettings: WebServerSettings = {
 	serverIp: null,
 	letsEncryptEmail: null,
 	sshPrivateKey: null,
-	enableDockerCleanup: false,
+	enableDockerCleanup: true,
 	buildsConcurrency: 1,
 	logCleanupCron: null,
 	metricsConfig: {
@@ -62,6 +62,10 @@ const baseSettings: WebServerSettings = {
 		errorPageDescription: null,
 		metaTitle: null,
 		footerText: null,
+	},
+	domainRestrictionConfig: {
+		enabled: false,
+		allowedWildcards: [],
 	},
 	cleanupCacheApplications: false,
 	cleanupCacheOnCompose: false,

@@ -54,6 +54,7 @@ export const compose = pgTable("compose", {
 	owner: text("owner"),
 	branch: text("branch"),
 	autoDeploy: boolean("autoDeploy").$defaultFn(() => true),
+	pullImagesOnDeploy: boolean("pullImagesOnDeploy").notNull().default(false),
 	// Gitlab
 	gitlabProjectId: integer("gitlabProjectId"),
 	gitlabRepository: text("gitlabRepository"),
@@ -185,6 +186,7 @@ export const apiCreateCompose = createSchema.pick({
 	appName: true,
 	serverId: true,
 	composeFile: true,
+	sourceType: true,
 });
 
 export const apiCreateComposeByTemplate = createSchema
@@ -204,12 +206,14 @@ export const apiDeployCompose = z.object({
 	composeId: z.string().min(1),
 	title: z.string().optional(),
 	description: z.string().optional(),
+	freshVolumes: z.boolean().optional(),
 });
 
 export const apiRedeployCompose = z.object({
 	composeId: z.string().min(1),
 	title: z.string().optional(),
 	description: z.string().optional(),
+	freshVolumes: z.boolean().optional(),
 });
 
 export const apiDeleteCompose = z.object({

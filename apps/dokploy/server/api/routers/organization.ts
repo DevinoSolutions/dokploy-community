@@ -17,15 +17,52 @@ import {
 	user,
 } from "@/server/db/schema";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
+
+const parseOrganizationMetadata = (metadata: string | null) => {
+	if (!metadata) {
+		return {} as Record<string, unknown>;
+	}
+
+	try {
+		const parsed = JSON.parse(metadata);
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+			? (parsed as Record<string, unknown>)
+			: ({} as Record<string, unknown>);
+	} catch {
+		return {} as Record<string, unknown>;
+	}
+};
+
+const stringifyOrganizationMetadata = (
+	metadata: Record<string, unknown>,
+	description?: string,
+) => {
+	const nextMetadata = { ...metadata };
+	const normalizedDescription = description?.trim();
+
+	if (normalizedDescription) {
+		nextMetadata.description = normalizedDescription;
+	} else {
+		delete nextMetadata.description;
+	}
+
+	return Object.keys(nextMetadata).length > 0
+		? JSON.stringify(nextMetadata)
+		: null;
+};
+
 export const organizationRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(
 			z.object({
 				name: z.string(),
 				logo: z.string().optional(),
+				description: z.string().max(280).optional(),
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			const normalizedDescription = input.description?.trim();
+
 			if (ctx.user.role !== "owner" && ctx.user.role !== "admin" && !IS_CLOUD) {
 				throw new TRPCError({
 					code: "FORBIDDEN",
@@ -40,7 +77,9 @@ export const organizationRouter = createTRPCRouter({
 			const result = await db
 				.insert(organization)
 				.values({
-					...input,
+					name: input.name,
+					logo: input.logo,
+					metadata: stringifyOrganizationMetadata({}, input.description),
 					slug: nanoid(),
 					createdAt: new Date(),
 					ownerId: ctx.user.id,
@@ -71,6 +110,9 @@ export const organizationRouter = createTRPCRouter({
 				resourceType: "organization",
 				resourceId: result.id,
 				resourceName: result.name,
+				metadata: normalizedDescription
+					? { description: normalizedDescription }
+					: undefined,
 			});
 			return result;
 		}),
@@ -128,6 +170,7 @@ export const organizationRouter = createTRPCRouter({
 				organizationId: z.string(),
 				name: z.string(),
 				logo: z.string().optional(),
+				description: z.string().max(280).optional(),
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
@@ -175,6 +218,10 @@ export const organizationRouter = createTRPCRouter({
 				.set({
 					name: input.name,
 					logo: input.logo,
+					metadata: stringifyOrganizationMetadata(
+						parseOrganizationMetadata(org.metadata),
+						input.description,
+					),
 				})
 				.where(eq(organization.id, input.organizationId))
 				.returning();
@@ -183,6 +230,7 @@ export const organizationRouter = createTRPCRouter({
 				resourceType: "organization",
 				resourceId: input.organizationId,
 				resourceName: input.name,
+				metadata: { description: input.description?.trim() || null },
 			});
 			return result[0];
 		}),
@@ -557,4 +605,168 @@ export const organizationRouter = createTRPCRouter({
 			where: eq(organization.id, ctx.session.activeOrganizationId),
 		});
 	}),
+
+	bulkInviteMembers: withPermission("member", "create")
+		.input(
+			z.object({
+				invitations: z.array(
+					z.object({
+						email: z.string().email(),
+						role: z.string().min(1),
+					}),
+				).min(1).max(50),
+			}),
+		)
+		.mutation(async ({ ctx, input }) => {
+			const orgId = ctx.session.activeOrganizationId;
+			const results: { email: string; status: "invited" | "skipped"; reason?: string }[] = [];
+
+			const callerMember = await db.query.member.findFirst({
+				where: and(
+					eq(member.organizationId, orgId),
+					eq(member.userId, ctx.user.id),
+				),
+			});
+
+			for (const invite of input.invitations) {
+				const email = invite.email.toLowerCase();
+
+				if (invite.role === "owner") {
+					results.push({ email, status: "skipped", reason: "Cannot invite as owner" });
+					continue;
+				}
+
+				if (
+					invite.role === "admin" &&
+					callerMember?.role !== "owner" &&
+					callerMember?.role !== "admin"
+				) {
+					results.push({ email, status: "skipped", reason: "Only owners and admins can invite admins" });
+					continue;
+				}
+
+				// Check if already a member
+				const existingUser = await db.query.user.findFirst({
+					where: eq(user.email, email),
+				});
+
+				if (existingUser) {
+					const existingMember = await db.query.member.findFirst({
+						where: and(
+							eq(member.organizationId, orgId),
+							eq(member.userId, existingUser.id),
+						),
+					});
+					if (existingMember) {
+						results.push({ email, status: "skipped", reason: "Already a member" });
+						continue;
+					}
+				}
+
+				// Check for pending invitation
+				const existingInvitation = await db.query.invitation.findFirst({
+					where: and(
+						eq(invitation.organizationId, orgId),
+						eq(invitation.email, email),
+						eq(invitation.status, "pending"),
+					),
+				});
+
+				if (existingInvitation) {
+					results.push({ email, status: "skipped", reason: "Invitation already pending" });
+					continue;
+				}
+
+				// Validate custom role if needed
+				if (!["owner", "admin", "member"].includes(invite.role)) {
+					const customRole = await db.query.organizationRole.findFirst({
+						where: and(
+							eq(organizationRole.organizationId, orgId),
+							eq(organizationRole.role, invite.role),
+						),
+					});
+					if (!customRole) {
+						results.push({ email, status: "skipped", reason: `Role "${invite.role}" not found` });
+						continue;
+					}
+				}
+
+				await db.insert(invitation).values({
+					id: nanoid(),
+					organizationId: orgId,
+					email,
+					role: invite.role as any,
+					status: "pending",
+					expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+					inviterId: ctx.user.id,
+				});
+
+				results.push({ email, status: "invited" });
+			}
+
+			await audit(ctx, {
+				action: "create",
+				resourceType: "organization",
+				resourceId: orgId,
+				metadata: { type: "bulkInviteMembers", count: results.filter((r) => r.status === "invited").length },
+			});
+
+			return results;
+		}),
+
+	moveMemberToTeam: withPermission("member", "update")
+		.input(
+			z.object({
+				memberId: z.string(),
+				teamId: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ ctx, input }) => {
+			const target = await db.query.member.findFirst({
+				where: eq(member.id, input.memberId),
+				with: { user: true },
+			});
+
+			if (!target) {
+				throw new TRPCError({ code: "NOT_FOUND", message: "Member not found" });
+			}
+
+			if (target.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "You are not allowed to move this member",
+				});
+			}
+
+			if (input.teamId) {
+				const teamMember = await db.query.member.findFirst({
+					where: and(
+						eq(member.teamId, input.teamId),
+						eq(member.organizationId, ctx.session.activeOrganizationId),
+					),
+				});
+
+				if (!teamMember) {
+					throw new TRPCError({
+						code: "NOT_FOUND",
+						message: "Team not found",
+					});
+				}
+			}
+
+			await db
+				.update(member)
+				.set({ teamId: input.teamId })
+				.where(eq(member.id, input.memberId));
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "user",
+				resourceId: target.userId,
+				resourceName: target.user.email,
+				metadata: { type: "moveMemberToTeam", teamId: input.teamId },
+			});
+
+			return { success: true };
+		}),
 });
