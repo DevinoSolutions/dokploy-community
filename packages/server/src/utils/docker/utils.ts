@@ -6,6 +6,7 @@ import type { Compose } from "@dokploy/server/services/compose";
 import type { ContainerInfo, ResourceRequirements } from "dockerode";
 import { parse } from "dotenv";
 import { quote } from "shell-quote";
+import { loginDockerToECR } from "../aws/ecr";
 import type { ApplicationNested } from "../builders";
 import type { LibsqlNested } from "../databases/libsql";
 import type { MariadbNested } from "../databases/mariadb";
@@ -21,6 +22,12 @@ interface RegistryAuth {
 	username: string;
 	password: string;
 	registryUrl: string;
+	/** AWS ECR credentials for SDK-based token acquisition and Docker login. */
+	ecr?: {
+		awsAccessKeyId?: string;
+		awsSecretAccessKey?: string;
+		awsRegion?: string;
+	};
 }
 
 export const pullImage = async (
@@ -33,7 +40,14 @@ export const pullImage = async (
 			throw new Error("Docker image not found");
 		}
 
-		if (authConfig?.username && authConfig?.password) {
+		if (authConfig?.ecr) {
+			await loginDockerToECR({
+				awsAccessKeyId: authConfig.ecr.awsAccessKeyId || "",
+				awsSecretAccessKey: authConfig.ecr.awsSecretAccessKey || "",
+				awsRegion: authConfig.ecr.awsRegion || "",
+				registryUrl: authConfig.registryUrl,
+			});
+		} else if (authConfig?.username && authConfig?.password) {
 			await spawnAsync(
 				"docker",
 				[
@@ -62,6 +76,19 @@ export const pullRemoteImage = async (
 	try {
 		if (!dockerImage) {
 			throw new Error("Docker image not found");
+		}
+
+		// Handle ECR authentication for remote servers
+		if (authConfig?.ecr) {
+			await loginDockerToECR(
+				{
+					awsAccessKeyId: authConfig.ecr.awsAccessKeyId || "",
+					awsSecretAccessKey: authConfig.ecr.awsSecretAccessKey || "",
+					awsRegion: authConfig.ecr.awsRegion || "",
+					registryUrl: authConfig.registryUrl,
+				},
+				serverId,
+			);
 		}
 
 		const remoteDocker = await getRemoteDocker(serverId);
@@ -371,6 +398,7 @@ export const prepareEnvironmentVariables = (
 	serviceEnv: string | null,
 	projectEnv?: string | null,
 	environmentEnv?: string | null,
+	serviceFqdns?: Record<string, string> | null,
 ) => {
 	const projectVars = parse(projectEnv ?? "");
 	const environmentVars = parse(environmentEnv ?? "");
@@ -407,6 +435,20 @@ export const prepareEnvironmentVariables = (
 			);
 		}
 
+		// Replace cross-service references: ${{service.<name>.fqdn}}
+		// Resolves to the public URL of another service in the same environment.
+		// The name->fqdn map is precomputed by the caller (it requires a DB
+		// lookup); this keeps the function pure and synchronous.
+		resolvedValue = resolvedValue.replace(
+			/\$\{\{service\.(.*?)\.fqdn\}\}/g,
+			(_, name) => {
+				if (serviceFqdns && serviceFqdns[name] !== undefined) {
+					return serviceFqdns[name];
+				}
+				throw new Error(`Invalid service reference: service.${name}.fqdn`);
+			},
+		);
+
 		// Replace self-references (service variables)
 		resolvedValue = resolvedValue.replace(/\$\{\{(.*?)\}\}/g, (_, ref) => {
 			if (serviceVars[ref] !== undefined) {
@@ -419,6 +461,128 @@ export const prepareEnvironmentVariables = (
 	});
 
 	return resolvedVars;
+};
+
+export interface PredefinedEnvApplication {
+	applicationId: string;
+	appName: string;
+	name: string;
+	branch?: string | null;
+	sourceType?: string | null;
+	dockerImage?: string | null;
+	environment: {
+		name: string;
+		project: {
+			name: string;
+		};
+	};
+}
+
+export interface PredefinedEnvDomain {
+	host: string;
+	https?: boolean | null;
+	port?: number | null;
+}
+
+/**
+ * Extracts the tag portion of a docker image reference, ignoring any registry
+ * host[:port]/ prefix and digest (`@sha256:...`) suffix. Falls back to
+ * `latest` when no explicit tag is present (matching Docker's own default).
+ */
+const getDockerImageTag = (dockerImage: string): string => {
+	const lastSlash = dockerImage.lastIndexOf("/");
+	const nameAndTag =
+		lastSlash === -1 ? dockerImage : dockerImage.slice(lastSlash + 1);
+	const atIndex = nameAndTag.indexOf("@");
+	const withoutDigest =
+		atIndex === -1 ? nameAndTag : nameAndTag.slice(0, atIndex);
+	const colon = withoutDigest.lastIndexOf(":");
+	if (colon === -1) {
+		return "latest";
+	}
+	return withoutDigest.slice(colon + 1) || "latest";
+};
+
+/**
+ * Computes the Dokploy-provided predefined environment variables (`DOKPLOY_*`)
+ * for an application. Every value is derived from data already persisted on the
+ * application, its environment/project and its primary domain — so this needs
+ * no schema changes. Injected at deploy time (see `mechanizeDockerContainer`),
+ * they let an app read its own domain/identity without the user duplicating it,
+ * and can be referenced from user env, e.g. `NEXTAUTH_URL=${{DOKPLOY_URL}}`.
+ *
+ * Implements a subset of Dokploy/dokploy#3829. Vars that would require data the
+ * fork does not persist (commit SHA, image digest) or a new schema column
+ * (user-selectable primary domain) are intentionally omitted — see PR notes.
+ */
+export const getPredefinedEnvVariables = (
+	application: PredefinedEnvApplication,
+	domain?: PredefinedEnvDomain | null,
+): Record<string, string> => {
+	const variables: Record<string, string> = {
+		DOKPLOY_APPLICATION_ID: application.applicationId,
+		DOKPLOY_CONTAINER_NAME: application.appName,
+		DOKPLOY_APP_NAME: application.name,
+		DOKPLOY_PROJECT_NAME: application.environment.project.name,
+		DOKPLOY_ENVIRONMENT_NAME: application.environment.name,
+	};
+
+	if (application.branch && application.sourceType !== "docker") {
+		variables.DOKPLOY_BRANCH = application.branch;
+	}
+
+	if (application.sourceType === "docker" && application.dockerImage) {
+		variables.DOKPLOY_IMAGE_TAG = getDockerImageTag(application.dockerImage);
+	}
+
+	if (domain?.host) {
+		const scheme = domain.https ? "https" : "http";
+		variables.DOKPLOY_FQDN = domain.host;
+		variables.DOKPLOY_URL = `${scheme}://${domain.host}`;
+		if (domain.port !== null && domain.port !== undefined) {
+			variables.DOKPLOY_PORT = String(domain.port);
+		}
+	}
+
+	return variables;
+};
+
+/**
+ * Prepends the predefined `DOKPLOY_*` variables to a service's raw env string,
+ * skipping any key the user has already defined so an explicit user value always
+ * wins. The result is fed to `prepareEnvironmentVariables`, so predefined vars
+ * are both present in the container env and available for `${{...}}` references.
+ */
+export const mergePredefinedEnvVariables = (
+	predefined: Record<string, string>,
+	serviceEnv: string | null,
+): string => {
+	const userVars = parse(serviceEnv ?? "");
+	const lines = Object.entries(predefined)
+		.filter(([key]) => !(key in userVars))
+		.map(([key, value]) => `${key}=${value}`);
+	if (serviceEnv && serviceEnv.length > 0) {
+		lines.push(serviceEnv);
+	}
+	return lines.join("\n");
+};
+
+const DOTENV_ESCAPE_MAP: Record<string, string> = {
+	"\\": "\\\\",
+	'"': '\\"',
+	"\n": "\\n",
+	"\r": "\\r",
+	$: "\\$",
+};
+
+export const quoteDotenvValue = (pair: string): string => {
+	const eqIndex = pair.indexOf("=");
+	if (eqIndex === -1) return pair;
+	const key = pair.substring(0, eqIndex);
+	const value = pair
+		.substring(eqIndex + 1)
+		.replace(/[\\"$\n\r]/g, (ch) => DOTENV_ESCAPE_MAP[ch] ?? ch);
+	return `${key}="${value}"`;
 };
 
 export const prepareEnvironmentVariablesForShell = (
@@ -838,6 +1002,89 @@ const getSwarmServiceContainerId = async (
 	} catch {
 		return null;
 	}
+};
+
+export type SwarmStabilityResult =
+	| { stable: true }
+	| { stable: false; reason: string };
+
+export const waitForSwarmServiceStable = async (
+	appName: string,
+	{
+		serverId,
+		windowMs = 60_000,
+		pollMs = 5_000,
+	}: { serverId?: string | null; windowMs?: number; pollMs?: number } = {},
+): Promise<SwarmStabilityResult> => {
+	const remoteDocker = await getRemoteDocker(serverId);
+	const deadline = Date.now() + windowMs;
+	let everRunning = false;
+	let lastReason = "Service did not reach running state";
+
+	while (Date.now() < deadline) {
+		try {
+			const tasks = await remoteDocker.listTasks({
+				filters: JSON.stringify({ service: [appName] }),
+			});
+
+			const sorted = [...tasks].sort((a, b) => {
+				const at = new Date(a.UpdatedAt ?? 0).getTime();
+				const bt = new Date(b.UpdatedAt ?? 0).getTime();
+				return bt - at;
+			});
+			const latest = sorted[0];
+			const state = latest?.Status?.State;
+			const message = latest?.Status?.Err || latest?.Status?.Message || "";
+
+			if (state === "failed" || state === "rejected") {
+				return {
+					stable: false,
+					reason: message
+						? `Task ${state}: ${message}`
+						: `Task entered ${state} state`,
+				};
+			}
+
+			const runningCount = sorted.filter(
+				(t) => t.Status?.State === "running",
+			).length;
+			const startingCount = sorted.filter((t) =>
+				[
+					"new",
+					"pending",
+					"assigned",
+					"accepted",
+					"preparing",
+					"starting",
+				].includes(t.Status?.State ?? ""),
+			).length;
+
+			if (runningCount > 0) {
+				everRunning = true;
+			} else if (everRunning && startingCount > 0) {
+				return {
+					stable: false,
+					reason: message
+						? `Container restarted after running: ${message}`
+						: "Container restarted after reaching running state",
+				};
+			}
+
+			lastReason = message
+				? `Latest task state: ${state ?? "unknown"} (${message})`
+				: `Latest task state: ${state ?? "unknown"}`;
+		} catch (error) {
+			lastReason =
+				error instanceof Error ? error.message : "Failed to inspect service";
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, pollMs));
+	}
+
+	if (everRunning) {
+		return { stable: true };
+	}
+	return { stable: false, reason: lastReason };
 };
 
 export const checkPostgresHealth = async (): Promise<ServiceHealthStatus> => {

@@ -63,6 +63,10 @@ const baseSettings: WebServerSettings = {
 		metaTitle: null,
 		footerText: null,
 	},
+	domainRestrictionConfig: {
+		enabled: false,
+		allowedWildcards: [],
+	},
 	cleanupCacheApplications: false,
 	cleanupCacheOnCompose: false,
 	cleanupCacheOnPreviews: false,

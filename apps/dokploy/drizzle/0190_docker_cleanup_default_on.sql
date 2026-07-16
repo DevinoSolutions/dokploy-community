@@ -1,1 +1,0 @@
-ALTER TABLE "server" ALTER COLUMN "enableDockerCleanup" SET DEFAULT true;
