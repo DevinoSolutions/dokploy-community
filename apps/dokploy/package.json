@@ -47,6 +47,7 @@
 		"@ai-sdk/mistral": "^3.0.20",
 		"@ai-sdk/openai": "^3.0.29",
 		"@ai-sdk/openai-compatible": "^2.0.30",
+		"@aws-sdk/client-ecr": "^3.1024.0",
 		"@better-auth/api-key": "1.6.23",
 		"@better-auth/scim": "1.6.23",
 		"@better-auth/sso": "1.6.23",
