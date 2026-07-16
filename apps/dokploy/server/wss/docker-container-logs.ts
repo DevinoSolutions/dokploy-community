@@ -166,12 +166,22 @@ export const setupDockerContainerLogsWebSocketServer = (
 					rows: 30,
 				});
 
+				const attachPty = spawn("docker", ["attach", containerId], {
+					name: "xterm-256color",
+					cwd: process.env.HOME,
+					env: process.env,
+					encoding: "utf8",
+					cols: 80,
+					rows: 30,
+				});
+
 				ptyProcess.onData((data) => {
 					ws.send(data);
 				});
 				ws.on("close", () => {
 					clearInterval(pingInterval);
 					ptyProcess.kill();
+					attachPty.kill();
 				});
 				ws.on("message", (message) => {
 					try {
@@ -181,7 +191,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 						} else {
 							command = message;
 						}
-						ptyProcess.write(command.toString());
+						attachPty.write(`${command.toString()}\n`);
 					} catch (error) {
 						// @ts-ignore
 						const errorMessage = error?.message as unknown as string;

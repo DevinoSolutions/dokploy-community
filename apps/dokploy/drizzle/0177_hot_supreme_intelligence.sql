@@ -1,0 +1,1 @@
+ALTER TABLE "compose" ADD COLUMN IF NOT EXISTS "pullImagesOnDeploy" boolean DEFAULT false NOT NULL;
