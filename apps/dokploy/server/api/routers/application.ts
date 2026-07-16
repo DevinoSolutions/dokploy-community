@@ -78,6 +78,11 @@ import {
 } from "@/server/queues/queueSetup";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
 
+const RAILPACK_VERSIONS_CACHE_TTL = 1000 * 60 * 60 * 24;
+let railpackVersionsCache:
+	| { versions: string[]; fetchedAt: number }
+	| undefined;
+
 export const applicationRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(apiCreateApplication)
@@ -455,6 +460,7 @@ export const applicationRouter = createTRPCRouter({
 				gitlabPathNamespace: input.gitlabPathNamespace,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -482,6 +488,7 @@ export const applicationRouter = createTRPCRouter({
 				bitbucketId: input.bitbucketId,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -508,6 +515,7 @@ export const applicationRouter = createTRPCRouter({
 				giteaId: input.giteaId,
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -531,6 +539,7 @@ export const applicationRouter = createTRPCRouter({
 				sourceType: "docker",
 				applicationStatus: "idle",
 				registryUrl: input.registryUrl,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -556,6 +565,7 @@ export const applicationRouter = createTRPCRouter({
 				applicationStatus: "idle",
 				watchPaths: input.watchPaths,
 				enableSubmodules: input.enableSubmodules,
+				isPreviewDeploymentsActive: false,
 			});
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
@@ -747,6 +757,15 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const application = await findApplicationById(input.applicationId);
+			// Allow overriding the Docker image/tag at deploy time for
+			// Docker-source applications. This mirrors the manual "save Docker
+			// provider then deploy" workaround as a single call so external
+			// pipelines can push a specific tag to deploy.
+			if (input.dockerImage?.trim() && application.sourceType === "docker") {
+				await updateApplication(input.applicationId, {
+					dockerImage: input.dockerImage.trim(),
+				});
+			}
 			const jobData: DeploymentJob = {
 				applicationId: input.applicationId,
 				titleLog: input.title || "Manual deployment",
@@ -863,6 +882,7 @@ export const applicationRouter = createTRPCRouter({
 			await updateApplication(applicationId, {
 				sourceType: "drop",
 				dropBuildPath: dropBuildPath || "",
+				isPreviewDeploymentsActive: false,
 			});
 
 			await unzipDrop(zipFile, app);
@@ -1152,6 +1172,37 @@ export const applicationRouter = createTRPCRouter({
 				total: countResult[0]?.count ?? 0,
 			};
 		}),
+
+	getRailpackVersions: protectedProcedure.query(async () => {
+		if (
+			railpackVersionsCache &&
+			Date.now() - railpackVersionsCache.fetchedAt < RAILPACK_VERSIONS_CACHE_TTL
+		) {
+			return railpackVersionsCache.versions;
+		}
+
+		const res = await fetch(
+			"https://api.github.com/repos/railwayapp/railpack/releases",
+			{
+				headers: {
+					Accept: "application/vnd.github+json",
+					...(process.env.GITHUB_TOKEN
+						? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` }
+						: {}),
+				},
+			},
+		);
+		if (!res.ok) {
+			throw new TRPCError({
+				code: "INTERNAL_SERVER_ERROR",
+				message: "Failed to fetch Railpack versions from GitHub",
+			});
+		}
+		const releases = (await res.json()) as Array<{ tag_name: string }>;
+		const versions = releases.map((r) => r.tag_name.replace(/^v/i, ""));
+		railpackVersionsCache = { versions, fetchedAt: Date.now() };
+		return versions;
+	}),
 
 	readLogs: protectedProcedure
 		.input(

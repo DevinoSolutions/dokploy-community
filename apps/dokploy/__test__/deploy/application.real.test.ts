@@ -6,7 +6,10 @@ import { execAsync } from "@dokploy/server/utils/process/execAsync";
 import { format } from "date-fns";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const REAL_TEST_TIMEOUT = 180000; // 3 minutes
+// 5 minutes: deployApplication now waits a fixed 60s post-deploy stability
+// window (waitForSwarmServiceStable) on every successful deploy, on top of
+// the real nixpacks/railpack build time.
+const REAL_TEST_TIMEOUT = 300000;
 
 // Mock ONLY database and notifications
 vi.mock("@dokploy/server/db", () => {
@@ -36,6 +39,9 @@ vi.mock("@dokploy/server/db", () => {
 				},
 				deployHook: {
 					findFirst: vi.fn(),
+				},
+				domains: {
+					findMany: vi.fn().mockResolvedValue([]),
 				},
 				patch: {
 					findMany: vi.fn().mockResolvedValue([]),

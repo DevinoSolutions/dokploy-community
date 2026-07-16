@@ -2,6 +2,7 @@ import {
 	type Bitbucket,
 	getBitbucketHeaders,
 	IS_CLOUD,
+	normalizeChangedFilesFromCommits,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -65,7 +66,7 @@ export default async function handler(
 			return;
 		}
 
-		const deploymentTitle = extractCommitMessage(req.headers, req.body);
+		let deploymentTitle = extractCommitMessage(req.headers, req.body);
 
 		const deploymentHash = extractHash(req.headers, req.body);
 		const sourceType = application.sourceType;
@@ -119,24 +120,46 @@ export default async function handler(
 			}
 			// If webhook doesn't provide image info, we'll use the configured image (old behavior)
 		} else if (sourceType === "github") {
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
-			);
+			const tagName = extractTagName(req.headers, req.body);
+			const isTagEvent = !!tagName;
 
-			const shouldDeployPaths = shouldDeploy(
-				application.watchPaths,
-				normalizedCommits,
-			);
+			if (application.triggerType === "tag") {
+				if (!isTagEvent) {
+					res.status(301).json({
+						message: "Trigger type is 'tag'; ignoring non-tag push",
+					});
+					return;
+				}
+				// Tag event: deploy without branch/watchPaths checks (tags are not
+				// branch-scoped and the UI hides watchPaths for the tag trigger).
+				deploymentTitle = `Tag created: ${tagName}`;
+			} else {
+				if (isTagEvent) {
+					res.status(301).json({
+						message: "Trigger type is 'push'; ignoring tag event",
+					});
+					return;
+				}
 
-			if (!shouldDeployPaths) {
-				res.status(301).json({ message: "Watch Paths Not Match" });
-				return;
-			}
+				const normalizedCommits = normalizeChangedFilesFromCommits(
+					req.body?.commits,
+				);
 
-			const branchName = extractBranchName(req.headers, req.body);
-			if (!branchName || branchName !== application.branch) {
-				res.status(301).json({ message: "Branch Not Match" });
-				return;
+				const shouldDeployPaths = shouldDeploy(
+					application.watchPaths,
+					normalizedCommits,
+				);
+
+				if (!shouldDeployPaths) {
+					res.status(301).json({ message: "Watch Paths Not Match" });
+					return;
+				}
+
+				const branchName = extractBranchName(req.headers, req.body);
+				if (!branchName || branchName !== application.branch) {
+					res.status(301).json({ message: "Branch Not Match" });
+					return;
+				}
 			}
 		} else if (sourceType === "git") {
 			const branchName = extractBranchName(req.headers, req.body);
@@ -150,21 +173,13 @@ export default async function handler(
 			let normalizedCommits: string[] = [];
 
 			if (provider === "github") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitlab") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "gitea") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			} else if (provider === "soft-serve") {
-				normalizedCommits = req.body?.commits?.flatMap(
-					(commit: any) => commit.modified,
-				);
+				normalizedCommits = normalizeChangedFilesFromCommits(req.body?.commits);
 			}
 
 			const shouldDeployPaths = shouldDeploy(
@@ -179,8 +194,8 @@ export default async function handler(
 		} else if (sourceType === "gitlab") {
 			const branchName = extractBranchName(req.headers, req.body);
 
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(
@@ -225,8 +240,8 @@ export default async function handler(
 		} else if (sourceType === "gitea") {
 			const branchName = extractBranchName(req.headers, req.body);
 
-			const normalizedCommits = req.body?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				req.body?.commits,
 			);
 
 			const shouldDeployPaths = shouldDeploy(
@@ -530,6 +545,35 @@ export const extractBranchName = (headers: any, body: any) => {
 
 	if (headers["x-event-key"]?.includes("repo:push")) {
 		return body?.push?.changes[0]?.new?.name;
+	}
+
+	return null;
+};
+
+/**
+ * Return the tag name for a tag-creation webhook event, or null when the event
+ * is not a tag push. Used to honor the application/compose `triggerType` ("tag"
+ * vs "push") on the refresh-token webhook path, mirroring the GitHub App handler.
+ */
+export const extractTagName = (headers: any, body: any) => {
+	// GitHub / Gitea: ref = refs/tags/<tag>
+	if (headers["x-github-event"] || headers["x-gitea-event"]) {
+		return body?.ref?.startsWith("refs/tags/")
+			? body.ref.replace("refs/tags/", "")
+			: null;
+	}
+
+	// GitLab: Tag Push Hook, ref = refs/tags/<tag>
+	if (headers["x-gitlab-event"]) {
+		return body?.ref?.startsWith("refs/tags/")
+			? body.ref.replace("refs/tags/", "")
+			: null;
+	}
+
+	// Bitbucket: push change with new.type === "tag"
+	if (headers["x-event-key"]?.includes("repo:push")) {
+		const change = body?.push?.changes?.[0]?.new;
+		return change?.type === "tag" ? change?.name : null;
 	}
 
 	return null;

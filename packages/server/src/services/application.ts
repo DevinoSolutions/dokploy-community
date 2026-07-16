@@ -31,16 +31,13 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import { deployHook } from "../db/schema";
-import {
-	parseDeployHooks,
-	runDeployHook,
-	waitForSwarmServiceRunning,
-} from "../utils/docker/hooks";
-import { encodeBase64 } from "../utils/docker/utils";
+import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
+import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 import {
 	createDeployment,
 	createDeploymentPreview,
+	getDeploymentErrorMessage,
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
@@ -238,8 +235,16 @@ export const deployApplication = async ({
 
 		await mechanizeDockerContainer(application);
 
+		const stability = await waitForSwarmServiceStable(application.appName, {
+			serverId,
+		});
+		if (!stability.stable) {
+			throw new Error(
+				`Container did not stay running after deployment: ${stability.reason}`,
+			);
+		}
+
 		if (deployHooks.post?.trim()) {
-			await waitForSwarmServiceRunning(application.appName, serverId);
 			await runDeployHook({
 				kind: "post",
 				appName: application.appName,
@@ -280,12 +285,17 @@ export const deployApplication = async ({
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updateApplicationStatus(applicationId, "error");
 
+		const errorMessage = await getDeploymentErrorMessage({
+			logPath: deployment.logPath,
+			serverId,
+			fallback: "Error building, check the logs for details.",
+		});
+
 		await sendBuildErrorNotifications({
 			projectName: application.environment.project.name,
 			applicationName: application.name,
 			applicationType: "application",
-			// @ts-ignore
-			errorMessage: error?.message || "Error building",
+			errorMessage,
 			buildLink,
 			organizationId: application.environment.project.organizationId,
 		});
@@ -355,8 +365,16 @@ export const rebuildApplication = async ({
 
 		await mechanizeDockerContainer(application);
 
+		const stability = await waitForSwarmServiceStable(application.appName, {
+			serverId,
+		});
+		if (!stability.stable) {
+			throw new Error(
+				`Container did not stay running after rebuild: ${stability.reason}`,
+			);
+		}
+
 		if (deployHooks.post?.trim()) {
-			await waitForSwarmServiceRunning(application.appName, serverId);
 			await runDeployHook({
 				kind: "post",
 				appName: application.appName,
@@ -653,8 +671,19 @@ export const rebuildPreviewApplication = async ({
 	return true;
 };
 
+// Matches the literal `dokploy` bucket plus `dokploy-<serverId>` where the
+// suffix is the same character set as a nanoid (alphanumeric + `_`/`-`).
+// Used as a defense-in-depth guard before treating `appName` as a host-stats
+// directory under MONITORING_PATH.
+// The {21} length constraint matches the default nanoid() output exactly, so
+// names like `dokploy-traefik` cannot be mis-routed through host-stats lookup.
+const DOKPLOY_HOST_STATS_PATTERN = /^dokploy(-[A-Za-z0-9_-]{21})?$/;
+
 export const getApplicationStats = async (appName: string) => {
-	if (appName === "dokploy") {
+	// "dokploy" = main server host stats; "dokploy-<serverId>" = remote
+	// server host stats. Both read from MONITORING_PATH/<appName>/*.json
+	// directly without going through a Docker container lookup.
+	if (DOKPLOY_HOST_STATS_PATTERN.test(appName)) {
 		return await getAdvancedStats(appName);
 	}
 	const filter = {

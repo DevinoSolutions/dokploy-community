@@ -1,6 +1,9 @@
+import { db } from "@dokploy/server/db";
+import { applications, domains } from "@dokploy/server/db/schema";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { eq } from "drizzle-orm";
 import { getRegistryTag, uploadImageRemoteCommand } from "../cluster/upload";
 import {
 	calculateResources,
@@ -8,6 +11,8 @@ import {
 	generateConfigContainer,
 	generateFileMounts,
 	generateVolumeMounts,
+	getPredefinedEnvVariables,
+	mergePredefinedEnvVariables,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { resolveNetworkNamesForResource } from "../../services/network";
@@ -76,6 +81,32 @@ export const getBuildCommand = async (application: ApplicationNested) => {
 	return command;
 };
 
+/**
+ * Builds a map of `serviceName -> public URL` for every other application in the
+ * same environment that has a domain, so env vars can reference a sibling's URL
+ * via `${{service.<name>.fqdn}}`. Skips the DB query entirely when the env has no
+ * such reference. When a service has multiple domains, its first domain is used.
+ */
+export const buildServiceFqdnMap = async (
+	application: ApplicationNested,
+): Promise<Record<string, string>> => {
+	if (!application.env?.includes("${{service.")) {
+		return {};
+	}
+	const siblings = await db.query.applications.findMany({
+		where: eq(applications.environmentId, application.environmentId),
+		with: { domains: true },
+	});
+	const map: Record<string, string> = {};
+	for (const sibling of siblings) {
+		const domain = sibling.domains?.[0];
+		if (domain?.host) {
+			map[sibling.name] = `${domain.https ? "https" : "http"}://${domain.host}`;
+		}
+	}
+	return map;
+};
+
 export const mechanizeDockerContainer = async (
 	application: ApplicationNested,
 ) => {
@@ -124,10 +155,24 @@ export const mechanizeDockerContainer = async (
 
 	const bindsMount = generateBindMounts(mounts);
 	const filesMount = generateFileMounts(appName, application);
+
+	// Inject Dokploy-provided predefined variables (DOKPLOY_FQDN, DOKPLOY_URL,
+	// ...) derived from the app's primary domain and identity. When an app has
+	// multiple domains the first is used as its primary. Implements
+	// Dokploy/dokploy#3829 (backend-only, no schema change).
+	const applicationDomains = await db.query.domains.findMany({
+		where: eq(domains.applicationId, application.applicationId),
+	});
+	const predefinedEnv = getPredefinedEnvVariables(
+		application,
+		applicationDomains[0] ?? null,
+	);
+	const serviceFqdns = await buildServiceFqdnMap(application);
 	const envVariables = prepareEnvironmentVariables(
-		env,
+		mergePredefinedEnvVariables(predefinedEnv, env),
 		application.environment.project.env,
 		application.environment.env,
+		serviceFqdns,
 	);
 
 	const image = await getImageName(application);

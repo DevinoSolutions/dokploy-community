@@ -1233,13 +1233,6 @@
       "when": 1784084286788,
       "tag": "0175_cool_big_bertha",
       "breakpoints": true
-    },
-    {
-      "idx": 176,
-      "version": "7",
-      "when": 1784132943326,
-      "tag": "0176_steady_warhawk",
-      "breakpoints": true
     }
   ]
 }
