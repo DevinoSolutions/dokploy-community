@@ -2,6 +2,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import copy from "copy-to-clipboard";
 import { ArrowUpDown, MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
+import { ContainerHealthBadge } from "@/components/dashboard/docker/container-health-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -85,7 +86,13 @@ export const columns: ColumnDef<Container>[] = [
 			);
 		},
 		cell: ({ row }) => {
-			return <div className="capitalize">{row.getValue("status")}</div>;
+			const value = row.getValue("status") as string;
+			return (
+				<div className="flex items-center gap-2">
+					<span className="capitalize">{value}</span>
+					<ContainerHealthBadge status={value} />
+				</div>
+			);
 		},
 	},
 	{

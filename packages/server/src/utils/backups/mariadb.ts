@@ -12,7 +12,7 @@ import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
 	getBackupCommand,
 	getBackupTimestamp,
-	getS3Credentials,
+	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "./utils";
 
@@ -20,21 +20,21 @@ export const runMariadbBackup = async (
 	mariadb: Mariadb,
 	backup: BackupSchedule,
 ) => {
-	const { environmentId, name, appName } = mariadb;
+	const { environmentId, name } = mariadb;
 	const environment = await findEnvironmentById(environmentId);
 	const project = await findProjectById(environment.projectId);
 	const { prefix } = backup;
 	const destination = await findDestinationById(backup.destinationId);
 	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
-	const bucketDestination = `${appName}/${normalizeS3Path(prefix)}${backupFileName}`;
+	const bucketDestination = `${normalizeS3Path(prefix)}${backupFileName}`;
 	const deployment = await createDeploymentBackup({
 		backupId: backup.backupId,
 		title: "MariaDB Backup",
 		description: "MariaDB Backup",
 	});
 	try {
-		const rcloneFlags = getS3Credentials(destination);
-		const rcloneDestination = `:s3:${destination.bucket}/${bucketDestination}`;
+		const { flags: rcloneFlags, path: rcloneDestination } =
+			await getRclonePathAndFlags(destination, bucketDestination);
 		const rcloneCommand = `rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
 
 		const backupCommand = getBackupCommand(

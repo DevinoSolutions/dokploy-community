@@ -17,6 +17,8 @@ import { manageDomain } from "../utils/traefik/domain";
 import { findApplicationById } from "./application";
 import { removeDeploymentsByPreviewDeploymentId } from "./deployment";
 import { createDomain } from "./domain";
+import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
+import { getPublicIpWithFallback } from "../wss/utils";
 import { type Github, getIssueComment } from "./github";
 import { getWebServerSettings } from "./web-server-settings";
 
@@ -33,6 +35,7 @@ export const findPreviewDeploymentById = async (
 				columns: {
 					applicationId: true,
 					serverId: true,
+					buildServerId: true,
 				},
 			},
 		},
@@ -126,22 +129,69 @@ export const findPreviewDeploymentsByApplicationId = async (
 	return deploymentsList;
 };
 
+const slugify = (value: string): string => {
+	return value
+		.toLowerCase()
+		.replace(/[^a-z0-9-]/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-|-$/g, "")
+		.slice(0, 63);
+};
+
+export const interpolateSubdomainTemplate = (
+	template: string,
+	vars: {
+		appName: string;
+		prNumber: string;
+		branchName: string;
+		uniqueId: string;
+	},
+): string => {
+	return template
+		.replace(/\$\{appName\}/g, vars.appName)
+		.replace(/\$\{prNumber\}/g, vars.prNumber)
+		.replace(/\$\{branchName\}/g, slugify(vars.branchName))
+		.replace(/\$\{uniqueId\}/g, vars.uniqueId);
+};
+
 export const createPreviewDeployment = async (
 	schema: z.infer<typeof apiCreatePreviewDeployment>,
 ) => {
 	const application = await findApplicationById(schema.applicationId);
-	const appName = `preview-${application.appName}-${generatePassword(6)}`;
+	const uniqueId = generatePassword(6);
+	const domainTemplate = application.previewWildcard || "*.sslip.io";
 
-	const org = await db.query.organization.findFirst({
-		where: eq(organization.id, application.environment.project.organizationId),
-	});
-	const generateDomain = await generatePreviewWildcardDomain(
-		application.previewWildcard || "*.sslip.io",
-		appName,
-		application.server?.ipAddress || "",
-		org?.ownerId || "",
-		schema.pullRequestNumber,
-	);
+	const hasIdentifier =
+		domainTemplate.includes("${prNumber}") ||
+		domainTemplate.includes("${branchName}") ||
+		domainTemplate.includes("${uniqueId}");
+
+	const appName: string = `preview-${application.appName}-${uniqueId}`;
+	let generateDomain: string;
+
+	if (hasIdentifier) {
+		const interpolated = interpolateSubdomainTemplate(domainTemplate, {
+			appName: application.appName,
+			prNumber: schema.pullRequestNumber,
+			branchName: schema.branch,
+			uniqueId,
+		});
+		generateDomain = interpolated.replace("*", application.appName);
+	} else {
+		const org = await db.query.organization.findFirst({
+			where: eq(
+				organization.id,
+				application.environment.project.organizationId,
+			),
+		});
+		generateDomain = await generateWildcardDomain(
+			domainTemplate,
+			appName,
+			application.server?.ipAddress || "",
+			org?.ownerId || "",
+			application.server?.serverId,
+		);
+	}
 
 	const octokit = authGithub(application?.github as Github);
 
@@ -229,32 +279,18 @@ export const findPreviewDeploymentByApplicationId = async (
 	return previewDeploymentResult;
 };
 
-export const generatePreviewWildcardDomain = async (
+const generateWildcardDomain = async (
 	baseDomain: string,
 	appName: string,
 	serverIp: string,
 	_userId: string,
-	pullRequestNumber: string,
+	serverId?: string,
 ): Promise<string> => {
-	if (!baseDomain.includes("*") && !baseDomain.includes("${prNumber}")) {
-		throw new Error(
-			'The domain must include "*" or the "${prNumber}" variable, otherwise every pull request would collide on the same domain.',
-		);
-	}
-
-	const domain = baseDomain.replaceAll("${prNumber}", pullRequestNumber);
-
-	if (!domain.includes("*")) {
-		return domain;
-	}
-
-	if (!domain.startsWith("*.")) {
-		throw new Error(
-			'The base domain must start with "*." or use the "${prNumber}" variable without a wildcard.',
-		);
+	if (!baseDomain.startsWith("*.")) {
+		throw new Error('The base domain must start with "*."');
 	}
 	const hash = `${appName}`;
-	if (domain.includes("sslip.io")) {
+	if (baseDomain.includes("sslip.io")) {
 		let ip = "";
 
 		if (process.env.NODE_ENV === "development") {
@@ -270,12 +306,18 @@ export const generatePreviewWildcardDomain = async (
 			ip = settings?.serverIp || "";
 		}
 
-		const slugIp = ip.replaceAll(".", "-");
-		return domain.replace(
+		if (process.env.NODE_ENV !== "development" && isPrivateIp(ip)) {
+			ip = serverId
+				? (await getRemotePublicIp(serverId)) ?? ip
+				: (await getPublicIpWithFallback()) || ip;
+		}
+
+		const slugIp = ip.replaceAll(".", "-").replaceAll(":", "-");
+		return baseDomain.replace(
 			"*",
 			`${hash}${slugIp === "" ? "" : `-${slugIp}`}`,
 		);
 	}
 
-	return domain.replace("*", hash);
+	return baseDomain.replace("*", hash);
 };
