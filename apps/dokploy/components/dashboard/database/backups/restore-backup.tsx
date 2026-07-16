@@ -13,6 +13,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
+import { AlertBlock } from "@/components/shared/alert-block";
 import { DrawerLogs } from "@/components/shared/drawer-logs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -74,6 +75,7 @@ interface Props {
 	databaseType?: DatabaseType;
 	serverId?: string | null;
 	backupType?: "database" | "compose";
+	disabled?: boolean;
 }
 
 const RestoreBackupSchema = z
@@ -200,6 +202,7 @@ export const RestoreBackup = ({
 	databaseType,
 	serverId,
 	backupType = "database",
+	disabled = false,
 }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const [search, setSearch] = useState("");
@@ -326,6 +329,12 @@ export const RestoreBackup = ({
 						Select a destination and search for backup files
 					</DialogDescription>
 				</DialogHeader>
+
+				{disabled && (
+					<AlertBlock type="warning">
+						The database must be running to restore a backup. Start it first.
+					</AlertBlock>
+				)}
 
 				<Form {...form}>
 					<form
@@ -466,14 +475,14 @@ export const RestoreBackup = ({
 																	value={file.Path}
 																	key={file.Path}
 																	onSelect={() => {
-																		form.setValue("backupFile", file.Path);
 																		if (file.IsDir) {
 																			setSearch(`${file.Path}/`);
 																			setDebouncedSearchTerm(`${file.Path}/`);
-																		} else {
-																			setSearch(file.Path);
-																			setDebouncedSearchTerm(file.Path);
+																			return;
 																		}
+																		form.setValue("backupFile", file.Path);
+																		setSearch(file.Path);
+																		setDebouncedSearchTerm(file.Path);
 																	}}
 																>
 																	<div className="flex w-full flex-col gap-1">
@@ -782,22 +791,19 @@ export const RestoreBackup = ({
 								)}
 							</>
 						)}
-
-						<DialogFooter>
-							<Button
-								isLoading={isDeploying}
-								form="hook-form-restore-backup"
-								type="submit"
-								// disabled={
-								// 	!form.watch("backupFile") ||
-								// 	(backupType === "compose" && !form.watch("databaseType"))
-								// }
-							>
-								Restore
-							</Button>
-						</DialogFooter>
 					</form>
 				</Form>
+
+				<DialogFooter>
+					<Button
+						isLoading={isDeploying}
+						form="hook-form-restore-backup"
+						type="submit"
+						disabled={disabled}
+					>
+						Restore
+					</Button>
+				</DialogFooter>
 
 				<DrawerLogs
 					isOpen={isDrawerOpen}

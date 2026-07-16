@@ -1,4 +1,5 @@
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
+import { VALID_GIT_URL_REGEX } from "@dokploy/server/utils/git-url-validation";
 import { relations } from "drizzle-orm";
 import {
 	bigint,
@@ -394,6 +395,7 @@ export const apiCreateApplication = createSchema.pick({
 	description: true,
 	environmentId: true,
 	serverId: true,
+	sourceType: true,
 });
 
 export const apiFindOneApplication = z.object({
@@ -408,6 +410,10 @@ export const apiDeployApplication = createSchema
 		applicationId: z.string().min(1),
 		title: z.string().optional(),
 		description: z.string().optional(),
+		// Optional Docker image/tag override applied at deploy time for
+		// Docker-source applications (e.g. deploy a freshly built tag from CI
+		// without a separate "save Docker provider" call).
+		dockerImage: z.string().optional(),
 	});
 
 export const apiRedeployApplication = createSchema
@@ -436,9 +442,19 @@ export const apiSaveBuildType = createSchema
 		dockerBuildStage: true,
 		herokuVersion: true,
 		railpackVersion: true,
+		publishDirectory: true,
+		isStaticSpa: true,
 	})
 	.required()
-	.merge(createSchema.pick({ publishDirectory: true, isStaticSpa: true }));
+	.superRefine((data, ctx) => {
+		if (data.buildType === "railpack" && !data.railpackVersion?.trim()) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["railpackVersion"],
+				message: "Railpack version is required",
+			});
+		}
+	});
 
 const branchField = z
 	.string()
@@ -507,9 +523,11 @@ export const apiSaveDockerProvider = createSchema
 		username: true,
 		password: true,
 		registryUrl: true,
-		registryId: true,
 	})
-	.required();
+	.required()
+	.extend({
+		registryId: z.string().nullable().optional(),
+	});
 
 export const apiSaveGitProvider = createSchema
 	.pick({
@@ -520,7 +538,13 @@ export const apiSaveGitProvider = createSchema
 		enableSubmodules: true,
 	})
 	.required()
-	.extend({ customGitBranch: branchField })
+	.extend({
+		customGitBranch: branchField,
+		customGitUrl: z
+			.string()
+			.min(1)
+			.refine(VALID_GIT_URL_REGEX, "Invalid Git URL"),
+	})
 	.merge(
 		createSchema.pick({
 			customGitSSHKeyId: true,
@@ -538,8 +562,17 @@ export const apiSaveEnvironmentVariables = createSchema
 	})
 	.required();
 
+// `appName` is concatenated into MONITORING_PATH on disk by
+// `getApplicationStats` -> `getAdvancedStats` -> `readStatsFile`. Restrict to
+// the literal `dokploy` host bucket or `dokploy-<serverId>` (nanoid-shaped)
+// so a crafted value cannot traverse out of MONITORING_PATH. Container app
+// names fed through this same endpoint are auto-generated and only contain
+// these characters as well.
 export const apiFindMonitoringStats = z.object({
-	appName: z.string().min(1),
+	appName: z
+		.string()
+		.min(1)
+		.regex(/^[A-Za-z0-9_.-]+$/, { message: "Invalid appName" }),
 });
 
 export const apiUpdateApplication = createSchema

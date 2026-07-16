@@ -95,6 +95,10 @@ export const S3_PROVIDERS: Array<{
 		name: "Rclone S3 Server",
 	},
 	{
+		key: "GenericRclone",
+		name: "Generic rclone remote",
+	},
+	{
 		key: "Scaleway",
 		name: "Scaleway Object Storage",
 	},
@@ -129,5 +133,13 @@ export const S3_PROVIDERS: Array<{
 	{
 		key: "Other",
 		name: "Any other S3 compatible provider",
+	},
+	{
+		key: "sftp",
+		name: "SFTP (SSH File Transfer Protocol)",
+	},
+	{
+		key: "ftp",
+		name: "FTP (File Transfer Protocol)",
 	},
 ];

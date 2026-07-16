@@ -32,11 +32,24 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { API_KEY_NAME_MAX_LENGTH, apiKeyNameSchema } from "@/lib/api-keys";
 import { api } from "@/utils/api";
+import {
+	apiKeyPrefixErrorMessage,
+	apiKeyPrefixRegex,
+	getCreateApiKeyErrorMessage,
+	getCreateApiKeyPrefixError,
+} from "./api-key-errors";
 
 const formSchema = z.object({
-	name: z.string().min(1, "Name is required"),
-	prefix: z.string().optional(),
+	name: apiKeyNameSchema,
+	prefix: z
+		.string()
+		.trim()
+		.refine((value) => value === "" || apiKeyPrefixRegex.test(value), {
+			message: apiKeyPrefixErrorMessage,
+		})
+		.optional(),
 	expiresIn: z.number().nullable(),
 	organizationId: z.string().min(1, "Organization is required"),
 	// Rate limiting fields
@@ -94,8 +107,16 @@ export const AddApiKey = () => {
 			form.reset();
 			void refetch();
 		},
-		onError: () => {
-			toast.error("Failed to generate API key");
+		onError: (error) => {
+			const prefixError = getCreateApiKeyPrefixError(error);
+			if (prefixError) {
+				form.setError("prefix", {
+					type: "server",
+					message: prefixError,
+				});
+			}
+
+			toast.error(getCreateApiKeyErrorMessage(error));
 		},
 	});
 
@@ -159,8 +180,15 @@ export const AddApiKey = () => {
 									<FormItem>
 										<FormLabel>Name</FormLabel>
 										<FormControl>
-											<Input placeholder="My API Key" {...field} />
+											<Input
+												placeholder="My API Key"
+												maxLength={API_KEY_NAME_MAX_LENGTH}
+												{...field}
+											/>
 										</FormControl>
+										<FormDescription>
+											Maximum {API_KEY_NAME_MAX_LENGTH} characters
+										</FormDescription>
 										<FormMessage />
 									</FormItem>
 								)}
