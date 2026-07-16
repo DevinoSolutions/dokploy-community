@@ -33,6 +33,12 @@ vi.mock("@dokploy/server/db", () => {
 				applications: {
 					findFirst: vi.fn(),
 				},
+				deployHook: {
+					findFirst: vi.fn(),
+				},
+				domains: {
+					findMany: vi.fn().mockResolvedValue([]),
+				},
 				patch: {
 					findMany: vi.fn().mockResolvedValue([]),
 				},
@@ -102,6 +108,20 @@ vi.mock("@dokploy/server/utils/notifications/build-error", () => ({
 vi.mock("@dokploy/server/services/rollbacks", () => ({
 	createRollback: vi.fn(),
 }));
+
+// deployApplication now verifies post-deploy service stability by polling
+// Docker Swarm for a 60s window (waitForSwarmServiceStable). These are
+// command-generation tests with no real Docker service running, so stub it
+// to report a stable service; keep the rest of docker/utils real.
+vi.mock("@dokploy/server/utils/docker/utils", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/utils/docker/utils")
+	>("@dokploy/server/utils/docker/utils");
+	return {
+		...actual,
+		waitForSwarmServiceStable: vi.fn().mockResolvedValue({ stable: true }),
+	};
+});
 
 import { db } from "@dokploy/server/db";
 import { cloneGitRepository } from "@dokploy/server/utils/providers/git";

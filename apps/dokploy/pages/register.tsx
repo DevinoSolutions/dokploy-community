@@ -1,5 +1,6 @@
 import { IS_CLOUD, isAdminPresent, validateRequest } from "@dokploy/server";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { createServerSideHelpers } from "@trpc/react-query/server";
 import { AlertTriangle } from "lucide-react";
 import type { GetServerSidePropsContext } from "next";
 import Link from "next/link";
@@ -7,7 +8,12 @@ import { useRouter } from "next/router";
 import { type ReactElement, useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
+import superjson from "superjson";
 import { z } from "zod";
+import {
+	type EnabledSocialProviders,
+	SocialLoginButtons,
+} from "@/components/auth/social-login";
 import { OnboardingLayout } from "@/components/layouts/onboarding-layout";
 import { SignInWithGithub } from "@/components/proprietary/auth/sign-in-with-github";
 import { SignInWithGoogle } from "@/components/proprietary/auth/sign-in-with-google";
@@ -25,6 +31,7 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { authClient } from "@/lib/auth-client";
+import { appRouter } from "@/server/api/root";
 import { useWhitelabelingPublic } from "@/utils/hooks/use-whitelabeling";
 
 const registerSchema = z
@@ -74,9 +81,10 @@ type Register = z.infer<typeof registerSchema>;
 interface Props {
 	hasAdmin: boolean;
 	isCloud: boolean;
+	socialProviders?: EnabledSocialProviders;
 }
 
-const Register = ({ isCloud }: Props) => {
+const Register = ({ isCloud, socialProviders = {} }: Props) => {
 	const router = useRouter();
 	const { config: whitelabeling } = useWhitelabelingPublic();
 	const [isError, setIsError] = useState(false);
@@ -170,6 +178,15 @@ const Register = ({ isCloud }: Props) => {
 									Or register with email
 								</p>
 							)}
+							{!isCloud &&
+								(socialProviders.github || socialProviders.google) && (
+									<>
+										<SocialLoginButtons providers={socialProviders} />
+										<p className="mb-4 text-center text-xs text-muted-foreground">
+											Or register with email
+										</p>
+									</>
+								)}
 							<Form {...form}>
 								<form
 									method="post"
@@ -297,6 +314,21 @@ Register.getLayout = (page: ReactElement) => {
 	return <OnboardingLayout>{page}</OnboardingLayout>;
 };
 export async function getServerSideProps(context: GetServerSidePropsContext) {
+	const helpers = createServerSideHelpers({
+		router: appRouter,
+		ctx: {
+			req: context.req as any,
+			res: context.res as any,
+			db: null as any,
+			session: null as any,
+			user: null as any,
+		},
+		transformer: superjson,
+	});
+	// Prefetch the public branding so the onboarding logo and app name render
+	// correctly on the server (no flash of default branding).
+	await helpers.whitelabeling.getPublic.prefetch();
+
 	if (IS_CLOUD) {
 		const { user } = await validateRequest(context.req);
 
@@ -310,6 +342,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 		}
 		return {
 			props: {
+				trpcState: helpers.dehydrate(),
 				isCloud: true,
 			},
 		};
@@ -326,7 +359,16 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 	}
 	return {
 		props: {
+			trpcState: helpers.dehydrate(),
 			isCloud: false,
+			socialProviders: {
+				github: Boolean(
+					process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET,
+				),
+				google: Boolean(
+					process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
+				),
+			},
 		},
 	};
 }
