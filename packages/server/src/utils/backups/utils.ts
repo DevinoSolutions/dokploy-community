@@ -2,6 +2,9 @@ import { logger } from "@dokploy/server/lib/logger";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileP = promisify(execFile);
 import { keepLatestNBackups } from ".";
 import { runComposeBackup } from "./compose";
 import { runLibsqlBackup } from "./libsql";
@@ -258,6 +261,11 @@ export const getBackupCommand = (
 ) => {
 	const containerSearch = getContainerSearchCommand(backup);
 	const backupCommand = generateBackupCommand(backup);
+	const destinationType = ["sftp", "ftp"].includes(
+		backup.destination?.provider || "",
+	)
+		? backup.destination?.provider?.toUpperCase() || "remote"
+		: "S3";
 
 	logger.info(
 		{
@@ -281,25 +289,80 @@ export const getBackupCommand = (
 	fi
 
 	echo "[$(date)] Container Up: $CONTAINER_ID" >> ${logPath};
+	echo "[$(date)] Streaming backup to ${destinationType}..." >> ${logPath};
 
-	# Run the backup command and capture the exit status
-	BACKUP_OUTPUT=$(${backupCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Backup failed" >> ${logPath};
-		echo "Error: $BACKUP_OUTPUT" >> ${logPath};
-		exit 1;
-	}
-
-	echo "[$(date)] ✅ backup completed successfully" >> ${logPath};
-	echo "[$(date)] Starting upload to S3..." >> ${logPath};
-
-	# Run the upload command and capture the exit status
+	# Stream the dump straight to the destination. The dump runs ONCE; "set -o pipefail"
+	# makes the pipeline fail if the dump (not just rclone) fails, so a broken
+	# backup never reports success. Running the dump a second time to "validate"
+	# it would double the load on the database and risk an inconsistent copy.
 	UPLOAD_OUTPUT=$(${backupCommand} | ${rcloneCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Upload to S3 failed" >> ${logPath};
+		echo "[$(date)] ❌ Error: Backup/upload to ${destinationType} failed" >> ${logPath};
 		echo "Error: $UPLOAD_OUTPUT" >> ${logPath};
 		exit 1;
 	}
 
-	echo "[$(date)] ✅ Upload to S3 completed successfully" >> ${logPath};
+	echo "[$(date)] ✅ Upload to ${destinationType} completed successfully" >> ${logPath};
 	echo "Backup done ✅" >> ${logPath};
 	`;
+};
+
+export const obscurePassword = async (password: string) => {
+	try {
+		const { stdout } = await execFileP("rclone", ["obscure", password]);
+		return stdout.trim();
+	} catch (error) {
+		logger.error("Error obscuring password with rclone", error);
+		return password;
+	}
+};
+
+export const getRclonePathAndFlags = async (
+	destination: Destination,
+	subPath: string,
+) => {
+	const isS3 = !["sftp", "ftp"].includes(destination.provider || "");
+	if (isS3) {
+		const flags = getS3Credentials(destination);
+		const path = `:s3:${destination.bucket}/${subPath}`;
+		return { flags, path };
+	}
+	const provider = destination.provider;
+	// The SFTP/FTP connection string below is interpolated into a shell command.
+	// These fields are user-supplied (destination form), so validate them strictly
+	// to prevent shell/connection-string injection before building the string.
+	// Charset that is safe to embed inside the quoted shell command (no shell
+	// metacharacters, quotes, or whitespace).
+	const shellSafe = /^[^"'$\\`;|&<>()\s]+$/;
+	// Path segments may additionally contain "/".
+	const pathSafe = /^[^"'$\\`;|&<>()\s]*$/;
+
+	if (!/^[a-zA-Z0-9.-]+$/.test(destination.endpoint)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} host: only letters, digits, dots and hyphens are allowed`,
+		);
+	}
+	if (destination.region && !/^\d{1,5}$/.test(destination.region)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} port: must be a number`,
+		);
+	}
+	if (!shellSafe.test(destination.accessKey)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} user: contains forbidden characters`,
+		);
+	}
+	if (!pathSafe.test(destination.bucket)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} path: contains forbidden characters`,
+		);
+	}
+	if (!pathSafe.test(subPath)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} backup path: contains forbidden characters`,
+		);
+	}
+
+	const obscuredPass = await obscurePassword(destination.secretAccessKey);
+	const path = `:${provider},host="${destination.endpoint}",port="${destination.region}",user="${destination.accessKey}",pass="${obscuredPass}":${destination.bucket}/${subPath}`;
+	return { flags: [], path };
 };

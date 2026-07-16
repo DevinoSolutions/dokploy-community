@@ -1,8 +1,5 @@
+import { redisConfig as sharedRedisConfig } from "@dokploy/server/setup/redis-constants";
 import type { ConnectionOptions } from "bullmq";
 
-export const redisConfig: ConnectionOptions = {
-	host:
-		process.env.NODE_ENV === "production"
-			? process.env.REDIS_HOST || "dokploy-redis"
-			: "127.0.0.1",
-};
+export const redisConfig: ConnectionOptions =
+	sharedRedisConfig as ConnectionOptions;
