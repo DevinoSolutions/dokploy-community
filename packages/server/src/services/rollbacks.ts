@@ -107,11 +107,34 @@ export const findRollbackById = async (rollbackId: string) => {
 		with: {
 			deployment: {
 				with: {
+					// `application` has 100 columns (incl. the fork's `networkIds`).
+					// Drizzle packs every selected column of a joined resource plus one
+					// entry per nested relation into a single json_build_array(...),
+					// which Postgres caps at 100 arguments (error 54023). Selecting all
+					// of `application` emits json_build_array(100 columns + environment)
+					// = 101 args and throws, so we project it down. Consumers only read
+					// `deployment.applicationId` (a deployments column); the identifying
+					// columns below are kept for API-shape stability. See
+					// services/schedule.ts and services/volume-backups.ts for the same
+					// fix.
 					application: {
+						columns: {
+							applicationId: true,
+							appName: true,
+							name: true,
+							serverId: true,
+						},
 						with: {
 							environment: {
+								columns: { environmentId: true, name: true },
 								with: {
-									project: true,
+									project: {
+										columns: {
+											projectId: true,
+											name: true,
+											organizationId: true,
+										},
+									},
 								},
 							},
 						},
