@@ -5,6 +5,7 @@ import {
 } from "@dokploy/server";
 import { validateRequest } from "@dokploy/server/lib/auth";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { createServerSideHelpers } from "@trpc/react-query/server";
 import { REGEXP_ONLY_DIGITS } from "input-otp";
 import type { GetServerSidePropsContext } from "next";
 import Link from "next/link";
@@ -12,7 +13,12 @@ import { useRouter } from "next/router";
 import { type ReactElement, useState } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
+import superjson from "superjson";
 import { z } from "zod";
+import {
+	type EnabledSocialProviders,
+	SocialLoginButtons,
+} from "@/components/auth/social-login";
 import { OnboardingLayout } from "@/components/layouts/onboarding-layout";
 import { SignInWithGithub } from "@/components/proprietary/auth/sign-in-with-github";
 import { SignInWithGoogle } from "@/components/proprietary/auth/sign-in-with-google";
@@ -45,6 +51,7 @@ import {
 } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
+import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabelingPublic } from "@/utils/hooks/use-whitelabeling";
 
@@ -62,8 +69,13 @@ type LoginForm = z.infer<typeof LoginSchema>;
 interface Props {
 	IS_CLOUD: boolean;
 	enforceSSO: boolean;
+	socialProviders?: EnabledSocialProviders;
 }
-export default function Home({ IS_CLOUD, enforceSSO }: Props) {
+export default function Home({
+	IS_CLOUD,
+	enforceSSO,
+	socialProviders = {},
+}: Props) {
 	const router = useRouter();
 	const { config: whitelabeling } = useWhitelabelingPublic();
 	const { data: showSignInWithSSO } = api.sso.showSignInWithSSO.useQuery();
@@ -100,26 +112,27 @@ export default function Home({ IS_CLOUD, enforceSSO }: Props) {
 						"Your email is not verified. We've sent a new verification link to your email.";
 					toast.info(msg);
 					setError(msg);
+					setIsLoginLoading(false);
 					return;
 				}
 				toast.error(error.message);
 				setError(error.message || "An error occurred while logging in");
+				setIsLoginLoading(false);
 				return;
 			}
 
-			// @ts-ignore
-			if (data?.twoFactorRedirect as boolean) {
+			if (data && "twoFactorRedirect" in data && data.twoFactorRedirect) {
 				setTwoFactorCode("");
 				setIsTwoFactor(true);
 				toast.info("Please enter your 2FA code");
+				setIsLoginLoading(false);
 				return;
 			}
 
 			toast.success("Logged in successfully");
-			router.push("/dashboard/home");
+			await router.push("/dashboard/home");
 		} catch {
 			toast.error("An error occurred while logging in");
-		} finally {
 			setIsLoginLoading(false);
 		}
 	};
@@ -139,14 +152,14 @@ export default function Home({ IS_CLOUD, enforceSSO }: Props) {
 			if (error) {
 				toast.error(error.message);
 				setError(error.message || "An error occurred while verifying 2FA code");
+				setIsTwoFactorLoading(false);
 				return;
 			}
 
 			toast.success("Logged in successfully");
-			router.push("/dashboard/home");
+			await router.push("/dashboard/home");
 		} catch {
 			toast.error("An error occurred while verifying 2FA code");
-		} finally {
 			setIsTwoFactorLoading(false);
 		}
 	};
@@ -169,14 +182,14 @@ export default function Home({ IS_CLOUD, enforceSSO }: Props) {
 				setError(
 					error.message || "An error occurred while verifying backup code",
 				);
+				setIsBackupCodeLoading(false);
 				return;
 			}
 
 			toast.success("Logged in successfully");
-			router.push("/dashboard/home");
+			await router.push("/dashboard/home");
 		} catch {
 			toast.error("An error occurred while verifying backup code");
-		} finally {
 			setIsBackupCodeLoading(false);
 		}
 	};
@@ -185,6 +198,7 @@ export default function Home({ IS_CLOUD, enforceSSO }: Props) {
 		<>
 			{IS_CLOUD && <SignInWithGithub />}
 			{IS_CLOUD && <SignInWithGoogle />}
+			{!IS_CLOUD && <SocialLoginButtons providers={socialProviders} />}
 			<Form {...loginForm}>
 				<form
 					method="post"
@@ -430,6 +444,21 @@ Home.getLayout = (page: ReactElement) => {
 	return <OnboardingLayout>{page}</OnboardingLayout>;
 };
 export async function getServerSideProps(context: GetServerSidePropsContext) {
+	const helpers = createServerSideHelpers({
+		router: appRouter,
+		ctx: {
+			req: context.req as any,
+			res: context.res as any,
+			db: null as any,
+			session: null as any,
+			user: null as any,
+		},
+		transformer: superjson,
+	});
+	// Prefetch the public branding so the login/onboarding logo and app name
+	// render correctly on the server (no flash of default branding).
+	await helpers.whitelabeling.getPublic.prefetch();
+
 	if (IS_CLOUD) {
 		try {
 			const { user } = await validateRequest(context.req);
@@ -445,6 +474,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 
 		return {
 			props: {
+				trpcState: helpers.dehydrate(),
 				IS_CLOUD: IS_CLOUD,
 				enforceSSO: false,
 			},
@@ -476,8 +506,17 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 
 	return {
 		props: {
+			trpcState: helpers.dehydrate(),
 			hasAdmin,
 			enforceSSO: webServerSettings?.enforceSSO ?? false,
+			socialProviders: {
+				github: Boolean(
+					process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET,
+				),
+				google: Boolean(
+					process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
+				),
+			},
 		},
 	};
 }
