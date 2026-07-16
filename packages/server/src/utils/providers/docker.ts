@@ -1,3 +1,4 @@
+import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import { getSafeRegistryLoginCommand } from "../../db/schema/registry";
 import { shEscape } from "../../db/schema/utils";
 import { getECRAuthToken } from "../aws/ecr";
@@ -33,9 +34,28 @@ if ! ${loginCommand} 2>&1; then
 	exit 1;
 fi
 `;
+		} else if (registry) {
+			// Standard registry attached to the application: pull with its
+			// stored credentials (loaded on demand because the fork excludes
+			// registry passwords from relational queries).
+			const r = await findRegistryByIdWithCredentials(registry.registryId);
+			if (r.username && r.password) {
+				const loginCommand = getSafeRegistryLoginCommand({
+					registryType: registry.registryType ?? "cloud",
+					registryUrl: r.registryUrl,
+					username: r.username,
+					password: r.password,
+				});
+				command += `
+if ! ${loginCommand} 2>&1; then
+	echo "❌ Login failed";
+	exit 1;
+fi
+`;
+			}
 		} else if (username && password) {
 			const loginCommand = getSafeRegistryLoginCommand({
-				registryType: registry?.registryType ?? "cloud",
+				registryType: "cloud",
 				registryUrl,
 				username,
 				password,

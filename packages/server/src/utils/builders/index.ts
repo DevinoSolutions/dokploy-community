@@ -276,6 +276,26 @@ export const getAuthConfig = async (application: ApplicationNested) => {
 	} = application;
 
 	if (sourceType === "docker") {
+		if (registry) {
+			if (registry.registryType === "awsEcr") {
+				const token = await getECRAuthToken({
+					awsAccessKeyId: registry.awsAccessKeyId || "",
+					awsSecretAccessKey: registry.awsSecretAccessKey || "",
+					awsRegion: registry.awsRegion || "",
+				});
+				return {
+					password: token.password,
+					username: "AWS",
+					serveraddress: registry.registryUrl || "",
+				};
+			}
+			const r = await findRegistryByIdWithCredentials(registry.registryId);
+			return {
+				password: r.password,
+				username: r.username,
+				serveraddress: r.registryUrl,
+			};
+		}
 		if (username && password) {
 			return { password, username, serveraddress: registryUrl || "" };
 		}
