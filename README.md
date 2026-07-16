@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.5**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.6**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.5 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.6 \
   --with-registry-auth \
   dokploy
 ```
@@ -107,6 +107,15 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.6
+
+**Project favicons, for real — and hardened.** Project icons now resolve the actual favicon of a project's first working domain, and the resolver is locked down against SSRF and stored XSS.
+
+- **Real favicon resolution** — projects without an explicit icon show their first working domain's favicon, including apps that declare it via a custom `<link rel="icon">` path instead of the default `/favicon.ico`; icons now also render in the project switcher, not just cards and headers ([#145](https://github.com/DevinoSolutions/dokploy-community/pull/145)).
+- **SSRF hardening** — every URL the resolver fetches, and every redirect hop, is re-validated as same-origin against the originally-requested org-managed host, pinning scheme + host **+ port** so the fetch can't be pivoted to an internal service or another port on the same IP ([#146](https://github.com/DevinoSolutions/dokploy-community/pull/146), [#147](https://github.com/DevinoSolutions/dokploy-community/pull/147)).
+- **Stored-XSS hardening** — `image/svg+xml` favicons are rejected (an SVG served with its real content-type can execute inline script), and the icon response carries a locked-down `default-src 'none'; sandbox` CSP plus `nosniff` ([#147](https://github.com/DevinoSolutions/dokploy-community/pull/147)).
+- **Private caching** — the auth-gated icon response is now `private`, so a shared cache can't serve one user's favicon to another.
+
 ### New in v0.29.12-community.5
 
 **Project icons & longer sessions.** Projects can now carry an icon — upload an image or paste a URL, and projects without one automatically fall back to the favicon of their first working domain. Login sessions last **30 days** (sliding) instead of 3, tunable via `DOKPLOY_SESSION_DAYS`. Also fixes a scheduled-task bug (caught by the new error reporting on day one) where schedules targeting a stopped container ran `docker exec` with an empty ID on every tick instead of failing with a clear message.
@@ -132,7 +141,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.5
+export DOKPLOY_VERSION=v0.29.12-community.6
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -145,7 +154,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.5   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.6   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -174,6 +183,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 3rd release | `v0.29.12-community.3` |
 | v0.29.12 | 4th release | `v0.29.12-community.4` |
 | v0.29.12 | 5th release | `v0.29.12-community.5` |
+| v0.29.12 | 6th release | `v0.29.12-community.6` |
 
 ## Contributing
 
