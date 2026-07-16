@@ -99,6 +99,7 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 - **Git providers & auth** — GitHub/Google social login on self-hosted, self-hosted password reset, Codeberg preset, Gitea `write:repository` scope, and several OAuth/redirect fixes
 - **Organizations & teams** — editable descriptions, bulk invitations, drag-and-drop logo upload, and **project export** to a portable JSON file
 - **Reliability** — clean exit on fatal startup errors instead of crash-looping, Podman idle-exec support, custom `template.toml` in git repos, and Docker/Ubuntu install-failure fixes
+- **Longer login sessions** — sessions last 30 days (sliding) instead of upstream's 3, configurable via `DOKPLOY_SESSION_DAYS`
 - **15+ UI/UX fixes** — deployments filtering and tab behavior, env-form edit stability, log-counter layout shift, responsive log pages, dark-theme icons, and new translations
 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
