@@ -1296,6 +1296,20 @@
       "when": 1784179617594,
       "tag": "0184_fresh_oracle",
       "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1784180934524,
+      "tag": "0185_minor_harrier",
+      "breakpoints": true
+    },
+    {
+      "idx": 186,
+      "version": "7",
+      "when": 1784182200127,
+      "tag": "0186_giant_thanos",
+      "breakpoints": true
     }
   ]
 }
