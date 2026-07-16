@@ -254,35 +254,41 @@ export const createPreviewDeployment = async (
 
 	// Post the initial PR comment now that we hold the unique row. A comment
 	// failure must not roll back the row — the deploy flow recreates a missing
-	// comment on the first deploy attempt.
-	try {
-		const octokit = authGithub(application?.github as Github);
-		const runningComment = getIssueComment(
-			application.name,
-			"initializing",
-			`${application.previewHttps ? "https" : "http"}://${generateDomain}`,
-		);
-		const issue = await octokit.rest.issues.createComment({
-			owner: application?.owner || "",
-			repo: application?.repository || "",
-			issue_number: Number.parseInt(schema.pullRequestNumber),
-			body: `### Dokploy Preview Deployment\n\n${runningComment}`,
-		});
-		await db
-			.update(previewDeployments)
-			.set({ pullRequestCommentId: `${issue.data.id}` })
-			.where(
-				eq(
-					previewDeployments.previewDeploymentId,
-					previewDeployment.previewDeploymentId,
-				),
+	// comment on the first deploy attempt. The initializing comment is
+	// GitHub-specific (posted via the GitHub App). GitLab previews
+	// (application.sourceType === "gitlab") have no GitHub provider, so authGithub
+	// would throw; they surface status via MR notes posted from the GitLab webhook
+	// handler instead.
+	if (application.sourceType === "github") {
+		try {
+			const octokit = authGithub(application?.github as Github);
+			const runningComment = getIssueComment(
+				application.name,
+				"initializing",
+				`${application.previewHttps ? "https" : "http"}://${generateDomain}`,
 			);
-		previewDeployment.pullRequestCommentId = `${issue.data.id}`;
-	} catch (error) {
-		console.error(
-			`Failed to create preview deployment PR comment for application=${schema.applicationId} pr=${schema.pullRequestId}:`,
-			error,
-		);
+			const issue = await octokit.rest.issues.createComment({
+				owner: application?.owner || "",
+				repo: application?.repository || "",
+				issue_number: Number.parseInt(schema.pullRequestNumber),
+				body: `### Dokploy Preview Deployment\n\n${runningComment}`,
+			});
+			await db
+				.update(previewDeployments)
+				.set({ pullRequestCommentId: `${issue.data.id}` })
+				.where(
+					eq(
+						previewDeployments.previewDeploymentId,
+						previewDeployment.previewDeploymentId,
+					),
+				);
+			previewDeployment.pullRequestCommentId = `${issue.data.id}`;
+		} catch (error) {
+			console.error(
+				`Failed to create preview deployment PR comment for application=${schema.applicationId} pr=${schema.pullRequestId}:`,
+				error,
+			);
+		}
 	}
 
 	const newDomain = await createDomain({
