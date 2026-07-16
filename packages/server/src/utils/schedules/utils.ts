@@ -1,4 +1,5 @@
 import { createWriteStream } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Schedule } from "@dokploy/server/db/schema/schedule";
@@ -73,7 +74,15 @@ export const scheduleJob = (schedule: Schedule) => {
 			rule: cronExpression,
 		},
 		async () => {
-			await runCommand(scheduleId);
+			try {
+				await runCommand(scheduleId);
+			} catch (error) {
+				// runCommand already logs to the deployment log and fires the
+				// failure notification via handleScheduleError before throwing.
+				// Swallow here so a failing scheduled run does not become an
+				// unhandledRejection from node-schedule's async callback.
+				console.error(`Scheduled job ${scheduleId} failed:`, error);
+			}
 		},
 	);
 };
@@ -117,6 +126,29 @@ export const runCommand = async (scheduleId: string) => {
 			const container = await getComposeContainer(compose, serviceName || "");
 			containerId = container?.Id || "";
 			serverId = compose.serverId || "";
+		}
+
+		if (!containerId) {
+			// The target container could not be resolved (service not running).
+			// Running `docker exec ""` here would fail on every cron tick with a
+			// cryptic "invalid container name or ID: value is empty" error, so
+			// fail the run cleanly with an actionable message instead.
+			const targetName =
+				scheduleType === "compose"
+					? `${compose?.appName || "compose"}${
+							serviceName ? ` (service "${serviceName}")` : ""
+						}`
+					: application?.appName || "application";
+			const error = new Error(
+				`Container not found for ${targetName} — the service may not be running`,
+			);
+			try {
+				await appendFile(deployment.logPath, `❌ ${error.message}\n`);
+			} catch (writeError) {
+				console.log("Failed to write schedule error to log:", writeError);
+			}
+			await handleScheduleError(schedule, deployment.deploymentId, error);
+			throw error;
 		}
 
 		if (serverId) {
