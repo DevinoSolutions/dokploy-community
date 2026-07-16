@@ -56,6 +56,7 @@ import { useDebounce } from "@/utils/hooks/use-debounce";
 import { ExportProject } from "./export-project";
 import { HandleProject } from "./handle-project";
 import { ProjectEnvironment } from "./project-environment";
+import { getProjectFaviconUrls, ProjectIcon } from "./project-icon";
 
 export const ShowProjects = () => {
 	const utils = api.useUtils();
@@ -350,16 +351,26 @@ export const ShowProjects = () => {
 																<CardTitle className="flex items-center justify-between gap-2 overflow-clip">
 																	<span className="flex flex-col gap-1.5 ">
 																		<div className="flex items-center gap-2">
-																			{project.logo ? (
-																				// biome-ignore lint/performance/noImgElement: user uploaded project icon
-																				<img
-																					src={project.logo}
-																					alt=""
-																					className="size-4 rounded-sm object-contain"
-																				/>
-																			) : (
-																				<BookIcon className="size-4 text-muted-foreground" />
-																			)}
+																			<ProjectIcon
+																				logo={project.logo}
+																				faviconUrls={getProjectFaviconUrls(
+																					project.environments.flatMap(
+																						(env) => [
+																							...env.applications.flatMap(
+																								(app) => app.domains ?? [],
+																							),
+																							...env.compose.flatMap(
+																								(service) =>
+																									service.domains ?? [],
+																							),
+																						],
+																					),
+																				)}
+																				className="size-4 rounded-sm object-contain"
+																				fallback={
+																					<BookIcon className="size-4 text-muted-foreground" />
+																				}
+																			/>
 																			<span className="text-base font-medium leading-none">
 																				{project.name}
 																			</span>
