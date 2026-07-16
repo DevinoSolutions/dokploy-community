@@ -1310,6 +1310,13 @@
       "when": 1784182200127,
       "tag": "0186_giant_thanos",
       "breakpoints": true
+    },
+    {
+      "idx": 187,
+      "version": "7",
+      "when": 1784183099047,
+      "tag": "0187_amusing_molten_man",
+      "breakpoints": true
     }
   ]
 }
