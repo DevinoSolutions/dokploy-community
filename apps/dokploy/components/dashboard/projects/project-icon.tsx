@@ -7,9 +7,10 @@ export interface DomainLike {
 
 /**
  * Build an ordered, de-duplicated list of favicon candidate URLs from a
- * project's domains. https domains come first, then http; each yields a
- * `<scheme>://<host>/favicon.ico` URL. On an https dashboard, http candidates
- * simply fail to load (mixed content) and the caller cascades to the next one.
+ * project's domains. https domains come first, then http; each is routed
+ * through the `/api/favicon` resolver (which parses the page's `<head>` for
+ * a declared icon, falling back to `/favicon.ico`) rather than requesting
+ * `/favicon.ico` directly, since many apps declare icons at custom paths.
  */
 export const getProjectFaviconUrls = (domains: DomainLike[]): string[] => {
 	const seen = new Set<string>();
@@ -17,7 +18,7 @@ export const getProjectFaviconUrls = (domains: DomainLike[]): string[] => {
 	const add = (list: DomainLike[]) => {
 		for (const domain of list) {
 			if (!domain?.host) continue;
-			const url = `${domain.https ? "https" : "http"}://${domain.host}/favicon.ico`;
+			const url = `/api/favicon?host=${encodeURIComponent(domain.host)}&https=${domain.https ? "1" : "0"}`;
 			if (seen.has(url)) continue;
 			seen.add(url);
 			urls.push(url);

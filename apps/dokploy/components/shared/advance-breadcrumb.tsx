@@ -11,6 +11,10 @@ import {
 import { useRouter } from "next/router";
 import { type ComponentType, useEffect, useMemo, useState } from "react";
 import {
+	getProjectFaviconUrls,
+	ProjectIcon,
+} from "@/components/dashboard/projects/project-icon";
+import {
 	LibsqlIcon,
 	MariadbIcon,
 	MongodbIcon,
@@ -150,7 +154,10 @@ const parseSortBy = (sortBy: string): { field: string; direction: string } => {
 	return { field: sortBy.slice(0, idx), direction: sortBy.slice(idx + 1) };
 };
 
-const sortServices = (services: ServiceItem[], sortBy: string): ServiceItem[] => {
+const sortServices = (
+	services: ServiceItem[],
+	sortBy: string,
+): ServiceItem[] => {
 	const { field, direction } = parseSortBy(sortBy);
 
 	if (field === "createdAt" || field === "lastDeploy") {
@@ -452,9 +459,25 @@ export const AdvanceBreadcrumb = () => {
 															className="flex items-center justify-between py-3 px-2 cursor-pointer"
 														>
 															<div className="flex items-center gap-3">
-																<div className="flex items-center justify-center size-8 rounded-md bg-muted text-xs font-semibold uppercase">
-																	{project.name.slice(0, 2)}
-																</div>
+																<ProjectIcon
+																	logo={project.logo}
+																	faviconUrls={getProjectFaviconUrls(
+																		project.environments.flatMap((env) => [
+																			...env.applications.flatMap(
+																				(app) => app.domains ?? [],
+																			),
+																			...env.compose.flatMap(
+																				(service) => service.domains ?? [],
+																			),
+																		]),
+																	)}
+																	className="size-8 rounded-md object-contain"
+																	fallback={
+																		<div className="flex items-center justify-center size-8 rounded-md bg-muted text-xs font-semibold uppercase">
+																			{project.name.slice(0, 2)}
+																		</div>
+																	}
+																/>
 																<div className="flex flex-col">
 																	<span className="font-medium">
 																		{project.name}
