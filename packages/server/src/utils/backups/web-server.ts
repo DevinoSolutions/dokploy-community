@@ -51,7 +51,7 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 		const backupFileName = `webserver-backup-${timestamp}.zip`;
 		const { flags: rcloneFlags, path: s3Path } = await getRclonePathAndFlags(
 			destination,
-			`${backup.appName}/${normalizeS3Path(backup.prefix)}${backupFileName}`,
+			`${normalizeS3Path(backup.prefix)}${backupFileName}`,
 		);
 
 		try {

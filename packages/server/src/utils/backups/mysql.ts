@@ -17,13 +17,13 @@ import {
 } from "./utils";
 
 export const runMySqlBackup = async (mysql: MySql, backup: BackupSchedule) => {
-	const { environmentId, name, appName } = mysql;
+	const { environmentId, name } = mysql;
 	const environment = await findEnvironmentById(environmentId);
 	const project = await findProjectById(environment.projectId);
 	const { prefix } = backup;
 	const destination = await findDestinationById(backup.destinationId);
 	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
-	const bucketDestination = `${appName}/${normalizeS3Path(prefix)}${backupFileName}`;
+	const bucketDestination = `${normalizeS3Path(prefix)}${backupFileName}`;
 	const deployment = await createDeploymentBackup({
 		backupId: backup.backupId,
 		title: "MySQL Backup",
