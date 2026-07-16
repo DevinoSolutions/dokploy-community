@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
 	findIconUrl,
+	isSafeImageContentType,
+	isSameOrigin,
 	parseIconHref,
 	resolveIconUrl,
 } from "@/lib/favicon-resolver";
@@ -121,5 +123,72 @@ describe("findIconUrl", () => {
 		const html =
 			'<html><head><link rel="icon" href="data:image/png;base64,AAAA"></head></html>';
 		expect(findIconUrl(html, "https://example.com")).toBeNull();
+	});
+});
+
+describe("isSameOrigin", () => {
+	const base = "https://example.com"; // new URL("https://example.com/").origin
+
+	it("accepts a same-origin absolute URL", () => {
+		expect(isSameOrigin("https://example.com/favicon.ico", base)).toBe(true);
+	});
+
+	it("accepts same origin with a path and query", () => {
+		expect(isSameOrigin("https://example.com/a/b?x=1", base)).toBe(true);
+	});
+
+	it("rejects a different host", () => {
+		expect(isSameOrigin("https://evil.com/favicon.ico", base)).toBe(false);
+		expect(isSameOrigin("https://169.254.169.254/latest", base)).toBe(false);
+	});
+
+	it("rejects a different PORT on the same host (internal port pivot)", () => {
+		expect(isSameOrigin("https://example.com:2375/", base)).toBe(false);
+		expect(isSameOrigin("https://example.com:5432/", base)).toBe(false);
+	});
+
+	it("rejects a scheme flip on the same host", () => {
+		expect(isSameOrigin("http://example.com/favicon.ico", base)).toBe(false);
+	});
+
+	it("rejects a userinfo-smuggled foreign host", () => {
+		// WHATWG URL parses the host as evil.com, not example.com.
+		expect(isSameOrigin("https://example.com@evil.com/", base)).toBe(false);
+	});
+
+	it("rejects protocol-relative and non-http(s) targets", () => {
+		expect(isSameOrigin("//evil.com/x", base)).toBe(false);
+		expect(isSameOrigin("data:image/png;base64,AAAA", base)).toBe(false);
+		expect(isSameOrigin("javascript:alert(1)", base)).toBe(false);
+	});
+
+	it("returns false for an unparseable URL", () => {
+		expect(isSameOrigin("not a url", base)).toBe(false);
+	});
+});
+
+describe("isSafeImageContentType", () => {
+	it("accepts raster image types", () => {
+		expect(isSafeImageContentType("image/png")).toBe(true);
+		expect(isSafeImageContentType("image/jpeg")).toBe(true);
+		expect(isSafeImageContentType("image/webp")).toBe(true);
+		expect(isSafeImageContentType("image/x-icon")).toBe(true);
+		expect(isSafeImageContentType("image/vnd.microsoft.icon")).toBe(true);
+	});
+
+	it("accepts an image type with charset/params and mixed case", () => {
+		expect(isSafeImageContentType("IMAGE/PNG; charset=binary")).toBe(true);
+	});
+
+	it("rejects image/svg+xml (executable on direct navigation)", () => {
+		expect(isSafeImageContentType("image/svg+xml")).toBe(false);
+		expect(isSafeImageContentType("image/svg+xml; charset=utf-8")).toBe(false);
+		expect(isSafeImageContentType("IMAGE/SVG+XML")).toBe(false);
+	});
+
+	it("rejects non-image types", () => {
+		expect(isSafeImageContentType("text/html")).toBe(false);
+		expect(isSafeImageContentType("application/json")).toBe(false);
+		expect(isSafeImageContentType("")).toBe(false);
 	});
 });
