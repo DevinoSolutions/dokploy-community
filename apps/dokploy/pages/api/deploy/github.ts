@@ -6,6 +6,7 @@ import {
 	findPreviewDeploymentByApplicationId,
 	findPreviewDeploymentsByPullRequestId,
 	IS_CLOUD,
+	normalizeChangedFilesFromCommits,
 	removePreviewDeployment,
 	shouldDeploy,
 } from "@dokploy/server";
@@ -245,8 +246,8 @@ export default async function handler(
 			const deploymentTitle = extractCommitMessage(req.headers, req.body);
 			const deploymentHash = extractHash(req.headers, req.body);
 			const owner = getGithubRepositoryOwner(githubBody);
-			const normalizedCommits = githubBody?.commits?.flatMap(
-				(commit: any) => commit.modified,
+			const normalizedCommits = normalizeChangedFilesFromCommits(
+				githubBody?.commits,
 			);
 
 			const apps = await db.query.applications.findMany({
@@ -504,10 +505,6 @@ export default async function handler(
 					if (!hasLabel) continue;
 				}
 
-				const previewLimit = app?.previewLimit || 0;
-				if (app?.previewDeployments?.length > previewLimit) {
-					continue;
-				}
 				const previewDeploymentResult =
 					await findPreviewDeploymentByApplicationId(app.applicationId, prId);
 
@@ -516,6 +513,11 @@ export default async function handler(
 				let createdPreviewDeployment = false;
 
 				if (!previewDeploymentResult && shouldCreateDeployment) {
+					// Only enforce the limit for new previews, not updates to existing ones
+					const previewLimit = app?.previewLimit ?? 3;
+					if (app?.previewDeployments?.length >= previewLimit) {
+						continue;
+					}
 					const previewDeployment = await createPreviewDeployment({
 						applicationId: app.applicationId as string,
 						branch: prBranch,
