@@ -2,9 +2,9 @@ import { logger } from "@dokploy/server/lib/logger";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-const execPromise = promisify(exec);
+const execFileP = promisify(execFile);
 import { keepLatestNBackups } from ".";
 import { runComposeBackup } from "./compose";
 import { runLibsqlBackup } from "./libsql";
@@ -308,9 +308,7 @@ export const getBackupCommand = (
 
 export const obscurePassword = async (password: string) => {
 	try {
-		const { stdout } = await execPromise(
-			`rclone obscure "${password.replace(/"/g, '\\"')}"`,
-		);
+		const { stdout } = await execFileP("rclone", ["obscure", password]);
 		return stdout.trim();
 	} catch (error) {
 		logger.error("Error obscuring password with rclone", error);
@@ -329,6 +327,41 @@ export const getRclonePathAndFlags = async (
 		return { flags, path };
 	}
 	const provider = destination.provider;
+	// The SFTP/FTP connection string below is interpolated into a shell command.
+	// These fields are user-supplied (destination form), so validate them strictly
+	// to prevent shell/connection-string injection before building the string.
+	// Charset that is safe to embed inside the quoted shell command (no shell
+	// metacharacters, quotes, or whitespace).
+	const shellSafe = /^[^"'$\\`;|&<>()\s]+$/;
+	// Path segments may additionally contain "/".
+	const pathSafe = /^[^"'$\\`;|&<>()\s]*$/;
+
+	if (!/^[a-zA-Z0-9.-]+$/.test(destination.endpoint)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} host: only letters, digits, dots and hyphens are allowed`,
+		);
+	}
+	if (destination.region && !/^\d{1,5}$/.test(destination.region)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} port: must be a number`,
+		);
+	}
+	if (!shellSafe.test(destination.accessKey)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} user: contains forbidden characters`,
+		);
+	}
+	if (!pathSafe.test(destination.bucket)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} path: contains forbidden characters`,
+		);
+	}
+	if (!pathSafe.test(subPath)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} backup path: contains forbidden characters`,
+		);
+	}
+
 	const obscuredPass = await obscurePassword(destination.secretAccessKey);
 	const path = `:${provider},host="${destination.endpoint}",port="${destination.region}",user="${destination.accessKey}",pass="${obscuredPass}":${destination.bucket}/${subPath}`;
 	return { flags: [], path };

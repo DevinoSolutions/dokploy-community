@@ -11,8 +11,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:child_process")>();
 	return {
 		...actual,
-		exec: (cmd: string, cb: any) => {
-			if (cmd.startsWith("rclone obscure")) {
+		execFile: (file: string, args: string[], cb: any) => {
+			if (file === "rclone" && args[0] === "obscure") {
 				cb(null, { stdout: "obscured_pass" });
 			} else {
 				cb(null, { stdout: "" });
