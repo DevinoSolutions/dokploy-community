@@ -33,6 +33,9 @@ vi.mock("@dokploy/server/db", () => {
 				applications: {
 					findFirst: vi.fn(),
 				},
+				deployHook: {
+					findFirst: vi.fn(),
+				},
 				domains: {
 					findMany: vi.fn().mockResolvedValue([]),
 				},

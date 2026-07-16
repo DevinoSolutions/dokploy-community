@@ -30,6 +30,8 @@ import { createTraefikConfig } from "@dokploy/server/utils/traefik/application";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
+import { deployHook } from "../db/schema";
+import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
 import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 import {
@@ -218,6 +220,19 @@ export const deployApplication = async ({
 			await execAsync(commandWithLog);
 		}
 
+		const hookRow = await db.query.deployHook.findFirst({
+			where: eq(deployHook.applicationId, application.applicationId),
+		});
+		const deployHooks = parseDeployHooks(hookRow?.hooks);
+
+		await runDeployHook({
+			kind: "pre",
+			appName: application.appName,
+			serverId,
+			command: deployHooks.pre,
+			logPath: deployment.logPath,
+		});
+
 		await mechanizeDockerContainer(application);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
@@ -227,6 +242,16 @@ export const deployApplication = async ({
 			throw new Error(
 				`Container did not stay running after deployment: ${stability.reason}`,
 			);
+		}
+
+		if (deployHooks.post?.trim()) {
+			await runDeployHook({
+				kind: "post",
+				appName: application.appName,
+				serverId,
+				command: deployHooks.post,
+				logPath: deployment.logPath,
+			});
 		}
 
 		await updateDeploymentStatus(deployment.deploymentId, "done");
@@ -324,6 +349,20 @@ export const rebuildApplication = async ({
 		} else {
 			await execAsync(commandWithLog);
 		}
+
+		const hookRow = await db.query.deployHook.findFirst({
+			where: eq(deployHook.applicationId, application.applicationId),
+		});
+		const deployHooks = parseDeployHooks(hookRow?.hooks);
+
+		await runDeployHook({
+			kind: "pre",
+			appName: application.appName,
+			serverId,
+			command: deployHooks.pre,
+			logPath: deployment.logPath,
+		});
+
 		await mechanizeDockerContainer(application);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
@@ -333,6 +372,16 @@ export const rebuildApplication = async ({
 			throw new Error(
 				`Container did not stay running after rebuild: ${stability.reason}`,
 			);
+		}
+
+		if (deployHooks.post?.trim()) {
+			await runDeployHook({
+				kind: "post",
+				appName: application.appName,
+				serverId,
+				command: deployHooks.post,
+				logPath: deployment.logPath,
+			});
 		}
 
 		await updateDeploymentStatus(deployment.deploymentId, "done");

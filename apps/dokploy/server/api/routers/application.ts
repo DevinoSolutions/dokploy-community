@@ -66,6 +66,7 @@ import {
 	apiSaveGitProvider,
 	apiUpdateApplication,
 	applications,
+	deployHook,
 	environments,
 	projects,
 } from "@/server/db/schema";
@@ -688,6 +689,48 @@ export const applicationRouter = createTRPCRouter({
 				resourceName: updateApp.appName,
 			});
 			return true;
+		}),
+	getDeployHooks: protectedProcedure
+		.input(z.object({ applicationId: z.string().min(1) }))
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.applicationId, "read");
+			const row = await db.query.deployHook.findFirst({
+				where: eq(deployHook.applicationId, input.applicationId),
+			});
+			return { deployHooks: row?.hooks ?? null };
+		}),
+	saveDeployHooks: protectedProcedure
+		.input(
+			z.object({
+				applicationId: z.string().min(1),
+				deployHooks: z.string().max(20000).nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.applicationId, {
+				service: ["create"],
+			});
+			const existing = await db.query.deployHook.findFirst({
+				where: eq(deployHook.applicationId, input.applicationId),
+			});
+			if (existing) {
+				await db
+					.update(deployHook)
+					.set({ hooks: input.deployHooks })
+					.where(eq(deployHook.applicationId, input.applicationId));
+			} else {
+				await db.insert(deployHook).values({
+					applicationId: input.applicationId,
+					hooks: input.deployHooks,
+				});
+			}
+			await audit(ctx, {
+				action: "update",
+				resourceType: "application",
+				resourceId: input.applicationId,
+				metadata: { type: "deployHooks" },
+			});
+			return { success: true };
 		}),
 	refreshToken: protectedProcedure
 		.input(apiFindOneApplication)
