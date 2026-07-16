@@ -1,9 +1,11 @@
 import {
 	deployApplication,
 	deployCompose,
+	deployComposePreview,
 	deployPreviewApplication,
 	rebuildApplication,
 	rebuildCompose,
+	rebuildComposePreview,
 	rebuildPreviewApplication,
 	updateApplicationStatus,
 	updateCompose,
@@ -72,6 +74,26 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 					previewDeploymentId: job.data.previewDeploymentId,
 				});
 			}
+		} else if (job.data.applicationType === "compose-preview") {
+			await updatePreviewDeployment(job.data.previewDeploymentId, {
+				previewStatus: "running",
+			});
+
+			if (job.data.type === "redeploy") {
+				await rebuildComposePreview({
+					composeId: job.data.composeId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+					previewDeploymentId: job.data.previewDeploymentId,
+				});
+			} else if (job.data.type === "deploy") {
+				await deployComposePreview({
+					composeId: job.data.composeId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+					previewDeploymentId: job.data.previewDeploymentId,
+				});
+			}
 		}
 	} catch (error) {
 		console.log("Error", error);
@@ -85,7 +107,10 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 			await updateCompose(job.data.composeId, {
 				composeStatus: "error",
 			}).catch(() => {});
-		} else if (job.data.applicationType === "application-preview") {
+		} else if (
+			job.data.applicationType === "application-preview" ||
+			job.data.applicationType === "compose-preview"
+		) {
 			await updatePreviewDeployment(job.data.previewDeploymentId, {
 				previewStatus: "error",
 			}).catch(() => {});

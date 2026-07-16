@@ -358,9 +358,13 @@ export const domainRouter = createTRPCRouter({
 				const preview = await findPreviewDeploymentById(
 					currentDomain.previewDeploymentId,
 				);
-				await checkServicePermissionAndAccess(ctx, preview.applicationId, {
-					domain: ["create"],
-				});
+				await checkServicePermissionAndAccess(
+					ctx,
+					(preview.composeId ?? preview.applicationId) as string,
+					{
+						domain: ["create"],
+					},
+				);
 			}
 
 			if (
@@ -427,11 +431,15 @@ export const domainRouter = createTRPCRouter({
 				const previewDeployment = await findPreviewDeploymentById(
 					domain.previewDeploymentId,
 				);
-				const application = await findApplicationById(
-					previewDeployment.applicationId,
-				);
-				application.appName = previewDeployment.appName;
-				await manageDomain(application, domain);
+				// Compose preview domains have no Traefik file config to manage —
+				// their labels are injected into the compose file at build time.
+				if (previewDeployment.applicationId) {
+					const application = await findApplicationById(
+						previewDeployment.applicationId,
+					);
+					application.appName = previewDeployment.appName;
+					await manageDomain(application, domain);
+				}
 			}
 
 			// Reconcile Cloudflare publishing for this domain.
@@ -508,9 +516,13 @@ export const domainRouter = createTRPCRouter({
 			const preview = await findPreviewDeploymentById(
 				domain.previewDeploymentId,
 			);
-			await checkServicePermissionAndAccess(ctx, preview.applicationId, {
-				domain: ["read"],
-			});
+			await checkServicePermissionAndAccess(
+				ctx,
+				(preview.composeId ?? preview.applicationId) as string,
+				{
+					domain: ["read"],
+				},
+			);
 		}
 		return domain;
 	}),
@@ -527,9 +539,13 @@ export const domainRouter = createTRPCRouter({
 				const preview = await findPreviewDeploymentById(
 					domain.previewDeploymentId,
 				);
-				await checkServicePermissionAndAccess(ctx, preview.applicationId, {
-					domain: ["delete"],
-				});
+				await checkServicePermissionAndAccess(
+					ctx,
+					(preview.composeId ?? preview.applicationId) as string,
+					{
+						domain: ["delete"],
+					},
+				);
 			}
 
 			// Tearing down a published domain removes org-scoped Cloudflare state
