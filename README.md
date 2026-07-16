@@ -4,6 +4,8 @@
 
 Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.2**
 
+Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
+
 ## Switching from official Dokploy
 
 One command. Keeps every app, database, domain, and setting — the extra migrations are additive:
@@ -25,32 +27,86 @@ The image is public — no registry login required.
 
 ## What's different
 
-Everything in Dokploy v0.29.12, plus:
+### Docker Network Management (fork original)
 
-### Docker Network Management
-- New Networks page in the sidebar
+- New **Networks** page in the sidebar
 - Create, delete, and manage Docker overlay networks
 - Attach networks to any application or database service
 - Per-resource network picker in the Advanced tab
 
 https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 
+### Cloudflare integration
+
+- Manage **Cloudflare credentials** directly in Dokploy
+- Publish apps through **Cloudflare Tunnels** — no exposed ports required
+- Gate services behind **Cloudflare Access** for zero-trust authentication
+
+### Domains & networking
+
+- **Wildcard domain support** (`*.example.com`), with an optional wildcard-restriction setting to control who can use it
+- **Per-server default domain** for auto-generated app domains — each server can hand out its own base domain
+- Global **response-compression** toggle (Traefik compress middleware)
+- Cross-service env references via `${{service.<name>.fqdn}}`
+- Configurable **MTU** for isolated networks, explicit `HostIp` on Traefik port bindings, and public-IP handling for `traefik.me` domains behind private IPs
+- Custom certificate provider display and more reliable Traefik file-provider discovery
+
+### Preview deployments, supercharged
+
+- **GitLab merge-request previews** via webhook (in addition to GitHub)
+- **API-triggered previews** — spin up a preview deployment programmatically
+- **Deterministic per-PR domains** using a `${prNumber}` template variable
+- **Custom preview templates** so previews match your production topology
+- **Duplicate-prevention** for concurrent webhook events and labeled PRs (with a one-time cleanup of existing duplicates)
+- **Re-clone on rebuild** so new pushes to a PR actually propagate
+- Build previews on a dedicated `buildServerId`, and don't block updates to existing previews when at the limit
+
+### Backups & destinations
+
+- **S3 encryption at rest** via rclone crypt — encrypt backups with obscured passwords before they ever leave the box
+- **SFTP, FTP, and generic rclone** backup destinations, plus user-defined **S3 prefixes**
+- Safer restores: 3-section sequential `pg_restore` to avoid OID race conditions, MongoDB **all-databases** backup, restore-button gating when the target service is down, and unlimited volume-backup retention
+- Fixes for double-dumps, MongoDB gzip filename mismatches, replica-set preservation, and post-failure container restart
+
+### Registries & deployments
+
+- **AWS ECR** registry support and pulling images with **stored registry credentials**
+- **Pre-deploy and post-deploy command hooks** for applications
+- Deploy a **specific Docker image/tag** on demand, and **pull latest images** on Compose deploy
+- Injected **`DOKPLOY_*` environment variables** and **git commit hash/message as build args** at deploy time
+- "Deploy with Fresh Volumes" for Compose, dynamic railpack version fetching, and smarter build-cache invalidation on env changes
+
+### Monitoring
+
+- **Container resource breakdown** and **swap usage** in monitoring
+- **Remote-server stats** via a server selector
+- **Container healthcheck status** surfaced in the UI
+- **Attach to a running container** to send input interactively
+
+### Security hardening (fork only)
+
+Beyond the ported features, this fork carries **7 direct security commits** and **13 ported hardening fixes**, including:
+
+- **Command-injection** fixes for `customGitUrl`, mount-permission inputs, and shell-less rclone `obscure`
+- **Secret redaction** — private keys kept out of build-failure notifications and logged command errors; webhook URLs masked by default
+- **Permission gates** — service-permission checks on template loading, org-scoped assigned-server access, custom-role listing behind `member:read`, and validated admin invites
+- **Webhook author authorization** — GitLab MR previews authorize the MR *author*, not the webhook actor, closing a preview-deployment bypass
+
+### Also included
+
+- **Notifications** — container crash-loop alerts, scheduled-job failure alerts, and real server names in threshold alerts
+- **Git providers & auth** — GitHub/Google social login on self-hosted, self-hosted password reset, Codeberg preset, Gitea `write:repository` scope, and several OAuth/redirect fixes
+- **Organizations & teams** — editable descriptions, bulk invitations, drag-and-drop logo upload, and **project export** to a portable JSON file
+- **Reliability** — clean exit on fatal startup errors instead of crash-looping, Podman idle-exec support, custom `template.toml` in git repos, and Docker/Ubuntu install-failure fixes
+- **15+ UI/UX fixes** — deployments filtering and tab behavior, env-form edit stability, log-counter layout shift, responsive log pages, dark-theme icons, and new translations
+
+Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
+
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
 ### New in v0.29.12-community.2
 
-This release rolls up 100+ upstream fixes and features — each ported 1:1 and credited to its original author — plus fork-side security hardening. Highlights:
-
-- **Cloudflare integration** — manage credentials, publish Tunnels, and gate apps behind Access (zero-trust)
-- **Wildcard domain support**, with a per-server default domain for auto-generated app domains
-- **AWS ECR registry support** and pulling images with stored registry credentials
-- **S3 backup encryption at rest** (rclone crypt), plus generic rclone, SFTP, and FTP backup destinations
-- **GitLab merge-request preview deployments** via webhook
-- **Pre-deploy and post-deploy command hooks** for applications, and deploying a specific Docker image/tag on demand
-- **Richer monitoring** — container resource breakdown, swap usage, and remote-server stats
-- **Export a project** to a portable JSON file, bulk organization invites, and GitHub/Google social login on self-hosted
-
-See the [full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2) for the complete list, migration details (schema 0176 → 0188), and known caveats.
+This release rolls up the full port train since `v0.29.12-community.1`: 100+ upstream fixes and features ported 1:1, plus the fork-side security hardening above. Flagship additions this release include native **Cloudflare integration**, **GitLab MR previews**, **AWS ECR** support, **S3 backup encryption at rest**, **per-server default domains**, and **remote-server monitoring stats**. Schema migrations **0176 → 0188** apply automatically on startup.
 
 ## Fresh install
 
@@ -104,6 +160,7 @@ For features that should go upstream, please also open a PR on the [official Dok
 ## Credits
 
 - [Dokploy](https://dokploy.com) — the original project by [@siumauricio](https://github.com/siumauricio)
+- Every ported change credits its original upstream author — their work, ported and re-verified against the fork's networking and branding layer
 - Community-maintained fork, stewarded by [Devino Solutions](https://devino.ca)
 
 ## License
