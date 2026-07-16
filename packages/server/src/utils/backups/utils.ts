@@ -1,7 +1,14 @@
+import { GENERIC_RCLONE_PROVIDER } from "@dokploy/server/db/validations/destination";
 import { logger } from "@dokploy/server/lib/logger";
+
+export { GENERIC_RCLONE_PROVIDER };
+
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileP = promisify(execFile);
 import { keepLatestNBackups } from ".";
 import { runComposeBackup } from "./compose";
 import { runLibsqlBackup } from "./libsql";
@@ -67,10 +74,39 @@ export const normalizeS3Path = (prefix: string) => {
 	return normalizedPrefix ? `${normalizedPrefix}/` : "";
 };
 
-export const getS3Credentials = (destination: Destination) => {
+// The rclone helpers only read S3 config fields, so they accept either a full
+// Destination row or the create-input (which lacks DB-generated metadata).
+type RcloneDestination = Pick<
+	Destination,
+	| "provider"
+	| "bucket"
+	| "accessKey"
+	| "secretAccessKey"
+	| "region"
+	| "endpoint"
+	| "additionalFlags"
+>;
+
+export const isGenericRcloneDestination = (destination: RcloneDestination) =>
+	destination.provider === GENERIC_RCLONE_PROVIDER;
+
+export const getRcloneDestination = (destination: RcloneDestination) =>
+	isGenericRcloneDestination(destination)
+		? destination.bucket
+		: `:s3:${destination.bucket}`;
+
+export const getRcloneCredentials = (destination: RcloneDestination) => {
 	const { accessKey, secretAccessKey, region, endpoint, provider } =
 		destination;
+
+	if (isGenericRcloneDestination(destination)) {
+		return destination.additionalFlags?.length
+			? [...destination.additionalFlags]
+			: [];
+	}
+
 	const rcloneFlags = [
+		`--s3-provider="${provider}"`,
 		`--s3-access-key-id="${accessKey}"`,
 		`--s3-secret-access-key="${secretAccessKey}"`,
 		`--s3-region="${region}"`,
@@ -79,16 +115,22 @@ export const getS3Credentials = (destination: Destination) => {
 		"--s3-force-path-style",
 	];
 
-	if (provider) {
-		rcloneFlags.unshift(`--s3-provider="${provider}"`);
-	}
-
 	if (destination.additionalFlags?.length) {
 		rcloneFlags.push(...destination.additionalFlags);
 	}
 
 	return rcloneFlags;
 };
+
+export const getRcloneTestFlags = (destination: RcloneDestination) => [
+	...getRcloneCredentials(destination),
+	"--retries 1",
+	"--low-level-retries 1",
+	"--timeout 10s",
+	"--contimeout 5s",
+];
+
+export const getS3Credentials = getRcloneCredentials;
 
 export const getPostgresBackupCommand = (
 	database: string,
@@ -117,7 +159,8 @@ export const getMongoBackupCommand = (
 	databaseUser: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mongodump -d '${database}' -u '${databaseUser}' -p '${databasePassword}' --archive --authenticationDatabase admin --gzip"`;
+	const dbFlag = database ? `-d '${database}' ` : "";
+	return `docker exec -i $CONTAINER_ID bash -c "set -o pipefail; mongodump ${dbFlag}-u '${databaseUser}' -p '${databasePassword}' --archive --authenticationDatabase admin --gzip"`;
 };
 
 export const getLibsqlBackupCommand = (database: string) => {
@@ -258,6 +301,11 @@ export const getBackupCommand = (
 ) => {
 	const containerSearch = getContainerSearchCommand(backup);
 	const backupCommand = generateBackupCommand(backup);
+	const destinationType = ["sftp", "ftp"].includes(
+		backup.destination?.provider || "",
+	)
+		? backup.destination?.provider?.toUpperCase() || "remote"
+		: "S3";
 
 	logger.info(
 		{
@@ -281,25 +329,108 @@ export const getBackupCommand = (
 	fi
 
 	echo "[$(date)] Container Up: $CONTAINER_ID" >> ${logPath};
+	echo "[$(date)] Streaming backup to ${destinationType}..." >> ${logPath};
 
-	# Run the backup command and capture the exit status
-	BACKUP_OUTPUT=$(${backupCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Backup failed" >> ${logPath};
-		echo "Error: $BACKUP_OUTPUT" >> ${logPath};
-		exit 1;
-	}
-
-	echo "[$(date)] ✅ backup completed successfully" >> ${logPath};
-	echo "[$(date)] Starting upload to S3..." >> ${logPath};
-
-	# Run the upload command and capture the exit status
+	# Stream the dump straight to the destination. The dump runs ONCE; "set -o pipefail"
+	# makes the pipeline fail if the dump (not just rclone) fails, so a broken
+	# backup never reports success. Running the dump a second time to "validate"
+	# it would double the load on the database and risk an inconsistent copy.
 	UPLOAD_OUTPUT=$(${backupCommand} | ${rcloneCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Upload to S3 failed" >> ${logPath};
+		echo "[$(date)] ❌ Error: Backup/upload to ${destinationType} failed" >> ${logPath};
 		echo "Error: $UPLOAD_OUTPUT" >> ${logPath};
 		exit 1;
 	}
 
-	echo "[$(date)] ✅ Upload to S3 completed successfully" >> ${logPath};
+	echo "[$(date)] ✅ Upload to ${destinationType} completed successfully" >> ${logPath};
 	echo "Backup done ✅" >> ${logPath};
 	`;
+};
+
+export const obscurePassword = async (password: string) => {
+	try {
+		const { stdout } = await execFileP("rclone", ["obscure", password]);
+		return stdout.trim();
+	} catch (error) {
+		logger.error("Error obscuring password with rclone", error);
+		return password;
+	}
+};
+
+export const getRclonePathAndFlags = async (
+	destination: Destination,
+	subPath: string,
+) => {
+	// Generic rclone remote: the user supplies a full remote spec (in `bucket`)
+	// plus their own rclone flags (additionalFlags, already validated against
+	// ADDITIONAL_FLAG_REGEX at the schema layer). We don't build an S3/SFTP
+	// connection string for it, but the remote spec and subPath are still
+	// interpolated into a shell command, so validate them the same way the
+	// SFTP/FTP branch validates its path segments to prevent shell injection.
+	if (isGenericRcloneDestination(destination)) {
+		// Charset safe to embed inside the quoted shell command; rclone remote
+		// specs legitimately contain ":" and "/", so allow those but forbid
+		// shell metacharacters, quotes and whitespace.
+		const genericPathSafe = /^[^"'$\\`;|&<>()\s]*$/;
+		if (!genericPathSafe.test(destination.bucket)) {
+			throw new Error(
+				"Invalid rclone remote: contains forbidden characters",
+			);
+		}
+		if (!genericPathSafe.test(subPath)) {
+			throw new Error(
+				"Invalid rclone backup path: contains forbidden characters",
+			);
+		}
+		const flags = destination.additionalFlags?.length
+			? [...destination.additionalFlags]
+			: [];
+		const path = `${destination.bucket}/${subPath}`;
+		return { flags, path };
+	}
+
+	const isS3 = !["sftp", "ftp"].includes(destination.provider || "");
+	if (isS3) {
+		const flags = getS3Credentials(destination);
+		const path = `:s3:${destination.bucket}/${subPath}`;
+		return { flags, path };
+	}
+	const provider = destination.provider;
+	// The SFTP/FTP connection string below is interpolated into a shell command.
+	// These fields are user-supplied (destination form), so validate them strictly
+	// to prevent shell/connection-string injection before building the string.
+	// Charset that is safe to embed inside the quoted shell command (no shell
+	// metacharacters, quotes, or whitespace).
+	const shellSafe = /^[^"'$\\`;|&<>()\s]+$/;
+	// Path segments may additionally contain "/".
+	const pathSafe = /^[^"'$\\`;|&<>()\s]*$/;
+
+	if (!/^[a-zA-Z0-9.-]+$/.test(destination.endpoint)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} host: only letters, digits, dots and hyphens are allowed`,
+		);
+	}
+	if (destination.region && !/^\d{1,5}$/.test(destination.region)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} port: must be a number`,
+		);
+	}
+	if (!shellSafe.test(destination.accessKey)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} user: contains forbidden characters`,
+		);
+	}
+	if (!pathSafe.test(destination.bucket)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} path: contains forbidden characters`,
+		);
+	}
+	if (!pathSafe.test(subPath)) {
+		throw new Error(
+			`Invalid ${provider?.toUpperCase() || "SFTP/FTP"} backup path: contains forbidden characters`,
+		);
+	}
+
+	const obscuredPass = await obscurePassword(destination.secretAccessKey);
+	const path = `:${provider},host="${destination.endpoint}",port="${destination.region}",user="${destination.accessKey}",pass="${obscuredPass}":${destination.bucket}/${subPath}`;
+	return { flags: [], path };
 };

@@ -146,8 +146,14 @@ export const createRouterConfig = async (
 		customEntrypoint,
 	} = domain;
 	const punycodeHost = toPunycode(host);
+	// Generate the Host rule — support wildcard subdomains via HostRegexp.
+	// Wildcards are ASCII in practice, so keep the raw host there and reserve
+	// punycode (IDN support) for the regular Host() rule.
+	const hostRule = host.includes("*")
+		? `HostRegexp(\`${host.replace("*", "{subdomain:[a-zA-Z0-9-]+}")}\`)`
+		: `Host(\`${punycodeHost}\`)`;
 	const routerConfig: HttpRouter = {
-		rule: `Host(\`${punycodeHost}\`)${path !== null && path !== "/" ? ` && PathPrefix(\`${path}\`)` : ""}`,
+		rule: `${hostRule}${path !== null && path !== "/" ? ` && PathPrefix(\`${path}\`)` : ""}`,
 		service: `${appName}-service-${uniqueConfigKey}`,
 		middlewares: [],
 		entryPoints: [entryPoint],

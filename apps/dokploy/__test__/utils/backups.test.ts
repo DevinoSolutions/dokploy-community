@@ -1,5 +1,29 @@
-import { normalizeS3Path } from "@dokploy/server/utils/backups/utils";
-import { describe, expect, test } from "vitest";
+import type { BackupSchedule } from "@dokploy/server/services/backup";
+import {
+	GENERIC_RCLONE_PROVIDER,
+	generateBackupCommand,
+	getBackupCommand,
+	getRcloneCredentials,
+	getRcloneDestination,
+	getRclonePathAndFlags,
+	getRcloneTestFlags,
+	normalizeS3Path,
+} from "@dokploy/server/utils/backups/utils";
+import { describe, expect, test, vi } from "vitest";
+
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:child_process")>();
+	return {
+		...actual,
+		execFile: (file: string, args: string[], cb: any) => {
+			if (file === "rclone" && args[0] === "obscure") {
+				cb(null, { stdout: "obscured_pass" });
+			} else {
+				cb(null, { stdout: "" });
+			}
+		},
+	};
+});
 
 describe("normalizeS3Path", () => {
 	test("should handle empty and whitespace-only prefix", () => {
@@ -57,5 +81,157 @@ describe("normalizeS3Path", () => {
 		expect(normalizeS3Path("instance-backups/")).toBe("instance-backups/");
 		expect(normalizeS3Path("/instance-backups/")).toBe("instance-backups/");
 		expect(normalizeS3Path("instance-backups")).toBe("instance-backups/");
+	});
+});
+
+describe("rclone destination helpers", () => {
+	const s3Destination = {
+		provider: "AWS",
+		accessKey: "access",
+		secretAccessKey: "secret",
+		bucket: "dokploy-backups",
+		region: "us-east-1",
+		endpoint: "https://s3.example.com",
+		additionalFlags: ["--s3-no-head"],
+	} as const;
+
+	const genericDestination = {
+		provider: GENERIC_RCLONE_PROVIDER,
+		accessKey: "",
+		secretAccessKey: "",
+		bucket: "gdrive:backups",
+		region: "",
+		endpoint: "",
+		additionalFlags: ["--drive-root-folder-id=abc123"],
+	} as const;
+
+	test("should keep s3 destinations on the s3 remote path", () => {
+		expect(getRcloneDestination(s3Destination as never)).toBe(
+			":s3:dokploy-backups",
+		);
+		expect(getRcloneCredentials(s3Destination as never)).toEqual([
+			'--s3-provider="AWS"',
+			'--s3-access-key-id="access"',
+			'--s3-secret-access-key="secret"',
+			'--s3-region="us-east-1"',
+			'--s3-endpoint="https://s3.example.com"',
+			"--s3-no-check-bucket",
+			"--s3-force-path-style",
+			"--s3-no-head",
+		]);
+	});
+
+	test("should allow generic rclone remotes", () => {
+		expect(getRcloneDestination(genericDestination as never)).toBe(
+			"gdrive:backups",
+		);
+		expect(getRcloneCredentials(genericDestination as never)).toEqual([
+			"--drive-root-folder-id=abc123",
+		]);
+		expect(getRcloneTestFlags(genericDestination as never)).toEqual([
+			"--drive-root-folder-id=abc123",
+			"--retries 1",
+			"--low-level-retries 1",
+			"--timeout 10s",
+			"--contimeout 5s",
+		]);
+	});
+});
+
+describe("getRclonePathAndFlags", () => {
+	test("should return correct flags and path for S3", async () => {
+		const destination = {
+			provider: "aws",
+			accessKey: "access",
+			secretAccessKey: "secret",
+			bucket: "mybucket",
+			region: "us-east-1",
+			endpoint: "https://s3.amazonaws.com",
+		};
+		const { flags, path } = await getRclonePathAndFlags(
+			destination as any,
+			"mypath",
+		);
+		expect(flags).toContain('--s3-access-key-id="access"');
+		expect(flags).toContain('--s3-secret-access-key="secret"');
+		expect(path).toBe(":s3:mybucket/mypath");
+	});
+
+	test("should return correct on-the-fly connection string for SFTP", async () => {
+		const destination = {
+			provider: "sftp",
+			accessKey: "sftpuser",
+			secretAccessKey: "sftppass",
+			bucket: "sftppath",
+			region: "2022",
+			endpoint: "sftp.example.com",
+		};
+		const { flags, path } = await getRclonePathAndFlags(
+			destination as any,
+			"mypath",
+		);
+		expect(flags).toEqual([]);
+		expect(path).toContain(
+			':sftp,host="sftp.example.com",port="2022",user="sftpuser"',
+		);
+		expect(path).toContain('pass="obscured_pass"');
+		expect(path.endsWith(":sftppath/mypath")).toBe(true);
+	});
+
+	test("should return correct on-the-fly connection string for FTP", async () => {
+		const destination = {
+			provider: "ftp",
+			accessKey: "ftpuser",
+			secretAccessKey: "ftppass",
+			bucket: "ftppath",
+			region: "21",
+			endpoint: "ftp.example.com",
+		};
+		const { flags, path } = await getRclonePathAndFlags(
+			destination as any,
+			"mypath",
+		);
+		expect(flags).toEqual([]);
+		expect(path).toContain(
+			':ftp,host="ftp.example.com",port="21",user="ftpuser"',
+		);
+		expect(path).toContain('pass="obscured_pass"');
+		expect(path.endsWith(":ftppath/mypath")).toBe(true);
+	});
+});
+
+describe("getBackupCommand", () => {
+	const backup = {
+		backupType: "database",
+		databaseType: "postgres",
+		database: "mydb",
+		postgres: {
+			appName: "my-app",
+			databaseUser: "postgres",
+			serverId: null,
+		},
+	} as unknown as BackupSchedule;
+
+	const rcloneCommand = 'rclone rcat --s3-provider="AWS" ":s3:bucket/key.sql.gz"';
+	const logPath = "/tmp/backup.log";
+
+	// Regression test for #4222: the database dump was executed twice — once
+	// discarded to /dev/null, then again piped to rclone — doubling load and
+	// risking inconsistent backups on busy databases.
+	test("runs the database dump exactly once", () => {
+		const dumpCommand = generateBackupCommand(backup);
+		expect(dumpCommand).not.toBeNull();
+
+		const script = getBackupCommand(backup, rcloneCommand, logPath);
+
+		const occurrences = script.split(dumpCommand as string).length - 1;
+		expect(occurrences).toBe(1);
+	});
+
+	test("pipes the single dump straight into the rclone upload", () => {
+		const dumpCommand = generateBackupCommand(backup) as string;
+		const script = getBackupCommand(backup, rcloneCommand, logPath);
+
+		expect(script).toContain(`${dumpCommand} | ${rcloneCommand}`);
 	});
 });
