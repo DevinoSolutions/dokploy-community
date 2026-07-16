@@ -39,6 +39,10 @@ import { DuplicateProject } from "@/components/dashboard/project/duplicate-proje
 import { EnvironmentVariables } from "@/components/dashboard/project/environment-variables";
 import { ProjectEnvironment } from "@/components/dashboard/projects/project-environment";
 import {
+	getProjectFaviconUrls,
+	ProjectIcon,
+} from "@/components/dashboard/projects/project-icon";
+import {
 	LibsqlIcon,
 	MariadbIcon,
 	MongodbIcon,
@@ -1038,16 +1042,21 @@ const EnvironmentPage = (
 						<div className="flex justify-between gap-4 w-full items-center flex-wrap p-6">
 							<CardHeader className="p-0">
 								<CardTitle className="text-xl flex flex-row gap-2 items-center">
-									{currentEnvironment.project.logo ? (
-										// biome-ignore lint/performance/noImgElement: user uploaded project icon
-										<img
-											src={currentEnvironment.project.logo}
-											alt=""
-											className="size-6 rounded-sm object-contain self-center"
-										/>
-									) : (
-										<FolderInput className="size-6 text-muted-foreground self-center" />
-									)}
+									<ProjectIcon
+										logo={currentEnvironment.project.logo}
+										faviconUrls={getProjectFaviconUrls([
+											...currentEnvironment.applications.flatMap(
+												(app) => app.domains ?? [],
+											),
+											...currentEnvironment.compose.flatMap(
+												(service) => service.domains ?? [],
+											),
+										])}
+										className="size-6 rounded-sm object-contain self-center"
+										fallback={
+											<FolderInput className="size-6 text-muted-foreground self-center" />
+										}
+									/>
 									<p className="text-base font-medium max-w-[250px] truncate">
 										{currentEnvironment.project.name}
 									</p>

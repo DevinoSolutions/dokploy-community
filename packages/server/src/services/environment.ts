@@ -51,6 +51,12 @@ export const findEnvironmentById = async (environmentId: string) => {
 							serverId: true,
 						},
 					},
+					domains: {
+						columns: {
+							host: true,
+							https: true,
+						},
+					},
 				},
 				columns: {
 					name: true,
@@ -158,6 +164,12 @@ export const findEnvironmentById = async (environmentId: string) => {
 						columns: {
 							name: true,
 							serverId: true,
+						},
+					},
+					domains: {
+						columns: {
+							host: true,
+							https: true,
 						},
 					},
 				},
