@@ -30,6 +30,17 @@ import { getPublicIpWithFallback } from "../wss/utils";
 import { ac, adminRole, memberRole, ownerRole } from "./access-control";
 import { betterAuthSecret } from "./auth-secret";
 
+// Number of days a login session stays valid (sliding window). Reads
+// DOKPLOY_SESSION_DAYS, falling back to 30. Invalid or non-positive values
+// fall back to the default so a bad env var can never lock everyone out.
+const DEFAULT_SESSION_DAYS = 30;
+const getSessionDays = () => {
+	const raw = process.env.DOKPLOY_SESSION_DAYS;
+	if (!raw) return DEFAULT_SESSION_DAYS;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SESSION_DAYS;
+};
+
 const resolveTrustedOrigins = async () => {
 	try {
 		if (IS_CLOUD) {
@@ -372,7 +383,11 @@ const createBetterAuth = () =>
 			},
 		},
 		session: {
-			expiresIn: 60 * 60 * 24 * 3,
+			// Sliding session lifetime, in days. Defaults to 30 (upstream ships 3,
+			// which logs infrequent users out too aggressively for a dashboard).
+			// Override per-install with DOKPLOY_SESSION_DAYS.
+			expiresIn: 60 * 60 * 24 * getSessionDays(),
+			// Refresh the sliding expiry at most once a day of use.
 			updateAge: 60 * 60 * 24,
 		},
 		user: {
