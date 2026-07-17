@@ -21,7 +21,10 @@ import {
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { findDestinationById } from "@dokploy/server/services/destination";
-import { findMemberByUserId } from "@dokploy/server/services/permission";
+import {
+	checkServicePermissionAndAccess,
+	findMemberByUserId,
+} from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, inArray, or, type SQL, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
@@ -417,6 +420,14 @@ export const backupPolicyRouter = createTRPCRouter({
 					serviceName: true,
 					name: true,
 					serviceType: true,
+					applicationId: true,
+					postgresId: true,
+					mysqlId: true,
+					mariadbId: true,
+					mongoId: true,
+					redisId: true,
+					libsqlId: true,
+					composeId: true,
 				},
 			});
 
@@ -425,6 +436,7 @@ export const backupPolicyRouter = createTRPCRouter({
 
 			let succeeded = 0;
 			let failed = 0;
+			let skipped = 0;
 
 			// A policy only materializes dump rows for the five dump-capable
 			// database types; dispatch each through the same manual runner +
@@ -476,6 +488,28 @@ export const backupPolicyRouter = createTRPCRouter({
 				try {
 					const backup = await findBackupById(backupId);
 					label = backup.serviceName ?? backup.database ?? backupId;
+					// Parity with backup.manualBackup* endpoints: a member with
+					// backup:create but restricted service access must not run
+					// (or read the DB name/error output of) services they cannot
+					// reach. Privileged members short-circuit inside the helper.
+					const serviceId =
+						backup.postgresId ||
+						backup.mysqlId ||
+						backup.mariadbId ||
+						backup.mongoId ||
+						backup.libsqlId ||
+						backup.composeId;
+					if (serviceId) {
+						try {
+							await checkServicePermissionAndAccess(ctx, serviceId, {
+								backup: ["create"],
+							});
+						} catch {
+							skipped++;
+							yield `⊘ ${label} (${backup.databaseType} dump): skipped — no access to this service`;
+							continue;
+						}
+					}
 					await runDump(backup);
 					succeeded++;
 					yield `✓ ${label} (${backup.databaseType} dump)`;
@@ -488,6 +522,27 @@ export const backupPolicyRouter = createTRPCRouter({
 			for (const volume of volumeRows) {
 				if (signal?.aborted) return;
 				const label = volume.serviceName ?? volume.name;
+				// Same per-service gate as the dump rows above.
+				const serviceId =
+					volume.applicationId ||
+					volume.postgresId ||
+					volume.mysqlId ||
+					volume.mariadbId ||
+					volume.mongoId ||
+					volume.redisId ||
+					volume.libsqlId ||
+					volume.composeId;
+				if (serviceId) {
+					try {
+						await checkServicePermissionAndAccess(ctx, serviceId, {
+							backup: ["create"],
+						});
+					} catch {
+						skipped++;
+						yield `⊘ ${label} (${volume.serviceType} volume): skipped — no access to this service`;
+						continue;
+					}
+				}
 				try {
 					await runVolumeBackup(volume.volumeBackupId);
 					succeeded++;
@@ -498,7 +553,11 @@ export const backupPolicyRouter = createTRPCRouter({
 				}
 			}
 
-			yield `${succeeded} succeeded, ${failed} failed`;
+			// Keep the "N succeeded, M failed" prefix so the UI completion regex
+			// still matches; append the skipped count only when non-zero.
+			yield skipped > 0
+				? `${succeeded} succeeded, ${failed} failed, ${skipped} skipped`
+				: `${succeeded} succeeded, ${failed} failed`;
 		}),
 
 	// Org-wide coverage table for the Backup Center. Permission-filtered for

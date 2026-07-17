@@ -34,7 +34,7 @@ export const RunBackupPolicy = ({ backupPolicyId, disabled }: Props) => {
 					setIsDrawerOpen(true);
 				}
 				// Final summary line the router yields once every service ran.
-				if (/^\d+ succeeded, \d+ failed$/.test(log)) {
+				if (/^\d+ succeeded, \d+ failed(?:, \d+ skipped)?$/.test(log)) {
 					setIsRunning(false);
 				}
 				setFilteredLogs((prev) => [...prev, ...parseLogs(log)]);

@@ -101,7 +101,7 @@ const createSchema = createInsertSchema(backupPolicies, {
 	name: z.string().min(1),
 	organizationId: z.string(),
 	scopeType: z.enum(["organization", "projects", "environments"]),
-	scopeIds: z.array(z.string()).default([]),
+	scopeIds: z.array(z.string()).max(200).default([]),
 	includeDatabases: z.boolean().optional(),
 	includeVolumes: z.boolean().optional(),
 	serviceTypeFilter: serviceTypeFilterSchema.default([]),
