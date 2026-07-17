@@ -302,3 +302,56 @@ export const parseBackupTimestamp = (fileName: string): Date | null => {
 export const countBackupFiles = (
 	files: ReadonlyArray<{ IsDir: boolean }>,
 ): number => files.reduce((total, file) => (file.IsDir ? total : total + 1), 0);
+
+// --- Backup Center: coverage-tree search ---
+
+/**
+ * Case-insensitive, whitespace-trimmed substring match. An empty query matches
+ * everything, so callers can pass the raw search box value unconditionally.
+ */
+export const textMatchesQuery = (text: string, query: string): boolean => {
+	const normalized = query.trim().toLowerCase();
+	if (normalized === "") return true;
+	return text.toLowerCase().includes(normalized);
+};
+
+/**
+ * Whether a coverage service is surfaced by the free-text coverage search. The
+ * query matches against the service name and its owning project/environment
+ * names (compose children are matched separately, as they load lazily).
+ */
+export const serviceMatchesSearch = (
+	fields: { name: string; projectName: string; environmentName: string },
+	query: string,
+): boolean => {
+	if (query.trim() === "") return true;
+	return (
+		textMatchesQuery(fields.name, query) ||
+		textMatchesQuery(fields.projectName, query) ||
+		textMatchesQuery(fields.environmentName, query)
+	);
+};
+
+// --- Backup Center: activity log parsing ---
+
+// A path/key ending in a known backup artifact extension. `[^\s"'`()]+` walks
+// back to the previous separator so the whole path (including any `bucket/` or
+// `:s3:` remote prefix) is captured. `tar.gz` precedes bare `tar` so a gzipped
+// tarball is not truncated.
+const BACKUP_ARTIFACT_PATTERN =
+	/[^\s"'`()]+\.(?:sql\.gz|bson\.gz|dump\.gz|tar\.gz|zip|tar)/gi;
+
+/**
+ * Extract the uploaded artifact path from a backup run log, or null when none
+ * is present (database/compose dump runs do not echo the path on success). The
+ * last match wins — it is the final upload line for the run.
+ */
+export const extractBackupArtifactPath = (
+	log: string | null | undefined,
+): string | null => {
+	if (!log) return null;
+	const matches = log.match(BACKUP_ARTIFACT_PATTERN);
+	if (!matches || matches.length === 0) return null;
+	const last = matches[matches.length - 1]?.replace(/[.,;]+$/, "");
+	return last || null;
+};

@@ -1,16 +1,17 @@
+import { existsSync, promises as fsPromises } from "node:fs";
 import {
 	createBackupPolicy,
 	findBackupById,
 	findBackupPolicyById,
 	findComposeById,
-	loadDockerCompose,
-	loadDockerComposeRemote,
 	findLibsqlByBackupId,
 	findMariadbByBackupId,
 	findMongoByBackupId,
 	findMySqlByBackupId,
 	findPostgresByBackupId,
 	keepLatestNBackups,
+	loadDockerCompose,
+	loadDockerComposeRemote,
 	removeBackupPolicy,
 	runLibsqlBackup,
 	runMariadbBackup,
@@ -29,11 +30,12 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
-import { and, desc, eq, inArray, or, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, type SQL, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { parse } from "yaml";
 import { z } from "zod";
 import {
+	extractBackupArtifactPath,
 	extractComposeChildren,
 	isComposeVolumeCovered,
 } from "@/lib/backup-coverage";
@@ -87,6 +89,19 @@ const DUMP_CAPABLE_TYPES: ReadonlySet<CoverageServiceType> = new Set([
 
 const errorMessage = (error: unknown) =>
 	error instanceof Error ? error.message : String(error);
+
+// Read the tail of a LOCAL deployment log for artifact-path extraction. Remote
+// logs are skipped (each would need an SSH round-trip); missing/rotated files
+// degrade to null rather than throwing.
+const readLocalLogTail = async (logPath: string): Promise<string | null> => {
+	try {
+		if (!logPath || logPath === "." || !existsSync(logPath)) return null;
+		const content = await fsPromises.readFile(logPath, "utf-8");
+		return content.split("\n").slice(-80).join("\n");
+	} catch {
+		return null;
+	}
+};
 
 // Mirrors the (unexported) `buildServiceFilter` in the project router: restrict
 // a service relation to the ids a non-privileged member may access.
@@ -706,8 +721,7 @@ export const backupPolicyRouter = createTRPCRouter({
 							dumpCapable: DUMP_CAPABLE_TYPES.has(type),
 							hasVolumes: false,
 							domains:
-								(row.domains as Array<{ host: string; https: boolean }>) ??
-								[],
+								(row.domains as Array<{ host: string; https: boolean }>) ?? [],
 							dumpBackups: [],
 							volumeBackups: [],
 						});
@@ -1013,6 +1027,332 @@ export const backupPolicyRouter = createTRPCRouter({
 						covered: isComposeVolumeCovered(volumeName, backedUpVolumeNames),
 					})),
 				})),
+			};
+		}),
+
+	// Recent backup + volume-backup runs across the organization, derived from
+	// the deployment rows each run persists (no new table). Permission-filtered
+	// for non-owner/admin members exactly like `coverage`, and scoped to one
+	// server (the "Viewing server" facet — undefined means the local Dokploy
+	// server). The artifact path is best-effort parsed from the run log tail for
+	// LOCAL runs only (remote logs would each need an SSH round-trip), falling
+	// back to the configured prefix folder.
+	recentActivity: withPermission("backup", "read")
+		.input(
+			z.object({
+				limit: z.number().min(1).max(100).default(50),
+				offset: z.number().min(0).default(0),
+				serverId: z.string().optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			const organizationId = ctx.session.activeOrganizationId;
+			const isPrivileged =
+				ctx.user.role === "owner" || ctx.user.role === "admin";
+			const empty = { runs: [], nextOffset: null as number | null };
+
+			let accessedProjects: string[] = [];
+			let accessedEnvironments: string[] = [];
+			let accessedServices: string[] = [];
+			if (!isPrivileged) {
+				const member = await findMemberByUserId(ctx.user.id, organizationId);
+				accessedProjects = member.accessedProjects;
+				accessedEnvironments = member.accessedEnvironments;
+				accessedServices = member.accessedServices;
+				if (accessedProjects.length === 0) return empty;
+			}
+
+			const projectWhere = isPrivileged
+				? eq(projects.organizationId, organizationId)
+				: and(
+						sql`${projects.projectId} IN (${sql.join(
+							accessedProjects.map((projectId) => sql`${projectId}`),
+							sql`, `,
+						)})`,
+						eq(projects.organizationId, organizationId),
+					);
+			const environmentWhere = isPrivileged
+				? undefined
+				: accessedEnvironments.length === 0
+					? sql`false`
+					: sql`${environments.environmentId} IN (${sql.join(
+							accessedEnvironments.map((envId) => sql`${envId}`),
+							sql`, `,
+						)})`;
+			const serviceFilter = (fieldName: AnyPgColumn) =>
+				isPrivileged
+					? undefined
+					: buildServiceFilter(fieldName, accessedServices);
+
+			const serviceColumns = { name: true, serverId: true } as const;
+			const projectRows = await db.query.projects.findMany({
+				where: projectWhere,
+				columns: { projectId: true, name: true },
+				with: {
+					environments: {
+						where: environmentWhere,
+						columns: { environmentId: true, name: true },
+						with: {
+							applications: {
+								where: serviceFilter(applications.applicationId),
+								columns: { applicationId: true, ...serviceColumns },
+							},
+							postgres: {
+								where: serviceFilter(postgres.postgresId),
+								columns: { postgresId: true, ...serviceColumns },
+							},
+							mysql: {
+								where: serviceFilter(mysql.mysqlId),
+								columns: { mysqlId: true, ...serviceColumns },
+							},
+							mariadb: {
+								where: serviceFilter(mariadb.mariadbId),
+								columns: { mariadbId: true, ...serviceColumns },
+							},
+							mongo: {
+								where: serviceFilter(mongo.mongoId),
+								columns: { mongoId: true, ...serviceColumns },
+							},
+							libsql: {
+								where: serviceFilter(libsql.libsqlId),
+								columns: { libsqlId: true, ...serviceColumns },
+							},
+							redis: {
+								where: serviceFilter(redis.redisId),
+								columns: { redisId: true, ...serviceColumns },
+							},
+							compose: {
+								where: serviceFilter(compose.composeId),
+								columns: { composeId: true, ...serviceColumns },
+							},
+						},
+					},
+				},
+			});
+
+			interface ServiceMeta {
+				type: CoverageServiceType;
+				name: string;
+				serverId: string | null;
+				projectName: string;
+				environmentName: string;
+			}
+			const serviceMetaById = new Map<string, ServiceMeta>();
+			for (const project of projectRows) {
+				for (const environment of project.environments) {
+					const record = environment as Record<string, unknown>;
+					for (const type of COVERAGE_SERVICE_TYPES) {
+						const rows = record[RELATION_KEY_BY_TYPE[type]] as
+							| Array<Record<string, unknown>>
+							| undefined;
+						if (!rows) continue;
+						for (const row of rows) {
+							serviceMetaById.set(row[ID_COLUMN_BY_TYPE[type]] as string, {
+								type,
+								name: row.name as string,
+								serverId: (row.serverId as string) ?? null,
+								projectName: project.name,
+								environmentName: environment.name,
+							});
+						}
+					}
+				}
+			}
+			if (serviceMetaById.size === 0) return empty;
+			const serviceIds = Array.from(serviceMetaById.keys());
+
+			interface RunMeta {
+				serviceId: string;
+				source: "policy" | "manual";
+				policyName: string | null;
+				destinationName: string;
+				prefix: string;
+			}
+			const backupMetaById = new Map<string, RunMeta>();
+			const volumeMetaById = new Map<string, RunMeta>();
+
+			// Service ids are unique nanoids across types, so the same id list is
+			// safe to test against every polymorphic FK column.
+			const backupRows = await db.query.backups.findMany({
+				where: or(
+					inArray(backups.postgresId, serviceIds),
+					inArray(backups.mysqlId, serviceIds),
+					inArray(backups.mariadbId, serviceIds),
+					inArray(backups.mongoId, serviceIds),
+					inArray(backups.libsqlId, serviceIds),
+					inArray(backups.composeId, serviceIds),
+				),
+				columns: {
+					backupId: true,
+					prefix: true,
+					backupPolicyId: true,
+					postgresId: true,
+					mysqlId: true,
+					mariadbId: true,
+					mongoId: true,
+					libsqlId: true,
+					composeId: true,
+				},
+				with: {
+					destination: { columns: { name: true } },
+					backupPolicy: { columns: { name: true } },
+				},
+			});
+			for (const row of backupRows) {
+				const serviceId =
+					row.postgresId ||
+					row.mysqlId ||
+					row.mariadbId ||
+					row.mongoId ||
+					row.libsqlId ||
+					row.composeId;
+				if (!serviceId || !serviceMetaById.has(serviceId)) continue;
+				backupMetaById.set(row.backupId, {
+					serviceId,
+					source: row.backupPolicyId ? "policy" : "manual",
+					policyName: row.backupPolicy?.name ?? null,
+					destinationName: row.destination?.name ?? "",
+					prefix: row.prefix,
+				});
+			}
+
+			const volumeRows = await db.query.volumeBackups.findMany({
+				where: or(
+					inArray(volumeBackups.applicationId, serviceIds),
+					inArray(volumeBackups.postgresId, serviceIds),
+					inArray(volumeBackups.mysqlId, serviceIds),
+					inArray(volumeBackups.mariadbId, serviceIds),
+					inArray(volumeBackups.mongoId, serviceIds),
+					inArray(volumeBackups.libsqlId, serviceIds),
+					inArray(volumeBackups.redisId, serviceIds),
+					inArray(volumeBackups.composeId, serviceIds),
+				),
+				columns: {
+					volumeBackupId: true,
+					prefix: true,
+					backupPolicyId: true,
+					applicationId: true,
+					postgresId: true,
+					mysqlId: true,
+					mariadbId: true,
+					mongoId: true,
+					libsqlId: true,
+					redisId: true,
+					composeId: true,
+				},
+				with: {
+					destination: { columns: { name: true } },
+					backupPolicy: { columns: { name: true } },
+				},
+			});
+			for (const row of volumeRows) {
+				const serviceId =
+					row.applicationId ||
+					row.postgresId ||
+					row.mysqlId ||
+					row.mariadbId ||
+					row.mongoId ||
+					row.libsqlId ||
+					row.redisId ||
+					row.composeId;
+				if (!serviceId || !serviceMetaById.has(serviceId)) continue;
+				volumeMetaById.set(row.volumeBackupId, {
+					serviceId,
+					source: row.backupPolicyId ? "policy" : "manual",
+					policyName: row.backupPolicy?.name ?? null,
+					destinationName: row.destination?.name ?? "",
+					prefix: row.prefix ?? "",
+				});
+			}
+
+			const backupIds = Array.from(backupMetaById.keys());
+			const volumeIds = Array.from(volumeMetaById.keys());
+			if (backupIds.length === 0 && volumeIds.length === 0) return empty;
+
+			const runConditions: SQL[] = [];
+			if (backupIds.length)
+				runConditions.push(inArray(deployments.backupId, backupIds));
+			if (volumeIds.length)
+				runConditions.push(inArray(deployments.volumeBackupId, volumeIds));
+
+			const serverCondition = input.serverId
+				? eq(deployments.serverId, input.serverId)
+				: isNull(deployments.serverId);
+
+			const deploymentRows = await db.query.deployments.findMany({
+				where: and(or(...runConditions), serverCondition),
+				columns: {
+					deploymentId: true,
+					backupId: true,
+					volumeBackupId: true,
+					status: true,
+					logPath: true,
+					serverId: true,
+					errorMessage: true,
+					createdAt: true,
+					startedAt: true,
+					finishedAt: true,
+				},
+				orderBy: [desc(deployments.createdAt)],
+				limit: input.limit + 1,
+				offset: input.offset,
+			});
+
+			const hasMore = deploymentRows.length > input.limit;
+			const page = hasMore
+				? deploymentRows.slice(0, input.limit)
+				: deploymentRows;
+
+			const runs = await Promise.all(
+				page.map(async (deployment) => {
+					const isVolume = Boolean(deployment.volumeBackupId);
+					const meta = isVolume
+						? deployment.volumeBackupId
+							? volumeMetaById.get(deployment.volumeBackupId)
+							: undefined
+						: deployment.backupId
+							? backupMetaById.get(deployment.backupId)
+							: undefined;
+					const service = meta
+						? serviceMetaById.get(meta.serviceId)
+						: undefined;
+
+					// Only local logs are read (no per-row SSH); remote runs fall back
+					// to the configured prefix folder.
+					const artifactPath =
+						!deployment.serverId && deployment.logPath
+							? extractBackupArtifactPath(
+									await readLocalLogTail(deployment.logPath),
+								)
+							: null;
+
+					return {
+						deploymentId: deployment.deploymentId,
+						kind: isVolume ? ("volume" as const) : ("database" as const),
+						backupId: deployment.backupId ?? null,
+						volumeBackupId: deployment.volumeBackupId ?? null,
+						serverId: deployment.serverId ?? null,
+						serviceName: service?.name ?? "Unknown service",
+						serviceType: service?.type ?? null,
+						projectName: service?.projectName ?? "",
+						environmentName: service?.environmentName ?? "",
+						destinationName: meta?.destinationName ?? "",
+						source: meta?.source ?? ("manual" as const),
+						policyName: meta?.policyName ?? null,
+						prefix: meta?.prefix ?? null,
+						status: deployment.status ?? "running",
+						createdAt: deployment.createdAt,
+						startedAt: deployment.startedAt ?? null,
+						finishedAt: deployment.finishedAt ?? null,
+						errorMessage: deployment.errorMessage ?? null,
+						artifactPath,
+					};
+				}),
+			);
+
+			return {
+				runs,
+				nextOffset: hasMore ? input.offset + input.limit : null,
 			};
 		}),
 });

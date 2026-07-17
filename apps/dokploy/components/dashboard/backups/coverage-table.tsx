@@ -5,6 +5,7 @@ import {
 	ExternalLink,
 	Folder,
 	Loader2,
+	Search,
 	TableProperties,
 	TriangleAlert,
 	X,
@@ -20,6 +21,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import {
 	Table,
 	TableBody,
@@ -35,6 +37,7 @@ import {
 	isProductionEnvironment,
 	isServiceShownByFacets,
 	normalizeEnvironmentName,
+	serviceMatchesSearch,
 } from "@/lib/backup-coverage";
 import { cn } from "@/lib/utils";
 import type { RouterOutputs } from "@/utils/api";
@@ -225,7 +228,7 @@ const ComposeChildRows = ({ composeId }: { composeId: string }) => {
 	);
 };
 
-export const CoverageTable = () => {
+export const CoverageTable = ({ serverId }: { serverId?: string }) => {
 	const { data, isPending } = api.backupPolicy.coverage.useQuery();
 
 	// Expansion overrides keyed by node id; absent = the node-type default
@@ -234,6 +237,7 @@ export const CoverageTable = () => {
 		Record<string, boolean>
 	>({});
 	const [facets, setFacets] = useState<CoverageFacets>(EMPTY_COVERAGE_FACETS);
+	const [search, setSearch] = useState("");
 
 	const isExpanded = (key: string, fallback: boolean) =>
 		expandOverrides[key] ?? fallback;
@@ -271,6 +275,22 @@ export const CoverageTable = () => {
 			}
 		>();
 		for (const service of data?.services ?? []) {
+			// The server facet and the free-text search fully remove services from
+			// the tree (they do not contribute to the facet "(N hidden)" hint).
+			// undefined serverId means the local Dokploy server (null serverId).
+			if ((service.serverId ?? null) !== (serverId ?? null)) continue;
+			if (
+				!serviceMatchesSearch(
+					{
+						name: service.name,
+						projectName: service.project.name,
+						environmentName: service.environment.name,
+					},
+					search,
+				)
+			) {
+				continue;
+			}
 			let project = projects.get(service.project.id);
 			if (!project) {
 				project = {
@@ -340,7 +360,7 @@ export const CoverageTable = () => {
 			}
 		}
 		return result;
-	}, [data, facets]);
+	}, [data, facets, serverId, search]);
 
 	return (
 		<Card className="bg-background">
@@ -369,6 +389,15 @@ export const CoverageTable = () => {
 					</div>
 				) : (
 					<>
+						<div className="relative">
+							<Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+							<Input
+								value={search}
+								onChange={(event) => setSearch(event.target.value)}
+								placeholder="Search by project, service or environment..."
+								className="pl-8"
+							/>
+						</div>
 						<CoverageFilters
 							environmentNames={environmentNames}
 							facets={facets}
@@ -377,7 +406,9 @@ export const CoverageTable = () => {
 						{tree.length === 0 ? (
 							<div className="flex min-h-[10vh] flex-col items-center justify-center gap-2">
 								<span className="text-sm text-muted-foreground">
-									Everything is hidden by the current filters.
+									{search.trim()
+										? "No services match your search and filters."
+										: "Everything is hidden by the current filters."}
 								</span>
 							</div>
 						) : (
