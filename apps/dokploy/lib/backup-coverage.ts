@@ -1,0 +1,184 @@
+// Pure helpers shared by the Backup Center coverage tree (client) and the
+// `backupPolicy.composeChildren` query (server). No React / DB imports here so
+// the logic stays unit-testable.
+
+/** Database families surfaced with a dedicated icon in the coverage tree. */
+export type DbKind =
+	| "postgres"
+	| "mysql"
+	| "mariadb"
+	| "mongo"
+	| "redis"
+	| "libsql";
+
+/** Convention shared with the backup-policy "production preset". */
+export const isProductionEnvironment = (environmentName: string): boolean =>
+	environmentName.trim().toLowerCase() === "production";
+
+// Ordered patterns: the first match wins. Mongo is tested before mysql so
+// `percona-server-mongodb` classifies as mongo (not the mysql-family percona),
+// and mariadb before mysql so `mariadb` never falls into the mysql bucket.
+const DB_IMAGE_PATTERNS: ReadonlyArray<[DbKind, RegExp]> = [
+	["mariadb", /mariadb/],
+	["mongo", /mongo/],
+	["postgres", /postgres|postgis|pgvector|timescaledb/],
+	["mysql", /mysql|percona/],
+	["redis", /redis|valkey|dragonfly|keydb/],
+	["libsql", /libsql|sqld/],
+];
+
+/**
+ * Classify a docker image reference into a database family, or null when it is
+ * not a recognized database image. Handles registries, namespaces, tags and
+ * digests (e.g. `ghcr.io/acme/postgres:16@sha256:...` → postgres).
+ */
+export const classifyDbImage = (
+	image: string | null | undefined,
+): DbKind | null => {
+	if (!image) return null;
+	// Strip digest, then tag (the tag colon is the last colon after the final
+	// slash — a leading `host:port/` must survive), then lowercase.
+	let ref = image.split("@")[0] ?? "";
+	const lastSlash = ref.lastIndexOf("/");
+	const lastColon = ref.lastIndexOf(":");
+	if (lastColon > lastSlash) {
+		ref = ref.slice(0, lastColon);
+	}
+	ref = ref.toLowerCase();
+	// Match against the final path segment so `mysql/mysql-server` works, but
+	// fall back to the whole reference for namespaced hits like
+	// `percona/percona-server`.
+	const name = ref.slice(ref.lastIndexOf("/") + 1);
+	for (const [kind, pattern] of DB_IMAGE_PATTERNS) {
+		if (pattern.test(name) || pattern.test(ref)) {
+			return kind;
+		}
+	}
+	return null;
+};
+
+/** Coverage service shape needed by the default-filter predicate. */
+export interface FilterableService {
+	type:
+		| "application"
+		| "postgres"
+		| "mysql"
+		| "mariadb"
+		| "mongo"
+		| "libsql"
+		| "redis"
+		| "compose";
+	hasVolumes: boolean;
+}
+
+const DB_SERVICE_TYPES: ReadonlySet<FilterableService["type"]> = new Set([
+	"postgres",
+	"mysql",
+	"mariadb",
+	"mongo",
+	"redis",
+	"libsql",
+]);
+
+/**
+ * The user-approved "hide non-prod plain apps" default:
+ * - production environments show every service;
+ * - other environments show databases and services with named volumes only —
+ *   a volume-less application/compose in a non-prod environment is hidden.
+ */
+export const isServiceShownByDefault = (
+	service: FilterableService,
+	environmentName: string,
+): boolean => {
+	if (isProductionEnvironment(environmentName)) return true;
+	if (DB_SERVICE_TYPES.has(service.type)) return true;
+	return service.hasVolumes;
+};
+
+/** A single container parsed out of a compose file. */
+export interface ComposeChildService {
+	name: string;
+	image: string | null;
+	dbKind: DbKind | null;
+	/** Named (top-level) volumes the container mounts, in declaration order. */
+	volumes: string[];
+}
+
+// Bind mounts and inline paths are not named volumes: absolute/relative paths,
+// home-relative paths and env-var driven sources are excluded.
+const isNamedVolumeSource = (source: string): boolean =>
+	source.length > 0 && !/^[./~$]/.test(source) && !source.includes("\\");
+
+/**
+ * Extract the child services of a parsed compose specification. Tolerates
+ * malformed documents: anything that does not look like `{ services: {...} }`
+ * yields an empty list, and malformed service/volume entries are skipped
+ * rather than throwing.
+ */
+export const extractComposeChildren = (
+	spec: unknown,
+): ComposeChildService[] => {
+	if (!spec || typeof spec !== "object") return [];
+	const services = (spec as { services?: unknown }).services;
+	if (!services || typeof services !== "object" || Array.isArray(services)) {
+		return [];
+	}
+
+	const children: ComposeChildService[] = [];
+	for (const [name, rawService] of Object.entries(
+		services as Record<string, unknown>,
+	)) {
+		if (!rawService || typeof rawService !== "object") continue;
+		const service = rawService as {
+			image?: unknown;
+			volumes?: unknown;
+		};
+		const image = typeof service.image === "string" ? service.image : null;
+
+		const volumes: string[] = [];
+		if (Array.isArray(service.volumes)) {
+			for (const entry of service.volumes) {
+				if (typeof entry === "string") {
+					// Short syntax `source:target[:mode]`. A colon-less entry is an
+					// anonymous volume; sources that look like paths are bind mounts.
+					const colonIndex = entry.indexOf(":");
+					if (colonIndex <= 0) continue;
+					const source = entry.slice(0, colonIndex).trim();
+					if (isNamedVolumeSource(source)) volumes.push(source);
+				} else if (entry && typeof entry === "object") {
+					// Long syntax `{ type: volume, source, target }`.
+					const long = entry as { type?: unknown; source?: unknown };
+					if (
+						long.type === "volume" &&
+						typeof long.source === "string" &&
+						isNamedVolumeSource(long.source)
+					) {
+						volumes.push(long.source);
+					}
+				}
+			}
+		}
+
+		children.push({
+			name,
+			image,
+			dbKind: classifyDbImage(image),
+			volumes: [...new Set(volumes)],
+		});
+	}
+	return children;
+};
+
+/**
+ * Whether a configured volume backup covers a compose named volume. Deployed
+ * compose volumes are usually prefixed with the stack/app name
+ * (`<appName>_<volume>`), so both the exact name and the prefixed form match.
+ */
+export const isComposeVolumeCovered = (
+	volumeName: string,
+	backedUpVolumeNames: readonly string[],
+): boolean =>
+	backedUpVolumeNames.some(
+		(backedUp) =>
+			backedUp === volumeName || backedUp.endsWith(`_${volumeName}`),
+	);
