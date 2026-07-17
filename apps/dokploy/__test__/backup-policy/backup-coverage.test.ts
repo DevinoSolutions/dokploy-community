@@ -6,6 +6,7 @@ import {
 	countBackupFiles,
 	DATABASE_SERVICE_TYPES,
 	EMPTY_COVERAGE_FACETS,
+	extractBackupArtifactPath,
 	extractComposeChildren,
 	hasExplicitFacets,
 	isComposeVolumeCovered,
@@ -14,6 +15,8 @@ import {
 	isServiceShownByDefault,
 	isServiceShownByFacets,
 	parseBackupTimestamp,
+	serviceMatchesSearch,
+	textMatchesQuery,
 } from "@/lib/backup-coverage";
 
 describe("classifyDbImage", () => {
@@ -431,5 +434,79 @@ describe("countBackupFiles", () => {
 	it("is zero for an empty or directory-only listing", () => {
 		expect(countBackupFiles([])).toBe(0);
 		expect(countBackupFiles([{ IsDir: true }, { IsDir: true }])).toBe(0);
+	});
+});
+
+describe("textMatchesQuery", () => {
+	it("matches case-insensitively and ignores surrounding whitespace", () => {
+		expect(textMatchesQuery("Production API", "api")).toBe(true);
+		expect(textMatchesQuery("Production API", "  PROD ")).toBe(true);
+		expect(textMatchesQuery("Production API", "staging")).toBe(false);
+	});
+
+	it("treats an empty or whitespace-only query as matching everything", () => {
+		expect(textMatchesQuery("anything", "")).toBe(true);
+		expect(textMatchesQuery("anything", "   ")).toBe(true);
+	});
+});
+
+describe("serviceMatchesSearch", () => {
+	const service = {
+		name: "orders-db",
+		projectName: "Checkout",
+		environmentName: "production",
+	};
+
+	it("matches against the service, project, or environment name", () => {
+		expect(serviceMatchesSearch(service, "orders")).toBe(true);
+		expect(serviceMatchesSearch(service, "checkout")).toBe(true);
+		expect(serviceMatchesSearch(service, "prod")).toBe(true);
+	});
+
+	it("returns false when nothing matches and true for an empty query", () => {
+		expect(serviceMatchesSearch(service, "payments")).toBe(false);
+		expect(serviceMatchesSearch(service, "  ")).toBe(true);
+	});
+});
+
+describe("extractBackupArtifactPath", () => {
+	it("pulls the artifact path from a run log for each backup kind", () => {
+		expect(
+			extractBackupArtifactPath(
+				"[date] Streaming...\nUploaded to team/db/2026-07-17T12-30-45-123Z.sql.gz\nBackup done",
+			),
+		).toBe("team/db/2026-07-17T12-30-45-123Z.sql.gz");
+		expect(
+			extractBackupArtifactPath("copied :s3:bucket/mongo/dump.bson.gz ok"),
+		).toBe(":s3:bucket/mongo/dump.bson.gz");
+		expect(
+			extractBackupArtifactPath("Transferred: data-2026.tar.gz done"),
+		).toBe("data-2026.tar.gz");
+		expect(extractBackupArtifactPath("wrote volume-data.tar")).toBe(
+			"volume-data.tar",
+		);
+	});
+
+	it("returns the last artifact when several appear", () => {
+		expect(extractBackupArtifactPath("old/a.sql.gz\nnew/b.sql.gz")).toBe(
+			"new/b.sql.gz",
+		);
+	});
+
+	it("strips surrounding quotes and trailing punctuation", () => {
+		expect(extractBackupArtifactPath('to "team/db/x.sql.gz".')).toBe(
+			"team/db/x.sql.gz",
+		);
+	});
+
+	it("returns null when no artifact path is present", () => {
+		expect(
+			extractBackupArtifactPath(
+				"[date] Streaming backup to S3...\n[date] Upload completed successfully",
+			),
+		).toBeNull();
+		expect(extractBackupArtifactPath("")).toBeNull();
+		expect(extractBackupArtifactPath(null)).toBeNull();
+		expect(extractBackupArtifactPath(undefined)).toBeNull();
 	});
 });
