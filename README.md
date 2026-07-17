@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.10**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.11**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.10 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.11 \
   --with-registry-auth \
   dokploy
 ```
@@ -107,6 +107,13 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.11
+
+**Backup verification, browsing & restore in the Backup Center.** Coverage no longer just assumes — it can prove backups exist. No migrations.
+
+- **Browse the real bucket contents** — every covered database/compose service gets a Browse-backups button; the dialog lazily lists the actual files under each backup's prefix (name, size, timestamp) with an "N in bucket" badge, and warns when a backup is configured but the bucket is empty ([#156](https://github.com/DevinoSolutions/dokploy-community/pull/156)).
+- **Restore from the Backup Center** — each listed file has a Restore action behind a double confirmation (destructive-action confirm, then type the database name), streaming live logs via the existing restore pipeline; hidden without the restore permission and enforced server-side ([#156](https://github.com/DevinoSolutions/dokploy-community/pull/156)).
+
 ### New in v0.29.12-community.10
 
 **Global coverage filters.** The Backup Center coverage filter is now three global facets instead of a per-project list — no migrations.
@@ -171,7 +178,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.10
+export DOKPLOY_VERSION=v0.29.12-community.11
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -184,7 +191,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.10   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.11   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -218,6 +225,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 8th release | `v0.29.12-community.8` |
 | v0.29.12 | 9th release | `v0.29.12-community.9` |
 | v0.29.12 | 10th release | `v0.29.12-community.10` |
+| v0.29.12 | 11th release | `v0.29.12-community.11` |
 
 ## Contributing
 
