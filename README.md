@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.12**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.13**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.12 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.13 \
   --with-registry-auth \
   dokploy
 ```
@@ -107,6 +107,13 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.13
+
+**Backup Center polish.** Two refinements — no migrations.
+
+- **Instance tab manages web-server backups in place** — the Instance tab now embeds the full Web Server Backups card (schedules, run/edit/delete, Restore Backup) instead of a read-only summary linking out ([#158](https://github.com/DevinoSolutions/dokploy-community/pull/158)).
+- **Destinations show the storage prefix** — coverage rows list each destination as "name · /prefix" so you can see where each backup lands at a glance ([#158](https://github.com/DevinoSolutions/dokploy-community/pull/158)).
+
 ### New in v0.29.12-community.12
 
 **Backup Center tabs, search & activity feed.** Community-requested UX pass — no migrations.
@@ -186,7 +193,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.12
+export DOKPLOY_VERSION=v0.29.12-community.13
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -199,7 +206,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.12   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.13   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -235,6 +242,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 10th release | `v0.29.12-community.10` |
 | v0.29.12 | 11th release | `v0.29.12-community.11` |
 | v0.29.12 | 12th release | `v0.29.12-community.12` |
+| v0.29.12 | 13th release | `v0.29.12-community.13` |
 
 ## Contributing
 
