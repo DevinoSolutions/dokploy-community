@@ -569,6 +569,78 @@ export const backupRouter = createTRPCRouter({
 			}
 		}),
 
+	// Lazy per-backup context for the Backup Center browser: everything the
+	// client needs to (a) list the files under this backup's prefix via
+	// `listBackupFiles` and (b) restore one of them via `restoreBackupWithLogs`,
+	// without exposing the destination credentials. Read-gated on the owning
+	// service; `canRestore` reflects the stricter restore permission so the UI
+	// can hide the restore affordance for members who lack it (the restore
+	// subscription re-checks it server-side regardless).
+	backupContext: withPermission("backup", "read")
+		.input(apiFindOneBackup)
+		.query(async ({ input, ctx }) => {
+			const backup = await findBackupById(input.backupId);
+			const serviceId =
+				backup.postgresId ||
+				backup.mysqlId ||
+				backup.mariadbId ||
+				backup.mongoId ||
+				backup.libsqlId ||
+				backup.composeId ||
+				"";
+			if (serviceId) {
+				await checkServicePermissionAndAccess(ctx, serviceId, {
+					backup: ["read"],
+				});
+			}
+
+			if (
+				backup.destination &&
+				backup.destination.organizationId !== ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You don't have access to this destination.",
+				});
+			}
+
+			const serverId =
+				backup.postgres?.serverId ??
+				backup.mysql?.serverId ??
+				backup.mariadb?.serverId ??
+				backup.mongo?.serverId ??
+				backup.libsql?.serverId ??
+				backup.compose?.serverId ??
+				null;
+
+			let canRestore = false;
+			if (serviceId) {
+				try {
+					await checkServicePermissionAndAccess(ctx, serviceId, {
+						backup: ["restore"],
+					});
+					canRestore = true;
+				} catch {
+					canRestore = false;
+				}
+			}
+
+			return {
+				backupId: backup.backupId,
+				databaseId: serviceId,
+				backupType: backup.backupType,
+				databaseType: backup.databaseType,
+				databaseName: backup.database,
+				serviceName: backup.serviceName ?? null,
+				destinationId: backup.destinationId,
+				destinationName: backup.destination?.name ?? "",
+				prefix: backup.prefix,
+				serverId,
+				metadata: backup.metadata ?? null,
+				canRestore,
+			};
+		}),
+
 	restoreBackupWithLogs: protectedProcedure
 		.meta({
 			openapi: {

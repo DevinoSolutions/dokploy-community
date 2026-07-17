@@ -266,3 +266,39 @@ export const isComposeVolumeCovered = (
 		(backedUp) =>
 			backedUp === volumeName || backedUp.endsWith(`_${volumeName}`),
 	);
+
+// --- Backup Center: verifying real files in the destination bucket ---
+
+/**
+ * Build the `search` argument for `backup.listBackupFiles` that lists exactly
+ * the files stored under a backup's prefix. Mirrors the server-side
+ * `normalizeS3Path`: surrounding whitespace and leading/trailing slashes are
+ * stripped, then a trailing slash is appended so the listing targets the prefix
+ * as a directory. An empty prefix lists the bucket root.
+ */
+export const buildBackupListPrefix = (prefix: string): string => {
+	const normalized = prefix.trim().replace(/^\/+|\/+$/g, "");
+	return normalized ? `${normalized}/` : "";
+};
+
+/**
+ * Recover the backup timestamp from a dump file name. Backup files are written
+ * as `<ISO-with-`:`-and-`.`-replaced-by-`-`>.<ext>.gz` (see `getBackupTimestamp`),
+ * e.g. `2026-07-17T12-30-45-123Z.sql.gz`. `listBackupFiles` lists with
+ * `--no-modtime`, so the name is the only timestamp source. Returns null when
+ * the name carries no recognizable timestamp.
+ */
+export const parseBackupTimestamp = (fileName: string): Date | null => {
+	const match = fileName.match(
+		/(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/,
+	);
+	if (!match) return null;
+	const iso = `${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`;
+	const date = new Date(iso);
+	return Number.isNaN(date.getTime()) ? null : date;
+};
+
+/** Count the actual backup files (excluding directories) in an rclone listing. */
+export const countBackupFiles = (
+	files: ReadonlyArray<{ IsDir: boolean }>,
+): number => files.reduce((total, file) => (file.IsDir ? total : total + 1), 0);

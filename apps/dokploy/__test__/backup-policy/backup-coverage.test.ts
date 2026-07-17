@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-	classifyDbImage,
+	buildBackupListPrefix,
 	type CoverageFacets,
+	classifyDbImage,
+	countBackupFiles,
 	DATABASE_SERVICE_TYPES,
 	EMPTY_COVERAGE_FACETS,
 	extractComposeChildren,
@@ -11,6 +13,7 @@ import {
 	isProductionEnvironment,
 	isServiceShownByDefault,
 	isServiceShownByFacets,
+	parseBackupTimestamp,
 } from "@/lib/backup-coverage";
 
 describe("classifyDbImage", () => {
@@ -371,5 +374,62 @@ describe("isComposeVolumeCovered", () => {
 		expect(isComposeVolumeCovered("db-data", [])).toBe(false);
 		expect(isComposeVolumeCovered("db-data", ["other"])).toBe(false);
 		expect(isComposeVolumeCovered("db-data", ["db-data-old"])).toBe(false);
+	});
+});
+
+describe("buildBackupListPrefix", () => {
+	it("appends a trailing slash to a bare prefix", () => {
+		expect(buildBackupListPrefix("backups")).toBe("backups/");
+		expect(buildBackupListPrefix("team/postgres")).toBe("team/postgres/");
+	});
+
+	it("strips surrounding whitespace and leading/trailing slashes", () => {
+		expect(buildBackupListPrefix("  backups  ")).toBe("backups/");
+		expect(buildBackupListPrefix("/backups/")).toBe("backups/");
+		expect(buildBackupListPrefix("///team/db///")).toBe("team/db/");
+	});
+
+	it("returns an empty string for an empty or slash-only prefix", () => {
+		expect(buildBackupListPrefix("")).toBe("");
+		expect(buildBackupListPrefix("   ")).toBe("");
+		expect(buildBackupListPrefix("/")).toBe("");
+	});
+});
+
+describe("parseBackupTimestamp", () => {
+	it("recovers the date from a dump file name", () => {
+		expect(
+			parseBackupTimestamp("2026-07-17T12-30-45-123Z.sql.gz")?.toISOString(),
+		).toBe("2026-07-17T12:30:45.123Z");
+		expect(
+			parseBackupTimestamp("2026-01-02T03-04-05-006Z.bson.gz")?.toISOString(),
+		).toBe("2026-01-02T03:04:05.006Z");
+	});
+
+	it("finds the timestamp even under a prefixed path", () => {
+		expect(
+			parseBackupTimestamp(
+				"team/db/2026-07-17T12-30-45-123Z.sql.gz",
+			)?.toISOString(),
+		).toBe("2026-07-17T12:30:45.123Z");
+	});
+
+	it("returns null when there is no recognizable timestamp", () => {
+		expect(parseBackupTimestamp("latest.sql.gz")).toBeNull();
+		expect(parseBackupTimestamp("")).toBeNull();
+		expect(parseBackupTimestamp("2026-07-17.sql.gz")).toBeNull();
+	});
+});
+
+describe("countBackupFiles", () => {
+	it("counts files and ignores directories", () => {
+		expect(
+			countBackupFiles([{ IsDir: false }, { IsDir: true }, { IsDir: false }]),
+		).toBe(2);
+	});
+
+	it("is zero for an empty or directory-only listing", () => {
+		expect(countBackupFiles([])).toBe(0);
+		expect(countBackupFiles([{ IsDir: true }, { IsDir: true }])).toBe(0);
 	});
 });
