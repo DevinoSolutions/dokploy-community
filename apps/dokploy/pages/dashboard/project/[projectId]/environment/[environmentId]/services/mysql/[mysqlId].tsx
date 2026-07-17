@@ -296,6 +296,7 @@ const MySql = (
 													<ShowDatabaseAdvancedSettings
 														id={mysqlId}
 														type="mysql"
+														serverId={data?.serverId}
 													/>
 													<ResourceNetworksCard
 														resourceType="mysql"

@@ -37,6 +37,7 @@ import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
 import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
+import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -437,6 +438,11 @@ const Service = (
 												<ShowSecurity applicationId={applicationId} />
 												<ShowPorts applicationId={applicationId} />
 												<ShowTraefikConfig applicationId={applicationId} />
+												<TransferService
+													id={applicationId}
+													type="application"
+													currentServerId={data?.serverId}
+												/>
 											</div>
 										</TabsContent>
 									)}

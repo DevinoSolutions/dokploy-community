@@ -213,3 +213,9 @@ export const apiRebuildMysql = createSchema
 		mysqlId: true,
 	})
 	.required();
+
+// Schema for transferring mysql to another server
+export const apiTransferMySql = z.object({
+	mysqlId: z.string().min(1),
+	targetServerId: z.string().trim().nullable(),
+});
