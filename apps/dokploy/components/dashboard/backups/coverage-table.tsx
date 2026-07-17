@@ -497,18 +497,27 @@ export const CoverageTable = ({ serverId }: { serverId?: string }) => {
 																	{envExpanded &&
 																		environment.visibleServices.map(
 																			(service) => {
+																				// Dedupe by destination name + prefix so each
+																				// distinct target (e.g. same bucket, different
+																				// prefix) is listed once.
 																				const destinations = Array.from(
-																					new Set(
+																					new Map(
 																						[
 																							...service.dumpBackups,
 																							...service.volumeBackups,
 																						]
-																							.map(
+																							.filter(
 																								(entry) =>
-																									entry.destinationName,
+																									!!entry.destinationName,
 																							)
-																							.filter((name) => !!name),
-																					),
+																							.map((entry) => [
+																								`${entry.destinationName} ${entry.prefix}`,
+																								{
+																									name: entry.destinationName,
+																									prefix: entry.prefix,
+																								},
+																							]),
+																					).values(),
 																				);
 																				const lastRunStatus = [
 																					...service.dumpBackups,
@@ -574,9 +583,28 @@ export const CoverageTable = ({ serverId }: { serverId?: string }) => {
 																							</TableCell>
 																							<TableCell>
 																								{destinations.length > 0 ? (
-																									<span className="text-sm text-muted-foreground">
-																										{destinations.join(", ")}
-																									</span>
+																									<div className="flex flex-col gap-0.5">
+																										{destinations.map(
+																											(destination) => (
+																												<span
+																													key={`${destination.name} ${destination.prefix}`}
+																													className="block max-w-[18rem] truncate text-sm text-muted-foreground"
+																													title={
+																														destination.prefix
+																															? `${destination.name} · ${destination.prefix}`
+																															: destination.name
+																													}
+																												>
+																													{destination.name}
+																													{destination.prefix ? (
+																														<span className="text-muted-foreground/70">
+																															{` · ${destination.prefix}`}
+																														</span>
+																													) : null}
+																												</span>
+																											),
+																										)}
+																									</div>
 																								) : (
 																									<span className="text-muted-foreground">
 																										—
