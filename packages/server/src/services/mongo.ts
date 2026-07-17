@@ -6,6 +6,7 @@ import {
 	compose,
 	mongo,
 } from "@dokploy/server/db/schema";
+import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { generatePassword } from "@dokploy/server/templates";
 import { buildMongo } from "@dokploy/server/utils/databases/mongo";
 import { pullImage } from "@dokploy/server/utils/docker/utils";
@@ -47,6 +48,7 @@ export const createMongo = async (input: z.infer<typeof apiCreateMongo>) => {
 		});
 	}
 
+	resyncBackupPoliciesForEnvironment(newMongo.environmentId);
 	return newMongo;
 };
 

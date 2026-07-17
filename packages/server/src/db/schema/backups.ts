@@ -12,6 +12,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { generateAppName } from ".";
+import { backupPolicies } from "./backup-policy";
 import { compose } from "./compose";
 import { deployments } from "./deployment";
 import { destinations } from "./destination";
@@ -81,6 +82,15 @@ export const backups = pgTable("backup", {
 		onDelete: "cascade",
 	}),
 	userId: text("userId").references(() => user.id),
+	// Set when this row was materialized by a backup policy. On policy deletion
+	// the FK is set null, demoting the row to a manual backup (cron keeps
+	// running).
+	backupPolicyId: text("backupPolicyId").references(
+		(): AnyPgColumn => backupPolicies.backupPolicyId,
+		{
+			onDelete: "set null",
+		},
+	),
 	// Only for compose backups
 	metadata: jsonb("metadata").$type<
 		| {
@@ -135,6 +145,10 @@ export const backupsRelations = relations(backups, ({ one, many }) => ({
 	compose: one(compose, {
 		fields: [backups.composeId],
 		references: [compose.composeId],
+	}),
+	backupPolicy: one(backupPolicies, {
+		fields: [backups.backupPolicyId],
+		references: [backupPolicies.backupPolicyId],
 	}),
 	deployments: many(deployments),
 }));

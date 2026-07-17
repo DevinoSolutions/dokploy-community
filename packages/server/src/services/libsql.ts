@@ -5,6 +5,7 @@ import {
 	buildAppName,
 	libsql,
 } from "@dokploy/server/db/schema";
+import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { generatePassword } from "@dokploy/server/templates";
 import { buildLibsql } from "@dokploy/server/utils/databases/libsql";
 import { pullImage } from "@dokploy/server/utils/docker/utils";
@@ -46,6 +47,7 @@ export const createLibsql = async (input: z.infer<typeof apiCreateLibsql>) => {
 		});
 	}
 
+	resyncBackupPoliciesForEnvironment(newLibsql.environmentId);
 	return newLibsql;
 };
 

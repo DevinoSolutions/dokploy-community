@@ -5,6 +5,7 @@ import {
 	buildAppName,
 	postgres,
 } from "@dokploy/server/db/schema";
+import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { generatePassword } from "@dokploy/server/templates";
 import { buildPostgres } from "@dokploy/server/utils/databases/postgres";
 import { pullImage } from "@dokploy/server/utils/docker/utils";
@@ -61,6 +62,7 @@ export const createPostgres = async (
 		});
 	}
 
+	resyncBackupPoliciesForEnvironment(newPostgres.environmentId);
 	return newPostgres;
 };
 export const findPostgresById = async (postgresId: string) => {

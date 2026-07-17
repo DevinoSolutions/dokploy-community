@@ -2,6 +2,7 @@ import {
 	ClipboardList,
 	DatabaseBackup,
 	Loader2,
+	PenBoxIcon,
 	Play,
 	Trash2,
 } from "lucide-react";
@@ -124,6 +125,10 @@ export const ShowVolumeBackups = ({
 								volumeBackup.mongo?.serverId ||
 								volumeBackup.redis?.serverId ||
 								volumeBackup.compose?.serverId;
+							const managedByPolicy = Boolean(
+								(volumeBackup as { backupPolicyId?: string | null })
+									.backupPolicyId,
+							);
 							return (
 								<div
 									key={volumeBackup.volumeBackupId}
@@ -146,6 +151,14 @@ export const ShowVolumeBackups = ({
 												>
 													{volumeBackup.enabled ? "Enabled" : "Disabled"}
 												</Badge>
+												{managedByPolicy && (
+													<Badge
+														variant="blue"
+														className="text-[10px] px-1 py-0"
+													>
+														Policy
+													</Badge>
+												)}
 											</div>
 											<div className="flex items-center gap-2 text-sm text-muted-foreground">
 												<Badge
@@ -193,40 +206,70 @@ export const ShowVolumeBackups = ({
 												</TooltipContent>
 											</Tooltip>
 										</TooltipProvider>
-										<HandleVolumeBackups
-											volumeBackupId={volumeBackup.volumeBackupId}
-											id={id}
-											volumeBackupType={type}
-										/>
-										<DialogAction
-											title="Delete Volume Backup"
-											description="Are you sure you want to delete this volume backup?"
-											type="destructive"
-											onClick={async () => {
-												await deleteVolumeBackup({
-													volumeBackupId: volumeBackup.volumeBackupId,
-												})
-													.then(() => {
-														utils.volumeBackups.list.invalidate({
-															id,
-															volumeBackupType: type,
-														});
-														toast.success("Volume backup deleted successfully");
-													})
-													.catch(() => {
-														toast.error("Error deleting volume backup");
-													});
-											}}
-										>
-											<Button
-												variant="ghost"
-												size="icon"
-												className="group hover:bg-red-500/10"
-												isLoading={isDeleting}
-											>
-												<Trash2 className="size-4 text-primary group-hover:text-red-500" />
-											</Button>
-										</DialogAction>
+										{managedByPolicy ? (
+											<TooltipProvider delayDuration={0}>
+												<Tooltip>
+													<TooltipTrigger asChild>
+														<span className="flex items-center gap-1.5">
+															<Button
+																type="button"
+																variant="ghost"
+																size="icon"
+																disabled
+															>
+																<PenBoxIcon className="size-3.5 text-muted-foreground" />
+															</Button>
+															<Button variant="ghost" size="icon" disabled>
+																<Trash2 className="size-4 text-muted-foreground" />
+															</Button>
+														</span>
+													</TooltipTrigger>
+													<TooltipContent className="max-w-60">
+														Managed by a backup policy — edit the policy in the
+														Backups tab
+													</TooltipContent>
+												</Tooltip>
+											</TooltipProvider>
+										) : (
+											<>
+												<HandleVolumeBackups
+													volumeBackupId={volumeBackup.volumeBackupId}
+													id={id}
+													volumeBackupType={type}
+												/>
+												<DialogAction
+													title="Delete Volume Backup"
+													description="Are you sure you want to delete this volume backup?"
+													type="destructive"
+													onClick={async () => {
+														await deleteVolumeBackup({
+															volumeBackupId: volumeBackup.volumeBackupId,
+														})
+															.then(() => {
+																utils.volumeBackups.list.invalidate({
+																	id,
+																	volumeBackupType: type,
+																});
+																toast.success(
+																	"Volume backup deleted successfully",
+																);
+															})
+															.catch(() => {
+																toast.error("Error deleting volume backup");
+															});
+													}}
+												>
+													<Button
+														variant="ghost"
+														size="icon"
+														className="group hover:bg-red-500/10"
+														isLoading={isDeleting}
+													>
+														<Trash2 className="size-4 text-primary group-hover:text-red-500" />
+													</Button>
+												</DialogAction>
+											</>
+										)}
 									</div>
 								</div>
 							);

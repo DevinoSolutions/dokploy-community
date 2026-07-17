@@ -3,6 +3,7 @@ import { adminRouter } from "./routers/admin";
 import { aiRouter } from "./routers/ai";
 import { applicationRouter } from "./routers/application";
 import { backupRouter } from "./routers/backup";
+import { backupPolicyRouter } from "./routers/backup-policy";
 import { bitbucketRouter } from "./routers/bitbucket";
 import { certificateRouter } from "./routers/certificate";
 import { cloudflareRouter } from "./routers/cloudflare";
@@ -62,6 +63,7 @@ export const appRouter = createTRPCRouter({
 	admin: adminRouter,
 	application: applicationRouter,
 	backup: backupRouter,
+	backupPolicy: backupPolicyRouter,
 	bitbucket: bitbucketRouter,
 	network: networkRouter,
 	certificates: certificateRouter,

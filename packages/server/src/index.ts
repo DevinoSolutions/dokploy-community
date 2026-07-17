@@ -10,6 +10,7 @@ export * from "./monitoring/utils";
 export * from "./services/admin";
 export * from "./services/application";
 export * from "./services/backup";
+export * from "./services/backup-policy";
 export * from "./services/bitbucket";
 export * from "./services/certificate";
 export * from "./services/cloudflare";
