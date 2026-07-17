@@ -1,6 +1,16 @@
-import { ExternalLink, Loader2, TableProperties } from "lucide-react";
+import {
+	Box,
+	CheckCircle2,
+	ChevronRight,
+	ExternalLink,
+	Folder,
+	Loader2,
+	TableProperties,
+	TriangleAlert,
+	X,
+} from "lucide-react";
 import Link from "next/link";
-import { Fragment, useMemo } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -18,14 +28,29 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import {
+	isProductionEnvironment,
+	isServiceShownByDefault,
+} from "@/lib/backup-coverage";
 import { cn } from "@/lib/utils";
 import type { RouterOutputs } from "@/utils/api";
 import { api } from "@/utils/api";
+import {
+	getProjectFaviconUrls,
+	ProjectIcon,
+} from "../projects/project-icon";
+import {
+	CoverageEnvFilter,
+	type EnvironmentMode,
+	type FilterEnvironment,
+} from "./coverage-env-filter";
 import { ServiceTypeIcon } from "./service-type-icon";
 
 type CoverageService =
 	RouterOutputs["backupPolicy"]["coverage"]["services"][number];
 type CoverageEntry = CoverageService["dumpBackups"][number];
+
+const COLUMN_COUNT = 6;
 
 // Prefer a policy-managed entry so the cell shows the policy name; fall back to
 // the first manual entry.
@@ -41,9 +66,6 @@ const CoverageCell = ({
 }) => {
 	if (!capable) {
 		return <span className="text-xs text-muted-foreground">n/a</span>;
-	}
-	if (entries.length === 0) {
-		return <span className="text-muted-foreground">—</span>;
 	}
 	const entry = pickEntry(entries);
 	if (!entry) {
@@ -73,41 +95,254 @@ const statusDotClass = (status?: string) => {
 	}
 };
 
-export const CoverageTable = () => {
-	const { data, isLoading } = api.backupPolicy.coverage.useQuery();
+const isCovered = (service: CoverageService) =>
+	service.dumpBackups.length > 0 || service.volumeBackups.length > 0;
 
-	// Group the flat service list into project → environment → services while
-	// preserving first-seen order.
-	const grouped = useMemo(() => {
+/** Rollup shown on a collapsed project/environment node. */
+const RollupBadge = ({ uncovered }: { uncovered: number }) =>
+	uncovered > 0 ? (
+		<Badge variant="orange" className="gap-1">
+			<TriangleAlert className="size-3" />
+			{uncovered} not covered
+		</Badge>
+	) : (
+		<CheckCircle2 className="size-4 text-green-500" />
+	);
+
+const ExpandChevron = ({ expanded }: { expanded: boolean }) => (
+	<ChevronRight
+		className={cn(
+			"size-4 shrink-0 text-muted-foreground transition-transform",
+			expanded && "rotate-90",
+		)}
+	/>
+);
+
+interface EnvironmentNode {
+	id: string;
+	name: string;
+	isProduction: boolean;
+	projectName: string;
+	visibleServices: CoverageService[];
+	hiddenCount: number;
+	uncoveredCount: number;
+}
+
+interface ProjectNode {
+	id: string;
+	name: string;
+	logo: string | null;
+	faviconUrls: string[];
+	environments: EnvironmentNode[];
+	uncoveredCount: number;
+}
+
+// Child containers of a compose service, lazy-loaded on expand.
+const ComposeChildRows = ({ composeId }: { composeId: string }) => {
+	const { data, isPending } = api.backupPolicy.composeChildren.useQuery({
+		composeId,
+	});
+
+	if (isPending) {
+		return (
+			<TableRow>
+				<TableCell colSpan={COLUMN_COUNT} className="py-2 pl-[4.25rem]">
+					<span className="flex items-center gap-2 text-xs text-muted-foreground">
+						<Loader2 className="size-3.5 animate-spin" />
+						Loading compose services...
+					</span>
+				</TableCell>
+			</TableRow>
+		);
+	}
+
+	if (data?.error) {
+		return (
+			<TableRow>
+				<TableCell colSpan={COLUMN_COUNT} className="py-2 pl-[4.25rem]">
+					<span className="flex items-center gap-2 text-xs text-muted-foreground">
+						<TriangleAlert className="size-3.5 text-orange-500" />
+						{data.error}
+					</span>
+				</TableCell>
+			</TableRow>
+		);
+	}
+
+	return (
+		<>
+			{data?.children.map((child) => (
+				<TableRow key={child.name} className="bg-muted/20 hover:bg-muted/30">
+					<TableCell className="py-2 pl-[4.25rem]">
+						<div className="flex items-center gap-2">
+							{child.dbKind ? (
+								<ServiceTypeIcon type={child.dbKind} />
+							) : (
+								<Box className="size-4 text-muted-foreground" />
+							)}
+							<span className="text-sm">{child.name}</span>
+							{child.image && (
+								<span className="truncate text-xs text-muted-foreground">
+									{child.image}
+								</span>
+							)}
+						</div>
+					</TableCell>
+					<TableCell className="py-2">
+						<span className="text-xs text-muted-foreground">n/a</span>
+					</TableCell>
+					<TableCell className="py-2">
+						{child.volumes.length > 0 ? (
+							<div className="flex flex-wrap gap-1">
+								{child.volumes.map((volume) => (
+									<Badge
+										key={volume.name}
+										variant={volume.covered ? "green" : "orange"}
+										className="gap-1 text-[10px]"
+										title={
+											volume.covered
+												? "Covered by a volume backup"
+												: "No volume backup covers this volume"
+										}
+									>
+										{volume.covered ? (
+											<CheckCircle2 className="size-3" />
+										) : (
+											<X className="size-3" />
+										)}
+										{volume.name}
+									</Badge>
+								))}
+							</div>
+						) : (
+							<span className="text-muted-foreground">—</span>
+						)}
+					</TableCell>
+					<TableCell className="py-2" />
+					<TableCell className="py-2" />
+					<TableCell className="py-2" />
+				</TableRow>
+			))}
+		</>
+	);
+};
+
+export const CoverageTable = () => {
+	const { data, isPending } = api.backupPolicy.coverage.useQuery();
+
+	// Expansion overrides keyed by node id; absent = the node-type default
+	// (projects expanded, environments and compose nodes collapsed).
+	const [expandOverrides, setExpandOverrides] = useState<
+		Record<string, boolean>
+	>({});
+	const [envModes, setEnvModes] = useState<Record<string, EnvironmentMode>>(
+		{},
+	);
+
+	const isExpanded = (key: string, fallback: boolean) =>
+		expandOverrides[key] ?? fallback;
+	const toggle = (key: string, fallback: boolean) =>
+		setExpandOverrides((prev) => ({
+			...prev,
+			[key]: !(prev[key] ?? fallback),
+		}));
+
+	// Every environment (unfiltered) for the filter popover.
+	const filterEnvironments = useMemo<FilterEnvironment[]>(() => {
+		const seen = new Map<string, FilterEnvironment>();
+		for (const service of data?.services ?? []) {
+			if (!seen.has(service.environment.id)) {
+				seen.set(service.environment.id, {
+					id: service.environment.id,
+					name: service.environment.name,
+					projectName: service.project.name,
+					isProduction: isProductionEnvironment(service.environment.name),
+				});
+			}
+		}
+		return Array.from(seen.values());
+	}, [data]);
+
+	// Group the flat service list into project → environment nodes, applying
+	// the environment filter, while preserving first-seen order.
+	const tree = useMemo<ProjectNode[]>(() => {
 		const projects = new Map<
 			string,
-			{
-				name: string;
-				environments: Map<
+			ProjectNode & {
+				environmentMap: Map<
 					string,
-					{ id: string; name: string; services: CoverageService[] }
+					EnvironmentNode & { allServices: CoverageService[] }
 				>;
 			}
 		>();
 		for (const service of data?.services ?? []) {
 			let project = projects.get(service.project.id);
 			if (!project) {
-				project = { name: service.project.name, environments: new Map() };
+				project = {
+					id: service.project.id,
+					name: service.project.name,
+					logo: service.project.logo,
+					faviconUrls: [],
+					environments: [],
+					uncoveredCount: 0,
+					environmentMap: new Map(),
+				};
 				projects.set(service.project.id, project);
 			}
-			let environment = project.environments.get(service.environment.id);
+			let environment = project.environmentMap.get(service.environment.id);
 			if (!environment) {
 				environment = {
 					id: service.environment.id,
 					name: service.environment.name,
-					services: [],
+					isProduction: isProductionEnvironment(service.environment.name),
+					projectName: service.project.name,
+					visibleServices: [],
+					hiddenCount: 0,
+					uncoveredCount: 0,
+					allServices: [],
 				};
-				project.environments.set(service.environment.id, environment);
+				project.environmentMap.set(service.environment.id, environment);
 			}
-			environment.services.push(service);
+			environment.allServices.push(service);
 		}
-		return projects;
-	}, [data]);
+
+		const result: ProjectNode[] = [];
+		for (const project of projects.values()) {
+			const allProjectDomains: Array<{ host: string; https: boolean }> = [];
+			for (const environment of project.environmentMap.values()) {
+				for (const service of environment.allServices) {
+					allProjectDomains.push(...service.domains);
+				}
+			}
+			project.faviconUrls = getProjectFaviconUrls(allProjectDomains);
+
+			for (const environment of project.environmentMap.values()) {
+				const mode = envModes[environment.id] ?? "default";
+				if (mode === "hidden") continue;
+				environment.visibleServices =
+					mode === "all"
+						? environment.allServices
+						: environment.allServices.filter((service) =>
+								isServiceShownByDefault(service, environment.name),
+							);
+				environment.hiddenCount =
+					environment.allServices.length -
+					environment.visibleServices.length;
+				environment.uncoveredCount = environment.visibleServices.filter(
+					(service) => !isCovered(service),
+				).length;
+				// Keep fully-filtered environments visible so their "(N hidden)"
+				// hint reveals that the filter is active.
+				project.environments.push(environment);
+				project.uncoveredCount += environment.uncoveredCount;
+			}
+			if (project.environments.length > 0) {
+				const { environmentMap: _environmentMap, ...node } = project;
+				result.push(node);
+			}
+		}
+		return result;
+	}, [data, envModes]);
 
 	return (
 		<Card className="bg-background">
@@ -118,16 +353,16 @@ export const CoverageTable = () => {
 				</CardTitle>
 				<CardDescription>
 					Every service in the organization and how it is backed up. Redis and
-					applications are covered via volume backups; Compose databases via
-					volumes in v1.
+					applications are covered via volume backups; expand a compose to see
+					the databases and volumes inside it.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="flex flex-col gap-4">
-				{isLoading ? (
+				{isPending ? (
 					<div className="flex min-h-[20vh] items-center justify-center">
 						<Loader2 className="size-6 animate-spin text-muted-foreground" />
 					</div>
-				) : grouped.size === 0 ? (
+				) : (data?.services.length ?? 0) === 0 ? (
 					<div className="flex min-h-[20vh] flex-col items-center justify-center gap-3">
 						<TableProperties className="size-8 text-muted-foreground" />
 						<span className="text-base text-muted-foreground">
@@ -135,122 +370,257 @@ export const CoverageTable = () => {
 						</span>
 					</div>
 				) : (
-					<div className="overflow-x-auto">
-						<Table>
-							<TableHeader>
-								<TableRow>
-									<TableHead>Service</TableHead>
-									<TableHead>Dump</TableHead>
-									<TableHead>Volume</TableHead>
-									<TableHead>Destinations</TableHead>
-									<TableHead className="text-center">Last run</TableHead>
-									<TableHead />
-								</TableRow>
-							</TableHeader>
-							<TableBody>
-								{Array.from(grouped.entries()).map(([projectId, project]) =>
-									Array.from(project.environments.values()).map(
-										(environment) => (
-											<Fragment key={`${projectId}-${environment.id}`}>
-												<TableRow className="bg-muted/40 hover:bg-muted/40">
-													<TableCell
-														colSpan={6}
-														className="py-2 text-xs font-medium text-muted-foreground"
+					<>
+						<div className="flex flex-wrap items-center gap-2">
+							<CoverageEnvFilter
+								environments={filterEnvironments}
+								modes={envModes}
+								onChange={setEnvModes}
+							/>
+							<span className="text-xs text-muted-foreground">
+								Non-production environments show databases and services with
+								volumes by default.
+							</span>
+						</div>
+						{tree.length === 0 ? (
+							<div className="flex min-h-[10vh] flex-col items-center justify-center gap-2">
+								<span className="text-sm text-muted-foreground">
+									Everything is hidden by the current environment filter.
+								</span>
+							</div>
+						) : (
+							<div className="overflow-x-auto">
+								<Table>
+									<TableHeader>
+										<TableRow>
+											<TableHead>Service</TableHead>
+											<TableHead>Dump</TableHead>
+											<TableHead>Volume</TableHead>
+											<TableHead>Destinations</TableHead>
+											<TableHead className="text-center">Last run</TableHead>
+											<TableHead />
+										</TableRow>
+									</TableHeader>
+									<TableBody>
+										{tree.map((project) => {
+											const projectExpanded = isExpanded(
+												`p:${project.id}`,
+												true,
+											);
+											return (
+												<Fragment key={project.id}>
+													<TableRow
+														className="cursor-pointer bg-muted/40 hover:bg-muted/60"
+														onClick={() => toggle(`p:${project.id}`, true)}
 													>
-														{project.name} / {environment.name}
-													</TableCell>
-												</TableRow>
-												{environment.services.map((service) => {
-													const destinations = Array.from(
-														new Set(
-															[...service.dumpBackups, ...service.volumeBackups]
-																.map((entry) => entry.destinationName)
-																.filter((name) => !!name),
-														),
-													);
-													const lastRunStatus = [
-														...service.dumpBackups,
-														...service.volumeBackups,
-													].find((entry) => entry.lastRunStatus)?.lastRunStatus;
-													const notCovered =
-														service.dumpBackups.length === 0 &&
-														service.volumeBackups.length === 0;
-													return (
-														<TableRow
-															key={service.serviceId}
-															className={cn(
-																notCovered &&
-																	"bg-orange-500/5 hover:bg-orange-500/10",
-															)}
+														<TableCell
+															colSpan={COLUMN_COUNT}
+															className="py-2"
 														>
-															<TableCell>
-																<div className="flex items-center gap-2">
-																	<ServiceTypeIcon type={service.type} />
-																	<span className="font-medium">
-																		{service.name}
-																	</span>
-																	{notCovered && (
-																		<Badge variant="orange">Not covered</Badge>
-																	)}
-																</div>
-															</TableCell>
-															<TableCell>
-																<CoverageCell
-																	entries={service.dumpBackups}
-																	capable={service.dumpCapable}
+															<div className="flex items-center gap-2">
+																<ExpandChevron expanded={projectExpanded} />
+																<ProjectIcon
+																	logo={project.logo}
+																	faviconUrls={project.faviconUrls}
+																	className="size-4 rounded-sm object-contain"
+																	fallback={
+																		<Folder className="size-4 text-muted-foreground" />
+																	}
 																/>
-															</TableCell>
-															<TableCell>
-																<CoverageCell
-																	entries={service.volumeBackups}
-																	capable
-																/>
-															</TableCell>
-															<TableCell>
-																{destinations.length > 0 ? (
-																	<span className="text-sm text-muted-foreground">
-																		{destinations.join(", ")}
-																	</span>
-																) : (
-																	<span className="text-muted-foreground">
-																		—
-																	</span>
-																)}
-															</TableCell>
-															<TableCell className="text-center">
-																{lastRunStatus ? (
-																	<span
-																		className={cn(
-																			"inline-block size-2 rounded-full",
-																			statusDotClass(lastRunStatus),
-																		)}
-																		title={lastRunStatus}
+																<span className="font-medium">
+																	{project.name}
+																</span>
+																{!projectExpanded && (
+																	<RollupBadge
+																		uncovered={project.uncoveredCount}
 																	/>
-																) : (
-																	<span className="text-muted-foreground">
-																		—
-																	</span>
 																)}
-															</TableCell>
-															<TableCell className="text-right">
-																<Link
-																	href={`/dashboard/project/${projectId}/environment/${environment.id}`}
-																	className="inline-flex items-center text-muted-foreground hover:text-foreground"
-																	title="Open service"
-																>
-																	<ExternalLink className="size-4" />
-																</Link>
-															</TableCell>
-														</TableRow>
-													);
-												})}
-											</Fragment>
-										),
-									),
-								)}
-							</TableBody>
-						</Table>
-					</div>
+															</div>
+														</TableCell>
+													</TableRow>
+													{projectExpanded &&
+														project.environments.map((environment) => {
+															const envKey = `e:${environment.id}`;
+															const envExpanded = isExpanded(envKey, false);
+															return (
+																<Fragment key={environment.id}>
+																	<TableRow
+																		className="cursor-pointer hover:bg-muted/40"
+																		onClick={() => toggle(envKey, false)}
+																	>
+																		<TableCell
+																			colSpan={COLUMN_COUNT}
+																			className="py-2 pl-8"
+																		>
+																			<div className="flex items-center gap-2">
+																				<ExpandChevron
+																					expanded={envExpanded}
+																				/>
+																				<span className="text-sm">
+																					{environment.name}
+																				</span>
+																				{environment.hiddenCount > 0 && (
+																					<span className="text-xs text-muted-foreground">
+																						({environment.hiddenCount} hidden)
+																					</span>
+																				)}
+																				{!envExpanded &&
+																					environment.visibleServices.length >
+																						0 && (
+																						<RollupBadge
+																							uncovered={
+																								environment.uncoveredCount
+																							}
+																						/>
+																					)}
+																			</div>
+																		</TableCell>
+																	</TableRow>
+																	{envExpanded &&
+																		environment.visibleServices.map(
+																			(service) => {
+																				const destinations = Array.from(
+																					new Set(
+																						[
+																							...service.dumpBackups,
+																							...service.volumeBackups,
+																						]
+																							.map(
+																								(entry) =>
+																									entry.destinationName,
+																							)
+																							.filter((name) => !!name),
+																					),
+																				);
+																				const lastRunStatus = [
+																					...service.dumpBackups,
+																					...service.volumeBackups,
+																				].find(
+																					(entry) => entry.lastRunStatus,
+																				)?.lastRunStatus;
+																				const notCovered =
+																					!isCovered(service);
+																				const composeKey = `c:${service.serviceId}`;
+																				const composeExpanded =
+																					service.type === "compose" &&
+																					isExpanded(composeKey, false);
+																				return (
+																					<Fragment key={service.serviceId}>
+																						<TableRow
+																							className={cn(
+																								notCovered &&
+																									"bg-orange-500/5 hover:bg-orange-500/10",
+																								service.type === "compose" &&
+																									"cursor-pointer",
+																							)}
+																							onClick={
+																								service.type === "compose"
+																									? () =>
+																											toggle(
+																												composeKey,
+																												false,
+																											)
+																									: undefined
+																							}
+																						>
+																							<TableCell className="pl-12">
+																								<div className="flex items-center gap-2">
+																									{service.type ===
+																										"compose" && (
+																										<ExpandChevron
+																											expanded={
+																												composeExpanded
+																											}
+																										/>
+																									)}
+																									<ServiceTypeIcon
+																										type={service.type}
+																									/>
+																									<span className="font-medium">
+																										{service.name}
+																									</span>
+																									{notCovered && (
+																										<Badge variant="orange">
+																											Not covered
+																										</Badge>
+																									)}
+																								</div>
+																							</TableCell>
+																							<TableCell>
+																								<CoverageCell
+																									entries={service.dumpBackups}
+																									capable={service.dumpCapable}
+																								/>
+																							</TableCell>
+																							<TableCell>
+																								<CoverageCell
+																									entries={
+																										service.volumeBackups
+																									}
+																									capable
+																								/>
+																							</TableCell>
+																							<TableCell>
+																								{destinations.length > 0 ? (
+																									<span className="text-sm text-muted-foreground">
+																										{destinations.join(", ")}
+																									</span>
+																								) : (
+																									<span className="text-muted-foreground">
+																										—
+																									</span>
+																								)}
+																							</TableCell>
+																							<TableCell className="text-center">
+																								{lastRunStatus ? (
+																									<span
+																										className={cn(
+																											"inline-block size-2 rounded-full",
+																											statusDotClass(
+																												lastRunStatus,
+																											),
+																										)}
+																										title={lastRunStatus}
+																									/>
+																								) : (
+																									<span className="text-muted-foreground">
+																										—
+																									</span>
+																								)}
+																							</TableCell>
+																							<TableCell className="text-right">
+																								<Link
+																									href={`/dashboard/project/${project.id}/environment/${environment.id}`}
+																									className="inline-flex items-center text-muted-foreground hover:text-foreground"
+																									title="Open service"
+																									onClick={(event) =>
+																										event.stopPropagation()
+																									}
+																								>
+																									<ExternalLink className="size-4" />
+																								</Link>
+																							</TableCell>
+																						</TableRow>
+																						{composeExpanded && (
+																							<ComposeChildRows
+																								composeId={service.serviceId}
+																							/>
+																						)}
+																					</Fragment>
+																				);
+																			},
+																		)}
+																</Fragment>
+															);
+														})}
+												</Fragment>
+											);
+										})}
+									</TableBody>
+								</Table>
+							</div>
+						)}
+					</>
 				)}
 				<AlertBlock type="info">
 					A policy-managed backup and a manual backup can coexist on the same

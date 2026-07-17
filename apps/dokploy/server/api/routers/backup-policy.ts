@@ -2,6 +2,9 @@ import {
 	createBackupPolicy,
 	findBackupById,
 	findBackupPolicyById,
+	findComposeById,
+	loadDockerCompose,
+	loadDockerComposeRemote,
 	findLibsqlByBackupId,
 	findMariadbByBackupId,
 	findMongoByBackupId,
@@ -28,6 +31,12 @@ import {
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, inArray, or, type SQL, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { parse } from "yaml";
+import { z } from "zod";
+import {
+	extractComposeChildren,
+	isComposeVolumeCovered,
+} from "@/lib/backup-coverage";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
@@ -45,6 +54,7 @@ import {
 	libsql,
 	mariadb,
 	mongo,
+	mounts,
 	mysql,
 	postgres,
 	projects,
@@ -107,9 +117,13 @@ interface CoverageService {
 	name: string;
 	appName: string | null;
 	serverId: string | null;
-	project: { id: string; name: string };
+	project: { id: string; name: string; logo: string | null };
 	environment: { id: string; name: string };
 	dumpCapable: boolean;
+	/** Whether the service has at least one named volume mount configured. */
+	hasVolumes: boolean;
+	/** Domains (applications/compose only) — used for the project favicon. */
+	domains: Array<{ host: string; https: boolean }>;
 	dumpBackups: CoverageBackupEntry[];
 	volumeBackups: CoverageBackupEntry[];
 }
@@ -612,7 +626,7 @@ export const backupPolicyRouter = createTRPCRouter({
 
 		const projectRows = await db.query.projects.findMany({
 			where: projectWhere,
-			columns: { projectId: true, name: true },
+			columns: { projectId: true, name: true, logo: true },
 			with: {
 				environments: {
 					where: environmentWhere,
@@ -621,6 +635,9 @@ export const backupPolicyRouter = createTRPCRouter({
 						applications: {
 							where: serviceFilter(applications.applicationId),
 							columns: { applicationId: true, ...serviceColumns },
+							with: {
+								domains: { columns: { host: true, https: true } },
+							},
 						},
 						postgres: {
 							where: serviceFilter(postgres.postgresId),
@@ -649,6 +666,9 @@ export const backupPolicyRouter = createTRPCRouter({
 						compose: {
 							where: serviceFilter(compose.composeId),
 							columns: { composeId: true, ...serviceColumns },
+							with: {
+								domains: { columns: { host: true, https: true } },
+							},
 						},
 					},
 				},
@@ -674,12 +694,20 @@ export const backupPolicyRouter = createTRPCRouter({
 							name: row.name as string,
 							appName: (row.appName as string) ?? null,
 							serverId: (row.serverId as string) ?? null,
-							project: { id: project.projectId, name: project.name },
+							project: {
+								id: project.projectId,
+								name: project.name,
+								logo: project.logo ?? null,
+							},
 							environment: {
 								id: environment.environmentId,
 								name: environment.name,
 							},
 							dumpCapable: DUMP_CAPABLE_TYPES.has(type),
+							hasVolumes: false,
+							domains:
+								(row.domains as Array<{ host: string; https: boolean }>) ??
+								[],
 							dumpBackups: [],
 							volumeBackups: [],
 						});
@@ -865,6 +893,126 @@ export const backupPolicyRouter = createTRPCRouter({
 			}
 		}
 
+		// --- Named volume mounts (drives the "databases & volumes" env filter) ---
+		const mountConditions: SQL[] = [];
+		if (idsByType.application.length)
+			mountConditions.push(
+				inArray(mounts.applicationId, idsByType.application),
+			);
+		if (idsByType.postgres.length)
+			mountConditions.push(inArray(mounts.postgresId, idsByType.postgres));
+		if (idsByType.mysql.length)
+			mountConditions.push(inArray(mounts.mysqlId, idsByType.mysql));
+		if (idsByType.mariadb.length)
+			mountConditions.push(inArray(mounts.mariadbId, idsByType.mariadb));
+		if (idsByType.mongo.length)
+			mountConditions.push(inArray(mounts.mongoId, idsByType.mongo));
+		if (idsByType.libsql.length)
+			mountConditions.push(inArray(mounts.libsqlId, idsByType.libsql));
+		if (idsByType.redis.length)
+			mountConditions.push(inArray(mounts.redisId, idsByType.redis));
+		if (idsByType.compose.length)
+			mountConditions.push(inArray(mounts.composeId, idsByType.compose));
+
+		if (mountConditions.length) {
+			const mountRows = await db.query.mounts.findMany({
+				where: and(eq(mounts.type, "volume"), or(...mountConditions)),
+				columns: {
+					applicationId: true,
+					postgresId: true,
+					mysqlId: true,
+					mariadbId: true,
+					mongoId: true,
+					libsqlId: true,
+					redisId: true,
+					composeId: true,
+				},
+			});
+			for (const row of mountRows) {
+				const serviceId =
+					row.applicationId ||
+					row.postgresId ||
+					row.mysqlId ||
+					row.mariadbId ||
+					row.mongoId ||
+					row.libsqlId ||
+					row.redisId ||
+					row.composeId;
+				if (!serviceId) continue;
+				const service = serviceById.get(serviceId);
+				if (service) service.hasVolumes = true;
+			}
+		}
+
 		return { services };
 	}),
+
+	// Children of a compose service, parsed from the compose file already on
+	// disk (never clones/fetches — the coverage tree lazy-loads this on
+	// expand). Same per-service authorization pattern as coverage/runNow.
+	// Parse failures degrade to `{ error }` instead of throwing so the Backup
+	// Center page never crashes on a malformed compose file.
+	composeChildren: withPermission("backup", "read")
+		.input(z.object({ composeId: z.string().min(1) }))
+		.query(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				backup: ["read"],
+			});
+			const composeService = await findComposeById(input.composeId);
+			if (
+				composeService.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "You are not allowed to access this compose",
+				});
+			}
+
+			let spec: unknown = null;
+			let error: string | null = null;
+			try {
+				if (composeService.sourceType === "raw") {
+					spec = parse(composeService.composeFile ?? "", {
+						maxAliasCount: 10000,
+					});
+				} else if (composeService.serverId) {
+					spec = await loadDockerComposeRemote(composeService);
+				} else {
+					spec = await loadDockerCompose(composeService);
+				}
+			} catch (parseError) {
+				error = `Could not parse compose file: ${errorMessage(parseError)}`;
+			}
+
+			let children = error ? [] : extractComposeChildren(spec);
+			if (!error && children.length === 0) {
+				error =
+					spec === null
+						? "Compose file not available yet — deploy this compose once to load its services"
+						: "Could not parse compose file: no services found";
+				children = [];
+			}
+
+			// Volume backups configured on this compose, to mark which named
+			// volumes are covered.
+			const volumeRows = await db.query.volumeBackups.findMany({
+				where: eq(volumeBackups.composeId, input.composeId),
+				columns: { volumeName: true },
+			});
+			const backedUpVolumeNames = volumeRows.map((row) => row.volumeName);
+
+			return {
+				error,
+				children: children.map((child) => ({
+					name: child.name,
+					image: child.image,
+					dbKind: child.dbKind,
+					volumes: child.volumes.map((volumeName) => ({
+						name: volumeName,
+						covered: isComposeVolumeCovered(volumeName, backedUpVolumeNames),
+					})),
+				})),
+			};
+		}),
 });
