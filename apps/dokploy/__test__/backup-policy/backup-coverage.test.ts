@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
 	classifyDbImage,
+	type CoverageFacets,
+	DATABASE_SERVICE_TYPES,
+	EMPTY_COVERAGE_FACETS,
 	extractComposeChildren,
+	hasExplicitFacets,
 	isComposeVolumeCovered,
+	isEnvironmentShownByFacets,
 	isProductionEnvironment,
 	isServiceShownByDefault,
+	isServiceShownByFacets,
 } from "@/lib/backup-coverage";
 
 describe("classifyDbImage", () => {
@@ -126,6 +132,146 @@ describe("isServiceShownByDefault", () => {
 		expect(
 			isServiceShownByDefault({ type: "compose", hasVolumes: false }, "dev"),
 		).toBe(false);
+	});
+});
+
+describe("coverage facets", () => {
+	const facets = (partial: Partial<CoverageFacets>): CoverageFacets => ({
+		...EMPTY_COVERAGE_FACETS,
+		...partial,
+	});
+	const app = { type: "application", hasVolumes: false } as const;
+	const appWithVolumes = { type: "application", hasVolumes: true } as const;
+	const postgres = { type: "postgres", hasVolumes: false } as const;
+	const compose = { type: "compose", hasVolumes: false } as const;
+
+	it("detects explicit selections", () => {
+		expect(hasExplicitFacets(EMPTY_COVERAGE_FACETS)).toBe(false);
+		expect(hasExplicitFacets(facets({ environmentNames: ["staging"] }))).toBe(
+			true,
+		);
+		expect(hasExplicitFacets(facets({ serviceTypes: ["postgres"] }))).toBe(
+			true,
+		);
+		expect(hasExplicitFacets(facets({ notCoveredOnly: true }))).toBe(true);
+	});
+
+	it("falls back to the default rule without explicit facets", () => {
+		// Production shows everything; non-prod hides volume-less apps.
+		expect(
+			isServiceShownByFacets(app, "production", false, EMPTY_COVERAGE_FACETS),
+		).toBe(true);
+		expect(
+			isServiceShownByFacets(app, "staging", false, EMPTY_COVERAGE_FACETS),
+		).toBe(false);
+		expect(
+			isServiceShownByFacets(
+				appWithVolumes,
+				"staging",
+				false,
+				EMPTY_COVERAGE_FACETS,
+			),
+		).toBe(true);
+		expect(
+			isServiceShownByFacets(postgres, "staging", false, EMPTY_COVERAGE_FACETS),
+		).toBe(true);
+	});
+
+	it("matches environment names globally, case-insensitively", () => {
+		const selection = facets({ environmentNames: ["Staging"] });
+		expect(isEnvironmentShownByFacets("staging", selection)).toBe(true);
+		expect(isEnvironmentShownByFacets(" STAGING ", selection)).toBe(true);
+		expect(isEnvironmentShownByFacets("production", selection)).toBe(false);
+		// No selection shows every environment.
+		expect(isEnvironmentShownByFacets("anything", EMPTY_COVERAGE_FACETS)).toBe(
+			true,
+		);
+	});
+
+	it("replaces the default rule the moment any facet is explicit", () => {
+		// A volume-less staging app is hidden by default but visible once the
+		// env-name facet selects staging (no type facet active).
+		expect(
+			isServiceShownByFacets(
+				app,
+				"staging",
+				false,
+				facets({ environmentNames: ["staging"] }),
+			),
+		).toBe(true);
+		// Conversely a production database disappears when only staging is picked.
+		expect(
+			isServiceShownByFacets(
+				postgres,
+				"production",
+				false,
+				facets({ environmentNames: ["staging"] }),
+			),
+		).toBe(false);
+	});
+
+	it("filters by service type, including the Databases group", () => {
+		const databasesOnly = facets({ serviceTypes: [...DATABASE_SERVICE_TYPES] });
+		for (const type of DATABASE_SERVICE_TYPES) {
+			expect(
+				isServiceShownByFacets(
+					{ type, hasVolumes: false },
+					"staging",
+					false,
+					databasesOnly,
+				),
+			).toBe(true);
+		}
+		expect(
+			isServiceShownByFacets(app, "production", false, databasesOnly),
+		).toBe(false);
+		expect(
+			isServiceShownByFacets(compose, "production", false, databasesOnly),
+		).toBe(false);
+
+		const appsOnly = facets({ serviceTypes: ["application"] });
+		expect(isServiceShownByFacets(app, "staging", false, appsOnly)).toBe(true);
+		expect(isServiceShownByFacets(postgres, "staging", false, appsOnly)).toBe(
+			false,
+		);
+	});
+
+	it("supports the not-covered-only toggle", () => {
+		const uncoveredOnly = facets({ notCoveredOnly: true });
+		expect(isServiceShownByFacets(app, "staging", false, uncoveredOnly)).toBe(
+			true,
+		);
+		expect(isServiceShownByFacets(app, "staging", true, uncoveredOnly)).toBe(
+			false,
+		);
+		// The default volume rule no longer applies once the toggle is explicit.
+		expect(
+			isServiceShownByFacets(postgres, "staging", true, uncoveredOnly),
+		).toBe(false);
+	});
+
+	it("ANDs facets together while ORing within a facet", () => {
+		const combined = facets({
+			environmentNames: ["staging", "development"],
+			serviceTypes: ["postgres", "redis"],
+			notCoveredOnly: true,
+		});
+		const redis = { type: "redis", hasVolumes: false } as const;
+		// Passes every facet.
+		expect(isServiceShownByFacets(postgres, "staging", false, combined)).toBe(
+			true,
+		);
+		expect(isServiceShownByFacets(redis, "development", false, combined)).toBe(
+			true,
+		);
+		// Fails exactly one facet each.
+		expect(
+			isServiceShownByFacets(postgres, "production", false, combined),
+		).toBe(false);
+		expect(isServiceShownByFacets(app, "staging", false, combined)).toBe(false);
+		expect(isServiceShownByFacets(postgres, "staging", true, combined)).toBe(
+			false,
+		);
 	});
 });
 
