@@ -121,6 +121,8 @@ interface CoverageBackupEntry {
 	source: "policy" | "manual";
 	policyName?: string;
 	destinationName: string;
+	/** Storage prefix under the destination (shown after the destination name). */
+	prefix: string;
 	schedule: string;
 	enabled: boolean;
 	lastRunStatus?: string;
@@ -760,6 +762,7 @@ export const backupPolicyRouter = createTRPCRouter({
 			schedule: string;
 			enabled: boolean | null;
 			backupPolicyId: string | null;
+			prefix?: string | null;
 			destination?: { name: string } | null;
 			backupPolicy?: { name: string } | null;
 			deployments?: Array<{ status: string | null }>;
@@ -768,6 +771,7 @@ export const backupPolicyRouter = createTRPCRouter({
 			source: row.backupPolicyId ? "policy" : "manual",
 			policyName: row.backupPolicy?.name,
 			destinationName: row.destination?.name ?? "",
+			prefix: row.prefix ?? "",
 			schedule: row.schedule,
 			enabled: row.enabled ?? false,
 			lastRunStatus: row.deployments?.[0]?.status ?? undefined,
@@ -796,6 +800,7 @@ export const backupPolicyRouter = createTRPCRouter({
 					schedule: true,
 					enabled: true,
 					backupPolicyId: true,
+					prefix: true,
 					postgresId: true,
 					mysqlId: true,
 					mariadbId: true,
@@ -865,6 +870,7 @@ export const backupPolicyRouter = createTRPCRouter({
 					cronExpression: true,
 					enabled: true,
 					backupPolicyId: true,
+					prefix: true,
 					applicationId: true,
 					postgresId: true,
 					mysqlId: true,

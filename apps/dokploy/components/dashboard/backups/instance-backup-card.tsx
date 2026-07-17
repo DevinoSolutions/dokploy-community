@@ -1,74 +1,45 @@
-import { ArrowRight, Server } from "lucide-react";
-import Link from "next/link";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Server } from "lucide-react";
 import {
 	Card,
-	CardContent,
 	CardDescription,
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
 import { api } from "@/utils/api";
+import { ShowBackups } from "../database/backups/show-backups";
 
-// Read-only summary of the Dokploy instance (web-server) backup. It is not
-// policy-managed — it keeps its own toggle under Web Server settings — so the
-// Center only surfaces its state and links out.
+// The Instance tab renders the exact Web Server Backups card used on
+// Settings → Server (schedules, destination/database/prefix, run/edit/delete
+// actions and Restore). Web-server backups are local-only and admin-managed, so
+// this is hidden on cloud and for non-privileged members.
 export const InstanceBackupCard = () => {
 	const { data: user } = api.user.get.useQuery();
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 
 	const isPrivileged = user?.role === "owner" || user?.role === "admin";
-	const canView = isPrivileged && !isCloud;
 
-	const { data: backupUser } = api.user.getBackups.useQuery(undefined, {
-		enabled: canView,
-	});
-
-	if (!canView) {
-		return null;
-	}
-
-	const backups = backupUser?.backups ?? [];
-	const enabledCount = backups.filter((backup) => backup.enabled).length;
-
-	return (
-		<Card className="bg-background">
-			<CardHeader className="flex flex-row flex-wrap items-start justify-between gap-4">
-				<div className="flex flex-col gap-0.5">
+	if (isCloud || !isPrivileged) {
+		return (
+			<Card className="bg-background">
+				<CardHeader>
 					<CardTitle className="flex flex-row items-center gap-2 text-xl">
 						<Server className="size-6 text-muted-foreground" />
 						Instance backup
 					</CardTitle>
 					<CardDescription>
-						The Dokploy web server backup keeps its own schedule under Web
-						Server settings.
+						The Dokploy web server backup is managed by an administrator on a
+						self-hosted instance.
 					</CardDescription>
-				</div>
-				<Button variant="outline" size="sm" asChild>
-					<Link href="/dashboard/settings/server">
-						Manage
-						<ArrowRight className="size-4" />
-					</Link>
-				</Button>
-			</CardHeader>
-			<CardContent>
-				{backups.length === 0 ? (
-					<p className="text-sm text-muted-foreground">
-						No web server backup configured.
-					</p>
-				) : (
-					<div className="flex items-center gap-2 text-sm">
-						<Badge variant={enabledCount > 0 ? "green" : "blank"}>
-							{enabledCount > 0 ? "Active" : "Inactive"}
-						</Badge>
-						<span className="text-muted-foreground">
-							{backups.length} schedule{backups.length === 1 ? "" : "s"}
-							{enabledCount !== backups.length && ` (${enabledCount} enabled)`}
-						</span>
-					</div>
-				)}
-			</CardContent>
-		</Card>
+				</CardHeader>
+			</Card>
+		);
+	}
+
+	return (
+		<ShowBackups
+			id={user?.userId ?? ""}
+			databaseType="web-server"
+			backupType="database"
+		/>
 	);
 };
