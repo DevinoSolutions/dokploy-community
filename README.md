@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.7**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.8**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.7 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.8 \
   --with-registry-auth \
   dokploy
 ```
@@ -107,6 +107,13 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.8
+
+**Move services between servers, and organization-wide backup policies.** Two headline features plus one additive migration (0191).
+
+- **Move a service to another server** — move an Application, Compose, or database service to a different server in multi-server mode. The move runs a two-phase **scan → execute** flow with a downtime-safe, **copy-based cutover**: the source is stopped, its data is copied to the destination, and the service's `serverId` switches **only after a fully successful copy** — on any failure the source is restarted and left untouched. No migration ([#148](https://github.com/DevinoSolutions/dokploy-community/pull/148), upstream [#3713](https://github.com/Dokploy/dokploy/pull/3713)).
+- **Backup policies + Backup Center** — manage backups organization-wide instead of service by service. Define **policies** scoped to the whole org, specific projects, or specific environments (with a one-click "production environments" preset), covering **database dumps and/or volume backups**, each targeting **one destination** with its own cron schedule and retention. Services added later that match a policy's scope are **auto-covered**. A new **Backup Center** page lists every policy, shows an org-wide **coverage table** (what's backed up vs. not) and the instance backup, and **coexists** with any manual backups you already set up. Redis/applications/Compose are covered via volume backups. Adds additive **migration 0191** ([#153](https://github.com/DevinoSolutions/dokploy-community/pull/153)).
+
 ### New in v0.29.12-community.7
 
 **Four upstream fixes — safe auth-secret migration, domain clearing, and two editor/UI papercuts.** No migrations in this release.
@@ -150,7 +157,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.7
+export DOKPLOY_VERSION=v0.29.12-community.8
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -163,7 +170,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.7   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.8   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -194,6 +201,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 5th release | `v0.29.12-community.5` |
 | v0.29.12 | 6th release | `v0.29.12-community.6` |
 | v0.29.12 | 7th release | `v0.29.12-community.7` |
+| v0.29.12 | 8th release | `v0.29.12-community.8` |
 
 ## Contributing
 
