@@ -5,6 +5,7 @@ import {
 	buildAppName,
 	mariadb,
 } from "@dokploy/server/db/schema";
+import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { generatePassword } from "@dokploy/server/templates";
 import { buildMariadb } from "@dokploy/server/utils/databases/mariadb";
 import { pullImage } from "@dokploy/server/utils/docker/utils";
@@ -51,6 +52,7 @@ export const createMariadb = async (
 		});
 	}
 
+	resyncBackupPoliciesForEnvironment(newMariadb.environmentId);
 	return newMariadb;
 };
 

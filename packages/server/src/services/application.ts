@@ -6,6 +6,7 @@ import {
 	buildAppName,
 } from "@dokploy/server/db/schema";
 import { getAdvancedStats } from "@dokploy/server/monitoring/utils";
+import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import {
 	getBuildCommand,
 	mechanizeDockerContainer,
@@ -69,7 +70,7 @@ export const createApplication = async (
 		});
 	}
 
-	return await db.transaction(async (tx) => {
+	const createdApplication = await db.transaction(async (tx) => {
 		const newApplication = await tx
 			.insert(applications)
 			.values({
@@ -92,6 +93,8 @@ export const createApplication = async (
 
 		return newApplication;
 	});
+	resyncBackupPoliciesForEnvironment(createdApplication.environmentId);
+	return createdApplication;
 };
 
 export const findApplicationById = async (applicationId: string) => {
@@ -504,7 +507,10 @@ export const deployPreviewApplication = async ({
 			previewDeployment.pullRequestNumber,
 		);
 		application.rollbackActive = false;
-		if (!application.buildServerId || application.buildServerId === application.serverId) {
+		if (
+			!application.buildServerId ||
+			application.buildServerId === application.serverId
+		) {
 			application.buildRegistry = null;
 		}
 		application.rollbackRegistry = null;
@@ -635,7 +641,10 @@ export const rebuildPreviewApplication = async ({
 			previewDeployment.pullRequestNumber,
 		);
 		application.rollbackActive = false;
-		if (!application.buildServerId || application.buildServerId === application.serverId) {
+		if (
+			!application.buildServerId ||
+			application.buildServerId === application.serverId
+		) {
 			application.buildRegistry = null;
 		}
 		application.rollbackRegistry = null;

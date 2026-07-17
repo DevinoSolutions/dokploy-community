@@ -1,9 +1,16 @@
 import { relations } from "drizzle-orm";
-import { boolean, integer, pgTable, text } from "drizzle-orm/pg-core";
+import {
+	type AnyPgColumn,
+	boolean,
+	integer,
+	pgTable,
+	text,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { applications } from "./application";
+import { backupPolicies } from "./backup-policy";
 import { compose } from "./compose";
 import { deployments } from "./deployment";
 import { destinations } from "./destination";
@@ -60,6 +67,14 @@ export const volumeBackups = pgTable("volume_backup", {
 	composeId: text("composeId").references(() => compose.composeId, {
 		onDelete: "cascade",
 	}),
+	// Set when this row was materialized by a backup policy. On policy deletion
+	// the FK is set null, demoting the row to a manual volume backup.
+	backupPolicyId: text("backupPolicyId").references(
+		(): AnyPgColumn => backupPolicies.backupPolicyId,
+		{
+			onDelete: "set null",
+		},
+	),
 	createdAt: text("createdAt")
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
@@ -108,6 +123,10 @@ export const volumeBackupsRelations = relations(
 		destination: one(destinations, {
 			fields: [volumeBackups.destinationId],
 			references: [destinations.destinationId],
+		}),
+		backupPolicy: one(backupPolicies, {
+			fields: [volumeBackups.backupPolicyId],
+			references: [backupPolicies.backupPolicyId],
 		}),
 		deployments: many(deployments),
 	}),

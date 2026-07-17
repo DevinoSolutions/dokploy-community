@@ -4,6 +4,7 @@ import {
 	buildAppName,
 	redis,
 } from "@dokploy/server/db/schema";
+import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { generatePassword } from "@dokploy/server/templates";
 import { buildRedis } from "@dokploy/server/utils/databases/redis";
 import { pullImage } from "@dokploy/server/utils/docker/utils";
@@ -46,6 +47,7 @@ export const createRedis = async (input: z.infer<typeof apiCreateRedis>) => {
 		});
 	}
 
+	resyncBackupPoliciesForEnvironment(newRedis.environmentId);
 	return newRedis;
 };
 

@@ -7,6 +7,7 @@ import {
 	cleanAppName,
 	compose,
 } from "@dokploy/server/db/schema";
+import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { getBuildComposeCommand } from "@dokploy/server/utils/builders/compose";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
@@ -145,6 +146,7 @@ export const createCompose = async (
 		});
 	}
 
+	resyncBackupPoliciesForEnvironment(newDestination.environmentId);
 	return newDestination;
 };
 
