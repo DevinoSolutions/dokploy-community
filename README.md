@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.8**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.9**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.8 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.9 \
   --with-registry-auth \
   dokploy
 ```
@@ -107,6 +107,14 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.9
+
+**Backup Center coverage tree.** UX overhaul of the Backup Center's coverage view — no migrations in this release.
+
+- **Coverage tree with rollup badges** — the flat coverage table is now an expandable **Project → Environment → Service** tree; collapsed nodes show an orange "⚠ N not covered" count (green check when fully covered), and project rows reuse the project icons/favicons ([#154](https://github.com/DevinoSolutions/dokploy-community/pull/154)).
+- **Environment filter with production-focused defaults** — a /deployments-style filter shows production environments in full while non-production environments only surface databases and volume-bearing services by default; every environment can be toggled fully on or off, with "(N hidden)" hints ([#154](https://github.com/DevinoSolutions/dokploy-community/pull/154)).
+- **Compose stacks expand into their containers** — a Compose service now lazily expands to the containers parsed from its compose file, with database-image detection (Postgres/MySQL/MariaDB/Mongo/Redis-family) and per-volume coverage badges, so "a compose with a database inside" is obvious at a glance ([#154](https://github.com/DevinoSolutions/dokploy-community/pull/154)).
+
 ### New in v0.29.12-community.8
 
 **Move services between servers, and organization-wide backup policies.** Two headline features plus one additive migration (0191).
@@ -157,7 +165,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.8
+export DOKPLOY_VERSION=v0.29.12-community.9
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -170,7 +178,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.8   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.9   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -202,6 +210,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 6th release | `v0.29.12-community.6` |
 | v0.29.12 | 7th release | `v0.29.12-community.7` |
 | v0.29.12 | 8th release | `v0.29.12-community.8` |
+| v0.29.12 | 9th release | `v0.29.12-community.9` |
 
 ## Contributing
 
