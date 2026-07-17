@@ -16,6 +16,7 @@ import {
 	Cloud,
 	CreditCard,
 	Database,
+	DatabaseBackup,
 	Folder,
 	Forward,
 	GalleryVerticalEnd,
@@ -188,6 +189,15 @@ const MENU: Menu = {
 			url: "/dashboard/schedules",
 			icon: Clock,
 			isEnabled: ({ permissions }) => !!permissions?.organization.update,
+		},
+		{
+			isSingle: true,
+			title: "Backups",
+			url: "/dashboard/backups",
+			icon: DatabaseBackup,
+			// Backup Center: policies + org-wide coverage. Gated by backup.read
+			// (the router enforces it server-side too).
+			isEnabled: ({ permissions }) => !!permissions?.backup?.read,
 		},
 		{
 			isSingle: true,

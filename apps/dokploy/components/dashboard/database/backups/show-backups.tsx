@@ -2,6 +2,7 @@ import {
 	ClipboardList,
 	Database,
 	DatabaseBackup,
+	PenBoxIcon,
 	Play,
 	Trash2,
 } from "lucide-react";
@@ -16,6 +17,7 @@ import {
 } from "@/components/icons/data-tools-icons";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { DialogAction } from "@/components/shared/dialog-action";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -197,6 +199,10 @@ export const ShowBackups = ({
 									{postgres?.backups.map((backup) => {
 										const serverId =
 											"serverId" in postgres ? postgres.serverId : undefined;
+										const managedByPolicy = Boolean(
+											(backup as { backupPolicyId?: string | null })
+												.backupPolicyId,
+										);
 
 										return (
 											<div key={backup.backupId}>
@@ -242,6 +248,9 @@ export const ShowBackups = ({
 																	<span className="text-xs text-muted-foreground">
 																		{backup.enabled ? "Active" : "Inactive"}
 																	</span>
+																	{managedByPolicy && (
+																		<Badge variant="blue">Policy</Badge>
+																	)}
 																</div>
 															</div>
 														</div>
@@ -347,40 +356,74 @@ export const ShowBackups = ({
 															</Tooltip>
 														</TooltipProvider>
 
-														<HandleBackup
-															backupType={backup.backupType}
-															backupId={backup.backupId}
-															databaseType={backup.databaseType}
-															refetch={refetch}
-														/>
-														<DialogAction
-															title="Delete Backup"
-															description="Are you sure you want to delete this backup?"
-															type="destructive"
-															onClick={async () => {
-																await deleteBackup({
-																	backupId: backup.backupId,
-																})
-																	.then(() => {
-																		refetch();
-																		toast.success(
-																			"Backup deleted successfully",
-																		);
-																	})
-																	.catch(() => {
-																		toast.error("Error deleting backup");
-																	});
-															}}
-														>
-															<Button
-																variant="ghost"
-																size="icon"
-																className="group hover:bg-red-500/10 size-8"
-																isLoading={isRemoving}
-															>
-																<Trash2 className="size-4 text-primary group-hover:text-red-500" />
-															</Button>
-														</DialogAction>
+														{managedByPolicy ? (
+															<TooltipProvider delayDuration={0}>
+																<Tooltip>
+																	<TooltipTrigger asChild>
+																		<span className="flex flex-row md:flex-col gap-1.5">
+																			<Button
+																				type="button"
+																				variant="ghost"
+																				size="icon"
+																				className="size-8"
+																				disabled
+																			>
+																				<PenBoxIcon className="size-3.5 text-muted-foreground" />
+																			</Button>
+																			<Button
+																				variant="ghost"
+																				size="icon"
+																				className="size-8"
+																				disabled
+																			>
+																				<Trash2 className="size-4 text-muted-foreground" />
+																			</Button>
+																		</span>
+																	</TooltipTrigger>
+																	<TooltipContent className="max-w-60">
+																		Managed by a backup policy — edit the policy
+																		in the Backups tab
+																	</TooltipContent>
+																</Tooltip>
+															</TooltipProvider>
+														) : (
+															<>
+																<HandleBackup
+																	backupType={backup.backupType}
+																	backupId={backup.backupId}
+																	databaseType={backup.databaseType}
+																	refetch={refetch}
+																/>
+																<DialogAction
+																	title="Delete Backup"
+																	description="Are you sure you want to delete this backup?"
+																	type="destructive"
+																	onClick={async () => {
+																		await deleteBackup({
+																			backupId: backup.backupId,
+																		})
+																			.then(() => {
+																				refetch();
+																				toast.success(
+																					"Backup deleted successfully",
+																				);
+																			})
+																			.catch(() => {
+																				toast.error("Error deleting backup");
+																			});
+																	}}
+																>
+																	<Button
+																		variant="ghost"
+																		size="icon"
+																		className="group hover:bg-red-500/10 size-8"
+																		isLoading={isRemoving}
+																	>
+																		<Trash2 className="size-4 text-primary group-hover:text-red-500" />
+																	</Button>
+																</DialogAction>
+															</>
+														)}
 													</div>
 												</div>
 											</div>
