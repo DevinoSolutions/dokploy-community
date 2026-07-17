@@ -180,6 +180,8 @@ export const createComposeByTemplate = async (
 		});
 	}
 
+	resyncBackupPoliciesForEnvironment(newDestination.environmentId);
+
 	return newDestination;
 };
 
