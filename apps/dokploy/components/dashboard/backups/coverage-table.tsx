@@ -39,10 +39,8 @@ import {
 import { cn } from "@/lib/utils";
 import type { RouterOutputs } from "@/utils/api";
 import { api } from "@/utils/api";
-import {
-	getProjectFaviconUrls,
-	ProjectIcon,
-} from "../projects/project-icon";
+import { getProjectFaviconUrls, ProjectIcon } from "../projects/project-icon";
+import { BackupBrowserDialog } from "./backup-browser-dialog";
 import { CoverageFilters } from "./coverage-filters";
 import { ServiceTypeIcon } from "./service-type-icon";
 
@@ -327,8 +325,7 @@ export const CoverageTable = () => {
 						),
 				);
 				environment.hiddenCount =
-					environment.allServices.length -
-					environment.visibleServices.length;
+					environment.allServices.length - environment.visibleServices.length;
 				environment.uncoveredCount = environment.visibleServices.filter(
 					(service) => !isCovered(service),
 				).length;
@@ -408,10 +405,7 @@ export const CoverageTable = () => {
 														className="cursor-pointer bg-muted/40 hover:bg-muted/60"
 														onClick={() => toggle(`p:${project.id}`, true)}
 													>
-														<TableCell
-															colSpan={COLUMN_COUNT}
-															className="py-2"
-														>
+														<TableCell colSpan={COLUMN_COUNT} className="py-2">
 															<div className="flex items-center gap-2">
 																<ExpandChevron expanded={projectExpanded} />
 																<ProjectIcon
@@ -448,9 +442,7 @@ export const CoverageTable = () => {
 																			className="py-2 pl-8"
 																		>
 																			<div className="flex items-center gap-2">
-																				<ExpandChevron
-																					expanded={envExpanded}
-																				/>
+																				<ExpandChevron expanded={envExpanded} />
 																				<span className="text-sm">
 																					{environment.name}
 																				</span>
@@ -493,8 +485,7 @@ export const CoverageTable = () => {
 																				].find(
 																					(entry) => entry.lastRunStatus,
 																				)?.lastRunStatus;
-																				const notCovered =
-																					!isCovered(service);
+																				const notCovered = !isCovered(service);
 																				const composeKey = `c:${service.serviceId}`;
 																				const composeExpanded =
 																					service.type === "compose" &&
@@ -511,10 +502,7 @@ export const CoverageTable = () => {
 																							onClick={
 																								service.type === "compose"
 																									? () =>
-																											toggle(
-																												composeKey,
-																												false,
-																											)
+																											toggle(composeKey, false)
 																									: undefined
 																							}
 																						>
@@ -523,9 +511,7 @@ export const CoverageTable = () => {
 																									{service.type ===
 																										"compose" && (
 																										<ExpandChevron
-																											expanded={
-																												composeExpanded
-																											}
+																											expanded={composeExpanded}
 																										/>
 																									)}
 																									<ServiceTypeIcon
@@ -584,6 +570,33 @@ export const CoverageTable = () => {
 																								)}
 																							</TableCell>
 																							<TableCell className="text-right">
+																								{service.dumpBackups.length >
+																									0 && (
+																									<span
+																										className="mr-1 inline-flex"
+																										onClick={(event) =>
+																											event.stopPropagation()
+																										}
+																									>
+																										<BackupBrowserDialog
+																											serviceName={service.name}
+																											serverId={
+																												service.serverId
+																											}
+																											dumpBackups={service.dumpBackups.map(
+																												(entry) => ({
+																													backupId:
+																														entry.backupId,
+																													destinationName:
+																														entry.destinationName,
+																													source: entry.source,
+																													policyName:
+																														entry.policyName,
+																												}),
+																											)}
+																										/>
+																									</span>
+																								)}
 																								<Link
 																									href={`/dashboard/project/${project.id}/environment/${environment.id}`}
 																									className="inline-flex items-center text-muted-foreground hover:text-foreground"
