@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.11**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.12**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.11 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.12 \
   --with-registry-auth \
   dokploy
 ```
@@ -107,6 +107,14 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.12
+
+**Backup Center tabs, search & activity feed.** Community-requested UX pass — no migrations.
+
+- **Tabbed layout** — the Backup Center is now organized like the Swarm page: **Policies / Instance / Coverage / Activity** tabs with `?tab=` deep links, plus a "Viewing server" selector scoping Coverage and Activity ([#157](https://github.com/DevinoSolutions/dokploy-community/pull/157)).
+- **Coverage search** — filter the coverage tree by project, environment, or service name, composing with the global facets ([#157](https://github.com/DevinoSolutions/dokploy-community/pull/157)).
+- **Activity feed** — recent backup and volume-backup runs org-wide with status, destination, policy-vs-manual source, timestamps, and the uploaded artifact path parsed from the run log (confirming the file landed in the bucket), with the full run log one click away; derived from existing run records, so it works retroactively ([#157](https://github.com/DevinoSolutions/dokploy-community/pull/157)).
+
 ### New in v0.29.12-community.11
 
 **Backup verification, browsing & restore in the Backup Center.** Coverage no longer just assumes — it can prove backups exist. No migrations.
@@ -178,7 +186,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.11
+export DOKPLOY_VERSION=v0.29.12-community.12
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -191,7 +199,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.11   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.12   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -226,6 +234,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 9th release | `v0.29.12-community.9` |
 | v0.29.12 | 10th release | `v0.29.12-community.10` |
 | v0.29.12 | 11th release | `v0.29.12-community.11` |
+| v0.29.12 | 12th release | `v0.29.12-community.12` |
 
 ## Contributing
 
