@@ -71,14 +71,26 @@ export interface FilterableService {
 	hasVolumes: boolean;
 }
 
-const DB_SERVICE_TYPES: ReadonlySet<FilterableService["type"]> = new Set([
+/** Service-type facet values selectable in the Coverage filters. */
+export type ServiceType = FilterableService["type"];
+
+/** Database service types grouped under "Databases" in the type facet. */
+export const DATABASE_SERVICE_TYPES: readonly DbKind[] = [
 	"postgres",
 	"mysql",
 	"mariadb",
 	"mongo",
 	"redis",
 	"libsql",
-]);
+];
+
+const DB_SERVICE_TYPES: ReadonlySet<FilterableService["type"]> = new Set(
+	DATABASE_SERVICE_TYPES,
+);
+
+/** Whether a service type belongs to the "Databases" facet group. */
+export const isDatabaseServiceType = (type: ServiceType): boolean =>
+	DB_SERVICE_TYPES.has(type);
 
 /**
  * The user-approved "hide non-prod plain apps" default:
@@ -93,6 +105,78 @@ export const isServiceShownByDefault = (
 	if (isProductionEnvironment(environmentName)) return true;
 	if (DB_SERVICE_TYPES.has(service.type)) return true;
 	return service.hasVolumes;
+};
+
+/**
+ * Global facet selections of the Coverage filters. Empty arrays / false mean
+ * "no explicit selection" — the default rule applies. The moment any facet is
+ * explicitly selected, the explicit selection fully replaces the default rule:
+ * facets combine with AND, values within a facet combine with OR.
+ */
+export interface CoverageFacets {
+	/** Selected environment names (matched case-insensitively, trimmed). */
+	environmentNames: string[];
+	/** Selected service types. */
+	serviceTypes: ServiceType[];
+	/** Show only services without any backup coverage. */
+	notCoveredOnly: boolean;
+}
+
+export const EMPTY_COVERAGE_FACETS: CoverageFacets = {
+	environmentNames: [],
+	serviceTypes: [],
+	notCoveredOnly: false,
+};
+
+/** Whether any explicit facet is active (i.e. the default rule is replaced). */
+export const hasExplicitFacets = (facets: CoverageFacets): boolean =>
+	facets.environmentNames.length > 0 ||
+	facets.serviceTypes.length > 0 ||
+	facets.notCoveredOnly;
+
+/** Environment names are compared trimmed and case-insensitively. */
+export const normalizeEnvironmentName = (name: string): string =>
+	name.trim().toLowerCase();
+
+/**
+ * Whether an environment survives the environment-name facet. With no
+ * explicit name selection every environment is shown.
+ */
+export const isEnvironmentShownByFacets = (
+	environmentName: string,
+	facets: CoverageFacets,
+): boolean =>
+	facets.environmentNames.length === 0 ||
+	facets.environmentNames.some(
+		(selected) =>
+			normalizeEnvironmentName(selected) ===
+			normalizeEnvironmentName(environmentName),
+	);
+
+/**
+ * Whether a service is visible under the active facets. Without any explicit
+ * facet the default rule (`isServiceShownByDefault`) applies; with explicit
+ * facets the service must pass every active facet (AND), where each facet is
+ * an OR over its selected values.
+ */
+export const isServiceShownByFacets = (
+	service: FilterableService,
+	environmentName: string,
+	covered: boolean,
+	facets: CoverageFacets,
+): boolean => {
+	if (!hasExplicitFacets(facets)) {
+		return isServiceShownByDefault(service, environmentName);
+	}
+	if (!isEnvironmentShownByFacets(environmentName, facets)) return false;
+	if (
+		facets.serviceTypes.length > 0 &&
+		!facets.serviceTypes.includes(service.type)
+	) {
+		return false;
+	}
+	if (facets.notCoveredOnly && covered) return false;
+	return true;
 };
 
 /** A single container parsed out of a compose file. */

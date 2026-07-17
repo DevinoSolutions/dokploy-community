@@ -29,8 +29,12 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import {
+	type CoverageFacets,
+	EMPTY_COVERAGE_FACETS,
+	isEnvironmentShownByFacets,
 	isProductionEnvironment,
-	isServiceShownByDefault,
+	isServiceShownByFacets,
+	normalizeEnvironmentName,
 } from "@/lib/backup-coverage";
 import { cn } from "@/lib/utils";
 import type { RouterOutputs } from "@/utils/api";
@@ -39,11 +43,7 @@ import {
 	getProjectFaviconUrls,
 	ProjectIcon,
 } from "../projects/project-icon";
-import {
-	CoverageEnvFilter,
-	type EnvironmentMode,
-	type FilterEnvironment,
-} from "./coverage-env-filter";
+import { CoverageFilters } from "./coverage-filters";
 import { ServiceTypeIcon } from "./service-type-icon";
 
 type CoverageService =
@@ -235,9 +235,7 @@ export const CoverageTable = () => {
 	const [expandOverrides, setExpandOverrides] = useState<
 		Record<string, boolean>
 	>({});
-	const [envModes, setEnvModes] = useState<Record<string, EnvironmentMode>>(
-		{},
-	);
+	const [facets, setFacets] = useState<CoverageFacets>(EMPTY_COVERAGE_FACETS);
 
 	const isExpanded = (key: string, fallback: boolean) =>
 		expandOverrides[key] ?? fallback;
@@ -247,20 +245,19 @@ export const CoverageTable = () => {
 			[key]: !(prev[key] ?? fallback),
 		}));
 
-	// Every environment (unfiltered) for the filter popover.
-	const filterEnvironments = useMemo<FilterEnvironment[]>(() => {
-		const seen = new Map<string, FilterEnvironment>();
+	// Distinct environment names across the organization (unfiltered) for the
+	// environment-name facet — one entry per name, not per project×environment.
+	const environmentNames = useMemo<string[]>(() => {
+		const seen = new Map<string, string>();
 		for (const service of data?.services ?? []) {
-			if (!seen.has(service.environment.id)) {
-				seen.set(service.environment.id, {
-					id: service.environment.id,
-					name: service.environment.name,
-					projectName: service.project.name,
-					isProduction: isProductionEnvironment(service.environment.name),
-				});
+			const normalized = normalizeEnvironmentName(service.environment.name);
+			if (!seen.has(normalized)) {
+				seen.set(normalized, service.environment.name.trim());
 			}
 		}
-		return Array.from(seen.values());
+		return Array.from(seen.values()).sort((a, b) =>
+			a.localeCompare(b, undefined, { sensitivity: "base" }),
+		);
 	}, [data]);
 
 	// Group the flat service list into project → environment nodes, applying
@@ -317,14 +314,18 @@ export const CoverageTable = () => {
 			project.faviconUrls = getProjectFaviconUrls(allProjectDomains);
 
 			for (const environment of project.environmentMap.values()) {
-				const mode = envModes[environment.id] ?? "default";
-				if (mode === "hidden") continue;
-				environment.visibleServices =
-					mode === "all"
-						? environment.allServices
-						: environment.allServices.filter((service) =>
-								isServiceShownByDefault(service, environment.name),
-							);
+				// An environment excluded by the name facet disappears entirely;
+				// the other facets hide services but keep the "(N hidden)" hint.
+				if (!isEnvironmentShownByFacets(environment.name, facets)) continue;
+				environment.visibleServices = environment.allServices.filter(
+					(service) =>
+						isServiceShownByFacets(
+							service,
+							environment.name,
+							isCovered(service),
+							facets,
+						),
+				);
 				environment.hiddenCount =
 					environment.allServices.length -
 					environment.visibleServices.length;
@@ -342,7 +343,7 @@ export const CoverageTable = () => {
 			}
 		}
 		return result;
-	}, [data, envModes]);
+	}, [data, facets]);
 
 	return (
 		<Card className="bg-background">
@@ -371,21 +372,15 @@ export const CoverageTable = () => {
 					</div>
 				) : (
 					<>
-						<div className="flex flex-wrap items-center gap-2">
-							<CoverageEnvFilter
-								environments={filterEnvironments}
-								modes={envModes}
-								onChange={setEnvModes}
-							/>
-							<span className="text-xs text-muted-foreground">
-								Non-production environments show databases and services with
-								volumes by default.
-							</span>
-						</div>
+						<CoverageFilters
+							environmentNames={environmentNames}
+							facets={facets}
+							onChange={setFacets}
+						/>
 						{tree.length === 0 ? (
 							<div className="flex min-h-[10vh] flex-col items-center justify-center gap-2">
 								<span className="text-sm text-muted-foreground">
-									Everything is hidden by the current environment filter.
+									Everything is hidden by the current filters.
 								</span>
 							</div>
 						) : (
