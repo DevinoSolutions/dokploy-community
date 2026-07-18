@@ -122,8 +122,8 @@ export const email = pgTable("email", {
 		.$defaultFn(() => nanoid()),
 	smtpServer: text("smtpServer").notNull(),
 	smtpPort: integer("smtpPort").notNull(),
-	username: text("username").notNull(),
-	password: text("password").notNull(),
+	username: text("username"),
+	password: text("password"),
 	fromAddress: text("fromAddress").notNull(),
 	toAddresses: text("toAddress").array().notNull(),
 });
@@ -375,8 +375,8 @@ export const apiCreateEmail = notificationsSchema
 	.extend({
 		smtpServer: z.string().min(1),
 		smtpPort: z.number().min(1),
-		username: z.string().min(1),
-		password: z.string().min(1),
+		username: z.string(),
+		password: z.string(),
 		fromAddress: z.string().min(1),
 		toAddresses: z.array(z.string()).min(1),
 	})
