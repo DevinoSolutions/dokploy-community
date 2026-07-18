@@ -92,6 +92,35 @@ const DB_SERVICE_TYPES: ReadonlySet<FilterableService["type"]> = new Set(
 export const isDatabaseServiceType = (type: ServiceType): boolean =>
 	DB_SERVICE_TYPES.has(type);
 
+// The service-page tab that holds each type's backups. Databases and compose
+// expose a dump "backups" tab; applications have a dedicated "volume-backups"
+// tab; redis keeps its volume backups under "advanced" (it has no dedicated
+// backups tab). Verified against the service pages under
+// pages/dashboard/project/.../services/<type>.
+const BACKUP_TAB_BY_TYPE: Record<ServiceType, string> = {
+	postgres: "backups",
+	mysql: "backups",
+	mariadb: "backups",
+	mongo: "backups",
+	libsql: "backups",
+	compose: "backups",
+	application: "volume-backups",
+	redis: "advanced",
+};
+
+/** The `?tab=` value that opens a service type's backups. */
+export const backupTabForServiceType = (type: ServiceType): string =>
+	BACKUP_TAB_BY_TYPE[type];
+
+/** Deep link to a service's backups tab used by the coverage tree. */
+export const buildServiceBackupHref = (service: {
+	type: ServiceType;
+	projectId: string;
+	environmentId: string;
+	serviceId: string;
+}): string =>
+	`/dashboard/project/${service.projectId}/environment/${service.environmentId}/services/${service.type}/${service.serviceId}?tab=${backupTabForServiceType(service.type)}`;
+
 /**
  * The user-approved "hide non-prod plain apps" default:
  * - production environments show every service;

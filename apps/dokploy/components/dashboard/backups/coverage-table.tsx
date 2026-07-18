@@ -31,6 +31,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import {
+	buildServiceBackupHref,
 	type CoverageFacets,
 	EMPTY_COVERAGE_FACETS,
 	isEnvironmentShownByFacets,
@@ -138,8 +139,15 @@ interface ProjectNode {
 	uncoveredCount: number;
 }
 
-// Child containers of a compose service, lazy-loaded on expand.
-const ComposeChildRows = ({ composeId }: { composeId: string }) => {
+// Child containers of a compose service, lazy-loaded on expand. `href` links
+// each child row to the parent compose's backups tab.
+const ComposeChildRows = ({
+	composeId,
+	href,
+}: {
+	composeId: string;
+	href: string;
+}) => {
 	const { data, isPending } = api.backupPolicy.composeChildren.useQuery({
 		composeId,
 	});
@@ -221,7 +229,15 @@ const ComposeChildRows = ({ composeId }: { composeId: string }) => {
 					</TableCell>
 					<TableCell className="py-2" />
 					<TableCell className="py-2" />
-					<TableCell className="py-2" />
+					<TableCell className="py-2 text-right">
+						<Link
+							href={href}
+							className="inline-flex items-center text-muted-foreground hover:text-foreground"
+							title="Open compose backups"
+						>
+							<ExternalLink className="size-4" />
+						</Link>
+					</TableCell>
 				</TableRow>
 			))}
 		</>
@@ -511,7 +527,7 @@ export const CoverageTable = ({ serverId }: { serverId?: string }) => {
 																									!!entry.destinationName,
 																							)
 																							.map((entry) => [
-																								`${entry.destinationName} ${entry.prefix}`,
+																								`${entry.destinationName} ${entry.prefix}`,
 																								{
 																									name: entry.destinationName,
 																									prefix: entry.prefix,
@@ -657,9 +673,16 @@ export const CoverageTable = ({ serverId }: { serverId?: string }) => {
 																									</span>
 																								)}
 																								<Link
-																									href={`/dashboard/project/${project.id}/environment/${environment.id}`}
+																									href={buildServiceBackupHref({
+																										type: service.type,
+																										projectId: project.id,
+																										environmentId:
+																											environment.id,
+																										serviceId:
+																											service.serviceId,
+																									})}
 																									className="inline-flex items-center text-muted-foreground hover:text-foreground"
-																									title="Open service"
+																									title="Open service backups"
 																									onClick={(event) =>
 																										event.stopPropagation()
 																									}
@@ -671,6 +694,12 @@ export const CoverageTable = ({ serverId }: { serverId?: string }) => {
 																						{composeExpanded && (
 																							<ComposeChildRows
 																								composeId={service.serviceId}
+																								href={buildServiceBackupHref({
+																									type: service.type,
+																									projectId: project.id,
+																									environmentId: environment.id,
+																									serviceId: service.serviceId,
+																								})}
 																							/>
 																						)}
 																					</Fragment>

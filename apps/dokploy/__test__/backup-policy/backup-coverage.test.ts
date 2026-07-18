@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+	backupTabForServiceType,
 	buildBackupListPrefix,
+	buildServiceBackupHref,
 	type CoverageFacets,
 	classifyDbImage,
 	countBackupFiles,
@@ -508,5 +510,60 @@ describe("extractBackupArtifactPath", () => {
 		expect(extractBackupArtifactPath("")).toBeNull();
 		expect(extractBackupArtifactPath(null)).toBeNull();
 		expect(extractBackupArtifactPath(undefined)).toBeNull();
+	});
+});
+
+describe("backupTabForServiceType", () => {
+	it("uses the dump backups tab for databases and compose", () => {
+		for (const type of [
+			"postgres",
+			"mysql",
+			"mariadb",
+			"mongo",
+			"libsql",
+			"compose",
+		] as const) {
+			expect(backupTabForServiceType(type)).toBe("backups");
+		}
+	});
+
+	it("uses volume-backups for applications and advanced for redis", () => {
+		expect(backupTabForServiceType("application")).toBe("volume-backups");
+		expect(backupTabForServiceType("redis")).toBe("advanced");
+	});
+});
+
+describe("buildServiceBackupHref", () => {
+	it("links to the service's backups tab", () => {
+		expect(
+			buildServiceBackupHref({
+				type: "postgres",
+				projectId: "p1",
+				environmentId: "e1",
+				serviceId: "s1",
+			}),
+		).toBe(
+			"/dashboard/project/p1/environment/e1/services/postgres/s1?tab=backups",
+		);
+		expect(
+			buildServiceBackupHref({
+				type: "application",
+				projectId: "p1",
+				environmentId: "e1",
+				serviceId: "a1",
+			}),
+		).toBe(
+			"/dashboard/project/p1/environment/e1/services/application/a1?tab=volume-backups",
+		);
+		expect(
+			buildServiceBackupHref({
+				type: "redis",
+				projectId: "p1",
+				environmentId: "e1",
+				serviceId: "r1",
+			}),
+		).toBe(
+			"/dashboard/project/p1/environment/e1/services/redis/r1?tab=advanced",
+		);
 	});
 });
