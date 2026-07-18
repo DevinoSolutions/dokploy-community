@@ -61,6 +61,7 @@ import {
 	postgres,
 	projects,
 	redis,
+	registry,
 	volumeBackups,
 } from "@/server/db/schema";
 
@@ -1361,4 +1362,172 @@ export const backupPolicyRouter = createTRPCRouter({
 				nextOffset: hasMore ? input.offset + input.limit : null,
 			};
 		}),
+
+	// Image-restorability view for the Registry settings page: for every
+	// application and compose service the user can see, the provenance fields
+	// needed to classify whether its image can be pulled back without a rebuild
+	// (classified client-side by lib/image-provenance). Plus a credential-free
+	// summary of the org's registries and how many applications push to each.
+	// Gated by `registry:read` to match the Registry page (owner/admin), and
+	// service-ACL-scoped for members exactly like `coverage`.
+	imageProvenance: withPermission("registry", "read").query(async ({ ctx }) => {
+		const organizationId = ctx.session.activeOrganizationId;
+		const isPrivileged = ctx.user.role === "owner" || ctx.user.role === "admin";
+		const empty = { services: [], registries: [] };
+
+		let accessedProjects: string[] = [];
+		let accessedEnvironments: string[] = [];
+		let accessedServices: string[] = [];
+		if (!isPrivileged) {
+			const member = await findMemberByUserId(ctx.user.id, organizationId);
+			accessedProjects = member.accessedProjects;
+			accessedEnvironments = member.accessedEnvironments;
+			accessedServices = member.accessedServices;
+			if (accessedProjects.length === 0) return empty;
+		}
+
+		const projectWhere = isPrivileged
+			? eq(projects.organizationId, organizationId)
+			: and(
+					sql`${projects.projectId} IN (${sql.join(
+						accessedProjects.map((projectId) => sql`${projectId}`),
+						sql`, `,
+					)})`,
+					eq(projects.organizationId, organizationId),
+				);
+		const environmentWhere = isPrivileged
+			? undefined
+			: accessedEnvironments.length === 0
+				? sql`false`
+				: sql`${environments.environmentId} IN (${sql.join(
+						accessedEnvironments.map((envId) => sql`${envId}`),
+						sql`, `,
+					)})`;
+		const serviceFilter = (fieldName: AnyPgColumn) =>
+			isPrivileged
+				? undefined
+				: buildServiceFilter(fieldName, accessedServices);
+
+		const projectRows = await db.query.projects.findMany({
+			where: projectWhere,
+			columns: { projectId: true, name: true, logo: true },
+			with: {
+				environments: {
+					where: environmentWhere,
+					columns: { environmentId: true, name: true },
+					with: {
+						applications: {
+							where: serviceFilter(applications.applicationId),
+							columns: {
+								applicationId: true,
+								name: true,
+								sourceType: true,
+								buildType: true,
+								dockerImage: true,
+								registryId: true,
+							},
+							with: { registry: { columns: { registryName: true } } },
+						},
+						compose: {
+							where: serviceFilter(compose.composeId),
+							columns: {
+								composeId: true,
+								name: true,
+								sourceType: true,
+								composeFile: true,
+							},
+						},
+					},
+				},
+			},
+		});
+
+		interface ImageService {
+			serviceId: string;
+			type: "application" | "compose";
+			name: string;
+			project: { id: string; name: string; logo: string | null };
+			environment: { id: string; name: string };
+			sourceType: string;
+			buildType: string | null;
+			dockerImage: string | null;
+			registryId: string | null;
+			registryName: string | null;
+			hasComposeFile: boolean;
+		}
+		const services: ImageService[] = [];
+		const registryPushCounts = new Map<string, number>();
+
+		for (const project of projectRows) {
+			const projectRef = {
+				id: project.projectId,
+				name: project.name,
+				logo: project.logo ?? null,
+			};
+			for (const environment of project.environments) {
+				const envRef = {
+					id: environment.environmentId,
+					name: environment.name,
+				};
+				for (const app of environment.applications) {
+					if (app.registryId) {
+						registryPushCounts.set(
+							app.registryId,
+							(registryPushCounts.get(app.registryId) ?? 0) + 1,
+						);
+					}
+					services.push({
+						serviceId: app.applicationId,
+						type: "application",
+						name: app.name,
+						project: projectRef,
+						environment: envRef,
+						sourceType: app.sourceType,
+						buildType: app.buildType,
+						dockerImage: app.dockerImage ?? null,
+						registryId: app.registryId ?? null,
+						registryName: app.registry?.registryName ?? null,
+						hasComposeFile: false,
+					});
+				}
+				for (const comp of environment.compose) {
+					services.push({
+						serviceId: comp.composeId,
+						type: "compose",
+						name: comp.name,
+						project: projectRef,
+						environment: envRef,
+						sourceType: comp.sourceType,
+						buildType: null,
+						dockerImage: null,
+						registryId: null,
+						registryName: null,
+						hasComposeFile: Boolean(comp.composeFile?.trim()),
+					});
+				}
+			}
+		}
+
+		// Credential-free registry summary (no password / AWS secret fields).
+		const registryRows = await db.query.registry.findMany({
+			where: eq(registry.organizationId, organizationId),
+			columns: {
+				registryId: true,
+				registryName: true,
+				registryUrl: true,
+				username: true,
+				registryType: true,
+			},
+		});
+		const registries = registryRows.map((row) => ({
+			registryId: row.registryId,
+			name: row.registryName,
+			url: row.registryUrl,
+			username: row.username,
+			type: row.registryType,
+			pushCount: registryPushCounts.get(row.registryId) ?? 0,
+		}));
+
+		return { services, registries };
+	}),
 });
