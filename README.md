@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.13**
+Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.14**
 
 Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.13 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.14 \
   --with-registry-auth \
   dokploy
 ```
@@ -107,6 +107,14 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
 
+### New in v0.29.12-community.14
+
+**Backup scale-safety, image restorability & navigation.** Three changes — no migrations.
+
+- **Scheduled backup concurrency limit** — scheduled database, compose, and volume backups now run through a per-server FIFO queue (`DOKPLOY_BACKUP_CONCURRENCY`, default 4), so a policy firing many backups on one cron drains gradually instead of spawning them all at once; manual runs stay immediate ([#160](https://github.com/DevinoSolutions/dokploy-community/pull/160)).
+- **Image-restorability view on the Registry page** — Settings → Registry now shows, for every application and compose service, whether its image is **Re-pullable** from a registry, **In registry** (source-built but pushed), or **⚠ Rebuild-only** (exists only on the local daemon), with per-registry push counts ([#161](https://github.com/DevinoSolutions/dokploy-community/pull/161)).
+- **Coverage deep-links + tab order** — coverage rows link straight to each service's backups tab, and Coverage is now the Backup Center's first tab ([#159](https://github.com/DevinoSolutions/dokploy-community/pull/159)).
+
 ### New in v0.29.12-community.13
 
 **Backup Center polish.** Two refinements — no migrations.
@@ -193,7 +201,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.13
+export DOKPLOY_VERSION=v0.29.12-community.14
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -206,7 +214,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.13   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.14   # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -243,6 +251,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 11th release | `v0.29.12-community.11` |
 | v0.29.12 | 12th release | `v0.29.12-community.12` |
 | v0.29.12 | 13th release | `v0.29.12-community.13` |
+| v0.29.12 | 14th release | `v0.29.12-community.14` |
 
 ## Contributing
 
