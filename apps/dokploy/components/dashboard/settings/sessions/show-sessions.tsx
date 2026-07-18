@@ -56,7 +56,8 @@ export const ShowSessions = () => {
 							Sessions
 						</CardTitle>
 						<CardDescription>
-							Manage active user sessions. Revoke sessions to force logout.
+							Manage your active sessions. Revoke a session to force logout on
+							that device.
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="space-y-6 py-8 border-t">
@@ -195,7 +196,6 @@ const SessionTable = ({
 	</Table>
 );
 
-/** ponyta: parse UA just enough to show OS + browser, no lib needed */
 function parseUserAgent(ua: string): string {
 	if (ua.includes("Chrome/") && !ua.includes("Edg/")) return "Chrome";
 	if (ua.includes("Edg/")) return "Edge";
