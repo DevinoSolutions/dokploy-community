@@ -17,6 +17,15 @@ export const ShowRegistry = () => {
 		api.registry.remove.useMutation();
 	const { data, isPending, refetch } = api.registry.all.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
+	// Reuses the Registry-page image-provenance query (deduped with the
+	// provenance table below) for the per-registry "services push here" count.
+	const { data: provenance } = api.backupPolicy.imageProvenance.useQuery();
+	const pushCountById = new Map(
+		(provenance?.registries ?? []).map((entry) => [
+			entry.registryId,
+			entry.pushCount,
+		]),
+	);
 
 	return (
 		<div className="w-full">
@@ -66,6 +75,16 @@ export const ShowRegistry = () => {
 																		{registry.registryUrl}
 																	</div>
 																)}
+																<div className="text-xs text-muted-foreground">
+																	{(() => {
+																		const count =
+																			pushCountById.get(registry.registryId) ??
+																			0;
+																		return count === 1
+																			? "1 service pushes here"
+																			: `${count} services push here`;
+																	})()}
+																</div>
 															</div>
 														</div>
 
