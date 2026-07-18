@@ -33,7 +33,7 @@ import {
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
-import { and, asc, eq, gt, ne } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ne } from "drizzle-orm";
 import { z } from "zod";
 import { apiKeyNameSchema } from "@/lib/api-keys";
 import { audit } from "@/server/api/utils/audit";
@@ -294,6 +294,57 @@ export const userRouter = createTRPCRouter({
 						error instanceof Error ? error.message : "Failed to update user",
 				});
 			}
+		}),
+	// Self-scoped: a user may only ever list and revoke their OWN sessions.
+	// Metadata only — the session token is never selected/returned.
+	listSessions: protectedProcedure.query(async ({ ctx }) => {
+		const sessions = await db
+			.select({
+				id: session.id,
+				userId: session.userId,
+				email: user.email,
+				firstName: user.firstName,
+				lastName: user.lastName,
+				ipAddress: session.ipAddress,
+				userAgent: session.userAgent,
+				createdAt: session.createdAt,
+				expiresAt: session.expiresAt,
+			})
+			.from(session)
+			.innerJoin(user, eq(session.userId, user.id))
+			.where(eq(session.userId, ctx.user.id))
+			.orderBy(desc(session.createdAt));
+		return sessions.map((s) => ({
+			...s,
+			isCurrent: s.id === ctx.session.id,
+		}));
+	}),
+	revokeSession: protectedProcedure
+		.input(
+			z.object({
+				sessionId: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			const targetSession = await db.query.session.findFirst({
+				where: eq(session.id, input.sessionId),
+			});
+			// Treat a session owned by anyone else as if it does not exist, so the
+			// endpoint never confirms the existence of another user's session.
+			if (!targetSession || targetSession.userId !== ctx.user.id) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Session not found",
+				});
+			}
+			if (targetSession.id === ctx.session.id) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Cannot revoke your own session. Use logout instead.",
+				});
+			}
+			await db.delete(session).where(eq(session.id, input.sessionId));
+			return true;
 		}),
 	getUserByToken: publicProcedure
 		.input(apiFindOneToken)
