@@ -11,10 +11,8 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { scheduledJobs, scheduleJob } from "node-schedule";
-import {
-	getRclonePathAndFlags,
-	normalizeS3Path,
-} from "../backups/utils";
+import { withBackupSlot } from "../backups/concurrency";
+import { getRclonePathAndFlags, normalizeS3Path } from "../backups/utils";
 import { sendVolumeBackupNotifications } from "../notifications/volume-backup";
 import { backupVolume, getVolumeServiceAppName } from "./backup";
 
@@ -67,8 +65,15 @@ const getOrganizationId = (
 
 export const scheduleVolumeBackup = async (volumeBackupId: string) => {
 	const volumeBackup = await findVolumeBackupById(volumeBackupId);
+	// Throttle scheduled runs against the same global per-server limit as
+	// database/compose backups. Manual runs (runVolumeBackup called directly)
+	// stay immediate.
+	const serverKey =
+		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
 	scheduleJob(volumeBackupId, volumeBackup.cronExpression, async () => {
-		await runVolumeBackup(volumeBackupId);
+		await withBackupSlot(serverKey, volumeBackupId, () =>
+			runVolumeBackup(volumeBackupId),
+		);
 	});
 };
 

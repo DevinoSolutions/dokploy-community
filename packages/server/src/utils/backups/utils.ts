@@ -3,14 +3,17 @@ import { logger } from "@dokploy/server/lib/logger";
 
 export { GENERIC_RCLONE_PROVIDER };
 
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+
 const execFileP = promisify(execFile);
+
 import { keepLatestNBackups } from ".";
 import { runComposeBackup } from "./compose";
+import { withBackupSlot } from "./concurrency";
 import { runLibsqlBackup } from "./libsql";
 import { runMariadbBackup } from "./mariadb";
 import { runMongoBackup } from "./mongo";
@@ -31,31 +34,43 @@ export const scheduleBackup = (backup: BackupSchedule) => {
 		libsql,
 		compose,
 	} = backup;
+	// Scheduled runs share a global per-server concurrency limit so a burst of
+	// policy-materialized backups on the same cron can't fire all at once.
+	const serverKey =
+		backup.backupType === "compose"
+			? compose?.serverId
+			: (postgres?.serverId ??
+				mysql?.serverId ??
+				mongo?.serverId ??
+				mariadb?.serverId ??
+				libsql?.serverId);
 	scheduleJob(backupId, schedule, async () => {
-		if (backup.backupType === "database") {
-			if (databaseType === "postgres" && postgres) {
-				await runPostgresBackup(postgres, backup);
-				await keepLatestNBackups(backup, postgres.serverId);
-			} else if (databaseType === "mysql" && mysql) {
-				await runMySqlBackup(mysql, backup);
-				await keepLatestNBackups(backup, mysql.serverId);
-			} else if (databaseType === "mongo" && mongo) {
-				await runMongoBackup(mongo, backup);
-				await keepLatestNBackups(backup, mongo.serverId);
-			} else if (databaseType === "mariadb" && mariadb) {
-				await runMariadbBackup(mariadb, backup);
-				await keepLatestNBackups(backup, mariadb.serverId);
-			} else if (databaseType === "libsql" && libsql) {
-				await runLibsqlBackup(libsql, backup);
-				await keepLatestNBackups(backup, libsql.serverId);
-			} else if (databaseType === "web-server") {
-				await runWebServerBackup(backup);
-				await keepLatestNBackups(backup);
+		await withBackupSlot(serverKey, backupId, async () => {
+			if (backup.backupType === "database") {
+				if (databaseType === "postgres" && postgres) {
+					await runPostgresBackup(postgres, backup);
+					await keepLatestNBackups(backup, postgres.serverId);
+				} else if (databaseType === "mysql" && mysql) {
+					await runMySqlBackup(mysql, backup);
+					await keepLatestNBackups(backup, mysql.serverId);
+				} else if (databaseType === "mongo" && mongo) {
+					await runMongoBackup(mongo, backup);
+					await keepLatestNBackups(backup, mongo.serverId);
+				} else if (databaseType === "mariadb" && mariadb) {
+					await runMariadbBackup(mariadb, backup);
+					await keepLatestNBackups(backup, mariadb.serverId);
+				} else if (databaseType === "libsql" && libsql) {
+					await runLibsqlBackup(libsql, backup);
+					await keepLatestNBackups(backup, libsql.serverId);
+				} else if (databaseType === "web-server") {
+					await runWebServerBackup(backup);
+					await keepLatestNBackups(backup);
+				}
+			} else if (backup.backupType === "compose" && compose) {
+				await runComposeBackup(compose, backup);
+				await keepLatestNBackups(backup, compose.serverId);
 			}
-		} else if (backup.backupType === "compose" && compose) {
-			await runComposeBackup(compose, backup);
-			await keepLatestNBackups(backup, compose.serverId);
-		}
+		});
 	});
 };
 
@@ -194,8 +209,10 @@ const getCryptEnvVars = async (
  * destination has encryption enabled. `envVars` comes from getRclonePathAndFlags
  * (empty string when the destination is not encrypted).
  */
-export const buildRcloneCommand = (command: string, envVars?: string): string =>
-	envVars ? `${envVars} ${command}` : command;
+export const buildRcloneCommand = (
+	command: string,
+	envVars?: string,
+): string => (envVars ? `${envVars} ${command}` : command);
 
 export const getPostgresBackupCommand = (
 	database: string,
@@ -437,9 +454,7 @@ export const getRclonePathAndFlags = async (
 		// shell metacharacters, quotes and whitespace.
 		const genericPathSafe = /^[^"'$\\`;|&<>()\s]*$/;
 		if (!genericPathSafe.test(destination.bucket)) {
-			throw new Error(
-				"Invalid rclone remote: contains forbidden characters",
-			);
+			throw new Error("Invalid rclone remote: contains forbidden characters");
 		}
 		if (!genericPathSafe.test(subPath)) {
 			throw new Error(
@@ -467,7 +482,10 @@ export const getRclonePathAndFlags = async (
 			return {
 				flags,
 				path: `:crypt:${subPath}`,
-				envVars: await getCryptEnvVars(destination, `:s3:${destination.bucket}`),
+				envVars: await getCryptEnvVars(
+					destination,
+					`:s3:${destination.bucket}`,
+				),
 			};
 		}
 		const path = `:s3:${destination.bucket}/${subPath}`;
