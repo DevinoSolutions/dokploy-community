@@ -17,6 +17,8 @@ const deferred = () => {
 	return { promise, resolve, reject };
 };
 
+type Deferred = ReturnType<typeof deferred>;
+
 // Let queued microtasks settle so slot hand-offs take effect before asserting.
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -64,25 +66,30 @@ describe("createBackupLimiter", () => {
 		const limiter = createBackupLimiter(2);
 		let active = 0;
 		let maxActive = 0;
-		const gates = [deferred(), deferred(), deferred(), deferred()];
-		const tasks = gates.map((gate, i) =>
-			limiter.withSlot("local", `b${i}`, async () => {
+		const run = (gate: Deferred, label: string) =>
+			limiter.withSlot("local", label, async () => {
 				active++;
 				maxActive = Math.max(maxActive, active);
 				await gate.promise;
 				active--;
-			}),
-		);
+			});
+		const g0 = deferred();
+		const g1 = deferred();
+		const g2 = deferred();
+		const g3 = deferred();
+		const tasks = [run(g0, "b0"), run(g1, "b1"), run(g2, "b2"), run(g3, "b3")];
 
 		await flush();
 		expect(active).toBe(2);
 
-		gates[0].resolve();
+		g0.resolve();
 		await flush();
 		// one finished, the next queued task took its slot — still capped at 2
 		expect(active).toBe(2);
 
-		for (const gate of gates) gate.resolve();
+		g1.resolve();
+		g2.resolve();
+		g3.resolve();
 		await Promise.all(tasks);
 		expect(maxActive).toBe(2);
 	});
@@ -90,26 +97,28 @@ describe("createBackupLimiter", () => {
 	it("wakes waiters in FIFO arrival order", async () => {
 		const limiter = createBackupLimiter(1);
 		const started: number[] = [];
-		const gates = [deferred(), deferred(), deferred()];
-		const tasks = [0, 1, 2].map((i) =>
+		const run = (i: number, gate: Deferred) =>
 			limiter.withSlot("k", `t${i}`, async () => {
 				started.push(i);
-				await gates[i].promise;
-			}),
-		);
+				await gate.promise;
+			});
+		const g0 = deferred();
+		const g1 = deferred();
+		const g2 = deferred();
+		const tasks = [run(0, g0), run(1, g1), run(2, g2)];
 
 		await flush();
 		expect(started).toEqual([0]);
 
-		gates[0].resolve();
+		g0.resolve();
 		await flush();
 		expect(started).toEqual([0, 1]);
 
-		gates[1].resolve();
+		g1.resolve();
 		await flush();
 		expect(started).toEqual([0, 1, 2]);
 
-		gates[2].resolve();
+		g2.resolve();
 		await Promise.all(tasks);
 	});
 
