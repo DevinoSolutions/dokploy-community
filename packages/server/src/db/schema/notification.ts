@@ -122,8 +122,8 @@ export const email = pgTable("email", {
 		.$defaultFn(() => nanoid()),
 	smtpServer: text("smtpServer").notNull(),
 	smtpPort: integer("smtpPort").notNull(),
-	username: text("username").notNull(),
-	password: text("password").notNull(),
+	username: text("username"),
+	password: text("password"),
 	fromAddress: text("fromAddress").notNull(),
 	toAddresses: text("toAddress").array().notNull(),
 });
