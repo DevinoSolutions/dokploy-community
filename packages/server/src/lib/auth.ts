@@ -536,6 +536,48 @@ function getApi() {
 	return getAuthInstance().api;
 }
 
+/**
+ * Diagnostic for the "logged out early" reports: when a request carries a
+ * session_token cookie but better-auth resolves no session, classify why by
+ * looking the token up directly. Requests without a session cookie are normal
+ * anonymous traffic and are not logged. Only a token prefix is logged — the
+ * full token would allow session hijacking from log output.
+ */
+async function logRejectedSessionCookie(cookieHeader: string) {
+	if (!cookieHeader) return;
+	try {
+		const sessionCookie = cookieHeader
+			.split(";")
+			.map((part) => part.trim())
+			.find((part) => {
+				const name = part.slice(0, part.indexOf("="));
+				return (
+					name.endsWith(".session_token") || name.endsWith("-session_token")
+				);
+			});
+		if (!sessionCookie) return;
+		const rawValue = decodeURIComponent(
+			sessionCookie.slice(sessionCookie.indexOf("=") + 1),
+		);
+		const token = rawValue.split(".")[0] || "";
+		if (!token) return;
+		const row = await db.query.session.findFirst({
+			where: eq(schema.session.token, token),
+			columns: { token: true, expiresAt: true, userId: true },
+		});
+		const reason = !row
+			? "token_not_in_db"
+			: row.expiresAt <= new Date()
+				? `expired_at=${row.expiresAt.toISOString()}`
+				: "row_valid_but_rejected(signature_or_secret)";
+		console.warn(
+			`[session-diag] session cookie rejected: reason=${reason} tokenPrefix=${token.slice(0, 8)}`,
+		);
+	} catch (error) {
+		console.warn("[session-diag] classification failed", error);
+	}
+}
+
 export const validateRequest = async (request: IncomingMessage) => {
 	const api = getApi();
 	const apiKey = request.headers["x-api-key"] as string;
@@ -639,6 +681,7 @@ export const validateRequest = async (request: IncomingMessage) => {
 	});
 
 	if (!session?.session || !session.user) {
+		await logRejectedSessionCookie(request.headers.cookie || "");
 		return {
 			session: null,
 			user: null,
