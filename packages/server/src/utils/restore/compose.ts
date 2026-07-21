@@ -1,6 +1,7 @@
 import type { apiRestoreBackup } from "@dokploy/server/db/schema";
 import type { Compose } from "@dokploy/server/services/compose";
 import type { Destination } from "@dokploy/server/services/destination";
+import { quote } from "shell-quote";
 import type { z } from "zod";
 import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
@@ -26,13 +27,13 @@ export const restoreComposeBackup = async (
 		const { flags: rcloneFlags, path: backupPath, envVars } =
 			await getRclonePathAndFlags(destination, backupInput.backupFile);
 		let rcloneCommand = buildRcloneCommand(
-			`rclone cat ${rcloneFlags.join(" ")} "${backupPath}" | gunzip`,
+			`rclone cat ${rcloneFlags.join(" ")} ${quote([backupPath])} | gunzip`,
 			envVars,
 		);
 
 		if (backupInput.metadata?.mongo) {
 			rcloneCommand = buildRcloneCommand(
-				`rclone copy ${rcloneFlags.join(" ")} "${backupPath}"`,
+				`rclone copy ${rcloneFlags.join(" ")} ${quote([backupPath])}`,
 				envVars,
 			);
 		}

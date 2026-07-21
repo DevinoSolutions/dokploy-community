@@ -110,11 +110,11 @@ describe("rclone destination helpers", () => {
 			":s3:dokploy-backups",
 		);
 		expect(getRcloneCredentials(s3Destination as never)).toEqual([
-			'--s3-provider="AWS"',
-			'--s3-access-key-id="access"',
-			'--s3-secret-access-key="secret"',
-			'--s3-region="us-east-1"',
-			'--s3-endpoint="https://s3.example.com"',
+			"--s3-provider=AWS",
+			"--s3-access-key-id=access",
+			"--s3-secret-access-key=secret",
+			"--s3-region=us-east-1",
+			"--s3-endpoint=https\\://s3.example.com",
 			"--s3-no-check-bucket",
 			"--s3-force-path-style",
 			"--s3-no-head",
@@ -152,8 +152,8 @@ describe("getRclonePathAndFlags", () => {
 			destination as any,
 			"mypath",
 		);
-		expect(flags).toContain('--s3-access-key-id="access"');
-		expect(flags).toContain('--s3-secret-access-key="secret"');
+		expect(flags).toContain("--s3-access-key-id=access");
+		expect(flags).toContain("--s3-secret-access-key=secret");
 		expect(path).toBe(":s3:mybucket/mypath");
 	});
 

@@ -57,7 +57,7 @@ describe("getRclonePathAndFlags — S3 without encryption", () => {
 		expect(path).toBe(":s3:my-bucket/daily/db.sql.gz");
 		expect(path).not.toContain(":crypt:");
 		expect(flags.join(" ")).toContain(
-			`--s3-access-key-id="${destination.accessKey}"`,
+			`--s3-access-key-id=${destination.accessKey}`,
 		);
 	});
 

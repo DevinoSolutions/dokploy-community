@@ -1,4 +1,5 @@
 import path from "node:path";
+import { quote } from "shell-quote";
 import {
 	findApplicationById,
 	findComposeById,
@@ -26,7 +27,7 @@ export const restoreVolume = async (
 
 	// Command to download backup file from the configured destination
 	const downloadCommand = buildRcloneCommand(
-		`rclone copyto ${rcloneFlags.join(" ")} "${backupPath}" "${volumeBackupPath}/${backupFileName}"`,
+		`rclone copyto ${rcloneFlags.join(" ")} ${quote([backupPath])} ${quote([`${volumeBackupPath}/${backupFileName}`])}`,
 		envVars,
 	);
 
@@ -45,7 +46,7 @@ export const restoreVolume = async (
 		-v ${volumeName}:/volume_data \
 		-v ${volumeBackupPath}:/backup \
 		ubuntu \
-		bash -c "cd /volume_data && tar xvf /backup/${backupFileName} ."
+		bash -c "cd /volume_data && tar xvf /backup/${quote([backupFileName])} ."
 	echo "Volume restore completed ✅"
 	`;
 

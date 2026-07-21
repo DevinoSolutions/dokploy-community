@@ -9,6 +9,7 @@ import {
 	listECRImageTags as listECRTags,
 	loginDockerToECR,
 	removeRegistry,
+	safeDockerLoginCommand,
 	updateRegistry,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";

@@ -351,6 +351,7 @@ const Service = (
 												<ShowDockerLogs
 													appName={data?.appName || ""}
 													serverId={data?.serverId || ""}
+													serviceId={data?.applicationId}
 												/>
 											</div>
 										</TabsContent>

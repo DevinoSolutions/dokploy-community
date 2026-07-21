@@ -42,19 +42,19 @@ test("Add suffix to volumes declared directly in services", () => {
 	);
 });
 
-const composeFileReadOnly = `
+const composeFileAccessMode = `
 version: "3.8"
 
 services:
-  db:
-    image: postgres:latest
+  web:
+    image: nginx:alpine
     volumes:
-      - db_data:/var/lib/postgresql/data:ro
-      - config/nginx:/etc/nginx/conf.d:z
+      - web_config:/etc/nginx/conf.d:ro
+      - certs/sub:/etc/certs:Z
 `;
 
-test("Preserve access mode when adding suffix to named volumes", () => {
-	const composeData = parse(composeFileReadOnly) as ComposeSpecification;
+test("Add suffix to volumes preserves access mode (:ro, :z, :Z)", () => {
+	const composeData = parse(composeFileAccessMode) as ComposeSpecification;
 
 	const suffix = generateRandomHash();
 
@@ -66,13 +66,12 @@ test("Preserve access mode when adding suffix to named volumes", () => {
 		composeData.services,
 		suffix,
 	);
-	const actualComposeData = { ...composeData, services: updatedComposeData };
 
-	expect(actualComposeData.services?.db?.volumes).toContain(
-		`db_data-${suffix}:/var/lib/postgresql/data:ro`,
+	expect(updatedComposeData.web?.volumes).toContain(
+		`web_config-${suffix}:/etc/nginx/conf.d:ro`,
 	);
-	expect(actualComposeData.services?.db?.volumes).toContain(
-		`config-${suffix}/nginx:/etc/nginx/conf.d:z`,
+	expect(updatedComposeData.web?.volumes).toContain(
+		`certs-${suffix}/sub:/etc/certs:Z`,
 	);
 });
 

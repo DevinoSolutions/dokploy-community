@@ -1,15 +1,19 @@
+import { quote } from "shell-quote";
 import {
 	getComposeContainerCommand,
 	getServiceContainerCommand,
 } from "../backups/utils";
 
+// User-controlled values are passed to the container via `docker exec -e` and
+// read as "$VAR" inside a single-quoted inner script, so they never enter the
+// inner command text. See the matching note in backups/utils.ts.
 export const getPostgresRestoreCommand = (
 	database: string,
 	databaseUser: string,
 ) => {
 	const tmpFile = "/tmp/dokploy_restore.dump";
-	const pgArgs = `-U '${databaseUser}' -d ${database} -O`;
-	return `docker exec -i $CONTAINER_ID sh -c "cat > ${tmpFile} && pg_restore ${pgArgs} --clean --if-exists --section=pre-data ${tmpFile} && pg_restore ${pgArgs} --section=data ${tmpFile} && pg_restore ${pgArgs} --section=post-data ${tmpFile}; rm -f ${tmpFile}"`;
+	const pgArgs = `-U "$DB_USER" -d "$DB_NAME" -O`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -i $CONTAINER_ID sh -c 'cat > ${tmpFile} && pg_restore ${pgArgs} --clean --if-exists --section=pre-data ${tmpFile} && pg_restore ${pgArgs} --section=data ${tmpFile} && pg_restore ${pgArgs} --section=post-data ${tmpFile}; rm -f ${tmpFile}'`;
 };
 
 export const getMariadbRestoreCommand = (
@@ -17,14 +21,14 @@ export const getMariadbRestoreCommand = (
 	databaseUser: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID sh -c "mariadb -u '${databaseUser}' -p'${databasePassword}' ${database}"`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID sh -c 'mariadb -u "$DB_USER" -p"$DB_PASS" "$DB_NAME"'`;
 };
 
 export const getMysqlRestoreCommand = (
 	database: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID sh -c "mysql -u root -p'${databasePassword}' ${database}"`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID sh -c 'mysql -u root -p"$DB_PASS" "$DB_NAME"'`;
 };
 
 export const getMongoRestoreCommand = (
@@ -32,7 +36,7 @@ export const getMongoRestoreCommand = (
 	databaseUser: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -i $CONTAINER_ID sh -c "mongorestore --username '${databaseUser}' --password '${databasePassword}' --authenticationDatabase admin --db ${database} --archive --drop"`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID sh -c 'mongorestore --username "$DB_USER" --password "$DB_PASS" --authenticationDatabase admin --db "$DB_NAME" --archive --drop'`;
 };
 
 export const getComposeSearchCommand = (
@@ -92,7 +96,7 @@ rm -rf ${tempDir} && \
 mkdir -p ${tempDir} && \
 ${rcloneCommand} ${tempDir} && \
 cd ${tempDir} && \
-ARCHIVE_FILE="${fileName || ""}" && \
+ARCHIVE_FILE=${quote([fileName || ""])} && \
 if [ -z "$ARCHIVE_FILE" ] || [ ! -f "$ARCHIVE_FILE" ]; then \
 	ARCHIVE_FILE=$(find . -maxdepth 1 -type f -name "*.gz" | head -n 1); \
 fi && \

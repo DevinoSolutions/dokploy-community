@@ -300,6 +300,7 @@ const Mariadb = (
 												<ShowDockerLogs
 													serverId={data?.serverId || ""}
 													appName={data?.appName || ""}
+													serviceId={data?.mariadbId}
 												/>
 											</div>
 										</TabsContent>

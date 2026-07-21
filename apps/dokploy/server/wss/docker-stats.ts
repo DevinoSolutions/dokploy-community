@@ -15,6 +15,7 @@ import {
 } from "@dokploy/server";
 import { hasPermission } from "@dokploy/server/services/permission";
 import { WebSocketServer } from "ws";
+import { canAccessDockerOverWss } from "./authorize";
 
 // serverIds are nanoid-generated (alphanumeric + `_` and `-`). Reject anything
 // else at the WS boundary so user input cannot reach filesystem paths or SSH
@@ -56,6 +57,7 @@ export const setupDockerStatsMonitoringSocketServer = (
 			| "stack"
 			| "docker-compose";
 		const serverIdParam = url.searchParams.get("serverId");
+		const serviceId = url.searchParams.get("serviceId");
 		const { user, session } = await validateRequest(req);
 
 		if (!appName) {
@@ -65,6 +67,11 @@ export const setupDockerStatsMonitoringSocketServer = (
 
 		if (!user || !session) {
 			ws.close();
+			return;
+		}
+
+		if (!(await canAccessDockerOverWss(user, session, serverIdParam, serviceId))) {
+			ws.close(4003, "Not authorized");
 			return;
 		}
 

@@ -270,6 +270,7 @@ const Libsql = (
 											<ShowDockerLogs
 												serverId={data?.serverId || ""}
 												appName={data?.appName || ""}
+												serviceId={data?.libsqlId}
 											/>
 										</div>
 									</TabsContent>
