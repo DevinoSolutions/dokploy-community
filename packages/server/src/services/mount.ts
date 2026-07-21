@@ -19,6 +19,7 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
 import { eq, type SQL, sql } from "drizzle-orm";
+import { quote } from "shell-quote";
 import type { z } from "zod";
 
 export type Mount = typeof mounts.$inferSelect;
@@ -399,7 +400,7 @@ export const updateFileMount = async (mountId: string) => {
 	try {
 		const serverId = await getServerId(mount);
 		const encodedContent = encodeBase64(mount.content || "");
-		const command = `echo "${encodedContent}" | base64 -d > ${fullPath}`;
+		const command = `echo "${encodedContent}" | base64 -d > ${quote([fullPath])}`;
 		if (serverId) {
 			await execAsyncRemote(serverId, command);
 		} else {
@@ -419,7 +420,7 @@ export const deleteFileMount = async (mountId: string) => {
 	try {
 		const serverId = await getServerId(mount);
 		if (serverId) {
-			const command = `rm -rf ${fullPath}`;
+			const command = `rm -rf ${quote([fullPath])}`;
 			await execAsyncRemote(serverId, command);
 		} else {
 			await removeFileOrDirectory(fullPath);

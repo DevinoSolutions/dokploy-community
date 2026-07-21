@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Destination } from "@dokploy/server/services/destination";
+import { quote } from "shell-quote";
 import { updateWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { getPublicIpWithFallback } from "@dokploy/server/wss/utils";
 import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
@@ -64,7 +65,7 @@ export const restoreWebServerBackup = async (
 			emit("Downloading backup from destination...");
 			await execAsync(
 				buildRcloneCommand(
-					`rclone copyto ${rcloneFlags.join(" ")} ${JSON.stringify(backupPath)} ${JSON.stringify(localArchivePath)}`,
+					`rclone copyto ${rcloneFlags.join(" ")} ${quote([backupPath])} ${quote([localArchivePath])}`,
 					envVars,
 				),
 			);
@@ -85,7 +86,7 @@ export const restoreWebServerBackup = async (
 			emit("Extracting backup...");
 			try {
 				const { stderr: unzipStderr } = await execAsync(
-					`unzip -o ${JSON.stringify(localArchivePath)}`,
+					`unzip -o ${quote([localArchivePath])}`,
 					{ cwd: tempDir },
 				);
 				if (unzipStderr.trim()) {

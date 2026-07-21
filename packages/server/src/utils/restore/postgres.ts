@@ -1,6 +1,7 @@
 import type { apiRestoreBackup } from "@dokploy/server/db/schema";
 import type { Destination } from "@dokploy/server/services/destination";
 import type { Postgres } from "@dokploy/server/services/postgres";
+import { quote } from "shell-quote";
 import type { z } from "zod";
 import { buildRcloneCommand, getRclonePathAndFlags } from "../backups/utils";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
@@ -19,7 +20,7 @@ export const restorePostgresBackup = async (
 			await getRclonePathAndFlags(destination, backupInput.backupFile);
 
 		const rcloneCommand = buildRcloneCommand(
-			`rclone cat ${rcloneFlags.join(" ")} "${backupPath}" | gunzip`,
+			`rclone cat ${rcloneFlags.join(" ")} ${quote([backupPath])} | gunzip`,
 			envVars,
 		);
 

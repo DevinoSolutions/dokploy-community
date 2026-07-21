@@ -217,7 +217,7 @@ test("Remote Traefik writer preserves shell-sensitive YAML values", async () => 
 	const encoded = command.match(/echo "([^"]+)"/)?.[1] ?? "";
 	const decoded = Buffer.from(encoded, "base64").toString("utf8");
 
-	expect(command).toContain('base64 -d > "');
+	expect(command).toContain("base64 -d > ");
 	expect(decoded).toContain("'unsafe-inline'");
 	expect(decoded).toContain("'unsafe-eval'");
 	expect(decoded).toContain("frame-ancestors 'self'");

@@ -11,6 +11,7 @@ import {
 import { db } from "@dokploy/server/db";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
+import { quote } from "shell-quote";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
@@ -81,7 +82,7 @@ export const destinationRouter = createTRPCRouter({
 				if (additionalFlags?.length) {
 					rcloneFlags.push(...additionalFlags);
 				}
-				const rcloneCommand = `rclone ls ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
+				const rcloneCommand = `rclone ls ${rcloneFlags.join(" ")} ${quote([rcloneDestination])}`;
 
 				if (IS_CLOUD && !input.serverId) {
 					throw new TRPCError({

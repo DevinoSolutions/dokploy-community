@@ -1,4 +1,5 @@
 import {
+	assertGitProviderAccess,
 	createGitlab,
 	findGitlabById,
 	getAccessibleGitProviderIds,
@@ -54,13 +55,9 @@ export const gitlabRouter = createTRPCRouter({
 	one: protectedProcedure
 		.input(apiFindOneGitlab)
 		.query(async ({ input, ctx }) => {
-			const result = await findGitlabById(input.gitlabId);
-			if (
-				result.gitProvider.organizationId !== ctx.session.activeOrganizationId
-			) {
-				throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
-			}
-			return result;
+			const gitlab = await findGitlabById(input.gitlabId);
+			await assertGitProviderAccess(ctx.session, gitlab.gitProvider);
+			return gitlab;
 		}),
 	gitlabProviders: protectedProcedure.query(async ({ ctx }) => {
 		const accessibleIds = await getAccessibleGitProviderIds(ctx.session);
@@ -94,19 +91,27 @@ export const gitlabRouter = createTRPCRouter({
 	}),
 	getGitlabRepositories: protectedProcedure
 		.input(apiFindOneGitlab)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
+			const gitlab = await findGitlabById(input.gitlabId);
+			await assertGitProviderAccess(ctx.session, gitlab.gitProvider);
 			return await getGitlabRepositories(input.gitlabId);
 		}),
 
 	getGitlabBranches: protectedProcedure
 		.input(apiFindGitlabBranches)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
+			if (input.gitlabId) {
+				const gitlab = await findGitlabById(input.gitlabId);
+				await assertGitProviderAccess(ctx.session, gitlab.gitProvider);
+			}
 			return await getGitlabBranches(input);
 		}),
 	testConnection: protectedProcedure
 		.input(apiGitlabTestConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				const gitlab = await findGitlabById(input.gitlabId);
+				await assertGitProviderAccess(ctx.session, gitlab.gitProvider);
 				const result = await testGitlabConnection(input);
 
 				return `Found ${result} repositories`;

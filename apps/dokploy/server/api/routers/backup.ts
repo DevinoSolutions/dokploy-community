@@ -50,6 +50,7 @@ import {
 	restoreWebServerBackup,
 } from "@dokploy/server/utils/restore";
 import { TRPCError } from "@trpc/server";
+import { quote } from "shell-quote";
 import { z } from "zod";
 import {
 	createTRPCRouter,
@@ -515,7 +516,7 @@ export const backupRouter = createTRPCRouter({
 					envVars,
 				} = await getRclonePathAndFlags(destination, baseDir);
 				const listCommand = buildRcloneCommand(
-					`rclone lsjson ${rcloneFlags.join(" ")} "${searchPath}" --no-mimetype --no-modtime 2>/dev/null`,
+					`rclone lsjson ${rcloneFlags.join(" ")} ${quote([searchPath])} --no-mimetype --no-modtime 2>/dev/null`,
 					envVars,
 				);
 

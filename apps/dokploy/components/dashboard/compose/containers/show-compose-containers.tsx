@@ -56,12 +56,14 @@ interface Props {
 	appName: string;
 	serverId?: string;
 	appType: "stack" | "docker-compose";
+	serviceId?: string;
 }
 
 export const ShowComposeContainers = ({
 	appName,
 	appType,
 	serverId,
+	serviceId,
 }: Props) => {
 	const { data, isPending, refetch } =
 		api.docker.getContainersByAppNameMatch.useQuery(
@@ -123,6 +125,7 @@ export const ShowComposeContainers = ({
 										key={container.containerId}
 										container={container}
 										serverId={serverId}
+										serviceId={serviceId}
 										onActionComplete={() => refetch()}
 									/>
 								))}
@@ -143,12 +146,14 @@ interface ContainerRowProps {
 		status: string;
 	};
 	serverId?: string;
+	serviceId?: string;
 	onActionComplete: () => void;
 }
 
 const ContainerRow = ({
 	container,
 	serverId,
+	serviceId,
 	onActionComplete,
 }: ContainerRowProps) => {
 	const [logsOpen, setLogsOpen] = useState(false);
@@ -242,6 +247,7 @@ const ContainerRow = ({
 							<DockerTerminalModal
 								containerId={container.containerId}
 								serverId={serverId || ""}
+								serviceId={serviceId}
 							>
 								Terminal
 							</DockerTerminalModal>
@@ -286,6 +292,7 @@ const ContainerRow = ({
 								containerId={container.containerId}
 								serverId={serverId}
 								runType="native"
+								serviceId={serviceId}
 							/>
 						</div>
 					</DialogContent>

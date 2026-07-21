@@ -4,6 +4,7 @@ import { findServerById, IS_CLOUD, validateRequest } from "@dokploy/server";
 import { spawn as spawnPty } from "node-pty";
 import { Client, type ClientChannel } from "ssh2";
 import { WebSocketServer } from "ws";
+import { canAccessDockerOverWss } from "./authorize";
 import {
 	buildDockerLogsArguments,
 	createDockerLogsDataHandler,
@@ -44,6 +45,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 		const since = url.searchParams.get("since") ?? "all";
 		const serverId = url.searchParams.get("serverId");
 		const runType = url.searchParams.get("runType");
+		const serviceId = url.searchParams.get("serviceId");
 		const timers: {
 			forceKill?: NodeJS.Timeout;
 			ping?: NodeJS.Timeout;
@@ -110,6 +112,11 @@ export const setupDockerContainerLogsWebSocketServer = (
 
 		if (!user || !session) {
 			ws.close();
+			return;
+		}
+
+		if (!(await canAccessDockerOverWss(user, session, serverId, serviceId))) {
+			ws.close(4003, "Not authorized");
 			return;
 		}
 

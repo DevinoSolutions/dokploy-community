@@ -434,7 +434,7 @@ const createBetterAuth = () =>
 				enableMetadata: true,
 				references: "user",
 			}),
-			sso(),
+			sso({ trustEmailVerified: true }),
 			scim({
 				beforeSCIMTokenGenerated: async ({ user }) => {
 					const dbUser = await db.query.user.findFirst({
