@@ -228,10 +228,47 @@ describe("getBackupCommand", () => {
 		expect(occurrences).toBe(1);
 	});
 
-	test("pipes the single dump straight into the rclone upload", () => {
+	test("streams the single dump directly into the rclone upload", () => {
 		const dumpCommand = generateBackupCommand(backup) as string;
 		const script = getBackupCommand(backup, rcloneCommand, logPath);
 
-		expect(script).toContain(`${dumpCommand} | ${rcloneCommand}`);
+		// The dump is piped straight into rclone (its stderr is teed to a temp
+		// file in between so dump vs upload failures stay distinguishable).
+		expect(script).toContain(`${dumpCommand} 2> "$DUMP_ERROR_FILE"`);
+		expect(script).toContain(`| ${rcloneCommand}`);
+	});
+
+	// #4896: split the combined error so operators can tell a dump failure from
+	// an upload failure.
+	test("keeps dump and upload failures distinguishable", () => {
+		const script = getBackupCommand(backup, rcloneCommand, logPath);
+
+		expect(script).toContain("❌ Error: Backup failed");
+		expect(script).toContain("❌ Error: Upload to S3 failed");
+	});
+
+	// #4896: a failed stream can leave a truncated object that would count toward
+	// keepLatestNBackups retention; delete it on the failure paths.
+	test("derives a deletefile cleanup command from the upload path", () => {
+		const script = getBackupCommand(backup, rcloneCommand, logPath);
+
+		expect(script).toContain(
+			'rclone deletefile --s3-provider="AWS" ":s3:bucket/key.sql.gz"',
+		);
+		// The dump command itself still appears exactly once (no second dump).
+		const dumpCommand = generateBackupCommand(backup) as string;
+		expect(script.split(dumpCommand).length - 1).toBe(1);
+	});
+
+	// The cleanup must inherit the crypt env prefix so encrypted remotes work —
+	// only the rcat verb is swapped, the RCLONE_CRYPT_* prefix is preserved.
+	test("preserves the crypt env prefix in the cleanup command", () => {
+		const cryptRcloneCommand =
+			"RCLONE_CRYPT_PASSWORD='obscured_pass' rclone rcat --s3-provider=\"AWS\" \":crypt:bucket/key.sql.gz\"";
+		const script = getBackupCommand(backup, cryptRcloneCommand, logPath);
+
+		expect(script).toContain(
+			"RCLONE_CRYPT_PASSWORD='obscured_pass' rclone deletefile --s3-provider=\"AWS\" \":crypt:bucket/key.sql.gz\"",
+		);
 	});
 });
