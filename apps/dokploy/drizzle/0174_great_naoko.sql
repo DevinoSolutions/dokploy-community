@@ -1,1 +1,1 @@
-ALTER TABLE "backup" ADD COLUMN "includeEncryptionKey" boolean DEFAULT true NOT NULL;
+ALTER TABLE "backup" ADD COLUMN IF NOT EXISTS "includeEncryptionKey" boolean DEFAULT true NOT NULL;
