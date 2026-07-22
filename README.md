@@ -2,9 +2,9 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.12** | Fork version **v0.29.12-community.15**
+Based on **Dokploy v0.29.13** | Fork version **v0.29.13-community.1**
 
-Everything in upstream Dokploy **v0.29.12**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
+Everything in upstream Dokploy **v0.29.13**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
 ## Switching from official Dokploy
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.15 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.1 \
   --with-registry-auth \
   dokploy
 ```
@@ -20,7 +20,7 @@ docker service update \
 Going back to official is just as easy (our extra tables/columns are simply ignored):
 
 ```bash
-docker service update --image dokploy/dokploy:v0.29.12 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.29.13 --with-registry-auth dokploy
 ```
 
 The image is public — no registry login required.
@@ -106,6 +106,15 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.29.13-community.1
+
+**Upstream v0.29.13 rebase + SMTP-without-auth, UI fixes & session diagnostics.** The fork is now based on upstream Dokploy v0.29.13 — a large security-hardening release (shell-escaping of all user-influenced commands, WebSocket handler authorization, git/registry command-injection fixes, secret redaction in API responses, org-scoped custom AI provider presets, email verification for SSO). All fork features were re-verified on top, and the fork's backup-command credential redaction was widened to cover the new escaping format. One additive migration (0192).
+
+- **SMTP without authentication** — email notifications now work with auth-less SMTP relays: username/password are optional and the auth block is omitted when blank ([#165](https://github.com/DevinoSolutions/dokploy-community/pull/165), upstream [#4844](https://github.com/Dokploy/dokploy/pull/4844) by @hbilal9; migration 0192).
+- **Org menu width fix** — the organization dropdown is no longer clipped when the sidebar is collapsed ([#166](https://github.com/DevinoSolutions/dokploy-community/pull/166), upstream [#4845](https://github.com/Dokploy/dokploy/pull/4845) by @hbilal9; also landed upstream in v0.29.13).
+- **Compose "Reload" renamed to "Rebuild"** — the button label now says what the action does ([#167](https://github.com/DevinoSolutions/dokploy-community/pull/167), upstream [#4847](https://github.com/Dokploy/dokploy/pull/4847) by @ANSUJKMEHER; also landed upstream in v0.29.13).
+- **Session-rejection diagnostics** (fork original) — when a browser presents a session cookie that the server rejects, the server now logs a classified reason (token unknown / expired / signature mismatch) with only an 8-char token prefix, to make unexplained logouts diagnosable ([#168](https://github.com/DevinoSolutions/dokploy-community/pull/168)).
 
 ### New in v0.29.12-community.15
 
@@ -209,7 +218,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.12-community.15
+export DOKPLOY_VERSION=v0.29.13-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -222,7 +231,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.12-community.15   # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.1    # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -261,6 +270,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 13th release | `v0.29.12-community.13` |
 | v0.29.12 | 14th release | `v0.29.12-community.14` |
 | v0.29.12 | 15th release | `v0.29.12-community.15` |
+| v0.29.13 | 1st release | `v0.29.13-community.1` |
 
 ## Contributing
 
