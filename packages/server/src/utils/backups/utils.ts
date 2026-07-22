@@ -398,6 +398,24 @@ export const getBackupCommand = (
 		? backup.destination?.provider?.toUpperCase() || "remote"
 		: "S3";
 
+	// A failed streamed upload can leave a TRUNCATED object at the destination.
+	// That partial object then counts toward keepLatestNBackups retention and can
+	// evict a good backup, so remove it best-effort on any failure. The delete
+	// reuses the SAME remote path, flags and env as the rcat upload (rcloneCommand
+	// is built by buildRcloneCommand, so a crypt env prefix is preserved) — we only
+	// swap the `rcat` verb for `deletefile`. rcloneCommand may start with that env
+	// prefix rather than `rclone`, so match the verb anywhere in the string.
+	const rcloneCleanupCommand = rcloneCommand.includes("rclone rcat ")
+		? `${rcloneCommand.replace(
+				"rclone rcat ",
+				"rclone deletefile ",
+			)} >/dev/null 2>&1 || true;`
+		: "";
+	const cleanupPartialUpload = rcloneCleanupCommand
+		? `echo "[$(date)] Cleaning up partial upload from ${destinationType}..." >> ${logPath};
+		${rcloneCleanupCommand}`
+		: "";
+
 	logger.info(
 		{
 			containerSearch,
@@ -422,15 +440,36 @@ export const getBackupCommand = (
 	echo "[$(date)] Container Up: $CONTAINER_ID" >> ${logPath};
 	echo "[$(date)] Streaming backup to ${destinationType}..." >> ${logPath};
 
-	# Stream the dump straight to the destination. The dump runs ONCE; "set -o pipefail"
-	# makes the pipeline fail if the dump (not just rclone) fails, so a broken
-	# backup never reports success. Running the dump a second time to "validate"
-	# it would double the load on the database and risk an inconsistent copy.
-	UPLOAD_OUTPUT=$(${backupCommand} | ${rcloneCommand} 2>&1 >/dev/null) || {
-		echo "[$(date)] ❌ Error: Backup/upload to ${destinationType} failed" >> ${logPath};
-		echo "Error: $UPLOAD_OUTPUT" >> ${logPath};
+	# Stream the dump straight to the destination. The dump runs ONCE; "set -o
+	# pipefail" makes the pipeline fail if the dump (not just rclone) fails, so a
+	# broken backup never reports success. Running the dump a second time to
+	# "validate" it would double the load on the database and risk an inconsistent
+	# copy. The dump's exit code and stderr are captured through temp files so a
+	# dump failure ("Backup failed") stays distinguishable from an upload failure
+	# ("Upload to ... failed"). Because the pipeline is on the left of "||", set -e
+	# is ignored inside it, so "echo $? > status" always records the dump's code.
+	DUMP_STATUS_FILE=$(mktemp);
+	DUMP_ERROR_FILE=$(mktemp);
+	trap 'rm -f "$DUMP_STATUS_FILE" "$DUMP_ERROR_FILE"' EXIT;
+
+	UPLOAD_FAILED=0;
+	UPLOAD_OUTPUT=$({ ${backupCommand} 2> "$DUMP_ERROR_FILE"; echo $? > "$DUMP_STATUS_FILE"; } | ${rcloneCommand} 2>&1 >/dev/null) || UPLOAD_FAILED=1;
+	DUMP_STATUS=$(cat "$DUMP_STATUS_FILE");
+
+	if [ "$DUMP_STATUS" != "0" ]; then
+		# Dump failure takes precedence: a failed dump also fails the upload stage.
+		echo "[$(date)] ❌ Error: Backup failed" >> ${logPath};
+		echo "Error: $(cat "$DUMP_ERROR_FILE")" >> ${logPath};
+		${cleanupPartialUpload}
 		exit 1;
-	}
+	fi
+
+	if [ "$UPLOAD_FAILED" != "0" ]; then
+		echo "[$(date)] ❌ Error: Upload to ${destinationType} failed" >> ${logPath};
+		echo "Error: $UPLOAD_OUTPUT" >> ${logPath};
+		${cleanupPartialUpload}
+		exit 1;
+	fi
 
 	echo "[$(date)] ✅ Upload to ${destinationType} completed successfully" >> ${logPath};
 	echo "Backup done ✅" >> ${logPath};
