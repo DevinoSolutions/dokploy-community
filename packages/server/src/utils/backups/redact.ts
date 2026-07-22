@@ -1,22 +1,16 @@
+import { redactSecrets } from "../process/redactSecrets";
+
 /**
- * Redacts S3 credentials and rclone crypt passwords from rclone command strings.
+ * Redacts credentials from rclone command strings before they reach structured
+ * logs or error output.
  *
- * Used to prevent credential leakage in structured logs and error output.
- * The flag value may be double-quoted, single-quoted, or an unquoted token,
- * because `getS3Credentials()` escapes values with shell-quote (which leaves
- * simple values bare and single-quotes/backslash-escapes the rest):
- *   --s3-access-key-id=VALUE  /  ="VALUE"  /  ='VALUE'
- * and the crypt password env vars produced by `getRclonePathAndFlags()` /
- * `buildRcloneCommand()`:
- *   RCLONE_CRYPT_PASSWORD='VALUE'  and  RCLONE_CRYPT_PASSWORD2='VALUE'
+ * This is a thin alias over the shared {@link redactSecrets} redactor so the
+ * logger path and the thrown-error path (ExecError, Sentry) share ONE source of
+ * truth. `redactSecrets` covers S3 access/secret/session keys, SFTP/FTP
+ * passwords, database passwords (PGPASSWORD/MYSQL_PWD/MONGO*),
+ * RCLONE_CONFIG_*_PASS and RCLONE_CRYPT_PASSWORD* env vars, and Authorization
+ * headers, in bare, single-quoted and double-quoted forms — the shapes
+ * `getS3Credentials()` (shell-quote) and `buildRcloneCommand()` produce.
  */
-export const redactRcloneCredentials = (command: string): string => {
-	const value = `("[^"]*"|'[^']*'|\\S+)`;
-	return command
-		.replace(new RegExp(`(--s3-access-key-id=)${value}`, "g"), '$1"[REDACTED]"')
-		.replace(
-			new RegExp(`(--s3-secret-access-key=)${value}`, "g"),
-			'$1"[REDACTED]"',
-		)
-		.replace(/(RCLONE_CRYPT_PASSWORD2?=)'[^']*'/g, "$1'[REDACTED]'");
-};
+export const redactRcloneCredentials = (command: string): string =>
+	redactSecrets(command);

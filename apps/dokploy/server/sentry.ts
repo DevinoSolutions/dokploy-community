@@ -1,5 +1,28 @@
+import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import * as Sentry from "@sentry/node";
+import type { ErrorEvent } from "@sentry/node";
 import packageInfo from "../package.json";
+
+// Defense in depth: even though ExecError scrubs its own fields, strip
+// credentials from every event field an embedded command could reach (exception
+// values, the top-level message, and breadcrumb messages) before it leaves the
+// process. This catches any future code path that puts a raw command in an error.
+const scrubEvent = (event: ErrorEvent): ErrorEvent => {
+	if (typeof event.message === "string") {
+		event.message = redactSecrets(event.message);
+	}
+	for (const exception of event.exception?.values ?? []) {
+		if (typeof exception.value === "string") {
+			exception.value = redactSecrets(exception.value);
+		}
+	}
+	for (const breadcrumb of event.breadcrumbs ?? []) {
+		if (typeof breadcrumb.message === "string") {
+			breadcrumb.message = redactSecrets(breadcrumb.message);
+		}
+	}
+	return event;
+};
 
 // Public ingest-only DSN for the fork's error tracker. A DSN can only submit
 // events — it grants no read access to the project — so it is safe in source.
@@ -35,7 +58,7 @@ if (isSentryEnabled) {
 		beforeSend(event) {
 			// The reporting instance's hostname identifies a user's server — drop it.
 			event.server_name = undefined;
-			return event;
+			return scrubEvent(event);
 		},
 	});
 }
