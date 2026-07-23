@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.13** | Fork version **v0.29.13-community.1**
+Based on **Dokploy v0.29.13** | Fork version **v0.29.13-community.2**
 
 Everything in upstream Dokploy **v0.29.13**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.1 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.2 \
   --with-registry-auth \
   dokploy
 ```
@@ -106,6 +106,16 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.29.13-community.2
+
+**Migration reliability for official-Dokploy switchers, credential scrubbing & backup cleanup.** A patch release on the v0.29.13 base — five fixes, no new migrations. **Upgrading is recommended**, especially if you switched to the fork from official Dokploy v0.29.13 or use S3 backups.
+
+- **Migration failures fixed for installs switching from official Dokploy v0.29.13** — installs that moved from official Dokploy v0.29.13 to the fork previously re-ran migration 0174 (the fork re-timestamps it), hit a `duplicate_column` error, and rolled back the **entire** pending migration batch (0174–0192) — leaving every fork table and column silently missing. Migration 0174 now uses `ADD COLUMN IF NOT EXISTS`, a fork-wide migration-idempotency audit plus a static lint test guards against recurrence, and migration failures now log loudly and report to Sentry instead of failing quietly ([#172](https://github.com/DevinoSolutions/dokploy-community/pull/172)).
+- **Credentials scrubbed from error reports** — a failed backup command could previously embed live S3 credentials (e.g. rclone `--s3-access-key-id` / `--s3-secret-access-key`) in an error message that then flowed into error reports. Credentials are now scrubbed from `ExecError` messages and from all error reports (a Sentry `beforeSend` scrubber) before anything leaves the process ([#173](https://github.com/DevinoSolutions/dokploy-community/pull/173)).
+- **Partial backup uploads are cleaned up on failure** — when a backup fails mid-upload, the truncated partial object is now deleted from the destination, so it can't pollute buckets or evict good backups from retention. Failure diagnostics now distinguish **"Backup failed"** (a dump error, with the dump's stderr) from **"Upload failed"** (a destination error) ([#174](https://github.com/DevinoSolutions/dokploy-community/pull/174), inspired by upstream [#4896](https://github.com/Dokploy/dokploy/pull/4896)).
+- **Cursor pointer on buttons** — buttons now show a pointer cursor on hover ([#170](https://github.com/DevinoSolutions/dokploy-community/pull/170), upstream [#4890](https://github.com/Dokploy/dokploy/pull/4890) by @SteadEXE).
+- **Security-audit robustness** — the server security audit no longer breaks when sshd/ufw config contains duplicate directives; the grep pipelines take the first match and strip carriage returns so the audit JSON stays valid ([#171](https://github.com/DevinoSolutions/dokploy-community/pull/171), upstream [#4889](https://github.com/Dokploy/dokploy/pull/4889) by @reikjarloekl).
 
 ### New in v0.29.13-community.1
 
@@ -218,7 +228,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.13-community.1
+export DOKPLOY_VERSION=v0.29.13-community.2
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -231,7 +241,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.1    # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.2    # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -271,6 +281,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 14th release | `v0.29.12-community.14` |
 | v0.29.12 | 15th release | `v0.29.12-community.15` |
 | v0.29.13 | 1st release | `v0.29.13-community.1` |
+| v0.29.13 | 2nd release | `v0.29.13-community.2` |
 
 ## Contributing
 
