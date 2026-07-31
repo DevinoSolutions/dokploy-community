@@ -30,7 +30,7 @@ import {
 import { createDomain } from "./domain";
 import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
 import { getPublicIpWithFallback } from "../wss/utils";
-import { type Github, getIssueComment } from "./github";
+import { type Github, findGithubById, getIssueComment } from "./github";
 import { getWebServerSettings } from "./web-server-settings";
 
 export type PreviewDeployment = typeof previewDeployments.$inferSelect;
@@ -295,7 +295,17 @@ export const createPreviewDeployment = async (
 	// handler instead.
 	if (application.sourceType === "github") {
 		try {
-			const octokit = authGithub(application?.github as Github);
+			if (!application.githubId) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Github Account not configured correctly",
+				});
+			}
+
+			// `findApplicationById` redacts `githubPrivateKey` from the `github`
+			// relation, so the provider must be refetched to authenticate.
+			const githubProvider = await findGithubById(application.githubId);
+			const octokit = authGithub(githubProvider);
 			const runningComment = getIssueComment(
 				application.name,
 				"initializing",
