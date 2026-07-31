@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.13** | Fork version **v0.29.13-community.2**
+Based on **Dokploy v0.29.13** | Fork version **v0.29.13-community.3**
 
 Everything in upstream Dokploy **v0.29.13**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.2 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.3 \
   --with-registry-auth \
   dokploy
 ```
@@ -106,6 +106,17 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.29.13-community.3
+
+**Security fix & six upstream ports.** Six 1:1 ports of upstream PRs — no new migrations. **Upgrading is recommended** for the command-injection fix.
+
+- **Security: command injection via compose service names** — a crafted compose service name could reach a `docker` error message that was interpolated unquoted into an `echo` inside the generated build script, allowing shell command injection during builds. The error text is now shell-quoted before embedding ([#178](https://github.com/DevinoSolutions/dokploy-community/pull/178), upstream [#4872](https://github.com/Dokploy/dokploy/pull/4872) by @Siumauricio).
+- **Preview deployments work with GitHub apps again** — creating a preview deployment passed a redacted GitHub private key to authentication, so previews always failed with `NOT_FOUND`; the provider credentials are now re-fetched unredacted ([#179](https://github.com/DevinoSolutions/dokploy-community/pull/179), upstream [#4933](https://github.com/Dokploy/dokploy/pull/4933) by @CyrilBIENNE).
+- **Postgres 100-argument limit fix for schedules & volume backups** — installs with many applications no longer crash schedule/volume-backup queries that hydrate app relations ([#175](https://github.com/DevinoSolutions/dokploy-community/pull/175), upstream [#4931](https://github.com/Dokploy/dokploy/pull/4931) by @Siumauricio).
+- **GitHub provider trigger type persists** — the selected deploy trigger (push/tag) is saved correctly when editing a GitHub-provider application ([#176](https://github.com/DevinoSolutions/dokploy-community/pull/176), upstream [#4937](https://github.com/Dokploy/dokploy/pull/4937) by @narcisonunez).
+- **DNS check tooltip no longer flags CDNs as errors** — domains behind a CDN/proxy show an informational message instead of a false-negative error ([#177](https://github.com/DevinoSolutions/dokploy-community/pull/177), upstream [#4911](https://github.com/Dokploy/dokploy/pull/4911) by @AbiRaditya).
+- **Template dialog keeps its state on tab switch** — the create-from-template dialog no longer closes when switching browser tabs ([#180](https://github.com/DevinoSolutions/dokploy-community/pull/180), upstream [#4906](https://github.com/Dokploy/dokploy/pull/4906) by @zenojunior).
 
 ### New in v0.29.13-community.2
 
@@ -228,7 +239,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.13-community.2
+export DOKPLOY_VERSION=v0.29.13-community.3
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -241,7 +252,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.2    # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.29.13-community.3    # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -282,6 +293,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.12 | 15th release | `v0.29.12-community.15` |
 | v0.29.13 | 1st release | `v0.29.13-community.1` |
 | v0.29.13 | 2nd release | `v0.29.13-community.2` |
+| v0.29.13 | 3rd release | `v0.29.13-community.3` |
 
 ## Contributing
 
