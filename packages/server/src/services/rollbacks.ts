@@ -9,7 +9,6 @@ import {
 	rollbacks,
 } from "../db/schema";
 import { getECRAuthToken } from "../utils/aws/ecr";
-import type { ApplicationNested } from "../utils/builders";
 import { getRegistryTag } from "../utils/cluster/upload";
 import {
 	calculateResources,
@@ -22,8 +21,9 @@ import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
 import { getRemoteDocker } from "../utils/servers/remote-docker";
 import { type Application, findApplicationById } from "./application";
 import { findDeploymentById } from "./deployment";
+import type { Environment } from "./environment";
 import type { Mount } from "./mount";
-import { resolveNetworkNamesForResource } from "./network";
+import { resolveServiceNetworks } from "./network";
 import type { Port } from "./port";
 import type { Project } from "./project";
 import { findRegistryByIdWithCredentials, type Registry } from "./registry";
@@ -105,42 +105,7 @@ export const findRollbackById = async (rollbackId: string) => {
 	const result = await db.query.rollbacks.findFirst({
 		where: eq(rollbacks.rollbackId, rollbackId),
 		with: {
-			deployment: {
-				with: {
-					// `application` has 100 columns (incl. the fork's `networkIds`).
-					// Drizzle packs every selected column of a joined resource plus one
-					// entry per nested relation into a single json_build_array(...),
-					// which Postgres caps at 100 arguments (error 54023). Selecting all
-					// of `application` emits json_build_array(100 columns + environment)
-					// = 101 args and throws, so we project it down. Consumers only read
-					// `deployment.applicationId` (a deployments column); the identifying
-					// columns below are kept for API-shape stability. See
-					// services/schedule.ts and services/volume-backups.ts for the same
-					// fix.
-					application: {
-						columns: {
-							applicationId: true,
-							appName: true,
-							name: true,
-							serverId: true,
-						},
-						with: {
-							environment: {
-								columns: { environmentId: true, name: true },
-								with: {
-									project: {
-										columns: {
-											projectId: true,
-											name: true,
-											organizationId: true,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
+			deployment: true,
 		},
 	});
 
@@ -250,7 +215,7 @@ const rollbackApplication = async (
 	image: string,
 	serverId?: string | null,
 	fullContext?: Application & {
-		environment: {
+		environment: Environment & {
 			project: Project;
 		};
 		mounts: Mount[];
@@ -298,6 +263,10 @@ const rollbackApplication = async (
 
 	const volumesMount = generateVolumeMounts(mounts);
 
+	const resolvedNetworks = await resolveServiceNetworks(
+		fullContext as Parameters<typeof resolveServiceNetworks>[0],
+	);
+
 	const {
 		HealthCheck,
 		RestartPolicy,
@@ -306,21 +275,16 @@ const rollbackApplication = async (
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		Ulimits,
 	} = generateConfigContainer(
 		fullContext as Parameters<typeof generateConfigContainer>[0],
-		await resolveNetworkNamesForResource(
-			(fullContext as ApplicationNested).networkIds,
-			(fullContext as ApplicationNested).serverId,
-			(fullContext as ApplicationNested).environment.project.organizationId,
-		),
 	);
 
 	const bindsMount = generateBindMounts(mounts);
 	const envVariables = prepareEnvironmentVariables(
 		env,
 		fullContext.environment.project.env,
+		fullContext.environment.env,
 	);
 
 	let rollbackImage = image;
@@ -355,7 +319,7 @@ const rollbackApplication = async (
 				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {

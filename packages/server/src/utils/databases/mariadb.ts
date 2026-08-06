@@ -1,5 +1,6 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -8,7 +9,6 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
-import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 export type MariadbNested = InferResultType<
@@ -38,6 +38,8 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 		env ? `\n${env}` : ""
 	}`;
 
+	const resolvedNetworks = await resolveServiceNetworks(mariadb);
+
 	const {
 		HealthCheck,
 		RestartPolicy,
@@ -46,18 +48,10 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(
-		mariadb,
-		await resolveNetworkNamesForResource(
-			mariadb.networkIds,
-			mariadb.serverId,
-			mariadb.environment.project.organizationId,
-		),
-	);
+	} = generateConfigContainer(mariadb);
 	const resources = calculateResources({
 		memoryLimit,
 		memoryReservation,
@@ -95,7 +89,7 @@ export const buildMariadb = async (mariadb: MariadbNested) => {
 				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {

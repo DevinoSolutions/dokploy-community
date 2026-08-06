@@ -1,10 +1,10 @@
 import { db } from "@dokploy/server/db";
 import { applications, domains } from "@dokploy/server/db/schema";
+import { resolveServiceNetworks } from "@dokploy/server/services/network";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
 import { eq } from "drizzle-orm";
-import { resolveNetworkNamesForResource } from "../../services/network";
 import { getECRAuthToken } from "../aws/ecr";
 import { getRegistryTag, uploadImageRemoteCommand } from "../cluster/upload";
 import {
@@ -133,6 +133,8 @@ export const mechanizeDockerContainer = async (
 
 	const volumesMount = generateVolumeMounts(mounts);
 
+	const resolvedNetworks = await resolveServiceNetworks(application);
+
 	const {
 		HealthCheck,
 		RestartPolicy,
@@ -141,18 +143,10 @@ export const mechanizeDockerContainer = async (
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(
-		application,
-		await resolveNetworkNamesForResource(
-			application.networkIds,
-			application.serverId,
-			application.environment.project.organizationId,
-		),
-	);
+	} = generateConfigContainer(application);
 
 	const bindsMount = generateBindMounts(mounts);
 	const filesMount = generateFileMounts(appName, application);
@@ -201,7 +195,7 @@ export const mechanizeDockerContainer = async (
 				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {

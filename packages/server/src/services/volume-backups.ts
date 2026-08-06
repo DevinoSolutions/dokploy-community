@@ -20,7 +20,11 @@ export const findVolumeBackupById = async (volumeBackupId: string) => {
 			// project it down to only the fields consumers read. The other joined
 			// resources are far narrower and left intact. See services/mount.ts.
 			application: {
-				columns: { applicationId: true, appName: true, serverId: true },
+				columns: {
+					applicationId: true,
+					appName: true,
+					serverId: true,
+				},
 				with: {
 					environment: {
 						columns: {},

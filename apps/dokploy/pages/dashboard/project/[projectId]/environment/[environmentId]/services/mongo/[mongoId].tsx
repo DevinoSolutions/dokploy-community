@@ -22,7 +22,6 @@ import { ShowInternalMongoCredentials } from "@/components/dashboard/mongo/gener
 import { UpdateMongo } from "@/components/dashboard/mongo/update-mongo";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
-import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
 import { MongodbIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -200,7 +199,7 @@ const Mongo = (
 										router.push(newPath, undefined, { shallow: true });
 									}}
 								>
-									<div className="flex flex-row items-center justify-between w-full gap-4 overflow-x-scroll">
+									<div className="flex flex-row items-center justify-between w-full gap-4 overflow-x-auto">
 										<TabsList
 											className={cn(
 												"md:grid md:w-fit max-md:overflow-y-scroll justify-start",
@@ -320,12 +319,6 @@ const Mongo = (
 												<ShowDatabaseAdvancedSettings
 													id={mongoId}
 													type="mongo"
-													serverId={data?.serverId}
-												/>
-												<ResourceNetworksCard
-													resourceType="mongo"
-													resourceId={mongoId}
-													value={data?.networkIds ?? []}
 													serverId={data?.serverId}
 												/>
 											</div>

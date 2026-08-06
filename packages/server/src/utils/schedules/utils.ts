@@ -1,5 +1,4 @@
 import { createWriteStream } from "node:fs";
-import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Schedule } from "@dokploy/server/db/schema/schedule";
@@ -79,9 +78,9 @@ export const scheduleJob = (schedule: Schedule) => {
 				await runCommand(scheduleId);
 			} catch (error) {
 				// runCommand already logs to the deployment log and fires the
-				// failure notification via handleScheduleError before throwing.
-				// Swallow here so a failing scheduled run does not become an
-				// unhandledRejection from node-schedule's async callback.
+				// failure notification via handleScheduleError. Swallow here so a
+				// failing scheduled run does not become an unhandledRejection from
+				// node-schedule's async callback.
 				console.error(`Scheduled job ${scheduleId} failed:`, error);
 			}
 		},
@@ -112,48 +111,46 @@ export const runCommand = async (scheduleId: string) => {
 		description: "Schedule",
 	});
 
-	if (scheduleType === "application" || scheduleType === "compose") {
-		let containerId = "";
-		let serverId = "";
-		if (scheduleType === "application" && application) {
-			const container = await getServiceContainer(
-				application.appName,
-				application.serverId,
-			);
-			containerId = container?.Id || "";
-			serverId = application.serverId || "";
-		}
-		if (scheduleType === "compose" && compose) {
-			const container = await getComposeContainer(compose, serviceName || "");
-			containerId = container?.Id || "";
-			serverId = compose.serverId || "";
-		}
-
-		if (!containerId) {
-			// The target container could not be resolved (service not running).
-			// Running `docker exec ""` here would fail on every cron tick with a
-			// cryptic "invalid container name or ID: value is empty" error, so
-			// fail the run cleanly with an actionable message instead.
-			const targetName =
-				scheduleType === "compose"
-					? `${compose?.appName || "compose"}${
-							serviceName ? ` (service "${serviceName}")` : ""
-						}`
-					: application?.appName || "application";
-			const error = new Error(
-				`Container not found for ${targetName} — the service may not be running`,
-			);
-			try {
-				await appendFile(deployment.logPath, `❌ ${error.message}\n`);
-			} catch (writeError) {
-				console.log("Failed to write schedule error to log:", writeError);
+	try {
+		if (scheduleType === "application" || scheduleType === "compose") {
+			let containerId = "";
+			let serverId = "";
+			if (scheduleType === "application" && application) {
+				const container = await getServiceContainer(
+					application.appName,
+					application.serverId,
+				);
+				containerId = container?.Id || "";
+				serverId = application.serverId || "";
 			}
-			await handleScheduleError(schedule, deployment.deploymentId, error);
-			throw error;
-		}
+			if (scheduleType === "compose" && compose) {
+				const container = await getComposeContainer(compose, serviceName || "");
+				containerId = container?.Id || "";
+				serverId = compose.serverId || "";
+			}
 
-		if (serverId) {
-			try {
+			if (!containerId) {
+				const target =
+					scheduleType === "compose"
+						? `service '${serviceName}' of compose '${compose?.name}'`
+						: `application '${application?.appName}'`;
+				const message = `Container not found for ${target}, make sure the service is running`;
+				if (serverId) {
+					await execAsyncRemote(
+						serverId,
+						`echo ${quote([`❌ ${message}`])} >> ${quote([deployment.logPath])}`,
+					);
+				} else {
+					const writeStream = createWriteStream(deployment.logPath, {
+						flags: "a",
+					});
+					writeStream.write(`❌ ${message}\n`);
+					writeStream.end();
+				}
+				throw new Error(message);
+			}
+
+			if (serverId) {
 				await execAsyncRemote(
 					serverId,
 					`
@@ -166,47 +163,44 @@ export const runCommand = async (scheduleId: string) => {
 					echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 					`,
 				);
-			} catch (error) {
-				await handleScheduleError(schedule, deployment.deploymentId, error);
-				throw error;
-			}
-		} else {
-			const writeStream = createWriteStream(deployment.logPath, { flags: "a" });
+			} else {
+				const writeStream = createWriteStream(deployment.logPath, {
+					flags: "a",
+				});
 
-			try {
-				if (IS_CLOUD) {
+				try {
+					if (IS_CLOUD) {
+						writeStream.write(
+							"This feature is not available in the cloud version.",
+						);
+						writeStream.end();
+						return { ...deployment, status: "running" as const };
+					}
 					writeStream.write(
-						"This feature is not available in the cloud version.",
+						`docker exec ${containerId} ${shellType} -c ${command}\n`,
+					);
+					await spawnAsync(
+						"docker",
+						["exec", containerId, shellType, "-c", command],
+						(data) => {
+							if (writeStream.writable) {
+								writeStream.write(data);
+							}
+						},
+					);
+
+					writeStream.write("✅ Command executed successfully\n");
+					writeStream.end();
+				} catch (error) {
+					writeStream.write("❌ Command failed\n");
+					writeStream.write(
+						error instanceof Error ? error.message : "Unknown error",
 					);
 					writeStream.end();
-					return;
+					throw error;
 				}
-				writeStream.write(
-					`docker exec ${containerId} ${shellType} -c ${command}\n`,
-				);
-				await spawnAsync(
-					"docker",
-					["exec", containerId, shellType, "-c", command],
-					(data) => {
-						if (writeStream.writable) {
-							writeStream.write(data);
-						}
-					},
-				);
-
-				writeStream.write("✅ Command executed successfully\n");
-			} catch (error) {
-				writeStream.write("❌ Command failed\n");
-				writeStream.write(
-					error instanceof Error ? error.message : "Unknown error",
-				);
-				writeStream.end();
-				await handleScheduleError(schedule, deployment.deploymentId, error);
-				throw error;
 			}
-		}
-	} else if (scheduleType === "dokploy-server") {
-		try {
+		} else if (scheduleType === "dokploy-server") {
 			const writeStream = createWriteStream(deployment.logPath, { flags: "a" });
 			const { SCHEDULES_PATH } = paths();
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
@@ -231,18 +225,13 @@ export const runCommand = async (scheduleId: string) => {
 					cwd: fullPath,
 				},
 			);
-		} catch (error) {
-			await handleScheduleError(schedule, deployment.deploymentId, error);
-			throw error;
-		}
-	} else if (scheduleType === "server") {
-		try {
+		} else if (scheduleType === "server") {
 			const { SCHEDULES_PATH } = paths(true);
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
 			const command = `
-				set -euo pipefail
+				set -e
 				echo "Running script" >> ${deployment.logPath};
-				bash -c ${fullPath}/script.sh 2>&1 | tee -a ${deployment.logPath} || { 
+				bash -c ${fullPath}/script.sh 2>&1 | tee -a ${deployment.logPath} || {
 					echo "❌ Command failed" >> ${deployment.logPath};
 					exit 1;
 				  }
@@ -257,10 +246,13 @@ export const runCommand = async (scheduleId: string) => {
 					});
 				}
 			});
-		} catch (error) {
-			await handleScheduleError(schedule, deployment.deploymentId, error);
-			throw error;
 		}
+		await updateDeploymentStatus(deployment.deploymentId, "done");
+		return { ...deployment, status: "done" as const };
+	} catch (error) {
+		// `handleScheduleError` marks the deployment as errored and fans out the
+		// schedule-failure notifications.
+		await handleScheduleError(schedule, deployment.deploymentId, error);
+		return { ...deployment, status: "error" as const };
 	}
-	await updateDeploymentStatus(deployment.deploymentId, "done");
 };

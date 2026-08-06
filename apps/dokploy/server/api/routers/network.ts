@@ -1,99 +1,151 @@
 import {
 	createNetwork,
 	findNetworkById,
-	findNetworksByOrganizationId,
-	findResourcesUsingNetwork,
-	getNetworkErrorMessage,
-	isDuplicateNetworkNameError,
-	removeNetworkById,
+	findNetworksToSync,
+	importDockerNetworks,
+	inspectNetwork,
+	recreateNetwork,
+	removeNetwork,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
+import { and, desc, eq, isNull } from "drizzle-orm";
+import { z } from "zod";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
-import { audit } from "@/server/api/utils/audit";
+import { db } from "@/server/db";
 import {
 	apiCreateNetwork,
 	apiFindOneNetwork,
 	apiRemoveNetwork,
+	network as networkTable,
 } from "@/server/db/schema";
+import { audit } from "../utils/audit";
 
 export const networkRouter = createTRPCRouter({
-	all: withPermission("network", "read").query(async ({ ctx }) =>
-		findNetworksByOrganizationId(ctx.session.activeOrganizationId),
-	),
+	all: withPermission("network", "read")
+		.input(z.object({ serverId: z.string().optional() }))
+		.query(async ({ ctx, input }) => {
+			const rows = await db.query.network.findMany({
+				where: and(
+					eq(networkTable.organizationId, ctx.session.activeOrganizationId),
+					input.serverId
+						? eq(networkTable.serverId, input.serverId)
+						: isNull(networkTable.serverId),
+				),
+				orderBy: desc(networkTable.createdAt),
+			});
+			return rows;
+		}),
 
 	one: withPermission("network", "read")
 		.input(apiFindOneNetwork)
-		.query(async ({ ctx, input }) =>
-			findNetworkById(input.networkId, ctx.session.activeOrganizationId),
-		),
-
+		.query(async ({ ctx, input }) => {
+			const row = await findNetworkById(input.networkId);
+			if (row.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Network not found",
+				});
+			}
+			return row;
+		}),
 	create: withPermission("network", "create")
 		.input(apiCreateNetwork)
 		.mutation(async ({ ctx, input }) => {
-			try {
-				const created = await createNetwork(
-					input,
-					ctx.session.activeOrganizationId,
-				);
+			const created = await createNetwork(
+				input,
+				ctx.session.activeOrganizationId,
+			);
+			await audit(ctx, {
+				action: "create",
+				resourceType: "network",
+				resourceId: created.networkId,
+				resourceName: created.name,
+			});
+			return created;
+		}),
+	networksToSync: withPermission("network", "read")
+		.input(z.object({ serverId: z.string().optional() }))
+		.query(async ({ ctx, input }) => {
+			return findNetworksToSync(
+				ctx.session.activeOrganizationId,
+				input.serverId ?? null,
+			);
+		}),
+
+	import: withPermission("network", "create")
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+				names: z.array(z.string().min(1)).min(1),
+			}),
+		)
+		.mutation(async ({ ctx, input }) => {
+			const result = await importDockerNetworks(
+				ctx.session.activeOrganizationId,
+				input.serverId ?? null,
+				input.names,
+			);
+			if (result.imported.length > 0) {
 				await audit(ctx, {
 					action: "create",
 					resourceType: "network",
-					resourceId: created.networkId,
-					resourceName: created.name,
-				});
-				return created;
-			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				const message = getNetworkErrorMessage(error);
-				if (isDuplicateNetworkNameError(error)) {
-					throw new TRPCError({
-						code: "CONFLICT",
-						message: `A network named "${input.name}" already exists on this server`,
-						cause: error,
-					});
-				}
-				if (
-					typeof (error as { code?: unknown }).code === "string" &&
-					(error as { code: string }).code === "BAD_REQUEST"
-				) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: message || "Error creating the network",
-						cause: error,
-					});
-				}
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "Error creating the network",
-					cause: error,
+					resourceName: result.imported.join(", "),
+					metadata: { imported: result.imported },
 				});
 			}
+			return result;
 		}),
 
-	usage: withPermission("network", "read")
+	inspect: withPermission("network", "read")
 		.input(apiFindOneNetwork)
-		.query(async ({ ctx, input }) =>
-			findResourcesUsingNetwork(
-				input.networkId,
-				ctx.session.activeOrganizationId,
-			),
-		),
+		.query(async ({ ctx, input }) => {
+			const network = await findNetworkById(input.networkId);
+			if (network.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Network not found",
+				});
+			}
+			return inspectNetwork(input.networkId);
+		}),
+
+	recreate: withPermission("network", "delete")
+		.input(apiFindOneNetwork)
+		.mutation(async ({ ctx, input }) => {
+			const network = await findNetworkById(input.networkId);
+			if (network.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Network not found",
+				});
+			}
+			const recreated = await recreateNetwork(input.networkId);
+			await audit(ctx, {
+				action: "reload",
+				resourceType: "network",
+				resourceId: recreated.networkId,
+				resourceName: recreated.name,
+			});
+			return recreated;
+		}),
 
 	remove: withPermission("network", "delete")
 		.input(apiRemoveNetwork)
 		.mutation(async ({ ctx, input }) => {
-			const deleted = await removeNetworkById(
-				input.networkId,
-				ctx.session.activeOrganizationId,
-			);
-			if (deleted) {
-				await audit(ctx, {
-					action: "delete",
-					resourceType: "network",
-					resourceId: deleted.networkId,
-					resourceName: deleted.name,
+			const network = await findNetworkById(input.networkId);
+			if (network.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "Not authorized to delete this network",
 				});
 			}
-			return deleted;
+			const removed = await removeNetwork(input.networkId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "network",
+				resourceId: removed.networkId,
+				resourceName: removed.name,
+			});
+			return removed;
 		}),
 });

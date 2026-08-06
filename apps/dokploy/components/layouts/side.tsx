@@ -228,9 +228,14 @@ const MENU: Menu = {
 			title: "Networks",
 			url: "/dashboard/networks",
 			icon: Network,
-			// Only enabled for users with network permission in non-cloud environments
-			isEnabled: ({ permissions, isCloud }) =>
-				!!(permissions?.network?.read && !isCloud),
+			// Only enabled for admins and users with access to Docker in non-cloud environments
+			isEnabled: ({ auth, isCloud }) =>
+				!!(
+					(auth?.role === "owner" ||
+						auth?.role === "admin" ||
+						auth?.canAccessToDocker) &&
+					!isCloud
+				),
 		},
 		{
 			isSingle: true,

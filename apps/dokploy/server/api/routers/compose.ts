@@ -54,6 +54,7 @@ import {
 import {
 	type CompleteTemplate,
 	fetchTemplateFiles,
+	fetchTemplateLogo,
 	fetchTemplatesList,
 } from "@dokploy/server/templates/github";
 import { TRPCError } from "@trpc/server";
@@ -760,7 +761,10 @@ export const composeRouter = createTRPCRouter({
 				}
 			}
 
-			const template = await fetchTemplateFiles(input.id, input.baseUrl);
+			const [template, templateLogo] = await Promise.all([
+				fetchTemplateFiles(input.id, input.baseUrl),
+				fetchTemplateLogo(input.id, input.baseUrl),
+			]);
 
 			let serverIp = "127.0.0.1";
 
@@ -798,7 +802,7 @@ export const composeRouter = createTRPCRouter({
 				name: input.id,
 				sourceType: "raw",
 				appName: appName,
-				isolatedDeployment: template.config.config?.isolated !== false,
+				icon: templateLogo,
 			});
 
 			await addNewService(ctx, compose.composeId);
@@ -1156,6 +1160,8 @@ export const composeRouter = createTRPCRouter({
 					serverIp: serverIp,
 					projectName: compose.appName,
 				});
+				// `applyTemplateToCompose` already persists `template.envs` as the
+				// compose env, so no `env` option is needed here.
 				await applyTemplateToCompose(compose, processedTemplate, {
 					composeFile: templateData.compose,
 					sourceType: "raw",

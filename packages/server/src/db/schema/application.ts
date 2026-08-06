@@ -235,6 +235,9 @@ export const applications = pgTable("application", {
 		},
 	),
 	networkIds: text("networkIds").array().default([]),
+	detachDokployNetwork: boolean("detachDokployNetwork")
+		.notNull()
+		.default(false),
 });
 
 export const applicationsRelations = relations(
@@ -376,6 +379,8 @@ const createSchema = createInsertSchema(applications, {
 	previewRequireCollaboratorPermissions: z.boolean().optional(),
 	watchPaths: z.array(z.string()).optional().optional(),
 	previewLabels: z.array(z.string()).optional(),
+	networkIds: z.array(z.string()).optional(),
+	detachDokployNetwork: z.boolean().optional(),
 	cleanCache: z.boolean().optional(),
 	stopGracePeriodSwarm: z.number().nullable(),
 	endpointSpecSwarm: EndpointSpecSwarmSchema.nullable(),
@@ -386,7 +391,6 @@ const createSchema = createInsertSchema(applications, {
 		.max(2 * 1024 * 1024, "Icon must be less than 2MB")
 		.nullable()
 		.optional(),
-	networkIds: z.array(z.string()).optional(),
 });
 
 export const apiCreateApplication = createSchema.pick({

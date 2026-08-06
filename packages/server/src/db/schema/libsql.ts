@@ -83,6 +83,10 @@ export const libsql = pgTable("libsql", {
 	stopGracePeriodSwarm: bigint("stopGracePeriodSwarm", { mode: "number" }),
 	endpointSpecSwarm: json("endpointSpecSwarm").$type<EndpointSpecSwarm>(),
 	replicas: integer("replicas").default(1).notNull(),
+	networkIds: text("networkIds").array().default([]),
+	detachDokployNetwork: boolean("detachDokployNetwork")
+		.notNull()
+		.default(false),
 	createdAt: text("createdAt")
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
@@ -93,7 +97,6 @@ export const libsql = pgTable("libsql", {
 	serverId: text("serverId").references(() => server.serverId, {
 		onDelete: "cascade",
 	}),
-	networkIds: text("networkIds").array().default([]),
 });
 
 export const libsqlRelations = relations(libsql, ({ one, many }) => ({
@@ -148,6 +151,7 @@ const createSchema = createInsertSchema(libsql, {
 	stopGracePeriodSwarm: z.number().nullable(),
 	endpointSpecSwarm: EndpointSpecSwarmSchema.nullable(),
 	networkIds: z.array(z.string()).optional(),
+	detachDokployNetwork: z.boolean().optional(),
 });
 
 export const apiCreateLibsql = createSchema

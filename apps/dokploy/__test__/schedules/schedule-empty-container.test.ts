@@ -9,6 +9,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * The old code then ran `docker exec "" ...` on every cron tick, and because
  * node-schedule's async callback had no catch, the rethrow became an
  * unhandledRejection.
+ *
+ * Upstream v0.29.14 landed its own guard for the empty container id and
+ * restructured `runCommand` so that a failed run RESOLVES with
+ * `status: "error"` instead of throwing. These tests track that shape; the
+ * behaviour they protect is unchanged: no `docker exec ""`, the run is recorded
+ * as a failure, the reason is written to the deployment log, and the fork's
+ * schedule-failure notification still fires.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -23,7 +30,8 @@ const mocks = vi.hoisted(() => ({
 	spawnAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
 	sendScheduleFailureNotifications: vi.fn(),
-	appendFile: vi.fn(),
+	createWriteStream: vi.fn(),
+	logWrite: vi.fn(),
 	scheduleJobNode: vi.fn(),
 }));
 
@@ -64,8 +72,8 @@ vi.mock("@dokploy/server/utils/notifications/schedule-failure", () => ({
 	sendScheduleFailureNotifications: mocks.sendScheduleFailureNotifications,
 }));
 
-vi.mock("node:fs/promises", () => ({
-	appendFile: mocks.appendFile,
+vi.mock("node:fs", () => ({
+	createWriteStream: mocks.createWriteStream,
 }));
 
 vi.mock("node-schedule", () => ({
@@ -103,6 +111,7 @@ const composeSchedule = () => ({
 	serverId: null,
 	application: null,
 	compose: {
+		name: "my-compose",
 		appName: "my-compose",
 		serverId: null,
 		composeType: "docker-compose",
@@ -110,27 +119,38 @@ const composeSchedule = () => ({
 	},
 });
 
-describe("runCommand — target container not running (DOKPLOY-COMMUNITY-1/2)", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		mocks.createDeploymentSchedule.mockResolvedValue({
-			deploymentId: "dep-1",
-			logPath: "/tmp/dep-1.log",
-		});
-		mocks.updateDeploymentStatus.mockResolvedValue(undefined);
-		mocks.findScheduleOrganizationId.mockResolvedValue("org-1");
-		mocks.getDokployUrl.mockResolvedValue("https://dokploy.test");
-		mocks.sendScheduleFailureNotifications.mockResolvedValue(undefined);
-		mocks.appendFile.mockResolvedValue(undefined);
+const primeMocks = () => {
+	vi.clearAllMocks();
+	mocks.createDeploymentSchedule.mockResolvedValue({
+		deploymentId: "dep-1",
+		logPath: "/tmp/dep-1.log",
 	});
+	mocks.updateDeploymentStatus.mockResolvedValue(undefined);
+	mocks.findScheduleOrganizationId.mockResolvedValue("org-1");
+	mocks.getDokployUrl.mockResolvedValue("https://dokploy.test");
+	mocks.sendScheduleFailureNotifications.mockResolvedValue(undefined);
+	mocks.createWriteStream.mockReturnValue({
+		write: mocks.logWrite,
+		end: vi.fn(),
+		writable: true,
+	});
+};
 
-	it("rejects with an actionable error and never runs docker exec for an application", async () => {
+/** Every chunk written to the deployment log, concatenated. */
+const loggedOutput = () =>
+	mocks.logWrite.mock.calls.map((call) => String(call[0])).join("");
+
+describe("runCommand — target container not running (DOKPLOY-COMMUNITY-1/2)", () => {
+	beforeEach(primeMocks);
+
+	it("fails the run and never runs docker exec for an application", async () => {
 		mocks.findScheduleById.mockResolvedValue(applicationSchedule());
 		mocks.getServiceContainer.mockResolvedValue(null);
 
-		await expect(runCommand("sch-app-1")).rejects.toThrow(
-			"Container not found for my-app — the service may not be running",
-		);
+		await expect(runCommand("sch-app-1")).resolves.toMatchObject({
+			deploymentId: "dep-1",
+			status: "error",
+		});
 
 		// The whole point: no docker exec with an empty container id.
 		expect(mocks.spawnAsync).not.toHaveBeenCalled();
@@ -145,42 +165,34 @@ describe("runCommand — target container not running (DOKPLOY-COMMUNITY-1/2)", 
 		expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
 
 		// The failure is written to the deployment log.
-		expect(mocks.appendFile).toHaveBeenCalledWith(
-			"/tmp/dep-1.log",
-			expect.stringContaining("Container not found for my-app"),
-		);
+		expect(mocks.createWriteStream).toHaveBeenCalledWith("/tmp/dep-1.log", {
+			flags: "a",
+		});
+		expect(loggedOutput()).toContain("Container not found for application");
+		expect(loggedOutput()).toContain("my-app");
 	});
 
-	it("includes the service name in the error for a compose schedule", async () => {
+	it("includes the service name in the log for a compose schedule", async () => {
 		mocks.findScheduleById.mockResolvedValue(composeSchedule());
 		mocks.getComposeContainer.mockResolvedValue(null);
 
-		await expect(runCommand("sch-compose-1")).rejects.toThrow(
-			'Container not found for my-compose (service "web") — the service may not be running',
-		);
+		await expect(runCommand("sch-compose-1")).resolves.toMatchObject({
+			status: "error",
+		});
 
 		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+		expect(loggedOutput()).toContain("service 'web'");
+		expect(loggedOutput()).toContain("my-compose");
 	});
 });
 
 describe("scheduleJob — cron callback must not leak rejections", () => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		mocks.createDeploymentSchedule.mockResolvedValue({
-			deploymentId: "dep-1",
-			logPath: "/tmp/dep-1.log",
-		});
-		mocks.updateDeploymentStatus.mockResolvedValue(undefined);
-		mocks.findScheduleOrganizationId.mockResolvedValue("org-1");
-		mocks.getDokployUrl.mockResolvedValue("https://dokploy.test");
-		mocks.sendScheduleFailureNotifications.mockResolvedValue(undefined);
-		mocks.appendFile.mockResolvedValue(undefined);
-	});
+	beforeEach(primeMocks);
 
-	it("swallows a failing runCommand instead of producing an unhandled rejection", async () => {
-		// runCommand will reject because the container lookup returns null.
+	it("does not produce an unhandled rejection when the run fails", async () => {
+		// The container lookup returns null, so the run fails.
 		mocks.findScheduleById.mockResolvedValue(applicationSchedule());
 		mocks.getServiceContainer.mockResolvedValue(null);
 
@@ -198,13 +210,14 @@ describe("scheduleJob — cron callback must not leak rejections", () => {
 		const registeredCallback = mocks.scheduleJobNode.mock
 			.calls[0]?.[2] as () => Promise<void>;
 
-		// The callback must resolve (not reject) even though runCommand rejects.
+		// The callback must settle without rejecting. `runCommand` reports the
+		// failure via its return value, and the guard in `scheduleJob` still
+		// catches anything that escapes.
 		await expect(registeredCallback()).resolves.toBeUndefined();
 
-		expect(consoleErrorSpy).toHaveBeenCalledWith(
-			"Scheduled job sch-app-1 failed:",
-			expect.any(Error),
-		);
+		// The failure is still recorded and notified.
+		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+		expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
 		consoleErrorSpy.mockRestore();
 	});
 });

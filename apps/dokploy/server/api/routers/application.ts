@@ -8,6 +8,7 @@ import {
 	findApplicationById,
 	findDomainsByApplicationId,
 	findEnvironmentById,
+	findPreviewDeploymentsByApplicationId,
 	findProjectById,
 	getAccessibleServerIds,
 	getApplicationStats,
@@ -20,6 +21,7 @@ import {
 	removeDeployments,
 	removeDirectoryCode,
 	removeMonitoringDirectory,
+	removePreviewDeployment,
 	removeService,
 	removeTraefikConfig,
 	scanServiceForTransfer,
@@ -286,6 +288,14 @@ export const applicationRouter = createTRPCRouter({
 			// any Cloudflare publishing BEFORE the row (and its domains) is removed.
 			const appDomains = await findDomainsByApplicationId(input.applicationId);
 			await deprovisionCloudflareForDomains(appDomains);
+			const previewDeploymentsList =
+				await findPreviewDeploymentsByApplicationId(input.applicationId);
+
+			for (const previewDeployment of previewDeploymentsList) {
+				try {
+					await removePreviewDeployment(previewDeployment.previewDeploymentId);
+				} catch (_) {}
+			}
 
 			const result = await db
 				.delete(applications)

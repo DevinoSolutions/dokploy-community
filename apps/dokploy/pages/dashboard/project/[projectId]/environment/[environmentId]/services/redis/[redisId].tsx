@@ -17,7 +17,6 @@ import { ShowDockerLogs } from "@/components/dashboard/application/logs/show";
 import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
-import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { ShowExternalRedisCredentials } from "@/components/dashboard/redis/general/show-external-redis-credentials";
 import { ShowGeneralRedis } from "@/components/dashboard/redis/general/show-general-redis";
 import { ShowInternalRedisCredentials } from "@/components/dashboard/redis/general/show-internal-redis-credentials";
@@ -199,7 +198,7 @@ const Redis = (
 										router.push(newPath, undefined, { shallow: true });
 									}}
 								>
-									<div className="flex flex-row items-center justify-between w-full gap-4 overflow-x-scroll">
+									<div className="flex flex-row items-center justify-between w-full gap-4 overflow-x-auto">
 										<TabsList
 											className={cn(
 												"md:grid md:w-fit max-md:overflow-y-scroll justify-start",
@@ -309,12 +308,6 @@ const Redis = (
 												<ShowDatabaseAdvancedSettings
 													id={redisId}
 													type="redis"
-													serverId={data?.serverId}
-												/>
-												<ResourceNetworksCard
-													resourceType="redis"
-													resourceId={redisId}
-													value={data?.networkIds ?? []}
 													serverId={data?.serverId}
 												/>
 											</div>

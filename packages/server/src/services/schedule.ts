@@ -88,7 +88,11 @@ export const findScheduleById = async (scheduleId: string) => {
 			// project it down to only the fields consumers read. `compose`/`server`
 			// are far narrower and left intact. See services/mount.ts for the same fix.
 			application: {
-				columns: { applicationId: true, appName: true, serverId: true },
+				columns: {
+					applicationId: true,
+					appName: true,
+					serverId: true,
+				},
 				with: {
 					environment: {
 						columns: {},

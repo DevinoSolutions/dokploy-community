@@ -37,6 +37,8 @@ export const generateRandomDomain = ({
 	baseDomain,
 }: Schema): string => {
 	const hash = randomBytes(3).toString("hex");
+	const effectiveIp = serverIp || "127.0.0.1";
+	const slugIp = effectiveIp.replaceAll(".", "-").replaceAll(":", "-");
 
 	const maxProjectNameLength = 40;
 	const truncatedProjectName =
@@ -48,12 +50,10 @@ export const generateRandomDomain = ({
 		return `${truncatedProjectName}-${hash}.${baseDomain}`;
 	}
 
-	const slugIp = serverIp.replaceAll(".", "-").replaceAll(":", "-");
-
 	// Domain labels have a max length of 63 characters
 	// Reserve space for: hash (6) + separators (1-2) + ip section + dot + sslip.io (8)
 	// Approx: 6 + 2 + (variable ip length) + 9 = ~19-30 chars for other parts
-	return `${truncatedProjectName}-${hash}${slugIp === "" ? "" : `-${slugIp}`}.sslip.io`;
+	return `${truncatedProjectName}-${hash}-${slugIp}.sslip.io`;
 };
 
 export const generateHash = (length = 8): string => {
