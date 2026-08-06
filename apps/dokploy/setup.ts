@@ -6,7 +6,6 @@ const execAsync = promisify(exec);
 
 import { setupDirectories } from "@dokploy/server/setup/config-paths";
 import { initializePostgres } from "@dokploy/server/setup/postgres-setup";
-import { initializeRedis } from "@dokploy/server/setup/redis-setup";
 import {
 	initializeNetwork,
 	initializeSwarm,
@@ -36,7 +35,6 @@ const useTraefikSwarmMode = process.env.TRAEFIK_SWARM_MODE === "true";
 		} else {
 			await initializeStandaloneTraefik();
 		}
-		await initializeRedis();
 		await initializePostgres();
 		console.log("Dokploy setup completed");
 		exit(0);

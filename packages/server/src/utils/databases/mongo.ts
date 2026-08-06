@@ -1,5 +1,6 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -8,7 +9,6 @@ import {
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
-import { resolveNetworkNamesForResource } from "../../services/network";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 export type MongoNested = InferResultType<
@@ -84,6 +84,8 @@ ${command ?? "wait $MONGOD_PID"}`;
 		env ? `\n${env}` : ""
 	}`;
 
+	const resolvedNetworks = await resolveServiceNetworks(mongo);
+
 	const {
 		HealthCheck,
 		RestartPolicy,
@@ -92,18 +94,10 @@ ${command ?? "wait $MONGOD_PID"}`;
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(
-		mongo,
-		await resolveNetworkNamesForResource(
-			mongo.networkIds,
-			mongo.serverId,
-			mongo.environment.project.organizationId,
-		),
-	);
+	} = generateConfigContainer(mongo);
 
 	const resources = calculateResources({
 		memoryLimit,
@@ -151,7 +145,7 @@ ${command ?? "wait $MONGOD_PID"}`;
 				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {

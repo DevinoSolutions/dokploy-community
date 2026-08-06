@@ -22,7 +22,6 @@ import { ShowInternalLibsqlCredentials } from "@/components/dashboard/libsql/gen
 import { UpdateLibsql } from "@/components/dashboard/libsql/update-libsql";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
-import { ResourceNetworksCard } from "@/components/dashboard/networks/resource-networks-card";
 import { ShowDatabaseAdvancedSettings } from "@/components/dashboard/shared/show-database-advanced-settings";
 import { LibsqlIcon } from "@/components/icons/data-tools-icons";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -186,7 +185,7 @@ const Libsql = (
 										router.push(newPath, undefined, { shallow: true });
 									}}
 								>
-									<div className="flex flex-row items-center justify-between w-full gap-4 overflow-x-scroll">
+									<div className="flex flex-row items-center justify-between w-full gap-4 overflow-x-auto">
 										<TabsList
 											className={cn(
 												"md:grid md:w-fit max-md:overflow-y-scroll justify-start",
@@ -288,12 +287,6 @@ const Libsql = (
 											<ShowDatabaseAdvancedSettings
 												id={libsqlId}
 												type="libsql"
-											/>
-											<ResourceNetworksCard
-												resourceType="libsql"
-												resourceId={libsqlId}
-												value={data?.networkIds ?? []}
-												serverId={data?.serverId}
 											/>
 										</div>
 									</TabsContent>

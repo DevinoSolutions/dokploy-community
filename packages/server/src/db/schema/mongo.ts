@@ -93,6 +93,9 @@ export const mongo = pgTable("mongo", {
 	}),
 	replicaSets: boolean("replicaSets").default(false),
 	networkIds: text("networkIds").array().default([]),
+	detachDokployNetwork: boolean("detachDokployNetwork")
+		.notNull()
+		.default(false),
 });
 
 export const mongoRelations = relations(mongo, ({ one, many }) => ({
@@ -148,6 +151,7 @@ const createSchema = createInsertSchema(mongo, {
 	endpointSpecSwarm: EndpointSpecSwarmSchema.nullable(),
 	ulimitsSwarm: UlimitsSwarmSchema.nullable(),
 	networkIds: z.array(z.string()).optional(),
+	detachDokployNetwork: z.boolean().optional(),
 });
 
 export const apiCreateMongo = createSchema.pick({

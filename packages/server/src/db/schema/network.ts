@@ -1,11 +1,11 @@
-import { relations, sql } from "drizzle-orm";
+import { relations } from "drizzle-orm";
 import {
 	boolean,
+	integer,
 	jsonb,
 	pgEnum,
 	pgTable,
 	text,
-	uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
@@ -13,6 +13,10 @@ import { z } from "zod";
 import { organization } from "./account";
 import { server } from "./server";
 
+// NOTE: the deployed `networkDriver` enum carries six values. Upstream narrowed
+// the enum to bridge/overlay, but recreating a Postgres enum in place is risky
+// on live databases, so the wider set is kept here to match production while the
+// API surface below only accepts the drivers upstream supports.
 export const networkDriver = pgEnum("networkDriver", [
 	"bridge",
 	"host",
@@ -22,52 +26,34 @@ export const networkDriver = pgEnum("networkDriver", [
 	"ipvlan",
 ]);
 
-export const network = pgTable(
-	"network",
-	{
-		networkId: text("networkId")
-			.notNull()
-			.primaryKey()
-			.$defaultFn(() => nanoid()),
-		name: text("name").notNull(),
-		driver: networkDriver("driver").notNull().default("bridge"),
-		scope: text("scope"),
-		internal: boolean("internal").notNull().default(false),
-		attachable: boolean("attachable").notNull().default(false),
-		ingress: boolean("ingress").notNull().default(false),
-		configOnly: boolean("configOnly").notNull().default(false),
-		enableIPv4: boolean("enableIPv4").notNull().default(true),
-		enableIPv6: boolean("enableIPv6").notNull().default(false),
-		ipam: jsonb("ipam")
-			.$type<{
-				driver?: string;
-				config?: Array<{ subnet?: string; gateway?: string; ipRange?: string }>;
-			}>()
-			.default({}),
-		createdAt: text("createdAt")
-			.notNull()
-			.$defaultFn(() => new Date().toISOString()),
-		organizationId: text("organizationId")
-			.notNull()
-			.references(() => organization.id, { onDelete: "cascade" }),
-		serverId: text("serverId").references(() => server.serverId, {
-			onDelete: "cascade",
-		}),
-	},
-	(t) => [
-		// Docker enforces unique network names per daemon (per server). Mirror
-		// that at the DB layer so two concurrent creates of the same name on the
-		// same server fail with a clean SQL constraint instead of an opaque
-		// Docker error after the row is already inserted. We COALESCE serverId
-		// to '' so host-level networks (serverId IS NULL) collapse into a single
-		// bucket — Drizzle 0.45 doesn't expose `nullsNotDistinct()` on
-		// uniqueIndex, so this is the equivalent.
-		uniqueIndex("network_name_serverId_idx").on(
-			t.name,
-			sql`COALESCE(${t.serverId}, '')`,
-		),
-	],
-);
+export const network = pgTable("network", {
+	networkId: text("networkId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	name: text("name").notNull(),
+	driver: networkDriver("driver").notNull().default("bridge"),
+	internal: boolean("internal").notNull().default(false),
+	attachable: boolean("attachable").notNull().default(false),
+	enableIPv4: boolean("enableIPv4").notNull().default(true),
+	enableIPv6: boolean("enableIPv6").notNull().default(false),
+	mtu: integer("mtu"),
+	ipam: jsonb("ipam")
+		.$type<{
+			driver?: string;
+			config?: Array<{ subnet?: string; gateway?: string; ipRange?: string }>;
+		}>()
+		.default({}),
+	createdAt: text("createdAt")
+		.notNull()
+		.$defaultFn(() => new Date().toISOString()),
+	organizationId: text("organizationId")
+		.notNull()
+		.references(() => organization.id, { onDelete: "cascade" }),
+	serverId: text("serverId").references(() => server.serverId, {
+		onDelete: "cascade",
+	}),
+});
 
 export const networkRelations = relations(network, ({ one }) => ({
 	organization: one(organization, {
@@ -82,39 +68,13 @@ export const networkRelations = relations(network, ({ one }) => ({
 
 const createSchema = createInsertSchema(network, {
 	networkId: z.string().min(1),
-	name: z
-		.string()
-		.min(1)
-		.max(64)
-		.regex(
-			/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
-			"Network name must start with a letter or digit and contain only letters, digits, '_', '.' or '-'",
-		)
-		.refine(
-			(n) =>
-				![
-					"dokploy-network",
-					"host",
-					"bridge",
-					"none",
-					"ingress",
-					"docker_gwbridge",
-				].includes(n),
-			{
-				message:
-					"This name is reserved (dokploy-network, host, bridge, none, ingress, docker_gwbridge).",
-			},
-		),
-	driver: z
-		.enum(["bridge", "host", "overlay", "macvlan", "none", "ipvlan"])
-		.optional(),
-	scope: z.string().optional(),
+	name: z.string().min(1),
+	driver: z.enum(["bridge", "overlay"]).optional(),
 	internal: z.boolean().optional(),
 	attachable: z.boolean().optional(),
-	ingress: z.boolean().optional(),
-	configOnly: z.boolean().optional(),
 	enableIPv4: z.boolean().optional(),
 	enableIPv6: z.boolean().optional(),
+	mtu: z.number().int().min(68).max(65535).optional().nullable(),
 	ipam: z
 		.object({
 			driver: z.string().optional(),
@@ -133,31 +93,54 @@ const createSchema = createInsertSchema(network, {
 	serverId: z.string().optional().nullable(),
 });
 
+const validateNetworkInput = (
+	input: {
+		enableIPv4?: boolean;
+		enableIPv6?: boolean;
+		ipam?: {
+			config?: Array<{ subnet?: string; gateway?: string; ipRange?: string }>;
+		} | null;
+	},
+	ctx: z.RefinementCtx,
+) => {
+	if (input.enableIPv4 === false && input.enableIPv6 !== true) {
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			path: ["enableIPv4"],
+			message: "IPv4 or IPv6 must be enabled",
+		});
+	}
+	for (const [index, entry] of (input.ipam?.config ?? []).entries()) {
+		if (!entry.subnet && (entry.gateway || entry.ipRange)) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["ipam", "config", index, "subnet"],
+				message: "Gateway and IP range require a subnet",
+			});
+		}
+	}
+};
+
 export const apiCreateNetwork = createSchema
 	.pick({
 		name: true,
 		driver: true,
-		scope: true,
 		internal: true,
 		attachable: true,
-		ingress: true,
-		configOnly: true,
 		enableIPv4: true,
 		enableIPv6: true,
+		mtu: true,
 		ipam: true,
 		serverId: true,
 	})
 	.partial()
-	.required({ name: true });
+	.required({ name: true })
+	.superRefine(validateNetworkInput);
 
-export const apiFindOneNetwork = createSchema
-	.pick({
-		networkId: true,
-	})
-	.required();
+export const apiFindOneNetwork = z.object({
+	networkId: z.string().min(1),
+});
 
-export const apiRemoveNetwork = createSchema
-	.pick({
-		networkId: true,
-	})
-	.required();
+export const apiRemoveNetwork = z.object({
+	networkId: z.string().min(1),
+});

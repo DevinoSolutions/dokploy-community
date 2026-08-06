@@ -1,6 +1,6 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
-import { resolveNetworkNamesForResource } from "../../services/network";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -35,6 +35,8 @@ export const buildRedis = async (redis: RedisNested) => {
 		env ? `\n${env}` : ""
 	}`;
 
+	const resolvedNetworks = await resolveServiceNetworks(redis);
+
 	const {
 		HealthCheck,
 		RestartPolicy,
@@ -43,18 +45,10 @@ export const buildRedis = async (redis: RedisNested) => {
 		Mode,
 		RollbackConfig,
 		UpdateConfig,
-		Networks,
 		StopGracePeriod,
 		EndpointSpec,
 		Ulimits,
-	} = generateConfigContainer(
-		redis,
-		await resolveNetworkNamesForResource(
-			redis.networkIds,
-			redis.serverId,
-			redis.environment.project.organizationId,
-		),
-	);
+	} = generateConfigContainer(redis);
 	const resources = calculateResources({
 		memoryLimit,
 		memoryReservation,
@@ -93,12 +87,13 @@ export const buildRedis = async (redis: RedisNested) => {
 								}),
 						}
 					: {
-							Args: ["redis-server", "--requirepass", databasePassword],
+							Command: ["/bin/sh"],
+							Args: ["-c", `redis-server --requirepass ${databasePassword}`],
 						}),
 				...(Ulimits && { Ulimits }),
 				Labels,
 			},
-			Networks,
+			Networks: resolvedNetworks,
 			RestartPolicy,
 			Placement,
 			Resources: {
