@@ -10,7 +10,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
+import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { db } from "@/server/db";
 import {
 	apiCreateNetwork,
@@ -21,7 +21,7 @@ import {
 import { audit } from "../utils/audit";
 
 export const networkRouter = createTRPCRouter({
-	all: protectedProcedure
+	all: withPermission("network", "read")
 		.input(z.object({ serverId: z.string().optional() }))
 		.query(async ({ ctx, input }) => {
 			const rows = await db.query.network.findMany({
@@ -36,7 +36,7 @@ export const networkRouter = createTRPCRouter({
 			return rows;
 		}),
 
-	one: protectedProcedure
+	one: withPermission("network", "read")
 		.input(apiFindOneNetwork)
 		.query(async ({ ctx, input }) => {
 			const row = await findNetworkById(input.networkId);
@@ -48,7 +48,7 @@ export const networkRouter = createTRPCRouter({
 			}
 			return row;
 		}),
-	create: protectedProcedure
+	create: withPermission("network", "create")
 		.input(apiCreateNetwork)
 		.mutation(async ({ ctx, input }) => {
 			const created = await createNetwork(
@@ -63,7 +63,7 @@ export const networkRouter = createTRPCRouter({
 			});
 			return created;
 		}),
-	networksToSync: protectedProcedure
+	networksToSync: withPermission("network", "read")
 		.input(z.object({ serverId: z.string().optional() }))
 		.query(async ({ ctx, input }) => {
 			return findNetworksToSync(
@@ -72,7 +72,7 @@ export const networkRouter = createTRPCRouter({
 			);
 		}),
 
-	import: protectedProcedure
+	import: withPermission("network", "create")
 		.input(
 			z.object({
 				serverId: z.string().optional(),
@@ -96,7 +96,7 @@ export const networkRouter = createTRPCRouter({
 			return result;
 		}),
 
-	inspect: protectedProcedure
+	inspect: withPermission("network", "read")
 		.input(apiFindOneNetwork)
 		.query(async ({ ctx, input }) => {
 			const network = await findNetworkById(input.networkId);
@@ -109,7 +109,7 @@ export const networkRouter = createTRPCRouter({
 			return inspectNetwork(input.networkId);
 		}),
 
-	recreate: protectedProcedure
+	recreate: withPermission("network", "delete")
 		.input(apiFindOneNetwork)
 		.mutation(async ({ ctx, input }) => {
 			const network = await findNetworkById(input.networkId);
@@ -129,7 +129,7 @@ export const networkRouter = createTRPCRouter({
 			return recreated;
 		}),
 
-	remove: protectedProcedure
+	remove: withPermission("network", "delete")
 		.input(apiRemoveNetwork)
 		.mutation(async ({ ctx, input }) => {
 			const network = await findNetworkById(input.networkId);
