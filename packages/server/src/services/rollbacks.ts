@@ -9,7 +9,6 @@ import {
 	rollbacks,
 } from "../db/schema";
 import { getECRAuthToken } from "../utils/aws/ecr";
-import type { ApplicationNested } from "../utils/builders";
 import { getRegistryTag } from "../utils/cluster/upload";
 import {
 	calculateResources,

@@ -670,29 +670,8 @@ export const calculateResources = ({
 	};
 };
 
-// Falls back to dokploy-network so Traefik routing is always preserved.
-const mergeNetworks = (
-	networkSwarm: Array<{ Target?: string }> | null,
-	extras: string[],
-): Array<{ Target?: string }> => {
-	const base =
-		networkSwarm && networkSwarm.length > 0
-			? networkSwarm
-			: [{ Target: "dokploy-network" }];
-	const seen = new Set(base.map((n) => n.Target).filter(Boolean));
-	const merged: Array<{ Target?: string }> = [...base];
-	for (const name of extras) {
-		if (!seen.has(name)) {
-			seen.add(name);
-			merged.push({ Target: name });
-		}
-	}
-	return merged;
-};
-
 export const generateConfigContainer = (
 	application: Partial<ApplicationNested>,
-	extraNetworks: string[] = [],
 ) => {
 	const {
 		healthCheckSwarm,
