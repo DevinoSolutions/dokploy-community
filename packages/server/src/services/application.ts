@@ -253,7 +253,7 @@ export const deployApplication = async ({
 		await mechanizeDockerContainer(application);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
-			serverId,
+			serverId: application.serverId,
 		});
 		if (!stability.stable) {
 			throw new Error(
@@ -383,7 +383,7 @@ export const rebuildApplication = async ({
 		await mechanizeDockerContainer(application);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
-			serverId,
+			serverId: application.serverId,
 		});
 		if (!stability.stable) {
 			throw new Error(
