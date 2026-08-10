@@ -401,6 +401,23 @@ export const filterEnvironmentServices = <T extends EnvironmentWithServices>(
 	),
 });
 
+export const environmentHasAccessedService = <T extends EnvironmentWithServices>(
+	environment: T,
+	accessedServices: string[],
+): boolean => {
+	const filtered = filterEnvironmentServices(environment, accessedServices);
+	return (
+		filtered.applications.length > 0 ||
+		filtered.compose.length > 0 ||
+		filtered.libsql.length > 0 ||
+		filtered.mariadb.length > 0 ||
+		filtered.mongo.length > 0 ||
+		filtered.mysql.length > 0 ||
+		filtered.postgres.length > 0 ||
+		filtered.redis.length > 0
+	);
+};
+
 export const createProductionEnvironment = async (projectId: string) => {
 	const newEnvironment = await db
 		.insert(environments)

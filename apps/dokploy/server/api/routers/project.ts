@@ -17,6 +17,8 @@ import {
 	createRedis,
 	createSecurity,
 	deleteProject,
+	environmentHasAccessedService,
+	filterEnvironmentServices,
 	findApplicationById,
 	findComposeById,
 	findEnvironmentById,
@@ -110,79 +112,41 @@ export const projectRouter = createTRPCRouter({
 		.input(apiFindOneProject)
 		.query(async ({ input, ctx }) => {
 			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
-				const { accessedServices, accessedProjects } = await findMemberByUserId(
+				const { accessedServices, accessedProjects, accessedEnvironments } = await findMemberByUserId(
 					ctx.user.id,
 					ctx.session.activeOrganizationId,
 				);
 
-				if (!accessedProjects.includes(input.projectId)) {
+				const project = await findProjectById(input.projectId);
+
+				if (project.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You don't have access to this project",
 					});
 				}
 
-				const project = await db.query.projects.findFirst({
-					where: and(
-						eq(projects.projectId, input.projectId),
-						eq(projects.organizationId, ctx.session.activeOrganizationId),
-					),
-					with: {
-						environments: {
-							with: {
-								applications: {
-									where: buildServiceFilter(
-										applications.applicationId,
-										accessedServices,
-									),
-								},
-								compose: {
-									where: buildServiceFilter(
-										compose.composeId,
-										accessedServices,
-									),
-								},
-								libsql: {
-									where: buildServiceFilter(libsql.libsqlId, accessedServices),
-								},
-								mariadb: {
-									where: buildServiceFilter(
-										mariadb.mariadbId,
-										accessedServices,
-									),
-								},
-								mongo: {
-									where: buildServiceFilter(mongo.mongoId, accessedServices),
-								},
-								mysql: {
-									where: buildServiceFilter(mysql.mysqlId, accessedServices),
-								},
-								postgres: {
-									where: buildServiceFilter(
-										postgres.postgresId,
-										accessedServices,
-									),
-								},
-								redis: {
-									where: buildServiceFilter(redis.redisId, accessedServices),
-								},
-							},
-						},
-						projectTags: {
-							with: {
-								tag: true,
-							},
-						},
-					},
-				});
+				const hasProjectAccess = accessedProjects.includes(input.projectId);
+				const hasEnvironmentAccess = project.environments.some((environment) =>
+					accessedEnvironments.includes(environment.environmentId),
+				);
+				const hasServiceAccess = project.environments.some((environment) =>
+					environmentHasAccessedService(environment, accessedServices),
+				);
 
-				if (!project) {
+				if (!hasProjectAccess && !hasEnvironmentAccess && !hasServiceAccess) {
 					throw new TRPCError({
-						code: "NOT_FOUND",
-						message: "Project not found",
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this project",
 					});
 				}
-				return project;
+
+				return {
+					...project,
+					environments: project.environments.map((environment) =>
+						filterEnvironmentServices(environment, accessedServices),
+					),
+				};
 			}
 			const project = await findProjectById(input.projectId);
 
