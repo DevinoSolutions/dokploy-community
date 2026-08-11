@@ -2,6 +2,7 @@ import {
 	createEnvironment,
 	deleteEnvironment,
 	duplicateEnvironment,
+	environmentHasAccessedService,
 	filterEnvironmentServices,
 	findEnvironmentById,
 	findEnvironmentsByProjectId,
@@ -96,7 +97,11 @@ export const environmentRouter = createTRPCRouter({
 						ctx.session.activeOrganizationId,
 					);
 
-				if (!accessedEnvironments.includes(environment.environmentId)) {
+				const canAccessEnvironment =
+					accessedEnvironments.includes(environment.environmentId) ||
+					environmentHasAccessedService(environment, accessedServices);
+
+				if (!canAccessEnvironment) {
 					throw new TRPCError({
 						code: "FORBIDDEN",
 						message: "You are not allowed to access this environment",
@@ -142,7 +147,8 @@ export const environmentRouter = createTRPCRouter({
 
 					const filteredEnvironments = environments
 						.filter((environment) =>
-							accessedEnvironments.includes(environment.environmentId),
+							accessedEnvironments.includes(environment.environmentId) ||
+							environmentHasAccessedService(environment, accessedServices),
 						)
 						.map((environment) =>
 							filterEnvironmentServices(environment, accessedServices),
