@@ -34,8 +34,8 @@ import { UpdateCompose } from "@/components/dashboard/compose/update-compose";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
 import { ComposeFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-compose-monitoring";
 import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-compose-monitoring";
-import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
+import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -56,6 +56,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { UseKeyboardNav } from "@/hooks/use-keyboard-nav";
+import { supportsPreviewDeployments } from "@/lib/preview-deployments";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabeling } from "@/utils/hooks/use-whitelabeling";
@@ -245,8 +246,7 @@ const Service = (
 												</TabsTrigger>
 											)}
 											{permissions?.deployment.read &&
-												(data?.sourceType === "github" ||
-													data?.sourceType === "gitlab") && (
+												supportsPreviewDeployments(data?.sourceType) && (
 													<TabsTrigger value="preview-deployments">
 														Preview Deployments
 													</TabsTrigger>
@@ -424,8 +424,7 @@ const Service = (
 									)}
 
 									{permissions?.deployment.read &&
-										(data?.sourceType === "github" ||
-											data?.sourceType === "gitlab") && (
+										supportsPreviewDeployments(data?.sourceType) && (
 											<TabsContent
 												value="preview-deployments"
 												className="w-full"

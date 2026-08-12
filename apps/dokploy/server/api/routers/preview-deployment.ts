@@ -14,6 +14,7 @@ import {
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import { supportsPreviewDeployments } from "@/lib/preview-deployments";
 import { audit } from "@/server/api/utils/audit";
 import { apiCreatePreviewDeployment } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
@@ -43,9 +44,13 @@ export const previewDeploymentRouter = createTRPCRouter({
 				});
 				return await findPreviewDeploymentsByComposeId(input.composeId);
 			}
-			await checkServicePermissionAndAccess(ctx, input.applicationId as string, {
-				deployment: ["read"],
-			});
+			await checkServicePermissionAndAccess(
+				ctx,
+				input.applicationId as string,
+				{
+					deployment: ["read"],
+				},
+			);
 			return await findPreviewDeploymentsByApplicationId(
 				input.applicationId as string,
 			);
@@ -110,9 +115,13 @@ export const previewDeploymentRouter = createTRPCRouter({
 			);
 
 			if (previewDeployment.composeId) {
-				await checkServicePermissionAndAccess(ctx, previewDeployment.composeId, {
-					deployment: ["create"],
-				});
+				await checkServicePermissionAndAccess(
+					ctx,
+					previewDeployment.composeId,
+					{
+						deployment: ["create"],
+					},
+				);
 				const compose = await findComposeById(previewDeployment.composeId);
 				const jobData: DeploymentJob = {
 					composeId: previewDeployment.composeId,
@@ -213,11 +222,11 @@ const createApplicationPreviewFromApi = async (
 	});
 	const application = await findApplicationById(applicationId);
 
-	if (application.sourceType !== "github") {
+	if (!supportsPreviewDeployments(application.sourceType)) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message:
-				"Preview deployments can only be created for applications using a GitHub provider",
+				"Preview deployments can only be created for applications using a GitHub or GitLab provider",
 		});
 	}
 
@@ -297,7 +306,7 @@ const createComposePreviewFromApi = async (
 	});
 	const compose = await findComposeById(composeId);
 
-	if (compose.sourceType !== "github" && compose.sourceType !== "gitlab") {
+	if (!supportsPreviewDeployments(compose.sourceType)) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message:

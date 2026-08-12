@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { toast } from "sonner";
-import { GithubIcon } from "@/components/icons/data-tools-icons";
+import { GithubIcon, GitlabIcon } from "@/components/icons/data-tools-icons";
 import { DateTooltip } from "@/components/shared/date-tooltip";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -42,6 +42,9 @@ interface Props {
 
 export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 	const { data } = api.application.one.useQuery({ applicationId });
+	const isGitlab = data?.sourceType === "gitlab";
+	const ChangeRequestIcon = isGitlab ? GitlabIcon : GithubIcon;
+	const changeRequestLabel = isGitlab ? "Merge Request" : "Pull Request";
 
 	const { mutateAsync: deletePreviewDeployment, isPending } =
 		api.previewDeployment.delete.useMutation();
@@ -90,9 +93,9 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 					<>
 						<div className="flex flex-col gap-2 text-sm">
 							<span>
-								Preview deployments are a way to test your application before it
-								is deployed to production. It will create a new deployment for
-								each pull request you create.
+								Preview deployments let you test your application before you
+								deploy it to production. Each {changeRequestLabel.toLowerCase()}
+								gets a new deployment.
 							</span>
 						</div>
 						{isLoadingPreviewDeployments ? (
@@ -173,8 +176,8 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 																window.open(deployment.pullRequestURL, "_blank")
 															}
 														>
-															<GithubIcon className="size-4" />
-															Pull Request
+															<ChangeRequestIcon className="size-4" />
+															{changeRequestLabel}
 														</Button>
 														<ShowModalLogs
 															appName={deployment.appName}

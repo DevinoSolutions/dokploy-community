@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { toast } from "sonner";
-import { GithubIcon } from "@/components/icons/data-tools-icons";
+import { GithubIcon, GitlabIcon } from "@/components/icons/data-tools-icons";
 import { DateTooltip } from "@/components/shared/date-tooltip";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -30,8 +30,8 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
-import { ShowModalLogs } from "../../settings/web-server/show-modal-logs";
 import { ShowDeploymentsModal } from "../../application/deployments/show-deployments-modal";
+import { ShowModalLogs } from "../../settings/web-server/show-modal-logs";
 import { ShowPreviewSettingsCompose } from "./show-preview-settings";
 
 interface Props {
@@ -40,6 +40,9 @@ interface Props {
 
 export const ShowPreviewDeploymentsCompose = ({ composeId }: Props) => {
 	const { data } = api.compose.one.useQuery({ composeId });
+	const isGitlab = data?.sourceType === "gitlab";
+	const ChangeRequestIcon = isGitlab ? GitlabIcon : GithubIcon;
+	const changeRequestLabel = isGitlab ? "Merge Request" : "Pull Request";
 
 	const { mutateAsync: deletePreviewDeployment, isPending } =
 		api.previewDeployment.delete.useMutation();
@@ -88,9 +91,9 @@ export const ShowPreviewDeploymentsCompose = ({ composeId }: Props) => {
 					<>
 						<div className="flex flex-col gap-2 text-sm">
 							<span>
-								Preview deployments spin up an isolated copy of this stack for
-								each pull request you create, with its own per-service domains,
-								volumes and network.
+								Each {changeRequestLabel.toLowerCase()} gets an isolated copy of
+								this stack. The copy has its own service domains, volumes, and
+								network.
 							</span>
 						</div>
 						{isLoadingPreviewDeployments ? (
@@ -192,8 +195,8 @@ export const ShowPreviewDeploymentsCompose = ({ composeId }: Props) => {
 																window.open(deployment.pullRequestURL, "_blank")
 															}
 														>
-															<GithubIcon className="size-4" />
-															Pull Request
+															<ChangeRequestIcon className="size-4" />
+															{changeRequestLabel}
 														</Button>
 														<ShowModalLogs
 															appName={deployment.appName}
@@ -267,7 +270,9 @@ export const ShowPreviewDeploymentsCompose = ({ composeId }: Props) => {
 																			>
 																				<p>
 																					Rebuild the preview stack from the
-																					latest pull request code
+																					latest{" "}
+																					{changeRequestLabel.toLowerCase()}{" "}
+																					code
 																				</p>
 																			</TooltipContent>
 																		</TooltipPrimitive.Portal>
