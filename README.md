@@ -2,9 +2,9 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.29.14** | Fork version **v0.29.14-community.3**
+Based on **Dokploy v0.30.0** | Fork version **v0.30.0-community.1**
 
-Everything in upstream Dokploy **v0.29.14**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
+Everything in upstream Dokploy **v0.30.0**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
 ## Switching from official Dokploy
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.29.14-community.3 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.0-community.1 \
   --with-registry-auth \
   dokploy
 ```
@@ -20,7 +20,7 @@ docker service update \
 Going back to official is just as easy (our extra tables/columns are simply ignored):
 
 ```bash
-docker service update --image dokploy/dokploy:v0.29.14 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.30.0 --with-registry-auth dokploy
 ```
 
 The image is public — no registry login required.
@@ -106,6 +106,20 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.0-community.1
+
+**Upstream v0.30.0 sync.** Full merge of upstream [Dokploy v0.30.0](https://github.com/Dokploy/dokploy/releases/tag/v0.30.0) ([#186](https://github.com/DevinoSolutions/dokploy-community/pull/186)) — one guarded migration, upgrades in place.
+
+- **Overview dashboard** — new org-wide Overview page with Services, Backups, Domains and Deployments tabs
+- **Secrets (vault providers)** — store secrets in HashiCorp Vault, Infisical, AWS Secrets Manager, Doppler, Azure Key Vault, or Scaleway and reference them from service environments
+- **DNS providers** — Cloudflare and AWS Route53 integration for managing DNS records from Dokploy
+- **Session management** — owners can view and revoke sessions across the organization (supersedes this fork's earlier self-scoped sessions page)
+- **Docker dashboard expansion** — Health diagnostics, Docker events (sortable, paginated), Images and Disk Usage tabs
+- **Organization improvements** — default role for newly joining members, larger searchable organization selector
+- **Traefik 3.6.25**, monitoring deployed as a swarm service, SCIM/SSO user linking fix, GitLab OAuth token fix, and TypeScript 7 across the codebase
+- **Fork fixes on top**: mysql/mariadb restores strip `USE`-statements (closes a restore bug found in our backup audit), ECR rollbacks use vault-resolved credentials, and compose `.env` files are no longer double-escaped
+- All fork features preserved: Backup Center (incl. destination encryption — upstream's new backup internals were adapted around it), Cloudflare Tunnel & Access, project icons, Sentry opt-out error reporting, 30-day sessions, preview deployments
 
 ### New in v0.29.14-community.3
 
@@ -262,7 +276,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.29.14-community.3
+export DOKPLOY_VERSION=v0.30.0-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -275,7 +289,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.29.14-community.3    # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.0-community.1     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -320,6 +334,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.14 | 1st release | `v0.29.14-community.1` |
 | v0.29.14 | 2nd release | `v0.29.14-community.2` |
 | v0.29.14 | 3rd release | `v0.29.14-community.3` |
+| v0.30.0 | 1st release | `v0.30.0-community.1` |
 
 ## Contributing
 
@@ -330,6 +345,14 @@ This fork tracks upstream Dokploy's `canary` branch. To contribute:
 3. Open a PR targeting `canary`
 
 For features that should go upstream, please also open a PR on the [official Dokploy repo](https://github.com/Dokploy/dokploy).
+
+## Contributors
+
+This fork carries the work of **100+ contributors** — upstream Dokploy's authors plus the fork's own community. GitHub hides the contributors panel on fork homepages, but the full list is here:
+
+[![Contributors](https://contrib.rocks/image?repo=DevinoSolutions/dokploy-community&max=48)](https://github.com/DevinoSolutions/dokploy-community/graphs/contributors)
+
+*[See all contributors →](https://github.com/DevinoSolutions/dokploy-community/graphs/contributors)*
 
 ## Credits
 
