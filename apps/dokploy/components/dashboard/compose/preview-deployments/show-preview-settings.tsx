@@ -201,9 +201,9 @@ export const ShowPreviewSettingsCompose = ({ composeId }: Props) => {
 					<div className="grid gap-4">
 						{isTraefikMeDomain && (
 							<AlertBlock type="info">
-								<strong>Note:</strong> sslip.io is a public HTTP service and does
-								not support SSL/HTTPS. HTTPS and certificate options will not
-								have any effect.
+								<strong>Note:</strong> sslip.io is a public HTTP service and
+								does not support SSL/HTTPS. HTTPS and certificate options will
+								not have any effect.
 							</AlertBlock>
 						)}
 						<Form {...form}>
@@ -287,9 +287,9 @@ export const ShowPreviewSettingsCompose = ({ composeId }: Props) => {
 															<TooltipContent>
 																<p>
 																	Add labels that will trigger a preview
-																	deployment for a pull request. If no labels are
-																	specified, all pull requests will trigger a
-																	preview deployment.
+																	deployment for a pull request. If no labels
+																	are specified, all pull requests will trigger
+																	a preview deployment.
 																</p>
 															</TooltipContent>
 														</Tooltip>
@@ -416,7 +416,10 @@ export const ShowPreviewSettingsCompose = ({ composeId }: Props) => {
 												<FormItem>
 													<FormLabel>Certificate Resolver</FormLabel>
 													<FormControl>
-														<Input placeholder="my-custom-resolver" {...field} />
+														<Input
+															placeholder="my-custom-resolver"
+															{...field}
+														/>
 													</FormControl>
 													<FormMessage />
 												</FormItem>
@@ -519,8 +522,9 @@ export const ShowPreviewSettingsCompose = ({ composeId }: Props) => {
 														<span>
 															Environment variables injected into the preview
 															stack. Use <code>{"${{preview.prNumber}}"}</code>{" "}
-															to reference the pull request number, e.g. to point
-															at another service's deterministic preview domain (
+															to reference the pull request number, e.g. to
+															point at another service's deterministic preview
+															domain (
 															<code>
 																VITE_API_URL=https://backend-pr$
 																{"{{preview.prNumber}}"}.example.com
@@ -528,9 +532,10 @@ export const ShowPreviewSettingsCompose = ({ composeId }: Props) => {
 															).
 														</span>
 													}
-													placeholder={["NODE_ENV=production", "PORT=3000"].join(
-														"\n",
-													)}
+													placeholder={[
+														"NODE_ENV=production",
+														"PORT=3000",
+													].join("\n")}
 												/>
 											</FormControl>
 											<FormMessage />

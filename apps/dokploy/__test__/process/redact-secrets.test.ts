@@ -52,7 +52,9 @@ describe("redactSecrets", () => {
 		expect(singleQuoted).not.toContain("secret123");
 		expect(singleQuoted).toContain('--s3-secret-access-key="[REDACTED]"');
 
-		const bare = redactSecrets("rclone rcat --s3-session-token=sessFAKE :s3:b/f");
+		const bare = redactSecrets(
+			"rclone rcat --s3-session-token=sessFAKE :s3:b/f",
+		);
 		expect(bare).not.toContain("sessFAKE");
 		expect(bare).toContain('--s3-session-token="[REDACTED]"');
 	});

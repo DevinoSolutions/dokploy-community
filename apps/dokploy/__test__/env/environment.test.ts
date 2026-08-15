@@ -384,9 +384,7 @@ describe("quoteDotenvValue (dotenv value quoting)", () => {
 	});
 
 	it("escapes double quotes in values", () => {
-		expect(quoteDotenvValue('MSG=say "hello"')).toBe(
-			'MSG="say \\"hello\\""',
-		);
+		expect(quoteDotenvValue('MSG=say "hello"')).toBe('MSG="say \\"hello\\""');
 	});
 
 	it("escapes literal newlines from dotenv expansion", () => {

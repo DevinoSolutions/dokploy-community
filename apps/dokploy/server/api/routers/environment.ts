@@ -146,9 +146,10 @@ export const environmentRouter = createTRPCRouter({
 						);
 
 					const filteredEnvironments = environments
-						.filter((environment) =>
-							accessedEnvironments.includes(environment.environmentId) ||
-							environmentHasAccessedService(environment, accessedServices),
+						.filter(
+							(environment) =>
+								accessedEnvironments.includes(environment.environmentId) ||
+								environmentHasAccessedService(environment, accessedServices),
 						)
 						.map((environment) =>
 							filterEnvironmentServices(environment, accessedServices),

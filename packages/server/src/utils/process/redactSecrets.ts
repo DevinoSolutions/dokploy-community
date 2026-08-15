@@ -54,7 +54,10 @@ const redactFlags = (value: string): string => {
 	let out = value;
 	for (const flag of SECRET_FLAGS) {
 		out = out
-			.replace(new RegExp(`(--${flag}=)${QUOTED_OR_BARE}`, "gi"), '$1"[REDACTED]"')
+			.replace(
+				new RegExp(`(--${flag}=)${QUOTED_OR_BARE}`, "gi"),
+				'$1"[REDACTED]"',
+			)
 			.replace(
 				new RegExp(`(--${flag}\\s+)${QUOTED_OR_BARE}`, "gi"),
 				'$1"[REDACTED]"',

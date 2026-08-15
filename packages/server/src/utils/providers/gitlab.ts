@@ -26,19 +26,22 @@ export const refreshGitlabToken = async (gitlabProviderId: string) => {
 	// Use internal URL for token refresh when GitLab is on same instance as Dokploy
 	const baseUrl = gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl;
 	const tokenUrl = new URL(baseUrl);
-	const response = await fetch(`${tokenUrl.origin}${tokenUrl.pathname.replace(/\/$/, "")}/oauth/token`, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/x-www-form-urlencoded",
+	const response = await fetch(
+		`${tokenUrl.origin}${tokenUrl.pathname.replace(/\/$/, "")}/oauth/token`,
+		{
+			method: "POST",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+			},
+			redirect: "manual",
+			body: new URLSearchParams({
+				grant_type: "refresh_token",
+				refresh_token: gitlabProvider.refreshToken as string,
+				client_id: gitlabProvider.applicationId as string,
+				client_secret: gitlabProvider.secret as string,
+			}),
 		},
-		redirect: "manual",
-		body: new URLSearchParams({
-			grant_type: "refresh_token",
-			refresh_token: gitlabProvider.refreshToken as string,
-			client_id: gitlabProvider.applicationId as string,
-			client_secret: gitlabProvider.secret as string,
-		}),
-	});
+	);
 
 	if (!response.ok) {
 		throw new Error(`Failed to refresh token: ${response.statusText}`);

@@ -259,10 +259,7 @@ export const CoverageFilters = ({
 				}
 			>
 				<TriangleAlert
-					className={cn(
-						"size-4",
-						facets.notCoveredOnly && "text-orange-500",
-					)}
+					className={cn("size-4", facets.notCoveredOnly && "text-orange-500")}
 				/>
 				Not covered only
 			</Button>

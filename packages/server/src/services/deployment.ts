@@ -1111,7 +1111,7 @@ export const findAllDeploymentsByServerId = async (serverId: string) => {
 
 export const clearOldDeployments = async (
 	id: string,
-	type: "application" | "compose"
+	type: "application" | "compose",
 ) => {
 	const deploymentsList = await db.query.deployments.findMany({
 		where: eq(deployments[`${type}Id`], id),

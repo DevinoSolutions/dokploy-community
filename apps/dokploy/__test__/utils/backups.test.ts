@@ -212,7 +212,8 @@ describe("getBackupCommand", () => {
 		},
 	} as unknown as BackupSchedule;
 
-	const rcloneCommand = 'rclone rcat --s3-provider="AWS" ":s3:bucket/key.sql.gz"';
+	const rcloneCommand =
+		'rclone rcat --s3-provider="AWS" ":s3:bucket/key.sql.gz"';
 	const logPath = "/tmp/backup.log";
 
 	// Regression test for #4222: the database dump was executed twice — once
@@ -264,11 +265,11 @@ describe("getBackupCommand", () => {
 	// only the rcat verb is swapped, the RCLONE_CRYPT_* prefix is preserved.
 	test("preserves the crypt env prefix in the cleanup command", () => {
 		const cryptRcloneCommand =
-			"RCLONE_CRYPT_PASSWORD='obscured_pass' rclone rcat --s3-provider=\"AWS\" \":crypt:bucket/key.sql.gz\"";
+			'RCLONE_CRYPT_PASSWORD=\'obscured_pass\' rclone rcat --s3-provider="AWS" ":crypt:bucket/key.sql.gz"';
 		const script = getBackupCommand(backup, cryptRcloneCommand, logPath);
 
 		expect(script).toContain(
-			"RCLONE_CRYPT_PASSWORD='obscured_pass' rclone deletefile --s3-provider=\"AWS\" \":crypt:bucket/key.sql.gz\"",
+			'RCLONE_CRYPT_PASSWORD=\'obscured_pass\' rclone deletefile --s3-provider="AWS" ":crypt:bucket/key.sql.gz"',
 		);
 	});
 });

@@ -64,7 +64,9 @@ describe("rclone crypt command composition", () => {
 		);
 
 		// Env vars are prepended; the rclone path is a plain :crypt: remote.
-		expect(command.startsWith("RCLONE_CRYPT_REMOTE=':s3:my-bucket'")).toBe(true);
+		expect(command.startsWith("RCLONE_CRYPT_REMOTE=':s3:my-bucket'")).toBe(
+			true,
+		);
 		expect(command).toContain("RCLONE_CRYPT_FILENAME_ENCRYPTION=standard");
 		expect(command).toContain("RCLONE_CRYPT_DIRECTORY_NAME_ENCRYPTION=true");
 		expect(command).toContain("RCLONE_CRYPT_PASSWORD='obscured_pass'");

@@ -55,7 +55,9 @@ export const previewDeployments = pgTable(
 		// first and the loser reuses the winner's row instead of creating a duplicate.
 		// Partial so compose previews (applicationId IS NULL) are covered by their own
 		// index below instead of colliding here.
-		applicationPrUnique: uniqueIndex("preview_deployments_application_pr_unique")
+		applicationPrUnique: uniqueIndex(
+			"preview_deployments_application_pr_unique",
+		)
 			.on(table.applicationId, table.pullRequestId)
 			.where(sql`"applicationId" IS NOT NULL`),
 		// Same insert-first dedupe guarantee for compose previews.

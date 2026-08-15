@@ -88,7 +88,8 @@ export const BulkInvite = () => {
 			}
 			await utils.organization.allInvitations.invalidate();
 		} catch (err) {
-			const message = err instanceof Error ? err.message : "Failed to send invitations";
+			const message =
+				err instanceof Error ? err.message : "Failed to send invitations";
 			toast.error(message);
 		}
 	};
@@ -124,12 +125,18 @@ export const BulkInvite = () => {
 								key={r.email}
 								className="flex items-center justify-between text-sm border rounded-md px-3 py-2"
 							>
-								<span className="text-muted-foreground truncate">{r.email}</span>
+								<span className="text-muted-foreground truncate">
+									{r.email}
+								</span>
 								<div className="flex items-center gap-2 shrink-0">
 									{r.reason && (
-										<span className="text-xs text-muted-foreground">{r.reason}</span>
+										<span className="text-xs text-muted-foreground">
+											{r.reason}
+										</span>
 									)}
-									<Badge variant={r.status === "invited" ? "default" : "secondary"}>
+									<Badge
+										variant={r.status === "invited" ? "default" : "secondary"}
+									>
 										{r.status}
 									</Badge>
 								</div>
@@ -219,11 +226,7 @@ export const BulkInvite = () => {
 					{results ? (
 						<Button onClick={() => handleClose(false)}>Done</Button>
 					) : (
-						<Button
-							form="bulk-invite-form"
-							type="submit"
-							isLoading={isPending}
-						>
+						<Button form="bulk-invite-form" type="submit" isLoading={isPending}>
 							Send {fields.length} Invitation{fields.length > 1 ? "s" : ""}
 						</Button>
 					)}

@@ -650,17 +650,24 @@ export const organizationRouter = createTRPCRouter({
 	bulkInviteMembers: withPermission("member", "create")
 		.input(
 			z.object({
-				invitations: z.array(
-					z.object({
-						email: z.string().email(),
-						role: z.string().min(1),
-					}),
-				).min(1).max(50),
+				invitations: z
+					.array(
+						z.object({
+							email: z.string().email(),
+							role: z.string().min(1),
+						}),
+					)
+					.min(1)
+					.max(50),
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
 			const orgId = ctx.session.activeOrganizationId;
-			const results: { email: string; status: "invited" | "skipped"; reason?: string }[] = [];
+			const results: {
+				email: string;
+				status: "invited" | "skipped";
+				reason?: string;
+			}[] = [];
 
 			const callerMember = await db.query.member.findFirst({
 				where: and(
@@ -673,7 +680,11 @@ export const organizationRouter = createTRPCRouter({
 				const email = invite.email.toLowerCase();
 
 				if (invite.role === "owner") {
-					results.push({ email, status: "skipped", reason: "Cannot invite as owner" });
+					results.push({
+						email,
+						status: "skipped",
+						reason: "Cannot invite as owner",
+					});
 					continue;
 				}
 
@@ -682,7 +693,11 @@ export const organizationRouter = createTRPCRouter({
 					callerMember?.role !== "owner" &&
 					callerMember?.role !== "admin"
 				) {
-					results.push({ email, status: "skipped", reason: "Only owners and admins can invite admins" });
+					results.push({
+						email,
+						status: "skipped",
+						reason: "Only owners and admins can invite admins",
+					});
 					continue;
 				}
 
@@ -699,7 +714,11 @@ export const organizationRouter = createTRPCRouter({
 						),
 					});
 					if (existingMember) {
-						results.push({ email, status: "skipped", reason: "Already a member" });
+						results.push({
+							email,
+							status: "skipped",
+							reason: "Already a member",
+						});
 						continue;
 					}
 				}
@@ -714,7 +733,11 @@ export const organizationRouter = createTRPCRouter({
 				});
 
 				if (existingInvitation) {
-					results.push({ email, status: "skipped", reason: "Invitation already pending" });
+					results.push({
+						email,
+						status: "skipped",
+						reason: "Invitation already pending",
+					});
 					continue;
 				}
 
@@ -727,7 +750,11 @@ export const organizationRouter = createTRPCRouter({
 						),
 					});
 					if (!customRole) {
-						results.push({ email, status: "skipped", reason: `Role "${invite.role}" not found` });
+						results.push({
+							email,
+							status: "skipped",
+							reason: `Role "${invite.role}" not found`,
+						});
 						continue;
 					}
 				}
@@ -749,7 +776,10 @@ export const organizationRouter = createTRPCRouter({
 				action: "create",
 				resourceType: "organization",
 				resourceId: orgId,
-				metadata: { type: "bulkInviteMembers", count: results.filter((r) => r.status === "invited").length },
+				metadata: {
+					type: "bulkInviteMembers",
+					count: results.filter((r) => r.status === "invited").length,
+				},
 			});
 
 			return results;

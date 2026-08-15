@@ -24,8 +24,11 @@ export const restoreComposeBackup = async (
 		}
 		const { serverId, appName, composeType } = compose;
 
-		const { flags: rcloneFlags, path: backupPath, envVars } =
-			await getRclonePathAndFlags(destination, backupInput.backupFile);
+		const {
+			flags: rcloneFlags,
+			path: backupPath,
+			envVars,
+		} = await getRclonePathAndFlags(destination, backupInput.backupFile);
 		let rcloneCommand = buildRcloneCommand(
 			`rclone cat ${rcloneFlags.join(" ")} ${quote([backupPath])} | gunzip`,
 			envVars,
