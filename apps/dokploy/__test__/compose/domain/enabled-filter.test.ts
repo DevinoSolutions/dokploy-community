@@ -48,6 +48,15 @@ const baseDomain: Domain = {
 	middlewares: null,
 	forwardAuthEnabled: false,
 	enabled: true,
+	publishToCloudflare: false,
+	cloudflareTunnelMode: null,
+	cloudflareId: null,
+	cloudflareZoneId: null,
+	cloudflareTunnelId: null,
+	cloudflareDnsRecordId: null,
+	cloudflareIngressApplied: false,
+	enableCloudflareAccess: false,
+	cloudflareAccessApplicationId: null,
 };
 
 const serviceLabels = (

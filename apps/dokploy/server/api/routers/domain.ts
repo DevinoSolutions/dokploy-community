@@ -518,9 +518,13 @@ export const domainRouter = createTRPCRouter({
 				const preview = await findPreviewDeploymentById(
 					currentDomain.previewDeploymentId,
 				);
-				await checkServicePermissionAndAccess(ctx, preview.applicationId, {
-					domain: ["create"],
-				});
+				await checkServicePermissionAndAccess(
+					ctx,
+					(preview.composeId ?? preview.applicationId) as string,
+					{
+						domain: ["create"],
+					},
+				);
 			}
 
 			const result = await updateDomainById(input.domainId, {
@@ -545,11 +549,15 @@ export const domainRouter = createTRPCRouter({
 				const previewDeployment = await findPreviewDeploymentById(
 					domain.previewDeploymentId,
 				);
-				const application = await findApplicationById(
-					previewDeployment.applicationId,
-				);
-				application.appName = previewDeployment.appName;
-				await manageDomain(application, domain);
+				// Compose preview domains have no Traefik file config to manage —
+				// their labels are injected into the compose file at build time.
+				if (previewDeployment.applicationId) {
+					const application = await findApplicationById(
+						previewDeployment.applicationId,
+					);
+					application.appName = previewDeployment.appName;
+					await manageDomain(application, domain);
+				}
 			}
 
 			return {

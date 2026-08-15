@@ -55,6 +55,7 @@ type ServiceItem = {
 
 type NamedService = {
 	name: string;
+	createdAt: string;
 	icon?: string | null;
 };
 
@@ -146,7 +147,7 @@ const countEnvironmentServices = (environment: ServiceCollections): number =>
 		0,
 	);
 
-const mapServices = <T extends NamedService & { createdAt: string }>(
+const mapServices = <T extends NamedService>(
 	items: readonly T[],
 	getId: (item: T) => string,
 	type: ServiceType,
