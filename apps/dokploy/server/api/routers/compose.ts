@@ -230,6 +230,7 @@ export const composeRouter = createTRPCRouter({
 			});
 			const updated = await updateCompose(input.composeId, {
 				env: input.env,
+				createEnvFile: input.createEnvFile,
 			});
 
 			if (!updated) {
