@@ -418,7 +418,7 @@ const generateWildcardDomain = async (
 
 		if (process.env.NODE_ENV !== "development" && isPrivateIp(ip)) {
 			ip = serverId
-				? (await getRemotePublicIp(serverId)) ?? ip
+				? ((await getRemotePublicIp(serverId)) ?? ip)
 				: (await getPublicIpWithFallback()) || ip;
 		}
 
@@ -877,7 +877,10 @@ export const removeComposePreview = async (previewDeploymentId: string) => {
 				await runQuiet(`docker network rm ${appName} 2>&1 || true;`);
 			},
 			async () =>
-				await removeDeploymentsByPreviewDeploymentId(previewDeployment, serverId),
+				await removeDeploymentsByPreviewDeploymentId(
+					previewDeployment,
+					serverId,
+				),
 			async () => await removeComposeDirectory(appName, serverId),
 			async () =>
 				await db

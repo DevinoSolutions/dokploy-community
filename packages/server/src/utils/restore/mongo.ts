@@ -16,8 +16,11 @@ export const restoreMongoBackup = async (
 	try {
 		const { appName, databasePassword, databaseUser, serverId } = mongo;
 
-		const { flags: rcloneFlags, path: backupPath, envVars } =
-			await getRclonePathAndFlags(destination, backupInput.backupFile);
+		const {
+			flags: rcloneFlags,
+			path: backupPath,
+			envVars,
+		} = await getRclonePathAndFlags(destination, backupInput.backupFile);
 		const rcloneCommand = buildRcloneCommand(
 			`rclone copy ${rcloneFlags.join(" ")} ${quote([backupPath])}`,
 			envVars,

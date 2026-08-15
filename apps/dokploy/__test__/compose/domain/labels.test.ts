@@ -33,6 +33,7 @@ describe("createDomainLabels", () => {
 		cloudflareIngressApplied: false,
 		enableCloudflareAccess: false,
 		cloudflareAccessApplicationId: null,
+		enabled: true,
 	};
 
 	it("should create basic labels for web entrypoint", async () => {

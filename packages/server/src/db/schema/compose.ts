@@ -89,6 +89,7 @@ export const compose = pgTable("compose", {
 	),
 	command: text("command").notNull().default(""),
 	//
+	createEnvFile: boolean("createEnvFile").notNull().default(true),
 	enableSubmodules: boolean("enableSubmodules").notNull().default(false),
 	composePath: text("composePath").notNull().default("./docker-compose.yml"),
 	suffix: text("suffix").notNull().default(""),
@@ -209,6 +210,7 @@ const createSchema = createInsertSchema(compose, {
 	environmentId: z.string(),
 	customGitSSHKeyId: z.string().optional(),
 	command: z.string().optional(),
+	createEnvFile: z.boolean().optional(),
 	composePath: z.string().min(1),
 	composeType: z.enum(["docker-compose", "stack"]).optional(),
 	watchPaths: z.array(z.string()).optional(),
@@ -300,7 +302,10 @@ export const apiSaveEnvironmentVariablesCompose = createSchema
 		composeId: true,
 		env: true,
 	})
-	.required();
+	.required()
+	.extend({
+		createEnvFile: z.boolean().optional(),
+	});
 
 export const apiRandomizeCompose = createSchema
 	.pick({

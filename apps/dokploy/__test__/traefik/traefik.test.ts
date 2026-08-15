@@ -166,6 +166,7 @@ const baseDomain: Domain = {
 	cloudflareIngressApplied: false,
 	enableCloudflareAccess: false,
 	cloudflareAccessApplicationId: null,
+	enabled: true,
 };
 
 const baseRedirect: Redirect = {

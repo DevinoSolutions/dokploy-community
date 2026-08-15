@@ -218,28 +218,28 @@ export const ShowUsers = () => {
 																				Actions
 																			</DropdownMenuLabel>
 
-								{canChangeRole && (
-												<ChangeRole
-													memberId={member.id}
-													currentRole={member.role}
-													userEmail={member.user.email}
-												/>
-											)}
+																			{canChangeRole && (
+																				<ChangeRole
+																					memberId={member.id}
+																					currentRole={member.role}
+																					userEmail={member.user.email}
+																				/>
+																			)}
 
-											{canEditPermissions && (
-												<AddUserPermissions
-													userId={member.user.id}
-													role={member.role}
-												/>
-											)}
+																			{canEditPermissions && (
+																				<AddUserPermissions
+																					userId={member.user.id}
+																					role={member.role}
+																				/>
+																			)}
 
-											{canChangeRole && (
-												<MoveToTeam
-													memberId={member.id}
-													userEmail={member.user.email}
-													currentTeamId={member.teamId}
-												/>
-											)}
+																			{canChangeRole && (
+																				<MoveToTeam
+																					memberId={member.id}
+																					userEmail={member.user.email}
+																					currentTeamId={member.teamId}
+																				/>
+																			)}
 
 																			{canDelete && (
 																				<DialogAction

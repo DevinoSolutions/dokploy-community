@@ -299,9 +299,9 @@ export const userRouter = createTRPCRouter({
 				});
 			}
 		}),
-	// Self-scoped: a user may only ever list and revoke their OWN sessions.
-	// Metadata only — the session token is never selected/returned.
 	listSessions: protectedProcedure.query(async ({ ctx }) => {
+		const isOwner = ctx.user.role === "owner";
+
 		const sessions = await db
 			.select({
 				id: session.id,
@@ -316,8 +316,16 @@ export const userRouter = createTRPCRouter({
 			})
 			.from(session)
 			.innerJoin(user, eq(session.userId, user.id))
-			.where(eq(session.userId, ctx.user.id))
+			.innerJoin(
+				member,
+				and(
+					eq(member.userId, session.userId),
+					eq(member.organizationId, ctx.session.activeOrganizationId),
+				),
+			)
+			.where(isOwner ? undefined : eq(session.userId, ctx.user.id))
 			.orderBy(desc(session.createdAt));
+
 		return sessions.map((s) => ({
 			...s,
 			isCurrent: s.id === ctx.session.id,
@@ -330,12 +338,26 @@ export const userRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			const targetSession = await db.query.session.findFirst({
-				where: eq(session.id, input.sessionId),
-			});
-			// Treat a session owned by anyone else as if it does not exist, so the
-			// endpoint never confirms the existence of another user's session.
-			if (!targetSession || targetSession.userId !== ctx.user.id) {
+			const isOwner = ctx.user.role === "owner";
+
+			const [targetSession] = await db
+				.select({
+					id: session.id,
+					userId: session.userId,
+					userEmail: user.email,
+				})
+				.from(session)
+				.innerJoin(user, eq(session.userId, user.id))
+				.innerJoin(
+					member,
+					and(
+						eq(member.userId, session.userId),
+						eq(member.organizationId, ctx.session.activeOrganizationId),
+					),
+				)
+				.where(eq(session.id, input.sessionId));
+
+			if (!targetSession) {
 				throw new TRPCError({
 					code: "NOT_FOUND",
 					message: "Session not found",
@@ -347,7 +369,21 @@ export const userRouter = createTRPCRouter({
 					message: "Cannot revoke your own session. Use logout instead.",
 				});
 			}
+			if (!isOwner && targetSession.userId !== ctx.user.id) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "You can only revoke your own sessions",
+				});
+			}
 			await db.delete(session).where(eq(session.id, input.sessionId));
+
+			await audit(ctx, {
+				action: "logout",
+				resourceType: "session",
+				resourceId: targetSession.id,
+				resourceName: targetSession.userEmail,
+			});
+
 			return true;
 		}),
 	getUserByToken: publicProcedure

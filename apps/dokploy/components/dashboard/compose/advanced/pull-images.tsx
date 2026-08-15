@@ -69,8 +69,8 @@ export const PullImagesCompose = ({ composeId }: Props) => {
 			<CardHeader>
 				<CardTitle className="text-xl">Pull Latest Images</CardTitle>
 				<CardDescription>
-					When enabled, the latest images are pulled before every deployment
-					(<code>docker compose up --pull always</code>), so a redeploy picks up
+					When enabled, the latest images are pulled before every deployment (
+					<code>docker compose up --pull always</code>), so a redeploy picks up
 					updated tags instead of reusing the local cache. Only applies to the
 					Docker Compose deploy type.
 				</CardDescription>

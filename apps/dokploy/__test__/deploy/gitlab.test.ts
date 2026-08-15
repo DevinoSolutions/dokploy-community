@@ -454,10 +454,7 @@ describe("GitLab webhook handler — Merge Request Hook open/update", () => {
 describe("GitLab webhook handler — Merge Request Hook compose previews", () => {
 	// The MR branch runs two findMany queries (applications first, compose
 	// second) against the shared setup.ts Proxy mock — prime both explicitly.
-	const primeMrQueries = (
-		composeRows: unknown[],
-		appRows: unknown[] = [],
-	) => {
+	const primeMrQueries = (composeRows: unknown[], appRows: unknown[] = []) => {
 		vi.mocked(db.query.applications.findMany).mockResolvedValueOnce(
 			appRows as any,
 		);

@@ -16,8 +16,11 @@ export const restoreMariadbBackup = async (
 	try {
 		const { appName, serverId, databaseUser, databasePassword } = mariadb;
 
-		const { flags: rcloneFlags, path: backupPath, envVars } =
-			await getRclonePathAndFlags(destination, backupInput.backupFile);
+		const {
+			flags: rcloneFlags,
+			path: backupPath,
+			envVars,
+		} = await getRclonePathAndFlags(destination, backupInput.backupFile);
 
 		const rcloneCommand = buildRcloneCommand(
 			`rclone cat ${rcloneFlags.join(" ")} ${quote([backupPath])} | gunzip`,

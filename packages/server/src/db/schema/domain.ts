@@ -62,6 +62,7 @@ export const domains = pgTable("domain", {
 	stripPath: boolean("stripPath").notNull().default(false),
 	middlewares: text("middlewares").array().default(sql`ARRAY[]::text[]`),
 	forwardAuthEnabled: boolean("forwardAuthEnabled").notNull().default(false),
+	enabled: boolean("enabled").notNull().default(true),
 	// --- Cloudflare Tunnel publishing ---
 	// User-settable intent + selection (validated as admin-only at the router):
 	publishToCloudflare: boolean("publishToCloudflare").notNull().default(false),
@@ -171,6 +172,7 @@ export const apiUpdateDomain = createSchema
 		stripPath: true,
 		middlewares: true,
 		forwardAuthEnabled: true,
+		enabled: true,
 		publishToCloudflare: true,
 		cloudflareTunnelMode: true,
 		cloudflareId: true,

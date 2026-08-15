@@ -43,9 +43,13 @@ export const previewDeploymentRouter = createTRPCRouter({
 				});
 				return await findPreviewDeploymentsByComposeId(input.composeId);
 			}
-			await checkServicePermissionAndAccess(ctx, input.applicationId as string, {
-				deployment: ["read"],
-			});
+			await checkServicePermissionAndAccess(
+				ctx,
+				input.applicationId as string,
+				{
+					deployment: ["read"],
+				},
+			);
 			return await findPreviewDeploymentsByApplicationId(
 				input.applicationId as string,
 			);
@@ -110,9 +114,13 @@ export const previewDeploymentRouter = createTRPCRouter({
 			);
 
 			if (previewDeployment.composeId) {
-				await checkServicePermissionAndAccess(ctx, previewDeployment.composeId, {
-					deployment: ["create"],
-				});
+				await checkServicePermissionAndAccess(
+					ctx,
+					previewDeployment.composeId,
+					{
+						deployment: ["create"],
+					},
+				);
 				const compose = await findComposeById(previewDeployment.composeId);
 				const jobData: DeploymentJob = {
 					composeId: previewDeployment.composeId,

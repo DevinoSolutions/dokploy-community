@@ -16,8 +16,11 @@ export const restoreMySqlBackup = async (
 	try {
 		const { appName, databaseRootPassword, serverId } = mysql;
 
-		const { flags: rcloneFlags, path: backupPath, envVars } =
-			await getRclonePathAndFlags(destination, backupInput.backupFile);
+		const {
+			flags: rcloneFlags,
+			path: backupPath,
+			envVars,
+		} = await getRclonePathAndFlags(destination, backupInput.backupFile);
 
 		const rcloneCommand = buildRcloneCommand(
 			`rclone cat ${rcloneFlags.join(" ")} ${quote([backupPath])} | gunzip`,

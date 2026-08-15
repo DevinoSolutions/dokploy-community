@@ -36,6 +36,7 @@ const previewDomain = (serviceName: string, host: string) =>
 		serviceName,
 		internalPath: null,
 		stripPath: false,
+		enabled: true,
 	}) as any;
 
 const previewEntity = (suffix: string, domains: unknown[]) =>
@@ -145,8 +146,14 @@ describe("compose preview suffix ordering", () => {
 
 	it("isolates two PRs of the same compose: disjoint service, volume and network names", () => {
 		// Parse fresh per PR — the preview build path re-clones the spec per deploy.
-		const prOne = randomizeSpecificationFile(parse(composeFile), "pr1-aaaaaaaa");
-		const prTwo = randomizeSpecificationFile(parse(composeFile), "pr2-bbbbbbbb");
+		const prOne = randomizeSpecificationFile(
+			parse(composeFile),
+			"pr1-aaaaaaaa",
+		);
+		const prTwo = randomizeSpecificationFile(
+			parse(composeFile),
+			"pr2-bbbbbbbb",
+		);
 
 		const serviceOverlap = Object.keys(prOne.services ?? {}).filter((name) =>
 			Object.keys(prTwo.services ?? {}).includes(name),

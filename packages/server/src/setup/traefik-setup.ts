@@ -21,7 +21,7 @@ export const TRAEFIK_PORT =
 export const TRAEFIK_HTTP3_PORT =
 	Number.parseInt(process.env.TRAEFIK_HTTP3_PORT!, 10) || 443;
 export const TRAEFIK_BIND_IP = process.env.TRAEFIK_BIND_IP || "0.0.0.0";
-export const TRAEFIK_VERSION = process.env.TRAEFIK_VERSION || "3.6.20";
+export const TRAEFIK_VERSION = process.env.TRAEFIK_VERSION || "3.6.25";
 
 export interface TraefikOptions {
 	env?: string[];
@@ -69,9 +69,7 @@ export const initializeStandaloneTraefik = async ({
 
 	if (enableDashboard) {
 		exposedPorts["8080/tcp"] = {};
-		portBindings["8080/tcp"] = [
-			{ HostPort: "8080", HostIp: TRAEFIK_BIND_IP },
-		];
+		portBindings["8080/tcp"] = [{ HostPort: "8080", HostIp: TRAEFIK_BIND_IP }];
 	}
 
 	for (const port of additionalPorts) {
