@@ -237,9 +237,9 @@ const rollbackApplication = async (
 	// alone is not sufficient — Docker Swarm also relies on the daemon's
 	// cached credentials (~/.docker/config.json) to distribute auth to nodes.
 	let ecrAuthPassword: string | undefined;
-	if (fullContext.rollbackRegistry) {
+	if (resolvedContext.rollbackRegistry) {
 		ecrAuthPassword = await dockerLoginForRegistry(
-			fullContext.rollbackRegistry,
+			resolvedContext.rollbackRegistry,
 			serverId,
 		);
 	}
@@ -295,16 +295,17 @@ const rollbackApplication = async (
 		rollbackImage = getRegistryTag(rollbackRegistry, image);
 	}
 
-	const isEcrRollback = fullContext.rollbackRegistry?.registryType === "awsEcr";
+	const isEcrRollback =
+		resolvedContext.rollbackRegistry?.registryType === "awsEcr";
 	const settings: CreateServiceOptions = {
 		authconfig: {
 			password: isEcrRollback
 				? ecrAuthPassword || ""
-				: fullContext.rollbackRegistry?.password || "",
+				: resolvedContext.rollbackRegistry?.password || "",
 			username: isEcrRollback
 				? "AWS"
-				: fullContext.rollbackRegistry?.username || "",
-			serveraddress: fullContext.rollbackRegistry?.registryUrl || "",
+				: resolvedContext.rollbackRegistry?.username || "",
+			serveraddress: resolvedContext.rollbackRegistry?.registryUrl || "",
 		},
 		Name: appName,
 		TaskTemplate: {
