@@ -651,8 +651,10 @@ export default async function handler(
 					if (!hasLabel) continue;
 				}
 
-				const existingComposePreview =
-					await findPreviewDeploymentByComposeId(composeApp.composeId, prId);
+				const existingComposePreview = await findPreviewDeploymentByComposeId(
+					composeApp.composeId,
+					prId,
+				);
 
 				let previewDeploymentId =
 					existingComposePreview?.previewDeploymentId || "";

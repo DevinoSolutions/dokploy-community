@@ -239,8 +239,8 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 														auto-generated subdomains, or template variables for
 														custom patterns. If the template includes{" "}
 														<code className="text-xs">{"${prNumber}"}</code> or{" "}
-														<code className="text-xs">{"${branchName}"}</code>, no
-														random suffix is appended.
+														<code className="text-xs">{"${branchName}"}</code>,
+														no random suffix is appended.
 													</span>
 													<span className="flex flex-wrap gap-x-3 gap-y-1 text-xs font-mono">
 														<code>{"${appName}"}</code>
@@ -546,9 +546,9 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 															You can add environment variables to your
 															resource. Use{" "}
 															<code>{"${{preview.prNumber}}"}</code> to
-															reference the pull request number, e.g. to
-															point at another service's deterministic
-															preview domain (
+															reference the pull request number, e.g. to point
+															at another service's deterministic preview domain
+															(
 															<code>
 																VITE_API_URL=https://backend-pr$
 																{"{{preview.prNumber}}"}.example.com

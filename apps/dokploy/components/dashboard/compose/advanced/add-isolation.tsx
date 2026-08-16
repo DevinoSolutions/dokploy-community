@@ -203,11 +203,11 @@ export const IsolatedDeploymentTab = ({ composeId }: Props) => {
 											render={({ field }) => (
 												<FormItem className="mt-4 rounded-lg border p-3 shadow-sm">
 													<div className="space-y-0.5">
-														<FormLabel>
-															Network MTU (optional)
-														</FormLabel>
+														<FormLabel>Network MTU (optional)</FormLabel>
 														<FormDescription>
-															Set a custom MTU for the isolated network. Leave empty for Docker default (1500). Use 1350 for environments behind VPN/overlay networks.
+															Set a custom MTU for the isolated network. Leave
+															empty for Docker default (1500). Use 1350 for
+															environments behind VPN/overlay networks.
 														</FormDescription>
 													</div>
 													<FormControl>

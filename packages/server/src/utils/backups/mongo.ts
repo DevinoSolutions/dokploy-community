@@ -31,8 +31,11 @@ export const runMongoBackup = async (mongo: Mongo, backup: BackupSchedule) => {
 		description: "MongoDB Backup",
 	});
 	try {
-		const { flags: rcloneFlags, path: rcloneDestination, envVars } =
-			await getRclonePathAndFlags(destination, bucketDestination);
+		const {
+			flags: rcloneFlags,
+			path: rcloneDestination,
+			envVars,
+		} = await getRclonePathAndFlags(destination, bucketDestination);
 		const rcloneCommand = buildRcloneCommand(
 			`rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`,
 			envVars,

@@ -89,7 +89,30 @@ resolve them by hand — annoying but not dangerous).
 | Network management feature (below) | Fork | keep; re-integrate onto upstream |
 | Everything else | Upstream | theirs |
 
-### Fork feature: Docker network management (KEEP — upstream has no equivalent)
+### Dropped at v0.29.14: fork Docker network management
+
+Upstream's own network management (#3774) landed in v0.29.14 and replaced the
+fork's implementation (same lineage — prod DBs already had the table/enum/
+`networkIds`). Migration 0193 dropped the fork-only columns
+(`scope`/`ingress`/`configOnly`); the fork's 6-value `networkDriver` enum stays
+in the schema TS to avoid an enum recreate. The fork re-applies
+`withPermission` gates on upstream's network router (upstream checks only org
+membership) — preserve those on every sync.
+
+### Dropped at v0.30.0: self-scoped sessions page (fork PR #164)
+
+Upstream v0.30.0 ships its own session management (list/filter/sort + revoke)
+and it is now the owner of `pages/dashboard/settings/sessions.tsx`,
+`components/dashboard/settings/sessions/*`, and the `listSessions`/
+`revokeSession` procedures in `routers/user.ts`. Behavioral difference accepted
+under theirs-wins: the fork's port was strictly self-scoped (users saw only
+their own sessions); upstream lets org owners list and revoke every member's
+sessions (IPs/user-agents visible to owners, with audit log). Do not re-apply
+the fork's `permissions.member.read` page gate — upstream intends members to
+see their own sessions. The fork's `apiKeyPrefixSchema` hardening in
+`routers/user.ts` is separate and must survive.
+
+### Historical (superseded): fork Docker network management file map
 
 Net-new fork files (kept as-is unless upstream restructures their neighbors):
 `packages/server/src/db/schema/network.ts`, `packages/server/src/services/network.ts`,

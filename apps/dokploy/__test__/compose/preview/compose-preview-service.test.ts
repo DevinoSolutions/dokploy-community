@@ -64,12 +64,15 @@ vi.mock("@dokploy/server/services/deployment", async (importOriginal) => ({
 		mocks.removeDeploymentsByPreviewDeploymentId,
 }));
 
-vi.mock("@dokploy/server/utils/filesystem/directory", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("@dokploy/server/utils/filesystem/directory")
-	>()),
-	removeComposeDirectory: mocks.removeComposeDirectory,
-}));
+vi.mock(
+	"@dokploy/server/utils/filesystem/directory",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("@dokploy/server/utils/filesystem/directory")
+		>()),
+		removeComposeDirectory: mocks.removeComposeDirectory,
+	}),
+);
 
 vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 	...(await importOriginal<

@@ -26,7 +26,8 @@ const scrubEvent = (event: ErrorEvent): ErrorEvent => {
 
 // Public ingest-only DSN for the fork's error tracker. A DSN can only submit
 // events — it grants no read access to the project — so it is safe in source.
-const SENTRY_DSN = "https://d98cecf413db8997128f3519f26e3620@sentry.devino.ca/59";
+const SENTRY_DSN =
+	"https://d98cecf413db8997128f3519f26e3620@sentry.devino.ca/59";
 
 const optedOut =
 	process.env.DOKPLOY_DISABLE_SENTRY === "true" ||

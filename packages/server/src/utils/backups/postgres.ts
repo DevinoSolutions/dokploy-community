@@ -35,8 +35,11 @@ export const runPostgresBackup = async (
 	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
 	const bucketDestination = `${normalizeS3Path(prefix)}${backupFileName}`;
 	try {
-		const { flags: rcloneFlags, path: rcloneDestination, envVars } =
-			await getRclonePathAndFlags(destination, bucketDestination);
+		const {
+			flags: rcloneFlags,
+			path: rcloneDestination,
+			envVars,
+		} = await getRclonePathAndFlags(destination, bucketDestination);
 
 		const rcloneCommand = buildRcloneCommand(
 			`rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`,

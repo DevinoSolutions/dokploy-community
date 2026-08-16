@@ -17,8 +17,7 @@ export const migration = async () => {
 		// the only visible symptom is downstream "column X does not exist" errors.
 		// Boot anyway (never brick a running install), but make the root cause
 		// LOUD in logs and report it to Sentry so broken switchers are diagnosable.
-		const message =
-			error instanceof Error ? error.message : String(error);
+		const message = error instanceof Error ? error.message : String(error);
 		console.error(
 			"\n============================================================\n" +
 				"DATABASE MIGRATION FAILED — the app is starting WITHOUT the\n" +

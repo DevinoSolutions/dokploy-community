@@ -1,9 +1,9 @@
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 
 const PUBLIC_IP_SERVICES = [
-  "https://api.ipify.org",
-  "https://checkip.amazonaws.com",
-  "https://ipinfo.io/ip",
+	"https://api.ipify.org",
+	"https://checkip.amazonaws.com",
+	"https://ipinfo.io/ip",
 ] as const;
 
 export const getRemotePublicIp = async (

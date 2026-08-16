@@ -401,7 +401,9 @@ export const filterEnvironmentServices = <T extends EnvironmentWithServices>(
 	),
 });
 
-export const environmentHasAccessedService = <T extends EnvironmentWithServices>(
+export const environmentHasAccessedService = <
+	T extends EnvironmentWithServices,
+>(
 	environment: T,
 	accessedServices: string[],
 ): boolean => {

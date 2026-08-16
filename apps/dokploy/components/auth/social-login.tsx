@@ -71,8 +71,7 @@ export function SocialLoginButton({
 			});
 			if (error) {
 				toast.error(
-					error.message ??
-						`Could not sign in with ${PROVIDER_LABEL[provider]}`,
+					error.message ?? `Could not sign in with ${PROVIDER_LABEL[provider]}`,
 				);
 			}
 		} catch (err) {

@@ -42,8 +42,11 @@ export const restoreWebServerBackup = async (
 	try {
 		assertWebServerBackupArchivePath(backupFile);
 
-		const { flags: rcloneFlags, path: backupPath, envVars } =
-			await getRclonePathAndFlags(destination, backupFile);
+		const {
+			flags: rcloneFlags,
+			path: backupPath,
+			envVars,
+		} = await getRclonePathAndFlags(destination, backupFile);
 		const { BASE_PATH } = paths();
 
 		// Create a temporary directory outside of BASE_PATH

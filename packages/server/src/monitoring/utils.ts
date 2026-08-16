@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { OSUtils } from "node-os-utils";
 import { paths } from "../constants";
 import { execAsyncRemote } from "../utils/process/execAsync";
+import { parseIoToMb } from "./units";
 
 export { LOCAL_SERVER_ID, getMonitoringAppName } from "./constants";
 
@@ -147,13 +148,13 @@ export const recordAdvancedStats = async (
 	await updateStatsFile(appName, "memory", memoryStats);
 
 	await updateStatsFile(appName, "block", {
-		readMb: stats.BlockIO.split(" ")[0],
-		writeMb: stats.BlockIO.split(" ")[2],
+		readMb: parseIoToMb(stats.BlockIO.split(" ")[0]),
+		writeMb: parseIoToMb(stats.BlockIO.split(" ")[2]),
 	});
 
 	await updateStatsFile(appName, "network", {
-		inputMb: stats.NetIO.split(" ")[0],
-		outputMb: stats.NetIO.split(" ")[2],
+		inputMb: parseIoToMb(stats.NetIO.split(" ")[0]),
+		outputMb: parseIoToMb(stats.NetIO.split(" ")[2]),
 	});
 
 	if (appName === "dokploy") {

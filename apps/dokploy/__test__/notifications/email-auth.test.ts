@@ -15,14 +15,17 @@ const buildTransportOptions = (
 ) => ({
 	host,
 	port,
-	...(username && password
-		? { auth: { user: username, pass: password } }
-		: {}),
+	...(username && password ? { auth: { user: username, pass: password } } : {}),
 });
 
 describe("sendEmailNotification transport auth", () => {
 	it("includes auth when both credentials are provided", () => {
-		const options = buildTransportOptions("smtp.example.com", 587, "user", "pass");
+		const options = buildTransportOptions(
+			"smtp.example.com",
+			587,
+			"user",
+			"pass",
+		);
 		expect(options).toHaveProperty("auth", { user: "user", pass: "pass" });
 	});
 

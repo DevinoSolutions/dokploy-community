@@ -44,6 +44,7 @@ const baseDomain: Domain = {
 	cloudflareIngressApplied: false,
 	enableCloudflareAccess: false,
 	cloudflareAccessApplicationId: null,
+	enabled: true,
 };
 
 describe("forwardAuthMiddlewareName", () => {

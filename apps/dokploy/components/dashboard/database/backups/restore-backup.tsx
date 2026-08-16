@@ -76,6 +76,7 @@ interface Props {
 	serverId?: string | null;
 	backupType?: "database" | "compose";
 	disabled?: boolean;
+	trigger?: React.ReactNode;
 }
 
 const RestoreBackupSchema = z
@@ -203,6 +204,7 @@ export const RestoreBackup = ({
 	serverId,
 	backupType = "database",
 	disabled = false,
+	trigger,
 }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const [search, setSearch] = useState("");
@@ -314,10 +316,12 @@ export const RestoreBackup = ({
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>
 			<DialogTrigger asChild>
-				<Button variant="outline">
-					<RotateCcw className="mr-2 size-4" />
-					Restore Backup
-				</Button>
+				{trigger ?? (
+					<Button variant="outline">
+						<RotateCcw className="mr-2 size-4" />
+						Restore Backup
+					</Button>
+				)}
 			</DialogTrigger>
 			<DialogContent className="sm:max-w-2xl">
 				<DialogHeader>

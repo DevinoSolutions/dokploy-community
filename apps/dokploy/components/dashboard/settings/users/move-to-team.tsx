@@ -26,9 +26,15 @@ interface MoveToTeamProps {
 	currentTeamId?: string | null;
 }
 
-export const MoveToTeam = ({ memberId, userEmail, currentTeamId }: MoveToTeamProps) => {
+export const MoveToTeam = ({
+	memberId,
+	userEmail,
+	currentTeamId,
+}: MoveToTeamProps) => {
 	const [open, setOpen] = useState(false);
-	const [selectedTeam, setSelectedTeam] = useState<string>(currentTeamId ?? "none");
+	const [selectedTeam, setSelectedTeam] = useState<string>(
+		currentTeamId ?? "none",
+	);
 	const utils = api.useUtils();
 
 	const { mutateAsync: moveMember, isPending } =
@@ -44,7 +50,8 @@ export const MoveToTeam = ({ memberId, userEmail, currentTeamId }: MoveToTeamPro
 			await utils.user.all.invalidate();
 			setOpen(false);
 		} catch (err) {
-			const message = err instanceof Error ? err.message : "Failed to move member";
+			const message =
+				err instanceof Error ? err.message : "Failed to move member";
 			toast.error(message);
 		}
 	};
@@ -52,7 +59,10 @@ export const MoveToTeam = ({ memberId, userEmail, currentTeamId }: MoveToTeamPro
 	return (
 		<Dialog open={open} onOpenChange={setOpen}>
 			<DialogTrigger asChild>
-				<Button variant="ghost" className="w-full justify-start px-2 py-1.5 text-sm">
+				<Button
+					variant="ghost"
+					className="w-full justify-start px-2 py-1.5 text-sm"
+				>
 					Move to Team
 				</Button>
 			</DialogTrigger>
@@ -75,8 +85,8 @@ export const MoveToTeam = ({ memberId, userEmail, currentTeamId }: MoveToTeamPro
 						</SelectContent>
 					</Select>
 					<p className="text-xs text-muted-foreground">
-						Teams are managed via the better-auth organization plugin. Create teams
-						from your organization settings.
+						Teams are managed via the better-auth organization plugin. Create
+						teams from your organization settings.
 					</p>
 				</div>
 

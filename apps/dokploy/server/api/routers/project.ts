@@ -112,10 +112,11 @@ export const projectRouter = createTRPCRouter({
 		.input(apiFindOneProject)
 		.query(async ({ input, ctx }) => {
 			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
-				const { accessedServices, accessedProjects, accessedEnvironments } = await findMemberByUserId(
-					ctx.user.id,
-					ctx.session.activeOrganizationId,
-				);
+				const { accessedServices, accessedProjects, accessedEnvironments } =
+					await findMemberByUserId(
+						ctx.user.id,
+						ctx.session.activeOrganizationId,
+					);
 
 				const project = await findProjectById(input.projectId);
 

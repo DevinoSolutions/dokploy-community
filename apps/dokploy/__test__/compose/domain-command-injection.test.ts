@@ -35,6 +35,7 @@ const makeDomain = (serviceName: string) =>
 		https: false,
 		uniqueConfigKey: 1,
 		port: 3000,
+		enabled: true,
 	}) as any;
 
 // If the returned shell fragment is safe, parse() yields only string tokens.
@@ -44,7 +45,7 @@ const leaksShellSyntax = (command: string, marker: string) =>
 		(t) => typeof t !== "string" && JSON.stringify(t).includes(marker),
 	);
 
-describe("writeDomainsToCompose error path (serviceName injection)", () => {
+describe("writeDomainsToCompose error path (GHSA-xmmr serviceName injection)", () => {
 	it("does not let a malicious serviceName inject shell operators", async () => {
 		const result = await writeDomainsToCompose(baseCompose, [
 			makeDomain("$(touch /tmp/pwned)"),

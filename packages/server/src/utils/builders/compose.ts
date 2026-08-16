@@ -7,20 +7,23 @@ import { writeDomainsToCompose } from "../docker/domain";
 import {
 	encodeBase64,
 	getEnvironmentVariablesObject,
-	prepareEnvironmentVariables,
-	quoteDotenvValue,
+	prepareEnvironmentVariablesForFile,
 } from "../docker/utils";
+import { withResolvedVaultRefs } from "../vault";
 
 export type ComposeNested = InferResultType<
 	"compose",
 	{ environment: { with: { project: true } }; mounts: true; domains: true }
 >;
 
-export const getBuildComposeCommand = async (compose: ComposeNested) => {
+export const getBuildComposeCommand = async (rawCompose: ComposeNested) => {
+	const compose = await withResolvedVaultRefs(rawCompose);
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const { sourceType, appName, mounts, composeType, domains } = compose;
 	const command = createCommand(compose);
-	const envCommand = getCreateEnvFileCommand(compose);
+	const envCommand = compose.createEnvFile
+		? getCreateEnvFileCommand(compose)
+		: "";
 	const projectPath = join(COMPOSE_PATH, compose.appName, "code");
 	const exportEnvCommand = getExportEnvCommand(compose);
 
@@ -54,12 +57,16 @@ Compose Type: ${composeType} ✅`;
 
 		cd "${projectPath}";
 
-		${compose.isolatedDeployment ? `
+		${
+			compose.isolatedDeployment
+				? `
 			if docker network inspect ${compose.appName} >/dev/null 2>&1; then
 				${compose.composeType !== "stack" && compose.isolatedNetworkMtu ? `CURRENT_MTU=$(docker network inspect ${compose.appName} --format '{{index .Options "com.docker.network.driver.mtu"}}'); if [ "$CURRENT_MTU" != "${compose.isolatedNetworkMtu}" ]; then echo "Info: Network ${compose.appName} has MTU $CURRENT_MTU but configured MTU is ${compose.isolatedNetworkMtu}. The network must be recreated for the new MTU to take effect."; fi` : "true"}
 			else
 				docker network create ${compose.composeType === "stack" ? "--driver overlay" : ""} --attachable ${compose.composeType !== "stack" && compose.isolatedNetworkMtu ? `--opt com.docker.network.driver.mtu=${compose.isolatedNetworkMtu}` : ""} ${compose.appName}
-			fi` : ""}
+			fi`
+				: ""
+		}
 		env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${command.split(" ").join(" ")} 2>&1 || { echo "Error: ❌ Docker command failed"; exit 1; }
 		${compose.isolatedDeployment ? `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1` : ""}
 
@@ -76,7 +83,8 @@ Compose Type: ${composeType} ✅`;
 // Shell control characters that must never appear in a user-provided compose
 // command: they would let it break out of the `docker ${command}` invocation
 // into arbitrary host commands. A normal docker compose CLI line never needs them.
-const UNSAFE_COMPOSE_COMMAND = /[;&|`$(){}<>\n\\]/;
+// Removed '&' from the blocklist to allow '&&' chaining
+const UNSAFE_COMPOSE_COMMAND = /[;|`$(){}<>\n\\]/;
 
 const sanitizeCommand = (command: string) => {
 	const sanitizedCommand = command.trim();
@@ -87,8 +95,33 @@ const sanitizeCommand = (command: string) => {
 		);
 	}
 
-	const parts = sanitizedCommand.split(/\s+/);
+	if (sanitizedCommand.includes("&")) {
+		// Block single '&' (e.g., backgrounding tasks) or malformed chains like '&&&'
+		if (
+			/(?<!&)&(?!&)/.test(sanitizedCommand) ||
+			sanitizedCommand.includes("&&&")
+		) {
+			throw new Error("Single '&' is not allowed. Use '&&' for chaining.");
+		}
 
+		// Split by '&&' and check that every chained command (skipping the first one) is safe
+		const chains = sanitizedCommand.split("&&").map((cmd) => cmd.trim());
+		const isSafeChain = chains
+			.slice(1)
+			.every(
+				(cmd) =>
+					cmd.startsWith("docker compose ") ||
+					cmd.startsWith("docker-compose "),
+			);
+
+		if (!isSafeChain) {
+			throw new Error(
+				"Chained commands must strictly start with 'docker compose '",
+			);
+		}
+	}
+
+	const parts = sanitizedCommand.split(/\s+/);
 	const restCommand = parts.map((arg) => arg.replace(/^"(.*)"$/, "$1"));
 
 	return restCommand.join(" ");
@@ -137,13 +170,11 @@ export const getCreateEnvFileCommand = (compose: ComposeNested) => {
 		envContent += `\nCOMPOSE_PREFIX=${compose.suffix}`;
 	}
 
-	const envFileContent = prepareEnvironmentVariables(
+	const envFileContent = prepareEnvironmentVariablesForFile(
 		envContent,
 		compose.environment.project.env,
 		compose.environment.env,
-	)
-		.map(quoteDotenvValue)
-		.join("\n");
+	).join("\n");
 
 	const encodedContent = encodeBase64(envFileContent);
 	return `
