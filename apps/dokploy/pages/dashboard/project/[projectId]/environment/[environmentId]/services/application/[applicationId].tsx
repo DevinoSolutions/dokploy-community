@@ -36,8 +36,8 @@ import { ShowVolumeBackups } from "@/components/dashboard/application/volume-bac
 import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
-import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { AssignNetworks } from "@/components/dashboard/networks/assign-networks";
+import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -58,6 +58,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { UseKeyboardNav } from "@/hooks/use-keyboard-nav";
+import { supportsPreviewDeployments } from "@/lib/preview-deployments";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabeling } from "@/utils/hooks/use-whitelabeling";
@@ -252,7 +253,7 @@ const Service = (
 												</TabsTrigger>
 											)}
 											{permissions?.deployment.read &&
-												data?.sourceType === "github" && (
+												supportsPreviewDeployments(data?.sourceType) && (
 													<TabsTrigger value="preview-deployments">
 														Preview Deployments
 													</TabsTrigger>
@@ -394,7 +395,7 @@ const Service = (
 										</TabsContent>
 									)}
 									{permissions?.deployment.read &&
-										data?.sourceType === "github" && (
+										supportsPreviewDeployments(data?.sourceType) && (
 											<TabsContent
 												value="preview-deployments"
 												className="w-full"
