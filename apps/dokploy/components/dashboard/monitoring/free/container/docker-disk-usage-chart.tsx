@@ -1,3 +1,4 @@
+import { LOCAL_SERVER_ID } from "@dokploy/server/monitoring/constants";
 import { Loader2, RefreshCw } from "lucide-react";
 import { useMemo } from "react";
 import { Cell, Label, Pie, PieChart } from "recharts";
@@ -48,11 +49,18 @@ const formatSize = (bytes: number): string => {
 	return `${bytes} B`;
 };
 
-export const DockerDiskUsageChart = () => {
+interface Props {
+	serverId?: string;
+}
+
+export const DockerDiskUsageChart = ({ serverId }: Props) => {
+	const remoteServerId =
+		serverId && serverId !== LOCAL_SERVER_ID ? serverId : undefined;
 	const { data, isLoading, refetch, isRefetching } =
-		api.settings.getDockerDiskUsage.useQuery(undefined, {
-			refetchOnWindowFocus: false,
-		});
+		api.settings.getDockerDiskUsage.useQuery(
+			{ serverId: remoteServerId },
+			{ refetchOnWindowFocus: false },
+		);
 
 	const { chartData, totalBytes } = useMemo(() => {
 		const items =

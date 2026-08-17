@@ -263,12 +263,20 @@ export const settingsRouter = createTRPCRouter({
 		});
 		return true;
 	}),
-	getDockerDiskUsage: adminProcedure.query(async () => {
-		if (IS_CLOUD) {
-			return [];
-		}
-		return getDockerDiskUsage();
-	}),
+	getDockerDiskUsage: adminProcedure
+		.input(z.object({ serverId: z.string().optional() }).optional())
+		.query(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				return [];
+			}
+			if (input?.serverId) {
+				const server = await findServerById(input.serverId);
+				if (server.organizationId !== ctx.session?.activeOrganizationId) {
+					throw new TRPCError({ code: "UNAUTHORIZED" });
+				}
+			}
+			return getDockerDiskUsage(input?.serverId);
+		}),
 	saveSSHPrivateKey: adminProcedure
 		.input(apiSaveSSHKey)
 		.mutation(async ({ input, ctx }) => {
