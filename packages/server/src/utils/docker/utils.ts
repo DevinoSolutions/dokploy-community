@@ -1065,7 +1065,8 @@ export const waitForSwarmServiceStable = async (
 	}: { serverId?: string | null; windowMs?: number; pollMs?: number } = {},
 ): Promise<SwarmStabilityResult> => {
 	const remoteDocker = await getRemoteDocker(serverId);
-	const deadline = Date.now() + windowMs;
+	const pollStartMs = Date.now();
+	const deadline = pollStartMs + windowMs;
 	let everRunning = false;
 	let lastReason = "Service did not reach running state";
 
@@ -1075,16 +1076,20 @@ export const waitForSwarmServiceStable = async (
 				filters: JSON.stringify({ service: [appName] }),
 			});
 
-			const sorted = [...tasks].sort((a, b) => {
-				const at = new Date(a.UpdatedAt ?? 0).getTime();
-				const bt = new Date(b.UpdatedAt ?? 0).getTime();
-				return bt - at;
-			});
-			const latest = sorted[0];
-			const state = latest?.Status?.State;
-			const message = latest?.Status?.Err || latest?.Status?.Message || "";
-
-			if (state === "failed" || state === "rejected") {
+			// Look for failed/rejected tasks anywhere in the current task set —
+			// after a rollback the failed task's DesiredState is moved to
+			// "shutdown", so filtering by desired-state would hide it. Restrict
+			// to failures updated since we started polling to avoid triggering
+			// on stale history from previous deploys that Swarm still retains.
+			const recentlyFailed = tasks.find(
+				(t) =>
+					(t.Status?.State === "failed" || t.Status?.State === "rejected") &&
+					new Date(t.UpdatedAt ?? 0).getTime() >= pollStartMs,
+			);
+			if (recentlyFailed) {
+				const state = recentlyFailed.Status?.State;
+				const message =
+					recentlyFailed.Status?.Err || recentlyFailed.Status?.Message || "";
 				return {
 					stable: false,
 					reason: message
@@ -1093,10 +1098,23 @@ export const waitForSwarmServiceStable = async (
 				};
 			}
 
-			const runningCount = sorted.filter(
+			// Stability counts must exclude tasks Swarm has already marked for
+			// shutdown (typically the outgoing task during a rolling update),
+			// otherwise the running→starting transition of the handover flags a
+			// perfectly healthy deploy as unstable.
+			const active = tasks.filter((t) => t.DesiredState === "running");
+			const sorted = [...active].sort((a, b) => {
+				const at = new Date(a.UpdatedAt ?? 0).getTime();
+				const bt = new Date(b.UpdatedAt ?? 0).getTime();
+				return bt - at;
+			});
+			const latest = sorted[0];
+			const state = latest?.Status?.State;
+			const message = latest?.Status?.Err || latest?.Status?.Message || "";
+			const runningCount = active.filter(
 				(t) => t.Status?.State === "running",
 			).length;
-			const startingCount = sorted.filter((t) =>
+			const startingCount = active.filter((t) =>
 				[
 					"new",
 					"pending",
