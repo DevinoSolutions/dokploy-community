@@ -1065,7 +1065,25 @@ export const waitForSwarmServiceStable = async (
 	}: { serverId?: string | null; windowMs?: number; pollMs?: number } = {},
 ): Promise<SwarmStabilityResult> => {
 	const remoteDocker = await getRemoteDocker(serverId);
+
+	// Swarm timestamps (`Task.CreatedAt`, `Task.UpdatedAt`) come from the
+	// target daemon's clock, which can drift from ours on remote servers.
+	// Anchor the time gates to the daemon's own clock so `CreatedAt` /
+	// `UpdatedAt` comparisons stay meaningful under skew. `deadline` stays
+	// on our clock — it's just a local timer for the poll loop.
+	let clockOffsetMs = 0;
+	try {
+		const info = await remoteDocker.info();
+		const daemonNowMs = new Date(info.SystemTime).getTime();
+		if (Number.isFinite(daemonNowMs)) {
+			clockOffsetMs = daemonNowMs - Date.now();
+		}
+	} catch {
+		// Fall back to our own clock — no worse than the pre-anchor behavior.
+	}
+
 	const pollStartMs = Date.now();
+	const daemonPollStartMs = pollStartMs + clockOffsetMs;
 	const deadline = pollStartMs + windowMs;
 	let everRunning = false;
 	let lastReason = "Service did not reach running state";
@@ -1084,7 +1102,7 @@ export const waitForSwarmServiceStable = async (
 			const recentlyFailed = tasks.find(
 				(t) =>
 					(t.Status?.State === "failed" || t.Status?.State === "rejected") &&
-					new Date(t.UpdatedAt ?? 0).getTime() >= pollStartMs,
+					new Date(t.UpdatedAt ?? 0).getTime() >= daemonPollStartMs,
 			);
 			if (recentlyFailed) {
 				const state = recentlyFailed.Status?.State;
@@ -1098,11 +1116,24 @@ export const waitForSwarmServiceStable = async (
 				};
 			}
 
-			// Stability counts must exclude tasks Swarm has already marked for
-			// shutdown (typically the outgoing task during a rolling update),
-			// otherwise the running→starting transition of the handover flags a
-			// perfectly healthy deploy as unstable.
-			const active = tasks.filter((t) => t.DesiredState === "running");
+			// Stability counts must exclude:
+			//   1. tasks Swarm has already marked for shutdown (the outgoing
+			//      task once the rolling update has flipped it), and
+			//   2. tasks created before this poll started — Swarm briefly
+			//      keeps the outgoing task at DesiredState="running" while the
+			//      new task boots, so filtering on DesiredState alone still
+			//      lets the outgoing task set `everRunning=true`, and the
+			//      subsequent handover (outgoing → shutdown, incoming still
+			//      starting) then trips the "restarted after running" branch.
+			// Small leeway so a task created in the sub-second between the
+			// service update call and our first Date.now() still counts.
+			const CREATED_AT_LEEWAY_MS = 5_000;
+			const active = tasks.filter(
+				(t) =>
+					t.DesiredState === "running" &&
+					new Date(t.CreatedAt ?? 0).getTime() >=
+						daemonPollStartMs - CREATED_AT_LEEWAY_MS,
+			);
 			const sorted = [...active].sort((a, b) => {
 				const at = new Date(a.UpdatedAt ?? 0).getTime();
 				const bt = new Date(b.UpdatedAt ?? 0).getTime();
@@ -1136,9 +1167,11 @@ export const waitForSwarmServiceStable = async (
 				};
 			}
 
-			lastReason = message
-				? `Latest task state: ${state ?? "unknown"} (${message})`
-				: `Latest task state: ${state ?? "unknown"}`;
+			lastReason = active.length === 0
+				? "No tasks from this deployment found"
+				: message
+					? `Latest task state: ${state ?? "unknown"} (${message})`
+					: `Latest task state: ${state ?? "unknown"}`;
 		} catch (error) {
 			lastReason =
 				error instanceof Error ? error.message : "Failed to inspect service";
