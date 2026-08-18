@@ -19,10 +19,14 @@ DO $$ BEGIN
 EXCEPTION
  WHEN duplicate_object THEN null;
 END $$;--> statement-breakpoint
-ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'host';--> statement-breakpoint
-ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'macvlan';--> statement-breakpoint
-ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'none';--> statement-breakpoint
-ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'ipvlan';--> statement-breakpoint
+-- Upstream ships networkDriver as ('bridge','overlay'); the fork's own
+-- 0175 created it as ('bridge','host','overlay','macvlan','none','ipvlan').
+-- The AFTER clauses reproduce the fork's exact label order (enumsortorder is
+-- what ORDER BY on the column uses) instead of appending to the tail.
+ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'host' AFTER 'bridge';--> statement-breakpoint
+ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'macvlan' AFTER 'overlay';--> statement-breakpoint
+ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'none' AFTER 'macvlan';--> statement-breakpoint
+ALTER TYPE "public"."networkDriver" ADD VALUE IF NOT EXISTS 'ipvlan' AFTER 'none';--> statement-breakpoint
 ALTER TYPE "public"."RegistryType" ADD VALUE IF NOT EXISTS 'awsEcr';--> statement-breakpoint
 DO $$ BEGIN
  CREATE TYPE "public"."backupPolicyScopeType" AS ENUM('organization', 'projects', 'environments');
