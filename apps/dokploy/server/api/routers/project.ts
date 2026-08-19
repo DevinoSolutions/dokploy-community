@@ -41,6 +41,7 @@ import {
 	checkProjectAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
+import { serviceColumns } from "@dokploy/server/services/project";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
@@ -118,9 +119,91 @@ export const projectRouter = createTRPCRouter({
 						ctx.session.activeOrganizationId,
 					);
 
-				const project = await findProjectById(input.projectId);
+				// Fork (#183): service- or environment-level access opens the project
+				// too, so the gate cannot be a pre-check on `accessedProjects` alone
+				// (upstream's shape) — load the access-filtered tree first, then
+				// decide. Column projections come from upstream #5103: selecting a
+				// service table in full alongside nested relations blows Postgres'
+				// 100-argument `json_build_array` limit.
+				const project = await db.query.projects.findFirst({
+					where: and(
+						eq(projects.projectId, input.projectId),
+						eq(projects.organizationId, ctx.session.activeOrganizationId),
+					),
+					with: {
+						environments: {
+							with: {
+								applications: {
+									columns: {
+										...serviceColumns,
+										applicationId: true,
+										icon: true,
+									},
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(
+										applications.applicationId,
+										accessedServices,
+									),
+								},
+								compose: {
+									columns: {
+										...serviceColumns,
+										composeId: true,
+										composeStatus: true,
+									},
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(
+										compose.composeId,
+										accessedServices,
+									),
+								},
+								libsql: {
+									columns: { ...serviceColumns, libsqlId: true },
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(libsql.libsqlId, accessedServices),
+								},
+								mariadb: {
+									columns: { ...serviceColumns, mariadbId: true },
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(
+										mariadb.mariadbId,
+										accessedServices,
+									),
+								},
+								mongo: {
+									columns: { ...serviceColumns, mongoId: true },
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(mongo.mongoId, accessedServices),
+								},
+								mysql: {
+									columns: { ...serviceColumns, mysqlId: true },
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(mysql.mysqlId, accessedServices),
+								},
+								postgres: {
+									columns: { ...serviceColumns, postgresId: true },
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(
+										postgres.postgresId,
+										accessedServices,
+									),
+								},
+								redis: {
+									columns: { ...serviceColumns, redisId: true },
+									with: { server: { columns: { name: true } } },
+									where: buildServiceFilter(redis.redisId, accessedServices),
+								},
+							},
+						},
+						projectTags: {
+							with: {
+								tag: true,
+							},
+						},
+					},
+				});
 
-				if (project.organizationId !== ctx.session.activeOrganizationId) {
+				if (!project) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You don't have access to this project",
