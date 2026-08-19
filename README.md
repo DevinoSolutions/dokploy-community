@@ -2,9 +2,9 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.0** | Fork version **v0.30.0-community.2**
+Based on **Dokploy v0.30.2** | Fork version **v0.30.2-community.1**
 
-Everything in upstream Dokploy **v0.30.0**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
+Everything in upstream Dokploy **v0.30.2**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
 ## Switching from official Dokploy
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.0-community.2 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.2-community.1 \
   --with-registry-auth \
   dokploy
 ```
@@ -20,7 +20,7 @@ docker service update \
 Going back to official is just as easy (our extra tables/columns are simply ignored):
 
 ```bash
-docker service update --image dokploy/dokploy:v0.30.0 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.30.2 --with-registry-auth dokploy
 ```
 
 The image is public — no registry login required.
@@ -106,6 +106,13 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.2-community.1
+
+**Upstream v0.30.2 sync + a self-healing migration for anyone switching from official Dokploy.**
+
+- **Switching from official Dokploy now works on any existing database** — the migration runner used to silently skip this fork's older migrations when upgrading a database that had already run newer official migrations, which broke fork features (backup destinations, Cloudflare integration, project icons, …) with `column does not exist` errors. A new fully idempotent catch-up migration recreates every fork table and column regardless of upgrade path ([#189](https://github.com/DevinoSolutions/dokploy-community/pull/189)) — found and fixed within hours thanks to the fork's opt-out error reporting catching a real install's crash.
+- **All fixes from upstream [v0.30.1](https://github.com/Dokploy/dokploy/releases/tag/v0.30.1) and [v0.30.2](https://github.com/Dokploy/dokploy/releases/tag/v0.30.2)** ([#190](https://github.com/DevinoSolutions/dokploy-community/pull/190)): stack deploys keep env-var quotes literal, preview redeploys are no longer blocked by the preview limit, project pages no longer over-fetch for members with limited permissions, terminal resize desync fixed, tags apply on project create, switch thumb alignment
 
 ### New in v0.30.0-community.2
 
@@ -283,7 +290,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.0-community.2
+export DOKPLOY_VERSION=v0.30.2-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -296,7 +303,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.0-community.2     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.2-community.1     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -343,6 +350,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.29.14 | 3rd release | `v0.29.14-community.3` |
 | v0.30.0 | 1st release | `v0.30.0-community.1` |
 | v0.30.0 | 2nd release | `v0.30.0-community.2` |
+| v0.30.2 | 1st release | `v0.30.2-community.1` |
 
 ## Contributing
 
