@@ -515,9 +515,13 @@ export default async function handler(
 				let createdPreviewDeployment = false;
 
 				if (!previewDeploymentResult && shouldCreateDeployment) {
-					// Only enforce the limit for new previews, not updates to existing ones
+					// The limit only applies to new previews, existing ones must
+					// still be redeployed when the pull request is updated.
 					const previewLimit = app?.previewLimit ?? 3;
-					if (app?.previewDeployments?.length >= previewLimit) {
+					if ((app?.previewDeployments?.length ?? 0) >= previewLimit) {
+						console.warn(
+							`⚠️ Preview deployment limit (${previewLimit}) reached for ${app.name}, skipping preview for pull request #${prNumber}`,
+						);
 						continue;
 					}
 					const previewDeployment = await createPreviewDeployment({

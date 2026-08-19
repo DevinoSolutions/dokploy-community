@@ -112,6 +112,22 @@ the fork's `permissions.member.read` page gate — upstream intends members to
 see their own sessions. The fork's `apiKeyPrefixSchema` hardening in
 `routers/user.ts` is separate and must survive.
 
+### Adapted at v0.30.2: `project.one` column projections vs. the member ACL
+
+Upstream #5103 rewrote `projectRouter.one`'s member branch to (a) pre-check
+`accessedProjects` and bail early, and (b) project every nested service down to
+`serviceColumns` (hoisted out of `findProjectById` and now exported from
+`packages/server/src/services/project.ts`) so the relational query stops blowing
+Postgres' 100-argument `json_build_array` limit. The fork's member ACL (#183)
+cannot keep upstream's early bail: service- or environment-level access must
+also open the project. Resolution kept on every sync: take upstream's projected
+`db.query.projects.findFirst(...)` verbatim, drop the `accessedProjects`
+pre-check, and re-apply the fork's
+`hasProjectAccess || hasEnvironmentAccess || hasServiceAccess` gate *after* the
+query (a missing row now means UNAUTHORIZED rather than upstream's NOT_FOUND).
+`filterEnvironmentServices` on the way out is redundant with the query's
+`buildServiceFilter` where-clauses but is kept as defence in depth.
+
 ### Historical (superseded): fork Docker network management file map
 
 Net-new fork files (kept as-is unless upstream restructures their neighbors):
