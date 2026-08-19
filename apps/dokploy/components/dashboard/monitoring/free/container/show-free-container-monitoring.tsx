@@ -356,7 +356,7 @@ export const ContainerFreeMonitoring = ({
 							</CardTitle>
 						</CardHeader>
 						<CardContent>
-							<DockerDiskUsageChart />
+							<DockerDiskUsageChart serverId={serverId} />
 						</CardContent>
 					</Card>
 				)}
