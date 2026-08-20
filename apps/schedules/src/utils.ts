@@ -14,6 +14,7 @@ import {
 	runMySqlBackup,
 	runPostgresBackup,
 	runVolumeBackup,
+	skipScheduledBackupIfStopped,
 } from "@dokploy/server";
 import {
 	and,
@@ -51,12 +52,22 @@ export const runJobs = async (job: QueueJob) => {
 						logger.info("Server is inactive");
 						return;
 					}
+					// Skip quietly when the database itself is stopped (see
+					// shouldSkipStoppedBackup): a stopped target is not a failure.
+					if (await skipScheduledBackupIfStopped(backup)) {
+						return;
+					}
 					await runPostgresBackup(postgres, backup);
 					await keepLatestNBackups(backup, server.serverId);
 				} else if (databaseType === "mysql" && mysql) {
 					const server = await findServerById(mysql.serverId as string);
 					if (server.serverStatus === "inactive") {
 						logger.info("Server is inactive");
+						return;
+					}
+					// Skip quietly when the database itself is stopped (see
+					// shouldSkipStoppedBackup): a stopped target is not a failure.
+					if (await skipScheduledBackupIfStopped(backup)) {
 						return;
 					}
 					await runMySqlBackup(mysql, backup);
@@ -67,12 +78,22 @@ export const runJobs = async (job: QueueJob) => {
 						logger.info("Server is inactive");
 						return;
 					}
+					// Skip quietly when the database itself is stopped (see
+					// shouldSkipStoppedBackup): a stopped target is not a failure.
+					if (await skipScheduledBackupIfStopped(backup)) {
+						return;
+					}
 					await runMongoBackup(mongo, backup);
 					await keepLatestNBackups(backup, server.serverId);
 				} else if (databaseType === "mariadb" && mariadb) {
 					const server = await findServerById(mariadb.serverId as string);
 					if (server.serverStatus === "inactive") {
 						logger.info("Server is inactive");
+						return;
+					}
+					// Skip quietly when the database itself is stopped (see
+					// shouldSkipStoppedBackup): a stopped target is not a failure.
+					if (await skipScheduledBackupIfStopped(backup)) {
 						return;
 					}
 					await runMariadbBackup(mariadb, backup);
@@ -83,6 +104,11 @@ export const runJobs = async (job: QueueJob) => {
 						logger.info("Server is inactive");
 						return;
 					}
+					// Skip quietly when the database itself is stopped (see
+					// shouldSkipStoppedBackup): a stopped target is not a failure.
+					if (await skipScheduledBackupIfStopped(backup)) {
+						return;
+					}
 					await runLibsqlBackup(libsql, backup);
 					await keepLatestNBackups(backup, server.serverId);
 				}
@@ -90,6 +116,11 @@ export const runJobs = async (job: QueueJob) => {
 				const server = await findServerById(compose.serverId as string);
 				if (server.serverStatus === "inactive") {
 					logger.info("Server is inactive");
+					return;
+				}
+				// Skip quietly when the database itself is stopped (see
+				// shouldSkipStoppedBackup): a stopped target is not a failure.
+				if (await skipScheduledBackupIfStopped(backup)) {
 					return;
 				}
 				await runComposeBackup(compose, backup);

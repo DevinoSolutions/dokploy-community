@@ -16,6 +16,7 @@ import { quote } from "shell-quote";
 const execFileP = promisify(execFile);
 
 import { keepLatestNBackups } from ".";
+import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { runComposeBackup } from "./compose";
 import { withBackupSlot } from "./concurrency";
 import { runLibsqlBackup } from "./libsql";
@@ -50,6 +51,11 @@ export const scheduleBackup = (backup: BackupSchedule) => {
 				libsql?.serverId);
 	scheduleJob(backupId, schedule, async () => {
 		await withBackupSlot(serverKey, backupId, async () => {
+			// A stopped database is not a backup failure: skip quietly instead of
+			// erroring on every tick (see shouldSkipStoppedBackup).
+			if (await skipScheduledBackupIfStopped(backup)) {
+				return;
+			}
 			if (backup.backupType === "database") {
 				if (databaseType === "postgres" && postgres) {
 					await runPostgresBackup(postgres, backup);
@@ -253,19 +259,35 @@ export const getPostgresBackupCommand = (
 	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -i $CONTAINER_ID bash -c 'set -o pipefail; pg_dump -Fc --no-acl --no-owner -h localhost -U "$DB_USER" --no-password "$DB_NAME" | gzip'`;
 };
 
+// MariaDB 11+ images renamed the client binaries (`mysqldump` → `mariadb-dump`)
+// and ship `mysqldump` only as a deprecated alias — or not at all. Older MariaDB
+// and every MySQL image ship `mysqldump` and have no `mariadb-dump`. On top of
+// that, users routinely register a MariaDB container as a "mysql" service (a
+// real production case: Uptime Kuma's MariaDB), so either binary can be the only
+// one present regardless of the service type. Pick whichever actually exists
+// inside the container at run time instead of hardcoding one; both accept the
+// exact same flags used below (mariadb-dump keeps --no-tablespaces and
+// --default-character-set for drop-in mysqldump compatibility).
+export const getDumpBinarySelection = (
+	preferred: "mariadb-dump" | "mysqldump",
+) => {
+	const fallback = preferred === "mariadb-dump" ? "mysqldump" : "mariadb-dump";
+	return `if command -v ${preferred} >/dev/null 2>&1; then DUMP_BIN=${preferred}; else DUMP_BIN=${fallback}; fi;`;
+};
+
 export const getMariadbBackupCommand = (
 	database: string,
 	databaseUser: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID bash -c 'set -o pipefail; mariadb-dump --user="$DB_USER" --password="$DB_PASS" --single-transaction --quick --databases "$DB_NAME" | gzip'`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID bash -c 'set -o pipefail; ${getDumpBinarySelection("mariadb-dump")} "$DUMP_BIN" --user="$DB_USER" --password="$DB_PASS" --single-transaction --quick --databases "$DB_NAME" | gzip'`;
 };
 
 export const getMysqlBackupCommand = (
 	database: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -e DB_NAME=${quote([database])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID bash -c 'set -o pipefail; mysqldump --default-character-set=utf8mb4 -u root --password="$DB_PASS" --single-transaction --no-tablespaces --quick "$DB_NAME" | gzip'`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID bash -c 'set -o pipefail; ${getDumpBinarySelection("mysqldump")} "$DUMP_BIN" --default-character-set=utf8mb4 -u root --password="$DB_PASS" --single-transaction --no-tablespaces --quick "$DB_NAME" | gzip'`;
 };
 
 export const getMongoBackupCommand = (
@@ -325,6 +347,163 @@ const getContainerSearchCommand = (backup: BackupSchedule) => {
 			composeType,
 		);
 	}
+};
+
+export type BackupRunTrigger = "schedule" | "manual";
+export type BackupTargetState = "running" | "stopped" | "unknown";
+
+// Which server the backup's target service lives on (null = the Dokploy host).
+export const getBackupServerId = (backup: BackupSchedule): string | null => {
+	const { backupType, postgres, mysql, mariadb, mongo, libsql, compose } =
+		backup;
+	if (backupType === "compose") {
+		return compose?.serverId ?? null;
+	}
+	return (
+		postgres?.serverId ??
+		mysql?.serverId ??
+		mariadb?.serverId ??
+		mongo?.serverId ??
+		libsql?.serverId ??
+		null
+	);
+};
+
+// The same `docker ps --filter status=running` lookup the dump pipeline itself
+// performs, so the pre-flight answer always matches what the dump would find.
+// Returns null when the target can't be resolved (web-server backups, missing
+// appName/serviceName) — the caller then treats the state as unknown and runs
+// the backup as before.
+const getBackupTargetSearchCommand = (backup: BackupSchedule): string | null => {
+	const {
+		backupType,
+		databaseType,
+		postgres,
+		mysql,
+		mariadb,
+		mongo,
+		libsql,
+		compose,
+		serviceName,
+	} = backup;
+
+	if (databaseType === "web-server") {
+		return null;
+	}
+
+	if (backupType === "database") {
+		const appName =
+			postgres?.appName ||
+			mysql?.appName ||
+			mariadb?.appName ||
+			mongo?.appName ||
+			libsql?.appName;
+		return appName ? getServiceContainerCommand(appName) : null;
+	}
+
+	if (backupType === "compose") {
+		const { appName, composeType } = compose || {};
+		if (!appName || !serviceName) {
+			return null;
+		}
+		return getComposeContainerCommand(appName, serviceName, composeType);
+	}
+
+	return null;
+};
+
+/**
+ * Skip policy for a backup whose target database is not running.
+ *
+ * A "backup everything" policy materializes a schedule for every database,
+ * including the ones that are intentionally stopped. Those runs used to fail
+ * with "Container not found" on every tick, producing an endless stream of
+ * failure notifications and Sentry ExecErrors. Scheduled runs now skip such a
+ * target instead; a user-triggered ("manual") run must still surface a real
+ * error, because there the user explicitly asked for a backup now.
+ *
+ * Kept pure so the policy is unit-testable without docker.
+ */
+export const shouldSkipStoppedBackup = ({
+	trigger,
+	backupType,
+	databaseType,
+	targetState,
+}: {
+	trigger: BackupRunTrigger;
+	backupType: BackupSchedule["backupType"];
+	databaseType: BackupSchedule["databaseType"];
+	targetState: BackupTargetState;
+}): boolean => {
+	// Manual runs always attempt and report the real failure.
+	if (trigger !== "schedule") {
+		return false;
+	}
+	// Web-server backups don't dump a database container.
+	if (databaseType === "web-server") {
+		return false;
+	}
+	if (backupType !== "database" && backupType !== "compose") {
+		return false;
+	}
+	// "unknown" (docker/SSH unreachable) must never skip: that would hide a real
+	// outage. Only a confirmed "no running container" skips.
+	return targetState === "stopped";
+};
+
+export const getBackupTargetState = async (
+	backup: BackupSchedule,
+): Promise<BackupTargetState> => {
+	const searchCommand = getBackupTargetSearchCommand(backup);
+	if (!searchCommand) {
+		return "unknown";
+	}
+
+	try {
+		const serverId = getBackupServerId(backup);
+		const { stdout } = serverId
+			? await execAsyncRemote(serverId, searchCommand)
+			: await execAsync(searchCommand);
+		return stdout.trim() ? "running" : "stopped";
+	} catch (error) {
+		// Can't tell (docker down, SSH failure) — fall through to the normal run
+		// so the real error is still reported.
+		logger.warn(
+			{ backupId: backup.backupId, error },
+			"Could not determine whether the backup target is running",
+		);
+		return "unknown";
+	}
+};
+
+/**
+ * Pre-flight check for SCHEDULED backup runs. Returns true when the run was
+ * skipped (target database is stopped), in which case the caller must return
+ * without dumping, notifying or throwing.
+ */
+export const skipScheduledBackupIfStopped = async (
+	backup: BackupSchedule,
+): Promise<boolean> => {
+	const targetState = await getBackupTargetState(backup);
+	const skip = shouldSkipStoppedBackup({
+		trigger: "schedule",
+		backupType: backup.backupType,
+		databaseType: backup.databaseType,
+		targetState,
+	});
+
+	if (skip) {
+		logger.info(
+			{
+				backupId: backup.backupId,
+				backupType: backup.backupType,
+				databaseType: backup.databaseType,
+			},
+			"[Backup] Skipping scheduled backup: target database is not running",
+		);
+	}
+
+	return skip;
 };
 
 export const generateBackupCommand = (backup: BackupSchedule) => {

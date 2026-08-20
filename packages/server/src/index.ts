@@ -87,6 +87,7 @@ export * from "./utils/aws/ecr";
 export * from "./utils/backups/compose";
 export * from "./utils/backups/index";
 export * from "./utils/backups/libsql";
+export * from "./utils/backups/log-tail";
 export * from "./utils/backups/mariadb";
 export * from "./utils/backups/mongo";
 export * from "./utils/backups/mysql";
