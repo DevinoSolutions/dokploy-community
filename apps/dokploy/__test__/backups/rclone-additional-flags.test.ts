@@ -71,10 +71,16 @@ describe("quoteAdditionalFlags", () => {
 		]);
 	});
 
-	it("is a no-op for flags that need no escaping", () => {
-		expect(
-			quoteAdditionalFlags(["--s3-no-check-bucket", "--checksum"]),
-		).toEqual(["--s3-no-check-bucket", "--checksum"]);
+	it("leaves schema-valid flags byte-identical", () => {
+		const flags = [
+			"--s3-no-check-bucket",
+			"--checksum",
+			"--transfers=4",
+			"--drive-root-folder-id=abc123",
+			"--bwlimit=10M",
+		];
+
+		expect(quoteAdditionalFlags(flags)).toEqual(flags);
 	});
 
 	// Negative control: without quoting, the very same payloads split the

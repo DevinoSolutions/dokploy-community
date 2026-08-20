@@ -1,4 +1,7 @@
-import { GENERIC_RCLONE_PROVIDER } from "@dokploy/server/db/validations/destination";
+import {
+	ADDITIONAL_FLAG_REGEX,
+	GENERIC_RCLONE_PROVIDER,
+} from "@dokploy/server/db/validations/destination";
 import { logger } from "@dokploy/server/lib/logger";
 
 export { GENERIC_RCLONE_PROVIDER };
@@ -111,17 +114,21 @@ type RcloneDestination = Pick<
  * are not covered, and every rclone call site (test connection, database
  * backups, volume backups, restores) shares these builders.
  *
- * Quoting here is the single choke point: shell-quote only escapes what the
- * shell would otherwise interpret, so ordinary flags still reach rclone as the
- * same argv words (`--s3-no-check-bucket` unchanged, `--transfers=4` escaped to
- * `--transfers\=4`, which the shell unescapes back), while an injection payload
- * (`--foo; touch /tmp/pwned`, `$(id)`, backticks) collapses into one inert
- * literal argument.
+ * This is the single choke point. A flag that satisfies the same
+ * ADDITIONAL_FLAG_REGEX allowlist is already free of shell metacharacters and
+ * passes through byte-identical (`--s3-no-check-bucket`, `--transfers=4`);
+ * anything else is shell-quoted, which collapses an injection payload
+ * (`--foo; touch /tmp/pwned`, `$(id)`, backticks) into one inert literal
+ * argument instead of extra shell words.
  */
 export const quoteAdditionalFlags = (
 	additionalFlags: string[] | null | undefined,
 ) =>
-	additionalFlags?.length ? additionalFlags.map((flag) => quote([flag])) : [];
+	additionalFlags?.length
+		? additionalFlags.map((flag) =>
+				ADDITIONAL_FLAG_REGEX.test(flag) ? flag : quote([flag]),
+			)
+		: [];
 
 export const isGenericRcloneDestination = (destination: RcloneDestination) =>
 	destination.provider === GENERIC_RCLONE_PROVIDER;
