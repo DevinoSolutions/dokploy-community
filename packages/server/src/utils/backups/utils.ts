@@ -103,6 +103,26 @@ type RcloneDestination = Pick<
 	| "additionalFlags"
 >;
 
+/**
+ * `additionalFlags` are user-supplied strings that get interpolated into the
+ * rclone shell command line. The destination API schema validates them against
+ * ADDITIONAL_FLAG_REGEX, but that only covers values written through the API
+ * after the validation landed — rows created before it, or by any other writer,
+ * are not covered, and every rclone call site (test connection, database
+ * backups, volume backups, restores) shares these builders.
+ *
+ * Quoting here is the single choke point: shell-quote only escapes what the
+ * shell would otherwise interpret, so ordinary flags still reach rclone as the
+ * same argv words (`--s3-no-check-bucket` unchanged, `--transfers=4` escaped to
+ * `--transfers\=4`, which the shell unescapes back), while an injection payload
+ * (`--foo; touch /tmp/pwned`, `$(id)`, backticks) collapses into one inert
+ * literal argument.
+ */
+export const quoteAdditionalFlags = (
+	additionalFlags: string[] | null | undefined,
+) =>
+	additionalFlags?.length ? additionalFlags.map((flag) => quote([flag])) : [];
+
 export const isGenericRcloneDestination = (destination: RcloneDestination) =>
 	destination.provider === GENERIC_RCLONE_PROVIDER;
 
@@ -116,9 +136,7 @@ export const getRcloneCredentials = (destination: RcloneDestination) => {
 		destination;
 
 	if (isGenericRcloneDestination(destination)) {
-		return destination.additionalFlags?.length
-			? [...destination.additionalFlags]
-			: [];
+		return quoteAdditionalFlags(destination.additionalFlags);
 	}
 
 	const rcloneFlags = [
@@ -134,9 +152,7 @@ export const getRcloneCredentials = (destination: RcloneDestination) => {
 		rcloneFlags.unshift(`--s3-provider=${quote([provider])}`);
 	}
 
-	if (destination.additionalFlags?.length) {
-		rcloneFlags.push(...destination.additionalFlags);
-	}
+	rcloneFlags.push(...quoteAdditionalFlags(destination.additionalFlags));
 
 	return rcloneFlags;
 };
@@ -491,9 +507,10 @@ export const getRclonePathAndFlags = async (
 	subPath: string,
 ) => {
 	// Generic rclone remote: the user supplies a full remote spec (in `bucket`)
-	// plus their own rclone flags (additionalFlags, already validated against
-	// ADDITIONAL_FLAG_REGEX at the schema layer). We don't build an S3/SFTP
-	// connection string for it, but the remote spec and subPath are still
+	// plus their own rclone flags (additionalFlags, validated against
+	// ADDITIONAL_FLAG_REGEX at the schema layer and shell-quoted here via
+	// quoteAdditionalFlags). We don't build an S3/SFTP connection string for
+	// it, but the remote spec and subPath are still
 	// interpolated into a shell command, so validate them the same way the
 	// SFTP/FTP branch validates its path segments to prevent shell injection.
 	if (isGenericRcloneDestination(destination)) {
@@ -509,9 +526,7 @@ export const getRclonePathAndFlags = async (
 				"Invalid rclone backup path: contains forbidden characters",
 			);
 		}
-		const flags = destination.additionalFlags?.length
-			? [...destination.additionalFlags]
-			: [];
+		const flags = quoteAdditionalFlags(destination.additionalFlags);
 		if (isDestinationEncrypted(destination)) {
 			return {
 				flags,

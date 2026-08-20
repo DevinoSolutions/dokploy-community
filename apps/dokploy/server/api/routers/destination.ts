@@ -3,10 +3,11 @@ import {
 	execAsync,
 	execAsyncRemote,
 	findDestinationById,
+	getRclonePathAndFlags,
 	IS_CLOUD,
+	quoteAdditionalFlags,
 	removeDestinationById,
 	updateDestinationById,
-	getRclonePathAndFlags,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { TRPCError } from "@trpc/server";
@@ -14,6 +15,7 @@ import { desc, eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateDestination,
 	apiFindOneDestination,
@@ -48,7 +50,7 @@ export const destinationRouter = createTRPCRouter({
 		}),
 	testConnection: withPermission("destination", "create")
 		.input(apiCreateDestination)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			const {
 				secretAccessKey,
 				bucket,
@@ -58,6 +60,12 @@ export const destinationRouter = createTRPCRouter({
 				provider,
 				additionalFlags,
 			} = input;
+			// The rclone probe runs over SSH on `input.serverId`; guard it before
+			// the try/catch below, which rewrites every error to BAD_REQUEST.
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			try {
 				const { flags: rcloneFlags, path: rcloneDestination } =
 					await getRclonePathAndFlags(
@@ -79,9 +87,7 @@ export const destinationRouter = createTRPCRouter({
 					"--contimeout 5s",
 				);
 
-				if (additionalFlags?.length) {
-					rcloneFlags.push(...additionalFlags);
-				}
+				rcloneFlags.push(...quoteAdditionalFlags(additionalFlags));
 				const rcloneCommand = `rclone ls ${rcloneFlags.join(" ")} ${quote([rcloneDestination])}`;
 
 				if (IS_CLOUD && !input.serverId) {

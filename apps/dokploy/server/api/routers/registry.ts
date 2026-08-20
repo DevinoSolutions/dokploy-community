@@ -17,6 +17,7 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateRegistry,
 	apiFindOneRegistry,
@@ -108,7 +109,15 @@ export const registryRouter = createTRPCRouter({
 		}),
 	testRegistry: withPermission("registry", "read")
 		.input(apiTestRegistry)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
+			// `docker login` runs over SSH on `input.serverId`; the guard stays
+			// outside the try/catch below so it is not rewritten to BAD_REQUEST.
+			await assertServerInOrganization(
+				input.serverId && input.serverId !== "none"
+					? input.serverId
+					: undefined,
+				ctx.session?.activeOrganizationId,
+			);
 			try {
 				if (IS_CLOUD && !input.serverId) {
 					throw new TRPCError({
@@ -170,25 +179,36 @@ export const registryRouter = createTRPCRouter({
 	testRegistryById: withPermission("registry", "read")
 		.input(apiTestRegistryById)
 		.mutation(async ({ input, ctx }) => {
-			try {
-				const registryData = await db.query.registry.findFirst({
-					where: eq(registry.registryId, input.registryId ?? ""),
+			// Both the registry row and the target server are caller-supplied and
+			// end up in a `docker login` over SSH, so authorize them before the
+			// try/catch below, which would otherwise rewrite UNAUTHORIZED into
+			// BAD_REQUEST.
+			const registryData = await db.query.registry.findFirst({
+				where: eq(registry.registryId, input.registryId ?? ""),
+			});
+
+			if (!registryData) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Registry not found",
 				});
+			}
 
-				if (!registryData) {
-					throw new TRPCError({
-						code: "NOT_FOUND",
-						message: "Registry not found",
-					});
-				}
+			if (registryData.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not allowed to test this registry",
+				});
+			}
 
-				if (registryData.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You are not allowed to test this registry",
-					});
-				}
+			await assertServerInOrganization(
+				input.serverId && input.serverId !== "none"
+					? input.serverId
+					: undefined,
+				ctx.session?.activeOrganizationId,
+			);
 
+			try {
 				if (IS_CLOUD && !input.serverId) {
 					throw new TRPCError({
 						code: "NOT_FOUND",
