@@ -57,6 +57,7 @@ import { scheduledJobs, scheduleJob } from "node-schedule";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiAssignDomain,
 	apiEnableDashboard,
@@ -83,29 +84,6 @@ import {
 	protectedProcedure,
 	publicProcedure,
 } from "../trpc";
-
-/**
- * Settings procedures take a caller-supplied `serverId` and then run docker /
- * SSH commands against that server. `adminProcedure` (and `protectedProcedure`)
- * only assert a role inside the caller's *active* organization, never that the
- * target server belongs to it, so without this check an owner/admin of one
- * organization could pass another organization's `serverId` and act on it.
- *
- * No-op when no `serverId` is supplied: those calls target the local Dokploy
- * host, which is already covered by the procedure's role gate.
- */
-const assertServerInOrganization = async (
-	serverId: string | undefined,
-	activeOrganizationId: string | null | undefined,
-) => {
-	if (!serverId) {
-		return;
-	}
-	const targetServer = await findServerById(serverId);
-	if (targetServer.organizationId !== activeOrganizationId) {
-		throw new TRPCError({ code: "UNAUTHORIZED" });
-	}
-};
 
 export const settingsRouter = createTRPCRouter({
 	getWebServerSettings: protectedProcedure.query(async () => {

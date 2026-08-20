@@ -22,6 +22,7 @@ import {
 	protectedProcedure,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreatePatch,
 	apiDeletePatch,
@@ -320,6 +321,13 @@ export const patchRouter = createTRPCRouter({
 	cleanPatchRepos: adminProcedure
 		.input(z.object({ serverId: z.string().optional() }))
 		.mutation(async ({ input, ctx }) => {
+			// Removes the patch repositories directory on `input.serverId` over
+			// SSH; `adminProcedure` only proves a role in the caller's active
+			// organization, not ownership of the target server.
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await cleanPatchRepos(input.serverId);
 			await audit(ctx, {
 				action: "delete",

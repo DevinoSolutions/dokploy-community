@@ -10,6 +10,7 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateCertificate,
 	apiFindCertificate,
@@ -27,6 +28,13 @@ export const certificateRouter = createTRPCRouter({
 					message: "Please set a server to create a certificate",
 				});
 			}
+			// Creating a certificate writes the cert/key and a traefik dynamic
+			// config onto `input.serverId` over SSH, so the target server must
+			// belong to the caller's organization.
+			await assertServerInOrganization(
+				input.serverId ?? undefined,
+				ctx.session?.activeOrganizationId,
+			);
 			const cert = await createCertificate(
 				input,
 				ctx.session.activeOrganizationId,
