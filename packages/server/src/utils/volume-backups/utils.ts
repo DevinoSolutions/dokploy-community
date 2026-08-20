@@ -12,6 +12,10 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import { scheduledJobs, scheduleJob } from "node-schedule";
 import { withBackupSlot } from "../backups/concurrency";
+import {
+	buildBackupErrorMessage,
+	readBackupLogTail,
+} from "../backups/log-tail";
 import { getRclonePathAndFlags, normalizeS3Path } from "../backups/utils";
 import { sendVolumeBackupNotifications } from "../notifications/volume-backup";
 import { backupVolume, getVolumeServiceAppName } from "./backup";
@@ -166,17 +170,35 @@ export const runVolumeBackup = async (volumeBackupId: string) => {
 			);
 		}
 	} catch (error) {
+		// The whole pipeline is redirected into the deployment log, so the thrown
+		// ExecError has no stderr of its own (tar failures used to surface as an
+		// error with an EMPTY message). Recover the tail of the log so the
+		// notification and the Sentry event say why it failed.
+		const logTail = await readBackupLogTail(deployment.logPath, serverId);
+		const errorMessage = buildBackupErrorMessage(error, logTail);
+		console.error(
+			`Volume backup "${volumeBackup.name}" failed: ${errorMessage}`,
+		);
+
 		const { VOLUME_BACKUPS_PATH } = paths(!!serverId);
 		const volumeBackupPath = path.join(
 			VOLUME_BACKUPS_PATH,
 			volumeBackup.appName,
 		);
-		// delete all the .tar files
+		// delete all the .tar files. Best-effort: a cleanup failure must not
+		// swallow the original error or leave the deployment stuck on "running".
 		const command = `rm -rf ${volumeBackupPath}/*.tar`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
+		try {
+			if (serverId) {
+				await execAsyncRemote(serverId, command);
+			} else {
+				await execAsync(command);
+			}
+		} catch (cleanupError) {
+			console.error(
+				"Failed to clean up local volume backup files",
+				cleanupError,
+			);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 
@@ -194,7 +216,7 @@ export const runVolumeBackup = async (volumeBackupId: string) => {
 				serviceType: mappedServiceType,
 				type: "error",
 				organizationId,
-				errorMessage: error instanceof Error ? error.message : String(error),
+				errorMessage,
 			});
 		} catch (notificationError) {
 			console.error(

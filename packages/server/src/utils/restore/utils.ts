@@ -16,19 +16,28 @@ export const getPostgresRestoreCommand = (
 	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -i $CONTAINER_ID sh -c 'cat > ${tmpFile} && pg_restore ${pgArgs} --clean --if-exists --section=pre-data ${tmpFile} && pg_restore ${pgArgs} --section=data ${tmpFile} && pg_restore ${pgArgs} --section=post-data ${tmpFile}; rm -f ${tmpFile}'`;
 };
 
+// Same binary-rename problem as the dump side (see getDumpBinarySelection in
+// backups/utils.ts): MariaDB 11+ images renamed `mysql` → `mariadb`, older
+// MariaDB and all MySQL images only ship `mysql`. Restoring must survive both,
+// otherwise a backup taken by the resilient dump path can't be restored.
+export const getClientBinarySelection = (preferred: "mariadb" | "mysql") => {
+	const fallback = preferred === "mariadb" ? "mysql" : "mariadb";
+	return `if command -v ${preferred} >/dev/null 2>&1; then CLIENT_BIN=${preferred}; else CLIENT_BIN=${fallback}; fi;`;
+};
+
 export const getMariadbRestoreCommand = (
 	database: string,
 	databaseUser: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID sh -c 'mariadb -u "$DB_USER" -p"$DB_PASS" "$DB_NAME"'`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_USER=${quote([databaseUser])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID sh -c '${getClientBinarySelection("mariadb")} "$CLIENT_BIN" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME"'`;
 };
 
 export const getMysqlRestoreCommand = (
 	database: string,
 	databasePassword: string,
 ) => {
-	return `docker exec -e DB_NAME=${quote([database])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID sh -c 'mysql -u root -p"$DB_PASS" "$DB_NAME"'`;
+	return `docker exec -e DB_NAME=${quote([database])} -e DB_PASS=${quote([databasePassword])} -i $CONTAINER_ID sh -c '${getClientBinarySelection("mysql")} "$CLIENT_BIN" -u root -p"$DB_PASS" "$DB_NAME"'`;
 };
 
 export const getMongoRestoreCommand = (

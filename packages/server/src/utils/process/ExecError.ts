@@ -1,5 +1,24 @@
 import { redactErrorSecrets, redactSecrets } from "./redactSecrets";
 
+/** Max characters of captured command output kept in an error message. */
+export const MAX_EXEC_OUTPUT_TAIL = 2000;
+
+/**
+ * Keep the LAST `limit` characters of a command's output — a failure is always
+ * reported at the end, and unbounded output must never be pasted into an error
+ * message (or a Sentry event).
+ */
+export const truncateOutputTail = (
+	output: string,
+	limit = MAX_EXEC_OUTPUT_TAIL,
+): string => {
+	const trimmed = output.trim();
+	if (trimmed.length <= limit) {
+		return trimmed;
+	}
+	return `...(truncated)...${trimmed.slice(-limit)}`;
+};
+
 export interface ExecErrorDetails {
 	command: string;
 	stdout?: string;

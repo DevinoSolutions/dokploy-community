@@ -2,10 +2,14 @@ import { exec, execFile } from "node:child_process";
 import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";
 import { Client } from "ssh2";
-import { ExecError } from "./ExecError";
+import { ExecError, truncateOutputTail } from "./ExecError";
 
 // Re-export ExecError for easier imports
-export { ExecError } from "./ExecError";
+export {
+	ExecError,
+	MAX_EXEC_OUTPUT_TAIL,
+	truncateOutputTail,
+} from "./ExecError";
 
 const execAsyncBase = util.promisify(exec);
 
@@ -179,9 +183,17 @@ export const execAsyncRemote = async (
 							if (code === 0) {
 								resolve({ stdout, stderr });
 							} else {
+								// Node's local exec embeds the command output in the error
+								// message; ssh2 does not, so a remote failure used to reach
+								// notifications/Sentry as a bare "exit code N". Append the
+								// tail of whatever the command printed (ExecError redacts
+								// secrets in the message).
+								const outputTail = truncateOutputTail(stderr || stdout);
 								reject(
 									new ExecError(
-										`Remote command failed with exit code ${code}`,
+										`Remote command failed with exit code ${code}${
+											outputTail ? `: ${outputTail}` : ""
+										}`,
 										{
 											command,
 											stdout,
