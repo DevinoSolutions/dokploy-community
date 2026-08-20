@@ -192,9 +192,12 @@ describe.skipIf(process.platform === "win32")(
 		});
 
 		it("negative control: the unquoted payload does execute", () => {
-			const argv = runShell([`--foo; echo ${PWNED}`]);
+			const output = runShell([`--foo; echo ${PWNED}`]);
 
-			expect(argv).toContain(PWNED);
+			// The payload ran as a second command, so `printf` only ever saw
+			// `ls --foo` and the injected `echo` produced the rest of the output.
+			expect(output).not.toContain(`--foo; echo ${PWNED}`);
+			expect(output.join("\n")).toContain(PWNED);
 		});
 	},
 );
