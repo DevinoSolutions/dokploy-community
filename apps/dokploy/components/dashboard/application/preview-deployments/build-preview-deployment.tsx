@@ -1,5 +1,6 @@
+import type { ChangeRequest } from "@dokploy/server";
 import { GitPullRequest, Loader2, RocketIcon, Search } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { GithubIcon, GitlabIcon } from "@/components/icons/data-tools-icons";
 import { AlertBlock } from "@/components/shared/alert-block";
@@ -23,97 +24,91 @@ import {
 } from "@/components/ui/select";
 import { api } from "@/utils/api";
 
-interface Props {
+interface PreviewResource {
 	applicationId?: string;
 	composeId?: string;
+	sourceType: string;
+	isPreviewDeploymentsActive: boolean | null;
+	owner: string | null;
+	repository: string | null;
+	githubId: string | null;
+	gitlabId: string | null;
+	gitlabOwner: string | null;
+	gitlabRepository: string | null;
+	gitlabProjectId: number | null;
+}
+
+interface Props {
+	resource: PreviewResource;
 	children: React.ReactNode;
 }
 
-interface ChangeRequest {
-	id: number | string;
-	number: number;
-	title: string;
-	html_url: string;
-	branch: string;
-	baseBranch?: string;
-	draft?: boolean;
-}
-
-export const BuildPreviewDeployment = ({
-	applicationId,
-	composeId,
-	children,
-}: Props) => {
+export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const [selected, setSelected] = useState<ChangeRequest | null>(null);
 	const [search, setSearch] = useState("");
 
-	const { data: application } = api.application.one.useQuery(
-		{ applicationId: applicationId || "" },
-		{ enabled: !!applicationId },
-	);
-	const { data: compose } = api.compose.one.useQuery(
-		{ composeId: composeId || "" },
-		{ enabled: !!composeId },
-	);
-
-	const data = application || compose;
-	const isGitlab = data?.sourceType === "gitlab";
+	const isGitlab = resource.sourceType === "gitlab";
 	const changeRequestLabel = isGitlab ? "Merge Request" : "Pull Request";
-	const owner = isGitlab ? data?.gitlabOwner || data?.owner : data?.owner;
+	const changeRequestLabelPlural = `${changeRequestLabel.toLowerCase()}s`;
+
+	const owner = isGitlab
+		? (resource.gitlabOwner ?? resource.owner)
+		: resource.owner;
 	const repo = isGitlab
-		? data?.gitlabRepository || data?.repository
-		: data?.repository;
+		? (resource.gitlabRepository ?? resource.repository)
+		: resource.repository;
 
 	const { data: githubPullRequests, isFetching: isFetchingGithub } =
 		api.github.getGithubPullRequests.useQuery(
 			{
-				owner: owner || "",
-				repo: repo || "",
-				githubId: data?.githubId || "",
+				owner: resource.owner ?? "",
+				repo: resource.repository ?? "",
+				githubId: resource.githubId ?? "",
 			},
 			{
 				enabled:
-					!!isOpen &&
-					!!data &&
-					data.sourceType === "github" &&
-					!!owner &&
-					!!repo,
+					isOpen &&
+					!isGitlab &&
+					!!resource.owner &&
+					!!resource.repository &&
+					!!resource.githubId,
 			},
 		);
 
 	const { data: gitlabMergeRequests, isFetching: isFetchingGitlab } =
 		api.gitlab.getGitlabMergeRequests.useQuery(
 			{
-				id: data?.gitlabProjectId || 0,
-				owner: data?.gitlabOwner || "",
-				repo: data?.gitlabRepository || "",
-				gitlabId: data?.gitlabId || "",
+				id: resource.gitlabProjectId ?? 0,
+				owner: resource.gitlabOwner ?? "",
+				repo: resource.gitlabRepository ?? "",
+				gitlabId: resource.gitlabId ?? "",
 			},
 			{
 				enabled:
-					!!isOpen &&
-					!!data &&
-					data.sourceType === "gitlab" &&
-					!!data.gitlabId &&
-					!!data.gitlabProjectId,
+					isOpen &&
+					isGitlab &&
+					!!resource.gitlabId &&
+					!!resource.gitlabProjectId &&
+					!!resource.gitlabOwner &&
+					!!resource.gitlabRepository,
 			},
 		);
 
-	const changeRequests = (
-		isGitlab ? gitlabMergeRequests : githubPullRequests
-	) as ChangeRequest[] | undefined;
+	const changeRequests = isGitlab ? gitlabMergeRequests : githubPullRequests;
 	const isFetching = isFetchingGithub || isFetchingGitlab;
 
-	const filtered = changeRequests?.filter((cr) => {
-		if (!search) return true;
+	const filtered = useMemo(() => {
+		if (!changeRequests) return undefined;
+		if (!search) return changeRequests;
 		const q = search.toLowerCase();
-		return (
-			String(cr.number).includes(q) ||
-			cr.title.toLowerCase().includes(q) ||
-			cr.branch.toLowerCase().includes(q)
+		return changeRequests.filter(
+			(cr) =>
+				String(cr.number).includes(q) ||
+				cr.title.toLowerCase().includes(q) ||
+				cr.branch.toLowerCase().includes(q),
 		);
-	});
+	}, [changeRequests, search]);
 
 	const { mutateAsync: createPreviewDeployment, isPending } =
 		api.previewDeployment.create.useMutation();
@@ -122,20 +117,18 @@ export const BuildPreviewDeployment = ({
 		if (!selected) return;
 		try {
 			await createPreviewDeployment({
-				applicationId,
-				composeId,
+				applicationId: resource.applicationId,
+				composeId: resource.composeId,
 				branch: selected.branch,
 				pullRequestId: String(selected.id),
 				pullRequestNumber: String(selected.number),
 				pullRequestTitle: selected.title,
-				pullRequestURL: selected.html_url,
+				pullRequestURL: selected.url,
 			});
 			toast.success(
 				`${changeRequestLabel} #${selected.number} preview deployment started`,
 			);
 			setIsOpen(false);
-			setSelected(null);
-			setSearch("");
 		} catch (error) {
 			toast.error(
 				error instanceof Error
@@ -145,11 +138,13 @@ export const BuildPreviewDeployment = ({
 		}
 	};
 
+	const reset = () => {
+		setSelected(null);
+		setSearch("");
+	};
+
 	useEffect(() => {
-		if (!isOpen) {
-			setSelected(null);
-			setSearch("");
-		}
+		if (!isOpen) reset();
 	}, [isOpen]);
 
 	const ChangeRequestIcon = isGitlab ? GitlabIcon : GithubIcon;
@@ -169,7 +164,7 @@ export const BuildPreviewDeployment = ({
 					</DialogDescription>
 				</DialogHeader>
 				<div className="grid gap-4">
-					{!data?.isPreviewDeploymentsActive && (
+					{!resource.isPreviewDeploymentsActive && (
 						<AlertBlock type="warning">
 							Preview deployments are disabled for this resource.
 						</AlertBlock>
@@ -182,7 +177,7 @@ export const BuildPreviewDeployment = ({
 					<div className="relative">
 						<Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
 						<Input
-							placeholder={`Search ${changeRequestLabel.toLowerCase()}s...`}
+							placeholder={`Search ${changeRequestLabelPlural}...`}
 							className="pl-9"
 							value={search}
 							onChange={(e) => setSearch(e.target.value)}
@@ -192,25 +187,24 @@ export const BuildPreviewDeployment = ({
 						<div className="flex flex-col items-center justify-center gap-3 min-h-[25vh]">
 							<Loader2 className="size-6 text-muted-foreground animate-spin" />
 							<span className="text-sm text-muted-foreground">
-								Loading open {changeRequestLabel.toLowerCase()}s...
+								Loading open {changeRequestLabelPlural}...
 							</span>
 						</div>
 					) : !filtered?.length ? (
 						<div className="flex flex-col items-center justify-center gap-3 min-h-[25vh]">
 							<ChangeRequestIcon className="size-8 text-muted-foreground" />
 							<span className="text-sm text-muted-foreground">
-								No open {changeRequestLabel.toLowerCase()}s found
+								No open {changeRequestLabelPlural} found
 							</span>
 						</div>
 					) : (
 						<Select
 							value={selected ? String(selected.number) : undefined}
-							onValueChange={(value) => {
-								const cr = filtered?.find(
-									(item) => String(item.number) === value,
-								);
-								setSelected(cr || null);
-							}}
+							onValueChange={(value) =>
+								setSelected(
+									filtered.find((cr) => String(cr.number) === value) ?? null,
+								)
+							}
 						>
 							<SelectTrigger className="w-full">
 								<SelectValue
@@ -218,7 +212,7 @@ export const BuildPreviewDeployment = ({
 								/>
 							</SelectTrigger>
 							<SelectContent>
-								{filtered?.map((cr) => (
+								{filtered.map((cr) => (
 									<SelectItem
 										key={String(cr.id)}
 										value={String(cr.number)}
@@ -252,7 +246,7 @@ export const BuildPreviewDeployment = ({
 					</Button>
 					<Button
 						isLoading={isPending}
-						disabled={!selected || !data?.isPreviewDeploymentsActive}
+						disabled={!selected || !resource.isPreviewDeploymentsActive}
 						onClick={handleBuild}
 					>
 						<RocketIcon className="size-4" />

@@ -75,6 +75,7 @@ export * from "./setup/server-validate";
 export * from "./setup/setup";
 export * from "./setup/traefik-setup";
 export * from "./templates/processors";
+export * from "./types/change-request";
 export * from "./utils/access-log/handler";
 export {
 	getLogCleanupStatus,

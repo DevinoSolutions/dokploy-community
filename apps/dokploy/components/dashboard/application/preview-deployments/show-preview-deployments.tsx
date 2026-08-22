@@ -87,7 +87,7 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 				</div>
 				{data?.isPreviewDeploymentsActive && (
 					<div className="flex items-center gap-2">
-						<BuildPreviewDeployment applicationId={applicationId}>
+						<BuildPreviewDeployment resource={data}>
 							<Button variant="outline" className="gap-2">
 								<GitPullRequest className="size-4" />
 								Build {changeRequestLabel}
