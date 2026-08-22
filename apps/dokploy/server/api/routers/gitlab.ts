@@ -4,6 +4,7 @@ import {
 	findGitlabById,
 	getAccessibleGitProviderIds,
 	getGitlabBranches,
+	getGitlabMergeRequests,
 	getGitlabRepositories,
 	haveGitlabRequirements,
 	testGitlabConnection,
@@ -21,6 +22,7 @@ import { audit } from "@/server/api/utils/audit";
 import {
 	apiCreateGitlab,
 	apiFindGitlabBranches,
+	apiFindGitlabMergeRequests,
 	apiFindOneGitlab,
 	apiGitlabTestConnection,
 	apiUpdateGitlab,
@@ -105,6 +107,15 @@ export const gitlabRouter = createTRPCRouter({
 				await assertGitProviderAccess(ctx.session, gitlab.gitProvider);
 			}
 			return await getGitlabBranches(input);
+		}),
+	getGitlabMergeRequests: protectedProcedure
+		.input(apiFindGitlabMergeRequests)
+		.query(async ({ input, ctx }) => {
+			if (input.gitlabId) {
+				const gitlab = await findGitlabById(input.gitlabId);
+				await assertGitProviderAccess(ctx.session, gitlab.gitProvider);
+			}
+			return await getGitlabMergeRequests(input);
 		}),
 	testConnection: protectedProcedure
 		.input(apiGitlabTestConnection)

@@ -3,6 +3,7 @@ import {
 	findGithubById,
 	getAccessibleGitProviderIds,
 	getGithubBranches,
+	getGithubPullRequests,
 	getGithubRepositories,
 	haveGithubRequirements,
 	updateGithub,
@@ -18,6 +19,7 @@ import {
 import { audit } from "@/server/api/utils/audit";
 import {
 	apiFindGithubBranches,
+	apiFindGithubPullRequests,
 	apiFindOneGithub,
 	apiUpdateGithub,
 } from "@/server/db/schema";
@@ -45,6 +47,15 @@ export const githubRouter = createTRPCRouter({
 				await assertGitProviderAccess(ctx.session, github.gitProvider);
 			}
 			return await getGithubBranches(input);
+		}),
+	getGithubPullRequests: protectedProcedure
+		.input(apiFindGithubPullRequests)
+		.query(async ({ input, ctx }) => {
+			if (input.githubId) {
+				const github = await findGithubById(input.githubId);
+				await assertGitProviderAccess(ctx.session, github.gitProvider);
+			}
+			return await getGithubPullRequests(input);
 		}),
 	githubProviders: protectedProcedure.query(async ({ ctx }) => {
 		const accessibleIds = await getAccessibleGitProviderIds(ctx.session);
