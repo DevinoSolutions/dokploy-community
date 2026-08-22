@@ -6,6 +6,7 @@ import {
 	type Gitlab,
 	updateGitlab,
 } from "@dokploy/server/services/gitlab";
+import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
@@ -269,19 +270,29 @@ export const getGitlabBranches = async (input: {
 	}[];
 };
 
+interface GitlabMergeRequest {
+	id: number;
+	iid: number;
+	title: string;
+	web_url: string;
+	source_branch: string;
+	target_branch: string;
+	draft: boolean;
+}
+
 export const getGitlabMergeRequests = async (input: {
 	id?: number;
 	gitlabId?: string;
 	owner: string;
 	repo: string;
-}) => {
+}): Promise<ChangeRequest[]> => {
 	if (!input.gitlabId || !input.id || input.id === 0) {
 		return [];
 	}
 
 	const gitlabProvider = await findGitlabById(input.gitlabId);
 
-	const allMergeRequests: Record<string, unknown>[] = [];
+	const allMergeRequests: GitlabMergeRequest[] = [];
 	let page = 1;
 	const perPage = 100; // GitLab's max per page is 100
 	const baseUrl = (
@@ -304,10 +315,8 @@ export const getGitlabMergeRequests = async (input: {
 			);
 		}
 
-		const mergeRequests = (await mergeRequestsResponse.json()) as Record<
-			string,
-			unknown
-		>[];
+		const mergeRequests =
+			(await mergeRequestsResponse.json()) as GitlabMergeRequest[];
 
 		if (mergeRequests.length === 0) {
 			break;
@@ -326,7 +335,7 @@ export const getGitlabMergeRequests = async (input: {
 		id: mr.id,
 		number: mr.iid,
 		title: mr.title,
-		html_url: mr.web_url,
+		url: mr.web_url,
 		branch: mr.source_branch,
 		baseBranch: mr.target_branch,
 		draft: mr.draft,

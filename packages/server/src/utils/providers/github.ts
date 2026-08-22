@@ -5,6 +5,7 @@ import type {
 	apiFindGithubPullRequests,
 } from "@dokploy/server/db/schema";
 import { findGithubById, type Github } from "@dokploy/server/services/github";
+import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { createAppAuth } from "@octokit/auth-app";
 import { TRPCError } from "@trpc/server";
@@ -268,7 +269,7 @@ export const getGithubRepositories = async (githubId?: string) => {
 
 export const getGithubPullRequests = async (
 	input: z.infer<typeof apiFindGithubPullRequests>,
-) => {
+): Promise<ChangeRequest[]> => {
 	if (!input.githubId) {
 		return [];
 	}
@@ -296,11 +297,10 @@ export const getGithubPullRequests = async (
 		id: pr.id,
 		number: pr.number,
 		title: pr.title,
-		html_url: pr.html_url,
-		branch: pr.head?.ref,
-		headSha: pr.head?.sha,
-		baseBranch: pr.base?.ref,
-		draft: pr.draft,
+		url: pr.html_url,
+		branch: pr.head?.ref ?? "",
+		baseBranch: pr.base?.ref ?? "",
+		draft: pr.draft ?? false,
 	}));
 };
 
