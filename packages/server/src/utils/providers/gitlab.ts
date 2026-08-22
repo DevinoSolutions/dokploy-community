@@ -269,6 +269,70 @@ export const getGitlabBranches = async (input: {
 	}[];
 };
 
+export const getGitlabMergeRequests = async (input: {
+	id?: number;
+	gitlabId?: string;
+	owner: string;
+	repo: string;
+}) => {
+	if (!input.gitlabId || !input.id || input.id === 0) {
+		return [];
+	}
+
+	const gitlabProvider = await findGitlabById(input.gitlabId);
+
+	const allMergeRequests: Record<string, unknown>[] = [];
+	let page = 1;
+	const perPage = 100; // GitLab's max per page is 100
+	const baseUrl = (
+		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
+	).replace(/\/+$/, "");
+
+	while (true) {
+		const mergeRequestsResponse = await fetch(
+			`${baseUrl}/api/v4/projects/${input.id}/merge_requests?state=opened&page=${page}&per_page=${perPage}`,
+			{
+				headers: {
+					Authorization: `Bearer ${gitlabProvider.accessToken}`,
+				},
+			},
+		);
+
+		if (!mergeRequestsResponse.ok) {
+			throw new Error(
+				`Failed to fetch merge requests: ${mergeRequestsResponse.statusText}`,
+			);
+		}
+
+		const mergeRequests = (await mergeRequestsResponse.json()) as Record<
+			string,
+			unknown
+		>[];
+
+		if (mergeRequests.length === 0) {
+			break;
+		}
+
+		allMergeRequests.push(...mergeRequests);
+		page++;
+
+		const total = mergeRequestsResponse.headers.get("x-total");
+		if (total && allMergeRequests.length >= Number.parseInt(total)) {
+			break;
+		}
+	}
+
+	return allMergeRequests.map((mr) => ({
+		id: mr.id,
+		number: mr.iid,
+		title: mr.title,
+		html_url: mr.web_url,
+		branch: mr.source_branch,
+		baseBranch: mr.target_branch,
+		draft: mr.draft,
+	}));
+};
+
 export const testGitlabConnection = async (
 	input: z.infer<typeof apiGitlabTestConnection>,
 ) => {

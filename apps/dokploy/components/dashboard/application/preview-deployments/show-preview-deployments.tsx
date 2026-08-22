@@ -34,6 +34,7 @@ import { api } from "@/utils/api";
 import { ShowModalLogs } from "../../settings/web-server/show-modal-logs";
 import { ShowDeploymentsModal } from "../deployments/show-deployments-modal";
 import { AddPreviewDomain } from "./add-preview-domain";
+import { BuildPreviewDeployment } from "./build-preview-deployment";
 import { ShowPreviewSettings } from "./show-preview-settings";
 
 interface Props {
@@ -85,7 +86,15 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 					<CardDescription>See all the preview deployments</CardDescription>
 				</div>
 				{data?.isPreviewDeploymentsActive && (
-					<ShowPreviewSettings applicationId={applicationId} />
+					<div className="flex items-center gap-2">
+						<BuildPreviewDeployment applicationId={applicationId}>
+							<Button variant="outline" className="gap-2">
+								<GitPullRequest className="size-4" />
+								Build {changeRequestLabel}
+							</Button>
+						</BuildPreviewDeployment>
+						<ShowPreviewSettings applicationId={applicationId} />
+					</div>
 				)}
 			</CardHeader>
 			<CardContent className="flex flex-col gap-4">

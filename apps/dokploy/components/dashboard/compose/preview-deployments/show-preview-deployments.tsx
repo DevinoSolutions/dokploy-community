@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
 import { ShowDeploymentsModal } from "../../application/deployments/show-deployments-modal";
+import { BuildPreviewDeployment } from "../../application/preview-deployments/build-preview-deployment";
 import { ShowModalLogs } from "../../settings/web-server/show-modal-logs";
 import { ShowPreviewSettingsCompose } from "./show-preview-settings";
 
@@ -83,7 +84,15 @@ export const ShowPreviewDeploymentsCompose = ({ composeId }: Props) => {
 					<CardDescription>See all the preview deployments</CardDescription>
 				</div>
 				{data?.isPreviewDeploymentsActive && (
-					<ShowPreviewSettingsCompose composeId={composeId} />
+					<div className="flex items-center gap-2">
+						<BuildPreviewDeployment composeId={composeId}>
+							<Button variant="outline" className="gap-2">
+								<GitPullRequest className="size-4" />
+								Build {changeRequestLabel}
+							</Button>
+						</BuildPreviewDeployment>
+						<ShowPreviewSettingsCompose composeId={composeId} />
+					</div>
 				)}
 			</CardHeader>
 			<CardContent className="flex flex-col gap-4">

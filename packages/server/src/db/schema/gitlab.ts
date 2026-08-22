@@ -61,6 +61,13 @@ export const apiFindGitlabBranches = z.object({
 	gitlabId: z.string().optional(),
 });
 
+export const apiFindGitlabMergeRequests = z.object({
+	id: z.number().optional(),
+	owner: z.string(),
+	repo: z.string(),
+	gitlabId: z.string().optional(),
+});
+
 export const apiUpdateGitlab = z.object({
 	applicationId: z.string().optional(),
 	secret: z.string().optional(),
