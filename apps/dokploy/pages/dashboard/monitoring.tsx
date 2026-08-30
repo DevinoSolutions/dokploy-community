@@ -22,10 +22,6 @@ import {
 import { useLocalStorage } from "@/hooks/useLocalStorage";
 import { api } from "@/utils/api";
 
-const BASE_URL = "http://localhost:3001/metrics";
-
-const DEFAULT_TOKEN = "metrics";
-
 const Dashboard = () => {
 	const [toggleMonitoring, _setToggleMonitoring] = useLocalStorage(
 		"monitoring-enabled",
@@ -52,21 +48,11 @@ const Dashboard = () => {
 		{ enabled: isRemoteSelected },
 	);
 
-	// In dev, ShowPaidMonitoring talks to a local stub at `BASE_URL` with
-	// `DEFAULT_TOKEN` regardless of which server is selected. In prod we point
-	// it at the real ip:port/metrics endpoint and pass the configured token.
-	const resolveMetricsEndpoint = (
-		ip: string | undefined | null,
-		port: number | undefined | null,
-		token: string | undefined | null,
-	): { url: string; token: string | undefined } => {
-		const isProd = process.env.NODE_ENV === "production";
-		return {
-			url: isProd ? `http://${ip}:${port}/metrics` : BASE_URL,
-			token: isProd ? (token ?? undefined) : DEFAULT_TOKEN,
-		};
-	};
-
+	// The metrics endpoint and its token are resolved server-side from the
+	// selected `serverId` (or from the web-server settings for the local host);
+	// this page only decides *which* server to ask about. `getMonitoringConfig`
+	// is still queried so we can show the "not configured" hint before firing a
+	// metrics request that would fail.
 	let paidMonitoringContent: ReactElement;
 	if (selectedServer) {
 		const remotePort = remoteMonitoringConfig?.port;
@@ -99,35 +85,22 @@ const Dashboard = () => {
 				</Card>
 			);
 		} else {
-			const endpoint = resolveMetricsEndpoint(
-				remoteMonitoringConfig?.ipAddress,
-				remotePort,
-				remoteToken,
-			);
 			paidMonitoringContent = (
 				<Card
 					key={`paid-${selectedServerId}`}
 					className="bg-sidebar  p-2.5 rounded-xl  mx-auto"
 				>
 					<div className="rounded-xl bg-background shadow-md">
-						<ShowPaidMonitoring
-							BASE_URL={endpoint.url}
-							token={endpoint.token}
-						/>
+						<ShowPaidMonitoring serverId={selectedServerId} />
 					</div>
 				</Card>
 			);
 		}
 	} else {
-		const endpoint = resolveMetricsEndpoint(
-			monitoring?.serverIp,
-			monitoring?.metricsConfig?.server?.port,
-			monitoring?.metricsConfig?.server?.token,
-		);
 		paidMonitoringContent = (
 			<Card className="bg-sidebar  p-2.5 rounded-xl  mx-auto">
 				<div className="rounded-xl bg-background shadow-md">
-					<ShowPaidMonitoring BASE_URL={endpoint.url} token={endpoint.token} />
+					<ShowPaidMonitoring />
 				</div>
 			</Card>
 		);

@@ -38,6 +38,7 @@ import { and, asc, desc, eq, gt, ne } from "drizzle-orm";
 import { z } from "zod";
 import { apiKeyNameSchema } from "@/lib/api-keys";
 import { audit } from "@/server/api/utils/audit";
+import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
 import {
 	adminProcedure,
 	createTRPCRouter,
@@ -538,13 +539,20 @@ export const userRouter = createTRPCRouter({
 	getContainerMetrics: withPermission("monitoring", "read")
 		.input(
 			z.object({
-				url: z.string(),
-				token: z.string(),
+				serverId: z.string().optional(),
 				appName: z.string(),
 				dataPoints: z.string(),
 			}),
 		)
-		.query(async ({ input }) => {
+		.query(async ({ ctx, input }) => {
+			// Endpoint + token are derived from the (organization-scoped) server
+			// row instead of being taken from the client; see
+			// `resolveMetricsEndpoint`. Resolved outside the try/catch so the
+			// authorization error is not reshaped.
+			const { baseUrl, token } = await resolveMetricsEndpoint(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			try {
 				if (!input.appName) {
 					throw new Error(
@@ -555,12 +563,12 @@ export const userRouter = createTRPCRouter({
 						].join("\n"),
 					);
 				}
-				const url = new URL(`${input.url}/metrics/containers`);
+				const url = new URL(`${baseUrl}/metrics/containers`);
 				url.searchParams.append("limit", input.dataPoints);
 				url.searchParams.append("appName", input.appName);
 				const response = await fetch(url.toString(), {
 					headers: {
-						Authorization: `Bearer ${input.token}`,
+						Authorization: `Bearer ${token}`,
 					},
 				});
 				if (!response.ok) {

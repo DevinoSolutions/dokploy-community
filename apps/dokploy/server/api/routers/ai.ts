@@ -40,13 +40,43 @@ import {
 	createTRPCRouter,
 	protectedProcedure,
 } from "@/server/api/trpc";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import { generatePassword } from "@/templates/utils";
+
+/**
+ * `getAiSettingById` looks an AI provider up by primary key only, so every
+ * procedure that accepts a caller-supplied `aiId` has to prove the row belongs
+ * to the caller's active organization before returning it (the row carries the
+ * provider `apiKey`) or using its credentials to talk to a model.
+ */
+const findAiSettingInOrganization = async (
+	aiId: string,
+	activeOrganizationId: string,
+) => {
+	const notFound = new TRPCError({
+		code: "NOT_FOUND",
+		message: "AI settings not found",
+	});
+	let aiSettings: Awaited<ReturnType<typeof getAiSettingById>>;
+	try {
+		aiSettings = await getAiSettingById(aiId);
+	} catch {
+		throw notFound;
+	}
+	if (aiSettings.organizationId !== activeOrganizationId) {
+		throw notFound;
+	}
+	return aiSettings;
+};
 
 export const aiRouter = createTRPCRouter({
 	one: adminProcedure
 		.input(z.object({ aiId: z.string() }))
-		.query(async ({ input }) => {
-			return await getAiSettingById(input.aiId);
+		.query(async ({ ctx, input }) => {
+			return await findAiSettingInOrganization(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
 		}),
 
 	getModels: protectedProcedure
@@ -182,6 +212,12 @@ export const aiRouter = createTRPCRouter({
 	}),
 
 	update: adminProcedure.input(apiUpdateAi).mutation(async ({ ctx, input }) => {
+		// `saveAiSettings` upserts on the `aiId` primary key, so an unscoped
+		// `aiId` would let an admin overwrite another organization's provider.
+		await findAiSettingInOrganization(
+			input.aiId,
+			ctx.session.activeOrganizationId,
+		);
 		return await saveAiSettings(ctx.session.activeOrganizationId, input);
 	}),
 
@@ -193,13 +229,20 @@ export const aiRouter = createTRPCRouter({
 
 	get: adminProcedure
 		.input(z.object({ aiId: z.string() }))
-		.query(async ({ input }) => {
-			return await getAiSettingById(input.aiId);
+		.query(async ({ ctx, input }) => {
+			return await findAiSettingInOrganization(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
 		}),
 
 	delete: adminProcedure
 		.input(z.object({ aiId: z.string() }))
-		.mutation(async ({ input }) => {
+		.mutation(async ({ ctx, input }) => {
+			await findAiSettingInOrganization(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
 			return await deleteAiSettings(input.aiId);
 		}),
 
@@ -234,19 +277,17 @@ export const aiRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			// Resolved outside the try/catch below, which rewrites every failure
+			// to BAD_REQUEST and would otherwise swallow the authorization code.
+			const aiSettings = await findAiSettingInOrganization(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
 			try {
-				const aiSettings = await getAiSettingById(input.aiId);
 				if (!aiSettings?.isEnabled) {
 					throw new TRPCError({
 						code: "BAD_REQUEST",
 						message: "AI provider is not enabled",
-					});
-				}
-
-				if (aiSettings.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "FORBIDDEN",
-						message: "Access denied",
 					});
 				}
 
@@ -326,6 +367,17 @@ ${input.logs}`,
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			// Both ids are scoped before the try/catch (which flattens errors to
+			// BAD_REQUEST): `suggestVariants` uses the provider credentials behind
+			// `aiId` and reads the ip address behind `serverId`.
+			await findAiSettingInOrganization(
+				input.aiId,
+				ctx.session.activeOrganizationId,
+			);
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			try {
 				return await suggestVariants({
 					...input,
@@ -343,6 +395,21 @@ ${input.logs}`,
 		.mutation(async ({ ctx, input }) => {
 			const environment = await findEnvironmentById(input.environmentId);
 			const project = await findProjectById(environment.projectId);
+			// `checkServiceAccess(..., "create")` only consults `accessedProjects`
+			// and short-circuits entirely for owner/admin, so the target project
+			// and server must be organization-scoped explicitly before anything
+			// is created or deployed.
+			if (project.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message:
+						"You are not authorized to access this project or it does not exist",
+				});
+			}
+			await assertServerInOrganization(
+				input.serverId ?? undefined,
+				ctx.session.activeOrganizationId,
+			);
 			await checkServiceAccess(ctx, environment.projectId, "create");
 
 			if (IS_CLOUD && !input.serverId) {

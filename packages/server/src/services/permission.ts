@@ -2,7 +2,7 @@ import { db } from "@dokploy/server/db";
 import { member, organizationRole } from "@dokploy/server/db/schema";
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { TRPCError } from "@trpc/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
 	ac,
 	adminRole,
@@ -241,6 +241,89 @@ export const checkProjectAccess = async (
 	}
 };
 
+/**
+ * Every deployable service (application, compose and the seven database
+ * flavours) hangs off `environment -> project -> organization`, and the id
+ * columns are globally unique, so a single query resolves the owning
+ * organization of an opaque service id without the caller having to know its
+ * type.
+ *
+ * Returns `null` when the id matches no service at all, which callers must
+ * treat exactly like "belongs to another organization" so the check cannot be
+ * used as an existence oracle.
+ */
+export const findServiceOrganizationId = async (
+	serviceId: string,
+): Promise<string | null> => {
+	if (!serviceId) {
+		return null;
+	}
+	const rows = await db.execute(sql`
+		SELECT p."organizationId" AS "organizationId"
+		FROM "environment" e
+		INNER JOIN "project" p ON p."projectId" = e."projectId"
+		WHERE e."environmentId" IN (
+			SELECT "environmentId" FROM "application" WHERE "applicationId" = ${serviceId}
+			UNION ALL
+			SELECT "environmentId" FROM "compose" WHERE "composeId" = ${serviceId}
+			UNION ALL
+			SELECT "environmentId" FROM "postgres" WHERE "postgresId" = ${serviceId}
+			UNION ALL
+			SELECT "environmentId" FROM "mysql" WHERE "mysqlId" = ${serviceId}
+			UNION ALL
+			SELECT "environmentId" FROM "mariadb" WHERE "mariadbId" = ${serviceId}
+			UNION ALL
+			SELECT "environmentId" FROM "mongo" WHERE "mongoId" = ${serviceId}
+			UNION ALL
+			SELECT "environmentId" FROM "redis" WHERE "redisId" = ${serviceId}
+			UNION ALL
+			SELECT "environmentId" FROM "libsql" WHERE "libsqlId" = ${serviceId}
+		)
+		LIMIT 1
+	`);
+	// postgres-js returns a row array directly; be defensive about the
+	// `{ rows: [] }` shape other drivers use so this keeps working if the
+	// driver is ever swapped.
+	const result = rows as unknown;
+	const list = (
+		Array.isArray(result)
+			? result
+			: ((result as { rows?: unknown[] } | null)?.rows ?? [])
+	) as { organizationId?: string }[];
+	return list[0]?.organizationId ?? null;
+};
+
+/**
+ * Fail-closed row-level organization scope for an arbitrary service id.
+ *
+ * `checkPermission` only proves the caller holds a permission *inside their
+ * active organization*; it says nothing about the id they passed in. Owners and
+ * admins additionally short-circuit the `accessedServices` allow-list, so
+ * without this assertion an owner of organization A could deploy, stop, read
+ * logs of, or rewrite env vars on organization B's services simply by passing
+ * their id.
+ *
+ * A missing service and a cross-organization service produce the identical
+ * UNAUTHORIZED error (mirroring `mount.listByServiceId`) so no existence oracle
+ * is introduced.
+ */
+export const assertServiceInOrganization = async (
+	serviceId: string,
+	organizationId: string,
+) => {
+	const serviceOrganizationId = await findServiceOrganizationId(serviceId);
+	if (
+		serviceOrganizationId === null ||
+		serviceOrganizationId !== organizationId
+	) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message:
+				"You are not authorized to access this service or it does not exist",
+		});
+	}
+};
+
 export const checkServicePermissionAndAccess = async (
 	ctx: PermissionCtx,
 	serviceId: string,
@@ -258,6 +341,12 @@ export const checkServicePermissionAndAccess = async (
 			});
 		}
 	}
+	// Runs for every role, including owner/admin, and after the member
+	// allow-list check so the member-path error message is unchanged. An
+	// `accessedServices` entry is not proof of organization membership either:
+	// nothing validates the ids an admin assigns through
+	// `user.assignPermissions`.
+	await assertServiceInOrganization(serviceId, organizationId);
 };
 
 export const checkServiceAccess = async (

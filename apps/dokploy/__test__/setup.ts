@@ -28,6 +28,10 @@ vi.mock("@dokploy/server/db", () => {
 
 	return {
 		db: {
+			// Raw SQL escape hatch (used by e.g. the service -> organization
+			// resolver in `checkServicePermissionAndAccess`). Defaults to "no
+			// rows"; tests that need a hit override it per case.
+			execute: vi.fn(() => Promise.resolve([] as unknown[])),
 			select: vi.fn(() => chain),
 			insert: vi.fn(() => ({
 				values: () => ({ returning: () => Promise.resolve([{}]) }),
