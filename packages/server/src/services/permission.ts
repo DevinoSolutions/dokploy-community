@@ -1,5 +1,10 @@
 import { db } from "@dokploy/server/db";
-import { member, organizationRole } from "@dokploy/server/db/schema";
+import {
+	environments,
+	member,
+	organizationRole,
+	projects,
+} from "@dokploy/server/db/schema";
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { TRPCError } from "@trpc/server";
 import { and, eq, sql } from "drizzle-orm";
@@ -215,6 +220,100 @@ export const resolvePermissions = async (
 	return result;
 };
 
+/**
+ * `project` carries `organizationId` directly, so a single row lookup resolves
+ * the owning organization of an opaque project id.
+ *
+ * Returns `null` when no project matches, which callers must treat exactly like
+ * "belongs to another organization" so the check cannot be used as an existence
+ * oracle.
+ */
+export const findProjectOrganizationId = async (
+	projectId: string,
+): Promise<string | null> => {
+	if (!projectId) {
+		return null;
+	}
+	const row = await db.query.projects.findFirst({
+		where: eq(projects.projectId, projectId),
+		columns: { organizationId: true },
+	});
+	return row?.organizationId ?? null;
+};
+
+/**
+ * Fail-closed row-level organization scope for an arbitrary project id.
+ *
+ * Mirrors `assertServiceInOrganization`: a missing project and a
+ * cross-organization project produce the identical UNAUTHORIZED error.
+ */
+export const assertProjectInOrganization = async (
+	projectId: string,
+	organizationId: string,
+) => {
+	const projectOrganizationId = await findProjectOrganizationId(projectId);
+	if (
+		projectOrganizationId === null ||
+		projectOrganizationId !== organizationId
+	) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message:
+				"You are not authorized to access this project or it does not exist",
+		});
+	}
+};
+
+/**
+ * Environments hang off `project`, which owns `organizationId`, so the relation
+ * resolves the owning organization of an opaque environment id.
+ *
+ * Returns `null` when no environment matches, which callers must treat exactly
+ * like "belongs to another organization" so the check cannot be used as an
+ * existence oracle.
+ */
+export const findEnvironmentOrganizationId = async (
+	environmentId: string,
+): Promise<string | null> => {
+	if (!environmentId) {
+		return null;
+	}
+	const row = await db.query.environments.findFirst({
+		where: eq(environments.environmentId, environmentId),
+		columns: { environmentId: true },
+		with: {
+			project: {
+				columns: { organizationId: true },
+			},
+		},
+	});
+	return row?.project?.organizationId ?? null;
+};
+
+/**
+ * Fail-closed row-level organization scope for an arbitrary environment id.
+ *
+ * Mirrors `assertServiceInOrganization`: a missing environment and a
+ * cross-organization environment produce the identical UNAUTHORIZED error.
+ */
+export const assertEnvironmentInOrganization = async (
+	environmentId: string,
+	organizationId: string,
+) => {
+	const environmentOrganizationId =
+		await findEnvironmentOrganizationId(environmentId);
+	if (
+		environmentOrganizationId === null ||
+		environmentOrganizationId !== organizationId
+	) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message:
+				"You are not authorized to access this environment or it does not exist",
+		});
+	}
+};
+
 export const checkProjectAccess = async (
 	ctx: PermissionCtx,
 	action: "create" | "delete",
@@ -238,6 +337,13 @@ export const checkProjectAccess = async (
 				message: "You don't have access to this project",
 			});
 		}
+	}
+
+	// Runs for every role, including owner/admin, and after the member
+	// allow-list check so the member-path error message is unchanged. Callers
+	// that pass no project id (the `create` path) have nothing to scope.
+	if (projectId) {
+		await assertProjectInOrganization(projectId, organizationId);
 	}
 };
 
@@ -377,6 +483,17 @@ export const checkServiceAccess = async (
 			}
 		}
 	}
+
+	// Runs for every role, including owner/admin, and after the member
+	// allow-list check so the member-path error messages are unchanged. On the
+	// `create` action the second parameter is a *project* id (that is what the
+	// member branch above compares against `accessedProjects`, and what every
+	// call site passes), so it has to be scoped with the project resolver.
+	if (action === "create") {
+		await assertProjectInOrganization(serviceId, organizationId);
+	} else {
+		await assertServiceInOrganization(serviceId, organizationId);
+	}
 };
 
 export const checkEnvironmentAccess = async (
@@ -402,6 +519,13 @@ export const checkEnvironmentAccess = async (
 			});
 		}
 	}
+
+	// Runs for every role, including owner/admin, and after the member
+	// allow-list check so the member-path error message is unchanged. The
+	// second parameter is an environment id for every action (no call site uses
+	// the `create` action, which only skips the member allow-list), so the
+	// environment resolver scopes all of them.
+	await assertEnvironmentInOrganization(environmentId, organizationId);
 };
 
 export const checkEnvironmentCreationPermission = async (
@@ -422,6 +546,10 @@ export const checkEnvironmentCreationPermission = async (
 			});
 		}
 	}
+
+	// Runs for every role, including owner/admin, and after the member
+	// allow-list check so the member-path error message is unchanged.
+	await assertProjectInOrganization(projectId, organizationId);
 };
 
 export const checkEnvironmentDeletionPermission = async (
@@ -442,6 +570,10 @@ export const checkEnvironmentDeletionPermission = async (
 			});
 		}
 	}
+
+	// Runs for every role, including owner/admin, and after the member
+	// allow-list check so the member-path error message is unchanged.
+	await assertProjectInOrganization(projectId, organizationId);
 };
 
 export const addNewProject = async (ctx: PermissionCtx, projectId: string) => {

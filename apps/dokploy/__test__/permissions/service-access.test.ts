@@ -36,6 +36,12 @@ let memberToReturn: ReturnType<typeof mockMemberData> =
  */
 let serviceOrganizationId: string | null = "org-1";
 
+/**
+ * Wave 4: `checkServiceAccess(..., "create")` receives a *project* id, so it is
+ * scoped through the project resolver instead.
+ */
+let projectOrganizationId: string | null = "org-1";
+
 vi.mock("@dokploy/server/db", () => ({
 	db: {
 		execute: vi.fn(() =>
@@ -53,6 +59,15 @@ vi.mock("@dokploy/server/db", () => ({
 			organizationRole: {
 				findFirst: vi.fn(),
 				findMany: vi.fn(() => Promise.resolve([])),
+			},
+			projects: {
+				findFirst: vi.fn(() =>
+					Promise.resolve(
+						projectOrganizationId === null
+							? undefined
+							: { organizationId: projectOrganizationId },
+					),
+				),
 			},
 		},
 	},
@@ -74,6 +89,7 @@ const ctx = {
 beforeEach(() => {
 	vi.clearAllMocks();
 	serviceOrganizationId = "org-1";
+	projectOrganizationId = "org-1";
 });
 
 describe("checkServicePermissionAndAccess", () => {
