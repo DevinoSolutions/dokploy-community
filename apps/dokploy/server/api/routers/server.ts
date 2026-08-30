@@ -32,6 +32,8 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateServer,
 	apiFindOneServer,
@@ -155,7 +157,13 @@ export const serverRouter = createTRPCRouter({
 	),
 	getDefaultCommand: withPermission("server", "read")
 		.input(apiFindOneServer)
-		.query(async ({ input }) => {
+		.query(async ({ ctx, input }) => {
+			// Reveals whether a serverId exists and whether it is a build server,
+			// so it has to be scoped to the caller's organization.
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			const server = await findServerById(input.serverId);
 			const isBuildServer = server.serverType === "build";
 			return defaultCommand(isBuildServer);
@@ -566,18 +574,25 @@ export const serverRouter = createTRPCRouter({
 	getServerMetrics: withPermission("monitoring", "read")
 		.input(
 			z.object({
-				url: z.string(),
-				token: z.string(),
+				serverId: z.string().optional(),
 				dataPoints: z.string(),
 			}),
 		)
-		.query(async ({ input }) => {
+		.query(async ({ ctx, input }) => {
+			// Endpoint + token come from the server row (or the web-server
+			// settings for the local host), never from the client -- see
+			// `resolveMetricsEndpoint` for the SSRF this closes. Resolved outside
+			// the try/catch so the authorization error is not reshaped.
+			const { baseUrl, token } = await resolveMetricsEndpoint(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			try {
-				const url = new URL(input.url);
+				const url = new URL(`${baseUrl}/metrics`);
 				url.searchParams.append("limit", input.dataPoints);
 				const response = await fetch(url.toString(), {
 					headers: {
-						Authorization: `Bearer ${input.token}`,
+						Authorization: `Bearer ${token}`,
 					},
 				});
 				if (!response.ok) {

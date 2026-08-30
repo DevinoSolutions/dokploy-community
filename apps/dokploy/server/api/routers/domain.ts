@@ -37,6 +37,7 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateDomain,
 	apiFindCompose,
@@ -309,6 +310,14 @@ export const domainRouter = createTRPCRouter({
 	generateDomain: withPermission("domain", "create")
 		.input(z.object({ appName: z.string(), serverId: z.string().optional() }))
 		.mutation(async ({ input, ctx }) => {
+			// `generateTraefikMeDomain` reads the target server's ip and can SSH
+			// into it (`getRemotePublicIp`) when that ip is private, so an
+			// unscoped serverId is both a cross-org exec and an ip/existence
+			// oracle.
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			return generateTraefikMeDomain(
 				input.appName,
 				ctx.user.ownerId,
@@ -317,8 +326,14 @@ export const domainRouter = createTRPCRouter({
 		}),
 	canGenerateTraefikMeDomains: withPermission("domain", "read")
 		.input(z.object({ serverId: z.string() }))
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
 			if (input.serverId) {
+				// Returns the raw ip address of the server, so it must be scoped
+				// to the caller's organization.
+				await assertServerInOrganization(
+					input.serverId,
+					ctx.session.activeOrganizationId,
+				);
 				const server = await findServerById(input.serverId);
 				return server.ipAddress;
 			}

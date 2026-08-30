@@ -53,15 +53,16 @@ interface SystemMetrics {
 }
 
 interface Props {
-	BASE_URL?: string;
-	token?: string;
+	/**
+	 * Remote server to read metrics from. Omit for the local Dokploy host. The
+	 * metrics endpoint and its bearer token are resolved server-side from this
+	 * id -- the client never supplies a URL or a token (see
+	 * `server/api/utils/metrics-endpoint.ts`).
+	 */
+	serverId?: string;
 }
 
-export const ShowPaidMonitoring = ({
-	BASE_URL = process.env.NEXT_PUBLIC_METRICS_URL ||
-		"http://localhost:3001/metrics",
-	token = process.env.NEXT_PUBLIC_METRICS_TOKEN || "my-token",
-}: Props) => {
+export const ShowPaidMonitoring = ({ serverId }: Props) => {
 	const [historicalData, setHistoricalData] = useState<SystemMetrics[]>([]);
 	const [metrics, setMetrics] = useState<SystemMetrics>({} as SystemMetrics);
 	const [dataPoints, setDataPoints] =
@@ -74,8 +75,7 @@ export const ShowPaidMonitoring = ({
 		error: queryError,
 	} = api.server.getServerMetrics.useQuery(
 		{
-			url: BASE_URL,
-			token,
+			serverId,
 			dataPoints,
 		},
 		{
@@ -143,7 +143,6 @@ export const ShowPaidMonitoring = ({
 							? queryError.message
 							: "Failed to fetch metrics, Please check your monitoring Instance is Configured correctly."}
 					</p>
-					<p className="text-sm text-muted-foreground">URL: {BASE_URL}</p>
 				</div>
 			</div>
 		);

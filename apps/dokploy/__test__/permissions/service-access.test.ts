@@ -29,8 +29,22 @@ const mockMemberData = (
 let memberToReturn: ReturnType<typeof mockMemberData> =
 	mockMemberData("member");
 
+/**
+ * Organization the service id resolves to, as returned by the single
+ * `environment -> project` lookup inside `findServiceOrganizationId`.
+ * `null` models "no service with that id exists".
+ */
+let serviceOrganizationId: string | null = "org-1";
+
 vi.mock("@dokploy/server/db", () => ({
 	db: {
+		execute: vi.fn(() =>
+			Promise.resolve(
+				serviceOrganizationId === null
+					? []
+					: [{ organizationId: serviceOrganizationId }],
+			),
+		),
 		query: {
 			member: {
 				findFirst: vi.fn(() => Promise.resolve(memberToReturn)),
@@ -59,6 +73,7 @@ const ctx = {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	serviceOrganizationId = "org-1";
 });
 
 describe("checkServicePermissionAndAccess", () => {
@@ -103,6 +118,80 @@ describe("checkServicePermissionAndAccess", () => {
 		await expect(
 			checkServicePermissionAndAccess(ctx, "service-123", {
 				domain: ["delete"],
+			}),
+		).rejects.toThrow("You don't have access to this service");
+	});
+});
+
+/**
+ * Wave 3: owner/admin short-circuit the `accessedServices` allow-list, and
+ * nothing else proved the id they passed belongs to their organization -- so an
+ * owner of org-1 could deploy/stop/read logs of org-2's services purely by id.
+ */
+describe("checkServicePermissionAndAccess is organization-scoped", () => {
+	const crossOrganizationMessage =
+		"You are not authorized to access this service or it does not exist";
+
+	it("rejects an owner passing a service from another organization", async () => {
+		memberToReturn = mockMemberData("owner", []);
+		serviceOrganizationId = "org-2";
+		await expect(
+			checkServicePermissionAndAccess(ctx, "service-123", {
+				deployment: ["create"],
+			}),
+		).rejects.toThrow(crossOrganizationMessage);
+	});
+
+	it("rejects an admin passing a service from another organization", async () => {
+		memberToReturn = mockMemberData("admin", []);
+		serviceOrganizationId = "org-2";
+		await expect(
+			checkServicePermissionAndAccess(ctx, "service-123", {
+				deployment: ["create"],
+			}),
+		).rejects.toThrow(crossOrganizationMessage);
+	});
+
+	it("gives a non-existent service the same error as a foreign one (no existence oracle)", async () => {
+		memberToReturn = mockMemberData("owner", []);
+		serviceOrganizationId = null;
+		await expect(
+			checkServicePermissionAndAccess(ctx, "service-does-not-exist", {
+				deployment: ["create"],
+			}),
+		).rejects.toThrow(crossOrganizationMessage);
+	});
+
+	it("allows an owner passing a service from their own organization", async () => {
+		memberToReturn = mockMemberData("owner", []);
+		serviceOrganizationId = "org-1";
+		await expect(
+			checkServicePermissionAndAccess(ctx, "service-123", {
+				deployment: ["create"],
+			}),
+		).resolves.toBeUndefined();
+	});
+
+	it("rejects a member whose accessedServices lists a foreign service", async () => {
+		// `accessedServices` is not proof of organization membership: nothing
+		// validates the ids an admin assigns through `user.assignPermissions`.
+		memberToReturn = mockMemberData("member", ["service-123"]);
+		serviceOrganizationId = "org-2";
+		await expect(
+			checkServicePermissionAndAccess(ctx, "service-123", {
+				deployment: ["read"],
+			}),
+		).rejects.toThrow(crossOrganizationMessage);
+	});
+
+	it("keeps the member allow-list error when the member simply lacks access", async () => {
+		// Ordering control: the allow-list check still runs first, so the
+		// member-facing message is unchanged by the new organization check.
+		memberToReturn = mockMemberData("member", []);
+		serviceOrganizationId = "org-1";
+		await expect(
+			checkServicePermissionAndAccess(ctx, "service-123", {
+				deployment: ["read"],
 			}),
 		).rejects.toThrow("You don't have access to this service");
 	});

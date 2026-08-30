@@ -304,10 +304,7 @@ const Service = (
 													{data?.serverId && isCloud ? (
 														<ContainerPaidMonitoring
 															appName={data?.appName || ""}
-															baseUrl={`${data?.serverId ? `http://${data?.server?.ipAddress}:${data?.server?.metricsConfig?.server?.port}` : "http://localhost:4500"}`}
-															token={
-																data?.server?.metricsConfig?.server?.token || ""
-															}
+															serverId={data?.serverId ?? undefined}
 														/>
 													) : (
 														<>

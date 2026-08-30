@@ -19,6 +19,7 @@ import {
 	network as networkTable,
 } from "@/server/db/schema";
 import { audit } from "../utils/audit";
+import { assertServerInOrganization } from "../utils/server-org-scope";
 
 export const networkRouter = createTRPCRouter({
 	all: withPermission("network", "read")
@@ -51,6 +52,10 @@ export const networkRouter = createTRPCRouter({
 	create: withPermission("network", "create")
 		.input(apiCreateNetwork)
 		.mutation(async ({ ctx, input }) => {
+			await assertServerInOrganization(
+				input.serverId ?? undefined,
+				ctx.session.activeOrganizationId,
+			);
 			const created = await createNetwork(
 				input,
 				ctx.session.activeOrganizationId,
@@ -66,6 +71,10 @@ export const networkRouter = createTRPCRouter({
 	networksToSync: withPermission("network", "read")
 		.input(z.object({ serverId: z.string().optional() }))
 		.query(async ({ ctx, input }) => {
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			return findNetworksToSync(
 				ctx.session.activeOrganizationId,
 				input.serverId ?? null,
@@ -80,6 +89,10 @@ export const networkRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			const result = await importDockerNetworks(
 				ctx.session.activeOrganizationId,
 				input.serverId ?? null,
