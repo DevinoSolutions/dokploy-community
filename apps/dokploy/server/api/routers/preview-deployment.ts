@@ -20,6 +20,7 @@ import { apiCreatePreviewDeployment } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
+import { assertPreviewAuthorAllowed } from "@/server/utils/preview-author-gate";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
 // A preview deployment belongs to either an application or a compose service.
@@ -237,6 +238,9 @@ const createApplicationPreviewFromApi = async (
 		});
 	}
 
+	// Same collaborator gate the webhook handler applies to the PR author.
+	await assertPreviewAuthorAllowed(application, input);
+
 	const existingPreviewDeployment = await findPreviewDeploymentByApplicationId(
 		applicationId,
 		input.pullRequestId,
@@ -246,8 +250,10 @@ const createApplicationPreviewFromApi = async (
 		existingPreviewDeployment?.previewDeploymentId || "";
 
 	if (!existingPreviewDeployment) {
-		const previewLimit = application.previewLimit || 0;
-		if ((application.previewDeployments?.length ?? 0) > previewLimit) {
+		// Matches the webhook: default 3, and the limit blocks the Nth+1 *new*
+		// preview rather than allowing one over.
+		const previewLimit = application.previewLimit ?? 3;
+		if ((application.previewDeployments?.length ?? 0) >= previewLimit) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
 				message: "Preview deployments limit reached",
@@ -321,6 +327,9 @@ const createComposePreviewFromApi = async (
 		});
 	}
 
+	// Same collaborator gate the webhook handler applies to the MR/PR author.
+	await assertPreviewAuthorAllowed(compose, input);
+
 	const existingPreviewDeployment = await findPreviewDeploymentByComposeId(
 		composeId,
 		input.pullRequestId,
@@ -330,9 +339,11 @@ const createComposePreviewFromApi = async (
 		existingPreviewDeployment?.previewDeploymentId || "";
 
 	if (!existingPreviewDeployment) {
-		const previewLimit = compose.previewLimit || 0;
+		// Matches the webhook: default 3, and the limit blocks the Nth+1 *new*
+		// preview rather than allowing one over.
+		const previewLimit = compose.previewLimit ?? 3;
 		const existingPreviews = await findPreviewDeploymentsByComposeId(composeId);
-		if (existingPreviews.length > previewLimit) {
+		if (existingPreviews.length >= previewLimit) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
 				message: "Preview deployments limit reached",

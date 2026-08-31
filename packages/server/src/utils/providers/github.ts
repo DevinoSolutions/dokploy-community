@@ -1,7 +1,11 @@
 import { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
-import type { apiFindGithubBranches } from "@dokploy/server/db/schema";
+import type {
+	apiFindGithubBranches,
+	apiFindGithubPullRequests,
+} from "@dokploy/server/db/schema";
 import { findGithubById, type Github } from "@dokploy/server/services/github";
+import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { createAppAuth } from "@octokit/auth-app";
 import { TRPCError } from "@trpc/server";
@@ -261,6 +265,48 @@ export const getGithubRepositories = async (githubId?: string) => {
 	>["data"]["repositories"];
 
 	return repositories;
+};
+
+export const getGithubPullRequests = async (
+	input: z.infer<typeof apiFindGithubPullRequests>,
+): Promise<ChangeRequest[]> => {
+	if (!input.githubId) {
+		return [];
+	}
+	const githubProvider = await findGithubById(input.githubId);
+
+	const octokit = new Octokit({
+		authStrategy: createAppAuth,
+		auth: {
+			appId: githubProvider.githubAppId,
+			privateKey: githubProvider.githubPrivateKey,
+			installationId: githubProvider.githubInstallationId,
+		},
+		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
+	});
+
+	const pullRequests = (await octokit.paginate(octokit.rest.pulls.list, {
+		owner: input.owner,
+		repo: input.repo,
+		state: "open",
+		sort: "updated",
+		direction: "desc",
+		per_page: 100,
+	})) as unknown as Awaited<ReturnType<typeof octokit.rest.pulls.list>>["data"];
+
+	return pullRequests.map((pr) => ({
+		id: pr.id,
+		number: pr.number,
+		title: pr.title,
+		url: pr.html_url,
+		branch: pr.head?.ref ?? "",
+		baseBranch: pr.base?.ref ?? "",
+		draft: pr.draft ?? false,
+		// The author drives the collaborator check on the manual build path, the
+		// same way `pull_request.user.login` does for webhook-triggered previews.
+		authorUsername: pr.user?.login ?? null,
+		authorId: null,
+	}));
 };
 
 export const getGithubBranches = async (

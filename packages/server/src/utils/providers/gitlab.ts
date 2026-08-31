@@ -6,6 +6,7 @@ import {
 	type Gitlab,
 	updateGitlab,
 } from "@dokploy/server/services/gitlab";
+import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
@@ -267,6 +268,90 @@ export const getGitlabBranches = async (input: {
 			id: string;
 		};
 	}[];
+};
+
+interface GitlabMergeRequest {
+	id: number;
+	iid: number;
+	title: string;
+	web_url: string;
+	source_branch: string;
+	target_branch: string;
+	draft: boolean;
+	author?: {
+		id?: number;
+		username?: string;
+	} | null;
+}
+
+export const getGitlabMergeRequests = async (input: {
+	id?: number;
+	gitlabId?: string;
+	owner: string;
+	repo: string;
+}): Promise<ChangeRequest[]> => {
+	if (!input.gitlabId || !input.id || input.id === 0) {
+		return [];
+	}
+
+	// GitLab OAuth access tokens are short lived; without this the listing 401s
+	// as soon as the stored token expires, like every other helper here does.
+	await refreshGitlabToken(input.gitlabId);
+	const gitlabProvider = await findGitlabById(input.gitlabId);
+
+	const allMergeRequests: GitlabMergeRequest[] = [];
+	let page = 1;
+	const perPage = 100; // GitLab's max per page is 100
+	const baseUrl = (
+		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
+	).replace(/\/+$/, "");
+
+	while (true) {
+		const mergeRequestsResponse = await fetch(
+			`${baseUrl}/api/v4/projects/${input.id}/merge_requests?state=opened&page=${page}&per_page=${perPage}`,
+			{
+				headers: {
+					Authorization: `Bearer ${gitlabProvider.accessToken}`,
+				},
+			},
+		);
+
+		if (!mergeRequestsResponse.ok) {
+			throw new Error(
+				`Failed to fetch merge requests: ${mergeRequestsResponse.statusText}`,
+			);
+		}
+
+		const mergeRequests =
+			(await mergeRequestsResponse.json()) as GitlabMergeRequest[];
+
+		if (mergeRequests.length === 0) {
+			break;
+		}
+
+		allMergeRequests.push(...mergeRequests);
+		page++;
+
+		const total = mergeRequestsResponse.headers.get("x-total");
+		if (total && allMergeRequests.length >= Number.parseInt(total)) {
+			break;
+		}
+	}
+
+	return allMergeRequests.map((mr) => ({
+		id: mr.id,
+		number: mr.iid,
+		title: mr.title,
+		url: mr.web_url,
+		branch: mr.source_branch,
+		baseBranch: mr.target_branch,
+		draft: mr.draft,
+		// `author.id` is the same identity the MR webhook authorizes through
+		// `object_attributes.author_id`; keep it so the manual path can reuse
+		// `checkGitlabMemberPermissionsByUserId`.
+		authorUsername: mr.author?.username ?? null,
+		authorId: mr.author?.id ?? null,
+	}));
 };
 
 export const testGitlabConnection = async (
