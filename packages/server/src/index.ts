@@ -41,6 +41,12 @@ export * from "./services/notification";
 export * from "./services/overview";
 export * from "./services/patch";
 export * from "./services/patch-repo";
+// Barrel-exported on purpose: `./services/user` used to ship unhardened
+// duplicates of these helpers, so `import { checkServiceAccess } from
+// "@dokploy/server"` silently resolved to the legacy, non-organization-scoped
+// implementation. The duplicates are gone and this export makes the hardened
+// implementation the only one the barrel can hand out.
+export * from "./services/permission";
 export * from "./services/port";
 export * from "./services/postgres";
 export * from "./services/preview-deployment";

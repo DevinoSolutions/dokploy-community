@@ -220,6 +220,9 @@ export const getGitlabBranches = async (input: {
 		return [];
 	}
 
+	// GitLab OAuth access tokens are short lived; without this the listing 401s
+	// as soon as the stored token expires, like every other helper here does.
+	await refreshGitlabToken(input.gitlabId);
 	const gitlabProvider = await findGitlabById(input.gitlabId);
 
 	const allBranches = [];
