@@ -43,7 +43,6 @@ import {
 	updateCompose,
 	updateDeploymentStatus,
 } from "@dokploy/server";
-import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
