@@ -64,42 +64,42 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 		isLoading: isLoadingGithub,
 		error: githubError,
 	} = api.github.getGithubPullRequests.useQuery(
-			{
-				owner: resource.owner ?? "",
-				repo: resource.repository ?? "",
-				githubId: resource.githubId ?? "",
-			},
-			{
-				enabled:
-					isOpen &&
-					!isGitlab &&
-					!!resource.owner &&
-					!!resource.repository &&
-					!!resource.githubId,
-			},
-		);
+		{
+			owner: resource.owner ?? "",
+			repo: resource.repository ?? "",
+			githubId: resource.githubId ?? "",
+		},
+		{
+			enabled:
+				isOpen &&
+				!isGitlab &&
+				!!resource.owner &&
+				!!resource.repository &&
+				!!resource.githubId,
+		},
+	);
 
 	const {
 		data: gitlabMergeRequests,
 		isLoading: isLoadingGitlab,
 		error: gitlabError,
 	} = api.gitlab.getGitlabMergeRequests.useQuery(
-			{
-				id: resource.gitlabProjectId ?? 0,
-				owner: resource.gitlabOwner ?? "",
-				repo: resource.gitlabRepository ?? "",
-				gitlabId: resource.gitlabId ?? "",
-			},
-			{
-				enabled:
-					isOpen &&
-					isGitlab &&
-					!!resource.gitlabId &&
-					!!resource.gitlabProjectId &&
-					!!resource.gitlabOwner &&
-					!!resource.gitlabRepository,
-			},
-		);
+		{
+			id: resource.gitlabProjectId ?? 0,
+			owner: resource.gitlabOwner ?? "",
+			repo: resource.gitlabRepository ?? "",
+			gitlabId: resource.gitlabId ?? "",
+		},
+		{
+			enabled:
+				isOpen &&
+				isGitlab &&
+				!!resource.gitlabId &&
+				!!resource.gitlabProjectId &&
+				!!resource.gitlabOwner &&
+				!!resource.gitlabRepository,
+		},
+	);
 
 	const changeRequests = isGitlab ? gitlabMergeRequests : githubPullRequests;
 	const isLoading = isGitlab ? isLoadingGitlab : isLoadingGithub;
