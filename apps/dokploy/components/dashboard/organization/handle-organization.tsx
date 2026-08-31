@@ -74,6 +74,7 @@ export function AddOrganization({
 		},
 		{
 			enabled: !!organizationId,
+			refetchOnWindowFocus: false,
 		},
 	);
 	const { mutateAsync, isPending } = organizationId
