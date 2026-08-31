@@ -45,16 +45,17 @@ describe("backupVolume - restart guarantee (#4263)", () => {
 		// The backup failure must be captured rather than aborting the script via
 		// `set -e`, so the restart below is always reached.
 		expect(script).toContain("set +e");
-		expect(script).toMatch(/BACKUP_EXIT=\$\?/);
+		expect(script).toMatch(/DOKPLOY_VOLUME_BACKUP_STATUS=\$\?/);
 		// Regression guard: the backup subshell must NOT be the left side of
-		// `|| BACKUP_EXIT=$?`. In that tested context bash disables the
-		// subshell's own `set -e`, silently swallowing a mid-backup failure.
-		expect(script).not.toMatch(/\)\s*\|\|\s*BACKUP_EXIT/);
+		// `|| DOKPLOY_VOLUME_BACKUP_STATUS=$?`. In that tested context bash
+		// disables the subshell's own `set -e`, silently swallowing a mid-backup
+		// failure.
+		expect(script).not.toMatch(/\)\s*\|\|\s*DOKPLOY_VOLUME_BACKUP_STATUS/);
 
 		const restartIdx = script.indexOf(
 			"docker service update --replicas=$ACTUAL_REPLICAS",
 		);
-		const bailIdx = script.indexOf('exit "$BACKUP_EXIT"');
+		const bailIdx = script.indexOf('exit "$DOKPLOY_VOLUME_BACKUP_STATUS"');
 
 		expect(restartIdx).toBeGreaterThan(-1);
 		expect(bailIdx).toBeGreaterThan(-1);
@@ -78,13 +79,13 @@ describe("backupVolume - restart guarantee (#4263)", () => {
 		const script = (await backupVolume(composeVolumeBackup)) as string;
 
 		expect(script).toContain("set +e");
-		expect(script).toMatch(/BACKUP_EXIT=\$\?/);
-		expect(script).not.toMatch(/\)\s*\|\|\s*BACKUP_EXIT/);
+		expect(script).toMatch(/DOKPLOY_VOLUME_BACKUP_STATUS=\$\?/);
+		expect(script).not.toMatch(/\)\s*\|\|\s*DOKPLOY_VOLUME_BACKUP_STATUS/);
 
 		const restartIdx = script.indexOf(
 			"docker service update --replicas=$ACTUAL_REPLICAS",
 		);
-		const bailIdx = script.indexOf('exit "$BACKUP_EXIT"');
+		const bailIdx = script.indexOf('exit "$DOKPLOY_VOLUME_BACKUP_STATUS"');
 
 		expect(restartIdx).toBeGreaterThan(-1);
 		expect(bailIdx).toBeGreaterThan(-1);

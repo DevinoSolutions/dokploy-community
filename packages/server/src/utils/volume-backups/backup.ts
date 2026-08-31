@@ -10,6 +10,43 @@ import {
 	normalizeS3Path,
 } from "../backups/utils";
 
+interface RestartSafeBackupCommandOptions {
+	stopCommand: string;
+	backupCommand: string;
+	startCommand: string;
+	uploadCommand: string;
+}
+
+export const createRestartSafeBackupCommand = ({
+	stopCommand,
+	backupCommand,
+	startCommand,
+	uploadCommand,
+}: RestartSafeBackupCommandOptions) => `
+	${stopCommand}
+	set +e
+	(
+		${backupCommand}
+	)
+	DOKPLOY_VOLUME_BACKUP_STATUS=$?
+	(
+		set -e
+		${startCommand}
+	)
+	DOKPLOY_VOLUME_RESTART_STATUS=$?
+	set -e
+	if [ "$DOKPLOY_VOLUME_BACKUP_STATUS" -ne 0 ]; then
+		if [ "$DOKPLOY_VOLUME_RESTART_STATUS" -ne 0 ]; then
+			echo "Service restart also failed with exit code $DOKPLOY_VOLUME_RESTART_STATUS"
+		fi
+		exit "$DOKPLOY_VOLUME_BACKUP_STATUS"
+	fi
+	if [ "$DOKPLOY_VOLUME_RESTART_STATUS" -ne 0 ]; then
+		exit "$DOKPLOY_VOLUME_RESTART_STATUS"
+	fi
+	${uploadCommand}
+`;
+
 export const getVolumeServiceAppName = (
 	volumeBackup: Awaited<ReturnType<typeof findVolumeBackupById>>,
 ): string => {
@@ -118,48 +155,27 @@ export const backupVolume = async (
 		echo "Volume backup lock released"
 	`;
 
-	// Run the backup between a stop and a start step, guaranteeing the start
-	// step always executes — even if the backup fails (e.g. the ubuntu image
-	// can't be pulled). The backup runs in a standalone subshell with `set +e`
-	// in the parent so a failure is captured into BACKUP_EXIT instead of
-	// aborting the script before the service is brought back up.
-	//
-	// The subshell must NOT be the left side of `||` (e.g. `( ... ) || x=$?`):
-	// in that "tested" context bash disables the subshell's own `set -e`, so a
-	// mid-backup failure would be swallowed and reported as success. A plain
-	// subshell followed by `$?` preserves `set -e` inside it.
-	const guardedBackup = (stopCommand: string, startCommand: string) =>
+	console.log(
 		lockWrapper(`
-		${stopCommand}
-
-		set +e
-		(
-		${backupCommand}
-		)
-		BACKUP_EXIT=$?
-		set -e
-
-		${startCommand}
-
-		if [ "$BACKUP_EXIT" -ne 0 ]; then
-			echo "Volume backup failed with exit code $BACKUP_EXIT ❌"
-			exit "$BACKUP_EXIT"
-		fi
-
-		${uploadCommand}
-  `);
+		echo "Volume backup lock acquired"
+		echo "Volume backup lock released"
+	`),
+	);
 
 	if (serviceType === "application") {
-		const appName = volumeBackup.application?.appName;
-		return guardedBackup(
-			`
-		echo "Stopping application to 0 replicas"
-		ACTUAL_REPLICAS=$(docker service inspect ${appName} --format "{{.Spec.Mode.Replicated.Replicas}}")
-		echo "Actual replicas: $ACTUAL_REPLICAS"
-		docker service update --replicas=0 ${appName}`,
-			`
-		echo "Starting application to $ACTUAL_REPLICAS replicas"
-		docker service update --replicas=$ACTUAL_REPLICAS --with-registry-auth ${appName}`,
+		return lockWrapper(
+			createRestartSafeBackupCommand({
+				stopCommand: `
+				echo "Stopping application to 0 replicas"
+				ACTUAL_REPLICAS=$(docker service inspect ${volumeBackup.application?.appName} --format "{{.Spec.Mode.Replicated.Replicas}}")
+				echo "Actual replicas: $ACTUAL_REPLICAS"
+				docker service update --replicas=0 ${volumeBackup.application?.appName}`,
+				backupCommand,
+				startCommand: `
+				echo "Starting application to $ACTUAL_REPLICAS replicas"
+				docker service update --replicas=$ACTUAL_REPLICAS --with-registry-auth ${volumeBackup.application?.appName}`,
+				uploadCommand,
+			}),
 		);
 	}
 	if (serviceType === "compose") {
@@ -192,6 +208,13 @@ export const backupVolume = async (
 			echo "Compose container started"
 			`;
 		}
-		return guardedBackup(stopCommand, startCommand);
+		return lockWrapper(
+			createRestartSafeBackupCommand({
+				stopCommand,
+				backupCommand,
+				startCommand,
+				uploadCommand,
+			}),
+		);
 	}
 };

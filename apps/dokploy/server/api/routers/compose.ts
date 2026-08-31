@@ -572,7 +572,9 @@ export const composeRouter = createTRPCRouter({
 				service: ["create"],
 			});
 			const compose = await findComposeById(input.composeId);
-			const command = createCommand(compose);
+			const { COMPOSE_PATH } = paths(!!compose.serverId);
+			const projectPath = join(COMPOSE_PATH, compose.appName, "code");
+			const command = createCommand(compose, projectPath);
 			return `docker ${command}`;
 		}),
 	refreshToken: protectedProcedure

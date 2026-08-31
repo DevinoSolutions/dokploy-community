@@ -128,6 +128,47 @@ query (a missing row now means UNAUTHORIZED rather than upstream's NOT_FOUND).
 `filterEnvironmentServices` on the way out is redundant with the query's
 `buildServiceFilter` where-clauses but is kept as defence in depth.
 
+### Dropped at v0.30.3: fork `guardedBackup` volume-backup restart guard
+
+Upstream #5082 shipped `createRestartSafeBackupCommand` in
+`packages/server/src/utils/volume-backups/backup.ts`, a strict superset of the
+fork's `guardedBackup` (it also captures a *restart* failure and reports it).
+Ours was deleted. The fork's own rclone layer in that file must survive every
+sync: `getRclonePathAndFlags` + `buildRcloneCommand` (crypt/generic
+destinations, env-var credentials) instead of upstream's `getS3Credentials`,
+the `effectivePrefix` fallback to `getVolumeServiceAppName(...)`, and the
+"destination" wording in `uploadCommand`. Upstream renamed the shell variable
+`BACKUP_EXIT` → `DOKPLOY_VOLUME_BACKUP_STATUS`; the fork's integration-level
+regression test `__test__/volume-backups/backup.test.ts` was retargeted at the
+new name rather than deleted, because upstream's
+`__test__/backups/volume-backup-restart.test.ts` only unit-tests the helper and
+does not assert that `backupVolume` actually wires it into both service types.
+
+### Adapted at v0.30.3: `network.resync` and the fork permission verbs
+
+Upstream #5198 added `networkRouter.resync` (dockerId-based delete/recreate
+detection) as a `protectedProcedure`. The fork gates every network procedure
+with `withPermission`, and its `network` statement only has
+`["read", "create", "delete"]` — there is no `update` verb. `resync` is
+therefore gated on `withPermission("network", "delete")`, matching the existing
+`recreate` procedure it most resembles. The wave-3 `assertServerInOrganization`
+calls on `create` / `import` / `networksToSync` and the `withPermission` gates
+on every other procedure are re-applied on every sync.
+
+### Adapted at v0.30.3: multi-IP domain validation vs. fork domain features
+
+Upstream #5214 changed `validateDomain(domain, expectedIp?)` to
+`validateDomain(domain, expectedIps?: string[])`, added
+`getServerIpCandidates()` in `packages/server/src/services/domain.ts`, and
+switched `domainRouter.validateDomain`'s input from `serverIp` to `serverId`
+(with its own org check, which subsumes the fork's guard). Take all of that
+verbatim, then re-apply the three fork additions to that file: the
+`validateDomainRestriction` gate in `createDomain`, the canonical host
+lowercasing in `createDomain`/`updateDomainById`, and the private-IP →
+public-IP resolution plus `baseDomain` argument in `generateTraefikMeDomain`.
+The wave-3 `assertServerInOrganization` guards on `generateDomain` and
+`canGenerateTraefikMeDomains` also stay.
+
 ### Historical (superseded): fork Docker network management file map
 
 Net-new fork files (kept as-is unless upstream restructures their neighbors):
@@ -186,7 +227,19 @@ new numbered migrations. Rules:
    - Enum types and `ADD CONSTRAINT` have no `IF NOT EXISTS`; wrap each in
      `DO $$ BEGIN <stmt>; EXCEPTION WHEN duplicate_object THEN null; END $$;`
      (keep `--> statement-breakpoint` separators intact).
-4. **Guard upstream migrations only on a real column-name collision.** If an
+4. **Number collisions: re-issue upstream's migration in a fork slot.** Rule 1
+   only works while upstream's new numbers are still free. Once the fork has
+   *released* migrations at those numbers (instances have already run them),
+   dropping ours would strand production. Instead: delete upstream's colliding
+   `.sql` + snapshot and their `_journal.json` entries, keep the fork's, and let
+   `migration:generate` re-emit the schema delta at the fork's next free number.
+   Upstream migrations that are pure **data** backfills are not schema-derivable
+   and will not be re-emitted — hand-carry the exact statement into the
+   generated `.sql` after a `--> statement-breakpoint`, and confirm it is
+   idempotent (upstream's usually are). Done at v0.30.3 for upstream's `0186`
+   (`network.dockerId`) and `0187` (`server.terminal` role backfill), both
+   folded into the fork's `0196_robust_lucky_pierre`.
+5. **Guard upstream migrations only on a real column-name collision.** If an
    upstream migration adds a column our *old* dropped migration already created
    under the **same name**, add `IF NOT EXISTS` to our copy of that upstream
    `.sql`. Upstream never retro-edits released migrations, so this never causes a
