@@ -57,6 +57,7 @@ import { ExportProject } from "./export-project";
 import { HandleProject } from "./handle-project";
 import { ProjectEnvironment } from "./project-environment";
 import { getProjectFaviconUrls, ProjectIcon } from "./project-icon";
+import { ProjectWildcardDomain } from "./project-wildcard-domain";
 
 export const ShowProjects = () => {
 	const utils = api.useUtils();
@@ -432,6 +433,14 @@ export const ShowProjects = () => {
 																					onClick={(e) => e.stopPropagation()}
 																				>
 																					<HandleProject
+																						projectId={project.projectId}
+																					/>
+																				</div>
+
+																				<div
+																					onClick={(e) => e.stopPropagation()}
+																				>
+																					<ProjectWildcardDomain
 																						projectId={project.projectId}
 																					/>
 																				</div>

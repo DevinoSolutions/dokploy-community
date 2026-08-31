@@ -169,6 +169,14 @@ public-IP resolution plus `baseDomain` argument in `generateTraefikMeDomain`.
 The wave-3 `assertServerInOrganization` guards on `generateDomain` and
 `canGenerateTraefikMeDomains` also stay.
 
+Since the user-owned wildcard base feature, `generateTraefikMeDomain` also takes
+a fourth `projectId` argument and returns `{ domain, baseDomain, source }`
+instead of a bare string, its base domain comes from `resolveGeneratedDomainBase`
+(same file), and `updateDomainById` enforces `validateDomainRestriction` on the
+host. `domain.generateDomain` / `domain.canGenerateTraefikMeDomains` take an
+optional `projectId` guarded by `assertProjectInOrganization`. Re-apply all of
+that on top of upstream's version of the file.
+
 ### Historical (superseded): fork Docker network management file map
 
 Net-new fork files (kept as-is unless upstream restructures their neighbors):
@@ -245,6 +253,26 @@ new numbered migrations. Rules:
    `.sql`. Upstream never retro-edits released migrations, so this never causes a
    future merge conflict. (At v0.29.11 there was **no** collision: upstream named
    its column `buildsConcurrency`, our dropped one was `deploymentConcurrency`.)
+
+### Fork columns on upstream-owned tables (schema ledger)
+
+Some fork features add columns to tables upstream owns. On a sync the schema
+`.ts` files resolve theirs-wins, which silently drops these unless they are
+re-applied by hand **before** `migration:generate` runs (rule 2). If one is
+dropped, the regenerated migration will contain a `DROP COLUMN` — that is the
+tell.
+
+| Table | Column | Feature | Landed in |
+|---|---|---|---|
+| `organization` | `wildcard_domain` (text, null) | user-owned wildcard base for generated domains | `0197` |
+| `project` | `wildcardDomain` (text, null) | per-project wildcard base override | `0197` |
+| `project` | `useOrganizationWildcard` (bool, not null, default true) | opt a project out of the organization wildcard | `0197` |
+
+The catch-up migration `0195_fork_schema_catchup` exists for exactly this class
+of drift: upstream→fork upgrades that skipped fork migrations get every
+fork-owned column/table re-created idempotently. When a new fork column is added
+to an upstream table, add it to the table above; if it is ever found missing in
+the wild, extend the catch-up migration rather than editing a released one.
 
 ### Migrator ordering gotcha (drizzle `postgres-js` migrator)
 

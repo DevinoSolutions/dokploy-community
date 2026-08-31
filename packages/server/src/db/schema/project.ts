@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text } from "drizzle-orm/pg-core";
+import { boolean, pgTable, text } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -24,6 +24,20 @@ export const projects = pgTable("project", {
 		.notNull()
 		.references(() => organization.id, { onDelete: "cascade" }),
 	env: encryptedText("env").notNull().default(""),
+	/**
+	 * Fork column. Per-project override for the base domain used when Dokploy
+	 * generates a domain. Stored BARE (`apps.example.com`), displayed as
+	 * `*.apps.example.com`. Highest rung of `resolveGeneratedDomainBase`.
+	 */
+	wildcardDomain: text("wildcardDomain"),
+	/**
+	 * Fork column. When true (default), a project with no `wildcardDomain` of
+	 * its own falls back to `organization.wildcardDomain`. Set to false to opt a
+	 * project out of the organization-wide base entirely.
+	 */
+	useOrganizationWildcard: boolean("useOrganizationWildcard")
+		.notNull()
+		.default(true),
 });
 
 export const projectRelations = relations(projects, ({ many, one }) => ({
@@ -68,7 +82,22 @@ export const apiRemoveProject = createSchema
 // 	})
 // 	.required();
 
-export const apiUpdateProject = createSchema.partial().extend({
-	projectId: z.string().min(1),
-});
+export const apiUpdateProject = createSchema
+	.partial()
+	.extend({
+		projectId: z.string().min(1),
+	})
+	// The generated-domain fields are written exclusively through
+	// `project.updateWildcardDomain`, which normalizes and validates the value
+	// (`*.` stripping, prefix-pattern rejection, hostname validation). Leaving
+	// them writable through the generic project update would let an unvalidated
+	// string reach the column, so they are omitted here on purpose.
+	.omit({ wildcardDomain: true, useOrganizationWildcard: true });
 // .omit({ serverId: true });
+
+export const apiUpdateProjectWildcardDomain = z.object({
+	projectId: z.string().min(1),
+	// `null` / "" clears the override.
+	wildcardDomain: z.string().nullable().optional(),
+	useOrganizationWildcard: z.boolean().optional(),
+});

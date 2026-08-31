@@ -23,13 +23,18 @@ import {
 	removeCloudflareRoute,
 	removeDomain,
 	removeDomainById,
+	resolveGeneratedDomainBase,
 	resolveOrgCloudflarePolicy,
 	resolveZoneIdForHost,
 	selectIntegrationForHost,
 	updateDomainById,
 	validateDomain,
 } from "@dokploy/server";
-import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import {
+	assertProjectInOrganization,
+	checkServicePermissionAndAccess,
+} from "@dokploy/server/services/permission";
+import { validateDomainRestriction } from "@dokploy/server/utils/wildcard-restriction";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
@@ -309,7 +314,13 @@ export const domainRouter = createTRPCRouter({
 			return await findDomainsByComposeId(input.composeId);
 		}),
 	generateDomain: withPermission("domain", "create")
-		.input(z.object({ appName: z.string(), serverId: z.string().optional() }))
+		.input(
+			z.object({
+				appName: z.string(),
+				serverId: z.string().optional(),
+				projectId: z.string().optional(),
+			}),
+		)
 		.mutation(async ({ input, ctx }) => {
 			// `generateTraefikMeDomain` reads the target server's ip and can SSH
 			// into it (`getRemotePublicIp`) when that ip is private, so an
@@ -319,15 +330,51 @@ export const domainRouter = createTRPCRouter({
 				input.serverId,
 				ctx.session.activeOrganizationId,
 			);
-			return generateTraefikMeDomain(
+			// The projectId selects which project/organization wildcard base is
+			// used, so it is an org-scoped read of another organization's
+			// configuration unless it is asserted here.
+			if (input.projectId) {
+				await assertProjectInOrganization(
+					input.projectId,
+					ctx.session.activeOrganizationId,
+				);
+			}
+			const generated = await generateTraefikMeDomain(
 				input.appName,
 				ctx.user.ownerId,
 				input.serverId,
+				input.projectId,
 			);
+
+			// Reconcile with the domain-restriction allow-list up front: without
+			// this the button happily hands the user a host that `domain.create`
+			// then refuses, with an error that says nothing about the wildcard
+			// base being the cause.
+			const restriction = await validateDomainRestriction(generated.domain);
+			if (!restriction.valid) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: `The generated domain "${generated.domain}" conflicts with the domain restriction allow-list. ${
+						generated.baseDomain
+							? `The base domain in use is "${generated.baseDomain}" (from the ${generated.source} configuration).`
+							: "No wildcard base domain is configured, so an sslip.io host was generated."
+					} Add a matching pattern under Settings → Server → Domain Restriction, or change the wildcard base domain.`,
+				});
+			}
+
+			return generated;
 		}),
 	canGenerateTraefikMeDomains: withPermission("domain", "read")
-		.input(z.object({ serverId: z.string() }))
+		.input(
+			z.object({ serverId: z.string(), projectId: z.string().optional() }),
+		)
 		.query(async ({ input, ctx }) => {
+			if (input.projectId) {
+				await assertProjectInOrganization(
+					input.projectId,
+					ctx.session.activeOrganizationId,
+				);
+			}
 			if (input.serverId) {
 				// Returns the raw ip address of the server, so it must be scoped
 				// to the caller's organization.
@@ -336,10 +383,25 @@ export const domainRouter = createTRPCRouter({
 					ctx.session.activeOrganizationId,
 				);
 				const server = await findServerById(input.serverId);
-				return server.ipAddress;
+				if (server.ipAddress) {
+					return server.ipAddress;
+				}
+			} else {
+				const settings = await getWebServerSettings();
+				if (settings?.serverIp) {
+					return settings.serverIp;
+				}
 			}
-			const settings = await getWebServerSettings();
-			return settings?.serverIp || "";
+
+			// No usable IP. Generation is still meaningful when a wildcard base
+			// domain resolves (the host does not encode the IP at all in that
+			// case), so report the base instead of "" — otherwise the feature is
+			// invisible exactly on the installs that configured it.
+			const { baseDomain } = await resolveGeneratedDomainBase({
+				projectId: input.projectId,
+				serverId: input.serverId || undefined,
+			});
+			return baseDomain ?? "";
 		}),
 
 	certificateResolvers: withPermission("domain", "read")

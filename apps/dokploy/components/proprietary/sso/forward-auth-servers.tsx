@@ -182,11 +182,15 @@ export const ForwardAuthServers = () => {
 
 	const handleGenerateDomain = async (serverId: string | null) => {
 		try {
-			const host = await generateDomain({
+			const generated = await generateDomain({
 				appName: "auth",
 				serverId: serverId ?? undefined,
 			});
-			patchForm(serverId, { host, https: false, certificateType: "none" });
+			patchForm(serverId, {
+				host: generated.domain,
+				https: false,
+				certificateType: "none",
+			});
 		} catch (error) {
 			toast.error(
 				error instanceof Error ? error.message : "Error generating domain",
