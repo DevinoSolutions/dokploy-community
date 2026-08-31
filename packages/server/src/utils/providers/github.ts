@@ -291,6 +291,7 @@ export const getGithubPullRequests = async (
 		state: "open",
 		sort: "updated",
 		direction: "desc",
+		per_page: 100,
 	})) as unknown as Awaited<ReturnType<typeof octokit.rest.pulls.list>>["data"];
 
 	return pullRequests.map((pr) => ({
@@ -301,6 +302,10 @@ export const getGithubPullRequests = async (
 		branch: pr.head?.ref ?? "",
 		baseBranch: pr.base?.ref ?? "",
 		draft: pr.draft ?? false,
+		// The author drives the collaborator check on the manual build path, the
+		// same way `pull_request.user.login` does for webhook-triggered previews.
+		authorUsername: pr.user?.login ?? null,
+		authorId: null,
 	}));
 };
 

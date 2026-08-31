@@ -278,6 +278,10 @@ interface GitlabMergeRequest {
 	source_branch: string;
 	target_branch: string;
 	draft: boolean;
+	author?: {
+		id?: number;
+		username?: string;
+	} | null;
 }
 
 export const getGitlabMergeRequests = async (input: {
@@ -290,6 +294,9 @@ export const getGitlabMergeRequests = async (input: {
 		return [];
 	}
 
+	// GitLab OAuth access tokens are short lived; without this the listing 401s
+	// as soon as the stored token expires, like every other helper here does.
+	await refreshGitlabToken(input.gitlabId);
 	const gitlabProvider = await findGitlabById(input.gitlabId);
 
 	const allMergeRequests: GitlabMergeRequest[] = [];
@@ -339,6 +346,11 @@ export const getGitlabMergeRequests = async (input: {
 		branch: mr.source_branch,
 		baseBranch: mr.target_branch,
 		draft: mr.draft,
+		// `author.id` is the same identity the MR webhook authorizes through
+		// `object_attributes.author_id`; keep it so the manual path can reuse
+		// `checkGitlabMemberPermissionsByUserId`.
+		authorUsername: mr.author?.username ?? null,
+		authorId: mr.author?.id ?? null,
 	}));
 };
 
