@@ -59,8 +59,11 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 		? (resource.gitlabRepository ?? resource.repository)
 		: resource.repository;
 
-	const { data: githubPullRequests, isFetching: isFetchingGithub } =
-		api.github.getGithubPullRequests.useQuery(
+	const {
+		data: githubPullRequests,
+		isLoading: isLoadingGithub,
+		error: githubError,
+	} = api.github.getGithubPullRequests.useQuery(
 			{
 				owner: resource.owner ?? "",
 				repo: resource.repository ?? "",
@@ -76,8 +79,11 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 			},
 		);
 
-	const { data: gitlabMergeRequests, isFetching: isFetchingGitlab } =
-		api.gitlab.getGitlabMergeRequests.useQuery(
+	const {
+		data: gitlabMergeRequests,
+		isLoading: isLoadingGitlab,
+		error: gitlabError,
+	} = api.gitlab.getGitlabMergeRequests.useQuery(
 			{
 				id: resource.gitlabProjectId ?? 0,
 				owner: resource.gitlabOwner ?? "",
@@ -96,7 +102,8 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 		);
 
 	const changeRequests = isGitlab ? gitlabMergeRequests : githubPullRequests;
-	const isFetching = isFetchingGithub || isFetchingGitlab;
+	const isLoading = isGitlab ? isLoadingGitlab : isLoadingGithub;
+	const listError = isGitlab ? gitlabError : githubError;
 
 	const filtered = useMemo(() => {
 		if (!changeRequests) return undefined;
@@ -124,6 +131,10 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 				pullRequestNumber: String(selected.number),
 				pullRequestTitle: selected.title,
 				pullRequestURL: selected.url,
+				// Needed for the collaborator check the server runs against the
+				// change request author when the resource requires it.
+				pullRequestAuthor: selected.authorUsername ?? undefined,
+				pullRequestAuthorId: selected.authorId ?? undefined,
 			});
 			toast.success(
 				`${changeRequestLabel} #${selected.number} preview deployment started`,
@@ -169,6 +180,11 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 							Preview deployments are disabled for this resource.
 						</AlertBlock>
 					)}
+					{listError && (
+						<AlertBlock type="error">
+							{`Could not load open ${changeRequestLabelPlural}: ${listError.message}`}
+						</AlertBlock>
+					)}
 					{owner && repo && (
 						<div className="text-sm text-muted-foreground">
 							{owner}/{repo}
@@ -183,7 +199,7 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 							onChange={(e) => setSearch(e.target.value)}
 						/>
 					</div>
-					{isFetching ? (
+					{isLoading ? (
 						<div className="flex flex-col items-center justify-center gap-3 min-h-[25vh]">
 							<Loader2 className="size-6 text-muted-foreground animate-spin" />
 							<span className="text-sm text-muted-foreground">
@@ -194,7 +210,9 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 						<div className="flex flex-col items-center justify-center gap-3 min-h-[25vh]">
 							<ChangeRequestIcon className="size-8 text-muted-foreground" />
 							<span className="text-sm text-muted-foreground">
-								No open {changeRequestLabelPlural} found
+								{listError
+									? `Could not load ${changeRequestLabelPlural}`
+									: `No open ${changeRequestLabelPlural} found`}
 							</span>
 						</div>
 					) : (
@@ -237,6 +255,14 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 							<div className="text-muted-foreground">
 								Branch: <span className="font-mono">{selected.branch}</span>
 							</div>
+							{selected.authorUsername && (
+								<div className="text-muted-foreground">
+									Author:{" "}
+									<span className="font-mono">{selected.authorUsername}</span> —
+									the build is blocked unless they have write access to the
+									repository.
+								</div>
+							)}
 						</div>
 					)}
 				</div>
