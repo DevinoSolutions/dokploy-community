@@ -576,10 +576,29 @@ export const checkEnvironmentDeletionPermission = async (
 	await assertProjectInOrganization(projectId, organizationId);
 };
 
+/**
+ * Write side of the allow-lists the read-side checks above rely on.
+ *
+ * Every read-side helper treats an `accessedProjects` / `accessedEnvironments` /
+ * `accessedServices` entry as "this id is in scope for this member", and the
+ * organization assertions exist because an entry was never proof of
+ * organization membership. These writers are the other half of that invariant:
+ * an id only ever enters a member's allow-list after it has been resolved to
+ * the caller's active organization, so a caller-supplied id from another
+ * organization (or one that does not exist at all) fails closed instead of
+ * being persisted.
+ *
+ * They are also idempotent: an id already present is left alone rather than
+ * appended a second time, so repeated calls cannot grow the array unboundedly.
+ */
 export const addNewProject = async (ctx: PermissionCtx, projectId: string) => {
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
+	await assertProjectInOrganization(projectId, organizationId);
 	const memberRecord = await findMemberByUserId(userId, organizationId);
+	if (memberRecord.accessedProjects.includes(projectId)) {
+		return;
+	}
 	await db
 		.update(member)
 		.set({
@@ -599,7 +618,11 @@ export const addNewEnvironment = async (
 ) => {
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
+	await assertEnvironmentInOrganization(environmentId, organizationId);
 	const memberRecord = await findMemberByUserId(userId, organizationId);
+	if (memberRecord.accessedEnvironments.includes(environmentId)) {
+		return;
+	}
 	await db
 		.update(member)
 		.set({
@@ -619,7 +642,11 @@ export const addNewEnvironment = async (
 export const addNewService = async (ctx: PermissionCtx, serviceId: string) => {
 	const userId = ctx.user.id;
 	const organizationId = ctx.session.activeOrganizationId;
+	await assertServiceInOrganization(serviceId, organizationId);
 	const memberRecord = await findMemberByUserId(userId, organizationId);
+	if (memberRecord.accessedServices.includes(serviceId)) {
+		return;
+	}
 	await db
 		.update(member)
 		.set({

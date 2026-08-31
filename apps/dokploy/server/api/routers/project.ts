@@ -91,7 +91,13 @@ export const projectRouter = createTRPCRouter({
 				);
 				await addNewProject(ctx, project.project.projectId);
 
-				await addNewEnvironment(ctx, project?.environment?.environmentId || "");
+				// `createProject` always returns the production environment it
+				// created (it throws otherwise), so this is never the empty string
+				// the previous `|| ""` fallback implied. The allow-list writers now
+				// fail closed on ids they cannot resolve to the active
+				// organization, so an empty id would raise instead of persisting a
+				// junk entry.
+				await addNewEnvironment(ctx, project.environment.environmentId);
 
 				await audit(ctx, {
 					action: "create",
@@ -1408,8 +1414,13 @@ export const projectRouter = createTRPCRouter({
 					}
 				}
 
-				if (!input.duplicateInSameProject) {
-					await addNewProject(ctx, targetProject?.projectId || "");
+				// `targetProject` is the environment of the project that was just
+				// created in the active organization on this branch, so the id is
+				// always present; the guard keeps the historical "do nothing when
+				// there is no id" behaviour instead of handing the empty string to
+				// the now fail-closed allow-list writer.
+				if (!input.duplicateInSameProject && targetProject?.projectId) {
+					await addNewProject(ctx, targetProject.projectId);
 				}
 
 				await audit(ctx, {
