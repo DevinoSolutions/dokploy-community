@@ -105,6 +105,13 @@ export const apiCreatePreviewDeployment = z
 		pullRequestNumber: z.string().min(1),
 		pullRequestURL: z.string().min(1),
 		pullRequestTitle: z.string().min(1),
+		// Identity of the pull/merge request author. Required (unless the service
+		// has `previewRequireCollaboratorPermissions` turned off) so this endpoint
+		// enforces the same collaborator gate the webhook handlers do — otherwise
+		// it is a way to build any branch's code without that check.
+		// GitHub authorizes by login, GitLab by numeric user id.
+		pullRequestAuthor: z.string().optional(),
+		pullRequestAuthorId: z.number().optional(),
 	})
 	.refine((data) => !!data.applicationId !== !!data.composeId, {
 		message: "Exactly one of applicationId or composeId must be provided",
