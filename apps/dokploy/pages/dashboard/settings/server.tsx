@@ -7,6 +7,7 @@ import { ShowBackups } from "@/components/dashboard/database/backups/show-backup
 import { DomainRestriction } from "@/components/dashboard/settings/domain-restriction";
 import { WebDomain } from "@/components/dashboard/settings/web-domain";
 import { WebServer } from "@/components/dashboard/settings/web-server";
+import { WildcardDomain } from "@/components/dashboard/settings/wildcard-domain";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { Card } from "@/components/ui/card";
 import { appRouter } from "@/server/api/root";
@@ -18,6 +19,7 @@ const Page = () => {
 		<div className="w-full">
 			<div className="h-full rounded-xl  max-w-5xl mx-auto flex flex-col gap-4">
 				<WebDomain />
+				<WildcardDomain />
 				<DomainRestriction />
 				<WebServer />
 				<div className="w-full flex flex-col gap-4">

@@ -67,6 +67,15 @@ export const organization = pgTable("organization", {
 	createdAt: timestamp("created_at").notNull(),
 	metadata: text("metadata"),
 	defaultRole: text("default_role"),
+	/**
+	 * Fork column. Organization-wide base domain used when Dokploy generates a
+	 * domain for a service (the "Dices" button, preview deployments, templates).
+	 * Stored as a BARE base domain (`apps.example.com`), matching
+	 * `server.defaultDomain`, and displayed as `*.apps.example.com`.
+	 * `null` (the default) keeps the pre-existing sslip.io / DEFAULT_DOMAIN
+	 * behaviour. See `resolveGeneratedDomainBase` for the precedence chain.
+	 */
+	wildcardDomain: text("wildcard_domain"),
 	ownerId: text("owner_id")
 		.notNull()
 		.references(() => user.id, { onDelete: "cascade" }),

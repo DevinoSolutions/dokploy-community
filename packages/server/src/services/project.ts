@@ -121,6 +121,44 @@ export const findProjectById = async (projectId: string) => {
 	return project;
 };
 
+export type ProjectWildcardConfig = {
+	projectId: string;
+	organizationId: string;
+	wildcardDomain: string | null;
+	useOrganizationWildcard: boolean;
+	organization: { wildcardDomain: string | null } | null;
+};
+
+/**
+ * Narrow read of the generated-domain configuration for a single project.
+ *
+ * Deliberately NOT folded into `findProjectById`: that one is the project
+ * dashboard's hot path and already loads the whole environment/service tree, so
+ * widening its relations to reach `organization` would make every project page
+ * load pay for two columns. Returns `null` when the project does not exist —
+ * callers must have org-scoped the id first (`assertProjectInOrganization`).
+ */
+export const findProjectWildcardConfig = async (
+	projectId: string,
+): Promise<ProjectWildcardConfig | null> => {
+	if (!projectId) {
+		return null;
+	}
+	const row = await db.query.projects.findFirst({
+		where: eq(projects.projectId, projectId),
+		columns: {
+			projectId: true,
+			organizationId: true,
+			wildcardDomain: true,
+			useOrganizationWildcard: true,
+		},
+		with: {
+			organization: { columns: { wildcardDomain: true } },
+		},
+	});
+	return (row as ProjectWildcardConfig | undefined) ?? null;
+};
+
 export const deleteProject = async (projectId: string) => {
 	// Domains are FK-cascade deleted through environments -> applications/compose
 	// when the project is removed, with no per-row hook. Gather every

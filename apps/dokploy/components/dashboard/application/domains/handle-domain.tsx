@@ -240,10 +240,31 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 	const { mutateAsync: generateDomain, isPending: isLoadingGenerate } =
 		api.domain.generateDomain.useMutation();
 
+	// Both `application.one` and `compose.one` load `environment -> project`, so
+	// the owning project id is already in hand — thread it through so the
+	// generated domain honours the project/organization wildcard base.
+	const projectId = application?.environment?.projectId ?? undefined;
+
 	const { data: canGenerateTraefikMeDomains } =
 		api.domain.canGenerateTraefikMeDomains.useQuery({
 			serverId: application?.serverId || "",
+			projectId,
 		});
+
+	const { data: wildcardConfig } =
+		api.project.getWildcardDomainConfig.useQuery(
+			{ projectId: projectId ?? "" },
+			{ enabled: !!projectId && isOpen, retry: false },
+		);
+
+	// `server` outranks the organization wildcard, but the resolver only sees
+	// the server when a serverId is passed; the config query above is
+	// project-only, so a service pinned to a server with its own default domain
+	// is reported here rather than through `effectiveBaseDomain`.
+	const generatedBaseDomain =
+		application?.serverId && application?.server?.defaultDomain
+			? application.server.defaultDomain
+			: (wildcardConfig?.effectiveBaseDomain ?? null);
 
 	const { data: restrictionConfig } =
 		api.settings.getDomainRestrictionConfig.useQuery();
@@ -809,9 +830,10 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 																			generateDomain({
 																				appName: application?.appName || "",
 																				serverId: application?.serverId || "",
+																				projectId,
 																			})
-																				.then((domain) => {
-																					field.onChange(domain);
+																				.then((generated) => {
+																					field.onChange(generated.domain);
 																				})
 																				.catch((err) => {
 																					toast.error(err.message);
@@ -824,9 +846,18 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 																<TooltipContent
 																	side="left"
 																	sideOffset={5}
-																	className="max-w-40"
+																	className="max-w-56"
 																>
-																	<p>Generate sslip.io domain</p>
+																	{generatedBaseDomain ? (
+																		<p>
+																			Generate a domain under{" "}
+																			<span className="font-mono">
+																				*.{generatedBaseDomain}
+																			</span>
+																		</p>
+																	) : (
+																		<p>Generate sslip.io domain</p>
+																	)}
 																</TooltipContent>
 															</Tooltip>
 														</TooltipProvider>

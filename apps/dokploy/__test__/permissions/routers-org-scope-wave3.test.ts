@@ -55,7 +55,13 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 		createNetwork: vi.fn(async () => ({ networkId: "net-1", name: "net" })),
 		importDockerNetworks: vi.fn(async () => ({ imported: [], errors: [] })),
 		findNetworksToSync: vi.fn(async () => []),
-		generateTraefikMeDomain: vi.fn(async () => "app.traefik.me"),
+		// Returns the wildcard-domain shape ({ domain, baseDomain, source }) the
+		// generator gained with the user-owned wildcard base feature.
+		generateTraefikMeDomain: vi.fn(async () => ({
+			domain: "app.traefik.me",
+			baseDomain: null,
+			source: "none" as const,
+		})),
 		createComposeByTemplate: vi.fn(async () => ({ composeId: "compose-1" })),
 	};
 });
@@ -240,7 +246,7 @@ describe("domain router is organization-scoped", () => {
 
 		await expect(
 			caller.domain.generateDomain({ appName: "app", serverId: "srv-1" }),
-		).resolves.toBe("app.traefik.me");
+		).resolves.toMatchObject({ domain: "app.traefik.me" });
 		expect(generateTraefikMeDomain).toHaveBeenCalled();
 	});
 

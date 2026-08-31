@@ -4,6 +4,7 @@ import {
 	IS_CLOUD,
 	sendInvitationEmail,
 } from "@dokploy/server/index";
+import { normalizeWildcardBaseDomain } from "@dokploy/server/utils/wildcard-domain-base";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, exists } from "drizzle-orm";
 import { nanoid } from "nanoid";
@@ -20,7 +21,12 @@ import {
 	organizationRole,
 	user,
 } from "@/server/db/schema";
-import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
+import {
+	adminProcedure,
+	createTRPCRouter,
+	protectedProcedure,
+	withPermission,
+} from "../trpc";
 
 const parseOrganizationMetadata = (metadata: string | null) => {
 	if (!metadata) {
@@ -839,5 +845,47 @@ export const organizationRouter = createTRPCRouter({
 			});
 
 			return { success: true };
+		}),
+
+	/**
+	 * Organization-wide base domain for generated domains.
+	 *
+	 * The organization is taken exclusively from `ctx.session.activeOrganizationId`
+	 * — never from input — so there is no id a caller could swap to read or write
+	 * another organization's configuration.
+	 */
+	getWildcardDomain: protectedProcedure.query(async ({ ctx }) => {
+		const org = await db.query.organization.findFirst({
+			where: eq(organization.id, ctx.session.activeOrganizationId),
+			columns: { wildcardDomain: true },
+		});
+		return { wildcardDomain: org?.wildcardDomain ?? null };
+	}),
+
+	updateWildcardDomain: adminProcedure
+		.input(z.object({ wildcardDomain: z.string().nullable() }))
+		.mutation(async ({ ctx, input }) => {
+			const normalized = normalizeWildcardBaseDomain(input.wildcardDomain);
+			if (normalized.error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: normalized.error,
+				});
+			}
+
+			await db
+				.update(organization)
+				.set({ wildcardDomain: normalized.base })
+				.where(eq(organization.id, ctx.session.activeOrganizationId));
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "organization",
+				resourceId: ctx.session.activeOrganizationId,
+				resourceName: "wildcard-domain",
+				metadata: { wildcardDomain: normalized.base },
+			});
+
+			return { wildcardDomain: normalized.base };
 		}),
 });

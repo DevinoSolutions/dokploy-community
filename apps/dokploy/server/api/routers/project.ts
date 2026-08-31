@@ -31,17 +31,23 @@ import {
 	findRedisById,
 	findUserById,
 	IS_CLOUD,
+	resolveGeneratedDomainBase,
 	updateProjectById,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import {
 	addNewEnvironment,
 	addNewProject,
+	assertProjectInOrganization,
 	checkPermission,
 	checkProjectAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
-import { serviceColumns } from "@dokploy/server/services/project";
+import {
+	findProjectWildcardConfig,
+	serviceColumns,
+} from "@dokploy/server/services/project";
+import { normalizeWildcardBaseDomain } from "@dokploy/server/utils/wildcard-domain-base";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
@@ -57,6 +63,7 @@ import {
 	apiFindOneProject,
 	apiRemoveProject,
 	apiUpdateProject,
+	apiUpdateProjectWildcardDomain,
 	applications,
 	compose,
 	environments,
@@ -950,6 +957,112 @@ export const projectRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
+	/**
+	 * Generated-domain configuration for one project.
+	 *
+	 * Gated on `domain:read` (the resource this configuration actually drives —
+	 * there is no `project:read` verb; members have `project: []`) plus a
+	 * row-level `assertProjectInOrganization`, so a foreign `projectId` is
+	 * UNAUTHORIZED before anything is read. The resolved base is returned from
+	 * here rather than from a bare "what is the effective wildcard" procedure so
+	 * it is never reachable without a permission + org check.
+	 */
+	getWildcardDomainConfig: withPermission("domain", "read")
+		.input(apiFindOneProject)
+		.query(async ({ input, ctx }) => {
+			await assertProjectInOrganization(
+				input.projectId,
+				ctx.session.activeOrganizationId,
+			);
+
+			const config = await findProjectWildcardConfig(input.projectId);
+			const effective = await resolveGeneratedDomainBase({
+				projectId: input.projectId,
+			});
+
+			return {
+				projectId: input.projectId,
+				wildcardDomain: config?.wildcardDomain ?? null,
+				useOrganizationWildcard: config?.useOrganizationWildcard ?? true,
+				organizationWildcardDomain:
+					config?.organization?.wildcardDomain ?? null,
+				effectiveBaseDomain: effective.baseDomain,
+				effectiveSource: effective.source,
+			};
+		}),
+
+	updateWildcardDomain: withPermission("domain", "create")
+		.input(apiUpdateProjectWildcardDomain)
+		.mutation(async ({ input, ctx }) => {
+			await assertProjectInOrganization(
+				input.projectId,
+				ctx.session.activeOrganizationId,
+			);
+
+			// Same member allow-list gate `project.update` applies: owners/admins
+			// may edit any project in the organization, members only the ones
+			// they were granted.
+			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
+				const { accessedProjects } = await findMemberByUserId(
+					ctx.user.id,
+					ctx.session.activeOrganizationId,
+				);
+				if (!accessedProjects.includes(input.projectId)) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this project",
+					});
+				}
+			}
+
+			const updates: {
+				wildcardDomain?: string | null;
+				useOrganizationWildcard?: boolean;
+			} = {};
+
+			if (input.wildcardDomain !== undefined) {
+				const normalized = normalizeWildcardBaseDomain(input.wildcardDomain);
+				if (normalized.error) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: normalized.error,
+					});
+				}
+				updates.wildcardDomain = normalized.base;
+			}
+
+			if (input.useOrganizationWildcard !== undefined) {
+				updates.useOrganizationWildcard = input.useOrganizationWildcard;
+			}
+
+			if (Object.keys(updates).length > 0) {
+				await updateProjectById(input.projectId, updates);
+			}
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "project",
+				resourceId: input.projectId,
+				resourceName: "wildcard-domain",
+				metadata: updates,
+			});
+
+			const effective = await resolveGeneratedDomainBase({
+				projectId: input.projectId,
+			});
+			const config = await findProjectWildcardConfig(input.projectId);
+
+			return {
+				projectId: input.projectId,
+				wildcardDomain: config?.wildcardDomain ?? null,
+				useOrganizationWildcard: config?.useOrganizationWildcard ?? true,
+				organizationWildcardDomain:
+					config?.organization?.wildcardDomain ?? null,
+				effectiveBaseDomain: effective.baseDomain,
+				effectiveSource: effective.source,
+			};
+		}),
+
 	update: protectedProcedure
 		.input(apiUpdateProject)
 		.mutation(async ({ input, ctx }) => {

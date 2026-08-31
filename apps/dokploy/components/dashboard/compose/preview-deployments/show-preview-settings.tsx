@@ -87,11 +87,22 @@ export const ShowPreviewSettingsCompose = ({ composeId }: Props) => {
 		{ enabled: !!data?.serverId },
 	);
 
-	const defaultWildcard = data?.serverId
-		? server?.defaultDomain
-			? `*.${server.defaultDomain}`
-			: "*.sslip.io"
-		: "*.sslip.io";
+	const projectId = data?.environment?.projectId;
+	const { data: wildcardConfig } = api.project.getWildcardDomainConfig.useQuery(
+		{ projectId: projectId ?? "" },
+		{ enabled: !!projectId, retry: false },
+	);
+
+	// Mirrors `resolveGeneratedDomainBase`: the project override outranks the
+	// server default domain, which in turn outranks the organization wildcard.
+	const resolvedBase =
+		wildcardConfig?.effectiveSource === "project"
+			? wildcardConfig.effectiveBaseDomain
+			: ((data?.serverId ? server?.defaultDomain : null) ??
+				wildcardConfig?.effectiveBaseDomain ??
+				null);
+
+	const defaultWildcard = resolvedBase ? `*.${resolvedBase}` : "*.sslip.io";
 
 	const form = useForm<Schema>({
 		defaultValues: {

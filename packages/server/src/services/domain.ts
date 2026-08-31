@@ -14,6 +14,7 @@ import type { z } from "zod";
 import { type apiCreateDomain, domains } from "../db/schema";
 import { findApplicationById } from "./application";
 import { detectCDNProvider } from "./cdn";
+import { findProjectWildcardConfig } from "./project";
 import { findServerById } from "./server";
 
 export type Domain = typeof domains.$inferSelect;
@@ -58,43 +59,131 @@ export const createDomain = async (input: z.infer<typeof apiCreateDomain>) => {
 	return result;
 };
 
+/**
+ * Where the base domain of a generated host came from. Surfaced through the
+ * permission-gated procedures so the UI can explain the choice.
+ */
+export type GeneratedDomainBaseSource =
+	| "project"
+	| "server"
+	| "organization"
+	| "environment"
+	| "none";
+
+export interface GeneratedDomainBase {
+	/** Bare base domain (`apps.example.com`), or null for the sslip.io fallback. */
+	baseDomain: string | null;
+	source: GeneratedDomainBaseSource;
+}
+
+/**
+ * Resolves the base domain Dokploy appends to a generated host, in precedence
+ * order:
+ *
+ * 1. `project.wildcardDomain` — the most explicit, per-project override.
+ * 2. `server.defaultDomain` — beats the organization policy on purpose: an
+ *    organization wildcard points at ONE machine's IP, so a server that
+ *    declared its own base must win or multi-server generation would emit
+ *    hosts resolving to the wrong host.
+ * 3. `organization.wildcardDomain` — only when the project has
+ *    `useOrganizationWildcard` (default true). Requires a `projectId`, since
+ *    the organization is derived from the project row.
+ * 4. `process.env.DEFAULT_DOMAIN` — legacy manager-host base. Only consulted
+ *    when no `serverId` was given (see note below).
+ * 5. `null` → `generateRandomDomain` falls back to `<ip>.sslip.io`.
+ *
+ * Note on rung 4: `DEFAULT_DOMAIN` describes the Dokploy manager host, so it is
+ * *not* applied to remote servers. Doing so would both change existing
+ * behaviour for every remote-server generation and point generated hosts at the
+ * manager's DNS while the service runs elsewhere.
+ */
+export const resolveGeneratedDomainBase = async ({
+	projectId,
+	serverId,
+}: {
+	projectId?: string | null;
+	serverId?: string | null;
+}): Promise<GeneratedDomainBase> => {
+	const project = projectId
+		? await findProjectWildcardConfig(projectId)
+		: null;
+
+	if (project?.wildcardDomain) {
+		return { baseDomain: project.wildcardDomain, source: "project" };
+	}
+
+	if (serverId) {
+		const server = await findServerById(serverId);
+		if (server.defaultDomain) {
+			return { baseDomain: server.defaultDomain, source: "server" };
+		}
+	}
+
+	if (project?.useOrganizationWildcard && project.organization?.wildcardDomain) {
+		return {
+			baseDomain: project.organization.wildcardDomain,
+			source: "organization",
+		};
+	}
+
+	if (!serverId && process.env.DEFAULT_DOMAIN) {
+		return { baseDomain: process.env.DEFAULT_DOMAIN, source: "environment" };
+	}
+
+	return { baseDomain: null, source: "none" };
+};
+
+export interface GeneratedDomain extends GeneratedDomainBase {
+	domain: string;
+}
+
 export const generateTraefikMeDomain = async (
 	appName: string,
 	_userId: string,
 	serverId?: string,
-) => {
+	projectId?: string,
+): Promise<GeneratedDomain> => {
+	const base = await resolveGeneratedDomainBase({ projectId, serverId });
+
 	if (serverId) {
 		const server = await findServerById(serverId);
 		let serverIp = server.ipAddress;
 		if (process.env.NODE_ENV !== "development" && isPrivateIp(serverIp)) {
 			serverIp = (await getRemotePublicIp(serverId)) ?? serverIp;
 		}
-		return generateRandomDomain({
-			serverIp,
-			projectName: appName,
-			baseDomain: server.defaultDomain,
-		});
+		return {
+			...base,
+			domain: generateRandomDomain({
+				serverIp,
+				projectName: appName,
+				baseDomain: base.baseDomain,
+			}),
+		};
 	}
 
-	const managerBaseDomain = process.env.DEFAULT_DOMAIN || null;
-
 	if (process.env.NODE_ENV === "development") {
-		return generateRandomDomain({
-			serverIp: "",
-			projectName: appName,
-			baseDomain: managerBaseDomain,
-		});
+		return {
+			...base,
+			domain: generateRandomDomain({
+				serverIp: "",
+				projectName: appName,
+				baseDomain: base.baseDomain,
+			}),
+		};
 	}
 	const settings = await getWebServerSettings();
 	let serverIp = settings?.serverIp || "";
 	if (isPrivateIp(serverIp)) {
 		serverIp = (await getPublicIpWithFallback()) || serverIp;
 	}
-	return generateRandomDomain({
-		serverIp,
-		projectName: appName,
-		baseDomain: managerBaseDomain,
-	});
+	return {
+		...base,
+		domain: generateRandomDomain({
+			serverIp,
+			projectName: appName,
+			baseDomain: base.baseDomain,
+		}),
+	};
 };
 
 export const generateWildcardDomain = (
@@ -152,6 +241,23 @@ export const updateDomainById = async (
 	domainId: string,
 	domainData: Partial<Domain>,
 ) => {
+	// `createDomain` has always enforced the domain-restriction allow-list, but
+	// the edit path did not: renaming an existing domain to a host outside the
+	// allow-list used to succeed, which made the restriction trivially
+	// bypassable. Validate here (rather than in the router) so every caller that
+	// changes the host — the domain router, imports, future callers — is covered.
+	// Internal updates that never touch `host` (toggleEnable, the Cloudflare
+	// provisioning bookkeeping) skip the check entirely.
+	if (domainData.host !== undefined && domainData.host !== null) {
+		const restriction = await validateDomainRestriction(domainData.host.trim());
+		if (!restriction.valid) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: restriction.error || "Domain not allowed",
+			});
+		}
+	}
+
 	const domain = await db
 		.update(domains)
 		.set({

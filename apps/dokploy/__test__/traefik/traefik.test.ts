@@ -72,6 +72,8 @@ const baseApp: ApplicationNested = {
 			logo: null,
 			createdAt: "",
 			projectId: "",
+			wildcardDomain: null,
+			useOrganizationWildcard: true,
 		},
 	},
 	buildPath: "/",
