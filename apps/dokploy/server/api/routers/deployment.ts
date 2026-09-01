@@ -6,7 +6,6 @@ import {
 	findAllDeploymentsByServerId,
 	findAllDeploymentsCentralized,
 	findDeploymentById,
-	findScheduleById,
 	IS_CLOUD,
 	removeDeployment,
 	resolveServicePath,
@@ -14,6 +13,7 @@ import {
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import {
+	checkPermission,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
@@ -32,6 +32,7 @@ import {
 } from "@/server/db/schema";
 import { myQueue } from "@/server/queues/queueSetup";
 import { fetchDeployApiJobs, type QueueJobRow } from "@/server/utils/deploy";
+import { resolveDeploymentAllByTypeAuthTarget } from "@/server/utils/deployment-all-by-type-target";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
 
 export const deploymentRouter = createTRPCRouter({
@@ -127,27 +128,42 @@ export const deploymentRouter = createTRPCRouter({
 	allByType: protectedProcedure
 		.input(apiFindAllByType)
 		.query(async ({ input, ctx }) => {
-			if (input.type === "schedule") {
-				const schedule = await findScheduleById(input.id);
-				const serviceId = schedule.applicationId || schedule.composeId;
-				if (serviceId) {
-					await checkServicePermissionAndAccess(ctx, serviceId, {
-						deployment: ["read"],
+			const target = await resolveDeploymentAllByTypeAuthTarget(input);
+			if (target.kind === "service") {
+				await checkServicePermissionAndAccess(ctx, target.serviceId, {
+					deployment: ["read"],
+				});
+			} else if (target.kind === "server") {
+				await checkPermission(ctx, { deployment: ["read"] });
+				const targetServer = await findServerById(target.serverId);
+				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message:
+							"You are not authorized to access this resource or it does not exist",
 					});
-				} else if (schedule.serverId) {
-					const targetServer = await findServerById(schedule.serverId);
-					if (
-						targetServer.organizationId !== ctx.session.activeOrganizationId
-					) {
-						throw new TRPCError({
-							code: "UNAUTHORIZED",
-							message: "You don't have access to this schedule.",
-						});
-					}
+				}
+			} else if (target.kind === "organization") {
+				await checkPermission(ctx, { deployment: ["read"] });
+				const member = await findMemberByUserId(
+					ctx.user.id,
+					ctx.session.activeOrganizationId,
+				);
+				if (
+					(member.role !== "owner" && member.role !== "admin") ||
+					target.organizationId !== ctx.session.activeOrganizationId
+				) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message:
+							"You are not authorized to access this resource or it does not exist",
+					});
 				}
 			} else {
-				await checkServicePermissionAndAccess(ctx, input.id, {
-					deployment: ["read"],
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message:
+						"You are not authorized to access this resource or it does not exist",
 				});
 			}
 			const deploymentsList = await db.query.deployments.findMany({
