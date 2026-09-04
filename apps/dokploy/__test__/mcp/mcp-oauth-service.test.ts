@@ -62,6 +62,7 @@ describe("isAllowedRedirectUri", () => {
 		"",
 		"https://example.com/cb#frag",
 		"http://localhost:1234/cb#frag",
+		"https://ok.example/a,http://evil.tld/cb",
 	])("rejects %s", (uri) => {
 		expect(isAllowedRedirectUri(uri)).toBe(false);
 	});
@@ -90,14 +91,20 @@ describe("resolveMcpOrigin", () => {
 	it("returns null when nothing is configured outside development", async () => {
 		webServerSettingsRow = { host: null };
 		expect(
-			await resolveMcpOrigin({ host: "1.2.3.4:3000" }, { NODE_ENV: "production" }),
+			await resolveMcpOrigin(
+				{ host: "1.2.3.4:3000" },
+				{ NODE_ENV: "production" },
+			),
 		).toBeNull();
 	});
 
 	it("uses the Host header in development only", async () => {
 		webServerSettingsRow = { host: null };
 		expect(
-			await resolveMcpOrigin({ host: "localhost:3000" }, { NODE_ENV: "development" }),
+			await resolveMcpOrigin(
+				{ host: "localhost:3000" },
+				{ NODE_ENV: "development" },
+			),
 		).toBe("http://localhost:3000");
 	});
 });

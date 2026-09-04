@@ -98,6 +98,10 @@ export const resolveMcpOrigin = async (
  * codes may be sent: loopback over http (Claude Code and other CLIs) or https.
  */
 export const isAllowedRedirectUri = (uri: string): boolean => {
+	// The plugin stores the registered list as `redirect_uris.join(",")` and
+	// splits it back on commas, so a single entry containing one would smuggle a
+	// second, unvetted target into the stored list.
+	if (uri.includes(",")) return false;
 	let parsed: URL;
 	try {
 		parsed = new URL(uri);
@@ -115,6 +119,32 @@ export const isAllowedRedirectUri = (uri: string): boolean => {
 		// Node's URL keeps IPv6 hosts bracketed.
 		parsed.hostname === "[::1]"
 	);
+};
+
+/** Verdict of the dynamic-client-registration policy, ready to become an APIError. */
+export type McpRegisterDecision =
+	| { ok: true }
+	| { ok: false; error: string; error_description: string };
+
+/**
+ * Gate for `POST /api/auth/mcp/register`. Pure so the policy can be exercised
+ * without a better-auth request context; `lib/auth.ts` only translates the
+ * verdict into an `APIError`.
+ */
+export const evaluateMcpRegisterBody = (body: unknown): McpRegisterDecision => {
+	const uris = (body as { redirect_uris?: unknown } | null | undefined)
+		?.redirect_uris;
+	const valid =
+		Array.isArray(uris) &&
+		uris.length > 0 &&
+		uris.every((uri) => typeof uri === "string" && isAllowedRedirectUri(uri));
+	if (valid) return { ok: true };
+	return {
+		ok: false,
+		error: "invalid_redirect_uri",
+		error_description:
+			"redirect_uris must use http://localhost, http://127.0.0.1 or https://",
+	};
 };
 
 /**
@@ -260,6 +290,70 @@ export const verifyConsentProof = (
 	const given = Buffer.from(proof.slice(dot + 1));
 	const wanted = Buffer.from(sign(consentProofMessage(expected, exp), secret));
 	return given.length === wanted.length && timingSafeEqual(given, wanted);
+};
+
+/** Verdict of the authorize gate: let the plugin run, bounce to the consent page, or refuse. */
+export type McpAuthorizeDecision =
+	| { action: "allow" }
+	| { action: "redirect"; location: string }
+	| { action: "reject"; error: string; error_description: string };
+
+export interface McpAuthorizeGateInput {
+	/** Raw query of the authorize request; every value is client-controlled. */
+	query: Record<string, unknown>;
+	/** Signed-in user, or null when the request carries no session. */
+	userId: string | null;
+	secret?: string;
+}
+
+const asString = (value: unknown) => (typeof value === "string" ? value : "");
+
+/**
+ * Gate for `GET /api/auth/mcp/authorize`. The plugin issues a code without ever
+ * asking the user, so an anonymous request is bounced to the fork's consent
+ * page (before the plugin can set its login-resume cookie) and a signed-in one
+ * must carry the proof that page mints for this exact user and parameters.
+ */
+export const evaluateMcpAuthorizeGate = ({
+	query,
+	userId,
+	secret = betterAuthSecret,
+}: McpAuthorizeGateInput): McpAuthorizeDecision => {
+	if (userId === null) {
+		const params = new URLSearchParams();
+		for (const [key, value] of Object.entries(query)) {
+			// `consent` is this gate's own parameter, and a repeated query key
+			// arrives as an array the consent page cannot act on.
+			if (key !== "consent" && typeof value === "string") {
+				params.set(key, value);
+			}
+		}
+		// Relative on purpose: better-auth's baseURL can be undefined, and the
+		// browser resolves this against the host it already reached.
+		return {
+			action: "redirect",
+			location: `${MCP_AUTHORIZE_PAGE_PATH}?${params.toString()}`,
+		};
+	}
+
+	const ok = verifyConsentProof(
+		asString(query.consent),
+		{
+			userId,
+			clientId: asString(query.client_id),
+			redirectUri: asString(query.redirect_uri),
+			state: asString(query.state),
+			codeChallenge: asString(query.code_challenge),
+			scope: asString(query.scope),
+		},
+		secret,
+	);
+	if (ok) return { action: "allow" };
+	return {
+		action: "reject",
+		error: "consent_required",
+		error_description: `Authorization must start from ${MCP_AUTHORIZE_PAGE_PATH}`,
+	};
 };
 
 // ---------------------------------------------------------------------------

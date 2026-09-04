@@ -24,12 +24,12 @@ import {
 import {
 	deleteConsumedRefreshToken,
 	DOKPLOY_MCP_SCOPE_IDS,
+	evaluateMcpAuthorizeGate,
+	evaluateMcpRegisterBody,
 	getMcpAccessTokenSeconds,
 	getMcpRefreshTokenSeconds,
-	isAllowedRedirectUri,
 	MCP_AUTHORIZE_PAGE_PATH,
 	MCP_ENDPOINT_PATH,
-	verifyConsentProof,
 } from "../services/mcp-oauth";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import { resolveOrganizationDefaultRole } from "../services/proprietary/license-key";
@@ -104,6 +104,10 @@ const createBetterAuth = () =>
 			"/.well-known/oauth-authorization-server",
 			"/.well-known/oauth-protected-resource",
 			"/oauth2/consent",
+			// The plugin's own session lookup returns the whole token row,
+			// refresh token included, to any bearer of an access token. The fork
+			// resolves tokens itself (services/mcp-oauth.ts) and never calls it.
+			"/mcp/get-session",
 			...(!IS_CLOUD ? ["/verify-email"] : []),
 		],
 		secret: betterAuthSecret,
@@ -159,19 +163,11 @@ const createBetterAuth = () =>
 				// Dynamic client registration is anonymous: only loopback-http or
 				// https redirect targets may receive authorization codes.
 				if (ctx.path === "/mcp/register") {
-					const uris = (ctx.body as { redirect_uris?: unknown } | undefined)
-						?.redirect_uris;
-					const valid =
-						Array.isArray(uris) &&
-						uris.length > 0 &&
-						uris.every(
-							(uri) => typeof uri === "string" && isAllowedRedirectUri(uri),
-						);
-					if (!valid) {
+					const decision = evaluateMcpRegisterBody(ctx.body);
+					if (!decision.ok) {
 						throw new APIError("BAD_REQUEST", {
-							error: "invalid_redirect_uri",
-							error_description:
-								"redirect_uris must use http://localhost, http://127.0.0.1 or https://",
+							error: decision.error,
+							error_description: decision.error_description,
 						});
 					}
 				}
@@ -181,32 +177,18 @@ const createBetterAuth = () =>
 				// the plugin (it would set a login-resume cookie that bypasses the
 				// consent page after sign-in).
 				if (ctx.path === "/mcp/authorize") {
-					const query = (ctx.query ?? {}) as Record<string, string | undefined>;
 					const session = await getSessionFromCtx(ctx);
-					if (!session) {
-						const origin = new URL(ctx.context.baseURL).origin;
-						const params = new URLSearchParams();
-						for (const [key, value] of Object.entries(query)) {
-							if (key !== "consent" && typeof value === "string") {
-								params.set(key, value);
-							}
-						}
-						throw ctx.redirect(
-							`${origin}${MCP_AUTHORIZE_PAGE_PATH}?${params.toString()}`,
-						);
-					}
-					const ok = verifyConsentProof(query.consent ?? "", {
-						userId: session.user.id,
-						clientId: query.client_id ?? "",
-						redirectUri: query.redirect_uri ?? "",
-						state: query.state ?? "",
-						codeChallenge: query.code_challenge ?? "",
-						scope: query.scope ?? "",
+					const decision = evaluateMcpAuthorizeGate({
+						query: (ctx.query ?? {}) as Record<string, unknown>,
+						userId: session?.user.id ?? null,
 					});
-					if (!ok) {
+					if (decision.action === "redirect") {
+						throw ctx.redirect(decision.location);
+					}
+					if (decision.action === "reject") {
 						throw new APIError("BAD_REQUEST", {
-							error: "consent_required",
-							error_description: `Authorization must start from ${MCP_AUTHORIZE_PAGE_PATH}`,
+							error: decision.error,
+							error_description: decision.error_description,
 						});
 					}
 				}
