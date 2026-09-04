@@ -373,3 +373,31 @@ Card "MCP Server" under Settings → Profile, next to API Keys, following the
 - Organization picker at authorization time.
 - Output redaction of secrets in tool results.
 - Per-server scoping (`dokploy:server:<id>`).
+
+## Amendments (2026-09-04, implementation)
+
+1. **Discovery documents are served by fork-owned Next API routes, not by the
+   plugin.** The plugin's `/.well-known/*` endpoints require a global string
+   `baseURL`, and setting one changes every better-auth redirect/callback URL
+   (social sign-in, SSO) for installs whose users reach Dokploy on more than
+   one host. Instead `/.well-known/oauth-authorization-server`,
+   `/.well-known/openid-configuration` and
+   `/.well-known/oauth-protected-resource(/…)` rewrite to
+   `/api/mcp-oauth/authorization-server` and `/api/mcp-oauth/protected-resource`,
+   which build the documents from the resolved MCP origin (`BETTER_AUTH_URL`,
+   else `https://<webServerSettings.host>`, else in development `http://<Host header>`,
+   else 503). The plugin's own discovery paths and `/oauth2/consent` are added to
+   `disabledPaths`. No `baseURL` is set.
+2. **Consent proof.** The plugin's `/api/auth/mcp/authorize` issues a code
+   without consent, so a crafted link could grant scopes silently. A `before`
+   hook on that path now (a) redirects unauthenticated requests to the fork's
+   `/mcp/authorize` page (never letting the plugin set its login-resume cookie),
+   and (b) requires a `consent` query parameter: an HMAC (better-auth secret)
+   over `userId|client_id|redirect_uri|state|code_challenge|scope|exp`, valid
+   5 minutes, minted by the `mcp.approveAuthorization` tRPC mutation that the
+   consent page calls when the user clicks Authorize. Any mismatch → 400
+   `consent_required`.
+3. **Toggle pre-selection.** Toggles shown = requested Dokploy scopes (all of
+   them when the client requests none); initially checked = shown ∩ default-on.
+   A client that requests every scope therefore still starts with delete/admin
+   off.
