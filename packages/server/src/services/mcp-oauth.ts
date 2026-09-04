@@ -7,6 +7,7 @@ import {
 	member,
 	oauthAccessToken,
 	oauthApplication,
+	oauthConsent,
 	organization,
 } from "../db/schema";
 import { betterAuthSecret } from "../lib/auth-secret";
@@ -103,9 +104,17 @@ export const isAllowedRedirectUri = (uri: string): boolean => {
 	} catch {
 		return false;
 	}
+	// A fragment is never sent to the server and cannot be matched reliably, so
+	// a registered redirect must not carry one.
+	if (parsed.hash !== "") return false;
 	if (parsed.protocol === "https:") return true;
 	if (parsed.protocol !== "http:") return false;
-	return parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+	return (
+		parsed.hostname === "localhost" ||
+		parsed.hostname === "127.0.0.1" ||
+		// Node's URL keeps IPv6 hosts bracketed.
+		parsed.hostname === "[::1]"
+	);
 };
 
 /**
@@ -141,7 +150,10 @@ export interface McpAccessToken {
 	scopes: string[];
 }
 
-/** Opaque access-token lookup. Null for missing, expired or user-less rows. */
+/**
+ * Opaque access-token lookup. Null for missing, expired or user-less rows, and
+ * for tokens whose client application has since been disabled.
+ */
 export const findMcpAccessToken = async (
 	accessToken: string,
 ): Promise<McpAccessToken | null> => {
@@ -154,8 +166,10 @@ export const findMcpAccessToken = async (
 			scopes: true,
 			accessTokenExpiresAt: true,
 		},
+		with: { application: { columns: { disabled: true } } },
 	});
 	if (!row || !row.userId) return null;
+	if (row.application?.disabled) return null;
 	if (row.accessTokenExpiresAt.getTime() <= Date.now()) return null;
 	return {
 		userId: row.userId,
@@ -203,16 +217,21 @@ const CONSENT_PROOF_TTL_MS = 5 * 60 * 1000;
 const canonicalScope = (scope: string) =>
 	scope.split(" ").filter(Boolean).sort().join(" ");
 
+/**
+ * JSON encoding, not a `|` join: every field below is client-controlled, and a
+ * separator-joined string lets one field absorb a separator to shift the field
+ * boundaries and forge a different-but-identical message.
+ */
 const consentProofMessage = (payload: ConsentProofPayload, exp: number) =>
-	[
+	JSON.stringify([
 		payload.userId,
 		payload.clientId,
 		payload.redirectUri,
 		payload.state,
 		payload.codeChallenge,
 		canonicalScope(payload.scope),
-		String(exp),
-	].join("|");
+		exp,
+	]);
 
 const sign = (message: string, secret: string) =>
 	createHmac("sha256", secret).update(message).digest("base64url");
@@ -256,8 +275,9 @@ export const deleteConsumedRefreshToken = async (refreshToken: string) => {
 };
 
 /**
- * Removes rows that can never be used again: refresh window closed, or no
- * refresh token and the access token expired.
+ * Removes rows that can never be used again: the refresh window closed, or the
+ * access token expired and no usable refresh window exists — either because
+ * there is no refresh token at all, or because its expiry was never recorded.
  */
 export const purgeExpiredMcpTokens = async () => {
 	const now = new Date();
@@ -268,6 +288,10 @@ export const purgeExpiredMcpTokens = async () => {
 				lt(oauthAccessToken.refreshTokenExpiresAt, now),
 				and(
 					isNull(oauthAccessToken.refreshToken),
+					lt(oauthAccessToken.accessTokenExpiresAt, now),
+				),
+				and(
+					isNull(oauthAccessToken.refreshTokenExpiresAt),
 					lt(oauthAccessToken.accessTokenExpiresAt, now),
 				),
 			),
@@ -296,18 +320,61 @@ export interface McpAuthorization {
 	authorizedAt: Date;
 	lastRefreshedAt: Date;
 	refreshExpiresAt: Date | null;
-	tokenCount: number;
 }
+
+/** Cap on rows read per user when listing authorizations. */
+const MCP_AUTHORIZATION_ROW_LIMIT = 200;
+
+/**
+ * Records the grant the user approved on the consent page. Token rows are
+ * rotated away on every refresh, so they cannot date the original grant; this
+ * row can.
+ */
+export const recordMcpConsent = async (
+	userId: string,
+	clientId: string,
+	scopes: string[],
+) => {
+	const now = new Date();
+	await db.insert(oauthConsent).values({
+		clientId,
+		userId,
+		scopes: scopes.join(" "),
+		consentGiven: true,
+		createdAt: now,
+		updatedAt: now,
+	});
+};
 
 /** One row per client the user has authorized, newest token wins for scopes. */
 export const listMcpAuthorizations = async (
 	userId: string,
 ): Promise<McpAuthorization[]> => {
+	// Never project the token columns: this list is rendered in the UI.
 	const rows = await db.query.oauthAccessToken.findMany({
 		where: eq(oauthAccessToken.userId, userId),
+		columns: {
+			clientId: true,
+			scopes: true,
+			createdAt: true,
+			refreshTokenExpiresAt: true,
+		},
 		orderBy: [asc(oauthAccessToken.createdAt)],
+		limit: MCP_AUTHORIZATION_ROW_LIMIT,
 		with: { application: { columns: { name: true } } },
 	});
+	const consents = await db.query.oauthConsent.findMany({
+		where: eq(oauthConsent.userId, userId),
+		columns: { clientId: true, createdAt: true },
+		orderBy: [asc(oauthConsent.createdAt)],
+		limit: MCP_AUTHORIZATION_ROW_LIMIT,
+	});
+	const grantedAt = new Map<string, Date>();
+	for (const consent of consents) {
+		if (!grantedAt.has(consent.clientId)) {
+			grantedAt.set(consent.clientId, consent.createdAt);
+		}
+	}
 	const byClient = new Map<string, McpAuthorization>();
 	for (const row of rows) {
 		const existing = byClient.get(row.clientId);
@@ -319,22 +386,25 @@ export const listMcpAuthorizations = async (
 				clientId: row.clientId,
 				clientName: row.application?.name || "Unnamed client",
 				scopes,
-				authorizedAt: row.createdAt,
+				// Falls back to the oldest surviving token for grants made before
+				// consent rows were recorded.
+				authorizedAt: grantedAt.get(row.clientId) ?? row.createdAt,
 				lastRefreshedAt: row.createdAt,
 				refreshExpiresAt: row.refreshTokenExpiresAt,
-				tokenCount: 1,
 			});
 			continue;
 		}
 		existing.scopes = scopes;
 		existing.lastRefreshedAt = row.createdAt;
 		existing.refreshExpiresAt = row.refreshTokenExpiresAt;
-		existing.tokenCount += 1;
 	}
 	return [...byClient.values()];
 };
 
-/** Deletes every token for client+user; the client's next call gets 401. */
+/**
+ * Deletes every token and consent row for client+user; the client's next call
+ * gets 401 and a re-authorization starts a fresh grant.
+ */
 export const revokeMcpAuthorization = async (
 	userId: string,
 	clientId: string,
@@ -346,5 +416,10 @@ export const revokeMcpAuthorization = async (
 				eq(oauthAccessToken.userId, userId),
 				eq(oauthAccessToken.clientId, clientId),
 			),
+		);
+	await db
+		.delete(oauthConsent)
+		.where(
+			and(eq(oauthConsent.userId, userId), eq(oauthConsent.clientId, clientId)),
 		);
 };

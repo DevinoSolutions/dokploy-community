@@ -56,6 +56,13 @@ export const oauthAccessToken = pgTable(
 	],
 );
 
+/**
+ * Written by the fork, not by the plugin: the plugin's own `/oauth2/consent`
+ * path is disabled, so it never records a grant here. `recordMcpConsent`
+ * inserts one row per approval on the fork's consent page, and the settings
+ * card reads it for "authorized at" — the token rows cannot answer that,
+ * because refresh rotation deletes the row that carried the original date.
+ */
 export const oauthConsent = pgTable(
 	"oauth_consent",
 	{

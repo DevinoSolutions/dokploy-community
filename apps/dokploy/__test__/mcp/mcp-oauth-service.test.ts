@@ -47,6 +47,7 @@ describe("isAllowedRedirectUri", () => {
 		"http://localhost/callback",
 		"http://localhost:53421/callback",
 		"http://127.0.0.1:8080/cb",
+		"http://[::1]:5000/cb",
 		"https://example.com/oauth/callback",
 	])("allows %s", (uri) => {
 		expect(isAllowedRedirectUri(uri)).toBe(true);
@@ -59,6 +60,8 @@ describe("isAllowedRedirectUri", () => {
 		"custom-app://callback",
 		"not a url",
 		"",
+		"https://example.com/cb#frag",
+		"http://localhost:1234/cb#frag",
 	])("rejects %s", (uri) => {
 		expect(isAllowedRedirectUri(uri)).toBe(false);
 	});
