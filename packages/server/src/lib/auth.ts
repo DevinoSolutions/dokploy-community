@@ -603,6 +603,49 @@ async function logRejectedSessionCookie(cookieHeader: string) {
 	}
 }
 
+type UserRow = typeof schema.user.$inferSelect;
+
+/**
+ * Synthesizes the `{ session, user }` shape tRPC's context expects for a
+ * user acting inside one organization without a browser session. Shared by
+ * the API-key branch of `validateRequest` and the MCP endpoint.
+ */
+export const buildMemberSession = async (
+	userFromDb: UserRow,
+	organizationId: string,
+) => {
+	const member = await db.query.member.findFirst({
+		where: and(
+			eq(schema.member.userId, userFromDb.id),
+			eq(schema.member.organizationId, organizationId),
+		),
+		with: {
+			organization: true,
+		},
+	});
+
+	return {
+		session: {
+			userId: userFromDb.id,
+			activeOrganizationId: organizationId,
+		},
+		user: {
+			id: userFromDb.id,
+			name: userFromDb.firstName, // Map firstName back to name for better-auth
+			email: userFromDb.email,
+			emailVerified: userFromDb.emailVerified,
+			image: userFromDb.image,
+			createdAt: userFromDb.createdAt,
+			updatedAt: userFromDb.updatedAt,
+			twoFactorEnabled: userFromDb.twoFactorEnabled,
+			role: member?.role || "member",
+			ownerId: member?.organization.ownerId || userFromDb.id,
+			enableEnterpriseFeatures: userFromDb.enableEnterpriseFeatures,
+			isValidEnterpriseLicense: userFromDb.isValidEnterpriseLicense,
+		},
+	};
+};
+
 export const validateRequest = async (request: IncomingMessage) => {
 	const api = getApi();
 	const apiKey = request.headers["x-api-key"] as string;
@@ -651,44 +694,7 @@ export const validateRequest = async (request: IncomingMessage) => {
 				};
 			}
 
-			const member = await db.query.member.findFirst({
-				where: and(
-					eq(schema.member.userId, apiKeyRecord.user.id),
-					eq(schema.member.organizationId, organizationId),
-				),
-				with: {
-					organization: true,
-				},
-			});
-
-			// When accessing from DB, use actual column names
-			const userFromDb = apiKeyRecord.user as typeof apiKeyRecord.user & {
-				firstName: string;
-				lastName: string;
-			};
-
-			const mockSession = {
-				session: {
-					userId: apiKeyRecord.user.id,
-					activeOrganizationId: organizationId || "",
-				},
-				user: {
-					id: userFromDb.id,
-					name: userFromDb.firstName, // Map firstName back to name for better-auth
-					email: userFromDb.email,
-					emailVerified: userFromDb.emailVerified,
-					image: userFromDb.image,
-					createdAt: userFromDb.createdAt,
-					updatedAt: userFromDb.updatedAt,
-					twoFactorEnabled: userFromDb.twoFactorEnabled,
-					role: member?.role || "member",
-					ownerId: member?.organization.ownerId || apiKeyRecord.user.id,
-					enableEnterpriseFeatures: userFromDb.enableEnterpriseFeatures,
-					isValidEnterpriseLicense: userFromDb.isValidEnterpriseLicense,
-				},
-			};
-
-			return mockSession;
+			return await buildMemberSession(apiKeyRecord.user, organizationId);
 		} catch (error) {
 			console.error("Error verifying API key", error);
 			return {
