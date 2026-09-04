@@ -6,8 +6,12 @@ import { sso } from "@better-auth/sso";
 import * as bcrypt from "bcrypt";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError, createAuthMiddleware } from "better-auth/api";
-import { admin, organization, twoFactor } from "better-auth/plugins";
+import {
+	APIError,
+	createAuthMiddleware,
+	getSessionFromCtx,
+} from "better-auth/api";
+import { admin, mcp, organization, twoFactor } from "better-auth/plugins";
 import { and, desc, eq } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
 import { db } from "../db";
@@ -17,6 +21,16 @@ import {
 	getTrustedProviders,
 	getUserByToken,
 } from "../services/admin";
+import {
+	deleteConsumedRefreshToken,
+	DOKPLOY_MCP_SCOPE_IDS,
+	getMcpAccessTokenSeconds,
+	getMcpRefreshTokenSeconds,
+	isAllowedRedirectUri,
+	MCP_AUTHORIZE_PAGE_PATH,
+	MCP_ENDPOINT_PATH,
+	verifyConsentProof,
+} from "../services/mcp-oauth";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import { resolveOrganizationDefaultRole } from "../services/proprietary/license-key";
 import {
@@ -85,6 +99,11 @@ const createBetterAuth = () =>
 			"/organization/create",
 			"/organization/update",
 			"/organization/delete",
+			// The fork serves OAuth discovery from /api/mcp-oauth/* (see
+			// services/mcp-oauth.ts); the plugin's copies need a global baseURL.
+			"/.well-known/oauth-authorization-server",
+			"/.well-known/oauth-protected-resource",
+			"/oauth2/consent",
 			...(!IS_CLOUD ? ["/verify-email"] : []),
 		],
 		secret: betterAuthSecret,
@@ -136,6 +155,82 @@ const createBetterAuth = () =>
 					...(ctx.context.baseURL ? [new URL(ctx.context.baseURL).origin] : []),
 					...(await resolveTrustedOrigins()),
 				].filter(Boolean);
+
+				// Dynamic client registration is anonymous: only loopback-http or
+				// https redirect targets may receive authorization codes.
+				if (ctx.path === "/mcp/register") {
+					const uris = (ctx.body as { redirect_uris?: unknown } | undefined)
+						?.redirect_uris;
+					const valid =
+						Array.isArray(uris) &&
+						uris.length > 0 &&
+						uris.every(
+							(uri) => typeof uri === "string" && isAllowedRedirectUri(uri),
+						);
+					if (!valid) {
+						throw new APIError("BAD_REQUEST", {
+							error: "invalid_redirect_uri",
+							error_description:
+								"redirect_uris must use http://localhost, http://127.0.0.1 or https://",
+						});
+					}
+				}
+
+				// The plugin issues a code without consent. Require the proof the
+				// fork's consent page mints, and never let an anonymous request reach
+				// the plugin (it would set a login-resume cookie that bypasses the
+				// consent page after sign-in).
+				if (ctx.path === "/mcp/authorize") {
+					const query = (ctx.query ?? {}) as Record<string, string | undefined>;
+					const session = await getSessionFromCtx(ctx);
+					if (!session) {
+						const origin = new URL(ctx.context.baseURL).origin;
+						const params = new URLSearchParams();
+						for (const [key, value] of Object.entries(query)) {
+							if (key !== "consent" && typeof value === "string") {
+								params.set(key, value);
+							}
+						}
+						throw ctx.redirect(
+							`${origin}${MCP_AUTHORIZE_PAGE_PATH}?${params.toString()}`,
+						);
+					}
+					const ok = verifyConsentProof(query.consent ?? "", {
+						userId: session.user.id,
+						clientId: query.client_id ?? "",
+						redirectUri: query.redirect_uri ?? "",
+						state: query.state ?? "",
+						codeChallenge: query.code_challenge ?? "",
+						scope: query.scope ?? "",
+					});
+					if (!ok) {
+						throw new APIError("BAD_REQUEST", {
+							error: "consent_required",
+							error_description: `Authorization must start from ${MCP_AUTHORIZE_PAGE_PATH}`,
+						});
+					}
+				}
+			}),
+			after: createAuthMiddleware(async (ctx) => {
+				// Refresh rotation: the plugin inserts a new row and leaves the
+				// consumed refresh token alive. Delete it so it cannot be replayed.
+				if (ctx.path !== "/mcp/token") return;
+				const rawBody = ctx.body as unknown;
+				const body =
+					rawBody instanceof FormData
+						? (Object.fromEntries(rawBody.entries()) as Record<string, unknown>)
+						: ((rawBody ?? {}) as Record<string, unknown>);
+				if (body.grant_type !== "refresh_token") return;
+				const returned = ctx.context.returned as unknown;
+				const succeeded =
+					!!returned &&
+					typeof returned === "object" &&
+					"access_token" in returned;
+				if (!succeeded) return;
+				const consumed = body.refresh_token;
+				if (typeof consumed === "string" && consumed) {
+					await deleteConsumedRefreshToken(consumed);
+				}
 			}),
 		},
 		emailVerification: {
@@ -475,6 +570,26 @@ const createBetterAuth = () =>
 			}),
 			twoFactor(),
 			passkey(),
+			// Remote MCP endpoint OAuth server (see docs/superpowers/specs/2026-09-04-remote-mcp-oauth-design.md).
+			// Discovery is served by the fork (apps/dokploy/pages/api/mcp-oauth/*), so no baseURL is set here.
+			mcp({
+				loginPage: MCP_AUTHORIZE_PAGE_PATH,
+				resource: MCP_ENDPOINT_PATH,
+				oidcConfig: {
+					// OIDCOptions requires loginPage; the plugin overwrites it with the
+					// top-level one, so both must name the fork's consent page.
+					loginPage: MCP_AUTHORIZE_PAGE_PATH,
+					accessTokenExpiresIn: getMcpAccessTokenSeconds(),
+					refreshTokenExpiresIn: getMcpRefreshTokenSeconds(),
+					requirePKCE: true,
+					defaultScope: [
+						"openid",
+						"offline_access",
+						...DOKPLOY_MCP_SCOPE_IDS,
+					].join(" "),
+					scopes: [...DOKPLOY_MCP_SCOPE_IDS],
+				},
+			}),
 			organization({
 				ac,
 				roles: {
