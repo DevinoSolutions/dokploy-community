@@ -2858,6 +2858,7 @@ vi.mock("@dokploy/server/services/mcp-oauth", async (importOriginal) => {
 		findOAuthApplicationByClientId: vi.fn(async () => clientRow),
 		listMcpAuthorizations: vi.fn(async () => []),
 		revokeMcpAuthorization: vi.fn(async () => {}),
+		recordMcpConsent: vi.fn(async () => {}),
 		createConsentProof: vi.fn(() => "123.sig"),
 	};
 });
@@ -2917,8 +2918,13 @@ describe("mcp router", () => {
 		expect(revokeMcpAuthorization).toHaveBeenCalledWith("user-1", "client-1");
 	});
 
-	it("approveAuthorization returns the plugin URL with openid/offline_access, sorted scopes and the consent proof", async () => {
+	it("approveAuthorization records the grant and returns the plugin URL with openid/offline_access, sorted scopes and the consent proof", async () => {
+		const { recordMcpConsent } = await import("@dokploy/server/services/mcp-oauth");
 		const { url } = await caller.mcp.approveAuthorization(approveInput);
+		expect(recordMcpConsent).toHaveBeenCalledWith("user-1", "client-1", [
+			"dokploy:deploy",
+			"dokploy:read",
+		]);
 		const parsed = new URL(url, "https://dok.example.com");
 		expect(parsed.pathname).toBe("/api/auth/mcp/authorize");
 		expect(parsed.searchParams.get("scope")).toBe(
@@ -2969,6 +2975,7 @@ import {
 	listMcpAuthorizations,
 	MCP_ENDPOINT_PATH,
 	MCP_PLUGIN_AUTHORIZE_PATH,
+	recordMcpConsent,
 	resolveDefaultOrganizationId,
 	resolveMcpOrigin,
 	revokeMcpAuthorization,
@@ -3064,11 +3071,11 @@ export const mcpRouter = createTRPCRouter({
 			if (!input.scopes.every(isDokployScope)) {
 				throw new TRPCError({ code: "BAD_REQUEST", message: "Unknown scope requested" });
 			}
-			const scope = [
-				"openid",
-				"offline_access",
-				...[...new Set(input.scopes)].sort(),
-			].join(" ");
+			const selectedScopes = [...new Set(input.scopes)].sort();
+			const scope = ["openid", "offline_access", ...selectedScopes].join(" ");
+			// Grant record: gives the settings card a stable "authorized at" and a
+			// scope history that survives refresh-token rotation.
+			await recordMcpConsent(ctx.user.id, input.clientId, selectedScopes);
 			const state = input.state ?? "";
 			const consent = createConsentProof({
 				userId: ctx.user.id,
