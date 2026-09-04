@@ -22,6 +22,7 @@ export * from "./github";
 export * from "./gitlab";
 export * from "./libsql";
 export * from "./mariadb";
+export * from "./mcp-oauth";
 export * from "./mongo";
 export * from "./mount";
 export * from "./mysql";

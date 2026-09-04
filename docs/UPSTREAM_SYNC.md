@@ -274,6 +274,15 @@ fork-owned column/table re-created idempotently. When a new fork column is added
 to an upstream table, add it to the table above; if it is ever found missing in
 the wild, extend the catch-up migration rather than editing a released one.
 
+### Fork-owned tables (schema ledger)
+
+Whole tables that exist only in the fork. On a sync, keep the schema file and
+make sure the regenerated migration does not `DROP` them.
+
+| Table | Schema file | Feature | Landed in |
+|---|---|---|---|
+| `oauth_application`, `oauth_access_token`, `oauth_consent` | `packages/server/src/db/schema/mcp-oauth.ts` | remote MCP server OAuth (better-auth `mcp` plugin storage) | `0198` |
+
 ### Migrator ordering gotcha (drizzle `postgres-js` migrator)
 
 `migrate()` finds the single highest `created_at` in `__drizzle_migrations`, then
