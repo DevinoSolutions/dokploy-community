@@ -130,3 +130,221 @@ export const findOrganizationName = async (organizationId: string) => {
 	});
 	return row ?? null;
 };
+
+// ---------------------------------------------------------------------------
+// Bearer tokens
+// ---------------------------------------------------------------------------
+
+export interface McpAccessToken {
+	userId: string;
+	clientId: string;
+	scopes: string[];
+}
+
+/** Opaque access-token lookup. Null for missing, expired or user-less rows. */
+export const findMcpAccessToken = async (
+	accessToken: string,
+): Promise<McpAccessToken | null> => {
+	if (!accessToken) return null;
+	const row = await db.query.oauthAccessToken.findFirst({
+		where: eq(oauthAccessToken.accessToken, accessToken),
+		columns: {
+			userId: true,
+			clientId: true,
+			scopes: true,
+			accessTokenExpiresAt: true,
+		},
+	});
+	if (!row || !row.userId) return null;
+	if (row.accessTokenExpiresAt.getTime() <= Date.now()) return null;
+	return {
+		userId: row.userId,
+		clientId: row.clientId,
+		scopes: row.scopes.split(" ").filter(Boolean),
+	};
+};
+
+export const findOAuthApplicationByClientId = async (clientId: string) => {
+	if (!clientId) return null;
+	const row = await db.query.oauthApplication.findFirst({
+		where: eq(oauthApplication.clientId, clientId),
+		columns: {
+			clientId: true,
+			name: true,
+			redirectUrls: true,
+			disabled: true,
+		},
+	});
+	if (!row) return null;
+	return {
+		clientId: row.clientId,
+		name: row.name || "Unnamed client",
+		redirectUrls: row.redirectUrls.split(",").filter(Boolean),
+		disabled: row.disabled,
+	};
+};
+
+// ---------------------------------------------------------------------------
+// Consent proof — binds the plugin's authorize call to a consent-page approval
+// ---------------------------------------------------------------------------
+
+export interface ConsentProofPayload {
+	userId: string;
+	clientId: string;
+	redirectUri: string;
+	state: string;
+	codeChallenge: string;
+	/** Space-separated scope string; compared as a sorted set. */
+	scope: string;
+}
+
+const CONSENT_PROOF_TTL_MS = 5 * 60 * 1000;
+
+const canonicalScope = (scope: string) =>
+	scope.split(" ").filter(Boolean).sort().join(" ");
+
+const consentProofMessage = (payload: ConsentProofPayload, exp: number) =>
+	[
+		payload.userId,
+		payload.clientId,
+		payload.redirectUri,
+		payload.state,
+		payload.codeChallenge,
+		canonicalScope(payload.scope),
+		String(exp),
+	].join("|");
+
+const sign = (message: string, secret: string) =>
+	createHmac("sha256", secret).update(message).digest("base64url");
+
+/**
+ * `<exp>.<signature>` — the signature covers every OAuth parameter the
+ * plugin will act on plus the approving user, so the proof cannot be replayed
+ * for another client, redirect, scope set, or user.
+ */
+export const createConsentProof = (
+	payload: ConsentProofPayload,
+	secret: string = betterAuthSecret,
+	expiresAt: number = Date.now() + CONSENT_PROOF_TTL_MS,
+): string =>
+	`${expiresAt}.${sign(consentProofMessage(payload, expiresAt), secret)}`;
+
+export const verifyConsentProof = (
+	proof: string,
+	expected: ConsentProofPayload,
+	secret: string = betterAuthSecret,
+): boolean => {
+	const dot = proof.indexOf(".");
+	if (dot <= 0) return false;
+	const exp = Number.parseInt(proof.slice(0, dot), 10);
+	if (!Number.isFinite(exp) || exp < Date.now()) return false;
+	const given = Buffer.from(proof.slice(dot + 1));
+	const wanted = Buffer.from(sign(consentProofMessage(expected, exp), secret));
+	return given.length === wanted.length && timingSafeEqual(given, wanted);
+};
+
+// ---------------------------------------------------------------------------
+// Token hygiene
+// ---------------------------------------------------------------------------
+
+/** Called after a successful refresh: the consumed refresh token must die. */
+export const deleteConsumedRefreshToken = async (refreshToken: string) => {
+	if (!refreshToken) return;
+	await db
+		.delete(oauthAccessToken)
+		.where(eq(oauthAccessToken.refreshToken, refreshToken));
+};
+
+/**
+ * Removes rows that can never be used again: refresh window closed, or no
+ * refresh token and the access token expired.
+ */
+export const purgeExpiredMcpTokens = async () => {
+	const now = new Date();
+	await db
+		.delete(oauthAccessToken)
+		.where(
+			or(
+				lt(oauthAccessToken.refreshTokenExpiresAt, now),
+				and(
+					isNull(oauthAccessToken.refreshToken),
+					lt(oauthAccessToken.accessTokenExpiresAt, now),
+				),
+			),
+		);
+};
+
+/** Daily purge; registered from server.ts when MCP is enabled. */
+export const initMcpTokenPurgeCronJob = () => {
+	scheduleJob("mcp-token-purge", "23 4 * * *", async () => {
+		try {
+			await purgeExpiredMcpTokens();
+		} catch (error) {
+			console.error("[mcp] token purge failed", error);
+		}
+	});
+};
+
+// ---------------------------------------------------------------------------
+// Authorizations (settings card)
+// ---------------------------------------------------------------------------
+
+export interface McpAuthorization {
+	clientId: string;
+	clientName: string;
+	scopes: string[];
+	authorizedAt: Date;
+	lastRefreshedAt: Date;
+	refreshExpiresAt: Date | null;
+	tokenCount: number;
+}
+
+/** One row per client the user has authorized, newest token wins for scopes. */
+export const listMcpAuthorizations = async (
+	userId: string,
+): Promise<McpAuthorization[]> => {
+	const rows = await db.query.oauthAccessToken.findMany({
+		where: eq(oauthAccessToken.userId, userId),
+		orderBy: [asc(oauthAccessToken.createdAt)],
+		with: { application: { columns: { name: true } } },
+	});
+	const byClient = new Map<string, McpAuthorization>();
+	for (const row of rows) {
+		const existing = byClient.get(row.clientId);
+		const scopes = row.scopes
+			.split(" ")
+			.filter((scope) => scope.startsWith("dokploy:"));
+		if (!existing) {
+			byClient.set(row.clientId, {
+				clientId: row.clientId,
+				clientName: row.application?.name || "Unnamed client",
+				scopes,
+				authorizedAt: row.createdAt,
+				lastRefreshedAt: row.createdAt,
+				refreshExpiresAt: row.refreshTokenExpiresAt,
+				tokenCount: 1,
+			});
+			continue;
+		}
+		existing.scopes = scopes;
+		existing.lastRefreshedAt = row.createdAt;
+		existing.refreshExpiresAt = row.refreshTokenExpiresAt;
+		existing.tokenCount += 1;
+	}
+	return [...byClient.values()];
+};
+
+/** Deletes every token for client+user; the client's next call gets 401. */
+export const revokeMcpAuthorization = async (
+	userId: string,
+	clientId: string,
+) => {
+	await db
+		.delete(oauthAccessToken)
+		.where(
+			and(
+				eq(oauthAccessToken.userId, userId),
+				eq(oauthAccessToken.clientId, clientId),
+			),
+		);
+};
