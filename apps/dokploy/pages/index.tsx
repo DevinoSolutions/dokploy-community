@@ -52,10 +52,7 @@ import {
 } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
-import {
-	getPostLoginDestination,
-	isSafeRelativePath,
-} from "@/lib/post-login-redirect";
+import { getPostLoginDestination } from "@/lib/post-login-redirect";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabelingPublic } from "@/utils/hooks/use-whitelabeling";
@@ -255,7 +252,12 @@ export default function Home({
 		<>
 			{IS_CLOUD && <SignInWithGithub />}
 			{IS_CLOUD && <SignInWithGoogle />}
-			{!IS_CLOUD && <SocialLoginButtons providers={socialProviders} />}
+			{!IS_CLOUD && (
+				<SocialLoginButtons
+					providers={socialProviders}
+					callbackURL={getPostLoginDestination(router.query)}
+				/>
+			)}
 			<Form {...loginForm}>
 				<form
 					method="post"
@@ -340,9 +342,16 @@ export default function Home({
 				{!isTwoFactor ? (
 					<>
 						{enforceSSO ? (
-							<SignInWithSSO enforce />
+							<SignInWithSSO
+								enforce
+								callbackURL={getPostLoginDestination(router.query)}
+							/>
 						) : showSignInWithSSO ? (
-							<SignInWithSSO>{loginContent}</SignInWithSSO>
+							<SignInWithSSO
+								callbackURL={getPostLoginDestination(router.query)}
+							>
+								{loginContent}
+							</SignInWithSSO>
 						) : (
 							loginContent
 						)}
@@ -530,15 +539,10 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 		try {
 			const { user } = await validateRequest(context.req);
 			if (user) {
-				const redirect = Array.isArray(context.query.redirect)
-					? context.query.redirect[0]
-					: context.query.redirect;
 				return {
 					redirect: {
 						permanent: false,
-						destination: isSafeRelativePath(redirect)
-							? redirect
-							: "/dashboard/home",
+						destination: getPostLoginDestination(context.query),
 					},
 				};
 			}
@@ -566,15 +570,10 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 	const { user } = await validateRequest(context.req);
 
 	if (user) {
-		const redirect = Array.isArray(context.query.redirect)
-			? context.query.redirect[0]
-			: context.query.redirect;
 		return {
 			redirect: {
 				permanent: false,
-				destination: isSafeRelativePath(redirect)
-					? redirect
-					: "/dashboard/home",
+				destination: getPostLoginDestination(context.query),
 			},
 		};
 	}

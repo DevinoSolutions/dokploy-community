@@ -13,6 +13,7 @@ vi.mock("@dokploy/server/services/mcp-oauth", async (importOriginal) => {
 		revokeMcpAuthorization: vi.fn(async () => {}),
 		recordMcpConsent: vi.fn(async () => {}),
 		createConsentProof: vi.fn(() => "123.sig"),
+		isMcpDisabled: vi.fn(() => false),
 	};
 });
 
@@ -25,7 +26,7 @@ let clientRow: {
 
 const { appRouter } = await import("@/server/api/root");
 const { createCallerFactory } = await import("@/server/api/trpc");
-const { revokeMcpAuthorization } = await import(
+const { isMcpDisabled, revokeMcpAuthorization } = await import(
 	"@dokploy/server/services/mcp-oauth"
 );
 
@@ -124,5 +125,17 @@ describe("mcp router", () => {
 		).rejects.toMatchObject({
 			code: "NOT_FOUND",
 		});
+	});
+
+	it("approveAuthorization refuses to mint a proof while the kill switch is on", async () => {
+		const { recordMcpConsent } = await import(
+			"@dokploy/server/services/mcp-oauth"
+		);
+		vi.mocked(recordMcpConsent).mockClear();
+		vi.mocked(isMcpDisabled).mockReturnValueOnce(true);
+		await expect(
+			caller.mcp.approveAuthorization(approveInput),
+		).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+		expect(recordMcpConsent).not.toHaveBeenCalled();
 	});
 });

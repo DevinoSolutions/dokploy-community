@@ -8,6 +8,7 @@ const {
 	findOAuthApplicationByClientId,
 	listMcpAuthorizations,
 	purgeExpiredMcpTokens,
+	recordMcpConsent,
 	revokeMcpAuthorization,
 	verifyConsentProof,
 } = await import("@dokploy/server/services/mcp-oauth");
@@ -17,6 +18,7 @@ const {
 const findFirst = vi.mocked(db.query.oauthAccessToken.findFirst);
 const findMany = vi.mocked(db.query.oauthAccessToken.findMany);
 const dbDelete = vi.mocked(db.delete);
+const dbInsert = vi.mocked(db.insert);
 
 const basePayload = {
 	userId: "user-1",
@@ -52,7 +54,11 @@ describe("consent proof", () => {
 			),
 		).toBe(false);
 		expect(verifyConsentProof(proof, basePayload, "other-secret")).toBe(false);
-		const expired = createConsentProof(basePayload, "secret", Date.now() - 1000);
+		const expired = createConsentProof(
+			basePayload,
+			"secret",
+			Date.now() - 1000,
+		);
 		expect(verifyConsentProof(expired, basePayload, "secret")).toBe(false);
 		expect(verifyConsentProof("garbage", basePayload, "secret")).toBe(false);
 	});
@@ -156,6 +162,13 @@ describe("token hygiene", () => {
 	it("revokeMcpAuthorization deletes both the tokens and the consents", async () => {
 		await revokeMcpAuthorization("user-1", "client-1");
 		expect(dbDelete).toHaveBeenCalledTimes(2);
+	});
+
+	it("recordMcpConsent replaces the previous grant instead of accumulating rows", async () => {
+		dbInsert.mockClear();
+		await recordMcpConsent("user-1", "client-1", ["dokploy:read"]);
+		expect(dbDelete).toHaveBeenCalledTimes(1);
+		expect(dbInsert).toHaveBeenCalledTimes(1);
 	});
 });
 

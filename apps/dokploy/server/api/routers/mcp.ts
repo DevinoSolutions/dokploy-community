@@ -92,6 +92,12 @@ export const mcpRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			if (isMcpDisabled()) {
+				throw new TRPCError({
+					code: "PRECONDITION_FAILED",
+					message: "The MCP server is disabled on this instance",
+				});
+			}
 			const client = await findOAuthApplicationByClientId(input.clientId);
 			if (!client || client.disabled) {
 				throw new TRPCError({

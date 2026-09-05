@@ -417,6 +417,10 @@ const MCP_AUTHORIZATION_ROW_LIMIT = 200;
  * Records the grant the user approved on the consent page. Token rows are
  * rotated away on every refresh, so they cannot date the original grant; this
  * row can.
+ *
+ * The row replaces any earlier grant for the same client: re-authorizing keeps
+ * one row per (user, client), so `authorizedAt` reflects the grant actually in
+ * force and the table cannot grow without bound.
  */
 export const recordMcpConsent = async (
 	userId: string,
@@ -424,6 +428,11 @@ export const recordMcpConsent = async (
 	scopes: string[],
 ) => {
 	const now = new Date();
+	await db
+		.delete(oauthConsent)
+		.where(
+			and(eq(oauthConsent.userId, userId), eq(oauthConsent.clientId, clientId)),
+		);
 	await db.insert(oauthConsent).values({
 		clientId,
 		userId,
@@ -434,7 +443,11 @@ export const recordMcpConsent = async (
 	});
 };
 
-/** One row per client the user has authorized, newest token wins for scopes. */
+/**
+ * One row per client the user has authorized, newest token wins for scopes.
+ * `authorizedAt` is the latest consent, since `recordMcpConsent` replaces the
+ * previous grant for the client rather than adding to it.
+ */
 export const listMcpAuthorizations = async (
 	userId: string,
 ): Promise<McpAuthorization[]> => {

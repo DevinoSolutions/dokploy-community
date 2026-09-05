@@ -17,6 +17,13 @@ describe("isSafeRelativePath", () => {
 		"dashboard",
 		"",
 	])("rejects %s", (path) => expect(isSafeRelativePath(path)).toBe(false));
+
+	// `?redirect=/%09/evil.com` arrives decoded; a Location header carrying the
+	// tab is re-parsed by the browser as https://evil.com/.
+	it.each(["/\t/evil.com", "/a\nb", "/a\rb"])(
+		"rejects the control character in %j",
+		(path) => expect(isSafeRelativePath(path)).toBe(false),
+	);
 });
 
 describe("getPostLoginDestination", () => {

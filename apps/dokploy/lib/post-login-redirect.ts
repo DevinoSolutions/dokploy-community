@@ -3,10 +3,26 @@ type Query = Record<string, string | string[] | undefined>;
 const first = (value: string | string[] | undefined) =>
 	Array.isArray(value) ? value[0] : value;
 
+/**
+ * Control characters are rejected because a `Location` header carrying one is
+ * re-parsed by the browser: `/%09/evil.com` decodes to `/<tab>/evil.com`, which
+ * resolves to `https://evil.com/`.
+ */
+const hasControlCharacter = (value: string) => {
+	for (const character of value) {
+		const code = character.codePointAt(0) ?? 0;
+		if (code <= 0x1f || code === 0x7f) return true;
+	}
+	return false;
+};
+
 /** Same-origin relative path: starts with a single `/`, never `//` or `/\`. */
 export const isSafeRelativePath = (
 	value: string | undefined,
-): value is string => typeof value === "string" && /^\/(?![\/\\])/.test(value);
+): value is string =>
+	typeof value === "string" &&
+	/^\/(?![\/\\])/.test(value) &&
+	!hasControlCharacter(value);
 
 const OAUTH_KEYS = [
 	"client_id",
