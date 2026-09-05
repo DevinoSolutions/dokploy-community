@@ -33,6 +33,7 @@ export * from "./services/github";
 export * from "./services/gitlab";
 export * from "./services/libsql";
 export * from "./services/mariadb";
+export * from "./services/mcp-oauth";
 export * from "./services/mongo";
 export * from "./services/mount";
 export * from "./services/mysql";

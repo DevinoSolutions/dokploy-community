@@ -32,11 +32,14 @@ interface SignInWithSSOProps {
 	children?: React.ReactNode;
 	/** When true, SSO is the only option — no fallback to email/password */
 	enforce?: boolean;
+	/** Where the identity provider returns the user; defaults to the dashboard */
+	callbackURL?: string;
 }
 
 export function SignInWithSSO({
 	children,
 	enforce = false,
+	callbackURL = "/dashboard/home",
 }: SignInWithSSOProps) {
 	const [expanded, setExpanded] = useState(false);
 
@@ -49,7 +52,7 @@ export function SignInWithSSO({
 		try {
 			const { data, error } = await authClient.signIn.sso({
 				email: values.email,
-				callbackURL: "/dashboard/home",
+				callbackURL,
 				errorCallbackURL: "/",
 			});
 			if (error) {

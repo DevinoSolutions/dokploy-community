@@ -52,6 +52,7 @@ import {
 } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
+import { getPostLoginDestination } from "@/lib/post-login-redirect";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabelingPublic } from "@/utils/hooks/use-whitelabeling";
@@ -155,7 +156,7 @@ export default function Home({
 			}
 
 			toast.success("Logged in successfully");
-			await router.push("/dashboard/home");
+			await router.push(getPostLoginDestination(router.query));
 		} catch {
 			toast.error("An error occurred while logging in");
 			setIsLoginLoading(false);
@@ -180,7 +181,7 @@ export default function Home({
 
 			if (data) {
 				toast.success("Logged in successfully");
-				router.push("/dashboard/home");
+				router.push(getPostLoginDestination(router.query));
 			}
 		} catch {
 			toast.error("An error occurred while signing in with passkey");
@@ -210,7 +211,7 @@ export default function Home({
 			}
 
 			toast.success("Logged in successfully");
-			await router.push("/dashboard/home");
+			await router.push(getPostLoginDestination(router.query));
 		} catch {
 			toast.error("An error occurred while verifying 2FA code");
 			setIsTwoFactorLoading(false);
@@ -240,7 +241,7 @@ export default function Home({
 			}
 
 			toast.success("Logged in successfully");
-			await router.push("/dashboard/home");
+			await router.push(getPostLoginDestination(router.query));
 		} catch {
 			toast.error("An error occurred while verifying backup code");
 			setIsBackupCodeLoading(false);
@@ -251,7 +252,12 @@ export default function Home({
 		<>
 			{IS_CLOUD && <SignInWithGithub />}
 			{IS_CLOUD && <SignInWithGoogle />}
-			{!IS_CLOUD && <SocialLoginButtons providers={socialProviders} />}
+			{!IS_CLOUD && (
+				<SocialLoginButtons
+					providers={socialProviders}
+					callbackURL={getPostLoginDestination(router.query)}
+				/>
+			)}
 			<Form {...loginForm}>
 				<form
 					method="post"
@@ -336,9 +342,16 @@ export default function Home({
 				{!isTwoFactor ? (
 					<>
 						{enforceSSO ? (
-							<SignInWithSSO enforce />
+							<SignInWithSSO
+								enforce
+								callbackURL={getPostLoginDestination(router.query)}
+							/>
 						) : showSignInWithSSO ? (
-							<SignInWithSSO>{loginContent}</SignInWithSSO>
+							<SignInWithSSO
+								callbackURL={getPostLoginDestination(router.query)}
+							>
+								{loginContent}
+							</SignInWithSSO>
 						) : (
 							loginContent
 						)}
@@ -529,7 +542,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 				return {
 					redirect: {
 						permanent: false,
-						destination: "/dashboard/home",
+						destination: getPostLoginDestination(context.query),
 					},
 				};
 			}
@@ -560,7 +573,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 		return {
 			redirect: {
 				permanent: false,
-				destination: "/dashboard/home",
+				destination: getPostLoginDestination(context.query),
 			},
 		};
 	}

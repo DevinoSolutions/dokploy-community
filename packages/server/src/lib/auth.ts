@@ -6,8 +6,12 @@ import { sso } from "@better-auth/sso";
 import * as bcrypt from "bcrypt";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError, createAuthMiddleware } from "better-auth/api";
-import { admin, organization, twoFactor } from "better-auth/plugins";
+import {
+	APIError,
+	createAuthMiddleware,
+	getSessionFromCtx,
+} from "better-auth/api";
+import { admin, mcp, organization, twoFactor } from "better-auth/plugins";
 import { and, desc, eq } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
 import { db } from "../db";
@@ -17,6 +21,16 @@ import {
 	getTrustedProviders,
 	getUserByToken,
 } from "../services/admin";
+import {
+	deleteConsumedRefreshToken,
+	DOKPLOY_MCP_SCOPE_IDS,
+	evaluateMcpAuthorizeGate,
+	evaluateMcpRegisterBody,
+	getMcpAccessTokenSeconds,
+	getMcpRefreshTokenSeconds,
+	MCP_AUTHORIZE_PAGE_PATH,
+	MCP_ENDPOINT_PATH,
+} from "../services/mcp-oauth";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import { resolveOrganizationDefaultRole } from "../services/proprietary/license-key";
 import {
@@ -85,6 +99,15 @@ const createBetterAuth = () =>
 			"/organization/create",
 			"/organization/update",
 			"/organization/delete",
+			// The fork serves OAuth discovery from /api/mcp-oauth/* (see
+			// services/mcp-oauth.ts); the plugin's copies need a global baseURL.
+			"/.well-known/oauth-authorization-server",
+			"/.well-known/oauth-protected-resource",
+			"/oauth2/consent",
+			// The plugin's own session lookup returns the whole token row,
+			// refresh token included, to any bearer of an access token. The fork
+			// resolves tokens itself (services/mcp-oauth.ts) and never calls it.
+			"/mcp/get-session",
 			...(!IS_CLOUD ? ["/verify-email"] : []),
 		],
 		secret: betterAuthSecret,
@@ -136,6 +159,60 @@ const createBetterAuth = () =>
 					...(ctx.context.baseURL ? [new URL(ctx.context.baseURL).origin] : []),
 					...(await resolveTrustedOrigins()),
 				].filter(Boolean);
+
+				// Dynamic client registration is anonymous: only loopback-http or
+				// https redirect targets may receive authorization codes.
+				if (ctx.path === "/mcp/register") {
+					const decision = evaluateMcpRegisterBody(ctx.body);
+					if (!decision.ok) {
+						throw new APIError("BAD_REQUEST", {
+							error: decision.error,
+							error_description: decision.error_description,
+						});
+					}
+				}
+
+				// The plugin issues a code without consent. Require the proof the
+				// fork's consent page mints, and never let an anonymous request reach
+				// the plugin (it would set a login-resume cookie that bypasses the
+				// consent page after sign-in).
+				if (ctx.path === "/mcp/authorize") {
+					const session = await getSessionFromCtx(ctx);
+					const decision = evaluateMcpAuthorizeGate({
+						query: (ctx.query ?? {}) as Record<string, unknown>,
+						userId: session?.user.id ?? null,
+					});
+					if (decision.action === "redirect") {
+						throw ctx.redirect(decision.location);
+					}
+					if (decision.action === "reject") {
+						throw new APIError("BAD_REQUEST", {
+							error: decision.error,
+							error_description: decision.error_description,
+						});
+					}
+				}
+			}),
+			after: createAuthMiddleware(async (ctx) => {
+				// Refresh rotation: the plugin inserts a new row and leaves the
+				// consumed refresh token alive. Delete it so it cannot be replayed.
+				if (ctx.path !== "/mcp/token") return;
+				const rawBody = ctx.body as unknown;
+				const body =
+					rawBody instanceof FormData
+						? (Object.fromEntries(rawBody.entries()) as Record<string, unknown>)
+						: ((rawBody ?? {}) as Record<string, unknown>);
+				if (body.grant_type !== "refresh_token") return;
+				const returned = ctx.context.returned as unknown;
+				const succeeded =
+					!!returned &&
+					typeof returned === "object" &&
+					"access_token" in returned;
+				if (!succeeded) return;
+				const consumed = body.refresh_token;
+				if (typeof consumed === "string" && consumed) {
+					await deleteConsumedRefreshToken(consumed);
+				}
 			}),
 		},
 		emailVerification: {
@@ -475,6 +552,26 @@ const createBetterAuth = () =>
 			}),
 			twoFactor(),
 			passkey(),
+			// Remote MCP endpoint OAuth server (see docs/superpowers/specs/2026-09-04-remote-mcp-oauth-design.md).
+			// Discovery is served by the fork (apps/dokploy/pages/api/mcp-oauth/*), so no baseURL is set here.
+			mcp({
+				loginPage: MCP_AUTHORIZE_PAGE_PATH,
+				resource: MCP_ENDPOINT_PATH,
+				oidcConfig: {
+					// OIDCOptions requires loginPage; the plugin overwrites it with the
+					// top-level one, so both must name the fork's consent page.
+					loginPage: MCP_AUTHORIZE_PAGE_PATH,
+					accessTokenExpiresIn: getMcpAccessTokenSeconds(),
+					refreshTokenExpiresIn: getMcpRefreshTokenSeconds(),
+					requirePKCE: true,
+					defaultScope: [
+						"openid",
+						"offline_access",
+						...DOKPLOY_MCP_SCOPE_IDS,
+					].join(" "),
+					scopes: [...DOKPLOY_MCP_SCOPE_IDS],
+				},
+			}),
 			organization({
 				ac,
 				roles: {
@@ -603,6 +700,49 @@ async function logRejectedSessionCookie(cookieHeader: string) {
 	}
 }
 
+type UserRow = typeof schema.user.$inferSelect;
+
+/**
+ * Synthesizes the `{ session, user }` shape tRPC's context expects for a
+ * user acting inside one organization without a browser session. Shared by
+ * the API-key branch of `validateRequest` and the MCP endpoint.
+ */
+export const buildMemberSession = async (
+	userFromDb: UserRow,
+	organizationId: string,
+) => {
+	const member = await db.query.member.findFirst({
+		where: and(
+			eq(schema.member.userId, userFromDb.id),
+			eq(schema.member.organizationId, organizationId),
+		),
+		with: {
+			organization: true,
+		},
+	});
+
+	return {
+		session: {
+			userId: userFromDb.id,
+			activeOrganizationId: organizationId,
+		},
+		user: {
+			id: userFromDb.id,
+			name: userFromDb.firstName, // Map firstName back to name for better-auth
+			email: userFromDb.email,
+			emailVerified: userFromDb.emailVerified,
+			image: userFromDb.image,
+			createdAt: userFromDb.createdAt,
+			updatedAt: userFromDb.updatedAt,
+			twoFactorEnabled: userFromDb.twoFactorEnabled,
+			role: member?.role || "member",
+			ownerId: member?.organization.ownerId || userFromDb.id,
+			enableEnterpriseFeatures: userFromDb.enableEnterpriseFeatures,
+			isValidEnterpriseLicense: userFromDb.isValidEnterpriseLicense,
+		},
+	};
+};
+
 export const validateRequest = async (request: IncomingMessage) => {
 	const api = getApi();
 	const apiKey = request.headers["x-api-key"] as string;
@@ -651,44 +791,7 @@ export const validateRequest = async (request: IncomingMessage) => {
 				};
 			}
 
-			const member = await db.query.member.findFirst({
-				where: and(
-					eq(schema.member.userId, apiKeyRecord.user.id),
-					eq(schema.member.organizationId, organizationId),
-				),
-				with: {
-					organization: true,
-				},
-			});
-
-			// When accessing from DB, use actual column names
-			const userFromDb = apiKeyRecord.user as typeof apiKeyRecord.user & {
-				firstName: string;
-				lastName: string;
-			};
-
-			const mockSession = {
-				session: {
-					userId: apiKeyRecord.user.id,
-					activeOrganizationId: organizationId || "",
-				},
-				user: {
-					id: userFromDb.id,
-					name: userFromDb.firstName, // Map firstName back to name for better-auth
-					email: userFromDb.email,
-					emailVerified: userFromDb.emailVerified,
-					image: userFromDb.image,
-					createdAt: userFromDb.createdAt,
-					updatedAt: userFromDb.updatedAt,
-					twoFactorEnabled: userFromDb.twoFactorEnabled,
-					role: member?.role || "member",
-					ownerId: member?.organization.ownerId || apiKeyRecord.user.id,
-					enableEnterpriseFeatures: userFromDb.enableEnterpriseFeatures,
-					isValidEnterpriseLicense: userFromDb.isValidEnterpriseLicense,
-				},
-			};
-
-			return mockSession;
+			return await buildMemberSession(apiKeyRecord.user, organizationId);
 		} catch (error) {
 			console.error("Error verifying API key", error);
 			return {
