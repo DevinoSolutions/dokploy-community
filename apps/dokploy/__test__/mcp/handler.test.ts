@@ -139,6 +139,24 @@ describe("executeMcpTool", () => {
 		expect(result.structuredContent).toEqual({ applicationId: "app-1" });
 	});
 
+	it("serializes bigint columns as strings instead of throwing", async () => {
+		const call = vi.fn(async () => ({ id: "app-1", bytes: 9007199254740993n }));
+		const result = await executeMcpTool({
+			tool: readTool,
+			args: {},
+			scopes: new Set(["dokploy:read"]),
+			call,
+		});
+		expect(result.isError).toBeUndefined();
+		expect((result.content[0] as { text: string }).text).toBe(
+			'{"id":"app-1","bytes":"9007199254740993"}',
+		);
+		expect(result.structuredContent).toEqual({
+			id: "app-1",
+			bytes: "9007199254740993",
+		});
+	});
+
 	it("maps TRPCError to an error result with CODE: message", async () => {
 		const call = vi.fn(async () => {
 			throw new TRPCError({ code: "UNAUTHORIZED", message: "nope" });

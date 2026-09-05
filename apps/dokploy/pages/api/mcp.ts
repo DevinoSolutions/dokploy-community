@@ -12,11 +12,15 @@ import {
 	authenticateMcpBearer,
 	createMcpRequestServer,
 	makeProcedureCall,
+	McpRequestBodyError,
+	readJsonBody,
 	unauthorizedPayload,
 } from "@/server/mcp/handler";
 import { getMcpToolRegistry } from "@/server/mcp/registry";
+import { captureError } from "@/server/sentry";
 
-// The MCP transport reads the raw JSON-RPC body itself.
+// The body is read by readJsonBody so the byte ceiling is enforced while
+// streaming; the SDK transport would otherwise buffer it unbounded.
 export const config = { api: { bodyParser: false } };
 
 const createCaller = createCallerFactory(appRouter);
@@ -58,12 +62,14 @@ export default async function handler(
 			"Method not allowed. MCP over Streamable HTTP uses POST.",
 		);
 	}
+	// Cheap pre-check on the declared length; readJsonBody still enforces the
+	// ceiling on the actual stream, since Content-Length can lie or be absent.
 	const contentLength = Number(req.headers["content-length"]);
 	if (
 		Number.isFinite(contentLength) &&
 		contentLength > OPENAPI_MAX_JSON_BODY_SIZE
 	) {
-		return jsonRpcError(res, 413, "Payload too large");
+		return jsonRpcError(res, 413, "Payload too large", -32000);
 	}
 
 	const auth = await authenticateMcpBearer(req.headers.authorization);
@@ -73,6 +79,17 @@ export default async function handler(
 			res.setHeader(key, value);
 		}
 		return res.status(payload.status).json(payload.body);
+	}
+
+	let body: unknown;
+	try {
+		body = await readJsonBody(req, OPENAPI_MAX_JSON_BODY_SIZE);
+	} catch (error) {
+		if (error instanceof McpRequestBodyError) {
+			return jsonRpcError(res, error.status, error.message, error.rpcCode);
+		}
+		captureError(error, { handler: "mcp-body" });
+		return jsonRpcError(res, 400, "Could not read the request body");
 	}
 
 	const caller = createCaller({
@@ -96,6 +113,14 @@ export default async function handler(
 		void transport.close();
 		void server.close();
 	});
-	await server.connect(transport);
-	await transport.handleRequest(req, res);
+	try {
+		await server.connect(transport);
+		await transport.handleRequest(req, res, body);
+	} catch (error) {
+		captureError(error, { handler: "mcp-transport" });
+		console.error("[mcp] transport failure", error);
+		if (!res.headersSent) {
+			jsonRpcError(res, 500, "Internal server error", -32603);
+		}
+	}
 }

@@ -10,6 +10,7 @@ import {
 	CallToolRequestSchema,
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { IncomingHttpHeaders } from "node:http";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import packageInfo from "../../package.json";
@@ -65,6 +66,65 @@ export const unauthorizedPayload = (origin: string) => {
 	};
 };
 
+/**
+ * Refusal raised while reading the JSON-RPC body, carrying the HTTP status and
+ * JSON-RPC error code the endpoint should answer with.
+ */
+export class McpRequestBodyError extends Error {
+	readonly status: number;
+	readonly rpcCode: number;
+
+	constructor(status: number, rpcCode: number, message: string) {
+		super(message);
+		this.name = "McpRequestBodyError";
+		this.status = status;
+		this.rpcCode = rpcCode;
+	}
+}
+
+export interface JsonBodyRequest extends AsyncIterable<Buffer | string> {
+	headers: IncomingHttpHeaders;
+}
+
+/**
+ * Reads and parses the JSON-RPC body with a hard byte ceiling. The SDK's own
+ * `handleRequest` buffers the whole stream with no limit, so the body is read
+ * here and handed to it pre-parsed. Aborts as soon as the limit is passed
+ * rather than after buffering everything.
+ */
+export const readJsonBody = async (
+	req: JsonBodyRequest,
+	limit: number,
+): Promise<unknown> => {
+	const contentType = req.headers["content-type"];
+	const mediaType =
+		typeof contentType === "string"
+			? contentType.split(";")[0]?.trim().toLowerCase()
+			: undefined;
+	if (mediaType !== "application/json") {
+		throw new McpRequestBodyError(
+			415,
+			-32000,
+			"Unsupported Media Type. MCP over Streamable HTTP requires application/json.",
+		);
+	}
+	const chunks: Buffer[] = [];
+	let size = 0;
+	for await (const chunk of req) {
+		const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+		size += buffer.length;
+		if (size > limit) {
+			throw new McpRequestBodyError(413, -32000, "Payload too large");
+		}
+		chunks.push(buffer);
+	}
+	try {
+		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	} catch {
+		throw new McpRequestBodyError(400, -32700, "Parse error");
+	}
+};
+
 export type ProcedureCall = (path: string, args: unknown) => Promise<unknown>;
 
 /**
@@ -82,6 +142,10 @@ const errorResult = (text: string): ToolCallResult => ({
 	content: [{ type: "text", text }],
 	isError: true,
 });
+
+/** Procedures can return bigint columns, which plain JSON.stringify throws on. */
+const bigintReplacer = (_key: string, value: unknown) =>
+	typeof value === "bigint" ? value.toString() : value;
 
 /** Scope check, then execution through the injected tRPC caller. */
 export const executeMcpTool = async ({
@@ -102,10 +166,13 @@ export const executeMcpTool = async ({
 	}
 	try {
 		const result = await call(tool.path, args ?? {});
-		const text = result === undefined ? "null" : JSON.stringify(result);
+		const text =
+			result === undefined ? "null" : JSON.stringify(result, bigintReplacer);
+		// Reuse the serialized form so structuredContent is JSON-safe too: a
+		// bigint anywhere in it would otherwise throw inside the transport.
 		const structured =
 			result && typeof result === "object" && !Array.isArray(result)
-				? (result as Record<string, unknown>)
+				? (JSON.parse(text) as Record<string, unknown>)
 				: undefined;
 		return {
 			content: [{ type: "text", text }],

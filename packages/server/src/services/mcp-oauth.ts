@@ -20,18 +20,12 @@ export const MCP_AUTHORIZE_PAGE_PATH = "/mcp/authorize";
 /** Path of the plugin's authorize endpoint relative to the origin. */
 export const MCP_PLUGIN_AUTHORIZE_PATH = "/api/auth/mcp/authorize";
 
-/** Scope ids the MCP OAuth server accepts. The catalogue with labels lives in apps/dokploy/server/mcp/scopes.ts. */
-export const DOKPLOY_MCP_SCOPE_IDS = [
-	"dokploy:read",
-	"dokploy:deploy",
-	"dokploy:services:write",
-	"dokploy:services:delete",
-	"dokploy:projects:write",
-	"dokploy:projects:delete",
-	"dokploy:backups",
-	"dokploy:admin",
-] as const;
-export type DokployMcpScope = (typeof DOKPLOY_MCP_SCOPE_IDS)[number];
+/**
+ * Scope ids live in the leaf module `./mcp-scopes` so the web app can import
+ * them without pulling `db`/`node-schedule` into a page bundle. Re-exported
+ * here so existing `services/mcp-oauth` imports keep working.
+ */
+export { DOKPLOY_MCP_SCOPE_IDS, type DokployMcpScope } from "./mcp-scopes";
 
 const DEFAULT_ACCESS_TOKEN_HOURS = 24;
 const DEFAULT_REFRESH_TOKEN_DAYS = 180;

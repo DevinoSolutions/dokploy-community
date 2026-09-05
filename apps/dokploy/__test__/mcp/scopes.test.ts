@@ -64,9 +64,30 @@ describe("resolveToolScope", () => {
 		expect(m("tag", "removeFromProject")).toBe("dokploy:services:write");
 		expect(m("docker", "deleteContainerFile")).toBe("dokploy:services:write");
 		expect(m("patch", "cleanPatchRepos")).toBe("dokploy:deploy");
-		expect(m("compose", "fetchSourceType")).toBe("dokploy:read");
+		expect(m("compose", "fetchSourceType")).toBe("dokploy:deploy");
 		expect(m("settings", "getUpdateData")).toBe("dokploy:read");
 		expect(m("user", "toggleTemplateBookmark")).toBe("dokploy:services:write");
+	});
+
+	it("queries that return credentials need admin, ordinary queries stay read", () => {
+		expect(q("sshKey", "one")).toBe("dokploy:admin");
+		expect(q("sshKey", "all")).toBe("dokploy:admin");
+		expect(q("destination", "all")).toBe("dokploy:admin");
+		expect(q("github", "one")).toBe("dokploy:admin");
+		expect(q("settings", "readTraefikEnv")).toBe("dokploy:admin");
+		expect(q("settings", "getWebServerSettings")).toBe("dokploy:admin");
+		expect(q("notification", "all")).toBe("dokploy:admin");
+		expect(q("ai", "getAll")).toBe("dokploy:admin");
+		expect(q("sso", "listProviders")).toBe("dokploy:admin");
+		expect(q("server", "withSSHKey")).toBe("dokploy:admin");
+		expect(q("certificates", "one")).toBe("dokploy:admin");
+		expect(q("user", "all")).toBe("dokploy:admin");
+		// Safe projections and ordinary reads keep the default-on read scope.
+		expect(q("application", "one")).toBe("dokploy:read");
+		expect(q("registry", "one")).toBe("dokploy:read");
+		expect(q("sshKey", "allForApps")).toBe("dokploy:read");
+		expect(q("gitProvider", "getAll")).toBe("dokploy:read");
+		expect(q("user", "get")).toBe("dokploy:read");
 	});
 
 	it("project routers split write/delete", () => {
