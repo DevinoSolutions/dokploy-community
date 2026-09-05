@@ -373,6 +373,11 @@ Card "MCP Server" under Settings → Profile, next to API Keys, following the
 - Organization picker at authorization time.
 - Output redaction of secrets in tool results.
 - Per-server scoping (`dokploy:server:<id>`).
+- A `dokploy:secrets` scope: every query maps to the default-on `dokploy:read`,
+  so a minimal grant can still read secret-bearing queries the caller's role
+  allows (`sshKey-one`, `settings-readTraefikEnv`, `user-getMetricsToken`,
+  `registry-one`, `destination-one`, `github-one`). Parity with the API key
+  today; splitting those behind an off-by-default scope is the fix.
 
 ## Amendments (2026-09-04, implementation)
 
