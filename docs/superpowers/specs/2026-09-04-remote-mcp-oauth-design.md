@@ -373,11 +373,16 @@ Card "MCP Server" under Settings → Profile, next to API Keys, following the
 - Organization picker at authorization time.
 - Output redaction of secrets in tool results.
 - Per-server scoping (`dokploy:server:<id>`).
-- A `dokploy:secrets` scope: every query maps to the default-on `dokploy:read`,
-  so a minimal grant can still read secret-bearing queries the caller's role
-  allows (`sshKey-one`, `settings-readTraefikEnv`, `user-getMetricsToken`,
-  `registry-one`, `destination-one`, `github-one`). Parity with the API key
-  today; splitting those behind an off-by-default scope is the fix.
+- A dedicated `dokploy:secrets` scope. v1 moves the queries whose purpose is
+  to return a credential store (SSH private keys, destination and git-provider
+  secrets, notification/AI/SSO/server/certificate secrets, Traefik env, the
+  metrics token, user records) behind `dokploy:admin` via a
+  `CREDENTIAL_QUERIES` table in `scopes.ts`. Service-level detail queries stay
+  on `dokploy:read` and still return that service's own configuration the way
+  the dashboard and the API key do (`application-one` build env and registry
+  password, database `one` passwords, `security-one`, `docker-getConfig`,
+  `project-export` with `includeSecrets`). Output redaction (above) or a
+  secrets scope is the follow-up that closes that.
 
 ## Amendments (2026-09-04, implementation)
 
