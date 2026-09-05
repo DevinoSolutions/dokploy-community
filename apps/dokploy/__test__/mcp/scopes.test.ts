@@ -62,6 +62,11 @@ describe("resolveToolScope", () => {
 		expect(m("compose", "deployTemplate")).toBe("dokploy:services:write");
 		expect(m("schedule", "runManually")).toBe("dokploy:deploy");
 		expect(m("tag", "removeFromProject")).toBe("dokploy:services:write");
+		expect(m("docker", "deleteContainerFile")).toBe("dokploy:services:write");
+		expect(m("patch", "cleanPatchRepos")).toBe("dokploy:deploy");
+		expect(m("compose", "fetchSourceType")).toBe("dokploy:read");
+		expect(m("settings", "getUpdateData")).toBe("dokploy:read");
+		expect(m("user", "toggleTemplateBookmark")).toBe("dokploy:services:write");
 	});
 
 	it("project routers split write/delete", () => {

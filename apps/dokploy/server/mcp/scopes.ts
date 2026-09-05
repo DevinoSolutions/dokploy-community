@@ -59,7 +59,7 @@ export const DOKPLOY_SCOPES: ScopeDefinition[] = [
 		id: "dokploy:backups",
 		label: "Backups",
 		description:
-			"Manage backups, backup policies, volume backups and destinations, including manual runs and restores.",
+			"Manage backups, backup policies, volume backups and destinations, including manual runs, restores and deletions.",
 		defaultOn: true,
 	},
 	{
@@ -123,6 +123,16 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
 	"compose.deployTemplate": "dokploy:services:write",
 	"schedule.runManually": "dokploy:deploy",
 	"tag.removeFromProject": "dokploy:services:write",
+	// Edits a file inside a container; its sibling writeContainerFile is write.
+	"docker.deleteContainerFile": "dokploy:services:write",
+	// Repo housekeeping, matched by the clean prefix rather than a real deletion.
+	"patch.cleanPatchRepos": "dokploy:deploy",
+	// Mutation that only inspects the source, so it reads rather than writes.
+	"compose.fetchSourceType": "dokploy:read",
+	// Update check: a mutation in shape, read-only in effect.
+	"settings.getUpdateData": "dokploy:read",
+	// Personal bookmark on a template; must not require administration.
+	"user.toggleTemplateBookmark": "dokploy:services:write",
 };
 
 const DELETE_PATTERN = /^(delete|remove|drop|clear|clean)/i;
