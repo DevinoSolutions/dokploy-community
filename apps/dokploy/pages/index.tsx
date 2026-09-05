@@ -52,6 +52,10 @@ import {
 } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
+import {
+	getPostLoginDestination,
+	isSafeRelativePath,
+} from "@/lib/post-login-redirect";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabelingPublic } from "@/utils/hooks/use-whitelabeling";
@@ -155,7 +159,7 @@ export default function Home({
 			}
 
 			toast.success("Logged in successfully");
-			await router.push("/dashboard/home");
+			await router.push(getPostLoginDestination(router.query));
 		} catch {
 			toast.error("An error occurred while logging in");
 			setIsLoginLoading(false);
@@ -180,7 +184,7 @@ export default function Home({
 
 			if (data) {
 				toast.success("Logged in successfully");
-				router.push("/dashboard/home");
+				router.push(getPostLoginDestination(router.query));
 			}
 		} catch {
 			toast.error("An error occurred while signing in with passkey");
@@ -210,7 +214,7 @@ export default function Home({
 			}
 
 			toast.success("Logged in successfully");
-			await router.push("/dashboard/home");
+			await router.push(getPostLoginDestination(router.query));
 		} catch {
 			toast.error("An error occurred while verifying 2FA code");
 			setIsTwoFactorLoading(false);
@@ -240,7 +244,7 @@ export default function Home({
 			}
 
 			toast.success("Logged in successfully");
-			await router.push("/dashboard/home");
+			await router.push(getPostLoginDestination(router.query));
 		} catch {
 			toast.error("An error occurred while verifying backup code");
 			setIsBackupCodeLoading(false);
@@ -526,10 +530,15 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 		try {
 			const { user } = await validateRequest(context.req);
 			if (user) {
+				const redirect = Array.isArray(context.query.redirect)
+					? context.query.redirect[0]
+					: context.query.redirect;
 				return {
 					redirect: {
 						permanent: false,
-						destination: "/dashboard/home",
+						destination: isSafeRelativePath(redirect)
+							? redirect
+							: "/dashboard/home",
 					},
 				};
 			}
@@ -557,10 +566,15 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 	const { user } = await validateRequest(context.req);
 
 	if (user) {
+		const redirect = Array.isArray(context.query.redirect)
+			? context.query.redirect[0]
+			: context.query.redirect;
 		return {
 			redirect: {
 				permanent: false,
-				destination: "/dashboard/home",
+				destination: isSafeRelativePath(redirect)
+					? redirect
+					: "/dashboard/home",
 			},
 		};
 	}
