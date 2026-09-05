@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.3** | Fork version **v0.30.3-community.3**
+Based on **Dokploy v0.30.3** | Fork version **v0.30.3-community.4**
 
 Everything in upstream Dokploy **v0.30.3**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.3-community.3 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.3-community.4 \
   --with-registry-auth \
   dokploy
 ```
@@ -35,6 +35,13 @@ The image is public — no registry login required.
 - Per-resource network picker in the Advanced tab
 
 https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
+
+### Remote MCP server with OAuth (fork original)
+
+- Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP) — Claude Code, Cursor or any MCP client connects over HTTPS with **no local process and no API key**
+- **OAuth 2.1** with PKCE and dynamic client registration: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then `/mcp → Authenticate` opens the browser and you sign in once
+- **Per-grant scopes** — a consent page with toggles for read, deploy, edit/delete services, edit/delete projects, backups and admin (delete and admin are off by default); role permissions still apply underneath
+- **Long-lived, silently refreshed tokens** (24h access / 180-day sliding refresh, env-tunable) shared by every session on the machine; revoke any client from Settings → Profile
 
 ### Cloudflare integration
 
@@ -106,6 +113,15 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.3-community.4
+
+**Remote MCP server with OAuth** — one guarded migration (three additive tables), upgrades in place.
+
+- **MCP server hosted inside Dokploy** — `POST /api/mcp` serves all 664 API procedures as MCP tools (same names as `@dokploy/mcp`) over Streamable HTTP, so 50 Claude Code sessions share one HTTPS endpoint instead of spawning 50 local processes; `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp` and `/mcp → Authenticate` is the whole setup ([#203](https://github.com/DevinoSolutions/dokploy-community/pull/203))
+- **OAuth 2.1 instead of API keys** — PKCE, dynamic client registration and RFC 9728 discovery via better-auth's in-core `mcp` plugin, hardened with a consent-proof gate on the authorize endpoint, a loopback/https-only redirect-URI policy, refresh-token rotation cleanup, and a bounded request body ([#203](https://github.com/DevinoSolutions/dokploy-community/pull/203))
+- **Scoped grants** — the consent page lets you check off exactly what a client may do: `dokploy:read`, `deploy`, `services:write`, `services:delete`, `projects:write`, `projects:delete`, `backups`, `admin` (delete + admin off by default); credential-store queries and raw file reads require `admin`; every tool still runs the caller's role checks ([#203](https://github.com/DevinoSolutions/dokploy-community/pull/203))
+- **Minimal re-authentication** — 24-hour access tokens with a 180-day sliding refresh (`DOKPLOY_MCP_ACCESS_TOKEN_HOURS` / `DOKPLOY_MCP_REFRESH_TOKEN_DAYS`), daily purge of expired rows, `DOKPLOY_MCP_DISABLED=true` kill switch, and a Settings → Profile card listing authorized clients with one-click revoke ([#203](https://github.com/DevinoSolutions/dokploy-community/pull/203))
 
 ### New in v0.30.3-community.3
 
@@ -323,7 +339,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.3-community.3
+export DOKPLOY_VERSION=v0.30.3-community.4
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -336,7 +352,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.3-community.3     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.3-community.4     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -388,6 +404,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.30.3 | 1st release | `v0.30.3-community.1` |
 | v0.30.3 | 2nd release | `v0.30.3-community.2` |
 | v0.30.3 | 3rd release | `v0.30.3-community.3` |
+| v0.30.3 | 4th release | `v0.30.3-community.4` |
 
 ## Contributing
 
