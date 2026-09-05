@@ -154,9 +154,9 @@ describe("token hygiene", () => {
 		expect(dbDelete).toHaveBeenCalledTimes(1);
 	});
 
-	it("purgeExpiredMcpTokens issues a single delete", async () => {
+	it("purgeExpiredMcpTokens deletes dead tokens and abandoned registrations", async () => {
 		await purgeExpiredMcpTokens();
-		expect(dbDelete).toHaveBeenCalledTimes(1);
+		expect(dbDelete).toHaveBeenCalledTimes(2);
 	});
 
 	it("revokeMcpAuthorization deletes both the tokens and the consents", async () => {

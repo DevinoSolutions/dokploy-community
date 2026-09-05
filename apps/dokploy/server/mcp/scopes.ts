@@ -18,7 +18,7 @@ export const DOKPLOY_SCOPES: ScopeDefinition[] = [
 		id: "dokploy:read",
 		label: "Read",
 		description:
-			"List and inspect projects, services, deployments, logs and settings. Stored credentials (SSH keys, backup destinations, git providers, notification and AI provider keys, server and certificate secrets) require Administration.",
+			"List and inspect projects, services, deployments, logs and settings, including a service's own configuration (environment, database passwords). Stored credentials, raw file reads and user records require Administration.",
 		defaultOn: true,
 	},
 	{
@@ -66,7 +66,7 @@ export const DOKPLOY_SCOPES: ScopeDefinition[] = [
 		id: "dokploy:admin",
 		label: "Administration",
 		description:
-			"Servers, cluster, Docker cleanup, SSH keys, registries, git providers, notifications, certificates, users, organization, roles and every other setting. Also required to read stored credentials, including the queries that return private keys, access keys and provider tokens.",
+			"Servers, cluster, Docker cleanup, SSH keys, registries, git providers, notifications, certificates, users, organization, roles and every other setting. Also required to read stored credentials and raw file reads, including the queries that return private keys, access keys and provider tokens.",
 		defaultOn: false,
 	},
 ];
@@ -173,6 +173,7 @@ const CREDENTIAL_QUERIES = new Set([
 	"notification.getEmailProviders",
 	// aiSettings row, unprojected → apiKey
 	"ai.one",
+	"ai.get",
 	"ai.getAll",
 	// oidcConfig/samlConfig blobs → clientSecret, SAML private key
 	"sso.one",
@@ -185,6 +186,13 @@ const CREDENTIAL_QUERIES = new Set([
 	// certificates row, unprojected → privateKey
 	"certificates.one",
 	"certificates.all",
+	// Raw file reads: the caller names an arbitrary path and gets the bytes
+	// back verbatim, so any .env or credential file on the host or in a
+	// container is reachable. patch.readRepoFile stays on read: it is scoped to
+	// the caller's own service repo, like application.one.
+	"docker.readContainerFile",
+	"dockerVolume.readVolumeFile",
+	"settings.readTraefikFile",
 ]);
 
 const DELETE_PATTERN = /^(delete|remove|drop|clear|clean)/i;

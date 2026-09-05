@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
-import { and, asc, desc, eq, isNull, lt, or } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, notExists, or } from "drizzle-orm";
 import { scheduleJob } from "node-schedule";
 import { db } from "../db";
 import {
@@ -363,9 +363,17 @@ export const deleteConsumedRefreshToken = async (refreshToken: string) => {
 };
 
 /**
- * Removes rows that can never be used again: the refresh window closed, or the
- * access token expired and no usable refresh window exists — either because
- * there is no refresh token at all, or because its expiry was never recorded.
+ * Removes rows that can never be used again.
+ *
+ * First the token rows: the refresh window closed, or the access token expired
+ * and no usable refresh window exists — either because there is no refresh
+ * token at all, or because its expiry was never recorded.
+ *
+ * Then the abandoned client registrations. Dynamic client registration is
+ * anonymous, so every `/mcp/register` call writes an `oauth_application` row
+ * whether or not the user ever authorizes it, and nothing else removes them.
+ * A row older than a day with no token row has never been used and never will
+ * be, since the authorization code that would create one has long expired.
  */
 export const purgeExpiredMcpTokens = async () => {
 	const now = new Date();
@@ -381,6 +389,21 @@ export const purgeExpiredMcpTokens = async () => {
 				and(
 					isNull(oauthAccessToken.refreshTokenExpiresAt),
 					lt(oauthAccessToken.accessTokenExpiresAt, now),
+				),
+			),
+		);
+
+	const dayAgo = new Date(now.getTime() - 86_400_000);
+	await db
+		.delete(oauthApplication)
+		.where(
+			and(
+				lt(oauthApplication.createdAt, dayAgo),
+				notExists(
+					db
+						.select({ id: oauthAccessToken.id })
+						.from(oauthAccessToken)
+						.where(eq(oauthAccessToken.clientId, oauthApplication.clientId)),
 				),
 			),
 		);
