@@ -8,8 +8,10 @@ import {
 	initCronJobs,
 	initEnterpriseBackupCronJobs,
 	initializeNetwork,
+	initMcpTokenPurgeCronJob,
 	initSchedules,
 	initVolumeBackupsCronJobs,
+	isMcpDisabled,
 	sendDokployRestartNotifications,
 	setupDirectories,
 } from "@dokploy/server";
@@ -115,6 +117,10 @@ void app
 				await sendDokployRestartNotifications();
 			}
 			await initEnterpriseBackupCronJobs();
+
+			if (!isMcpDisabled()) {
+				initMcpTokenPurgeCronJob();
+			}
 
 			if (!IS_CLOUD) {
 				console.log("Starting Deployment Worker");
