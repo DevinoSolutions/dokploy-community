@@ -210,6 +210,34 @@ be adapted on sync: pass the project id and read `.domain`. This one auto-merged
 cleanly and only the typecheck caught it — grep for `generateTraefikMeDomain`
 after every merge.
 
+### BREAKING at v0.30.5: default Docker build context is now the repo root
+
+Upstream `f1e2467bb` ("fix/docker-context-path-default") changed the *default*
+build context for `buildType: "dockerfile"` applications:
+
+- `getDockerContextPath` used to return `null` when the app had no explicit
+  `dockerContextPath`, and `builders/docker-file.ts` then fell back to
+  `defaultContextPath` — **the directory containing the Dockerfile**.
+- It now returns `<APPLICATIONS_PATH>/<appName>/code/<dockerContextPath || ".">`
+  and the fallback was deleted, so the default context is **the repository
+  root**, matching what the UI placeholder always claimed.
+
+Taken under theirs-wins (it is deliberate, and it is a file upstream edits), but
+it is a **behaviour break for existing users**: any Dockerfile app whose
+Dockerfile sits in a subdirectory and copies paths relative to that
+subdirectory (`COPY package.json .`, `COPY deno.json .`, …) will start failing
+its build with a "file not found" until the user sets `dockerContextPath`
+explicitly. This must be called out in the release notes for the release that
+ships this sync.
+
+The fork's `__test__/deploy/application.real.test.ts` "should REALLY build with
+Dockerfile" case caught it on CI (it builds `Dokploy/examples` `/deno`, whose
+Dockerfile does `COPY deno.json .`). The test now sets
+`dockerContextPath: "/deno"` — the same migration a user has to make. That test
+file's `@dokploy/server/services/deployment` mock also gained
+`getDeploymentErrorMessage`; without it, *any* real deploy failure surfaces as a
+missing-mock-export error and the actual build error is lost.
+
 ### Superseded at v0.30.5: remote Traefik writes go through SFTP
 
 Upstream #5246 replaced the `echo <base64> | base64 -d > path` remote write in

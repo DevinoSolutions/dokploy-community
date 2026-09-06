@@ -73,6 +73,10 @@ vi.mock("@dokploy/server/services/deployment", () => ({
 	createDeployment: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
 	updateDeployment: vi.fn(),
+	// deployApplication's catch block calls this. Without it in the mock, any
+	// real deploy failure is reported as "No getDeploymentErrorMessage export is
+	// defined on the mock" and the actual build error is lost.
+	getDeploymentErrorMessage: vi.fn().mockResolvedValue("Error building"),
 }));
 
 vi.mock("@dokploy/server/utils/notifications/build-success", () => ({
@@ -455,6 +459,14 @@ describe(
 					buildType: "dockerfile",
 					customGitBuildPath: "/deno",
 					dockerfile: "Dockerfile",
+					// Upstream v0.30.5 (f1e2467bb) changed the *default* build context
+					// from "the directory holding the Dockerfile" to the repository
+					// root, so the UI placeholder claiming the default is "." is now
+					// true. examples/deno/Dockerfile does `COPY deno.json .`, which
+					// only resolves when the context is the deno/ directory, so the
+					// context now has to be stated explicitly - exactly the migration
+					// every existing subdirectory-Dockerfile app has to make.
+					dockerContextPath: "/deno",
 				});
 				currentAppName = dockerfileAppName;
 				allTestAppNames.push(dockerfileAppName);
