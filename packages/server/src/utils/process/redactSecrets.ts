@@ -75,13 +75,40 @@ const redactAssignments = (value: string): string =>
 const redactAuthHeaders = (value: string): string =>
 	value.replace(/(Authorization:\s*)([^"'\r\n]+)/gi, "$1[REDACTED]");
 
+// Credentials embedded in a URL userinfo: `https://oauth2:<token>@github.com/…`
+// (GitHub App installation tokens, GitLab/Gitea OAuth tokens, Bitbucket app
+// passwords, registry basic-auth). Git clone commands are shell-escaped before
+// they run, so the `:` / `@` separators may appear as `\:` / `\@` — both forms
+// are matched. The scheme, user and host stay so the failure is still legible.
+const URL_USERINFO_PASSWORD =
+	/(\b[a-z][a-z0-9+.-]*\\?:\/\/[^\s/:@\\"']+\\?:)([^\s@"']+?)(\\?@)/gi;
+
+const redactUrlCredentials = (value: string): string =>
+	value.replace(URL_USERINFO_PASSWORD, "$1[REDACTED]$3");
+
+// Well-known token prefixes that identify a live credential on their own,
+// wherever they appear (GitHub ghp_/gho_/ghu_/ghs_/ghr_ + fine-grained PATs,
+// GitLab personal/project/runner tokens).
+const KNOWN_TOKEN =
+	/\b(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}|glrt-[A-Za-z0-9_-]{8,})/g;
+
+const redactKnownTokens = (value: string): string =>
+	value.replace(KNOWN_TOKEN, "[REDACTED]");
+
 export const redactSecrets = (value: string): string =>
-	redactAuthHeaders(
-		redactAssignments(
-			redactFlags(
-				value
-					.replace(PRIVATE_KEY_BLOCK, "[REDACTED PRIVATE KEY]")
-					.replace(BASE64_DECODE_PIPE, 'echo "[REDACTED]" | base64 -d'),
+	redactKnownTokens(
+		redactUrlCredentials(
+			redactAuthHeaders(
+				redactAssignments(
+					redactFlags(
+						value
+							.replace(PRIVATE_KEY_BLOCK, "[REDACTED PRIVATE KEY]")
+							.replace(
+								BASE64_DECODE_PIPE,
+								'echo "[REDACTED]" | base64 -d',
+							),
+					),
+				),
 			),
 		),
 	);

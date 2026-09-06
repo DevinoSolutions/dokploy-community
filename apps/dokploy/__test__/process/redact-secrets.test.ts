@@ -128,4 +128,65 @@ describe("redactSecrets", () => {
 		expect(redacted).toContain('--s3-region="us-east-1"');
 		expect(redacted).toContain("pg_dump -U dokploy mydb");
 	});
+
+	// Token values below are synthetic and only shaped like the real prefixes.
+	it("redacts the token in a git clone URL userinfo (GitHub App, GitLab)", () => {
+		const token = "ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKE";
+		const redacted = redactSecrets(
+			`git clone --branch main --depth 1 https://oauth2:${token}@github.com/org/repo.git /code --progress`,
+		);
+		expect(redacted).not.toContain(token);
+		expect(redacted).toContain(
+			"https://oauth2:[REDACTED]@github.com/org/repo.git /code --progress",
+		);
+
+		const gitlab = redactSecrets(
+			"https://oauth2:glFAKEaccessToken@gitlab.example.com/group/repo.git",
+		);
+		expect(gitlab).not.toContain("glFAKEaccessToken");
+		expect(gitlab).toContain("https://oauth2:[REDACTED]@gitlab.example.com/");
+	});
+
+	it("redacts URL credentials in the shell-escaped form the clone command uses", () => {
+		const token = "ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKE";
+		const redacted = redactSecrets(
+			`git clone --branch main --depth 1 https\\://oauth2\\:${token}\\@github.com/org/repo.git /code`,
+		);
+		expect(redacted).not.toContain(token);
+		expect(redacted).toContain(
+			"https\\://oauth2\\:[REDACTED]\\@github.com/org/repo.git /code",
+		);
+	});
+
+	it("redacts basic-auth passwords in any URL but keeps user and host", () => {
+		const redacted = redactSecrets(
+			"docker login https://user:appPassFAKE@registry.example.com:5000/v2/",
+		);
+		expect(redacted).not.toContain("appPassFAKE");
+		expect(redacted).toContain(
+			"https://user:[REDACTED]@registry.example.com:5000/v2/",
+		);
+	});
+
+	it("leaves credential-free URLs and scp-style remotes untouched", () => {
+		for (const command of [
+			"git clone --branch main https://github.com/org/repo.git /code",
+			"git clone git@github.com:org/repo.git /code",
+			"curl https://s3.example.com:9000/bucket/key",
+		]) {
+			expect(redactSecrets(command)).toBe(command);
+		}
+	});
+
+	it("redacts well-known token prefixes outside a URL", () => {
+		const redacted = redactSecrets(
+			"git remote set-url origin ghp_FAKEFAKEFAKEFAKEFAKE github_pat_FAKEFAKEFAKE_x glpat-FAKEFAKEFAKE",
+		);
+		expect(redacted).not.toContain("ghp_FAKE");
+		expect(redacted).not.toContain("github_pat_FAKE");
+		expect(redacted).not.toContain("glpat-FAKE");
+		expect(redacted).toContain(
+			"remote set-url origin [REDACTED] [REDACTED] [REDACTED]",
+		);
+	});
 });
