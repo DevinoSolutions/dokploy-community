@@ -50,6 +50,7 @@ export * from "./services/patch-repo";
 export * from "./services/permission";
 export * from "./services/port";
 export * from "./services/postgres";
+export * from "./services/preview-comment";
 export * from "./services/preview-deployment";
 export * from "./services/project";
 export * from "./services/project-export";

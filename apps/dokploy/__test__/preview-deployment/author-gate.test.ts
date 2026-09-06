@@ -6,9 +6,10 @@ const mocks = vi.hoisted(() => ({
 	checkUserRepositoryPermissions: vi.fn(),
 	checkGitlabMemberPermissions: vi.fn(),
 	checkGitlabMemberPermissionsByUserId: vi.fn(),
+	checkGiteaUserRepositoryPermissions: vi.fn(),
 }));
 
-// Only the four provider helpers the gate uses — keeps the server barrel (and
+// Only the provider helpers the gate uses — keeps the server barrel (and
 // its DB/auth imports) out of this test.
 vi.mock("@dokploy/server", () => mocks);
 
@@ -26,6 +27,9 @@ const GITHUB_RESOURCE: PreviewAuthorGateResource = {
 	githubId: "github-provider-1",
 	gitlabId: null,
 	gitlabProjectId: null,
+	giteaId: null,
+	giteaOwner: null,
+	giteaRepository: null,
 };
 
 const GITLAB_RESOURCE: PreviewAuthorGateResource = {
@@ -37,6 +41,23 @@ const GITLAB_RESOURCE: PreviewAuthorGateResource = {
 	githubId: null,
 	gitlabId: "gitlab-provider-1",
 	gitlabProjectId: 42,
+	giteaId: null,
+	giteaOwner: null,
+	giteaRepository: null,
+};
+
+const GITEA_RESOURCE: PreviewAuthorGateResource = {
+	name: "my-app",
+	sourceType: "gitea",
+	previewRequireCollaboratorPermissions: true,
+	owner: null,
+	repository: null,
+	githubId: null,
+	gitlabId: null,
+	gitlabProjectId: null,
+	giteaId: "gitea-provider-1",
+	giteaOwner: "dokploy",
+	giteaRepository: "dokploy",
 };
 
 const expectTRPCError = async (promise: Promise<unknown>, code: string) => {
@@ -223,5 +244,111 @@ describe("assertPreviewAuthorAllowed - gitlab", () => {
 		).resolves.toBeUndefined();
 
 		expect(mocks.checkGitlabMemberPermissionsByUserId).not.toHaveBeenCalled();
+	});
+});
+
+describe("assertPreviewAuthorAllowed - gitea", () => {
+	it("allows an author with write access", async () => {
+		mocks.checkGiteaUserRepositoryPermissions.mockResolvedValue({
+			hasWriteAccess: true,
+			permission: "write",
+			verified: true,
+		});
+
+		await expect(
+			assertPreviewAuthorAllowed(GITEA_RESOURCE, {
+				pullRequestAuthor: "trusted-dev",
+			}),
+		).resolves.toBeUndefined();
+
+		expect(mocks.checkGiteaUserRepositoryPermissions).toHaveBeenCalledWith(
+			"gitea-provider-1",
+			"dokploy",
+			"dokploy",
+			"trusted-dev",
+		);
+	});
+
+	it("blocks an author without write access", async () => {
+		mocks.checkGiteaUserRepositoryPermissions.mockResolvedValue({
+			hasWriteAccess: false,
+			permission: "read",
+			verified: true,
+		});
+
+		await expectTRPCError(
+			assertPreviewAuthorAllowed(GITEA_RESOURCE, {
+				pullRequestAuthor: "drive-by",
+			}),
+			"FORBIDDEN",
+		);
+	});
+
+	it("blocks when Gitea refuses to answer the permission lookup", async () => {
+		mocks.checkGiteaUserRepositoryPermissions.mockResolvedValue({
+			hasWriteAccess: false,
+			permission: null,
+			verified: false,
+		});
+
+		await expectTRPCError(
+			assertPreviewAuthorAllowed(GITEA_RESOURCE, {
+				pullRequestAuthor: "trusted-dev",
+			}),
+			"FORBIDDEN",
+		);
+	});
+
+	it("short circuits for the repository owner", async () => {
+		await expect(
+			assertPreviewAuthorAllowed(GITEA_RESOURCE, {
+				pullRequestAuthor: "DokPloy",
+			}),
+		).resolves.toBeUndefined();
+
+		expect(mocks.checkGiteaUserRepositoryPermissions).not.toHaveBeenCalled();
+	});
+
+	it("blocks when the author is missing entirely", async () => {
+		await expectTRPCError(
+			assertPreviewAuthorAllowed(GITEA_RESOURCE, {}),
+			"BAD_REQUEST",
+		);
+		expect(mocks.checkGiteaUserRepositoryPermissions).not.toHaveBeenCalled();
+	});
+
+	it("blocks when the provider is not fully configured", async () => {
+		await expectTRPCError(
+			assertPreviewAuthorAllowed(
+				{ ...GITEA_RESOURCE, giteaRepository: null },
+				{ pullRequestAuthor: "trusted-dev" },
+			),
+			"BAD_REQUEST",
+		);
+		expect(mocks.checkGiteaUserRepositoryPermissions).not.toHaveBeenCalled();
+	});
+
+	it("fails closed when the permission lookup throws", async () => {
+		mocks.checkGiteaUserRepositoryPermissions.mockRejectedValue(
+			new Error("Gitea API is down"),
+		);
+
+		await expectTRPCError(
+			assertPreviewAuthorAllowed(GITEA_RESOURCE, {
+				pullRequestAuthor: "trusted-dev",
+			}),
+			"FORBIDDEN",
+		);
+	});
+
+	it("skips the check when previewRequireCollaboratorPermissions is false", async () => {
+		await expect(
+			assertPreviewAuthorAllowed(
+				{ ...GITEA_RESOURCE, previewRequireCollaboratorPermissions: false },
+				{},
+			),
+		).resolves.toBeUndefined();
+
+		expect(mocks.checkGiteaUserRepositoryPermissions).not.toHaveBeenCalled();
 	});
 });

@@ -241,6 +241,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "gitProvider-toggleShare": "dokploy:admin",
   "gitea-create": "dokploy:admin",
   "gitea-getGiteaBranches": "dokploy:read",
+  "gitea-getGiteaPullRequests": "dokploy:read",
   "gitea-getGiteaRepositories": "dokploy:read",
   "gitea-getGiteaUrl": "dokploy:read",
   "gitea-giteaProviders": "dokploy:read",

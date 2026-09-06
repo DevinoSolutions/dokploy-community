@@ -2,7 +2,11 @@ import type { ChangeRequest } from "@dokploy/server";
 import { GitPullRequest, Loader2, RocketIcon, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { GithubIcon, GitlabIcon } from "@/components/icons/data-tools-icons";
+import {
+	GiteaIcon,
+	GithubIcon,
+	GitlabIcon,
+} from "@/components/icons/data-tools-icons";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +40,9 @@ interface PreviewResource {
 	gitlabOwner: string | null;
 	gitlabRepository: string | null;
 	gitlabProjectId: number | null;
+	giteaId: string | null;
+	giteaOwner: string | null;
+	giteaRepository: string | null;
 }
 
 interface Props {
@@ -49,15 +56,20 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 	const [search, setSearch] = useState("");
 
 	const isGitlab = resource.sourceType === "gitlab";
+	const isGitea = resource.sourceType === "gitea";
 	const changeRequestLabel = isGitlab ? "Merge Request" : "Pull Request";
 	const changeRequestLabelPlural = `${changeRequestLabel.toLowerCase()}s`;
 
 	const owner = isGitlab
 		? (resource.gitlabOwner ?? resource.owner)
-		: resource.owner;
+		: isGitea
+			? (resource.giteaOwner ?? resource.owner)
+			: resource.owner;
 	const repo = isGitlab
 		? (resource.gitlabRepository ?? resource.repository)
-		: resource.repository;
+		: isGitea
+			? (resource.giteaRepository ?? resource.repository)
+			: resource.repository;
 
 	const {
 		data: githubPullRequests,
@@ -73,6 +85,7 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 			enabled:
 				isOpen &&
 				!isGitlab &&
+				!isGitea &&
 				!!resource.owner &&
 				!!resource.repository &&
 				!!resource.githubId,
@@ -101,9 +114,41 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 		},
 	);
 
-	const changeRequests = isGitlab ? gitlabMergeRequests : githubPullRequests;
-	const isLoading = isGitlab ? isLoadingGitlab : isLoadingGithub;
-	const listError = isGitlab ? gitlabError : githubError;
+	const {
+		data: giteaPullRequests,
+		isLoading: isLoadingGitea,
+		error: giteaError,
+	} = api.gitea.getGiteaPullRequests.useQuery(
+		{
+			owner: resource.giteaOwner ?? "",
+			repositoryName: resource.giteaRepository ?? "",
+			giteaId: resource.giteaId ?? "",
+		},
+		{
+			enabled:
+				isOpen &&
+				isGitea &&
+				!!resource.giteaId &&
+				!!resource.giteaOwner &&
+				!!resource.giteaRepository,
+		},
+	);
+
+	const changeRequests = isGitlab
+		? gitlabMergeRequests
+		: isGitea
+			? giteaPullRequests
+			: githubPullRequests;
+	const isLoading = isGitlab
+		? isLoadingGitlab
+		: isGitea
+			? isLoadingGitea
+			: isLoadingGithub;
+	const listError = isGitlab
+		? gitlabError
+		: isGitea
+			? giteaError
+			: githubError;
 
 	const filtered = useMemo(() => {
 		if (!changeRequests) return undefined;
@@ -158,7 +203,11 @@ export const BuildPreviewDeployment = ({ resource, children }: Props) => {
 		if (!isOpen) reset();
 	}, [isOpen]);
 
-	const ChangeRequestIcon = isGitlab ? GitlabIcon : GithubIcon;
+	const ChangeRequestIcon = isGitlab
+		? GitlabIcon
+		: isGitea
+			? GiteaIcon
+			: GithubIcon;
 
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>

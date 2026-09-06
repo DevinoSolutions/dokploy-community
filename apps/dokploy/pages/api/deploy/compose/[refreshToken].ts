@@ -11,6 +11,10 @@ import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import {
+	handleGiteaComposePullRequestEvent,
+	isGiteaPullRequestEvent,
+} from "@/server/utils/gitea-preview";
+import {
 	extractBranchName,
 	extractCommitMessage,
 	extractCommittedPaths,
@@ -48,6 +52,7 @@ export default async function handler(
 					},
 				},
 				bitbucket: true,
+				previewDeployments: true,
 			},
 		});
 
@@ -55,6 +60,27 @@ export default async function handler(
 			res.status(404).json({ message: "Compose Not Found" });
 			return;
 		}
+
+		// Preview deployments are driven by pull request events and are a separate
+		// feature from push auto deployments, so they are handled before the
+		// `autoDeploy` gate below.
+		if (isGiteaPullRequestEvent(req.headers)) {
+			if (composeResult.sourceType !== "gitea") {
+				res.status(400).json({
+					message:
+						"Preview deployments require the Gitea source type, a custom Git URL cannot be used",
+				});
+				return;
+			}
+
+			const result = await handleGiteaComposePullRequestEvent({
+				compose: composeResult,
+				body: req.body,
+			});
+			res.status(result.status).json({ message: result.message });
+			return;
+		}
+
 		const fromGitProvider = isGitProviderWebhook(req.headers);
 
 		if (fromGitProvider && !composeResult?.autoDeploy) {
