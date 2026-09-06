@@ -242,10 +242,14 @@ export const deployApplication = async ({
 		});
 		const deployHooks = parseDeployHooks(hookRow?.hooks);
 
+		// Hooks exec inside the application's own container, which only exists
+		// on the deploy host. `serverId` above is `buildServerId || serverId` —
+		// using it here would target the build server, where the container is
+		// absent (pre would silently no-op, post would throw).
 		await runDeployHook({
 			kind: "pre",
 			appName: application.appName,
-			serverId,
+			serverId: application.serverId,
 			command: deployHooks.pre,
 			logPath: deployment.logPath,
 		});
@@ -265,9 +269,10 @@ export const deployApplication = async ({
 			await runDeployHook({
 				kind: "post",
 				appName: application.appName,
-				serverId,
+				serverId: application.serverId,
 				command: deployHooks.post,
 				logPath: deployment.logPath,
+				containerId: stability.containerId,
 			});
 		}
 
@@ -372,10 +377,12 @@ export const rebuildApplication = async ({
 		});
 		const deployHooks = parseDeployHooks(hookRow?.hooks);
 
+		// See deployApplication: hooks must target the deploy host
+		// (`application.serverId`), never the build server.
 		await runDeployHook({
 			kind: "pre",
 			appName: application.appName,
-			serverId,
+			serverId: application.serverId,
 			command: deployHooks.pre,
 			logPath: deployment.logPath,
 		});
@@ -395,9 +402,10 @@ export const rebuildApplication = async ({
 			await runDeployHook({
 				kind: "post",
 				appName: application.appName,
-				serverId,
+				serverId: application.serverId,
 				command: deployHooks.post,
 				logPath: deployment.logPath,
+				containerId: stability.containerId,
 			});
 		}
 
