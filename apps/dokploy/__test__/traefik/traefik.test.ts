@@ -1,10 +1,11 @@
 import type { ApplicationNested, Domain, Redirect } from "@dokploy/server";
 import { createRouterConfig } from "@dokploy/server";
-import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
+import { writeFileRemote } from "@dokploy/server/utils/process/execAsync";
 import { expect, test, vi } from "vitest";
 
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	execAsyncRemote: vi.fn().mockResolvedValue({ stdout: "", stderr: "" }),
+	writeFileRemote: vi.fn().mockResolvedValue(undefined),
 }));
 
 const baseApp: ApplicationNested = {
@@ -194,6 +195,11 @@ test("Web entrypoint on http domain", async () => {
 	expect(router.rule).not.toContain("PathPrefix");
 });
 
+// Upstream v0.30.5 (#5246) replaced the `echo <base64> | base64 -d > path`
+// remote write with an SFTP `writeFileRemote`, so there is no shell command to
+// inspect any more. The regression this test guards is unchanged: the YAML the
+// writer hands to the transport must still carry the shell-sensitive quoting
+// verbatim.
 test("Remote Traefik writer preserves shell-sensitive YAML values", async () => {
 	const { writeTraefikConfigRemote } = await import("@dokploy/server");
 	const csp =
@@ -217,15 +223,16 @@ test("Remote Traefik writer preserves shell-sensitive YAML values", async () => 
 		"server-1",
 	);
 
-	const command = vi.mocked(execAsyncRemote).mock.calls.at(-1)?.[1] ?? "";
-	const encoded = command.match(/echo "([^"]+)"/)?.[1] ?? "";
-	const decoded = Buffer.from(encoded, "base64").toString("utf8");
+	const lastCall = vi.mocked(writeFileRemote).mock.calls.at(-1);
+	expect(lastCall).toBeDefined();
+	const [serverId, configPath, written] = lastCall ?? [];
 
-	expect(command).toContain("base64 -d > ");
-	expect(decoded).toContain("'unsafe-inline'");
-	expect(decoded).toContain("'unsafe-eval'");
-	expect(decoded).toContain("frame-ancestors 'self'");
-	expect(decoded).toContain("object-src 'none'");
+	expect(serverId).toBe("server-1");
+	expect(configPath).toContain("middlewares.yml");
+	expect(written).toContain("'unsafe-inline'");
+	expect(written).toContain("'unsafe-eval'");
+	expect(written).toContain("frame-ancestors 'self'");
+	expect(written).toContain("object-src 'none'");
 });
 
 test("Web entrypoint on http domain with custom path", async () => {
