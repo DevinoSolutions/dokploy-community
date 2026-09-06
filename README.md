@@ -2,9 +2,9 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.3** | Fork version **v0.30.3-community.4**
+Based on **Dokploy v0.30.5** | Fork version **v0.30.5-community.1**
 
-Everything in upstream Dokploy **v0.30.3**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
+Everything in upstream Dokploy **v0.30.5**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
 ## Switching from official Dokploy
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.3-community.4 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.5-community.1 \
   --with-registry-auth \
   dokploy
 ```
@@ -20,7 +20,7 @@ docker service update \
 Going back to official is just as easy (our extra tables/columns are simply ignored):
 
 ```bash
-docker service update --image dokploy/dokploy:v0.30.2 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.30.5 --with-registry-auth dokploy
 ```
 
 The image is public — no registry login required.
@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 ### Preview deployments, supercharged
 
 - **Docker Compose preview deployments** — the most-requested unbuilt feature in upstream Dokploy ([#2028](https://github.com/Dokploy/dokploy/issues/2028)): a PR or MR spins up an **isolated copy of your entire compose stack** (own volumes, networks, and per-service preview domains), redeploys on update, and fully tears down on close
-- **GitLab merge-request previews** via webhook (in addition to GitHub) — for both applications and compose stacks
+- **GitLab merge-request and Gitea/Forgejo pull-request previews** via webhook (in addition to GitHub) — for both applications and compose stacks
 - **API-triggered previews** — spin up a preview deployment programmatically
 - **Deterministic per-PR domains** using a `${prNumber}` template variable
 - **Custom preview templates** so previews match your production topology
@@ -80,6 +80,7 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 
 - **AWS ECR** registry support and pulling images with **stored registry credentials**
 - **Pre-deploy and post-deploy command hooks** for applications
+- **Compose auto-rollback** — a failed `docker compose up` restores the last good compose file and `.env` and brings the previous release back up
 - Deploy a **specific Docker image/tag** on demand, and **pull latest images** on Compose deploy
 - Injected **`DOKPLOY_*` environment variables** and **git commit hash/message as build args** at deploy time
 - "Deploy with Fresh Volumes" for Compose, dynamic railpack version fetching, and smarter build-cache invalidation on env changes
@@ -113,6 +114,17 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.5-community.1
+
+**Upstream v0.30.5 sync + the three most-requested open upstream PRs + credential redaction** — one guarded migration (two enum values, one nullable column with a backfill), upgrades in place.
+
+- **Upstream v0.30.4 + v0.30.5** — Phase.dev vault provider, Porkbun DNS provider, reworked DNS records management for every record type, bulk secret import from vault providers, "Deploy with Fresh Volumes" for compose, swarm convergence check before a database deploy is marked done, remote Traefik config written over SFTP, git-provider secrets stripped from compose responses, password reset by email, responsive application logs, and an onboarding wizard for brand-new instances ([#205](https://github.com/DevinoSolutions/dokploy-community/pull/205))
+- **⚠ Docker build context now defaults to the repository root** (upstream [#5231](https://github.com/Dokploy/dokploy/pull/5231)) — it used to be the Dockerfile's directory. A Dockerfile app whose Dockerfile lives in a subdirectory and copies paths relative to it needs *Docker Context Path* set to that directory, otherwise its next build fails with a file-not-found ([#205](https://github.com/DevinoSolutions/dokploy-community/pull/205))
+- **Compose deployments roll back automatically** — a failed `docker compose up` restores the last good compose file and `.env` and re-runs the previous release, so a bad push no longer takes a running stack down; disabled for fresh-volume deploys, previews included, plus Live / Deploying / Deploy failed badges in the compose header ([#207](https://github.com/DevinoSolutions/dokploy-community/pull/207), from upstream [#5182](https://github.com/Dokploy/dokploy/pull/5182) by [@EngAbo3lia](https://github.com/EngAbo3lia))
+- **Gitea / Forgejo preview deployments** — pull-request webhooks for applications and compose stacks, PR comments with the preview URL, a *Build Pull Request* dialog, and the same author-collaborator gate GitHub and GitLab previews use ([#208](https://github.com/DevinoSolutions/dokploy-community/pull/208), from upstream [#5149](https://github.com/Dokploy/dokploy/pull/5149) by [@ankit8697](https://github.com/ankit8697))
+- **Deploy hooks run on the right server** — with a build server configured, pre/post-deploy hooks tried to `docker exec` on the build host where the container never exists; they now run on the app server and the post-deploy hook targets the exact container the rolling update brought up ([#206](https://github.com/DevinoSolutions/dokploy-community/pull/206), from upstream [#4240](https://github.com/Dokploy/dokploy/pull/4240) review fixes by [@Alfredao](https://github.com/Alfredao))
+- **Security: credentials in URLs are redacted** — GitHub App installation tokens, GitLab/Gitea OAuth tokens and registry passwords embedded in clone or login URLs (including the shell-escaped form git clone uses), plus bare `ghs_`/`ghp_`/`glpat-` style tokens, no longer reach deployment logs or crash reports ([#204](https://github.com/DevinoSolutions/dokploy-community/pull/204))
 
 ### New in v0.30.3-community.4
 
@@ -339,7 +351,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.3-community.4
+export DOKPLOY_VERSION=v0.30.5-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -352,7 +364,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.3-community.4     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.5-community.1     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -405,6 +417,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.30.3 | 2nd release | `v0.30.3-community.2` |
 | v0.30.3 | 3rd release | `v0.30.3-community.3` |
 | v0.30.3 | 4th release | `v0.30.3-community.4` |
+| v0.30.5 | 1st release | `v0.30.5-community.1` |
 
 ## Contributing
 
