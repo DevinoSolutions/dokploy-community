@@ -26,7 +26,12 @@ const POLL_MS = 20;
 const PRE_EXISTING_TASK_AGE_MS = 7 * 60 * 60 * 1000;
 
 type Task = {
-	Status?: { State?: string; Err?: string; Message?: string };
+	Status?: {
+		State?: string;
+		Err?: string;
+		Message?: string;
+		ContainerStatus?: { ContainerID?: string };
+	};
 	DesiredState?: string;
 	CreatedAt?: string;
 	UpdatedAt?: string;
@@ -69,6 +74,69 @@ describe("waitForSwarmServiceStable", () => {
 		});
 
 		expect(result).toEqual({ stable: true });
+	});
+
+	it("returns the running task's container id so callers can exec into it", async () => {
+		listTasksMock.mockResolvedValue([
+			runningTask({
+				Status: {
+					State: "running",
+					ContainerStatus: { ContainerID: "container-abc" },
+				},
+			}),
+		]);
+
+		const result = await waitForSwarmServiceStable("app", {
+			windowMs: WINDOW_MS,
+			pollMs: POLL_MS,
+		});
+
+		expect(result).toEqual({ stable: true, containerId: "container-abc" });
+	});
+
+	it("reports the newest running task's container during a start-first handover", async () => {
+		// Both the outgoing and incoming tasks are momentarily running and share
+		// the service label, so a label lookup is ambiguous. The gate must hand
+		// back the container of the task this deploy just brought up (the most
+		// recently updated one), not the one about to be torn down.
+		listTasksMock.mockResolvedValue([
+			runningTask({
+				UpdatedAt: ago(30_000),
+				Status: {
+					State: "running",
+					ContainerStatus: { ContainerID: "outgoing-container" },
+				},
+			}),
+			runningTask({
+				UpdatedAt: now(),
+				Status: {
+					State: "running",
+					ContainerStatus: { ContainerID: "incoming-container" },
+				},
+			}),
+		]);
+
+		const result = await waitForSwarmServiceStable("app", {
+			windowMs: WINDOW_MS,
+			pollMs: POLL_MS,
+		});
+
+		expect(result).toEqual({
+			stable: true,
+			containerId: "incoming-container",
+		});
+	});
+
+	it("omits containerId when Swarm never reports one", async () => {
+		listTasksMock.mockResolvedValue([runningTask()]);
+
+		const result = await waitForSwarmServiceStable("app", {
+			windowMs: WINDOW_MS,
+			pollMs: POLL_MS,
+		});
+
+		expect(result).toEqual({ stable: true });
+		expect("containerId" in result).toBe(false);
 	});
 
 	it("does not false-positive when Swarm still lists the outgoing task as desired=running during the handover", async () => {

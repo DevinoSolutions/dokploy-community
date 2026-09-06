@@ -1,6 +1,9 @@
 import * as adminService from "@dokploy/server/services/admin";
 import * as applicationService from "@dokploy/server/services/application";
-import { deployApplication } from "@dokploy/server/services/application";
+import {
+	deployApplication,
+	rebuildApplication,
+} from "@dokploy/server/services/application";
 import * as deploymentService from "@dokploy/server/services/deployment";
 import * as builders from "@dokploy/server/utils/builders";
 import * as hooks from "@dokploy/server/utils/docker/hooks";
@@ -145,6 +148,7 @@ const createMockApplication = (overrides = {}) => ({
 	buildPath: "/astro",
 	env: "NODE_ENV=production",
 	serverId: null,
+	buildServerId: null,
 	rollbackActive: false,
 	enableSubmodules: false,
 	environmentId: "env-id",
@@ -419,6 +423,100 @@ describe("deployApplication - Deploy Hooks", () => {
 				kind: "post",
 				serverId: "remote-server-id",
 			}),
+		);
+	});
+
+	it("passes the running task's container id to the post-deploy hook", async () => {
+		primeMocks(
+			createMockApplication({
+				deployHooks: JSON.stringify({ post: "echo post" }),
+			}),
+		);
+		vi.mocked(dockerUtils.waitForSwarmServiceStable).mockResolvedValue({
+			stable: true,
+			containerId: "new-task-container",
+		} as any);
+
+		await deployApplication({
+			applicationId: "test-app-id",
+			titleLog: "t",
+			descriptionLog: "",
+		});
+
+		expect(hooks.runDeployHook).toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "post",
+				containerId: "new-task-container",
+			}),
+		);
+	});
+});
+
+// Regression coverage for upstream #4240's review fix: the build step runs on
+// `buildServerId || serverId`, but hooks `docker exec` into the application's
+// container, which only exists on `application.serverId`. Reusing the build
+// server here made the pre-deploy hook silently no-op and the post-deploy hook
+// throw "no running container found".
+describe.each([
+	["deployApplication", deployApplication],
+	["rebuildApplication", rebuildApplication],
+])("%s - Deploy Hooks with a dedicated build server", (_name, run) => {
+	const BUILD_SERVER = "build-server-id";
+	const APP_SERVER = "app-server-id";
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		primeMocks(
+			createMockApplication({
+				serverId: APP_SERVER,
+				buildServerId: BUILD_SERVER,
+				deployHooks: JSON.stringify({ pre: "echo pre", post: "echo post" }),
+			}),
+		);
+	});
+
+	it("runs both hooks on the app server, never on the build server", async () => {
+		await run({
+			applicationId: "test-app-id",
+			titleLog: "t",
+			descriptionLog: "",
+		});
+
+		const hookCalls = vi.mocked(hooks.runDeployHook).mock.calls;
+		expect(hookCalls).toHaveLength(2);
+		for (const [arg] of hookCalls) {
+			expect(arg.serverId).toBe(APP_SERVER);
+		}
+		// The build server must never appear in a hook invocation.
+		expect(hooks.runDeployHook).not.toHaveBeenCalledWith(
+			expect.objectContaining({ serverId: BUILD_SERVER }),
+		);
+	});
+
+	it("gates the hooks on the app server's swarm service, not the build server's", async () => {
+		await run({
+			applicationId: "test-app-id",
+			titleLog: "t",
+			descriptionLog: "",
+		});
+
+		expect(dockerUtils.waitForSwarmServiceStable).toHaveBeenCalledWith(
+			"test-app",
+			{ serverId: APP_SERVER },
+		);
+	});
+
+	it("still routes the build step itself to the build server", async () => {
+		await run({
+			applicationId: "test-app-id",
+			titleLog: "t",
+			descriptionLog: "",
+		});
+
+		// Guards against "fixing" the hook host by changing the build host.
+		expect(execProcess.execAsyncRemote).toHaveBeenCalledWith(
+			BUILD_SERVER,
+			expect.stringContaining("/tmp/test-deployment.log"),
 		);
 	});
 });

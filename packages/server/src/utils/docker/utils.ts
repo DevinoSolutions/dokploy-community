@@ -1053,7 +1053,14 @@ const getSwarmServiceContainerId = async (
 };
 
 export type SwarmStabilityResult =
-	| { stable: true }
+	// `containerId` is the container of the last task observed in the `running`
+	// state during the stability window. Callers that need to exec into the
+	// freshly deployed task (post-deploy hooks) should use it instead of
+	// re-resolving the container by service label: during a `start-first`
+	// rolling update the outgoing and incoming tasks briefly share that label,
+	// so a label lookup can return the container that is about to go away.
+	// Optional because Swarm may not have populated `ContainerStatus` yet.
+	| { stable: true; containerId?: string }
 	| { stable: false; reason: string };
 
 export const waitForSwarmServiceStable = async (
@@ -1086,6 +1093,7 @@ export const waitForSwarmServiceStable = async (
 	const daemonPollStartMs = pollStartMs + clockOffsetMs;
 	const deadline = pollStartMs + windowMs;
 	let everRunning = false;
+	let lastRunningContainerId: string | undefined;
 	let lastReason = "Service did not reach running state";
 
 	while (Date.now() < deadline) {
@@ -1158,6 +1166,16 @@ export const waitForSwarmServiceStable = async (
 
 			if (runningCount > 0) {
 				everRunning = true;
+				// `sorted` is the active task set newest-first, so this tracks the
+				// most recently updated running task — the one this deployment
+				// just brought up.
+				const newestRunning = sorted.find(
+					(t) => t.Status?.State === "running",
+				);
+				const containerId = newestRunning?.Status?.ContainerStatus?.ContainerID;
+				if (containerId) {
+					lastRunningContainerId = containerId;
+				}
 			} else if (everRunning && startingCount > 0) {
 				return {
 					stable: false,
@@ -1181,7 +1199,15 @@ export const waitForSwarmServiceStable = async (
 	}
 
 	if (everRunning) {
-		return { stable: true };
+		// Spread rather than always setting the key so existing callers (and
+		// their `toEqual({ stable: true })` assertions) see an unchanged shape
+		// when Swarm never reported a container id.
+		return {
+			stable: true,
+			...(lastRunningContainerId
+				? { containerId: lastRunningContainerId }
+				: {}),
+		};
 	}
 	return { stable: false, reason: lastReason };
 };
