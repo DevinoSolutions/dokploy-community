@@ -71,6 +71,12 @@ export const apiFindGiteaBranches = z.object({
 	giteaId: z.string().optional(),
 });
 
+export const apiFindGiteaPullRequests = z.object({
+	owner: z.string().min(1),
+	repositoryName: z.string().min(1),
+	giteaId: z.string().optional(),
+});
+
 export const apiUpdateGitea = createSchema.extend({
 	clientId: z.string().optional(),
 	clientSecret: z.string().optional(),

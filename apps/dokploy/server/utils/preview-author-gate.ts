@@ -1,4 +1,5 @@
 import {
+	checkGiteaUserRepositoryPermissions,
 	checkGitlabMemberPermissions,
 	checkGitlabMemberPermissionsByUserId,
 	checkUserRepositoryPermissions,
@@ -19,6 +20,9 @@ export interface PreviewAuthorGateResource {
 	githubId: string | null;
 	gitlabId: string | null;
 	gitlabProjectId: number | null;
+	giteaId: string | null;
+	giteaOwner: string | null;
+	giteaRepository: string | null;
 }
 
 export interface PreviewAuthorGateInput {
@@ -60,6 +64,11 @@ export const assertPreviewAuthorAllowed = async (
 
 	if (resource.sourceType === "gitlab") {
 		await assertGitlabAuthorAllowed(resource, input);
+		return;
+	}
+
+	if (resource.sourceType === "gitea") {
+		await assertGiteaAuthorAllowed(resource, input);
 		return;
 	}
 
@@ -118,6 +127,82 @@ const assertGithubAuthorAllowed = async (
 		throw new TRPCError({
 			code: "FORBIDDEN",
 			message: `Preview deployment blocked: ${author} does not have write access to ${owner}/${repository} (permission: ${permission || "none"})`,
+		});
+	}
+};
+
+/**
+ * Gitea/Forgejo authorizes by handle, like GitHub. Two Gitea specifics:
+ * the repository owner short circuits the lookup (Gitea only answers the
+ * collaborator endpoint for repository admins), and an *unverified* answer —
+ * Gitea refusing to name a permission — blocks the build without claiming the
+ * author is untrusted.
+ */
+const assertGiteaAuthorAllowed = async (
+	resource: PreviewAuthorGateResource,
+	input: PreviewAuthorGateInput,
+) => {
+	const author = input.pullRequestAuthor?.trim();
+	if (!author) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: AUTHOR_REQUIRED_MESSAGE,
+		});
+	}
+
+	const { giteaId, giteaOwner, giteaRepository } = resource;
+	if (!giteaId || !giteaOwner || !giteaRepository) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				"Preview deployment blocked: the Gitea provider, owner and repository must be configured before the author's access can be verified",
+		});
+	}
+
+	// The repository owner always has admin access on their own repository.
+	if (author.toLowerCase() === giteaOwner.toLowerCase()) {
+		return;
+	}
+
+	let hasWriteAccess: boolean;
+	let permission: string | null;
+	let verified: boolean;
+	try {
+		({ hasWriteAccess, permission, verified } =
+			await checkGiteaUserRepositoryPermissions(
+				giteaId,
+				giteaOwner,
+				giteaRepository,
+				author,
+			));
+	} catch (error) {
+		console.error(
+			`Error validating pull request author permissions for ${resource.name}:`,
+			error,
+		);
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: `Preview deployment blocked: could not verify that ${author} has write access to ${giteaOwner}/${giteaRepository}`,
+		});
+	}
+
+	if (!verified) {
+		console.error(
+			`🚨 SECURITY: Could not verify permissions of ${author} on ${giteaOwner}/${giteaRepository}; the Gitea account connected to Dokploy needs admin access on the repository.`,
+		);
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: `Preview deployment blocked: the Gitea account connected to Dokploy cannot read collaborator permissions for ${giteaOwner}/${giteaRepository}`,
+		});
+	}
+
+	if (!hasWriteAccess) {
+		console.warn(
+			`🚨 SECURITY: Blocked manual preview deployment for ${resource.name} from unauthorized user ${author} on ${giteaOwner}/${giteaRepository}. Permission: ${permission || "none"}`,
+		);
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: `Preview deployment blocked: ${author} does not have write access to ${giteaOwner}/${giteaRepository} (permission: ${permission || "none"})`,
 		});
 	}
 };

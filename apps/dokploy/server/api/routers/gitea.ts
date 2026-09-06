@@ -5,6 +5,7 @@ import {
 	findGiteaById,
 	getAccessibleGitProviderIds,
 	getGiteaBranches,
+	getGiteaPullRequests,
 	getGiteaRepositories,
 	haveGiteaRequirements,
 	testGiteaConnection,
@@ -22,6 +23,7 @@ import { audit } from "@/server/api/utils/audit";
 import {
 	apiCreateGitea,
 	apiFindGiteaBranches,
+	apiFindGiteaPullRequests,
 	apiFindOneGitea,
 	apiGiteaTestConnection,
 	apiUpdateGitea,
@@ -154,6 +156,37 @@ export const giteaRouter = createTRPCRouter({
 				});
 			} catch (error) {
 				console.error("Error fetching Gitea branches:", error);
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}),
+
+	getGiteaPullRequests: protectedProcedure
+		.input(apiFindGiteaPullRequests)
+		.query(async ({ input, ctx }) => {
+			const { giteaId, owner, repositoryName } = input;
+
+			if (!giteaId || !owner || !repositoryName) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						"Gitea provider ID, owner, and repository name are required.",
+				});
+			}
+
+			const gitea = await findGiteaById(giteaId);
+			await assertGitProviderAccess(ctx.session, gitea.gitProvider);
+
+			try {
+				return await getGiteaPullRequests({
+					giteaId,
+					owner,
+					repositoryName,
+				});
+			} catch (error) {
+				console.error("Error fetching Gitea pull requests:", error);
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: error instanceof Error ? error.message : String(error),

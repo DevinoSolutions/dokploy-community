@@ -227,7 +227,7 @@ const createApplicationPreviewFromApi = async (
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message:
-				"Preview deployments can only be created for applications using a GitHub or GitLab provider",
+				"Preview deployments can only be created for applications using a GitHub, GitLab or Gitea provider",
 		});
 	}
 
@@ -316,7 +316,7 @@ const createComposePreviewFromApi = async (
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message:
-				"Preview deployments can only be created for compose services using a GitHub or GitLab provider",
+				"Preview deployments can only be created for compose services using a GitHub, GitLab or Gitea provider",
 		});
 	}
 

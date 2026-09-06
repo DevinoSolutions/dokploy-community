@@ -27,9 +27,13 @@ vi.mock("@dokploy/server/services/domain", () => ({
 }));
 
 vi.mock("@dokploy/server/services/github", () => ({
-	createPreviewDeploymentComment: vi.fn(),
+	createIssueComment: vi.fn(),
+	createSecurityBlockedComment: vi.fn(),
+	findGithubById: vi.fn(),
 	getIssueComment: vi.fn(),
+	getSecurityBlockedMessage: vi.fn(),
 	issueCommentExists: vi.fn(),
+	SECURITY_BLOCKED_COMMENT_MARKER: "blocked-marker",
 	updateIssueComment: vi.fn(),
 }));
 
@@ -50,7 +54,18 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 }));
 
 vi.mock("@dokploy/server/utils/providers/github", () => ({
+	checkUserRepositoryPermissions: vi.fn(),
 	cloneGithubRepository: vi.fn(),
+}));
+
+vi.mock("@dokploy/server/utils/providers/gitea", () => ({
+	checkGiteaUserRepositoryPermissions: vi.fn(),
+	cloneGiteaRepository: vi.fn(),
+	createGiteaIssueComment: vi.fn(),
+	GITEA_WRITE_PERMISSIONS: ["write", "admin", "owner"],
+	giteaIssueCommentExists: vi.fn(),
+	listGiteaIssueComments: vi.fn(),
+	updateGiteaIssueComment: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/utils/providers/gitlab", () => ({
