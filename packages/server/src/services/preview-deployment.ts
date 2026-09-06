@@ -17,7 +17,6 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "../utils/process/execAsync";
-import { authGithub } from "../utils/providers/github";
 import { removeTraefikConfig } from "../utils/traefik/application";
 import { manageDomain } from "../utils/traefik/domain";
 import { findApplicationById } from "./application";
@@ -30,7 +29,13 @@ import {
 import { createDomain } from "./domain";
 import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
 import { getPublicIpWithFallback } from "../wss/utils";
-import { type Github, findGithubById, getIssueComment } from "./github";
+import { getIssueComment } from "./github";
+import {
+	createPreviewComment,
+	ensurePreviewComment,
+	getPreviewCommentContext,
+	updatePreviewComment,
+} from "./preview-comment";
 import { getWebServerSettings } from "./web-server-settings";
 
 export type PreviewDeployment = typeof previewDeployments.$inferSelect;
@@ -288,45 +293,32 @@ export const createPreviewDeployment = async (
 
 	// Post the initial PR comment now that we hold the unique row. A comment
 	// failure must not roll back the row — the deploy flow recreates a missing
-	// comment on the first deploy attempt. The initializing comment is
-	// GitHub-specific (posted via the GitHub App). GitLab previews
-	// (application.sourceType === "gitlab") have no GitHub provider, so authGithub
-	// would throw; they surface status via MR notes posted from the GitLab webhook
-	// handler instead.
-	if (application.sourceType === "github") {
+	// comment on the first deploy attempt. The comment is written through the
+	// provider-agnostic dispatch layer (GitHub App or Gitea/Forgejo REST).
+	// GitLab previews have no comment context here; they surface status via MR
+	// notes posted from the GitLab webhook handler instead.
+	const commentContext = getPreviewCommentContext(application);
+	if (commentContext) {
 		try {
-			if (!application.githubId) {
-				throw new TRPCError({
-					code: "NOT_FOUND",
-					message: "Github Account not configured correctly",
-				});
-			}
-
-			// `findApplicationById` redacts `githubPrivateKey` from the `github`
-			// relation, so the provider must be refetched to authenticate.
-			const githubProvider = await findGithubById(application.githubId);
-			const octokit = authGithub(githubProvider);
 			const runningComment = getIssueComment(
 				application.name,
 				"initializing",
 				`${application.previewHttps ? "https" : "http"}://${generateDomain}`,
 			);
-			const issue = await octokit.rest.issues.createComment({
-				owner: application?.owner || "",
-				repo: application?.repository || "",
-				issue_number: Number.parseInt(schema.pullRequestNumber),
+			const pullRequestCommentId = await createPreviewComment(commentContext, {
+				issueNumber: schema.pullRequestNumber,
 				body: `### Dokploy Preview Deployment\n\n${runningComment}`,
 			});
 			await db
 				.update(previewDeployments)
-				.set({ pullRequestCommentId: `${issue.data.id}` })
+				.set({ pullRequestCommentId })
 				.where(
 					eq(
 						previewDeployments.previewDeploymentId,
 						previewDeployment.previewDeploymentId,
 					),
 				);
-			previewDeployment.pullRequestCommentId = `${issue.data.id}`;
+			previewDeployment.pullRequestCommentId = pullRequestCommentId;
 		} catch (error) {
 			console.error(
 				`Failed to create preview deployment PR comment for application=${schema.applicationId} pr=${schema.pullRequestId}:`,
@@ -502,30 +494,36 @@ const postComposePreviewComment = async (
 	status: "initializing" | "running" | "success" | "error",
 	previewUrl: string,
 ) => {
-	// GitHub-only: GitLab/other providers surface status via MR notes instead of
-	// the GitHub App comment API (compose preview is GitHub-first).
-	if (compose.sourceType !== "github" || !compose.github) {
+	// GitHub and Gitea/Forgejo write a status comment on the pull request;
+	// GitLab and the other source types surface status via MR notes instead, so
+	// they resolve to no comment context and are skipped.
+	const commentContext = getPreviewCommentContext(compose);
+	if (!commentContext) {
 		return;
 	}
 	try {
-		const octokit = authGithub(compose.github as Github);
 		const body = getIssueComment(compose.name, status, previewUrl);
-		const commentId = Number.parseInt(previewDeployment.pullRequestCommentId);
-		if (previewDeployment.pullRequestCommentId && !Number.isNaN(commentId)) {
-			await octokit.rest.issues.updateComment({
-				owner: compose.owner || "",
-				repo: compose.repository || "",
-				comment_id: commentId,
-				body: `### Dokploy Preview Deployment\n\n${body}`,
+		const ensured = await ensurePreviewComment(commentContext, {
+			issueNumber: previewDeployment.pullRequestNumber,
+			commentId: previewDeployment.pullRequestCommentId,
+			body: `### Dokploy Preview Deployment\n\n${body}`,
+		});
+
+		if (ensured.created) {
+			// The freshly created comment already carries the status body, only the
+			// new id has to be remembered for the next update.
+			await updatePreviewDeployment(previewDeployment.previewDeploymentId, {
+				pullRequestCommentId: ensured.commentId,
 			});
-		} else {
-			await octokit.rest.issues.createComment({
-				owner: compose.owner || "",
-				repo: compose.repository || "",
-				issue_number: Number.parseInt(previewDeployment.pullRequestNumber),
-				body: `### Dokploy Preview Deployment\n\n${body}`,
-			});
+			previewDeployment.pullRequestCommentId = ensured.commentId;
+			return;
 		}
+
+		await updatePreviewComment(commentContext, {
+			issueNumber: previewDeployment.pullRequestNumber,
+			commentId: ensured.commentId,
+			body: `### Dokploy Preview Deployment\n\n${body}`,
+		});
 	} catch (error) {
 		console.error(
 			`Failed to post compose preview PR comment for compose=${compose.composeId} pr=${previewDeployment.pullRequestId}:`,
@@ -623,27 +621,29 @@ export const createComposePreview = async (
 		});
 	}
 
-	// Post the initializing PR comment (GitHub only) now that we hold the row.
-	if (compose.sourceType === "github" && compose.github) {
+	// Post the initializing PR comment (GitHub or Gitea/Forgejo) now that we hold
+	// the row.
+	const composeCommentContext = getPreviewCommentContext(compose);
+	if (composeCommentContext) {
 		try {
-			const octokit = authGithub(compose.github as Github);
 			const runningComment = getIssueComment(compose.name, "initializing", "");
-			const issue = await octokit.rest.issues.createComment({
-				owner: compose.owner || "",
-				repo: compose.repository || "",
-				issue_number: Number.parseInt(schema.pullRequestNumber),
-				body: `### Dokploy Preview Deployment\n\n${runningComment}`,
-			});
+			const pullRequestCommentId = await createPreviewComment(
+				composeCommentContext,
+				{
+					issueNumber: schema.pullRequestNumber,
+					body: `### Dokploy Preview Deployment\n\n${runningComment}`,
+				},
+			);
 			await db
 				.update(previewDeployments)
-				.set({ pullRequestCommentId: `${issue.data.id}` })
+				.set({ pullRequestCommentId })
 				.where(
 					eq(
 						previewDeployments.previewDeploymentId,
 						previewDeployment.previewDeploymentId,
 					),
 				);
-			previewDeployment.pullRequestCommentId = `${issue.data.id}`;
+			previewDeployment.pullRequestCommentId = pullRequestCommentId;
 		} catch (error) {
 			console.error(
 				`Failed to create compose preview PR comment for compose=${composeId} pr=${schema.pullRequestId}:`,
@@ -763,6 +763,9 @@ const executeComposePreview = async ({
 			appName: previewDeployment.appName,
 			branch: previewDeployment.branch,
 			gitlabBranch: previewDeployment.branch,
+			// Gitea clones read `giteaBranch`, so the preview must override it too
+			// or the base branch would be built instead of the pull request tip.
+			giteaBranch: previewDeployment.branch,
 			suffix: previewSuffix,
 			randomize: true,
 			isolatedDeployment: false,

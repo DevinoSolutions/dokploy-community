@@ -12,6 +12,10 @@ import { applications } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
+import {
+	handleGiteaApplicationPullRequestEvent,
+	isGiteaPullRequestEvent,
+} from "@/server/utils/gitea-preview";
 
 /**
  * Log a webhook handler error server-side without leaking its shape to the HTTP
@@ -52,6 +56,7 @@ export default async function handler(
 					},
 				},
 				bitbucket: true,
+				previewDeployments: true,
 			},
 		});
 
@@ -59,6 +64,27 @@ export default async function handler(
 			res.status(404).json({ message: "Application Not Found" });
 			return;
 		}
+
+		// Preview deployments are driven by pull request events and are a separate
+		// feature from push auto deployments, so they are handled before the
+		// `autoDeploy` gate below.
+		if (isGiteaPullRequestEvent(req.headers)) {
+			if (application.sourceType !== "gitea") {
+				res.status(400).json({
+					message:
+						"Preview deployments require the Gitea source type, a custom Git URL cannot be used",
+				});
+				return;
+			}
+
+			const result = await handleGiteaApplicationPullRequestEvent({
+				application,
+				body: req.body,
+			});
+			res.status(result.status).json({ message: result.message });
+			return;
+		}
+
 		if (!application?.autoDeploy) {
 			res.status(400).json({
 				message: "Automatic deployments are disabled for this application",

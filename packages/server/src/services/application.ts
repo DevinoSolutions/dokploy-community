@@ -43,13 +43,13 @@ import {
 	updateDeploymentStatus,
 } from "./deployment";
 import { type Domain, getDomainHost } from "./domain";
-import {
-	createPreviewDeploymentComment,
-	getIssueComment,
-	issueCommentExists,
-	updateIssueComment,
-} from "./github";
+import { getIssueComment } from "./github";
 import { generateApplyPatchesCommand } from "./patch";
+import {
+	ensurePreviewComment,
+	getPreviewCommentContext,
+	updatePreviewComment,
+} from "./preview-comment";
 import {
 	findPreviewDeploymentById,
 	updatePreviewDeployment,
@@ -442,6 +442,70 @@ const resolvePreviewTemplateVariables = (
 	pullRequestNumber: string,
 ) => value.replaceAll("${{preview.prNumber}}", pullRequestNumber);
 
+/**
+ * Build a writer that keeps the pull request comment of a preview deployment up
+ * to date, no matter which git provider hosts the pull request. The comment can
+ * be deleted by users, so it is recreated (and the new id persisted) on demand.
+ *
+ * Source types that do not write preview comments through this layer (GitLab
+ * previews report status as merge request notes from the webhook handler, and a
+ * half-configured provider has no coordinates to post with) resolve to no
+ * comment context, in which case the writer is a no-op instead of failing the
+ * deployment.
+ */
+const buildPreviewCommentWriter = ({
+	application,
+	previewDeployment,
+	previewDeploymentId,
+	previewDomain,
+}: {
+	application: { name: string } & Parameters<
+		typeof getPreviewCommentContext
+	>[0];
+	previewDeployment: {
+		pullRequestNumber: string;
+		pullRequestCommentId: string;
+	};
+	previewDeploymentId: string;
+	previewDomain: string;
+}) => {
+	let commentId = previewDeployment.pullRequestCommentId;
+	const issueNumber = previewDeployment.pullRequestNumber;
+
+	return async (status: "running" | "success" | "error") => {
+		const commentContext = getPreviewCommentContext(application);
+
+		if (!commentContext) {
+			return;
+		}
+
+		const comment = getIssueComment(application.name, status, previewDomain);
+		const body = `### Dokploy Preview Deployment\n\n${comment}`;
+
+		const ensured = await ensurePreviewComment(commentContext, {
+			issueNumber,
+			commentId,
+			body,
+		});
+
+		if (ensured.created) {
+			// The freshly created comment already carries `body`, only the new id
+			// has to be remembered for the next status update.
+			commentId = ensured.commentId;
+			await updatePreviewDeployment(previewDeploymentId, {
+				pullRequestCommentId: commentId,
+			});
+			return;
+		}
+
+		await updatePreviewComment(commentContext, {
+			issueNumber,
+			commentId,
+			body,
+		});
+	};
+};
+
 export const deployPreviewApplication = async ({
 	applicationId,
 	titleLog = "Preview Deployment",
@@ -469,48 +533,14 @@ export const deployPreviewApplication = async ({
 	});
 
 	const previewDomain = getDomainHost(previewDeployment?.domain as Domain);
-	const issueParams = {
-		owner: application?.owner || "",
-		repository: application?.repository || "",
-		issue_number: previewDeployment.pullRequestNumber,
-		comment_id: Number.parseInt(previewDeployment.pullRequestCommentId),
-		githubId: application?.githubId || "",
-	};
-	const isGithubPreview = application.sourceType === "github";
+	const writePreviewComment = buildPreviewCommentWriter({
+		application,
+		previewDeployment,
+		previewDeploymentId,
+		previewDomain,
+	});
 	try {
-		if (isGithubPreview) {
-			const commentExists = await issueCommentExists({
-				...issueParams,
-			});
-			if (!commentExists) {
-				const result = await createPreviewDeploymentComment({
-					...issueParams,
-					previewDomain,
-					appName: previewDeployment.appName,
-					githubId: application?.githubId || "",
-					previewDeploymentId,
-				});
-
-				if (!result) {
-					throw new TRPCError({
-						code: "NOT_FOUND",
-						message: "Pull request comment not found",
-					});
-				}
-
-				issueParams.comment_id = Number.parseInt(result.pullRequestCommentId);
-			}
-
-			const buildingComment = getIssueComment(
-				application.name,
-				"running",
-				previewDomain,
-			);
-			await updateIssueComment({
-				...issueParams,
-				body: `### Dokploy Preview Deployment\n\n${buildingComment}`,
-			});
-		}
+		await writePreviewComment("running");
 
 		application.appName = previewDeployment.appName;
 		application.env = resolvePreviewTemplateVariables(
@@ -553,10 +583,16 @@ export const deployPreviewApplication = async ({
 				appName: previewDeployment.appName,
 				gitlabBranch: previewDeployment.branch,
 			});
+		} else if (application.sourceType === "gitea") {
+			command += await cloneGiteaRepository({
+				...applicationEntity,
+				appName: previewDeployment.appName,
+				giteaBranch: previewDeployment.branch,
+			});
 		} else {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Preview deployment provider is not supported",
+				message: `Preview deployments are not supported for the '${application.sourceType}' source type`,
 			});
 		}
 		command += await getBuildCommand(application);
@@ -569,17 +605,7 @@ export const deployPreviewApplication = async ({
 		}
 		await mechanizeDockerContainer(application);
 
-		if (isGithubPreview) {
-			const successComment = getIssueComment(
-				application.name,
-				"success",
-				previewDomain,
-			);
-			await updateIssueComment({
-				...issueParams,
-				body: `### Dokploy Preview Deployment\n\n${successComment}`,
-			});
-		}
+		await writePreviewComment("success");
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "done",
@@ -603,17 +629,13 @@ export const deployPreviewApplication = async ({
 			console.error(logError);
 		}
 
-		if (isGithubPreview) {
-			const comment = getIssueComment(application.name, "error", previewDomain);
-			try {
-				await updateIssueComment({
-					...issueParams,
-					body: `### Dokploy Preview Deployment\n\n${comment}`,
-				});
-			} catch (commentError) {
-				console.error(commentError);
-			}
-		}
+		// Never let a failing status comment hide the actual build error.
+		await writePreviewComment("error").catch((commentError) => {
+			console.error(
+				"Error reporting the preview deployment failure:",
+				commentError,
+			);
+		});
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",
@@ -646,49 +668,15 @@ export const rebuildPreviewApplication = async ({
 	});
 
 	const previewDomain = getDomainHost(previewDeployment?.domain as Domain);
-	const issueParams = {
-		owner: application?.owner || "",
-		repository: application?.repository || "",
-		issue_number: previewDeployment.pullRequestNumber,
-		comment_id: Number.parseInt(previewDeployment.pullRequestCommentId),
-		githubId: application?.githubId || "",
-	};
-	const isGithubPreview = application.sourceType === "github";
+	const writePreviewComment = buildPreviewCommentWriter({
+		application,
+		previewDeployment,
+		previewDeploymentId,
+		previewDomain,
+	});
 
 	try {
-		if (isGithubPreview) {
-			const commentExists = await issueCommentExists({
-				...issueParams,
-			});
-			if (!commentExists) {
-				const result = await createPreviewDeploymentComment({
-					...issueParams,
-					previewDomain,
-					appName: previewDeployment.appName,
-					githubId: application?.githubId || "",
-					previewDeploymentId,
-				});
-
-				if (!result) {
-					throw new TRPCError({
-						code: "NOT_FOUND",
-						message: "Pull request comment not found",
-					});
-				}
-
-				issueParams.comment_id = Number.parseInt(result.pullRequestCommentId);
-			}
-
-			const buildingComment = getIssueComment(
-				application.name,
-				"running",
-				previewDomain,
-			);
-			await updateIssueComment({
-				...issueParams,
-				body: `### Dokploy Preview Deployment\n\n${buildingComment}`,
-			});
-		}
+		await writePreviewComment("running");
 
 		// Set application properties for preview deployment
 		application.appName = previewDeployment.appName;
@@ -739,10 +727,16 @@ export const rebuildPreviewApplication = async ({
 				appName: previewDeployment.appName,
 				gitlabBranch: previewDeployment.branch,
 			});
+		} else if (application.sourceType === "gitea") {
+			command += await cloneGiteaRepository({
+				...applicationEntity,
+				appName: previewDeployment.appName,
+				giteaBranch: previewDeployment.branch,
+			});
 		} else {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Preview deployment provider is not supported",
+				message: `Preview deployments are not supported for the '${application.sourceType}' source type`,
 			});
 		}
 		command += await getBuildCommand(application);
@@ -754,17 +748,7 @@ export const rebuildPreviewApplication = async ({
 		}
 		await mechanizeDockerContainer(application);
 
-		if (isGithubPreview) {
-			const successComment = getIssueComment(
-				application.name,
-				"success",
-				previewDomain,
-			);
-			await updateIssueComment({
-				...issueParams,
-				body: `### Dokploy Preview Deployment\n\n${successComment}`,
-			});
-		}
+		await writePreviewComment("success");
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "done",
@@ -787,17 +771,13 @@ export const rebuildPreviewApplication = async ({
 			await execAsync(command);
 		}
 
-		if (isGithubPreview) {
-			const comment = getIssueComment(application.name, "error", previewDomain);
-			try {
-				await updateIssueComment({
-					...issueParams,
-					body: `### Dokploy Preview Deployment\n\n${comment}`,
-				});
-			} catch (commentError) {
-				console.error(commentError);
-			}
-		}
+		// Never let a failing status comment hide the actual build error.
+		await writePreviewComment("error").catch((commentError) => {
+			console.error(
+				"Error reporting the preview deployment failure:",
+				commentError,
+			);
+		});
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",
