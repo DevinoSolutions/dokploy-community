@@ -571,6 +571,7 @@ export const createGotifyNotification = async (
 				volumeBackup: input.volumeBackup,
 				dokployRestart: input.dokployRestart,
 				dockerCleanup: input.dockerCleanup,
+				serverThreshold: input.serverThreshold,
 				notificationType: "gotify",
 				organizationId: organizationId,
 				scheduleFailure: input.scheduleFailure,
@@ -604,6 +605,7 @@ export const updateGotifyNotification = async (
 				volumeBackup: input.volumeBackup,
 				dokployRestart: input.dokployRestart,
 				dockerCleanup: input.dockerCleanup,
+				serverThreshold: input.serverThreshold,
 				organizationId: input.organizationId,
 				scheduleFailure: input.scheduleFailure,
 			})
@@ -667,6 +669,7 @@ export const createNtfyNotification = async (
 				volumeBackup: input.volumeBackup,
 				dokployRestart: input.dokployRestart,
 				dockerCleanup: input.dockerCleanup,
+				serverThreshold: input.serverThreshold,
 				notificationType: "ntfy",
 				organizationId: organizationId,
 				scheduleFailure: input.scheduleFailure,
@@ -700,6 +703,7 @@ export const updateNtfyNotification = async (
 				volumeBackup: input.volumeBackup,
 				dokployRestart: input.dokployRestart,
 				dockerCleanup: input.dockerCleanup,
+				serverThreshold: input.serverThreshold,
 				organizationId: input.organizationId,
 				scheduleFailure: input.scheduleFailure,
 			})

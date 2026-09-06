@@ -1394,6 +1394,13 @@
       "when": 1788561607051,
       "tag": "0198_good_harry_osborn",
       "breakpoints": true
+    },
+    {
+      "idx": 199,
+      "version": "7",
+      "when": 1788711192772,
+      "tag": "0199_complex_mantis",
+      "breakpoints": true
     }
   ]
 }

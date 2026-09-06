@@ -177,6 +177,90 @@ host. `domain.generateDomain` / `domain.canGenerateTraefikMeDomains` take an
 optional `projectId` guarded by `assertProjectInOrganization`. Re-apply all of
 that on top of upstream's version of the file.
 
+### Adapted at v0.30.5: swarm convergence vs. the fork's stability check
+
+Upstream #5247 added `waitForSwarmServiceConvergence` +
+`ServiceConvergenceError` to `packages/server/src/utils/docker/utils.ts` and
+calls it from the six database services
+(`services/{libsql,mariadb,mongo,mysql,postgres,redis}.ts`) after a deploy. It
+conflicted with the fork's `waitForSwarmServiceStable` only *positionally* —
+both blocks are inserted immediately before `checkPostgresHealth`. **Keep
+both.** They are different functions with disjoint call sites: upstream's is
+DB-deploy convergence (`services/application.ts` never calls it), the fork's is
+the application deploy stability window from #184/#188.
+
+Upstream's check is **not** a superset of the fork's. It returns the moment
+`runningTasksCount >= desiredTasksCount`, so it has no post-running stability
+window (a container that starts then crash-loops still counts as converged), it
+counts `DesiredState === "running"` tasks without excluding the outgoing task of
+a rolling update or tasks created before the poll started, and it compares no
+timestamps so it needs no daemon-clock anchoring. Swapping the fork's helper for
+it would reintroduce exactly the two bugs lmichelin fixed. If a future upstream
+release grows those behaviours, drop `waitForSwarmServiceStable` then.
+
+### Adapted at v0.30.5: `generateTraefikMeDomain` call sites in new upstream code
+
+Upstream's onboarding wizard (#5264) added
+`applicationRouter.deployNginxQuickstart`, which calls
+`generateTraefikMeDomain(appName, ownerId, serverId)` and uses the return value
+directly as a host string. Since the wildcard-base feature the fork's version
+takes a fourth `projectId` argument and returns
+`{ domain, baseDomain, source }`. Every upstream call site of that function must
+be adapted on sync: pass the project id and read `.domain`. This one auto-merged
+cleanly and only the typecheck caught it — grep for `generateTraefikMeDomain`
+after every merge.
+
+### BREAKING at v0.30.5: default Docker build context is now the repo root
+
+Upstream `f1e2467bb` ("fix/docker-context-path-default") changed the *default*
+build context for `buildType: "dockerfile"` applications:
+
+- `getDockerContextPath` used to return `null` when the app had no explicit
+  `dockerContextPath`, and `builders/docker-file.ts` then fell back to
+  `defaultContextPath` — **the directory containing the Dockerfile**.
+- It now returns `<APPLICATIONS_PATH>/<appName>/code/<dockerContextPath || ".">`
+  and the fallback was deleted, so the default context is **the repository
+  root**, matching what the UI placeholder always claimed.
+
+Taken under theirs-wins (it is deliberate, and it is a file upstream edits), but
+it is a **behaviour break for existing users**: any Dockerfile app whose
+Dockerfile sits in a subdirectory and copies paths relative to that
+subdirectory (`COPY package.json .`, `COPY deno.json .`, …) will start failing
+its build with a "file not found" until the user sets `dockerContextPath`
+explicitly. This must be called out in the release notes for the release that
+ships this sync.
+
+The fork's `__test__/deploy/application.real.test.ts` "should REALLY build with
+Dockerfile" case caught it on CI (it builds `Dokploy/examples` `/deno`, whose
+Dockerfile does `COPY deno.json .`). The test now sets
+`dockerContextPath: "/deno"` — the same migration a user has to make. That test
+file's `@dokploy/server/services/deployment` mock also gained
+`getDeploymentErrorMessage`; without it, *any* real deploy failure surfaces as a
+missing-mock-export error and the actual build error is lost.
+
+### Superseded at v0.30.5: remote Traefik writes go through SFTP
+
+Upstream #5246 replaced the `echo <base64> | base64 -d > path` remote write in
+`packages/server/src/utils/traefik/application.ts` with `writeFileRemote`
+(SFTP). The fork's regression test
+`__test__/traefik/traefik.test.ts` ("Remote Traefik writer preserves
+shell-sensitive YAML values") was retargeted at `writeFileRemote` rather than
+deleted — the invariant it guards (the YAML reaches the transport with its
+quoting intact) still matters; only the transport changed.
+
+### Cloud onboarding wizard (#5264) on self-hosted
+
+`projectRouter.onboardingStatus` gates on
+`isOwner && !user.onboardingCompletedAt && projectCount === 0 && billingGate`,
+where `billingGate` is `!hasActiveAccess` on cloud and unconditionally `true`
+self-hosted. So a **self-hosted fork instance does show the wizard** to a brand
+new owner with zero projects — but never to anyone who existed before the
+upgrade, because migration `0199` backfills `onboardingCompletedAt`. The
+cloud-only content is filtered inside the wizard:
+`components/dashboard/onboarding/onboarding-wizard.tsx` drops the `plan`
+(Stripe billing) and `server` steps when `settings.isCloud` is false, leaving
+welcome → project → deploy → complete. No fork change was needed.
+
 ### Historical (superseded): fork Docker network management file map
 
 Net-new fork files (kept as-is unless upstream restructures their neighbors):
@@ -246,7 +330,14 @@ new numbered migrations. Rules:
    generated `.sql` after a `--> statement-breakpoint`, and confirm it is
    idempotent (upstream's usually are). Done at v0.30.3 for upstream's `0186`
    (`network.dockerId`) and `0187` (`server.terminal` role backfill), both
-   folded into the fork's `0196_robust_lucky_pierre`.
+   folded into the fork's `0196_robust_lucky_pierre`. Done again at **v0.30.5**
+   for upstream's `0188_volatile_piledriver` (`VaultProviderType` += `phase`),
+   `0189_wooden_nextwave` (`DnsProviderType` += `porkbun`) and
+   `0190_nappy_anita_blake` (`user.onboardingCompletedAt` + a backfill),
+   all three folded into the fork's `0199_complex_mantis`. The `0190` backfill
+   (`UPDATE "user" SET "onboardingCompletedAt" = now() WHERE
+   "onboardingCompletedAt" IS NULL`) was hand-carried; it must **not** become a
+   column `DEFAULT`, or newly created users would skip the onboarding wizard.
 5. **Guard upstream migrations only on a real column-name collision.** If an
    upstream migration adds a column our *old* dropped migration already created
    under the **same name**, add `IF NOT EXISTS` to our copy of that upstream

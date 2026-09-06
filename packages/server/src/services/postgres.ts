@@ -8,7 +8,10 @@ import {
 import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { generatePassword } from "@dokploy/server/templates";
 import { buildPostgres } from "@dokploy/server/utils/databases/postgres";
-import { pullImage } from "@dokploy/server/utils/docker/utils";
+import {
+	pullImage,
+	waitForSwarmServiceConvergence,
+} from "@dokploy/server/utils/docker/utils";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
@@ -166,6 +169,8 @@ export const deployPostgres = async (
 		}
 
 		await buildPostgres(postgres);
+
+		await waitForSwarmServiceConvergence(postgres.appName, postgres.serverId);
 
 		await updatePostgresById(postgresId, {
 			applicationStatus: "done",
