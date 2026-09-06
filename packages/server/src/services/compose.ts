@@ -8,7 +8,12 @@ import {
 	compose,
 } from "@dokploy/server/db/schema";
 import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
-import { getBuildComposeCommand } from "@dokploy/server/utils/builders/compose";
+import {
+	type ComposePathLike,
+	getBackupCurrentDeploymentCommand,
+	getBuildComposeCommand,
+	getRollbackMarkerProbeCommand,
+} from "@dokploy/server/utils/builders/compose";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	cloneCompose,
@@ -54,6 +59,46 @@ type ComposeBuildEntity = Awaited<ReturnType<typeof findComposeById>> & {
 };
 
 /**
+ * Snapshots the compose file and `.env` that are on disk *before* the deploy
+ * touches the code directory, so a failed deploy can restore exactly the
+ * release that was serving traffic when it started.
+ */
+export const backupCurrentDeployment = async (
+	compose: ComposePathLike,
+	logPath: string,
+) => {
+	const command = `(${getBackupCurrentDeploymentCommand(compose)}) >> ${logPath} 2>&1`;
+	if (compose.serverId) {
+		await execAsyncRemote(compose.serverId, command);
+	} else {
+		await execAsync(command);
+	}
+};
+
+/**
+ * True when the deploy script reported that it restored the previous release
+ * *and* brought it back up. The marker is bound to the deployment id, so a
+ * marker written by an earlier deployment can never make this one look live.
+ */
+export const didRollbackSucceed = async (
+	compose: ComposePathLike,
+	logPath: string,
+	deploymentId: string,
+) => {
+	const command = getRollbackMarkerProbeCommand(logPath, deploymentId);
+	try {
+		if (compose.serverId) {
+			const { stdout } = await execAsyncRemote(compose.serverId, command);
+			return stdout.trim() === "LIVE_OK";
+		}
+		const { stdout } = await execAsync(command);
+		return stdout.trim() === "LIVE_OK";
+	} catch {
+		return false;
+	}
+};
+
+/**
  * Shared clone → patches → (optional fresh-volumes down) → build pipeline used
  * by both `deployCompose` and the compose-preview deploy path. Extracting it
  * keeps `deployCompose` behavior identical while letting a preview run the same
@@ -63,10 +108,16 @@ type ComposeBuildEntity = Awaited<ReturnType<typeof findComposeById>> & {
  * `applyPatches` is skipped for previews because `generateApplyPatchesCommand`
  * resolves the code directory from the base compose's appName, which does not
  * match the preview's isolated appName.
+ *
+ * The pipeline is transactional: the release currently on disk is snapshotted
+ * before the clone, and `getBuildComposeCommand` restores it if the docker
+ * command fails. Previews get the same treatment — their snapshots live under
+ * their own isolated appName — so a broken PR push does not take the existing
+ * preview URL down.
  */
 export const runComposeBuild = async (
 	entity: ComposeBuildEntity,
-	deployment: { logPath: string },
+	deployment: { logPath: string; deploymentId?: string },
 	options: { freshVolumes?: boolean; applyPatches?: boolean } = {},
 ) => {
 	const { freshVolumes = false, applyPatches = true } = options;
@@ -80,6 +131,10 @@ export const runComposeBuild = async (
 			await execAsync(commandWithLog);
 		}
 	};
+
+	// Must run before the clone / raw-file rewrite below overwrites the code
+	// directory, otherwise there is nothing left to roll back to.
+	await backupCurrentDeployment(entity, deployment.logPath);
 
 	let command = "set -e;";
 	if (entity.sourceType === "github") {
@@ -113,7 +168,10 @@ export const runComposeBuild = async (
 	}
 
 	command = "set -e;";
-	command += await getBuildComposeCommand(entity);
+	command += await getBuildComposeCommand(entity, {
+		deploymentId: deployment.deploymentId,
+		freshVolumes,
+	});
 	await runStep(command);
 };
 
@@ -359,8 +417,15 @@ export const deployCompose = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		// The deployment itself always records the failure; the *service* is only
+		// marked broken when the previous release could not be brought back.
+		const rollbackSucceeded = await didRollbackSucceed(
+			compose,
+			deployment.logPath,
+			deployment.deploymentId,
+		);
 		await updateCompose(composeId, {
-			composeStatus: "error",
+			composeStatus: rollbackSucceeded ? "done" : "error",
 		});
 		const errorMessage = await getDeploymentErrorMessage({
 			logPath: deployment.logPath,
@@ -413,6 +478,9 @@ export const rebuildCompose = async ({
 	});
 
 	try {
+		// Snapshot before the raw-file rewrite / patch application below.
+		await backupCurrentDeployment(compose, deployment.logPath);
+
 		let command = "set -e;";
 		if (compose.sourceType === "raw") {
 			command += getCreateComposeFileCommand(compose);
@@ -451,7 +519,10 @@ export const rebuildCompose = async ({
 		}
 
 		command = "set -e;";
-		command += await getBuildComposeCommand(compose);
+		command += await getBuildComposeCommand(compose, {
+			deploymentId: deployment.deploymentId,
+			freshVolumes,
+		});
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (compose.serverId) {
 			await execAsyncRemote(compose.serverId, commandWithLog);
@@ -480,8 +551,13 @@ export const rebuildCompose = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		const rollbackSucceeded = await didRollbackSucceed(
+			compose,
+			deployment.logPath,
+			deployment.deploymentId,
+		);
 		await updateCompose(composeId, {
-			composeStatus: "error",
+			composeStatus: rollbackSucceeded ? "done" : "error",
 		});
 		throw error;
 	}
