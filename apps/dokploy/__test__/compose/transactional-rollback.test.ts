@@ -252,12 +252,20 @@ describe("getBuildComposeCommand — rollback decision logic", () => {
 		);
 	});
 
-	it("shell-quotes snapshot paths built from a hostile composePath", async () => {
+	it("shell-quotes restore paths built from a hostile composePath", async () => {
 		const command = await build({
 			composePath: './x.yml"; touch /tmp/pwned; #',
 		});
 
-		expect(command).toMatch(/cp '[^']*last-good-docker-compose.yml.bak' '/);
+		// The snapshot filenames themselves are constants and need no quoting;
+		// what matters is that the user-controlled destination stays inside a
+		// single-quoted shell word on both the restore and the persist side.
+		expect(command).toMatch(
+			/cp [^\n]*last-good-docker-compose\.yml\.bak'? '[^']*x\.yml"; touch [^']*pwned[^']*'/,
+		);
+		expect(command).toMatch(
+			/cp '[^']*x\.yml"; touch [^']*pwned[^']*' [^\n]*last-good-docker-compose\.yml\.bak/,
+		);
 	});
 });
 
