@@ -127,11 +127,25 @@ export const buildPolicyDeployGate = async ({
 			composePath: unit.composePath,
 		});
 		if (!shouldDeploy(paths, changedFiles)) {
-			return {
-				deploy: false,
-				reason: "watch_paths",
-				message: `Deployment skipped: no changed file matched the derived watch paths (${paths.join(", ")})`,
-			};
+			const message = `Deployment skipped: no changed file matched the derived watch paths (${paths.join(", ")})`;
+			// Audited for the same reason the skip marker is, and with more force:
+			// nobody asked for a derived watch path, so "why did my push not
+			// deploy" has no other answer at all. Without this row the only trace
+			// is a 301 on a webhook delivery nobody reads. Round-2 review
+			// finding B.
+			await recordBuildPolicyAudit({
+				organizationId,
+				action: "deploy_skipped",
+				applicationId: unitType === "application" ? unit.unitId : null,
+				composeId: unitType === "compose" ? unit.unitId : null,
+				reason: message,
+				metadata: {
+					unitName: unit.unitName,
+					derivedWatchPaths: paths,
+					changedFiles,
+				},
+			});
+			return { deploy: false, reason: "watch_paths", message };
 		}
 	}
 
@@ -172,7 +186,11 @@ export const deployHookBodyHasImage = (body: unknown): boolean => {
 export interface DeployHookImageUnit {
 	organizationId: string | null;
 	appName: string;
-	/** The unit's own registry, then its build registry, then the org default. */
+	/**
+	 * Fallbacks only. The org default is preferred, because that is the
+	 * repository an enforced build publishes to; these are consulted only when
+	 * the organization has no default at all.
+	 */
 	registryId?: string | null;
 	buildRegistryId?: string | null;
 }
@@ -193,8 +211,17 @@ export const resolveDeployHookImage = async (
 
 	try {
 		// Gate 2: exactly one acceptable repository, the unit's own.
+		//
+		// The organization default comes FIRST because that is where an enforced
+		// build publishes: `decideBuildPolicy` uses `settings.defaultRegistryId`
+		// and consults neither `unit.registryId` nor `unit.buildRegistryId`. With
+		// the unit's own registry first, a unit that had one would have had the
+		// digest the enforced build just published *rejected*, while a digest on
+		// a repository the enforced path never writes to was accepted. The
+		// allowlist and the publish target must not be able to diverge.
+		// Round-2 review finding D.
 		const registryId =
-			unit.registryId ?? unit.buildRegistryId ?? settings.defaultRegistryId;
+			settings.defaultRegistryId ?? unit.registryId ?? unit.buildRegistryId;
 		if (!registryId) {
 			return {
 				ok: false,

@@ -292,9 +292,29 @@ export default async function handler(
 			}
 		}
 
-		// >>> build-policy hook: `[skip deploy]`, derived watchPaths, queue
-		// coalescing, and the optional `{image, tag, digest}` body.
+		// >>> build-policy hook: the optional `{image, tag, digest}` body, then
+		// `[skip deploy]`, derived watchPaths and queue coalescing.
+		//
+		// Body validation comes FIRST on purpose. The gate coalesces, which drops
+		// this unit's still-waiting deploys; doing that on behalf of a request
+		// that is then refused with a 400 leaves the queue empty and nothing
+		// enqueued, and a CI job retrying with a broken body would keep it that
+		// way for ever. The validation reads nothing the gate produces, so the
+		// order is free. Round-2 review finding C.
 		// See packages/server/src/services/build-policy/README.md
+		const hookImage = await resolveDeployHookImage(
+			{
+				organizationId: application.environment.project.organizationId,
+				appName: application.appName,
+				registryId: application.registryId,
+				buildRegistryId: application.buildRegistryId,
+			},
+			req.body,
+		);
+		if (!hookImage.ok) {
+			res.status(400).json({ message: hookImage.message });
+			return;
+		}
 		const gate = await buildPolicyDeployGate({
 			unitType: "application",
 			unit: {
@@ -312,19 +332,6 @@ export default async function handler(
 		});
 		if (!gate.deploy) {
 			res.status(301).json({ message: gate.message });
-			return;
-		}
-		const hookImage = await resolveDeployHookImage(
-			{
-				organizationId: application.environment.project.organizationId,
-				appName: application.appName,
-				registryId: application.registryId,
-				buildRegistryId: application.buildRegistryId,
-			},
-			req.body,
-		);
-		if (!hookImage.ok) {
-			res.status(400).json({ message: hookImage.message });
 			return;
 		}
 		// <<< build-policy hook

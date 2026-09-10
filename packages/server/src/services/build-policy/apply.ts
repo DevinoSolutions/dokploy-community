@@ -86,6 +86,36 @@ export const registryForAuth = async (registryId: string) => {
 	return rest;
 };
 
+/**
+ * The registry fields to spread onto the application object handed to
+ * `mechanizeDockerContainer`, so the deploy host authenticates against the
+ * registry the digest **actually lives on**.
+ *
+ * Round-2 review finding D. Both pin sites used to only *fill in*
+ * `buildRegistry` when the unit had none, and never touched `registry`. But
+ * `getAuthConfig` (`utils/builders/index.ts`) tests `registry` in an `else if`
+ * that precedes the `else if (buildRegistry)` branch, so a non-null `registry`
+ * wins and `buildRegistry` is never consulted. A unit carrying a stale
+ * `registryId` from a previous Docker-provider configuration — the column is not
+ * cleared on a source-type change — therefore pulled the org registry's digest
+ * with the other registry's credentials, and failed at the swarm update.
+ *
+ * So when there is a policy registry, it is authoritative for this deploy:
+ * `registry` is nulled and `buildRegistry` carries it. When there is not,
+ * nothing is changed and the unit's own configuration stands.
+ *
+ * `registry` is nulled rather than overwritten because `getAuthConfig`'s
+ * `sourceType === "docker"` branch also reads it, and this application is not
+ * being deployed from a Docker source; the `buildRegistry` branch is the one
+ * that means "the registry this build published to".
+ */
+export const authForPublishedRegistry = async (
+	registryId: string | null,
+): Promise<{ registry?: null; buildRegistry?: unknown }> => {
+	if (!registryId) return {};
+	return { registry: null, buildRegistry: await registryForAuth(registryId) };
+};
+
 const LOCAL_PLAN = (
 	reason: string,
 	settings: BuildPolicySettings | null,
@@ -619,10 +649,6 @@ export const prepareBuildPolicyDeploy = async <
 	return {
 		...application,
 		buildPolicyImage: published.ref,
-		// The deploy host has to authenticate to pull the digest. When the unit
-		// itself has no registry configured, borrow the org one for auth only.
-		buildRegistry:
-			application.buildRegistry ??
-			(plan.registryId ? await registryForAuth(plan.registryId) : null),
+		...(await authForPublishedRegistry(plan.registryId)),
 	};
 };

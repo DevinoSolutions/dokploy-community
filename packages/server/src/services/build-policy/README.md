@@ -69,6 +69,40 @@ needs to decide the plan at all. The compose path costs even less: an empty
 absence of the calls, and it is where the "one settings read, not none" number
 comes from ("reads the organization settings exactly once").
 
+## Before you turn it on
+
+"Off by default" is only half the story. This is what changes the moment an
+operator sets `enforceRemoteBuilds`, in rough order of blast radius. Round-2
+review finding B: the section above was excellent and this one did not exist.
+
+1. **Derived `watchPaths` start filtering pushes.** Every unit with a
+   `buildPath` and no explicit `watchPaths` immediately gets `<buildPath>/**`
+   from `deriveDefaultWatchPaths`. In a monorepo — the common shape across this
+   fleet — a push that touches only shared code under `packages/**` now stops at
+   the webhook with a 301 and no deployment record. This is the single
+   highest-blast-radius consequence of enabling the policy.
+   **Set explicit `watchPaths` on your monorepo units first.** Every such skip
+   now writes a `deploy_skipped` audit row carrying the derived paths and the
+   changed-file list, so "why did my push not deploy" has an answer; before, the
+   only trace was a webhook delivery response nobody reads.
+2. **Every GitHub-sourced unit's build moves to the org build server**, and its
+   deploy pulls by digest. A unit that must keep building where it is needs an
+   exclusion, added before the switch is flipped.
+3. **Queued deploys start coalescing.** A burst of pushes produces one build.
+   Previews are never coalesced.
+4. **`[skip deploy]` starts being honoured** on the routes listed in
+   `skip-deploy.ts`.
+5. **A deploy-hook `{image, …}` body stops being ignored**: validated on an
+   application, refused with a 400 on a compose unit.
+6. **Required checks are a separate opt-in on top.** Nothing waits on CI until
+   somebody sets `requiredChecks` on a unit. Before you do, read the slot cost
+   in the required-checks section below and raise `buildsConcurrency`.
+
+The audit log (`buildPolicy.audit`, admin only) is where all of this is visible:
+`deploy_skipped`, `deploy_coalesced`, `required_checks_failed`,
+`required_checks_timeout`, `deploy_by_digest`, `exclusion_added`,
+`break_glass_granted`.
+
 ## The decision
 
 `policy.ts` holds the whole decision as a pure function, in this order:
@@ -264,15 +298,24 @@ busiest route for some units did not have it.
 
 ### `apps/dokploy/pages/api/deploy/[refreshToken].ts`
 
-- the gate, plus `resolveDeployHookImage(...)` for the optional
-  `{image, tag, digest}` body; a validated image is passed through the job as
+- `resolveDeployHookImage(...)` for the optional `{image, tag, digest}` body,
+  **then** the gate; a validated image is passed through the job as
   `pinnedImage`.
+- the order matters. The gate coalesces, which drops this unit's still-waiting
+  deploys, and the body validation can answer 400. Coalescing on behalf of a
+  request that is then refused leaves the queue empty and nothing enqueued, and
+  a CI job retrying with a broken body would keep it that way. The validation
+  reads nothing the gate produces, so putting it first is free.
 
 ### `apps/dokploy/pages/api/deploy/compose/[refreshToken].ts`
 
-- the gate, plus `rejectComposeDeployHookImage(...)`. A supplied image is
+- `rejectComposeDeployHookImage(...)`, **then** the gate. A supplied image is
   **rejected with a 400 while the organization enforces**, and ignored otherwise
   — see Known gap.
+- the ordering argument above applies here with more force: this refuses *every*
+  body carrying an image while enforcing, so a CI job that standardises on
+  always posting one would otherwise coalesce the queue and 400 on every single
+  push, for ever.
 
 ### `apps/dokploy/server/queues/queueSetup.ts`
 
@@ -559,6 +602,8 @@ can be check-gated").
 | `rollback-by-digest.test.ts` | rollback to a stored digest, and the refusal when there is none |
 | `required-checks-support.test.ts` | that a unit with no GitHub App is refused a required check at the API boundary, and that clearing one is always allowed |
 | `required-checks-before-build.test.ts` | that the checks gate is policy-gated, runs before the build on the freshly cloned sha, and is a no-op that executes nothing while the policy is off |
+| `gate-audit-and-registry.test.ts` | that a derived watch-path skip is audited, and that the deploy-hook allowlist follows the registry an enforced build publishes to |
+| `hook-body-before-coalescing.test.ts` | that a refused deploy-hook body never coalesces the unit's queue |
 | `compose-required-checks.test.ts` | that a compose unit's required checks are honoured, that the gate is default-off, and that it never consults exclusions or break-glass |
 | `gitlab-route-gate.test.ts` | that the GitLab push webhook consults the gate for both unit types, and reads `[skip deploy]` from the commit rather than the job title |
 | `deploy-path.integration.test.ts` | the real deploy path end to end, with docker, ssh and git mocked |

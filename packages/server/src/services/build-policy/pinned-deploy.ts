@@ -103,12 +103,19 @@ export const deployPinnedApplicationImage = async ({
 			imageDigest: pinnedImage.digest,
 		});
 
+		// Finding D: the registry the digest actually lives on is authoritative
+		// for this deploy, so `registry` is nulled rather than left to win the
+		// `else if` chain in `getAuthConfig`. See `authForPublishedRegistry`.
+		const pullRegistry = await findRegistryForHost(
+			organizationId,
+			pinnedImage.ref,
+		);
 		await mechanizeDockerContainer({
 			...application,
 			buildPolicyImage: pinnedImage.ref,
-			buildRegistry:
-				application.buildRegistry ??
-				(await findRegistryForHost(organizationId, pinnedImage.ref)),
+			...(pullRegistry
+				? { registry: null, buildRegistry: pullRegistry }
+				: { buildRegistry: application.buildRegistry ?? null }),
 		});
 
 		const stability = await waitForSwarmServiceStable(application.appName, {

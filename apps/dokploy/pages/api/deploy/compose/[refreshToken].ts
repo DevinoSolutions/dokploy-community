@@ -234,11 +234,27 @@ export default async function handler(
 			}
 		}
 
-		// >>> build-policy hook: `[skip deploy]`, derived watchPaths and queue
-		// coalescing. A compose unit cannot deploy a supplied image by digest
-		// yet (see README.md § Known gap), so an enforcing organization gets a
-		// 400 rather than a silently ignored body. While the policy is off the
-		// body is ignored, which is what upstream does with it.
+		// >>> build-policy hook: the supplied-image body, then `[skip deploy]`,
+		// derived watchPaths and queue coalescing.
+		//
+		// A compose unit cannot deploy a supplied image by digest yet (see
+		// README.md § Known gap), so an enforcing organization gets a 400 rather
+		// than a silently ignored body. While the policy is off the body is
+		// ignored, which is what upstream does with it.
+		//
+		// The refusal is checked BEFORE the gate on purpose, and it matters more
+		// here than on the application route: this rejects EVERY body carrying an
+		// image while enforcing. A CI job that standardises on always posting one
+		// would otherwise coalesce the unit's queue and then 400 on every single
+		// push, for ever. Round-2 review finding C.
+		const hookImage = await rejectComposeDeployHookImage(
+			composeResult.environmentId,
+			req.body,
+		);
+		if (!hookImage.ok) {
+			res.status(400).json({ message: hookImage.message });
+			return;
+		}
 		const gate = await buildPolicyDeployGate({
 			unitType: "compose",
 			unit: {
@@ -254,14 +270,6 @@ export default async function handler(
 		});
 		if (!gate.deploy) {
 			res.status(301).json({ message: gate.message });
-			return;
-		}
-		const hookImage = await rejectComposeDeployHookImage(
-			composeResult.environmentId,
-			req.body,
-		);
-		if (!hookImage.ok) {
-			res.status(400).json({ message: hookImage.message });
 			return;
 		}
 		// <<< build-policy hook
