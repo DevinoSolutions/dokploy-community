@@ -308,6 +308,14 @@ export default async function handler(
 				appName: application.appName,
 				registryId: application.registryId,
 				buildRegistryId: application.buildRegistryId,
+				// The allowlist follows what the plan would decide, so it needs
+				// what the plan reads. Round-3 review finding I.
+				unitType: "application",
+				unitId: application.applicationId,
+				unitName: application.name,
+				sourceType: application.sourceType,
+				customGitUrl: application.customGitUrl,
+				buildServerId: application.buildServerId,
 			},
 			req.body,
 		);

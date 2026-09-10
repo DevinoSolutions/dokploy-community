@@ -9,9 +9,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * C — coalescing ran before the deploy-hook body was validated, so a malformed
  *     or foreign-repository body dropped every waiting deploy for the unit and
  *     then enqueued nothing.
- * D — the deploy-hook allowlist was built from the unit's own registry first,
- *     while an enforced build always publishes to the organization default, so
- *     the two could name different repositories.
+ *
+ * D's allowlist half lived here too, until round-3 finding I showed the fix had
+ * inverted the divergence rather than removed it. It now resolves through
+ * `previewBuildPolicyDecision`, and all of its coverage moved to
+ * `hook-allowlist-follows-plan.test.ts`, which has the mocks that decision path
+ * needs. What stays here is B, plus D's other half — the pull credentials — in
+ * `deploy-path.integration.test.ts`.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -19,7 +23,6 @@ const mocks = vi.hoisted(() => ({
 	findBuildPolicySettings: vi.fn(),
 	recordBuildPolicyAudit: vi.fn().mockResolvedValue(undefined),
 	environmentsFindFirst: vi.fn(),
-	findRegistryByIdWithCredentials: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => ({
@@ -49,14 +52,7 @@ vi.mock("@dokploy/server/services/build-policy/audit", () => ({
 	listBuildPolicyAudit: vi.fn(),
 }));
 
-vi.mock("@dokploy/server/services/registry", () => ({
-	findRegistryByIdWithCredentials: mocks.findRegistryByIdWithCredentials,
-}));
-
-import {
-	buildPolicyDeployGate,
-	resolveDeployHookImage,
-} from "@dokploy/server/services/build-policy/webhook";
+import { buildPolicyDeployGate } from "@dokploy/server/services/build-policy/webhook";
 
 const ENFORCING = {
 	buildPolicySettingsId: "s-1",
@@ -176,106 +172,5 @@ describe("finding B — a derived watch-path skip is audited", () => {
 
 		expect(result.deploy).toBe(true);
 		expect(mocks.recordBuildPolicyAudit).not.toHaveBeenCalled();
-	});
-});
-
-describe("finding D — the allowlist follows the publish target", () => {
-	const registry = (registryId: string, url: string) => ({
-		registryId,
-		registryUrl: url,
-		imagePrefix: null,
-		username: "devino",
-		password: "unused",
-		registryType: "cloud",
-	});
-
-	it("validates against the organization default, which is where an enforced build publishes", async () => {
-		mocks.findRegistryByIdWithCredentials.mockResolvedValue(
-			registry("reg-default", "ghcr.io") as any,
-		);
-
-		const result = await resolveDeployHookImage(
-			{
-				organizationId: "org-1",
-				appName: "sendly-web",
-				// A stale registry from a previous Docker-provider configuration.
-				registryId: "reg-stale",
-				buildRegistryId: null,
-			},
-			{
-				image: "ghcr.io/devino/sendly-web",
-				digest: `sha256:${"a".repeat(64)}`,
-			},
-		);
-
-		expect(mocks.findRegistryByIdWithCredentials).toHaveBeenCalledWith(
-			"reg-default",
-		);
-		expect(result.ok).toBe(true);
-	});
-
-	it("falls back to the unit's own registry only when the org has no default", async () => {
-		mocks.findBuildPolicySettings.mockResolvedValue({
-			...ENFORCING,
-			defaultRegistryId: null,
-		});
-		mocks.findRegistryByIdWithCredentials.mockResolvedValue(
-			registry("reg-own", "registry.example.com") as any,
-		);
-
-		await resolveDeployHookImage(
-			{
-				organizationId: "org-1",
-				appName: "sendly-web",
-				registryId: "reg-own",
-				buildRegistryId: "reg-build",
-			},
-			{
-				image: "registry.example.com/devino/sendly-web",
-				digest: `sha256:${"b".repeat(64)}`,
-			},
-		);
-
-		expect(mocks.findRegistryByIdWithCredentials).toHaveBeenCalledWith(
-			"reg-own",
-		);
-	});
-
-	it("still refuses a digest on a repository the enforced build never writes to", async () => {
-		mocks.findRegistryByIdWithCredentials.mockResolvedValue(
-			registry("reg-default", "ghcr.io") as any,
-		);
-
-		const result = await resolveDeployHookImage(
-			{
-				organizationId: "org-1",
-				appName: "sendly-web",
-				registryId: "reg-stale",
-				buildRegistryId: null,
-			},
-			{
-				image: "ghcr.io/someone-else/sendly-web",
-				digest: `sha256:${"c".repeat(64)}`,
-			},
-		);
-
-		expect(result.ok).toBe(false);
-	});
-
-	it("is still inert while the policy is off", async () => {
-		mocks.isBuildPolicyEnforcedAnywhere.mockResolvedValue(false);
-
-		const result = await resolveDeployHookImage(
-			{
-				organizationId: "org-1",
-				appName: "sendly-web",
-				registryId: "reg-stale",
-				buildRegistryId: null,
-			},
-			{ image: "ghcr.io/anyone/anything", digest: `sha256:${"d".repeat(64)}` },
-		);
-
-		expect(result.ok).toBe(true);
-		expect(mocks.findRegistryByIdWithCredentials).not.toHaveBeenCalled();
 	});
 });

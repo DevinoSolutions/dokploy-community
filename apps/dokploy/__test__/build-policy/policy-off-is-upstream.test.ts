@@ -335,7 +335,14 @@ describe("the enqueue gate while the policy is off", () => {
 describe("the deploy-hook image body while the policy is off", () => {
 	it("is ignored rather than deploying an unbuilt image", async () => {
 		const result = await resolveDeployHookImage(
-			{ organizationId: "org-1", appName: "sendly-web" },
+			{
+				organizationId: "org-1",
+				appName: "sendly-web",
+				unitType: "application" as const,
+				unitId: "app-1",
+				unitName: "Sendly Web",
+				sourceType: "github",
+			},
 			{
 				image: "ghcr.io/devinosolutions/sendly-web",
 				digest: `sha256:${"a".repeat(64)}`,
@@ -346,7 +353,14 @@ describe("the deploy-hook image body while the policy is off", () => {
 
 	it("does not read the organization's registries", async () => {
 		await resolveDeployHookImage(
-			{ organizationId: "org-1", appName: "sendly-web" },
+			{
+				organizationId: "org-1",
+				appName: "sendly-web",
+				unitType: "application" as const,
+				unitId: "app-1",
+				unitName: "Sendly Web",
+				sourceType: "github",
+			},
 			{
 				image: "ghcr.io/devinosolutions/sendly-web",
 				digest: `sha256:${"a".repeat(64)}`,

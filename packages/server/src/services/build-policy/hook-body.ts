@@ -3,7 +3,6 @@ import {
 	assertSafeImageReference,
 	buildDigestRef,
 	isValidDigest,
-	registryHostOf,
 	repositoryOf,
 	splitRepositoryAndTag,
 } from "./image";
@@ -66,15 +65,20 @@ export const parseDeployHookImage = (
 		);
 	}
 
-	const host = registryHostOf(reference);
-	if (!host) {
-		throw new BuildPolicyError(
-			"REGISTRY_NOT_ALLOWED",
-			`Deploy hook image "${reference}" has no registry host. It must be fully ` +
-				"qualified and name this unit's own repository.",
-		);
-	}
-
+	// There is deliberately no "must have a registry host" check here.
+	//
+	// It bought something when the allowlist was a *host* allowlist. It buys
+	// nothing now that the comparison below is whole-repository equality: a
+	// hostless reference can only pass if the allowed repository is itself
+	// hostless, and then it is the same repository.
+	//
+	// Requiring a host was also actively wrong. `registryUrl` is
+	// `notNull().default("")` and the empty string is the supported Docker Hub
+	// configuration, not a misconfiguration, so `getRegistryTag` legitimately
+	// returns `prefix/app` with no host. Round-2 nit N2 declined this as needing
+	// an odd row; round-3 finding J showed that after the allowlist started
+	// resolving through the organization default, an organization whose default
+	// registry is Docker Hub had *every* unit's deploy-hook body rejected.
 	const repository = repositoryOf(reference);
 	if (!allowedRepositories.includes(repository)) {
 		throw new BuildPolicyError(

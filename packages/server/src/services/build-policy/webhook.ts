@@ -12,6 +12,7 @@ import {
 import { parseDeployHookImage } from "./hook-body";
 import { toPinnedImageJob } from "./pinned-deploy";
 import type { BuildPolicyUnitType } from "./policy";
+import { previewBuildPolicyDecision } from "./resolve";
 import {
 	findBuildPolicySettings,
 	isBuildPolicyEnforcedAnywhere,
@@ -187,12 +188,18 @@ export interface DeployHookImageUnit {
 	organizationId: string | null;
 	appName: string;
 	/**
-	 * Fallbacks only. The org default is preferred, because that is the
-	 * repository an enforced build publishes to; these are consulted only when
-	 * the organization has no default at all.
+	 * Where this unit's image lives when the policy does **not** relocate its
+	 * build — an excluded unit, a break-glassed one, or a non-GitHub source.
 	 */
 	registryId?: string | null;
 	buildRegistryId?: string | null;
+	/** Everything the plan needs to say whether this unit would be enforced. */
+	unitType: BuildPolicyUnitType;
+	unitId: string;
+	unitName: string;
+	sourceType: string;
+	customGitUrl?: string | null;
+	buildServerId?: string | null;
 }
 
 export const resolveDeployHookImage = async (
@@ -210,18 +217,42 @@ export const resolveDeployHookImage = async (
 	if (!settings?.enforceRemoteBuilds) return { ok: true };
 
 	try {
-		// Gate 2: exactly one acceptable repository, the unit's own.
+		// Gate 2: exactly one acceptable repository, the one this unit's image
+		// will actually live on.
 		//
-		// The organization default comes FIRST because that is where an enforced
-		// build publishes: `decideBuildPolicy` uses `settings.defaultRegistryId`
-		// and consults neither `unit.registryId` nor `unit.buildRegistryId`. With
-		// the unit's own registry first, a unit that had one would have had the
-		// digest the enforced build just published *rejected*, while a digest on
-		// a repository the enforced path never writes to was accepted. The
-		// allowlist and the publish target must not be able to diverge.
-		// Round-2 review finding D.
+		// That is not a fixed precedence, it is whatever the plan would decide,
+		// so ask the plan. An enforced unit publishes to
+		// `settings.defaultRegistryId` (`policy.ts`), and a unit the policy
+		// leaves local — excluded, break-glassed, or not GitHub sourced —
+		// publishes to its own registry exactly as it did before the fork.
+		//
+		// Round-2 finding D fixed this in one direction by putting the org
+		// default first, and round-3 finding I caught the other: gate 1 above
+		// tests whether the *organization* enforces, not whether *this unit* is
+		// enforced, so the capability is live for local units too and a fixed
+		// precedence gets one of the two cases wrong whichever way it points.
+		//
+		// `previewBuildPolicyDecision` is the read-only sibling of
+		// `resolveBuildPolicy`: it spends no break-glass grant and writes no
+		// audit row, because validating a request body must not consume a
+		// one-shot grant that belongs to the next deploy.
+		const { decision } = await previewBuildPolicyDecision({
+			unitType: unit.unitType,
+			unitId: unit.unitId,
+			unitName: unit.unitName,
+			organizationId: unit.organizationId,
+			sourceType: unit.sourceType,
+			customGitUrl: unit.customGitUrl,
+			buildServerId: unit.buildServerId,
+			buildRegistryId: unit.buildRegistryId,
+		});
+
 		const registryId =
-			settings.defaultRegistryId ?? unit.registryId ?? unit.buildRegistryId;
+			decision.mode === "remote"
+				? decision.registryId
+				: (unit.registryId ??
+					unit.buildRegistryId ??
+					settings.defaultRegistryId);
 		if (!registryId) {
 			return {
 				ok: false,

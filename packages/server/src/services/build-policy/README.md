@@ -145,7 +145,7 @@ always loads that relation, but a caller with a leaner row plans as
 | `exclusions.ts` | exclusion list / lookup / add / remove |
 | `ownership.ts` | asserts a unit id taken from tRPC input belongs to the active organization |
 | `audit.ts` | append-only trail; break-glass grant, lookup and consumption |
-| `resolve.ts` | database-backed wrapper around `policy.ts`; the only place a grant is spent |
+| `resolve.ts` | database-backed wrapper around `policy.ts`; the only place a grant is spent. `previewBuildPolicyDecision` is its read-only sibling: same answer, no grant spent, no audit row |
 | `apply.ts` | the application deploy path: plan, remote tag/push/digest shell, digest read-back, deploy-by-digest preparation |
 | `image.ts` | `<app>:<sha>` tagging, digest validation, digest-marker parsing, `repo@sha256:…` refs |
 | `hook-body.ts` | validation of a deploy-hook `{image, tag, digest}` body against the unit's own repository |
@@ -377,6 +377,45 @@ Creates `build_policy_settings`, `build_policy_exclusion`, `build_policy_audit`
 and the `buildPolicyAuditAction` enum; adds the four columns above. No data
 migration: an organization with no settings row has the policy off, which is the
 pre-change behaviour.
+
+---
+
+## The deploy-hook image body, and which repository it may name
+
+A deploy hook URL is a bearer token pasted into CI configs across the fleet, so
+the `{image, tag, digest}` body has two gates: it does nothing while the policy
+is off, and the image must be **this unit's own repository**, compared for exact
+whole-repository equality. An org-wide *host* allowlist would let any one unit's
+token deploy any image on ghcr.io, which is why it is not one.
+
+"Its own repository" is not a fixed precedence, it is wherever this unit's image
+actually lives, so the allowlist asks the plan through
+`previewBuildPolicyDecision`:
+
+- a unit the policy would **enforce** publishes to `settings.defaultRegistryId`,
+  so that is the allowed repository;
+- a unit the policy leaves **local** — excluded, break-glassed, or not GitHub
+  sourced — publishes to its own `registryId`, exactly as it did before the
+  fork, so that is the allowed one.
+
+Gate 1 tests whether the *organization* enforces, not whether this unit does, so
+both cases are live and a fixed precedence gets one of them wrong whichever way
+it points. Round-2 finding D pointed it at the org default and fixed the
+enforced case; round-3 finding I caught the local case it broke.
+
+`previewBuildPolicyDecision` is read-only on purpose: validating a request body
+must not spend the one-shot break-glass grant that belongs to the next deploy,
+and must not write an audit row per webhook delivery.
+
+There is deliberately **no** "must be fully qualified with a registry host"
+check. `registryUrl` is `notNull().default("")` and an empty string is the
+supported Docker Hub configuration, so `getRegistryTag` legitimately returns
+`prefix/app` with no host. Requiring a host meant that an organization whose
+default registry is Docker Hub rejected every deploy-hook body once the
+allowlist started resolving through that default (round-3 finding J). The check
+bought something when the allowlist was a host allowlist; under whole-repository
+equality a hostless reference can only match a hostless allowed repository,
+which is the same repository.
 
 ---
 
@@ -619,6 +658,7 @@ path is ever added, it needs the call too.
 | `required-checks-support.test.ts` | that a unit with no GitHub App is refused a required check at the API boundary, and that clearing one is always allowed |
 | `required-checks-before-build.test.ts` | that the checks gate is policy-gated, runs before the build on the freshly cloned sha, and is a no-op that executes nothing while the policy is off |
 | `gate-audit-and-registry.test.ts` | that a derived watch-path skip is audited, and that the deploy-hook allowlist follows the registry an enforced build publishes to |
+| `hook-allowlist-follows-plan.test.ts` | that the deploy-hook allowlist names the repository this unit's image will actually live on, for enforced and for local units alike, and that a Docker Hub registry with no host is accepted |
 | `hook-body-before-coalescing.test.ts` | that a refused deploy-hook body never coalesces the unit's queue |
 | `compose-redeploy-gate.test.ts` | that the Redeploy button is check-gated too, so a commit the push gate refused cannot be shipped from the code directory it left behind |
 | `compose-required-checks.test.ts` | that a compose unit's required checks are honoured, that the gate is default-off, and that it never consults exclusions or break-glass |

@@ -1,4 +1,7 @@
-import type { BuildPolicySettings } from "@dokploy/server/db/schema";
+import type {
+	BuildPolicyAudit,
+	BuildPolicySettings,
+} from "@dokploy/server/db/schema";
 import {
 	consumeBreakGlass,
 	findPendingBreakGlass,
@@ -35,10 +38,22 @@ export interface ResolvedBuildPolicy {
 	settings: BuildPolicySettings | null;
 }
 
-export const resolveBuildPolicy = async (
+/**
+ * The decision, read-only: no grant is spent and no audit row is written.
+ *
+ * `resolveBuildPolicy` below is the deploy-path entry point and has both of
+ * those side effects, which is right for a deploy and wrong for anything that
+ * merely wants to *know* what the plan would be. Round-3 review finding I: the
+ * deploy-hook allowlist has to resolve the same registry the plan would, and it
+ * must not consume a one-shot break-glass grant to do it — the grant belongs to
+ * the next deploy.
+ *
+ * Returns the grant alongside the decision so `resolveBuildPolicy` can spend it
+ * without reading it twice.
+ */
+export const previewBuildPolicyDecision = async (
 	unit: BuildPolicyUnitRef,
-	{ consume = true }: { consume?: boolean } = {},
-): Promise<ResolvedBuildPolicy> => {
+): Promise<ResolvedBuildPolicy & { grant: BuildPolicyAudit | null }> => {
 	const settings = await findBuildPolicySettings(unit.organizationId);
 
 	// Nothing else needs reading when the policy is off, which is the common
@@ -46,6 +61,7 @@ export const resolveBuildPolicy = async (
 	if (!settings?.enforceRemoteBuilds) {
 		return {
 			settings,
+			grant: null,
 			decision: decideBuildPolicy({
 				unit,
 				settings,
@@ -80,6 +96,15 @@ export const resolveBuildPolicy = async (
 				}
 			: null,
 	});
+
+	return { settings, decision, grant };
+};
+
+export const resolveBuildPolicy = async (
+	unit: BuildPolicyUnitRef,
+	{ consume = true }: { consume?: boolean } = {},
+): Promise<ResolvedBuildPolicy> => {
+	const { settings, decision, grant } = await previewBuildPolicyDecision(unit);
 
 	if (
 		consume &&
