@@ -47,7 +47,18 @@ export interface BuildPolicyGateUnit {
 	unitName: string;
 	environmentId: string;
 	watchPaths?: string[] | null;
+	/**
+	 * Source type and every build-path column, because the derived watch paths
+	 * have to read the one this unit actually builds from — see
+	 * `buildPathForSource`. Passing only `buildPath` was round-3 finding K.
+	 */
+	sourceType?: string | null;
 	buildPath?: string | null;
+	gitlabBuildPath?: string | null;
+	bitbucketBuildPath?: string | null;
+	giteaBuildPath?: string | null;
+	dropBuildPath?: string | null;
+	customGitBuildPath?: string | null;
 	dockerfile?: string | null;
 	dockerContextPath?: string | null;
 	composePath?: string | null;
@@ -122,7 +133,13 @@ export const buildPolicyDeployGate = async ({
 	if (!hasOwnWatchPaths && Array.isArray(changedFiles)) {
 		const { paths } = resolveWatchPaths(unit.watchPaths, {
 			unitType,
+			sourceType: unit.sourceType,
 			buildPath: unit.buildPath,
+			gitlabBuildPath: unit.gitlabBuildPath,
+			bitbucketBuildPath: unit.bitbucketBuildPath,
+			giteaBuildPath: unit.giteaBuildPath,
+			dropBuildPath: unit.dropBuildPath,
+			customGitBuildPath: unit.customGitBuildPath,
 			dockerfile: unit.dockerfile,
 			dockerContextPath: unit.dockerContextPath,
 			composePath: unit.composePath,

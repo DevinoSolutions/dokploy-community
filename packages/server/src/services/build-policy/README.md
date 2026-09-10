@@ -75,9 +75,10 @@ comes from ("reads the organization settings exactly once").
 operator sets `enforceRemoteBuilds`, in rough order of blast radius. Round-2
 review finding B: the section above was excellent and this one did not exist.
 
-1. **Derived `watchPaths` start filtering pushes.** Every unit with a
-   `buildPath` and no explicit `watchPaths` immediately gets `<buildPath>/**`
-   from `deriveDefaultWatchPaths`. In a monorepo — the common shape across this
+1. **Derived `watchPaths` start filtering pushes.** Every unit with a build
+   path and no explicit `watchPaths` immediately gets `<buildPath>/**` from
+   `deriveDefaultWatchPaths`, reading the build-path column that matches its
+   source type. In a monorepo — the common shape across this
    fleet — a push that touches only shared code under `packages/**` now stops at
    the webhook with a 301 and no deployment record. This is the single
    highest-blast-radius consequence of enabling the policy.
@@ -155,7 +156,7 @@ always loads that relation, but a caller with a leaner row plans as
 | `github-checks.ts` | the same wait, wired to the GitHub App installation token; merges check runs and commit statuses |
 | `coalesce.ts` | drop still-waiting deploys for a unit and audit what was dropped |
 | `compose-checks.ts` | `requiredChecks` for compose units, run between the clone and the build |
-| `watch-paths.ts` | derive default `watchPaths` from `buildPath` / Dockerfile / compose path |
+| `watch-paths.ts` | derive default `watchPaths` from the unit's build path (selected by source type, as `getBuildAppDirectory` does) / Dockerfile / compose path |
 | `skip-deploy.ts` | the `[skip deploy]` commit-message marker |
 | `webhook.ts` | the single enqueue-time gate every deploy entry point calls, plus deploy-hook body resolution |
 | `errors.ts` | `BuildPolicyError` with stable codes |
@@ -658,6 +659,7 @@ path is ever added, it needs the call too.
 | `required-checks-support.test.ts` | that a unit with no GitHub App is refused a required check at the API boundary, and that clearing one is always allowed |
 | `required-checks-before-build.test.ts` | that the checks gate is policy-gated, runs before the build on the freshly cloned sha, and is a no-op that executes nothing while the policy is off |
 | `gate-audit-and-registry.test.ts` | that a derived watch-path skip is audited, and that the deploy-hook allowlist follows the registry an enforced build publishes to |
+| `watch-paths-by-source.test.ts` | that the derived watch paths read the build-path column matching the unit's source type, so a unit migrated from GitHub to GitLab is not filtered by a stale path |
 | `hook-allowlist-follows-plan.test.ts` | that the deploy-hook allowlist names the repository this unit's image will actually live on, for enforced and for local units alike, and that a Docker Hub registry with no host is accepted |
 | `hook-body-before-coalescing.test.ts` | that a refused deploy-hook body never coalesces the unit's queue |
 | `compose-redeploy-gate.test.ts` | that the Redeploy button is check-gated too, so a commit the push gate refused cannot be shipped from the code directory it left behind |
