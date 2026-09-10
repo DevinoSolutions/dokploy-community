@@ -23,7 +23,7 @@ Design source: `docs/superpowers/specs/2026-09-10-ci-build-once-and-pool-design.
 | 3 | Push `<repository>:<sha>`, capture the digest, deploy by digest | `apply.ts`, `image.ts` |
 | 4 | Queue coalescing on enqueue | `coalesce.ts`, `webhook.ts` |
 | 5 | Derived default `watchPaths`, `[skip deploy]` marker | `watch-paths.ts`, `skip-deploy.ts`, `webhook.ts` |
-| 6 | Per-unit `requiredChecks` gating, over check runs **and** commit statuses | `required-checks.ts`, `github-checks.ts` |
+| 6 | Per-unit `requiredChecks` gating, over check runs **and** commit statuses, for applications and compose units | `required-checks.ts`, `github-checks.ts`, `compose-checks.ts` |
 | 7 | Deploy-hook body `{image, tag, digest}`, restricted to the unit's own repository | `hook-body.ts`, `pinned-deploy.ts` |
 | 8 | Rollback to a digest a past deployment stored, with no build | `rollback.ts`, `pinned-deploy.ts` |
 
@@ -61,13 +61,13 @@ caller's command string unchanged, having executed nothing, unless the
 organization enforces; `prepareBuildPolicyDeploy` returns the application
 unchanged on the plan's `enforced` flag alone, before it reads a commit sha or
 anything else. So an unenforced deploy makes no extra SSH round trip and one
-settings read — the single indexed `build_policy_settings` SELECT
-`resolveBuildPolicy` needs to decide the plan at all. `policy-off-is-upstream.test.ts`
-asserts that count directly ("reads the organization settings exactly once"),
-which is why this paragraph says one rather than none.
+settings read — the single `build_policy_settings` SELECT `resolveBuildPolicy`
+needs to decide the plan at all. The compose path costs even less: an empty
+`requiredChecks` returns before the cached enforcement probe.
 
 `policy-off-is-upstream.test.ts` asserts all of this directly, including the
-absence of the calls.
+absence of the calls, and it is where the "one settings read, not none" number
+comes from ("reads the organization settings exactly once").
 
 ## The decision
 
@@ -120,6 +120,7 @@ always loads that relation, but a caller with a leaner row plans as
 | `required-checks.ts` | pure check evaluation plus a polling wait with an injectable clock |
 | `github-checks.ts` | the same wait, wired to the GitHub App installation token; merges check runs and commit statuses |
 | `coalesce.ts` | drop still-waiting deploys for a unit and audit what was dropped |
+| `compose-checks.ts` | `requiredChecks` for compose units, run between the clone and the build |
 | `watch-paths.ts` | derive default `watchPaths` from `buildPath` / Dockerfile / compose path |
 | `skip-deploy.ts` | the `[skip deploy]` commit-message marker |
 | `webhook.ts` | the single enqueue-time gate every deploy entry point calls, plus deploy-hook body resolution |
@@ -150,12 +151,21 @@ arrives in input is checked against that organization before use
 `audit` is admin-only because its rows carry registry ids, build server ids and
 break-glass reasons.
 
+`addExclusion` and `allowLocalBuildOnce` **refuse a `composeId`** with a 400.
+Both decide where a unit builds and a compose build is never relocated, so the
+row they would write is one nothing ever reads. See "What a compose unit does
+and does not get".
+
+Two upstream mutations also gained a build-policy check: `application.update`
+and `compose.update` refuse a non-empty `requiredChecks` on a unit that can
+never satisfy one. See "What a unit needs before it can be check-gated".
+
 ---
 
 ## Hook points in upstream code
 
 Every one is marked in the source with `build-policy hook`. Grep for that string
-to find them all. There are **thirty-seven**, in ten files, plus six import
+to find them all. There are **thirty-eight**, in eleven files, plus seven import
 markers, two zod lines in the schema files, and the two UI fields below.
 
 | File | Hooks |
@@ -163,6 +173,7 @@ markers, two zod lines in the schema files, and the two UI fields below.
 | `packages/server/src/services/application.ts` | 22 |
 | `packages/server/src/services/deployment.ts` | 2 |
 | `packages/server/src/utils/builders/index.ts` | 1 |
+| `packages/server/src/services/compose.ts` | 1 |
 | `apps/dokploy/pages/api/deploy/github.ts` | 2 |
 | `apps/dokploy/pages/api/deploy/gitlab.ts` | 3 |
 | `apps/dokploy/pages/api/deploy/[refreshToken].ts` | 2 |
@@ -211,6 +222,18 @@ relocates the build.
 
 This is the deploy-by-digest seam. Nothing else in the builders is touched, so
 the six build types are exactly upstream's.
+
+### `packages/server/src/services/compose.ts`
+
+One call to `waitForComposeRequiredChecks` inside `runComposeBuild`, between the
+clone/patches steps and the build step, and ahead of the `down --volumes` step
+so a refused check never leaves the stack torn down. `runComposeBuild` already
+ran its deploy as discrete `runStep` calls, so this is a single inserted line
+rather than a restructure. Plus one import block, marked `Fork module`.
+
+**Merge note:** if upstream reorders the steps in `runComposeBuild`, the call
+must stay after the clone (so the sha is the one being deployed) and before the
+build.
 
 ### `apps/dokploy/pages/api/deploy/github.ts`
 
@@ -480,9 +503,41 @@ while the organization enforces. There is a test asserting exactly that reason
 (`policy-decision.test.ts` → "does not relocate a compose build, and says so
 explicitly"), so the gap is visible and any future change to it is deliberate.
 
-**Every other behaviour applies to compose units in full**: exclusions,
-break-glass, queue coalescing, `[skip deploy]`, derived `watchPaths` and
-`requiredChecks`.
+### What a compose unit does and does not get
+
+Not everything, and the difference is deliberate. Round-2 review finding A: this
+paragraph used to claim all six behaviours applied "in full", three of them did
+not, and `compose.requiredChecks` was a writable API field that silently did
+nothing — a document claiming a CI gate that is not wired is wrong in the
+dangerous direction.
+
+| Behaviour | Compose | Where |
+|---|---|---|
+| Queue coalescing | **yes** | `buildPolicyDeployGate`, enqueue time |
+| `[skip deploy]` | **yes** | same gate |
+| Derived `watchPaths` | **yes** | same gate |
+| `requiredChecks` | **yes** | `compose-checks.ts`, between the clone and the build |
+| Exclusions | **no** | nothing to exclude from |
+| Break-glass | **no** | no relocated build to grant an escape from |
+| Relocated build, push by sha, deploy by digest | **no** | the Known gap above |
+
+Exclusions and break-glass decide **where** a unit builds. A compose build is
+never relocated, so `resolveBuildPolicy` — the only reader of exclusions and
+grants — is never called on the compose path at all. Both procedures therefore
+refuse a `composeId` with a 400 that says why, rather than writing an FK-linked
+row nothing will ever read: before this, a break-glass grant issued against a
+compose unit stayed pending for ever and the audit log showed a grant that was
+never spent.
+
+`requiredChecks` is different, and is the half with real value, so it is wired.
+`runComposeBuild` already runs the deploy in discrete steps, which gives a clean
+hook between the clone/patches steps and the build step — the compose equivalent
+of the application path's hook 2a/4. It sits **ahead** of the
+`down --volumes` step, so a refused check never leaves the stack torn down. It
+carries the same default-off shape as everything else here (an empty list reads
+nothing; a non-empty one costs the cached enforcement boolean first) and the
+same API-boundary validation as an application (see "What a unit needs before it
+can be check-gated").
 
 ---
 
@@ -504,6 +559,7 @@ break-glass, queue coalescing, `[skip deploy]`, derived `watchPaths` and
 | `rollback-by-digest.test.ts` | rollback to a stored digest, and the refusal when there is none |
 | `required-checks-support.test.ts` | that a unit with no GitHub App is refused a required check at the API boundary, and that clearing one is always allowed |
 | `required-checks-before-build.test.ts` | that the checks gate is policy-gated, runs before the build on the freshly cloned sha, and is a no-op that executes nothing while the policy is off |
+| `compose-required-checks.test.ts` | that a compose unit's required checks are honoured, that the gate is default-off, and that it never consults exclusions or break-glass |
 | `gitlab-route-gate.test.ts` | that the GitLab push webhook consults the gate for both unit types, and reads `[skip deploy]` from the commit rather than the job title |
 | `deploy-path.integration.test.ts` | the real deploy path end to end, with docker, ssh and git mocked |
 

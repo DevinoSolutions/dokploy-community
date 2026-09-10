@@ -87,7 +87,21 @@ export const decideBuildPolicy = (
 	// A compose unit builds and runs in one `docker compose up --build`, so its
 	// build cannot be relocated to another host without splitting the deploy in
 	// two. That is out of scope for this module; see README.md § Known gap.
-	// Every other build-policy behaviour still applies to compose units.
+	//
+	// Which build-policy behaviours a compose unit does and does not get, since
+	// this function is where the asymmetry starts:
+	//
+	// - it DOES get queue coalescing, `[skip deploy]` and derived `watchPaths`
+	//   (all at enqueue time, in `buildPolicyDeployGate`), and `requiredChecks`
+	//   (in `compose-checks.ts`, between the clone and the build);
+	// - it does NOT get exclusions or break-glass, and cannot: both decide where
+	//   a unit builds, and this early return means a compose unit is never
+	//   enforced, so there is nothing to exclude it from. The router refuses a
+	//   `composeId` on both rather than writing a row nothing reads.
+	//
+	// Keep this list honest. Round-2 review finding A was a comment here, plus
+	// the README and the PR body, all claiming compose parity that three of the
+	// six behaviours did not have.
 	if (unit.unitType === "compose") {
 		return { mode: "local", reason: "compose_build_not_relocatable" };
 	}

@@ -1,6 +1,8 @@
 import { dirname, join } from "node:path";
 import {
 	addDomainToCompose,
+	// build-policy hook: required-checks support check at the API boundary.
+	assertRequiredChecksSupportedForUpdate,
 	clearOldDeployments,
 	cloneBitbucketRepository,
 	cloneCompose,
@@ -28,6 +30,8 @@ import {
 	getContainerLogs,
 	getWebServerSettings,
 	IS_CLOUD,
+	// build-policy hook: narrows a thrown support error to a 400.
+	isBuildPolicyError,
 	loadServices,
 	paths,
 	processTemplate,
@@ -213,6 +217,37 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
+
+			// >>> build-policy hook: refuse a required check this compose unit can
+			// never satisfy, here rather than on every deploy. Same rule and the
+			// same message as the application path. See finding F in the round-2
+			// review and build-policy/source.ts.
+			if (input.requiredChecks !== undefined) {
+				const current = await findComposeById(input.composeId);
+				try {
+					assertRequiredChecksSupportedForUpdate(
+						{
+							unitName: current.name,
+							sourceType: current.sourceType,
+							githubId: current.githubId,
+							owner: current.owner,
+							repository: current.repository,
+							customGitUrl: current.customGitUrl,
+						},
+						{ ...input, unitName: current.name },
+					);
+				} catch (error) {
+					if (isBuildPolicyError(error)) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: error.message,
+						});
+					}
+					throw error;
+				}
+			}
+			// <<< build-policy hook
+
 			const updated = await updateCompose(input.composeId, input);
 			await audit(ctx, {
 				action: "update",

@@ -32,6 +32,34 @@ import { audit } from "../utils/audit";
  * and never from input, so there is no id a caller could swap to read or write
  * another organization's policy.
  */
+
+/**
+ * Exclusions and break-glass decide **where** a unit builds. A compose build is
+ * never relocated (`decideBuildPolicy` returns `compose_build_not_relocatable`),
+ * so there is nothing to exclude a compose unit from and no local build to
+ * grant: `resolveBuildPolicy` is never called on the compose path at all.
+ *
+ * Both procedures used to accept a `composeId` and write an FK-linked row that
+ * nothing would ever read — a grant that stayed pending for ever and an audit
+ * entry for a grant that was never spent. Round-2 review finding A: an API
+ * affordance that does nothing is worse than no affordance, so it is refused
+ * with a message that says why.
+ *
+ * `requiredChecks` is the one build-policy behaviour compose *does* get; see
+ * `build-policy/compose-checks.ts`.
+ */
+const assertNotComposeUnit = (unitType: string, what: string): void => {
+	if (unitType !== "compose") return;
+	throw new TRPCError({
+		code: "BAD_REQUEST",
+		message:
+			`${what} does not apply to a compose unit. A compose build is never ` +
+			"relocated to the organization build server, so it is never enforced " +
+			"and there is nothing to exclude it from. Required checks are the one " +
+			"build-policy control that does apply to compose units; set them on " +
+			"the unit itself.",
+	});
+};
 export const buildPolicyRouter = createTRPCRouter({
 	settings: protectedProcedure.query(async ({ ctx }) =>
 		findBuildPolicySettings(ctx.session.activeOrganizationId),
@@ -95,6 +123,7 @@ export const buildPolicyRouter = createTRPCRouter({
 				applicationId: input.applicationId,
 				composeId: input.composeId,
 			});
+			assertNotComposeUnit(unitType, "An exclusion");
 			const exclusion = await addBuildPolicyExclusion({
 				organizationId,
 				applicationId: unitType === "application" ? unitId : null,
@@ -165,6 +194,7 @@ export const buildPolicyRouter = createTRPCRouter({
 				applicationId: input.applicationId,
 				composeId: input.composeId,
 			});
+			assertNotComposeUnit(unitType, "A break-glass grant");
 			await grantBreakGlass({
 				organizationId,
 				unitType,

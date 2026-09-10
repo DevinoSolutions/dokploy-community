@@ -1,6 +1,7 @@
 export * from "./apply";
 export * from "./audit";
 export * from "./coalesce";
+export * from "./compose-checks";
 export * from "./errors";
 export * from "./exclusions";
 export * from "./github-checks";
