@@ -132,6 +132,12 @@ export const compose = pgTable("compose", {
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
 	watchPaths: text("watchPaths").array(),
+	/**
+	 * Fork column (build-policy). GitHub check-run names that must conclude
+	 * successfully on the deployed commit before the deploy step runs. Empty
+	 * (the default) means ungated. See services/build-policy/README.md.
+	 */
+	requiredChecks: text("requiredChecks").array(),
 	githubId: text("githubId").references(() => github.githubId, {
 		onDelete: "set null",
 	}),
@@ -214,6 +220,8 @@ const createSchema = createInsertSchema(compose, {
 	composePath: z.string().min(1),
 	composeType: z.enum(["docker-compose", "stack"]).optional(),
 	watchPaths: z.array(z.string()).optional(),
+	// build-policy hook: array column, needs the same explicit zod shape.
+	requiredChecks: z.array(z.string()).optional(),
 	sourceType: z
 		.enum(["git", "github", "gitlab", "bitbucket", "gitea", "raw"])
 		.optional(),

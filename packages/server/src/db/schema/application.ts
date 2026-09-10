@@ -91,6 +91,13 @@ export const applications = pgTable("application", {
 	env: encryptedText("env"),
 	previewEnv: encryptedText("previewEnv"),
 	watchPaths: text("watchPaths").array(),
+	/**
+	 * Fork column (build-policy). GitHub check-run names that must conclude
+	 * successfully on the deployed commit before the deploy step runs. Empty
+	 * (the default) means ungated, so push-to-deploy latency is unchanged until
+	 * a team opts in. See services/build-policy/README.md.
+	 */
+	requiredChecks: text("requiredChecks").array(),
 	previewBuildArgs: encryptedText("previewBuildArgs"),
 	previewBuildSecrets: encryptedText("previewBuildSecrets"),
 	previewLabels: text("previewLabels").array(),
@@ -378,6 +385,8 @@ const createSchema = createInsertSchema(applications, {
 	previewCertificateType: z.enum(["letsencrypt", "none", "custom"]).optional(),
 	previewRequireCollaboratorPermissions: z.boolean().optional(),
 	watchPaths: z.array(z.string()).optional().optional(),
+	// build-policy hook: array column, needs the same explicit zod shape.
+	requiredChecks: z.array(z.string()).optional(),
 	previewLabels: z.array(z.string()).optional(),
 	networkIds: z.array(z.string()).optional(),
 	detachDokployNetwork: z.boolean().optional(),

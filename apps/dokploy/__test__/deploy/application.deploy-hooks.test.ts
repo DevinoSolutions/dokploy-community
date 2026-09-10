@@ -36,6 +36,11 @@ vi.mock("@dokploy/server/db", () => {
 			update: vi.fn(() => createChainableMock()),
 			delete: vi.fn(),
 			query: {
+				// build-policy: the deploy path resolves org policy settings first.
+				// No row means the policy is off, which is the default.
+				buildPolicySettings: {
+					findFirst: vi.fn().mockResolvedValue(undefined),
+				},
 				applications: {
 					findFirst: vi.fn(),
 				},

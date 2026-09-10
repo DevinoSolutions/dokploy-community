@@ -1,6 +1,10 @@
 import {
+	// build-policy hook: enqueue-time gate and deploy-hook image body.
+	buildPolicyDeployGate,
+	findUnitOrganizationId,
 	IS_CLOUD,
 	normalizeChangedFilesFromCommits,
+	resolveDeployHookImage,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -8,7 +12,7 @@ import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { compose } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+import { cleanQueuesByCompose, myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import {
 	handleGiteaComposePullRequestEvent,
@@ -227,6 +231,40 @@ export default async function handler(
 				return;
 			}
 		}
+
+		// >>> build-policy hook: `[skip deploy]`, derived watchPaths and queue
+		// coalescing. A compose unit cannot deploy a supplied image by digest
+		// yet (see README.md § Known gap), so such a body is rejected rather
+		// than silently ignored.
+		const gate = await buildPolicyDeployGate({
+			unitType: "compose",
+			unit: {
+				unitId: composeResult.composeId,
+				unitName: composeResult.name,
+				environmentId: composeResult.environmentId,
+				watchPaths: composeResult.watchPaths,
+				composePath: composeResult.composePath,
+			},
+			commitMessage: deploymentTitle,
+			removeWaiting: () => cleanQueuesByCompose(composeResult.composeId),
+		});
+		if (!gate.deploy) {
+			res.status(301).json({ message: gate.message });
+			return;
+		}
+		const hookImage = await resolveDeployHookImage(
+			await findUnitOrganizationId(composeResult.environmentId),
+			req.body,
+		);
+		if (!hookImage.ok || hookImage.pinnedImage) {
+			res.status(400).json({
+				message: hookImage.ok
+					? "Deploying a supplied image by digest is not supported for compose units."
+					: hookImage.message,
+			});
+			return;
+		}
+		// <<< build-policy hook
 
 		try {
 			const jobData: DeploymentJob = {

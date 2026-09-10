@@ -1,8 +1,11 @@
 import {
 	type Bitbucket,
+	// build-policy hook: enqueue-time gate and deploy-hook image body.
+	buildPolicyDeployGate,
 	getBitbucketHeaders,
 	IS_CLOUD,
 	normalizeChangedFilesFromCommits,
+	resolveDeployHookImage,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -10,7 +13,10 @@ import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { applications } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+import {
+	cleanQueuesByApplication,
+	myQueue,
+} from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import {
 	handleGiteaApplicationPullRequestEvent,
@@ -286,6 +292,37 @@ export default async function handler(
 			}
 		}
 
+		// >>> build-policy hook: `[skip deploy]`, derived watchPaths, queue
+		// coalescing, and the optional `{image, tag, digest}` body.
+		// See packages/server/src/services/build-policy/README.md
+		const gate = await buildPolicyDeployGate({
+			unitType: "application",
+			unit: {
+				unitId: application.applicationId,
+				unitName: application.name,
+				environmentId: application.environmentId,
+				watchPaths: application.watchPaths,
+				buildPath: application.buildPath,
+				dockerfile: application.dockerfile,
+				dockerContextPath: application.dockerContextPath,
+			},
+			commitMessage: deploymentTitle,
+			removeWaiting: () => cleanQueuesByApplication(application.applicationId),
+		});
+		if (!gate.deploy) {
+			res.status(301).json({ message: gate.message });
+			return;
+		}
+		const hookImage = await resolveDeployHookImage(
+			application.environment.project.organizationId,
+			req.body,
+		);
+		if (!hookImage.ok) {
+			res.status(400).json({ message: hookImage.message });
+			return;
+		}
+		// <<< build-policy hook
+
 		try {
 			const jobData: DeploymentJob = {
 				applicationId: application.applicationId as string,
@@ -294,6 +331,8 @@ export default async function handler(
 				type: "deploy",
 				applicationType: "application",
 				server: !!application.serverId,
+				// build-policy hook: deploy this image by digest, do not build.
+				...(hookImage.pinnedImage && { pinnedImage: hookImage.pinnedImage }),
 			};
 
 			if (IS_CLOUD && application.serverId) {

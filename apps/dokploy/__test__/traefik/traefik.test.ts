@@ -42,6 +42,7 @@ const baseApp: ApplicationNested = {
 	dockerBuildStage: "",
 	registryUrl: "",
 	watchPaths: [],
+	requiredChecks: [],
 	buildArgs: null,
 	buildSecrets: null,
 	isPreviewDeploymentsActive: false,

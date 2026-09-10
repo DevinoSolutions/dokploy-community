@@ -95,6 +95,9 @@ if (!IS_CLOUD) {
 	});
 }
 
+// build-policy hook: these two now return how many waiting jobs they dropped,
+// so the enqueue-time coalescing gate can audit it. Existing callers ignore the
+// returned value. See packages/server/src/services/build-policy/README.md.
 export const cleanQueuesByApplication = async (applicationId: string) => {
 	const removed = myQueue.removeWaiting(
 		(data) => (data as any)?.applicationId === applicationId,
@@ -104,6 +107,7 @@ export const cleanQueuesByApplication = async (applicationId: string) => {
 			`Removed ${removed} waiting job(s) for application ${applicationId}`,
 		);
 	}
+	return removed;
 };
 
 export const cleanQueuesByCompose = async (composeId: string) => {
@@ -113,6 +117,7 @@ export const cleanQueuesByCompose = async (composeId: string) => {
 	if (removed > 0) {
 		console.log(`Removed ${removed} waiting job(s) for compose ${composeId}`);
 	}
+	return removed;
 };
 
 export const cleanAllDeploymentQueue = async () => {

@@ -43,7 +43,15 @@ export type ApplicationNested = InferResultType<
 		deployments: true;
 		environment: { with: { project: true } };
 	}
->;
+> & {
+	/**
+	 * Fork field (build-policy): when an enforced remote build published an
+	 * image, the deploy is pinned to `<repository>@sha256:…` instead of the
+	 * mutable tag. Set by `prepareBuildPolicyDeploy`, read by `getImageName`.
+	 * See services/build-policy/README.md.
+	 */
+	buildPolicyImage?: string | null;
+};
 
 export const getBuildCommand = async (rawApplication: ApplicationNested) => {
 	const application = await withResolvedVaultRefs(rawApplication);
@@ -243,6 +251,10 @@ export const mechanizeDockerContainer = async (
 };
 
 const getImageName = async (application: ApplicationNested) => {
+	// >>> build-policy hook: deploy by digest.
+	// See packages/server/src/services/build-policy/README.md
+	if (application.buildPolicyImage) return application.buildPolicyImage;
+	// <<< build-policy hook
 	const { appName, sourceType, dockerImage, registry, buildRegistry } =
 		application;
 	const imageName = `${appName}:latest`;

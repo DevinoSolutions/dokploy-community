@@ -35,6 +35,13 @@ import { deployHook } from "../db/schema";
 import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
 import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
+// Fork module: enforced remote builds. See services/build-policy/README.md.
+import {
+	getBuildPolicyPushCommand,
+	planApplicationBuild,
+	prepareBuildPolicyDeploy,
+	toBuildPolicyUnit,
+} from "./build-policy/apply";
 import {
 	createDeployment,
 	createDeploymentPreview,
@@ -191,7 +198,14 @@ export const deployApplication = async ({
 	descriptionLog: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-	const serverId = application.buildServerId || application.serverId;
+	// >>> build-policy hook 1/4: enforced remote builds.
+	// See packages/server/src/services/build-policy/README.md
+	const buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	const serverId =
+		buildPolicy.buildServerId ||
+		application.buildServerId ||
+		application.serverId;
+	// <<< build-policy hook 1/4
 	const applicationEntity = {
 		...application,
 		serverId: serverId,
@@ -230,12 +244,30 @@ export const deployApplication = async ({
 
 		command += await getBuildCommand(application);
 
+		// >>> build-policy hook 2/4: tag `<repository>:<sha>`, push to the
+		// organization registry and echo the digest. Empty when not enforcing.
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: application.appName,
+			serverId,
+		});
+		// <<< build-policy hook 2/4
+
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (serverId) {
 			await execAsyncRemote(serverId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
 		}
+
+		// >>> build-policy hook 3/4: gate on required checks, then pin the deploy
+		// to the digest that was just published. Identity when not enforcing.
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+		});
+		// <<< build-policy hook 3/4
 
 		const hookRow = await db.query.deployHook.findFirst({
 			where: eq(deployHook.applicationId, application.applicationId),
@@ -254,7 +286,9 @@ export const deployApplication = async ({
 			logPath: deployment.logPath,
 		});
 
-		await mechanizeDockerContainer(application);
+		// build-policy hook 4/4: `deployTarget` is `application` plus the pinned
+		// digest when a remote build was enforced. See hook 3/4 above.
+		await mechanizeDockerContainer(deployTarget);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
 			serverId: application.serverId,
@@ -352,7 +386,13 @@ export const rebuildApplication = async ({
 	descriptionLog: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-	const serverId = application.buildServerId || application.serverId;
+	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
+	const buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	const serverId =
+		buildPolicy.buildServerId ||
+		application.buildServerId ||
+		application.serverId;
+	// <<< build-policy hook 1/4
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 
 	const deployment = await createDeployment({
@@ -365,12 +405,27 @@ export const rebuildApplication = async ({
 		let command = "set -e;";
 		// Check case for docker only
 		command += await getBuildCommand(application);
+		// >>> build-policy hook 2/4 (rebuild)
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: application.appName,
+			serverId,
+		});
+		// <<< build-policy hook 2/4
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (serverId) {
 			await execAsyncRemote(serverId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
 		}
+
+		// >>> build-policy hook 3/4 (rebuild)
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+		});
+		// <<< build-policy hook 3/4
 
 		const hookRow = await db.query.deployHook.findFirst({
 			where: eq(deployHook.applicationId, application.applicationId),
@@ -387,7 +442,8 @@ export const rebuildApplication = async ({
 			logPath: deployment.logPath,
 		});
 
-		await mechanizeDockerContainer(application);
+		// build-policy hook 4/4 (rebuild): see hook 3/4 above.
+		await mechanizeDockerContainer(deployTarget);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
 			serverId: application.serverId,

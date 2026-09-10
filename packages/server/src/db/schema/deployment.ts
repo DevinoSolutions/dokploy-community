@@ -73,6 +73,14 @@ export const deployments = pgTable("deployment", {
 	buildServerId: text("buildServerId").references(() => server.serverId, {
 		onDelete: "cascade",
 	}),
+	/**
+	 * Fork columns (build-policy). The image this deployment actually shipped:
+	 * the `<repository>:<sha>` tag that was pushed and the digest the swarm
+	 * service was pinned to. Null on a local build. Together they are what a
+	 * rollback redeploys with no build.
+	 */
+	imageTag: text("imageTag"),
+	imageDigest: text("imageDigest"),
 });
 
 export const deploymentsRelations = relations(deployments, ({ one }) => ({
