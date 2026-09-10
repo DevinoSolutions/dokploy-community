@@ -417,11 +417,144 @@ export const requirePublishedImage = async ({
 	return published;
 };
 
+/** The prefix every generated deploy command opens with. */
+const SHELL_PREFIX = "set -e;";
+
+interface RequiredChecksGateUnit {
+	applicationId: string;
+	appName: string;
+	name: string;
+	sourceType: string;
+	owner?: string | null;
+	repository?: string | null;
+	customGitUrl?: string | null;
+	githubId?: string | null;
+	requiredChecks?: string[] | null;
+	environment?: {
+		project?: { organizationId?: string | null } | null;
+	} | null;
+}
+
+/**
+ * The `requiredChecks` gate, run **between the clone and the build**.
+ *
+ * Round-2 review finding E. This wait used to live in
+ * `prepareBuildPolicyDeploy`, after the build, and it entered on a non-empty
+ * `requiredChecks` alone with no policy switch involved. Two consequences, both
+ * fixed here:
+ *
+ * - **It cost a whole build.** The image had already been built, tagged and
+ *   pushed to the organization registry by the time the gate ran, so a check
+ *   that failed or never arrived bought back no compute at all. For a fork
+ *   whose point is cutting CI compute, gating after the build is the expensive
+ *   ordering. The gate now runs on the sha the clone just fetched, so a refused
+ *   check costs one clone.
+ * - **It was not policy-gated.** It now does nothing unless the organization
+ *   has `enforceRemoteBuilds` on, so `requiredChecks` can no longer change what
+ *   a deploy does on an instance where nobody enabled the policy. It is still
+ *   honoured for a unit the policy left *local* — an exclusion decides where a
+ *   unit builds, not whether its team gave up its CI gate.
+ *
+ * **What is still true and has to be planned for:** the wait occupies the
+ * deployment slot it is running in. On a self-hosted instance `jobData.serverId`
+ * is only ever set under `IS_CLOUD`, so every deployment job lands in the single
+ * `LOCAL_PARTITION` whose concurrency is `buildsConcurrency ?? 1`. Raise
+ * `buildsConcurrency` before enabling checks on a busy instance, and keep the
+ * timeout short. Moving the wait out of the queue entirely means not enqueueing
+ * until the checks pass, which is a queue redesign rather than a hook; see the
+ * README's required-checks section.
+ *
+ * Returns the command string the caller should carry on appending to. When the
+ * gate is inactive that is the caller's own string, unchanged and unexecuted,
+ * so the built command stays byte-identical to upstream's.
+ */
+export const runBuildPolicyPreBuildGate = async ({
+	application,
+	plan,
+	deployment,
+	serverId,
+	command,
+	appName,
+}: {
+	application: RequiredChecksGateUnit;
+	plan: BuildPolicyPlan;
+	deployment: { logPath: string };
+	serverId: string | null;
+	command: string;
+	/** The checkout directory to read the sha from; a preview uses its own. */
+	appName?: string;
+}): Promise<string> => {
+	const requiredChecks = (application.requiredChecks ?? []).filter(
+		(name): name is string =>
+			typeof name === "string" && name.trim().length > 0,
+	);
+	if (requiredChecks.length === 0) return command;
+
+	// The policy switch. Without it a `requiredChecks` value alone gated deploys
+	// on an instance where nobody turned the policy on.
+	if (!plan.settings?.enforceRemoteBuilds) return command;
+
+	const organizationId = application.environment?.project?.organizationId;
+	if (!organizationId) {
+		console.warn(
+			`[build-policy] no organization on application ${application.applicationId}; skipping the required-checks gate`,
+		);
+		return command;
+	}
+
+	// Run the clone half now, so the gate reads the commit this deploy is
+	// actually about rather than whatever was checked out last time. A rebuild
+	// has no clone — its command is still the bare `set -e;` prefix — so there
+	// is nothing to run and the existing checkout is already the right one.
+	if (command.replace(SHELL_PREFIX, "").trim().length > 0) {
+		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
+		if (serverId) {
+			await execAsyncRemote(serverId, commandWithLog);
+		} else {
+			await execAsync(commandWithLog);
+		}
+	}
+
+	const sha =
+		(
+			await getGitCommitInfo({
+				appName: appName ?? application.appName,
+				type: "application",
+				serverId,
+			})
+		)?.hash || null;
+
+	await waitForUnitRequiredChecks({
+		unit: {
+			unitType: "application",
+			unitId: application.applicationId,
+			unitName: application.name,
+			organizationId,
+			requiredChecks,
+			sourceType: application.sourceType,
+			githubId: application.githubId,
+			owner: application.owner,
+			repository: application.repository,
+			customGitUrl: application.customGitUrl,
+		},
+		sha,
+		// Already read when the plan was made; never read twice per deploy.
+		timeoutMs: requiredChecksTimeoutMs(plan.settings),
+	});
+
+	// The clone is done; the caller starts the build half from a clean shell.
+	// Every generated build command addresses absolute paths or does its own
+	// `cd`, so nothing depends on a working directory the clone half left behind.
+	return SHELL_PREFIX;
+};
+
 /**
  * Everything an enforced deploy does between "the build finished" and "update
- * the swarm service": gate on required checks, read the published digest, store
- * it on the deployment record, and hand back the application object the deploy
- * step should use.
+ * the swarm service": read the published digest, store it on the deployment
+ * record, and hand back the application object the deploy step should use.
+ *
+ * Required checks are **not** here any more; they run before the build, in
+ * `runBuildPolicyPreBuildGate` above.
  *
  * Returns the application unchanged when the policy is not enforcing, so the
  * upstream call site is a single assignment either way.
@@ -453,14 +586,10 @@ export const prepareBuildPolicyDeploy = async <
 	deployment: { deploymentId: string; logPath: string };
 	serverId: string | null;
 }): Promise<T & { buildPolicyImage?: string | null }> => {
-	const requiredChecks = (application.requiredChecks ?? []).filter(
-		(name): name is string => typeof name === "string" && name.length > 0,
-	);
-
 	// Nothing to do. Return before any query or remote exec, so a deploy with
 	// the policy off costs exactly what it costs on upstream. The organization
 	// is read after this, so an unenforced deploy does not even touch it.
-	if (!plan.enforced && requiredChecks.length === 0) return application;
+	if (!plan.enforced) return application;
 
 	const organizationId = application.environment?.project?.organizationId;
 	if (!organizationId) {
@@ -473,52 +602,14 @@ export const prepareBuildPolicyDeploy = async <
 		return application;
 	}
 
-	const published = plan.enforced
-		? await requirePublishedImage({
-				plan,
-				logPath: deployment.logPath,
-				serverId,
-				organizationId,
-				applicationId: application.applicationId,
-				unitName: application.name,
-			})
-		: null;
-
-	if (requiredChecks.length > 0) {
-		// Gate on required checks before the deploy step. The sha comes from the
-		// tag the build just published when there is one, otherwise from the
-		// checkout — an SSH round trip, so only when checks are configured.
-		const sha =
-			published?.tag.split(":").pop() ??
-			(
-				await getGitCommitInfo({
-					appName: application.appName,
-					type: "application",
-					serverId,
-				})
-			)?.hash ??
-			null;
-
-		await waitForUnitRequiredChecks({
-			unit: {
-				unitType: "application",
-				unitId: application.applicationId,
-				unitName: application.name,
-				organizationId,
-				requiredChecks,
-				sourceType: application.sourceType,
-				githubId: application.githubId,
-				owner: application.owner,
-				repository: application.repository,
-				customGitUrl: application.customGitUrl,
-			},
-			sha,
-			// Already read when the plan was made; never read twice per deploy.
-			timeoutMs: requiredChecksTimeoutMs(plan.settings),
-		});
-	}
-
-	if (!published) return application;
+	const published = await requirePublishedImage({
+		plan,
+		logPath: deployment.logPath,
+		serverId,
+		organizationId,
+		applicationId: application.applicationId,
+		unitName: application.name,
+	});
 
 	await updateDeployment(deployment.deploymentId, {
 		imageTag: published.tag,

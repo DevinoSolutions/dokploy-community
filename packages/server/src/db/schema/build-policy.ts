@@ -66,10 +66,19 @@ export const buildPolicySettings = pgTable("build_policy_settings", {
 		() => registry.registryId,
 		{ onDelete: "set null" },
 	),
-	/** Minutes a deploy waits for a unit's `requiredChecks` before failing. */
+	/**
+	 * Minutes a deploy waits for a unit's `requiredChecks` before failing.
+	 *
+	 * The wait occupies the deployment slot it runs in, and on a self-hosted
+	 * instance there is usually exactly one (`buildsConcurrency ?? 1` on the
+	 * single `LOCAL_PARTITION`). So this default is deliberately short: a
+	 * mistyped check name costs five minutes of the instance's deploy capacity,
+	 * not thirty. Raise it, and `buildsConcurrency` with it, only when a real
+	 * pipeline needs longer.
+	 */
 	requiredChecksTimeoutMinutes: integer("requiredChecksTimeoutMinutes")
 		.notNull()
-		.default(30),
+		.default(5),
 	createdAt: text("createdAt")
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),

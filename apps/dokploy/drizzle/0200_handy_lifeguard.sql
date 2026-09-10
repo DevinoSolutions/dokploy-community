@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS "build_policy_settings" (
 	"enforceRemoteBuilds" boolean DEFAULT false NOT NULL,
 	"defaultBuildServerId" text,
 	"defaultRegistryId" text,
-	"requiredChecksTimeoutMinutes" integer DEFAULT 30 NOT NULL,
+	"requiredChecksTimeoutMinutes" integer DEFAULT 5 NOT NULL,
 	"createdAt" text NOT NULL,
 	"updatedAt" text NOT NULL,
 	CONSTRAINT "build_policy_settings_organizationId_unique" UNIQUE("organizationId")

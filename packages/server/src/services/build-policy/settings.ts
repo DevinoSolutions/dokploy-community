@@ -71,14 +71,18 @@ export const upsertBuildPolicySettings = async (
 ): Promise<BuildPolicySettings> => {
 	const existing = await findBuildPolicySettings(organizationId);
 	const now = new Date().toISOString();
-	// A write can flip enforcement on or off; drop the cached global answer.
-	clearBuildPolicyEnforcementCache();
 
+	// A write can flip enforcement on or off, so the cached global answer has to
+	// go. Clear it AFTER the write, not before: a concurrent read in the window
+	// between a pre-write clear and the write itself repopulates the cache with
+	// the old value, and the enable is then up to the TTL late despite this
+	// function having been called. Review round 2, nit N3.
 	if (!existing) {
 		const [created] = await db
 			.insert(buildPolicySettings)
 			.values({ organizationId, ...updates, createdAt: now, updatedAt: now })
 			.returning();
+		clearBuildPolicyEnforcementCache();
 		if (!created) {
 			throw new Error("Failed to create build policy settings");
 		}
@@ -90,13 +94,24 @@ export const upsertBuildPolicySettings = async (
 		.set({ ...updates, updatedAt: now })
 		.where(eq(buildPolicySettings.organizationId, organizationId))
 		.returning();
+	clearBuildPolicyEnforcementCache();
 	if (!updated) {
 		throw new Error("Failed to update build policy settings");
 	}
 	return updated;
 };
 
-/** Timeout, in milliseconds, a deploy waits for a unit's required checks. */
+/**
+ * Timeout, in milliseconds, a deploy waits for a unit's required checks.
+ *
+ * The fallback matches the column default. Keep the two in step: the wait holds
+ * a deployment slot, so the default is short on purpose. See the README's
+ * required-checks section.
+ */
+export const DEFAULT_REQUIRED_CHECKS_TIMEOUT_MINUTES = 5;
+
 export const requiredChecksTimeoutMs = (
 	settings: BuildPolicySettings | null,
-): number => (settings?.requiredChecksTimeoutMinutes ?? 30) * 60_000;
+): number =>
+	(settings?.requiredChecksTimeoutMinutes ??
+		DEFAULT_REQUIRED_CHECKS_TIMEOUT_MINUTES) * 60_000;

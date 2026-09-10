@@ -47,17 +47,24 @@ enqueue time rather than deploy time:
   accepts into a 400 the day this merges is the same mistake.
 
 `buildPolicyDeployGate` and `resolveDeployHookImage` both begin with
-`isBuildPolicyEnforcedAnywhere()` (`settings.ts`), one indexed
-`enforceRemoteBuilds = true` lookup cached process-locally for five seconds. On
+`isBuildPolicyEnforcedAnywhere()` (`settings.ts`), one
+`enforceRemoteBuilds = true` lookup cached process-locally for five seconds.
+There is no index on that column and there deliberately is not one: the table
+holds one row per organization, so the scan is free. On
 an instance where nobody enforces, that cached boolean is the entire cost of the
 fork at enqueue time: no organization lookup, no settings read, no audit write.
 `upsertBuildPolicySettings` clears the cache, so turning the policy on through
 the UI takes effect at once; a direct database write takes up to the TTL.
 
-The deploy path is the same story. `prepareBuildPolicyDeploy` (`apply.ts`)
-returns the application unchanged before it reads a commit sha or a settings row
-when the plan is unenforced and the unit has no required checks, so an
-unenforced deploy makes no extra SSH round trip and no extra query.
+The deploy path is the same story. `runBuildPolicyPreBuildGate` returns the
+caller's command string unchanged, having executed nothing, unless the
+organization enforces; `prepareBuildPolicyDeploy` returns the application
+unchanged on the plan's `enforced` flag alone, before it reads a commit sha or
+anything else. So an unenforced deploy makes no extra SSH round trip and one
+settings read — the single indexed `build_policy_settings` SELECT
+`resolveBuildPolicy` needs to decide the plan at all. `policy-off-is-upstream.test.ts`
+asserts that count directly ("reads the organization settings exactly once"),
+which is why this paragraph says one rather than none.
 
 `policy-off-is-upstream.test.ts` asserts all of this directly, including the
 absence of the calls.
@@ -148,12 +155,12 @@ break-glass reasons.
 ## Hook points in upstream code
 
 Every one is marked in the source with `build-policy hook`. Grep for that string
-to find them all. There are **thirty-three**, in ten files, plus six import
+to find them all. There are **thirty-seven**, in ten files, plus six import
 markers, two zod lines in the schema files, and the two UI fields below.
 
 | File | Hooks |
 |---|---|
-| `packages/server/src/services/application.ts` | 18 |
+| `packages/server/src/services/application.ts` | 22 |
 | `packages/server/src/services/deployment.ts` | 2 |
 | `packages/server/src/utils/builders/index.ts` | 1 |
 | `apps/dokploy/pages/api/deploy/github.ts` | 2 |
@@ -166,7 +173,7 @@ markers, two zod lines in the schema files, and the two UI fields below.
 
 ### `packages/server/src/services/application.ts`
 
-The same four hooks in each of four deploy paths — `deployApplication`,
+The same five hooks in each of four deploy paths — `deployApplication`,
 `rebuildApplication`, `deployPreviewApplication`, `rebuildPreviewApplication` —
 plus one line in each of the two non-preview paths that creates the deployment
 log on the build host.
@@ -174,8 +181,9 @@ log on the build host.
 | Hook | What it replaces / adds |
 |---|---|
 | 1/4 | `const serverId = application.buildServerId \|\| application.serverId` becomes the same expression with `buildPolicy.buildServerId` in front. `planApplicationBuild` throws `BuildPolicyError` on an `error` decision, which is how a missing build server fails the deploy. |
+| 2a/4 | before `getBuildCommand`, `runBuildPolicyPreBuildGate(...)` gates on required checks. Returns the caller's command string unchanged, and executes nothing, when the gate is inactive. |
 | 2/4 | after `getBuildCommand`, appends `getBuildPolicyPushCommand(...)`. Returns `""` when not enforcing, so the built command is byte-identical in that case. |
-| 3/4 | after the build shell runs, `prepareBuildPolicyDeploy(...)` gates on required checks, reads the published digest, writes it to the deployment row, and returns the application object to deploy. Returns the input unchanged when not enforcing. |
+| 3/4 | after the build shell runs, `prepareBuildPolicyDeploy(...)` reads the published digest, writes it to the deployment row, and returns the application object to deploy. Returns the input unchanged when not enforcing. Required checks are no longer here; see 2a/4. |
 | 4/4 | `mechanizeDockerContainer(application)` becomes `mechanizeDockerContainer(deployTarget)`. |
 
 Plus one import block, marked `Fork module`.
@@ -187,7 +195,7 @@ status, the deployment log and the PR comment all carry the reason.
 
 **Merge note:** if upstream moves the `serverId` line or the
 `mechanizeDockerContainer` call, re-apply hooks 1/4 and 4/4 to the new location.
-Hooks 2/4 and 3/4 must stay between the build shell and the swarm update.
+Hook 2a/4 must stay between the clone and `getBuildCommand`; hooks 2/4 and 3/4 must stay between the build shell and the swarm update.
 
 ### `packages/server/src/services/deployment.ts`
 
@@ -337,6 +345,43 @@ Without the statuses half, a team that typed the name of a check published as a
 commit status would wait the full timeout and then fail with
 `REQUIRED_CHECKS_TIMEOUT` naming a check that had in fact passed.
 
+### When the gate runs, and what it costs
+
+The gate runs **between the clone and the build** (`runBuildPolicyPreBuildGate`,
+hook 2a/4), on the sha the clone just fetched. When it is active it executes the
+clone half of the deploy command itself and hands the caller a fresh `set -e;`
+prefix to build the rest from; when it is inactive it returns the caller's
+string unchanged and executes nothing, so the assembled command is
+byte-identical to upstream's. Every generated build command uses absolute paths
+or does its own `cd`, so nothing depends on a working directory the clone half
+left behind.
+
+It is also **policy-gated**: it does nothing unless the organization has
+`enforceRemoteBuilds` on. A `requiredChecks` value alone used to be enough to
+enter the branch, which meant a per-unit field could change deploy behaviour on
+an instance where nobody had turned the policy on. It *is* still honoured for a
+unit the policy left local — an exclusion decides where a unit builds, not
+whether its team gave up its CI gate.
+
+**What this does not fix, and you have to plan for it.** The wait still occupies
+the deployment slot it is running in. `jobData.serverId` is set only under
+`IS_CLOUD`, so on a self-hosted instance every deployment job lands in the single
+`LOCAL_PARTITION`, whose concurrency is `buildsConcurrency ?? 1`. One unit
+waiting on a check that never arrives therefore queues every other deploy on the
+instance for the whole timeout. Two consequences:
+
+- the default timeout is **5 minutes**, not 30. A mistyped check name costs five
+  minutes of the instance's deploy capacity;
+- **raise `buildsConcurrency` before enabling required checks** on a busy
+  instance.
+
+Taking the wait out of the queue entirely means not enqueueing the deploy until
+the checks pass — a waiter that lives outside the queue and survives a restart.
+That is a queue redesign rather than a hook point, and it is deliberately left as
+follow-up rather than smuggled into this branch. What has changed is that the
+ordering is now a decision rather than an accident of where hook 3/4 sat, and
+that a refused check no longer costs a whole build.
+
 ### What a unit needs before it can be check-gated
 
 Three things, all of them, and `describeRequiredChecksSupport` (`source.ts`)
@@ -458,6 +503,7 @@ break-glass, queue coalescing, `[skip deploy]`, derived `watchPaths` and
 | `policy-off-is-upstream.test.ts` | that nothing here changes behaviour while the policy is off |
 | `rollback-by-digest.test.ts` | rollback to a stored digest, and the refusal when there is none |
 | `required-checks-support.test.ts` | that a unit with no GitHub App is refused a required check at the API boundary, and that clearing one is always allowed |
+| `required-checks-before-build.test.ts` | that the checks gate is policy-gated, runs before the build on the freshly cloned sha, and is a no-op that executes nothing while the policy is off |
 | `gitlab-route-gate.test.ts` | that the GitLab push webhook consults the gate for both unit types, and reads `[skip deploy]` from the commit rather than the job title |
 | `deploy-path.integration.test.ts` | the real deploy path end to end, with docker, ssh and git mocked |
 

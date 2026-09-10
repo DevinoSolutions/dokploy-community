@@ -42,6 +42,7 @@ import {
 	planApplicationBuild,
 	prepareBuildPolicyDeploy,
 	reportBuildPolicyPlanFailure,
+	runBuildPolicyPreBuildGate,
 	toBuildPolicyUnit,
 } from "./build-policy/apply";
 import {
@@ -262,6 +263,19 @@ export const deployApplication = async ({
 			});
 		}
 
+		// >>> build-policy hook 2a/4: the required-checks gate, between the clone
+		// and the build. Runs the clone half itself and returns a fresh prefix
+		// when it is active; returns `command` unchanged and executes nothing
+		// when it is not, which is every deploy while the policy is off.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+			command,
+		});
+		// <<< build-policy hook 2a/4
+
 		command += await getBuildCommand(application);
 
 		// >>> build-policy hook 2/4: tag `<repository>:<sha>`, push to the
@@ -438,6 +452,17 @@ export const rebuildApplication = async ({
 
 	try {
 		let command = "set -e;";
+		// >>> build-policy hook 2a/4 (rebuild): the required-checks gate. A
+		// rebuild has no clone, so this only waits; the existing checkout is
+		// already the commit being rebuilt.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+			command,
+		});
+		// <<< build-policy hook 2a/4 (rebuild)
 		// Check case for docker only
 		command += await getBuildCommand(application);
 		// >>> build-policy hook 2/4 (rebuild)
@@ -721,6 +746,18 @@ export const deployPreviewApplication = async ({
 				message: `Preview deployments are not supported for the '${application.sourceType}' source type`,
 			});
 		}
+		// >>> build-policy hook 2a/4 (preview): the required-checks gate, on the
+		// preview's own checkout, between the clone and the build.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+			command,
+			appName: previewDeployment.appName,
+		});
+		// <<< build-policy hook 2a/4 (preview)
+
 		command += await getBuildCommand(application);
 
 		// >>> build-policy hook 2/4 (preview): tag and push the preview image by
@@ -906,6 +943,16 @@ export const rebuildPreviewApplication = async ({
 				message: `Preview deployments are not supported for the '${application.sourceType}' source type`,
 			});
 		}
+		// >>> build-policy hook 2a/4 (preview rebuild): the required-checks gate.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+			command,
+			appName: previewDeployment.appName,
+		});
+		// <<< build-policy hook 2a/4 (preview rebuild)
 		command += await getBuildCommand(application);
 		// >>> build-policy hook 2/4 (preview rebuild)
 		command += await getBuildPolicyPushCommand(buildPolicy, {

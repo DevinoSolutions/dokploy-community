@@ -56,7 +56,7 @@ export const BuildPolicy = () => {
 			enforceRemoteBuilds: false,
 			defaultBuildServerId: "none",
 			defaultRegistryId: "none",
-			requiredChecksTimeoutMinutes: 30,
+			requiredChecksTimeoutMinutes: 5,
 		},
 		resolver: zodResolver(buildPolicySchema),
 	});
@@ -270,6 +270,11 @@ export const BuildPolicy = () => {
 											<FormDescription>
 												How long a deploy waits for a unit's required GitHub
 												check runs before failing. Between 1 and 720 minutes.
+												The wait occupies a deployment slot, and a self-hosted
+												instance has <code>buildsConcurrency</code> of them in
+												total, so a long timeout on one unit queues every other
+												deploy behind it. Raise the build concurrency before
+												raising this.
 											</FormDescription>
 											<FormMessage />
 										</FormItem>
