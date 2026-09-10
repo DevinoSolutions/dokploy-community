@@ -1,4 +1,6 @@
 import {
+	// build-policy hook: enqueue-time gate.
+	buildPolicyDeployGate,
 	checkGitlabMemberPermissionsByUserId,
 	createComposePreview,
 	createPreviewDeployment,
@@ -16,8 +18,34 @@ import { and, eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { applications, compose } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+// >>> build-policy hook: enqueue-time gate (skip marker, derived watchPaths,
+// queue coalescing). See packages/server/src/services/build-policy/README.md
+import {
+	coalesceQueuedApplicationDeploys,
+	coalesceQueuedComposeDeploys,
+	myQueue,
+} from "@/server/queues/queueSetup";
+// <<< build-policy hook
 import { deploy } from "@/server/utils/deploy";
+
+// >>> build-policy hook
+/**
+ * The commit message the push is really about.
+ *
+ * The GitLab job title is `Push to <branch>`, which nobody writes
+ * `[skip deploy]` into, so the marker has to come from the payload. GitLab
+ * sends `checkout_sha` alongside a `commits` array ordered oldest-first; prefer
+ * the commit that sha names and fall back to the newest one.
+ */
+const gitlabHeadCommitMessage = (body: any): string | null => {
+	const commits: any[] = Array.isArray(body?.commits) ? body.commits : [];
+	if (commits.length === 0) return null;
+	const head =
+		commits.find((commit) => commit?.id === body?.checkout_sha) ??
+		commits[commits.length - 1];
+	return typeof head?.message === "string" ? head.message : null;
+};
+// <<< build-policy hook
 
 export default async function handler(
 	req: NextApiRequest,
@@ -157,6 +185,8 @@ export default async function handler(
 				),
 			});
 
+			const commitMessage = gitlabHeadCommitMessage(body);
+
 			let deployedCount = 0;
 
 			for (const app of apps) {
@@ -172,6 +202,26 @@ export default async function handler(
 				if (!shouldDeploy(app.watchPaths, modifiedFiles)) {
 					continue;
 				}
+
+				// >>> build-policy hook
+				const gate = await buildPolicyDeployGate({
+					unitType: "application",
+					unit: {
+						unitId: app.applicationId,
+						unitName: app.name,
+						environmentId: app.environmentId,
+						watchPaths: app.watchPaths,
+						buildPath: app.buildPath,
+						dockerfile: app.dockerfile,
+						dockerContextPath: app.dockerContextPath,
+					},
+					changedFiles: modifiedFiles,
+					commitMessage,
+					removeWaiting: () =>
+						coalesceQueuedApplicationDeploys(app.applicationId),
+				});
+				if (!gate.deploy) continue;
+				// <<< build-policy hook
 
 				deployedCount++;
 				if (IS_CLOUD && app.serverId) {
@@ -215,6 +265,24 @@ export default async function handler(
 				if (!shouldDeploy(composeApp.watchPaths, modifiedFiles)) {
 					continue;
 				}
+
+				// >>> build-policy hook
+				const composeGate = await buildPolicyDeployGate({
+					unitType: "compose",
+					unit: {
+						unitId: composeApp.composeId,
+						unitName: composeApp.name,
+						environmentId: composeApp.environmentId,
+						watchPaths: composeApp.watchPaths,
+						composePath: composeApp.composePath,
+					},
+					changedFiles: modifiedFiles,
+					commitMessage,
+					removeWaiting: () =>
+						coalesceQueuedComposeDeploys(composeApp.composeId),
+				});
+				if (!composeGate.deploy) continue;
+				// <<< build-policy hook
 
 				deployedCount++;
 				if (IS_CLOUD && composeApp.serverId) {

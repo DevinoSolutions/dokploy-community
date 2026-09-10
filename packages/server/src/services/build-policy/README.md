@@ -148,8 +148,8 @@ break-glass reasons.
 ## Hook points in upstream code
 
 Every one is marked in the source with `build-policy hook`. Grep for that string
-to find them all. There are **thirty**, in nine files, plus five import markers,
-two zod lines in the schema files, and the two UI fields below.
+to find them all. There are **thirty-three**, in ten files, plus six import
+markers, two zod lines in the schema files, and the two UI fields below.
 
 | File | Hooks |
 |---|---|
@@ -157,6 +157,7 @@ two zod lines in the schema files, and the two UI fields below.
 | `packages/server/src/services/deployment.ts` | 2 |
 | `packages/server/src/utils/builders/index.ts` | 1 |
 | `apps/dokploy/pages/api/deploy/github.ts` | 2 |
+| `apps/dokploy/pages/api/deploy/gitlab.ts` | 3 |
 | `apps/dokploy/pages/api/deploy/[refreshToken].ts` | 2 |
 | `apps/dokploy/pages/api/deploy/compose/[refreshToken].ts` | 1 |
 | `apps/dokploy/server/queues/queueSetup.ts` | 2 |
@@ -213,6 +214,22 @@ the six build types are exactly upstream's.
 Tag pushes and pull-request previews are deliberately not gated here: a preview
 is created by opening a PR, and coalescing or watch-path filtering it would
 silently drop the preview a reviewer is waiting for.
+
+### `apps/dokploy/pages/api/deploy/gitlab.ts`
+
+The same two gate blocks as `github.ts`, in the Push Hook handler's applications
+and composes loops, again **after** upstream's own `shouldDeploy` check. Tag
+pushes and merge-request previews are not gated, for the same reasons.
+
+One extra local helper, `gitlabHeadCommitMessage`, because GitLab's job title is
+`Push to <branch>` rather than the commit message, so `[skip deploy]` has to be
+read out of the payload: the commit whose `id` equals `checkout_sha`, falling
+back to the newest entry in `commits`.
+
+Coalescing is the reason this route is gated at all. A GitLab-sourced unit is
+never build-relocated (`decideBuildPolicy` returns `not_github`), but coalescing
+is a pure compute win that applies whatever the source type, and before this the
+busiest route for some units did not have it.
 
 ### `apps/dokploy/pages/api/deploy/[refreshToken].ts`
 
@@ -414,6 +431,7 @@ break-glass, queue coalescing, `[skip deploy]`, derived `watchPaths` and
 | `plan-failure.test.ts` | that a refused plan still produces a deployment row and a notification |
 | `policy-off-is-upstream.test.ts` | that nothing here changes behaviour while the policy is off |
 | `rollback-by-digest.test.ts` | rollback to a stored digest, and the refusal when there is none |
+| `gitlab-route-gate.test.ts` | that the GitLab push webhook consults the gate for both unit types, and reads `[skip deploy]` from the commit rather than the job title |
 | `deploy-path.integration.test.ts` | the real deploy path end to end, with docker, ssh and git mocked |
 
 The integration test is the tripwire for upstream merges (spec §11): it drives
