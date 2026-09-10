@@ -12,7 +12,9 @@ export type BuildPolicyErrorCode =
 	| "DIGEST_NOT_PUBLISHED"
 	| "REQUIRED_CHECKS_FAILED"
 	| "REQUIRED_CHECKS_TIMEOUT"
-	| "REQUIRED_CHECKS_UNAVAILABLE";
+	| "REQUIRED_CHECKS_UNAVAILABLE"
+	/** The unit can never satisfy required checks; refused at the API boundary. */
+	| "REQUIRED_CHECKS_UNSUPPORTED";
 
 export class BuildPolicyError extends Error {
 	public readonly code: BuildPolicyErrorCode;

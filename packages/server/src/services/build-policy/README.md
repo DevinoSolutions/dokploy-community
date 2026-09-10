@@ -337,6 +337,32 @@ Without the statuses half, a team that typed the name of a check published as a
 commit status would wait the full timeout and then fail with
 `REQUIRED_CHECKS_TIMEOUT` naming a check that had in fact passed.
 
+### What a unit needs before it can be check-gated
+
+Three things, all of them, and `describeRequiredChecksSupport` (`source.ts`)
+tests all three:
+
+1. **A github.com source.** Either `sourceType: "github"`, or `sourceType: "git"`
+   with a github.com `customGitUrl`. Enterprise GitHub hosts are excluded on
+   purpose: they use a different API base.
+2. **A resolvable `owner`/`repo`**, from the unit's own columns for a GitHub App
+   unit or parsed out of `customGitUrl` for a plain git remote.
+3. **A GitHub App installation** — `githubId`. The checks and statuses endpoints
+   are authenticated and there is no anonymous path, so a unit that never had an
+   App connection can never satisfy a check, however well its repository parses.
+
+The `sourceType: "git"` fallback is not decorative: `saveGitProvider` sets
+`sourceType: "git"` without clearing `githubId`, so a unit moved from the App to
+a plain git remote keeps a usable installation token and stays gateable. A unit
+that never had one does not.
+
+`application.update` refuses a non-empty `requiredChecks` on a unit failing any
+of the three, with a 400 naming the unit and the remedy. Setting an **empty**
+list is always allowed, so a unit can always be cleared out of an unsupported
+state. Round-2 review finding F: before this, the owner/repo resolved, the very
+next step threw, and the operator learned about it one wasted build at a time —
+after the image had been tagged and pushed.
+
 ---
 
 ## Coalescing
@@ -431,6 +457,7 @@ break-glass, queue coalescing, `[skip deploy]`, derived `watchPaths` and
 | `plan-failure.test.ts` | that a refused plan still produces a deployment row and a notification |
 | `policy-off-is-upstream.test.ts` | that nothing here changes behaviour while the policy is off |
 | `rollback-by-digest.test.ts` | rollback to a stored digest, and the refusal when there is none |
+| `required-checks-support.test.ts` | that a unit with no GitHub App is refused a required check at the API boundary, and that clearing one is always allowed |
 | `gitlab-route-gate.test.ts` | that the GitLab push webhook consults the gate for both unit types, and reads `[skip deploy]` from the commit rather than the job title |
 | `deploy-path.integration.test.ts` | the real deploy path end to end, with docker, ssh and git mocked |
 

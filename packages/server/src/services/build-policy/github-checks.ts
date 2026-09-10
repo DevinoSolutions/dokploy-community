@@ -114,10 +114,17 @@ export const waitForUnitRequiredChecks = async ({
 		listCheckRunsOverride ??
 		(async (): Promise<CheckRunLike[]> => {
 			if (!unit.githubId) {
+				// Reachable only for a row whose App connection was removed after
+				// the checks were set: `application.update` refuses this
+				// combination at the API boundary (finding F). The message names
+				// both remedies, because by the time this throws the image has
+				// already been built and pushed.
 				throw new BuildPolicyError(
 					"REQUIRED_CHECKS_UNAVAILABLE",
 					`Required checks are configured on "${unit.unitName}" but it is not ` +
-						"connected to a GitHub App provider, so they cannot be verified.",
+						"connected to a GitHub App provider, so they cannot be verified. " +
+						"Connect a GitHub App provider on the unit's Git tab, or clear " +
+						"the unit's required checks.",
 				);
 			}
 			const provider = await findGithubById(unit.githubId);

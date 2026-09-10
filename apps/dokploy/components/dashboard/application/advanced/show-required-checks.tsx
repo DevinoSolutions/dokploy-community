@@ -81,7 +81,9 @@ export const ShowRequiredChecks = ({ applicationId }: Props) => {
 							the deploy waits for those GitHub check runs on the commit to
 							succeed before it continues. Legacy commit-status contexts are
 							accepted too, so either a check-run name or a status context works
-							here.
+							here. Checks are read through a GitHub App installation, so this
+							unit has to be connected to a GitHub App provider and to a
+							github.com repository; saving a name without both is refused.
 						</CardDescription>
 					</div>
 				</div>
