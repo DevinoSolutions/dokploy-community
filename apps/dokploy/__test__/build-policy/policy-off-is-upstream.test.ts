@@ -168,6 +168,7 @@ import { deployApplication } from "@dokploy/server/services/application";
 import { clearBuildPolicyEnforcementCache } from "@dokploy/server/services/build-policy/settings";
 import {
 	buildPolicyDeployGate,
+	rejectComposeDeployHookImage,
 	resolveDeployHookImage,
 } from "@dokploy/server/services/build-policy/webhook";
 import * as deploymentService from "@dokploy/server/services/deployment";
@@ -352,6 +353,18 @@ describe("the deploy-hook image body while the policy is off", () => {
 			},
 		);
 		expect(mocks.registryFindMany).not.toHaveBeenCalled();
+	});
+
+	it("is ignored on a compose unit too, rather than turning into a 400", async () => {
+		// Upstream ignores the request body on a compose deploy hook. A CI job
+		// that posts one must not start failing the day this merges.
+		await expect(
+			rejectComposeDeployHookImage("env-1", {
+				image: "ghcr.io/devinosolutions/sendly-web",
+				digest: `sha256:${"a".repeat(64)}`,
+			}),
+		).resolves.toEqual({ ok: true });
+		expect(mocks.environmentsFindFirst).not.toHaveBeenCalled();
 	});
 });
 

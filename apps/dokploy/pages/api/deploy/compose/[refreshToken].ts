@@ -1,9 +1,9 @@
 import {
 	// build-policy hook: enqueue-time gate and deploy-hook image body.
 	buildPolicyDeployGate,
-	deployHookBodyHasImage,
 	IS_CLOUD,
 	normalizeChangedFilesFromCommits,
+	rejectComposeDeployHookImage,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -236,8 +236,9 @@ export default async function handler(
 
 		// >>> build-policy hook: `[skip deploy]`, derived watchPaths and queue
 		// coalescing. A compose unit cannot deploy a supplied image by digest
-		// yet (see README.md § Known gap), so such a body is rejected rather
-		// than silently ignored.
+		// yet (see README.md § Known gap), so an enforcing organization gets a
+		// 400 rather than a silently ignored body. While the policy is off the
+		// body is ignored, which is what upstream does with it.
 		const gate = await buildPolicyDeployGate({
 			unitType: "compose",
 			unit: {
@@ -255,11 +256,12 @@ export default async function handler(
 			res.status(301).json({ message: gate.message });
 			return;
 		}
-		if (deployHookBodyHasImage(req.body)) {
-			res.status(400).json({
-				message:
-					"Deploying a supplied image by digest is not supported for compose units.",
-			});
+		const hookImage = await rejectComposeDeployHookImage(
+			composeResult.environmentId,
+			req.body,
+		);
+		if (!hookImage.ok) {
+			res.status(400).json({ message: hookImage.message });
 			return;
 		}
 		// <<< build-policy hook

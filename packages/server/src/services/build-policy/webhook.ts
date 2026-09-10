@@ -217,4 +217,31 @@ export const resolveDeployHookImage = async (
 	}
 };
 
+/**
+ * A compose unit cannot deploy a supplied image by digest (see README.md
+ * § Known gap), so an enforcing organization is told so with a 400 rather than
+ * having the body silently ignored.
+ *
+ * While the policy is off this returns `ok` and the body is ignored, exactly as
+ * upstream ignores it. Turning a request upstream accepts into a 400 the day
+ * this merges is the same mistake as gating a deploy on a derived watch path
+ * nobody configured.
+ */
+export const rejectComposeDeployHookImage = async (
+	environmentId: string,
+	body: unknown,
+): Promise<{ ok: true } | { ok: false; message: string }> => {
+	if (!deployHookBodyHasImage(body)) return { ok: true };
+	if (!(await isBuildPolicyEnforcedAnywhere())) return { ok: true };
+	const organizationId = await findOrganizationId(environmentId);
+	if (!organizationId) return { ok: true };
+	const settings = await findBuildPolicySettings(organizationId);
+	if (!settings?.enforceRemoteBuilds) return { ok: true };
+	return {
+		ok: false,
+		message:
+			"Deploying a supplied image by digest is not supported for compose units.",
+	};
+};
+
 export const findUnitOrganizationId = findOrganizationId;
