@@ -3,12 +3,14 @@ import {
 	assertUnitInOrganization,
 	findBuildPolicySettings,
 	findRegistryById,
+	findRollbackTarget,
 	getAccessibleServerIds,
 	grantBreakGlass,
 	listBuildPolicyAudit,
 	listBuildPolicyExclusions,
 	recordBuildPolicyAudit,
 	removeBuildPolicyExclusion,
+	rollbackToDeploymentDigest,
 	upsertBuildPolicySettings,
 } from "@dokploy/server";
 import {
@@ -16,6 +18,7 @@ import {
 	apiGrantBuildPolicyBreakGlass,
 	apiListBuildPolicyAudit,
 	apiRemoveBuildPolicyExclusion,
+	apiRollbackToBuildPolicyDigest,
 	apiUpdateBuildPolicySettings,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
@@ -178,6 +181,35 @@ export const buildPolicyRouter = createTRPCRouter({
 				metadata: { reason: input.reason },
 			});
 			return { success: true };
+		}),
+
+	/**
+	 * Rollback by stored digest (spec 5.2.4): redeploy the image a past
+	 * deployment published, with no build. Separate from upstream's rollback,
+	 * which replays a snapshot pushed to a dedicated rollback registry.
+	 */
+	rollbackToDigest: adminProcedure
+		.input(apiRollbackToBuildPolicyDigest)
+		.mutation(async ({ ctx, input }) => {
+			const organizationId = ctx.session.activeOrganizationId;
+			const target = await findRollbackTarget(input.deploymentId);
+			// The deployment id comes from input, so prove the application it
+			// belongs to is this organization's before deploying anything.
+			await assertUnitInOrganization({
+				organizationId,
+				applicationId: target.applicationId,
+			});
+			const result = await rollbackToDeploymentDigest({
+				deploymentId: input.deploymentId,
+				organizationId,
+			});
+			await audit(ctx, {
+				action: "restore",
+				resourceType: "deployment",
+				resourceId: input.deploymentId,
+				resourceName: "build-policy-rollback",
+			});
+			return result;
 		}),
 
 	/** Admin only: rows carry registry ids, build server ids and break-glass reasons. */

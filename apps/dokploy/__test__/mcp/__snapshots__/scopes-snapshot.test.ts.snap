@@ -91,6 +91,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "buildPolicy-audit": "dokploy:read",
   "buildPolicy-exclusions": "dokploy:read",
   "buildPolicy-removeExclusion": "dokploy:admin",
+  "buildPolicy-rollbackToDigest": "dokploy:admin",
   "buildPolicy-settings": "dokploy:read",
   "buildPolicy-updateSettings": "dokploy:admin",
   "certificates-all": "dokploy:admin",

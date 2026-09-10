@@ -24,6 +24,21 @@ const mocks = vi.hoisted(() => ({
 	environmentsFindFirst: vi.fn(),
 	applicationsFindFirst: vi.fn(),
 	buildPolicySettingsFindFirst: vi.fn(),
+	deploymentsFindFirst: vi.fn(),
+	findPreviewDeploymentById: vi.fn(),
+	updatePreviewDeployment: vi.fn(),
+	createDeploymentPreview: vi.fn(),
+}));
+
+vi.mock("@dokploy/server/services/preview-deployment", () => ({
+	findPreviewDeploymentById: mocks.findPreviewDeploymentById,
+	updatePreviewDeployment: mocks.updatePreviewDeployment,
+}));
+
+vi.mock("@dokploy/server/services/preview-comment", () => ({
+	ensurePreviewComment: vi.fn().mockResolvedValue({ created: false }),
+	getPreviewCommentContext: vi.fn(() => null),
+	updatePreviewComment: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => {
@@ -55,6 +70,7 @@ vi.mock("@dokploy/server/db", () => {
 				buildPolicySettings: {
 					findFirst: mocks.buildPolicySettingsFindFirst,
 				},
+				deployments: { findFirst: mocks.deploymentsFindFirst },
 			},
 		},
 	};
@@ -97,6 +113,7 @@ vi.mock("@dokploy/server/services/registry", () => ({
 }));
 
 vi.mock("@dokploy/server/services/deployment", () => ({
+	createDeploymentPreview: mocks.createDeploymentPreview,
 	createDeployment: vi.fn(),
 	updateDeployment: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
@@ -174,8 +191,12 @@ import {
 } from "@dokploy/server/services/application";
 import { DIGEST_MARKER } from "@dokploy/server/services/build-policy/image";
 import { deployPinnedApplicationImage } from "@dokploy/server/services/build-policy/pinned-deploy";
+import { rollbackToDeploymentDigest } from "@dokploy/server/services/build-policy/rollback";
 import { clearBuildPolicyEnforcementCache } from "@dokploy/server/services/build-policy/settings";
-import { buildPolicyDeployGate } from "@dokploy/server/services/build-policy/webhook";
+import {
+	buildPolicyDeployGate,
+	rejectComposeDeployHookImage,
+} from "@dokploy/server/services/build-policy/webhook";
 import * as deploymentService from "@dokploy/server/services/deployment";
 import * as registryService from "@dokploy/server/services/registry";
 import * as builders from "@dokploy/server/utils/builders";
@@ -321,6 +342,12 @@ const primeMocks = (app: Record<string, unknown> = APPLICATION()) => {
 	mocks.environmentsFindFirst.mockResolvedValue({
 		environmentId: "env-1",
 		project: { organizationId: "org-1" },
+	});
+	mocks.deploymentsFindFirst.mockResolvedValue({
+		deploymentId: "deployment-9",
+		applicationId: "app-1",
+		imageTag: `${REPOSITORY}:${SHA}`,
+		imageDigest: DIGEST,
 	});
 	// The cheap "does anybody enforce at all" probe the gate makes first.
 	mocks.buildPolicySettingsFindFirst.mockResolvedValue({
@@ -829,6 +856,54 @@ describe("required checks", () => {
 	});
 });
 
+describe("rollback to a stored digest", () => {
+	it("redeploys the digest a past deployment stored, with no build", async () => {
+		await rollbackToDeploymentDigest({
+			deploymentId: "deployment-9",
+			organizationId: "org-1",
+		});
+		expect(builders.getBuildCommand).not.toHaveBeenCalled();
+		expect(gitProvider.cloneGitRepository).not.toHaveBeenCalled();
+		expect(deployedApplication()?.buildPolicyImage).toBe(
+			`${REPOSITORY}@${DIGEST}`,
+		);
+	});
+
+	it("does not wait on required checks for an image that already shipped", async () => {
+		primeMocks(APPLICATION({ requiredChecks: ["build"] }));
+		mocks.listCheckRuns.mockResolvedValue({
+			data: {
+				check_runs: [
+					{ name: "build", status: "completed", conclusion: "failure" },
+				],
+			},
+		});
+		await expect(
+			rollbackToDeploymentDigest({
+				deploymentId: "deployment-9",
+				organizationId: "org-1",
+			}),
+		).resolves.toBe(true);
+		expect(mocks.listCheckRuns).not.toHaveBeenCalled();
+	});
+
+	it("refuses a deployment that stored no digest, and deploys nothing", async () => {
+		mocks.deploymentsFindFirst.mockResolvedValue({
+			deploymentId: "deployment-9",
+			applicationId: "app-1",
+			imageTag: null,
+			imageDigest: null,
+		});
+		await expect(
+			rollbackToDeploymentDigest({
+				deploymentId: "deployment-9",
+				organizationId: "org-1",
+			}),
+		).rejects.toMatchObject({ code: "DIGEST_NOT_PUBLISHED" });
+		expect(builders.mechanizeDockerContainer).not.toHaveBeenCalled();
+	});
+});
+
 describe("deploy-hook body with an image", () => {
 	it("deploys the supplied image by digest and never builds", async () => {
 		await deployPinnedApplicationImage({
@@ -880,6 +955,23 @@ describe("deploy-hook body with an image", () => {
 			}),
 		).rejects.toMatchObject({ code: "REQUIRED_CHECKS_FAILED" });
 		expect(builders.mechanizeDockerContainer).not.toHaveBeenCalled();
+	});
+
+	it("tells a compose unit the capability does not exist, rather than ignoring the body", async () => {
+		// The compose build is not relocatable, so there is no digest to deploy.
+		// An enforcing organization gets a 400 body back; see README § Known gap.
+		await expect(
+			rejectComposeDeployHookImage("env-1", {
+				image: `${REPOSITORY}`,
+				digest: DIGEST,
+			}),
+		).resolves.toMatchObject({ ok: false });
+	});
+
+	it("leaves a compose deploy hook with no image alone", async () => {
+		await expect(
+			rejectComposeDeployHookImage("env-1", { branch: "main" }),
+		).resolves.toEqual({ ok: true });
 	});
 });
 

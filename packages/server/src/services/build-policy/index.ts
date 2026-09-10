@@ -11,6 +11,7 @@ export * from "./pinned-deploy";
 export * from "./policy";
 export * from "./required-checks";
 export * from "./resolve";
+export * from "./rollback";
 export * from "./settings";
 export * from "./skip-deploy";
 export * from "./source";

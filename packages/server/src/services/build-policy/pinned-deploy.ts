@@ -36,11 +36,20 @@ export const deployPinnedApplicationImage = async ({
 	pinnedImage,
 	titleLog = "Deploy hook image",
 	descriptionLog = "",
+	skipRequiredChecks = false,
+	introLog = "Deploy hook supplied an image; skipping the build.",
 }: {
 	applicationId: string;
 	pinnedImage: { ref: string; tag: string | null; digest: string };
 	titleLog?: string;
 	descriptionLog?: string;
+	/**
+	 * A rollback restores an image that already shipped, so it must not be held
+	 * behind CI: waiting on checks is the one thing a rollback cannot afford.
+	 */
+	skipRequiredChecks?: boolean;
+	/** First line of the deployment log, saying why there is no build. */
+	introLog?: string;
 }) => {
 	const application = await findApplicationById(applicationId);
 	const organizationId = application.environment.project.organizationId;
@@ -63,29 +72,31 @@ export const deployPinnedApplicationImage = async ({
 
 	try {
 		await log(
-			"📦 [build-policy] Deploy hook supplied an image; skipping the build.\n" +
+			`📦 [build-policy] ${introLog}\n` +
 				`   image:  ${pinnedImage.tag ?? pinnedImage.ref}\n` +
 				`   digest: ${pinnedImage.digest}\n`,
 		);
 
-		await waitForUnitRequiredChecks({
-			unit: {
-				unitType: "application",
-				unitId: application.applicationId,
-				unitName: application.name,
-				organizationId,
-				requiredChecks: application.requiredChecks,
-				sourceType: application.sourceType,
-				githubId: application.githubId,
-				owner: application.owner,
-				repository: application.repository,
-				customGitUrl: application.customGitUrl,
-			},
-			sha: pinnedImage.tag,
-			timeoutMs: requiredChecksTimeoutMs(
-				await findBuildPolicySettings(organizationId),
-			),
-		});
+		if (!skipRequiredChecks) {
+			await waitForUnitRequiredChecks({
+				unit: {
+					unitType: "application",
+					unitId: application.applicationId,
+					unitName: application.name,
+					organizationId,
+					requiredChecks: application.requiredChecks,
+					sourceType: application.sourceType,
+					githubId: application.githubId,
+					owner: application.owner,
+					repository: application.repository,
+					customGitUrl: application.customGitUrl,
+				},
+				sha: pinnedImage.tag,
+				timeoutMs: requiredChecksTimeoutMs(
+					await findBuildPolicySettings(organizationId),
+				),
+			});
+		}
 
 		await updateDeployment(deployment.deploymentId, {
 			imageTag: pinnedImage.tag,
