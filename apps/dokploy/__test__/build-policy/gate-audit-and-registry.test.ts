@@ -110,6 +110,48 @@ describe("finding B — a derived watch-path skip is audited", () => {
 		expect(row.metadata.changedFiles).toEqual(["packages/shared/index.ts"]);
 	});
 
+	/**
+	 * Round-3 nit N9. A monorepo push can touch thousands of files, and this row
+	 * is written per skipped delivery, so the whole array in the metadata blob is
+	 * a real write-amplification. The count is what an operator actually needs
+	 * alongside a sample; the full list is not worth the storage.
+	 */
+	it("caps the changed files it stores, keeping the count and a truncation flag", async () => {
+		const many = Array.from(
+			{ length: 500 },
+			(_, i) => `packages/shared/f${i}.ts`,
+		);
+
+		await buildPolicyDeployGate({
+			unitType: "application",
+			unit: UNIT,
+			changedFiles: many,
+			commitMessage: "chore: a very wide refactor",
+			removeWaiting: vi.fn(),
+		});
+
+		const row = mocks.recordBuildPolicyAudit.mock.calls[0]?.[0];
+		expect(row.metadata.changedFilesCount).toBe(500);
+		expect(row.metadata.changedFilesTruncated).toBe(true);
+		expect(row.metadata.changedFiles).toHaveLength(50);
+		expect(row.metadata.changedFiles[0]).toBe("packages/shared/f0.ts");
+	});
+
+	it("stores a small push whole, and says it was not truncated", async () => {
+		await buildPolicyDeployGate({
+			unitType: "application",
+			unit: UNIT,
+			changedFiles: ["packages/shared/index.ts"],
+			commitMessage: "chore: shared code only",
+			removeWaiting: vi.fn(),
+		});
+
+		const row = mocks.recordBuildPolicyAudit.mock.calls[0]?.[0];
+		expect(row.metadata.changedFilesCount).toBe(1);
+		expect(row.metadata.changedFilesTruncated).toBe(false);
+		expect(row.metadata.changedFiles).toEqual(["packages/shared/index.ts"]);
+	});
+
 	it("targets the compose id for a compose unit", async () => {
 		await buildPolicyDeployGate({
 			unitType: "compose",

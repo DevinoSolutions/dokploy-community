@@ -199,23 +199,45 @@ never satisfy one. See "What a unit needs before it can be check-gated".
 
 ## Hook points in upstream code
 
-Every one is marked in the source with `build-policy hook`. Grep for that string
-to find them all. There are **thirty-eight**, in eleven files, plus seven import
-markers, two zod lines in the schema files, and the two UI fields below.
+Every one is marked in the source with the literal string `build-policy hook`,
+in one of two forms:
 
-| File | Hooks |
-|---|---|
-| `packages/server/src/services/application.ts` | 22 |
-| `packages/server/src/services/deployment.ts` | 2 |
-| `packages/server/src/utils/builders/index.ts` | 1 |
-| `packages/server/src/services/compose.ts` | 1 |
-| `apps/dokploy/pages/api/deploy/github.ts` | 2 |
-| `apps/dokploy/pages/api/deploy/gitlab.ts` | 3 |
-| `apps/dokploy/pages/api/deploy/[refreshToken].ts` | 2 |
-| `apps/dokploy/pages/api/deploy/compose/[refreshToken].ts` | 1 |
-| `apps/dokploy/server/queues/queueSetup.ts` | 2 |
-| `apps/dokploy/server/queues/queue-types.ts` | 1 |
-| `apps/dokploy/server/queues/deployments-queue.ts` | 1 |
+- a **block**, opened with `>>> build-policy hook` and closed with
+  `<<< build-policy hook`, wrapping code an upstream merge has to reconcile;
+- a **note**, a single-line comment on an upstream line that changed meaning but
+  did not grow a block — an import, a zod shape, a widened field.
+
+The table below is generated, not maintained by hand; it was wrong at two
+consecutive review heads when it was. Regenerate it with:
+
+```sh
+git grep -c '>>> build-policy hook' -- ':!*README.md'   # blocks, per file
+git grep -c 'build-policy hook'     -- ':!*README.md'   # blocks x2 + notes
+```
+
+**31 blocks and 25 notes, across 15 files**, plus the two UI fields below.
+
+| File | Blocks | Notes |
+|---|---|---|
+| `packages/server/src/services/application.ts` | 16 | 8 |
+| `apps/dokploy/pages/api/deploy/gitlab.ts` | 4 | 1 |
+| `apps/dokploy/pages/api/deploy/github.ts` | 3 | 1 |
+| `packages/server/src/services/compose.ts` | 2 | 0 |
+| `apps/dokploy/pages/api/deploy/[refreshToken].ts` | 1 | 2 |
+| `apps/dokploy/pages/api/deploy/compose/[refreshToken].ts` | 1 | 1 |
+| `apps/dokploy/server/api/routers/application.ts` | 1 | 2 |
+| `apps/dokploy/server/api/routers/compose.ts` | 1 | 2 |
+| `apps/dokploy/server/queues/deployments-queue.ts` | 1 | 1 |
+| `packages/server/src/utils/builders/index.ts` | 1 | 0 |
+| `apps/dokploy/server/queues/queueSetup.ts` | 0 | 2 |
+| `apps/dokploy/server/queues/queue-types.ts` | 0 | 1 |
+| `packages/server/src/services/deployment.ts` | 0 | 2 |
+| `packages/server/src/db/schema/application.ts` | 0 | 1 |
+| `packages/server/src/db/schema/compose.ts` | 0 | 1 |
+
+The two router files carry the mutation-side guards: `requiredChecks`
+validation on `update` (finding F) and the compose refusal on `addExclusion` /
+`allowLocalBuildOnce` (finding A).
 
 ### `packages/server/src/services/application.ts`
 
@@ -223,6 +245,11 @@ The same five hooks in each of four deploy paths — `deployApplication`,
 `rebuildApplication`, `deployPreviewApplication`, `rebuildPreviewApplication` —
 plus one line in each of the two non-preview paths that creates the deployment
 log on the build host.
+
+Four of the five (1/4, 2a/4, 2/4, 3/4) are blocks and 4/4 is a note, which is
+how the file reconciles to 16 blocks and 8 notes in the table above: 4 x 4
+blocks, 4 x hook 4/4, the two deployment-log lines, and the two `continued`
+notes in the preview paths.
 
 | Hook | What it replaces / adds |
 |---|---|

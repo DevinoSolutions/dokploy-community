@@ -74,6 +74,17 @@ export type BuildPolicyGateResult =
 
 const PASS: BuildPolicyGateResult = { deploy: true, coalesced: 0 };
 
+/**
+ * How many changed paths a `deploy_skipped` audit row stores.
+ *
+ * The row exists so an operator can answer "why did my push not deploy", which
+ * needs the derived paths, the total, and enough of a sample to recognise the
+ * push. It does not need the whole list: a monorepo-wide change touches
+ * thousands of paths and this row is written once per skipped webhook delivery.
+ * Round-3 nit N9.
+ */
+const AUDIT_CHANGED_FILES_LIMIT = 50;
+
 const findOrganizationId = async (
 	environmentId: string,
 ): Promise<string | null> => {
@@ -160,7 +171,10 @@ export const buildPolicyDeployGate = async ({
 				metadata: {
 					unitName: unit.unitName,
 					derivedWatchPaths: paths,
-					changedFiles,
+					changedFilesCount: changedFiles.length,
+					changedFilesTruncated:
+						changedFiles.length > AUDIT_CHANGED_FILES_LIMIT,
+					changedFiles: changedFiles.slice(0, AUDIT_CHANGED_FILES_LIMIT),
 				},
 			});
 			return { deploy: false, reason: "watch_paths", message };
