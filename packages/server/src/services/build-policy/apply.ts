@@ -63,7 +63,12 @@ interface PlanUnit {
 	unitId: string;
 	unitName: string;
 	appName: string;
-	organizationId: string;
+	/**
+	 * Null when the loaded row carried no nested environment. The fork must not
+	 * be the reason a deploy throws, so that case plans as unenforced rather
+	 * than dereferencing its way to a crash. See `planApplicationBuild`.
+	 */
+	organizationId: string | null;
 	sourceType: string;
 	customGitUrl?: string | null;
 	buildServerId?: string | null;
@@ -105,12 +110,15 @@ export const toBuildPolicyUnit = (application: {
 	customGitUrl?: string | null;
 	buildServerId?: string | null;
 	buildRegistryId?: string | null;
-	environment: { project: { organizationId: string } };
+	environment?: { project?: { organizationId?: string | null } | null } | null;
 }): PlanUnit => ({
 	unitId: application.applicationId,
 	unitName: application.name,
 	appName: application.appName,
-	organizationId: application.environment.project.organizationId,
+	// `findApplicationById` always nests the environment, so this is a belt on
+	// top of braces: a deploy must never fail because the fork reached through
+	// a field a caller did not load.
+	organizationId: application.environment?.project?.organizationId ?? null,
 	sourceType: application.sourceType,
 	customGitUrl: application.customGitUrl,
 	buildServerId: application.buildServerId,
@@ -193,6 +201,15 @@ export const reportBuildPolicyPlanFailure = async ({
 export const planApplicationBuild = async (
 	unit: PlanUnit,
 ): Promise<BuildPolicyPlan> => {
+	if (!unit.organizationId) {
+		// No organization means no settings row to read, which is the same
+		// answer as the policy being off. Warn rather than fail: refusing the
+		// deploy here would turn an unloaded relation into an outage.
+		console.warn(
+			`[build-policy] no organization on unit ${unit.unitId}; leaving the build alone`,
+		);
+		return LOCAL_PLAN("no_organization", null);
+	}
 	const { decision, settings } = await resolveBuildPolicy({
 		unitType: "application",
 		unitId: unit.unitId,
@@ -421,7 +438,9 @@ export const prepareBuildPolicyDeploy = async <
 		githubId?: string | null;
 		requiredChecks?: string[] | null;
 		buildRegistry?: unknown;
-		environment: { project: { organizationId: string } };
+		environment?: {
+			project?: { organizationId?: string | null } | null;
+		} | null;
 	},
 >({
 	application,
@@ -434,14 +453,25 @@ export const prepareBuildPolicyDeploy = async <
 	deployment: { deploymentId: string; logPath: string };
 	serverId: string | null;
 }): Promise<T & { buildPolicyImage?: string | null }> => {
-	const organizationId = application.environment.project.organizationId;
 	const requiredChecks = (application.requiredChecks ?? []).filter(
 		(name): name is string => typeof name === "string" && name.length > 0,
 	);
 
 	// Nothing to do. Return before any query or remote exec, so a deploy with
-	// the policy off costs exactly what it costs on upstream.
+	// the policy off costs exactly what it costs on upstream. The organization
+	// is read after this, so an unenforced deploy does not even touch it.
 	if (!plan.enforced && requiredChecks.length === 0) return application;
+
+	const organizationId = application.environment?.project?.organizationId;
+	if (!organizationId) {
+		// Same reasoning as `planApplicationBuild`: without an organization there
+		// is nothing to enforce against, and the fork must not be the reason a
+		// deploy throws.
+		console.warn(
+			`[build-policy] no organization on application ${application.applicationId}; deploying unchanged`,
+		);
+		return application;
+	}
 
 	const published = plan.enforced
 		? await requirePublishedImage({

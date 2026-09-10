@@ -45,7 +45,12 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	ExecError: class ExecError extends Error {},
 }));
 
-import { reportBuildPolicyPlanFailure } from "@dokploy/server/services/build-policy/apply";
+import {
+	planApplicationBuild,
+	prepareBuildPolicyDeploy,
+	reportBuildPolicyPlanFailure,
+	toBuildPolicyUnit,
+} from "@dokploy/server/services/build-policy/apply";
 import { BuildPolicyError } from "@dokploy/server/services/build-policy/errors";
 
 const APPLICATION = (serverId: string | null = "deploy-server-1") => ({
@@ -154,5 +159,38 @@ describe("reportBuildPolicyPlanFailure", () => {
 			"error",
 		);
 		expect(mocks.sendBuildErrorNotifications).toHaveBeenCalledTimes(1);
+	});
+});
+
+/**
+ * The fork reaches through `application.environment.project` for the
+ * organization. `findApplicationById` always loads that relation, but a caller
+ * that loads a leaner row must not get a crashed deploy out of it: the policy
+ * has nothing to enforce against, so it stands aside and says so.
+ */
+describe("an application row with no environment loaded", () => {
+	const LEAN = {
+		applicationId: "app-1",
+		appName: "sendly-web",
+		name: "Sendly Web",
+		sourceType: "github",
+		requiredChecks: ["build"],
+	};
+
+	it("plans unenforced instead of throwing", async () => {
+		const plan = await planApplicationBuild(toBuildPolicyUnit(LEAN));
+		expect(plan.enforced).toBe(false);
+		expect(plan.reason).toBe("no_organization");
+	});
+
+	it("deploys the application unchanged, even with required checks configured", async () => {
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application: LEAN,
+			plan: await planApplicationBuild(toBuildPolicyUnit(LEAN)),
+			deployment: { deploymentId: "deployment-1", logPath: "/tmp/d.log" },
+			serverId: null,
+		});
+		expect(deployTarget).toBe(LEAN);
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 	});
 });
