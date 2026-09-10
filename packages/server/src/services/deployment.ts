@@ -246,11 +246,15 @@ export const createDeploymentPreview = async (
 		z.infer<typeof apiCreateDeploymentPreview>,
 		"deploymentId" | "createdAt" | "status" | "logPath"
 	>,
+	// build-policy hook: the build server the policy forced, when it forced one.
+	// The log file has to be created on whichever host is going to build.
+	options?: { buildServerId?: string | null },
 ) => {
 	const previewDeployment = await findPreviewDeploymentById(
 		deployment.previewDeploymentId,
 	);
 	const buildServerId =
+		options?.buildServerId ||
 		previewDeployment?.application?.buildServerId ||
 		previewDeployment?.application?.serverId ||
 		previewDeployment?.compose?.serverId;

@@ -617,15 +617,35 @@ export const deployPreviewApplication = async ({
 	previewDeploymentId: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-
-	const deployment = await createDeploymentPreview({
-		title: titleLog,
-		description: descriptionLog,
-		previewDeploymentId: previewDeploymentId,
-	});
-
+	// >>> build-policy hook 1/4 (preview): a PR preview is GitHub App sourced
+	// like any other deploy, so spec 5.2.1 forces it onto the build server too.
+	// The plan needs the preview's own appName, so the preview row is read
+	// before the deployment record is created rather than after; the read is
+	// idempotent and `createDeploymentPreview` reads it again itself.
+	// A refused plan is rethrown inside the try below, so the preview status,
+	// the log and the PR comment all report it. See build-policy/README.md
 	const previewDeployment =
 		await findPreviewDeploymentById(previewDeploymentId);
+	let buildPolicy: BuildPolicyPlan | null = null;
+	let buildPolicyError: unknown = null;
+	try {
+		buildPolicy = await planApplicationBuild({
+			...toBuildPolicyUnit(application),
+			appName: previewDeployment.appName,
+		});
+	} catch (error) {
+		buildPolicyError = error;
+	}
+
+	const deployment = await createDeploymentPreview(
+		{
+			title: titleLog,
+			description: descriptionLog,
+			previewDeploymentId: previewDeploymentId,
+		},
+		{ buildServerId: buildPolicy?.buildServerId },
+	);
+	// <<< build-policy hook 1/4 (preview)
 
 	await updatePreviewDeployment(previewDeploymentId, {
 		createdAt: new Date().toISOString(),
@@ -640,6 +660,10 @@ export const deployPreviewApplication = async ({
 	});
 	try {
 		await writePreviewComment("running");
+
+		// build-policy hook 1/4 (preview), continued: refusing here rather than
+		// above means the preview status, the log and the PR comment all say why.
+		if (!buildPolicy) throw buildPolicyError;
 
 		application.appName = previewDeployment.appName;
 		application.env = resolvePreviewTemplateVariables(
@@ -664,7 +688,10 @@ export const deployPreviewApplication = async ({
 		application.rollbackRegistry = null;
 		application.registry = null;
 
-		const buildServerId = application.buildServerId || application.serverId;
+		const buildServerId =
+			buildPolicy.buildServerId ||
+			application.buildServerId ||
+			application.serverId;
 		const applicationEntity = {
 			...application,
 			serverId: buildServerId,
@@ -696,13 +723,32 @@ export const deployPreviewApplication = async ({
 		}
 		command += await getBuildCommand(application);
 
+		// >>> build-policy hook 2/4 (preview): tag and push the preview image by
+		// sha. Empty when not enforcing.
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: previewDeployment.appName,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 2/4 (preview)
+
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (buildServerId) {
 			await execAsyncRemote(buildServerId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
 		}
-		await mechanizeDockerContainer(application);
+		// >>> build-policy hook 3/4 (preview): pin to the digest just published.
+		// Identity when not enforcing.
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 3/4 (preview)
+		// build-policy hook 4/4 (preview): `deployTarget` is `application` plus
+		// the pinned digest when a remote build was enforced.
+		await mechanizeDockerContainer(deployTarget);
 
 		await writePreviewComment("success");
 		await updateDeploymentStatus(deployment.deploymentId, "done");
@@ -760,11 +806,27 @@ export const rebuildPreviewApplication = async ({
 	const previewDeployment =
 		await findPreviewDeploymentById(previewDeploymentId);
 
-	const deployment = await createDeploymentPreview({
-		title: titleLog,
-		description: descriptionLog,
-		previewDeploymentId: previewDeploymentId,
-	});
+	// >>> build-policy hook 1/4 (preview rebuild). See build-policy/README.md
+	let buildPolicy: BuildPolicyPlan | null = null;
+	let buildPolicyError: unknown = null;
+	try {
+		buildPolicy = await planApplicationBuild({
+			...toBuildPolicyUnit(application),
+			appName: previewDeployment.appName,
+		});
+	} catch (error) {
+		buildPolicyError = error;
+	}
+
+	const deployment = await createDeploymentPreview(
+		{
+			title: titleLog,
+			description: descriptionLog,
+			previewDeploymentId: previewDeploymentId,
+		},
+		{ buildServerId: buildPolicy?.buildServerId },
+	);
+	// <<< build-policy hook 1/4 (preview rebuild)
 
 	const previewDomain = getDomainHost(previewDeployment?.domain as Domain);
 	const writePreviewComment = buildPreviewCommentWriter({
@@ -776,6 +838,9 @@ export const rebuildPreviewApplication = async ({
 
 	try {
 		await writePreviewComment("running");
+
+		// build-policy hook 1/4 (preview rebuild), continued.
+		if (!buildPolicy) throw buildPolicyError;
 
 		// Set application properties for preview deployment
 		application.appName = previewDeployment.appName;
@@ -801,7 +866,10 @@ export const rebuildPreviewApplication = async ({
 		application.rollbackRegistry = null;
 		application.registry = null;
 
-		const buildServerId = application.buildServerId || application.serverId;
+		const buildServerId =
+			buildPolicy.buildServerId ||
+			application.buildServerId ||
+			application.serverId;
 		const applicationEntity = {
 			...application,
 			serverId: buildServerId,
@@ -839,13 +907,28 @@ export const rebuildPreviewApplication = async ({
 			});
 		}
 		command += await getBuildCommand(application);
+		// >>> build-policy hook 2/4 (preview rebuild)
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: previewDeployment.appName,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 2/4 (preview rebuild)
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (buildServerId) {
 			await execAsyncRemote(buildServerId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
 		}
-		await mechanizeDockerContainer(application);
+		// >>> build-policy hook 3/4 (preview rebuild)
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 3/4 (preview rebuild)
+		// build-policy hook 4/4 (preview rebuild)
+		await mechanizeDockerContainer(deployTarget);
 
 		await writePreviewComment("success");
 		await updateDeploymentStatus(deployment.deploymentId, "done");
