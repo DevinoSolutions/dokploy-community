@@ -259,15 +259,22 @@ the six build types are exactly upstream's.
 
 ### `packages/server/src/services/compose.ts`
 
-One call to `waitForComposeRequiredChecks` inside `runComposeBuild`, between the
-clone/patches steps and the build step, and ahead of the `down --volumes` step
-so a refused check never leaves the stack torn down. `runComposeBuild` already
-ran its deploy as discrete `runStep` calls, so this is a single inserted line
-rather than a restructure. Plus one import block, marked `Fork module`.
+Two calls to `waitForComposeRequiredChecks`, one per compose deploy pipeline:
 
-**Merge note:** if upstream reorders the steps in `runComposeBuild`, the call
-must stay after the clone (so the sha is the one being deployed) and before the
-build.
+- in `runComposeBuild`, between the clone/patches steps and the build step, and
+  ahead of the `down --volumes` step so a refused check never leaves the stack
+  torn down. `runComposeBuild` already ran its deploy as discrete `runStep`
+  calls, so this is a single inserted line rather than a restructure.
+  `deployCompose` and both compose preview paths reach it.
+- in `rebuildCompose`, which has its own inlined pipeline, in the same position
+  relative to the patches step, the teardown and the build.
+
+Plus one import block, marked `Fork module`.
+
+**Merge note:** if upstream reorders the steps in either function, the call must
+stay after the clone or the patches (so the sha is the one being deployed) and
+before the teardown and the build. If upstream adds a third compose deploy
+pipeline, it needs its own call: missing one is round-3 review finding H.
 
 ### `apps/dokploy/pages/api/deploy/github.ts`
 
@@ -559,7 +566,7 @@ dangerous direction.
 | Queue coalescing | **yes** | `buildPolicyDeployGate`, enqueue time |
 | `[skip deploy]` | **yes** | same gate |
 | Derived `watchPaths` | **yes** | same gate |
-| `requiredChecks` | **yes** | `compose-checks.ts`, between the clone and the build |
+| `requiredChecks` | **yes**, on deploy, redeploy and previews | `compose-checks.ts`, called from `runComposeBuild` and from `rebuildCompose`, between the clone and the build |
 | Exclusions | **no** | nothing to exclude from |
 | Break-glass | **no** | no relocated build to grant an escape from |
 | Relocated build, push by sha, deploy by digest | **no** | the Known gap above |
@@ -581,6 +588,15 @@ carries the same default-off shape as everything else here (an empty list reads
 nothing; a non-empty one costs the cached enforcement boolean first) and the
 same API-boundary validation as an application (see "What a unit needs before it
 can be check-gated").
+
+**Every compose deploy path must call it, and there are two.** `deployCompose`
+and both compose preview paths go through `runComposeBuild`; `rebuildCompose`
+— the Redeploy button — has its own inlined pipeline and needs its own call.
+Round-3 review finding H was exactly that call missing, and it was worse than a
+stale table row: `runComposeBuild` clones *before* it gates, so a refused deploy
+leaves the unchecked commit in the code directory, and an ungated Redeploy would
+build precisely the commit the gate had just rejected. If a third compose deploy
+path is ever added, it needs the call too.
 
 ---
 
@@ -604,6 +620,7 @@ can be check-gated").
 | `required-checks-before-build.test.ts` | that the checks gate is policy-gated, runs before the build on the freshly cloned sha, and is a no-op that executes nothing while the policy is off |
 | `gate-audit-and-registry.test.ts` | that a derived watch-path skip is audited, and that the deploy-hook allowlist follows the registry an enforced build publishes to |
 | `hook-body-before-coalescing.test.ts` | that a refused deploy-hook body never coalesces the unit's queue |
+| `compose-redeploy-gate.test.ts` | that the Redeploy button is check-gated too, so a commit the push gate refused cannot be shipped from the code directory it left behind |
 | `compose-required-checks.test.ts` | that a compose unit's required checks are honoured, that the gate is default-off, and that it never consults exclusions or break-glass |
 | `gitlab-route-gate.test.ts` | that the GitLab push webhook consults the gate for both unit types, and reads `[skip deploy]` from the commit rather than the job title |
 | `deploy-path.integration.test.ts` | the real deploy path end to end, with docker, ssh and git mocked |

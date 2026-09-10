@@ -93,7 +93,8 @@ export const decideBuildPolicy = (
 	//
 	// - it DOES get queue coalescing, `[skip deploy]` and derived `watchPaths`
 	//   (all at enqueue time, in `buildPolicyDeployGate`), and `requiredChecks`
-	//   (in `compose-checks.ts`, between the clone and the build);
+	//   (in `compose-checks.ts`, between the clone and the build, on the deploy
+	//   path, the redeploy path and both preview paths);
 	// - it does NOT get exclusions or break-glass, and cannot: both decide where
 	//   a unit builds, and this early return means a compose unit is never
 	//   enforced, so there is nothing to exclude it from. The router refuses a

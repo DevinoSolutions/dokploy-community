@@ -520,6 +520,22 @@ export const rebuildCompose = async ({
 			}
 		}
 
+		// >>> build-policy hook (compose rebuild): the same required-checks gate
+		// `runComposeBuild` applies, in the same position — after the patches
+		// step, ahead of the `down --volumes` step and the build.
+		//
+		// A redeploy re-uses whatever is already in the code directory, and
+		// `runComposeBuild` clones *before* it gates, so a refused deploy leaves
+		// the unchecked commit on disk. Without this call, Redeploy would build
+		// exactly the commit the gate had just rejected. `rebuildApplication`
+		// never had that hole; this is compose catching up. Round-3 review
+		// finding H.
+		await waitForComposeRequiredChecks({
+			compose,
+			serverId: compose.serverId,
+		});
+		// <<< build-policy hook (compose rebuild)
+
 		if (freshVolumes && compose.composeType === "docker-compose") {
 			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
 			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;

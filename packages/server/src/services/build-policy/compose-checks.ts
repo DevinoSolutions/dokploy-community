@@ -26,10 +26,22 @@ import {
  * This deliberately does **not** consult exclusions or break-glass, for the
  * same reason: an exclusion must not silently disable a team's CI gate.
  *
- * Call site: `runComposeBuild`, between the clone/patches steps and the build
- * step, which is the compose equivalent of the application path's hook 2a/4. It
- * runs on the commit the clone just fetched, so a check that fails or never
- * arrives costs no build.
+ * **Two call sites, and both are needed.**
+ *
+ * - `runComposeBuild`, between the clone/patches steps and the build step,
+ *   which is the compose equivalent of the application path's hook 2a/4. It
+ *   runs on the commit the clone just fetched, so a check that fails or never
+ *   arrives costs no build. `deployCompose` and both compose preview paths go
+ *   through here.
+ * - `rebuildCompose`, in the same position in its own inlined pipeline. This is
+ *   the Redeploy button, and leaving it out was round-3 review finding H. A
+ *   redeploy re-uses whatever is in the code directory, and `runComposeBuild`
+ *   clones *before* it gates, so a refused deploy leaves the unchecked commit
+ *   sitting on disk — Redeploy would then build precisely the commit the gate
+ *   had just rejected, with no check and no audit row.
+ *
+ * If a new compose deploy path is ever added, it needs this call too. The
+ * application side has the same rule for `runBuildPolicyPreBuildGate`.
  *
  * **Default-off**, in the same shape as every other touch point: an empty list
  * (every existing row, since the column is nullable with no default) reads
