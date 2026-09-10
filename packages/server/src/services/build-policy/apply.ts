@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { posix } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { getSafeRegistryLoginCommand } from "@dokploy/server/db/schema";
 import { getECRAuthToken } from "@dokploy/server/utils/aws/ecr";
@@ -163,7 +163,9 @@ export const getBuildPolicyPushCommand = async (
 	});
 
 	const { APPLICATIONS_PATH } = paths(!!serverId);
-	const codeDir = join(APPLICATIONS_PATH, appName, "code");
+	// posix.join: the shell always runs on the Linux build host, so the path
+	// must use forward slashes even when Dokploy itself runs on Windows.
+	const codeDir = posix.join(APPLICATIONS_PATH, appName, "code");
 	const repository = plan.repository;
 
 	return `
