@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
 import { BuildPolicyError } from "@dokploy/server/services/build-policy/errors";
 import {
 	evaluateRequiredChecks,
 	waitForRequiredChecks,
 } from "@dokploy/server/services/build-policy/required-checks";
+import { describe, expect, it, vi } from "vitest";
 
 const run = (
 	name: string,
@@ -56,7 +56,10 @@ describe("evaluateRequiredChecks", () => {
 		"fails on a %s conclusion",
 		(conclusion) => {
 			expect(
-				evaluateRequiredChecks(["build"], [run("build", "completed", conclusion)]),
+				evaluateRequiredChecks(
+					["build"],
+					[run("build", "completed", conclusion)],
+				),
 			).toEqual({ state: "failed", failed: ["build"] });
 		},
 	);
@@ -150,7 +153,12 @@ describe("waitForRequiredChecks", () => {
 			.fn()
 			.mockResolvedValue([run("build", "completed", "failure")]);
 		await expect(
-			waitForRequiredChecks({ ...base, listCheckRuns, sleep: vi.fn(), now: () => 0 }),
+			waitForRequiredChecks({
+				...base,
+				listCheckRuns,
+				sleep: vi.fn(),
+				now: () => 0,
+			}),
 		).rejects.toThrow(/build/);
 	});
 
@@ -192,7 +200,12 @@ describe("waitForRequiredChecks", () => {
 			.fn()
 			.mockResolvedValue([run("build", "completed", "failure")]);
 		await expect(
-			waitForRequiredChecks({ ...base, listCheckRuns, sleep: vi.fn(), now: () => 0 }),
+			waitForRequiredChecks({
+				...base,
+				listCheckRuns,
+				sleep: vi.fn(),
+				now: () => 0,
+			}),
 		).rejects.toBeInstanceOf(BuildPolicyError);
 	});
 });

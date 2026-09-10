@@ -72,10 +72,7 @@ export const removeBuildPolicyExclusion = async ({
 		.where(
 			and(
 				eq(buildPolicyExclusion.organizationId, organizationId),
-				eq(
-					buildPolicyExclusion.buildPolicyExclusionId,
-					buildPolicyExclusionId,
-				),
+				eq(buildPolicyExclusion.buildPolicyExclusionId, buildPolicyExclusionId),
 			),
 		)
 		.returning();

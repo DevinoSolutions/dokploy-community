@@ -27,7 +27,7 @@ export const imageTagForSha = (appName: string, sha?: string | null): string =>
 	`${appName}:${sha && sha.length > 0 ? sha : SHA_PLACEHOLDER}`;
 
 /** Split a reference into its repository part and its tag, if any. */
-const splitRepositoryAndTag = (
+export const splitRepositoryAndTag = (
 	reference: string,
 ): { repository: string; tag: string | null } => {
 	const lastSlash = reference.lastIndexOf("/");
@@ -41,6 +41,10 @@ const splitRepositoryAndTag = (
 	}
 	return { repository: reference, tag: null };
 };
+
+/** The repository part of a reference: no tag, no digest. */
+export const repositoryOf = (reference: string): string =>
+	splitRepositoryAndTag(reference.split("@")[0] ?? reference).repository;
 
 export const registryHostOf = (reference: string): string | null => {
 	const firstSlash = reference.indexOf("/");

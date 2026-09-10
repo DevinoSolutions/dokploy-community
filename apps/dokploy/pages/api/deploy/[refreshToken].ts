@@ -14,7 +14,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { applications } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
-	cleanQueuesByApplication,
+	coalesceQueuedApplicationDeploys,
 	myQueue,
 } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
@@ -307,14 +307,20 @@ export default async function handler(
 				dockerContextPath: application.dockerContextPath,
 			},
 			commitMessage: deploymentTitle,
-			removeWaiting: () => cleanQueuesByApplication(application.applicationId),
+			removeWaiting: () =>
+				coalesceQueuedApplicationDeploys(application.applicationId),
 		});
 		if (!gate.deploy) {
 			res.status(301).json({ message: gate.message });
 			return;
 		}
 		const hookImage = await resolveDeployHookImage(
-			application.environment.project.organizationId,
+			{
+				organizationId: application.environment.project.organizationId,
+				appName: application.appName,
+				registryId: application.registryId,
+				buildRegistryId: application.buildRegistryId,
+			},
 			req.body,
 		);
 		if (!hookImage.ok) {

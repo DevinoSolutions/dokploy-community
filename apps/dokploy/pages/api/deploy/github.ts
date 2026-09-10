@@ -23,8 +23,8 @@ import type { DeploymentJob } from "@/server/queues/queue-types";
 // >>> build-policy hook: enqueue-time gate (skip marker, derived watchPaths,
 // queue coalescing). See packages/server/src/services/build-policy/README.md
 import {
-	cleanQueuesByApplication,
-	cleanQueuesByCompose,
+	coalesceQueuedApplicationDeploys,
+	coalesceQueuedComposeDeploys,
 	myQueue,
 } from "@/server/queues/queueSetup";
 // <<< build-policy hook
@@ -306,7 +306,8 @@ export default async function handler(
 					},
 					changedFiles: normalizedCommits,
 					commitMessage: deploymentTitle,
-					removeWaiting: () => cleanQueuesByApplication(app.applicationId),
+					removeWaiting: () =>
+						coalesceQueuedApplicationDeploys(app.applicationId),
 				});
 				if (!gate.deploy) continue;
 				// <<< build-policy hook
@@ -371,7 +372,8 @@ export default async function handler(
 					},
 					changedFiles: normalizedCommits,
 					commitMessage: deploymentTitle,
-					removeWaiting: () => cleanQueuesByCompose(composeApp.composeId),
+					removeWaiting: () =>
+						coalesceQueuedComposeDeploys(composeApp.composeId),
 				});
 				if (!composeGate.deploy) continue;
 				// <<< build-policy hook

@@ -1,15 +1,15 @@
-import { describe, expect, it } from "vitest";
 import { BuildPolicyError } from "@dokploy/server/services/build-policy/errors";
+import { parseDeployHookImage } from "@dokploy/server/services/build-policy/hook-body";
 import {
-	DIGEST_MARKER,
-	SHA_PLACEHOLDER,
 	buildDigestRef,
+	DIGEST_MARKER,
 	imageTagForSha,
 	parseImageDigestFromLog,
 	parseImageTagFromLog,
 	registryHostOf,
+	SHA_PLACEHOLDER,
 } from "@dokploy/server/services/build-policy/image";
-import { parseDeployHookImage } from "@dokploy/server/services/build-policy/hook-body";
+import { describe, expect, it } from "vitest";
 
 describe("imageTagForSha", () => {
 	it("tags <app>:<sha>", () => {
@@ -24,7 +24,10 @@ describe("imageTagForSha", () => {
 describe("buildDigestRef", () => {
 	it("drops the tag and pins the digest", () => {
 		expect(
-			buildDigestRef("ghcr.io/devino/sendly-web:abc123", `sha256:${"a".repeat(64)}`),
+			buildDigestRef(
+				"ghcr.io/devino/sendly-web:abc123",
+				`sha256:${"a".repeat(64)}`,
+			),
 		).toBe(`ghcr.io/devino/sendly-web@sha256:${"a".repeat(64)}`);
 	});
 
@@ -117,7 +120,13 @@ describe("parseImageDigestFromLog", () => {
 
 describe("parseDeployHookImage", () => {
 	const digest = `sha256:${"f".repeat(64)}`;
-	const allowed = ["ghcr.io", "registry.devino.ca"];
+	// The unit's OWN repositories, not merely hosts the organization owns.
+	// Finding 4 of the PR #209 review: a host allowlist would let any deploy-hook
+	// token run any image that happens to sit on ghcr.io.
+	const allowed = [
+		"ghcr.io/devino/sendly-web",
+		"registry.devino.ca/devino/sendly-web",
+	];
 
 	it("returns none for an empty body", () => {
 		expect(parseDeployHookImage(undefined, allowed)).toEqual({ kind: "none" });
@@ -125,7 +134,7 @@ describe("parseDeployHookImage", () => {
 		expect(parseDeployHookImage("", allowed)).toEqual({ kind: "none" });
 	});
 
-	it("accepts an image on an allowed registry and pins the digest", () => {
+	it("accepts an image that is the unit's own repository and pins the digest", () => {
 		expect(
 			parseDeployHookImage(
 				{ image: "ghcr.io/devino/sendly-web", tag: "abc123", digest },
@@ -170,6 +179,26 @@ describe("parseDeployHookImage", () => {
 		).toThrow(/registry/i);
 	});
 
+	it("rejects a foreign repository on the unit's own registry host", () => {
+		// Same host as the unit's own repository, different repository path.
+		// A host-only allowlist accepted this; the unit-repository check must not.
+		expect(() =>
+			parseDeployHookImage(
+				{ image: "ghcr.io/someone-else/backdoor", tag: "1", digest },
+				allowed,
+			),
+		).toThrow(/repository/i);
+	});
+
+	it("rejects a repository that merely starts with the unit's own name", () => {
+		expect(() =>
+			parseDeployHookImage(
+				{ image: "ghcr.io/devino/sendly-web-evil", tag: "1", digest },
+				allowed,
+			),
+		).toThrow(/repository/i);
+	});
+
 	it("rejects a body with an image but no digest, because deploys are by digest", () => {
 		expect(() =>
 			parseDeployHookImage(
@@ -189,9 +218,9 @@ describe("parseDeployHookImage", () => {
 	});
 
 	it("rejects an image that is not a string", () => {
-		expect(() =>
-			parseDeployHookImage({ image: 42, digest }, allowed),
-		).toThrow(BuildPolicyError);
+		expect(() => parseDeployHookImage({ image: 42, digest }, allowed)).toThrow(
+			BuildPolicyError,
+		);
 	});
 
 	it("rejects shell metacharacters in the image reference", () => {
@@ -203,12 +232,12 @@ describe("parseDeployHookImage", () => {
 		).toThrow(BuildPolicyError);
 	});
 
-	it("returns none when the org configured no registries, rather than trusting the caller", () => {
+	it("rejects every image when the unit has no repository to compare against", () => {
 		expect(() =>
 			parseDeployHookImage(
 				{ image: "ghcr.io/devino/sendly-web", tag: "a", digest },
 				[],
 			),
-		).toThrow(/registry/i);
+		).toThrow(/repository/i);
 	});
 });

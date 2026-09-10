@@ -23,9 +23,7 @@ const extractHost = (rawUrl: string): string | null => {
 	}
 };
 
-export const isGithubHostUrl = (
-	url: string | null | undefined,
-): boolean => {
+export const isGithubHostUrl = (url: string | null | undefined): boolean => {
 	if (typeof url !== "string") return false;
 	const host = extractHost(url);
 	return host !== null && GITHUB_HOSTS.has(host);

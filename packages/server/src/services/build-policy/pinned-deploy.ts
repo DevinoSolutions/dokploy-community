@@ -10,16 +10,13 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { getDokployUrl } from "../admin";
-import {
-	findApplicationById,
-	updateApplicationStatus,
-} from "../application";
-import { findAllRegistryByOrganizationId } from "../registry";
+import { findApplicationById, updateApplicationStatus } from "../application";
 import {
 	createDeployment,
 	updateDeployment,
 	updateDeploymentStatus,
 } from "../deployment";
+import { findAllRegistryByOrganizationId } from "../registry";
 import { registryForAuth } from "./apply";
 import { recordBuildPolicyAudit } from "./audit";
 import { waitForUnitRequiredChecks } from "./github-checks";
@@ -66,7 +63,7 @@ export const deployPinnedApplicationImage = async ({
 
 	try {
 		await log(
-			`📦 [build-policy] Deploy hook supplied an image; skipping the build.\n` +
+			"📦 [build-policy] Deploy hook supplied an image; skipping the build.\n" +
 				`   image:  ${pinnedImage.tag ?? pinnedImage.ref}\n` +
 				`   digest: ${pinnedImage.digest}\n`,
 		);

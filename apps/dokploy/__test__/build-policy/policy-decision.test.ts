@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
 import {
-	decideBuildPolicy,
 	type BuildPolicyDecisionInput,
+	decideBuildPolicy,
 } from "@dokploy/server/services/build-policy/policy";
+import { describe, expect, it } from "vitest";
 
 const settings = (overrides: Record<string, unknown> = {}) => ({
 	enforceRemoteBuilds: true,

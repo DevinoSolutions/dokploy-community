@@ -65,7 +65,10 @@ export const listBuildPolicyAudit = async ({
 			offset,
 			with: { application: true, compose: true },
 		}),
-		db.$count(buildPolicyAudit, eq(buildPolicyAudit.organizationId, organizationId)),
+		db.$count(
+			buildPolicyAudit,
+			eq(buildPolicyAudit.organizationId, organizationId),
+		),
 	]);
 	return { logs: rows, total };
 };

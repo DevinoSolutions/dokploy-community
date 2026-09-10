@@ -37,9 +37,11 @@ import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 // Fork module: enforced remote builds. See services/build-policy/README.md.
 import {
+	type BuildPolicyPlan,
 	getBuildPolicyPushCommand,
 	planApplicationBuild,
 	prepareBuildPolicyDeploy,
+	reportBuildPolicyPlanFailure,
 	toBuildPolicyUnit,
 } from "./build-policy/apply";
 import {
@@ -198,9 +200,23 @@ export const deployApplication = async ({
 	descriptionLog: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-	// >>> build-policy hook 1/4: enforced remote builds.
+	// >>> build-policy hook 1/4: enforced remote builds. Runs before
+	// `createDeployment` because the deployment log has to be created on the
+	// host that will build. A refusal still produces a deployment row, an error
+	// status and a build-failure notification before it is rethrown.
 	// See packages/server/src/services/build-policy/README.md
-	const buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	let buildPolicy: BuildPolicyPlan;
+	try {
+		buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	} catch (error) {
+		await reportBuildPolicyPlanFailure({
+			application,
+			titleLog,
+			descriptionLog,
+			error,
+		});
+		throw error;
+	}
 	const serverId =
 		buildPolicy.buildServerId ||
 		application.buildServerId ||
@@ -212,11 +228,15 @@ export const deployApplication = async ({
 	};
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
-	const deployment = await createDeployment({
-		applicationId: applicationId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeployment(
+		{
+			applicationId: applicationId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		// build-policy hook: create the log on the host that will build.
+		{ buildServerId: buildPolicy.buildServerId },
+	);
 
 	try {
 		let command = "set -e;";
@@ -387,7 +407,18 @@ export const rebuildApplication = async ({
 }) => {
 	const application = await findApplicationById(applicationId);
 	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
-	const buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	let buildPolicy: BuildPolicyPlan;
+	try {
+		buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	} catch (error) {
+		await reportBuildPolicyPlanFailure({
+			application,
+			titleLog,
+			descriptionLog,
+			error,
+		});
+		throw error;
+	}
 	const serverId =
 		buildPolicy.buildServerId ||
 		application.buildServerId ||
@@ -395,11 +426,15 @@ export const rebuildApplication = async ({
 	// <<< build-policy hook 1/4
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 
-	const deployment = await createDeployment({
-		applicationId: applicationId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeployment(
+		{
+			applicationId: applicationId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		// build-policy hook: create the log on the host that will build.
+		{ buildServerId: buildPolicy.buildServerId },
+	);
 
 	try {
 		let command = "set -e;";

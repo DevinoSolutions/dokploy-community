@@ -77,9 +77,11 @@ export const ShowRequiredChecks = ({ applicationId }: Props) => {
 					<div>
 						<CardTitle className="text-xl">Required Checks</CardTitle>
 						<CardDescription>
-							An empty list leaves the deploy ungated. With one or more check
-							names, the deploy waits for those GitHub check runs on the commit
-							to succeed before it continues.
+							An empty list leaves the deploy ungated. With one or more names,
+							the deploy waits for those GitHub check runs on the commit to
+							succeed before it continues. Legacy commit-status contexts are
+							accepted too, so either a check-run name or a status context works
+							here.
 						</CardDescription>
 					</div>
 				</div>

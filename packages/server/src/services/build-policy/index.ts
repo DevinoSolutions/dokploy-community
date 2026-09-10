@@ -6,6 +6,7 @@ export * from "./exclusions";
 export * from "./github-checks";
 export * from "./hook-body";
 export * from "./image";
+export * from "./ownership";
 export * from "./pinned-deploy";
 export * from "./policy";
 export * from "./required-checks";

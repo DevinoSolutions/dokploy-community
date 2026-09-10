@@ -1,13 +1,13 @@
-import { describe, expect, it } from "vitest";
+import {
+	hasSkipDeployMarker,
+	SKIP_DEPLOY_MARKERS,
+} from "@dokploy/server/services/build-policy/skip-deploy";
 import {
 	isGithubHostUrl,
 	isGithubSourcedUnit,
 } from "@dokploy/server/services/build-policy/source";
-import {
-	SKIP_DEPLOY_MARKERS,
-	hasSkipDeployMarker,
-} from "@dokploy/server/services/build-policy/skip-deploy";
 import { deriveDefaultWatchPaths } from "@dokploy/server/services/build-policy/watch-paths";
+import { describe, expect, it } from "vitest";
 
 describe("isGithubHostUrl", () => {
 	it.each([
@@ -90,9 +90,9 @@ describe("hasSkipDeployMarker", () => {
 	});
 
 	it("does not match a plain mention of deploying", () => {
-		expect(hasSkipDeployMarker("fix: skip deploy when the queue is empty")).toBe(
-			false,
-		);
+		expect(
+			hasSkipDeployMarker("fix: skip deploy when the queue is empty"),
+		).toBe(false);
 	});
 
 	it("does not match the unrelated [skip ci] marker", () => {

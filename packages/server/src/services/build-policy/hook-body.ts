@@ -4,6 +4,8 @@ import {
 	buildDigestRef,
 	isValidDigest,
 	registryHostOf,
+	repositoryOf,
+	splitRepositoryAndTag,
 } from "./image";
 
 /**
@@ -30,7 +32,14 @@ const asRecord = (body: unknown): Record<string, unknown> | null =>
 
 export const parseDeployHookImage = (
 	body: unknown,
-	allowedRegistryHosts: string[],
+	/**
+	 * Fully qualified repositories this unit may deploy, e.g.
+	 * `ghcr.io/devinosolutions/sendly-web`. A host allowlist is not enough: it
+	 * would let any deploy-hook token run any image on a registry the
+	 * organization owns. Spec 5.2.9 restricts the body to the unit's own
+	 * configured registry.
+	 */
+	allowedRepositories: string[],
 ): DeployHookImage => {
 	const record = asRecord(body);
 	if (!record) return { kind: "none" };
@@ -62,25 +71,23 @@ export const parseDeployHookImage = (
 		throw new BuildPolicyError(
 			"REGISTRY_NOT_ALLOWED",
 			`Deploy hook image "${reference}" has no registry host. It must be fully ` +
-				"qualified and point at a registry configured on this organization.",
+				"qualified and name this unit's own repository.",
 		);
 	}
-	if (!allowedRegistryHosts.includes(host)) {
+
+	const repository = repositoryOf(reference);
+	if (!allowedRepositories.includes(repository)) {
 		throw new BuildPolicyError(
 			"REGISTRY_NOT_ALLOWED",
-			`Deploy hook image "${reference}" is on registry "${host}", which is not ` +
-				"configured on this organization.",
-			{ host, allowedRegistryHosts },
+			`Deploy hook image "${reference}" resolves to repository "${repository}", ` +
+				`which is not this unit's own repository (${allowedRepositories.join(", ") || "none configured"}).`,
+			{ repository, allowedRepositories },
 		);
 	}
 
 	const explicitTag =
 		typeof tag === "string" && tag.trim().length > 0 ? tag.trim() : null;
-	const embeddedTag = (() => {
-		const lastSlash = reference.lastIndexOf("/");
-		const lastColon = reference.lastIndexOf(":");
-		return lastColon > lastSlash ? reference.slice(lastColon + 1) : null;
-	})();
+	const embeddedTag = splitRepositoryAndTag(reference).tag;
 
 	return {
 		kind: "image",

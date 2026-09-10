@@ -1,9 +1,9 @@
 import {
 	deployApplication,
-	// build-policy hook: see the pinnedImage branch below.
-	deployPinnedApplicationImage,
 	deployCompose,
 	deployComposePreview,
+	// build-policy hook: see the pinnedImage branch below.
+	deployPinnedApplicationImage,
 	deployPreviewApplication,
 	rebuildApplication,
 	rebuildCompose,

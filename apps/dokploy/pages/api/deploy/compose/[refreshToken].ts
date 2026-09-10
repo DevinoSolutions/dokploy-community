@@ -1,10 +1,9 @@
 import {
 	// build-policy hook: enqueue-time gate and deploy-hook image body.
 	buildPolicyDeployGate,
-	findUnitOrganizationId,
+	deployHookBodyHasImage,
 	IS_CLOUD,
 	normalizeChangedFilesFromCommits,
-	resolveDeployHookImage,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -12,7 +11,10 @@ import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { compose } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { cleanQueuesByCompose, myQueue } from "@/server/queues/queueSetup";
+import {
+	coalesceQueuedComposeDeploys,
+	myQueue,
+} from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import {
 	handleGiteaComposePullRequestEvent,
@@ -246,21 +248,17 @@ export default async function handler(
 				composePath: composeResult.composePath,
 			},
 			commitMessage: deploymentTitle,
-			removeWaiting: () => cleanQueuesByCompose(composeResult.composeId),
+			removeWaiting: () =>
+				coalesceQueuedComposeDeploys(composeResult.composeId),
 		});
 		if (!gate.deploy) {
 			res.status(301).json({ message: gate.message });
 			return;
 		}
-		const hookImage = await resolveDeployHookImage(
-			await findUnitOrganizationId(composeResult.environmentId),
-			req.body,
-		);
-		if (!hookImage.ok || hookImage.pinnedImage) {
+		if (deployHookBodyHasImage(req.body)) {
 			res.status(400).json({
-				message: hookImage.ok
-					? "Deploying a supplied image by digest is not supported for compose units."
-					: hookImage.message,
+				message:
+					"Deploying a supplied image by digest is not supported for compose units.",
 			});
 			return;
 		}

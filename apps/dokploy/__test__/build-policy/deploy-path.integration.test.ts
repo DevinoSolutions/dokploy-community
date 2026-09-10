@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
 	listCheckRuns: vi.fn(),
 	environmentsFindFirst: vi.fn(),
 	applicationsFindFirst: vi.fn(),
+	buildPolicySettingsFindFirst: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => {
@@ -34,6 +35,7 @@ vi.mock("@dokploy/server/db", () => {
 			from: vi.fn(() => self),
 			innerJoin: vi.fn(() => self),
 			returning: vi.fn().mockResolvedValue([{}]),
+			// biome-ignore lint/suspicious/noThenProperty: drizzle's query builder is itself a thenable, so the fake standing in for it must be one too
 			then: (resolve: (value: unknown) => void) => resolve([]),
 		};
 		return self;
@@ -50,6 +52,9 @@ vi.mock("@dokploy/server/db", () => {
 				patch: { findMany: vi.fn().mockResolvedValue([]) },
 				member: { findMany: vi.fn().mockResolvedValue([]) },
 				environments: { findFirst: mocks.environmentsFindFirst },
+				buildPolicySettings: {
+					findFirst: mocks.buildPolicySettingsFindFirst,
+				},
 			},
 		},
 	};
@@ -169,11 +174,13 @@ import {
 } from "@dokploy/server/services/application";
 import { DIGEST_MARKER } from "@dokploy/server/services/build-policy/image";
 import { deployPinnedApplicationImage } from "@dokploy/server/services/build-policy/pinned-deploy";
+import { clearBuildPolicyEnforcementCache } from "@dokploy/server/services/build-policy/settings";
 import { buildPolicyDeployGate } from "@dokploy/server/services/build-policy/webhook";
 import * as deploymentService from "@dokploy/server/services/deployment";
 import * as registryService from "@dokploy/server/services/registry";
 import * as builders from "@dokploy/server/utils/builders";
 import * as dockerUtils from "@dokploy/server/utils/docker/utils";
+import * as buildErrorNotifications from "@dokploy/server/utils/notifications/build-error";
 import * as execProcess from "@dokploy/server/utils/process/execAsync";
 import * as gitProvider from "@dokploy/server/utils/providers/git";
 
@@ -315,6 +322,10 @@ const primeMocks = (app: Record<string, unknown> = APPLICATION()) => {
 		environmentId: "env-1",
 		project: { organizationId: "org-1" },
 	});
+	// The cheap "does anybody enforce at all" probe the gate makes first.
+	mocks.buildPolicySettingsFindFirst.mockResolvedValue({
+		buildPolicySettingsId: "bps-1",
+	});
 };
 
 /** The shell that was handed to the build host. */
@@ -339,6 +350,7 @@ const deployedApplication = () =>
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	clearBuildPolicyEnforcementCache();
 	primeMocks();
 });
 
@@ -613,6 +625,80 @@ describe("no silent local fallback", () => {
 		).rejects.toMatchObject({ code: "NO_REGISTRY" });
 	});
 
+	/**
+	 * Finding 3 of the PR #209 review: the plan used to throw before
+	 * `createDeployment`, so a refused deploy left no deployment row, no error
+	 * status and no notification — the team saw nothing at all.
+	 */
+	it("still records a deployment for the refused deploy", async () => {
+		mocks.findBuildPolicySettings.mockResolvedValue(
+			SETTINGS({ defaultBuildServerId: null }),
+		);
+		await deployApplication({
+			applicationId: "app-1",
+			titleLog: "Manual deployment",
+			descriptionLog: "",
+		}).catch(() => {});
+		expect(deploymentService.createDeployment).toHaveBeenCalledWith(
+			expect.objectContaining({
+				applicationId: "app-1",
+				title: "Manual deployment",
+			}),
+		);
+	});
+
+	it("marks that deployment as errored", async () => {
+		mocks.findBuildPolicySettings.mockResolvedValue(
+			SETTINGS({ defaultBuildServerId: null }),
+		);
+		await deployApplication({
+			applicationId: "app-1",
+			titleLog: "t",
+			descriptionLog: "",
+		}).catch(() => {});
+		expect(deploymentService.updateDeploymentStatus).toHaveBeenCalledWith(
+			"deployment-1",
+			"error",
+		);
+	});
+
+	it("sends exactly one build-error notification naming the reason", async () => {
+		mocks.findBuildPolicySettings.mockResolvedValue(
+			SETTINGS({ defaultBuildServerId: null }),
+		);
+		await deployApplication({
+			applicationId: "app-1",
+			titleLog: "t",
+			descriptionLog: "",
+		}).catch(() => {});
+		const send = vi.mocked(buildErrorNotifications.sendBuildErrorNotifications);
+		expect(send).toHaveBeenCalledTimes(1);
+		expect(send.mock.calls[0]?.[0]).toMatchObject({
+			applicationType: "application",
+			organizationId: "org-1",
+		});
+		expect(String(send.mock.calls[0]?.[0]?.errorMessage)).toMatch(
+			/build server/i,
+		);
+	});
+
+	it("writes the reason into the deployment log", async () => {
+		mocks.findBuildPolicySettings.mockResolvedValue(
+			SETTINGS({ defaultRegistryId: null }),
+		);
+		await deployApplication({
+			applicationId: "app-1",
+			titleLog: "t",
+			descriptionLog: "",
+		}).catch(() => {});
+		const wrote = vi
+			.mocked(execProcess.execAsyncRemote)
+			.mock.calls.some(([, command]) =>
+				String(command).includes("/var/log/deployment-1.log"),
+			);
+		expect(wrote).toBe(true);
+	});
+
 	it("audits the refusal so the reason is recoverable", async () => {
 		mocks.findBuildPolicySettings.mockResolvedValue(
 			SETTINGS({ defaultBuildServerId: null }),
@@ -717,7 +803,10 @@ describe("required checks", () => {
 
 	it("audits a failed gate", async () => {
 		mocks.listCheckRuns.mockResolvedValue({
-			data: { data: [], check_runs: [checkRun("build", "completed", "failure")] },
+			data: {
+				data: [],
+				check_runs: [checkRun("build", "completed", "failure")],
+			},
 		});
 		await deployApplication({
 			applicationId: "app-1",
@@ -774,7 +863,11 @@ describe("deploy-hook body with an image", () => {
 	it("still honours required checks", async () => {
 		primeMocks(APPLICATION({ requiredChecks: ["build"] }));
 		mocks.listCheckRuns.mockResolvedValue({
-			data: { check_runs: [{ name: "build", status: "completed", conclusion: "failure" }] },
+			data: {
+				check_runs: [
+					{ name: "build", status: "completed", conclusion: "failure" },
+				],
+			},
 		});
 		await expect(
 			deployPinnedApplicationImage({

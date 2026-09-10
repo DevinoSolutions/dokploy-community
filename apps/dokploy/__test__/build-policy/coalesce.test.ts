@@ -1,5 +1,8 @@
+import {
+	coalesceQueuedDeploy,
+	isCoalescableDeployJob,
+} from "@dokploy/server/services/build-policy/coalesce";
 import { describe, expect, it, vi } from "vitest";
-import { coalesceQueuedDeploy } from "@dokploy/server/services/build-policy/coalesce";
 
 describe("coalesceQueuedDeploy", () => {
 	const base = {
@@ -28,7 +31,10 @@ describe("coalesceQueuedDeploy", () => {
 				action: "deploy_coalesced",
 				applicationId: "app-1",
 				composeId: null,
-				metadata: expect.objectContaining({ removed: 1, unitName: "sendly-web" }),
+				metadata: expect.objectContaining({
+					removed: 1,
+					unitName: "sendly-web",
+				}),
 			}),
 		);
 	});
@@ -89,5 +95,127 @@ describe("coalesceQueuedDeploy", () => {
 		});
 		expect(result).toEqual({ removed: 0 });
 		expect(recordAudit).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * Finding 5 of the PR #209 review. Coalescing used the same predicate as the
+ * explicit "clean queues" action, which matches on `applicationId` alone, so a
+ * push to main silently cancelled the pull request preview that was waiting for
+ * the same application.
+ */
+describe("isCoalescableDeployJob", () => {
+	const push = {
+		applicationId: "app-1",
+		applicationType: "application",
+		titleLog: "Push to main",
+	};
+	const preview = {
+		applicationId: "app-1",
+		applicationType: "application-preview",
+		previewDeploymentId: "preview-1",
+		titleLog: "PR #42 preview",
+	};
+
+	it("drops the unit's own plain deploy", () => {
+		expect(isCoalescableDeployJob("application", "app-1", push)).toBe(true);
+	});
+
+	it("never drops a preview deployment of the same application", () => {
+		expect(isCoalescableDeployJob("application", "app-1", preview)).toBe(false);
+	});
+
+	it("never drops a plain deploy of a different application", () => {
+		expect(isCoalescableDeployJob("application", "app-2", push)).toBe(false);
+	});
+
+	it("never drops a compose job while coalescing an application", () => {
+		expect(
+			isCoalescableDeployJob("application", "app-1", {
+				composeId: "app-1",
+				applicationType: "compose",
+			}),
+		).toBe(false);
+	});
+
+	it("drops the unit's own compose deploy but not its compose preview", () => {
+		expect(
+			isCoalescableDeployJob("compose", "compose-1", {
+				composeId: "compose-1",
+				applicationType: "compose",
+			}),
+		).toBe(true);
+		expect(
+			isCoalescableDeployJob("compose", "compose-1", {
+				composeId: "compose-1",
+				applicationType: "compose-preview",
+				previewDeploymentId: "preview-9",
+			}),
+		).toBe(false);
+	});
+
+	it("tolerates a job payload that is not an object", () => {
+		expect(isCoalescableDeployJob("application", "app-1", null)).toBe(false);
+		expect(isCoalescableDeployJob("application", "app-1", "app-1")).toBe(false);
+	});
+});
+
+describe("coalescing a queue that also holds a preview", () => {
+	/** Stands in for the in-memory queue's `removeWaiting`. */
+	const fakeQueue = (jobs: Record<string, unknown>[]) => ({
+		jobs,
+		removeWaiting(predicate: (data: unknown) => boolean) {
+			const titles: string[] = [];
+			const kept = jobs.filter((job) => {
+				if (!predicate(job)) return true;
+				if (typeof job.titleLog === "string") titles.push(job.titleLog);
+				return false;
+			});
+			this.jobs = kept;
+			return { removed: jobs.length - kept.length, titles };
+		},
+	});
+
+	it("leaves the waiting preview in the queue and names the dropped deploys", async () => {
+		const queue = fakeQueue([
+			{
+				applicationId: "app-1",
+				applicationType: "application",
+				titleLog: "Push 1",
+			},
+			{
+				applicationId: "app-1",
+				applicationType: "application-preview",
+				previewDeploymentId: "preview-1",
+				titleLog: "PR #42 preview",
+			},
+			{
+				applicationId: "app-2",
+				applicationType: "application",
+				titleLog: "Other app",
+			},
+		]);
+		const recordAudit = vi.fn().mockResolvedValue(undefined);
+
+		const result = await coalesceQueuedDeploy({
+			unitType: "application",
+			unitId: "app-1",
+			unitName: "sendly-web",
+			organizationId: "org-1",
+			removeWaiting: () =>
+				queue.removeWaiting((data) =>
+					isCoalescableDeployJob("application", "app-1", data),
+				),
+			recordAudit,
+		});
+
+		expect(result).toEqual({ removed: 1 });
+		expect(queue.jobs.map((job) => job.titleLog)).toEqual([
+			"PR #42 preview",
+			"Other app",
+		]);
+		expect(recordAudit.mock.calls[0]?.[0].metadata.droppedTitles).toEqual([
+			"Push 1",
+		]);
 	});
 });

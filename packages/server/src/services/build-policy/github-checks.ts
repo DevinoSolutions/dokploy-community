@@ -3,10 +3,7 @@ import { findGithubById } from "../github";
 import { recordBuildPolicyAudit } from "./audit";
 import { BuildPolicyError } from "./errors";
 import type { BuildPolicyUnitType } from "./policy";
-import {
-	type CheckRunLike,
-	waitForRequiredChecks,
-} from "./required-checks";
+import { type CheckRunLike, waitForRequiredChecks } from "./required-checks";
 import { parseGithubOwnerRepo } from "./source";
 
 /**
@@ -20,6 +17,37 @@ const DEFAULT_POLL_INTERVAL_MS = 15_000;
 
 const sleep = (ms: number) =>
 	new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Legacy commit statuses (the statuses API) carry a `state` rather than the
+ * `status`/`conclusion` pair a check run has. A team that configures the name
+ * of a status *context* as a required check has to be able to pass the gate,
+ * so both sources are normalised into the same `CheckRunLike` shape.
+ */
+const COMMIT_STATUS_STATES: Record<
+	string,
+	{ status: string; conclusion: string | null }
+> = {
+	success: { status: "completed", conclusion: "success" },
+	failure: { status: "completed", conclusion: "failure" },
+	error: { status: "completed", conclusion: "failure" },
+	pending: { status: "in_progress", conclusion: null },
+};
+
+const toCheckRunLike = (status: {
+	context: string;
+	state: string;
+}): CheckRunLike => {
+	const mapped = COMMIT_STATUS_STATES[status.state] ?? {
+		status: "in_progress",
+		conclusion: null,
+	};
+	return {
+		name: status.context,
+		status: mapped.status,
+		conclusion: mapped.conclusion,
+	};
+};
 
 export interface RequiredChecksUnit {
 	unitType: BuildPolicyUnitType;
@@ -94,17 +122,55 @@ export const waitForUnitRequiredChecks = async ({
 			}
 			const provider = await findGithubById(unit.githubId);
 			const octokit = authGithub(provider);
-			const { data } = await octokit.rest.checks.listForRef({
-				owner,
-				repo,
-				ref: sha,
-				per_page: 100,
-			});
-			return (data.check_runs ?? []).map((run) => ({
-				name: run.name,
-				status: run.status,
-				conclusion: run.conclusion ?? null,
-			}));
+			// A legacy commit-status context is as valid a required-check name as
+			// a check run, so both sources are read, concurrently, and merged.
+			//
+			// The statuses endpoint returns newest-first while check runs come
+			// back oldest-first, and `evaluateRequiredChecks` keeps the LAST
+			// occurrence of a name as the newest. So the statuses are reversed
+			// and appended after the check runs.
+			const readCommitStatuses = async (): Promise<CheckRunLike[]> => {
+				try {
+					const { data } = await octokit.rest.repos.listCommitStatusesForRef({
+						owner,
+						repo,
+						ref: sha,
+						per_page: 100,
+					});
+					return [...(data ?? [])].reverse().map(toCheckRunLike);
+				} catch (error) {
+					// A token without the statuses scope must not stop the deploy;
+					// fall back to check runs alone. A failure of the check runs call
+					// itself is deliberately left to propagate, so the gate still
+					// fails closed when GitHub cannot be read at all.
+					console.error(
+						`[build-policy] could not read commit statuses for ${owner}/${repo}@${sha}, ` +
+							"falling back to check runs alone:",
+						error,
+					);
+					return [];
+				}
+			};
+
+			const [checkRuns, statusRuns] = await Promise.all([
+				octokit.rest.checks.listForRef({
+					owner,
+					repo,
+					ref: sha,
+					per_page: 100,
+				}),
+				readCommitStatuses(),
+			]);
+
+			const runs: CheckRunLike[] = (checkRuns.data.check_runs ?? []).map(
+				(run) => ({
+					name: run.name,
+					status: run.status,
+					conclusion: run.conclusion ?? null,
+				}),
+			);
+
+			return [...runs, ...statusRuns];
 		});
 
 	try {

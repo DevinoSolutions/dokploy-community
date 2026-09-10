@@ -25,5 +25,7 @@ export const matchedSkipDeployMarker = (
 ): string | null => {
 	if (typeof message !== "string" || message.length === 0) return null;
 	const haystack = message.toLowerCase();
-	return SKIP_DEPLOY_MARKERS.find((marker) => haystack.includes(marker)) ?? null;
+	return (
+		SKIP_DEPLOY_MARKERS.find((marker) => haystack.includes(marker)) ?? null
+	);
 };

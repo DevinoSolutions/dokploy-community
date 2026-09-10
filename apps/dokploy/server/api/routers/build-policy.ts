@@ -1,5 +1,6 @@
 import {
 	addBuildPolicyExclusion,
+	assertUnitInOrganization,
 	findBuildPolicySettings,
 	findRegistryById,
 	getAccessibleServerIds,
@@ -86,18 +87,23 @@ export const buildPolicyRouter = createTRPCRouter({
 		.input(apiAddBuildPolicyExclusion)
 		.mutation(async ({ ctx, input }) => {
 			const organizationId = ctx.session.activeOrganizationId;
-			const exclusion = await addBuildPolicyExclusion({
+			const { unitType, unitId } = await assertUnitInOrganization({
 				organizationId,
 				applicationId: input.applicationId,
 				composeId: input.composeId,
+			});
+			const exclusion = await addBuildPolicyExclusion({
+				organizationId,
+				applicationId: unitType === "application" ? unitId : null,
+				composeId: unitType === "compose" ? unitId : null,
 				reason: input.reason,
 			});
 
 			await recordBuildPolicyAudit({
 				organizationId,
 				action: "exclusion_added",
-				applicationId: input.applicationId ?? null,
-				composeId: input.composeId ?? null,
+				applicationId: unitType === "application" ? unitId : null,
+				composeId: unitType === "compose" ? unitId : null,
 				actorId: ctx.user.id,
 				actorEmail: ctx.user.email,
 				reason: input.reason ?? null,
@@ -151,10 +157,15 @@ export const buildPolicyRouter = createTRPCRouter({
 		.input(apiGrantBuildPolicyBreakGlass)
 		.mutation(async ({ ctx, input }) => {
 			const organizationId = ctx.session.activeOrganizationId;
+			const { unitType, unitId } = await assertUnitInOrganization({
+				organizationId,
+				applicationId: input.applicationId,
+				composeId: input.composeId,
+			});
 			await grantBreakGlass({
 				organizationId,
-				unitType: input.applicationId ? "application" : "compose",
-				unitId: (input.applicationId ?? input.composeId) as string,
+				unitType,
+				unitId,
 				actorId: ctx.user.id,
 				actorEmail: ctx.user.email,
 				reason: input.reason,
@@ -169,7 +180,8 @@ export const buildPolicyRouter = createTRPCRouter({
 			return { success: true };
 		}),
 
-	audit: protectedProcedure
+	/** Admin only: rows carry registry ids, build server ids and break-glass reasons. */
+	audit: adminProcedure
 		.input(apiListBuildPolicyAudit)
 		.query(async ({ ctx, input }) =>
 			listBuildPolicyAudit({
