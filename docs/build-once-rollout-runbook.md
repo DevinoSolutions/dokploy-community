@@ -173,6 +173,26 @@ Second trap: `install.sh update` resolves `latest` by default
 either direction of this rollout; use the explicit `docker service update`
 commands below.
 
+Third trap, and it is the one that can invalidate this whole section:
+**any merge to the fork's `canary` branch republishes the image and moves all
+three tags.** `.github/workflows/dokploy.yml` triggers on
+`push: branches: [canary]` with no `paths` or `paths-ignore` filter, so even a
+docs-only merge rebuilds `linux/amd64` and `linux/arm64` and runs
+`docker buildx imagetools create` for `canary`, `latest` and the package.json
+version. The digest you captured above stops being the digest those tags
+resolve to, and the digest you are rolling *to* changes as well.
+
+Two consequences for the operator:
+
+- **Freeze `canary` for the length of the rollout window.** Capture the digest
+  (§2.1), roll (§3.3) and verify (§3.4) without a merge to `canary` in between.
+  If something does land on `canary` mid-window, re-read the digest before
+  acting on it.
+- **The PR that adds this document is itself such a merge.** It is deliberately
+  left open for the owner to merge inside the rollout window, or after a
+  `paths-ignore: [docs/**]` is added to `dokploy.yml`. Merging it casually
+  republishes the image for a markdown file.
+
 ### 2.2 Database dump
 
 Dokploy's own state is a Postgres swarm service `dokploy-postgres`, database
@@ -975,7 +995,67 @@ runs drops a required one and times out - fail-closed.
 **Operationally:** upAPI runs 51 jobs per CI run and GetItDone 49; neither is
 near 100 today, but a repo that adds a large matrix could cross it.
 
-**G6. Docker Hub reference normalisation (follow-up 3).**
+**G6. #209 turned the fork's PR workflow red, and the review rounds could not
+see it.** This was found while opening the PR that adds this document, and it is
+the one gap here that was not already known.
+
+`pull-request.yml` job `pr-check (test)` fails on every PR targeting `canary`
+since #209. Five tests fail, all in one file,
+`apps/dokploy/__test__/deploy/application.real.test.ts`, with
+`TypeError: Cannot read properties of undefined (reading 'findFirst')` raised at
+`packages/server/src/services/build-policy/settings.ts:18`
+(`db.query.buildPolicySettings.findFirst`), through
+`previewBuildPolicyDecision` (`resolve.ts:57`), `resolveBuildPolicy`
+(`resolve.ts:107`), `planApplicationBuild` (`apply.ts:243`) and
+`deployApplication` (`services/application.ts:211`).
+
+Evidence, three runs of the same workflow:
+
+| Run | Head | Contains #209 | Test files | Tests | Failures |
+|---|---|---|---|---|---|
+| 34048304936 | `b0161304` (`port/upr-5182`) | no | 190 passed (190) | 1912 passed, 1 skipped (1913) | **0** |
+| 34543739811 | `6d27c886` (the #209 head merged as `b0cadcd`) | yes | 1 failed, 213 passed (214) | 5 failed, 2309 passed, 1 skipped (2315) | 5 |
+| 34611157554 | `3b7e233` (this document's PR, docs-only) | yes | 1 failed, 213 passed (214) | 5 failed, 2309 passed, 1 skipped (2315) | **the same 5** |
+
+**Verdict: inherited from #209, not a pre-existing fork baseline.** The docs PR
+did not cause it - its diff against `canary` is one markdown file, 1123
+insertions, zero deletions - and its failure set is identical to the #209 head's.
+But the last pre-#209 run of this workflow was fully green, so #209 introduced
+it.
+
+**Why four review rounds missed it.** The reviewers ran the suite locally on
+Windows and compared failing-test sets against the merge base, which matched
+exactly (2315 total, 15 failed, both directions empty). `w6-review-2.md:78`
+lists `deploy/application.real.test.ts` as item 5 of the files that already fail
+on that host, for an unrelated reason: `Command failed: mkdir -p C:\…`. The file
+was red before and after, so a set comparison could not show that #209 changed
+*why* it is red. On Linux CI the Windows path problem does not exist, and the
+file fails for the new build-policy reason instead. A local baseline that
+already fails a file cannot prove anything about that file.
+
+**What it means operationally.**
+
+- **Production risk is low.** The real `db` is built from the full schema
+  barrel, which now exports the build-policy tables, so
+  `db.query.buildPolicySettings` exists at runtime. The failure is confined to a
+  test that mocks `@dokploy/server/db` with a hand-written `query` namespace
+  (`application.real.test.ts:15-53`) listing only `applications`, `deployHook`,
+  `domains`, `patch` and `member`. The fix is one line in that mock.
+- **But it is not zero risk, and the failure mode is instructive.** The README
+  claims "the fork never crashes a deploy", and the guard behind that claim
+  covers a missing organization relation only. It does not cover a `db.query`
+  namespace without the table. When it is missing, the TypeError is raised
+  inside the deploy's own `try`, and the deployment log gets
+  `[build-policy] cannot read properties of undefined (reading 'findfirst')`
+  where the deploy's own error should be - which is exactly what the second
+  failing assertion caught. Any future caller that hands the module a partial
+  `db` gets a build-policy error in place of the real one.
+- **Fix it before enabling the policy, not after.** A red `pull-request.yml` on
+  every canary PR masks the next real regression, and this branch's integration
+  test is the designated tripwire for upstream merges (spec §11). A tripwire
+  nobody can read is not one.
+
+**G7. Docker Hub reference normalisation (follow-up 3).**
 `docker.io/prefix/app` and `prefix/app` are the same image but whole-repository
 equality treats them as different, so an explicitly qualified Docker Hub
 reference is refused against a hostless allowlist. Fail-closed and cosmetic;
@@ -1089,6 +1169,12 @@ acceptance criteria in §5.6.
 
 ## 7. One-page sequence
 
+0. Fix the `pull-request.yml` test failure #209 introduced (§5 G6): add
+   `buildPolicySettings: { findFirst: vi.fn() }` to the `db` mock in
+   `apps/dokploy/__test__/deploy/application.real.test.ts`. Do this first, so
+   the tripwire is readable for everything that follows. Separately, decide
+   whether `dokploy.yml` gets a `paths-ignore: [docs/**]`, and freeze `canary`
+   for the rollout window either way (§2.1, third trap).
 1. Rotate the Notifly OAuth token and move those four units to the GitHub App
    provider (owner prerequisite, spec §10).
 2. Stand up the GHCR pull-through proxy on `registry.devino.ca`, add the
@@ -1115,6 +1201,8 @@ Everything in this document was read, not assumed, except where marked.
 | Fork head `b0cadcd`, diffstat, file list | fresh clone at `S/work/dokploy-plan`, `git rev-parse HEAD`, `git ls-remote origin canary`, `git show --stat b0cadcd` |
 | Default-off line references | `packages/server/src/db/schema/build-policy.ts`, `services/build-policy/policy.ts`, `settings.ts`, `source.ts`, `README.md` at that head |
 | Review findings and follow-ups | `S/track2/w6-review-2.md` rounds 2, 3 and 4 |
+| G6, the CI test regression | job logs of runs 34048304936, 34543739811 and 34611157554 of `pull-request.yml`, read via `gh api repos/DevinoSolutions/dokploy-community/actions/jobs/<id>/logs`; the db mock at `apps/dokploy/__test__/deploy/application.real.test.ts:15-53`; the local-failure attribution at `S/track2/w6-review-2.md:78` |
+| The canary republish hazard | `.github/workflows/dokploy.yml` trigger block at `b0cadcd` |
 | Unit inventory and field values | `S/dokploy/applications.csv`, `S/dokploy/composes.csv` |
 | CI image-build table | `S/review-products.md` § 2 |
 | Workflow and job minutes | `S/cost/aggregate.json` `per_workflow`; `S/cost/jobs/*.jsonl` aggregated by `S/track5/jobagg.py` into `S/track5/jobagg.txt` |
