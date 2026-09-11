@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
 	verify: vi.fn(),
 	shouldDeploy: vi.fn(),
 	createPreviewDeployment: vi.fn(),
+	// build-policy: the enqueue-time gate the webhook calls before queueing.
+	buildPolicyDeployGate: vi.fn(),
 	findPreviewDeploymentByApplicationId: vi.fn(),
 }));
 
@@ -65,6 +67,7 @@ vi.mock("@dokploy/server/db", () => ({
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
 	shouldDeploy: mocks.shouldDeploy,
+	buildPolicyDeployGate: mocks.buildPolicyDeployGate,
 	normalizeChangedFilesFromCommits: (commits: any) =>
 		(commits ?? [])
 			.flatMap((commit: any) => [
@@ -96,6 +99,9 @@ vi.mock("@/server/queues/queueSetup", () => ({
 	myQueue: {
 		add: mocks.queueAdd,
 	},
+	// build-policy: the gate calls these to coalesce still-waiting deploys.
+	cleanQueuesByApplication: vi.fn().mockResolvedValue(0),
+	cleanQueuesByCompose: vi.fn().mockResolvedValue(0),
 }));
 
 vi.mock("@/server/utils/deploy", () => ({
@@ -177,6 +183,10 @@ describe("GitHub app webhook auto-deploy", () => {
 			githubWebhookSecret: "webhook-secret",
 		});
 		mocks.verify.mockResolvedValue(true);
+		mocks.buildPolicyDeployGate.mockResolvedValue({
+			deploy: true,
+			coalesced: 0,
+		});
 		mocks.shouldDeploy.mockReturnValue(true);
 		mocks.composeFindMany.mockResolvedValue([]);
 		mocks.queueAdd.mockResolvedValue({ id: "job-id" });
@@ -397,6 +407,10 @@ describe("GitHub app webhook preview deployments", () => {
 			githubWebhookSecret: "webhook-secret",
 		});
 		mocks.verify.mockResolvedValue(true);
+		mocks.buildPolicyDeployGate.mockResolvedValue({
+			deploy: true,
+			coalesced: 0,
+		});
 		mocks.queueAdd.mockResolvedValue({ id: "job-id" });
 		mocks.createPreviewDeployment.mockResolvedValue({
 			previewDeploymentId: "new-preview-id",

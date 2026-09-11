@@ -159,6 +159,11 @@ export const createDeployment = async (
 		z.infer<typeof apiCreateDeployment>,
 		"deploymentId" | "createdAt" | "status" | "logPath"
 	>,
+	// build-policy hook: when the org policy relocates the build, the log file
+	// has to be created on THAT host, because that is where the build script
+	// appends to it. Omitted everywhere else, so upstream behaviour is unchanged.
+	// See packages/server/src/services/build-policy/README.md
+	options?: { buildServerId?: string | null },
 ) => {
 	const application = await findApplicationById(deployment.applicationId);
 	await removeLastTenDeployments(
@@ -167,7 +172,8 @@ export const createDeployment = async (
 		application.serverId,
 	);
 	try {
-		const serverId = application.buildServerId || application.serverId;
+		const buildServerId = options?.buildServerId ?? application.buildServerId;
+		const serverId = buildServerId || application.serverId;
 
 		const { LOGS_PATH } = paths(!!serverId);
 		const formattedDateTime = format(new Date(), "yyyy-MM-dd:HH:mm:ss");
@@ -201,9 +207,7 @@ export const createDeployment = async (
 				logPath: logFilePath,
 				description: deployment.description || "",
 				startedAt: new Date().toISOString(),
-				...(application.buildServerId && {
-					buildServerId: application.buildServerId,
-				}),
+				...(buildServerId && { buildServerId }),
 			})
 			.returning();
 		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
@@ -242,11 +246,15 @@ export const createDeploymentPreview = async (
 		z.infer<typeof apiCreateDeploymentPreview>,
 		"deploymentId" | "createdAt" | "status" | "logPath"
 	>,
+	// build-policy hook: the build server the policy forced, when it forced one.
+	// The log file has to be created on whichever host is going to build.
+	options?: { buildServerId?: string | null },
 ) => {
 	const previewDeployment = await findPreviewDeploymentById(
 		deployment.previewDeploymentId,
 	);
 	const buildServerId =
+		options?.buildServerId ||
 		previewDeployment?.application?.buildServerId ||
 		previewDeployment?.application?.serverId ||
 		previewDeployment?.compose?.serverId;

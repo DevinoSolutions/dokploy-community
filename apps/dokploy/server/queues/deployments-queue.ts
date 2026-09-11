@@ -2,6 +2,8 @@ import {
 	deployApplication,
 	deployCompose,
 	deployComposePreview,
+	// build-policy hook: see the pinnedImage branch below.
+	deployPinnedApplicationImage,
 	deployPreviewApplication,
 	rebuildApplication,
 	rebuildCompose,
@@ -22,7 +24,17 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 		if (job.data.applicationType === "application") {
 			await updateApplicationStatus(job.data.applicationId, "running");
 
-			if (job.data.type === "redeploy") {
+			// >>> build-policy hook: deploy-hook supplied image, no build.
+			// See packages/server/src/services/build-policy/README.md
+			if (job.data.pinnedImage) {
+				await deployPinnedApplicationImage({
+					applicationId: job.data.applicationId,
+					pinnedImage: job.data.pinnedImage,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+				});
+			} else if (job.data.type === "redeploy") {
+				// <<< build-policy hook
 				await rebuildApplication({
 					applicationId: job.data.applicationId,
 					titleLog: job.data.titleLog,

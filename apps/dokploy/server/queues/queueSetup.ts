@@ -1,4 +1,5 @@
 import { IS_CLOUD } from "@dokploy/server";
+import { isCoalescableDeployJob } from "@dokploy/server/services/build-policy/coalesce";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -95,6 +96,9 @@ if (!IS_CLOUD) {
 	});
 }
 
+// build-policy hook: these two now return how many waiting jobs they dropped,
+// so the enqueue-time coalescing gate can audit it. Existing callers ignore the
+// returned value. See packages/server/src/services/build-policy/README.md.
 export const cleanQueuesByApplication = async (applicationId: string) => {
 	const removed = myQueue.removeWaiting(
 		(data) => (data as any)?.applicationId === applicationId,
@@ -104,6 +108,7 @@ export const cleanQueuesByApplication = async (applicationId: string) => {
 			`Removed ${removed} waiting job(s) for application ${applicationId}`,
 		);
 	}
+	return removed;
 };
 
 export const cleanQueuesByCompose = async (composeId: string) => {
@@ -113,7 +118,40 @@ export const cleanQueuesByCompose = async (composeId: string) => {
 	if (removed > 0) {
 		console.log(`Removed ${removed} waiting job(s) for compose ${composeId}`);
 	}
+	return removed;
 };
+
+/**
+ * build-policy hook: coalescing siblings of the two helpers above.
+ *
+ * The originals back explicit "clean queues" actions, where dropping every
+ * waiting job for a unit — previews included — is the intent. Coalescing runs
+ * automatically on every push, so it must drop ONLY the unit's own plain
+ * deploys: a queued PR preview for the same application is a different job that
+ * nobody asked to cancel.
+ *
+ * Both return the titles of what they dropped, so the audit entry names it.
+ */
+const coalesceWaiting = (
+	matches: (data: any) => boolean,
+): { removed: number; titles: string[] } => {
+	const titles: string[] = [];
+	const removed = myQueue.removeWaiting((data) => {
+		if (!matches(data)) return false;
+		const title = (data as any)?.titleLog;
+		if (typeof title === "string") titles.push(title);
+		return true;
+	});
+	return { removed, titles };
+};
+
+export const coalesceQueuedApplicationDeploys = async (applicationId: string) =>
+	coalesceWaiting((data) =>
+		isCoalescableDeployJob("application", applicationId, data),
+	);
+
+export const coalesceQueuedComposeDeploys = async (composeId: string) =>
+	coalesceWaiting((data) => isCoalescableDeployJob("compose", composeId, data));
 
 export const cleanAllDeploymentQueue = async () => {
 	myQueue.clearWaiting();

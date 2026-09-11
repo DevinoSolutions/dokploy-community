@@ -1,4 +1,6 @@
 import {
+	// build-policy hook: enqueue-time gate.
+	buildPolicyDeployGate,
 	checkUserRepositoryPermissions,
 	createComposePreview,
 	createPreviewDeployment,
@@ -18,7 +20,14 @@ import { and, eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { applications, compose, github } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+// >>> build-policy hook: enqueue-time gate (skip marker, derived watchPaths,
+// queue coalescing). See packages/server/src/services/build-policy/README.md
+import {
+	coalesceQueuedApplicationDeploys,
+	coalesceQueuedComposeDeploys,
+	myQueue,
+} from "@/server/queues/queueSetup";
+// <<< build-policy hook
 import { deploy } from "@/server/utils/deploy";
 import {
 	extractCommitMessage,
@@ -283,6 +292,32 @@ export default async function handler(
 					continue;
 				}
 
+				// >>> build-policy hook
+				const gate = await buildPolicyDeployGate({
+					unitType: "application",
+					unit: {
+						unitId: app.applicationId,
+						unitName: app.name,
+						environmentId: app.environmentId,
+						watchPaths: app.watchPaths,
+						sourceType: app.sourceType,
+						buildPath: app.buildPath,
+						gitlabBuildPath: app.gitlabBuildPath,
+						bitbucketBuildPath: app.bitbucketBuildPath,
+						giteaBuildPath: app.giteaBuildPath,
+						dropBuildPath: app.dropBuildPath,
+						customGitBuildPath: app.customGitBuildPath,
+						dockerfile: app.dockerfile,
+						dockerContextPath: app.dockerContextPath,
+					},
+					changedFiles: normalizedCommits,
+					commitMessage: deploymentTitle,
+					removeWaiting: () =>
+						coalesceQueuedApplicationDeploys(app.applicationId),
+				});
+				if (!gate.deploy) continue;
+				// <<< build-policy hook
+
 				if (IS_CLOUD && app.serverId) {
 					jobData.serverId = app.serverId;
 					deploy(jobData).catch((error) => {
@@ -330,6 +365,25 @@ export default async function handler(
 				if (!shouldDeployPaths) {
 					continue;
 				}
+
+				// >>> build-policy hook
+				const composeGate = await buildPolicyDeployGate({
+					unitType: "compose",
+					unit: {
+						unitId: composeApp.composeId,
+						unitName: composeApp.name,
+						environmentId: composeApp.environmentId,
+						watchPaths: composeApp.watchPaths,
+						composePath: composeApp.composePath,
+					},
+					changedFiles: normalizedCommits,
+					commitMessage: deploymentTitle,
+					removeWaiting: () =>
+						coalesceQueuedComposeDeploys(composeApp.composeId),
+				});
+				if (!composeGate.deploy) continue;
+				// <<< build-policy hook
+
 				if (IS_CLOUD && composeApp.serverId) {
 					jobData.serverId = composeApp.serverId;
 					deploy(jobData).catch((error) => {

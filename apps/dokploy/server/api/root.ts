@@ -5,6 +5,8 @@ import { applicationRouter } from "./routers/application";
 import { backupRouter } from "./routers/backup";
 import { backupPolicyRouter } from "./routers/backup-policy";
 import { bitbucketRouter } from "./routers/bitbucket";
+// Fork router. See packages/server/src/services/build-policy/README.md.
+import { buildPolicyRouter } from "./routers/build-policy";
 import { certificateRouter } from "./routers/certificate";
 import { cloudflareRouter } from "./routers/cloudflare";
 import { cloudflareAccessRouter } from "./routers/cloudflare-access";
@@ -72,6 +74,7 @@ export const appRouter = createTRPCRouter({
 	backup: backupRouter,
 	backupPolicy: backupPolicyRouter,
 	bitbucket: bitbucketRouter,
+	buildPolicy: buildPolicyRouter,
 	network: networkRouter,
 	certificates: certificateRouter,
 	cloudflare: cloudflareRouter,

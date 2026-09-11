@@ -1,8 +1,11 @@
 import {
 	type Bitbucket,
+	// build-policy hook: enqueue-time gate and deploy-hook image body.
+	buildPolicyDeployGate,
 	getBitbucketHeaders,
 	IS_CLOUD,
 	normalizeChangedFilesFromCommits,
+	resolveDeployHookImage,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -10,7 +13,10 @@ import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { applications } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+import {
+	coalesceQueuedApplicationDeploys,
+	myQueue,
+} from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import {
 	handleGiteaApplicationPullRequestEvent,
@@ -286,6 +292,64 @@ export default async function handler(
 			}
 		}
 
+		// >>> build-policy hook: the optional `{image, tag, digest}` body, then
+		// `[skip deploy]`, derived watchPaths and queue coalescing.
+		//
+		// Body validation comes FIRST on purpose. The gate coalesces, which drops
+		// this unit's still-waiting deploys; doing that on behalf of a request
+		// that is then refused with a 400 leaves the queue empty and nothing
+		// enqueued, and a CI job retrying with a broken body would keep it that
+		// way for ever. The validation reads nothing the gate produces, so the
+		// order is free. Round-2 review finding C.
+		// See packages/server/src/services/build-policy/README.md
+		const hookImage = await resolveDeployHookImage(
+			{
+				organizationId: application.environment.project.organizationId,
+				appName: application.appName,
+				registryId: application.registryId,
+				buildRegistryId: application.buildRegistryId,
+				// The allowlist follows what the plan would decide, so it needs
+				// what the plan reads. Round-3 review finding I.
+				unitType: "application",
+				unitId: application.applicationId,
+				unitName: application.name,
+				sourceType: application.sourceType,
+				customGitUrl: application.customGitUrl,
+				buildServerId: application.buildServerId,
+			},
+			req.body,
+		);
+		if (!hookImage.ok) {
+			res.status(400).json({ message: hookImage.message });
+			return;
+		}
+		const gate = await buildPolicyDeployGate({
+			unitType: "application",
+			unit: {
+				unitId: application.applicationId,
+				unitName: application.name,
+				environmentId: application.environmentId,
+				watchPaths: application.watchPaths,
+				sourceType: application.sourceType,
+				buildPath: application.buildPath,
+				gitlabBuildPath: application.gitlabBuildPath,
+				bitbucketBuildPath: application.bitbucketBuildPath,
+				giteaBuildPath: application.giteaBuildPath,
+				dropBuildPath: application.dropBuildPath,
+				customGitBuildPath: application.customGitBuildPath,
+				dockerfile: application.dockerfile,
+				dockerContextPath: application.dockerContextPath,
+			},
+			commitMessage: deploymentTitle,
+			removeWaiting: () =>
+				coalesceQueuedApplicationDeploys(application.applicationId),
+		});
+		if (!gate.deploy) {
+			res.status(301).json({ message: gate.message });
+			return;
+		}
+		// <<< build-policy hook
+
 		try {
 			const jobData: DeploymentJob = {
 				applicationId: application.applicationId as string,
@@ -294,6 +358,8 @@ export default async function handler(
 				type: "deploy",
 				applicationType: "application",
 				server: !!application.serverId,
+				// build-policy hook: deploy this image by digest, do not build.
+				...(hookImage.pinnedImage && { pinnedImage: hookImage.pinnedImage }),
 			};
 
 			if (IS_CLOUD && application.serverId) {

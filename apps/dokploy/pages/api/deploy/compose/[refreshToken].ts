@@ -1,6 +1,9 @@
 import {
+	// build-policy hook: enqueue-time gate and deploy-hook image body.
+	buildPolicyDeployGate,
 	IS_CLOUD,
 	normalizeChangedFilesFromCommits,
+	rejectComposeDeployHookImage,
 	shouldDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -8,7 +11,10 @@ import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { compose } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
-import { myQueue } from "@/server/queues/queueSetup";
+import {
+	coalesceQueuedComposeDeploys,
+	myQueue,
+} from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
 import {
 	handleGiteaComposePullRequestEvent,
@@ -227,6 +233,46 @@ export default async function handler(
 				return;
 			}
 		}
+
+		// >>> build-policy hook: the supplied-image body, then `[skip deploy]`,
+		// derived watchPaths and queue coalescing.
+		//
+		// A compose unit cannot deploy a supplied image by digest yet (see
+		// README.md § Known gap), so an enforcing organization gets a 400 rather
+		// than a silently ignored body. While the policy is off the body is
+		// ignored, which is what upstream does with it.
+		//
+		// The refusal is checked BEFORE the gate on purpose, and it matters more
+		// here than on the application route: this rejects EVERY body carrying an
+		// image while enforcing. A CI job that standardises on always posting one
+		// would otherwise coalesce the unit's queue and then 400 on every single
+		// push, for ever. Round-2 review finding C.
+		const hookImage = await rejectComposeDeployHookImage(
+			composeResult.environmentId,
+			req.body,
+		);
+		if (!hookImage.ok) {
+			res.status(400).json({ message: hookImage.message });
+			return;
+		}
+		const gate = await buildPolicyDeployGate({
+			unitType: "compose",
+			unit: {
+				unitId: composeResult.composeId,
+				unitName: composeResult.name,
+				environmentId: composeResult.environmentId,
+				watchPaths: composeResult.watchPaths,
+				composePath: composeResult.composePath,
+			},
+			commitMessage: deploymentTitle,
+			removeWaiting: () =>
+				coalesceQueuedComposeDeploys(composeResult.composeId),
+		});
+		if (!gate.deploy) {
+			res.status(301).json({ message: gate.message });
+			return;
+		}
+		// <<< build-policy hook
 
 		try {
 			const jobData: DeploymentJob = {

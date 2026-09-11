@@ -19,6 +19,8 @@ import { ShowPorts } from "@/components/dashboard/application/advanced/ports/sho
 import { ShowRedirects } from "@/components/dashboard/application/advanced/redirects/show-redirects";
 import { ShowSecurity } from "@/components/dashboard/application/advanced/security/show-security";
 import { ShowBuildServer } from "@/components/dashboard/application/advanced/show-build-server";
+// build-policy
+import { ShowRequiredChecks } from "@/components/dashboard/application/advanced/show-required-checks";
 import { ShowResources } from "@/components/dashboard/application/advanced/show-resources";
 import { ShowTraefikConfig } from "@/components/dashboard/application/advanced/traefik/show-traefik-config";
 import { ShowVolumes } from "@/components/dashboard/application/advanced/volumes/show-volumes";
@@ -426,6 +428,8 @@ const Service = (
 													type="application"
 												/>
 												<ShowBuildServer applicationId={applicationId} />
+												{/* build-policy */}
+												<ShowRequiredChecks applicationId={applicationId} />
 												<ShowResources id={applicationId} type="application" />
 												<ShowVolumes id={applicationId} type="application" />
 												<AssignNetworks id={applicationId} type="application" />

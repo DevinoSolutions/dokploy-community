@@ -5,6 +5,7 @@ export * from "./audit-log";
 export * from "./backup-policy";
 export * from "./backups";
 export * from "./bitbucket";
+export * from "./build-policy";
 export * from "./certificate";
 export * from "./cloudflare";
 export * from "./cloudflare-access";

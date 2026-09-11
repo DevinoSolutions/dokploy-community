@@ -49,6 +49,7 @@ const baseApp: ApplicationNested = {
 	giteaRepository: "",
 	cleanCache: false,
 	watchPaths: [],
+	requiredChecks: [],
 	rollbackRegistryId: "",
 	rollbackRegistry: null,
 	deployments: [],

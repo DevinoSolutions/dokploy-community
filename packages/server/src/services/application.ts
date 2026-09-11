@@ -35,6 +35,16 @@ import { deployHook } from "../db/schema";
 import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
 import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
+// Fork module: enforced remote builds. See services/build-policy/README.md.
+import {
+	type BuildPolicyPlan,
+	getBuildPolicyPushCommand,
+	planApplicationBuild,
+	prepareBuildPolicyDeploy,
+	reportBuildPolicyPlanFailure,
+	runBuildPolicyPreBuildGate,
+	toBuildPolicyUnit,
+} from "./build-policy/apply";
 import {
 	createDeployment,
 	createDeploymentPreview,
@@ -191,18 +201,43 @@ export const deployApplication = async ({
 	descriptionLog: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-	const serverId = application.buildServerId || application.serverId;
+	// >>> build-policy hook 1/4: enforced remote builds. Runs before
+	// `createDeployment` because the deployment log has to be created on the
+	// host that will build. A refusal still produces a deployment row, an error
+	// status and a build-failure notification before it is rethrown.
+	// See packages/server/src/services/build-policy/README.md
+	let buildPolicy: BuildPolicyPlan;
+	try {
+		buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	} catch (error) {
+		await reportBuildPolicyPlanFailure({
+			application,
+			titleLog,
+			descriptionLog,
+			error,
+		});
+		throw error;
+	}
+	const serverId =
+		buildPolicy.buildServerId ||
+		application.buildServerId ||
+		application.serverId;
+	// <<< build-policy hook 1/4
 	const applicationEntity = {
 		...application,
 		serverId: serverId,
 	};
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
-	const deployment = await createDeployment({
-		applicationId: applicationId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeployment(
+		{
+			applicationId: applicationId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		// build-policy hook: create the log on the host that will build.
+		{ buildServerId: buildPolicy.buildServerId },
+	);
 
 	try {
 		let command = "set -e;";
@@ -228,7 +263,28 @@ export const deployApplication = async ({
 			});
 		}
 
+		// >>> build-policy hook 2a/4: the required-checks gate, between the clone
+		// and the build. Runs the clone half itself and returns a fresh prefix
+		// when it is active; returns `command` unchanged and executes nothing
+		// when it is not, which is every deploy while the policy is off.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+			command,
+		});
+		// <<< build-policy hook 2a/4
+
 		command += await getBuildCommand(application);
+
+		// >>> build-policy hook 2/4: tag `<repository>:<sha>`, push to the
+		// organization registry and echo the digest. Empty when not enforcing.
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: application.appName,
+			serverId,
+		});
+		// <<< build-policy hook 2/4
 
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (serverId) {
@@ -236,6 +292,16 @@ export const deployApplication = async ({
 		} else {
 			await execAsync(commandWithLog);
 		}
+
+		// >>> build-policy hook 3/4: gate on required checks, then pin the deploy
+		// to the digest that was just published. Identity when not enforcing.
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+		});
+		// <<< build-policy hook 3/4
 
 		const hookRow = await db.query.deployHook.findFirst({
 			where: eq(deployHook.applicationId, application.applicationId),
@@ -254,7 +320,9 @@ export const deployApplication = async ({
 			logPath: deployment.logPath,
 		});
 
-		await mechanizeDockerContainer(application);
+		// build-policy hook 4/4: `deployTarget` is `application` plus the pinned
+		// digest when a remote build was enforced. See hook 3/4 above.
+		await mechanizeDockerContainer(deployTarget);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
 			serverId: application.serverId,
@@ -352,25 +420,72 @@ export const rebuildApplication = async ({
 	descriptionLog: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-	const serverId = application.buildServerId || application.serverId;
+	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
+	let buildPolicy: BuildPolicyPlan;
+	try {
+		buildPolicy = await planApplicationBuild(toBuildPolicyUnit(application));
+	} catch (error) {
+		await reportBuildPolicyPlanFailure({
+			application,
+			titleLog,
+			descriptionLog,
+			error,
+		});
+		throw error;
+	}
+	const serverId =
+		buildPolicy.buildServerId ||
+		application.buildServerId ||
+		application.serverId;
+	// <<< build-policy hook 1/4
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 
-	const deployment = await createDeployment({
-		applicationId: applicationId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeployment(
+		{
+			applicationId: applicationId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		// build-policy hook: create the log on the host that will build.
+		{ buildServerId: buildPolicy.buildServerId },
+	);
 
 	try {
 		let command = "set -e;";
+		// >>> build-policy hook 2a/4 (rebuild): the required-checks gate. A
+		// rebuild has no clone, so this only waits; the existing checkout is
+		// already the commit being rebuilt.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+			command,
+		});
+		// <<< build-policy hook 2a/4 (rebuild)
 		// Check case for docker only
 		command += await getBuildCommand(application);
+		// >>> build-policy hook 2/4 (rebuild)
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: application.appName,
+			serverId,
+		});
+		// <<< build-policy hook 2/4
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (serverId) {
 			await execAsyncRemote(serverId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
 		}
+
+		// >>> build-policy hook 3/4 (rebuild)
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId,
+		});
+		// <<< build-policy hook 3/4
 
 		const hookRow = await db.query.deployHook.findFirst({
 			where: eq(deployHook.applicationId, application.applicationId),
@@ -387,7 +502,8 @@ export const rebuildApplication = async ({
 			logPath: deployment.logPath,
 		});
 
-		await mechanizeDockerContainer(application);
+		// build-policy hook 4/4 (rebuild): see hook 3/4 above.
+		await mechanizeDockerContainer(deployTarget);
 
 		const stability = await waitForSwarmServiceStable(application.appName, {
 			serverId: application.serverId,
@@ -526,15 +642,35 @@ export const deployPreviewApplication = async ({
 	previewDeploymentId: string;
 }) => {
 	const application = await findApplicationById(applicationId);
-
-	const deployment = await createDeploymentPreview({
-		title: titleLog,
-		description: descriptionLog,
-		previewDeploymentId: previewDeploymentId,
-	});
-
+	// >>> build-policy hook 1/4 (preview): a PR preview is GitHub App sourced
+	// like any other deploy, so spec 5.2.1 forces it onto the build server too.
+	// The plan needs the preview's own appName, so the preview row is read
+	// before the deployment record is created rather than after; the read is
+	// idempotent and `createDeploymentPreview` reads it again itself.
+	// A refused plan is rethrown inside the try below, so the preview status,
+	// the log and the PR comment all report it. See build-policy/README.md
 	const previewDeployment =
 		await findPreviewDeploymentById(previewDeploymentId);
+	let buildPolicy: BuildPolicyPlan | null = null;
+	let buildPolicyError: unknown = null;
+	try {
+		buildPolicy = await planApplicationBuild({
+			...toBuildPolicyUnit(application),
+			appName: previewDeployment.appName,
+		});
+	} catch (error) {
+		buildPolicyError = error;
+	}
+
+	const deployment = await createDeploymentPreview(
+		{
+			title: titleLog,
+			description: descriptionLog,
+			previewDeploymentId: previewDeploymentId,
+		},
+		{ buildServerId: buildPolicy?.buildServerId },
+	);
+	// <<< build-policy hook 1/4 (preview)
 
 	await updatePreviewDeployment(previewDeploymentId, {
 		createdAt: new Date().toISOString(),
@@ -549,6 +685,10 @@ export const deployPreviewApplication = async ({
 	});
 	try {
 		await writePreviewComment("running");
+
+		// build-policy hook 1/4 (preview), continued: refusing here rather than
+		// above means the preview status, the log and the PR comment all say why.
+		if (!buildPolicy) throw buildPolicyError;
 
 		application.appName = previewDeployment.appName;
 		application.env = resolvePreviewTemplateVariables(
@@ -573,7 +713,10 @@ export const deployPreviewApplication = async ({
 		application.rollbackRegistry = null;
 		application.registry = null;
 
-		const buildServerId = application.buildServerId || application.serverId;
+		const buildServerId =
+			buildPolicy.buildServerId ||
+			application.buildServerId ||
+			application.serverId;
 		const applicationEntity = {
 			...application,
 			serverId: buildServerId,
@@ -603,7 +746,27 @@ export const deployPreviewApplication = async ({
 				message: `Preview deployments are not supported for the '${application.sourceType}' source type`,
 			});
 		}
+		// >>> build-policy hook 2a/4 (preview): the required-checks gate, on the
+		// preview's own checkout, between the clone and the build.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+			command,
+			appName: previewDeployment.appName,
+		});
+		// <<< build-policy hook 2a/4 (preview)
+
 		command += await getBuildCommand(application);
+
+		// >>> build-policy hook 2/4 (preview): tag and push the preview image by
+		// sha. Empty when not enforcing.
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: previewDeployment.appName,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 2/4 (preview)
 
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (buildServerId) {
@@ -611,7 +774,18 @@ export const deployPreviewApplication = async ({
 		} else {
 			await execAsync(commandWithLog);
 		}
-		await mechanizeDockerContainer(application);
+		// >>> build-policy hook 3/4 (preview): pin to the digest just published.
+		// Identity when not enforcing.
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 3/4 (preview)
+		// build-policy hook 4/4 (preview): `deployTarget` is `application` plus
+		// the pinned digest when a remote build was enforced.
+		await mechanizeDockerContainer(deployTarget);
 
 		await writePreviewComment("success");
 		await updateDeploymentStatus(deployment.deploymentId, "done");
@@ -669,11 +843,27 @@ export const rebuildPreviewApplication = async ({
 	const previewDeployment =
 		await findPreviewDeploymentById(previewDeploymentId);
 
-	const deployment = await createDeploymentPreview({
-		title: titleLog,
-		description: descriptionLog,
-		previewDeploymentId: previewDeploymentId,
-	});
+	// >>> build-policy hook 1/4 (preview rebuild). See build-policy/README.md
+	let buildPolicy: BuildPolicyPlan | null = null;
+	let buildPolicyError: unknown = null;
+	try {
+		buildPolicy = await planApplicationBuild({
+			...toBuildPolicyUnit(application),
+			appName: previewDeployment.appName,
+		});
+	} catch (error) {
+		buildPolicyError = error;
+	}
+
+	const deployment = await createDeploymentPreview(
+		{
+			title: titleLog,
+			description: descriptionLog,
+			previewDeploymentId: previewDeploymentId,
+		},
+		{ buildServerId: buildPolicy?.buildServerId },
+	);
+	// <<< build-policy hook 1/4 (preview rebuild)
 
 	const previewDomain = getDomainHost(previewDeployment?.domain as Domain);
 	const writePreviewComment = buildPreviewCommentWriter({
@@ -685,6 +875,9 @@ export const rebuildPreviewApplication = async ({
 
 	try {
 		await writePreviewComment("running");
+
+		// build-policy hook 1/4 (preview rebuild), continued.
+		if (!buildPolicy) throw buildPolicyError;
 
 		// Set application properties for preview deployment
 		application.appName = previewDeployment.appName;
@@ -710,7 +903,10 @@ export const rebuildPreviewApplication = async ({
 		application.rollbackRegistry = null;
 		application.registry = null;
 
-		const buildServerId = application.buildServerId || application.serverId;
+		const buildServerId =
+			buildPolicy.buildServerId ||
+			application.buildServerId ||
+			application.serverId;
 		const applicationEntity = {
 			...application,
 			serverId: buildServerId,
@@ -747,14 +943,39 @@ export const rebuildPreviewApplication = async ({
 				message: `Preview deployments are not supported for the '${application.sourceType}' source type`,
 			});
 		}
+		// >>> build-policy hook 2a/4 (preview rebuild): the required-checks gate.
+		command = await runBuildPolicyPreBuildGate({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+			command,
+			appName: previewDeployment.appName,
+		});
+		// <<< build-policy hook 2a/4 (preview rebuild)
 		command += await getBuildCommand(application);
+		// >>> build-policy hook 2/4 (preview rebuild)
+		command += await getBuildPolicyPushCommand(buildPolicy, {
+			appName: previewDeployment.appName,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 2/4 (preview rebuild)
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (buildServerId) {
 			await execAsyncRemote(buildServerId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
 		}
-		await mechanizeDockerContainer(application);
+		// >>> build-policy hook 3/4 (preview rebuild)
+		const deployTarget = await prepareBuildPolicyDeploy({
+			application,
+			plan: buildPolicy,
+			deployment,
+			serverId: buildServerId,
+		});
+		// <<< build-policy hook 3/4 (preview rebuild)
+		// build-policy hook 4/4 (preview rebuild)
+		await mechanizeDockerContainer(deployTarget);
 
 		await writePreviewComment("success");
 		await updateDeploymentStatus(deployment.deploymentId, "done");

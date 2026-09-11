@@ -43,6 +43,9 @@ import { quote } from "shell-quote";
 import type { z } from "zod";
 import { encodeBase64 } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
+// Fork module: build-policy required checks for compose units.
+// See services/build-policy/README.md.
+import { waitForComposeRequiredChecks } from "./build-policy/compose-checks";
 import {
 	createDeploymentCompose,
 	getDeploymentErrorMessage,
@@ -161,6 +164,15 @@ export const runComposeBuild = async (
 		});
 		await runStep(command);
 	}
+
+	// >>> build-policy hook (compose): required-checks gate, between the clone
+	// and the build — the compose equivalent of the application path's hook
+	// 2a/4. Deliberately ahead of the `down --volumes` step below, so a refused
+	// check never leaves the stack torn down. Reads nothing at all when the
+	// unit has no `requiredChecks`, which is every existing row.
+	// See packages/server/src/services/build-policy/README.md
+	await waitForComposeRequiredChecks({ compose: entity, serverId });
+	// <<< build-policy hook (compose)
 
 	if (freshVolumes && entity.composeType === "docker-compose") {
 		const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
@@ -507,6 +519,22 @@ export const rebuildCompose = async ({
 				await execAsync(commandWithLog);
 			}
 		}
+
+		// >>> build-policy hook (compose rebuild): the same required-checks gate
+		// `runComposeBuild` applies, in the same position — after the patches
+		// step, ahead of the `down --volumes` step and the build.
+		//
+		// A redeploy re-uses whatever is already in the code directory, and
+		// `runComposeBuild` clones *before* it gates, so a refused deploy leaves
+		// the unchecked commit on disk. Without this call, Redeploy would build
+		// exactly the commit the gate had just rejected. `rebuildApplication`
+		// never had that hole; this is compose catching up. Round-3 review
+		// finding H.
+		await waitForComposeRequiredChecks({
+			compose,
+			serverId: compose.serverId,
+		});
+		// <<< build-policy hook (compose rebuild)
 
 		if (freshVolumes && compose.composeType === "docker-compose") {
 			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;

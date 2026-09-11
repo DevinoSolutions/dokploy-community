@@ -4,6 +4,12 @@ import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
 import superjson from "superjson";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
+// build-policy
+import { BuildPolicy } from "@/components/dashboard/settings/build-policy";
+// build-policy
+import { BuildPolicyAudit } from "@/components/dashboard/settings/build-policy-audit";
+// build-policy
+import { BuildPolicyExclusions } from "@/components/dashboard/settings/build-policy-exclusions";
 import { DomainRestriction } from "@/components/dashboard/settings/domain-restriction";
 import { WebDomain } from "@/components/dashboard/settings/web-domain";
 import { WebServer } from "@/components/dashboard/settings/web-server";
@@ -21,6 +27,10 @@ const Page = () => {
 				<WebDomain />
 				<WildcardDomain />
 				<DomainRestriction />
+				{/* build-policy */}
+				<BuildPolicy />
+				<BuildPolicyExclusions />
+				<BuildPolicyAudit />
 				<WebServer />
 				<div className="w-full flex flex-col gap-4">
 					<Card className="h-full bg-sidebar  p-2.5 rounded-xl  mx-auto w-full">

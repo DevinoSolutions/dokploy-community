@@ -1,5 +1,7 @@
 import {
 	assertNetworkIdsAttachableToResource,
+	// build-policy hook: required-checks support check at the API boundary.
+	assertRequiredChecksSupportedForUpdate,
 	clearOldDeployments,
 	createApplication,
 	createDomain,
@@ -17,6 +19,8 @@ import {
 	getContainerLogs,
 	getWebServerSettings,
 	IS_CLOUD,
+	// build-policy hook: narrows a thrown support error to a 400.
+	isBuildPolicyError,
 	mechanizeDockerContainer,
 	readConfig,
 	readRemoteConfig,
@@ -831,6 +835,38 @@ export const applicationRouter = createTRPCRouter({
 			}
 
 			const { applicationId, ...rest } = input;
+
+			// >>> build-policy hook: refuse a required check the unit can never
+			// satisfy, here rather than on every deploy for ever after. Reading a
+			// commit's checks needs a github.com source, a resolvable owner/repo and
+			// an authenticated GitHub App installation; without all three the deploy
+			// would build, tag and push and only then fail. See finding F in the
+			// round-2 review and build-policy/source.ts.
+			if (input.requiredChecks !== undefined) {
+				const current = await findApplicationById(applicationId);
+				try {
+					assertRequiredChecksSupportedForUpdate(
+						{
+							unitName: current.name,
+							sourceType: current.sourceType,
+							githubId: current.githubId,
+							owner: current.owner,
+							repository: current.repository,
+							customGitUrl: current.customGitUrl,
+						},
+						{ ...rest, unitName: current.name },
+					);
+				} catch (error) {
+					if (isBuildPolicyError(error)) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: error.message,
+						});
+					}
+					throw error;
+				}
+			}
+			// <<< build-policy hook
 
 			if (input.networkIds !== undefined) {
 				const application = await findApplicationById(applicationId);

@@ -1,3 +1,4 @@
+import { isGithubHostUrl } from "@dokploy/server/services/build-policy/source";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import { Server } from "lucide-react";
 import Link from "next/link";
@@ -73,6 +74,17 @@ export const ShowBuildServer = ({ applicationId }: Props) => {
 	);
 	const { data: buildServers } = api.server.buildServers.useQuery();
 	const { data: registries } = api.registry.all.useQuery();
+	const { data: buildPolicySettings } = api.buildPolicy.settings.useQuery();
+
+	// Spec 5.2.1: while the organization enforces remote builds, a GitHub-sourced
+	// unit builds on the organization build server and deploys by digest, so this
+	// per-unit field is ignored at deploy time. Show that instead of silently
+	// accepting an edit that has no effect.
+	const isGithubSourced =
+		data?.sourceType === "github" ||
+		(data?.sourceType === "git" && isGithubHostUrl(data?.customGitUrl));
+	const isPolicyEnforced =
+		!!buildPolicySettings?.enforceRemoteBuilds && isGithubSourced;
 
 	const { mutateAsync, isPending } = api.application.update.useMutation();
 
@@ -128,6 +140,14 @@ export const ShowBuildServer = ({ applicationId }: Props) => {
 				</div>
 			</CardHeader>
 			<CardContent className="flex flex-col gap-4">
+				{isPolicyEnforced ? (
+					<AlertBlock type="info">
+						Your organization enforces remote builds. This unit builds on the
+						organization build server and deploys by digest, so this field is
+						ignored.
+					</AlertBlock>
+				) : null}
+
 				<AlertBlock type="info">
 					Build servers offload the build process from your deployment servers.
 					Select a build server and registry to use for building your
@@ -181,6 +201,7 @@ export const ShowBuildServer = ({ applicationId }: Props) => {
 											}
 										}}
 										value={field.value || "none"}
+										disabled={isPolicyEnforced}
 									>
 										<FormControl>
 											<SelectTrigger>
@@ -237,6 +258,7 @@ export const ShowBuildServer = ({ applicationId }: Props) => {
 											}
 										}}
 										value={field.value || "none"}
+										disabled={isPolicyEnforced}
 									>
 										<FormControl>
 											<SelectTrigger>
@@ -274,7 +296,11 @@ export const ShowBuildServer = ({ applicationId }: Props) => {
 						/>
 
 						<div className="flex w-full justify-end">
-							<Button isLoading={isPending} type="submit">
+							<Button
+								isLoading={isPending}
+								disabled={isPolicyEnforced}
+								type="submit"
+							>
 								Save
 							</Button>
 						</div>
