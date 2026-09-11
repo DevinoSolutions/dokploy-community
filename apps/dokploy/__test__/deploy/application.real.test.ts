@@ -37,6 +37,17 @@ vi.mock("@dokploy/server/db", () => {
 				applications: {
 					findFirst: vi.fn(),
 				},
+				// build-policy reads this on the deploy path, through
+				// planApplicationBuild -> resolveBuildPolicy ->
+				// previewBuildPolicyDecision -> findBuildPolicySettings
+				// (services/build-policy/settings.ts:18). Without it the
+				// namespace is undefined and every test here throws
+				// "Cannot read properties of undefined (reading 'findFirst')".
+				// Resolving undefined is the policy-off answer, which is what
+				// these upstream-behaviour tests want.
+				buildPolicySettings: {
+					findFirst: vi.fn(),
+				},
 				deployHook: {
 					findFirst: vi.fn(),
 				},
