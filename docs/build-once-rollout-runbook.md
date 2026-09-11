@@ -39,6 +39,15 @@ produces. The image is `ghcr.io/devinosolutions/dokploy-community`.
 same string the live instance reports. Version is therefore useless as a
 rollout marker; pin and verify by **digest**.
 
+**The export is smaller than the instance, and the gap is yours to close.** The
+live instance has 102 applications and 80 compose units; the audit export in
+`S/dokploy/` has 89 and 42. So roughly **13 applications and 38 compose units
+are not in the tables in §4**, most likely created after the export was taken.
+Before you flip the org-wide switch, re-export the unit list and classify the
+missing ones by the same two rules in §4.1: a GitHub-sourced application is a
+candidate, a compose unit is not. A unit you did not classify is a unit the
+switch will enforce anyway.
+
 ### 1.2 The fork
 
 | Fact | Value |
