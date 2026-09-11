@@ -3,6 +3,18 @@ name: Dokploy Docker Build
 on:
   push:
     branches: [canary]
+    # A docs-only merge must not republish the image. This workflow retags
+    # `canary`, `latest` and the package.json version on every push, so any
+    # merge to canary moves all three to a new digest - including a merge that
+    # changes nothing the image contains. That breaks the one operating
+    # procedure that depends on those tags being stable: capturing the running
+    # digest before a version roll, so there is something to roll back to.
+    # See docs/build-once-rollout-runbook.md, section 2.1.
+    #
+    # workflow_dispatch is untouched, so a deliberate rebuild is always one
+    # click away.
+    paths-ignore:
+      - "docs/**"
   workflow_dispatch:
 
 env:
