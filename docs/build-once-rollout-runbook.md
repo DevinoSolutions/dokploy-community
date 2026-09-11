@@ -542,10 +542,11 @@ unit in the organization at once, whether or not you meant to enable that unit:
    and no explicit `watchPaths` gets `<buildPath>/**`. In a monorepo a push
    touching only `packages/**` stops at the webhook with a 301 and no
    deployment record. README calls this "the single highest-blast-radius
-   consequence". **83 of 89 application units have no `watchPaths` today**
-   (only BioFlow Landing, Caly caly-landing, SuperBooks docs/iii-engine/
-   landing/mastra/web, upAPI docs and uNotes pdf2html do). The heaviest
-   monorepos - marka, shorty, caly, uNotes, Postify, BioFlow Web/Workers - are
+   consequence". **80 of 89 application units and 39 of 42 compose units have
+   no explicit `watchPaths` today.** The nine applications that do are BioFlow
+   `Landing`, Caly `caly-landing`, all five SuperBooks units, upAPI `docs` and
+   uNotes `pdf2html Dev`. The heaviest monorepos - marka, shorty, caly, uNotes,
+   Postify, BioFlow `Web` and `Workers`, upAPI `web` and `landing` - are
    exactly the ones without them.
 2. Every GitHub-sourced **application**'s build moves to the build server.
 3. Queued deploys start coalescing (previews excluded).
@@ -1076,8 +1077,9 @@ the CI-side deletion of **2,248 job-min/month** safe to do (1,682 upAPI +
 remaining 1,831 job-min of compose-stack builds needs either the compose
 `image:` work the README's Known gap defers, or Track 1's per-repo reuse edits.
 
-The other half of the saving is not on the pool at all: it is the ~139
-auto-deploy units that currently build on `devino`, the **prod** machine
+The other half of the saving is not on the pool at all: it is the 139
+auto-deploy units the spec measured (§1: 209 units built from git on every
+deploy, 139 of them auto-deploying on push) that build on `devino`, the **prod** machine
 (16 cores), on every push. Moving those builds to `devino-second` is the point
 of the track, and its benefit shows up as prod-host load, not as job-minutes.
 Measure it as `devino` load average before and after, per the spec's
