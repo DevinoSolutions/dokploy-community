@@ -52,7 +52,7 @@ switch will enforce anyway.
 
 | Fact | Value |
 |---|---|
-| Fork canary head | `b0cadcd296b377889b550b10a0ade25987192ea4` |
+| Fork canary head when this was written | `b0cadcd296b377889b550b10a0ade25987192ea4`; since advanced by #211 (`3a27cec`) and #212 (`e92e4ad`), both runtime-neutral - see §3.1 |
 | What it is | Merge of PR #209 `feat/build-policy` into `canary`, 2026-09-10 20:00:25 -0400 |
 | Behavioural baseline (merge base) | `cf4abf059` |
 | Size | 79 files changed, +22,568 / -41 |
@@ -173,25 +173,38 @@ Second trap: `install.sh update` resolves `latest` by default
 either direction of this rollout; use the explicit `docker service update`
 commands below.
 
-Third trap, and it is the one that can invalidate this whole section:
-**any merge to the fork's `canary` branch republishes the image and moves all
-three tags.** `.github/workflows/dokploy.yml` triggers on
-`push: branches: [canary]` with no `paths` or `paths-ignore` filter, so even a
-docs-only merge rebuilds `linux/amd64` and `linux/arm64` and runs
-`docker buildx imagetools create` for `canary`, `latest` and the package.json
-version. The digest you captured above stops being the digest those tags
-resolve to, and the digest you are rolling *to* changes as well.
+Third, a smaller point that is easy to misread as a bigger one:
+**any merge to the fork's `canary` branch republishes the image and moves the
+`canary`, `latest` and version tags to a new digest.**
+`.github/workflows/dokploy.yml` triggers on `push: branches: [canary]` with no
+`paths` filter, so even a docs-only merge rebuilds both architectures and runs
+`docker buildx imagetools create` for all three tags.
 
-Two consequences for the operator:
+**This does not invalidate the rollback digest.** Step 1 above reads the digest
+off the *running service* on the host, not off a tag, and a republish only adds
+a new version to the GHCR package - it does not delete or rewrite the old
+manifest. The `docker save` in step 3 makes the point moot regardless. The real
+consequences are narrower:
 
-- **Freeze `canary` for the length of the rollout window.** Capture the digest
-  (§2.1), roll (§3.3) and verify (§3.4) without a merge to `canary` in between.
-  If something does land on `canary` mid-window, re-read the digest before
-  acting on it.
-- **The PR that adds this document is itself such a merge.** It is deliberately
-  left open for the owner to merge inside the rollout window, or after a
-  `paths-ignore: [docs/**]` is added to `dokploy.yml`. Merging it casually
-  republishes the image for a markdown file.
+- **Re-read the digest you are rolling *to* if `canary` moves mid-window.**
+  §3.2 pins a specific digest for the `b0cadcd` build; if something lands on
+  `canary` between reading this and running the update, that digest is still
+  valid and still `b0cadcd`, but `:canary` no longer points at it. Pin the
+  digest, not the tag, and this stops mattering.
+- **Untagged manifests are what retention sweeps collect.** Each republish
+  leaves the previous build untagged, which is already how the pre-#209 image
+  ended up with no tag. That is an argument for the `docker save`, not for
+  freezing the branch.
+
+A `paths-ignore: [docs/**]` on `dokploy.yml` removes the docs case entirely, so
+a markdown edit stops producing a container image. That landed on `canary` as
+PR #211 (`3a27cec`). It is hygiene, not a prerequisite for this rollout.
+
+Worth stating plainly, because it is the question this raises: the fork itself
+is **not** a Dokploy unit. `dokploy-community` appears in neither
+`applications.csv` nor `composes.csv`, so merging to `canary` redeploys nothing
+on the live instance. The only thing a merge changes is what is in the registry.
+Rolling the instance is the separate, deliberate act in §3.
 
 ### 2.2 Database dump
 
@@ -374,19 +387,39 @@ workflow rather than building on the prod host - a local `docker buildx build`
 of this image on `devino` is exactly the prod-host build load the whole
 programme exists to remove.
 
+**`canary` has moved since that build, and the moves are runtime-neutral.**
+Two follow-ups to #209 landed on 2026-09-11: #211 (`3a27cec`), the
+`paths-ignore` on this workflow, and #212 (`e92e4ad`), one added namespace in a
+test mock. Neither changes a line the running container executes - one is a CI
+trigger, the other is a file under `__test__/`. Both nevertheless rebuilt the
+image and moved the `canary`, `latest` and version tags, because they are not
+under `docs/**`. Either build is a valid rollout target; the current head is
+the tidier choice, because it is the one whose test suite is green.
+
 ### 3.2 Pin by digest, not by tag
 
-```
-NEW=ghcr.io/devinosolutions/dokploy-community@sha256:8773cca09190ff905a8bedaebcd100dd295bef8eb56254a16f680eb91efee7e6
+Resolve the digest for the commit you mean, rather than trusting a tag:
 
-# Confirm the digest still resolves to the b0cadcd build before you use it.
+```
+# The current canary head, and the manifest its build published.
+gh api repos/DevinoSolutions/dokploy-community/commits/canary --jq .sha
+docker buildx imagetools inspect ghcr.io/devinosolutions/dokploy-community:canary \
+  --format '{{.Manifest.Digest}}'
+
+NEW=ghcr.io/devinosolutions/dokploy-community@<that digest>
+
 docker pull "$NEW"
 docker image inspect "$NEW" --format '{{.Created}} {{index .RepoDigests 0}}'
 ```
 
-Using the digest and not `:canary` matters here: `canary` moves on every push
-to the fork, and a later unrelated push would silently change what a `--force`
-update pulls.
+The `b0cadcd` build - #209 exactly, before the two follow-ups - remains valid
+and pinnable at
+`sha256:8773cca09190ff905a8bedaebcd100dd295bef8eb56254a16f680eb91efee7e6`
+if you would rather roll the reviewed commit and nothing else.
+
+Using a digest and not `:canary` is the point either way: `canary` moves on
+every push that touches something outside `docs/**`, and a later unrelated push
+would silently change what a `--force` update pulls.
 
 ### 3.3 The switch
 
@@ -1050,10 +1083,15 @@ already fails a file cannot prove anything about that file.
   where the deploy's own error should be - which is exactly what the second
   failing assertion caught. Any future caller that hands the module a partial
   `db` gets a build-policy error in place of the real one.
-- **Fix it before enabling the policy, not after.** A red `pull-request.yml` on
-  every canary PR masks the next real regression, and this branch's integration
-  test is the designated tripwire for upstream merges (spec §11). A tripwire
-  nobody can read is not one.
+- **Fixed, before anything else in this runbook runs.** PR #212 added
+  `buildPolicySettings` to that mock's `query` namespace and merged to `canary`
+  as `e92e4ad`. Run 34615190789 on it reports `Test Files 214 passed (214)` and
+  `Tests 2314 passed | 1 skipped (2315)`, zero failures, with
+  `application.real.test.ts` passing - exactly the five tests recovered against
+  run 34611157554 on the same base. The reason it was worth doing first: a red
+  `pull-request.yml` on every canary PR masks the next real regression, and
+  #209's integration test is the designated tripwire for upstream merges
+  (spec §11). A tripwire nobody can read is not one.
 
 **G7. Docker Hub reference normalisation (follow-up 3).**
 `docker.io/prefix/app` and `prefix/app` are the same image but whole-repository
@@ -1169,12 +1207,9 @@ acceptance criteria in §5.6.
 
 ## 7. One-page sequence
 
-0. Fix the `pull-request.yml` test failure #209 introduced (§5 G6): add
-   `buildPolicySettings: { findFirst: vi.fn() }` to the `db` mock in
-   `apps/dokploy/__test__/deploy/application.real.test.ts`. Do this first, so
-   the tripwire is readable for everything that follows. Separately, decide
-   whether `dokploy.yml` gets a `paths-ignore: [docs/**]`, and freeze `canary`
-   for the rollout window either way (§2.1, third trap).
+0. **Done.** The `pull-request.yml` test failure #209 introduced (§5 G6) is
+   fixed on `canary` by PR #212 (`e92e4ad`), so the suite is green and the
+   upstream-merge tripwire is readable for everything below.
 1. Rotate the Notifly OAuth token and move those four units to the GitHub App
    provider (owner prerequisite, spec §10).
 2. Stand up the GHCR pull-through proxy on `registry.devino.ca`, add the
