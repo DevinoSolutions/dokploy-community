@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { db } = await import("@dokploy/server/db");
 const {
+	consumeRotatedRefreshToken,
 	createConsentProof,
-	deleteConsumedRefreshToken,
 	findMcpAccessToken,
 	findOAuthApplicationByClientId,
 	listMcpAuthorizations,
@@ -19,6 +19,7 @@ const findFirst = vi.mocked(db.query.oauthAccessToken.findFirst);
 const findMany = vi.mocked(db.query.oauthAccessToken.findMany);
 const dbDelete = vi.mocked(db.delete);
 const dbInsert = vi.mocked(db.insert);
+const dbUpdate = vi.mocked(db.update);
 
 const basePayload = {
 	userId: "user-1",
@@ -145,13 +146,29 @@ describe("findOAuthApplicationByClientId", () => {
 describe("token hygiene", () => {
 	// mockClear, not mockReset: the setup's `db.delete` implementation returns
 	// the query chain and must survive between cases.
-	beforeEach(() => dbDelete.mockClear());
+	beforeEach(() => {
+		dbDelete.mockClear();
+		dbUpdate.mockClear();
+	});
 
-	it("deleteConsumedRefreshToken skips an empty token and deletes a real one", async () => {
-		await deleteConsumedRefreshToken("");
+	it("consumeRotatedRefreshToken ignores an empty token", async () => {
+		await consumeRotatedRefreshToken("");
+		expect(dbUpdate).not.toHaveBeenCalled();
 		expect(dbDelete).not.toHaveBeenCalled();
-		await deleteConsumedRefreshToken("refresh-1");
+	});
+
+	// The default grace window keeps the row alive but clamps its expiry, so a
+	// client retrying a dropped refresh response still succeeds.
+	it("consumeRotatedRefreshToken clamps the row instead of deleting it", async () => {
+		await consumeRotatedRefreshToken("refresh-1");
+		expect(dbUpdate).toHaveBeenCalledTimes(1);
+		expect(dbDelete).not.toHaveBeenCalled();
+	});
+
+	it("consumeRotatedRefreshToken deletes outright when the grace period is 0", async () => {
+		await consumeRotatedRefreshToken("refresh-1", 0);
 		expect(dbDelete).toHaveBeenCalledTimes(1);
+		expect(dbUpdate).not.toHaveBeenCalled();
 	});
 
 	it("purgeExpiredMcpTokens deletes dead tokens and abandoned registrations", async () => {

@@ -9,6 +9,7 @@ let webServerSettingsRow: { host?: string | null } | undefined;
 const { db } = await import("@dokploy/server/db");
 const {
 	getMcpAccessTokenSeconds,
+	getMcpRefreshGraceSeconds,
 	getMcpRefreshTokenSeconds,
 	isAllowedRedirectUri,
 	isMcpDisabled,
@@ -21,9 +22,10 @@ const findFirst = vi.mocked(db.query.member.findFirst);
 // The vitest config statically `define`s `process.env`, so tests pass an
 // explicit env object instead of mutating process.env.
 describe("mcp-oauth env knobs", () => {
-	it("defaults to 24h access / 180d refresh", () => {
-		expect(getMcpAccessTokenSeconds({})).toBe(24 * 3600);
-		expect(getMcpRefreshTokenSeconds({})).toBe(180 * 86400);
+	it("defaults to 30d access / 365d refresh / 5min grace", () => {
+		expect(getMcpAccessTokenSeconds({})).toBe(720 * 3600);
+		expect(getMcpRefreshTokenSeconds({})).toBe(365 * 86400);
+		expect(getMcpRefreshGraceSeconds({})).toBe(300);
 	});
 
 	it("honours positive integer overrides and ignores garbage", () => {
@@ -32,7 +34,23 @@ describe("mcp-oauth env knobs", () => {
 		).toBe(6 * 3600);
 		expect(
 			getMcpRefreshTokenSeconds({ DOKPLOY_MCP_REFRESH_TOKEN_DAYS: "-3" }),
-		).toBe(180 * 86400);
+		).toBe(365 * 86400);
+	});
+
+	// Unlike the TTLs, 0 is a real setting here: it means "revoke at once".
+	it("accepts a zero grace period but still rejects garbage", () => {
+		expect(
+			getMcpRefreshGraceSeconds({ DOKPLOY_MCP_REFRESH_GRACE_SECONDS: "0" }),
+		).toBe(0);
+		expect(
+			getMcpRefreshGraceSeconds({ DOKPLOY_MCP_REFRESH_GRACE_SECONDS: "30" }),
+		).toBe(30);
+		expect(
+			getMcpRefreshGraceSeconds({ DOKPLOY_MCP_REFRESH_GRACE_SECONDS: "-1" }),
+		).toBe(300);
+		expect(
+			getMcpRefreshGraceSeconds({ DOKPLOY_MCP_REFRESH_GRACE_SECONDS: "nope" }),
+		).toBe(300);
 	});
 
 	it("isMcpDisabled only for the literal string true", () => {
