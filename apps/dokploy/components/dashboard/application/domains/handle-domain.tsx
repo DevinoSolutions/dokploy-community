@@ -207,7 +207,7 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			domainId,
 		},
 		{
-			enabled: !!domainId,
+			enabled: isOpen && !!domainId,
 		},
 	);
 
@@ -218,7 +218,7 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 						applicationId: id,
 					},
 					{
-						enabled: !!id,
+						enabled: isOpen && !!id,
 					},
 				)
 			: api.compose.one.useQuery(
@@ -226,7 +226,7 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 						composeId: id,
 					},
 					{
-						enabled: !!id,
+						enabled: isOpen && !!id,
 					},
 				);
 
@@ -246,10 +246,15 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 	const projectId = application?.environment?.projectId ?? undefined;
 
 	const { data: canGenerateTraefikMeDomains } =
-		api.domain.canGenerateTraefikMeDomains.useQuery({
-			serverId: application?.serverId || "",
-			projectId,
-		});
+		api.domain.canGenerateTraefikMeDomains.useQuery(
+			{
+				serverId: application?.serverId || "",
+				projectId,
+			},
+			{
+				enabled: isOpen,
+			},
+		);
 
 	const { data: wildcardConfig } =
 		api.project.getWildcardDomainConfig.useQuery(
@@ -298,7 +303,7 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 		{
 			retry: false,
 			refetchOnWindowFocus: false,
-			enabled: type === "compose" && !!id,
+			enabled: isOpen && type === "compose" && !!id,
 		},
 	);
 
