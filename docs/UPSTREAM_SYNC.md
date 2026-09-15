@@ -212,6 +212,18 @@ after every merge.
 
 ### BREAKING at v0.30.5: default Docker build context is now the repo root
 
+> **Reverted upstream at v0.30.6** (`8c9e473b4`). `getDockerContextPath` returns
+> `null` again when the app has no explicit `dockerContextPath`, and
+> `builders/docker-file.ts` restored the `defaultContextPath` fallback (the
+> directory containing the Dockerfile) while passing that context as the build
+> argument instead of `"."`. The break below therefore only ever shipped in
+> `v0.30.5-community.1`; upgrading to `v0.30.6-community.1` restores the old
+> default. Anyone who set `dockerContextPath` explicitly to work around it is
+> unaffected — an explicit context is still honoured — so the fork's
+> `application.real.test.ts` keeps its `dockerContextPath: "/deno"`. Say so in
+> the release notes: users who changed their config do not need to change it
+> back.
+
 Upstream `f1e2467bb` ("fix/docker-context-path-default") changed the *default*
 build context for `buildType: "dockerfile"` applications:
 
@@ -247,6 +259,108 @@ Upstream #5246 replaced the `echo <base64> | base64 -d > path` remote write in
 shell-sensitive YAML values") was retargeted at `writeFileRemote` rather than
 deleted — the invariant it guards (the YAML reaches the transport with its
 quoting intact) still matters; only the transport changed.
+
+### Adapted at v0.30.6: same-change collisions on the whitelabeling PRs
+
+The fork had already ported two upstream PRs *before* they merged upstream:
+#4769 (whitelabeling FOUC, fork commit `2035eed43`) and #4765 (organization
+logo drag-and-drop, fork commit `625b42dff`), both authored by Yash Kumar. At
+v0.30.6 upstream's own, further-developed versions land, so theirs-wins applies
+and the fork's ports are dropped wholesale in
+`pages/_document.tsx`, `server/api/routers/proprietary/whitelabeling.ts`,
+`components/ui/dropzone.tsx` (upstream adopted the fork's `classNameContent`
+prop verbatim) and `components/dashboard/organization/handle-organization.tsx`.
+Take upstream's extracted `utils/image-processing.ts`, `utils/sanitize-svg.ts`,
+`utils/create-server-helpers.ts` and `components/shared/truncate-tooltip.tsx`
+too, and let `whitelabeling-provider.tsx` stay deleted.
+
+Two behavioural deltas were accepted under theirs-wins:
+
+- The fork's port inlined the favicon as a base64 data URI (`resolveFaviconHref`
+  + a `__FAVICON_CACHE`) so the custom favicon was present in the first HTML
+  response. Upstream emits the raw `faviconUrl`. Upstream's version is otherwise
+  a superset (OG metadata, the `</style>` XSS scrub, SVG sanitising).
+- The fork's `whitelabelingConfig.metaTitle` column is gone; upstream drives the
+  document title from `appName` and adds `ogImageUrl`. The schema `.ts` follows
+  upstream, which is why `0201` re-issues the jsonb default.
+
+One fork feature upstream lacks had to be re-applied on top of upstream's
+`handle-organization.tsx`: **organization descriptions** (`d8ff0a7a7`), stored
+in better-auth's opaque `metadata` JSON. The zod field, the
+`getOrganizationDescription` reader, the `form.reset` / submit plumbing and the
+Description form field all come back; `organizationRouter.create`/`update`
+already carry `description` and auto-merged cleanly. The fork's
+`{!isControlled && <DialogTrigger>}` guard was **not** re-applied — upstream
+ships the same controlled `open` / `onOpenChange` props and renders the trigger
+unconditionally, and no caller uses controlled mode (`side.tsx` uses both
+`AddOrganization` forms uncontrolled).
+
+The fork's project-icon feature keeps its own `@/lib/image-upload`
+(`processImageUpload`) helper in `handle-project.tsx` even though upstream's new
+`utils/image-processing.ts` overlaps it. No opportunistic refactor: they are
+different call sites and the typecheck does not force a merge.
+
+### Adapted at v0.30.6: login pages rebuilt on `generateServerSideHelper`
+
+Upstream hoisted the `createServerSideHelpers` boilerplate that the fork had
+inlined in four pages into `utils/create-server-helpers.ts`. Take upstream's
+structure for `pages/index.tsx`, `register.tsx`, `invitation.tsx` and
+`send-reset-password.tsx`, then re-apply the fork behaviours on top:
+
+- `index.tsx` — `getPostLoginDestination(router.query)` replaces every
+  `/dashboard/home` literal (4 client redirects + 2 `getServerSideProps`
+  redirects) so the validated post-login target survives password, passkey, 2FA,
+  backup-code, social and SSO sign-in; this is the MCP consent return path
+  (`ec4e90253`, `4af3e723d`). `SocialLoginButtons` for self-hosted GitHub/Google
+  when the env vars are configured, plus the `socialProviders` prop
+  (`9e63ae180`). `callbackURL` threaded into both `<SignInWithSSO>` branches.
+  The `finally { setIsLoading(false) }` blocks stay unpacked into per-branch
+  calls so the button keeps spinning across the awaited redirect (`94be4ca34`).
+- `register.tsx` — self-hosted social login (`9e63ae180`).
+- `send-reset-password.tsx` — the `!IS_CLOUD` redirect is deleted so self-hosted
+  can reset passwords (`03d51628c`); the `IS_CLOUD` import goes with it.
+- `invitation.tsx` — `await router.push(...)` (`94be4ca34`).
+
+### Adapted at v0.30.6: SSO enforcement coexists with the MCP plugin hooks
+
+Upstream (`b839e6d6b`, `5f10ed688`) enforces SSO at the better-auth layer:
+`hooks.before` throws `FORBIDDEN` for `/sign-in/email`, `/sign-in/social`,
+`/sign-in/passkey`, `/sign-up/email` and the two passkey ceremony paths when
+`!IS_CLOUD && settings.enforceSSO`. The fork restructured that same
+`hooks.before` for the remote-MCP OAuth gates (`/mcp/register` DCR policy,
+`/mcp/authorize` consent proof) and owns `hooks.after` (refresh-token rotation
+clamp). **Both sides must survive.** Upstream's block runs first — it is a hard
+deny for the whole request — then the fork's MCP gates. The two path sets are
+disjoint, so the ordering is readability, not behaviour. `auth-cli.ts` and
+`auth-schema2.ts` auto-merge and need no change.
+
+Note the interaction: with `enforceSSO` on, the fork's self-hosted social login
+buttons are dead (upstream blocks `/sign-in/social`). That is upstream's intent
+and the buttons are only rendered when the provider env vars are set.
+
+### Adapted at v0.30.6: Drizzle rule 4, again (upstream 0191-0195 → fork 0201)
+
+Fourth application of Drizzle rule 4. Upstream added `0191_cool_christian_walker`,
+`0192_light_lake`, `0193_chemical_the_liberteens`, `0194_acoustic_prima` and
+`0195_classy_whirlwind`; the fork has *released* migrations at all five numbers,
+so upstream's five `.sql` files, five snapshots and five `_journal.json` entries
+were dropped (snapshots resolved `--ours` on the add/add conflict) and the
+schema delta regenerated as `0201_steep_sage`:
+
+```sql
+DnsProviderType   += 'infomaniak', 'ovh'
+VaultProviderType += 'aws-parameter-store' BEFORE 'doppler'
+webServerSettings.whitelabelingConfig default: -metaTitle, +ogImageUrl
+sso_provider.domain_verified boolean DEFAULT true NOT NULL
+```
+
+Guarded with `ADD VALUE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`, the pattern
+`0199_complex_mantis` used for `porkbun` and `phase`. None of the five upstream
+migrations is a data backfill, so nothing had to be hand-carried this time.
+
+The generated SQL containing **no** `DROP` and touching no fork object is the
+proof that the schema merge preserved every fork column and table — check that
+before anything else.
 
 ### Cloud onboarding wizard (#5264) on self-hosted
 
@@ -358,6 +472,7 @@ tell.
 | `organization` | `wildcard_domain` (text, null) | user-owned wildcard base for generated domains | `0197` |
 | `project` | `wildcardDomain` (text, null) | per-project wildcard base override | `0197` |
 | `project` | `useOrganizationWildcard` (bool, not null, default true) | opt a project out of the organization wildcard | `0197` |
+| `webServerSettings` | `domainRestrictionConfig` (jsonb, default `{enabled:false,allowedWildcards:[]}`) | generated-domain allow-list | `0179` (in the `0195` catch-up) |
 
 The catch-up migration `0195_fork_schema_catchup` exists for exactly this class
 of drift: upstream→fork upgrades that skipped fork migrations get every
