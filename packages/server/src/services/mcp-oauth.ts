@@ -1,6 +1,16 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
-import { and, asc, desc, eq, isNull, lt, notExists, or } from "drizzle-orm";
+import {
+	and,
+	asc,
+	desc,
+	eq,
+	isNull,
+	lt,
+	notExists,
+	or,
+	sql,
+} from "drizzle-orm";
 import { scheduleJob } from "node-schedule";
 import { db } from "../db";
 import {
@@ -27,8 +37,9 @@ export const MCP_PLUGIN_AUTHORIZE_PATH = "/api/auth/mcp/authorize";
  */
 export { DOKPLOY_MCP_SCOPE_IDS, type DokployMcpScope } from "./mcp-scopes";
 
-const DEFAULT_ACCESS_TOKEN_HOURS = 24;
-const DEFAULT_REFRESH_TOKEN_DAYS = 180;
+const DEFAULT_ACCESS_TOKEN_HOURS = 24 * 30; // 30 days
+const DEFAULT_REFRESH_TOKEN_DAYS = 365;
+const DEFAULT_REFRESH_GRACE_SECONDS = 300; // 5 minutes
 
 /** Env reads take an explicit env object so tests never mutate process.env. */
 type Env = Record<string, string | undefined>;
@@ -40,7 +51,15 @@ const positiveIntEnv = (env: Env, name: string, fallback: number) => {
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-/** Access-token lifetime in seconds (DOKPLOY_MCP_ACCESS_TOKEN_HOURS, default 24). */
+/** Like positiveIntEnv but accepts 0, which is meaningful for the grace window. */
+const nonNegativeIntEnv = (env: Env, name: string, fallback: number) => {
+	const raw = env[name];
+	if (!raw) return fallback;
+	const parsed = Number.parseInt(raw, 10);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
+/** Access-token lifetime in seconds (DOKPLOY_MCP_ACCESS_TOKEN_HOURS, default 720 = 30 days). */
 export const getMcpAccessTokenSeconds = (env: Env = process.env) =>
 	positiveIntEnv(
 		env,
@@ -48,13 +67,24 @@ export const getMcpAccessTokenSeconds = (env: Env = process.env) =>
 		DEFAULT_ACCESS_TOKEN_HOURS,
 	) * 3600;
 
-/** Refresh-token lifetime in seconds (DOKPLOY_MCP_REFRESH_TOKEN_DAYS, default 180). Slides on every refresh. */
+/** Refresh-token lifetime in seconds (DOKPLOY_MCP_REFRESH_TOKEN_DAYS, default 365). Slides on every refresh. */
 export const getMcpRefreshTokenSeconds = (env: Env = process.env) =>
 	positiveIntEnv(
 		env,
 		"DOKPLOY_MCP_REFRESH_TOKEN_DAYS",
 		DEFAULT_REFRESH_TOKEN_DAYS,
 	) * 86400;
+
+/**
+ * How long a rotated refresh token stays usable after being consumed
+ * (DOKPLOY_MCP_REFRESH_GRACE_SECONDS, default 300). 0 revokes immediately.
+ */
+export const getMcpRefreshGraceSeconds = (env: Env = process.env) =>
+	nonNegativeIntEnv(
+		env,
+		"DOKPLOY_MCP_REFRESH_GRACE_SECONDS",
+		DEFAULT_REFRESH_GRACE_SECONDS,
+	);
 
 /** Kill switch: DOKPLOY_MCP_DISABLED=true removes the endpoint and the purge job. */
 export const isMcpDisabled = (env: Env = process.env) =>
@@ -354,11 +384,47 @@ export const evaluateMcpAuthorizeGate = ({
 // Token hygiene
 // ---------------------------------------------------------------------------
 
-/** Called after a successful refresh: the consumed refresh token must die. */
-export const deleteConsumedRefreshToken = async (refreshToken: string) => {
+/**
+ * Called after a successful refresh. better-auth rotates by inserting a new
+ * row and leaving the consumed one alive for its whole remaining window, so
+ * the old refresh token stays replayable until something retires it.
+ *
+ * Retiring it instantly is the strictest option, but it strands clients: a
+ * dropped response or a racing second request leaves the client holding a
+ * token that no longer exists, and the only way out is a browser re-auth.
+ * PostHog hit exactly this with MCP clients and responded by disabling
+ * rotation for them outright; Google, Okta and Cognito issue non-rotating
+ * refresh tokens for the same reason. We keep rotation but clamp the consumed
+ * row to a short grace window, so a retry inside it still succeeds.
+ *
+ * LEAST() only ever shortens the row: one already expiring sooner keeps its
+ * own expiry, and the daily purge reaps it either way. LEAST ignores NULL, so
+ * a row with no recorded refresh expiry also ends up bounded by the window
+ * rather than staying open. Set DOKPLOY_MCP_REFRESH_GRACE_SECONDS=0 to restore
+ * immediate revocation.
+ */
+export const consumeRotatedRefreshToken = async (
+	refreshToken: string,
+	// Injected like the env helpers above: the vitest config statically
+	// `define`s process.env, so tests cannot stub it.
+	graceSeconds: number = getMcpRefreshGraceSeconds(),
+) => {
 	if (!refreshToken) return;
+
+	if (graceSeconds <= 0) {
+		await db
+			.delete(oauthAccessToken)
+			.where(eq(oauthAccessToken.refreshToken, refreshToken));
+		return;
+	}
+
+	const until = new Date(Date.now() + graceSeconds * 1000);
 	await db
-		.delete(oauthAccessToken)
+		.update(oauthAccessToken)
+		.set({
+			accessTokenExpiresAt: sql`LEAST(${oauthAccessToken.accessTokenExpiresAt}, ${until}::timestamp)`,
+			refreshTokenExpiresAt: sql`LEAST(${oauthAccessToken.refreshTokenExpiresAt}, ${until}::timestamp)`,
+		})
 		.where(eq(oauthAccessToken.refreshToken, refreshToken));
 };
 

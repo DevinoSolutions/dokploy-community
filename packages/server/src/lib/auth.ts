@@ -22,7 +22,7 @@ import {
 	getUserByToken,
 } from "../services/admin";
 import {
-	deleteConsumedRefreshToken,
+	consumeRotatedRefreshToken,
 	DOKPLOY_MCP_SCOPE_IDS,
 	evaluateMcpAuthorizeGate,
 	evaluateMcpRegisterBody,
@@ -195,7 +195,9 @@ const createBetterAuth = () =>
 			}),
 			after: createAuthMiddleware(async (ctx) => {
 				// Refresh rotation: the plugin inserts a new row and leaves the
-				// consumed refresh token alive. Delete it so it cannot be replayed.
+				// consumed refresh token alive for its whole remaining window.
+				// Clamp it to a short grace window so it cannot be replayed later
+				// but an in-flight retry still succeeds.
 				if (ctx.path !== "/mcp/token") return;
 				const rawBody = ctx.body as unknown;
 				const body =
@@ -211,7 +213,7 @@ const createBetterAuth = () =>
 				if (!succeeded) return;
 				const consumed = body.refresh_token;
 				if (typeof consumed === "string" && consumed) {
-					await deleteConsumedRefreshToken(consumed);
+					await consumeRotatedRefreshToken(consumed);
 				}
 			}),
 		},
