@@ -2,9 +2,9 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.5** | Fork version **v0.30.5-community.1**
+Based on **Dokploy v0.30.6** | Fork version **v0.30.6-community.1**
 
-Everything in upstream Dokploy **v0.30.5**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
+Everything in upstream Dokploy **v0.30.6**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
 ## Switching from official Dokploy
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.5-community.1 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.1 \
   --with-registry-auth \
   dokploy
 ```
@@ -20,7 +20,7 @@ docker service update \
 Going back to official is just as easy (our extra tables/columns are simply ignored):
 
 ```bash
-docker service update --image dokploy/dokploy:v0.30.5 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.30.6 --with-registry-auth dokploy
 ```
 
 The image is public — no registry login required.
@@ -41,7 +41,15 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 - Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP) — Claude Code, Cursor or any MCP client connects over HTTPS with **no local process and no API key**
 - **OAuth 2.1** with PKCE and dynamic client registration: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then `/mcp → Authenticate` opens the browser and you sign in once
 - **Per-grant scopes** — a consent page with toggles for read, deploy, edit/delete services, edit/delete projects, backups and admin (delete and admin are off by default); role permissions still apply underneath
-- **Long-lived, silently refreshed tokens** (24h access / 180-day sliding refresh, env-tunable) shared by every session on the machine; revoke any client from Settings → Profile
+- **Long-lived, silently refreshed tokens** (30-day access / 365-day sliding refresh, env-tunable) shared by every session on the machine; revoke any client from Settings → Profile
+
+### Build once, deploy by digest (fork original)
+
+- **One builder for the whole organization** — with enforcement on, every GitHub-sourced application builds on the organization build server, pushes `<repository>:<sha>` to the organization registry, and updates the swarm service **by digest**, so CI can wait for that image instead of building a second copy of it
+- **Escape hatches that leave a record** — per-application and per-compose exclusions, plus a one-shot "build locally once" grant written to an audit trail with actor, reason and timestamp, and spent by the next deploy
+- **Required checks and coalescing** — a deploy can wait for named commit checks before it builds, and rapid pushes to the same unit collapse into a single deploy
+- **Rollback by digest** — the last good image digest is stored, so a rollback re-deploys exactly the image that was running
+- **Off by default** — with no policy configured for an organization, every code path is stock upstream behaviour
 
 ### Cloudflare integration
 
@@ -114,6 +122,16 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.6-community.1
+
+**Upstream v0.30.6 sync + a fork-original build policy + longer-lived MCP sessions + critical dependency patches** — one guarded migration (three enum values, one column, one default), upgrades in place.
+
+- **Upstream v0.30.6** — Infomaniak and OVHcloud DNS providers, an AWS Parameter Store vault provider, Infisical secret references expanded with folder paths, organization logo drag-and-drop with smarter name truncation, dynamic Open Graph metadata for whitelabeled instances, SSO enforcement extended to server-side sign-in, passkeys and email signup, DNS upserts that match on record content instead of overwriting existing records, domain validation that accepts a server's own interface addresses, and custom Docker address-pool detection in server health ([#215](https://github.com/DevinoSolutions/dokploy-community/pull/215))
+- **The v0.30.5 Docker build-context change is reverted upstream** — the default build context is the Dockerfile's own directory again. An application that needed *Docker Context Path* set as a workaround on `v0.30.5-community.1` keeps working either way, so no action is required ([#215](https://github.com/DevinoSolutions/dokploy-community/pull/215))
+- **Build once, deploy by digest (fork original)** — enforced remote builds on the organization build server, a registry push per commit, swarm updates by image digest, audited break-glass local builds, required commit checks, deploy coalescing, and rollback to a stored digest; off by default ([#209](https://github.com/DevinoSolutions/dokploy-community/pull/209))
+- **MCP sessions stop re-authorizing daily** — access tokens now last 30 days and refresh tokens 365 days sliding, and a 5-minute rotation grace window keeps a dropped refresh response from stranding a client; every lifetime is env-tunable ([#214](https://github.com/DevinoSolutions/dokploy-community/pull/214))
+- **Critical dependency patches** — `next` 16.3.3 closes two unauthenticated remote-code-execution advisories (one affecting Windows-hosted servers, one in the image optimizer), alongside `sharp` and `js-yaml` fixes ([#213](https://github.com/DevinoSolutions/dokploy-community/pull/213))
 
 ### New in v0.30.5-community.1
 
@@ -351,7 +369,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.5-community.1
+export DOKPLOY_VERSION=v0.30.6-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -364,7 +382,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.5-community.1     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.1     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -418,6 +436,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.30.3 | 3rd release | `v0.30.3-community.3` |
 | v0.30.3 | 4th release | `v0.30.3-community.4` |
 | v0.30.5 | 1st release | `v0.30.5-community.1` |
+| v0.30.6 | 1st release | `v0.30.6-community.1` |
 
 ## Contributing
 
