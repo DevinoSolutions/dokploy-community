@@ -10,6 +10,7 @@ permissions:
 jobs:
   pr-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       matrix:
         job: [build, test, typecheck]
