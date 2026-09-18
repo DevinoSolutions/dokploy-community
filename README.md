@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.6** | Fork version **v0.30.6-community.1**
+Based on **Dokploy v0.30.6** | Fork version **v0.30.6-community.2**
 
 Everything in upstream Dokploy **v0.30.6**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.1 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.2 \
   --with-registry-auth \
   dokploy
 ```
@@ -122,6 +122,15 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.6-community.2
+
+**Self-healing fork schema for upstream switchers, a Settings → Build policy fix, and quieter scheduled-backup failures** — one guarded catch-up migration, upgrades in place.
+
+- **Switching from upstream Dokploy v0.30.6 no longer loses fork tables** — the drizzle migrator orders migrations by timestamp, so an upstream v0.30.6 database that switched to the fork silently skipped the fork's wildcard-domain, MCP OAuth and earlier catch-up migrations (`column wildcard_domain does not exist`, `relation oauth_access_token does not exist`). A new catch-up migration re-issues them, and the boot sequence now applies any fork catch-up whose hash is missing from the migrations table, independent of timestamps ([#220](https://github.com/DevinoSolutions/dokploy-community/pull/220))
+- **Settings → Build policy loads again** — the exclusions and audit listings selected the full `application` row inside a relational query, which exceeds Postgres's 100-argument limit; they now select only the columns the page shows ([#220](https://github.com/DevinoSolutions/dokploy-community/pull/220))
+- **Scheduled backup failures no longer surface as context-free crashes** — a failing scheduled database or volume backup is logged with its backup and server ids instead of escaping as an unhandled rejection, and command errors reported to the error tracker now carry the scrubbed command, exit code and output tail ([#220](https://github.com/DevinoSolutions/dokploy-community/pull/220))
+- **Migration failures are reported** — the migration step reports a failed batch to the error tracker instead of only logging it, so a half-migrated install is diagnosable ([#220](https://github.com/DevinoSolutions/dokploy-community/pull/220))
 
 ### New in v0.30.6-community.1
 
@@ -369,7 +378,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.6-community.1
+export DOKPLOY_VERSION=v0.30.6-community.2
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -382,7 +391,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.1     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.2     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -437,6 +446,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.30.3 | 4th release | `v0.30.3-community.4` |
 | v0.30.5 | 1st release | `v0.30.5-community.1` |
 | v0.30.6 | 1st release | `v0.30.6-community.1` |
+| v0.30.6 | 2nd release | `v0.30.6-community.2` |
 
 ## Contributing
 
