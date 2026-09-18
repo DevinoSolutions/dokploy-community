@@ -1,3 +1,7 @@
+import {
+	ExecError,
+	truncateOutputTail,
+} from "@dokploy/server/utils/process/ExecError";
 import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import * as Sentry from "@sentry/node";
 import type { ErrorEvent } from "@sentry/node";
@@ -64,9 +68,43 @@ if (isSentryEnabled) {
 	});
 }
 
+type ExecErrorLike = Pick<
+	ExecError,
+	"command" | "stdout" | "stderr" | "exitCode" | "serverId"
+>;
+
+const isExecError = (error: unknown): error is ExecErrorLike =>
+	error instanceof ExecError ||
+	(error instanceof Error &&
+		error.name === "ExecError" &&
+		typeof (error as Partial<ExecErrorLike>).command === "string");
+
+/**
+ * Identifying fields for an ExecError. Node's exception context carries only
+ * the message, so a remote "exit code 1" used to reach Sentry with no command,
+ * server or output attached. ExecError scrubs its own fields; they are scrubbed
+ * once more here as defense in depth.
+ */
+export const execErrorContext = (error: unknown) => {
+	if (!isExecError(error)) return undefined;
+	const tail = (output?: string) =>
+		output ? redactSecrets(truncateOutputTail(output, 500)) : "";
+	return {
+		command: redactSecrets(error.command),
+		exitCode: error.exitCode ?? null,
+		serverId: error.serverId ?? null,
+		stderrTail: tail(error.stderr),
+		stdoutTail: tail(error.stdout),
+	};
+};
+
 export const captureError = (error: unknown, tags?: Record<string, string>) => {
 	if (!isSentryEnabled) return;
-	Sentry.captureException(error, tags ? { tags } : undefined);
+	const extra = execErrorContext(error);
+	Sentry.captureException(error, {
+		...(tags ? { tags } : {}),
+		...(extra ? { extra } : {}),
+	});
 };
 
 /** Best-effort flush with a hard cap so crash paths still exit promptly. */

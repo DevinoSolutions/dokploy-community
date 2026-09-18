@@ -3,6 +3,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 import { captureError } from "../sentry";
+import { applyForkSchemaCatchups } from "./fork-schema-catchup";
 
 const sql = postgres(dbUrl, { max: 1 });
 const db = drizzle(sql);
@@ -28,6 +29,19 @@ export const migration = async () => {
 		);
 		console.error(error);
 		captureError(error, { subsystem: "db-migration" });
+	}
+
+	// Runs even when the batch above failed: catch-ups are guarded, so they can
+	// still heal a fork-schema gap that batch never reached. See
+	// ./fork-schema-catchup.ts for why drizzle's `when` ordering skips them.
+	try {
+		await applyForkSchemaCatchups(db);
+	} catch (error) {
+		console.error(
+			"FORK SCHEMA CATCH-UP FAILED — fork-only tables/columns may be missing:",
+			error,
+		);
+		captureError(error, { subsystem: "db-migration-catchup" });
 	} finally {
 		await sql.end();
 	}
