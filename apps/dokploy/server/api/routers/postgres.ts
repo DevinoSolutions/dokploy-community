@@ -776,6 +776,7 @@ export const postgresRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({ openapi: { enabled: false } })
 		.input(
 			apiTransferPostgres.extend({
 				decisions: z
