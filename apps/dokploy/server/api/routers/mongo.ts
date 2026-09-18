@@ -763,6 +763,7 @@ export const mongoRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({ openapi: { enabled: false } })
 		.input(
 			apiTransferMongo.extend({
 				decisions: z

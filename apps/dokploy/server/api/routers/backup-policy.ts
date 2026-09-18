@@ -425,6 +425,7 @@ export const backupPolicyRouter = createTRPCRouter({
 	// failures, and emits a per-service line plus a final summary. Never throws
 	// mid-stream for a per-service failure.
 	runNow: withPermission("backup", "create")
+		.meta({ openapi: { enabled: false } })
 		.input(apiFindOneBackupPolicy)
 		.subscription(async function* ({ input, ctx, signal }) {
 			const policy = await findBackupPolicyById(input.backupPolicyId);
