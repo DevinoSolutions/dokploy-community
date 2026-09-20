@@ -1,3 +1,4 @@
+import { logger } from "@dokploy/server/lib/logger";
 import path from "node:path";
 import { paths } from "@dokploy/server/constants";
 import {
@@ -77,7 +78,15 @@ export const scheduleVolumeBackup = async (volumeBackupId: string) => {
 	scheduleJob(volumeBackupId, volumeBackup.cronExpression, async () => {
 		await withBackupSlot(serverKey, volumeBackupId, () =>
 			runVolumeBackup(volumeBackupId),
-		);
+		).catch((error: unknown) => {
+			// Same containment as scheduleBackup: node-schedule drops the
+			// callback's promise, so a failed run would surface only as a
+			// context-free unhandled rejection.
+			logger.error(
+				{ volumeBackupId, serverId: serverKey ?? null, error },
+				"[VolumeBackup] Scheduled volume backup failed",
+			);
+		});
 	});
 };
 

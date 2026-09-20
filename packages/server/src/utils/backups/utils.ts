@@ -80,6 +80,16 @@ export const scheduleBackup = (backup: BackupSchedule) => {
 				await runComposeBackup(compose, backup);
 				await keepLatestNBackups(backup, compose.serverId);
 			}
+		}).catch((error: unknown) => {
+			// The run* helpers have already notified the user and marked the
+			// deployment before rethrowing (manual runs need the throw to reach
+			// tRPC). node-schedule ignores the callback's promise, so without this
+			// a failed scheduled run surfaced only as a context-free unhandled
+			// rejection ("Remote command failed with exit code 1").
+			logger.error(
+				{ backupId, serverId: serverKey ?? null, error },
+				"[Backup] Scheduled backup failed",
+			);
 		});
 	});
 };

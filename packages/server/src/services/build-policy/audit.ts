@@ -6,6 +6,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { BuildPolicyUnitType } from "./policy";
+import { buildPolicyUnitProjection } from "./unit-projection";
 
 /**
  * Append-only trail for build-policy decisions, plus the break-glass grants
@@ -63,7 +64,7 @@ export const listBuildPolicyAudit = async ({
 			orderBy: [desc(buildPolicyAudit.createdAt)],
 			limit,
 			offset,
-			with: { application: true, compose: true },
+			with: buildPolicyUnitProjection,
 		}),
 		db.$count(
 			buildPolicyAudit,
