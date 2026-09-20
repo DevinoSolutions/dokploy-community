@@ -60,6 +60,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=dokploy-amd64
+          cache-to: type=gha,mode=max,scope=dokploy-amd64
           build-args: |
             DOKPLOY_BUILD_SHA=${{ github.sha }}
   docker-arm:
@@ -101,6 +103,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha,scope=dokploy-arm64
+          cache-to: type=gha,mode=max,scope=dokploy-arm64
           build-args: |
             DOKPLOY_BUILD_SHA=${{ github.sha }}
 
