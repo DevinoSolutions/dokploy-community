@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Detect version from environment variable or detect latest stable from GitHub
-# Usage with curl (export first): export DOKPLOY_VERSION=canary && curl -sSL https://raw.githubusercontent.com/DevinoSolutions/dokploy-community/canary/install.sh | sh
-# Usage with curl (export first): export DOKPLOY_VERSION=latest && curl -sSL https://raw.githubusercontent.com/DevinoSolutions/dokploy-community/canary/install.sh | sh
-# Usage with curl (bash -s): DOKPLOY_VERSION=canary bash -s < <(curl -sSL https://raw.githubusercontent.com/DevinoSolutions/dokploy-community/canary/install.sh)
-# Usage with curl (default): curl -sSL https://raw.githubusercontent.com/DevinoSolutions/dokploy-community/canary/install.sh | sh (detects latest stable version)
+# Usage with curl (export first): export DOKPLOY_VERSION=canary && curl -sSL https://raw.githubusercontent.com/rossreicks/dokploy-community/canary/install.sh | sh
+# Usage with curl (export first): export DOKPLOY_VERSION=latest && curl -sSL https://raw.githubusercontent.com/rossreicks/dokploy-community/canary/install.sh | sh
+# Usage with curl (bash -s): DOKPLOY_VERSION=canary bash -s < <(curl -sSL https://raw.githubusercontent.com/rossreicks/dokploy-community/canary/install.sh)
+# Usage with curl (default): curl -sSL https://raw.githubusercontent.com/rossreicks/dokploy-community/canary/install.sh | sh
 # Usage with bash: DOKPLOY_VERSION=canary bash install.sh
 # Usage with bash: DOKPLOY_VERSION=latest bash install.sh
 # Usage with bash: bash install.sh (detects latest stable version)
@@ -17,7 +17,7 @@ detect_version() {
         
         # Try to get latest release from GitHub by following redirects
         version=$(curl -fsSL -o /dev/null -w '%{url_effective}\n' \
-            https://github.com/DevinoSolutions/dokploy-community/releases/latest 2>/dev/null | \
+            https://github.com/rossreicks/dokploy-community/releases/latest 2>/dev/null | \
             sed 's#.*/tag/##')
         
         # Fallback to latest tag if detection fails
@@ -81,7 +81,7 @@ generate_random_password() {
 install_dokploy() {
     # Detect version tag
     VERSION_TAG=$(detect_version)
-    DOCKER_IMAGE="ghcr.io/devinosolutions/dokploy-community:${VERSION_TAG}"
+    DOCKER_IMAGE="ghcr.io/rossreicks/dokploy-community:${VERSION_TAG}"
     
     echo "Installing Dokploy version: ${VERSION_TAG}"
     if [ "$(id -u)" != "0" ]; then
@@ -351,7 +351,7 @@ install_dokploy() {
 update_dokploy() {
     # Detect version tag
     VERSION_TAG=$(detect_version)
-    DOCKER_IMAGE="ghcr.io/devinosolutions/dokploy-community:${VERSION_TAG}"
+    DOCKER_IMAGE="ghcr.io/rossreicks/dokploy-community:${VERSION_TAG}"
     
     echo "Updating Dokploy to version: ${VERSION_TAG}"
     

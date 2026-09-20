@@ -49,6 +49,16 @@ jobs:
           git checkout -B sync/devino-canary
 
           if git merge devino/canary --no-ff --no-edit; then
+            # These files describe and operate this personal fork. Restore them
+            # even when Git merged upstream edits without a conflict.
+            git checkout origin/canary -- \
+              README.md \
+              CHANGELOG.md \
+              install.sh \
+              .github/workflows/dokploy.yml \
+              .github/workflows/sync-devino-canary.yml
+            git rm --force --ignore-unmatch CNAME
+            git commit --amend --no-edit
             echo "conflicted=false" >> "$GITHUB_OUTPUT"
           else
             git diff --name-only --diff-filter=U > /tmp/conflicts.txt
