@@ -511,6 +511,35 @@ instance has the column, and the next sync takes upstream's journal verbatim.
 `when` is below the previous fork release's highest `when`; bump those so
 upgraders don't skip them.
 
+### Fork-original migrations vs. an upstream-to-fork switch (v0.30.6 lesson)
+
+The same high-water-mark rule bites in the other direction. A database created
+by **upstream** carries upstream's newest `created_at`; when that instance
+switches to the fork, every fork-original migration whose `when` is older than
+upstream's newest is silently skipped. At v0.30.6 upstream's newest
+(`0195_classy_whirlwind`, 2026-09-08) sat above fork `0195_fork_schema_catchup`
+(08-18) and `0196`..`0199` (08-31..09-06), so an upstream v0.30.6 switcher got
+only `0200` and `0201`: `build_policy_*` existed while
+`organization.wildcard_domain`, `oauth_access_token` and `server.default_domain`
+did not (Sentry DOKPLOY-COMMUNITY-3C/3J/H).
+
+Two layers cover this:
+
+1. **Catch-up migrations.** `*_fork_schema_catchup*` migrations re-issue fork
+   schema idempotently (`0195_fork_schema_catchup`,
+   `0202_fork_schema_catchup_v2`). **Every sync must add a new one** that
+   re-issues each fork-original migration whose `when` is older than upstream's
+   newest migration in the tag being synced (compare both journals in the
+   pre-scout). Guard every statement per the idempotency test; data backfills
+   must be conditional (see 0202's `onboardingCompletedAt` block).
+2. **Boot-time runner.** `apps/dokploy/server/db/fork-schema-catchup.ts` runs
+   after `migrate()` from the real entrypoint (`apps/dokploy/migration.ts` →
+   `server/db/migration.ts`) and applies any catch-up whose file **hash** is
+   absent from `drizzle.__drizzle_migrations`, recording it the way drizzle
+   would. This is independent of `when`, so a switcher heals on its first boot
+   of a fixed image even when drizzle skipped the catch-up itself. Never edit a
+   shipped catch-up file: its hash is its identity.
+
 ## Version convention
 
 `vX.Y.Z-community.N` where `X.Y.Z` is the synced upstream release and `N` starts at

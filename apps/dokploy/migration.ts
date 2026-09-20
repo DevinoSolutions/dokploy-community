@@ -1,19 +1,12 @@
-import { dbUrl } from "@dokploy/server/db";
-import { drizzle } from "drizzle-orm/postgres-js";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
-import postgres from "postgres";
+import { migration } from "./server/db/migration";
+import { flushSentry } from "./server/sentry";
 
-const sql = postgres(dbUrl, { max: 1 });
-const db = drizzle(sql);
-
-await migrate(db, { migrationsFolder: "drizzle" })
-	.then(() => {
-		console.log("Migration complete");
-		sql.end();
-	})
-	.catch((error) => {
-		console.log("Migration failed", error);
-	})
-	.finally(() => {
-		sql.end();
-	});
+// Entrypoint for `dist/migration.mjs` (Dockerfile CMD and `pnpm start`). The
+// shared `migration()` runs drizzle's migrator, then the fork schema catch-up
+// pass, and reports a failing batch to Sentry instead of only logging it. It
+// never throws: the server still boots so an install is never bricked.
+await migration();
+await flushSentry();
+// Exit explicitly so a lingering transport socket cannot delay the server
+// start that follows in the container command.
+process.exit(0);

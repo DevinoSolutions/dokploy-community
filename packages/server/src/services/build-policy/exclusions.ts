@@ -5,6 +5,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { and, eq } from "drizzle-orm";
 import type { BuildPolicyUnitType } from "./policy";
+import { buildPolicyUnitProjection } from "./unit-projection";
 
 /** Units that keep a local build while enforcement is on (spec 5.2.2). */
 const unitColumn = (unitType: BuildPolicyUnitType) =>
@@ -15,7 +16,7 @@ const unitColumn = (unitType: BuildPolicyUnitType) =>
 export const listBuildPolicyExclusions = async (organizationId: string) =>
 	db.query.buildPolicyExclusion.findMany({
 		where: eq(buildPolicyExclusion.organizationId, organizationId),
-		with: { application: true, compose: true },
+		with: buildPolicyUnitProjection,
 	});
 
 export const isUnitExcluded = async ({
