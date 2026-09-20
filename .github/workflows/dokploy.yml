@@ -60,6 +60,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            DOKPLOY_BUILD_SHA=${{ github.sha }}
   docker-arm:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
@@ -99,6 +101,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            DOKPLOY_BUILD_SHA=${{ github.sha }}
 
   combine-manifests:
     needs: [docker-amd, docker-arm]

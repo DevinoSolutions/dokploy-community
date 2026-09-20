@@ -14,6 +14,7 @@ import {
 	findServerById,
 	getDockerDiskUsage,
 	getDokployImageTag,
+	getDokployUpdateImage,
 	getLogCleanupStatus,
 	getReleaseNotes,
 	getUpdateData,
@@ -643,7 +644,7 @@ export const settingsRouter = createTRPCRouter({
 				"update",
 				"--force",
 				"--image",
-				`ghcr.io/devinosolutions/dokploy-community:${data.latestVersion}`,
+				getDokployUpdateImage(),
 				"dokploy",
 			]);
 			await audit(ctx, {

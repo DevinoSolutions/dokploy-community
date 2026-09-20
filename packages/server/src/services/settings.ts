@@ -6,7 +6,6 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import { and, eq } from "drizzle-orm";
 
-import semver from "semver";
 import { db } from "../db";
 import { compose } from "../db/schema";
 import {
@@ -23,6 +22,14 @@ export const DEFAULT_UPDATE_DATA: IUpdateData = {
 	latestVersion: null,
 	updateAvailable: false,
 };
+
+const UPDATE_REPOSITORY =
+	process.env.DOKPLOY_UPDATE_REPOSITORY || "rossreicks/dokploy-community";
+const UPDATE_IMAGE =
+	process.env.DOKPLOY_UPDATE_IMAGE || "ghcr.io/rossreicks/dokploy-community";
+const UPDATE_CHANNEL = process.env.DOKPLOY_UPDATE_CHANNEL || "canary";
+
+export const getDokployUpdateImage = () => `${UPDATE_IMAGE}:${UPDATE_CHANNEL}`;
 
 /** Returns current Dokploy docker image tag or `latest` by default. */
 export const getDokployImageTag = () => {
@@ -44,14 +51,17 @@ export const getServiceImageDigest = async () => {
 	return currentDigest;
 };
 
-/** Returns latest version and whether an update is available by checking
- *  GitHub releases on the DevinoSolutions fork. */
+/** Returns the version from the newest successfully published canary image.
+ *  The workflow SHA is baked into each image, so same-version development
+ *  builds can still be detected without pulling the image during a check. */
 export const getUpdateData = async (
 	currentVersion: string,
 ): Promise<IUpdateData> => {
 	try {
 		const response = await fetch(
-			"https://api.github.com/repos/DevinoSolutions/dokploy-community/releases/latest",
+			`https://api.github.com/repos/${UPDATE_REPOSITORY}/actions/workflows/dokploy.yml/runs?branch=${encodeURIComponent(
+				UPDATE_CHANNEL,
+			)}&status=success&per_page=1`,
 			{
 				method: "GET",
 				headers: {
@@ -65,25 +75,27 @@ export const getUpdateData = async (
 			return DEFAULT_UPDATE_DATA;
 		}
 
-		const release = (await response.json()) as { tag_name: string };
-		const latestVersion = release.tag_name;
-
-		if (!latestVersion) {
+		const data = (await response.json()) as {
+			workflow_runs?: Array<{ head_sha?: string }>;
+		};
+		const latestRevision = data.workflow_runs?.[0]?.head_sha;
+		if (!latestRevision) {
 			return DEFAULT_UPDATE_DATA;
 		}
 
-		const cleanedCurrent = semver.clean(currentVersion);
-		const cleanedLatest = semver.clean(latestVersion);
-
-		if (!cleanedCurrent || !cleanedLatest) {
-			return DEFAULT_UPDATE_DATA;
-		}
-
-		const updateAvailable = semver.gt(cleanedLatest, cleanedCurrent);
+		const versionResponse = await fetch(
+			`https://raw.githubusercontent.com/${UPDATE_REPOSITORY}/${latestRevision}/apps/dokploy/package.json`,
+		);
+		const latestVersion = versionResponse.ok
+			? ((await versionResponse.json()) as { version?: string }).version ||
+				currentVersion
+			: currentVersion;
 
 		return {
 			latestVersion,
-			updateAvailable,
+			updateAvailable:
+				process.env.DOKPLOY_BUILD_SHA?.toLowerCase() !==
+				latestRevision.toLowerCase(),
 		};
 	} catch (error) {
 		console.error("Error fetching update data:", error);
@@ -338,7 +350,7 @@ export const reloadDockerResource = async (
 				imageTag = currentImageTag;
 			}
 
-			command = `docker service update --force --image ghcr.io/devinosolutions/dokploy-community:${imageTag} ${resourceName}`;
+			command = `docker service update --force --image ${getDokployUpdateImage()} ${resourceName}`;
 		} else {
 			command = `docker service update --force ${resourceName}`;
 		}

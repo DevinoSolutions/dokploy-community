@@ -6,6 +6,8 @@ RUN corepack enable
 RUN corepack prepare pnpm@10.22.0 --activate
 
 FROM base AS build
+ARG DOKPLOY_BUILD_SHA=unknown
+ENV DOKPLOY_BUILD_SHA=$DOKPLOY_BUILD_SHA
 COPY . /usr/src/app
 WORKDIR /usr/src/app
 
@@ -26,10 +28,12 @@ RUN cp -R /usr/src/app/apps/dokploy/.next /prod/dokploy/.next
 RUN cp -R /usr/src/app/apps/dokploy/dist /prod/dokploy/dist
 
 FROM base AS dokploy
+ARG DOKPLOY_BUILD_SHA=unknown
 WORKDIR /app
 
 # Set production
 ENV NODE_ENV=production
+ENV DOKPLOY_BUILD_SHA=$DOKPLOY_BUILD_SHA
 
 RUN apt-get update && apt-get install -y tini curl unzip zip apache2-utils iproute2 rsync git-lfs && git lfs install && rm -rf /var/lib/apt/lists/*
 

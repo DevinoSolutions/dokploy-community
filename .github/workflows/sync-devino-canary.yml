@@ -1,0 +1,100 @@
+name: Sync DevinoSolutions canary
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: sync-devino-canary
+  cancel-in-progress: false
+
+jobs:
+  prepare-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout canary
+        uses: actions/checkout@v4
+        with:
+          ref: canary
+          fetch-depth: 0
+
+      - name: Fetch DevinoSolutions canary
+        run: |
+          git remote add devino https://github.com/DevinoSolutions/dokploy-community.git
+          git fetch --no-tags devino canary
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          if git merge-base --is-ancestor devino/canary HEAD; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream changes
+        if: steps.check.outputs.needed == 'true'
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config merge.ours.driver true
+          git checkout -B sync/devino-canary
+
+          if git merge devino/canary --no-ff --no-edit; then
+            echo "conflicted=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt
+            git merge --abort
+            echo "conflicted=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open conflict issue
+        if: steps.merge.outputs.conflicted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="DevinoSolutions canary sync needs manual conflict resolution"
+          {
+            echo "A scheduled sync from \`DevinoSolutions/dokploy-community:canary\` could not be merged automatically."
+            echo
+            echo "Conflicting files:"
+            echo '```'
+            cat /tmp/conflicts.txt
+            echo '```'
+            echo
+            echo "Run the tag-based/manual reconciliation process in \`docs/UPSTREAM_SYNC.md\` before merging."
+          } > /tmp/issue.md
+
+          EXISTING=$(gh issue list --state open --search "in:title $TITLE" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body-file /tmp/issue.md
+          else
+            gh issue create --title "$TITLE" --body-file /tmp/issue.md
+          fi
+          exit 1
+
+      - name: Push sync branch
+        if: steps.check.outputs.needed == 'true' && steps.merge.outputs.conflicted == 'false'
+        run: git push --force origin HEAD:refs/heads/sync/devino-canary
+
+      - name: Open draft pull request
+        if: steps.check.outputs.needed == 'true' && steps.merge.outputs.conflicted == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr list --state open --base canary --head sync/devino-canary --json number --jq 'length' | grep -q '^0$'; then
+            gh pr create \
+              --draft \
+              --base canary \
+              --head sync/devino-canary \
+              --title "Sync DevinoSolutions canary" \
+              --body $'Automated merge of `DevinoSolutions/dokploy-community:canary`.\n\nThis is intentionally a draft. Review fork-owned behavior, migrations, and the checks in `docs/UPSTREAM_SYNC.md` before merging.'
+          fi
