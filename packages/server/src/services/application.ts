@@ -318,6 +318,7 @@ export const deployApplication = async ({
 			serverId: application.serverId,
 			command: deployHooks.pre,
 			logPath: deployment.logPath,
+			logServerId: deployment.buildServerId || deployment.serverId,
 		});
 
 		// build-policy hook 4/4: `deployTarget` is `application` plus the pinned
@@ -340,6 +341,7 @@ export const deployApplication = async ({
 				serverId: application.serverId,
 				command: deployHooks.post,
 				logPath: deployment.logPath,
+				logServerId: deployment.buildServerId || deployment.serverId,
 				containerId: stability.containerId,
 			});
 		}
@@ -500,6 +502,7 @@ export const rebuildApplication = async ({
 			serverId: application.serverId,
 			command: deployHooks.pre,
 			logPath: deployment.logPath,
+			logServerId: deployment.buildServerId || deployment.serverId,
 		});
 
 		// build-policy hook 4/4 (rebuild): see hook 3/4 above.
@@ -521,6 +524,7 @@ export const rebuildApplication = async ({
 				serverId: application.serverId,
 				command: deployHooks.post,
 				logPath: deployment.logPath,
+				logServerId: deployment.buildServerId || deployment.serverId,
 				containerId: stability.containerId,
 			});
 		}

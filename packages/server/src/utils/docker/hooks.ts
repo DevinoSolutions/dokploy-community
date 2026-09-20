@@ -1,4 +1,4 @@
-import { execAsync, execAsyncRemote } from "../process/execAsync";
+import { ExecError, execAsync, execAsyncRemote } from "../process/execAsync";
 import { encodeBase64, getServiceContainer } from "./utils";
 
 export type DeployHookKind = "pre" | "post";
@@ -36,6 +36,9 @@ interface RunDeployHookParams {
 	serverId: string | null | undefined;
 	command: string | null | undefined;
 	logPath: string;
+	// The deployment log follows the build. When builds are relocated this is
+	// different from serverId, so hook output must be relayed between hosts.
+	logServerId: string | null | undefined;
 	// If provided, skip the label-based container lookup and exec against this
 	// container id directly. Post-deploy uses this to target the exact task the
 	// swarm stability gate observed as running, avoiding the ambiguity of a
@@ -49,6 +52,7 @@ export const runDeployHook = async ({
 	serverId,
 	command,
 	logPath,
+	logServerId,
 	containerId,
 }: RunDeployHookParams): Promise<void> => {
 	const trimmed = command?.trim();
@@ -59,12 +63,11 @@ export const runDeployHook = async ({
 		const container = await getServiceContainer(appName, serverId);
 		if (!container) {
 			if (kind === "pre") {
-				const skipLine = `echo "===== No previous container found; skipping pre-deploy hook =====" >> "${logPath}"`;
-				if (serverId) {
-					await execAsyncRemote(serverId, skipLine);
-				} else {
-					await execAsync(skipLine);
-				}
+				await appendHookLog(
+					"===== No previous container found; skipping pre-deploy hook =====\n",
+					logPath,
+					logServerId,
+				);
 				return;
 			}
 			throw new Error(
@@ -77,11 +80,41 @@ export const runDeployHook = async ({
 	const label = kind === "pre" ? "pre-deploy" : "post-deploy";
 	const encoded = encodeBase64(trimmed);
 	const scriptWrapper = `hook_cmd=$(echo "${encoded}" | base64 -d) && docker exec "${resolvedContainerId}" sh -c "$hook_cmd"`;
-	const wrappedCommand = `(echo "===== Running ${label} hook (length=${trimmed.length} chars) =====" && ${scriptWrapper} && echo "===== ${label} hook finished =====") >> "${logPath}" 2>&1`;
+	const wrappedCommand = `echo "===== Running ${label} hook (length=${trimmed.length} chars) =====" && ${scriptWrapper} && echo "===== ${label} hook finished ====="`;
+	let output = "";
 
-	if (serverId) {
-		await execAsyncRemote(serverId, wrappedCommand);
+	try {
+		if (serverId) {
+			await execAsyncRemote(serverId, wrappedCommand, (chunk) => {
+				output += chunk;
+			});
+		} else {
+			const result = await execAsync(wrappedCommand);
+			output = result.stdout + result.stderr;
+		}
+	} catch (error) {
+		if (!output && error instanceof ExecError) {
+			output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+		}
+		await appendHookLog(output, logPath, logServerId);
+		throw error;
+	}
+
+	await appendHookLog(output, logPath, logServerId);
+};
+
+const appendHookLog = async (
+	output: string,
+	logPath: string,
+	logServerId: string | null | undefined,
+): Promise<void> => {
+	if (!output) return;
+
+	const encoded = encodeBase64(output);
+	const appendCommand = `echo "${encoded}" | base64 -d >> "${logPath}"`;
+	if (logServerId) {
+		await execAsyncRemote(logServerId, appendCommand);
 	} else {
-		await execAsync(wrappedCommand);
+		await execAsync(appendCommand);
 	}
 };
