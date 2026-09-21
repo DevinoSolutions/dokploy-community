@@ -234,7 +234,13 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 
 	const client = await findOAuthApplicationByClientId(params.clientId);
 	if (!client || client.disabled) {
-		return { props: { ...empty, error: "Unknown or disabled OAuth client." } };
+		return {
+			props: {
+				...empty,
+				error:
+					"Unknown or disabled OAuth client. Your MCP client is using a registration this instance no longer knows. Remove the Dokploy MCP server from the client and add it again so it registers afresh.",
+			},
+		};
 	}
 	if (!client.redirectUrls.includes(params.redirectUri)) {
 		return {

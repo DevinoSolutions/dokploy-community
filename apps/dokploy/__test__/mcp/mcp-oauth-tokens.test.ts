@@ -165,6 +165,24 @@ describe("token hygiene", () => {
 		expect(dbDelete).not.toHaveBeenCalled();
 	});
 
+	// Regression: the clamp interpolates the grace deadline into a raw `sql`
+	// template, which skips drizzle's Date -> string mapping. postgres-js then
+	// throws ERR_INVALID_ARG_TYPE on every refresh and the token endpoint 500s.
+	it("consumeRotatedRefreshToken never hands a Date to the driver", async () => {
+		const set = vi.fn((_values: unknown) => ({ where: () => Promise.resolve() }));
+		dbUpdate.mockReturnValueOnce({ set } as never);
+		await consumeRotatedRefreshToken("refresh-1", 120);
+		expect(set).toHaveBeenCalledTimes(1);
+		const seen = new Set<object>();
+		const containsDate = (value: unknown): boolean => {
+			if (value instanceof Date) return true;
+			if (!value || typeof value !== "object" || seen.has(value)) return false;
+			seen.add(value);
+			return Object.values(value).some(containsDate);
+		};
+		expect(containsDate(set.mock.calls[0]?.[0])).toBe(false);
+	});
+
 	it("consumeRotatedRefreshToken deletes outright when the grace period is 0", async () => {
 		await consumeRotatedRefreshToken("refresh-1", 0);
 		expect(dbDelete).toHaveBeenCalledTimes(1);
