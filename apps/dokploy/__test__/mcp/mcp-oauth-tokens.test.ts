@@ -169,7 +169,7 @@ describe("token hygiene", () => {
 	// template, which skips drizzle's Date -> string mapping. postgres-js then
 	// throws ERR_INVALID_ARG_TYPE on every refresh and the token endpoint 500s.
 	it("consumeRotatedRefreshToken never hands a Date to the driver", async () => {
-		const set = vi.fn(() => ({ where: () => Promise.resolve() }));
+		const set = vi.fn((_values: unknown) => ({ where: () => Promise.resolve() }));
 		dbUpdate.mockReturnValueOnce({ set } as never);
 		await consumeRotatedRefreshToken("refresh-1", 120);
 		expect(set).toHaveBeenCalledTimes(1);
