@@ -2,9 +2,9 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.6** | Fork version **v0.30.6-community.2**
+Based on **Dokploy v0.30.7** | Fork version **v0.30.7-community.1**
 
-Everything in upstream Dokploy **v0.30.6**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
+Everything in upstream Dokploy **v0.30.7**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
 ## Switching from official Dokploy
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.2 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.1 \
   --with-registry-auth \
   dokploy
 ```
@@ -20,7 +20,7 @@ docker service update \
 Going back to official is just as easy (our extra tables/columns are simply ignored):
 
 ```bash
-docker service update --image dokploy/dokploy:v0.30.6 --with-registry-auth dokploy
+docker service update --image dokploy/dokploy:v0.30.7 --with-registry-auth dokploy
 ```
 
 The image is public — no registry login required.
@@ -122,6 +122,14 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.7-community.1
+
+**Upstream v0.30.7 sync + the MCP OAuth refresh fix** — no migrations, upgrades in place.
+
+- **Upstream v0.30.7** — trial-expiration emails and a reworked billing/onboarding plan step (cloud-only; no effect on self-hosted). The extended static Railpack version list is superseded by the fork's dynamic list fetched from GitHub releases ([#224](https://github.com/DevinoSolutions/dokploy-community/pull/224))
+- **MCP clients stay connected** — every refresh-token grant failed with `ERR_INVALID_ARG_TYPE` because the rotation clamp handed a JavaScript `Date` to the database driver as a raw SQL parameter, turning a successful refresh into a 500; clients dropped their grant and looped back to the browser authorization page. The deadline is now serialised the way the timestamp column expects, and a hygiene failure can no longer fail the token response ([#225](https://github.com/DevinoSolutions/dokploy-community/pull/225))
+- **Dynamically registered MCP clients survive a slow approval** — the daily purge deleted any registration older than one day with no token, so a client that registered and was authorized a few days later hit `Unknown or disabled OAuth client`. Registrations now get 30 days, and that error explains how to recover (remove and re-add the MCP server) ([#225](https://github.com/DevinoSolutions/dokploy-community/pull/225))
 
 ### New in v0.30.6-community.2
 
@@ -378,7 +386,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.6-community.2
+export DOKPLOY_VERSION=v0.30.7-community.1
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -391,7 +399,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.6-community.2     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.1     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -447,6 +455,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.30.5 | 1st release | `v0.30.5-community.1` |
 | v0.30.6 | 1st release | `v0.30.6-community.1` |
 | v0.30.6 | 2nd release | `v0.30.6-community.2` |
+| v0.30.7 | 1st release | `v0.30.7-community.1` |
 
 ## Contributing
 
