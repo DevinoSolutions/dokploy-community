@@ -418,7 +418,11 @@ export const consumeRotatedRefreshToken = async (
 		return;
 	}
 
-	const until = new Date(Date.now() + graceSeconds * 1000);
+	// A value interpolated into a raw `sql` template bypasses the column's
+	// driver mapping, so a Date reaches postgres-js as-is and its parameter
+	// encoder throws (`The "string" argument must be of type string ... Received
+	// an instance of Date`). Serialise the way drizzle's timestamp column does.
+	const until = new Date(Date.now() + graceSeconds * 1000).toISOString();
 	await db
 		.update(oauthAccessToken)
 		.set({
@@ -438,9 +442,15 @@ export const consumeRotatedRefreshToken = async (
  * Then the abandoned client registrations. Dynamic client registration is
  * anonymous, so every `/mcp/register` call writes an `oauth_application` row
  * whether or not the user ever authorizes it, and nothing else removes them.
- * A row older than a day with no token row has never been used and never will
- * be, since the authorization code that would create one has long expired.
+ * A registration with no token row has never completed an authorization.
+ * Clients cache their registration indefinitely, though (Claude Code keeps the
+ * client id in its credentials file), and a user who registers today and only
+ * clicks Authorize next week must still land on a known client rather than
+ * "Unknown or disabled OAuth client". Wait ABANDONED_REGISTRATION_DAYS before
+ * treating such a row as abandoned.
  */
+export const ABANDONED_REGISTRATION_DAYS = 30;
+
 export const purgeExpiredMcpTokens = async () => {
 	const now = new Date();
 	await db
@@ -459,12 +469,14 @@ export const purgeExpiredMcpTokens = async () => {
 			),
 		);
 
-	const dayAgo = new Date(now.getTime() - 86_400_000);
+	const abandonedBefore = new Date(
+		now.getTime() - ABANDONED_REGISTRATION_DAYS * 86_400_000,
+	);
 	await db
 		.delete(oauthApplication)
 		.where(
 			and(
-				lt(oauthApplication.createdAt, dayAgo),
+				lt(oauthApplication.createdAt, abandonedBefore),
 				notExists(
 					db
 						.select({ id: oauthAccessToken.id })

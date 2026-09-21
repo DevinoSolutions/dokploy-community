@@ -231,7 +231,15 @@ const createBetterAuth = () =>
 				if (!succeeded) return;
 				const consumed = body.refresh_token;
 				if (typeof consumed === "string" && consumed) {
-					await consumeRotatedRefreshToken(consumed);
+					// Hygiene only. The plugin has already rotated and the response
+					// carries the new tokens; a failure here must not turn a
+					// successful refresh into a 500 that makes the client drop its
+					// grant and start a browser re-authorization.
+					try {
+						await consumeRotatedRefreshToken(consumed);
+					} catch (error) {
+						console.error("[mcp] failed to clamp rotated refresh token", error);
+					}
 				}
 			}),
 		},
