@@ -38,7 +38,7 @@ interface RunDeployHookParams {
 	logPath: string;
 	// The deployment log follows the build. When builds are relocated this is
 	// different from serverId, so hook output must be relayed between hosts.
-	logServerId: string | null | undefined;
+	logServerId?: string | null;
 	// If provided, skip the label-based container lookup and exec against this
 	// container id directly. Post-deploy uses this to target the exact task the
 	// swarm stability gate observed as running, avoiding the ambiguity of a
