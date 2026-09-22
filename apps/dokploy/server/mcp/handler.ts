@@ -1,7 +1,8 @@
 import { db } from "@dokploy/server/db";
 import { user as userTable } from "@dokploy/server/db/schema";
-import { buildMemberSession } from "@dokploy/server/lib/auth";
+import { buildMemberSession, validateApiKey } from "@dokploy/server/lib/auth";
 import {
+	DOKPLOY_MCP_SCOPE_IDS,
 	findMcpAccessToken,
 	resolveDefaultOrganizationId,
 } from "@dokploy/server/services/mcp-oauth";
@@ -48,6 +49,60 @@ export const authenticateMcpBearer = async (
 		session,
 		user,
 	};
+};
+
+/**
+ * Marker `clientId` for grants that came from a Dokploy API key rather than
+ * an OAuth client; the Settings → Profile client list keys on OAuth clients.
+ */
+export const MCP_API_KEY_CLIENT_ID = "api-key";
+
+/**
+ * `x-api-key` → the same member session the REST API builds for that key,
+ * with every MCP scope. API keys never expire or rotate, so an automation
+ * fleet that shares one MCP configuration does not depend on a single OAuth
+ * grant surviving every client on the machine.
+ */
+export const authenticateMcpApiKey = async (
+	apiKey: string | undefined,
+): Promise<McpAuth | null> => {
+	if (!apiKey) return null;
+	const member = await validateApiKey(apiKey);
+	if (!member) return null;
+	const { session, user } = member;
+	return {
+		userId: user.id,
+		clientId: MCP_API_KEY_CLIENT_ID,
+		scopes: new Set<string>(DOKPLOY_MCP_SCOPE_IDS),
+		session,
+		user,
+	};
+};
+
+/** `x-api-key` wins when present; otherwise the OAuth bearer path. */
+export const authenticateMcpRequest = async (
+	headers: IncomingHttpHeaders,
+): Promise<McpAuth | null> => {
+	const apiKey = headers["x-api-key"];
+	if (typeof apiKey === "string" && apiKey) {
+		return authenticateMcpApiKey(apiKey);
+	}
+	return authenticateMcpBearer(headers.authorization);
+};
+
+/**
+ * Diagnostic for "MCP keeps asking me to log in" reports: classify why a
+ * request carrying credentials was refused. Only a token prefix is logged.
+ */
+export const describeRejectedMcpRequest = (headers: IncomingHttpHeaders) => {
+	const apiKey = headers["x-api-key"];
+	if (typeof apiKey === "string" && apiKey) return "api_key_invalid";
+	const authorization = headers.authorization;
+	if (!authorization) return "no_credentials";
+	if (!authorization.startsWith("Bearer ")) return "not_bearer";
+	const token = authorization.slice("Bearer ".length).trim();
+	if (!token) return "empty_bearer";
+	return `bearer_rejected tokenPrefix=${token.slice(0, 8)}`;
 };
 
 export const unauthorizedPayload = (origin: string) => {

@@ -16,6 +16,7 @@ vi.mock("@dokploy/server/lib/auth", async (importOriginal) => {
 		await importOriginal<typeof import("@dokploy/server/lib/auth")>();
 	return {
 		...actual,
+		validateApiKey: vi.fn(async () => apiKeyResult),
 		buildMemberSession: vi.fn(async (user: { id: string }, orgId: string) => ({
 			session: { userId: user.id, activeOrganizationId: orgId },
 			user: {
@@ -30,11 +31,22 @@ vi.mock("@dokploy/server/lib/auth", async (importOriginal) => {
 
 let tokenRow: { userId: string; clientId: string; scopes: string[] } | null =
 	null;
+let apiKeyResult: { session: unknown; user: unknown } | null = null;
 let organizationId: string | null = "org-1";
 
 const { db } = await import("@dokploy/server/db");
-const { authenticateMcpBearer, executeMcpTool, unauthorizedPayload } =
-	await import("@/server/mcp/handler");
+const {
+	authenticateMcpBearer,
+	authenticateMcpRequest,
+	describeRejectedMcpRequest,
+	executeMcpTool,
+	MCP_API_KEY_CLIENT_ID,
+	unauthorizedPayload,
+} = await import("@/server/mcp/handler");
+const { DOKPLOY_MCP_SCOPE_IDS } = await import(
+	"@dokploy/server/services/mcp-oauth"
+);
+const { validateApiKey } = await import("@dokploy/server/lib/auth");
 const findFirst = vi.mocked(db.query.user.findFirst);
 
 const readTool = {
@@ -101,6 +113,75 @@ describe("authenticateMcpBearer", () => {
 			activeOrganizationId: "org-1",
 		});
 		expect(auth?.user.id).toBe("user-1");
+	});
+});
+
+describe("authenticateMcpRequest", () => {
+	beforeEach(() => {
+		tokenRow = {
+			userId: "user-1",
+			clientId: "client-1",
+			scopes: ["openid", "dokploy:read"],
+		};
+		organizationId = "org-1";
+		apiKeyResult = null;
+		findFirst.mockReset();
+		findFirst.mockResolvedValue({ id: "user-1", firstName: "Ada" } as never);
+		vi.mocked(validateApiKey).mockClear();
+	});
+
+	it("falls back to the OAuth bearer when no api key is sent", async () => {
+		const auth = await authenticateMcpRequest({ authorization: "Bearer tok" });
+		expect(auth?.clientId).toBe("client-1");
+		expect(validateApiKey).not.toHaveBeenCalled();
+	});
+
+	it("grants every MCP scope to a valid api key without touching the bearer path", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		tokenRow = null;
+		const auth = await authenticateMcpRequest({
+			"x-api-key": "dk_live_1",
+			authorization: "Bearer stale",
+		});
+		expect(auth?.clientId).toBe(MCP_API_KEY_CLIENT_ID);
+		expect(auth?.userId).toBe("user-9");
+		expect(auth?.session).toEqual({
+			userId: "user-9",
+			activeOrganizationId: "org-9",
+		});
+		expect([...(auth?.scopes ?? [])].sort()).toEqual(
+			[...DOKPLOY_MCP_SCOPE_IDS].sort(),
+		);
+		expect(validateApiKey).toHaveBeenCalledWith("dk_live_1");
+	});
+
+	it("rejects an unknown api key instead of trying the bearer", async () => {
+		const auth = await authenticateMcpRequest({
+			"x-api-key": "nope",
+			authorization: "Bearer tok",
+		});
+		expect(auth).toBeNull();
+	});
+
+	it("classifies rejected requests without leaking the token", () => {
+		expect(describeRejectedMcpRequest({})).toBe("no_credentials");
+		expect(describeRejectedMcpRequest({ "x-api-key": "k" })).toBe(
+			"api_key_invalid",
+		);
+		expect(describeRejectedMcpRequest({ authorization: "Basic x" })).toBe(
+			"not_bearer",
+		);
+		expect(describeRejectedMcpRequest({ authorization: "Bearer " })).toBe(
+			"empty_bearer",
+		);
+		expect(
+			describeRejectedMcpRequest({
+				authorization: "Bearer abcdefghijklmnopqrstuvwxyz",
+			}),
+		).toBe("bearer_rejected tokenPrefix=abcdefgh");
 	});
 });
 

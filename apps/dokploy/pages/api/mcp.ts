@@ -9,8 +9,9 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { appRouter } from "@/server/api/root";
 import { createCallerFactory } from "@/server/api/trpc";
 import {
-	authenticateMcpBearer,
+	authenticateMcpRequest,
 	createMcpRequestServer,
+	describeRejectedMcpRequest,
 	makeProcedureCall,
 	McpRequestBodyError,
 	readJsonBody,
@@ -72,8 +73,12 @@ export default async function handler(
 		return jsonRpcError(res, 413, "Payload too large", -32000);
 	}
 
-	const auth = await authenticateMcpBearer(req.headers.authorization);
+	const auth = await authenticateMcpRequest(req.headers);
 	if (!auth) {
+		const reason = describeRejectedMcpRequest(req.headers);
+		if (reason !== "no_credentials") {
+			console.warn(`[mcp-diag] request rejected: reason=${reason}`);
+		}
 		const payload = unauthorizedPayload(origin);
 		for (const [key, value] of Object.entries(payload.headers)) {
 			res.setHeader(key, value);

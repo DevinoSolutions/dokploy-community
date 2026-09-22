@@ -40,6 +40,7 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 
 - Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP) — Claude Code, Cursor or any MCP client connects over HTTPS with **no local process and no API key**
 - **OAuth 2.1** with PKCE and dynamic client registration: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then `/mcp → Authenticate` opens the browser and you sign in once
+- **API-key alternative for automation fleets** — `POST /api/mcp` also accepts a Dokploy API key in the `x-api-key` header (`claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"`), so dozens of unattended agent sessions never depend on one shared OAuth grant
 - **Per-grant scopes** — a consent page with toggles for read, deploy, edit/delete services, edit/delete projects, backups and admin (delete and admin are off by default); role permissions still apply underneath
 - **Long-lived, silently refreshed tokens** (30-day access / 365-day sliding refresh, env-tunable) shared by every session on the machine; revoke any client from Settings → Profile
 

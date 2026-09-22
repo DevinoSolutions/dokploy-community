@@ -28,7 +28,7 @@ vi.mock("@/server/mcp/handler", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@/server/mcp/handler")>();
 	return {
 		...actual,
-		authenticateMcpBearer: vi.fn(async () => auth),
+		authenticateMcpRequest: vi.fn(async () => auth),
 		createMcpRequestServer: vi.fn(() => ({
 			connect: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),
