@@ -771,62 +771,66 @@ export const buildMemberSession = async (
 	};
 };
 
+/**
+ * Resolves a Dokploy API key to the member session of its owner inside the
+ * organization the key was created for. Null for unknown, expired, disabled
+ * or organization-less keys. Shared by the REST/tRPC `x-api-key` path and the
+ * MCP endpoint.
+ */
+export const validateApiKey = async (apiKey: string) => {
+	const api = getApi();
+	try {
+		const { valid, key, error } = await api.verifyApiKey({
+			body: {
+				key: apiKey,
+			},
+		});
+
+		if (error) {
+			throw new Error(error.message?.toString() || "Error verifying API key");
+		}
+		if (!valid || !key) {
+			return null;
+		}
+
+		const apiKeyRecord = await db.query.apikey.findFirst({
+			where: eq(schema.apikey.id, key.id),
+			with: {
+				user: true,
+			},
+		});
+
+		if (!apiKeyRecord) {
+			return null;
+		}
+
+		const organizationId = (
+			JSON.parse(apiKeyRecord.metadata || "{}") as {
+				organizationId?: string;
+			}
+		).organizationId;
+
+		if (!organizationId) {
+			return null;
+		}
+
+		return await buildMemberSession(apiKeyRecord.user, organizationId);
+	} catch (error) {
+		console.error("Error verifying API key", error);
+		return null;
+	}
+};
+
 export const validateRequest = async (request: IncomingMessage) => {
 	const api = getApi();
 	const apiKey = request.headers["x-api-key"] as string;
 	if (apiKey) {
-		try {
-			const { valid, key, error } = await api.verifyApiKey({
-				body: {
-					key: apiKey,
-				},
-			});
-
-			if (error) {
-				throw new Error(error.message?.toString() || "Error verifying API key");
-			}
-			if (!valid || !key) {
-				return {
-					session: null,
-					user: null,
-				};
-			}
-
-			const apiKeyRecord = await db.query.apikey.findFirst({
-				where: eq(schema.apikey.id, key.id),
-				with: {
-					user: true,
-				},
-			});
-
-			if (!apiKeyRecord) {
-				return {
-					session: null,
-					user: null,
-				};
-			}
-
-			const organizationId = (
-				JSON.parse(apiKeyRecord.metadata || "{}") as {
-					organizationId?: string;
-				}
-			).organizationId;
-
-			if (!organizationId) {
-				return {
-					session: null,
-					user: null,
-				};
-			}
-
-			return await buildMemberSession(apiKeyRecord.user, organizationId);
-		} catch (error) {
-			console.error("Error verifying API key", error);
-			return {
+		return (
+			(await validateApiKey(apiKey)) ?? {
 				session: null,
 				user: null,
-			};
-		}
+			}
+		);
 	}
 
 	// If no API key, proceed with normal session validation
