@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.7** | Fork version **v0.30.7-community.1**
+Based on **Dokploy v0.30.7** | Fork version **v0.30.7-community.2**
 
 Everything in upstream Dokploy **v0.30.7**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.1 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.2 \
   --with-registry-auth \
   dokploy
 ```
@@ -123,6 +123,15 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.7-community.2
+
+**API-key authentication for the MCP endpoint** — no migrations, upgrades in place.
+
+- **MCP endpoint accepts a Dokploy API key** — `POST /api/mcp` now also authenticates with a Dokploy API key sent in the `x-api-key` header, resolved through the same path the REST API uses, with every MCP scope. Clients that keep one OAuth grant per machine (Claude Code shares a single grant across every session and a stale session can wipe it) can instead be configured with `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"` and never depend on that grant ([#226](https://github.com/DevinoSolutions/dokploy-community/pull/226))
+- **Rejected MCP requests are logged** — the endpoint logs `[mcp-diag] request rejected: reason=…` (`api_key_invalid`, `not_bearer`, `empty_bearer`, `bearer_rejected` with an 8-character token prefix) so a "keeps asking me to log in" report can be answered from the server log. Credential-less discovery probes are not logged ([#226](https://github.com/DevinoSolutions/dokploy-community/pull/226))
+
+> Released while GitHub Actions was unavailable for the organisation: merged on local green (typecheck + MCP test suite) and the `v0.30.7-community.2` image was built and pushed locally for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
 
 ### New in v0.30.7-community.1
 
@@ -387,7 +396,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.7-community.1
+export DOKPLOY_VERSION=v0.30.7-community.2
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -400,7 +409,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.1     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.2     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -457,6 +466,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.30.6 | 1st release | `v0.30.6-community.1` |
 | v0.30.6 | 2nd release | `v0.30.6-community.2` |
 | v0.30.7 | 1st release | `v0.30.7-community.1` |
+| v0.30.7 | 2nd release | `v0.30.7-community.2` |
 
 ## Contributing
 
