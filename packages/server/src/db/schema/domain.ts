@@ -7,6 +7,7 @@ import {
 	pgTable,
 	serial,
 	text,
+	timestamp,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
@@ -23,6 +24,20 @@ export const domainType = pgEnum("domainType", [
 	"application",
 	"preview",
 ]);
+
+/**
+ * DNS verification state of a domain, driven by DoDomain (fork). Stored as
+ * text (not a pg enum) so adding a state never needs an enum migration on an
+ * upstream-owned table. `null` means DoDomain was never used for the domain.
+ */
+export const DNS_VERIFICATION_STATUSES = [
+	"unverified",
+	"pending",
+	"verified",
+	"failed",
+] as const;
+
+export type DnsVerificationStatus = (typeof DNS_VERIFICATION_STATUSES)[number];
 
 export const cloudflareTunnelMode = pgEnum("cloudflareTunnelMode", [
 	"existing-instance",
@@ -83,6 +98,14 @@ export const domains = pgTable("domain", {
 		.notNull()
 		.default(false),
 	cloudflareAccessApplicationId: text("cloudflareAccessApplicationId"),
+	// --- DoDomain custom-domain connect (fork) ---
+	// Server-managed by the dodomain router and webhook receiver:
+	dodomainConnectionId: text("dodomainConnectionId"),
+	dodomainSessionId: text("dodomainSessionId"),
+	dnsVerificationStatus: text("dnsVerificationStatus", {
+		enum: DNS_VERIFICATION_STATUSES,
+	}),
+	dnsVerifiedAt: timestamp("dnsVerifiedAt"),
 });
 
 export const domainsRelations = relations(domains, ({ one }) => ({

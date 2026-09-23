@@ -19,6 +19,7 @@ import { dockerRouter } from "./routers/docker";
 import { dockerDiskUsageRouter } from "./routers/docker-disk-usage";
 import { dockerImageRouter } from "./routers/docker-image";
 import { dockerVolumeRouter } from "./routers/docker-volume";
+import { dodomainRouter } from "./routers/dodomain";
 import { domainRouter } from "./routers/domain";
 import { environmentRouter } from "./routers/environment";
 import { gitProviderRouter } from "./routers/git-provider";
@@ -117,6 +118,7 @@ export const appRouter = createTRPCRouter({
 	stripe: stripeRouter,
 	swarm: swarmRouter,
 	uptimely: uptimelyRouter,
+	dodomain: dodomainRouter,
 	user: userRouter,
 	vaultProvider: vaultProviderRouter,
 	ai: aiRouter,

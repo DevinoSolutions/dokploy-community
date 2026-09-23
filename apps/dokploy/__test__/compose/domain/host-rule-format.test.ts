@@ -44,6 +44,10 @@ describe("Host rule format regression tests", () => {
 		cloudflareIngressApplied: false,
 		enableCloudflareAccess: false,
 		cloudflareAccessApplicationId: null,
+		dodomainConnectionId: null,
+		dodomainSessionId: null,
+		dnsVerificationStatus: null,
+		dnsVerifiedAt: null,
 		enabled: true,
 	};
 

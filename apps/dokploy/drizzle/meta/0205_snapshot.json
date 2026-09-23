@@ -1,5 +1,5 @@
 {
-  "id": "557801d5-a5ac-4c19-9675-d6a360e53efb",
+  "id": "d36c628f-8cee-4622-8758-1d9b280a5b11",
   "prevId": "5c0c6e9b-d279-4e39-9dfd-84f972d389bf",
   "version": "7",
   "dialect": "postgresql",
@@ -1225,12 +1225,6 @@
           "primaryKey": false,
           "notNull": false,
           "default": true
-        },
-        "snapvisorProjectName": {
-          "name": "snapvisorProjectName",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "rollbackActive": {
           "name": "rollbackActive",
@@ -4497,6 +4491,212 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.dodomain_connect_session": {
+      "name": "dodomain_connect_session",
+      "schema": "",
+      "columns": {
+        "sessionId": {
+          "name": "sessionId",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "domainId": {
+          "name": "domainId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dodomainId": {
+          "name": "dodomainId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "connectUrl": {
+          "name": "connectUrl",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "records": {
+          "name": "records",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expiresAt": {
+          "name": "expiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "dodomain_connect_session_domainId_domain_domainId_fk": {
+          "name": "dodomain_connect_session_domainId_domain_domainId_fk",
+          "tableFrom": "dodomain_connect_session",
+          "tableTo": "domain",
+          "columnsFrom": [
+            "domainId"
+          ],
+          "columnsTo": [
+            "domainId"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "dodomain_connect_session_dodomainId_dodomain_integration_dodomainId_fk": {
+          "name": "dodomain_connect_session_dodomainId_dodomain_integration_dodomainId_fk",
+          "tableFrom": "dodomain_connect_session",
+          "tableTo": "dodomain_integration",
+          "columnsFrom": [
+            "dodomainId"
+          ],
+          "columnsTo": [
+            "dodomainId"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.dodomain_integration": {
+      "name": "dodomain_integration",
+      "schema": "",
+      "columns": {
+        "dodomainId": {
+          "name": "dodomainId",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organizationId": {
+          "name": "organizationId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "secretKey": {
+          "name": "secretKey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "appId": {
+          "name": "appId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "baseUrl": {
+          "name": "baseUrl",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'https://app.dodomain.io'"
+        },
+        "webhookEndpointId": {
+          "name": "webhookEndpointId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "webhookUrl": {
+          "name": "webhookUrl",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "webhookSecret": {
+          "name": "webhookSecret",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "dodomain_integration_organizationId_organization_id_fk": {
+          "name": "dodomain_integration_organizationId_organization_id_fk",
+          "tableFrom": "dodomain_integration",
+          "tableTo": "organization",
+          "columnsFrom": [
+            "organizationId"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "dodomain_integration_organizationId_unique": {
+          "name": "dodomain_integration_organizationId_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "organizationId"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.dodomain_webhook_delivery": {
+      "name": "dodomain_webhook_delivery",
+      "schema": "",
+      "columns": {
+        "deliveryId": {
+          "name": "deliveryId",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "receivedAt": {
+          "name": "receivedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.domain": {
       "name": "domain",
       "schema": "",
@@ -4688,6 +4888,30 @@
         "cloudflareAccessApplicationId": {
           "name": "cloudflareAccessApplicationId",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dodomainConnectionId": {
+          "name": "dodomainConnectionId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dodomainSessionId": {
+          "name": "dodomainSessionId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dnsVerificationStatus": {
+          "name": "dnsVerificationStatus",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dnsVerifiedAt": {
+          "name": "dnsVerifiedAt",
+          "type": "timestamp",
           "primaryKey": false,
           "notNull": false
         }
@@ -8553,24 +8777,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "snapvisorDeploymentId": {
-          "name": "snapvisorDeploymentId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "snapvisorBuildId": {
-          "name": "snapvisorBuildId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "snapvisorBuildStatus": {
-          "name": "snapvisorBuildStatus",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -9781,85 +9987,6 @@
           "nullsNotDistinct": false,
           "columns": [
             "token"
-          ]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.snapvisor_integration": {
-      "name": "snapvisor_integration",
-      "schema": "",
-      "columns": {
-        "snapvisorId": {
-          "name": "snapvisorId",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "accessToken": {
-          "name": "accessToken",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "accountSlug": {
-          "name": "accountSlug",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "baseUrl": {
-          "name": "baseUrl",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'https://app.snapvisor.io'"
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "snapvisor_integration_organizationId_organization_id_fk": {
-          "name": "snapvisor_integration_organizationId_organization_id_fk",
-          "tableFrom": "snapvisor_integration",
-          "tableTo": "organization",
-          "columnsFrom": [
-            "organizationId"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "snapvisor_integration_organizationId_unique": {
-          "name": "snapvisor_integration_organizationId_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "organizationId"
           ]
         }
       },

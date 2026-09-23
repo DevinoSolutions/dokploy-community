@@ -43,6 +43,12 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+import {
+	DoDomainHostCheck,
+	DoDomainSendConnectLinkButton,
+	isDoDomainConnectableHost,
+	useDoDomainConfigured,
+} from "./dodomain-verification";
 import { COMPOSE_REDEPLOY_TOAST, ComposeRedeployAlert } from "./redeploy-hint";
 
 export type CacheType = "fetch" | "cache";
@@ -232,6 +238,38 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const canPublishCloudflare = !!permissions?.cloudflare.read;
+	const dodomainConfigured = useDoDomainConfigured();
+	const { mutateAsync: createConnectSession } =
+		api.dodomain.createConnectSession.useMutation();
+
+	/** Toast action after creating a domain: mint a link and copy it. */
+	const sendConnectLink = async (newDomainId: string) => {
+		await createConnectSession({ domainId: newDomainId })
+			.then(async (session) => {
+				await navigator.clipboard
+					.writeText(session.connectUrl)
+					.then(() =>
+						toast.success("Connect link copied to clipboard", {
+							description: `Send it to the owner of the domain. It expires on ${new Date(session.expiresAt).toLocaleString()}.`,
+						}),
+					)
+					.catch(() =>
+						toast.success("Connect link created", {
+							description: session.connectUrl,
+						}),
+					);
+				if (type === "application") {
+					await utils.domain.byApplicationId.invalidate({ applicationId: id });
+				} else {
+					await utils.domain.byComposeId.invalidate({ composeId: id });
+				}
+			})
+			.catch((e) => {
+				toast.error("Error creating the DoDomain connect link", {
+					description: e.message,
+				});
+			});
+	};
 
 	const { mutateAsync, isError, error, isPending } = domainId
 		? api.domain.update.useMutation()
@@ -256,11 +294,10 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			},
 		);
 
-	const { data: wildcardConfig } =
-		api.project.getWildcardDomainConfig.useQuery(
-			{ projectId: projectId ?? "" },
-			{ enabled: !!projectId && isOpen, retry: false },
-		);
+	const { data: wildcardConfig } = api.project.getWildcardDomainConfig.useQuery(
+		{ projectId: projectId ?? "" },
+		{ enabled: !!projectId && isOpen, retry: false },
+	);
 
 	// `server` outranks the organization wildcard, but the resolver only sees
 	// the server when a serverId is passed; the config query above is
@@ -489,13 +526,31 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			...data,
 			customEntrypoint: data.useCustomEntrypoint ? data.customEntrypoint : null,
 		})
-			.then(async () => {
-				toast.success(
-					dictionary.success,
-					data.domainType === "compose"
+			.then(async (saved) => {
+				const createdDomainId =
+					!domainId && saved && typeof saved === "object" && "domainId" in saved
+						? (saved.domainId as string)
+						: null;
+				const offerConnectLink =
+					!!createdDomainId &&
+					dodomainConfigured &&
+					isDoDomainConnectableHost(data.host);
+				toast.success(dictionary.success, {
+					...(data.domainType === "compose"
 						? { description: COMPOSE_REDEPLOY_TOAST }
-						: undefined,
-				);
+						: {}),
+					...(offerConnectLink && createdDomainId
+						? {
+								duration: 15_000,
+								action: {
+									label: "Send connect link",
+									onClick: () => {
+										void sendConnectLink(createdDomainId);
+									},
+								},
+							}
+						: {}),
+				});
 
 				if (data.domainType === "application") {
 					await utils.domain.byApplicationId.invalidate({
@@ -884,6 +939,11 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 													</div>
 												</div>
 											)}
+											{dodomainConfigured &&
+												!isRestrictionEnabled &&
+												isDoDomainConnectableHost(field.value) && (
+													<DoDomainHostCheck host={field.value} />
+												)}
 										</FormItem>
 									)}
 								/>
@@ -1433,7 +1493,29 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 						</div>
 					</form>
 
-					<DialogFooter>
+					<DialogFooter className="gap-2">
+						{domainId &&
+							dodomainConfigured &&
+							data?.host &&
+							!data.previewDeploymentId &&
+							isDoDomainConnectableHost(data.host) && (
+								<DoDomainSendConnectLinkButton
+									domainId={domainId}
+									host={data.host}
+									onChanged={() => {
+										refetch();
+										if (type === "application") {
+											void utils.domain.byApplicationId.invalidate({
+												applicationId: id,
+											});
+										} else {
+											void utils.domain.byComposeId.invalidate({
+												composeId: id,
+											});
+										}
+									}}
+								/>
+							)}
 						<Button isLoading={isPending} form="hook-form" type="submit">
 							{dictionary.submit}
 						</Button>

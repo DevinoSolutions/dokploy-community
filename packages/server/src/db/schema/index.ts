@@ -14,6 +14,7 @@ export * from "./deploy-hook";
 export * from "./deployment";
 export * from "./destination";
 export * from "./dns-provider";
+export * from "./dodomain";
 export * from "./domain";
 export * from "./environment";
 export * from "./forward-auth";
