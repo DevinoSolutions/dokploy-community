@@ -28,6 +28,8 @@ export interface McpAuth {
 	scopes: Set<string>;
 	session: Awaited<ReturnType<typeof buildMemberSession>>["session"];
 	user: Awaited<ReturnType<typeof buildMemberSession>>["user"];
+	/** API-key grants only: when better-auth last verified the key (epoch ms). */
+	verifiedAt?: number;
 }
 
 /** Bearer → token row → default organization → synthesized member session. */
@@ -78,10 +80,11 @@ export class McpApiKeyRateLimitedError extends Error {
 }
 
 /**
- * How long a verified API key is reused for protocol traffic (initialize,
- * notifications, tools/list). Every MCP client opens with several of these,
- * so without reuse N sessions starting together spend 3N of the key's rate
- * limit before doing any work. tools/call always re-verifies.
+ * How long a verified API key is reused to admit a request. Every MCP client
+ * opens with several protocol requests (initialize, notifications,
+ * tools/list), so without reuse N sessions starting together spend 3N of the
+ * key's rate limit before doing any work. The endpoint re-verifies tool calls
+ * that were admitted from a reused check.
  */
 export const MCP_API_KEY_HANDSHAKE_TTL_MS = 60_000;
 const MCP_API_KEY_HANDSHAKE_CACHE_MAX = 500;
@@ -115,10 +118,9 @@ export const clearMcpApiKeyHandshakeCache = () => {
 
 export interface McpAuthenticateOptions {
 	/**
-	 * False when the request only carries protocol traffic (no tools/call):
-	 * a recent verification of the same API key is reused and concurrent
-	 * checks share one lookup, so they do not count against the key's rate
-	 * limit. Defaults to true (always verify).
+	 * False to admit the request on a recent verification of the same API key,
+	 * with concurrent checks sharing one lookup, so a burst of clients does not
+	 * drain the key's rate limit. Defaults to true (always verify).
 	 */
 	countsAgainstRateLimit?: boolean;
 }
@@ -153,6 +155,7 @@ export const authenticateMcpApiKey = async (
 			scopes: new Set<string>(DOKPLOY_MCP_SCOPE_IDS),
 			session,
 			user,
+			verifiedAt: Date.now(),
 		};
 		rememberHandshakeAuth(cacheId, auth);
 		return auth;
@@ -183,7 +186,7 @@ export const authenticateMcpRequest = async (
 
 /**
  * True when a parsed JSON-RPC body (single message or batch) invokes a tool.
- * Anything else is protocol traffic that may reuse a recent API-key check.
+ * Anything else is protocol traffic that may ride on a recent API-key check.
  */
 export const invokesTool = (body: unknown): boolean => {
 	const messages = Array.isArray(body) ? body : [body];
