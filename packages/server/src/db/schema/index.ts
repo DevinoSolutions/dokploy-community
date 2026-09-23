@@ -44,6 +44,7 @@ export * from "./security";
 export * from "./server";
 export * from "./session";
 export * from "./shared";
+export * from "./snapvisor";
 export * from "./ssh-key";
 export * from "./sso";
 export * from "./tag";

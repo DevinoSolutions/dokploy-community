@@ -117,6 +117,12 @@ export const applications = pgTable("application", {
 	previewRequireCollaboratorPermissions: boolean(
 		"previewRequireCollaboratorPermissions",
 	).default(true),
+	/**
+	 * Fork column (Snapvisor integration). Name of the Snapvisor project that
+	 * receives this application's preview-deployment builds; `null` means
+	 * visual testing is off. See services/snapvisor.ts.
+	 */
+	snapvisorProjectName: text("snapvisorProjectName"),
 	rollbackActive: boolean("rollbackActive").default(false),
 	buildArgs: encryptedText("buildArgs"),
 	buildSecrets: encryptedText("buildSecrets"),
