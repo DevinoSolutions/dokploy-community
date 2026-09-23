@@ -98,4 +98,5 @@ export type AuditResourceType =
 	| "vaultProvider"
 	| "dnsProvider"
 	| "dodomain"
-	| "uptimely";
+	| "uptimely"
+	| "snapvisor";

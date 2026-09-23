@@ -42,6 +42,97 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+import { PoweredBySnapvisor } from "../../settings/integrations/snapvisor/snapvisor-logo";
+
+const SNAPVISOR_OFF = "__off__";
+
+/**
+ * Visual testing (Snapvisor) section: which Snapvisor project this
+ * application's preview deployments register their commit against. Hidden
+ * (with a hint) when the organization has no Snapvisor integration.
+ */
+const SnapvisorPreviewSettingSection = ({
+	applicationId,
+}: {
+	applicationId: string;
+}) => {
+	const { data: integration, isPending: isLoadingIntegration } =
+		api.snapvisor.one.useQuery();
+	const { data: application } = api.application.one.useQuery({
+		applicationId,
+	});
+	const { data: projects, isPending: isLoadingProjects } =
+		api.snapvisor.projects.useQuery(undefined, { enabled: !!integration });
+	const utils = api.useUtils();
+	const { mutateAsync: setApplicationProject, isPending: isSaving } =
+		api.snapvisor.setApplicationProject.useMutation();
+
+	if (isLoadingIntegration) return null;
+
+	if (!integration) {
+		return (
+			<div className="flex flex-row items-center justify-between p-3 border rounded-lg shadow-xs text-sm text-muted-foreground">
+				<span>
+					Connect Snapvisor in{" "}
+					<a href="/dashboard/settings/integrations" className="underline">
+						Settings → Integrations
+					</a>{" "}
+					to show visual-diff status on this application&apos;s previews.
+				</span>
+			</div>
+		);
+	}
+
+	const onChange = async (value: string) => {
+		const projectName = value === SNAPVISOR_OFF ? null : value;
+		await setApplicationProject({ applicationId, projectName })
+			.then(async () => {
+				toast.success(
+					projectName
+						? `Visual testing linked to "${projectName}"`
+						: "Visual testing turned off",
+				);
+				await utils.application.one.invalidate({ applicationId });
+			})
+			.catch((error) => {
+				toast.error("Error updating the Snapvisor project", {
+					description: error.message,
+				});
+			});
+	};
+
+	return (
+		<div className="flex flex-col gap-2 p-3 border rounded-lg shadow-xs">
+			<div className="flex flex-row items-center justify-between">
+				<div className="space-y-0.5">
+					<FormLabel>Visual testing (Snapvisor)</FormLabel>
+					<FormDescription>
+						Register each preview deployment with a Snapvisor project so its
+						visual-diff status shows on the preview card.
+					</FormDescription>
+				</div>
+			</div>
+			<Select
+				value={application?.snapvisorProjectName ?? SNAPVISOR_OFF}
+				onValueChange={onChange}
+				disabled={isSaving || isLoadingProjects}
+			>
+				<SelectTrigger>
+					<SelectValue placeholder="Off" />
+				</SelectTrigger>
+				<SelectContent>
+					<SelectItem value={SNAPVISOR_OFF}>Off</SelectItem>
+					{projects?.map((project) => (
+						<SelectItem key={project.id} value={project.name}>
+							{project.name}
+						</SelectItem>
+					))}
+				</SelectContent>
+			</Select>
+			<PoweredBySnapvisor />
+		</div>
+	);
+};
 
 const schema = z
 	.object({
@@ -492,6 +583,12 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 													});
 											}}
 										/>
+									</div>
+								</div>
+
+								<div className="grid gap-4 lg:grid-cols-2">
+									<div className="col-span-2">
+										<SnapvisorPreviewSettingSection applicationId={applicationId} />
 									</div>
 								</div>
 

@@ -78,6 +78,7 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 - **Duplicate-prevention** for concurrent webhook events and labeled PRs (with a one-time cleanup of existing duplicates)
 - **Re-clone on rebuild** so new pushes to a PR actually propagate
 - Build previews on a dedicated `buildServerId`, and don't block updates to existing previews when at the limit
+- **Snapvisor integration** — visual-diff review status on preview deployments, powered by [Snapvisor](https://snapvisor.io): connect an account once in Settings → Integrations, then pick a Snapvisor project per application to see each preview's build status (pending, changes detected, approved, rejected) and jump straight to the review
 
 ### Backups & destinations
 

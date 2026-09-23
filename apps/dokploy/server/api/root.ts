@@ -56,6 +56,7 @@ import { scheduleRouter } from "./routers/schedule";
 import { securityRouter } from "./routers/security";
 import { serverRouter } from "./routers/server";
 import { settingsRouter } from "./routers/settings";
+import { snapvisorRouter } from "./routers/snapvisor";
 import { sshRouter } from "./routers/ssh-key";
 import { stripeRouter } from "./routers/stripe";
 import { swarmRouter } from "./routers/swarm";
@@ -112,6 +113,7 @@ export const appRouter = createTRPCRouter({
 	security: securityRouter,
 	server: serverRouter,
 	settings: settingsRouter,
+	snapvisor: snapvisorRouter,
 	sshKey: sshRouter,
 	stripe: stripeRouter,
 	swarm: swarmRouter,

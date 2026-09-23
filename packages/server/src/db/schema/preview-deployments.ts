@@ -48,6 +48,17 @@ export const previewDeployments = pgTable(
 			.notNull()
 			.$defaultFn(() => new Date().toISOString()),
 		expiresAt: text("expiresAt"),
+		/**
+		 * Fork columns (Snapvisor integration). Populated once a Snapvisor build
+		 * matching this preview's commit is found; all three stay `null` until
+		 * then. `snapvisorDeploymentId` is the matched build's internal id
+		 * (Snapvisor's own "Deployment" resource is an unrelated static-hosting
+		 * feature — see services/snapvisor.ts for why it is not used here).
+		 * `snapvisorBuildId` is the build's number, used to deep-link to it.
+		 */
+		snapvisorDeploymentId: text("snapvisorDeploymentId"),
+		snapvisorBuildId: text("snapvisorBuildId"),
+		snapvisorBuildStatus: text("snapvisorBuildStatus"),
 	},
 	(table) => ({
 		// Serializes the concurrent pull_request webhooks GitHub fires when a PR is
