@@ -5,7 +5,9 @@ import {
 	Hammer,
 	Loader2,
 	PenSquare,
+	RefreshCw,
 	RocketIcon,
+	ScanEye,
 	Trash2,
 } from "lucide-react";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
@@ -41,6 +43,90 @@ import { ShowDeploymentsModal } from "../deployments/show-deployments-modal";
 import { AddPreviewDomain } from "./add-preview-domain";
 import { BuildPreviewDeployment } from "./build-preview-deployment";
 import { ShowPreviewSettings } from "./show-preview-settings";
+
+/** Snapvisor `Build.status` → the label/tone shown on the preview card. */
+const SNAPVISOR_STATUS_PRESENTATION: Record<
+	string,
+	{ label: string; className: string }
+> = {
+	pending: { label: "Pending", className: "text-muted-foreground" },
+	progress: { label: "Pending", className: "text-muted-foreground" },
+	"no-changes": { label: "No changes", className: "text-green-600" },
+	"changes-detected": { label: "Changes detected", className: "text-yellow-600" },
+	accepted: { label: "Approved", className: "text-green-600" },
+	rejected: { label: "Rejected", className: "text-red-600" },
+	error: { label: "Error", className: "text-red-600" },
+	aborted: { label: "Error", className: "text-red-600" },
+	expired: { label: "Expired", className: "text-muted-foreground" },
+};
+
+/**
+ * Snapvisor visual-diff badge for one preview deployment. Only rendered when
+ * the application has a Snapvisor project linked (`show-preview-settings.tsx`);
+ * polls the stored build linkage and offers a manual refresh + deep link.
+ */
+const SnapvisorPreviewBadge = ({
+	previewDeploymentId,
+}: {
+	previewDeploymentId: string;
+}) => {
+	const { data, isPending } = api.snapvisor.previewBuild.useQuery(
+		{ previewDeploymentId },
+		{ refetchInterval: 15_000 },
+	);
+	const { mutateAsync: refresh, isPending: isRefreshing } =
+		api.snapvisor.refreshPreviewBuild.useMutation();
+	const utils = api.useUtils();
+
+	if (isPending || !data) return null;
+
+	const presentation = data.buildStatus
+		? SNAPVISOR_STATUS_PRESENTATION[data.buildStatus]
+		: null;
+
+	return (
+		<div className="flex items-center gap-1">
+			<Badge variant="outline" className="gap-1.5">
+				<ScanEye className="size-3" />
+				<span className={presentation?.className}>
+					{data.buildId ? (presentation?.label ?? "Unknown") : "Not registered"}
+				</span>
+			</Badge>
+			<Button
+				variant="ghost"
+				size="icon"
+				className="size-6"
+				isLoading={isRefreshing}
+				aria-label="Refresh Snapvisor status"
+				onClick={async () => {
+					await refresh({ previewDeploymentId })
+						.then(async () => {
+							await utils.snapvisor.previewBuild.invalidate({
+								previewDeploymentId,
+							});
+						})
+						.catch((error) => {
+							toast.error("Error refreshing Snapvisor status", {
+								description: error.message,
+							});
+						});
+				}}
+			>
+				<RefreshCw className="size-3" />
+			</Button>
+			{data.reviewUrl && (
+				<a
+					href={data.reviewUrl}
+					target="_blank"
+					rel="noopener noreferrer"
+					className="text-xs text-blue-500 hover:underline"
+				>
+					Review in Snapvisor
+				</a>
+			)}
+		</div>
+	);
+};
 
 interface Props {
 	applicationId: string;
@@ -187,6 +273,11 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 												</div>
 
 												<div className="pl-8 space-y-3">
+													{data?.snapvisorProjectName && (
+														<SnapvisorPreviewBadge
+															previewDeploymentId={deployment.previewDeploymentId}
+														/>
+													)}
 													<div className="relative grow">
 														<Input
 															value={deploymentUrl}
