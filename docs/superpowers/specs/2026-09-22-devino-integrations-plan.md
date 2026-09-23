@@ -78,8 +78,10 @@ DoDomain (`dodomain.io`, repo `INTERNAL/dodomain`):
 
 ## Fit assessment of the full lineup (17 RevenueCat projects, 2026-09-22)
 
-Owner decision 2026-09-22: build Uptimely, DoDomain, Snapvisor, Notifly,
-Sendly, upAPI and GetItDone. Everything else is skipped.
+Owner decision 2026-09-22 (final): build native integrations for Uptimely,
+Snapvisor, Sendly, Notifly and DoDomain. upAPI and GetItDone were weighed and
+dropped from the build lineup; their sections stay below as optional later
+work. Everything else is skipped.
 
 | Product | Dokploy surface | Verdict |
 |---|---|---|
@@ -88,8 +90,8 @@ Sendly, upAPI and GetItDone. Everything else is skipped.
 | Snapvisor (visual testing) | Register preview deployments, show visual-diff status on the preview card | **Build 3** |
 | Notifly (push/workflows) | Notification provider triggering a workflow on deploy events | **Build 4** |
 | Sendly (email) | Notification provider like `resend` | **Build 4** |
-| upAPI (marketplace API gateway) | "Publish as marketplace API" action on a service | **Build 5** |
-| GetItDone (AI task management) | Notification provider creating ops tasks on failures | **Build 6** |
+| upAPI (marketplace API gateway) | "Publish as marketplace API" action on a service | Later, optional (dropped from lineup) |
+| GetItDone (AI task management) | Notification provider creating ops tasks on failures | Later, optional (dropped from lineup) |
 | VoiceLabs, Shorty | Compose templates in the external templates repo only | Later, no in-product hook |
 | Marka, Postify, SuperBooks, BioFlow, SafeMeet, Demofy, Caly, uNotes | No PaaS-shaped surface | Skip |
 | Sapphis | Not in RevenueCat, no local repo, no MCP | Cannot assess |
@@ -243,7 +245,7 @@ id / from address), one `notificationType` enum value, one send function in
 Every deploy/backup/schedule/threshold event already fans out to all providers,
 so both light up everywhere at once.
 
-## Integration 5 — upAPI "Publish as marketplace API"
+## Later, optional — upAPI "Publish as marketplace API" (not in the build lineup)
 
 upAPI (`INTERNAL/upAPI`, upapi.io) runs one source-of-truth API definition
 (manifest, input schema, output schema, execute function) and exposes it on
@@ -265,7 +267,7 @@ Scope (v1):
 Needs a survey of the upAPI management API before implementation (not done
 today). Effort estimate 3 days including the Traefik header middleware.
 
-## Integration 6 — GetItDone ops-task provider
+## Later, optional — GetItDone ops-task provider (not in the build lineup)
 
 GetItDone (`INTERNAL/GetItDone`, app.nowgetitdone.com) is an AI-native task
 manager with an MCP where agents are first-class users. Fit is operations, not
@@ -278,21 +280,26 @@ last.
 
 ## Order and release plan
 
-1. PR A: Uptimely settings card + MCP client + per-service Uptime panel
-   (application only). Release as v0.30.7-community.3 after a stealth-Chrome
+1. PR A: Settings → Integrations page + Uptimely card + MCP client +
+   per-service Uptime panel for applications, compose and every database
+   type (fork PR #229). Release as v0.30.7-community.3 after a stealth-Chrome
    pass against prod (the Devino Team project already has 50 monitors to link).
-2. PR B: compose + database panels, heartbeat, Uptimely notification channel.
-3. PR C: DoDomain settings + Add Domain verification + webhook receiver.
-4. PR D: Snapvisor settings + preview-deployment registration + badge.
-5. PR E: Notifly + Sendly providers.
-6. PR F: upAPI settings + Publish as marketplace API.
-7. PR G: GetItDone provider.
-8. README "Integrations" section listing all seven with product links.
+2. PR E: Notifly + Sendly providers (built in parallel with PR A; whichever
+   merges second regenerates its migration into the next slot).
+3. PR C: DoDomain card + Add Domain verification + webhook receiver (needs the
+   Integrations page from PR A).
+4. PR D: Snapvisor card + preview-deployment registration + badge (needs the
+   Integrations page from PR A).
+5. PR B (follow-up): Uptimely heartbeat on deploy + Uptimely notification
+   channel.
+6. README "Integrations" section listing the five with product links.
+
+upAPI and GetItDone are not scheduled.
 
 ## Decisions needed from the owner
 
-Decided 2026-09-22: lineup = Uptimely, DoDomain, Snapvisor, Notifly, Sendly,
-upAPI, GetItDone, in that order.
+Decided 2026-09-22 (final): lineup = Uptimely, Snapvisor, Sendly, Notifly,
+DoDomain. upAPI and GetItDone dropped.
 
 Still open:
 
