@@ -1436,6 +1436,13 @@
       "when": 1790128292693,
       "tag": "0204_massive_storm",
       "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1790130504345,
+      "tag": "0205_solid_wrecker",
+      "breakpoints": true
     }
   ]
 }
