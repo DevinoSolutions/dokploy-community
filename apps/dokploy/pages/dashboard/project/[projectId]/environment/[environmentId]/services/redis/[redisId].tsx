@@ -17,6 +17,7 @@ import { ShowDockerLogs } from "@/components/dashboard/application/logs/show";
 import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
+import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { ShowExternalRedisCredentials } from "@/components/dashboard/redis/general/show-external-redis-credentials";
 import { ShowGeneralRedis } from "@/components/dashboard/redis/general/show-general-redis";
 import { ShowInternalRedisCredentials } from "@/components/dashboard/redis/general/show-internal-redis-credentials";
@@ -246,7 +247,11 @@ const Redis = (
 									)}
 									{permissions?.monitoring.read && (
 										<TabsContent value="monitoring">
-											<div className="pt-2.5">
+											<div className="pt-2.5 flex flex-col gap-4">
+												<UptimelyServicePanel
+													serviceType="redis"
+													serviceId={redisId}
+												/>
 												<div className="flex flex-col gap-4 border rounded-lg p-6">
 													{data?.serverId && isCloud ? (
 														<ContainerPaidMonitoring
