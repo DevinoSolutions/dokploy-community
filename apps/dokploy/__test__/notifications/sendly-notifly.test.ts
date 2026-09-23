@@ -33,7 +33,7 @@ describe("sendSendlyNotification", () => {
 		);
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
-		const [url, options] = fetchMock.mock.calls[0];
+		const [url, options] = fetchMock.mock.calls[0]!;
 		expect(url).toBe("https://app.sendly.now/api/emails");
 		expect(options?.method).toBe("POST");
 		expect(options?.headers).toMatchObject({
@@ -67,7 +67,7 @@ describe("sendSendlyNotification", () => {
 			"body",
 		);
 
-		const [url] = fetchMock.mock.calls[0];
+		const [url] = fetchMock.mock.calls[0]!;
 		expect(url).toBe("https://app.sendly.now/api/emails");
 	});
 
@@ -120,7 +120,7 @@ describe("sendNotiflyNotification", () => {
 		);
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
-		const [url, options] = fetchMock.mock.calls[0];
+		const [url, options] = fetchMock.mock.calls[0]!;
 		expect(url).toBe("https://api.notifly.io/v1/events/trigger");
 		expect(options?.method).toBe("POST");
 		expect(options?.headers).toMatchObject({
@@ -149,7 +149,7 @@ describe("sendNotiflyNotification", () => {
 			{ event: "test" },
 		);
 
-		const [, options] = fetchMock.mock.calls[0];
+		const [, options] = fetchMock.mock.calls[0]!;
 		expect(JSON.parse(options?.body as string).to).toBe("dokploy");
 	});
 

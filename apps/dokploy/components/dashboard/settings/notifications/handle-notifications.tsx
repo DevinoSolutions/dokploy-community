@@ -1506,7 +1506,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												<FormItem>
 													<FormLabel>Base URL</FormLabel>
 													<FormControl>
-														<Input placeholder="https://app.sendly.now" {...field} />
+														<Input
+															placeholder="https://app.sendly.now"
+															{...field}
+														/>
 													</FormControl>
 													<FormDescription>
 														The base URL of your Sendly instance.
@@ -1534,7 +1537,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											<FormLabel>To Addresses</FormLabel>
 
 											{fields.map((field, index) => (
-												<div key={field.id} className="flex flex-row gap-2 w-full">
+												<div
+													key={field.id}
+													className="flex flex-row gap-2 w-full"
+												>
 													<FormField
 														control={form.control}
 														name={`toAddresses.${index}`}
@@ -1611,7 +1617,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												<FormItem>
 													<FormLabel>Base URL</FormLabel>
 													<FormControl>
-														<Input placeholder="https://api.notifly.io" {...field} />
+														<Input
+															placeholder="https://api.notifly.io"
+															{...field}
+														/>
 													</FormControl>
 													<FormDescription>
 														The base URL of your Notifly instance.
@@ -1628,7 +1637,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												<FormItem>
 													<FormLabel>Workflow Key</FormLabel>
 													<FormControl>
-														<Input placeholder="dokploy-notifications" {...field} />
+														<Input
+															placeholder="dokploy-notifications"
+															{...field}
+														/>
 													</FormControl>
 													<FormDescription>
 														The identifier of the Notifly workflow to trigger.

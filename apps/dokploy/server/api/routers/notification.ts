@@ -511,7 +511,10 @@ export const notificationRouter = createTRPCRouter({
 		.input(apiCreateNotifly)
 		.mutation(async ({ input, ctx }) => {
 			try {
-				await createNotiflyNotification(input, ctx.session.activeOrganizationId);
+				await createNotiflyNotification(
+					input,
+					ctx.session.activeOrganizationId,
+				);
 				await audit(ctx, {
 					action: "create",
 					resourceType: "notification",
