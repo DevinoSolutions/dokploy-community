@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.7** | Fork version **v0.30.7-community.2**
+Based on **Dokploy v0.30.7** | Fork version **v0.30.7-community.3**
 
 Everything in upstream Dokploy **v0.30.7**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -12,7 +12,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.2 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.3 \
   --with-registry-auth \
   dokploy
 ```
@@ -126,6 +126,18 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/tag/v0.29.12-community.2)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.7-community.3
+
+**Native integrations for the Devino product lineup** — new **Settings → Integrations** page, four migrations (`0203`–`0206`, all idempotent), upgrades in place.
+
+- **Uptimely** — per-service uptime, SSL and domain monitors from the Monitoring tab of every application, compose stack and database, talking to Uptimely over its MCP endpoint with a project API key; status pill, 30-day timeline, run-probe, status-page badge. Monitor creation is opt-in per service and needs the project's "AI write operations" toggle ON in Uptimely ([#229](https://github.com/DevinoSolutions/dokploy-community/pull/229))
+- **Sendly and Notifly notification channels** — email through Sendly (`POST /api/emails`) and workflow triggers through Notifly (`POST /v1/events/trigger`), wired into every notification event alongside Slack, Discord, Telegram, Email and Resend ([#231](https://github.com/DevinoSolutions/dokploy-community/pull/231))
+- **DoDomain custom-domain connect** — "Check DNS" and "Send connect link" on domains; end users link their own domain through DoDomain's hosted flow, a signed webhook (`/api/webhooks/dodomain`, HMAC-verified, deduplicated) marks the domain verified and re-applies it through the normal Traefik path; failures fan out to notification channels ([#232](https://github.com/DevinoSolutions/dokploy-community/pull/232))
+- **Snapvisor visual testing on preview deployments** — pick a Snapvisor project per application; each preview shows the visual-diff status of the build for the deployed commit with a "Review in Snapvisor" link ([#233](https://github.com/DevinoSolutions/dokploy-community/pull/233))
+- **Migrations 0203/0204 hardened** so every fork-delta migration replays idempotently on installs switching from official Dokploy ([#234](https://github.com/DevinoSolutions/dokploy-community/pull/234))
+
+> Released while GitHub Actions was unavailable for the organisation: every PR was merged on local green (typecheck, feature and migration test suites, independent review) and the `v0.30.7-community.3` image was built and pushed locally for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
 
 ### New in v0.30.7-community.2
 
@@ -399,7 +411,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.7-community.2
+export DOKPLOY_VERSION=v0.30.7-community.3
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -412,7 +424,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.2     # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.7-community.3     # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -470,6 +482,7 @@ We follow the scheme `v<upstream-version>-community.<release>`:
 | v0.30.6 | 2nd release | `v0.30.6-community.2` |
 | v0.30.7 | 1st release | `v0.30.7-community.1` |
 | v0.30.7 | 2nd release | `v0.30.7-community.2` |
+| v0.30.7 | 3rd release | `v0.30.7-community.3` |
 
 ## Contributing
 
