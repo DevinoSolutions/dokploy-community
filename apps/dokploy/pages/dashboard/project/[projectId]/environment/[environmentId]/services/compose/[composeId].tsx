@@ -43,6 +43,7 @@ import { UpdateCompose } from "@/components/dashboard/compose/update-compose";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
 import { ComposeFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-compose-monitoring";
 import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-compose-monitoring";
+import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -453,7 +454,11 @@ const Service = (
 
 									{permissions?.monitoring.read && (
 										<TabsContent value="monitoring">
-											<div className="pt-2.5">
+											<div className="pt-2.5 flex flex-col gap-4">
+												<UptimelyServicePanel
+													serviceType="compose"
+													serviceId={composeId}
+												/>
 												<div className="flex flex-col border rounded-lg ">
 													{data?.serverId && isCloud ? (
 														<ComposePaidMonitoring
