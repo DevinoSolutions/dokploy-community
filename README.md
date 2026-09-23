@@ -112,7 +112,7 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 
 ### Also included
 
-- **Notifications** — container crash-loop alerts, scheduled-job failure alerts, and real server names in threshold alerts
+- **Notifications** — container crash-loop alerts, scheduled-job failure alerts, real server names in threshold alerts, and [Sendly](https://sendly.now) / [Notifly](https://notifly.io) provider channels
 - **Git providers & auth** — GitHub/Google social login on self-hosted, self-hosted password reset, Codeberg preset, Gitea `write:repository` scope, and several OAuth/redirect fixes
 - **Organizations & teams** — editable descriptions, bulk invitations, drag-and-drop logo upload, and **project export** to a portable JSON file
 - **Per-project icons** — paste a URL or drag-and-drop an image onto any project; projects without one automatically show the **favicon of their first working domain**
