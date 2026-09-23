@@ -97,6 +97,7 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 ### Monitoring
 
 - **Uptimely integration** — per-service uptime, SSL and domain monitors from the monitoring tab, powered by [Uptimely](https://getuptimely.com): connect once in Settings → Integrations, then opt each application, compose stack or database in from its Monitoring tab
+- **DoDomain custom-domain connect** — end users link their own domain through a hosted flow (Cloudflare OAuth, Domain Connect, or guided manual) and Dokploy verifies DNS and applies the domain automatically, powered by [DoDomain](https://dodomain.io): connect once in Settings → Integrations, then send a connect link from a domain's row in the Domains tab
 - **Container resource breakdown** and **swap usage** in monitoring
 - **Remote-server stats** via a server selector
 - **Container healthcheck status** surfaced in the UI
