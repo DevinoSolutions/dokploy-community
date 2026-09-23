@@ -47,6 +47,7 @@ export * from "./shared";
 export * from "./ssh-key";
 export * from "./sso";
 export * from "./tag";
+export * from "./uptimely";
 export * from "./user";
 export * from "./utils";
 export * from "./vault-provider";
