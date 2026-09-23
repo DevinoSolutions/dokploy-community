@@ -5,8 +5,10 @@ import {
 	GotifyIcon,
 	LarkIcon,
 	MattermostIcon,
+	NotiflyIcon,
 	NtfyIcon,
 	ResendIcon,
+	SendlyIcon,
 	SlackIcon,
 	TeamsIcon,
 	TelegramIcon,
@@ -95,6 +97,16 @@ export const ShowNotifications = () => {
 															{notification.notificationType === "resend" && (
 																<div className="flex  items-center justify-center rounded-lg ">
 																	<ResendIcon className="size-6 text-muted-foreground" />
+																</div>
+															)}
+															{notification.notificationType === "sendly" && (
+																<div className="flex  items-center justify-center rounded-lg ">
+																	<SendlyIcon className="size-6 text-muted-foreground" />
+																</div>
+															)}
+															{notification.notificationType === "notifly" && (
+																<div className="flex  items-center justify-center rounded-lg ">
+																	<NotiflyIcon className="size-6 text-muted-foreground" />
 																</div>
 															)}
 															{notification.notificationType === "gotify" && (

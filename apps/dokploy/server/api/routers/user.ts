@@ -13,6 +13,7 @@ import {
 	renderInvitationEmail,
 	sendEmailNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	updateUser,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -770,12 +771,13 @@ export const userRouter = createTRPCRouter({
 
 			const email = notification.email;
 			const resend = notification.resend;
+			const sendly = notification.sendly;
 
 			const currentInvitation = await db.query.invitation.findFirst({
 				where: eq(invitation.id, input.invitationId),
 			});
 
-			if (!email && !resend) {
+			if (!email && !resend && !sendly) {
 				throw new TRPCError({
 					code: "NOT_FOUND",
 					message: "Email provider not found",
@@ -811,6 +813,12 @@ export const userRouter = createTRPCRouter({
 				} else if (resend) {
 					await sendResendNotification(
 						{ ...resend, toAddresses: [toEmail] },
+						subject,
+						html,
+					);
+				} else if (sendly) {
+					await sendSendlyNotification(
+						{ ...sendly, toAddresses: [toEmail] },
 						subject,
 						html,
 					);

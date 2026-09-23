@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -49,6 +51,8 @@ export const sendScheduleFailureNotifications = async ({
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -63,6 +67,8 @@ export const sendScheduleFailureNotifications = async ({
 		const {
 			email,
 			resend,
+			sendly,
+			notifly,
 			discord,
 			telegram,
 			slack,
@@ -75,7 +81,7 @@ export const sendScheduleFailureNotifications = async ({
 			teams,
 		} = notification;
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					BuildFailedEmail({
 						projectName,
@@ -98,6 +104,14 @@ export const sendScheduleFailureNotifications = async ({
 				if (resend) {
 					await sendResendNotification(
 						resend,
+						"Scheduled job failed for dokploy",
+						template,
+					);
+				}
+
+				if (sendly) {
+					await sendSendlyNotification(
+						sendly,
 						"Scheduled job failed for dokploy",
 						template,
 					);
@@ -285,6 +299,18 @@ ${errorMessage}
 					date: date.toLocaleString(),
 					status: "error",
 					type: "schedule",
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "schedule.failure",
+					projectName,
+					applicationName: scheduleName,
+					status: "error",
+					link: scheduleLink,
+					timestamp: date.toISOString(),
+					message: `Scheduled job ${scheduleName} failed: ${errorMessage}`,
 				});
 			}
 

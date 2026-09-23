@@ -12,9 +12,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -52,6 +54,8 @@ export const sendBuildSuccessNotifications = async ({
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -66,6 +70,8 @@ export const sendBuildSuccessNotifications = async ({
 		const {
 			email,
 			resend,
+			sendly,
+			notifly,
 			discord,
 			telegram,
 			slack,
@@ -78,7 +84,7 @@ export const sendBuildSuccessNotifications = async ({
 			teams,
 		} = notification;
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					BuildSuccessEmail({
 						projectName,
@@ -101,6 +107,14 @@ export const sendBuildSuccessNotifications = async ({
 				if (resend) {
 					await sendResendNotification(
 						resend,
+						"Build success for dokploy",
+						template,
+					);
+				}
+
+				if (sendly) {
+					await sendSendlyNotification(
+						sendly,
 						"Build success for dokploy",
 						template,
 					);
@@ -289,6 +303,18 @@ export const sendBuildSuccessNotifications = async ({
 					domains: domains.map((domain) => domain.host).join(", "),
 					status: "success",
 					type: "build",
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "build.success",
+					projectName,
+					applicationName,
+					status: "success",
+					link: buildLink,
+					timestamp: date.toISOString(),
+					message: `Build succeeded for ${applicationName}`,
 				});
 			}
 
