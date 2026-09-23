@@ -7,7 +7,9 @@ let disabled = false;
 let origin: string | null = "https://dok.example.com";
 let auth: { scopes: Set<string>; session: unknown; user: unknown } | null =
 	null;
+let throttledFor: number | null = null;
 const handledBodies: unknown[] = [];
+const authOptions: unknown[] = [];
 
 vi.mock("@dokploy/server", () => ({
 	isMcpDisabled: () => disabled,
@@ -28,7 +30,15 @@ vi.mock("@/server/mcp/handler", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@/server/mcp/handler")>();
 	return {
 		...actual,
-		authenticateMcpRequest: vi.fn(async () => auth),
+		authenticateMcpRequest: vi.fn(
+			async (_headers: unknown, options: unknown) => {
+				authOptions.push(options);
+				if (throttledFor !== null) {
+					throw new actual.McpApiKeyRateLimitedError(throttledFor);
+				}
+				return auth;
+			},
+		),
 		createMcpRequestServer: vi.fn(() => ({
 			connect: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),
@@ -120,7 +130,9 @@ describe("POST /api/mcp", () => {
 			session: { userId: "user-1" },
 			user: { id: "user-1" },
 		};
+		throttledFor = null;
 		handledBodies.length = 0;
+		authOptions.length = 0;
 	});
 
 	it("answers 503 when the instance disabled MCP", async () => {
@@ -215,6 +227,78 @@ describe("POST /api/mcp", () => {
 			error: { message: "Unauthorized: Authentication required" },
 		});
 		expect(handledBodies).toHaveLength(0);
+	});
+
+	it("answers 429 with Retry-After, not 401, when the api key is throttled", async () => {
+		throttledFor = 17;
+		const { res, recorded } = makeRes();
+		await run(
+			makeReq({
+				headers: jsonHeaders(),
+				chunks: [
+					Buffer.from(
+						JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+					),
+				],
+			}),
+			res,
+		);
+		expect(recorded.status).toBe(429);
+		expect(recorded.headers["Retry-After"]).toBe("17");
+		expect(recorded.headers["WWW-Authenticate"]).toBeUndefined();
+		expect(recorded.body).toMatchObject({
+			jsonrpc: "2.0",
+			error: { code: -32000 },
+		});
+		expect(handledBodies).toHaveLength(0);
+	});
+
+	it("lets protocol-only requests reuse a recent api-key check", async () => {
+		const { res } = makeRes();
+		await run(
+			makeReq({
+				headers: jsonHeaders(),
+				chunks: [
+					Buffer.from(
+						JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+					),
+				],
+			}),
+			res,
+		);
+		expect(authOptions).toEqual([{ countsAgainstRateLimit: false }]);
+	});
+
+	it("makes tool calls and unreadable bodies count against the rate limit", async () => {
+		await run(
+			makeReq({
+				headers: jsonHeaders(),
+				chunks: [
+					Buffer.from(
+						JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call" }),
+					),
+				],
+			}),
+			makeRes().res,
+		);
+		await run(
+			makeReq({ headers: jsonHeaders(), chunks: [Buffer.from("{not json")] }),
+			makeRes().res,
+		);
+		expect(authOptions).toEqual([
+			{ countsAgainstRateLimit: true },
+			{ countsAgainstRateLimit: true },
+		]);
+	});
+
+	it("still answers 401 before reporting a bad body to an unauthenticated caller", async () => {
+		auth = null;
+		const { res, recorded } = makeRes();
+		await run(
+			makeReq({ headers: jsonHeaders(), chunks: [Buffer.from("{not json")] }),
+			res,
+		);
+		expect(recorded.status).toBe(401);
 	});
 
 	it("hands the parsed body to the transport on the happy path", async () => {

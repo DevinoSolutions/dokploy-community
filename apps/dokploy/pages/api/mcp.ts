@@ -12,7 +12,9 @@ import {
 	authenticateMcpRequest,
 	createMcpRequestServer,
 	describeRejectedMcpRequest,
+	invokesTool,
 	makeProcedureCall,
+	McpApiKeyRateLimitedError,
 	McpRequestBodyError,
 	readJsonBody,
 	unauthorizedPayload,
@@ -73,7 +75,36 @@ export default async function handler(
 		return jsonRpcError(res, 413, "Payload too large", -32000);
 	}
 
-	const auth = await authenticateMcpRequest(req.headers);
+	// The body is read before authenticating so protocol-only requests can
+	// reuse a recent API-key check; a body error is still reported only after
+	// authentication, so unauthenticated callers keep getting 401.
+	let body: unknown;
+	let bodyError: unknown = null;
+	try {
+		body = await readJsonBody(req, OPENAPI_MAX_JSON_BODY_SIZE);
+	} catch (error) {
+		bodyError = error;
+	}
+
+	let auth: Awaited<ReturnType<typeof authenticateMcpRequest>>;
+	try {
+		auth = await authenticateMcpRequest(req.headers, {
+			countsAgainstRateLimit: bodyError !== null || invokesTool(body),
+		});
+	} catch (error) {
+		if (error instanceof McpApiKeyRateLimitedError) {
+			console.warn(
+				`[mcp-diag] request throttled: reason=api_key_rate_limited retryAfter=${error.retryAfterSeconds}s`,
+			);
+			res.setHeader("Retry-After", String(error.retryAfterSeconds));
+			return jsonRpcError(
+				res,
+				429,
+				`Rate limit exceeded for this API key. Retry in ${error.retryAfterSeconds}s.`,
+			);
+		}
+		throw error;
+	}
 	if (!auth) {
 		const reason = describeRejectedMcpRequest(req.headers);
 		if (reason !== "no_credentials") {
@@ -86,14 +117,16 @@ export default async function handler(
 		return res.status(payload.status).json(payload.body);
 	}
 
-	let body: unknown;
-	try {
-		body = await readJsonBody(req, OPENAPI_MAX_JSON_BODY_SIZE);
-	} catch (error) {
-		if (error instanceof McpRequestBodyError) {
-			return jsonRpcError(res, error.status, error.message, error.rpcCode);
+	if (bodyError !== null) {
+		if (bodyError instanceof McpRequestBodyError) {
+			return jsonRpcError(
+				res,
+				bodyError.status,
+				bodyError.message,
+				bodyError.rpcCode,
+			);
 		}
-		captureError(error, { handler: "mcp-body" });
+		captureError(bodyError, { handler: "mcp-body" });
 		return jsonRpcError(res, 400, "Could not read the request body");
 	}
 
