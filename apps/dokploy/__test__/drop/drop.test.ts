@@ -44,6 +44,7 @@ const baseApp: ApplicationNested = {
 	args: [],
 	giteaBuildPath: "",
 	previewRequireCollaboratorPermissions: false,
+	snapvisorProjectName: null,
 	giteaId: "",
 	giteaOwner: "",
 	giteaRepository: "",

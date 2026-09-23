@@ -37,6 +37,7 @@ const baseApp: ApplicationNested = {
 	autoDeploy: true,
 	enableSubmodules: false,
 	previewRequireCollaboratorPermissions: false,
+	snapvisorProjectName: null,
 	serverId: "",
 	branch: null,
 	dockerBuildStage: "",
