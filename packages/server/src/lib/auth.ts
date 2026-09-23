@@ -772,12 +772,38 @@ export const buildMemberSession = async (
 };
 
 /**
- * Resolves a Dokploy API key to the member session of its owner inside the
- * organization the key was created for. Null for unknown, expired, disabled
- * or organization-less keys. Shared by the REST/tRPC `x-api-key` path and the
- * MCP endpoint.
+ * Outcome of checking a Dokploy API key. A key that is over its per-key rate
+ * limit is still a good key, so it is reported apart from an invalid one:
+ * callers that answer 401 for invalid keys should answer 429 for throttled
+ * ones, or clients will treat a busy key as a lost login.
  */
-export const validateApiKey = async (apiKey: string) => {
+export type ApiKeyVerification =
+	| {
+			status: "valid";
+			member: Awaited<ReturnType<typeof buildMemberSession>>;
+	  }
+	| { status: "invalid" }
+	| { status: "rate_limited"; retryAfterSeconds: number };
+
+/** Seconds until a throttled key may retry, from better-auth's `tryAgainIn` (ms). */
+const retryAfterSecondsFrom = (error: unknown) => {
+	const source = error as {
+		details?: { tryAgainIn?: unknown };
+		tryAgainIn?: unknown;
+	};
+	const tryAgainIn = Number(source.details?.tryAgainIn ?? source.tryAgainIn);
+	if (!Number.isFinite(tryAgainIn) || tryAgainIn <= 0) return 1;
+	return Math.max(1, Math.ceil(tryAgainIn / 1000));
+};
+
+/**
+ * Resolves a Dokploy API key to the member session of its owner inside the
+ * organization the key was created for, telling a throttled key apart from
+ * an unknown, expired, disabled or organization-less one.
+ */
+export const verifyApiKeyDetailed = async (
+	apiKey: string,
+): Promise<ApiKeyVerification> => {
 	const api = getApi();
 	try {
 		const { valid, key, error } = await api.verifyApiKey({
@@ -787,10 +813,16 @@ export const validateApiKey = async (apiKey: string) => {
 		});
 
 		if (error) {
+			if ((error as { code?: unknown }).code === "RATE_LIMITED") {
+				return {
+					status: "rate_limited",
+					retryAfterSeconds: retryAfterSecondsFrom(error),
+				};
+			}
 			throw new Error(error.message?.toString() || "Error verifying API key");
 		}
 		if (!valid || !key) {
-			return null;
+			return { status: "invalid" };
 		}
 
 		const apiKeyRecord = await db.query.apikey.findFirst({
@@ -801,7 +833,7 @@ export const validateApiKey = async (apiKey: string) => {
 		});
 
 		if (!apiKeyRecord) {
-			return null;
+			return { status: "invalid" };
 		}
 
 		const organizationId = (
@@ -811,14 +843,28 @@ export const validateApiKey = async (apiKey: string) => {
 		).organizationId;
 
 		if (!organizationId) {
-			return null;
+			return { status: "invalid" };
 		}
 
-		return await buildMemberSession(apiKeyRecord.user, organizationId);
+		return {
+			status: "valid",
+			member: await buildMemberSession(apiKeyRecord.user, organizationId),
+		};
 	} catch (error) {
 		console.error("Error verifying API key", error);
-		return null;
+		return { status: "invalid" };
 	}
+};
+
+/**
+ * Resolves a Dokploy API key to the member session of its owner inside the
+ * organization the key was created for. Null for unknown, expired, disabled,
+ * throttled or organization-less keys. Used by the REST/tRPC `x-api-key` path;
+ * the MCP endpoint uses {@link verifyApiKeyDetailed} to answer 429 on throttling.
+ */
+export const validateApiKey = async (apiKey: string) => {
+	const verification = await verifyApiKeyDetailed(apiKey);
+	return verification.status === "valid" ? verification.member : null;
 };
 
 export const validateRequest = async (request: IncomingMessage) => {

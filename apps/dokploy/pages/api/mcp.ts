@@ -12,7 +12,9 @@ import {
 	authenticateMcpRequest,
 	createMcpRequestServer,
 	describeRejectedMcpRequest,
+	invokesTool,
 	makeProcedureCall,
+	McpApiKeyRateLimitedError,
 	McpRequestBodyError,
 	readJsonBody,
 	unauthorizedPayload,
@@ -35,6 +37,23 @@ const jsonRpcError = (
 	res
 		.status(status)
 		.json({ jsonrpc: "2.0", error: { code, message }, id: null });
+
+/**
+ * A throttled API key is still a good key: answer 429 + Retry-After, never
+ * 401, or MCP clients drop their login. Anything else is rethrown.
+ */
+const rejectThrottled = (res: NextApiResponse, error: unknown) => {
+	if (!(error instanceof McpApiKeyRateLimitedError)) throw error;
+	console.warn(
+		`[mcp-diag] request throttled: reason=api_key_rate_limited retryAfter=${error.retryAfterSeconds}s`,
+	);
+	res.setHeader("Retry-After", String(error.retryAfterSeconds));
+	return jsonRpcError(
+		res,
+		429,
+		`Rate limit exceeded for this API key. Retry in ${error.retryAfterSeconds}s.`,
+	);
+};
 
 export default async function handler(
 	req: NextApiRequest,
@@ -73,8 +92,7 @@ export default async function handler(
 		return jsonRpcError(res, 413, "Payload too large", -32000);
 	}
 
-	const auth = await authenticateMcpRequest(req.headers);
-	if (!auth) {
+	const rejectUnauthenticated = () => {
 		const reason = describeRejectedMcpRequest(req.headers);
 		if (reason !== "no_credentials") {
 			console.warn(`[mcp-diag] request rejected: reason=${reason}`);
@@ -84,7 +102,22 @@ export default async function handler(
 			res.setHeader(key, value);
 		}
 		return res.status(payload.status).json(payload.body);
+	};
+
+	// Authenticate before touching the body. API-key requests are admitted on a
+	// recent check of the same key (concurrent checks share one lookup), so a
+	// burst of clients opening sessions does not drain the key's rate limit;
+	// tool calls admitted that way are re-verified once the body is known.
+	const requestStartedAt = Date.now();
+	let auth: Awaited<ReturnType<typeof authenticateMcpRequest>>;
+	try {
+		auth = await authenticateMcpRequest(req.headers, {
+			countsAgainstRateLimit: false,
+		});
+	} catch (error) {
+		return rejectThrottled(res, error);
 	}
+	if (!auth) return rejectUnauthenticated();
 
 	let body: unknown;
 	try {
@@ -95,6 +128,19 @@ export default async function handler(
 		}
 		captureError(error, { handler: "mcp-body" });
 		return jsonRpcError(res, 400, "Could not read the request body");
+	}
+
+	if (
+		auth.verifiedAt !== undefined &&
+		auth.verifiedAt < requestStartedAt &&
+		invokesTool(body)
+	) {
+		try {
+			auth = await authenticateMcpRequest(req.headers);
+		} catch (error) {
+			return rejectThrottled(res, error);
+		}
+		if (!auth) return rejectUnauthenticated();
 	}
 
 	const caller = createCaller({

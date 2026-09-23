@@ -1,6 +1,9 @@
 import { db } from "@dokploy/server/db";
 import { user as userTable } from "@dokploy/server/db/schema";
-import { buildMemberSession, validateApiKey } from "@dokploy/server/lib/auth";
+import {
+	buildMemberSession,
+	verifyApiKeyDetailed,
+} from "@dokploy/server/lib/auth";
 import {
 	DOKPLOY_MCP_SCOPE_IDS,
 	findMcpAccessToken,
@@ -11,6 +14,7 @@ import {
 	CallToolRequestSchema,
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createHash } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
@@ -24,6 +28,8 @@ export interface McpAuth {
 	scopes: Set<string>;
 	session: Awaited<ReturnType<typeof buildMemberSession>>["session"];
 	user: Awaited<ReturnType<typeof buildMemberSession>>["user"];
+	/** API-key grants only: when better-auth last verified the key (epoch ms). */
+	verifiedAt?: number;
 }
 
 /** Bearer → token row → default organization → synthesized member session. */
@@ -58,36 +64,138 @@ export const authenticateMcpBearer = async (
 export const MCP_API_KEY_CLIENT_ID = "api-key";
 
 /**
+ * The API key is valid but over its per-key rate limit. The endpoint answers
+ * 429 + Retry-After for this, never 401: a 401 tells MCP clients the login is
+ * gone, and Claude Code then marks the server "needs authentication" for every
+ * session on the machine.
+ */
+export class McpApiKeyRateLimitedError extends Error {
+	readonly retryAfterSeconds: number;
+
+	constructor(retryAfterSeconds: number) {
+		super(`API key rate limit exceeded; retry in ${retryAfterSeconds}s`);
+		this.name = "McpApiKeyRateLimitedError";
+		this.retryAfterSeconds = retryAfterSeconds;
+	}
+}
+
+/**
+ * How long a verified API key is reused to admit a request. Every MCP client
+ * opens with several protocol requests (initialize, notifications,
+ * tools/list), so without reuse N sessions starting together spend 3N of the
+ * key's rate limit before doing any work. The endpoint re-verifies tool calls
+ * that were admitted from a reused check.
+ */
+export const MCP_API_KEY_HANDSHAKE_TTL_MS = 60_000;
+const MCP_API_KEY_HANDSHAKE_CACHE_MAX = 500;
+
+const handshakeAuthCache = new Map<
+	string,
+	{ auth: McpAuth; expiresAt: number }
+>();
+const pendingHandshakeAuth = new Map<string, Promise<McpAuth | null>>();
+
+const apiKeyCacheId = (apiKey: string) =>
+	createHash("sha256").update(apiKey).digest("hex");
+
+const rememberHandshakeAuth = (cacheId: string, auth: McpAuth) => {
+	handshakeAuthCache.delete(cacheId);
+	if (handshakeAuthCache.size >= MCP_API_KEY_HANDSHAKE_CACHE_MAX) {
+		const oldest = handshakeAuthCache.keys().next().value;
+		if (oldest !== undefined) handshakeAuthCache.delete(oldest);
+	}
+	handshakeAuthCache.set(cacheId, {
+		auth,
+		expiresAt: Date.now() + MCP_API_KEY_HANDSHAKE_TTL_MS,
+	});
+};
+
+/** Test hook: forget every reused API-key verification. */
+export const clearMcpApiKeyHandshakeCache = () => {
+	handshakeAuthCache.clear();
+	pendingHandshakeAuth.clear();
+};
+
+export interface McpAuthenticateOptions {
+	/**
+	 * False to admit the request on a recent verification of the same API key,
+	 * with concurrent checks sharing one lookup, so a burst of clients does not
+	 * drain the key's rate limit. Defaults to true (always verify).
+	 */
+	countsAgainstRateLimit?: boolean;
+}
+
+/**
  * `x-api-key` → the same member session the REST API builds for that key,
  * with every MCP scope. API keys never expire or rotate, so an automation
  * fleet that shares one MCP configuration does not depend on a single OAuth
- * grant surviving every client on the machine.
+ * grant surviving every client on the machine. Throws
+ * {@link McpApiKeyRateLimitedError} when the key is throttled.
  */
 export const authenticateMcpApiKey = async (
 	apiKey: string | undefined,
+	{ countsAgainstRateLimit = true }: McpAuthenticateOptions = {},
 ): Promise<McpAuth | null> => {
 	if (!apiKey) return null;
-	const member = await validateApiKey(apiKey);
-	if (!member) return null;
-	const { session, user } = member;
-	return {
-		userId: user.id,
-		clientId: MCP_API_KEY_CLIENT_ID,
-		scopes: new Set<string>(DOKPLOY_MCP_SCOPE_IDS),
-		session,
-		user,
+	const cacheId = apiKeyCacheId(apiKey);
+
+	const verify = async (): Promise<McpAuth | null> => {
+		const verification = await verifyApiKeyDetailed(apiKey);
+		if (verification.status === "rate_limited") {
+			throw new McpApiKeyRateLimitedError(verification.retryAfterSeconds);
+		}
+		if (verification.status === "invalid") {
+			handshakeAuthCache.delete(cacheId);
+			return null;
+		}
+		const { session, user } = verification.member;
+		const auth: McpAuth = {
+			userId: user.id,
+			clientId: MCP_API_KEY_CLIENT_ID,
+			scopes: new Set<string>(DOKPLOY_MCP_SCOPE_IDS),
+			session,
+			user,
+			verifiedAt: Date.now(),
+		};
+		rememberHandshakeAuth(cacheId, auth);
+		return auth;
 	};
+
+	if (countsAgainstRateLimit) return verify();
+
+	const cached = handshakeAuthCache.get(cacheId);
+	if (cached && cached.expiresAt > Date.now()) return cached.auth;
+	const pending = pendingHandshakeAuth.get(cacheId);
+	if (pending) return pending;
+	const lookup = verify().finally(() => pendingHandshakeAuth.delete(cacheId));
+	pendingHandshakeAuth.set(cacheId, lookup);
+	return lookup;
 };
 
 /** `x-api-key` wins when present; otherwise the OAuth bearer path. */
 export const authenticateMcpRequest = async (
 	headers: IncomingHttpHeaders,
+	options: McpAuthenticateOptions = {},
 ): Promise<McpAuth | null> => {
 	const apiKey = headers["x-api-key"];
 	if (typeof apiKey === "string" && apiKey) {
-		return authenticateMcpApiKey(apiKey);
+		return authenticateMcpApiKey(apiKey, options);
 	}
 	return authenticateMcpBearer(headers.authorization);
+};
+
+/**
+ * True when a parsed JSON-RPC body (single message or batch) invokes a tool.
+ * Anything else is protocol traffic that may ride on a recent API-key check.
+ */
+export const invokesTool = (body: unknown): boolean => {
+	const messages = Array.isArray(body) ? body : [body];
+	return messages.some(
+		(message) =>
+			typeof message !== "object" ||
+			message === null ||
+			(message as { method?: unknown }).method === "tools/call",
+	);
 };
 
 /**
