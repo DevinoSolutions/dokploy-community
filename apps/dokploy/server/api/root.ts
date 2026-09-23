@@ -59,6 +59,7 @@ import { sshRouter } from "./routers/ssh-key";
 import { stripeRouter } from "./routers/stripe";
 import { swarmRouter } from "./routers/swarm";
 import { tagRouter } from "./routers/tag";
+import { uptimelyRouter } from "./routers/uptimely";
 import { userRouter } from "./routers/user";
 import { vaultProviderRouter } from "./routers/vault-provider";
 import { volumeBackupsRouter } from "./routers/volume-backups";
@@ -113,6 +114,7 @@ export const appRouter = createTRPCRouter({
 	sshKey: sshRouter,
 	stripe: stripeRouter,
 	swarm: swarmRouter,
+	uptimely: uptimelyRouter,
 	user: userRouter,
 	vaultProvider: vaultProviderRouter,
 	ai: aiRouter,
