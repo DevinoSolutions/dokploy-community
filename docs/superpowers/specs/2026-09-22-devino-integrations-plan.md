@@ -76,17 +76,23 @@ DoDomain (`dodomain.io`, repo `INTERNAL/dodomain`):
   (`uptimely/src/app/api/webhooks/dodomain/route.ts`): a working reference
   consumer in the same codebase family.
 
-## Fit assessment of the other Devino / RevenueCat products
+## Fit assessment of the full lineup (17 RevenueCat projects, 2026-09-22)
 
-| Product | Fit as a Dokploy integration | Verdict |
+Owner decision 2026-09-22: build Uptimely, DoDomain, Snapvisor, Notifly,
+Sendly, upAPI and GetItDone. Everything else is skipped.
+
+| Product | Dokploy surface | Verdict |
 |---|---|---|
-| Uptimely | Per-service uptime/SSL/domain monitors, status badge, deploy heartbeat | **Build first** |
-| DoDomain | End-user custom-domain connect for apps hosted on Dokploy | **Build second** |
-| Sendly (email) | Notification provider like the existing `resend` table (API key + from address) | Cheap third; one-table provider |
-| Notifly (push/workflows) | Notification provider that triggers a Notifly workflow on deploy events | Cheap; same recipe as Sendly |
-| Snapvisor (visual testing) | Trigger a Snapvisor build against a preview deployment URL after deploy | Later; needs a post-deploy hook that does not exist yet |
-| Sapphis | No local repo, no MCP in this environment; nothing to survey | Cannot assess; owner to describe the product |
-| Postify, Shorty, VoiceLabs, SuperBooks, BioFlow, GetItDone, Marka, Caly, Caramel | No PaaS-shaped surface | Skip |
+| Uptimely | Per-service uptime/SSL/domain monitors, status badge, deploy heartbeat | **Build 1** |
+| DoDomain | End-user custom-domain connect + real DNS verification for hosted apps | **Build 2** |
+| Snapvisor (visual testing) | Register preview deployments, show visual-diff status on the preview card | **Build 3** |
+| Notifly (push/workflows) | Notification provider triggering a workflow on deploy events | **Build 4** |
+| Sendly (email) | Notification provider like `resend` | **Build 4** |
+| upAPI (marketplace API gateway) | "Publish as marketplace API" action on a service | **Build 5** |
+| GetItDone (AI task management) | Notification provider creating ops tasks on failures | **Build 6** |
+| VoiceLabs, Shorty | Compose templates in the external templates repo only | Later, no in-product hook |
+| Marka, Postify, SuperBooks, BioFlow, SafeMeet, Demofy, Caly, uNotes | No PaaS-shaped surface | Skip |
+| Sapphis | Not in RevenueCat, no local repo, no MCP | Cannot assess |
 
 ## Integration 1 — Uptimely
 
@@ -194,13 +200,81 @@ Settings card + client (`@dodomain/node` or a 6-call fetch wrapper): 1 day.
 Add Domain dialog changes + status badges: 1.5 days. Webhook receiver + Traefik
 trigger + tests: 1 day.
 
-## Integration 3 (cheap) — Sendly and Notifly notification providers
+## Integration 3 — Snapvisor on preview deployments
 
-Same shape as the existing `resend` provider: one table each (api key, from
-address / workflow id), one enum value, one send function in
-`utils/notifications/utils.ts`, one settings card. Half a day each. Good
-advertising surface because the notifications settings page lists every
-provider logo.
+Snapvisor (Argos fork, `INTERNAL/snapvisor`) already has a deployments API
+(`POST /v2/deployments`, handler `apps/backend/src/api/handlers/projectDeployments.ts`)
+and MCP tools `listProjectDeployments`, `listBuilds`, `listBuildDiffs`,
+`createReview`; the deployments product is built but unprovisioned, so this is
+its launch use case.
+
+Scope (v1):
+
+1. **Settings → Snapvisor card**: access token (encrypted), account slug, base
+   URL (default `https://app.snapvisor.io`).
+2. **Per-application "Visual testing" toggle** in the preview-deployments
+   settings: pick the Snapvisor project. On preview-deployment success the fork
+   registers a deployment (preview URL, PR number, commit SHA, branch) with
+   Snapvisor.
+3. **Preview-deployment card** gains a Snapvisor build badge: pending / diffs
+   detected (n changes) / approved / rejected, with a deep link to the build
+   review. Polled through the existing preview refresh, no webhook receiver in
+   v1.
+4. Attribution "Visual testing by Snapvisor".
+
+Out of scope for v1: taking screenshots inside Dokploy. Capture stays in the
+user's CI via the Snapvisor CLI; the fork only ties builds to deployments and
+surfaces the result. v2 can add an optional Playwright capture job run as a
+Dokploy schedule against the preview URL.
+
+Data: `snapvisor_integration` (organizationId, token encrypted, accountSlug,
+baseUrl) + nullable `snapvisorProjectId` on `application` and
+`snapvisorDeploymentId`/`snapvisorBuildStatus` on `previewDeployments`
+(upstream-owned table → sync ledger).
+
+Effort: settings card + client 0.5 day, deployment registration hook 0.5 day,
+preview card badge 1 day.
+
+## Integration 4 — Notifly and Sendly notification providers
+
+Same shape as the existing `resend` provider: one table each (api key, workflow
+id / from address), one `notificationType` enum value, one send function in
+`utils/notifications/utils.ts`, one settings card, one icon. Half a day each.
+Every deploy/backup/schedule/threshold event already fans out to all providers,
+so both light up everywhere at once.
+
+## Integration 5 — upAPI "Publish as marketplace API"
+
+upAPI (`INTERNAL/upAPI`, upapi.io) runs one source-of-truth API definition
+(manifest, input schema, output schema, execute function) and exposes it on
+upapi.io, RapidAPI and Apify. A Dokploy service already has a stable URL,
+domain and health; upAPI adds keys, metering, billing and listings. This is the
+"serverless function becomes a sellable API" path.
+
+Scope (v1):
+
+1. **Settings → upAPI card**: account API key (encrypted), base URL.
+2. **"Publish as marketplace API" action** in the application domain tab:
+   form for name, description, input/output JSON schema (prefilled from an
+   OpenAPI URL if the service exposes one), pricing tier; the fork creates the
+   upAPI definition whose execute function proxies to the service domain with a
+   per-definition shared secret header that Traefik middleware enforces, so the
+   origin only answers upAPI.
+3. Domain row badge "Listed on upAPI" with call counts pulled from upAPI.
+
+Needs a survey of the upAPI management API before implementation (not done
+today). Effort estimate 3 days including the Traefik header middleware.
+
+## Integration 6 — GetItDone ops-task provider
+
+GetItDone (`INTERNAL/GetItDone`, app.nowgetitdone.com) is an AI-native task
+manager with an MCP where agents are first-class users. Fit is operations, not
+end users: a notification provider that creates a task on `build-error`,
+`database-backup`/`volume-backup` failure, `schedule-failure` and
+`server-threshold`, with the log tail, deployment link and server attached, and
+optionally completes it on the next `build-success` for the same service.
+GetItDone agents can then triage. Half a day via the provider recipe; build
+last.
 
 ## Order and release plan
 
@@ -209,19 +283,25 @@ provider logo.
    pass against prod (the Devino Team project already has 50 monitors to link).
 2. PR B: compose + database panels, heartbeat, Uptimely notification channel.
 3. PR C: DoDomain settings + Add Domain verification + webhook receiver.
-4. PR D: Sendly + Notifly providers.
-5. README "Integrations" section listing all four with product links.
+4. PR D: Snapvisor settings + preview-deployment registration + badge.
+5. PR E: Notifly + Sendly providers.
+6. PR F: upAPI settings + Publish as marketplace API.
+7. PR G: GetItDone provider.
+8. README "Integrations" section listing all seven with product links.
 
 ## Decisions needed from the owner
 
-1. Confirm Uptimely first, DoDomain second (recommended above).
-2. Uptimely side: turn on `enableAiWriteOperations` for the Devino Team
+Decided 2026-09-22: lineup = Uptimely, DoDomain, Snapvisor, Notifly, Sendly,
+upAPI, GetItDone, in that order.
+
+Still open:
+
+1. Uptimely side: turn on `enableAiWriteOperations` for the Devino Team
    project, or ship a REST API / API-key exemption so the fork can create
    monitors without the AI-write gate.
-3. Whether the Uptimely per-service panel should replace the existing
-   monitoring tab content when linked, or sit above it (recommendation: above
-   it, as a card; the built-in metrics stay).
-4. Whether monitors are created automatically for every new HTTPS domain
-   (opt-in default recommended: a toggle on the Uptimely card, default off).
+2. Whether the Uptimely per-service panel sits above the existing monitoring
+   metrics (recommended) or replaces them.
+3. Whether monitors are created automatically for every new HTTPS domain
+   (opt-in default recommended).
+4. Snapvisor: provision the deployments product on app.snapvisor.io before PR D.
 5. Sapphis: what is it, and does it have an API or MCP? Not present locally.
-6. Sendly/Notifly providers: include in this train or defer.
