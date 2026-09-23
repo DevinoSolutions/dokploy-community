@@ -5,9 +5,11 @@ import type {
 	gotify,
 	lark,
 	mattermost,
+	notifly,
 	ntfy,
 	pushover,
 	resend,
+	sendly,
 	slack,
 	teams,
 	telegram,
@@ -76,6 +78,77 @@ export const sendResendNotification = async (
 		console.log(err);
 		throw new Error(
 			`Failed to send Resend notification ${err instanceof Error ? err.message : "Unknown error"}`,
+		);
+	}
+};
+
+export const sendSendlyNotification = async (
+	connection: typeof sendly.$inferInsert,
+	subject: string,
+	htmlContent: string,
+) => {
+	try {
+		const baseUrl = connection.baseUrl || "https://app.sendly.now";
+
+		const response = await fetch(`${baseUrl}/api/emails`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `Bearer ${connection.apiKey}`,
+			},
+			body: JSON.stringify({
+				from: connection.fromAddress,
+				to: connection.toAddresses,
+				subject,
+				body: htmlContent,
+			}),
+		});
+
+		if (!response.ok) {
+			const data = await response.json().catch(() => null);
+			throw new Error(
+				data?.error?.message ||
+					`Failed to send Sendly notification: ${response.statusText}`,
+			);
+		}
+	} catch (err) {
+		console.log(err);
+		throw new Error(
+			`Failed to send Sendly notification ${err instanceof Error ? err.message : "Unknown error"}`,
+		);
+	}
+};
+
+export const sendNotiflyNotification = async (
+	connection: typeof notifly.$inferInsert,
+	payload: Record<string, any>,
+) => {
+	try {
+		const baseUrl = connection.baseUrl || "https://api.notifly.io";
+
+		const response = await fetch(`${baseUrl}/v1/events/trigger`, {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				Authorization: `ApiKey ${connection.apiKey}`,
+			},
+			body: JSON.stringify({
+				name: connection.workflowKey,
+				to: connection.subscriberId || "dokploy",
+				payload,
+			}),
+		});
+
+		if (!response.ok) {
+			const body = await response.text().catch(() => "");
+			throw new Error(
+				`Failed to send Notifly notification: ${response.statusText} ${body}`,
+			);
+		}
+	} catch (err) {
+		console.log(err);
+		throw new Error(
+			`Failed to send Notifly notification ${err instanceof Error ? err.message : "Unknown error"}`,
 		);
 	}
 };

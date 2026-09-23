@@ -6,9 +6,11 @@ import {
 	type apiCreateGotify,
 	type apiCreateLark,
 	type apiCreateMattermost,
+	type apiCreateNotifly,
 	type apiCreateNtfy,
 	type apiCreatePushover,
 	type apiCreateResend,
+	type apiCreateSendly,
 	type apiCreateSlack,
 	type apiCreateTeams,
 	type apiCreateTelegram,
@@ -18,9 +20,11 @@ import {
 	type apiUpdateGotify,
 	type apiUpdateLark,
 	type apiUpdateMattermost,
+	type apiUpdateNotifly,
 	type apiUpdateNtfy,
 	type apiUpdatePushover,
 	type apiUpdateResend,
+	type apiUpdateSendly,
 	type apiUpdateSlack,
 	type apiUpdateTeams,
 	type apiUpdateTelegram,
@@ -31,9 +35,11 @@ import {
 	lark,
 	mattermost,
 	notifications,
+	notifly,
 	ntfy,
 	pushover,
 	resend,
+	sendly,
 	slack,
 	teams,
 	telegram,
@@ -536,6 +542,206 @@ export const updateResendNotification = async (
 	});
 };
 
+export const createSendlyNotification = async (
+	input: z.infer<typeof apiCreateSendly>,
+	organizationId: string,
+) => {
+	await db.transaction(async (tx) => {
+		const newSendly = await tx
+			.insert(sendly)
+			.values({
+				apiKey: input.apiKey,
+				fromAddress: input.fromAddress,
+				toAddresses: input.toAddresses,
+				baseUrl: input.baseUrl,
+			})
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newSendly) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error input: Inserting sendly",
+			});
+		}
+
+		const newDestination = await tx
+			.insert(notifications)
+			.values({
+				sendlyId: newSendly.sendlyId,
+				name: input.name,
+				appDeploy: input.appDeploy,
+				appBuildError: input.appBuildError,
+				databaseBackup: input.databaseBackup,
+				dokployBackup: input.dokployBackup,
+				volumeBackup: input.volumeBackup,
+				dokployRestart: input.dokployRestart,
+				dockerCleanup: input.dockerCleanup,
+				notificationType: "sendly",
+				organizationId: organizationId,
+				serverThreshold: input.serverThreshold,
+				scheduleFailure: input.scheduleFailure,
+			})
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newDestination) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error input: Inserting notification",
+			});
+		}
+
+		return newDestination;
+	});
+};
+
+export const updateSendlyNotification = async (
+	input: z.infer<typeof apiUpdateSendly>,
+) => {
+	await db.transaction(async (tx) => {
+		const newDestination = await tx
+			.update(notifications)
+			.set({
+				name: input.name,
+				appDeploy: input.appDeploy,
+				appBuildError: input.appBuildError,
+				databaseBackup: input.databaseBackup,
+				dokployBackup: input.dokployBackup,
+				volumeBackup: input.volumeBackup,
+				dokployRestart: input.dokployRestart,
+				dockerCleanup: input.dockerCleanup,
+				organizationId: input.organizationId,
+				serverThreshold: input.serverThreshold,
+				scheduleFailure: input.scheduleFailure,
+			})
+			.where(eq(notifications.notificationId, input.notificationId))
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newDestination) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error Updating notification",
+			});
+		}
+
+		await tx
+			.update(sendly)
+			.set({
+				apiKey: input.apiKey,
+				fromAddress: input.fromAddress,
+				toAddresses: input.toAddresses,
+				baseUrl: input.baseUrl,
+			})
+			.where(eq(sendly.sendlyId, input.sendlyId))
+			.returning()
+			.then((value) => value[0]);
+
+		return newDestination;
+	});
+};
+
+export const createNotiflyNotification = async (
+	input: z.infer<typeof apiCreateNotifly>,
+	organizationId: string,
+) => {
+	await db.transaction(async (tx) => {
+		const newNotifly = await tx
+			.insert(notifly)
+			.values({
+				apiKey: input.apiKey,
+				workflowKey: input.workflowKey,
+				subscriberId: input.subscriberId,
+				baseUrl: input.baseUrl,
+			})
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newNotifly) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error input: Inserting notifly",
+			});
+		}
+
+		const newDestination = await tx
+			.insert(notifications)
+			.values({
+				notiflyId: newNotifly.notiflyId,
+				name: input.name,
+				appDeploy: input.appDeploy,
+				appBuildError: input.appBuildError,
+				databaseBackup: input.databaseBackup,
+				dokployBackup: input.dokployBackup,
+				volumeBackup: input.volumeBackup,
+				dokployRestart: input.dokployRestart,
+				dockerCleanup: input.dockerCleanup,
+				notificationType: "notifly",
+				organizationId: organizationId,
+				serverThreshold: input.serverThreshold,
+				scheduleFailure: input.scheduleFailure,
+			})
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newDestination) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error input: Inserting notification",
+			});
+		}
+
+		return newDestination;
+	});
+};
+
+export const updateNotiflyNotification = async (
+	input: z.infer<typeof apiUpdateNotifly>,
+) => {
+	await db.transaction(async (tx) => {
+		const newDestination = await tx
+			.update(notifications)
+			.set({
+				name: input.name,
+				appDeploy: input.appDeploy,
+				appBuildError: input.appBuildError,
+				databaseBackup: input.databaseBackup,
+				dokployBackup: input.dokployBackup,
+				volumeBackup: input.volumeBackup,
+				dokployRestart: input.dokployRestart,
+				dockerCleanup: input.dockerCleanup,
+				organizationId: input.organizationId,
+				serverThreshold: input.serverThreshold,
+				scheduleFailure: input.scheduleFailure,
+			})
+			.where(eq(notifications.notificationId, input.notificationId))
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newDestination) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error Updating notification",
+			});
+		}
+
+		await tx
+			.update(notifly)
+			.set({
+				apiKey: input.apiKey,
+				workflowKey: input.workflowKey,
+				subscriberId: input.subscriberId,
+				baseUrl: input.baseUrl,
+			})
+			.where(eq(notifly.notiflyId, input.notiflyId))
+			.returning()
+			.then((value) => value[0]);
+
+		return newDestination;
+	});
+};
+
 export const createGotifyNotification = async (
 	input: z.infer<typeof apiCreateGotify>,
 	organizationId: string,
@@ -835,6 +1041,8 @@ export const findNotificationById = async (notificationId: string) => {
 			discord: true,
 			email: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,

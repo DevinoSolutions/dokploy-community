@@ -5,9 +5,11 @@ import {
 	createGotifyNotification,
 	createLarkNotification,
 	createMattermostNotification,
+	createNotiflyNotification,
 	createNtfyNotification,
 	createPushoverNotification,
 	createResendNotification,
+	createSendlyNotification,
 	createSlackNotification,
 	createTeamsNotification,
 	createTelegramNotification,
@@ -21,9 +23,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendServerThresholdNotifications,
 	sendSlackNotification,
 	sendTeamsNotification,
@@ -34,9 +38,11 @@ import {
 	updateGotifyNotification,
 	updateLarkNotification,
 	updateMattermostNotification,
+	updateNotiflyNotification,
 	updateNtfyNotification,
 	updatePushoverNotification,
 	updateResendNotification,
+	updateSendlyNotification,
 	updateSlackNotification,
 	updateTeamsNotification,
 	updateTelegramNotification,
@@ -58,9 +64,11 @@ import {
 	apiCreateGotify,
 	apiCreateLark,
 	apiCreateMattermost,
+	apiCreateNotifly,
 	apiCreateNtfy,
 	apiCreatePushover,
 	apiCreateResend,
+	apiCreateSendly,
 	apiCreateSlack,
 	apiCreateTeams,
 	apiCreateTelegram,
@@ -71,9 +79,11 @@ import {
 	apiTestGotifyConnection,
 	apiTestLarkConnection,
 	apiTestMattermostConnection,
+	apiTestNotiflyConnection,
 	apiTestNtfyConnection,
 	apiTestPushoverConnection,
 	apiTestResendConnection,
+	apiTestSendlyConnection,
 	apiTestSlackConnection,
 	apiTestTeamsConnection,
 	apiTestTelegramConnection,
@@ -83,9 +93,11 @@ import {
 	apiUpdateGotify,
 	apiUpdateLark,
 	apiUpdateMattermost,
+	apiUpdateNotifly,
 	apiUpdateNtfy,
 	apiUpdatePushover,
 	apiUpdateResend,
+	apiUpdateSendly,
 	apiUpdateSlack,
 	apiUpdateTeams,
 	apiUpdateTelegram,
@@ -429,6 +441,141 @@ export const notificationRouter = createTRPCRouter({
 				});
 			}
 		}),
+	createSendly: withPermission("notification", "create")
+		.input(apiCreateSendly)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				await createSendlyNotification(input, ctx.session.activeOrganizationId);
+				await audit(ctx, {
+					action: "create",
+					resourceType: "notification",
+					resourceName: input.name,
+				});
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error creating the notification",
+					cause: error,
+				});
+			}
+		}),
+	updateSendly: withPermission("notification", "update")
+		.input(apiUpdateSendly)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				const notification = await findNotificationById(input.notificationId);
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not authorized to update this notification",
+					});
+				}
+				const result = await updateSendlyNotification({
+					...input,
+					organizationId: ctx.session.activeOrganizationId,
+				});
+				await audit(ctx, {
+					action: "update",
+					resourceType: "notification",
+					resourceId: input.notificationId,
+					resourceName: notification.name,
+				});
+				return result;
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+					cause: error,
+				});
+			}
+		}),
+	testSendlyConnection: withPermission("notification", "create")
+		.input(apiTestSendlyConnection)
+		.mutation(async ({ input }) => {
+			try {
+				await sendSendlyNotification(
+					input,
+					"Test Email",
+					"<p>Hi, From Dokploy 👋</p>",
+				);
+				return true;
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: `${error instanceof Error ? error.message : "Unknown error"}`,
+					cause: error,
+				});
+			}
+		}),
+	createNotifly: withPermission("notification", "create")
+		.input(apiCreateNotifly)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				await createNotiflyNotification(
+					input,
+					ctx.session.activeOrganizationId,
+				);
+				await audit(ctx, {
+					action: "create",
+					resourceType: "notification",
+					resourceName: input.name,
+				});
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error creating the notification",
+					cause: error,
+				});
+			}
+		}),
+	updateNotifly: withPermission("notification", "update")
+		.input(apiUpdateNotifly)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				const notification = await findNotificationById(input.notificationId);
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not authorized to update this notification",
+					});
+				}
+				const result = await updateNotiflyNotification({
+					...input,
+					organizationId: ctx.session.activeOrganizationId,
+				});
+				await audit(ctx, {
+					action: "update",
+					resourceType: "notification",
+					resourceId: input.notificationId,
+					resourceName: notification.name,
+				});
+				return result;
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+					cause: error,
+				});
+			}
+		}),
+	testNotiflyConnection: withPermission("notification", "create")
+		.input(apiTestNotiflyConnection)
+		.mutation(async ({ input }) => {
+			try {
+				await sendNotiflyNotification(input, {
+					event: "test",
+					message: "Hi, From Dokploy 👋",
+					timestamp: new Date().toISOString(),
+				});
+				return true;
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: `${error instanceof Error ? error.message : "Unknown error"}`,
+					cause: error,
+				});
+			}
+		}),
 	remove: withPermission("notification", "delete")
 		.input(apiFindOneNotification)
 		.mutation(async ({ input, ctx }) => {
@@ -477,6 +624,8 @@ export const notificationRouter = createTRPCRouter({
 				discord: true,
 				email: true,
 				resend: true,
+				sendly: true,
+				notifly: true,
 				gotify: true,
 				ntfy: true,
 				mattermost: true,
@@ -1023,6 +1172,7 @@ export const notificationRouter = createTRPCRouter({
 				with: {
 					email: true,
 					resend: true,
+					sendly: true,
 				},
 			});
 		},

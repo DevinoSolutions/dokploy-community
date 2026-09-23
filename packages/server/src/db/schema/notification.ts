@@ -25,6 +25,8 @@ export const notificationType = pgEnum("notificationType", [
 	"custom",
 	"lark",
 	"teams",
+	"sendly",
+	"notifly",
 ]);
 
 export const notifications = pgTable("notification", {
@@ -80,6 +82,12 @@ export const notifications = pgTable("notification", {
 		onDelete: "cascade",
 	}),
 	teamsId: text("teamsId").references(() => teams.teamsId, {
+		onDelete: "cascade",
+	}),
+	sendlyId: text("sendlyId").references(() => sendly.sendlyId, {
+		onDelete: "cascade",
+	}),
+	notiflyId: text("notiflyId").references(() => notifly.notiflyId, {
 		onDelete: "cascade",
 	}),
 	organizationId: text("organizationId")
@@ -207,6 +215,28 @@ export const teams = pgTable("teams", {
 	webhookUrl: text("webhookUrl").notNull(),
 });
 
+export const sendly = pgTable("sendly", {
+	sendlyId: text("sendlyId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	apiKey: text("apiKey").notNull(),
+	fromAddress: text("fromAddress").notNull(),
+	toAddresses: text("toAddress").array().notNull(),
+	baseUrl: text("baseUrl").notNull().default("https://app.sendly.now"),
+});
+
+export const notifly = pgTable("notifly", {
+	notiflyId: text("notiflyId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	apiKey: text("apiKey").notNull(),
+	workflowKey: text("workflowKey").notNull(),
+	subscriberId: text("subscriberId"),
+	baseUrl: text("baseUrl").notNull().default("https://api.notifly.io"),
+});
+
 export const notificationsRelations = relations(notifications, ({ one }) => ({
 	slack: one(slack, {
 		fields: [notifications.slackId],
@@ -255,6 +285,14 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 	teams: one(teams, {
 		fields: [notifications.teamsId],
 		references: [teams.teamsId],
+	}),
+	sendly: one(sendly, {
+		fields: [notifications.sendlyId],
+		references: [sendly.sendlyId],
+	}),
+	notifly: one(notifly, {
+		fields: [notifications.notiflyId],
+		references: [notifly.notiflyId],
 	}),
 	organization: one(organization, {
 		fields: [notifications.organizationId],
@@ -427,6 +465,74 @@ export const apiTestResendConnection = apiCreateResend.pick({
 	apiKey: true,
 	fromAddress: true,
 	toAddresses: true,
+});
+
+export const apiCreateSendly = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		scheduleFailure: true,
+		serverThreshold: true,
+	})
+	.extend({
+		apiKey: z.string().min(1),
+		fromAddress: z.string().min(1),
+		toAddresses: z.array(z.string()).min(1),
+		baseUrl: z.string().min(1),
+	})
+	.required();
+
+export const apiUpdateSendly = apiCreateSendly.partial().extend({
+	notificationId: z.string().min(1),
+	sendlyId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestSendlyConnection = apiCreateSendly.pick({
+	apiKey: true,
+	fromAddress: true,
+	toAddresses: true,
+	baseUrl: true,
+});
+
+export const apiCreateNotifly = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		scheduleFailure: true,
+		serverThreshold: true,
+	})
+	.extend({
+		apiKey: z.string().min(1),
+		workflowKey: z.string().min(1),
+		subscriberId: z.string().optional(),
+		baseUrl: z.string().min(1),
+	})
+	.required();
+
+export const apiUpdateNotifly = apiCreateNotifly.partial().extend({
+	notificationId: z.string().min(1),
+	notiflyId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestNotiflyConnection = apiCreateNotifly.pick({
+	apiKey: true,
+	workflowKey: true,
+	subscriberId: true,
+	baseUrl: true,
 });
 
 export const apiCreateGotify = notificationsSchema
@@ -725,5 +831,8 @@ export const apiSendTest = notificationsSchema
 		priority: z.number(),
 		endpoint: z.string(),
 		headers: z.string(),
+		workflowKey: z.string(),
+		subscriberId: z.string().optional(),
+		baseUrl: z.string(),
 	})
 	.partial();

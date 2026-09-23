@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -38,6 +40,8 @@ export const sendDokployBackupNotifications = async ({
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -55,6 +59,8 @@ export const sendDokployBackupNotifications = async ({
 			telegram,
 			slack,
 			resend,
+			sendly,
+			notifly,
 			gotify,
 			ntfy,
 			mattermost,
@@ -65,7 +71,7 @@ export const sendDokployBackupNotifications = async ({
 		} = notification;
 
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					DokployBackupEmail({
 						type,
@@ -86,6 +92,14 @@ export const sendDokployBackupNotifications = async ({
 				if (resend) {
 					await sendResendNotification(
 						resend,
+						"Dokploy instance backup",
+						template,
+					);
+				}
+
+				if (sendly) {
+					await sendSendlyNotification(
+						sendly,
 						"Dokploy instance backup",
 						template,
 					);
@@ -381,6 +395,18 @@ export const sendDokployBackupNotifications = async ({
 					date: date.toLocaleString(),
 					status: type,
 					type: "dokploy-backup",
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "dokploy.backup",
+					status: type,
+					timestamp: date.toISOString(),
+					message:
+						type === "success"
+							? "Dokploy instance backup completed successfully"
+							: `Dokploy instance backup failed${errorMessage ? `: ${errorMessage}` : ""}`,
 				});
 			}
 
