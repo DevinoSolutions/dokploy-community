@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -59,6 +61,8 @@ export const sendVolumeBackupNotifications = async ({
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -73,6 +77,8 @@ export const sendVolumeBackupNotifications = async ({
 		const {
 			email,
 			resend,
+			sendly,
+			notifly,
 			discord,
 			telegram,
 			slack,
@@ -86,7 +92,7 @@ export const sendVolumeBackupNotifications = async ({
 		} = notification;
 
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const subject = `Volume Backup ${type === "success" ? "Successful" : "Failed"} - ${applicationName}`;
 				const htmlContent = await render(
 					VolumeBackupEmail({
@@ -105,6 +111,9 @@ export const sendVolumeBackupNotifications = async ({
 				}
 				if (resend) {
 					await sendResendNotification(resend, subject, htmlContent);
+				}
+				if (sendly) {
+					await sendSendlyNotification(sendly, subject, htmlContent);
 				}
 			}
 
@@ -488,6 +497,20 @@ export const sendVolumeBackupNotifications = async ({
 					timestamp: date.toISOString(),
 					date: date.toLocaleString(),
 					status: type,
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "volume.backup",
+					projectName,
+					applicationName,
+					status: type,
+					timestamp: date.toISOString(),
+					message:
+						type === "success"
+							? `Volume backup for ${volumeName} completed successfully`
+							: `Volume backup for ${volumeName} failed${errorMessage ? `: ${errorMessage}` : ""}`,
 				});
 			}
 		} catch (error) {

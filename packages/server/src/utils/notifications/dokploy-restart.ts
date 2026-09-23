@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -31,6 +33,8 @@ export const sendDokployRestartNotifications = async () => {
 				telegram: true,
 				slack: true,
 				resend: true,
+				sendly: true,
+				notifly: true,
 				gotify: true,
 				ntfy: true,
 				mattermost: true,
@@ -45,6 +49,8 @@ export const sendDokployRestartNotifications = async () => {
 			const {
 				email,
 				resend,
+				sendly,
+				notifly,
 				discord,
 				telegram,
 				slack,
@@ -58,7 +64,7 @@ export const sendDokployRestartNotifications = async () => {
 			} = notification;
 
 			try {
-				if (email || resend) {
+				if (email || resend || sendly) {
 					const template = await render(
 						DokployRestartEmail({ date: date.toLocaleString() }),
 					).catch();
@@ -74,6 +80,14 @@ export const sendDokployRestartNotifications = async () => {
 					if (resend) {
 						await sendResendNotification(
 							resend,
+							"Dokploy Server Restarted",
+							template,
+						);
+					}
+
+					if (sendly) {
+						await sendSendlyNotification(
+							sendly,
 							"Dokploy Server Restarted",
 							template,
 						);
@@ -182,6 +196,15 @@ export const sendDokployRestartNotifications = async () => {
 					} catch (error) {
 						console.log(error);
 					}
+				}
+
+				if (notifly) {
+					await sendNotiflyNotification(notifly, {
+						event: "dokploy.restart",
+						status: "success",
+						timestamp: date.toISOString(),
+						message: "Dokploy server has been restarted successfully",
+					});
 				}
 
 				if (lark) {

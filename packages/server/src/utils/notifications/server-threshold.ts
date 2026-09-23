@@ -10,9 +10,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -46,6 +48,8 @@ export const sendServerThresholdNotifications = async (
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -66,6 +70,8 @@ export const sendServerThresholdNotifications = async (
 			telegram,
 			slack,
 			resend,
+			sendly,
+			notifly,
 			gotify,
 			ntfy,
 			mattermost,
@@ -76,7 +82,7 @@ export const sendServerThresholdNotifications = async (
 		} = notification;
 
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					ServerThresholdEmail({
 						serverName: payload.ServerName,
@@ -99,6 +105,14 @@ export const sendServerThresholdNotifications = async (
 				if (resend) {
 					await sendResendNotification(
 						resend,
+						`Server ${payload.Type} alert for ${payload.ServerName}`,
+						template,
+					);
+				}
+
+				if (sendly) {
+					await sendSendlyNotification(
+						sendly,
 						`Server ${payload.Type} alert for ${payload.ServerName}`,
 						template,
 					);
@@ -263,6 +277,16 @@ export const sendServerThresholdNotifications = async (
 					date: date.toLocaleString(),
 					status: "alert",
 					alertType: "server-threshold",
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "server.threshold",
+					serverName: payload.ServerName,
+					status: "alert",
+					timestamp: date.toISOString(),
+					message: payload.Message,
 				});
 			}
 

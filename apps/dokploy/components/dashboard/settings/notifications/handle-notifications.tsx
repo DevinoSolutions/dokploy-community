@@ -15,9 +15,11 @@ import {
 	GotifyIcon,
 	LarkIcon,
 	MattermostIcon,
+	NotiflyIcon,
 	NtfyIcon,
 	PushoverIcon,
 	ResendIcon,
+	SendlyIcon,
 	SlackIcon,
 	TeamsIcon,
 	TelegramIcon,
@@ -121,6 +123,33 @@ export const notificationSchema = z.discriminatedUnion("type", [
 		.merge(notificationBaseSchema),
 	z
 		.object({
+			type: z.literal("sendly"),
+			apiKey: z.string().min(1, { message: "API Key is required" }),
+			fromAddress: z
+				.string()
+				.min(1, { message: "From Address is required" })
+				.email({ message: "Email is invalid" }),
+			toAddresses: z
+				.array(
+					z.string().min(1, { message: "Email is required" }).email({
+						message: "Email is invalid",
+					}),
+				)
+				.min(1, { message: "At least one email is required" }),
+			baseUrl: z.string().min(1, { message: "Base URL is required" }),
+		})
+		.merge(notificationBaseSchema),
+	z
+		.object({
+			type: z.literal("notifly"),
+			apiKey: z.string().min(1, { message: "API Key is required" }),
+			workflowKey: z.string().min(1, { message: "Workflow Key is required" }),
+			subscriberId: z.string().optional(),
+			baseUrl: z.string().min(1, { message: "Base URL is required" }),
+		})
+		.merge(notificationBaseSchema),
+	z
+		.object({
 			type: z.literal("gotify"),
 			serverUrl: z.string().min(1, { message: "Server URL is required" }),
 			appToken: z.string().min(1, { message: "App Token is required" }),
@@ -213,6 +242,14 @@ export const notificationsMap = {
 		icon: <ResendIcon className="text-muted-foreground" />,
 		label: "Resend",
 	},
+	sendly: {
+		icon: <SendlyIcon className="text-muted-foreground" />,
+		label: "Sendly",
+	},
+	notifly: {
+		icon: <NotiflyIcon className="text-muted-foreground" />,
+		label: "Notifly",
+	},
 	gotify: {
 		icon: <GotifyIcon />,
 		label: "Gotify",
@@ -264,6 +301,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 		api.notification.testEmailConnection.useMutation();
 	const { mutateAsync: testResendConnection, isPending: isLoadingResend } =
 		api.notification.testResendConnection.useMutation();
+	const { mutateAsync: testSendlyConnection, isPending: isLoadingSendly } =
+		api.notification.testSendlyConnection.useMutation();
+	const { mutateAsync: testNotiflyConnection, isPending: isLoadingNotifly } =
+		api.notification.testNotiflyConnection.useMutation();
 	const { mutateAsync: testGotifyConnection, isPending: isLoadingGotify } =
 		api.notification.testGotifyConnection.useMutation();
 	const { mutateAsync: testNtfyConnection, isPending: isLoadingNtfy } =
@@ -299,6 +340,12 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 	const resendMutation = notificationId
 		? api.notification.updateResend.useMutation()
 		: api.notification.createResend.useMutation();
+	const sendlyMutation = notificationId
+		? api.notification.updateSendly.useMutation()
+		: api.notification.createSendly.useMutation();
+	const notiflyMutation = notificationId
+		? api.notification.updateNotifly.useMutation()
+		: api.notification.createNotifly.useMutation();
 	const gotifyMutation = notificationId
 		? api.notification.updateGotify.useMutation()
 		: api.notification.createGotify.useMutation();
@@ -344,7 +391,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 	});
 
 	useEffect(() => {
-		if ((type === "email" || type === "resend") && fields.length === 0) {
+		if (
+			(type === "email" || type === "resend" || type === "sendly") &&
+			fields.length === 0
+		) {
 			append("");
 		}
 	}, [type, append, fields.length]);
@@ -432,6 +482,42 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					apiKey: notification.resend?.apiKey,
 					toAddresses: notification.resend?.toAddresses,
 					fromAddress: notification.resend?.fromAddress,
+					name: notification.name,
+					dockerCleanup: notification.dockerCleanup,
+					serverThreshold: notification.serverThreshold,
+					scheduleFailure: notification.scheduleFailure,
+				});
+			} else if (notification.notificationType === "sendly") {
+				form.reset({
+					appBuildError: notification.appBuildError,
+					appDeploy: notification.appDeploy,
+					dokployRestart: notification.dokployRestart,
+					databaseBackup: notification.databaseBackup,
+					dokployBackup: notification.dokployBackup,
+					volumeBackup: notification.volumeBackup,
+					type: notification.notificationType,
+					apiKey: notification.sendly?.apiKey,
+					toAddresses: notification.sendly?.toAddresses,
+					fromAddress: notification.sendly?.fromAddress,
+					baseUrl: notification.sendly?.baseUrl,
+					name: notification.name,
+					dockerCleanup: notification.dockerCleanup,
+					serverThreshold: notification.serverThreshold,
+					scheduleFailure: notification.scheduleFailure,
+				});
+			} else if (notification.notificationType === "notifly") {
+				form.reset({
+					appBuildError: notification.appBuildError,
+					appDeploy: notification.appDeploy,
+					dokployRestart: notification.dokployRestart,
+					databaseBackup: notification.databaseBackup,
+					dokployBackup: notification.dokployBackup,
+					volumeBackup: notification.volumeBackup,
+					type: notification.notificationType,
+					apiKey: notification.notifly?.apiKey,
+					workflowKey: notification.notifly?.workflowKey,
+					subscriberId: notification.notifly?.subscriberId || "",
+					baseUrl: notification.notifly?.baseUrl,
 					name: notification.name,
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
@@ -574,6 +660,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 		discord: discordMutation,
 		email: emailMutation,
 		resend: resendMutation,
+		sendly: sendlyMutation,
+		notifly: notiflyMutation,
 		gotify: gotifyMutation,
 		ntfy: ntfyMutation,
 		mattermost: mattermostMutation,
@@ -684,6 +772,44 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
 				resendId: notification?.resendId || "",
+				serverThreshold: serverThreshold,
+				scheduleFailure: scheduleFailure,
+			});
+		} else if (data.type === "sendly") {
+			promise = sendlyMutation.mutateAsync({
+				appBuildError: appBuildError,
+				appDeploy: appDeploy,
+				dokployRestart: dokployRestart,
+				databaseBackup: databaseBackup,
+				dokployBackup: dokployBackup,
+				volumeBackup: volumeBackup,
+				apiKey: data.apiKey,
+				fromAddress: data.fromAddress,
+				toAddresses: data.toAddresses,
+				baseUrl: data.baseUrl,
+				name: data.name,
+				dockerCleanup: dockerCleanup,
+				notificationId: notificationId || "",
+				sendlyId: notification?.sendlyId || "",
+				serverThreshold: serverThreshold,
+				scheduleFailure: scheduleFailure,
+			});
+		} else if (data.type === "notifly") {
+			promise = notiflyMutation.mutateAsync({
+				appBuildError: appBuildError,
+				appDeploy: appDeploy,
+				dokployRestart: dokployRestart,
+				databaseBackup: databaseBackup,
+				dokployBackup: dokployBackup,
+				volumeBackup: volumeBackup,
+				apiKey: data.apiKey,
+				workflowKey: data.workflowKey,
+				subscriberId: data.subscriberId || "",
+				baseUrl: data.baseUrl,
+				name: data.name,
+				dockerCleanup: dockerCleanup,
+				notificationId: notificationId || "",
+				notiflyId: notification?.notiflyId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
@@ -1349,6 +1475,197 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 										>
 											Add
 										</Button>
+									</>
+								)}
+
+								{type === "sendly" && (
+									<>
+										<FormField
+											control={form.control}
+											name="apiKey"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>API Key</FormLabel>
+													<FormControl>
+														<Input
+															type="password"
+															placeholder="sk_********"
+															{...field}
+														/>
+													</FormControl>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="baseUrl"
+											defaultValue="https://app.sendly.now"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Base URL</FormLabel>
+													<FormControl>
+														<Input
+															placeholder="https://app.sendly.now"
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription>
+														The base URL of your Sendly instance.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="fromAddress"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>From Address</FormLabel>
+													<FormControl>
+														<Input placeholder="from@example.com" {...field} />
+													</FormControl>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<div className="flex flex-col gap-2 pt-2">
+											<FormLabel>To Addresses</FormLabel>
+
+											{fields.map((field, index) => (
+												<div
+													key={field.id}
+													className="flex flex-row gap-2 w-full"
+												>
+													<FormField
+														control={form.control}
+														name={`toAddresses.${index}`}
+														render={({ field }) => (
+															<FormItem className="w-full">
+																<FormControl>
+																	<Input
+																		placeholder="email@example.com"
+																		className="w-full"
+																		{...field}
+																	/>
+																</FormControl>
+
+																<FormMessage />
+															</FormItem>
+														)}
+													/>
+													<Button
+														variant="outline"
+														type="button"
+														onClick={() => {
+															remove(index);
+														}}
+													>
+														Remove
+													</Button>
+												</div>
+											))}
+											{type === "sendly" &&
+												"toAddresses" in form.formState.errors && (
+													<div className="text-sm font-medium text-destructive">
+														{form.formState?.errors?.toAddresses?.root?.message}
+													</div>
+												)}
+										</div>
+
+										<Button
+											variant="outline"
+											type="button"
+											onClick={() => {
+												append("");
+											}}
+										>
+											Add
+										</Button>
+									</>
+								)}
+
+								{type === "notifly" && (
+									<>
+										<FormField
+											control={form.control}
+											name="apiKey"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>API Key</FormLabel>
+													<FormControl>
+														<Input
+															type="password"
+															placeholder="Novu secret key"
+															{...field}
+														/>
+													</FormControl>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="baseUrl"
+											defaultValue="https://api.notifly.io"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Base URL</FormLabel>
+													<FormControl>
+														<Input
+															placeholder="https://api.notifly.io"
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription>
+														The base URL of your Notifly instance.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="workflowKey"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Workflow Key</FormLabel>
+													<FormControl>
+														<Input
+															placeholder="dokploy-notifications"
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription>
+														The identifier of the Notifly workflow to trigger.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="subscriberId"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Subscriber ID</FormLabel>
+													<FormControl>
+														<Input placeholder="dokploy" {...field} />
+													</FormControl>
+													<FormDescription>
+														Optional. Defaults to "dokploy" when left empty.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
 									</>
 								)}
 
@@ -2062,6 +2379,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 								isLoadingDiscord ||
 								isLoadingEmail ||
 								isLoadingResend ||
+								isLoadingSendly ||
+								isLoadingNotifly ||
 								isLoadingGotify ||
 								isLoadingNtfy ||
 								isLoadingMattermost ||
@@ -2109,6 +2428,20 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											apiKey: data.apiKey,
 											fromAddress: data.fromAddress,
 											toAddresses: data.toAddresses,
+										});
+									} else if (data.type === "sendly") {
+										await testSendlyConnection({
+											apiKey: data.apiKey,
+											fromAddress: data.fromAddress,
+											toAddresses: data.toAddresses,
+											baseUrl: data.baseUrl,
+										});
+									} else if (data.type === "notifly") {
+										await testNotiflyConnection({
+											apiKey: data.apiKey,
+											workflowKey: data.workflowKey,
+											subscriberId: data.subscriberId || "",
+											baseUrl: data.baseUrl,
 										});
 									} else if (data.type === "gotify") {
 										await testGotifyConnection({

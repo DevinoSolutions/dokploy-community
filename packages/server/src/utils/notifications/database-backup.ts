@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -49,6 +51,8 @@ export const sendDatabaseBackupNotifications = async ({
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -63,6 +67,8 @@ export const sendDatabaseBackupNotifications = async ({
 		const {
 			email,
 			resend,
+			sendly,
+			notifly,
 			discord,
 			telegram,
 			slack,
@@ -75,7 +81,7 @@ export const sendDatabaseBackupNotifications = async ({
 			teams,
 		} = notification;
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					DatabaseBackupEmail({
 						projectName,
@@ -98,6 +104,14 @@ export const sendDatabaseBackupNotifications = async ({
 				if (resend) {
 					await sendResendNotification(
 						resend,
+						"Database backup for dokploy",
+						template,
+					);
+				}
+
+				if (sendly) {
+					await sendSendlyNotification(
+						sendly,
 						"Database backup for dokploy",
 						template,
 					);
@@ -306,6 +320,20 @@ export const sendDatabaseBackupNotifications = async ({
 					timestamp: date.toISOString(),
 					date: date.toLocaleString(),
 					status: type,
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "database.backup",
+					projectName,
+					applicationName,
+					status: type,
+					timestamp: date.toISOString(),
+					message:
+						type === "success"
+							? `Database backup for ${databaseName} completed successfully`
+							: `Database backup for ${databaseName} failed${errorMessage ? `: ${errorMessage}` : ""}`,
 				});
 			}
 
