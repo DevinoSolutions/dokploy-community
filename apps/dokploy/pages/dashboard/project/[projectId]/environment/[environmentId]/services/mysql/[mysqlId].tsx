@@ -18,6 +18,7 @@ import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
+import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { ShowExternalMysqlCredentials } from "@/components/dashboard/mysql/general/show-external-mysql-credentials";
 import { ShowGeneralMysql } from "@/components/dashboard/mysql/general/show-general-mysql";
 import { ShowInternalMysqlCredentials } from "@/components/dashboard/mysql/general/show-internal-mysql-credentials";
@@ -248,7 +249,11 @@ const MySql = (
 										)}
 										{permissions?.monitoring.read && (
 											<TabsContent value="monitoring">
-												<div className="pt-2.5">
+												<div className="pt-2.5 flex flex-col gap-4">
+													<UptimelyServicePanel
+														serviceType="mysql"
+														serviceId={mysqlId}
+													/>
 													<div className="flex flex-col gap-4 border rounded-lg p-6">
 														{data?.serverId && isCloud ? (
 															<ContainerPaidMonitoring

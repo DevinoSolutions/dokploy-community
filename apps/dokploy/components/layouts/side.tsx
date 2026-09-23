@@ -413,6 +413,16 @@ const MENU: Menu = {
 			icon: Cloud,
 			isEnabled: ({ permissions }) => !!permissions?.cloudflare.read,
 		},
+		{
+			isSingle: true,
+			title: "Integrations",
+			url: "/dashboard/settings/integrations",
+			icon: BlocksIcon,
+			// Devino product integrations (Uptimely, ...). Org-wide credentials:
+			// owners/admins only, self-hosted only.
+			isEnabled: ({ auth, isCloud }) =>
+				!!((auth?.role === "owner" || auth?.role === "admin") && !isCloud),
+		},
 
 		{
 			isSingle: true,

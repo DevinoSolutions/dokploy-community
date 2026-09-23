@@ -18,6 +18,7 @@ import { DeleteService } from "@/components/dashboard/compose/delete-service";
 import { ShowBackups } from "@/components/dashboard/database/backups/show-backups";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/container/show-paid-container-monitoring";
+import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { ShowExternalPostgresCredentials } from "@/components/dashboard/postgres/general/show-external-postgres-credentials";
 import { ShowGeneralPostgres } from "@/components/dashboard/postgres/general/show-general-postgres";
 import { ShowInternalPostgresCredentials } from "@/components/dashboard/postgres/general/show-internal-postgres-credentials";
@@ -253,7 +254,11 @@ const Postgresql = (
 									)}
 									{permissions?.monitoring.read && (
 										<TabsContent value="monitoring">
-											<div className="pt-2.5">
+											<div className="pt-2.5 flex flex-col gap-4">
+												<UptimelyServicePanel
+													serviceType="postgres"
+													serviceId={postgresId}
+												/>
 												<div className="flex flex-col gap-4 border rounded-lg p-6">
 													{data?.serverId && isCloud ? (
 														<ContainerPaidMonitoring
