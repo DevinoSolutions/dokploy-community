@@ -23,6 +23,11 @@ import {
 } from "@/components/ui/tooltip";
 import type { RouterOutputs } from "@/utils/api";
 import { DnsHelperModal } from "./dns-helper-modal";
+import {
+	DoDomainDomainActions,
+	DoDomainVerificationBadge,
+	isDoDomainConnectableHost,
+} from "./dodomain-verification";
 import { AddDomain } from "./handle-domain";
 import type { ValidationStates } from "./show-domains";
 
@@ -42,6 +47,9 @@ interface ColumnsProps {
 	serverIp?: string;
 	canCreateDomain: boolean;
 	canDeleteDomain: boolean;
+	/** The organization has DoDomain connected. */
+	dodomainConfigured?: boolean;
+	onDoDomainChanged?: () => void;
 }
 
 export const createColumns = ({
@@ -56,6 +64,8 @@ export const createColumns = ({
 	serverIp,
 	canCreateDomain,
 	canDeleteDomain,
+	dodomainConfigured = false,
+	onDoDomainChanged,
 }: ColumnsProps): ColumnDef<Domain>[] => [
 	...(type === "compose"
 		? [
@@ -259,34 +269,46 @@ export const createColumns = ({
 		header: "Status",
 		cell: ({ row }) => {
 			const domain = row.original;
+			const verification = (
+				<DoDomainVerificationBadge
+					status={domain.dnsVerificationStatus}
+					verifiedAt={domain.dnsVerifiedAt}
+				/>
+			);
 			if (!canCreateDomain) {
 				return (
-					<Badge variant={domain.enabled ? "outline" : "secondary"}>
-						{domain.enabled ? "Enabled" : "Disabled"}
-					</Badge>
+					<div className="flex items-center gap-2">
+						<Badge variant={domain.enabled ? "outline" : "secondary"}>
+							{domain.enabled ? "Enabled" : "Disabled"}
+						</Badge>
+						{verification}
+					</div>
 				);
 			}
 			return (
-				<TooltipProvider>
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<div className="flex items-center">
-								<Switch
-									checked={domain.enabled}
-									onCheckedChange={() => handleToggleEnable(domain.domainId)}
-									disabled={isToggling}
-								/>
-							</div>
-						</TooltipTrigger>
-						<TooltipContent>
-							<p>
-								{domain.enabled
-									? "Domain is active. Toggle to disable routing without deleting it."
-									: "Domain is disabled and not routed. Toggle to enable it again."}
-							</p>
-						</TooltipContent>
-					</Tooltip>
-				</TooltipProvider>
+				<div className="flex items-center gap-2">
+					<TooltipProvider>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<div className="flex items-center">
+									<Switch
+										checked={domain.enabled}
+										onCheckedChange={() => handleToggleEnable(domain.domainId)}
+										disabled={isToggling}
+									/>
+								</div>
+							</TooltipTrigger>
+							<TooltipContent>
+								<p>
+									{domain.enabled
+										? "Domain is active. Toggle to disable routing without deleting it."
+										: "Domain is disabled and not routed. Toggle to enable it again."}
+								</p>
+							</TooltipContent>
+						</Tooltip>
+					</TooltipProvider>
+					{verification}
+				</div>
 			);
 		},
 	},
@@ -320,6 +342,16 @@ export const createColumns = ({
 							</Button>
 						</AddDomain>
 					)}
+					{canCreateDomain &&
+						dodomainConfigured &&
+						isDoDomainConnectableHost(domain.host) && (
+							<DoDomainDomainActions
+								domainId={domain.domainId}
+								host={domain.host}
+								connectionId={domain.dodomainConnectionId}
+								onChanged={onDoDomainChanged}
+							/>
+						)}
 					{canDeleteDomain && (
 						<DialogAction
 							title="Delete Domain"

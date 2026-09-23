@@ -65,6 +65,12 @@ import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import { createColumns } from "./columns";
 import { DnsHelperModal } from "./dns-helper-modal";
+import {
+	DoDomainDomainActions,
+	DoDomainVerificationBadge,
+	isDoDomainConnectableHost,
+	useDoDomainConfigured,
+} from "./dodomain-verification";
 import { DomainAccessPolicyEditor } from "./domain-access-policy-editor";
 import { AddDomain } from "./handle-domain";
 import { HandleForwardAuth } from "./handle-forward-auth";
@@ -90,6 +96,7 @@ export const ShowDomains = ({ id, type }: Props) => {
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const canCreateDomain = permissions?.domain.create ?? false;
 	const canDeleteDomain = permissions?.domain.delete ?? false;
+	const dodomainConfigured = useDoDomainConfigured();
 	const { data: application } =
 		type === "application"
 			? api.application.one.useQuery(
@@ -233,6 +240,8 @@ export const ShowDomains = ({ id, type }: Props) => {
 		serverIp: application?.server?.ipAddress?.toString() || ip?.toString(),
 		canCreateDomain,
 		canDeleteDomain,
+		dodomainConfigured,
+		onDoDomainChanged: () => refetch(),
 	});
 
 	const table = useReactTable({
@@ -498,6 +507,16 @@ export const ShowDomains = ({ id, type }: Props) => {
 																</Button>
 															</AddDomain>
 														)}
+														{canCreateDomain &&
+															dodomainConfigured &&
+															isDoDomainConnectableHost(item.host) && (
+																<DoDomainDomainActions
+																	domainId={item.domainId}
+																	host={item.host}
+																	connectionId={item.dodomainConnectionId}
+																	onChanged={() => refetch()}
+																/>
+															)}
 														{canCreateDomain && type === "application" && (
 															<HandleForwardAuth
 																domainId={item.domainId}
@@ -680,6 +699,10 @@ export const ShowDomains = ({ id, type }: Props) => {
 															</Tooltip>
 														</TooltipProvider>
 													)}
+													<DoDomainVerificationBadge
+														status={item.dnsVerificationStatus}
+														verifiedAt={item.dnsVerifiedAt}
+													/>
 													{item.middlewares?.map((middleware, index) => (
 														<TooltipProvider key={`${middleware}-${index}`}>
 															<Tooltip>

@@ -33,6 +33,10 @@ describe("createDomainLabels", () => {
 		cloudflareIngressApplied: false,
 		enableCloudflareAccess: false,
 		cloudflareAccessApplicationId: null,
+		dodomainConnectionId: null,
+		dodomainSessionId: null,
+		dnsVerificationStatus: null,
+		dnsVerifiedAt: null,
 		enabled: true,
 	};
 

@@ -7,6 +7,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
+import { ShowDoDomain } from "./dodomain/show-dodomain";
 import { ShowUptimely } from "./uptimely/show-uptimely";
 
 /**
@@ -16,6 +17,7 @@ import { ShowUptimely } from "./uptimely/show-uptimely";
  */
 const INTEGRATION_CARDS: { id: string; Card: ComponentType }[] = [
 	{ id: "uptimely", Card: ShowUptimely },
+	{ id: "dodomain", Card: ShowDoDomain },
 ];
 
 export const IntegrationsPage = () => {
