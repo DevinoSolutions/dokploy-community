@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -58,6 +60,8 @@ export const sendBuildErrorNotifications = async ({
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -72,6 +76,8 @@ export const sendBuildErrorNotifications = async ({
 		const {
 			email,
 			resend,
+			sendly,
+			notifly,
 			discord,
 			telegram,
 			slack,
@@ -84,7 +90,7 @@ export const sendBuildErrorNotifications = async ({
 			teams,
 		} = notification;
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					BuildFailedEmail({
 						projectName,
@@ -107,6 +113,14 @@ export const sendBuildErrorNotifications = async ({
 				if (resend) {
 					await sendResendNotification(
 						resend,
+						"Build failed for dokploy",
+						template,
+					);
+				}
+
+				if (sendly) {
+					await sendSendlyNotification(
+						sendly,
 						"Build failed for dokploy",
 						template,
 					);
@@ -293,6 +307,18 @@ ${errorMessage}
 					date: date.toLocaleString(),
 					status: "error",
 					type: "build",
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "build.error",
+					projectName,
+					applicationName,
+					status: "error",
+					link: buildLink,
+					timestamp: date.toISOString(),
+					message: `Build failed for ${applicationName}: ${truncateErrorMessage(errorMessage)}`,
 				});
 			}
 

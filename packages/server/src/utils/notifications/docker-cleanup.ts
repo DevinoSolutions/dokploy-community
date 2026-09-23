@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -36,6 +38,8 @@ export const sendDockerCleanupNotifications = async (
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -50,6 +54,8 @@ export const sendDockerCleanupNotifications = async (
 		const {
 			email,
 			resend,
+			sendly,
+			notifly,
 			discord,
 			telegram,
 			slack,
@@ -62,7 +68,7 @@ export const sendDockerCleanupNotifications = async (
 			teams,
 		} = notification;
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					DockerCleanupEmail({ message, date: date.toLocaleString() }),
 				).catch();
@@ -78,6 +84,14 @@ export const sendDockerCleanupNotifications = async (
 				if (resend) {
 					await sendResendNotification(
 						resend,
+						"Docker cleanup for dokploy",
+						template,
+					);
+				}
+
+				if (sendly) {
+					await sendSendlyNotification(
+						sendly,
 						"Docker cleanup for dokploy",
 						template,
 					);
@@ -188,6 +202,15 @@ export const sendDockerCleanupNotifications = async (
 					date: date.toLocaleString(),
 					status: "success",
 					type: "docker-cleanup",
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "docker.cleanup",
+					status: "success",
+					timestamp: date.toISOString(),
+					message,
 				});
 			}
 
