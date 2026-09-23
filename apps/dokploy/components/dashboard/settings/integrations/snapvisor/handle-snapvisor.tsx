@@ -33,7 +33,11 @@ const snapvisorSchema = z.object({
 	name: z.string().trim().min(1, "Name is required"),
 	accessToken: z.string(),
 	accountSlug: z.string().trim().min(1, "Account slug is required"),
-	baseUrl: z.string().trim().url("Enter a valid URL"),
+	baseUrl: z
+		.string()
+		.trim()
+		.url("Enter a valid URL")
+		.refine((value) => /^https?:\/\//i.test(value), "Use an http(s) URL"),
 });
 
 type SnapvisorForm = z.infer<typeof snapvisorSchema>;

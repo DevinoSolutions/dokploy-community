@@ -66,6 +66,8 @@ const { registerPreviewDeployment, findLatestPreviewCommitSha } =
 
 const ORG = "org-1";
 const PREVIEW_ID = "preview-1";
+// Snapvisor's `headSha` filter matches on the full SHA1: 40 hex characters.
+const FULL_SHA = "abc1234defabc1234defabc1234defabc1234def";
 
 const application = (overrides: Record<string, unknown> = {}) => ({
 	applicationId: "app-1",
@@ -110,7 +112,7 @@ beforeEach(() => {
 	});
 	mocks.findApplicationById.mockResolvedValue(application());
 	mocks.deploymentFindFirst.mockResolvedValue({
-		description: "Commit: abc1234def",
+		description: `Commit: ${FULL_SHA}`,
 		createdAt: new Date().toISOString(),
 	});
 	mocks.integrationFindFirst.mockResolvedValue(integrationRow);
@@ -120,13 +122,13 @@ describe("registerPreviewDeployment", () => {
 	it("looks up the Snapvisor build for the deployed commit and stores it", async () => {
 		responder = (url) => {
 			expect(url).toContain("/v2/projects/my-team/web/builds");
-			expect(url).toContain("headSha=abc1234def");
+			expect(url).toContain(`headSha=${FULL_SHA}`);
 			return {
 				results: [
 					{
 						id: "build-1",
 						number: 42,
-						head: { sha: "abc1234def", branch: "feature" },
+						head: { sha: FULL_SHA, branch: "feature" },
 						base: null,
 						status: "changes-detected",
 						stats: null,
@@ -195,13 +197,15 @@ describe("registerPreviewDeployment", () => {
 });
 
 describe("findLatestPreviewCommitSha", () => {
+	const FULL_SHA_2 = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
 	it("extracts the sha from the `Commit: <sha>` marker", async () => {
 		mocks.deploymentFindFirst.mockResolvedValue({
-			description: "Commit: deadbeef",
+			description: `Commit: ${FULL_SHA_2}`,
 			createdAt: new Date().toISOString(),
 		});
 		await expect(findLatestPreviewCommitSha(PREVIEW_ID)).resolves.toBe(
-			"deadbeef",
+			FULL_SHA_2,
 		);
 	});
 
@@ -211,6 +215,14 @@ describe("findLatestPreviewCommitSha", () => {
 
 		mocks.deploymentFindFirst.mockResolvedValue({
 			description: "Manual redeploy",
+			createdAt: new Date().toISOString(),
+		});
+		await expect(findLatestPreviewCommitSha(PREVIEW_ID)).resolves.toBeNull();
+	});
+
+	it("rejects an abbreviated sha (Snapvisor's headSha filter needs the full 40 characters)", async () => {
+		mocks.deploymentFindFirst.mockResolvedValue({
+			description: "Commit: abc1234",
 			createdAt: new Date().toISOString(),
 		});
 		await expect(findLatestPreviewCommitSha(PREVIEW_ID)).resolves.toBeNull();

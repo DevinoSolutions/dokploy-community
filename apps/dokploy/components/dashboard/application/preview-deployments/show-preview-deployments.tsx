@@ -61,6 +61,21 @@ const SNAPVISOR_STATUS_PRESENTATION: Record<
 };
 
 /**
+ * Build statuses that can never change again on their own: a review outcome
+ * (accepted/rejected) or a finished/failed run (no-changes/error/aborted/
+ * expired). Polling stops once one of these is reached; a new commit gets a
+ * new build anyway, registered by the next preview deploy.
+ */
+const SNAPVISOR_TERMINAL_STATUSES = new Set([
+	"accepted",
+	"rejected",
+	"no-changes",
+	"error",
+	"aborted",
+	"expired",
+]);
+
+/**
  * Snapvisor visual-diff badge for one preview deployment. Only rendered when
  * the application has a Snapvisor project linked (`show-preview-settings.tsx`);
  * polls the stored build linkage and offers a manual refresh + deep link.
@@ -72,7 +87,14 @@ const SnapvisorPreviewBadge = ({
 }) => {
 	const { data, isPending } = api.snapvisor.previewBuild.useQuery(
 		{ previewDeploymentId },
-		{ refetchInterval: 15_000 },
+		{
+			refetchInterval: (query) => {
+				const status = query.state.data?.buildStatus;
+				return status && SNAPVISOR_TERMINAL_STATUSES.has(status)
+					? false
+					: 15_000;
+			},
+		},
 	);
 	const { mutateAsync: refresh, isPending: isRefreshing } =
 		api.snapvisor.refreshPreviewBuild.useMutation();

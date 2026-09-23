@@ -177,7 +177,9 @@ export const findLatestPreviewCommitSha = async (previewDeploymentId: string) =>
 		where: eq(deployments.previewDeploymentId, previewDeploymentId),
 		orderBy: desc(deployments.createdAt),
 	});
-	const match = deployment?.description?.match(/Commit:\s*([0-9a-f]{7,40})/i);
+	// Snapvisor's `headSha` filter matches on the full SHA1, so a short/abbreviated
+	// hash would silently return zero builds; require all 40 hex characters.
+	const match = deployment?.description?.match(/Commit:\s*([0-9a-f]{40})/i);
 	return match?.[1] ?? null;
 };
 
