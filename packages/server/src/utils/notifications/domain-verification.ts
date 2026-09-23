@@ -11,9 +11,11 @@ import {
 	sendGotifyNotification,
 	sendLarkNotification,
 	sendMattermostNotification,
+	sendNotiflyNotification,
 	sendNtfyNotification,
 	sendPushoverNotification,
 	sendResendNotification,
+	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
@@ -61,6 +63,8 @@ export const sendDomainVerificationFailedNotifications = async ({
 			telegram: true,
 			slack: true,
 			resend: true,
+			sendly: true,
+			notifly: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -75,6 +79,8 @@ export const sendDomainVerificationFailedNotifications = async ({
 		const {
 			email,
 			resend,
+			sendly,
+			notifly,
 			discord,
 			telegram,
 			slack,
@@ -87,7 +93,7 @@ export const sendDomainVerificationFailedNotifications = async ({
 			teams,
 		} = notification;
 		try {
-			if (email || resend) {
+			if (email || resend || sendly) {
 				const template = await render(
 					BuildFailedEmail({
 						projectName,
@@ -104,6 +110,9 @@ export const sendDomainVerificationFailedNotifications = async ({
 				}
 				if (resend) {
 					await sendResendNotification(resend, `${TITLE}: ${host}`, template);
+				}
+				if (sendly) {
+					await sendSendlyNotification(sendly, `${TITLE}: ${host}`, template);
 				}
 			}
 
@@ -255,6 +264,19 @@ ${reason}
 					date: date.toLocaleString(),
 					status: "error",
 					type: "domain-verification",
+				});
+			}
+
+			if (notifly) {
+				await sendNotiflyNotification(notifly, {
+					event: "domain.verification_failed",
+					projectName,
+					applicationName: serviceName,
+					host,
+					status: "error",
+					link: domainLink,
+					timestamp: date.toISOString(),
+					message: `DNS verification failed for ${host}: ${reason}`,
 				});
 			}
 

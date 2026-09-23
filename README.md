@@ -60,6 +60,7 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 
 ### Domains & networking
 
+- **DoDomain custom-domain connect** — end users link their own domain through a hosted flow (Cloudflare OAuth, Domain Connect, or guided manual) and Dokploy verifies DNS and applies the domain automatically, powered by [DoDomain](https://dodomain.io): connect once in Settings → Integrations, then send a connect link from a domain's row in the Domains tab
 - **Wildcard domain support** (`*.example.com`), with an optional wildcard-restriction setting to control who can use it
 - **Per-server default domain** for auto-generated app domains — each server can hand out its own base domain
 - Global **response-compression** toggle (Traefik compress middleware)
@@ -97,7 +98,6 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 ### Monitoring
 
 - **Uptimely integration** — per-service uptime, SSL and domain monitors from the monitoring tab, powered by [Uptimely](https://getuptimely.com): connect once in Settings → Integrations, then opt each application, compose stack or database in from its Monitoring tab
-- **DoDomain custom-domain connect** — end users link their own domain through a hosted flow (Cloudflare OAuth, Domain Connect, or guided manual) and Dokploy verifies DNS and applies the domain automatically, powered by [DoDomain](https://dodomain.io): connect once in Settings → Integrations, then send a connect link from a domain's row in the Domains tab
 - **Container resource breakdown** and **swap usage** in monitoring
 - **Remote-server stats** via a server selector
 - **Container healthcheck status** surfaced in the UI
@@ -114,7 +114,7 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 
 ### Also included
 
-- **Notifications** — container crash-loop alerts, scheduled-job failure alerts, and real server names in threshold alerts
+- **Notifications** — container crash-loop alerts, scheduled-job failure alerts, real server names in threshold alerts, and [Sendly](https://sendly.now) / [Notifly](https://notifly.io) provider channels
 - **Git providers & auth** — GitHub/Google social login on self-hosted, self-hosted password reset, Codeberg preset, Gitea `write:repository` scope, and several OAuth/redirect fixes
 - **Organizations & teams** — editable descriptions, bulk invitations, drag-and-drop logo upload, and **project export** to a portable JSON file
 - **Per-project icons** — paste a URL or drag-and-drop an image onto any project; projects without one automatically show the **favicon of their first working domain**
