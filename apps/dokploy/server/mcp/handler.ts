@@ -28,8 +28,12 @@ export interface McpAuth {
 	scopes: Set<string>;
 	session: Awaited<ReturnType<typeof buildMemberSession>>["session"];
 	user: Awaited<ReturnType<typeof buildMemberSession>>["user"];
-	/** API-key grants only: when better-auth last verified the key (epoch ms). */
-	verifiedAt?: number;
+	/**
+	 * API-key grants only: admitted on a check another request made (recent
+	 * or still in flight). Such a grant must be re-verified before it runs a
+	 * tool, so the key's rate limit still counts every tool call.
+	 */
+	reusedVerification?: boolean;
 }
 
 /** Bearer → token row → default organization → synthesized member session. */
@@ -155,7 +159,6 @@ export const authenticateMcpApiKey = async (
 			scopes: new Set<string>(DOKPLOY_MCP_SCOPE_IDS),
 			session,
 			user,
-			verifiedAt: Date.now(),
 		};
 		rememberHandshakeAuth(cacheId, auth);
 		return auth;
@@ -163,10 +166,12 @@ export const authenticateMcpApiKey = async (
 
 	if (countsAgainstRateLimit) return verify();
 
+	const reused = (auth: McpAuth | null): McpAuth | null =>
+		auth && { ...auth, reusedVerification: true };
 	const cached = handshakeAuthCache.get(cacheId);
-	if (cached && cached.expiresAt > Date.now()) return cached.auth;
+	if (cached && cached.expiresAt > Date.now()) return reused(cached.auth);
 	const pending = pendingHandshakeAuth.get(cacheId);
-	if (pending) return pending;
+	if (pending) return pending.then(reused);
 	const lookup = verify().finally(() => pendingHandshakeAuth.delete(cacheId));
 	pendingHandshakeAuth.set(cacheId, lookup);
 	return lookup;
