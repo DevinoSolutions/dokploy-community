@@ -153,9 +153,10 @@ describe.skipIf(!adminUrl)("better-auth guarded increments on Postgres", () => {
 			// reason, without exercising the recheck this test is about.
 			const deadline = Date.now() + 10_000;
 			for (;;) {
-				const [{ waiting }] = await sql<{ waiting: number }[]>`
+				const [row] = await sql<{ waiting: number }[]>`
 					select count(*)::int as waiting from pg_stat_activity
 					where datname = current_database() and wait_event_type = 'Lock'`;
+				const waiting = row?.waiting ?? 0;
 				if (waiting >= pending.length) break;
 				if (Date.now() > deadline) {
 					throw new Error(
