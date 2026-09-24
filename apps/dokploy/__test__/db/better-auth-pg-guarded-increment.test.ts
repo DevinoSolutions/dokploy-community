@@ -57,7 +57,9 @@ describe.skipIf(!adminUrl)("better-auth guarded increments on Postgres", () => {
 		sql = postgres(url.toString(), { max: WAITERS + 2, onnotice: () => {} });
 		db = drizzle(sql, { schema });
 		await migrate(db, {
-			migrationsFolder: fileURLToPath(new URL("../../drizzle", import.meta.url)),
+			migrationsFolder: fileURLToPath(
+				new URL("../../drizzle", import.meta.url),
+			),
 		});
 		// Same adapter configuration as packages/server/src/lib/auth.ts.
 		adapter = drizzleAdapter(db, { provider: "pg", schema })({
@@ -142,10 +144,26 @@ describe.skipIf(!adminUrl)("better-auth guarded increments on Postgres", () => {
 		const holder = await sql.reserve();
 		try {
 			await holder.unsafe("BEGIN");
-			await holder.unsafe(`UPDATE "${table}" SET ${change} WHERE id = $1`, [id]);
+			await holder.unsafe(`UPDATE "${table}" SET ${change} WHERE id = $1`, [
+				id,
+			]);
 			const pending = claims();
-			// Let every claim reach the lock before the holder commits.
-			await new Promise((resolve) => setTimeout(resolve, 500));
+			// Commit only once every claim is blocked on the row lock. A claim that
+			// arrived after the commit would see the new row and pass for the wrong
+			// reason, without exercising the recheck this test is about.
+			const deadline = Date.now() + 10_000;
+			for (;;) {
+				const [{ waiting }] = await sql<{ waiting: number }[]>`
+					select count(*)::int as waiting from pg_stat_activity
+					where datname = current_database() and wait_event_type = 'Lock'`;
+				if (waiting >= pending.length) break;
+				if (Date.now() > deadline) {
+					throw new Error(
+						`only ${waiting}/${pending.length} claims reached the row lock`,
+					);
+				}
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
 			await holder.unsafe("COMMIT");
 			return await Promise.all(pending);
 		} finally {
@@ -161,7 +179,8 @@ describe.skipIf(!adminUrl)("better-auth guarded increments on Postgres", () => {
 			() => Array.from({ length: WAITERS }, claimRateLimitSlot),
 		);
 		expect(results.filter(Boolean)).toHaveLength(0);
-		const [row] = await sql`select request_count from apikey where id = ${KEY_ID}`;
+		const [row] =
+			await sql`select request_count from apikey where id = ${KEY_ID}`;
 		expect(row?.request_count).toBe(5);
 	});
 
@@ -170,13 +189,16 @@ describe.skipIf(!adminUrl)("better-auth guarded increments on Postgres", () => {
 			Array.from({ length: WAITERS * 2 }, claimRateLimitSlot),
 		);
 		expect(results.filter(Boolean)).toHaveLength(4);
-		const [row] = await sql`select request_count from apikey where id = ${KEY_ID}`;
+		const [row] =
+			await sql`select request_count from apikey where id = ${KEY_ID}`;
 		expect(row?.request_count).toBe(5);
 	});
 
 	it("spends a backup code at most once under concurrent sign-ins", async () => {
 		const results = await Promise.all(
-			Array.from({ length: WAITERS }, (_, i) => spendBackupCode(`codes-v2-${i}`)),
+			Array.from({ length: WAITERS }, (_, i) =>
+				spendBackupCode(`codes-v2-${i}`),
+			),
 		);
 		expect(results.filter(Boolean)).toHaveLength(1);
 	});
@@ -186,7 +208,8 @@ describe.skipIf(!adminUrl)("better-auth guarded increments on Postgres", () => {
 			"two_factor",
 			TWO_FACTOR_ID,
 			"backup_codes = 'codes-v2-other'",
-			() => Array.from({ length: WAITERS }, (_, i) => spendBackupCode(`late-${i}`)),
+			() =>
+				Array.from({ length: WAITERS }, (_, i) => spendBackupCode(`late-${i}`)),
 		);
 		expect(results.filter(Boolean)).toHaveLength(0);
 		const [row] =

@@ -13,3 +13,4 @@ README.md merge=ours
 CNAME merge=ours
 install.sh merge=ours
 .github/workflows/dokploy.yml merge=ours
+patches/*.patch text eol=lf
