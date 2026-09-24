@@ -384,12 +384,18 @@ export const execAsyncRemote = async (
 /** A command on a remote server that reads its input from a caller. */
 export interface RemoteInputSession {
 	/**
-	 * Sends data to the command's stdin. Resolves once the channel can take
-	 * more; rejects if the command or the connection has already failed.
+	 * Hands data to the SSH channel for the command's stdin. Resolves once the
+	 * channel can take more, which does not mean the command has read it;
+	 * rejects if the command or the connection has already failed.
 	 */
 	write(data: Buffer): Promise<void>;
-	/** Closes stdin and waits for the command; rejects unless it exits 0. */
+	/**
+	 * Closes stdin and waits for the command. Only this confirms delivery:
+	 * it rejects unless the command exits 0.
+	 */
 	end(): Promise<void>;
+	/** Drops the connection; pending and later calls reject. */
+	abort(): void;
 }
 
 /**
@@ -492,6 +498,15 @@ export const openRemoteInputSession = async (
 							const error = await finished;
 							if (error) throw error;
 						},
+						abort: () => {
+							finish(
+								new ExecError("Remote command was aborted", {
+									command,
+									serverId,
+								}),
+							);
+							conn.destroy();
+						},
 					});
 				});
 			})
@@ -524,7 +539,6 @@ export const openRemoteInputSession = async (
 				port: server.port,
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
-				timeout: 99999,
 				// A session can stay open for as long as a deploy hook runs; notice
 				// a dead connection instead of waiting on it forever.
 				keepaliveInterval: 10_000,

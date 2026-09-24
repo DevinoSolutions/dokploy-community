@@ -1,7 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promisify } from "node:util";
-import { runDeployHook } from "@dokploy/server/utils/docker/hooks";
+import {
+	HOOK_LOG_RETRY_MARKER,
+	runDeployHook,
+} from "@dokploy/server/utils/docker/hooks";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { utils } from "ssh2";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -144,6 +147,45 @@ describe.skipIf(!process.env.DOKPLOY_DOCKER_REAL_TESTS)(
 			// About 2.7 MB of output, relayed over a single SSH connection.
 			expect((await acceptedConnections()) - before).toBe(1);
 		}, 120_000);
+
+		it("restarts the session once when the connection drops mid-hook", async () => {
+			const logPath = "/tmp/relay-drop.log";
+			await inContainer(`: > ${logPath}`);
+			const before = await acceptedConnections();
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				const hook = runDeployHook({
+					kind: "post",
+					appName: "relay-test",
+					serverId: null,
+					command:
+						'i=0; while [ $i -lt 60 ]; do echo "tick $i"; i=$((i+1)); sleep 0.1; done',
+					logPath,
+					logServerId: LOG_HOST_ID,
+					containerId: name,
+				});
+				const deadline = Date.now() + 15_000;
+				while (!(await inContainer(`cat ${logPath}`)).includes("tick 5\n")) {
+					if (Date.now() > deadline) throw new Error("no output relayed");
+					await new Promise((resolve) => setTimeout(resolve, 100));
+				}
+				// Kill the relay's SSH session on the log host. The brackets keep
+				// the pattern from matching this shell's own command line.
+				await inContainer("pkill -f 'root@nott[y]'");
+
+				await expect(hook).resolves.toBeUndefined();
+
+				const log = await inContainer(`cat ${logPath}`);
+				expect(log).toContain(HOOK_LOG_RETRY_MARKER);
+				expect(
+					log.endsWith("tick 59\n===== post-deploy hook finished =====\n"),
+				).toBe(true);
+				expect((await acceptedConnections()) - before).toBe(2);
+				expect(errorSpy).not.toHaveBeenCalled();
+			} finally {
+				errorSpy.mockRestore();
+			}
+		}, 60_000);
 
 		it("keeps multi-byte characters intact across SSH packets", async () => {
 			const lines = 20_000;

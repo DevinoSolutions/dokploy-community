@@ -2,8 +2,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-	HOOK_LOG_RECONNECT_MARKER,
+	HOOK_LOG_CLOSE_TIMEOUT_MS,
 	HOOK_LOG_RELAY_MAX_BYTES,
+	HOOK_LOG_RETRY_DELAY_MS,
+	HOOK_LOG_RETRY_MARKER,
 	HOOK_LOG_TRUNCATION_MARKER,
 	runDeployHook,
 } from "@dokploy/server/utils/docker/hooks";
@@ -306,6 +308,7 @@ interface FakeSession {
 	command: string;
 	writes: Buffer[];
 	ended: boolean;
+	aborted: boolean;
 }
 
 /** SSH sessions the relay opened to the build server, in order. */
@@ -319,12 +322,25 @@ const fakeSessions = (
 	opts: {
 		failWrite?: (sessionIndex: number, writeIndex: number) => Error | null;
 		failEnd?: Error;
+		// The log host never confirms: end() waits until the session is aborted.
+		hangEnd?: boolean;
 	} = {},
 ) => {
 	vi.mocked(execProcess.openRemoteInputSession).mockImplementation(
 		async (host, command) => {
-			const session: FakeSession = { host, command, writes: [], ended: false };
+			const session: FakeSession = {
+				host,
+				command,
+				writes: [],
+				ended: false,
+				aborted: false,
+			};
 			const index = sessions.push(session) - 1;
+			let abort = () => {};
+			const aborted = new Promise<never>((_, reject) => {
+				abort = () => reject(new Error("Remote command was aborted"));
+			});
+			aborted.catch(() => {});
 			return {
 				write: async (data: Buffer) => {
 					// A failed write never reaches the log.
@@ -334,7 +350,12 @@ const fakeSessions = (
 				},
 				end: async () => {
 					session.ended = true;
+					if (opts.hangEnd) await aborted;
 					if (opts.failEnd) throw opts.failEnd;
+				},
+				abort: () => {
+					session.aborted = true;
+					abort();
 				},
 			};
 		},
@@ -390,6 +411,7 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 	afterEach(() => {
 		errorSpy.mockRestore();
+		vi.useRealTimers();
 	});
 
 	it("runs the hook on the app server without touching the log path there", async () => {
@@ -503,21 +525,24 @@ describe("runDeployHook - log on a different host (build server)", () => {
 		expect(relayedLog()).toBe("step 1 done\nstep 2 done\n");
 	});
 
-	it("reopens a lost connection once and marks the gap in the log", async () => {
+	it("restarts a lost session once, after a pause, and marks the gap in the log", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		const lost = new Error("SSH connection closed before the command finished");
 		fakeSessions({
 			failWrite: (session, write) =>
 				session === 0 && write === 1 ? lost : null,
 		});
+		let sessionsBeforePause = 0;
 		vi.mocked(execProcess.execAsyncRemote).mockImplementation(
 			async (host, _command, onData) => {
 				if (host === APP_SERVER) {
-					for (const step of ["one\n", "two\n", "three\n"]) {
-						onData?.(step);
-						await vi.waitFor(() =>
-							expect(relayedLog().endsWith(step)).toBe(true),
-						);
-					}
+					onData?.("one\n");
+					await vi.advanceTimersByTimeAsync(0);
+					onData?.("two\n");
+					await vi.advanceTimersByTimeAsync(HOOK_LOG_RETRY_DELAY_MS - 1);
+					sessionsBeforePause = sessions.length;
+					await vi.advanceTimersByTimeAsync(1);
+					onData?.("three\n");
 				}
 				return { stdout: "", stderr: "" };
 			},
@@ -525,9 +550,11 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 		await expect(runRelayedHook()).resolves.toBeUndefined();
 
+		// The restart waits instead of hammering a host that just failed.
+		expect(sessionsBeforePause).toBe(1);
 		expect(sessions).toHaveLength(2);
 		expect(sessions[1]!.ended).toBe(true);
-		expect(relayedLog()).toBe(`one\n${HOOK_LOG_RECONNECT_MARKER}two\nthree\n`);
+		expect(relayedLog()).toBe(`one\n${HOOK_LOG_RETRY_MARKER}two\nthree\n`);
 		expect(errorSpy).not.toHaveBeenCalled();
 	});
 
@@ -623,6 +650,30 @@ describe("runDeployHook - log on a different host (build server)", () => {
 		expect(errorSpy).toHaveBeenCalledWith(
 			expect.stringContaining("Failed to relay deploy hook output"),
 			catFailed,
+		);
+	});
+
+	it("gives up on a log host that never confirms instead of holding the deploy", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		fakeSessions({ hangEnd: true });
+		hookOnAppServerPrints(["hello\n"]);
+		let settled = false;
+
+		const result = runRelayedHook().finally(() => {
+			settled = true;
+		});
+		await vi.advanceTimersByTimeAsync(HOOK_LOG_CLOSE_TIMEOUT_MS - 1);
+		expect(settled).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+
+		await expect(result).resolves.toBeUndefined();
+		expect(sessions[0]!.aborted).toBe(true);
+		expect(errorSpy).toHaveBeenCalledTimes(1);
+		expect(errorSpy).toHaveBeenCalledWith(
+			expect.stringContaining("Failed to relay deploy hook output"),
+			expect.objectContaining({
+				message: expect.stringContaining("waiting for the log host"),
+			}),
 		);
 	});
 

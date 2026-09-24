@@ -61,9 +61,13 @@ export const HOOK_LOG_RELAY_MAX_BYTES = 8 * 1024 * 1024;
 export const HOOK_LOG_TRUNCATION_MARKER = `\n===== Hook output truncated: only the first ${
 	HOOK_LOG_RELAY_MAX_BYTES / (1024 * 1024)
 } MiB were copied to this log =====\n`;
-/** Written where the connection to the log host dropped and was reopened. */
-export const HOOK_LOG_RECONNECT_MARKER =
-	"\n===== Connection to the log host was lost and reopened; hook output around here may be missing or repeated =====\n";
+/** Written where the relay to the log host failed and was restarted. */
+export const HOOK_LOG_RETRY_MARKER =
+	"\n===== Relaying hook output to this log failed and was restarted; output around here may be missing or repeated =====\n";
+/** How long the relay waits before restarting a failed session. */
+export const HOOK_LOG_RETRY_DELAY_MS = 1500;
+/** How long a finished hook waits for its relayed output to reach the log. */
+export const HOOK_LOG_CLOSE_TIMEOUT_MS = 60_000;
 
 const normalizeHost = (id: string | null | undefined): string | null =>
 	id || null;
@@ -158,7 +162,7 @@ export const runDeployHook = async ({
  * written as it arrives over a single SSH session that runs `cat` into the
  * log, so a long or chatty hook still costs one connection to the log host.
  *
- * Relaying is best effort: a lost connection is reopened once, and a failure
+ * Relaying is best effort: a failed session is restarted once, and a failure
  * after that is reported and stops the relay. It never fails the deploy nor
  * replaces the hook's own error.
  */
@@ -168,7 +172,7 @@ class HookLogRelay {
 	private receivedOutput = false;
 	private truncated = false;
 	private stopped = false;
-	private reconnected = false;
+	private retried = false;
 	private session: RemoteInputSession | null = null;
 	private draining: Promise<void> | null = null;
 
@@ -200,17 +204,39 @@ class HookLogRelay {
 		this.drain();
 	}
 
-	/** Writes what is left and waits for the log host to confirm it. Never throws. */
+	/**
+	 * Writes what is left and waits for `cat` on the log host to exit, which is
+	 * the only confirmation that the output reached the log. Gives up after
+	 * HOOK_LOG_CLOSE_TIMEOUT_MS so a stuck log host cannot hold the deploy.
+	 * Never throws.
+	 */
 	async close(): Promise<void> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timedOut = new Promise<true>((resolve) => {
+			timer = setTimeout(() => resolve(true), HOOK_LOG_CLOSE_TIMEOUT_MS);
+		});
+		const result = await Promise.race([this.finish(), timedOut]);
+		clearTimeout(timer);
+		if (result === true) {
+			this.fail(
+				new Error(
+					`Timed out after ${HOOK_LOG_CLOSE_TIMEOUT_MS / 1000}s waiting for the log host`,
+				),
+			);
+		}
+	}
+
+	private async finish(): Promise<void> {
 		await this.draining;
 		const session = this.session;
-		this.session = null;
 		if (!session) return;
 		try {
 			await session.end();
 		} catch (error) {
 			this.fail(error);
 		}
+		// Kept until now so that a timeout can still abort it.
+		if (this.session === session) this.session = null;
 	}
 
 	/** Writes pending output one write at a time, so the log keeps its order. */
@@ -244,19 +270,22 @@ class HookLogRelay {
 			);
 			await this.session.write(data);
 		} catch (error) {
+			// A write only means ssh2 took the data; a session that dies can take
+			// some of what it already took with it.
 			const lost = this.session !== null;
 			this.session = null;
-			if (this.reconnected) {
+			if (this.stopped) return;
+			if (this.retried) {
 				this.fail(error);
 				return;
 			}
-			this.reconnected = true;
+			this.retried = true;
+			await new Promise((resolve) =>
+				setTimeout(resolve, HOOK_LOG_RETRY_DELAY_MS),
+			);
 			await this.write(
 				lost
-					? Buffer.concat([
-							Buffer.from(HOOK_LOG_RECONNECT_MARKER, "utf8"),
-							data,
-						])
+					? Buffer.concat([Buffer.from(HOOK_LOG_RETRY_MARKER, "utf8"), data])
 					: data,
 			);
 		}
@@ -266,6 +295,8 @@ class HookLogRelay {
 		if (this.stopped) return;
 		this.stopped = true;
 		this.pending = [];
+		this.session?.abort();
+		this.session = null;
 		console.error(
 			`Failed to relay deploy hook output to ${this.logPath} on ${
 				this.logHost ?? "the Dokploy server"

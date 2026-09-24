@@ -64,6 +64,10 @@ vi.mock("ssh2", async () => {
 		end() {
 			this.ended = true;
 		}
+		destroyed = false;
+		destroy() {
+			this.destroyed = true;
+		}
 	}
 
 	return { Client };
@@ -228,7 +232,10 @@ describe("openRemoteInputSession", () => {
 		ssh.channelAcceptsWrites = false;
 
 		const write = session.write(Buffer.from("big"));
+		// What ssh2 does when the connection dies: the client closes, then its
+		// channels close without an exit status.
 		ssh.clients[0].emit("close");
+		ssh.clients[0].channel.emit("close", undefined);
 
 		await expect(write).rejects.toThrow(/closed before the command finished/);
 		await expect(session.write(Buffer.from("more"))).rejects.toThrow(
@@ -237,6 +244,19 @@ describe("openRemoteInputSession", () => {
 		await expect(session.end()).rejects.toThrow(
 			/closed before the command finished/,
 		);
+	});
+
+	it("abort() drops the connection and fails what is still waiting", async () => {
+		const session = await openRemoteInputSession("server-1", "cat");
+		ssh.channelAcceptsWrites = false;
+
+		const write = session.write(Buffer.from("big"));
+		const end = session.end();
+		session.abort();
+
+		await expect(write).rejects.toThrow(/aborted/);
+		await expect(end).rejects.toThrow(/aborted/);
+		expect(ssh.clients[0].destroyed).toBe(true);
 	});
 
 	it("fails writes after a connection error", async () => {
