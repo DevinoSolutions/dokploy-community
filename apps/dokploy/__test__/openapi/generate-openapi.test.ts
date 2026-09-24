@@ -16,7 +16,9 @@ describe("OpenAPI document", () => {
 		});
 
 		expect(Object.keys(document.paths ?? {}).length).toBeGreaterThan(0);
-		expect(document.paths).not.toHaveProperty(["/application.transferWithLogs"]);
+		expect(document.paths).not.toHaveProperty([
+			"/application.transferWithLogs",
+		]);
 		expect(document.paths).not.toHaveProperty(["/backupPolicy.runNow"]);
 	});
 });
