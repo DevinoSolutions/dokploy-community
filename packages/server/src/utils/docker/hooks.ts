@@ -4,6 +4,8 @@ import {
 	execAsync,
 	execAsyncRemote,
 	execAsyncStream,
+	openRemoteInputSession,
+	type RemoteInputSession,
 } from "../process/execAsync";
 import { encodeBase64, getServiceContainer } from "./utils";
 
@@ -54,22 +56,18 @@ interface RunDeployHookParams {
 	containerId?: string;
 }
 
-/**
- * Raw bytes of hook output appended to a remote log per command. The bytes are
- * base64-encoded into the command string (about 44 KiB here), which has to stay
- * well under the remote shell's single-argument limit (Linux MAX_ARG_STRLEN,
- * 128 KiB, since sshd runs `$SHELL -c <command>`) and the SSH request limits.
- */
-export const HOOK_LOG_APPEND_CHUNK_BYTES = 32 * 1024;
-/** How long relayed output may wait before it is flushed to the log host. */
-export const HOOK_LOG_FLUSH_INTERVAL_MS = 2000;
 /** Hook output relayed to a log on another host is capped at this size. */
 export const HOOK_LOG_RELAY_MAX_BYTES = 8 * 1024 * 1024;
 export const HOOK_LOG_TRUNCATION_MARKER = `\n===== Hook output truncated: only the first ${
 	HOOK_LOG_RELAY_MAX_BYTES / (1024 * 1024)
 } MiB were copied to this log =====\n`;
-/** Local hook output buffered while relaying (exec's default is only 1 MiB). */
-const LOCAL_HOOK_MAX_BUFFER = 64 * 1024 * 1024;
+/** Written where the relay to the log host failed and was restarted. */
+export const HOOK_LOG_RETRY_MARKER =
+	"\n===== Relaying hook output to this log failed and was restarted; output around here may be missing or repeated =====\n";
+/** How long the relay waits before restarting a failed session. */
+export const HOOK_LOG_RETRY_DELAY_MS = 1500;
+/** How long a finished hook waits for its relayed output to reach the log. */
+export const HOOK_LOG_CLOSE_TIMEOUT_MS = 60_000;
 
 const normalizeHost = (id: string | null | undefined): string | null =>
 	id || null;
@@ -128,18 +126,22 @@ export const runDeployHook = async ({
 	}
 
 	// The log lives on another host (the build server). Capture the hook's
-	// output here and relay it there in bounded chunks as it arrives. `2>&1`
-	// keeps stdout and stderr interleaved in order on a single stream.
+	// output here and relay it there as it arrives. `2>&1` keeps stdout and
+	// stderr interleaved in order on a single stream.
 	const relay = new HookLogRelay(logPath, logHost);
 	const relayedCommand = `${hookCommand} 2>&1`;
 	try {
+		// The relay has the output; the exec helpers keep only its tail.
 		if (hookHost) {
-			await execAsyncRemote(hookHost, relayedCommand, (chunk) =>
-				relay.push(chunk),
+			await execAsyncRemote(
+				hookHost,
+				relayedCommand,
+				(chunk) => relay.push(chunk),
+				{ streamOnly: true },
 			);
 		} else {
 			await execAsyncStream(relayedCommand, (chunk) => relay.push(chunk), {
-				maxBuffer: LOCAL_HOOK_MAX_BUFFER,
+				streamOnly: true,
 			});
 		}
 	} catch (error) {
@@ -157,21 +159,22 @@ export const runDeployHook = async ({
 
 /**
  * Appends a hook's output to a deployment log on another host. Output is
- * flushed whenever a chunk's worth has accumulated or after a short delay, so
- * the log keeps up with long hooks, and every write is bounded in size.
+ * written as it arrives over a single SSH session that runs `cat` into the
+ * log, so a long or chatty hook still costs one connection to the log host.
  *
- * Relaying is best effort: a failed append is reported and stops the relay,
- * but it never fails the deploy nor replaces the hook's own error.
+ * Relaying is best effort: a failed session is restarted once, and a failure
+ * after that is reported and stops the relay. It never fails the deploy nor
+ * replaces the hook's own error.
  */
 class HookLogRelay {
 	private pending: Buffer[] = [];
-	private pendingBytes = 0;
 	private acceptedBytes = 0;
 	private receivedOutput = false;
 	private truncated = false;
-	private failed = false;
-	private timer: ReturnType<typeof setTimeout> | null = null;
-	private chain: Promise<void> = Promise.resolve();
+	private stopped = false;
+	private retried = false;
+	private session: RemoteInputSession | null = null;
+	private draining: Promise<void> | null = null;
 
 	constructor(
 		private readonly logPath: string,
@@ -185,7 +188,7 @@ class HookLogRelay {
 	push(data: string): void {
 		if (!data) return;
 		this.receivedOutput = true;
-		if (this.truncated || this.failed) return;
+		if (this.truncated || this.stopped) return;
 
 		let bytes = Buffer.from(data, "utf8");
 		const room = HOOK_LOG_RELAY_MAX_BYTES - this.acceptedBytes;
@@ -193,84 +196,120 @@ class HookLogRelay {
 			bytes = bytes.subarray(0, room);
 			this.truncated = true;
 		}
-		if (bytes.length > 0) {
-			this.pending.push(bytes);
-			this.pendingBytes += bytes.length;
-			this.acceptedBytes += bytes.length;
-		}
-
+		this.acceptedBytes += bytes.length;
+		if (bytes.length > 0) this.pending.push(bytes);
 		if (this.truncated) {
-			const marker = Buffer.from(HOOK_LOG_TRUNCATION_MARKER, "utf8");
-			this.pending.push(marker);
-			this.pendingBytes += marker.length;
-			this.flush();
-		} else if (this.pendingBytes >= HOOK_LOG_APPEND_CHUNK_BYTES) {
-			this.flush();
-		} else if (!this.timer) {
-			this.timer = setTimeout(() => {
-				this.timer = null;
-				this.flush();
-			}, HOOK_LOG_FLUSH_INTERVAL_MS);
+			this.pending.push(Buffer.from(HOOK_LOG_TRUNCATION_MARKER, "utf8"));
 		}
+		this.drain();
 	}
 
-	/** Flushes what is left and waits for every append. Never throws. */
+	/**
+	 * Writes what is left and waits for `cat` on the log host to exit, which is
+	 * the only confirmation that the output reached the log. Gives up after
+	 * HOOK_LOG_CLOSE_TIMEOUT_MS so a stuck log host cannot hold the deploy.
+	 * Never throws.
+	 */
 	async close(): Promise<void> {
-		this.flush();
-		await this.chain;
-	}
-
-	private flush(): void {
-		if (this.timer) {
-			clearTimeout(this.timer);
-			this.timer = null;
-		}
-		if (this.pendingBytes === 0) return;
-		const data = Buffer.concat(this.pending);
-		this.pending = [];
-		this.pendingBytes = 0;
-		// Appends run one after another so the log keeps the output's order.
-		this.chain = this.chain.then(() => this.write(data));
-	}
-
-	private async write(data: Buffer): Promise<void> {
-		if (this.failed) return;
-		try {
-			await appendToLog(data, this.logPath, this.logHost);
-		} catch (error) {
-			this.failed = true;
-			console.error(
-				`Failed to relay deploy hook output to ${this.logPath} on ${
-					this.logHost ?? "the Dokploy server"
-				}:`,
-				error,
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timedOut = new Promise<true>((resolve) => {
+			timer = setTimeout(() => resolve(true), HOOK_LOG_CLOSE_TIMEOUT_MS);
+		});
+		const result = await Promise.race([this.finish(), timedOut]);
+		clearTimeout(timer);
+		if (result === true) {
+			this.fail(
+				new Error(
+					`Timed out after ${HOOK_LOG_CLOSE_TIMEOUT_MS / 1000}s waiting for the log host`,
+				),
 			);
 		}
 	}
-}
 
-const appendToLog = async (
-	data: Buffer,
-	logPath: string,
-	logHost: string | null,
-): Promise<void> => {
-	if (!logHost) {
-		// Logs on the Dokploy host live on this process's own filesystem.
-		await appendFile(logPath, data);
-		return;
+	private async finish(): Promise<void> {
+		await this.draining;
+		const session = this.session;
+		if (!session) return;
+		try {
+			await session.end();
+		} catch (error) {
+			this.fail(error);
+		}
+		// Kept until now so that a timeout can still abort it.
+		if (this.session === session) this.session = null;
 	}
-	for (
-		let offset = 0;
-		offset < data.length;
-		offset += HOOK_LOG_APPEND_CHUNK_BYTES
-	) {
-		// base64 is [A-Za-z0-9+/=] only, so it is safe inside the double quotes.
-		const encoded = data
-			.subarray(offset, offset + HOOK_LOG_APPEND_CHUNK_BYTES)
-			.toString("base64");
-		await execAsyncRemote(
-			logHost,
-			`echo "${encoded}" | base64 -d >> "${logPath}"`,
+
+	/** Writes pending output one write at a time, so the log keeps its order. */
+	private drain(): void {
+		if (this.draining || this.pending.length === 0) return;
+		this.draining = (async () => {
+			while (this.pending.length > 0) {
+				const data = Buffer.concat(this.pending);
+				this.pending = [];
+				await this.write(data);
+			}
+			this.draining = null;
+		})();
+	}
+
+	private async write(data: Buffer): Promise<void> {
+		if (this.stopped) return;
+		if (!this.logHost) {
+			// Logs on the Dokploy host live on this process's own filesystem.
+			try {
+				await appendFile(this.logPath, data);
+			} catch (error) {
+				this.fail(error);
+			}
+			return;
+		}
+		try {
+			if (!this.session) {
+				const session = await openRemoteInputSession(
+					this.logHost,
+					`cat >> "${this.logPath}"`,
+				);
+				// The relay may have given up while the session was opening.
+				if (this.stopped) {
+					session.abort();
+					return;
+				}
+				this.session = session;
+			}
+			await this.session.write(data);
+		} catch (error) {
+			// A write only means ssh2 took the data; a session that dies can take
+			// some of what it already took with it.
+			const lost = this.session !== null;
+			this.session = null;
+			if (this.stopped) return;
+			if (this.retried) {
+				this.fail(error);
+				return;
+			}
+			this.retried = true;
+			await new Promise((resolve) =>
+				setTimeout(resolve, HOOK_LOG_RETRY_DELAY_MS),
+			);
+			await this.write(
+				lost
+					? Buffer.concat([Buffer.from(HOOK_LOG_RETRY_MARKER, "utf8"), data])
+					: data,
+			);
+		}
+	}
+
+	private fail(error: unknown): void {
+		if (this.stopped) return;
+		this.stopped = true;
+		this.pending = [];
+		this.session?.abort();
+		this.session = null;
+		console.error(
+			`Failed to relay deploy hook output to ${this.logPath} on ${
+				this.logHost ?? "the Dokploy server"
+			}:`,
+			error,
 		);
 	}
-};
+}
