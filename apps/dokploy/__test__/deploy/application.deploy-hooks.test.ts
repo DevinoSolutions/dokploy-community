@@ -524,4 +524,46 @@ describe.each([
 			expect.stringContaining("/tmp/test-deployment.log"),
 		);
 	});
+
+	// #221: the deployment log is created on the build server, so hook output
+	// must be written there, not on the app server where the path is missing.
+	it("points both hooks at the build server's deployment log", async () => {
+		vi.mocked(deploymentService.createDeployment).mockResolvedValue({
+			...createMockDeployment(),
+			serverId: APP_SERVER,
+			buildServerId: BUILD_SERVER,
+		} as any);
+
+		await run({
+			applicationId: "test-app-id",
+			titleLog: "t",
+			descriptionLog: "",
+		});
+
+		const hookCalls = vi.mocked(hooks.runDeployHook).mock.calls;
+		expect(hookCalls).toHaveLength(2);
+		for (const [arg] of hookCalls) {
+			expect(arg.serverId).toBe(APP_SERVER);
+			expect(arg.logServerId).toBe(BUILD_SERVER);
+			expect(arg.logPath).toBe("/tmp/test-deployment.log");
+		}
+	});
+
+	it("keeps the log on the app server when the deployment was not relocated", async () => {
+		vi.mocked(deploymentService.createDeployment).mockResolvedValue({
+			...createMockDeployment(),
+			serverId: APP_SERVER,
+			buildServerId: null,
+		} as any);
+
+		await run({
+			applicationId: "test-app-id",
+			titleLog: "t",
+			descriptionLog: "",
+		});
+
+		for (const [arg] of vi.mocked(hooks.runDeployHook).mock.calls) {
+			expect(arg.logServerId).toBe(APP_SERVER);
+		}
+	});
 });
