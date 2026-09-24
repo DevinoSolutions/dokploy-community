@@ -324,10 +324,15 @@ const fakeSessions = (
 		failEnd?: Error;
 		// The log host never confirms: end() waits until the session is aborted.
 		hangEnd?: boolean;
+		// How long connecting to the log host takes.
+		openDelayMs?: number;
 	} = {},
 ) => {
 	vi.mocked(execProcess.openRemoteInputSession).mockImplementation(
 		async (host, command) => {
+			if (opts.openDelayMs) {
+				await new Promise((resolve) => setTimeout(resolve, opts.openDelayMs));
+			}
 			const session: FakeSession = {
 				host,
 				command,
@@ -675,6 +680,23 @@ describe("runDeployHook - log on a different host (build server)", () => {
 				message: expect.stringContaining("waiting for the log host"),
 			}),
 		);
+	});
+
+	it("drops a session that opens only after the relay gave up", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		fakeSessions({ openDelayMs: HOOK_LOG_CLOSE_TIMEOUT_MS + 5_000 });
+		hookOnAppServerPrints(["hello\n"]);
+
+		const result = runRelayedHook();
+		await vi.advanceTimersByTimeAsync(HOOK_LOG_CLOSE_TIMEOUT_MS);
+		await expect(result).resolves.toBeUndefined();
+		await vi.advanceTimersByTimeAsync(5_000);
+
+		// Nothing reaches the log after runDeployHook returned.
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0]!.aborted).toBe(true);
+		expect(relayedLog()).toBe("");
+		expect(errorSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("runs a local hook through the streaming exec when the log is remote", async () => {

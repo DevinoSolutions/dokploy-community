@@ -264,10 +264,18 @@ class HookLogRelay {
 			return;
 		}
 		try {
-			this.session ??= await openRemoteInputSession(
-				this.logHost,
-				`cat >> "${this.logPath}"`,
-			);
+			if (!this.session) {
+				const session = await openRemoteInputSession(
+					this.logHost,
+					`cat >> "${this.logPath}"`,
+				);
+				// The relay may have given up while the session was opening.
+				if (this.stopped) {
+					session.abort();
+					return;
+				}
+				this.session = session;
+			}
 			await this.session.write(data);
 		} catch (error) {
 			// A write only means ssh2 took the data; a session that dies can take

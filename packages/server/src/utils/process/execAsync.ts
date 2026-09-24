@@ -499,13 +499,15 @@ export const openRemoteInputSession = async (
 							if (error) throw error;
 						},
 						abort: () => {
+							// Destroy first: once finish() has ended the connection,
+							// ssh2's destroy() no longer drops the socket.
+							conn.destroy();
 							finish(
 								new ExecError("Remote command was aborted", {
 									command,
 									serverId,
 								}),
 							);
-							conn.destroy();
 						},
 					});
 				});

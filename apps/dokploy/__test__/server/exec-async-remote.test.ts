@@ -61,12 +61,15 @@ vi.mock("ssh2", async () => {
 			callback(undefined, this.channel);
 			ssh.onExec(this.channel);
 		}
+		calls: string[] = [];
 		end() {
 			this.ended = true;
+			this.calls.push("end");
 		}
 		destroyed = false;
 		destroy() {
 			this.destroyed = true;
+			this.calls.push("destroy");
 		}
 	}
 
@@ -257,6 +260,8 @@ describe("openRemoteInputSession", () => {
 		await expect(write).rejects.toThrow(/aborted/);
 		await expect(end).rejects.toThrow(/aborted/);
 		expect(ssh.clients[0].destroyed).toBe(true);
+		// ssh2 only drops the socket if destroy() comes before end().
+		expect(ssh.clients[0].calls[0]).toBe("destroy");
 	});
 
 	it("fails writes after a connection error", async () => {
