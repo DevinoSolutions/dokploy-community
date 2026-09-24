@@ -207,6 +207,30 @@ describe("authenticateMcpRequest", () => {
 		expect(verifyApiKeyDetailed).toHaveBeenCalledTimes(1);
 	});
 
+	it("marks every request but the one that ran the shared check as reused", async () => {
+		apiKeyResult = {
+			session: { userId: "user-9", activeOrganizationId: "org-9" },
+			user: { id: "user-9", email: "k@example.com", role: "owner" },
+		};
+		const burst = await Promise.all(
+			Array.from({ length: 5 }, () =>
+				authenticateMcpRequest(
+					{ "x-api-key": "dk_fleet" },
+					{ countsAgainstRateLimit: false },
+				),
+			),
+		);
+		expect(verifyApiKeyDetailed).toHaveBeenCalledTimes(1);
+		expect(burst.filter((auth) => !auth?.reusedVerification)).toHaveLength(1);
+		const cached = await authenticateMcpRequest(
+			{ "x-api-key": "dk_fleet" },
+			{ countsAgainstRateLimit: false },
+		);
+		expect(cached?.reusedVerification).toBe(true);
+		const counted = await authenticateMcpRequest({ "x-api-key": "dk_fleet" });
+		expect(counted?.reusedVerification).toBeUndefined();
+	});
+
 	it("keeps serving protocol traffic from a recent check while the key is throttled", async () => {
 		apiKeyResult = {
 			session: { userId: "user-9", activeOrganizationId: "org-9" },

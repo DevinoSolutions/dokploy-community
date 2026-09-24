@@ -9,7 +9,7 @@ let auth: {
 	scopes: Set<string>;
 	session: unknown;
 	user: unknown;
-	verifiedAt?: number;
+	reusedVerification?: boolean;
 } | null = null;
 let throttledFor: number | null = null;
 /** Throttle only the counted re-verification, not the admitting check. */
@@ -269,7 +269,7 @@ describe("POST /api/mcp", () => {
 	});
 
 	it("admits protocol-only requests on a recent api-key check", async () => {
-		auth = { ...(auth ?? {}), verifiedAt: 0 } as typeof auth;
+		auth = { ...(auth ?? {}), reusedVerification: true } as typeof auth;
 		await run(
 			makeReq({
 				headers: jsonHeaders(),
@@ -286,7 +286,7 @@ describe("POST /api/mcp", () => {
 	});
 
 	it("re-verifies a tool call that was admitted on a reused api-key check", async () => {
-		auth = { ...(auth ?? {}), verifiedAt: 0 } as typeof auth;
+		auth = { ...(auth ?? {}), reusedVerification: true } as typeof auth;
 		await run(
 			makeReq({
 				headers: jsonHeaders(),
@@ -302,11 +302,8 @@ describe("POST /api/mcp", () => {
 		expect(handledBodies).toHaveLength(1);
 	});
 
-	it("does not re-verify a tool call whose key was verified during this request", async () => {
-		auth = {
-			...(auth ?? {}),
-			verifiedAt: Date.now() + 60_000,
-		} as typeof auth;
+	it("does not re-verify a tool call whose key was verified by this request", async () => {
+		auth = { ...(auth ?? {}), reusedVerification: false } as typeof auth;
 		await run(
 			makeReq({
 				headers: jsonHeaders(),
@@ -337,7 +334,7 @@ describe("POST /api/mcp", () => {
 	});
 
 	it("answers 429 when the tool-call re-verification is throttled", async () => {
-		auth = { ...(auth ?? {}), verifiedAt: 0 } as typeof auth;
+		auth = { ...(auth ?? {}), reusedVerification: true } as typeof auth;
 		throttledFor = 9;
 		throttleRecountOnly = true;
 		const { res, recorded } = makeRes();

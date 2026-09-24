@@ -108,7 +108,6 @@ export default async function handler(
 	// recent check of the same key (concurrent checks share one lookup), so a
 	// burst of clients opening sessions does not drain the key's rate limit;
 	// tool calls admitted that way are re-verified once the body is known.
-	const requestStartedAt = Date.now();
 	let auth: Awaited<ReturnType<typeof authenticateMcpRequest>>;
 	try {
 		auth = await authenticateMcpRequest(req.headers, {
@@ -130,11 +129,7 @@ export default async function handler(
 		return jsonRpcError(res, 400, "Could not read the request body");
 	}
 
-	if (
-		auth.verifiedAt !== undefined &&
-		auth.verifiedAt < requestStartedAt &&
-		invokesTool(body)
-	) {
+	if (auth.reusedVerification && invokesTool(body)) {
 		try {
 			auth = await authenticateMcpRequest(req.headers);
 		} catch (error) {
