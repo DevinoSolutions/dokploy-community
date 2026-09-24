@@ -751,6 +751,13 @@ export const mariadbRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({
+			openapi: {
+				enabled: false,
+				method: "POST",
+				path: "/mariadb.transferWithLogs",
+			},
+		})
 		.input(
 			apiTransferMariaDB.extend({
 				decisions: z

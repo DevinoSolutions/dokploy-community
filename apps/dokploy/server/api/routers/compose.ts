@@ -1488,6 +1488,13 @@ export const composeRouter = createTRPCRouter({
 		}),
 
 	transferScanWithLogs: protectedProcedure
+		.meta({
+			openapi: {
+				enabled: false,
+				method: "POST",
+				path: "/compose.transferScanWithLogs",
+			},
+		})
 		.input(apiTransferCompose)
 		.subscription(async ({ input, ctx }) => {
 			const compose = await findComposeById(input.composeId);
@@ -1619,6 +1626,13 @@ export const composeRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({
+			openapi: {
+				enabled: false,
+				method: "POST",
+				path: "/compose.transferWithLogs",
+			},
+		})
 		.input(
 			apiTransferCompose.extend({
 				decisions: z

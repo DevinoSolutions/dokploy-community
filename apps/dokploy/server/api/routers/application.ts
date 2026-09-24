@@ -1553,6 +1553,13 @@ export const applicationRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({
+			openapi: {
+				enabled: false,
+				method: "POST",
+				path: "/application.transferWithLogs",
+			},
+		})
 		.input(
 			apiTransferApplication.extend({
 				decisions: z

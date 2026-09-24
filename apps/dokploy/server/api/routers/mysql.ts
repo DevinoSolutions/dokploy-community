@@ -766,6 +766,13 @@ export const mysqlRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({
+			openapi: {
+				enabled: false,
+				method: "POST",
+				path: "/mysql.transferWithLogs",
+			},
+		})
 		.input(
 			apiTransferMySql.extend({
 				decisions: z

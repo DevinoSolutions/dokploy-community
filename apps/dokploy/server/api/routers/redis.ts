@@ -749,6 +749,13 @@ export const redisRouter = createTRPCRouter({
 		}),
 
 	transferWithLogs: protectedProcedure
+		.meta({
+			openapi: {
+				enabled: false,
+				method: "POST",
+				path: "/redis.transferWithLogs",
+			},
+		})
 		.input(
 			apiTransferRedis.extend({
 				decisions: z
