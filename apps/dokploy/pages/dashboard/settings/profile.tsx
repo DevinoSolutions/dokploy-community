@@ -1,4 +1,8 @@
-import { validateRequest } from "@dokploy/server";
+import {
+	getWebServerSettings,
+	IS_CLOUD,
+	validateRequest,
+} from "@dokploy/server";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
@@ -55,6 +59,7 @@ export async function getServerSideProps(
 		transformer: superjson,
 	});
 
+	await helpers.settings.isCloud.prefetch();
 	await helpers.user.get.prefetch();
 
 	if (!user) {
@@ -66,16 +71,24 @@ export async function getServerSideProps(
 		};
 	}
 
+	// Enforced SSO blocks social sign-in and linking, so offer neither.
+	const ssoEnforced =
+		!IS_CLOUD && Boolean((await getWebServerSettings())?.enforceSSO);
+
 	return {
 		props: {
 			trpcState: helpers.dehydrate(),
 			socialProviders: {
-				github: Boolean(
-					process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET,
-				),
-				google: Boolean(
-					process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
-				),
+				github:
+					!ssoEnforced &&
+					Boolean(
+						process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET,
+					),
+				google:
+					!ssoEnforced &&
+					Boolean(
+						process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET,
+					),
 			},
 		},
 	};
