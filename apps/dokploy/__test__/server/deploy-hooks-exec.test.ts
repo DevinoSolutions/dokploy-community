@@ -2,8 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-	HOOK_LOG_APPEND_CHUNK_BYTES,
-	HOOK_LOG_FLUSH_INTERVAL_MS,
+	HOOK_LOG_RECONNECT_MARKER,
 	HOOK_LOG_RELAY_MAX_BYTES,
 	HOOK_LOG_TRUNCATION_MARKER,
 	runDeployHook,
@@ -17,6 +16,7 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	execAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
 	execAsyncStream: vi.fn(),
+	openRemoteInputSession: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/utils/docker/utils", async () => {
@@ -103,6 +103,7 @@ describe("runDeployHook", () => {
 		expect(execProcess.execAsync).not.toHaveBeenCalled();
 		expect(execProcess.execAsyncRemote).not.toHaveBeenCalled();
 		expect(execProcess.execAsyncStream).not.toHaveBeenCalled();
+		expect(execProcess.openRemoteInputSession).not.toHaveBeenCalled();
 		expect(dockerUtils.getServiceContainer).not.toHaveBeenCalled();
 	});
 
@@ -299,25 +300,50 @@ describe("runDeployHook - log on the hook's own host", () => {
 
 const APP_SERVER = "app-server-id";
 const BUILD_SERVER = "build-server-id";
-const APPEND_RE = /^echo "([A-Za-z0-9+/=]*)" \| base64 -d >> "([^"]*)"$/;
 
-/** The `execAsyncRemote` calls that append to the log on the build server. */
-const appendCalls = () =>
-	vi
-		.mocked(execProcess.execAsyncRemote)
-		.mock.calls.filter(([host]) => host === BUILD_SERVER)
-		.map(([, command]) => String(command));
+interface FakeSession {
+	host: string;
+	command: string;
+	writes: Buffer[];
+	ended: boolean;
+}
 
-/** What the append commands would leave in the remote log, decoded. */
+/** SSH sessions the relay opened to the build server, in order. */
+let sessions: FakeSession[] = [];
+
+/**
+ * Fake `openRemoteInputSession`. `failWrite(session, n)` can make the n-th
+ * write (0-based) of the i-th session fail, as a lost connection would.
+ */
+const fakeSessions = (
+	opts: {
+		failWrite?: (sessionIndex: number, writeIndex: number) => Error | null;
+		failEnd?: Error;
+	} = {},
+) => {
+	vi.mocked(execProcess.openRemoteInputSession).mockImplementation(
+		async (host, command) => {
+			const session: FakeSession = { host, command, writes: [], ended: false };
+			const index = sessions.push(session) - 1;
+			return {
+				write: async (data: Buffer) => {
+					// A failed write never reaches the log.
+					const error = opts.failWrite?.(index, session.writes.length);
+					if (error) throw error;
+					session.writes.push(Buffer.from(data));
+				},
+				end: async () => {
+					session.ended = true;
+					if (opts.failEnd) throw opts.failEnd;
+				},
+			};
+		},
+	);
+};
+
+/** What the sessions left in the log on the build server. */
 const relayedLog = () =>
-	Buffer.concat(
-		appendCalls().map((command) => {
-			const match = APPEND_RE.exec(command);
-			expect(match, `unexpected append command: ${command}`).not.toBeNull();
-			expect(match![2]).toBe(LOG_PATH);
-			return Buffer.from(match![1]!, "base64");
-		}),
-	).toString("utf8");
+	Buffer.concat(sessions.flatMap((session) => session.writes)).toString("utf8");
 
 /** Make the hook on the app server print `chunks`, then succeed or fail. */
 const hookOnAppServerPrints = (chunks: string[], failWith?: Error) => {
@@ -353,6 +379,8 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		sessions = [];
+		fakeSessions();
 		vi.mocked(execProcess.execAsync).mockResolvedValue({
 			stdout: "",
 			stderr: "",
@@ -362,7 +390,6 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 	afterEach(() => {
 		errorSpy.mockRestore();
-		vi.useRealTimers();
 	});
 
 	it("runs the hook on the app server without touching the log path there", async () => {
@@ -374,14 +401,16 @@ describe("runDeployHook - log on a different host (build server)", () => {
 			.mocked(execProcess.execAsyncRemote)
 			.mock.calls.filter(([host]) => host === APP_SERVER);
 		expect(hookCalls).toHaveLength(1);
-		const [, command, onData] = hookCalls[0]!;
+		const [, command, onData, options] = hookCalls[0]!;
 		expect(command).toContain('docker exec "c1"');
 		expect(command).toMatch(/\) 2>&1$/);
 		expect(command).not.toContain(LOG_PATH);
 		expect(onData).toBeTypeOf("function");
+		// The relay has the output, so the exec helper must not pile it up too.
+		expect(options).toEqual({ streamOnly: true });
 	});
 
-	it("relays the output, stdout and stderr alike, to the log on the build server", async () => {
+	it("relays the output, stdout and stderr alike, over one session into the log", async () => {
 		hookOnAppServerPrints([
 			"===== Running post-deploy hook (length=16 chars) =====\n",
 			"Installing dependencies\n",
@@ -391,6 +420,12 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 		await runRelayedHook();
 
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0]).toMatchObject({
+			host: BUILD_SERVER,
+			command: `cat >> "${LOG_PATH}"`,
+			ended: true,
+		});
 		expect(relayedLog()).toBe(
 			"===== Running post-deploy hook (length=16 chars) =====\n" +
 				"Installing dependencies\n" +
@@ -398,6 +433,12 @@ describe("runDeployHook - log on a different host (build server)", () => {
 				"===== post-deploy hook finished =====\n",
 		);
 		expect(execProcess.execAsync).not.toHaveBeenCalled();
+		// Nothing is appended through one-off commands any more.
+		expect(
+			vi
+				.mocked(execProcess.execAsyncRemote)
+				.mock.calls.filter(([host]) => host === BUILD_SERVER),
+		).toHaveLength(0);
 	});
 
 	it("keeps multi-byte characters intact", async () => {
@@ -409,13 +450,13 @@ describe("runDeployHook - log on a different host (build server)", () => {
 	});
 
 	it.each([
-		["one 300 KiB burst", 1],
-		["many small chunks", 300],
+		["one 5 MiB burst", 1],
+		["many small chunks", 5000],
 	])(
-		"appends 300 KiB of output in bounded chunks (%s)",
+		"uses a single connection however much output there is (%s)",
 		async (_name, parts) => {
 			const line = `${"x".repeat(1023)}\n`;
-			const output = line.repeat(300);
+			const output = line.repeat(5 * 1024);
 			const chunks = Array.from({ length: parts }, (_, i) =>
 				output.slice(
 					(i * output.length) / parts,
@@ -426,15 +467,7 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 			await runRelayedHook();
 
-			const commands = appendCalls();
-			// A single `echo "<base64>"` of 300 KiB would be ~400 KiB, over both
-			// MAX_ARG_STRLEN (128 KiB) and OpenSSH's request limits.
-			expect(commands.length).toBeGreaterThanOrEqual(
-				Math.ceil(output.length / HOOK_LOG_APPEND_CHUNK_BYTES),
-			);
-			for (const command of commands) {
-				expect(command.length).toBeLessThan(64 * 1024);
-			}
+			expect(execProcess.openRemoteInputSession).toHaveBeenCalledTimes(1);
 			expect(relayedLog()).toBe(output);
 		},
 	);
@@ -445,23 +478,18 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 		await runRelayedHook();
 
-		const log = relayedLog();
-		expect(log).toBe(
+		expect(relayedLog()).toBe(
 			"y".repeat(HOOK_LOG_RELAY_MAX_BYTES) + HOOK_LOG_TRUNCATION_MARKER,
 		);
-		for (const command of appendCalls()) {
-			expect(command.length).toBeLessThan(64 * 1024);
-		}
 	});
 
-	it("flushes output while a long hook is still running", async () => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+	it("writes output to the log while a long hook is still running", async () => {
 		let appendedWhileRunning = "";
 		vi.mocked(execProcess.execAsyncRemote).mockImplementation(
 			async (host, _command, onData) => {
 				if (host === APP_SERVER) {
 					onData?.("step 1 done\n");
-					await vi.advanceTimersByTimeAsync(HOOK_LOG_FLUSH_INTERVAL_MS);
+					await vi.waitFor(() => expect(relayedLog()).not.toBe(""));
 					appendedWhileRunning = relayedLog();
 					onData?.("step 2 done\n");
 				}
@@ -473,6 +501,47 @@ describe("runDeployHook - log on a different host (build server)", () => {
 
 		expect(appendedWhileRunning).toBe("step 1 done\n");
 		expect(relayedLog()).toBe("step 1 done\nstep 2 done\n");
+	});
+
+	it("reopens a lost connection once and marks the gap in the log", async () => {
+		const lost = new Error("SSH connection closed before the command finished");
+		fakeSessions({
+			failWrite: (session, write) =>
+				session === 0 && write === 1 ? lost : null,
+		});
+		vi.mocked(execProcess.execAsyncRemote).mockImplementation(
+			async (host, _command, onData) => {
+				if (host === APP_SERVER) {
+					for (const step of ["one\n", "two\n", "three\n"]) {
+						onData?.(step);
+						await vi.waitFor(() =>
+							expect(relayedLog().endsWith(step)).toBe(true),
+						);
+					}
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+
+		await expect(runRelayedHook()).resolves.toBeUndefined();
+
+		expect(sessions).toHaveLength(2);
+		expect(sessions[1]!.ended).toBe(true);
+		expect(relayedLog()).toBe(`one\n${HOOK_LOG_RECONNECT_MARKER}two\nthree\n`);
+		expect(errorSpy).not.toHaveBeenCalled();
+	});
+
+	it("retries a connection that could not be opened without marking a gap", async () => {
+		const refused = new Error("SSH connection error: connect ECONNREFUSED");
+		const openSession = vi.mocked(execProcess.openRemoteInputSession);
+		openSession.mockRejectedValueOnce(refused);
+		hookOnAppServerPrints(["hello\n"]);
+
+		await runRelayedHook();
+
+		expect(openSession).toHaveBeenCalledTimes(2);
+		expect(relayedLog()).toBe("hello\n");
+		expect(errorSpy).not.toHaveBeenCalled();
 	});
 
 	it("rethrows a failing hook's own error after relaying its output", async () => {
@@ -492,6 +561,7 @@ describe("runDeployHook - log on a different host (build server)", () => {
 		await expect(result).rejects.toBe(hookError);
 		// Streamed output is relayed exactly once; the error's copy is not added.
 		expect(relayedLog()).toBe("partial output\nboom\n");
+		expect(sessions[0]!.ended).toBe(true);
 	});
 
 	it("falls back to the error's captured output when nothing was streamed", async () => {
@@ -507,22 +577,17 @@ describe("runDeployHook - log on a different host (build server)", () => {
 		expect(relayedLog()).toBe("out\nerr\n");
 	});
 
-	it("does not mask a failing hook's error when the log append also fails", async () => {
+	it("does not mask a failing hook's error when the log host is unreachable", async () => {
 		const hookError = new ExecError("Remote command failed with exit code 42", {
 			command: "hook",
 			exitCode: 42,
 			serverId: APP_SERVER,
 		});
 		const appendError = new Error("SSH connection error: build server down");
-		vi.mocked(execProcess.execAsyncRemote).mockImplementation(
-			async (host, _command, onData) => {
-				if (host === APP_SERVER) {
-					onData?.("some output\n");
-					throw hookError;
-				}
-				throw appendError;
-			},
+		vi.mocked(execProcess.openRemoteInputSession).mockRejectedValue(
+			appendError,
 		);
+		hookOnAppServerPrints(["some output\n"], hookError);
 
 		await expect(runRelayedHook()).rejects.toBe(hookError);
 		expect(errorSpy).toHaveBeenCalledWith(
@@ -531,23 +596,34 @@ describe("runDeployHook - log on a different host (build server)", () => {
 		);
 	});
 
-	it("does not fail a successful hook when the log append fails", async () => {
+	it("does not fail a successful hook when the relay keeps failing", async () => {
 		const appendError = new Error("SSH connection error: build server down");
-		vi.mocked(execProcess.execAsyncRemote).mockImplementation(
-			async (host, _command, onData) => {
-				if (host === APP_SERVER) {
-					// Two flushes' worth: the relay must stop after the first failure.
-					onData?.("a".repeat(HOOK_LOG_APPEND_CHUNK_BYTES));
-					onData?.("b".repeat(HOOK_LOG_APPEND_CHUNK_BYTES));
-					return { stdout: "", stderr: "" };
-				}
-				throw appendError;
-			},
-		);
+		fakeSessions({ failWrite: () => appendError });
+		hookOnAppServerPrints(["a\n", "b\n"]);
 
 		await expect(runRelayedHook()).resolves.toBeUndefined();
-		expect(appendCalls()).toHaveLength(1);
+		// One reconnect, then the relay gives up and reports it once.
+		expect(execProcess.openRemoteInputSession).toHaveBeenCalledTimes(2);
 		expect(errorSpy).toHaveBeenCalledTimes(1);
+		expect(errorSpy).toHaveBeenCalledWith(
+			expect.stringContaining("Failed to relay deploy hook output"),
+			appendError,
+		);
+	});
+
+	it("reports, without failing the deploy, when the log host rejects the output", async () => {
+		const catFailed = new ExecError(
+			"Remote command failed with exit code 1: cat: can't open '/tmp/deploy.log'",
+			{ command: 'cat >> "/tmp/deploy.log"', exitCode: 1 },
+		);
+		fakeSessions({ failEnd: catFailed });
+		hookOnAppServerPrints(["hello\n"]);
+
+		await expect(runRelayedHook()).resolves.toBeUndefined();
+		expect(errorSpy).toHaveBeenCalledWith(
+			expect.stringContaining("Failed to relay deploy hook output"),
+			catFailed,
+		);
 	});
 
 	it("runs a local hook through the streaming exec when the log is remote", async () => {
@@ -557,10 +633,6 @@ describe("runDeployHook - log on a different host (build server)", () => {
 				return { stdout: "", stderr: "" };
 			},
 		);
-		vi.mocked(execProcess.execAsyncRemote).mockResolvedValue({
-			stdout: "",
-			stderr: "",
-		} as any);
 
 		await runRelayedHook({ serverId: null });
 
@@ -568,8 +640,9 @@ describe("runDeployHook - log on a different host (build server)", () => {
 			.calls[0]!;
 		expect(command).toContain('docker exec "c1"');
 		expect(command).not.toContain(LOG_PATH);
-		// exec's 1 MiB default would kill a chatty hook that used to succeed.
-		expect(options?.maxBuffer).toBeGreaterThan(1024 * 1024);
+		// Stream-only: no maxBuffer that would kill a chatty hook, and the output
+		// is not kept a second time in memory.
+		expect(options).toEqual({ streamOnly: true });
 		expect(execProcess.execAsync).not.toHaveBeenCalled();
 		expect(relayedLog()).toBe("local hook output\n");
 	});

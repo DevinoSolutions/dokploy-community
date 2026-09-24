@@ -1,8 +1,13 @@
-import { exec, execFile } from "node:child_process";
+import { exec, execFile, spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";
 import { Client } from "ssh2";
-import { ExecError, truncateOutputTail } from "./ExecError";
+import {
+	ExecError,
+	MAX_EXEC_OUTPUT_TAIL,
+	truncateOutputTail,
+} from "./ExecError";
 
 export class WriteFileRemoteError extends Error {
 	constructor(
@@ -68,13 +73,96 @@ interface ExecOptions {
 	env?: NodeJS.ProcessEnv;
 	// Output buffered per stream before the child is killed (exec default 1 MiB).
 	maxBuffer?: number;
+	// The caller consumes the output through onData. Only the tail of each
+	// stream is kept for the result and errors, and there is no size limit.
+	streamOnly?: boolean;
 }
+
+/**
+ * Keeps a command's output: all of it, or with `tailOnly` just enough of the
+ * end for an error message, so streamed output never piles up in memory.
+ */
+class OutputCollector {
+	private text = "";
+
+	constructor(private readonly tailOnly = false) {}
+
+	add(chunk: string): void {
+		this.text += chunk;
+		if (this.tailOnly && this.text.length > 4 * MAX_EXEC_OUTPUT_TAIL) {
+			this.text = this.text.slice(-2 * MAX_EXEC_OUTPUT_TAIL);
+		}
+	}
+
+	get value(): string {
+		return this.tailOnly
+			? this.text.slice(-2 * MAX_EXEC_OUTPUT_TAIL)
+			: this.text;
+	}
+}
+
+// exec buffers everything for its callback and kills the command past
+// maxBuffer, so streamed commands run through spawn instead.
+const spawnStream = (
+	command: string,
+	onData: ((data: string) => void) | undefined,
+	{ cwd, env }: ExecOptions,
+): Promise<{ stdout: string; stderr: string }> => {
+	return new Promise((resolve, reject) => {
+		const stdout = new OutputCollector(true);
+		const stderr = new OutputCollector(true);
+		const child = spawn(command, { cwd, env, shell: true });
+
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (data: string) => {
+			stdout.add(data);
+			onData?.(data);
+		});
+		child.stderr.on("data", (data: string) => {
+			stderr.add(data);
+			onData?.(data);
+		});
+
+		child.on("error", (error) => {
+			reject(
+				new ExecError(`Command execution error: ${error.message}`, {
+					command,
+					stdout: stdout.value,
+					stderr: stderr.value,
+					originalError: error,
+				}),
+			);
+		});
+		child.on("close", (code, signal) => {
+			if (code === 0) {
+				resolve({ stdout: stdout.value, stderr: stderr.value });
+				return;
+			}
+			const outputTail = truncateOutputTail(stderr.value || stdout.value);
+			reject(
+				new ExecError(
+					`Command failed with ${
+						code === null ? `signal ${signal}` : `exit code ${code}`
+					}${outputTail ? `: ${outputTail}` : ""}`,
+					{
+						command,
+						stdout: stdout.value,
+						stderr: stderr.value,
+						exitCode: code ?? undefined,
+					},
+				),
+			);
+		});
+	});
+};
 
 export const execAsyncStream = (
 	command: string,
 	onData?: (data: string) => void,
 	options: ExecOptions = {},
 ): Promise<{ stdout: string; stderr: string }> => {
+	if (options.streamOnly) return spawnStream(command, onData, options);
 	return new Promise((resolve, reject) => {
 		let stdoutComplete = "";
 		let stderrComplete = "";
@@ -167,13 +255,23 @@ export const execAsyncRemote = async (
 	serverId: string | null,
 	command: string,
 	onData?: (data: string) => void,
+	// The caller consumes the output through onData; keep only its tail.
+	options: { streamOnly?: boolean } = {},
 ): Promise<{ stdout: string; stderr: string }> => {
 	if (!serverId) return { stdout: "", stderr: "" };
 	const server = await findServerById(serverId);
 	if (!server.sshKeyId) throw new Error("No SSH key available for this server");
 
-	let stdout = "";
-	let stderr = "";
+	const stdoutOutput = new OutputCollector(options.streamOnly);
+	const stderrOutput = new OutputCollector(options.streamOnly);
+	// ssh2 hands over raw packets, which can split a UTF-8 character.
+	const stdoutDecoder = new StringDecoder("utf8");
+	const stderrDecoder = new StringDecoder("utf8");
+	const emit = (output: OutputCollector, text: string) => {
+		if (!text) return;
+		output.add(text);
+		onData?.(text);
+	};
 	return new Promise((resolve, reject) => {
 		const conn = new Client();
 
@@ -195,6 +293,10 @@ export const execAsyncRemote = async (
 					stream
 						.on("close", (code: number, _signal: string) => {
 							conn.end();
+							emit(stdoutOutput, stdoutDecoder.end());
+							emit(stderrOutput, stderrDecoder.end());
+							const stdout = stdoutOutput.value;
+							const stderr = stderrOutput.value;
 							if (code === 0) {
 								resolve({ stdout, stderr });
 							} else {
@@ -220,13 +322,11 @@ export const execAsyncRemote = async (
 								);
 							}
 						})
-						.on("data", (data: string) => {
-							stdout += data.toString();
-							onData?.(data.toString());
+						.on("data", (data: Buffer) => {
+							emit(stdoutOutput, stdoutDecoder.write(data));
 						})
-						.stderr.on("data", (data) => {
-							stderr += data.toString();
-							onData?.(data.toString());
+						.stderr.on("data", (data: Buffer) => {
+							emit(stderrOutput, stderrDecoder.write(data));
 						});
 				});
 			})
@@ -277,6 +377,158 @@ export const execAsyncRemote = async (
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
 				timeout: 99999,
+			});
+	});
+};
+
+/** A command on a remote server that reads its input from a caller. */
+export interface RemoteInputSession {
+	/**
+	 * Sends data to the command's stdin. Resolves once the channel can take
+	 * more; rejects if the command or the connection has already failed.
+	 */
+	write(data: Buffer): Promise<void>;
+	/** Closes stdin and waits for the command; rejects unless it exits 0. */
+	end(): Promise<void>;
+}
+
+/**
+ * Starts `command` on a remote server over one SSH connection and keeps its
+ * stdin open, so a caller can feed it data for as long as it needs.
+ */
+export const openRemoteInputSession = async (
+	serverId: string,
+	command: string,
+): Promise<RemoteInputSession> => {
+	const server = await findServerById(serverId);
+	if (!server.sshKeyId) throw new Error("No SSH key available for this server");
+
+	return new Promise((resolve, reject) => {
+		const conn = new Client();
+		const output = new OutputCollector(true);
+		let opened = false;
+		// undefined while the command runs, then null (exit 0) or the failure.
+		let outcome: Error | null | undefined;
+		let settle: (error: Error | null) => void = () => {};
+		const finished = new Promise<Error | null>((resolveFinished) => {
+			settle = resolveFinished;
+		});
+		const finish = (error: Error | null) => {
+			if (outcome !== undefined) return;
+			outcome = error;
+			conn.end();
+			settle(error);
+		};
+		const failure = (error: Error | null) =>
+			error ??
+			new ExecError("Remote command exited before reading all its input", {
+				command,
+				serverId,
+			});
+
+		conn
+			.once("ready", () => {
+				conn.exec(command, (err, stream) => {
+					if (err) {
+						conn.end();
+						reject(
+							new ExecError(`Remote command execution failed: ${err.message}`, {
+								command,
+								serverId,
+								originalError: err,
+							}),
+						);
+						return;
+					}
+					opened = true;
+					stream.setEncoding("utf8");
+					stream.stderr.setEncoding("utf8");
+					stream.on("data", (data: string) => output.add(data));
+					stream.stderr.on("data", (data: string) => output.add(data));
+					stream.on("close", (code: number | undefined) => {
+						if (code === 0) {
+							finish(null);
+							return;
+						}
+						const outputTail = truncateOutputTail(output.value);
+						finish(
+							new ExecError(
+								`${
+									code == null
+										? "Remote command ended without an exit status"
+										: `Remote command failed with exit code ${code}`
+								}${outputTail ? `: ${outputTail}` : ""}`,
+								{ command, stderr: output.value, exitCode: code, serverId },
+							),
+						);
+					});
+					// The session is useless once the command is gone; drop
+					// whatever is still queued.
+					stream.on("error", (error: Error) =>
+						finish(
+							new ExecError(`Remote command stream error: ${error.message}`, {
+								command,
+								serverId,
+								originalError: error,
+							}),
+						),
+					);
+
+					resolve({
+						write: async (data) => {
+							if (outcome !== undefined) throw failure(outcome);
+							if (stream.write(data)) return;
+							const drained = new Promise<null>((resolveDrained) =>
+								stream.once("drain", () => resolveDrained(null)),
+							);
+							const error = await Promise.race([
+								drained,
+								finished.then(failure),
+							]);
+							if (error) throw error;
+						},
+						end: async () => {
+							if (outcome === undefined) stream.end();
+							const error = await finished;
+							if (error) throw error;
+						},
+					});
+				});
+			})
+			.on("error", (err) => {
+				const error = new ExecError(`SSH connection error: ${err.message}`, {
+					command,
+					serverId,
+					originalError: err,
+				});
+				if (opened) {
+					finish(error);
+				} else {
+					conn.end();
+					reject(error);
+				}
+			})
+			.on("close", () => {
+				const error = new ExecError(
+					"SSH connection closed before the command finished",
+					{ command, serverId },
+				);
+				if (opened) {
+					finish(error);
+				} else {
+					reject(error);
+				}
+			})
+			.connect({
+				host: server.ipAddress,
+				port: server.port,
+				username: server.username,
+				privateKey: server.sshKey?.privateKey,
+				timeout: 99999,
+				// A session can stay open for as long as a deploy hook runs; notice
+				// a dead connection instead of waiting on it forever.
+				keepaliveInterval: 10_000,
+				keepaliveCountMax: 3,
 			});
 	});
 };
