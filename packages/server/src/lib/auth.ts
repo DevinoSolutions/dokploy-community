@@ -163,6 +163,9 @@ const createBetterAuth = () =>
 				const isBlockedAuthPath =
 					ctx.path.startsWith("/sign-in/email") ||
 					ctx.path.startsWith("/sign-in/social") ||
+					// Linking a social account would add a login method that
+					// bypasses SSO as soon as enforcement is turned off.
+					ctx.path.startsWith("/link-social") ||
 					ctx.path.startsWith("/sign-in/passkey") ||
 					ctx.path.startsWith("/sign-up/email") ||
 					ctx.path.startsWith("/passkey/verify-authentication") ||
