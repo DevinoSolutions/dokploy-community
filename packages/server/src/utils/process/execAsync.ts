@@ -66,6 +66,8 @@ export const execAsync = async (
 interface ExecOptions {
 	cwd?: string;
 	env?: NodeJS.ProcessEnv;
+	// Output buffered per stream before the child is killed (exec default 1 MiB).
+	maxBuffer?: number;
 }
 
 export const execAsyncStream = (
