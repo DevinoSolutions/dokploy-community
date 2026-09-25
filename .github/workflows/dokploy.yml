@@ -22,6 +22,8 @@ env:
 
 jobs:
   docker-amd:
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     permissions:
@@ -54,6 +56,7 @@ jobs:
           cp apps/dokploy/.env.production.example apps/dokploy/.env.production
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -61,6 +64,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
   docker-arm:
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     permissions:
@@ -93,6 +98,7 @@ jobs:
           cp apps/dokploy/.env.production.example apps/dokploy/.env.production
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -122,18 +128,39 @@ jobs:
           password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Create and push manifests
+        env:
+          # This run's own builds. The canary-amd64 and canary-arm64 tags can
+          # already belong to another run that finished its builds first.
+          AMD64: ${{ env.IMAGE_NAME }}@${{ needs.docker-amd.outputs.digest }}
+          ARM64: ${{ env.IMAGE_NAME }}@${{ needs.docker-arm.outputs.digest }}
+          # Canary's tip before this push; empty on a manual run.
+          BEFORE: ${{ github.event.before }}
         run: |
           VERSION=$(node -p "require('./apps/dokploy/package.json').version")
           TAG="canary"
 
-          docker buildx imagetools create -t ${IMAGE_NAME}:${TAG} \
-            ${IMAGE_NAME}:${TAG}-amd64 \
-            ${IMAGE_NAME}:${TAG}-arm64
+          # Runs can finish out of order. Only the run for canary's current tip
+          # moves canary and latest, so they never go back to older code.
+          if [ "$(git ls-remote origin refs/heads/canary | cut -f1)" = "$GITHUB_SHA" ]; then
+            docker buildx imagetools create -t ${IMAGE_NAME}:${TAG} "$AMD64" "$ARM64"
+            docker buildx imagetools create -t ${IMAGE_NAME}:latest "$AMD64" "$ARM64"
+          else
+            echo "canary has moved past ${GITHUB_SHA}; leaving canary and latest alone."
+          fi
 
-          docker buildx imagetools create -t ${IMAGE_NAME}:${VERSION} \
-            ${IMAGE_NAME}:${TAG}-amd64 \
-            ${IMAGE_NAME}:${TAG}-arm64
-
-          docker buildx imagetools create -t ${IMAGE_NAME}:latest \
-            ${IMAGE_NAME}:${TAG}-amd64 \
-            ${IMAGE_NAME}:${TAG}-arm64
+          # A version tag names the release that set that version. Merges that
+          # land after it keep the same package.json version, and retagging the
+          # version on each of them would put unreleased code under a released
+          # version. So the tag is published only by the push that changes the
+          # version. A manual run republishes it: run one only while the release
+          # commit is still canary's tip.
+          PREVIOUS=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags --depth=1 origin "$BEFORE" 2>/dev/null || true
+            PREVIOUS=$(git show "$BEFORE:apps/dokploy/package.json" 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version" 2>/dev/null || true)
+          fi
+          if [ "$VERSION" != "$PREVIOUS" ]; then
+            docker buildx imagetools create -t ${IMAGE_NAME}:${VERSION} "$AMD64" "$ARM64"
+          else
+            echo "This push does not change the version; keeping the ${VERSION} tag."
+          fi
