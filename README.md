@@ -135,7 +135,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 - Relayed output is capped at 8 MiB. A dropped connection is restarted once, with a marker in the log, and a failed relay never fails the deploy.
 - Remote command output no longer garbles multi-byte characters split across SSH packets, and a hook that runs on the Dokploy server with the log on a build server no longer dies after 64 MiB of output.
 
-> Released while GitHub Actions was unavailable: merged on green tests, typecheck and independent review run on a clean clone; image built and pushed for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
+> Merged on green tests, typecheck and independent review run on a clean clone; the image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.7-community.7
 
@@ -144,7 +144,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 - Opening or closing a container's log viewer no longer sends SIGHUP to the container. Services that exit on SIGHUP (PocketBase, for one) used to restart whenever someone looked at their logs.
 - The viewer attaches to the container only when you send it a command, and never forwards signals. A new test checks this against a real container.
 
-> Released while GitHub Actions was unavailable: merged on green tests, typecheck and independent review run on a clean clone; image built and pushed for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
+> Merged on green tests, typecheck and independent review run on a clean clone; the image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.7-community.6
 
@@ -166,7 +166,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 - API-key rate limits and other guarded auth updates now hold when many requests arrive at once. This fixes MCP keys whose request count could climb past their limit.
 - The change patches the better-auth Drizzle adapter until an upstream fix ships.
 
-> Released while GitHub Actions was unavailable: merged on green tests, typecheck and independent review run on a clean clone; image built and pushed for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
+> Merged on green tests, typecheck and independent review run on a clean clone; the image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.7-community.5
 
@@ -175,7 +175,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 - Tool calls that arrived together after a key sat idle shared one check and skipped the per-call count; each one is now counted against the key's rate limit
 - Requests admitted on another request's check are flagged explicitly instead of compared by timestamp, which also closes a same-millisecond gap
 
-> Released while GitHub Actions was unavailable: merged on green tests, typecheck and independent review run on a clean clone; image built and pushed for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
+> Merged on green tests, typecheck and independent review run on a clean clone; the image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.7-community.4
 
@@ -186,7 +186,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 - Unauthenticated callers are rejected before the request body is read
 - New diagnostic line: `[mcp-diag] request throttled: reason=api_key_rate_limited retryAfter=<s>s`
 
-> Released while GitHub Actions was unavailable: merged on green tests, typecheck and independent review run on a clean clone; image built and pushed for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
+> Merged on green tests, typecheck and independent review run on a clean clone; the image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.7-community.3
 
@@ -198,7 +198,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 - **Snapvisor visual testing on preview deployments** — pick a Snapvisor project per application; each preview shows the visual-diff status of the build for the deployed commit with a "Review in Snapvisor" link ([#233](https://github.com/DevinoSolutions/dokploy-community/pull/233))
 - **Migrations 0203/0204 hardened** so every fork-delta migration replays idempotently on installs switching from official Dokploy ([#234](https://github.com/DevinoSolutions/dokploy-community/pull/234))
 
-> Released while GitHub Actions was unavailable for the organisation: every PR was merged on local green (typecheck, feature and migration test suites, independent review) and the `v0.30.7-community.3` image was built and pushed locally for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
+> Every PR was merged on local green (typecheck, feature and migration test suites, independent review); the image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.7-community.2
 
@@ -207,7 +207,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 - **MCP endpoint accepts a Dokploy API key** — `POST /api/mcp` now also authenticates with a Dokploy API key sent in the `x-api-key` header, resolved through the same path the REST API uses, with every MCP scope. Clients that keep one OAuth grant per machine (Claude Code shares a single grant across every session and a stale session can wipe it) can instead be configured with `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"` and never depend on that grant ([#226](https://github.com/DevinoSolutions/dokploy-community/pull/226))
 - **Rejected MCP requests are logged** — the endpoint logs `[mcp-diag] request rejected: reason=…` (`api_key_invalid`, `not_bearer`, `empty_bearer`, `bearer_rejected` with an 8-character token prefix) so a "keeps asking me to log in" report can be answered from the server log. Credential-less discovery probes are not logged ([#226](https://github.com/DevinoSolutions/dokploy-community/pull/226))
 
-> Released while GitHub Actions was unavailable for the organisation: merged on local green (typecheck + MCP test suite) and the `v0.30.7-community.2` image was built and pushed locally for `linux/amd64` only. CI will rebuild the tag multi-arch once Actions returns.
+> Merged on local green (typecheck + MCP test suite); the image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.7-community.1
 
