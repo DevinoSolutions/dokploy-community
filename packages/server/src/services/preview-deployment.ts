@@ -9,16 +9,25 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { generatePassword } from "../templates";
-import { removeComposeDirectory } from "../utils/filesystem/directory";
 import { removeService } from "../utils/docker/utils";
-import { removeDirectoryCode } from "../utils/filesystem/directory";
+import {
+	removeComposeDirectory,
+	removeDirectoryCode,
+} from "../utils/filesystem/directory";
+import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
+import {
+	hasPreviewTemplateVariable,
+	PREVIEW_WILDCARD_GUIDANCE,
+} from "../utils/preview-wildcard";
 import {
 	ExecError,
 	execAsync,
 	execAsyncRemote,
 } from "../utils/process/execAsync";
+import { buildPreviewHeadRef } from "../utils/providers/head-ref";
 import { removeTraefikConfig } from "../utils/traefik/application";
 import { manageDomain } from "../utils/traefik/domain";
+import { getPublicIpWithFallback } from "../wss/utils";
 import { findApplicationById } from "./application";
 import { findComposeById, runComposeBuild } from "./compose";
 import {
@@ -27,12 +36,6 @@ import {
 	updateDeploymentStatus,
 } from "./deployment";
 import { createDomain } from "./domain";
-import { getRemotePublicIp, isPrivateIp } from "../utils/ip";
-import {
-	hasPreviewTemplateVariable,
-	PREVIEW_WILDCARD_GUIDANCE,
-} from "../utils/preview-wildcard";
-import { getPublicIpWithFallback } from "../wss/utils";
 import { getIssueComment } from "./github";
 import {
 	createPreviewComment,
@@ -767,6 +770,13 @@ const executeComposePreview = async ({
 			// Gitea clones read `giteaBranch`, so the preview must override it too
 			// or the base branch would be built instead of the pull request tip.
 			giteaBranch: previewDeployment.branch,
+			// Fork-safe checkout: the PR/MR head ref lives on the base repository
+			// even when `branch` only exists in a fork — see
+			// utils/providers/head-ref.ts. Null falls back to the branch.
+			headRef: buildPreviewHeadRef(
+				compose.sourceType,
+				previewDeployment.pullRequestNumber,
+			),
 			suffix: previewSuffix,
 			randomize: true,
 			isolatedDeployment: false,

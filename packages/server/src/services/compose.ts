@@ -60,6 +60,13 @@ export type Compose = typeof compose.$inferSelect;
 
 type ComposeBuildEntity = Awaited<ReturnType<typeof findComposeById>> & {
 	type: "compose";
+	/**
+	 * Pull-request head ref, set only by the compose-preview path so previews
+	 * of pull requests from forks check out the PR head on the base repository
+	 * instead of a branch that does not exist there — see
+	 * utils/providers/head-ref.ts.
+	 */
+	headRef?: string | null;
 };
 
 /**

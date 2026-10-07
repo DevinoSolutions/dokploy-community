@@ -8,6 +8,7 @@ import {
 } from "@dokploy/server/services/gitlab";
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
+import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import type { z } from "zod";
@@ -117,6 +118,12 @@ const getGitlabCloneUrl = (gitlab: GitlabInfo, repoClone: string) => {
 interface CloneGitlabRepository {
 	appName: string;
 	gitlabBranch: string | null;
+	/**
+	 * Merge-request head ref (e.g. `refs/merge-requests/123/head`) to check out
+	 * instead of `gitlabBranch`. Set for preview deployments so merge requests
+	 * from forks build from the base project — see utils/providers/head-ref.ts.
+	 */
+	headRef?: string | null;
 	gitlabId: string | null;
 	gitlabPathNamespace: string | null;
 	enableSubmodules: boolean;
@@ -133,6 +140,7 @@ export const cloneGitlabRepository = async ({
 	const {
 		appName,
 		gitlabBranch,
+		headRef,
 		gitlabId,
 		gitlabPathNamespace,
 		enableSubmodules,
@@ -164,6 +172,16 @@ export const cloneGitlabRepository = async ({
 	const repoClone = getGitlabRepoClone(gitlab, gitlabPathNamespace);
 	const cloneUrl = getGitlabCloneUrl(gitlab, repoClone);
 	command += `echo ${quote([`Cloning Repo ${repoClone} to ${outputPath}: ✅`])};`;
+	if (headRef) {
+		command += buildHeadRefCheckoutCommand({
+			cloneUrl: String(cloneUrl ?? ""),
+			branch: String(gitlabBranch ?? ""),
+			headRef,
+			outputPath: String(outputPath ?? ""),
+			enableSubmodules,
+		});
+		return command;
+	}
 	command += `git clone --branch ${quote([String(gitlabBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
 	return command;
 };
