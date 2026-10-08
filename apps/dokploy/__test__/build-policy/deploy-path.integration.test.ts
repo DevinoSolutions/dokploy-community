@@ -401,7 +401,7 @@ describe("enforced remote build for a GitHub-sourced application", () => {
 		expect(command).toContain("git -C");
 		expect(command).toContain("rev-parse HEAD");
 		expect(command).toContain(`DOKPLOY_BP_TAG=${REPOSITORY}:"$DOKPLOY_BP_SHA"`);
-		expect(command).toContain('docker push "$DOKPLOY_BP_TAG"');
+		expect(command).toContain('push "$DOKPLOY_BP_TAG"');
 		expect(command).toContain(DIGEST_MARKER);
 	});
 

@@ -275,11 +275,22 @@ describe("prepareComposeBuildServerDeploy", () => {
 			servingHostLabel: "prod-1",
 		});
 
-		// Logged in on the build server before the push, then on the serving host
-		// (no server id: the Dokploy host), each as its own command.
+		// Logged in on the build server (to the registry's own docker config)
+		// before the push, then on the serving host (no server id: the Dokploy
+		// host, default config for the swarm deploy), each as its own command.
 		expect(mocks.loginDockerRegistry.mock.calls).toEqual([
-			[registry, "build-1"],
-			[registry, null],
+			[
+				registry,
+				"build-1",
+				{
+					isolated: true,
+					cancelable: {
+						pidFile: expect.stringContaining("dep1"),
+						deploymentId: "dep1",
+					},
+				},
+			],
+			[registry, null, { isolated: false, cancelable: undefined }],
 		]);
 		expect(joined).not.toContain("docker login");
 	});

@@ -7,6 +7,7 @@ import {
 } from "@dokploy/server/utils/cluster/upload";
 import { encodeBase64 } from "@dokploy/server/utils/docker/utils";
 import { sendBuildErrorNotifications } from "@dokploy/server/utils/notifications/build-error";
+import { dockerWithConfig } from "@dokploy/server/utils/process/dockerConfig";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -288,7 +289,9 @@ export const getBuildPolicyPushCommand = async (
 	const registry = await findRegistryByIdWithCredentials(plan.registryId);
 	// Logged in on the build host ahead of the script, so the password travels
 	// on stdin instead of in the script's command line.
-	await loginDockerRegistry(registry, serverId);
+	const configDir = await loginDockerRegistry(registry, serverId, {
+		isolated: true,
+	});
 
 	const { APPLICATIONS_PATH } = paths(!!serverId);
 	// posix.join: the shell always runs on the Linux build host, so the path
@@ -308,7 +311,7 @@ docker tag ${quote([`${appName}:latest`])} "$DOKPLOY_BP_TAG" || {
 	echo "❌ [build-policy] Tagging the image by sha failed" ;
 	exit 1;
 }
-docker push "$DOKPLOY_BP_TAG" || {
+${dockerWithConfig(configDir)} push "$DOKPLOY_BP_TAG" || {
 	echo "❌ [build-policy] Pushing the image to the organization registry failed" ;
 	exit 1;
 }

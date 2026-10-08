@@ -9,6 +9,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const PASSWORD = "hunter2-S3cret";
 const ECR_TOKEN = "ecr-token-S3cret";
+const OTHER_PASSWORD = "other-S3cret";
+const CONFIG_1 = "/etc/dokploy/docker-config/reg-1";
+const CONFIG_2 = "/etc/dokploy/docker-config/reg-2";
+const isolatedLogin = (configDir: string, rest: string) =>
+	`umask 077 && mkdir -p '${configDir}' && docker --config '${configDir}' login ${rest}`;
 
 const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
@@ -123,19 +128,7 @@ describe("uploadImageRemoteCommand", () => {
 		expectNoSecretIn(script, ...executedCommands());
 	});
 
-	it("logs in once when two registries share a URL and an account", async () => {
-		await uploadImageRemoteCommand(
-			{
-				...(application as object),
-				buildRegistry: { registryId: "reg-2" },
-			} as never,
-			"srv-1",
-		);
-
-		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
-	});
-
-	it("refuses two accounts on one registry URL: the later login would win", async () => {
+	it("pushes two registries on one URL under their own account and config", async () => {
 		mocks.findRegistryByIdWithCredentials.mockImplementation(
 			async (id: string) =>
 				id === "reg-2"
@@ -144,23 +137,40 @@ describe("uploadImageRemoteCommand", () => {
 							registryId: "reg-2",
 							registryName: "other",
 							username: "someone-else",
-							password: "another-pass",
+							password: OTHER_PASSWORD,
 						}
 					: registryRow,
 		);
 
-		await expect(
-			uploadImageRemoteCommand(
-				{
-					...(application as object),
-					buildRegistry: { registryId: "reg-2" },
-				} as never,
-				"srv-1",
-			),
-		).rejects.toThrow(
-			/"main" and "other" both use registry\.example\.com with different accounts/,
+		const script = await uploadImageRemoteCommand(
+			{
+				...(application as object),
+				buildRegistry: { registryId: "reg-2" },
+			} as never,
+			"srv-1",
 		);
-		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
+
+		// The deploy registry stays in the default config; the build registry
+		// gets its own, so neither login replaces the other.
+		expect(mocks.execAsyncRemote).toHaveBeenNthCalledWith(
+			1,
+			"srv-1",
+			"docker login 'registry.example.com' -u 'acme' --password-stdin",
+			undefined,
+			{ stdin: PASSWORD },
+		);
+		expect(mocks.execAsyncRemote).toHaveBeenNthCalledWith(
+			2,
+			"srv-1",
+			`umask 077 && mkdir -p '${CONFIG_2}' && docker --config '${CONFIG_2}' login 'registry.example.com' -u 'someone-else' --password-stdin`,
+			undefined,
+			{ stdin: OTHER_PASSWORD },
+		);
+		expect(script).toMatch(/\ndocker push /);
+		expect(script).toContain(`docker --config ${CONFIG_2} push `);
+		expect(script).not.toContain(`docker --config ${CONFIG_1}`);
+		expectNoSecretIn(script, ...executedCommands());
+		expect(script).not.toContain(OTHER_PASSWORD);
 	});
 
 	it("reports a failed login with docker's output, never the password", async () => {
@@ -244,9 +254,12 @@ describe("buildRemoteDocker", () => {
 		);
 
 		expect(mocks.execAsync).toHaveBeenCalledWith(
-			"docker login 'registry.example.com' -u 'acme' --password-stdin",
+			expect.stringMatching(
+				/^umask 077 && mkdir -p '[^']*docker-config\/reg-1' && docker --config '[^']*docker-config\/reg-1' login 'registry\.example\.com' -u 'acme' --password-stdin$/,
+			),
 			{ stdin: PASSWORD },
 		);
+		expect(script).toMatch(/docker --config \S*docker-config\/reg-1 pull /);
 		expectNoSecretIn(script, ...executedCommands());
 	});
 
@@ -268,10 +281,14 @@ describe("buildRemoteDocker", () => {
 
 		expect(mocks.execAsyncRemote).toHaveBeenCalledWith(
 			"srv-1",
-			"docker login --username AWS --password-stdin '123.dkr.ecr.us-east-1.amazonaws.com'",
+			isolatedLogin(
+				CONFIG_1,
+				"--username AWS --password-stdin '123.dkr.ecr.us-east-1.amazonaws.com'",
+			),
 			undefined,
 			{ stdin: ECR_TOKEN },
 		);
+		expect(script).toContain(`docker --config ${CONFIG_1} pull `);
 		expectNoSecretIn(script, ...executedCommands());
 	});
 });
@@ -293,13 +310,16 @@ describe("getBuildPolicyPushCommand", () => {
 
 		expect(mocks.execAsyncRemote).toHaveBeenCalledWith(
 			"srv-1",
-			"docker login 'registry.example.com' -u 'acme' --password-stdin",
+			isolatedLogin(
+				CONFIG_1,
+				"'registry.example.com' -u 'acme' --password-stdin",
+			),
 			undefined,
 			{ stdin: PASSWORD },
 		);
 		expectNoSecretIn(script, ...executedCommands());
 		expect(script).not.toContain("docker login");
-		expect(script).toContain("docker push");
+		expect(script).toContain(`docker --config ${CONFIG_1} push `);
 	});
 
 	it("does nothing when the policy is not enforcing", async () => {

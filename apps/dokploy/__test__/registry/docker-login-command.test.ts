@@ -11,6 +11,10 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	execAsyncRemote: mocks.execAsyncRemote,
 }));
 
+import {
+	dockerWithConfig,
+	getRegistryConfigDir,
+} from "@dokploy/server/utils/process/dockerConfig";
 import { runDockerLogin } from "@dokploy/server/utils/process/dockerLogin";
 
 const PASSWORD = "p@ss'w0rd; $(touch /tmp/pwned)";
@@ -110,5 +114,58 @@ describe("runDockerLogin", () => {
 	it("passes a failed login on to the caller", async () => {
 		mocks.execAsyncRemote.mockRejectedValue(new Error("unauthorized"));
 		await expect(runDockerLogin(data, "srv-1")).rejects.toThrow("unauthorized");
+	});
+});
+
+describe("per-registry docker config", () => {
+	const data = {
+		registryType: "cloud" as const,
+		registryUrl: "registry.example.com",
+		username: "acme",
+		password: PASSWORD,
+	};
+
+	it("logs in to the given directory, created private, with the password still on stdin", () => {
+		const login = getSafeRegistryLoginCommand({
+			...data,
+			configDir: "/etc/dokploy/docker-config/reg-1",
+		});
+
+		expect(login.command).toBe(
+			"umask 077 && mkdir -p '/etc/dokploy/docker-config/reg-1' && docker --config '/etc/dokploy/docker-config/reg-1' login 'registry.example.com' -u 'acme' --password-stdin",
+		);
+		expect(login.stdin).toBe(PASSWORD);
+		expect(login.command).not.toContain("p@ss");
+	});
+
+	it("derives a directory per registry id and refuses ids that could escape it", () => {
+		expect(getRegistryConfigDir("reg-1", true)).toBe(
+			"/etc/dokploy/docker-config/reg-1",
+		);
+		expect(getRegistryConfigDir("reg-2", true)).not.toBe(
+			getRegistryConfigDir("reg-1", true),
+		);
+		expect(() => getRegistryConfigDir("../x; rm -rf /", true)).toThrow(
+			"Invalid registry id",
+		);
+	});
+
+	it("builds docker commands for a config directory, or plain docker without one", () => {
+		expect(dockerWithConfig("/etc/dokploy/docker-config/reg-1")).toBe(
+			"docker --config /etc/dokploy/docker-config/reg-1",
+		);
+		expect(dockerWithConfig(undefined)).toBe("docker");
+	});
+
+	it("hands a cancel target to the remote login", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		const cancelable = { pidFile: "/p.pid", deploymentId: "dep1" };
+
+		await runDockerLogin(data, "srv-1", { cancelable });
+
+		expect(mocks.execAsyncRemote.mock.calls.at(-1)?.[3]).toEqual({
+			stdin: PASSWORD,
+			cancelable,
+		});
 	});
 });

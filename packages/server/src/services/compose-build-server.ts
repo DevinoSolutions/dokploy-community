@@ -282,6 +282,30 @@ const buildImagesOnBuildServer = async (
 		await checkpoint();
 		return execOnBuildServer(command, log.push);
 	};
+	// A failed login explains itself nowhere else: nothing has run that would
+	// have written it to the log.
+	const login = async (
+		targetServerId: string | null,
+		isolated: boolean,
+		cancelTarget: typeof cancelable,
+	) => {
+		await checkpoint();
+		try {
+			return await loginDockerRegistry(registry, targetServerId, {
+				isolated,
+				cancelable: cancelTarget,
+			});
+		} catch (error) {
+			const settled = await toCancelledErrorIfCancelled(
+				deployment.deploymentId,
+				error,
+			);
+			if (settled === error) {
+				log.line(error instanceof Error ? error.message : String(error));
+			}
+			throw settled;
+		}
+	};
 	// Raw composes have no checkout (the clone step only writes the file), so
 	// they always take the normal path. Any probe failure falls back to cloning,
 	// as a deploy does; only a cancel is let through.
@@ -405,27 +429,21 @@ const buildImagesOnBuildServer = async (
 		});
 
 		// The logins run as their own commands, with the password on stdin: a
-		// password inside a script would show in the host's process list.
-		try {
-			await loginDockerRegistry(registry, buildServerId);
-		} catch (error) {
-			// Nothing has run on the build server that would explain the failure.
-			log.line(error instanceof Error ? error.message : String(error));
-			throw error;
-		}
+		// password inside a script would show in the host's process list. The
+		// build server logs in to the registry's own docker config (the push uses
+		// it), so it cannot replace another registry's login on that host.
+		const configDir = await login(buildServerId, true, cancelable);
 		await run(
 			getTagAndPushCommand({
 				images: [...byLocalImage.values()],
 				registryLabel: registry.registryUrl || registry.registryName,
+				configDir,
 			}),
 		);
-		// The serving host pulls the images it was just told about.
-		try {
-			await loginDockerRegistry(registry, entity.serverId);
-		} catch (error) {
-			log.line(error instanceof Error ? error.message : String(error));
-			throw error;
-		}
+		// The serving host pulls the images it was just told about, and its stack
+		// deploy sends the default config's login to the swarm
+		// (--with-registry-auth), so that login stays in the default config.
+		await login(entity.serverId, false, undefined);
 		return { images };
 	} finally {
 		await log.close();

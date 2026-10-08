@@ -265,6 +265,12 @@ export interface RegistryLoginData {
 	 * registryType is "awsEcr" and building a shell login command.
 	 */
 	ecrAuthPassword?: string | null;
+	/**
+	 * Log in to this docker config directory (created mode 700) instead of the
+	 * host default, so the login cannot replace another registry's credentials
+	 * on the same URL. Pass the same directory to `docker --config` afterwards.
+	 */
+	configDir?: string | null;
 }
 
 /**
@@ -287,14 +293,17 @@ export const getSafeRegistryLoginCommand = (
 	data: RegistryLoginData,
 ): DockerLogin => {
 	const escapedRegistry = shEscape(data.registryUrl);
+	const docker = data.configDir
+		? `umask 077 && mkdir -p ${shEscape(data.configDir)} && docker --config ${shEscape(data.configDir)}`
+		: "docker";
 	if (data.registryType === "awsEcr") {
 		return {
-			command: `docker login --username AWS --password-stdin ${escapedRegistry}`,
+			command: `${docker} login --username AWS --password-stdin ${escapedRegistry}`,
 			stdin: data.ecrAuthPassword ?? "",
 		};
 	}
 	return {
-		command: `docker login ${escapedRegistry} -u ${shEscape(data.username)} --password-stdin`,
+		command: `${docker} login ${escapedRegistry} -u ${shEscape(data.username)} --password-stdin`,
 		stdin: data.password ?? "",
 	};
 };

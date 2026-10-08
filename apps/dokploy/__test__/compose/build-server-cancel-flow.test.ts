@@ -154,6 +154,40 @@ describe("prepareComposeBuildServerDeploy and cancellation", () => {
 		expect(runStep).toHaveBeenCalledTimes(1);
 	});
 
+	it("makes the build-server login cancelable and leaves the serving-host login alone", async () => {
+		await prepare().promise;
+
+		expect(mocks.loginDockerRegistry).toHaveBeenCalledTimes(2);
+		const [buildHost, servingHost] = mocks.loginDockerRegistry.mock.calls;
+		expect(buildHost?.[1]).toBe("build-1");
+		expect(buildHost?.[2]).toEqual({
+			isolated: true,
+			cancelable: { pidFile: PID_FILE, deploymentId: "dep1" },
+		});
+		expect(servingHost?.[2]).toEqual({
+			isolated: false,
+			cancelable: undefined,
+		});
+	});
+
+	it("a cancel during the registry login ends as a cancel, before the push", async () => {
+		mocks.loginDockerRegistry.mockImplementationOnce(async () => {
+			// The kill drops the login's connection; the row says cancelled.
+			mocks.deploymentStatus.mockResolvedValue({ status: "cancelled" });
+			throw new Error("Registry login failed for reg.example.com: closed");
+		});
+
+		const { promise, runStep } = prepare();
+
+		await expect(promise).rejects.toMatchObject({ deploymentCancelled: true });
+		expect(
+			mocks.execAsyncRemote.mock.calls.some((call) =>
+				String(call[1]).includes("docker push"),
+			),
+		).toBe(false);
+		expectOnlyTheRestore(runStep);
+	});
+
 	it("stops before the first step when the deployment was cancelled while queued", async () => {
 		mocks.deploymentStatus.mockResolvedValue({ status: "cancelled" });
 
@@ -213,8 +247,8 @@ describe("prepareComposeBuildServerDeploy and cancellation", () => {
 		const after = seen;
 		expect(after).toBeGreaterThan(0);
 		expect(
-			mocks.execAsyncRemote.mock.calls.some(
-				(call) => String(call[1]).includes("docker push"),
+			mocks.execAsyncRemote.mock.calls.some((call) =>
+				String(call[1]).includes("docker push"),
 			),
 		).toBe(false);
 		expectOnlyTheRestore(runStep);
@@ -308,7 +342,9 @@ describe("prepareComposeBuildServerDeploy and cancellation", () => {
 		const errors = vi.spyOn(console, "error").mockImplementation(() => {});
 		const failure = new Error("docker build failed");
 		mocks.execAsyncRemote.mockRejectedValue(failure);
-		const runStep = vi.fn().mockRejectedValue(new Error("ssh: connection lost"));
+		const runStep = vi
+			.fn()
+			.mockRejectedValue(new Error("ssh: connection lost"));
 
 		await expect(prepare(runStep).promise).rejects.toBe(failure);
 		errors.mockRestore();
