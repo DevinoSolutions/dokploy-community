@@ -406,7 +406,13 @@ const buildImagesOnBuildServer = async (
 
 		// The logins run as their own commands, with the password on stdin: a
 		// password inside a script would show in the host's process list.
-		await loginDockerRegistry(registry, buildServerId);
+		try {
+			await loginDockerRegistry(registry, buildServerId);
+		} catch (error) {
+			// Nothing has run on the build server that would explain the failure.
+			log.line(error instanceof Error ? error.message : String(error));
+			throw error;
+		}
 		await run(
 			getTagAndPushCommand({
 				images: [...byLocalImage.values()],
@@ -414,7 +420,12 @@ const buildImagesOnBuildServer = async (
 			}),
 		);
 		// The serving host pulls the images it was just told about.
-		await loginDockerRegistry(registry, entity.serverId);
+		try {
+			await loginDockerRegistry(registry, entity.serverId);
+		} catch (error) {
+			log.line(error instanceof Error ? error.message : String(error));
+			throw error;
+		}
 		return { images };
 	} finally {
 		await log.close();

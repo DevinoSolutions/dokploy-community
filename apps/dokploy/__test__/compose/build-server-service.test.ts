@@ -580,6 +580,41 @@ describe("prepareComposeBuildServerDeploy", () => {
 		expect(restore).not.toContain("base64 -d");
 	});
 
+	it("writes a failed registry login to the deployment log", async () => {
+		const servingCompose = { ...compose, serverId: "serve-1" };
+		mocks.execAsyncRemote.mockImplementation(
+			async (_s: string, command: string) => ({
+				stdout: command.includes("config --format json")
+					? configJson({ web: { build: "." } })
+					: "",
+				stderr: "",
+			}),
+		);
+		mocks.loginDockerRegistry.mockRejectedValueOnce(
+			new Error("Registry login failed for registry.example.com: unauthorized"),
+		);
+
+		await expect(
+			prepareComposeBuildServerDeploy({
+				entity: servingCompose,
+				deployment: { logPath: "/var/log/dep.log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			}),
+		).rejects.toThrow("Registry login failed");
+
+		const logText = callsOn("serve-1")
+			.map((call) =>
+				Buffer.from(
+					(call[1] as string).match(/echo "([A-Za-z0-9+/=]+)"/)?.[1] ?? "",
+					"base64",
+				).toString("utf8"),
+			)
+			.join("");
+		expect(logText).toContain(
+			"Registry login failed for registry.example.com: unauthorized",
+		);
+	});
+
 	it("does not trust a server that stopped being a build server", async () => {
 		mocks.findServerById.mockResolvedValue({
 			...buildServer,
