@@ -2,8 +2,8 @@ import {
 	getSafeRegistryLoginCommand,
 	type RegistryLoginData,
 } from "@dokploy/server/db/schema";
-import { execAsync, execAsyncRemote } from "./execAsync";
 import { truncateOutputTail } from "./ExecError";
+import { execAsync, execAsyncRemote } from "./execAsync";
 import { redactSecrets } from "./redactSecrets";
 
 /** Chars of docker's output kept in the login failure message. */
@@ -25,6 +25,9 @@ const describeLoginFailure = (error: unknown, secret: string): string => {
 	return tail;
 };
 
+type RemoteOptions = NonNullable<Parameters<typeof execAsyncRemote>[3]>;
+export type LoginCancelable = RemoteOptions["cancelable"];
+
 /**
  * Logs Docker into a registry on `serverId`, or on this host without one.
  * The password travels on the command's stdin: it must never be part of a
@@ -38,11 +41,18 @@ const describeLoginFailure = (error: unknown, secret: string): string => {
 export const runDockerLogin = async (
 	data: RegistryLoginData,
 	serverId?: string | null,
+	options?: {
+		/** Lets a deployment cancel stop a remote login. */
+		cancelable?: LoginCancelable;
+	},
 ): Promise<void> => {
 	const { command, stdin } = getSafeRegistryLoginCommand(data);
 	try {
 		if (serverId) {
-			await execAsyncRemote(serverId, command, undefined, { stdin });
+			await execAsyncRemote(serverId, command, undefined, {
+				stdin,
+				cancelable: options?.cancelable,
+			});
 		} else {
 			await execAsync(command, { stdin });
 		}

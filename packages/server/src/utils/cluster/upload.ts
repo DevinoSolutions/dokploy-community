@@ -4,9 +4,16 @@ import {
 	type Registry,
 } from "@dokploy/server/services/registry";
 import { createRollback } from "@dokploy/server/services/rollbacks";
-import { runDockerLogin } from "@dokploy/server/utils/process/dockerLogin";
-import { getECRAuthToken } from "../aws/ecr";
+import {
+	dockerWithConfig,
+	getRegistryConfigDir,
+} from "@dokploy/server/utils/process/dockerConfig";
+import {
+	type LoginCancelable,
+	runDockerLogin,
+} from "@dokploy/server/utils/process/dockerLogin";
 import { quote } from "shell-quote";
+import { getECRAuthToken } from "../aws/ecr";
 import type { ApplicationNested } from "../builders";
 
 export const uploadImageRemoteCommand = async (
@@ -28,14 +35,13 @@ export const uploadImageRemoteCommand = async (
 			: `${appName}:latest`;
 
 	const commands: string[] = [];
-	const logins = createLoginSession(serverId);
 	if (registry) {
 		const r = await findRegistryByIdWithCredentials(registry.registryId);
 		const registryTag = getRegistryTag(r, imageName);
 		if (registryTag) {
 			commands.push(`echo "📦 [Enabled Registry Swarm]"`);
 			commands.push(
-				await getRegistryCommands(r, imageName, registryTag, logins),
+				await getRegistryCommands(r, imageName, registryTag, serverId, false),
 			);
 		}
 	}
@@ -45,7 +51,13 @@ export const uploadImageRemoteCommand = async (
 		if (buildRegistryTag) {
 			commands.push(`echo "🔑 [Enabled Build Registry]"`);
 			commands.push(
-				await getRegistryCommands(r, imageName, buildRegistryTag, logins),
+				await getRegistryCommands(
+					r,
+					imageName,
+					buildRegistryTag,
+					serverId,
+					true,
+				),
 			);
 			commands.push(
 				`echo "⚠️ INFO: After the build is finished, you need to wait a few seconds for the server to download the image and run the container."`,
@@ -76,7 +88,13 @@ export const uploadImageRemoteCommand = async (
 		if (rollbackRegistryTag) {
 			commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
 			commands.push(
-				await getRegistryCommands(r, imageName, rollbackRegistryTag, logins),
+				await getRegistryCommands(
+					r,
+					imageName,
+					rollbackRegistryTag,
+					serverId,
+					true,
+				),
 			);
 		}
 	}
@@ -135,13 +153,21 @@ export const getRegistryTag = (registry: Registry, imageName: string) => {
  * Logs docker in to `registry` on `serverId` (this host without one), fetching
  * a fresh auth token for ECR. It runs as its own command, ahead of the script
  * that pushes or pulls, so the password travels on stdin and never lands in a
- * command line; docker keeps the credentials in the host's config for that
- * script. Shared by the application upload and the compose build server flow.
+ * command line.
+ *
+ * With `isolated` the login goes to the registry's own docker config directory
+ * and that directory is returned: the script must then run `docker --config
+ * <dir>` (see dockerWithConfig). Registries on one URL with different accounts
+ * then no longer replace each other's login. Without it the login goes to the
+ * host's default config, which is what `stack deploy --with-registry-auth` and
+ * `service update --with-registry-auth` read.
+ * Shared by the application upload and the compose build server flow.
  */
 export const loginDockerRegistry = async (
 	registry: Registry,
 	serverId: string | null | undefined,
-): Promise<void> => {
+	options?: { isolated?: boolean; cancelable?: LoginCancelable },
+): Promise<string | undefined> => {
 	let ecrAuthPassword: string | undefined;
 	if (registry.registryType === "awsEcr") {
 		const token = await getECRAuthToken({
@@ -152,6 +178,9 @@ export const loginDockerRegistry = async (
 		ecrAuthPassword = token.password;
 	}
 
+	const configDir = options?.isolated
+		? getRegistryConfigDir(registry.registryId, !!serverId)
+		: undefined;
 	await runDockerLogin(
 		{
 			registryType: registry.registryType,
@@ -159,51 +188,27 @@ export const loginDockerRegistry = async (
 			username: registry.username,
 			password: registry.password,
 			ecrAuthPassword,
+			configDir,
 		},
 		serverId,
+		{ cancelable: options?.cancelable },
 	);
+	return configDir;
 };
-
-type LoginSession = (registry: Registry) => Promise<void>;
 
 /**
- * Logs in each registry of one upload, once. The logins all run while the
- * script is generated, ahead of every push, and docker keeps a single login per
- * registry URL in the host config, so two registries on one URL with different
- * accounts would leave the later account in place for both pushes. That is
- * refused with a clear error instead of pushing under the wrong credential.
+ * The deploy registry logs in to the host's default config, which the swarm
+ * deploy reads; the build and rollback registries get their own config, so
+ * they cannot replace its login (or each other's) when they share a URL.
  */
-const createLoginSession = (
-	serverId: string | null | undefined,
-): LoginSession => {
-	const seen = new Map<string, { account: string; name: string }>();
-	return async (registry) => {
-		const url = (registry.registryUrl || "").toLowerCase();
-		const account =
-			registry.registryType === "awsEcr"
-				? `aws:${registry.awsAccessKeyId}`
-				: `${registry.username}:${registry.password}`;
-		const previous = seen.get(url);
-		if (previous) {
-			if (previous.account !== account) {
-				throw new Error(
-					`Registries "${previous.name}" and "${registry.registryName}" both use ${url || "Docker Hub"} with different accounts. Docker keeps one login per registry URL on a host, so the second login would replace the first before its push. Use the same account for both, or a different registry URL.`,
-				);
-			}
-			return;
-		}
-		await loginDockerRegistry(registry, serverId);
-		seen.set(url, { account, name: registry.registryName });
-	};
-};
-
 const getRegistryCommands = async (
 	registry: Registry,
 	imageName: string,
 	registryTag: string,
-	logins: LoginSession,
+	serverId: string | null | undefined,
+	isolated: boolean,
 ): Promise<string> => {
-	await logins(registry);
+	const configDir = await loginDockerRegistry(registry, serverId, { isolated });
 
 	return `
 echo ${quote([`📦 [Enabled Registry] Uploading image to '${registry.registryType}' | '${registryTag}'`])} ;
@@ -213,7 +218,7 @@ docker tag ${quote([imageName])} ${quote([registryTag])} || {
 	exit 1;
 }
 echo "✅ Image Tagged" ;
-docker push ${quote([registryTag])} || {
+${dockerWithConfig(configDir)} push ${quote([registryTag])} || {
 	echo "❌ Error pushing image" ;
 	exit 1;
 }

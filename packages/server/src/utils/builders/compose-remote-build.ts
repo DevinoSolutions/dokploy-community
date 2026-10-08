@@ -1,4 +1,5 @@
 import { dirname } from "node:path";
+import { dockerWithConfig } from "@dokploy/server/utils/process/dockerConfig";
 import { quote } from "shell-quote";
 import { stringify } from "yaml";
 import {
@@ -199,10 +200,14 @@ export const getComposeBuildCommand = (
 export const getTagAndPushCommand = ({
 	images,
 	registryLabel,
+	configDir,
 }: {
 	images: ComposePushedImage[];
 	registryLabel: string;
+	/** The registry's own docker config (see loginDockerRegistry), if any. */
+	configDir?: string;
 }) => {
+	const docker = dockerWithConfig(configDir);
 	const lines: string[] = [
 		"set -e;",
 		`echo ${quote([`🔑 Logging in to registry ${registryLabel}`])};`,
@@ -217,8 +222,8 @@ export const getTagAndPushCommand = ({
 			`docker image inspect ${local} >/dev/null 2>&1 || { echo ${quote([`❌ The build did not produce image ${image.localImage} for service ${image.service}`])}; exit 1; }`,
 			`docker tag ${local} ${ref} || { echo "❌ Error tagging image"; exit 1; }`,
 			`docker tag ${local} ${latest} || { echo "❌ Error tagging image"; exit 1; }`,
-			`docker push ${ref} || { echo "❌ Error pushing image"; exit 1; }`,
-			`docker push ${latest} || { echo "❌ Error pushing image"; exit 1; }`,
+			`${docker} push ${ref} || { echo "❌ Error pushing image"; exit 1; }`,
+			`${docker} push ${latest} || { echo "❌ Error pushing image"; exit 1; }`,
 			`echo ${quote([`✅ ${image.service} pushed`])};`,
 		);
 	}
