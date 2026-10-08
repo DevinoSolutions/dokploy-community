@@ -343,7 +343,8 @@ export const execAsyncRemote = async (
 						return;
 					}
 					if (options.stdin !== undefined) {
-						stream.write(options.stdin);
+						// Nothing to send for an empty secret, but the input is still closed.
+						if (options.stdin) stream.write(options.stdin);
 						stream.end();
 					}
 					stream
