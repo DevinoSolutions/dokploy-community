@@ -195,10 +195,16 @@ unconfirmed until measured).
 1. Pass the gate (section 3).
 2. Back up or confirm the recovery path (section 8). **If there is no recovery path,
    stop.**
-3. Put the registry in read-only mode (4.1). Check that a push now fails:
-   `docker push` of a tiny throwaway tag from devino-first is not needed; an
-   unauthenticated check is enough: `GET /v2/` still returns 401, and the container
-   `Env` names include the maintenance variable.
+3. Put the registry in read-only mode (4.1), then **prove that writes are blocked**.
+   An env var name in `docker inspect` is not proof. Send an authenticated blob
+   upload start to a repo that exists:
+   `POST http://localhost:5000/v2/<repo>/blobs/uploads/`. Feed the credentials with
+   `curl -K -` and a config on stdin (`user = "dokploy:..."`), never on the command
+   line, and do not print them. Expect an error (405 or 503, `UNSUPPORTED` or a
+   read-only message). **If it returns 202, the registry is still writable: abort and
+   do not run GC.** In that case, cancel the upload session it opened with `DELETE`
+   on the `Location` it returned, then fix the read-only setup. Also check that
+   `GET /v2/` with the credentials still returns 200.
 4. Run the dry-run (section 5), review, and approve.
 5. Re-check the gate (section 3, items 1 to 4).
 6. Run for real:
@@ -248,13 +254,22 @@ Before going back to read-write:
 
 1. **Registry health.** `GET /v2/` with the `dokploy` credentials returns 200;
    anonymous returns 401. The container is up.
-2. **Pull a kept digest for a few repos.** Choose at least three: one swarm app
+2. **Prove no layer is missing, with no local cache involved.** A pull on
+   devino-first can succeed from cached layers even when the registry lost them, so
+   do not rely on a plain pull. Choose at least three repos: one swarm app
    (`:latest`), one compose with `dpl-*` tags (a kept digest and the newest), and one
-   that is multi-arch if any. For each, pull **by digest** from devino-first
-   (`docker pull localhost:5000/registry.devino.ca/<name>@sha256:...`). A manifest
-   `HEAD` is not enough; a pull fetches every layer, which is what GC could have
-   broken. Remove the pulled test images afterward only if they were not already
-   present (check first).
+   multi-arch if any. For each kept manifest, over the registry API (credentials via
+   `curl -K -` on stdin, never argv):
+   - `GET /v2/<repo>/manifests/<digest>` (for an index, repeat for every child
+     manifest);
+   - `HEAD /v2/<repo>/blobs/<digest>` for the config blob and **every layer blob**.
+     Expect 200 for all. Any 404 means GC swept something that is still referenced:
+     stop, keep the registry read-only, and go to section 8.
+
+   As a second check, pull one kept digest with an empty image store: use a
+   throwaway `DOCKER_CONFIG` for the login, and `docker image rm` the digest first (or
+   pull on a host that has never had it). Remove the pulled test image afterward only
+   if it was not already present (check first).
 3. **Spot-check a deleted `dpl-*` tag** now returns 404, as expected.
 4. Look at the registry log for errors (`docker logs --since 30m`), names and status
    lines only.
