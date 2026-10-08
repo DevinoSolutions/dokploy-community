@@ -45,11 +45,11 @@ Confirmed means read in the distribution docs through Context7
 | The registry is eventually consistent by design and relies on digest verification and write-once manifests | Confirmed | architecture.md |
 | A push during GC can lose a blob uploaded during the mark phase | Given in the task brief; consistent with the upstream guidance to make the registry read-only or stop it | brief |
 | Cost and time of the S3 mark walk (number of LIST and GET calls, minutes per 1000 manifests) | **Unconfirmed.** The mark phase enumerates every repository, tag and manifest and reads each manifest from S3, so cost grows with the number of manifests, not with bytes. Measure it with the dry-run (section 5) | none |
-| S3 read-after-write consistency | **Unconfirmed for this endpoint.** AWS S3 is strongly consistent since December 2020. The bucket endpoint here (`REGISTRY_STORAGE_S3_REGIONENDPOINT` is set, with path-style) may be a different S3-compatible provider. Check which one it is | none |
+| S3 read-after-write consistency | The provider is **Backblaze B2** (endpoint host `s3.us-east-005.backblazeb2.com`, bucket `devino-dokploy-backups`), checked 2026-10-08. B2's consistency for this access pattern is still **unconfirmed** | devino-first (env names and endpoint host only) |
 | Container mounts: bind `registry.password` to `/auth/registry.password`, and an anonymous docker volume at `/var/lib/registry` | Confirmed (inspect) | devino-first |
 | Restart policy `unless-stopped`; `StartedAt` 2026-09-12T05:19:21Z | Confirmed (inspect) | devino-first |
 | Env var names present: `REGISTRY_STORAGE`, `REGISTRY_STORAGE_S3_*` (BUCKET, REGION, REGIONENDPOINT, FORCEPATHSTYLE, CHUNKSIZE, ACCESSKEY, SECRETKEY), `REGISTRY_STORAGE_DELETE_ENABLED`, `REGISTRY_AUTH*`, `REGISTRY_HTTP_SECRET`, `REGISTRY_HEALTH_STORAGEDRIVER_ENABLED`. No `MAINTENANCE` var yet | Confirmed (names only) | devino-first |
-| S3 bucket versioning status | **To check** (section 8) | none |
+| S3 bucket versioning status | **Effectively on.** Checked 2026-10-08, read-only. The bucket has no lifecycle rules, so B2 keeps all versions. It has no object lock and no default retention. See section 8 | `b2 bucket get` |
 
 ## 3. Preconditions gate
 
@@ -294,10 +294,28 @@ Then return to read-write:
 layer was swept, the image cannot be pulled, and the only way back is to restore the
 objects from S3 or rebuild the image.
 
-- **Bucket versioning: to check.** Look at the bucket's versioning status with the
-  provider's tooling before the first real run. If versioning is on, deleted objects
-  become delete markers and can be restored by removing the marker (or restoring the
-  prior version). If it is off, nothing is recoverable from the bucket.
+- **Bucket versioning: effectively on.** This was checked read-only on 2026-10-08:
+  - `b2 bucket get devino-dokploy-backups` shows `lifecycleRules: []`, no
+    `fileLockConfiguration` and no default retention.
+  - `GetBucketVersioning` returns `Enabled` on another B2 bucket of this account (the S3
+    API reports that for every B2 bucket). It was not called with the registry's own key.
+  - B2 always keeps file versions, and with no lifecycle rule it keeps them forever.
+
+  What this means for GC:
+  - A GC delete is an S3 `DeleteObject` without a version id. On B2 it only *hides* the
+    file, as a delete marker. The blob stays restorable: remove the hide marker, or copy
+    the prior version back, with `b2 file hide`/`unhide` or the console's "show versions".
+  - **GC alone frees no B2 storage.** The hidden versions are still billed until a
+    lifecycle rule (`daysFromHidingToDeleting`) or an explicit version delete removes
+    them. Getting the space back is a second, deliberate step after GC has been verified.
+    One example is a lifecycle rule on the `docker/registry/v2/` prefix with a grace
+    period of a few days. Adding a lifecycle rule is a write to the bucket and needs
+    its own approval.
+  - The bucket is named `devino-dokploy-backups`. Check whether it also holds Dokploy
+    backups before scoping any lifecycle rule. Never apply a rule to the whole bucket.
+
+  Re-check before the first real run: if anyone has since added a lifecycle rule that
+  purges hidden files quickly, the restore window is gone.
 - **Backups: to check.** Is there a copy of the bucket (provider snapshot, a second
   bucket, `rclone sync`)? Not known at the time of writing.
 - **Do not run GC without a recovery path.** That means either versioning on, or a
@@ -329,8 +347,11 @@ objects from S3 or rebuild the image.
 
 ## 10. Open items
 
-- Check bucket versioning and the existing backup state (sections 2 and 8).
-- Confirm which S3 provider the endpoint is, and its consistency model.
+- ~~Check bucket versioning~~ Done 2026-10-08: effectively on (B2 keeps all versions, no
+  lifecycle rules); see section 8. A separate backup copy is still unknown.
+- The provider is Backblaze B2. Its consistency model for this access pattern is still to confirm.
+- Plan how storage is reclaimed after GC: a lifecycle rule scoped to the registry prefix
+  (section 8), only once GC is verified.
 - Test the env override `REGISTRY_STORAGE_MAINTENANCE_READONLY_ENABLED` on a
   throwaway registry container (not prod) to confirm it works next to
   `REGISTRY_STORAGE=s3`.
