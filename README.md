@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.10**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.11**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.10 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.11 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,18 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.11
+
+**Registry passwords never appear in a process command line** ([#300](https://github.com/DevinoSolutions/dokploy-community/pull/300)). Registry logins now send the password on the login process's stdin, locally and over SSH, instead of embedding it in a `printf ... | docker login` command. Application deploys, build-policy pushes, docker-source pulls, rollbacks, ECR and the registry test calls all use it, so `ps` on a host no longer shows a registry password. A refused login now fails the deploy with the command's own error. Other secrets in build scripts (git clone tokens, the base64 `.env`) are not covered yet.
+
+**A failed compose registry login is logged** ([#301](https://github.com/DevinoSolutions/dokploy-community/pull/301)). A failed registry login on the build server or the serving host writes `Registry login failed for <url>: ...` to the deployment log before the deploy fails. SSH commands no longer write an empty stdin.
+
+**Registries on one URL keep their own login** ([#303](https://github.com/DevinoSolutions/dokploy-community/pull/303)). Each registry row gets its own docker config directory per host (`/etc/dokploy/docker-config/<registryId>`, mode 700), used with `docker --config` for build and rollback registry pushes, build-policy pushes, compose build-server pushes and docker-source pulls. Two registry rows with the same URL and different accounts no longer replace each other's login. The deploy registry and the compose serving host stay on the default config. A cancel during a compose build-server login ends as a cancel. Deleting a registry row does not yet remove its config directory.
+
+**Docs and tests.** A registry password rotation record ([#299](https://github.com/DevinoSolutions/dokploy-community/pull/299)), a registry garbage collection runbook ([#302](https://github.com/DevinoSolutions/dokploy-community/pull/302)) with the bucket versioning check ([#304](https://github.com/DevinoSolutions/dokploy-community/pull/304)), and the env-file tests skip on Windows ([#298](https://github.com/DevinoSolutions/dokploy-community/pull/298)).
+
+> No database migration in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.10
 
@@ -630,7 +642,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.10
+export DOKPLOY_VERSION=v0.30.8-community.11
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -643,7 +655,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.10      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.11      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
