@@ -102,6 +102,14 @@ describe("execAsyncRemote stdin", () => {
 		expect(client.channel.ended).toBe(true);
 	});
 
+	it("writes nothing for an empty stdin but still closes the channel", async () => {
+		await execAsyncRemote("srv-1", LOGIN, undefined, { stdin: "" });
+
+		const [client] = ssh.clients;
+		expect(client.channel.written).toEqual([]);
+		expect(client.channel.ended).toBe(true);
+	});
+
 	it("leaves stdin alone when no stdin is given", async () => {
 		await execAsyncRemote("srv-1", "echo hi");
 
