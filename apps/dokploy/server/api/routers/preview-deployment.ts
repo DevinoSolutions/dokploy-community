@@ -13,7 +13,9 @@ import {
 } from "@dokploy/server";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import {
+	getPreviewSourceMismatchMessage,
 	isValidPreviewIdentifier,
+	PREVIEW_IDENTIFIER_GUIDANCE,
 	PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
 	resolvePreviewDockerImage,
 } from "@dokploy/server/utils/preview-image";
@@ -184,6 +186,13 @@ export const previewDeploymentRouter = createTRPCRouter({
 			const application = await findApplicationById(
 				previewDeployment.applicationId as string,
 			);
+			const sourceMismatch = getPreviewSourceMismatchMessage(
+				application.sourceType === "docker",
+				previewDeployment.pullRequestId,
+			);
+			if (sourceMismatch) {
+				throw new TRPCError({ code: "BAD_REQUEST", message: sourceMismatch });
+			}
 			const jobData: DeploymentJob = {
 				applicationId: previewDeployment.applicationId as string,
 				titleLog: input.title || "Rebuild Preview Deployment",
@@ -262,14 +271,23 @@ const dockerImagePreviewInput = (
 	if (!isValidPreviewIdentifier(identifier)) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message:
-				"The preview identifier may only contain letters, digits, '.', '_' and '-'",
+			message: PREVIEW_IDENTIFIER_GUIDANCE,
 		});
 	}
-	const image = resolvePreviewDockerImage(
-		application.previewDockerImage,
-		identifier,
-	);
+	let image: string | null;
+	try {
+		image = resolvePreviewDockerImage(
+			application.previewDockerImage,
+			identifier,
+		);
+	} catch (error) {
+		// A stored template that no longer passes validation (it predates the
+		// rules, or was written around the API) must not be pulled.
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: error instanceof Error ? error.message : String(error),
+		});
+	}
 	if (!image) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",

@@ -181,10 +181,69 @@ describe("previewDeployment.create for a Docker-image application", () => {
 				applicationId: "app-1",
 				pullRequestNumber: "42; rm -rf /",
 			}),
-		).rejects.toThrow("may only contain");
+		).rejects.toThrow("1 to 63 letters, digits or '-'");
 
 		expect(mocks.createPreviewDeployment).not.toHaveBeenCalled();
 	});
+
+	it.each([
+		"evil.example.com",
+		"v1.2_rc",
+		"a_b",
+		"-42",
+		"42-",
+		"a".repeat(64),
+	])("rejects the identifier %j that is not a DNS label", async (identifier) => {
+		mocks.findApplicationById.mockResolvedValue(dockerApplication());
+
+		await expect(
+			caller.create({ applicationId: "app-1", pullRequestNumber: identifier }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+		expect(mocks.createPreviewDeployment).not.toHaveBeenCalled();
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+	});
+
+	it("accepts a 63 character identifier", async () => {
+		mocks.findApplicationById.mockResolvedValue(dockerApplication());
+
+		await caller.create({
+			applicationId: "app-1",
+			pullRequestNumber: "a".repeat(63),
+		});
+
+		expect(mocks.createPreviewDeployment).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		["the placeholder in the registry part", "${{preview.prNumber}}/app:latest"],
+		[
+			"the placeholder in the repository",
+			"ghcr.io/${{preview.prNumber}}/app:latest",
+		],
+		["no placeholder", "ghcr.io/acme/app:staging"],
+		[
+			"two placeholders",
+			"ghcr.io/acme/app:${{preview.prNumber}}-${{preview.prNumber}}",
+		],
+	])(
+		"refuses to pull a stored template with %s",
+		async (_name, previewDockerImage) => {
+			mocks.findApplicationById.mockResolvedValue(
+				dockerApplication({ previewDockerImage }),
+			);
+
+			await expect(
+				caller.create({ applicationId: "app-1", pullRequestNumber: "42" }),
+			).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				message: expect.stringContaining("Invalid preview image template"),
+			});
+
+			expect(mocks.createPreviewDeployment).not.toHaveBeenCalled();
+			expect(mocks.queueAdd).not.toHaveBeenCalled();
+		},
+	);
 
 	it("honours the preview switch and the preview limit", async () => {
 		mocks.findApplicationById.mockResolvedValueOnce(
@@ -205,6 +264,49 @@ describe("previewDeployment.create for a Docker-image application", () => {
 		).rejects.toThrow("limit reached");
 
 		expect(mocks.createPreviewDeployment).not.toHaveBeenCalled();
+	});
+});
+
+describe("previewDeployment.redeploy source mismatch", () => {
+	const previewRow = (pullRequestId: string) => ({
+		previewDeploymentId: "preview-1",
+		applicationId: "app-1",
+		composeId: null,
+		pullRequestId,
+	});
+
+	it("refuses to redeploy a Docker preview after the source type changed", async () => {
+		mocks.findPreviewDeploymentById.mockResolvedValue(previewRow("docker-42"));
+		mocks.findApplicationById.mockResolvedValue(
+			dockerApplication({ sourceType: "github" }),
+		);
+
+		await expect(
+			caller.redeploy({ previewDeploymentId: "preview-1" }),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: expect.stringContaining("created for a Docker-image source"),
+		});
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+	});
+
+	it("refuses to redeploy a pull request preview of a Docker-image source", async () => {
+		mocks.findPreviewDeploymentById.mockResolvedValue(previewRow("1001"));
+		mocks.findApplicationById.mockResolvedValue(dockerApplication());
+
+		await expect(
+			caller.redeploy({ previewDeploymentId: "preview-1" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+	});
+
+	it("redeploys a Docker preview of a Docker-image source", async () => {
+		mocks.findPreviewDeploymentById.mockResolvedValue(previewRow("docker-42"));
+		mocks.findApplicationById.mockResolvedValue(dockerApplication());
+
+		await caller.redeploy({ previewDeploymentId: "preview-1" });
+
+		expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
 	});
 });
 

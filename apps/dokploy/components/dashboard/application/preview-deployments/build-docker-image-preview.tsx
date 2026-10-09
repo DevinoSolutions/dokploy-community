@@ -125,7 +125,7 @@ export const BuildDockerImagePreview = ({
 						/>
 						{trimmed && !isValid && (
 							<span className="text-sm text-destructive">
-								Use only letters, digits, ".", "_" and "-".
+								Use 1 to 63 letters, digits or "-", starting and ending with a letter or digit.
 							</span>
 						)}
 					</div>

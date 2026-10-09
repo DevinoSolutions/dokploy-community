@@ -78,3 +78,11 @@ test("handles multiple occurrences of the same variable", () => {
 	);
 	expect(result).toBe("123-123.example.com");
 });
+
+test("lower-cases a mixed-case ${prNumber} for the hostname", () => {
+	const result = interpolateSubdomainTemplate(
+		"${prNumber}.previews.example.com",
+		{ ...baseVars, prNumber: "PR-Fix-42" },
+	);
+	expect(result).toBe("pr-fix-42.previews.example.com");
+});

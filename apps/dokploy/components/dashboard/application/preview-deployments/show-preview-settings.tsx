@@ -1,6 +1,5 @@
 import {
-	isValidPreviewImageTemplate,
-	PREVIEW_IMAGE_GUIDANCE,
+	getPreviewImageTemplateError,
 	PREVIEW_IMAGE_PLACEHOLDER,
 } from "@dokploy/server/utils/preview-image";
 import {
@@ -168,7 +167,12 @@ const schema = z
 			.refine(isValidPreviewWildcard, { message: PREVIEW_WILDCARD_GUIDANCE }),
 		previewDockerImage: z
 			.string()
-			.refine(isValidPreviewImageTemplate, { message: PREVIEW_IMAGE_GUIDANCE }),
+			.superRefine((value, ctx) => {
+				const message = getPreviewImageTemplateError(value);
+				if (message) {
+					ctx.addIssue({ code: "custom", message });
+				}
+			}),
 		port: z.number(),
 		previewLimit: z.number(),
 		previewLabels: z.array(z.string()).optional(),
@@ -379,8 +383,10 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 															<code className="text-xs">
 																{PREVIEW_IMAGE_PLACEHOLDER}
 															</code>{" "}
-															for the pull request number or tag you deploy
-															the preview for. Registry credentials of this
+															once, in the tag, for the pull request
+															number or tag you deploy the preview for
+															(it cannot be used in the registry or
+															repository part). Registry credentials of this
 															application are used to pull it. Set the port
 															below to the one the image listens on.
 														</span>

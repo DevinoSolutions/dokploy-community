@@ -117,6 +117,7 @@ const previewDeployment = {
 	previewDeploymentId: "preview-id",
 	appName: "preview-app",
 	branch: "42",
+	pullRequestId: "docker-42",
 	pullRequestNumber: "42",
 	pullRequestCommentId: "",
 	domain: {
@@ -235,11 +236,98 @@ describe("Docker image application previews", () => {
 		},
 	);
 
+	it.each([
+		["deploy", deployPreviewApplication],
+		["rebuild", rebuildPreviewApplication],
+	])(
+		"refuses to pull a stored template that puts the placeholder in the registry during %s",
+		async (_, fn) => {
+			vi.mocked(db.query.applications.findFirst).mockResolvedValue({
+				...structuredClone(application),
+				previewDockerImage: "${{preview.prNumber}}/app:latest",
+				registry: { registryId: "registry-id", registryType: "cloud" },
+			} as never);
+			vi.mocked(previewService.findPreviewDeploymentById).mockResolvedValue({
+				...structuredClone(previewDeployment),
+				pullRequestNumber: "evil.example.com",
+			} as never);
+
+			await expect(run(fn)).rejects.toThrow("Invalid preview image template");
+
+			expect(dockerProvider.buildRemoteDocker).not.toHaveBeenCalled();
+			expect(builders.mechanizeDockerContainer).not.toHaveBeenCalled();
+			expect(deploymentService.updateDeploymentStatus).toHaveBeenCalledWith(
+				"deployment-id",
+				"error",
+			);
+		},
+	);
+
+	it.each([
+		["deploy", deployPreviewApplication],
+		["rebuild", rebuildPreviewApplication],
+	])(
+		"refuses a stored template without a placeholder during %s",
+		async (_, fn) => {
+			vi.mocked(db.query.applications.findFirst).mockResolvedValue({
+				...structuredClone(application),
+				previewDockerImage: "ghcr.io/acme/app:latest",
+			} as never);
+
+			await expect(run(fn)).rejects.toThrow(
+				"every preview would pull the same image",
+			);
+			expect(dockerProvider.buildRemoteDocker).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		["deploy", deployPreviewApplication],
+		["rebuild", rebuildPreviewApplication],
+	])(
+		"refuses a pull request preview row when the source is a Docker image during %s",
+		async (_, fn) => {
+			vi.mocked(previewService.findPreviewDeploymentById).mockResolvedValue({
+				...structuredClone(previewDeployment),
+				pullRequestId: "1001",
+			} as never);
+
+			await expect(run(fn)).rejects.toThrow("created from a pull request");
+
+			expect(dockerProvider.buildRemoteDocker).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		["deploy", deployPreviewApplication],
+		["rebuild", rebuildPreviewApplication],
+	])(
+		"refuses to clone for a Docker preview row after the source type changed during %s",
+		async (_, fn) => {
+			vi.mocked(db.query.applications.findFirst).mockResolvedValue({
+				...structuredClone(application),
+				sourceType: "gitlab",
+				registry: null,
+			} as never);
+
+			await expect(run(fn)).rejects.toThrow(
+				"This preview was created for a Docker-image source; recreate it after changing the source type",
+			);
+
+			expect(gitlabProvider.cloneGitlabRepository).not.toHaveBeenCalled();
+			expect(dockerProvider.buildRemoteDocker).not.toHaveBeenCalled();
+		},
+	);
+
 	it("does not use the docker pull path for a git provider preview", async () => {
 		vi.mocked(db.query.applications.findFirst).mockResolvedValue({
 			...structuredClone(application),
 			sourceType: "gitlab",
 			registry: null,
+		} as never);
+		vi.mocked(previewService.findPreviewDeploymentById).mockResolvedValue({
+			...structuredClone(previewDeployment),
+			pullRequestId: "1001",
 		} as never);
 		vi.mocked(gitlabProvider.cloneGitlabRepository).mockResolvedValue(
 			"clone-gitlab;",

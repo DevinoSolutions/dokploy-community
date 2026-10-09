@@ -1,8 +1,7 @@
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import { VALID_GIT_URL_REGEX } from "@dokploy/server/utils/git-url-validation";
 import {
-	isValidPreviewImageTemplate,
-	PREVIEW_IMAGE_GUIDANCE,
+	getPreviewImageTemplateError,
 } from "@dokploy/server/utils/preview-image";
 import {
 	isValidPreviewWildcard,
@@ -404,8 +403,11 @@ const createSchema = createInsertSchema(applications, {
 		.optional(),
 	previewDockerImage: z
 		.string()
-		.refine(isValidPreviewImageTemplate, {
-			message: PREVIEW_IMAGE_GUIDANCE,
+		.superRefine((value, ctx) => {
+			const message = getPreviewImageTemplateError(value);
+			if (message) {
+				ctx.addIssue({ code: "custom", message });
+			}
 		})
 		.nullable()
 		.optional(),

@@ -29,6 +29,7 @@ import { cloneGithubRepository } from "@dokploy/server/utils/providers/github";
 import { cloneGitlabRepository } from "@dokploy/server/utils/providers/gitlab";
 import { buildPreviewHeadRef } from "@dokploy/server/utils/providers/head-ref";
 import {
+	getPreviewSourceMismatchMessage,
 	PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
 	resolvePreviewDockerImage,
 } from "@dokploy/server/utils/preview-image";
@@ -883,6 +884,16 @@ export const deployPreviewApplication = async ({
 		// above means the preview status, the log and the PR comment all say why.
 		if (!buildPolicy) throw buildPolicyError;
 
+		// A preview row only fits the source it was created for (see
+		// getPreviewSourceMismatchMessage); refuse before cloning or pulling.
+		const sourceMismatch = getPreviewSourceMismatchMessage(
+			application.sourceType === "docker",
+			previewDeployment.pullRequestId,
+		);
+		if (sourceMismatch) {
+			throw new TRPCError({ code: "BAD_REQUEST", message: sourceMismatch });
+		}
+
 		application.appName = previewDeployment.appName;
 		application.env = resolvePreviewTemplateVariables(
 			`${application.previewEnv}\nDOKPLOY_DEPLOY_URL=${previewDeployment?.domain?.host}`,
@@ -1103,6 +1114,16 @@ export const rebuildPreviewApplication = async ({
 
 		// build-policy hook 1/4 (preview rebuild), continued.
 		if (!buildPolicy) throw buildPolicyError;
+
+		// A preview row only fits the source it was created for (see
+		// getPreviewSourceMismatchMessage); refuse before cloning or pulling.
+		const sourceMismatch = getPreviewSourceMismatchMessage(
+			application.sourceType === "docker",
+			previewDeployment.pullRequestId,
+		);
+		if (sourceMismatch) {
+			throw new TRPCError({ code: "BAD_REQUEST", message: sourceMismatch });
+		}
 
 		// Set application properties for preview deployment
 		application.appName = previewDeployment.appName;
