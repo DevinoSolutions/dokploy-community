@@ -137,7 +137,12 @@ const createResponse = () => {
 
 const createPullRequestRequest = (
 	action: string,
-	{ labels = [] as Array<{ name: string }> } = {},
+	{
+		labels = [] as Array<{ name: string }>,
+		author = "contributor",
+		sender = author,
+		fromFork = false,
+	} = {},
 ) =>
 	({
 		headers: {
@@ -149,6 +154,8 @@ const createPullRequestRequest = (
 				id: 12345,
 			},
 			action,
+			// The webhook actor: a maintainer labelling/pushing is not the author.
+			sender: { login: sender },
 			repository: {
 				name: "dokploy",
 				full_name: "agentHits/dokploy",
@@ -159,9 +166,15 @@ const createPullRequestRequest = (
 				number: "42",
 				title: "Add feature",
 				html_url: "https://github.com/agentHits/dokploy/pull/42",
-				head: { ref: "feature-branch", sha: "head-sha" },
+				head: {
+					ref: "feature-branch",
+					sha: "head-sha",
+					repo: fromFork
+						? { name: "dokploy", full_name: `${author}/dokploy` }
+						: { name: "dokploy", full_name: "agentHits/dokploy" },
+				},
 				base: { ref: "main" },
-				user: { login: "contributor" },
+				user: { login: author },
 				labels,
 			},
 		},
@@ -340,6 +353,69 @@ describe("GitHub webhook compose preview deployments", () => {
 				prAuthor: "contributor",
 			}),
 		);
+	});
+
+	describe("pull requests from forks", () => {
+		// Only the maintainer has write access, like a real repository.
+		const onlyMaintainerCanWrite = async (
+			_provider: unknown,
+			_owner: string,
+			_repo: string,
+			login: string,
+		) => ({
+			hasWriteAccess: login === "maintainer",
+			permission: login === "maintainer" ? "admin" : "read",
+		});
+
+		it("blocks a fork PR from a non-collaborator, even when a maintainer is the webhook actor", async () => {
+			mocks.checkUserRepositoryPermissions.mockImplementation(
+				onlyMaintainerCanWrite,
+			);
+			const res = createResponse();
+
+			// A maintainer labelling/pushing to an outsider's fork PR is the actor,
+			// but the code being built is the outsider's.
+			await handler(
+				createPullRequestRequest("labeled", {
+					author: "outsider",
+					sender: "maintainer",
+					fromFork: true,
+				}),
+				res,
+			);
+
+			expect(mocks.checkUserRepositoryPermissions).toHaveBeenCalledWith(
+				expect.anything(),
+				"agentHits",
+				"dokploy",
+				"outsider",
+			);
+			expect(mocks.createComposePreview).not.toHaveBeenCalled();
+			expect(mocks.createPreviewDeployment).not.toHaveBeenCalled();
+			expect(mocks.queueAdd).not.toHaveBeenCalled();
+			expect(mocks.createSecurityBlockedComment).toHaveBeenCalledWith(
+				expect.objectContaining({ prAuthor: "outsider" }),
+			);
+		});
+
+		it("builds a fork PR whose author has write access", async () => {
+			mocks.checkUserRepositoryPermissions.mockImplementation(
+				onlyMaintainerCanWrite,
+			);
+			const res = createResponse();
+
+			await handler(
+				createPullRequestRequest("opened", {
+					author: "maintainer",
+					fromFork: true,
+				}),
+				res,
+			);
+
+			expect(mocks.createComposePreview).toHaveBeenCalledTimes(1);
+			expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
+			expect(mocks.createSecurityBlockedComment).not.toHaveBeenCalled();
+		});
 	});
 
 	it("skips the permission check when previewRequireCollaboratorPermissions is disabled", async () => {
