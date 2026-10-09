@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { db } = await import("@dokploy/server/db");
+const schema = await import("@dokploy/server/db/schema");
 const {
 	createConsentProof,
 	findMcpAccessToken,
@@ -23,6 +24,7 @@ const findFirst = vi.mocked(db.query.oauthAccessToken.findFirst);
 const findMany = vi.mocked(db.query.oauthRefreshToken.findMany);
 const dbDelete = vi.mocked(db.delete);
 const dbInsert = vi.mocked(db.insert);
+const dbUpdate = vi.mocked(db.update);
 
 const basePayload = {
 	userId: "user-1",
@@ -284,14 +286,35 @@ describe("token hygiene", () => {
 		dbDelete.mockClear();
 	});
 
-	it("purgeExpiredMcpTokens deletes dead tokens, assertions and abandoned registrations", async () => {
+	it("purgeExpiredMcpTokens deletes dead tokens, assertions, expired 1.6 rows and abandoned registrations", async () => {
+		dbUpdate.mockClear();
 		await purgeExpiredMcpTokens();
-		expect(dbDelete).toHaveBeenCalledTimes(4);
+		const tables = dbDelete.mock.calls.map(([table]) => table);
+		expect(tables).toEqual([
+			schema.oauthRefreshToken,
+			schema.oauthAccessToken,
+			schema.oauthClientAssertion,
+			schema.legacyOauthAccessToken,
+			schema.oauthClient,
+		]);
+		// Live 1.6 rows are the rollback copy: neither the consent nor the
+		// client table of 1.6 is purged.
+		expect(tables).not.toContain(schema.legacyOauthConsent);
+		expect(tables).not.toContain(schema.legacyOauthApplication);
+		// Replay responses past their window are cleared, rows kept.
+		expect(dbUpdate).toHaveBeenCalledTimes(1);
+		expect(dbUpdate).toHaveBeenCalledWith(schema.oauthRefreshToken);
 	});
 
-	it("revokeMcpAuthorization deletes the access tokens, refresh tokens and consents", async () => {
+	it("revokeMcpAuthorization deletes the 1.7 tokens and consents and the matching 1.6 rows", async () => {
 		await revokeMcpAuthorization("user-1", "client-1");
-		expect(dbDelete).toHaveBeenCalledTimes(3);
+		expect(dbDelete.mock.calls.map(([table]) => table)).toEqual([
+			schema.oauthAccessToken,
+			schema.oauthRefreshToken,
+			schema.oauthConsent,
+			schema.legacyOauthAccessToken,
+			schema.legacyOauthConsent,
+		]);
 	});
 
 	it("recordMcpConsent replaces the previous grant instead of accumulating rows", async () => {

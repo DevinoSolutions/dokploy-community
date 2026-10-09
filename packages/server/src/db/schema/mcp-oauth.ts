@@ -301,7 +301,11 @@ export const legacyOauthApplication = pgTable(
 	(table) => [index("oauth_application_user_id_idx").on(table.userId)],
 );
 
-/** 1.6 token rows (plaintext tokens). Kept for rollback only; see above. */
+/**
+ * 1.6 token rows (plaintext tokens). Kept for rollback; see above. Rows go
+ * only once both tokens expired or when the user revokes the client
+ * (`purgeExpiredMcpTokens`, `revokeMcpAuthorization`).
+ */
 export const legacyOauthAccessToken = pgTable(
 	"oauth_access_token",
 	{
