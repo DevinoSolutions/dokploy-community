@@ -60,33 +60,82 @@ const lockSql = () => {
 	return globalForLock.mcpRefreshLockSql;
 };
 
+/**
+ * Longest wait for a free connection of the lock pool. `lock_timeout` only
+ * starts once a connection is held, and the pool has no queue limit of its
+ * own, so without this bound a burst of distinct tokens (or holders stuck on a
+ * slow provider) would queue requests behind the four connections.
+ */
+export const ADVISORY_ACQUIRE_TIMEOUT_MS = 5_000;
+
+/**
+ * Builds a cross-replica lock on `getSql()`: a transaction-scoped Postgres
+ * advisory lock. When no pool connection frees up within `acquireTimeoutMs`
+ * (or the database is unreachable, or the advisory lock times out) the request
+ * proceeds under the in-process lock only and the reason is logged.
+ */
+export const createPostgresAdvisoryLock =
+	({
+		getSql = lockSql,
+		acquireTimeoutMs = ADVISORY_ACQUIRE_TIMEOUT_MS,
+	}: {
+		getSql?: () => ReturnType<typeof postgres>;
+		acquireTimeoutMs?: number;
+	} = {}): AdvisoryLock =>
+	async (key, fn) => {
+		type Result = Awaited<ReturnType<typeof fn>>;
+		let connected = false;
+		let abandoned = false;
+		let started = false;
+		let finished = false;
+		let result: Result | undefined;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const acquireTimeout = new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
+					if (connected) return;
+					abandoned = true;
+					reject(
+						new Error(
+							`no lock connection available within ${acquireTimeoutMs}ms`,
+						),
+					);
+				}, acquireTimeoutMs);
+			});
+			const run = getSql().begin(async (tx) => {
+				connected = true;
+				clearTimeout(timer);
+				// The request gave up waiting and runs without this lock; hand
+				// the slot straight back.
+				if (abandoned) return;
+				await tx`SELECT set_config('lock_timeout', ${ADVISORY_LOCK_TIMEOUT}, true)`;
+				await tx`SELECT pg_advisory_xact_lock(${REFRESH_LOCK_NAMESPACE}::int4, hashtext(${key}))`;
+				started = true;
+				result = await fn();
+				finished = true;
+			});
+			// A transaction that settles after the timeout won must not become
+			// an unhandled rejection.
+			run.catch(() => undefined);
+			await Promise.race([run, acquireTimeout]);
+			return result as Result;
+		} catch (error) {
+			// The request already ran: a failed COMMIT only means the lock was
+			// released by the server instead.
+			if (finished) return result as Result;
+			if (started) throw error;
+			console.error(
+				"[mcp] refresh advisory lock unavailable, using the in-process lock only",
+				error,
+			);
+			return fn();
+		} finally {
+			clearTimeout(timer);
+		}
+	};
+
 /** Default cross-replica lock: a transaction-scoped Postgres advisory lock. */
-export const postgresAdvisoryLock: AdvisoryLock = async (key, fn) => {
-	type Result = Awaited<ReturnType<typeof fn>>;
-	let started = false;
-	let finished = false;
-	let result: Result | undefined;
-	try {
-		await lockSql().begin(async (tx) => {
-			await tx`SELECT set_config('lock_timeout', ${ADVISORY_LOCK_TIMEOUT}, true)`;
-			await tx`SELECT pg_advisory_xact_lock(${REFRESH_LOCK_NAMESPACE}::int4, hashtext(${key}))`;
-			started = true;
-			result = await fn();
-			finished = true;
-		});
-		return result as Result;
-	} catch (error) {
-		// The request already ran: a failed COMMIT only means the lock was
-		// released by the server instead.
-		if (finished) return result as Result;
-		if (started) throw error;
-		console.error(
-			"[mcp] refresh advisory lock unavailable, using the in-process lock only",
-			error,
-		);
-		return fn();
-	}
-};
+export const postgresAdvisoryLock: AdvisoryLock = createPostgresAdvisoryLock();
 
 /**
  * Lock factory. `advisory: null` keeps the in-process layer only (tests, or a
@@ -189,6 +238,7 @@ export const serializeRefreshGrants =
 	(
 		handler: (req: IncomingMessage, res: ServerResponse) => Promise<unknown>,
 		lock: RefreshTokenLock,
+		{ maxHoldMs = REFRESH_LOCK_MAX_HOLD_MS }: { maxHoldMs?: number } = {},
 	) =>
 	async (req: IncomingMessage, res: ServerResponse) => {
 		if (req.method !== "POST" || pathOf(req.url) !== MCP_TOKEN_PATH) {
@@ -213,9 +263,31 @@ export const serializeRefreshGrants =
 		);
 		if (!refreshToken) return handler(req, res);
 		return lock(hashOAuthToken(refreshToken), async () => {
-			const result = await handler(req, res);
-			await responseDone(res);
-			return result;
+			// A handler that never settles must not keep its pool connection and
+			// its queue position forever: after the maximum hold the lock is
+			// released and the handler is left to finish (or hang) on its own,
+			// since a running handler cannot be cancelled.
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const held = (async () => {
+				const result = await handler(req, res);
+				await responseDone(res);
+				return result;
+			})();
+			const expired = new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => {
+					console.error(
+						`[mcp] refresh grant held its lock for ${maxHoldMs}ms, releasing it`,
+					);
+					resolve(undefined);
+				}, maxHoldMs);
+			});
+			// Whichever side loses must not surface as an unhandled rejection.
+			held.catch(() => undefined);
+			try {
+				return await Promise.race([held, expired]);
+			} finally {
+				clearTimeout(timer);
+			}
 		});
 	};
 

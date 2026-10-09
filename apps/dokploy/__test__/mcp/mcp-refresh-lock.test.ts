@@ -6,11 +6,15 @@ import {
 	type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { hashOAuthToken } = await import("@dokploy/server/services/mcp-oauth");
-const { createRefreshTokenLock, serializeRefreshGrants, refreshTokenOfTokenRequest } =
-	await import("@dokploy/server/services/mcp-refresh-lock");
+const {
+	createPostgresAdvisoryLock,
+	createRefreshTokenLock,
+	serializeRefreshGrants,
+	refreshTokenOfTokenRequest,
+} = await import("@dokploy/server/services/mcp-refresh-lock");
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -72,9 +76,12 @@ const createFakeProvider = (initialToken: string) => {
 const servers: Server[] = [];
 afterEach(async () => {
 	await Promise.all(
-		servers.splice(0).map(
-			(server) => new Promise((resolve) => server.close(resolve)),
-		),
+		servers.splice(0).map((server) => {
+			const closed = new Promise((resolve) => server.close(resolve));
+			// A test may leave a request hanging on purpose.
+			server.closeAllConnections();
+			return closed;
+		}),
 	);
 });
 
@@ -294,5 +301,140 @@ describe("refreshTokenOfTokenRequest", () => {
 			),
 		).toBeNull();
 		expect(refreshTokenOfTokenRequest("application/json", "{bad")).toBeNull();
+	});
+});
+
+describe("postgres advisory lock pool wait", () => {
+	// A stand-in for the 4-connection pool: `begin` hands the callback a
+	// transaction once `release()` frees a slot (or at once when `open`).
+	const createFakePool = ({ open }: { open: boolean }) => {
+		const waiting: Array<() => void> = [];
+		const statements: string[] = [];
+		let callbacksRun = 0;
+		const tx = (strings: TemplateStringsArray) => {
+			statements.push(strings.join("?"));
+			return Promise.resolve([]);
+		};
+		const sql = {
+			begin: async (callback: (tx: unknown) => Promise<unknown>) => {
+				if (!open) await new Promise<void>((resolve) => waiting.push(resolve));
+				callbacksRun++;
+				return callback(tx);
+			},
+		};
+		return {
+			sql: sql as never,
+			release: () => {
+				for (const resolve of waiting.splice(0)) resolve();
+			},
+			statements,
+			callbacksRun: () => callbacksRun,
+		};
+	};
+
+	it("falls back to the in-process lock when no connection frees up in time", async () => {
+		const pool = createFakePool({ open: false });
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const lock = createPostgresAdvisoryLock({
+				getSql: () => pool.sql,
+				acquireTimeoutMs: 20,
+			});
+			const ran = vi.fn(async () => "ran");
+			const started = Date.now();
+			await expect(lock("k", ran)).resolves.toBe("ran");
+			expect(Date.now() - started).toBeLessThan(2_000);
+			expect(ran).toHaveBeenCalledTimes(1);
+			expect(logged).toHaveBeenCalledWith(
+				"[mcp] refresh advisory lock unavailable, using the in-process lock only",
+				expect.objectContaining({
+					message: expect.stringContaining("no lock connection available"),
+				}),
+			);
+
+			// The queued transaction gets its slot later: it must not take the
+			// advisory lock or run the request a second time.
+			pool.release();
+			await sleep(20);
+			expect(pool.callbacksRun()).toBe(1);
+			expect(pool.statements).toEqual([]);
+			expect(ran).toHaveBeenCalledTimes(1);
+		} finally {
+			logged.mockRestore();
+		}
+	});
+
+	it("takes the advisory lock when a connection is available", async () => {
+		const pool = createFakePool({ open: true });
+		const lock = createPostgresAdvisoryLock({
+			getSql: () => pool.sql,
+			acquireTimeoutMs: 20,
+		});
+		await expect(lock("k", async () => "ran")).resolves.toBe("ran");
+		expect(pool.statements).toHaveLength(2);
+		expect(pool.statements[1]).toContain("pg_advisory_xact_lock");
+	});
+
+	it("does not time out a holder that already has its connection", async () => {
+		const pool = createFakePool({ open: true });
+		const lock = createPostgresAdvisoryLock({
+			getSql: () => pool.sql,
+			acquireTimeoutMs: 10,
+		});
+		const ran = vi.fn(async () => {
+			await sleep(50);
+			return "slow";
+		});
+		await expect(lock("k", ran)).resolves.toBe("slow");
+		expect(ran).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("serializeRefreshGrants hold bound", () => {
+	it("releases the lock of a handler that never settles", async () => {
+		const token = randomUUID();
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		let calls = 0;
+		const lock = createRefreshTokenLock({ advisory: null });
+		const base = await listen(
+			serializeRefreshGrants(
+				async (_req, res) => {
+					calls++;
+					if (calls === 1) return new Promise(() => {}); // never settles
+					res.statusCode = 204;
+					res.end();
+				},
+				lock,
+				{ maxHoldMs: 50 },
+			),
+		);
+		try {
+			// The first request hangs; the second queues behind it and must get
+			// its turn once the hold expires.
+			void fetch(`${base}/api/auth/oauth2/token`, {
+				method: "POST",
+				headers: { "content-type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: token,
+				}).toString(),
+			}).catch(() => undefined);
+			await sleep(10);
+			const second = await fetch(`${base}/api/auth/oauth2/token`, {
+				method: "POST",
+				headers: { "content-type": "application/x-www-form-urlencoded" },
+				body: new URLSearchParams({
+					grant_type: "refresh_token",
+					refresh_token: token,
+				}).toString(),
+			});
+			expect(second.status).toBe(204);
+			expect(calls).toBe(2);
+			expect(logged).toHaveBeenCalledWith(
+				expect.stringContaining("releasing it"),
+			);
+		} finally {
+			logged.mockRestore();
+		}
 	});
 });
