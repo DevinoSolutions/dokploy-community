@@ -20,7 +20,10 @@ import { apiCreatePreviewDeployment } from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
-import { assertPreviewAuthorAllowed } from "@/server/utils/preview-author-gate";
+import {
+	assertPreviewAuthorAllowed,
+	resolveVerifiedPreviewAuthor,
+} from "@/server/utils/preview-author-gate";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
 // A preview deployment belongs to either an application or a compose service.
@@ -238,8 +241,11 @@ const createApplicationPreviewFromApi = async (
 		});
 	}
 
-	// Same collaborator gate the webhook handler applies to the PR author.
-	await assertPreviewAuthorAllowed(application, input);
+	// Same collaborator gate the webhook handler applies to the PR author — but
+	// the author comes from the provider's pull request list for this number,
+	// never from the client (the number selects the code that gets built).
+	const verifiedInput = await resolveVerifiedPreviewAuthor(application, input);
+	await assertPreviewAuthorAllowed(application, verifiedInput);
 
 	const existingPreviewDeployment = await findPreviewDeploymentByApplicationId(
 		applicationId,
@@ -259,7 +265,7 @@ const createApplicationPreviewFromApi = async (
 				message: "Preview deployments limit reached",
 			});
 		}
-		const previewDeployment = await createPreviewDeployment(input);
+		const previewDeployment = await createPreviewDeployment(verifiedInput);
 		previewDeploymentId = previewDeployment.previewDeploymentId;
 	}
 
@@ -327,8 +333,11 @@ const createComposePreviewFromApi = async (
 		});
 	}
 
-	// Same collaborator gate the webhook handler applies to the MR/PR author.
-	await assertPreviewAuthorAllowed(compose, input);
+	// Same collaborator gate the webhook handler applies to the MR/PR author — the
+	// author comes from the provider's pull request list for this number, never
+	// from the client.
+	const verifiedInput = await resolveVerifiedPreviewAuthor(compose, input);
+	await assertPreviewAuthorAllowed(compose, verifiedInput);
 
 	const existingPreviewDeployment = await findPreviewDeploymentByComposeId(
 		composeId,
@@ -349,7 +358,7 @@ const createComposePreviewFromApi = async (
 				message: "Preview deployments limit reached",
 			});
 		}
-		const previewDeployment = await createComposePreview(input);
+		const previewDeployment = await createComposePreview(verifiedInput);
 		previewDeploymentId = previewDeployment.previewDeploymentId;
 	}
 

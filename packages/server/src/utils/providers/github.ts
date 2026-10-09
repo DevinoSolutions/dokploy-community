@@ -7,6 +7,7 @@ import type {
 import { findGithubById, type Github } from "@dokploy/server/services/github";
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
+import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { createAppAuth } from "@octokit/auth-app";
 import { TRPCError } from "@trpc/server";
 import { Octokit } from "octokit";
@@ -185,6 +186,12 @@ interface CloneGithubRepository {
 	appName: string;
 	owner: string | null;
 	branch: string | null;
+	/**
+	 * Pull-request head ref (e.g. `refs/pull/123/head`) to check out instead of
+	 * `branch`. Set for preview deployments so pull requests from forks build
+	 * from the base repository — see utils/providers/head-ref.ts.
+	 */
+	headRef?: string | null;
 	githubId: string | null;
 	repository: string | null;
 	type?: "application" | "compose";
@@ -203,6 +210,7 @@ export const cloneGithubRepository = async ({
 		repository,
 		owner,
 		branch,
+		headRef,
 		githubId,
 		enableSubmodules,
 		serverId,
@@ -236,6 +244,16 @@ export const cloneGithubRepository = async ({
 	const cloneUrl = `${cloneBase.protocol}//oauth2:${token}@${repoclone}`;
 
 	command += `echo ${quote([`Cloning Repo ${repoclone} to ${outputPath}: ✅`])};`;
+	if (headRef) {
+		command += buildHeadRefCheckoutCommand({
+			cloneUrl: String(cloneUrl ?? ""),
+			branch: String(branch ?? ""),
+			headRef,
+			outputPath: String(outputPath ?? ""),
+			enableSubmodules,
+		});
+		return command;
+	}
 	command += `git clone --branch ${quote([String(branch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
 
 	return command;

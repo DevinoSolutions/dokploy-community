@@ -7,6 +7,7 @@ import {
 } from "@dokploy/server/services/gitea";
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
+import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 
@@ -126,6 +127,12 @@ type GiteaClone = (ApplicationWithGitea | ComposeWithGitea) & {
 interface CloneGiteaRepository {
 	appName: string;
 	giteaBranch: string | null;
+	/**
+	 * Pull-request head ref (e.g. `refs/pull/123/head`) to check out instead of
+	 * `giteaBranch`. Set for preview deployments so pull requests from forks
+	 * build from the base repository — see utils/providers/head-ref.ts.
+	 */
+	headRef?: string | null;
 	giteaId: string | null;
 	giteaOwner: string | null;
 	giteaRepository: string | null;
@@ -143,6 +150,7 @@ export const cloneGiteaRepository = async ({
 	const {
 		appName,
 		giteaBranch,
+		headRef,
 		giteaId,
 		giteaOwner,
 		giteaRepository,
@@ -195,6 +203,16 @@ export const cloneGiteaRepository = async ({
 	);
 
 	command += `echo ${quote([`Cloning Repo ${repoClone} to ${outputPath}: ✅`])};`;
+	if (headRef) {
+		command += buildHeadRefCheckoutCommand({
+			cloneUrl: String(cloneUrl ?? ""),
+			branch: String(giteaBranch ?? ""),
+			headRef,
+			outputPath: String(outputPath ?? ""),
+			enableSubmodules,
+		});
+		return command;
+	}
 	command += `git clone --branch ${quote([String(giteaBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
 	return command;
 };

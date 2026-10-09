@@ -27,6 +27,7 @@ import {
 import { cloneGiteaRepository } from "@dokploy/server/utils/providers/gitea";
 import { cloneGithubRepository } from "@dokploy/server/utils/providers/github";
 import { cloneGitlabRepository } from "@dokploy/server/utils/providers/gitlab";
+import { buildPreviewHeadRef } from "@dokploy/server/utils/providers/head-ref";
 import { createTraefikConfig } from "@dokploy/server/utils/traefik/application";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
@@ -783,10 +784,7 @@ const finalizePreviewBuildMetadata = async ({
 	}
 
 	registerPreviewDeployment({ previewDeploymentId }).catch((error) => {
-		console.error(
-			"Error registering the Snapvisor preview deployment:",
-			error,
-		);
+		console.error("Error registering the Snapvisor preview deployment:", error);
 	});
 };
 
@@ -882,23 +880,32 @@ export const deployPreviewApplication = async ({
 			serverId: buildServerId,
 		};
 		let command = "set -e;";
+		// Preview checkouts resolve the pull-request head ref (fork-safe) — see
+		// utils/providers/head-ref.ts. Falls back to the branch when null.
+		const previewHeadRef = buildPreviewHeadRef(
+			application.sourceType,
+			previewDeployment.pullRequestNumber,
+		);
 		if (application.sourceType === "github") {
 			command += await cloneGithubRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
 				branch: previewDeployment.branch,
+				headRef: previewHeadRef,
 			});
 		} else if (application.sourceType === "gitlab") {
 			command += await cloneGitlabRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
 				gitlabBranch: previewDeployment.branch,
+				headRef: previewHeadRef,
 			});
 		} else if (application.sourceType === "gitea") {
 			command += await cloneGiteaRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
 				giteaBranch: previewDeployment.branch,
+				headRef: previewHeadRef,
 			});
 		} else {
 			throw new TRPCError({
@@ -1087,23 +1094,30 @@ export const rebuildPreviewApplication = async ({
 		// cache-hits every layer including `COPY . .` and the deploy
 		// finishes in seconds while still serving the original commit.
 		// Symmetric with `deployPreviewApplication` above.
+		const previewHeadRef = buildPreviewHeadRef(
+			application.sourceType,
+			previewDeployment.pullRequestNumber,
+		);
 		if (application.sourceType === "github") {
 			command += await cloneGithubRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
 				branch: previewDeployment.branch,
+				headRef: previewHeadRef,
 			});
 		} else if (application.sourceType === "gitlab") {
 			command += await cloneGitlabRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
 				gitlabBranch: previewDeployment.branch,
+				headRef: previewHeadRef,
 			});
 		} else if (application.sourceType === "gitea") {
 			command += await cloneGiteaRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
 				giteaBranch: previewDeployment.branch,
+				headRef: previewHeadRef,
 			});
 		} else {
 			throw new TRPCError({

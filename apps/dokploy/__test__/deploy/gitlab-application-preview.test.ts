@@ -162,6 +162,9 @@ describe("GitLab application previews", () => {
 				expect.objectContaining({
 					appName: previewDeployment.appName,
 					gitlabBranch: previewDeployment.branch,
+					// Fork-safe checkout: the MR head ref is fetched from the base
+					// project even when the source branch only exists in a fork.
+					headRef: "refs/merge-requests/42/head",
 				}),
 			);
 			expect(githubProvider.cloneGithubRepository).not.toHaveBeenCalled();

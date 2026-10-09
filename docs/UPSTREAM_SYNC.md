@@ -375,6 +375,32 @@ cloud-only content is filtered inside the wizard:
 (Stripe billing) and `server` steps when `settings.isCloud` is false, leaving
 welcome → project → deploy → complete. No fork change was needed.
 
+### Kept on every sync: preview deployments check out the PR head ref (forks supported)
+
+Upstream preview deploys run `git clone --branch <head branch>` against the
+*base* repository, which fails whenever the head branch only exists in a fork
+(GitHub/Gitea PRs, GitLab MRs), and upstream's Gitea handler refused fork PRs
+outright (`"Preview deployments are not supported for pull requests from
+forks"`). The fork derives the provider's PR head ref at deploy time and
+checks it out from the base repository instead — no fork credentials needed,
+`refs/pull/<n>/head` (github/gitea) / `refs/merge-requests/<iid>/head`
+(gitlab) are advertised by the base repo:
+
+- `packages/server/src/utils/providers/head-ref.ts` (**fork-owned**, net-new):
+  `buildPreviewHeadRef` + `buildHeadRefCheckoutCommand` (init → fetch head ref
+  `||` fetch branch → `checkout FETCH_HEAD`; the branch fallback keeps
+  hand-crafted/API rows and ref-less servers on the old behaviour).
+- Shared files whose hunks must survive theirs-wins: `utils/providers/
+  {github,gitlab,gitea}.ts` (`if (headRef)` branch after the Cloning echo),
+  `services/application.ts` (both preview clone sites), `services/compose.ts`
+  (`ComposeBuildEntity.headRef`), `services/preview-deployment.ts`
+  (`executeComposePreview` entity), and the fork-refusal deletion in
+  `apps/dokploy/server/utils/gitea-preview.ts`.
+- The `previewRequireCollaboratorPermissions` author gate is untouched and
+  still gates fork PRs on the *author's* write access.
+
+Drop ours and take upstream's when upstream ships an equivalent.
+
 ### Historical (superseded): fork Docker network management file map
 
 Net-new fork files (kept as-is unless upstream restructures their neighbors):

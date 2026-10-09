@@ -4,6 +4,9 @@ import {
 	checkGitlabMemberPermissionsByUserId,
 	checkUserRepositoryPermissions,
 	findGithubById,
+	getGiteaPullRequests,
+	getGithubPullRequests,
+	getGitlabMergeRequests,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
 
@@ -32,6 +35,120 @@ export interface PreviewAuthorGateInput {
 
 const AUTHOR_REQUIRED_MESSAGE =
 	"Preview deployment blocked: the change request author is required so their repository access can be verified. Send pullRequestAuthor (and pullRequestAuthorId for GitLab), or turn off the collaborator permission requirement in the preview deployment settings.";
+
+export interface PreviewChangeRequestInput extends PreviewAuthorGateInput {
+	branch: string;
+	pullRequestId: string;
+	pullRequestNumber: string;
+}
+
+/**
+ * Replace the client-claimed change request identity with the provider's.
+ *
+ * A preview checks out `refs/pull/<pullRequestNumber>/head`, so the number
+ * selects the code that gets built. The author gate only authorizes whoever the
+ * request *names* as the author; without this lookup a caller could name a
+ * collaborator while pointing the number at an untrusted fork's pull request.
+ * Here the open change request is fetched from the provider by number and its
+ * real author (and head branch) replace whatever the client sent. An unknown or
+ * closed change request, or an id that does not belong to that number, is
+ * rejected; a provider failure blocks the deployment (fail closed).
+ *
+ * Returns the input untouched when `previewRequireCollaboratorPermissions` is
+ * off (no author is checked then) and when the provider is not configured —
+ * `assertPreviewAuthorAllowed` rejects that case with its own message.
+ */
+export const resolveVerifiedPreviewAuthor = async <
+	T extends PreviewChangeRequestInput,
+>(
+	resource: PreviewAuthorGateResource,
+	input: T,
+): Promise<T> => {
+	if (resource.previewRequireCollaboratorPermissions === false) {
+		return input;
+	}
+
+	const listChangeRequests = async () => {
+		if (
+			resource.sourceType === "github" &&
+			resource.githubId &&
+			resource.owner &&
+			resource.repository
+		) {
+			return await getGithubPullRequests({
+				githubId: resource.githubId,
+				owner: resource.owner,
+				repo: resource.repository,
+			});
+		}
+		if (
+			resource.sourceType === "gitlab" &&
+			resource.gitlabId &&
+			resource.gitlabProjectId
+		) {
+			// Only the numeric project id is used to list merge requests.
+			return await getGitlabMergeRequests({
+				gitlabId: resource.gitlabId,
+				id: resource.gitlabProjectId,
+				owner: "",
+				repo: "",
+			});
+		}
+		if (
+			resource.sourceType === "gitea" &&
+			resource.giteaId &&
+			resource.giteaOwner &&
+			resource.giteaRepository
+		) {
+			return await getGiteaPullRequests({
+				giteaId: resource.giteaId,
+				owner: resource.giteaOwner,
+				repositoryName: resource.giteaRepository,
+			});
+		}
+		return null;
+	};
+
+	let changeRequests: Awaited<ReturnType<typeof listChangeRequests>>;
+	try {
+		changeRequests = await listChangeRequests();
+	} catch (error) {
+		console.error(
+			`Error listing change requests to verify the author for ${resource.name}:`,
+			error,
+		);
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message:
+				"Preview deployment blocked: could not look up the pull request to verify its author",
+		});
+	}
+
+	if (changeRequests === null) {
+		return input;
+	}
+
+	const number = input.pullRequestNumber.trim();
+	const changeRequest = changeRequests.find(
+		(candidate) =>
+			String(candidate.number) === number &&
+			String(candidate.id) === input.pullRequestId.trim(),
+	);
+
+	if (!changeRequest) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Preview deployment blocked: no open pull request #${number} matches the request (it may be closed or the id is wrong)`,
+		});
+	}
+
+	return {
+		...input,
+		branch: changeRequest.branch || input.branch,
+		pullRequestAuthor: changeRequest.authorUsername ?? undefined,
+		pullRequestAuthorId: changeRequest.authorId ?? undefined,
+	};
+};
 
 /**
  * Authorize a preview deployment by the *change request author*, mirroring what

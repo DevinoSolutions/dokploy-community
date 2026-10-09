@@ -299,21 +299,9 @@ const handleGiteaPullRequest = async <T extends PreviewResource>(
 	const prNumber = pullRequest?.number;
 	const repositorySlug = `${resource.giteaOwner}/${resource.giteaRepository}`;
 
-	// `cloneGiteaRepository` always clones the configured repository, so a branch
-	// that only exists in a fork can never be checked out. Bail out with a clear
-	// message instead of producing a failing build.
-	const headRepository = pullRequest?.head?.repo;
-	if (
-		headRepository &&
-		(!sameHandle(headRepository?.name, resource.giteaRepository) ||
-			!sameHandle(getPayloadOwner(headRepository), resource.giteaOwner))
-	) {
-		return {
-			status: 200,
-			message:
-				"Preview deployments are not supported for pull requests from forks",
-		};
-	}
+	// Pull requests from forks are supported: the deploy checks out
+	// `refs/pull/<n>/head` on this repository instead of the head branch, which
+	// only exists in the fork (see packages/server/src/utils/providers/head-ref.ts).
 
 	// SECURITY: preview deployments build and run pull request code on the
 	// Dokploy host, so only *authors* with write access may trigger them — the
