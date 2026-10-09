@@ -1,6 +1,10 @@
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import { VALID_GIT_URL_REGEX } from "@dokploy/server/utils/git-url-validation";
 import {
+	isValidPreviewImageTemplate,
+	PREVIEW_IMAGE_GUIDANCE,
+} from "@dokploy/server/utils/preview-image";
+import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
 } from "@dokploy/server/utils/preview-wildcard";
@@ -106,6 +110,12 @@ export const applications = pgTable("application", {
 	previewBuildSecrets: encryptedText("previewBuildSecrets"),
 	previewLabels: text("previewLabels").array(),
 	previewWildcard: text("previewWildcard"),
+	/**
+	 * Fork column. Image template for previews of a Docker-image application
+	 * (no repository to clone), e.g. `ghcr.io/acme/app:pr-${{preview.prNumber}}`.
+	 * `null` means previews are not available for the application.
+	 */
+	previewDockerImage: text("previewDockerImage"),
 	previewPort: integer("previewPort").default(3000),
 	previewHttps: boolean("previewHttps").notNull().default(false),
 	previewPath: text("previewPath").default("/"),
@@ -391,6 +401,13 @@ const createSchema = createInsertSchema(applications, {
 	previewWildcard: z
 		.string()
 		.refine(isValidPreviewWildcard, { message: PREVIEW_WILDCARD_GUIDANCE })
+		.optional(),
+	previewDockerImage: z
+		.string()
+		.refine(isValidPreviewImageTemplate, {
+			message: PREVIEW_IMAGE_GUIDANCE,
+		})
+		.nullable()
 		.optional(),
 	previewLimit: z.number().optional(),
 	previewHttps: z.boolean().optional(),

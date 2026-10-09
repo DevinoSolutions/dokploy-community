@@ -106,6 +106,11 @@ export const createSchema = createInsertSchema(previewDeployments, {
 	composeId: z.string().optional(),
 });
 
+const previewDeploymentTargetMessage = {
+	message: "Exactly one of applicationId or composeId must be provided",
+	path: ["applicationId"],
+};
+
 export const apiCreatePreviewDeployment = z
 	.object({
 		applicationId: z.string().min(1).optional(),
@@ -124,7 +129,33 @@ export const apiCreatePreviewDeployment = z
 		pullRequestAuthor: z.string().optional(),
 		pullRequestAuthorId: z.number().optional(),
 	})
-	.refine((data) => !!data.applicationId !== !!data.composeId, {
-		message: "Exactly one of applicationId or composeId must be provided",
-		path: ["applicationId"],
-	});
+	.refine(
+		(data) => !!data.applicationId !== !!data.composeId,
+		previewDeploymentTargetMessage,
+	);
+
+/**
+ * What `previewDeployment.create` accepts. A pull request preview needs the
+ * full change request (`apiCreatePreviewDeployment`); a preview of a
+ * Docker-image application has no change request at all and only needs the
+ * identifier that fills the image template's `${{preview.prNumber}}`
+ * (`pullRequestNumber`). Which one applies depends on the application's source
+ * type, so the procedure enforces the git fields itself.
+ */
+export const apiCreatePreviewDeploymentRequest = z
+	.object({
+		applicationId: z.string().min(1).optional(),
+		composeId: z.string().min(1).optional(),
+		domainId: z.string().optional(),
+		branch: z.string().min(1).optional(),
+		pullRequestId: z.string().min(1).optional(),
+		pullRequestNumber: z.string().min(1),
+		pullRequestURL: z.string().min(1).optional(),
+		pullRequestTitle: z.string().min(1).optional(),
+		pullRequestAuthor: z.string().optional(),
+		pullRequestAuthorId: z.number().optional(),
+	})
+	.refine(
+		(data) => !!data.applicationId !== !!data.composeId,
+		previewDeploymentTargetMessage,
+	);
