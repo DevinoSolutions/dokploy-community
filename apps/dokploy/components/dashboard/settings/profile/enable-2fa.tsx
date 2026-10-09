@@ -170,10 +170,18 @@ export const Enable2FA = () => {
 			const { data: enableData, error } = await authClient.twoFactor.enable({
 				password: formData.password,
 				issuer: formData.issuer,
+				method: "totp",
 			});
 
 			if (!enableData) {
 				throw new Error(error?.message || "Error enabling 2FA");
+			}
+
+			// better-auth 1.7 answers with a discriminated union: only the
+			// "totp" method carries a TOTP URI and backup codes. This dialog
+			// sets up an authenticator app, so any other method is an error.
+			if (enableData.method !== "totp") {
+				throw new Error("No TOTP URI received from server");
 			}
 
 			if (enableData.backupCodes) {

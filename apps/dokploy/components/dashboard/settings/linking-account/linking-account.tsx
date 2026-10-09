@@ -20,6 +20,8 @@ const TRUSTED_PROVIDERS = ["google", "github"] as const;
 type SocialProvider = (typeof TRUSTED_PROVIDERS)[number];
 
 type AccountItem = {
+	/** Better Auth account row id, which 1.7 `unlinkAccount` expects. */
+	id: string;
 	providerId: string;
 	accountId?: string;
 };
@@ -89,12 +91,11 @@ export function LinkingAccount({
 		}
 	};
 
-	const handleUnlink = async (providerId: string, accountId?: string) => {
+	const handleUnlink = async (providerId: string, accountId: string) => {
 		setUnlinkingProviderId(providerId);
 		try {
 			const { error } = await authClient.unlinkAccount({
-				providerId,
-				...(accountId && { accountId }),
+				accountId,
 			});
 			if (error) {
 				toast.error(error.message ?? "Failed to unlink account");
@@ -147,7 +148,7 @@ export function LinkingAccount({
 							<ul className="space-y-2">
 								{socialAccounts.map((acc) => (
 									<li
-										key={acc.accountId ?? acc.providerId}
+										key={acc.id}
 										className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm"
 									>
 										<span className="font-medium">
@@ -159,7 +160,7 @@ export function LinkingAccount({
 												size="sm"
 												className="text-destructive hover:text-destructive hover:bg-destructive/10"
 												onClick={() =>
-													handleUnlink(acc.providerId, acc.accountId)
+													handleUnlink(acc.providerId, acc.id)
 												}
 												disabled={unlinkingProviderId === acc.providerId}
 												isLoading={unlinkingProviderId === acc.providerId}
