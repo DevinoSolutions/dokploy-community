@@ -142,7 +142,7 @@ export const mcpRouter = createTRPCRouter({
 						canonicalizeMcpResource(
 							resource,
 							origin,
-							await mcpResourceAliasHosts(ctx.req.headers),
+							await mcpResourceAliasHosts(),
 						) ?? resource;
 				}
 			}

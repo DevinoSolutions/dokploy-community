@@ -27,6 +27,7 @@ import {
 	organization,
 } from "../db/schema";
 import { betterAuthSecret } from "../lib/auth-secret";
+import { getTrustedOrigins } from "./admin";
 import { getWebServerSettings } from "./web-server-settings";
 
 /** Path of the MCP endpoint relative to the origin. */
@@ -299,25 +300,46 @@ export const normalizeMcpRegisterBody = (
 export const mcpResourceIdentifier = (origin: string) =>
 	`${origin}${MCP_ENDPOINT_PATH}`;
 
-const firstHeaderHost = (value: string | string[] | undefined) => {
-	const raw = Array.isArray(value) ? value[0] : value;
-	const host = raw?.split(",")[0]?.trim().toLowerCase();
-	return host ? host : null;
+const hostOfOrigin = (value: string | null | undefined): string | null => {
+	const trimmed = value?.trim();
+	// Wildcard trusted origins name no single host.
+	if (!trimmed || trimmed.includes("*")) return null;
+	try {
+		const parsed = new URL(
+			trimmed.includes("://") ? trimmed : `https://${trimmed}`,
+		);
+		return parsed.host ? parsed.host.toLowerCase() : null;
+	} catch {
+		return null;
+	}
 };
 
 /**
- * Hosts this instance is reached under besides the advertised origin: the
- * request's Host and X-Forwarded-Host, and the configured web server host.
+ * Hosts this instance is legitimately reached under besides the advertised
+ * origin. Built from configuration only, never from the request: a client
+ * controls its `Host` and `X-Forwarded-Host` headers, and an accepted host
+ * decides which resource name a token is bound to.
+ *
+ * - the configured web server host, and the server IP origin `lib/auth.ts`
+ *   trusts (`http://<serverIp>:3000`);
+ * - the host of `BETTER_AUTH_URL`;
+ * - the hosts of the owners' better-auth trusted origins.
+ *
+ * The advertised origin itself (`resolveMcpOrigin`, which reads the request
+ * Host only in development) is always accepted by `canonicalizeMcpResource`
+ * and needs no entry here.
  */
 export const mcpResourceAliasHosts = async (
-	headers: IncomingHttpHeaders,
+	env: Env = process.env,
 ): Promise<string[]> => {
-	const hosts = [
-		firstHeaderHost(headers.host),
-		firstHeaderHost(headers["x-forwarded-host"]),
-	];
+	const hosts: Array<string | null> = [hostOfOrigin(env.BETTER_AUTH_URL)];
 	const settings = await getWebServerSettings().catch(() => null);
-	if (settings?.host) hosts.push(settings.host.trim().toLowerCase());
+	if (settings?.host) hosts.push(hostOfOrigin(settings.host));
+	if (settings?.serverIp) {
+		hosts.push(hostOfOrigin(`http://${settings.serverIp}:3000`));
+	}
+	const trusted = await getTrustedOrigins().catch(() => [] as string[]);
+	for (const origin of trusted) hosts.push(hostOfOrigin(origin));
 	return [...new Set(hosts.filter((host): host is string => !!host))];
 };
 

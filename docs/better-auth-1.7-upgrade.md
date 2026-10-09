@@ -135,6 +135,12 @@ after the upgrade exist only in the 1.7 tables, so those MCP clients must
 authorize again after a rollback. SCIM connections created on 1.7 do not exist
 on 1.6.
 
+Until they expire, the unexpired legacy 1.6 tokens stay in
+`oauth_access_token` in plaintext. They are kept on purpose, as the rollback
+copy: 1.7 never reads them, it only deletes expired rows (the daily purge) and
+the rows of a revoked client. Removing them is the soak-cleanup
+follow-up below.
+
 ## Follow-up after a soak
 
 The 1.6 tables keep their tokens in plaintext as the rollback copy. Once the

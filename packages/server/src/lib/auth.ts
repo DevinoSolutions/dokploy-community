@@ -130,7 +130,7 @@ const prepareMcpResourceParam = async (
 		return canonicalizeMcpResourceParam(
 			value,
 			origin,
-			await mcpResourceAliasHosts(incoming),
+			await mcpResourceAliasHosts(),
 		);
 	} catch (error) {
 		console.error("[mcp] failed to register the MCP resource", error);
