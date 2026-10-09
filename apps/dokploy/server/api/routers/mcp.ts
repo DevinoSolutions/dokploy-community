@@ -130,10 +130,18 @@ export const mcpRouter = createTRPCRouter({
 				});
 			}
 			const selectedScopes = [...new Set(input.scopes)].sort();
-			const scope = ["openid", "offline_access", ...selectedScopes].join(" ");
-			// Grant record: gives the settings card a stable "authorized at" and a
-			// scope history that survives refresh-token rotation.
-			await recordMcpConsent(ctx.user.id, input.clientId, selectedScopes);
+			const grantedScopes = ["openid", "offline_access", ...selectedScopes];
+			const scope = grantedScopes.join(" ");
+			// Grant record: the provider's authorize endpoint issues a code only
+			// when it covers every requested scope and resource. It also gives the
+			// settings card a stable "authorized at" that survives refresh-token
+			// rotation.
+			await recordMcpConsent(
+				ctx.user.id,
+				input.clientId,
+				grantedScopes,
+				input.resource ? [input.resource] : [],
+			);
 			const state = input.state ?? "";
 			const consent = createConsentProof({
 				userId: ctx.user.id,

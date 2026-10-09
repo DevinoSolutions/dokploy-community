@@ -86,18 +86,42 @@ describe("mcp router", () => {
 			"@dokploy/server/services/mcp-oauth"
 		);
 		const { url } = await caller.mcp.approveAuthorization(approveInput);
-		expect(recordMcpConsent).toHaveBeenCalledWith("user-1", "client-1", [
-			"dokploy:deploy",
-			"dokploy:read",
-		]);
+		// The provider issues a code only when the consent row covers every
+		// requested scope, openid and offline_access included.
+		expect(recordMcpConsent).toHaveBeenCalledWith(
+			"user-1",
+			"client-1",
+			["openid", "offline_access", "dokploy:deploy", "dokploy:read"],
+			[],
+		);
 		const parsed = new URL(url, "https://dok.example.com");
-		expect(parsed.pathname).toBe("/api/auth/mcp/authorize");
+		expect(parsed.pathname).toBe("/api/auth/oauth2/authorize");
 		expect(parsed.searchParams.get("scope")).toBe(
 			"openid offline_access dokploy:deploy dokploy:read",
 		);
 		expect(parsed.searchParams.get("consent")).toBe("123.sig");
 		expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
 		expect(parsed.searchParams.get("state")).toBe("st");
+	});
+
+	it("approveAuthorization records the requested resource in the consent and forwards it", async () => {
+		const { recordMcpConsent } = await import(
+			"@dokploy/server/services/mcp-oauth"
+		);
+		vi.mocked(recordMcpConsent).mockClear();
+		const { url } = await caller.mcp.approveAuthorization({
+			...approveInput,
+			resource: "https://dok.example.com/api/mcp",
+		});
+		expect(recordMcpConsent).toHaveBeenCalledWith(
+			"user-1",
+			"client-1",
+			["openid", "offline_access", "dokploy:deploy", "dokploy:read"],
+			["https://dok.example.com/api/mcp"],
+		);
+		expect(
+			new URL(url, "https://dok.example.com").searchParams.get("resource"),
+		).toBe("https://dok.example.com/api/mcp");
 	});
 
 	it("approveAuthorization rejects unknown clients, unregistered redirects, bad PKCE and unknown scopes", async () => {

@@ -1,4 +1,5 @@
 import { apiKey } from "@better-auth/api-key";
+import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 import { scim } from "@better-auth/scim";
 import { sso } from "@better-auth/sso";
@@ -9,12 +10,13 @@ import { db } from "../db";
 import * as schema from "../db/schema";
 import { ac, adminRole, memberRole, ownerRole } from "./access-control";
 
-// CLI-only config for `@better-auth/cli generate` — must mirror the plugin set
+// CLI-only config for `npx auth generate` — must mirror the plugin set
 // in auth.ts. Never import this from runtime code.
 export const auth = betterAuth({
 	database: drizzleAdapter(db, {
 		provider: "pg",
 		schema,
+		transaction: true,
 	}),
 	user: {
 		modelName: "user",
@@ -23,7 +25,6 @@ export const auth = betterAuth({
 		},
 		additionalFields: {
 			role: { type: "string", input: false },
-			ownerId: { type: "string", input: false },
 			allowImpersonation: { type: "boolean", defaultValue: false },
 			lastName: { type: "string", required: false, defaultValue: "" },
 			enableEnterpriseFeatures: { type: "boolean", required: false },
@@ -47,8 +48,30 @@ export const auth = betterAuth({
 				enabled: true,
 				maximumRolesPerOrganization: 10,
 			},
+			schema: {
+				organization: {
+					additionalFields: {
+						ownerId: { type: "string", required: false, input: false },
+					},
+				},
+			},
 		}),
-		scim(),
+		scim({
+			connections: [],
+			managedConnections: {
+				credentialHashSecret: "cli-only-placeholder-secret-0123456789abcdef",
+			},
+			projection: { reconcileUser: () => {} },
+		}),
+		oauthProvider({
+			loginPage: "/mcp/authorize",
+			consentPage: "/mcp/authorize",
+			disableJwtPlugin: true,
+			storeClientSecret: {
+				encrypt: (value) => value,
+				decrypt: (value) => value,
+			},
+		}),
 		admin(),
 	],
 });
