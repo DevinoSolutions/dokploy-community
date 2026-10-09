@@ -12,11 +12,22 @@ import {
 	removePreviewDeployment,
 } from "@dokploy/server";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import {
+	isValidPreviewIdentifier,
+	PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
+	resolvePreviewDockerImage,
+} from "@dokploy/server/utils/preview-image";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { supportsPreviewDeployments } from "@/lib/preview-deployments";
+import {
+	supportsApplicationPreviewDeployments,
+	supportsPreviewDeployments,
+} from "@/lib/preview-deployments";
 import { audit } from "@/server/api/utils/audit";
-import { apiCreatePreviewDeployment } from "@/server/db/schema";
+import {
+	type apiCreatePreviewDeployment,
+	apiCreatePreviewDeploymentRequest,
+} from "@/server/db/schema";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
 import { deploy } from "@/server/utils/deploy";
@@ -97,7 +108,7 @@ export const previewDeploymentRouter = createTRPCRouter({
 		}),
 
 	create: protectedProcedure
-		.input(apiCreatePreviewDeployment)
+		.input(apiCreatePreviewDeploymentRequest)
 		.mutation(async ({ input, ctx }) => {
 			if (input.composeId) {
 				return await createComposePreviewFromApi(ctx, input);
@@ -214,7 +225,66 @@ export const previewDeploymentRouter = createTRPCRouter({
 
 type CreateCtx = Parameters<typeof checkServicePermissionAndAccess>[0] &
 	Parameters<typeof audit>[0];
-type CreateInput = z.infer<typeof apiCreatePreviewDeployment>;
+type CreateInput = z.infer<typeof apiCreatePreviewDeploymentRequest>;
+type ChangeRequestInput = z.infer<typeof apiCreatePreviewDeployment>;
+
+/**
+ * A pull request preview is built from a change request, so the fields that
+ * describe it are mandatory (they are optional in the request only because a
+ * Docker-image preview has none).
+ */
+const requireChangeRequest = (input: CreateInput): ChangeRequestInput => {
+	const { branch, pullRequestId, pullRequestURL, pullRequestTitle } = input;
+	if (!branch || !pullRequestId || !pullRequestURL || !pullRequestTitle) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				"branch, pullRequestId, pullRequestURL and pullRequestTitle are required to preview a pull request",
+		});
+	}
+	return { ...input, branch, pullRequestId, pullRequestURL, pullRequestTitle };
+};
+
+/**
+ * Describe a Docker-image preview as the preview row the rest of the flow
+ * expects. There is no change request and therefore no author: the identifier
+ * only picks which image to pull, and the caller already passed the same
+ * `deployment: create` permission as a regular deploy. The collaborator gate is
+ * deliberately not applied (and the git provider never contacted) because it
+ * authorizes the author of code that is *built* on this host; here nothing is
+ * built, only the image the owner configured is pulled.
+ */
+const dockerImagePreviewInput = (
+	application: { previewDockerImage: string | null },
+	input: CreateInput,
+): ChangeRequestInput => {
+	const identifier = input.pullRequestNumber.trim();
+	if (!isValidPreviewIdentifier(identifier)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				"The preview identifier may only contain letters, digits, '.', '_' and '-'",
+		});
+	}
+	const image = resolvePreviewDockerImage(
+		application.previewDockerImage,
+		identifier,
+	);
+	if (!image) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
+		});
+	}
+	return {
+		applicationId: input.applicationId,
+		branch: identifier,
+		pullRequestId: `docker-${identifier}`,
+		pullRequestNumber: identifier,
+		pullRequestURL: "",
+		pullRequestTitle: image,
+	};
+};
 
 const createApplicationPreviewFromApi = async (
 	ctx: CreateCtx,
@@ -225,12 +295,13 @@ const createApplicationPreviewFromApi = async (
 		deployment: ["create"],
 	});
 	const application = await findApplicationById(applicationId);
+	const isDockerImage = application.sourceType === "docker";
 
-	if (!supportsPreviewDeployments(application.sourceType)) {
+	if (!supportsApplicationPreviewDeployments(application.sourceType)) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message:
-				"Preview deployments can only be created for applications using a GitHub, GitLab or Gitea provider",
+				"Preview deployments can only be created for applications using a GitHub, GitLab or Gitea provider, or a Docker image",
 		});
 	}
 
@@ -241,15 +312,24 @@ const createApplicationPreviewFromApi = async (
 		});
 	}
 
-	// Same collaborator gate the webhook handler applies to the PR author — but
-	// the author comes from the provider's pull request list for this number,
-	// never from the client (the number selects the code that gets built).
-	const verifiedInput = await resolveVerifiedPreviewAuthor(application, input);
-	await assertPreviewAuthorAllowed(application, verifiedInput);
+	let verifiedInput: ChangeRequestInput;
+	if (isDockerImage) {
+		verifiedInput = dockerImagePreviewInput(application, input);
+	} else {
+		// Same collaborator gate the webhook handler applies to the PR author —
+		// but the author comes from the provider's pull request list for this
+		// number, never from the client (the number selects the code that gets
+		// built).
+		verifiedInput = await resolveVerifiedPreviewAuthor(
+			application,
+			requireChangeRequest(input),
+		);
+		await assertPreviewAuthorAllowed(application, verifiedInput);
+	}
 
 	const existingPreviewDeployment = await findPreviewDeploymentByApplicationId(
 		applicationId,
-		input.pullRequestId,
+		verifiedInput.pullRequestId,
 	);
 
 	let previewDeploymentId =
@@ -272,7 +352,9 @@ const createApplicationPreviewFromApi = async (
 	const jobData: DeploymentJob = {
 		applicationId,
 		titleLog: "Preview Deployment",
-		descriptionLog: `Triggered via API for PR #${input.pullRequestNumber}`,
+		descriptionLog: isDockerImage
+			? `Triggered via API for image preview ${verifiedInput.pullRequestNumber}`
+			: `Triggered via API for PR #${input.pullRequestNumber}`,
 		type: "deploy",
 		applicationType: "application-preview",
 		previewDeploymentId,
@@ -336,12 +418,15 @@ const createComposePreviewFromApi = async (
 	// Same collaborator gate the webhook handler applies to the MR/PR author — the
 	// author comes from the provider's pull request list for this number, never
 	// from the client.
-	const verifiedInput = await resolveVerifiedPreviewAuthor(compose, input);
+	const verifiedInput = await resolveVerifiedPreviewAuthor(
+		compose,
+		requireChangeRequest(input),
+	);
 	await assertPreviewAuthorAllowed(compose, verifiedInput);
 
 	const existingPreviewDeployment = await findPreviewDeploymentByComposeId(
 		composeId,
-		input.pullRequestId,
+		verifiedInput.pullRequestId,
 	);
 
 	let previewDeploymentId =
