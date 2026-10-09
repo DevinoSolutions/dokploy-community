@@ -17,6 +17,15 @@ The 1.6 in-core `mcp` plugin is gone. The OAuth server behind `/api/mcp` is now
   `DOKPLOY_MCP_REFRESH_TOKEN_DAYS`, `DOKPLOY_MCP_REFRESH_GRACE_SECONDS`;
 - a refresh token presented again after its grace window is refused on its own
   (`invalid_grant`), and the grant the other sessions share stays valid;
+- sessions that refresh the same token at the same moment all receive the same
+  new tokens. Refresh requests are serialized per token (in process, plus a
+  Postgres advisory lock so several replicas serialize too), and the requests
+  that wait receive the first one's response from the replay record;
+- token revocation and introspection (`/api/auth/oauth2/revoke`,
+  `/api/auth/oauth2/introspect`) stay closed, as in 1.6. The provider's revoke
+  deletes every token of the grant when it sees an already-rotated refresh
+  token, which would log out every session sharing it. Revoke a client from
+  the MCP Server card in Settings → Profile instead;
 - `x-api-key` access to `/api/mcp` and the 429-on-throttle answer are unchanged.
 
 **Existing grants keep working.** Migration 0211 copies every live client,
@@ -38,7 +47,16 @@ working:
 The discovery documents (`/.well-known/oauth-authorization-server`,
 `/.well-known/oauth-protected-resource`) now advertise the 1.7 URLs.
 Authorization responses carry an RFC 9207 `iss` parameter equal to the
-advertised issuer.
+advertised issuer. The authorize endpoint accepts GET only.
+
+MCP clients send the MCP endpoint URL as the RFC 8707 `resource` on every
+authorize and token request. The advertised value (`resource` in the
+protected-resource document: the `BETTER_AUTH_URL` origin, else
+`https://<configured host>`, plus `/api/mcp`) is accepted, and so are the
+variants clients send for it: a trailing slash, `http`, or another host name
+this instance is reached under (the request's `Host`/`X-Forwarded-Host`, or the
+configured web server host). Any other value is refused with
+`invalid_target`.
 
 A confidential client (one registered with a client secret) migrated from 1.6
 must authenticate at the token endpoint with `client_secret_basic`, the
@@ -84,9 +102,43 @@ key; changing either one invalidates every SCIM token.
 
 No change for users. Enabling 2FA still sets up an authenticator app.
 
+## Rotating BETTER_AUTH_SECRET
+
+More data depends on the auth secret than before. Run
+`apps/dokploy/scripts/migrate-auth-secret.ts` with `OLD_SECRET` and
+`NEW_SECRET` before restarting with the new secret. It:
+
+- re-encrypts 2FA secrets and backup codes (as before);
+- re-encrypts the client secrets of confidential MCP OAuth clients, which 1.7
+  stores encrypted with the auth secret (clients migrated from 1.6 keep their
+  plaintext-marked value, which does not depend on the secret);
+- clears the stored refresh-token replay responses, which are encrypted with
+  the auth secret and only serve a retry within the refresh grace window.
+
+It cannot carry over **SCIM tokens**: they are stored as digests keyed with
+`DOKPLOY_SCIM_CREDENTIAL_HASH_SECRET`, or with a key derived from the auth
+secret when that variable is unset, and a digest cannot be re-keyed. Without
+the variable, rotate every SCIM connection's token in Settings after the
+restart and paste it into the identity provider.
+
+MCP access and refresh tokens are stored as plain SHA-256 digests and survive
+a rotation.
+
 ## Rollback
 
-Revert the upgrade PR and redeploy. The 1.6 tables are never changed by the
-upgrade, so 1.6 finds the grants it issued. Grants made or refreshed after the
-upgrade exist only in the 1.7 tables, so those MCP clients must authorize again
-after a rollback. SCIM connections created on 1.7 do not exist on 1.6.
+Revert the upgrade PR and redeploy. The upgrade never changes a live 1.6 row,
+so 1.6 finds the grants it issued. Two kinds of 1.6 rows are removed after the
+upgrade: token rows whose access and refresh tokens have both expired (the
+daily purge), and the rows of a client a user revokes in Settings, so a
+rollback cannot bring back a revoked authorization. Grants made or refreshed
+after the upgrade exist only in the 1.7 tables, so those MCP clients must
+authorize again after a rollback. SCIM connections created on 1.7 do not exist
+on 1.6.
+
+## Follow-up after a soak
+
+The 1.6 tables keep their tokens in plaintext as the rollback copy. Once the
+upgrade has run long enough that a rollback is off the table, delete the 1.6
+token rows (or null their `access_token`/`refresh_token` columns) in a later
+migration, and then drop `oauth_application`, `oauth_access_token` and
+`oauth_consent` with their `legacy*` schema exports.
