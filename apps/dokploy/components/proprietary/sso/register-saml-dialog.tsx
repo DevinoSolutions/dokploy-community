@@ -81,23 +81,30 @@ function parseSamlConfig(samlConfig: string | null): {
 	entryPoint?: string;
 	cert?: string;
 	idpMetadataXml?: string;
+	callbackUrl?: string;
 } | null {
 	if (!samlConfig) return null;
 	try {
 		const parsed = JSON.parse(samlConfig) as {
 			entryPoint?: string;
 			cert?: string;
+			callbackUrl?: string;
 			idpMetadata?: { metadata?: string };
 		};
 		return {
 			entryPoint: parsed.entryPoint,
 			cert: parsed.cert,
 			idpMetadataXml: parsed.idpMetadata?.metadata,
+			callbackUrl: parsed.callbackUrl,
 		};
 	} catch {
 		return null;
 	}
 }
+
+/** Assertion consumer service of better-auth 1.7 SSO. */
+const samlAcsUrl = (baseURL: string, providerId: string) =>
+	`${baseURL}/api/auth/sso/saml2/sp/acs/${providerId}`;
 
 export function RegisterSamlDialog({
 	providerId,
@@ -105,6 +112,12 @@ export function RegisterSamlDialog({
 }: RegisterSamlDialogProps) {
 	const utils = api.useUtils();
 	const [open, setOpen] = useState(false);
+	// ACS URL a provider was registered with. Providers created before the
+	// better-auth 1.7 upgrade use the 1.6 callback path, which stays an alias;
+	// editing them keeps it so the IdP configuration does not have to change.
+	const [registeredAcsUrl, setRegisteredAcsUrl] = useState<string | null>(
+		null,
+	);
 
 	const { data } = api.sso.one.useQuery(
 		{ providerId: providerId ?? "" },
@@ -138,6 +151,7 @@ export function RegisterSamlDialog({
 			: [""];
 		if (domains.length === 0) domains.push("");
 		const saml = parseSamlConfig(data.samlConfig);
+		setRegisteredAcsUrl(saml?.callbackUrl || null);
 		form.reset({
 			providerId: data.providerId,
 			issuer: data.issuer,
@@ -161,19 +175,20 @@ export function RegisterSamlDialog({
 
 	const isSubmitting = form.formState.isSubmitting;
 
+	const acsUrlFor = (id: string) =>
+		(isEdit && registeredAcsUrl) || samlAcsUrl(baseURL, id);
+
 	const onSubmit = async (data: SamlProviderForm) => {
 		try {
-			// maybe add the /saml/metadata endpoint to the baseURL
-			const baseURLWithMetadata = `${baseURL}/saml/metadata`;
-			const generateSpMetadata = (providerId: string) => {
-				return `<?xml version="1.0" encoding="UTF-8"?>
+			const acsUrl = acsUrlFor(data.providerId);
+			const spMetadata = `<?xml version="1.0" encoding="UTF-8"?>
 <md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${baseURL}">
     <md:SPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
-        <md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="${baseURL}/api/auth/sso/saml2/callback/${providerId}" index="1"/>
+        <md:AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="${acsUrl}" index="1"/>
     </md:SPSSODescriptor>
 </md:EntityDescriptor>`;
-			};
 
+			const metadataXml = data.idpMetadataXml?.trim();
 			await mutateAsync({
 				providerId: data.providerId,
 				issuer: data.issuer,
@@ -181,16 +196,17 @@ export function RegisterSamlDialog({
 				samlConfig: {
 					entryPoint: data.entryPoint,
 					cert: data.cert,
-					callbackUrl: `${baseURL}/api/auth/sso/saml2/callback/${data.providerId}`,
+					callbackUrl: acsUrl,
 					audience: baseURL,
-					idpMetadata: data.idpMetadataXml?.trim()
-						? { metadata: data.idpMetadataXml.trim() }
-						: undefined,
+					// Without metadata XML the IdP is identified by its issuer, as
+					// better-auth 1.6 did implicitly; 1.7 requires it explicitly.
+					idpMetadata: metadataXml
+						? { metadata: metadataXml }
+						: { entityID: data.issuer },
 					spMetadata: {
-						metadata: generateSpMetadata(data.providerId),
+						metadata: spMetadata,
 					},
 					mapping: {
-						id: "nameID",
 						email: "email",
 						name: "displayName",
 						firstName: "givenName",
@@ -252,11 +268,10 @@ export function RegisterSamlDialog({
 									{baseURL && (
 										<div className="rounded-md bg-muted px-3 py-2 text-xs">
 											<p className="font-medium text-muted-foreground">
-												Callback URL (configure in your IdP)
+												ACS (callback) URL (configure in your IdP)
 											</p>
 											<p className="mt-0.5 break-all font-mono">
-												{baseURL}/api/auth/sso/saml2/callback/
-												{watchedProviderId?.trim() || "..."}
+												{acsUrlFor(watchedProviderId?.trim() || "...")}
 											</p>
 										</div>
 									)}

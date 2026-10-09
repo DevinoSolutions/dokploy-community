@@ -47,8 +47,9 @@ const domainsArraySchema = z
 
 const scopesArraySchema = z.array(z.string().trim());
 
+// No user id mapping: better-auth 1.7 always identifies an OIDC user by the
+// `sub` claim (the default Dokploy used on 1.6 as well).
 const mappingSchema = z.object({
-	id: z.string().min(1, "Required").trim(),
 	email: z.string().min(1, "Required").trim(),
 	emailVerified: z.string().trim(),
 	name: z.string().min(1, "Required").trim(),
@@ -76,7 +77,6 @@ const isAzureIssuer = (issuer: string) =>
 // `preferred_username` — the latter is only present in the ID token. Default
 // Azure/Entra to the `email` claim so discovery-based login resolves the email.
 const azureMapping: ClaimMapping = {
-	id: "sub",
 	email: "email",
 	emailVerified: "email_verified",
 	name: "name",
@@ -89,7 +89,6 @@ const azureMapping: ClaimMapping = {
 // name: "name",
 
 const genericMapping: ClaimMapping = {
-	id: "sub",
 	email: "email",
 	emailVerified: "email_verified",
 	name: "preferred_username",
@@ -105,7 +104,6 @@ const MAPPING_FIELDS: Array<{
 	placeholder: string;
 	optional?: boolean;
 }> = [
-	{ key: "id", label: "User ID", placeholder: "sub" },
 	{ key: "email", label: "Email", placeholder: "email" },
 	{
 		key: "emailVerified",
@@ -231,7 +229,6 @@ export function RegisterOidcDialog({
 					? oidc.scopes
 					: [...DEFAULT_SCOPES],
 			mapping: {
-				id: oidc?.mapping?.id ?? baseMapping.id,
 				email: oidc?.mapping?.email ?? baseMapping.email,
 				emailVerified: oidc?.mapping?.emailVerified ?? "",
 				name: oidc?.mapping?.name ?? baseMapping.name,
@@ -263,7 +260,6 @@ export function RegisterOidcDialog({
 				: DEFAULT_SCOPES;
 
 			const mapping = {
-				id: data.mapping.id.trim(),
 				email: data.mapping.email.trim(),
 				name: data.mapping.name.trim(),
 				...(data.mapping.emailVerified.trim()

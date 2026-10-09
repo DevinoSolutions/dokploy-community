@@ -39,7 +39,6 @@ exclude:
   - apps
   - packages
   - docs
-  - patches
   - scripts
   - .github
   - .claude

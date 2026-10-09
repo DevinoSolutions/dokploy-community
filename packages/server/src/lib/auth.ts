@@ -1,5 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import { apiKey } from "@better-auth/api-key";
+import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 import { scim } from "@better-auth/scim";
 import { sso } from "@better-auth/sso";
@@ -11,7 +12,8 @@ import {
 	createAuthMiddleware,
 	getSessionFromCtx,
 } from "better-auth/api";
-import { admin, mcp, organization, twoFactor } from "better-auth/plugins";
+import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
+import { admin, organization, twoFactor } from "better-auth/plugins";
 import { and, desc, eq } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
 import { db } from "../db";
@@ -22,15 +24,22 @@ import {
 	getUserByToken,
 } from "../services/admin";
 import {
-	consumeRotatedRefreshToken,
+	canonicalizeMcpResourceParam,
 	DOKPLOY_MCP_SCOPE_IDS,
+	ensureMcpResource,
 	evaluateMcpAuthorizeGate,
 	evaluateMcpRegisterBody,
 	getMcpAccessTokenSeconds,
+	getMcpRefreshGraceSeconds,
 	getMcpRefreshTokenSeconds,
+	isMcpAuthorizeMethodAllowed,
+	isStaleRotatedRefreshToken,
 	MCP_AUTHORIZE_PAGE_PATH,
-	MCP_ENDPOINT_PATH,
+	mcpResourceAliasHosts,
+	normalizeMcpRegisterBody,
+	resolveMcpOrigin,
 } from "../services/mcp-oauth";
+import { scimOptions } from "../services/proprietary/scim";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import { resolveOrganizationDefaultRole } from "../services/proprietary/license-key";
 import {
@@ -88,11 +97,76 @@ const resolveTrustedOrigins = async () => {
 	}
 };
 
+/** Token requests are form-encoded; normalize either body shape to a record. */
+const readFormOrJsonBody = (rawBody: unknown): Record<string, unknown> => {
+	if (rawBody instanceof FormData) {
+		return Object.fromEntries(rawBody.entries()) as Record<string, unknown>;
+	}
+	if (rawBody instanceof URLSearchParams) {
+		return Object.fromEntries(rawBody.entries());
+	}
+	return rawBody && typeof rawBody === "object"
+		? (rawBody as Record<string, unknown>)
+		: {};
+};
+
+/**
+ * Prepares a `resource` parameter before the provider validates it: makes
+ * sure the MCP endpoint of this instance is a known RFC 8707 resource, and
+ * maps the variants clients send for it (trailing slash, another host name of
+ * this instance, http) to the advertised identifier. Returns the value to use.
+ * A failure is logged and the value is left to the provider, which then
+ * answers `invalid_target`.
+ */
+const prepareMcpResourceParam = async (
+	headers: Headers | undefined,
+	value: unknown,
+): Promise<unknown> => {
+	try {
+		const incoming = Object.fromEntries(headers?.entries() ?? []);
+		const origin = await resolveMcpOrigin(incoming);
+		if (!origin) return value;
+		await ensureMcpResource(origin);
+		return canonicalizeMcpResourceParam(
+			value,
+			origin,
+			await mcpResourceAliasHosts(incoming),
+		);
+	} catch (error) {
+		console.error("[mcp] failed to register the MCP resource", error);
+		return value;
+	}
+};
+
+const sameParam = (left: unknown, right: unknown) =>
+	JSON.stringify(left) === JSON.stringify(right);
+
+/**
+ * Client secrets of confidential OAuth clients. Opaque access tokens (see
+ * `disableJwtPlugin` below) make the provider sign confidential clients' ID
+ * tokens with their secret, so secrets are stored encrypted, not hashed.
+ * Clients migrated from better-auth 1.6, which stored secrets in plaintext,
+ * carry the legacy prefix (migration 0211) and keep verifying.
+ */
+export const LEGACY_PLAINTEXT_CLIENT_SECRET_PREFIX = "dokploy-legacy-plain:";
+const oauthClientSecretStorage = {
+	encrypt: (clientSecret: string) =>
+		symmetricEncrypt({ key: betterAuthSecret, data: clientSecret }),
+	decrypt: async (storedSecret: string) =>
+		storedSecret.startsWith(LEGACY_PLAINTEXT_CLIENT_SECRET_PREFIX)
+			? storedSecret.slice(LEGACY_PLAINTEXT_CLIENT_SECRET_PREFIX.length)
+			: symmetricDecrypt({ key: betterAuthSecret, data: storedSecret }),
+};
+
 const createBetterAuth = () =>
 	betterAuth({
 		database: drizzleAdapter(db, {
 			provider: "pg",
 			schema: schema,
+			// The 1.7 SCIM plugin refuses to start without native interactive
+			// transactions. Core runs database `after` hooks once the
+			// transaction commits (see `session.create.after` below).
+			transaction: true,
 		}),
 		disabledPaths: [
 			"/sso/register",
@@ -100,14 +174,42 @@ const createBetterAuth = () =>
 			"/organization/update",
 			"/organization/delete",
 			// The fork serves OAuth discovery from /api/mcp-oauth/* (see
-			// services/mcp-oauth.ts); the plugin's copies need a global baseURL.
+			// services/mcp-oauth.ts), pointing at its own consent page.
 			"/.well-known/oauth-authorization-server",
+			"/.well-known/openid-configuration",
 			"/.well-known/oauth-protected-resource",
+			// MCP clients are approved only on the fork's consent page, which
+			// records the consent row the provider's authorize endpoint checks.
+			// The provider's own consent/continue flow, client CRUD, consent
+			// CRUD, resource admin and OIDC session endpoints are not part of
+			// that flow and stay closed.
 			"/oauth2/consent",
-			// The plugin's own session lookup returns the whole token row,
-			// refresh token included, to any bearer of an access token. The fork
-			// resolves tokens itself (services/mcp-oauth.ts) and never calls it.
-			"/mcp/get-session",
+			"/oauth2/continue",
+			"/oauth2/create-client",
+			"/oauth2/get-client",
+			"/oauth2/get-clients",
+			"/oauth2/public-client",
+			"/oauth2/public-client-prelogin",
+			"/oauth2/update-client",
+			"/oauth2/delete-client",
+			"/oauth2/client/rotate-secret",
+			"/oauth2/get-consent",
+			"/oauth2/get-consents",
+			"/oauth2/update-consent",
+			"/oauth2/delete-consent",
+			"/oauth2/end-session",
+			"/oauth2/end-session/confirm",
+			"/oauth2/userinfo",
+			// Not advertised in discovery. The provider's revoke answers a
+			// rotated refresh token by deleting every token of the (client,
+			// user) pair, which would log out all sessions sharing the grant
+			// (#214); Settings revokes through `revokeMcpAuthorization`.
+			// Introspection is not used: the MCP endpoint looks tokens up itself.
+			"/oauth2/revoke",
+			"/oauth2/introspect",
+			"/admin/oauth2/create-client",
+			"/admin/oauth2/update-client",
+			"/admin/oauth2/resources",
 			...(!IS_CLOUD ? ["/verify-email"] : []),
 		],
 		secret: betterAuthSecret,
@@ -181,9 +283,16 @@ const createBetterAuth = () =>
 					}
 				}
 
+				// OAuth resource administration is not part of the MCP flow.
+				// `disabledPaths` matches exact paths only, so the parameterized
+				// admin routes are closed here.
+				if (ctx.path.startsWith("/admin/oauth2/")) {
+					throw new APIError("NOT_FOUND");
+				}
+
 				// Dynamic client registration is anonymous: only loopback-http or
 				// https redirect targets may receive authorization codes.
-				if (ctx.path === "/mcp/register") {
+				if (ctx.path === "/oauth2/register") {
 					const decision = evaluateMcpRegisterBody(ctx.body);
 					if (!decision.ok) {
 						throw new APIError("BAD_REQUEST", {
@@ -191,16 +300,33 @@ const createBetterAuth = () =>
 							error_description: decision.error_description,
 						});
 					}
+					const normalized = normalizeMcpRegisterBody(ctx.body);
+					if (normalized) {
+						return { context: { body: normalized } };
+					}
 				}
 
-				// The plugin issues a code without consent. Require the proof the
-				// fork's consent page mints, and never let an anonymous request reach
-				// the plugin (it would set a login-resume cookie that bypasses the
-				// consent page after sign-in).
-				if (ctx.path === "/mcp/authorize") {
+				// The fork's consent page is the only way to approve a client.
+				// Require the proof it mints, and never let an anonymous request
+				// reach the provider (it would start its own login flow, which
+				// bypasses the consent page after sign-in).
+				if (ctx.path === "/oauth2/authorize") {
+					// A POST would make the provider read its parameters from the
+					// body, which the proof (checked on the query) never covered.
+					if (
+						!isMcpAuthorizeMethodAllowed(
+							ctx.request?.method ?? (ctx.body ? "POST" : "GET"),
+						)
+					) {
+						throw new APIError("METHOD_NOT_ALLOWED", {
+							error: "invalid_request",
+							error_description: "authorization requests must use GET",
+						});
+					}
+					const query = (ctx.query ?? {}) as Record<string, unknown>;
 					const session = await getSessionFromCtx(ctx);
 					const decision = evaluateMcpAuthorizeGate({
-						query: (ctx.query ?? {}) as Record<string, unknown>,
+						query,
 						userId: session?.user.id ?? null,
 					});
 					if (decision.action === "redirect") {
@@ -212,36 +338,37 @@ const createBetterAuth = () =>
 							error_description: decision.error_description,
 						});
 					}
+					if (query.resource !== undefined) {
+						const resource = await prepareMcpResourceParam(
+							ctx.headers,
+							query.resource,
+						);
+						if (!sameParam(resource, query.resource)) {
+							return { context: { query: { ...query, resource } } };
+						}
+					}
 				}
-			}),
-			after: createAuthMiddleware(async (ctx) => {
-				// Refresh rotation: the plugin inserts a new row and leaves the
-				// consumed refresh token alive for its whole remaining window.
-				// Clamp it to a short grace window so it cannot be replayed later
-				// but an in-flight retry still succeeds.
-				if (ctx.path !== "/mcp/token") return;
-				const rawBody = ctx.body as unknown;
-				const body =
-					rawBody instanceof FormData
-						? (Object.fromEntries(rawBody.entries()) as Record<string, unknown>)
-						: ((rawBody ?? {}) as Record<string, unknown>);
-				if (body.grant_type !== "refresh_token") return;
-				const returned = ctx.context.returned as unknown;
-				const succeeded =
-					!!returned &&
-					typeof returned === "object" &&
-					"access_token" in returned;
-				if (!succeeded) return;
-				const consumed = body.refresh_token;
-				if (typeof consumed === "string" && consumed) {
-					// Hygiene only. The plugin has already rotated and the response
-					// carries the new tokens; a failure here must not turn a
-					// successful refresh into a 500 that makes the client drop its
-					// grant and start a browser re-authorization.
-					try {
-						await consumeRotatedRefreshToken(consumed);
-					} catch (error) {
-						console.error("[mcp] failed to clamp rotated refresh token", error);
+
+				if (ctx.path === "/oauth2/token") {
+					const body = readFormOrJsonBody(ctx.body);
+					if (
+						body.grant_type === "refresh_token" &&
+						typeof body.refresh_token === "string" &&
+						(await isStaleRotatedRefreshToken(body.refresh_token))
+					) {
+						throw new APIError("BAD_REQUEST", {
+							error: "invalid_grant",
+							error_description: "invalid refresh token",
+						});
+					}
+					if (body.resource !== undefined) {
+						const resource = await prepareMcpResourceParam(
+							ctx.headers,
+							body.resource,
+						);
+						if (!sameParam(resource, body.resource)) {
+							return { context: { body: { ...body, resource } } };
+						}
 					}
 				}
 			}),
@@ -374,21 +501,10 @@ const createBetterAuth = () =>
 							}
 						}
 
+						// SCIM-provisioned users join their organization through the
+						// SCIM projection (services/proprietary/scim.ts), never through
+						// the first-admin or SSO paths below.
 						if (isSCIMRequest) {
-							const membership = await db.query.member.findFirst({
-								where: eq(schema.member.userId, user.id),
-							});
-							if (membership) {
-								const defaultRole = await resolveOrganizationDefaultRole(
-									membership.organizationId,
-								);
-								if (defaultRole !== membership.role) {
-									await db
-										.update(schema.member)
-										.set({ role: defaultRole })
-										.where(eq(schema.member.id, membership.id));
-								}
-							}
 							return;
 						}
 
@@ -466,10 +582,30 @@ const createBetterAuth = () =>
 						};
 					},
 					after: async (session) => {
-						const orgId = (
+						let orgId = (
 							session as typeof session & { activeOrganizationId?: string }
 						).activeOrganizationId;
-						if (!orgId) return;
+						if (!orgId) {
+							// With adapter transactions, a sign-up creates the session
+							// inside the transaction while `user.create.after` (which
+							// creates the first organization and membership) only runs
+							// after it commits, so `create.before` found no membership.
+							// This hook is queued after that one; finish the job here.
+							const defaultMember = await db.query.member.findFirst({
+								where: eq(schema.member.userId, session.userId),
+								orderBy: [
+									desc(schema.member.isDefault),
+									desc(schema.member.createdAt),
+								],
+								columns: { organizationId: true },
+							});
+							if (!defaultMember) return;
+							orgId = defaultMember.organizationId;
+							await db
+								.update(schema.session)
+								.set({ activeOrganizationId: orgId })
+								.where(eq(schema.session.id, session.id));
+						}
 						const memberRecord = await db.query.member.findFirst({
 							where: and(
 								eq(schema.member.userId, session.userId),
@@ -533,11 +669,10 @@ const createBetterAuth = () =>
 					// required: true,
 					input: false,
 				},
-				ownerId: {
-					type: "string",
-					// required: true,
-					input: false,
-				},
+				// `ownerId` is not a user column: validateRequest derives it per
+				// request from the active organization. It cannot be declared
+				// here, since 1.7 rejects declared fields that have no column in
+				// the Drizzle schema.
 				allowImpersonation: {
 					fieldName: "allowImpersonation",
 					type: "boolean",
@@ -566,50 +701,47 @@ const createBetterAuth = () =>
 				enableMetadata: true,
 				references: "user",
 			}),
+			// IdP-initiated SAML stays off (the 1.7 default): every SAML login
+			// must answer a request this instance issued.
 			sso({ trustEmailVerified: true }),
-			scim({
-				beforeSCIMTokenGenerated: async ({ user, member }) => {
-					// better-auth's /scim/generate-token also accepts a token with no
-					// organizationId. Before @better-auth/scim 1.7, such a provider has no
-					// owner binding and any user can take it over (GHSA-j8v8-g9cx-5qf4).
-					// Dokploy only creates organization providers, so refuse the rest.
-					if (!member) {
-						throw new APIError("BAD_REQUEST", {
-							message: "A SCIM provider must belong to an organization",
-						});
-					}
-					const dbUser = await db.query.user.findFirst({
-						where: eq(schema.user.id, user.id),
-						columns: { enableEnterpriseFeatures: true },
-					});
-
-					if (!dbUser?.enableEnterpriseFeatures) {
-						throw new APIError("FORBIDDEN", {
-							message: "SCIM provisioning requires an enterprise license",
-						});
-					}
-				},
-			}),
+			// Organization-scoped SCIM connections (services/proprietary/scim.ts).
+			scim(scimOptions()),
 			twoFactor(),
 			passkey(),
 			// Remote MCP endpoint OAuth server (see docs/superpowers/specs/2026-09-04-remote-mcp-oauth-design.md).
-			// Discovery is served by the fork (apps/dokploy/pages/api/mcp-oauth/*), so no baseURL is set here.
-			mcp({
+			// `@better-auth/mcp`'s `mcp()` preset is not used: it needs one static
+			// HTTPS resource URL at boot, while Dokploy learns its public origin
+			// per request and also runs on plain-http installs. The preset is a
+			// thin wrapper over this provider; the fork serves discovery itself
+			// (apps/dokploy/pages/api/mcp-oauth/*) and registers the MCP resource
+			// on demand (`ensureMcpResource`).
+			oauthProvider({
 				loginPage: MCP_AUTHORIZE_PAGE_PATH,
-				resource: MCP_ENDPOINT_PATH,
-				oidcConfig: {
-					// OIDCOptions requires loginPage; the plugin overwrites it with the
-					// top-level one, so both must name the fork's consent page.
-					loginPage: MCP_AUTHORIZE_PAGE_PATH,
-					accessTokenExpiresIn: getMcpAccessTokenSeconds(),
-					refreshTokenExpiresIn: getMcpRefreshTokenSeconds(),
-					requirePKCE: true,
-					defaultScope: [
-						"openid",
-						"offline_access",
-						...DOKPLOY_MCP_SCOPE_IDS,
-					].join(" "),
-					scopes: [...DOKPLOY_MCP_SCOPE_IDS],
+				consentPage: MCP_AUTHORIZE_PAGE_PATH,
+				scopes: ["openid", "offline_access", ...DOKPLOY_MCP_SCOPE_IDS],
+				grantTypes: ["authorization_code", "refresh_token"],
+				accessTokenExpiresIn: getMcpAccessTokenSeconds(),
+				refreshTokenExpiresIn: getMcpRefreshTokenSeconds(),
+				refreshTokenReuseInterval: getMcpRefreshGraceSeconds(),
+				// Opaque, database-backed access tokens: the MCP endpoint looks
+				// them up itself, and revoking a grant in Settings takes effect on
+				// the next request instead of when a JWT expires.
+				disableJwtPlugin: true,
+				storeTokens: "hashed",
+				storeClientSecret: oauthClientSecretStorage,
+				// Claude Code and other MCP clients register themselves. The
+				// register gate in `hooks.before` restricts redirect targets.
+				allowDynamicClientRegistration: true,
+				allowUnauthenticatedClientRegistration: true,
+				// The single MCP resource is implicitly available to every client.
+				enforcePerClientResources: false,
+				// A fleet of MCP sessions on one machine shares an IP and can
+				// refresh at the same moment; the provider defaults (20 token
+				// requests a minute) would answer some of them 429.
+				rateLimit: {
+					token: { window: 60, max: 600 },
+					authorize: { window: 60, max: 120 },
+					register: { window: 60, max: 30 },
 				},
 			}),
 			organization({
@@ -622,6 +754,30 @@ const createBetterAuth = () =>
 				dynamicAccessControl: {
 					enabled: true,
 					maximumRolesPerOrganization: 10,
+				},
+				// Dokploy creates organizations itself (the plugin's create
+				// endpoint is disabled) and stores their owner. Declaring the
+				// column satisfies the 1.7 schema check, which rejects NOT NULL
+				// columns the plugin does not know about.
+				// `member.isDefault` is declared so SCIM provisioning, which writes
+				// through the adapter inside its transaction, can set it (see
+				// services/proprietary/scim.ts).
+				schema: {
+					organization: {
+						additionalFields: {
+							ownerId: { type: "string", required: false, input: false },
+						},
+					},
+					member: {
+						additionalFields: {
+							isDefault: {
+								type: "boolean",
+								required: false,
+								input: false,
+								defaultValue: false,
+							},
+						},
+					},
 				},
 			}),
 			// Self-hosted needs the admin plugin too: SCIM deactivation (active: false)
@@ -679,14 +835,20 @@ const _auth = {
 	get updateSSOProvider() {
 		return getAuthInstance().api.updateSSOProvider;
 	},
-	get generateSCIMToken() {
-		return getAuthInstance().api.generateSCIMToken;
+	get createSCIMManagedConnection() {
+		return getAuthInstance().api.createSCIMManagedConnection;
 	},
-	get listSCIMProviderConnections() {
-		return getAuthInstance().api.listSCIMProviderConnections;
+	get listSCIMManagedConnections() {
+		return getAuthInstance().api.listSCIMManagedConnections;
 	},
-	get deleteSCIMProviderConnection() {
-		return getAuthInstance().api.deleteSCIMProviderConnection;
+	get getSCIMManagedConnection() {
+		return getAuthInstance().api.getSCIMManagedConnection;
+	},
+	get rotateSCIMManagedCredential() {
+		return getAuthInstance().api.rotateSCIMManagedCredential;
+	},
+	get decommissionSCIMManagedConnection() {
+		return getAuthInstance().api.decommissionSCIMManagedConnection;
 	},
 };
 
@@ -892,11 +1054,21 @@ export const validateRequest = async (request: IncomingMessage) => {
 	}
 
 	// If no API key, proceed with normal session validation
-	const session = await api.getSession({
+	const betterAuthSession = await api.getSession({
 		headers: new Headers({
 			cookie: request.headers.cookie || "",
 		}),
 	});
+	// `ownerId` is not a user column: it is derived below from the active
+	// organization, so it is added to the type here rather than declared as a
+	// better-auth additional field.
+	const session = betterAuthSession as
+		| (NonNullable<typeof betterAuthSession> & {
+				user: NonNullable<typeof betterAuthSession>["user"] & {
+					ownerId: string;
+				};
+		  })
+		| null;
 
 	if (!session?.session || !session.user) {
 		await logRejectedSessionCookie(request.headers.cookie || "");

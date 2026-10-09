@@ -14,11 +14,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
  * a condition still holds (`requestCount < max`, `backupCodes = <old>`), so
  * concurrent requests cannot all win.
  *
- * On Postgres, @better-auth/drizzle-adapter 1.6.23 put those guards only in an
+ * On Postgres, @better-auth/drizzle-adapter up to 1.6.x put those guards only in an
  * `id IN (subquery)`. A request that waits on the row lock is rechecked against
  * the new row version, but the subquery is not, so every waiting request won.
- * The fork patches the adapter (patches/@better-auth__drizzle-adapter@1.6.23.patch)
- * to repeat the guards on the outer WHERE. These tests pin that behaviour.
+ * The fork patched the adapter until better-auth 1.7, whose adapter (1.7.7) repeats
+ * the guards on the outer WHERE itself, so the patch is gone. These tests pin
+ * that behaviour against future adapter releases.
  *
  * They need a real Postgres. Set DOKPLOY_PG_RACE_ADMIN_URL to a superuser URL
  * (e.g. postgres://postgres:pw@127.0.0.1:55432/postgres); the suite creates a
@@ -62,7 +63,11 @@ describe.skipIf(!adminUrl)("better-auth guarded increments on Postgres", () => {
 			),
 		});
 		// Same adapter configuration as packages/server/src/lib/auth.ts.
-		adapter = drizzleAdapter(db, { provider: "pg", schema })({
+		adapter = drizzleAdapter(db, {
+			provider: "pg",
+			schema,
+			transaction: true,
+		})({
 			plugins: [apiKey(), twoFactor()],
 		} as never) as unknown as typeof adapter;
 	}, 120_000);

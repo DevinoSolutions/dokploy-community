@@ -1,23 +1,29 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import {
 	and,
 	asc,
 	desc,
 	eq,
+	gt,
+	isNotNull,
 	isNull,
 	lt,
 	notExists,
 	or,
-	sql,
 } from "drizzle-orm";
 import { scheduleJob } from "node-schedule";
 import { db } from "../db";
 import {
+	legacyOauthAccessToken,
+	legacyOauthConsent,
 	member,
 	oauthAccessToken,
-	oauthApplication,
+	oauthClient,
+	oauthClientAssertion,
 	oauthConsent,
+	oauthRefreshToken,
+	oauthResource,
 	organization,
 } from "../db/schema";
 import { betterAuthSecret } from "../lib/auth-secret";
@@ -27,8 +33,83 @@ import { getWebServerSettings } from "./web-server-settings";
 export const MCP_ENDPOINT_PATH = "/api/mcp";
 /** Path of the fork's consent page relative to the origin. */
 export const MCP_AUTHORIZE_PAGE_PATH = "/mcp/authorize";
-/** Path of the plugin's authorize endpoint relative to the origin. */
-export const MCP_PLUGIN_AUTHORIZE_PATH = "/api/auth/mcp/authorize";
+/** Path of the OAuth provider's authorize endpoint relative to the origin. */
+export const MCP_PLUGIN_AUTHORIZE_PATH = "/api/auth/oauth2/authorize";
+/** Path of the OAuth provider's token endpoint relative to the origin. */
+export const MCP_TOKEN_PATH = "/api/auth/oauth2/token";
+/** Path of the OAuth provider's registration endpoint relative to the origin. */
+export const MCP_REGISTER_PATH = "/api/auth/oauth2/register";
+
+/**
+ * better-auth 1.6 served the MCP OAuth endpoints under `/api/auth/mcp/*`, and
+ * clients registered before the 1.7 upgrade keep those URLs cached (Claude
+ * Code stores the token endpoint with the grant). `pages/api/auth/[...all].ts`
+ * rewrites each legacy path to its 1.7 equivalent before better-auth routes it.
+ */
+export const LEGACY_MCP_OAUTH_PATH_REWRITES: Readonly<Record<string, string>> =
+	{
+		"/api/auth/mcp/token": MCP_TOKEN_PATH,
+		"/api/auth/mcp/register": MCP_REGISTER_PATH,
+		"/api/auth/mcp/authorize": MCP_PLUGIN_AUTHORIZE_PATH,
+	};
+
+/**
+ * better-auth 1.6 SSO received SAML responses at
+ * `/api/auth/sso/saml2/callback/:providerId`; 1.7 serves the ACS at
+ * `/api/auth/sso/saml2/sp/acs/:providerId`. IdPs configured before the
+ * upgrade keep posting to the old URL, so it stays an alias.
+ */
+const LEGACY_SAML_ACS_PATH = /^\/api\/auth\/sso\/saml2\/callback\/([^/]+)$/;
+
+/** Path of the 1.7 SAML assertion consumer service for a provider. */
+export const samlAcsPath = (providerId: string) =>
+	`/api/auth/sso/saml2/sp/acs/${encodeURIComponent(providerId)}`;
+
+/**
+ * Maps a request URL on a 1.6 auth route (MCP OAuth endpoints, SAML ACS) to
+ * its 1.7 equivalent, query string preserved. Other URLs are returned as is.
+ */
+export const rewriteLegacyAuthUrl = (url: string): string => {
+	const queryStart = url.indexOf("?");
+	const path = queryStart === -1 ? url : url.slice(0, queryStart);
+	const query = queryStart === -1 ? "" : url.slice(queryStart);
+	// Keys all start with "/", so no Object.prototype member can match.
+	const mcpTarget = LEGACY_MCP_OAUTH_PATH_REWRITES[path];
+	if (mcpTarget) return `${mcpTarget}${query}`;
+	const saml = LEGACY_SAML_ACS_PATH.exec(path);
+	if (saml?.[1]) {
+		return `/api/auth/sso/saml2/sp/acs/${saml[1]}${query}`;
+	}
+	return url;
+};
+
+/**
+ * The provider stamps every authorization response with an RFC 9207 `iss`
+ * parameter derived from better-auth's base URL (`https://<host>/api/auth`),
+ * while the discovery document the fork serves advertises the bare origin
+ * (`resolveMcpOrigin`). A client that checks `iss` against the discovery
+ * issuer would reject the response, so the redirect carries the advertised
+ * issuer instead. Locations without an `iss` parameter are returned as is.
+ */
+export const withAdvertisedIssuer = (location: string, issuer: string) => {
+	let url: URL;
+	try {
+		url = new URL(location);
+	} catch {
+		return location;
+	}
+	if (!url.searchParams.has("iss")) return location;
+	url.searchParams.set("iss", issuer);
+	return url.toString();
+};
+
+/**
+ * Storage format of OAuth tokens: `base64url(SHA-256)`, byte-identical to
+ * `@better-auth/oauth-provider`'s `"hashed"` storage. The fork looks bearer
+ * tokens up itself, so it must hash the same way.
+ */
+export const hashOAuthToken = (value: string) =>
+	createHash("sha256").update(value, "utf8").digest("base64url");
 
 /**
  * Scope ids live in the leaf module `./mcp-scopes` so the web app can import
@@ -76,8 +157,11 @@ export const getMcpRefreshTokenSeconds = (env: Env = process.env) =>
 	) * 86400;
 
 /**
- * How long a rotated refresh token stays usable after being consumed
- * (DOKPLOY_MCP_REFRESH_GRACE_SECONDS, default 300). 0 revokes immediately.
+ * How long a rotated refresh token can still be presented after being
+ * consumed (DOKPLOY_MCP_REFRESH_GRACE_SECONDS, default 300). Inside the window
+ * the provider replays the response of the refresh that consumed it, so a
+ * retried or racing request recovers the same tokens instead of stranding the
+ * client. 0 makes a consumed token invalid immediately.
  */
 export const getMcpRefreshGraceSeconds = (env: Env = process.env) =>
 	nonNegativeIntEnv(
@@ -122,9 +206,10 @@ export const resolveMcpOrigin = async (
  * codes may be sent: loopback over http (Claude Code and other CLIs) or https.
  */
 export const isAllowedRedirectUri = (uri: string): boolean => {
-	// The plugin stores the registered list as `redirect_uris.join(",")` and
-	// splits it back on commas, so a single entry containing one would smuggle a
-	// second, unvetted target into the stored list.
+	// The 1.6 plugin stored the registered list as `redirect_uris.join(",")`
+	// and migration 0211 splits it back on commas, so a single entry containing
+	// one would smuggle a second, unvetted target into the list. 1.7 stores an
+	// array, but the rule stays: no legitimate redirect target needs a comma.
 	if (uri.includes(",")) return false;
 	let parsed: URL;
 	try {
@@ -151,7 +236,8 @@ export type McpRegisterDecision =
 	| { ok: false; error: string; error_description: string };
 
 /**
- * Gate for `POST /api/auth/mcp/register`. Pure so the policy can be exercised
+ * Gate for `POST /api/auth/oauth2/register` (and the legacy
+ * `/api/auth/mcp/register` alias). Pure so the policy can be exercised
  * without a better-auth request context; `lib/auth.ts` only translates the
  * verdict into an `APIError`.
  */
@@ -169,6 +255,148 @@ export const evaluateMcpRegisterBody = (body: unknown): McpRegisterDecision => {
 		error_description:
 			"redirect_uris must use http://localhost, http://127.0.0.1 or https://",
 	};
+};
+
+const isLoopbackHttpUri = (uri: string) => {
+	try {
+		const parsed = new URL(uri);
+		return (
+			parsed.protocol === "http:" &&
+			(parsed.hostname === "localhost" ||
+				parsed.hostname === "127.0.0.1" ||
+				parsed.hostname === "[::1]")
+		);
+	} catch {
+		return false;
+	}
+};
+
+/**
+ * Registration defaults the 1.6 plugin applied implicitly. The 1.7 provider
+ * treats a registration without `application_type` as a `web` client, and a
+ * web client may not use an http loopback redirect, which is exactly what
+ * Claude Code and other CLIs register (RFC 8252 native clients). Such a
+ * registration is declared `native` here so it keeps working. Returns null
+ * when the body needs no change.
+ */
+export const normalizeMcpRegisterBody = (
+	body: unknown,
+): Record<string, unknown> | null => {
+	if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+	const record = body as Record<string, unknown>;
+	if (record.application_type !== undefined) return null;
+	const uris = record.redirect_uris;
+	if (
+		!Array.isArray(uris) ||
+		!uris.some((uri) => typeof uri === "string" && isLoopbackHttpUri(uri))
+	) {
+		return null;
+	}
+	return { ...record, application_type: "native" };
+};
+
+/** Canonical RFC 8707 resource identifier of the MCP endpoint for an origin. */
+export const mcpResourceIdentifier = (origin: string) =>
+	`${origin}${MCP_ENDPOINT_PATH}`;
+
+const firstHeaderHost = (value: string | string[] | undefined) => {
+	const raw = Array.isArray(value) ? value[0] : value;
+	const host = raw?.split(",")[0]?.trim().toLowerCase();
+	return host ? host : null;
+};
+
+/**
+ * Hosts this instance is reached under besides the advertised origin: the
+ * request's Host and X-Forwarded-Host, and the configured web server host.
+ */
+export const mcpResourceAliasHosts = async (
+	headers: IncomingHttpHeaders,
+): Promise<string[]> => {
+	const hosts = [
+		firstHeaderHost(headers.host),
+		firstHeaderHost(headers["x-forwarded-host"]),
+	];
+	const settings = await getWebServerSettings().catch(() => null);
+	if (settings?.host) hosts.push(settings.host.trim().toLowerCase());
+	return [...new Set(hosts.filter((host): host is string => !!host))];
+};
+
+/**
+ * Maps a client-sent RFC 8707 `resource` naming this instance's MCP endpoint
+ * to the identifier the protected-resource metadata advertises
+ * (`mcpResourceIdentifier(resolveMcpOrigin(...))`), or null when it names
+ * something else.
+ *
+ * Clients do not all echo the advertised value byte for byte: some append a
+ * trailing slash, some keep the URL they were configured with (another host
+ * name of this instance, or http behind a TLS-terminating proxy). Each of
+ * those is this endpoint, and the provider would answer `invalid_target`
+ * because it knows only the advertised identifier. Only hosts that reach this
+ * instance are accepted, never an arbitrary one, so a token can never be bound
+ * to a third-party resource name.
+ */
+export const canonicalizeMcpResource = (
+	resource: string,
+	origin: string,
+	aliasHosts: readonly string[] = [],
+): string | null => {
+	let parsed: URL;
+	let advertised: URL;
+	try {
+		parsed = new URL(resource);
+		advertised = new URL(origin);
+	} catch {
+		return null;
+	}
+	if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+	if (parsed.search !== "" || parsed.hash !== "") return null;
+	if (parsed.username !== "" || parsed.password !== "") return null;
+	if (parsed.pathname.replace(/\/+$/, "") !== MCP_ENDPOINT_PATH) return null;
+	const host = parsed.host.toLowerCase();
+	const known =
+		host === advertised.host.toLowerCase() ||
+		aliasHosts.some((alias) => alias.toLowerCase() === host);
+	return known ? mcpResourceIdentifier(advertised.origin) : null;
+};
+
+/**
+ * Canonical form of a `resource` parameter (a string, or an array when the
+ * key repeats). Values naming another resource are left as sent, so the
+ * provider still rejects them.
+ */
+export const canonicalizeMcpResourceParam = (
+	value: unknown,
+	origin: string,
+	aliasHosts: readonly string[] = [],
+): unknown => {
+	const one = (entry: unknown) =>
+		typeof entry === "string"
+			? (canonicalizeMcpResource(entry, origin, aliasHosts) ?? entry)
+			: entry;
+	if (Array.isArray(value)) return [...new Set(value.map(one))];
+	return one(value);
+};
+
+/**
+ * The 1.7 provider rejects an RFC 8707 `resource` it has no `oauth_resource`
+ * row for, and MCP clients send the endpoint URL as `resource` on every
+ * authorize and token request (the 1.6 plugin ignored it). The origin is only
+ * known per request (BETTER_AUTH_URL or the configured host), so the row is
+ * created on demand instead of from static plugin options. Idempotent.
+ */
+export const ensureMcpResource = async (origin: string) => {
+	const identifier = mcpResourceIdentifier(origin);
+	const now = new Date();
+	await db
+		.insert(oauthResource)
+		.values({
+			identifier,
+			name: "Dokploy MCP",
+			createdAt: now,
+			updatedAt: now,
+		})
+		.onConflictDoNothing({ target: oauthResource.identifier });
+	return identifier;
 };
 
 /**
@@ -205,41 +433,44 @@ export interface McpAccessToken {
 }
 
 /**
- * Opaque access-token lookup. Null for missing, expired or user-less rows, and
- * for tokens whose client application has since been disabled.
+ * Opaque access-token lookup against the provider's hashed token store. Null
+ * for missing, expired, revoked or user-less rows, and for tokens whose client
+ * has since been disabled.
  */
 export const findMcpAccessToken = async (
 	accessToken: string,
 ): Promise<McpAccessToken | null> => {
 	if (!accessToken) return null;
 	const row = await db.query.oauthAccessToken.findFirst({
-		where: eq(oauthAccessToken.accessToken, accessToken),
+		where: eq(oauthAccessToken.token, hashOAuthToken(accessToken)),
 		columns: {
 			userId: true,
 			clientId: true,
 			scopes: true,
-			accessTokenExpiresAt: true,
+			expiresAt: true,
+			revoked: true,
 		},
-		with: { application: { columns: { disabled: true } } },
+		with: { client: { columns: { disabled: true } } },
 	});
 	if (!row || !row.userId) return null;
-	if (row.application?.disabled) return null;
-	if (row.accessTokenExpiresAt.getTime() <= Date.now()) return null;
+	if (row.revoked) return null;
+	if (row.client?.disabled) return null;
+	if (!row.expiresAt || row.expiresAt.getTime() <= Date.now()) return null;
 	return {
 		userId: row.userId,
 		clientId: row.clientId,
-		scopes: row.scopes.split(" ").filter(Boolean),
+		scopes: (row.scopes ?? []).filter(Boolean),
 	};
 };
 
 export const findOAuthApplicationByClientId = async (clientId: string) => {
 	if (!clientId) return null;
-	const row = await db.query.oauthApplication.findFirst({
-		where: eq(oauthApplication.clientId, clientId),
+	const row = await db.query.oauthClient.findFirst({
+		where: eq(oauthClient.clientId, clientId),
 		columns: {
 			clientId: true,
 			name: true,
-			redirectUrls: true,
+			redirectUris: true,
 			disabled: true,
 		},
 	});
@@ -247,8 +478,8 @@ export const findOAuthApplicationByClientId = async (clientId: string) => {
 	return {
 		clientId: row.clientId,
 		name: row.name || "Unnamed client",
-		redirectUrls: row.redirectUrls.split(",").filter(Boolean),
-		disabled: row.disabled,
+		redirectUrls: (row.redirectUris ?? []).filter(Boolean),
+		disabled: row.disabled ?? false,
 	};
 };
 
@@ -333,10 +564,21 @@ export interface McpAuthorizeGateInput {
 const asString = (value: unknown) => (typeof value === "string" ? value : "");
 
 /**
- * Gate for `GET /api/auth/mcp/authorize`. The plugin issues a code without ever
- * asking the user, so an anonymous request is bounced to the fork's consent
- * page (before the plugin can set its login-resume cookie) and a signed-in one
- * must carry the proof that page mints for this exact user and parameters.
+ * The provider also accepts POST on its authorize endpoint and then reads the
+ * parameters from the body, while the consent proof is checked against the
+ * query string. The fork's consent page always redirects with GET, so any
+ * other method is refused before the provider can issue a code for parameters
+ * the proof never covered.
+ */
+export const isMcpAuthorizeMethodAllowed = (method: string | undefined) =>
+	(method ?? "").toUpperCase() === "GET";
+
+/**
+ * Gate for `GET /api/auth/oauth2/authorize` (and the legacy
+ * `/api/auth/mcp/authorize` alias). The fork's consent page is the only way to
+ * approve a client, so an anonymous request is bounced to it (before the
+ * provider can redirect to its own login flow) and a signed-in one must carry
+ * the proof that page mints for this exact user and parameters.
  */
 export const evaluateMcpAuthorizeGate = ({
 	query,
@@ -385,86 +627,121 @@ export const evaluateMcpAuthorizeGate = ({
 // ---------------------------------------------------------------------------
 
 /**
- * Called after a successful refresh. better-auth rotates by inserting a new
- * row and leaving the consumed one alive for its whole remaining window, so
- * the old refresh token stays replayable until something retires it.
- *
- * Retiring it instantly is the strictest option, but it strands clients: a
- * dropped response or a racing second request leaves the client holding a
- * token that no longer exists, and the only way out is a browser re-auth.
- * PostHog hit exactly this with MCP clients and responded by disabling
- * rotation for them outright; Google, Okta and Cognito issue non-rotating
- * refresh tokens for the same reason. We keep rotation but clamp the consumed
- * row to a short grace window, so a retry inside it still succeeds.
- *
- * LEAST() only ever shortens the row: one already expiring sooner keeps its
- * own expiry, and the daily purge reaps it either way. LEAST ignores NULL, so
- * a row with no recorded refresh expiry also ends up bounded by the window
- * rather than staying open. Set DOKPLOY_MCP_REFRESH_GRACE_SECONDS=0 to restore
- * immediate revocation.
+ * How long a rotated refresh row is kept after rotation. The provider marks
+ * the consumed row `revoked` and, when the same token is presented again
+ * outside the reuse window, treats it as replay and tears the whole grant
+ * family down (RFC 9700 §4.14). The row has to exist for that detection, so
+ * it is reaped only well after any legitimate retry could arrive.
  */
-export const consumeRotatedRefreshToken = async (
+export const ROTATED_REFRESH_RETENTION_DAYS = 30;
+
+/**
+ * True when a refresh token was already consumed (rotated or revoked) and its
+ * replay window has closed.
+ *
+ * The provider answers such a token by deleting every refresh and access token
+ * of the (client, user) pair, as RFC 9700 §4.14 suggests for a stolen token.
+ * MCP clients share one grant across many sessions (every Claude Code session
+ * on a machine reads the same credentials file), so a session still holding
+ * the previous token would log every other session out with it. The 1.6
+ * behaviour, kept on purpose since #214, is to refuse only the stale token:
+ * `lib/auth.ts` answers `invalid_grant` before the provider sees it, and the
+ * grant the other sessions use stays valid.
+ */
+export const isStaleRotatedRefreshToken = async (
 	refreshToken: string,
-	// Injected like the env helpers above: the vitest config statically
-	// `define`s process.env, so tests cannot stub it.
-	graceSeconds: number = getMcpRefreshGraceSeconds(),
+	now: Date = new Date(),
 ) => {
-	if (!refreshToken) return;
-
-	if (graceSeconds <= 0) {
-		await db
-			.delete(oauthAccessToken)
-			.where(eq(oauthAccessToken.refreshToken, refreshToken));
-		return;
-	}
-
-	// A value interpolated into a raw `sql` template bypasses the column's
-	// driver mapping, so a Date reaches postgres-js as-is and its parameter
-	// encoder throws (`The "string" argument must be of type string ... Received
-	// an instance of Date`). Serialise the way drizzle's timestamp column does.
-	const until = new Date(Date.now() + graceSeconds * 1000).toISOString();
-	await db
-		.update(oauthAccessToken)
-		.set({
-			accessTokenExpiresAt: sql`LEAST(${oauthAccessToken.accessTokenExpiresAt}, ${until}::timestamp)`,
-			refreshTokenExpiresAt: sql`LEAST(${oauthAccessToken.refreshTokenExpiresAt}, ${until}::timestamp)`,
-		})
-		.where(eq(oauthAccessToken.refreshToken, refreshToken));
+	if (!refreshToken) return false;
+	const row = await db.query.oauthRefreshToken.findFirst({
+		where: eq(oauthRefreshToken.token, hashOAuthToken(refreshToken)),
+		columns: { revoked: true, rotationReplayExpiresAt: true },
+	});
+	if (!row?.revoked) return false;
+	return (
+		!row.rotationReplayExpiresAt ||
+		row.rotationReplayExpiresAt.getTime() < now.getTime()
+	);
 };
 
 /**
  * Removes rows that can never be used again.
  *
- * First the token rows: the refresh window closed, or the access token expired
- * and no usable refresh window exists — either because there is no refresh
- * token at all, or because its expiry was never recorded.
+ * First the token rows: refresh tokens whose window closed or that were
+ * rotated/revoked long ago (their access tokens go with them through the
+ * `refresh_id` cascade), then access tokens that expired or were revoked.
  *
  * Then the abandoned client registrations. Dynamic client registration is
- * anonymous, so every `/mcp/register` call writes an `oauth_application` row
- * whether or not the user ever authorizes it, and nothing else removes them.
- * A registration with no token row has never completed an authorization.
+ * anonymous, so every registration writes an `oauth_client` row whether or
+ * not the user ever authorizes it, and nothing else removes them. A
+ * registration with no token row has never completed an authorization.
  * Clients cache their registration indefinitely, though (Claude Code keeps the
  * client id in its credentials file), and a user who registers today and only
  * clicks Authorize next week must still land on a known client rather than
  * "Unknown or disabled OAuth client". Wait ABANDONED_REGISTRATION_DAYS before
  * treating such a row as abandoned.
+ *
+ * The better-auth 1.6 tables (`oauth_application`, `oauth_access_token`,
+ * `oauth_consent`) are the rollback copy, so live rows stay. 1.6 stored its
+ * tokens in plaintext, though, so a 1.6 token row is removed as soon as both
+ * of its tokens have expired: 1.6 would refuse it too, and nothing else ever
+ * cleans that table.
+ *
+ * Finally, the encrypted replay response of a rotated refresh token is
+ * cleared once its replay window has closed. The row itself stays for
+ * ROTATED_REFRESH_RETENTION_DAYS (stale-token detection needs it), but the
+ * response, which holds the tokens issued by the rotation, is never used
+ * again.
  */
 export const ABANDONED_REGISTRATION_DAYS = 30;
 
 export const purgeExpiredMcpTokens = async () => {
 	const now = new Date();
+	const rotatedBefore = new Date(
+		now.getTime() - ROTATED_REFRESH_RETENTION_DAYS * 86_400_000,
+	);
+	await db
+		.delete(oauthRefreshToken)
+		.where(
+			or(
+				lt(oauthRefreshToken.expiresAt, now),
+				and(
+					isNotNull(oauthRefreshToken.revoked),
+					lt(oauthRefreshToken.revoked, rotatedBefore),
+				),
+			),
+		);
 	await db
 		.delete(oauthAccessToken)
 		.where(
 			or(
-				lt(oauthAccessToken.refreshTokenExpiresAt, now),
+				lt(oauthAccessToken.expiresAt, now),
 				and(
-					isNull(oauthAccessToken.refreshToken),
-					lt(oauthAccessToken.accessTokenExpiresAt, now),
+					isNotNull(oauthAccessToken.revoked),
+					lt(oauthAccessToken.revoked, now),
 				),
-				and(
-					isNull(oauthAccessToken.refreshTokenExpiresAt),
-					lt(oauthAccessToken.accessTokenExpiresAt, now),
+			),
+		);
+	await db
+		.delete(oauthClientAssertion)
+		.where(lt(oauthClientAssertion.expiresAt, now));
+	await db
+		.update(oauthRefreshToken)
+		.set({ rotationReplayResponse: null })
+		.where(
+			and(
+				isNotNull(oauthRefreshToken.rotationReplayResponse),
+				lt(oauthRefreshToken.rotationReplayExpiresAt, now),
+			),
+		);
+	await db
+		.delete(legacyOauthAccessToken)
+		.where(
+			and(
+				lt(legacyOauthAccessToken.accessTokenExpiresAt, now),
+				or(
+					isNull(legacyOauthAccessToken.refreshTokenExpiresAt),
+					lt(legacyOauthAccessToken.refreshTokenExpiresAt, now),
 				),
 			),
 		);
@@ -473,15 +750,21 @@ export const purgeExpiredMcpTokens = async () => {
 		now.getTime() - ABANDONED_REGISTRATION_DAYS * 86_400_000,
 	);
 	await db
-		.delete(oauthApplication)
+		.delete(oauthClient)
 		.where(
 			and(
-				lt(oauthApplication.createdAt, abandonedBefore),
+				lt(oauthClient.createdAt, abandonedBefore),
+				notExists(
+					db
+						.select({ id: oauthRefreshToken.id })
+						.from(oauthRefreshToken)
+						.where(eq(oauthRefreshToken.clientId, oauthClient.clientId)),
+				),
 				notExists(
 					db
 						.select({ id: oauthAccessToken.id })
 						.from(oauthAccessToken)
-						.where(eq(oauthAccessToken.clientId, oauthApplication.clientId)),
+						.where(eq(oauthAccessToken.clientId, oauthClient.clientId)),
 				),
 			),
 		);
@@ -515,9 +798,11 @@ export interface McpAuthorization {
 const MCP_AUTHORIZATION_ROW_LIMIT = 200;
 
 /**
- * Records the grant the user approved on the consent page. Token rows are
- * rotated away on every refresh, so they cannot date the original grant; this
- * row can.
+ * Records the grant the user approved on the consent page. The provider's
+ * authorize endpoint issues a code only when a consent row for the user and
+ * client covers every requested scope and resource, so this row is what lets
+ * the redirect that follows succeed. Token rows are rotated away on every
+ * refresh and cannot date the original grant; this row can.
  *
  * The row replaces any earlier grant for the same client: re-authorizing keeps
  * one row per (user, client), so `authorizedAt` reflects the grant actually in
@@ -527,6 +812,7 @@ export const recordMcpConsent = async (
 	userId: string,
 	clientId: string,
 	scopes: string[],
+	resources: string[] = [],
 ) => {
 	const now = new Date();
 	await db
@@ -537,34 +823,41 @@ export const recordMcpConsent = async (
 	await db.insert(oauthConsent).values({
 		clientId,
 		userId,
-		scopes: scopes.join(" "),
-		consentGiven: true,
+		scopes,
+		resources: resources.length > 0 ? resources : null,
 		createdAt: now,
 		updatedAt: now,
 	});
 };
 
 /**
- * One row per client the user has authorized, newest token wins for scopes.
- * `authorizedAt` is the latest consent, since `recordMcpConsent` replaces the
- * previous grant for the client rather than adding to it.
+ * One row per client the user has authorized, newest live refresh token wins
+ * for scopes. `authorizedAt` is the latest consent, since `recordMcpConsent`
+ * replaces the previous grant for the client rather than adding to it.
  */
 export const listMcpAuthorizations = async (
 	userId: string,
 ): Promise<McpAuthorization[]> => {
-	// Never project the token columns: this list is rendered in the UI.
-	const rows = await db.query.oauthAccessToken.findMany({
-		where: eq(oauthAccessToken.userId, userId),
+	// Never project the token columns: this list is rendered in the UI. The
+	// newest live tokens are read (a user with many sessions can hold far more
+	// than the cap), then walked oldest first so the newest wins per client.
+	const newestFirst = await db.query.oauthRefreshToken.findMany({
+		where: and(
+			eq(oauthRefreshToken.userId, userId),
+			isNull(oauthRefreshToken.revoked),
+			gt(oauthRefreshToken.expiresAt, new Date()),
+		),
 		columns: {
 			clientId: true,
 			scopes: true,
 			createdAt: true,
-			refreshTokenExpiresAt: true,
+			expiresAt: true,
 		},
-		orderBy: [asc(oauthAccessToken.createdAt)],
+		orderBy: [desc(oauthRefreshToken.createdAt)],
 		limit: MCP_AUTHORIZATION_ROW_LIMIT,
-		with: { application: { columns: { name: true } } },
+		with: { client: { columns: { name: true } } },
 	});
+	const rows = [...newestFirst].reverse();
 	const consents = await db.query.oauthConsent.findMany({
 		where: eq(oauthConsent.userId, userId),
 		columns: { clientId: true, createdAt: true },
@@ -573,39 +866,42 @@ export const listMcpAuthorizations = async (
 	});
 	const grantedAt = new Map<string, Date>();
 	for (const consent of consents) {
-		if (!grantedAt.has(consent.clientId)) {
+		if (consent.createdAt && !grantedAt.has(consent.clientId)) {
 			grantedAt.set(consent.clientId, consent.createdAt);
 		}
 	}
 	const byClient = new Map<string, McpAuthorization>();
 	for (const row of rows) {
 		const existing = byClient.get(row.clientId);
-		const scopes = row.scopes
-			.split(" ")
-			.filter((scope) => scope.startsWith("dokploy:"));
+		const createdAt = row.createdAt ?? new Date(0);
+		const scopes = (row.scopes ?? []).filter((scope) =>
+			scope.startsWith("dokploy:"),
+		);
 		if (!existing) {
 			byClient.set(row.clientId, {
 				clientId: row.clientId,
-				clientName: row.application?.name || "Unnamed client",
+				clientName: row.client?.name || "Unnamed client",
 				scopes,
 				// Falls back to the oldest surviving token for grants made before
 				// consent rows were recorded.
-				authorizedAt: grantedAt.get(row.clientId) ?? row.createdAt,
-				lastRefreshedAt: row.createdAt,
-				refreshExpiresAt: row.refreshTokenExpiresAt,
+				authorizedAt: grantedAt.get(row.clientId) ?? createdAt,
+				lastRefreshedAt: createdAt,
+				refreshExpiresAt: row.expiresAt,
 			});
 			continue;
 		}
 		existing.scopes = scopes;
-		existing.lastRefreshedAt = row.createdAt;
-		existing.refreshExpiresAt = row.refreshTokenExpiresAt;
+		existing.lastRefreshedAt = createdAt;
+		existing.refreshExpiresAt = row.expiresAt;
 	}
 	return [...byClient.values()];
 };
 
 /**
  * Deletes every token and consent row for client+user; the client's next call
- * gets 401 and a re-authorization starts a fresh grant.
+ * gets 401 and a re-authorization starts a fresh grant. The matching 1.6 rows
+ * go too: they hold the same grant in plaintext, and a rollback must not bring
+ * back an authorization the user revoked.
  */
 export const revokeMcpAuthorization = async (
 	userId: string,
@@ -620,8 +916,32 @@ export const revokeMcpAuthorization = async (
 			),
 		);
 	await db
+		.delete(oauthRefreshToken)
+		.where(
+			and(
+				eq(oauthRefreshToken.userId, userId),
+				eq(oauthRefreshToken.clientId, clientId),
+			),
+		);
+	await db
 		.delete(oauthConsent)
 		.where(
 			and(eq(oauthConsent.userId, userId), eq(oauthConsent.clientId, clientId)),
+		);
+	await db
+		.delete(legacyOauthAccessToken)
+		.where(
+			and(
+				eq(legacyOauthAccessToken.userId, userId),
+				eq(legacyOauthAccessToken.clientId, clientId),
+			),
+		);
+	await db
+		.delete(legacyOauthConsent)
+		.where(
+			and(
+				eq(legacyOauthConsent.userId, userId),
+				eq(legacyOauthConsent.clientId, clientId),
+			),
 		);
 };

@@ -1,4 +1,5 @@
 import {
+	canonicalizeMcpResource,
 	createConsentProof,
 	findOAuthApplicationByClientId,
 	findOrganizationName,
@@ -7,6 +8,7 @@ import {
 	listMcpAuthorizations,
 	MCP_ENDPOINT_PATH,
 	MCP_PLUGIN_AUTHORIZE_PATH,
+	mcpResourceAliasHosts,
 	recordMcpConsent,
 	resolveDefaultOrganizationId,
 	resolveMcpOrigin,
@@ -129,11 +131,34 @@ export const mcpRouter = createTRPCRouter({
 					message: "Unknown scope requested",
 				});
 			}
+			// The consent row must name the resource exactly as the authorize
+			// hook hands it to the provider (the advertised identifier), or the
+			// provider finds no consent covering it.
+			let resource = input.resource;
+			if (resource) {
+				const origin = await resolveMcpOrigin(ctx.req.headers);
+				if (origin) {
+					resource =
+						canonicalizeMcpResource(
+							resource,
+							origin,
+							await mcpResourceAliasHosts(ctx.req.headers),
+						) ?? resource;
+				}
+			}
 			const selectedScopes = [...new Set(input.scopes)].sort();
-			const scope = ["openid", "offline_access", ...selectedScopes].join(" ");
-			// Grant record: gives the settings card a stable "authorized at" and a
-			// scope history that survives refresh-token rotation.
-			await recordMcpConsent(ctx.user.id, input.clientId, selectedScopes);
+			const grantedScopes = ["openid", "offline_access", ...selectedScopes];
+			const scope = grantedScopes.join(" ");
+			// Grant record: the provider's authorize endpoint issues a code only
+			// when it covers every requested scope and resource. It also gives the
+			// settings card a stable "authorized at" that survives refresh-token
+			// rotation.
+			await recordMcpConsent(
+				ctx.user.id,
+				input.clientId,
+				grantedScopes,
+				resource ? [resource] : [],
+			);
 			const state = input.state ?? "";
 			const consent = createConsentProof({
 				userId: ctx.user.id,
@@ -153,7 +178,7 @@ export const mcpRouter = createTRPCRouter({
 				consent,
 			});
 			if (state) params.set("state", state);
-			if (input.resource) params.set("resource", input.resource);
+			if (resource) params.set("resource", resource);
 			return { url: `${MCP_PLUGIN_AUTHORIZE_PATH}?${params.toString()}` };
 		}),
 });
