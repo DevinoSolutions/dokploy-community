@@ -328,8 +328,8 @@ Upstream (`b839e6d6b`, `5f10ed688`) enforces SSO at the better-auth layer:
 `/sign-in/passkey`, `/sign-up/email` and the two passkey ceremony paths when
 `!IS_CLOUD && settings.enforceSSO`. The fork restructured that same
 `hooks.before` for the remote-MCP OAuth gates (`/mcp/register` DCR policy,
-`/mcp/authorize` consent proof) and owns `hooks.after` (refresh-token rotation
-clamp). **Both sides must survive.** Upstream's block runs first — it is a hard
+`/mcp/authorize` consent proof; `/oauth2/*` since better-auth 1.7, see below)
+and owned `hooks.after` (refresh-token rotation clamp, gone in 1.7). **Both sides must survive.** Upstream's block runs first — it is a hard
 deny for the whole request — then the fork's MCP gates. The two path sets are
 disjoint, so the ordering is readability, not behaviour. `auth-cli.ts` and
 `auth-schema2.ts` auto-merge and need no change.
@@ -337,6 +337,33 @@ disjoint, so the ordering is readability, not behaviour. `auth-cli.ts` and
 Note the interaction: with `enforceSSO` on, the fork's self-hosted social login
 buttons are dead (upstream blocks `/sign-in/social`). That is upstream's intent
 and the buttons are only rendered when the provider env vars are set.
+
+### Fork-owned: better-auth 1.7 (ahead of upstream)
+
+The fork runs better-auth 1.7 before upstream does (see
+`docs/better-auth-1.7-upgrade.md`). When upstream upgrades, keep the fork's
+side of these:
+
+- `lib/auth.ts`: `oauthProvider` replaces the 1.6 `mcp` plugin, and the MCP
+  gates in `hooks.before` match `/oauth2/register`, `/oauth2/authorize` and
+  `/oauth2/token`. There is no `hooks.after` any more: the provider's
+  `refreshTokenReuseInterval` replaces the 1.6 rotation clamp, and the
+  `/oauth2/token` gate refuses a stale rotated token before the provider can
+  revoke the whole grant family.
+- `pages/api/auth/[...all].ts` rewrites the 1.6 MCP and SAML callback URLs
+  (`rewriteLegacyAuthUrl`) and the authorize response `iss`.
+- Schema: `db/schema/mcp-oauth.ts` and `db/schema/scim.ts` hold the 1.7 tables;
+  the 1.6 tables stay as `legacy*` exports. The 1.7 token and consent tables
+  use new physical names because the 1.6 tables kept `oauth_access_token` and
+  `oauth_consent`. Migrations 0210 (tables) and 0211 (grant copy) are
+  fork-owned; an upstream 1.7 migration for the same tables must be
+  hand-carried as a no-op.
+- 1.7 checks the Drizzle schema against the plugin set on every request. A new
+  better-auth field or a NOT NULL column it does not write (as with
+  `organization.ownerId`, declared as an organization additional field) fails
+  every auth request until the schema is fixed. Run
+  `npx auth@<version> generate --config packages/server/src/lib/auth-cli.ts`
+  and compare.
 
 ### Adapted at v0.30.6: Drizzle rule 4, again (upstream 0191-0195 → fork 0201)
 
