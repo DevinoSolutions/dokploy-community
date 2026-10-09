@@ -1471,6 +1471,20 @@
       "when": 1791522896676,
       "tag": "0209_preview_docker_image",
       "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1791533105237,
+      "tag": "0210_better_auth_1_7_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 211,
+      "version": "7",
+      "when": 1791533152655,
+      "tag": "0211_better_auth_1_7_grants",
+      "breakpoints": true
     }
   ]
 }
