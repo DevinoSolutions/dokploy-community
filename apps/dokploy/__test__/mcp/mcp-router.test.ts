@@ -124,6 +124,23 @@ describe("mcp router", () => {
 		).toBe("https://dok.example.com/api/mcp");
 	});
 
+	it("approveAuthorization records the advertised resource for a variant of it", async () => {
+		const { recordMcpConsent } = await import(
+			"@dokploy/server/services/mcp-oauth"
+		);
+		vi.mocked(recordMcpConsent).mockClear();
+		const { url } = await caller.mcp.approveAuthorization({
+			...approveInput,
+			resource: "http://dok.example.com/api/mcp/",
+		});
+		expect(vi.mocked(recordMcpConsent).mock.calls[0]?.[3]).toEqual([
+			"https://dok.example.com/api/mcp",
+		]);
+		expect(
+			new URL(url, "https://dok.example.com").searchParams.get("resource"),
+		).toBe("https://dok.example.com/api/mcp");
+	});
+
 	it("approveAuthorization rejects unknown clients, unregistered redirects, bad PKCE and unknown scopes", async () => {
 		await expect(
 			caller.mcp.approveAuthorization({

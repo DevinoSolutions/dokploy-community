@@ -24,6 +24,7 @@ import {
 	getUserByToken,
 } from "../services/admin";
 import {
+	canonicalizeMcpResourceParam,
 	DOKPLOY_MCP_SCOPE_IDS,
 	ensureMcpResource,
 	evaluateMcpAuthorizeGate,
@@ -31,8 +32,10 @@ import {
 	getMcpAccessTokenSeconds,
 	getMcpRefreshGraceSeconds,
 	getMcpRefreshTokenSeconds,
+	isMcpAuthorizeMethodAllowed,
 	isStaleRotatedRefreshToken,
 	MCP_AUTHORIZE_PAGE_PATH,
+	mcpResourceAliasHosts,
 	normalizeMcpRegisterBody,
 	resolveMcpOrigin,
 } from "../services/mcp-oauth";
@@ -108,20 +111,35 @@ const readFormOrJsonBody = (rawBody: unknown): Record<string, unknown> => {
 };
 
 /**
- * Makes sure the MCP endpoint of this instance is a known RFC 8707 resource
- * before the provider validates a `resource` parameter. A failure is logged
- * and left to the provider, which then answers `invalid_target`.
+ * Prepares a `resource` parameter before the provider validates it: makes
+ * sure the MCP endpoint of this instance is a known RFC 8707 resource, and
+ * maps the variants clients send for it (trailing slash, another host name of
+ * this instance, http) to the advertised identifier. Returns the value to use.
+ * A failure is logged and the value is left to the provider, which then
+ * answers `invalid_target`.
  */
-const ensureMcpResourceForRequest = async (headers: Headers | undefined) => {
+const prepareMcpResourceParam = async (
+	headers: Headers | undefined,
+	value: unknown,
+): Promise<unknown> => {
 	try {
-		const origin = await resolveMcpOrigin(
-			Object.fromEntries(headers?.entries() ?? []),
+		const incoming = Object.fromEntries(headers?.entries() ?? []);
+		const origin = await resolveMcpOrigin(incoming);
+		if (!origin) return value;
+		await ensureMcpResource(origin);
+		return canonicalizeMcpResourceParam(
+			value,
+			origin,
+			await mcpResourceAliasHosts(incoming),
 		);
-		if (origin) await ensureMcpResource(origin);
 	} catch (error) {
 		console.error("[mcp] failed to register the MCP resource", error);
+		return value;
 	}
 };
+
+const sameParam = (left: unknown, right: unknown) =>
+	JSON.stringify(left) === JSON.stringify(right);
 
 /**
  * Client secrets of confidential OAuth clients. Opaque access tokens (see
@@ -293,6 +311,18 @@ const createBetterAuth = () =>
 				// reach the provider (it would start its own login flow, which
 				// bypasses the consent page after sign-in).
 				if (ctx.path === "/oauth2/authorize") {
+					// A POST would make the provider read its parameters from the
+					// body, which the proof (checked on the query) never covered.
+					if (
+						!isMcpAuthorizeMethodAllowed(
+							ctx.request?.method ?? (ctx.body ? "POST" : "GET"),
+						)
+					) {
+						throw new APIError("METHOD_NOT_ALLOWED", {
+							error: "invalid_request",
+							error_description: "authorization requests must use GET",
+						});
+					}
 					const query = (ctx.query ?? {}) as Record<string, unknown>;
 					const session = await getSessionFromCtx(ctx);
 					const decision = evaluateMcpAuthorizeGate({
@@ -309,15 +339,18 @@ const createBetterAuth = () =>
 						});
 					}
 					if (query.resource !== undefined) {
-						await ensureMcpResourceForRequest(ctx.headers);
+						const resource = await prepareMcpResourceParam(
+							ctx.headers,
+							query.resource,
+						);
+						if (!sameParam(resource, query.resource)) {
+							return { context: { query: { ...query, resource } } };
+						}
 					}
 				}
 
 				if (ctx.path === "/oauth2/token") {
 					const body = readFormOrJsonBody(ctx.body);
-					if (body.resource !== undefined) {
-						await ensureMcpResourceForRequest(ctx.headers);
-					}
 					if (
 						body.grant_type === "refresh_token" &&
 						typeof body.refresh_token === "string" &&
@@ -327,6 +360,15 @@ const createBetterAuth = () =>
 							error: "invalid_grant",
 							error_description: "invalid refresh token",
 						});
+					}
+					if (body.resource !== undefined) {
+						const resource = await prepareMcpResourceParam(
+							ctx.headers,
+							body.resource,
+						);
+						if (!sameParam(resource, body.resource)) {
+							return { context: { body: { ...body, resource } } };
+						}
 					}
 				}
 			}),

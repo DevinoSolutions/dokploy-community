@@ -1,4 +1,5 @@
 import {
+	canonicalizeMcpResource,
 	createConsentProof,
 	findOAuthApplicationByClientId,
 	findOrganizationName,
@@ -7,6 +8,7 @@ import {
 	listMcpAuthorizations,
 	MCP_ENDPOINT_PATH,
 	MCP_PLUGIN_AUTHORIZE_PATH,
+	mcpResourceAliasHosts,
 	recordMcpConsent,
 	resolveDefaultOrganizationId,
 	resolveMcpOrigin,
@@ -129,6 +131,21 @@ export const mcpRouter = createTRPCRouter({
 					message: "Unknown scope requested",
 				});
 			}
+			// The consent row must name the resource exactly as the authorize
+			// hook hands it to the provider (the advertised identifier), or the
+			// provider finds no consent covering it.
+			let resource = input.resource;
+			if (resource) {
+				const origin = await resolveMcpOrigin(ctx.req.headers);
+				if (origin) {
+					resource =
+						canonicalizeMcpResource(
+							resource,
+							origin,
+							await mcpResourceAliasHosts(ctx.req.headers),
+						) ?? resource;
+				}
+			}
 			const selectedScopes = [...new Set(input.scopes)].sort();
 			const grantedScopes = ["openid", "offline_access", ...selectedScopes];
 			const scope = grantedScopes.join(" ");
@@ -140,7 +157,7 @@ export const mcpRouter = createTRPCRouter({
 				ctx.user.id,
 				input.clientId,
 				grantedScopes,
-				input.resource ? [input.resource] : [],
+				resource ? [resource] : [],
 			);
 			const state = input.state ?? "";
 			const consent = createConsentProof({
@@ -161,7 +178,7 @@ export const mcpRouter = createTRPCRouter({
 				consent,
 			});
 			if (state) params.set("state", state);
-			if (input.resource) params.set("resource", input.resource);
+			if (resource) params.set("resource", resource);
 			return { url: `${MCP_PLUGIN_AUTHORIZE_PATH}?${params.toString()}` };
 		}),
 });

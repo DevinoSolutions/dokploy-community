@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 const {
+	canonicalizeMcpResource,
+	canonicalizeMcpResourceParam,
 	createConsentProof,
 	evaluateMcpAuthorizeGate,
 	evaluateMcpRegisterBody,
+	isMcpAuthorizeMethodAllowed,
+	resolveMcpOrigin,
 } = await import("@dokploy/server/services/mcp-oauth");
 
 const SECRET = "consent-proof-test-secret";
@@ -135,5 +139,106 @@ describe("evaluateMcpAuthorizeGate", () => {
 		expect(decision.action).toBe("reject");
 		if (decision.action !== "reject") return;
 		expect(decision.error).toBe("consent_required");
+	});
+});
+
+describe("isMcpAuthorizeMethodAllowed", () => {
+	// The provider reads POST parameters from the body while the consent
+	// proof is checked on the query, so only GET may reach it.
+	it("allows only GET", () => {
+		expect(isMcpAuthorizeMethodAllowed("GET")).toBe(true);
+		expect(isMcpAuthorizeMethodAllowed("get")).toBe(true);
+		for (const method of [
+			"POST",
+			"PUT",
+			"PATCH",
+			"DELETE",
+			"HEAD",
+			"",
+			undefined,
+		]) {
+			expect(isMcpAuthorizeMethodAllowed(method)).toBe(false);
+		}
+	});
+});
+
+describe("canonicalizeMcpResource", () => {
+	const origin = "https://devino-first.basa-ulmer.ts.net";
+	const advertised = `${origin}/api/mcp`;
+	const aliases = ["dokploy.example.com", "10.0.0.5:3000"];
+
+	it("passes the advertised resource through unchanged", () => {
+		expect(canonicalizeMcpResource(advertised, origin, aliases)).toBe(
+			advertised,
+		);
+	});
+
+	it.each([
+		["a trailing slash", `${advertised}/`],
+		["several trailing slashes", `${advertised}//`],
+		[
+			"http on the advertised host",
+			"http://devino-first.basa-ulmer.ts.net/api/mcp",
+		],
+		["an upper-case host", "https://DEVINO-FIRST.basa-ulmer.ts.net/api/mcp"],
+		["the configured host alias", "https://dokploy.example.com/api/mcp"],
+		["the request host with a port", "http://10.0.0.5:3000/api/mcp/"],
+	])("maps %s to the advertised resource", (_label, resource) => {
+		expect(canonicalizeMcpResource(resource, origin, aliases)).toBe(
+			advertised,
+		);
+	});
+
+	it.each([
+		["another host", "https://evil.example.com/api/mcp"],
+		["another path", `${origin}/api/other`],
+		["a sub-path", `${advertised}/x`],
+		["a query", `${advertised}?a=1`],
+		["a fragment", `${advertised}#x`],
+		["credentials", "https://u:p@devino-first.basa-ulmer.ts.net/api/mcp"],
+		["another scheme", "ftp://devino-first.basa-ulmer.ts.net/api/mcp"],
+		[
+			"a host alias on another port",
+			"https://dokploy.example.com:8443/api/mcp",
+		],
+		["garbage", "not a url"],
+	])("refuses %s", (_label, resource) => {
+		expect(canonicalizeMcpResource(resource, origin, aliases)).toBeNull();
+	});
+
+	it("canonicalizes string and repeated params, leaving foreign values for the provider to reject", () => {
+		expect(canonicalizeMcpResourceParam(`${advertised}/`, origin, aliases)).toBe(
+			advertised,
+		);
+		expect(
+			canonicalizeMcpResourceParam(
+				[`${advertised}/`, advertised, "https://evil.example.com/api/mcp"],
+				origin,
+				aliases,
+			),
+		).toEqual([advertised, "https://evil.example.com/api/mcp"]);
+		expect(canonicalizeMcpResourceParam(undefined, origin, aliases)).toBe(
+			undefined,
+		);
+	});
+
+	it("always accepts the resource the protected-resource metadata advertises", async () => {
+		const { buildProtectedResourceMetadata } = await import(
+			"@/server/mcp/discovery"
+		);
+		// Same derivation as pages/api/mcp-oauth/protected-resource.ts.
+		const resolved = await resolveMcpOrigin(
+			{ host: "ignored.example.com" },
+			{ BETTER_AUTH_URL: `${origin}/some/path` },
+		);
+		expect(resolved).toBe(origin);
+		const { resource } = buildProtectedResourceMetadata(resolved as string);
+		expect(resource).toBe(advertised);
+		expect(canonicalizeMcpResource(resource, resolved as string)).toBe(
+			resource,
+		);
+		expect(canonicalizeMcpResource(`${resource}/`, resolved as string)).toBe(
+			resource,
+		);
 	});
 });

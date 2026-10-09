@@ -299,6 +299,84 @@ export const normalizeMcpRegisterBody = (
 export const mcpResourceIdentifier = (origin: string) =>
 	`${origin}${MCP_ENDPOINT_PATH}`;
 
+const firstHeaderHost = (value: string | string[] | undefined) => {
+	const raw = Array.isArray(value) ? value[0] : value;
+	const host = raw?.split(",")[0]?.trim().toLowerCase();
+	return host ? host : null;
+};
+
+/**
+ * Hosts this instance is reached under besides the advertised origin: the
+ * request's Host and X-Forwarded-Host, and the configured web server host.
+ */
+export const mcpResourceAliasHosts = async (
+	headers: IncomingHttpHeaders,
+): Promise<string[]> => {
+	const hosts = [
+		firstHeaderHost(headers.host),
+		firstHeaderHost(headers["x-forwarded-host"]),
+	];
+	const settings = await getWebServerSettings().catch(() => null);
+	if (settings?.host) hosts.push(settings.host.trim().toLowerCase());
+	return [...new Set(hosts.filter((host): host is string => !!host))];
+};
+
+/**
+ * Maps a client-sent RFC 8707 `resource` naming this instance's MCP endpoint
+ * to the identifier the protected-resource metadata advertises
+ * (`mcpResourceIdentifier(resolveMcpOrigin(...))`), or null when it names
+ * something else.
+ *
+ * Clients do not all echo the advertised value byte for byte: some append a
+ * trailing slash, some keep the URL they were configured with (another host
+ * name of this instance, or http behind a TLS-terminating proxy). Each of
+ * those is this endpoint, and the provider would answer `invalid_target`
+ * because it knows only the advertised identifier. Only hosts that reach this
+ * instance are accepted, never an arbitrary one, so a token can never be bound
+ * to a third-party resource name.
+ */
+export const canonicalizeMcpResource = (
+	resource: string,
+	origin: string,
+	aliasHosts: readonly string[] = [],
+): string | null => {
+	let parsed: URL;
+	let advertised: URL;
+	try {
+		parsed = new URL(resource);
+		advertised = new URL(origin);
+	} catch {
+		return null;
+	}
+	if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+	if (parsed.search !== "" || parsed.hash !== "") return null;
+	if (parsed.username !== "" || parsed.password !== "") return null;
+	if (parsed.pathname.replace(/\/+$/, "") !== MCP_ENDPOINT_PATH) return null;
+	const host = parsed.host.toLowerCase();
+	const known =
+		host === advertised.host.toLowerCase() ||
+		aliasHosts.some((alias) => alias.toLowerCase() === host);
+	return known ? mcpResourceIdentifier(advertised.origin) : null;
+};
+
+/**
+ * Canonical form of a `resource` parameter (a string, or an array when the
+ * key repeats). Values naming another resource are left as sent, so the
+ * provider still rejects them.
+ */
+export const canonicalizeMcpResourceParam = (
+	value: unknown,
+	origin: string,
+	aliasHosts: readonly string[] = [],
+): unknown => {
+	const one = (entry: unknown) =>
+		typeof entry === "string"
+			? (canonicalizeMcpResource(entry, origin, aliasHosts) ?? entry)
+			: entry;
+	if (Array.isArray(value)) return [...new Set(value.map(one))];
+	return one(value);
+};
+
 /**
  * The 1.7 provider rejects an RFC 8707 `resource` it has no `oauth_resource`
  * row for, and MCP clients send the endpoint URL as `resource` on every
@@ -484,6 +562,16 @@ export interface McpAuthorizeGateInput {
 }
 
 const asString = (value: unknown) => (typeof value === "string" ? value : "");
+
+/**
+ * The provider also accepts POST on its authorize endpoint and then reads the
+ * parameters from the body, while the consent proof is checked against the
+ * query string. The fork's consent page always redirects with GET, so any
+ * other method is refused before the provider can issue a code for parameters
+ * the proof never covered.
+ */
+export const isMcpAuthorizeMethodAllowed = (method: string | undefined) =>
+	(method ?? "").toUpperCase() === "GET";
 
 /**
  * Gate for `GET /api/auth/oauth2/authorize` (and the legacy
