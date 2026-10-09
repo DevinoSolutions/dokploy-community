@@ -28,6 +28,10 @@ import { cloneGiteaRepository } from "@dokploy/server/utils/providers/gitea";
 import { cloneGithubRepository } from "@dokploy/server/utils/providers/github";
 import { cloneGitlabRepository } from "@dokploy/server/utils/providers/gitlab";
 import { buildPreviewHeadRef } from "@dokploy/server/utils/providers/head-ref";
+import {
+	PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
+	resolvePreviewDockerImage,
+} from "@dokploy/server/utils/preview-image";
 import { createTraefikConfig } from "@dokploy/server/utils/traefik/application";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
@@ -684,6 +688,37 @@ const resolvePreviewTemplateVariables = (
 ) => value.replaceAll("${{preview.prNumber}}", pullRequestNumber);
 
 /**
+ * Previews of a Docker-image application have no repository to clone: CI pushes
+ * an image for the change and the preview pulls it. The image comes from the
+ * application's preview image template, with `${{preview.prNumber}}` replaced
+ * by the preview's identifier, and the pull reuses the application's registry
+ * credentials like a regular Docker-image deploy does. Every (re)deploy pulls
+ * again, so a tag that CI re-pushes is picked up by redeploying the preview.
+ */
+const buildPreviewDockerPullCommand = async ({
+	application,
+	identifier,
+	serverId,
+}: {
+	application: Parameters<typeof buildRemoteDocker>[0];
+	identifier: string;
+	serverId: string | null | undefined;
+}) => {
+	const image = resolvePreviewDockerImage(
+		application.previewDockerImage,
+		identifier,
+	);
+	if (!image) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
+		});
+	}
+	application.dockerImage = image;
+	return await buildRemoteDocker(application, serverId);
+};
+
+/**
  * Build a writer that keeps the pull request comment of a preview deployment up
  * to date, no matter which git provider hosts the pull request. The comment can
  * be deleted by users, so it is recreated (and the new id persisted) on demand.
@@ -869,7 +904,12 @@ export const deployPreviewApplication = async ({
 			application.buildRegistry = null;
 		}
 		application.rollbackRegistry = null;
-		application.registry = null;
+		// A Docker-image preview keeps the registry: it carries the credentials
+		// the image is pulled with, and nothing is pushed back to it.
+		const isDockerPreview = application.sourceType === "docker";
+		if (!isDockerPreview) {
+			application.registry = null;
+		}
 
 		const buildServerId =
 			buildPolicy.buildServerId ||
@@ -886,7 +926,13 @@ export const deployPreviewApplication = async ({
 			application.sourceType,
 			previewDeployment.pullRequestNumber,
 		);
-		if (application.sourceType === "github") {
+		if (isDockerPreview) {
+			command += await buildPreviewDockerPullCommand({
+				application,
+				identifier: previewDeployment.pullRequestNumber,
+				serverId: buildServerId,
+			});
+		} else if (application.sourceType === "github") {
 			command += await cloneGithubRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
@@ -925,7 +971,11 @@ export const deployPreviewApplication = async ({
 		});
 		// <<< build-policy hook 2a/4 (preview)
 
-		command += await getBuildCommand(application, buildServerId);
+		// A pulled image needs no build, and must not be re-tagged and pushed to
+		// the application's registry either.
+		if (!isDockerPreview) {
+			command += await getBuildCommand(application, buildServerId);
+		}
 
 		// >>> build-policy hook 2/4 (preview): tag and push the preview image by
 		// sha. Empty when not enforcing.
@@ -1076,7 +1126,12 @@ export const rebuildPreviewApplication = async ({
 			application.buildRegistry = null;
 		}
 		application.rollbackRegistry = null;
-		application.registry = null;
+		// A Docker-image preview keeps the registry: it carries the credentials
+		// the image is pulled with, and nothing is pushed back to it.
+		const isDockerPreview = application.sourceType === "docker";
+		if (!isDockerPreview) {
+			application.registry = null;
+		}
 
 		const buildServerId =
 			buildPolicy.buildServerId ||
@@ -1098,7 +1153,14 @@ export const rebuildPreviewApplication = async ({
 			application.sourceType,
 			previewDeployment.pullRequestNumber,
 		);
-		if (application.sourceType === "github") {
+		if (isDockerPreview) {
+			// Pull the image again: CI may have re-pushed the tag since.
+			command += await buildPreviewDockerPullCommand({
+				application,
+				identifier: previewDeployment.pullRequestNumber,
+				serverId: buildServerId,
+			});
+		} else if (application.sourceType === "github") {
 			command += await cloneGithubRepository({
 				...applicationEntity,
 				appName: previewDeployment.appName,
@@ -1135,7 +1197,11 @@ export const rebuildPreviewApplication = async ({
 			appName: previewDeployment.appName,
 		});
 		// <<< build-policy hook 2a/4 (preview rebuild)
-		command += await getBuildCommand(application, buildServerId);
+		// A pulled image needs no build, and must not be re-tagged and pushed to
+		// the application's registry either.
+		if (!isDockerPreview) {
+			command += await getBuildCommand(application, buildServerId);
+		}
 		// >>> build-policy hook 2/4 (preview rebuild)
 		command += await getBuildPolicyPushCommand(buildPolicy, {
 			appName: previewDeployment.appName,
