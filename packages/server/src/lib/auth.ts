@@ -711,10 +711,23 @@ const createBetterAuth = () =>
 				// endpoint is disabled) and stores their owner. Declaring the
 				// column satisfies the 1.7 schema check, which rejects NOT NULL
 				// columns the plugin does not know about.
+				// `member.isDefault` is declared so SCIM provisioning, which writes
+				// through the adapter inside its transaction, can set it (see
+				// services/proprietary/scim.ts).
 				schema: {
 					organization: {
 						additionalFields: {
 							ownerId: { type: "string", required: false, input: false },
+						},
+					},
+					member: {
+						additionalFields: {
+							isDefault: {
+								type: "boolean",
+								required: false,
+								input: false,
+								defaultValue: false,
+							},
 						},
 					},
 				},

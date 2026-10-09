@@ -54,6 +54,16 @@ export const auth = betterAuth({
 						ownerId: { type: "string", required: false, input: false },
 					},
 				},
+				member: {
+					additionalFields: {
+						isDefault: {
+							type: "boolean",
+							required: false,
+							input: false,
+							defaultValue: false,
+						},
+					},
+				},
 			},
 		}),
 		scim({
