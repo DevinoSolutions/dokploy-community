@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.12**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.13**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.12 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.13 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,16 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.13
+
+**Upgrade notes:** [better-auth 1.7 upgrade notes](https://github.com/DevinoSolutions/dokploy-community/blob/canary/docs/better-auth-1.7-upgrade.md). Read them before updating if you use SCIM, SAML or the remote MCP server.
+
+**better-auth 1.6.33 to 1.7.7** ([#309](https://github.com/DevinoSolutions/dokploy-community/pull/309)). The MCP OAuth provider moves to `@better-auth/oauth-provider`, with endpoints at `/api/auth/oauth2/*`; the old `/api/auth/mcp/*` URLs keep working. Migrations `0210` (new tables) and `0211` (copies existing MCP clients, tokens and consents) mean existing grants keep working without re-authorization. Concurrent refreshes of one token are serialized. SCIM is rewritten for the 1.7 plugin, so adopters using SCIM must re-create their connections and re-push their directory. The SAML ACS URL changes to `/sso/saml2/sp/acs/:providerId` (the old callback URL is kept as an alias), and IdP-initiated SAML is off. The provider's revoke and introspect endpoints are closed. Fixes the Dependabot high alerts for `@better-auth/scim` (GHSA-j8v8-g9cx-5qf4).
+
+**MCP OAuth hardening** ([#310](https://github.com/DevinoSolutions/dokploy-community/pull/310)). Resource alias hosts now come from configuration only, and the refresh-lock pool wait is bounded.
+
+> Includes database migrations 0210 and 0211, applied on startup. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.12
 
@@ -652,7 +662,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.12
+export DOKPLOY_VERSION=v0.30.8-community.13
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -665,7 +675,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.12      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.13      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
