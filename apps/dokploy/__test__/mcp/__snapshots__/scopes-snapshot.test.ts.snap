@@ -530,6 +530,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "scim-deleteProvider": "dokploy:admin",
   "scim-generateToken": "dokploy:admin",
   "scim-listProviders": "dokploy:read",
+  "scim-rotateToken": "dokploy:admin",
   "security-create": "dokploy:services:write",
   "security-delete": "dokploy:services:delete",
   "security-one": "dokploy:read",
