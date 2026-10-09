@@ -5,6 +5,7 @@ import {
 	asc,
 	desc,
 	eq,
+	gt,
 	isNotNull,
 	isNull,
 	lt,
@@ -718,11 +719,14 @@ export const recordMcpConsent = async (
 export const listMcpAuthorizations = async (
 	userId: string,
 ): Promise<McpAuthorization[]> => {
-	// Never project the token columns: this list is rendered in the UI.
-	const rows = await db.query.oauthRefreshToken.findMany({
+	// Never project the token columns: this list is rendered in the UI. The
+	// newest live tokens are read (a user with many sessions can hold far more
+	// than the cap), then walked oldest first so the newest wins per client.
+	const newestFirst = await db.query.oauthRefreshToken.findMany({
 		where: and(
 			eq(oauthRefreshToken.userId, userId),
 			isNull(oauthRefreshToken.revoked),
+			gt(oauthRefreshToken.expiresAt, new Date()),
 		),
 		columns: {
 			clientId: true,
@@ -730,10 +734,11 @@ export const listMcpAuthorizations = async (
 			createdAt: true,
 			expiresAt: true,
 		},
-		orderBy: [asc(oauthRefreshToken.createdAt)],
+		orderBy: [desc(oauthRefreshToken.createdAt)],
 		limit: MCP_AUTHORIZATION_ROW_LIMIT,
 		with: { client: { columns: { name: true } } },
 	});
+	const rows = [...newestFirst].reverse();
 	const consents = await db.query.oauthConsent.findMany({
 		where: eq(oauthConsent.userId, userId),
 		columns: { clientId: true, createdAt: true },

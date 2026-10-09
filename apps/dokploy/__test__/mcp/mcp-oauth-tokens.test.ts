@@ -310,12 +310,13 @@ describe("listMcpAuthorizations", () => {
 		const clientTwoAt = new Date("2026-02-01T00:00:00.000Z");
 		const newest = new Date("2026-03-01T00:00:00.000Z");
 		const consentedAt = new Date("2025-12-01T00:00:00.000Z");
+		// The query reads the newest rows first.
 		findMany.mockResolvedValueOnce([
 			{
 				clientId: "client-1",
-				scopes: ["openid", "dokploy:read"],
-				createdAt: oldest,
-				expiresAt: oldest,
+				scopes: ["openid", "dokploy:read", "dokploy:deploy"],
+				createdAt: newest,
+				expiresAt: newest,
 				client: { name: "Claude Code" },
 			},
 			{
@@ -327,9 +328,9 @@ describe("listMcpAuthorizations", () => {
 			},
 			{
 				clientId: "client-1",
-				scopes: ["openid", "dokploy:read", "dokploy:deploy"],
-				createdAt: newest,
-				expiresAt: newest,
+				scopes: ["openid", "dokploy:read"],
+				createdAt: oldest,
+				expiresAt: oldest,
 				client: { name: "Claude Code" },
 			},
 		] as never);
