@@ -1,4 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+let webServerSettingsRow:
+	| { host?: string | null; serverIp?: string | null }
+	| undefined;
+let trustedOriginsRows: string[] = [];
+
+vi.mock("@dokploy/server/services/web-server-settings", () => ({
+	getWebServerSettings: vi.fn(async () => webServerSettingsRow),
+}));
+vi.mock("@dokploy/server/services/admin", () => ({
+	getTrustedOrigins: vi.fn(async () => trustedOriginsRows),
+}));
 
 const {
 	canonicalizeMcpResource,
@@ -7,6 +19,7 @@ const {
 	evaluateMcpAuthorizeGate,
 	evaluateMcpRegisterBody,
 	isMcpAuthorizeMethodAllowed,
+	mcpResourceAliasHosts,
 	resolveMcpOrigin,
 } = await import("@dokploy/server/services/mcp-oauth");
 
@@ -240,5 +253,110 @@ describe("canonicalizeMcpResource", () => {
 		expect(canonicalizeMcpResource(`${resource}/`, resolved as string)).toBe(
 			resource,
 		);
+	});
+});
+
+describe("mcpResourceAliasHosts", () => {
+	const origin = "https://devino-first.basa-ulmer.ts.net";
+	const advertised = `${origin}/api/mcp`;
+
+	beforeEach(() => {
+		webServerSettingsRow = undefined;
+		trustedOriginsRows = [];
+	});
+
+	it("builds the set from configuration only", async () => {
+		webServerSettingsRow = {
+			host: "Dokploy.Example.com",
+			serverIp: "10.0.0.5",
+		};
+		trustedOriginsRows = [
+			"https://trusted.example.org",
+			"https://trusted.example.org:8443/",
+			"https://*.wild.example.org",
+		];
+		const hosts = await mcpResourceAliasHosts({
+			BETTER_AUTH_URL: "https://auth.example.net/some/path",
+		});
+		expect([...hosts].sort()).toEqual(
+			[
+				"10.0.0.5:3000",
+				"auth.example.net",
+				"dokploy.example.com",
+				"trusted.example.org",
+				"trusted.example.org:8443",
+			].sort(),
+		);
+	});
+
+	it("is empty when nothing is configured", async () => {
+		expect(await mcpResourceAliasHosts({})).toEqual([]);
+	});
+
+	it("does not accept a foreign Host or X-Forwarded-Host", async () => {
+		webServerSettingsRow = { host: "dokploy.example.com" };
+		// Request headers are not an input any more: a client-chosen host is
+		// not in the set, so its resource never canonicalizes.
+		const aliases = await mcpResourceAliasHosts({});
+		for (const foreign of ["evil.example.com", "evil.example.com:3000"]) {
+			const resource = `https://${foreign}/api/mcp`;
+			expect(canonicalizeMcpResource(resource, origin, aliases)).toBeNull();
+			expect(canonicalizeMcpResourceParam(resource, origin, aliases)).toBe(
+				resource,
+			);
+		}
+	});
+
+	it("still canonicalizes configured hosts and the advertised origin", async () => {
+		webServerSettingsRow = {
+			host: "dokploy.example.com",
+			serverIp: "10.0.0.5",
+		};
+		trustedOriginsRows = ["https://trusted.example.org"];
+		const aliases = await mcpResourceAliasHosts({
+			BETTER_AUTH_URL: "https://auth.example.net",
+		});
+		for (const host of [
+			"dokploy.example.com",
+			"auth.example.net",
+			"trusted.example.org",
+		]) {
+			expect(
+				canonicalizeMcpResource(`https://${host}/api/mcp/`, origin, aliases),
+			).toBe(advertised);
+		}
+		expect(
+			canonicalizeMcpResource("http://10.0.0.5:3000/api/mcp", origin, aliases),
+		).toBe(advertised);
+		// The advertised origin needs no alias entry.
+		expect(canonicalizeMcpResource(advertised, origin, [])).toBe(advertised);
+		expect(canonicalizeMcpResource(`${advertised}/`, origin, [])).toBe(
+			advertised,
+		);
+		// Canonicalization still only returns our identifier: exact path, no
+		// userinfo, query or hash, even for a configured host.
+		for (const bad of [
+			"https://dokploy.example.com/api/mcp/x",
+			"https://dokploy.example.com/api/mcp?a=1",
+			"https://dokploy.example.com/api/mcp#f",
+			"https://u:p@dokploy.example.com/api/mcp",
+		]) {
+			expect(canonicalizeMcpResource(bad, origin, aliases)).toBeNull();
+		}
+	});
+
+	it("accepts a development origin taken from the request Host", async () => {
+		const devOrigin = await resolveMcpOrigin(
+			{ host: "localhost:3000" },
+			{ NODE_ENV: "development" },
+		);
+		expect(devOrigin).toBe("http://localhost:3000");
+		expect(
+			canonicalizeMcpResource(
+				"http://localhost:3000/api/mcp/",
+				devOrigin as string,
+				await mcpResourceAliasHosts({}),
+			),
+		).toBe("http://localhost:3000/api/mcp");
 	});
 });
