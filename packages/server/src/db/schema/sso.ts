@@ -60,9 +60,11 @@ export const ssoProviderBodySchema = z.object({
 			skipDiscovery: z.boolean().optional(),
 			scopes: z.array(z.string()).optional(),
 			pkce: z.boolean().default(true).optional(),
+			// better-auth 1.7 removed `mapping.id` (the user id is always the
+			// `sub` claim) and rejects unknown mapping keys. A stale `id` sent by
+			// an older client is stripped here rather than refused.
 			mapping: z
 				.object({
-					id: z.string({}),
 					email: z.string({}),
 					emailVerified: z.string({}).optional(),
 					name: z.string({}),
@@ -116,9 +118,9 @@ export const ssoProviderBodySchema = z.object({
 			privateKey: z.string().optional(),
 			decryptionPvk: z.string().optional(),
 			additionalParams: z.record(z.string(), z.any()).optional(),
+			// As above: the SAML user id is always the NameID in 1.7.
 			mapping: z
 				.object({
-					id: z.string({}),
 					email: z.string({}),
 					emailVerified: z.string({}).optional(),
 					name: z.string({}),

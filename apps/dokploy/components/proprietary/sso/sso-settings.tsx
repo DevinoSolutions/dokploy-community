@@ -65,11 +65,14 @@ function parseOidcConfig(config: string | null): {
 
 function parseSamlConfig(
 	config: string | null,
-): { entryPoint?: string } | null {
+): { entryPoint?: string; callbackUrl?: string } | null {
 	if (!config) return null;
 	try {
-		const parsed = JSON.parse(config) as { entryPoint?: string };
-		return { entryPoint: parsed.entryPoint };
+		const parsed = JSON.parse(config) as {
+			entryPoint?: string;
+			callbackUrl?: string;
+		};
+		return { entryPoint: parsed.entryPoint, callbackUrl: parsed.callbackUrl };
 	} catch {
 		return null;
 	}
@@ -452,11 +455,17 @@ export const SSOSettings = () => {
 										Callback URL (configure in your IdP)
 									</span>
 									<p className="break-all rounded-md bg-muted px-2 py-1.5 font-mono text-xs">
-										{baseURL || "{baseURL}"}
-										{detailsProvider.samlConfig
-											? "/api/auth/sso/saml2/callback/"
-											: "/api/auth/sso/callback/"}
-										{detailsProvider.providerId}
+										{/* A SAML provider shows the ACS URL it was registered
+										    with: providers created before better-auth 1.7 keep the
+										    1.6 callback path, which stays an alias. */}
+										{(detailsProvider.samlConfig &&
+											parseSamlConfig(detailsProvider.samlConfig)
+												?.callbackUrl) ||
+											`${baseURL || "{baseURL}"}${
+												detailsProvider.samlConfig
+													? "/api/auth/sso/saml2/sp/acs/"
+													: "/api/auth/sso/callback/"
+											}${detailsProvider.providerId}`}
 									</p>
 									{!baseURL && (
 										<p className="text-xs text-muted-foreground">
