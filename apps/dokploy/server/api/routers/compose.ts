@@ -1,8 +1,10 @@
 import { dirname, join } from "node:path";
 import {
 	addDomainToCompose,
+	assertComposeBuildSettings,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
+	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	cloneBitbucketRepository,
 	cloneCompose,
@@ -26,6 +28,7 @@ import {
 	findProjectById,
 	findServerById,
 	getAccessibleServerIds,
+	getComposeBuildOverridePath,
 	getComposeContainer,
 	getContainerLogs,
 	getWebServerSettings,
@@ -218,6 +221,42 @@ export const composeRouter = createTRPCRouter({
 				service: ["create"],
 			});
 
+			// Build server: the caller must be allowed to use the server (same check
+			// as applications), and the settings as a whole must be valid. Checked
+			// against the merged result, so clearing the registry on its own, or
+			// adding a custom command to a build-server compose, is refused too.
+			if (
+				input.buildServerId !== undefined ||
+				input.buildRegistryId !== undefined ||
+				input.command !== undefined
+			) {
+				if (input.buildServerId) {
+					const accessibleIds = await getAccessibleServerIds(ctx.session);
+					if (!accessibleIds.has(input.buildServerId)) {
+						throw new TRPCError({
+							code: "UNAUTHORIZED",
+							message: "You are not authorized to access this build server",
+						});
+					}
+				}
+				const existing = await findComposeById(input.composeId);
+				await assertComposeBuildSettings(
+					{
+						buildServerId:
+							input.buildServerId !== undefined
+								? input.buildServerId
+								: existing.buildServerId,
+						buildRegistryId:
+							input.buildRegistryId !== undefined
+								? input.buildRegistryId
+								: existing.buildRegistryId,
+						command:
+							input.command !== undefined ? input.command : existing.command,
+					},
+					ctx.session.activeOrganizationId,
+				);
+			}
+
 			// >>> build-policy hook: refuse a required check this compose unit can
 			// never satisfy, here rather than on every deploy. Same rule and the
 			// same message as the application path. See finding F in the round-2
@@ -365,6 +404,17 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const compose = await findComposeById(input.composeId);
+			// A compose that builds on a build server is cancelled there, by
+			// deployment (see deployment-cancel.ts). The `pkill "docker compose"`
+			// below only ever runs on the serving host, where it would hit every
+			// other compose operation running there.
+			if (compose.buildServerId) {
+				await cancelBuildServerDeploymentsForService({
+					type: "compose",
+					composeId: input.composeId,
+				});
+				return;
+			}
 			await killDockerBuild("compose", compose.serverId);
 		}),
 
@@ -612,6 +662,9 @@ export const composeRouter = createTRPCRouter({
 			const command = createCommand(
 				compose,
 				compose.mounts.length > 0 ? projectPath : undefined,
+				compose.buildServerId
+					? { overridePath: getComposeBuildOverridePath(compose) }
+					: undefined,
 			);
 			return `docker ${command}`;
 		}),

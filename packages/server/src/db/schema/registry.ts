@@ -5,6 +5,7 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import { organization } from "./account";
 import { applications } from "./application";
+import { compose } from "./compose";
 import { isNonEmptyString, shEscape } from "./utils";
 /**
  * This is an example of how to use the multi-project schema feature of Drizzle ORM. Use the same
@@ -47,6 +48,9 @@ export const registryRelations = relations(registry, ({ many }) => ({
 	}),
 	buildApplications: many(applications, {
 		relationName: "applicationBuildRegistry",
+	}),
+	buildCompose: many(compose, {
+		relationName: "composeBuildRegistry",
 	}),
 	rollbackApplications: many(applications, {
 		relationName: "applicationRollbackRegistry",
@@ -261,29 +265,45 @@ export interface RegistryLoginData {
 	 * registryType is "awsEcr" and building a shell login command.
 	 */
 	ecrAuthPassword?: string | null;
+	/**
+	 * Log in to this docker config directory (created mode 700) instead of the
+	 * host default, so the login cannot replace another registry's credentials
+	 * on the same URL. Pass the same directory to `docker --config` afterwards.
+	 */
+	configDir?: string | null;
 }
 
-export const getSafeDockerLoginCommand = (data: RegistryLoginData): string => {
-	const { registryUrl, username, password } = data;
-	const escapedRegistry = shEscape(registryUrl);
-	const escapedUser = shEscape(username);
-	const escapedPassword = shEscape(password);
-
-	return `printf %s ${escapedPassword} | docker login ${escapedRegistry} -u ${escapedUser} --password-stdin`;
-};
+/**
+ * A `docker login` that is safe to run anywhere: `command` holds no secret,
+ * `stdin` is the password and must be fed to the command's stdin. A password in
+ * the command line would show up in `ps` for every user on the host.
+ */
+export interface DockerLogin {
+	command: string;
+	stdin: string;
+}
 
 /**
- * Returns a safe shell command to log Docker into a registry.
- * For ECR registries, expects `ecrAuthPassword` (fetched via getECRAuthToken)
- * rather than raw AWS credentials — the SDK handles token acquisition.
+ * Returns the command (and the stdin to feed it) that logs Docker into a
+ * registry. For ECR registries, expects `ecrAuthPassword` (fetched via
+ * getECRAuthToken) rather than raw AWS credentials — the SDK handles token
+ * acquisition.
  */
 export const getSafeRegistryLoginCommand = (
 	data: RegistryLoginData,
-): string => {
+): DockerLogin => {
+	const escapedRegistry = shEscape(data.registryUrl);
+	const docker = data.configDir
+		? `umask 077 && mkdir -p ${shEscape(data.configDir)} && docker --config ${shEscape(data.configDir)}`
+		: "docker";
 	if (data.registryType === "awsEcr") {
-		const escapedPassword = shEscape(data.ecrAuthPassword);
-		const escapedRegistry = shEscape(data.registryUrl);
-		return `printf %s ${escapedPassword} | docker login --username AWS --password-stdin ${escapedRegistry}`;
+		return {
+			command: `${docker} login --username AWS --password-stdin ${escapedRegistry}`,
+			stdin: data.ecrAuthPassword ?? "",
+		};
 	}
-	return getSafeDockerLoginCommand(data);
+	return {
+		command: `${docker} login ${escapedRegistry} -u ${shEscape(data.username)} --password-stdin`,
+		stdin: data.password ?? "",
+	};
 };

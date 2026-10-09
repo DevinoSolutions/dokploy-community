@@ -9,10 +9,13 @@ import {
 	compose,
 } from "@dokploy/server/db/schema";
 import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
+import { prepareComposeBuildServerDeploy } from "@dokploy/server/services/compose-build-server";
+import { pruneComposeBuildRegistry } from "@dokploy/server/services/compose-registry-retention";
 import {
 	type ComposePathLike,
 	getBackupCurrentDeploymentCommand,
 	getBuildComposeCommand,
+	getComposeBuildOverridePath,
 	getRollbackMarkerProbeCommand,
 } from "@dokploy/server/utils/builders/compose";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
@@ -53,10 +56,57 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
+import {
+	appendLogLine,
+	CANCELLED_THEN_FAILED_NOTE,
+	CANCELLED_TOO_LATE_NOTE,
+	DeploymentCancelledError,
+	isDeploymentCancelled,
+	isDeploymentCancelledError,
+	markDeploymentDoneUnlessCancelled,
+	statusAfterCancelledDeploy,
+} from "./deployment-cancel";
 import { generateApplyPatchesCommand } from "./patch";
 import { validUniqueServerAppName } from "./project";
 
 export type Compose = typeof compose.$inferSelect;
+
+/** How long after a deploy returns its registry prune starts. */
+export const REGISTRY_PRUNE_START_DELAY_MS = 3_000;
+
+/**
+ * Starts the build-registry cleanup of a build-server compose *after* the
+ * deploy that triggered it has returned, never as part of it.
+ *
+ * The deployment queue holds a concurrency slot and the compose's group lock
+ * until `deployCompose` / `rebuildCompose` resolve, so awaiting the prune there
+ * would keep the next deploy of the same compose (and one of the LOCAL slots)
+ * waiting on housekeeping. Here nothing is awaited: the prune is a timer, its
+ * outcome is only ever logged, and it is not journaled (a prune lost to a
+ * restart is simply retried by the next deploy). Whatever it does, including
+ * throwing, cannot change the deployment's or the compose's status, because it
+ * runs outside the deploy's try/catch and outside the queue job.
+ *
+ * A no-op (no timer at all) for a compose without a build server.
+ */
+export const scheduleComposeBuildRegistryPrune = (
+	args: Parameters<typeof pruneComposeBuildRegistry>[0],
+) => {
+	if (!args.entity.buildServerId) return;
+	try {
+		const timer = setTimeout(() => {
+			Promise.resolve()
+				.then(() => pruneComposeBuildRegistry(args))
+				.catch((error) => {
+					console.error("Build registry cleanup failed", error);
+				});
+		}, REGISTRY_PRUNE_START_DELAY_MS);
+		// Never keep the process alive (shutdown) for housekeeping.
+		timer.unref?.();
+	} catch (error) {
+		console.error("Could not schedule the build registry cleanup", error);
+	}
+};
 
 type ComposeBuildEntity = Awaited<ReturnType<typeof findComposeById>> & {
 	type: "compose";
@@ -129,9 +179,14 @@ export const didRollbackSucceed = async (
 export const runComposeBuild = async (
 	entity: ComposeBuildEntity,
 	deployment: { logPath: string; deploymentId?: string },
-	options: { freshVolumes?: boolean; applyPatches?: boolean } = {},
+	options: {
+		freshVolumes?: boolean;
+		applyPatches?: boolean;
+		/** False for compose previews, which cannot be cancelled (see prepare). */
+		cancellable?: boolean;
+	} = {},
 ) => {
-	const { freshVolumes = false, applyPatches = true } = options;
+	const { freshVolumes = false, applyPatches = true, cancellable } = options;
 	const serverId = entity.serverId;
 
 	const runStep = async (rawCommand: string) => {
@@ -182,6 +237,18 @@ export const runComposeBuild = async (
 	await waitForComposeRequiredChecks({ compose: entity, serverId });
 	// <<< build-policy hook (compose)
 
+	// Build-server composes build and push their images before the running
+	// release is touched, so a failed build never reaches `down --volumes`.
+	// A no-op (undefined) for every compose without a `buildServerId`.
+	const remoteBuild = await prepareComposeBuildServerDeploy({
+		entity,
+		deployment,
+		runStep,
+		applyPatches,
+		freshVolumes,
+		cancellable,
+	});
+
 	if (freshVolumes && entity.composeType === "docker-compose") {
 		const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
 		await runStep(downCommand);
@@ -191,6 +258,7 @@ export const runComposeBuild = async (
 	command += await getBuildComposeCommand(entity, {
 		deploymentId: deployment.deploymentId,
 		freshVolumes,
+		remoteBuild,
 	});
 	await runStep(command);
 };
@@ -295,6 +363,9 @@ export const findComposeById = async (composeId: string) => {
 				},
 			},
 			server: true,
+			// Only its name: the restore step quotes it in "redeploy, which builds
+			// on <name>" when it refuses to rebuild a pre-build-server release.
+			buildServer: { columns: { serverId: true, name: true } },
 			backups: {
 				with: {
 					destination: {
@@ -376,6 +447,47 @@ export const updateCompose = async (
 	return composeResult[0];
 };
 
+/**
+ * A build-server deploy that was cancelled (see `deployment-cancel.ts`) ends
+ * here instead of in the generic failure path: the deployment already says
+ * `cancelled` and must not become `error`, no build-error notification goes
+ * out for something the user asked for, and the service returns to the state
+ * of the release that is still serving.
+ *
+ * Returns the error to rethrow, or `null` when this was not a cancellation.
+ *
+ * Only a `DeploymentCancelledError` counts. A cancel that arrives too late
+ * (the pull/up is already running) leaves the row `cancelled`, but if the
+ * release then genuinely fails, that failure takes the normal failure path
+ * (error status, rollback handling, notification) and the log notes the
+ * earlier cancel request. The same goes for a cancel inside prepare whose
+ * restore of the previous release failed: that is thrown as a plain error.
+ */
+const settleCancelledComposeDeploy = async (
+	entity: Pick<Compose, "composeId" | "buildServerId" | "serverId">,
+	deployment: { deploymentId: string; logPath: string },
+	error: unknown,
+) => {
+	if (!entity.buildServerId) return null;
+	if (!isDeploymentCancelledError(error)) return null;
+
+	try {
+		const command = `echo "\nDeployment cancelled ⛔ Nothing was pulled or started from this build; the previous release keeps serving." >> ${quote([deployment.logPath])};`;
+		if (entity.serverId) {
+			await execAsyncRemote(entity.serverId, command);
+		} else {
+			await execAsync(command);
+		}
+	} catch (logError) {
+		console.error("Could not log the cancelled deployment", logError);
+	}
+	const settledStatus = await statusAfterCancelledDeploy({
+		composeId: entity.composeId,
+	});
+	await updateCompose(entity.composeId, { composeStatus: settledStatus });
+	return new DeploymentCancelledError(undefined, { settledStatus });
+};
+
 export const deployCompose = async ({
 	composeId,
 	titleLog = "Manual deployment",
@@ -406,21 +518,49 @@ export const deployCompose = async ({
 
 		await runComposeBuild(entity, deployment, { freshVolumes });
 
-		await updateDeploymentStatus(deployment.deploymentId, "done");
+		// A cancel that landed during the pull/up cannot be honoured (the release
+		// is already running); it stays recorded as cancelled, not "done".
+		let finished = true;
+		if (compose.buildServerId) {
+			finished = await markDeploymentDoneUnlessCancelled(
+				deployment.deploymentId,
+			);
+		} else {
+			await updateDeploymentStatus(deployment.deploymentId, "done");
+		}
 		await updateCompose(composeId, {
 			composeStatus: "done",
 		});
 
-		await sendBuildSuccessNotifications({
-			projectName: compose.environment.project.name,
-			applicationName: compose.name,
-			applicationType: "compose",
-			buildLink,
-			organizationId: compose.environment.project.organizationId,
-			domains: compose.domains,
-			environmentName: compose.environment.name,
-		});
+		if (!finished) {
+			await appendLogLine(
+				compose.serverId,
+				deployment.logPath,
+				CANCELLED_TOO_LATE_NOTE,
+			);
+		} else {
+			await sendBuildSuccessNotifications({
+				projectName: compose.environment.project.name,
+				applicationName: compose.name,
+				applicationType: "compose",
+				buildLink,
+				organizationId: compose.environment.project.organizationId,
+				domains: compose.domains,
+				environmentName: compose.environment.name,
+			});
+		}
+
+		// Build-server composes: drop old per-deployment registry tags, detached
+		// (see scheduleComposeBuildRegistryPrune).
+		scheduleComposeBuildRegistryPrune({ entity, deployment });
 	} catch (error) {
+		const cancelled = await settleCancelledComposeDeploy(
+			compose,
+			deployment,
+			error,
+		);
+		if (cancelled) throw cancelled;
+
 		let command = "";
 
 		// Only log details for non-ExecError errors
@@ -430,6 +570,14 @@ export const deployCompose = async ({
 			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
 		}
 
+		// A cancel that came too late, followed by a real failure: say so, the
+		// deployment ends as `error` (it did fail), not `cancelled`.
+		if (
+			compose.buildServerId &&
+			(await isDeploymentCancelled(deployment.deploymentId))
+		) {
+			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+		}
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		if (compose.serverId) {
 			await execAsyncRemote(compose.serverId, command);
@@ -544,6 +692,25 @@ export const rebuildCompose = async ({
 		});
 		// <<< build-policy hook (compose rebuild)
 
+		// Build-server composes: build and push first (see runComposeBuild).
+		const runRebuildStep = async (rawCommand: string) => {
+			const stepWithLog = `(${rawCommand}) >> ${deployment.logPath} 2>&1`;
+			if (compose.serverId) {
+				await execAsyncRemote(compose.serverId, stepWithLog);
+			} else {
+				await execAsync(stepWithLog);
+			}
+		};
+		const remoteBuild = await prepareComposeBuildServerDeploy({
+			entity: compose,
+			deployment,
+			runStep: runRebuildStep,
+			freshVolumes,
+			// A rebuild does not pull on the serving host, so it must not
+			// build newer code on the build server either.
+			reuseClone: true,
+		});
+
 		if (freshVolumes && compose.composeType === "docker-compose") {
 			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
 			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;
@@ -558,6 +725,7 @@ export const rebuildCompose = async ({
 		command += await getBuildComposeCommand(compose, {
 			deploymentId: deployment.deploymentId,
 			freshVolumes,
+			remoteBuild,
 		});
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (compose.serverId) {
@@ -566,11 +734,37 @@ export const rebuildCompose = async ({
 			await execAsync(commandWithLog);
 		}
 
-		await updateDeploymentStatus(deployment.deploymentId, "done");
+		// See deployCompose: a cancel during the pull/up stays cancelled.
+		let finished = true;
+		if (compose.buildServerId) {
+			finished = await markDeploymentDoneUnlessCancelled(
+				deployment.deploymentId,
+			);
+		} else {
+			await updateDeploymentStatus(deployment.deploymentId, "done");
+		}
 		await updateCompose(composeId, {
 			composeStatus: "done",
 		});
+		if (!finished) {
+			await appendLogLine(
+				compose.serverId,
+				deployment.logPath,
+				CANCELLED_TOO_LATE_NOTE,
+			);
+		}
+
+		// Build-server composes: drop old per-deployment registry tags, detached
+		// (see scheduleComposeBuildRegistryPrune).
+		scheduleComposeBuildRegistryPrune({ entity: compose, deployment });
 	} catch (error) {
+		const cancelled = await settleCancelledComposeDeploy(
+			compose,
+			deployment,
+			error,
+		);
+		if (cancelled) throw cancelled;
+
 		let command = "";
 
 		// Only log details for non-ExecError errors
@@ -580,6 +774,14 @@ export const rebuildCompose = async ({
 			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
 		}
 
+		// A cancel that came too late, followed by a real failure: say so, the
+		// deployment ends as `error` (it did fail), not `cancelled`.
+		if (
+			compose.buildServerId &&
+			(await isDeploymentCancelled(deployment.deploymentId))
+		) {
+			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+		}
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		if (compose.serverId) {
 			await execAsyncRemote(compose.serverId, command);
@@ -679,7 +881,14 @@ export const startCompose = async (composeId: string) => {
 	try {
 		const path =
 			compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath;
-		const baseCommand = `env -i PATH="$PATH" docker compose -p ${quote([compose.appName])} -f ${quote([path])} up -d`;
+		// A compose built on a build server starts from the pushed images: merge
+		// the override (when the last deploy wrote one) and never build here.
+		let baseCommand = `env -i PATH="$PATH" docker compose -p ${quote([compose.appName])} -f ${quote([path])} up -d`;
+		if (compose.buildServerId) {
+			const overridePath = quote([getComposeBuildOverridePath(compose)]);
+			const upBase = `env -i PATH="$PATH" docker compose -p ${quote([compose.appName])} -f ${quote([path])}`;
+			baseCommand = `if [ -f ${overridePath} ]; then ${upBase} -f ${overridePath} up -d --no-build; else ${upBase} up -d --no-build; fi`;
+		}
 		if (compose.composeType === "docker-compose") {
 			if (compose.serverId) {
 				await execAsyncRemote(

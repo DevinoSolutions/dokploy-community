@@ -2,7 +2,12 @@ import { exec, execFile, spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";
+import {
+	type RemoteBuildCancelTarget,
+	wrapCancelableRemoteBuild,
+} from "@dokploy/server/utils/builders/remote-build-cancel";
 import { Client } from "ssh2";
+import { registerRemoteBuild } from "./remote-build-registry";
 import {
 	ExecError,
 	MAX_EXEC_OUTPUT_TAIL,
@@ -39,10 +44,21 @@ export const execAsync = async (
 		env?: NodeJS.ProcessEnv;
 		shell?: string;
 		maxBuffer?: number;
+		// Written to the command's stdin. Secrets go here, never in `command`:
+		// the command line is visible to every user on the host through ps.
+		stdin?: string;
 	},
 ): Promise<{ stdout: string; stderr: string }> => {
 	try {
-		const result = await execAsyncBase(command, options);
+		const { stdin, ...execOptions } = options ?? {};
+		const pending = execAsyncBase(command, execOptions);
+		if (stdin !== undefined) {
+			// A command that exits without reading its input must not crash the
+			// process with an unhandled EPIPE; its exit status is what we report.
+			pending.child.stdin?.on("error", () => {});
+			pending.child.stdin?.end(stdin);
+		}
+		const result = await pending;
 		return {
 			stdout: result.stdout.toString(),
 			stderr: result.stderr.toString(),
@@ -256,7 +272,22 @@ export const execAsyncRemote = async (
 	command: string,
 	onData?: (data: string) => void,
 	// The caller consumes the output through onData; keep only its tail.
-	options: { streamOnly?: boolean } = {},
+	options: {
+		streamOnly?: boolean;
+		/**
+		 * A build on a build server that Dokploy must be able to cancel: the
+		 * command runs in its own session with a pid file (see
+		 * `builders/remote-build-cancel.ts`), and `abortRemoteBuild(deploymentId)`
+		 * can drop this connection. Omitted for every other command, which then
+		 * runs exactly as before.
+		 */
+		cancelable?: RemoteBuildCancelTarget;
+		/**
+		 * Written to the command's stdin, then closed. Secrets go here, never in
+		 * `command`: the command line is visible to every user on the host.
+		 */
+		stdin?: string;
+	} = {},
 ): Promise<{ stdout: string; stderr: string }> => {
 	if (!serverId) return { stdout: "", stderr: "" };
 	const server = await findServerById(serverId);
@@ -272,13 +303,34 @@ export const execAsyncRemote = async (
 		output.add(text);
 		onData?.(text);
 	};
+	const { cancelable } = options;
+	const remoteCommand = cancelable
+		? wrapCancelableRemoteBuild(command, cancelable)
+		: command;
 	return new Promise((resolve, reject) => {
 		const conn = new Client();
+		if (cancelable) {
+			// Dropping the connection rejects this command so the deployment job
+			// ends; the build on the server is stopped separately, by pid file.
+			const unregister = registerRemoteBuild(
+				cancelable.deploymentId,
+				(reason) => {
+					conn.destroy();
+					reject(
+						new ExecError(`Remote build was cancelled: ${reason}`, {
+							command,
+							serverId,
+						}),
+					);
+				},
+			);
+			conn.once("close", unregister);
+		}
 
 		sleep(1000);
 		conn
 			.once("ready", () => {
-				conn.exec(command, (err, stream) => {
+				conn.exec(remoteCommand, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
 						reject(
@@ -289,6 +341,11 @@ export const execAsyncRemote = async (
 							}),
 						);
 						return;
+					}
+					if (options.stdin !== undefined) {
+						// Nothing to send for an empty secret, but the input is still closed.
+						if (options.stdin) stream.write(options.stdin);
+						stream.end();
 					}
 					stream
 						.on("close", (code: number, _signal: string) => {
@@ -405,6 +462,13 @@ export interface RemoteInputSession {
 export const openRemoteInputSession = async (
 	serverId: string,
 	command: string,
+	options: {
+		/**
+		 * Receives the command's stdout as it arrives (stderr is not passed on).
+		 * For commands whose output the caller needs, not just their exit status.
+		 */
+		onStdout?: (text: string) => void;
+	} = {},
 ): Promise<RemoteInputSession> => {
 	const server = await findServerById(serverId);
 	if (!server.sshKeyId) throw new Error("No SSH key available for this server");
@@ -449,7 +513,10 @@ export const openRemoteInputSession = async (
 					opened = true;
 					stream.setEncoding("utf8");
 					stream.stderr.setEncoding("utf8");
-					stream.on("data", (data: string) => output.add(data));
+					stream.on("data", (data: string) => {
+						output.add(data);
+						options.onStdout?.(data);
+					});
 					stream.stderr.on("data", (data: string) => output.add(data));
 					stream.on("close", (code: number | undefined) => {
 						if (code === 0) {

@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.7**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.11**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.7 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.11 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,48 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.11
+
+**Registry passwords never appear in a process command line** ([#300](https://github.com/DevinoSolutions/dokploy-community/pull/300)). Registry logins now send the password on the login process's stdin, locally and over SSH, instead of embedding it in a `printf ... | docker login` command. Application deploys, build-policy pushes, docker-source pulls, rollbacks, ECR and the registry test calls all use it, so `ps` on a host no longer shows a registry password. A refused login now fails the deploy with the command's own error. Other secrets in build scripts (git clone tokens, the base64 `.env`) are not covered yet.
+
+**A failed compose registry login is logged** ([#301](https://github.com/DevinoSolutions/dokploy-community/pull/301)). A failed registry login on the build server or the serving host writes `Registry login failed for <url>: ...` to the deployment log before the deploy fails. SSH commands no longer write an empty stdin.
+
+**Registries on one URL keep their own login** ([#303](https://github.com/DevinoSolutions/dokploy-community/pull/303)). Each registry row gets its own docker config directory per host (`/etc/dokploy/docker-config/<registryId>`, mode 700), used with `docker --config` for build and rollback registry pushes, build-policy pushes, compose build-server pushes and docker-source pulls. Two registry rows with the same URL and different accounts no longer replace each other's login. The deploy registry and the compose serving host stay on the default config. A cancel during a compose build-server login ends as a cancel. Deleting a registry row does not yet remove its config directory.
+
+**Docs and tests.** A registry password rotation record ([#299](https://github.com/DevinoSolutions/dokploy-community/pull/299)), a registry garbage collection runbook ([#302](https://github.com/DevinoSolutions/dokploy-community/pull/302)) with the bucket versioning check ([#304](https://github.com/DevinoSolutions/dokploy-community/pull/304)), and the env-file tests skip on Windows ([#298](https://github.com/DevinoSolutions/dokploy-community/pull/298)).
+
+> No database migration in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
+### New in v0.30.8-community.10
+
+**Compose rollback and restore never build on the serving host** ([#293](https://github.com/DevinoSolutions/dokploy-community/pull/293)). Restoring a previous release of a compose service uses `--no-build`. If the restore fails, Dokploy prints a neutral warning telling you to redeploy instead of building on the host that serves traffic.
+
+**Old build-server image tags are cleaned up** ([#294](https://github.com/DevinoSolutions/dokploy-community/pull/294)). After a build-server compose deploy, the `dpl-` image tags in the build registry are pruned. It keeps `latest`, every non-`dpl-` tag, every tag referenced by an override file, and the 5 newest `dpl-` tags. A digest is deleted only when no kept tag resolves to it, with at most 50 deletions per run. ECR registries are skipped. Set `DOKPLOY_DISABLE_BUILD_REGISTRY_RETENTION=true` to turn it off. Blob garbage collection is not included.
+
+**Cancelling stops a build running on a build server** ([#295](https://github.com/DevinoSolutions/dokploy-community/pull/295)). Remote builds run under `setsid` with a pid file, and cancel sends TERM and then KILL to the process group.
+
+**A compose rebuild on a build server reuses the existing clone** ([#296](https://github.com/DevinoSolutions/dokploy-community/pull/296)). The clone is reused only when a completion marker (`.git/dokploy-clone-ok`) exists and the directory is a top-level repo. Otherwise it clones again. A real failure after a cancel now logs neutral wording.
+
+> No database migration in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
+### New in v0.30.8-community.9
+
+**Compose services can build on a build server** ([#290](https://github.com/DevinoSolutions/dokploy-community/pull/290)). Set a build server and a registry on a compose service's Advanced tab. Its images are then built on that server, pushed to the registry, and pulled on the server that runs the stack, which never builds. Each built service is pushed with a per-deployment tag and run through a generated override file with `--no-build`. Services that share one image are pushed and pulled once. A failed build or pull restores the previous release. Works for `docker compose` and `docker stack` deployments. Composes without a build server behave exactly as before.
+
+**Deploys that pull a large image are no longer marked failed too early** ([#291](https://github.com/DevinoSolutions/dokploy-community/pull/291)). When an application is built on a build server, the serving host has to pull the image before the new container can start. The post-deploy check now waits up to 10 minutes while the image is still being pulled, then watches the container for 30 seconds once it is running.
+
+> Database migration 0208 adds `buildServerId` and `buildRegistryId` to compose services. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
+### New in v0.30.8-community.8
+
+**Restarting Dokploy no longer loses queued deployments** ([#288](https://github.com/DevinoSolutions/dokploy-community/pull/288)). Every queued deployment is now also saved in the database. When Dokploy restarts, for example during an update, waiting deployments are queued again in their original order. A deployment that was running at the moment of the restart is marked "Interrupted by a Dokploy restart; re-queued" and runs again. A deployment that keeps crashing Dokploy is dropped after 3 attempts. On shutdown, Dokploy stops starting new jobs and gives the running ones a few seconds to finish.
+
+**better-auth 1.6.33** ([#287](https://github.com/DevinoSolutions/dokploy-community/pull/287)) fixes the SSO advisory GHSA-8c5h-wx78-2cfg. Signing in with GitHub or Google no longer adds you to an SSO provider's organization just because your email domain matches. That now needs a verified domain.
+
+**Smaller fixes:** live log and status streams now return a clear "server unreachable" error instead of a 500 ([#286](https://github.com/DevinoSolutions/dokploy-community/pull/286)), and screen readers no longer read the DoDomain webhook address twice ([#285](https://github.com/DevinoSolutions/dokploy-community/pull/285)).
+
+> Database migration 0207 adds the `deployment_queue_job` table. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.7
 
@@ -600,7 +642,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.7
+export DOKPLOY_VERSION=v0.30.8-community.11
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -613,7 +655,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.7      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.11      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
