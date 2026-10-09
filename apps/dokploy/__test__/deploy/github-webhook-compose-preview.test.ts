@@ -140,11 +140,17 @@ const createPullRequestRequest = (
 	{
 		labels = [] as Array<{ name: string }>,
 		author = "contributor",
-		sender = author,
+		sender: senderOverride,
 		fromFork = false,
+	}: {
+		labels?: Array<{ name: string }>;
+		author?: string;
+		sender?: string;
+		fromFork?: boolean;
 	} = {},
-) =>
-	({
+) => {
+	const sender = senderOverride ?? author;
+	return {
 		headers: {
 			"x-hub-signature-256": "sha256=test-signature",
 			"x-github-event": "pull_request",
@@ -178,7 +184,8 @@ const createPullRequestRequest = (
 				labels,
 			},
 		},
-	}) as unknown as NextApiRequest;
+	} as unknown as NextApiRequest;
+};
 
 const composeFixture = (overrides: Record<string, unknown> = {}) => ({
 	composeId: "compose-id",
