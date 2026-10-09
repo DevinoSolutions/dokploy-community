@@ -1,4 +1,9 @@
 import {
+	isValidPreviewImageTemplate,
+	PREVIEW_IMAGE_GUIDANCE,
+	PREVIEW_IMAGE_PLACEHOLDER,
+} from "@dokploy/server/utils/preview-image";
+import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
 } from "@dokploy/server/utils/preview-wildcard";
@@ -161,6 +166,9 @@ const schema = z
 		wildcardDomain: z
 			.string()
 			.refine(isValidPreviewWildcard, { message: PREVIEW_WILDCARD_GUIDANCE }),
+		previewDockerImage: z
+			.string()
+			.refine(isValidPreviewImageTemplate, { message: PREVIEW_IMAGE_GUIDANCE }),
 		port: z.number(),
 		previewLimit: z.number(),
 		previewLabels: z.array(z.string()).optional(),
@@ -223,6 +231,7 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 		defaultValues: {
 			env: "",
 			wildcardDomain: "*.sslip.io",
+			previewDockerImage: "",
 			port: 3000,
 			previewLimit: 3,
 			previewLabels: [],
@@ -234,6 +243,7 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 		resolver: zodResolver(schema),
 	});
 
+	const isDockerImage = data?.sourceType === "docker";
 	const previewHttps = form.watch("previewHttps");
 	const wildcardDomain = form.watch("wildcardDomain");
 	const isTraefikMeDomain = wildcardDomain?.includes("sslip.io") || false;
@@ -274,6 +284,7 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 				buildArgs: data.previewBuildArgs || "",
 				buildSecrets: data.previewBuildSecrets || "",
 				wildcardDomain: data.previewWildcard || defaultWildcard,
+				previewDockerImage: data.previewDockerImage || "",
 				port: data.previewPort || 3000,
 				previewLabels: data.previewLabels || [],
 				previewLimit: data.previewLimit || 3,
@@ -293,6 +304,11 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 			previewBuildArgs: formData.buildArgs,
 			previewBuildSecrets: formData.buildSecrets,
 			previewWildcard: formData.wildcardDomain,
+			// Only Docker-image applications have an image template; leave the
+			// column untouched for every other source type.
+			...(isDockerImage && {
+				previewDockerImage: formData.previewDockerImage.trim() || null,
+			}),
 			previewPort: formData.port,
 			previewLabels: formData.previewLabels,
 			applicationId,
@@ -344,6 +360,36 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 								className="grid w-full gap-4"
 							>
 								<div className="grid gap-4 lg:grid-cols-2">
+									{isDockerImage && (
+										<FormField
+											control={form.control}
+											name="previewDockerImage"
+											render={({ field }) => (
+												<FormItem className="lg:col-span-2">
+													<FormLabel>Preview Image</FormLabel>
+													<FormControl>
+														<Input
+															placeholder={`ghcr.io/acme/app:pr-${PREVIEW_IMAGE_PLACEHOLDER}`}
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription className="flex flex-col gap-1.5">
+														<span>
+															The image each preview pulls. Use{" "}
+															<code className="text-xs">
+																{PREVIEW_IMAGE_PLACEHOLDER}
+															</code>{" "}
+															for the pull request number or tag you deploy
+															the preview for. Registry credentials of this
+															application are used to pull it. Set the port
+															below to the one the image listens on.
+														</span>
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+									)}
 									<FormField
 										control={form.control}
 										name="wildcardDomain"
@@ -405,90 +451,92 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 											</FormItem>
 										)}
 									/>
-									<FormField
-										control={form.control}
-										name="previewLabels"
-										render={({ field }) => (
-											<FormItem className="md:col-span-2">
-												<div className="flex items-center gap-2">
-													<FormLabel>Preview Labels</FormLabel>
-													<TooltipProvider>
-														<Tooltip>
-															<TooltipTrigger asChild>
-																<HelpCircle className="size-4 text-muted-foreground hover:text-foreground transition-colors cursor-pointer" />
-															</TooltipTrigger>
-															<TooltipContent>
-																<p>
-																	Add a labels that will trigger a preview
-																	deployment for a pull request. If no labels
-																	are specified, all pull requests will trigger
-																	a preview deployment.
-																</p>
-															</TooltipContent>
-														</Tooltip>
-													</TooltipProvider>
-												</div>
-												<div className="flex flex-wrap gap-2 mb-2">
-													{field.value?.map((label, index) => (
-														<Badge
-															key={index}
-															variant="secondary"
-															className="flex items-center gap-1"
-														>
-															{label}
-															<X
-																className="size-3 cursor-pointer hover:text-destructive"
-																onClick={() => {
-																	const newLabels = [...(field.value || [])];
-																	newLabels.splice(index, 1);
-																	field.onChange(newLabels);
+									{!isDockerImage && (
+										<FormField
+											control={form.control}
+											name="previewLabels"
+											render={({ field }) => (
+												<FormItem className="md:col-span-2">
+													<div className="flex items-center gap-2">
+														<FormLabel>Preview Labels</FormLabel>
+														<TooltipProvider>
+															<Tooltip>
+																<TooltipTrigger asChild>
+																	<HelpCircle className="size-4 text-muted-foreground hover:text-foreground transition-colors cursor-pointer" />
+																</TooltipTrigger>
+																<TooltipContent>
+																	<p>
+																		Add a labels that will trigger a preview
+																		deployment for a pull request. If no labels
+																		are specified, all pull requests will trigger
+																		a preview deployment.
+																	</p>
+																</TooltipContent>
+															</Tooltip>
+														</TooltipProvider>
+													</div>
+													<div className="flex flex-wrap gap-2 mb-2">
+														{field.value?.map((label, index) => (
+															<Badge
+																key={index}
+																variant="secondary"
+																className="flex items-center gap-1"
+															>
+																{label}
+																<X
+																	className="size-3 cursor-pointer hover:text-destructive"
+																	onClick={() => {
+																		const newLabels = [...(field.value || [])];
+																		newLabels.splice(index, 1);
+																		field.onChange(newLabels);
+																	}}
+																/>
+															</Badge>
+														))}
+													</div>
+													<div className="flex gap-2">
+														<FormControl>
+															<Input
+																placeholder="Enter a label (e.g. enhancements, needs-review)"
+																onKeyDown={(e) => {
+																	if (e.key === "Enter") {
+																		e.preventDefault();
+																		const input = e.currentTarget;
+																		const label = input.value.trim();
+																		if (label) {
+																			field.onChange([
+																				...(field.value || []),
+																				label,
+																			]);
+																			input.value = "";
+																		}
+																	}
 																}}
 															/>
-														</Badge>
-													))}
-												</div>
-												<div className="flex gap-2">
-													<FormControl>
-														<Input
-															placeholder="Enter a label (e.g. enhancements, needs-review)"
-															onKeyDown={(e) => {
-																if (e.key === "Enter") {
-																	e.preventDefault();
-																	const input = e.currentTarget;
-																	const label = input.value.trim();
-																	if (label) {
-																		field.onChange([
-																			...(field.value || []),
-																			label,
-																		]);
-																		input.value = "";
-																	}
+														</FormControl>
+														<Button
+															type="button"
+															variant="outline"
+															size="icon"
+															onClick={() => {
+																const input = document.querySelector(
+																	'input[placeholder*="Enter a label"]',
+																) as HTMLInputElement;
+																const label = input.value.trim();
+																if (label) {
+																	field.onChange([...(field.value || []), label]);
+																	input.value = "";
 																}
 															}}
-														/>
-													</FormControl>
-													<Button
-														type="button"
-														variant="outline"
-														size="icon"
-														onClick={() => {
-															const input = document.querySelector(
-																'input[placeholder*="Enter a label"]',
-															) as HTMLInputElement;
-															const label = input.value.trim();
-															if (label) {
-																field.onChange([...(field.value || []), label]);
-																input.value = "";
-															}
-														}}
-													>
-														<Plus className="size-4" />
-													</Button>
-												</div>
-												<FormMessage />
-											</FormItem>
-										)}
-									/>
+														>
+															<Plus className="size-4" />
+														</Button>
+													</div>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+									)}
 									<FormField
 										control={form.control}
 										name="previewLimit"
@@ -613,53 +661,55 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 									</div>
 								</div>
 
-								<div className="grid gap-4 lg:grid-cols-2">
-									<FormField
-										control={form.control}
-										name="previewRequireCollaboratorPermissions"
-										render={({ field }) => (
-											<FormItem className="flex flex-row items-center justify-between p-3 mt-4 border rounded-lg shadow-xs col-span-2">
-												<div className="space-y-0.5">
-													{data?.sourceType === "gitlab" ? (
-														<>
-															<FormLabel>Require Member Access</FormLabel>
-															<FormDescription>
-																Require a minimum GitLab access level to trigger
-																preview deployments. Valid roles are:
-																<ul>
-																	<li>Owner</li>
-																	<li>Maintainer</li>
-																	<li>Developer</li>
-																</ul>
-															</FormDescription>
-														</>
-													) : (
-														<>
-															<FormLabel>
-																Require Collaborator Permissions
-															</FormLabel>
-															<FormDescription>
-																Require collaborator permissions to preview
-																deployments, valid roles are:
-																<ul>
-																	<li>Admin</li>
-																	<li>Maintain</li>
-																	<li>Write</li>
-																</ul>
-															</FormDescription>
-														</>
-													)}
-												</div>
-												<FormControl>
-													<Switch
-														checked={field.value}
-														onCheckedChange={field.onChange}
-													/>
-												</FormControl>
-											</FormItem>
-										)}
-									/>
-								</div>
+								{!isDockerImage && (
+									<div className="grid gap-4 lg:grid-cols-2">
+										<FormField
+											control={form.control}
+											name="previewRequireCollaboratorPermissions"
+											render={({ field }) => (
+												<FormItem className="flex flex-row items-center justify-between p-3 mt-4 border rounded-lg shadow-xs col-span-2">
+													<div className="space-y-0.5">
+														{data?.sourceType === "gitlab" ? (
+															<>
+																<FormLabel>Require Member Access</FormLabel>
+																<FormDescription>
+																	Require a minimum GitLab access level to trigger
+																	preview deployments. Valid roles are:
+																	<ul>
+																		<li>Owner</li>
+																		<li>Maintainer</li>
+																		<li>Developer</li>
+																	</ul>
+																</FormDescription>
+															</>
+														) : (
+															<>
+																<FormLabel>
+																	Require Collaborator Permissions
+																</FormLabel>
+																<FormDescription>
+																	Require collaborator permissions to preview
+																	deployments, valid roles are:
+																	<ul>
+																		<li>Admin</li>
+																		<li>Maintain</li>
+																		<li>Write</li>
+																	</ul>
+																</FormDescription>
+															</>
+														)}
+													</div>
+													<FormControl>
+														<Switch
+															checked={field.value}
+															onCheckedChange={field.onChange}
+														/>
+													</FormControl>
+												</FormItem>
+											)}
+										/>
+									</div>
+								)}
 
 								<FormField
 									control={form.control}
