@@ -123,8 +123,8 @@ describe("buildHeadRefCheckoutCommand", () => {
 
 		// shell-quote backslash-escapes every metacharacter, so the command
 		// substitution can never execute.
-		expect(command).toContain("origin refs/pull/\\$\\(id\\)/head");
-		expect(command).not.toContain("origin refs/pull/$(id)/head");
+		expect(command).toContain("origin -- refs/pull/\\$\\(id\\)/head");
+		expect(command).not.toContain("origin -- refs/pull/$(id)/head");
 	});
 });
 
@@ -177,8 +177,8 @@ describe("clone helpers with a head ref", () => {
 		expect(command).toContain(
 			"fetch --progress --depth 1 origin -- refs/pull/7/head",
 		);
-		expect(command).toContain("origin refs/pull/7/head || git -C");
-		expect(command).toContain("origin feature/thing;");
+		expect(command).toContain("origin -- refs/pull/7/head || git -C");
+		expect(command).toContain("origin -- feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");
 		expect(command).not.toContain("git clone");
 	});
@@ -198,7 +198,7 @@ describe("clone helpers with a head ref", () => {
 		expect(command).toContain(
 			"fetch --progress --depth 1 origin -- refs/pull/7/head",
 		);
-		expect(command).toContain("origin feature/thing;");
+		expect(command).toContain("origin -- feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");
 		expect(command).not.toContain("git clone");
 	});
@@ -225,7 +225,7 @@ describe("clone helpers with a head ref", () => {
 		expect(command).toContain(
 			"fetch --progress --depth 1 origin -- refs/merge-requests/42/head",
 		);
-		expect(command).toContain("origin feature/thing;");
+		expect(command).toContain("origin -- feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");
 		expect(command).not.toContain("git clone");
 	});
