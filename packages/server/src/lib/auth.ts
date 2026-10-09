@@ -180,7 +180,15 @@ const createBetterAuth = () =>
 			"/oauth2/update-consent",
 			"/oauth2/delete-consent",
 			"/oauth2/end-session",
+			"/oauth2/end-session/confirm",
 			"/oauth2/userinfo",
+			// Not advertised in discovery. The provider's revoke answers a
+			// rotated refresh token by deleting every token of the (client,
+			// user) pair, which would log out all sessions sharing the grant
+			// (#214); Settings revokes through `revokeMcpAuthorization`.
+			// Introspection is not used: the MCP endpoint looks tokens up itself.
+			"/oauth2/revoke",
+			"/oauth2/introspect",
 			"/admin/oauth2/create-client",
 			"/admin/oauth2/update-client",
 			"/admin/oauth2/resources",
@@ -692,8 +700,6 @@ const createBetterAuth = () =>
 					token: { window: 60, max: 600 },
 					authorize: { window: 60, max: 120 },
 					register: { window: 60, max: 30 },
-					revoke: { window: 60, max: 120 },
-					introspect: { window: 60, max: 600 },
 				},
 			}),
 			organization({
