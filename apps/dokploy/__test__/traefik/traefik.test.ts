@@ -58,6 +58,7 @@ const baseApp: ApplicationNested = {
 	previewLimit: 0,
 	previewCustomCertResolver: null,
 	previewWildcard: "",
+	previewDockerImage: null,
 	environmentId: "",
 	environment: {
 		env: "",

@@ -61,7 +61,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { UseKeyboardNav } from "@/hooks/use-keyboard-nav";
-import { supportsPreviewDeployments } from "@/lib/preview-deployments";
+import { supportsApplicationPreviewDeployments } from "@/lib/preview-deployments";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 import { useWhitelabeling } from "@/utils/hooks/use-whitelabeling";
@@ -256,7 +256,7 @@ const Service = (
 												</TabsTrigger>
 											)}
 											{permissions?.deployment.read &&
-												supportsPreviewDeployments(data?.sourceType) && (
+												supportsApplicationPreviewDeployments(data?.sourceType) && (
 													<TabsTrigger value="preview-deployments">
 														Preview Deployments
 													</TabsTrigger>
@@ -399,7 +399,7 @@ const Service = (
 										</TabsContent>
 									)}
 									{permissions?.deployment.read &&
-										supportsPreviewDeployments(data?.sourceType) && (
+										supportsApplicationPreviewDeployments(data?.sourceType) && (
 											<TabsContent
 												value="preview-deployments"
 												className="w-full"

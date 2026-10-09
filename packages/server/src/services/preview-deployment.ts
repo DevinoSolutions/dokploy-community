@@ -203,7 +203,10 @@ export const interpolateSubdomainTemplate = (
 ): string => {
 	return template
 		.replace(/\$\{appName\}/g, vars.appName)
-		.replace(/\$\{prNumber\}/g, vars.prNumber)
+		// Hostnames are case-insensitive and Traefik/Let's Encrypt want them in
+		// lower case; a Docker-image preview identifier may hold capitals (image
+		// tags are case-sensitive, so only the host is lowered).
+		.replace(/\$\{prNumber\}/g, vars.prNumber.toLowerCase())
 		.replace(/\$\{branchName\}/g, slugify(vars.branchName))
 		.replace(/\$\{uniqueId\}/g, vars.uniqueId);
 };
