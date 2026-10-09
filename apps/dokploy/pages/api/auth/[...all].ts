@@ -6,13 +6,22 @@ import {
 	rewriteLegacyAuthUrl,
 	withAdvertisedIssuer,
 } from "@dokploy/server/services/mcp-oauth";
+import {
+	getRefreshTokenLock,
+	serializeRefreshGrants,
+} from "@dokploy/server/services/mcp-refresh-lock";
 import { toNodeHandler } from "better-auth/node";
 import { isHttpsRequest, secureSetCookie } from "@/lib/secure-cookies";
 
 // Disallow body parsing, we will parse it manually
 export const config = { api: { bodyParser: false } };
 
-const handler = toNodeHandler(auth.handler);
+// Concurrent refreshes of one MCP refresh token are serialized so the losers
+// receive the winner's replay instead of invalid_grant (see mcp-refresh-lock).
+const handler = serializeRefreshGrants(
+	toNodeHandler(auth.handler),
+	getRefreshTokenLock(),
+);
 
 const pathOf = (url: string | undefined) => (url ?? "").split("?")[0];
 
