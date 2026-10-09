@@ -134,7 +134,7 @@ describe("deployComposePreview head-ref checkout", () => {
 		expect(mocks.runComposeBuild).toHaveBeenCalledWith(
 			expect.objectContaining({ headRef: "refs/pull/42/head" }),
 			deployment,
-			{ applyPatches: false },
+			{ applyPatches: false, cancellable: false },
 		);
 		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith(
 			"deployment-id",

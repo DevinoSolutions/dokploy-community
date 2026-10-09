@@ -79,15 +79,28 @@ describe("buildHeadRefCheckoutCommand", () => {
 
 		expect(command).toContain("git init -q /code/preview;");
 		expect(command).toContain(
-			"fetch --progress --depth 1 origin refs/pull/7/head",
+			"fetch --progress --depth 1 origin -- refs/pull/7/head",
 		);
 		// The `||` fallback keeps branch-based previews working when a server
 		// does not advertise the ref (or the stored PR number is not a PR).
 		expect(command).toContain(
-			"origin refs/pull/7/head || git -C /code/preview fetch --progress --depth 1 origin feature/thing;",
+			"origin -- refs/pull/7/head || git -C /code/preview fetch --progress --depth 1 origin -- feature/thing;",
 		);
 		expect(command).toContain("git -C /code/preview checkout -q FETCH_HEAD;");
 		expect(command).not.toContain("git clone");
+	});
+
+	it("never lets a branch name that looks like an option reach git as a flag", () => {
+		const command = buildHeadRefCheckoutCommand({
+			...base,
+			branch: "--upload-pack=touch /tmp/pwned",
+			headRef: "refs/pull/7/head",
+		});
+
+		// `--` ends option parsing, so the quoted branch can only be a refspec.
+		expect(command).toContain(
+			"fetch --progress --depth 1 origin -- '--upload-pack=touch /tmp/pwned';",
+		);
 	});
 
 	it("updates submodules after the checkout when enabled", () => {
@@ -162,7 +175,7 @@ describe("clone helpers with a head ref", () => {
 			"https://oauth2:gh-token@github.com/acme/web.git",
 		);
 		expect(command).toContain(
-			"fetch --progress --depth 1 origin refs/pull/7/head",
+			"fetch --progress --depth 1 origin -- refs/pull/7/head",
 		);
 		expect(command).toContain("origin refs/pull/7/head || git -C");
 		expect(command).toContain("origin feature/thing;");
@@ -183,7 +196,7 @@ describe("clone helpers with a head ref", () => {
 		});
 
 		expect(command).toContain(
-			"fetch --progress --depth 1 origin refs/pull/7/head",
+			"fetch --progress --depth 1 origin -- refs/pull/7/head",
 		);
 		expect(command).toContain("origin feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");
@@ -210,7 +223,7 @@ describe("clone helpers with a head ref", () => {
 		});
 
 		expect(command).toContain(
-			"fetch --progress --depth 1 origin refs/merge-requests/42/head",
+			"fetch --progress --depth 1 origin -- refs/merge-requests/42/head",
 		);
 		expect(command).toContain("origin feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");

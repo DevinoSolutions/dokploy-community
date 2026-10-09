@@ -69,7 +69,7 @@ export const buildHeadRefCheckoutCommand = ({
 	command += `echo ${quote([`Checking out ${headRef} into ${outputPath}: ✅`])};`;
 	command += `git init -q ${dir};`;
 	command += `git -C ${dir} remote add origin ${quote([cloneUrl])};`;
-	command += `git -C ${dir} fetch --progress --depth 1 origin ${quote([headRef])} || git -C ${dir} fetch --progress --depth 1 origin ${quote([branch])};`;
+	command += `git -C ${dir} fetch --progress --depth 1 origin -- ${quote([headRef])} || git -C ${dir} fetch --progress --depth 1 origin -- ${quote([branch])};`;
 	command += `git -C ${dir} checkout -q FETCH_HEAD;`;
 
 	if (enableSubmodules) {
