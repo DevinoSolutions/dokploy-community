@@ -19,11 +19,17 @@ export const maskWebhookUrl = (webhookUrl: string) => {
 	}
 };
 
-/** Masks every value of a header map; the header names stay visible. */
-export const maskHeaderValues = (headers: Record<string, string> | null) =>
+/**
+ * Masks every value of a header map; the header names stay visible. The column
+ * is untyped JSON, so a value that is not a string (null, a number) is fully
+ * hidden instead of throwing.
+ */
+export const maskHeaderValues = (
+	headers: Record<string, string | null> | null,
+) =>
 	Object.fromEntries(
 		Object.entries(headers ?? {}).map(([name, value]) => [
 			name,
-			maskApiKey(value),
+			typeof value === "string" ? maskApiKey(value) : "••••",
 		]),
 	);

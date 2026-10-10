@@ -794,6 +794,8 @@ export const apiUpdateNtfy = apiCreateNtfy.partial().extend({
 	notificationId: z.string().min(1),
 	// Ignored: the provider row is derived from the notification row.
 	ntfyId: z.string().optional(),
+	// The topic is the secret of a public server (ntfy.sh): blank keeps it.
+	topic: writeOnlySecret,
 	accessToken: writeOnlySecret,
 	// The token is optional (public topics), so a blank one means "keep":
 	// removing the stored token takes this explicit flag.
@@ -804,11 +806,13 @@ export const apiUpdateNtfy = apiCreateNtfy.partial().extend({
 export const apiTestNtfyConnection = apiCreateNtfy
 	.pick({
 		serverUrl: true,
-		topic: true,
 		priority: true,
 	})
 	.extend({
+		topic: writeOnlySecret,
 		accessToken: writeOnlySecret,
+		// Testing without the stored token (it is about to be removed).
+		clearAccessToken: z.boolean().optional(),
 		notificationId: testNotificationId,
 	});
 
@@ -890,11 +894,13 @@ export const apiUpdateCustom = apiCreateCustom.partial().extend({
 	notificationId: z.string().min(1),
 	// Ignored: the provider row is derived from the notification row.
 	customId: z.string().optional(),
+	// The endpoint often carries a token: blank keeps the stored one.
+	endpoint: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
 export const apiTestCustomConnection = z.object({
-	endpoint: z.string().min(1),
+	endpoint: writeOnlySecret,
 	// Header values are write-only: a blank value of a header that is stored
 	// under `notificationId` keeps the stored value.
 	headers: z.record(z.string(), z.string()).optional(),
