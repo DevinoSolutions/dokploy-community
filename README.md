@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.15**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.16**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.15 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.16 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,16 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.16
+
+**Uptimely deploy heartbeat and notification channel** ([#318](https://github.com/DevinoSolutions/dokploy-community/pull/318)). An optional per-service deploy heartbeat pings Uptimely on every successful deploy, fire-and-forget. Paste the heartbeat key from the monitor's Settings page, because Uptimely doesn't return it yet. A new Uptimely notification channel declares an incident when a deploy fails and resolves it on the next success. Keys are masked on read, and changing the URL requires re-entering the key. Migration 0212.
+
+**Integration key hardening** ([#319](https://github.com/DevinoSolutions/dokploy-community/pull/319)). Notifly and Sendly API keys are masked and kept when the field is left blank. Sendly, Notifly and DoDomain require the key again when the base URL changes. `getEmailProviders` no longer returns secrets, and deleting an organization now removes its notification channel rows and keys. No migration.
+
+**Snapvisor visual testing for compose preview deployments** ([#320](https://github.com/DevinoSolutions/dokploy-community/pull/320)). Compose services get a Snapvisor project picker, and compose previews show the Snapvisor build status, a review link and refresh. Builds are looked up by head SHA. The Snapvisor token gets the same re-enter-on-URL-change rule. Migration 0213.
+
+> Migrations 0212 and 0213 are idempotent and additive (new tables and columns, an enum value). The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.15
 
@@ -678,7 +688,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.15
+export DOKPLOY_VERSION=v0.30.8-community.16
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -691,7 +701,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.15      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.16      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
