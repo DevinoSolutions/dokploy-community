@@ -12,6 +12,7 @@ import {
 	SlackIcon,
 	TeamsIcon,
 	TelegramIcon,
+	UptimelyIcon,
 } from "@/components/icons/notification-icons";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { Button } from "@/components/ui/button";
@@ -42,7 +43,7 @@ export const ShowNotifications = () => {
 						</CardTitle>
 						<CardDescription>
 							Add your providers to receive notifications, like Discord, Slack,
-							Telegram, Teams, Email, Resend, Lark, Sendly, Notifly.
+							Telegram, Teams, Email, Resend, Lark, Sendly, Notifly, Uptimely.
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="space-y-2 py-8 border-t">
@@ -107,6 +108,11 @@ export const ShowNotifications = () => {
 															{notification.notificationType === "notifly" && (
 																<div className="flex  items-center justify-center rounded-lg ">
 																	<NotiflyIcon className="size-6" />
+																</div>
+															)}
+															{notification.notificationType === "uptimely" && (
+																<div className="flex  items-center justify-center rounded-lg ">
+																	<UptimelyIcon className="size-6" />
 																</div>
 															)}
 															{notification.notificationType === "gotify" && (

@@ -23,6 +23,7 @@ import {
 	SlackIcon,
 	TeamsIcon,
 	TelegramIcon,
+	UptimelyIcon,
 } from "@/components/icons/notification-icons";
 import { Button } from "@/components/ui/button";
 import {
@@ -151,6 +152,23 @@ export const notificationSchema = z.discriminatedUnion("type", [
 		.merge(notificationBaseSchema),
 	z
 		.object({
+			type: z.literal("uptimely"),
+			apiKey: z.string().min(1, { message: "API Key is required" }),
+			projectId: z
+				.string()
+				.trim()
+				.uuid({ message: "The Uptimely project id is a UUID" }),
+			baseUrl: z.string().min(1, { message: "Base URL is required" }),
+			resolvedStateId: z
+				.string()
+				.trim()
+				.uuid({ message: "The incident state id is a UUID" })
+				.or(z.literal(""))
+				.optional(),
+		})
+		.merge(notificationBaseSchema),
+	z
+		.object({
 			type: z.literal("gotify"),
 			serverUrl: z.string().min(1, { message: "Server URL is required" }),
 			appToken: z.string().min(1, { message: "App Token is required" }),
@@ -251,6 +269,10 @@ export const notificationsMap = {
 		icon: <NotiflyIcon />,
 		label: "Notifly",
 	},
+	uptimely: {
+		icon: <UptimelyIcon />,
+		label: "Uptimely",
+	},
 	gotify: {
 		icon: <GotifyIcon />,
 		label: "Gotify",
@@ -306,6 +328,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 		api.notification.testSendlyConnection.useMutation();
 	const { mutateAsync: testNotiflyConnection, isPending: isLoadingNotifly } =
 		api.notification.testNotiflyConnection.useMutation();
+	const { mutateAsync: testUptimelyConnection, isPending: isLoadingUptimely } =
+		api.notification.testUptimelyConnection.useMutation();
 	const { mutateAsync: testGotifyConnection, isPending: isLoadingGotify } =
 		api.notification.testGotifyConnection.useMutation();
 	const { mutateAsync: testNtfyConnection, isPending: isLoadingNtfy } =
@@ -347,6 +371,9 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 	const notiflyMutation = notificationId
 		? api.notification.updateNotifly.useMutation()
 		: api.notification.createNotifly.useMutation();
+	const uptimelyMutation = notificationId
+		? api.notification.updateUptimely.useMutation()
+		: api.notification.createUptimely.useMutation();
 	const gotifyMutation = notificationId
 		? api.notification.updateGotify.useMutation()
 		: api.notification.createGotify.useMutation();
@@ -524,6 +551,24 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
 				});
+			} else if (notification.notificationType === "uptimely") {
+				form.reset({
+					appBuildError: notification.appBuildError,
+					appDeploy: notification.appDeploy,
+					dokployRestart: notification.dokployRestart,
+					databaseBackup: notification.databaseBackup,
+					dokployBackup: notification.dokployBackup,
+					volumeBackup: notification.volumeBackup,
+					type: notification.notificationType,
+					apiKey: notification.uptimelyChannel?.apiKey,
+					projectId: notification.uptimelyChannel?.projectId,
+					baseUrl: notification.uptimelyChannel?.baseUrl,
+					resolvedStateId: notification.uptimelyChannel?.resolvedStateId || "",
+					name: notification.name,
+					dockerCleanup: notification.dockerCleanup,
+					serverThreshold: notification.serverThreshold,
+					scheduleFailure: notification.scheduleFailure,
+				});
 			} else if (notification.notificationType === "gotify") {
 				form.reset({
 					appBuildError: notification.appBuildError,
@@ -663,6 +708,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 		resend: resendMutation,
 		sendly: sendlyMutation,
 		notifly: notiflyMutation,
+		uptimely: uptimelyMutation,
 		gotify: gotifyMutation,
 		ntfy: ntfyMutation,
 		mattermost: mattermostMutation,
@@ -813,6 +859,27 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notiflyId: notification?.notiflyId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+			});
+		} else if (data.type === "uptimely") {
+			// An Uptimely channel only reacts to deploys: "App Build Error"
+			// declares the incident, the next success resolves it.
+			promise = uptimelyMutation.mutateAsync({
+				appBuildError: appBuildError,
+				appDeploy: false,
+				dokployRestart: false,
+				databaseBackup: false,
+				dokployBackup: false,
+				volumeBackup: false,
+				apiKey: data.apiKey,
+				projectId: data.projectId,
+				baseUrl: data.baseUrl,
+				resolvedStateId: data.resolvedStateId || "",
+				name: data.name,
+				dockerCleanup: false,
+				notificationId: notificationId || "",
+				uptimelyChannelId: notification?.uptimelyChannelId || "",
+				serverThreshold: false,
+				scheduleFailure: false,
 			});
 		} else if (data.type === "gotify") {
 			promise = gotifyMutation.mutateAsync({
@@ -1672,6 +1739,93 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 									</>
 								)}
 
+								{type === "uptimely" && (
+									<>
+										<DevinoProviderIntro provider="uptimely" />
+										<FormField
+											control={form.control}
+											name="apiKey"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>API Key</FormLabel>
+													<FormControl>
+														<Input
+															type="password"
+															placeholder="Uptimely project API key"
+															{...field}
+														/>
+													</FormControl>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="projectId"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Project ID</FormLabel>
+													<FormControl>
+														<Input
+															placeholder="00000000-0000-0000-0000-000000000000"
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription>
+														The Uptimely project that receives the incidents.
+														The project needs AI write operations enabled, or
+														Uptimely refuses to declare incidents.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="baseUrl"
+											defaultValue="https://app.getuptimely.com"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Base URL</FormLabel>
+													<FormControl>
+														<Input
+															placeholder="https://app.getuptimely.com"
+															{...field}
+														/>
+													</FormControl>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+
+										<FormField
+											control={form.control}
+											name="resolvedStateId"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Resolved state ID</FormLabel>
+													<FormControl>
+														<Input
+															placeholder="Optional"
+															{...field}
+															value={field.value ?? ""}
+														/>
+													</FormControl>
+													<FormDescription>
+														Optional. Uptimely cannot list incident states, so
+														Dokploy reads the Resolved state from the
+														project&apos;s existing incidents. Set this if a
+														resolve fails because none has been resolved yet.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+									</>
+								)}
+
 								{type === "gotify" && (
 									<>
 										<FormField
@@ -2177,27 +2331,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 								Select the actions.
 							</FormLabel>
 
-							<div className="grid md:grid-cols-2 gap-4">
-								<FormField
-									control={form.control}
-									name="appDeploy"
-									render={({ field }) => (
-										<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
-											<div className="">
-												<FormLabel>App Deploy</FormLabel>
-												<FormDescription>
-													Trigger the action when an app is deployed.
-												</FormDescription>
-											</div>
-											<FormControl>
-												<Switch
-													checked={field.value}
-													onCheckedChange={field.onChange}
-												/>
-											</FormControl>
-										</FormItem>
-									)}
-								/>
+							{type === "uptimely" ? (
 								<FormField
 									control={form.control}
 									name="appBuildError"
@@ -2206,7 +2340,9 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											<div className="space-y-0.5">
 												<FormLabel>App Build Error</FormLabel>
 												<FormDescription>
-													Trigger the action when the build fails.
+													Declare an incident when a deploy fails. The next
+													successful deploy of the same service resolves it.
+													Uptimely only receives deploy events.
 												</FormDescription>
 											</div>
 											<FormControl>
@@ -2218,101 +2354,17 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 										</FormItem>
 									)}
 								/>
-
-								<FormField
-									control={form.control}
-									name="databaseBackup"
-									render={({ field }) => (
-										<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
-											<div className="space-y-0.5">
-												<FormLabel>Database Backup</FormLabel>
-												<FormDescription>
-													Trigger the action when a database backup is created.
-												</FormDescription>
-											</div>
-											<FormControl>
-												<Switch
-													checked={field.value}
-													onCheckedChange={field.onChange}
-												/>
-											</FormControl>
-										</FormItem>
-									)}
-								/>
-
-								<FormField
-									control={form.control}
-									name="dokployBackup"
-									render={({ field }) => (
-										<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
-											<div className="space-y-0.5">
-												<FormLabel>Dokploy Backup</FormLabel>
-												<FormDescription>
-													Trigger the action when a Dokploy backup is created.
-												</FormDescription>
-											</div>
-											<FormControl>
-												<Switch
-													checked={field.value}
-													onCheckedChange={field.onChange}
-												/>
-											</FormControl>
-										</FormItem>
-									)}
-								/>
-
-								<FormField
-									control={form.control}
-									name="volumeBackup"
-									render={({ field }) => (
-										<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
-											<div className="space-y-0.5">
-												<FormLabel>Volume Backup</FormLabel>
-												<FormDescription>
-													Trigger the action when a volume backup is created.
-												</FormDescription>
-											</div>
-											<FormControl>
-												<Switch
-													checked={field.value}
-													onCheckedChange={field.onChange}
-												/>
-											</FormControl>
-										</FormItem>
-									)}
-								/>
-
-								<FormField
-									control={form.control}
-									name="dockerCleanup"
-									render={({ field }) => (
-										<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
-											<div className="space-y-0.5">
-												<FormLabel>Docker Cleanup</FormLabel>
-												<FormDescription>
-													Trigger the action when Docker cleanup is performed.
-												</FormDescription>
-											</div>
-											<FormControl>
-												<Switch
-													checked={field.value}
-													onCheckedChange={field.onChange}
-												/>
-											</FormControl>
-										</FormItem>
-									)}
-								/>
-
-								{!isCloud && (
+							) : (
+								<div className="grid md:grid-cols-2 gap-4">
 									<FormField
 										control={form.control}
-										name="dokployRestart"
+										name="appDeploy"
 										render={({ field }) => (
 											<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
-												<div className="space-y-0.5">
-													<FormLabel>Dokploy Restart</FormLabel>
+												<div className="">
+													<FormLabel>App Deploy</FormLabel>
 													<FormDescription>
-														Trigger the action when Dokploy is restarted.
+														Trigger the action when an app is deployed.
 													</FormDescription>
 												</div>
 												<FormControl>
@@ -2324,40 +2376,15 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											</FormItem>
 										)}
 									/>
-								)}
-
-								<FormField
-									control={form.control}
-									name="scheduleFailure"
-									render={({ field }) => (
-										<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm gap-2">
-											<div className="space-y-0.5">
-												<FormLabel>Schedule Failure</FormLabel>
-												<FormDescription>
-													Trigger the action when a scheduled job fails.
-												</FormDescription>
-											</div>
-											<FormControl>
-												<Switch
-													checked={field.value}
-													onCheckedChange={field.onChange}
-												/>
-											</FormControl>
-										</FormItem>
-									)}
-								/>
-
-								{isCloud && (
 									<FormField
 										control={form.control}
-										name="serverThreshold"
+										name="appBuildError"
 										render={({ field }) => (
 											<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
 												<div className="space-y-0.5">
-													<FormLabel>Server Threshold</FormLabel>
+													<FormLabel>App Build Error</FormLabel>
 													<FormDescription>
-														Trigger the action when the server threshold is
-														reached.
+														Trigger the action when the build fails.
 													</FormDescription>
 												</div>
 												<FormControl>
@@ -2369,8 +2396,161 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											</FormItem>
 										)}
 									/>
-								)}
-							</div>
+
+									<FormField
+										control={form.control}
+										name="databaseBackup"
+										render={({ field }) => (
+											<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
+												<div className="space-y-0.5">
+													<FormLabel>Database Backup</FormLabel>
+													<FormDescription>
+														Trigger the action when a database backup is
+														created.
+													</FormDescription>
+												</div>
+												<FormControl>
+													<Switch
+														checked={field.value}
+														onCheckedChange={field.onChange}
+													/>
+												</FormControl>
+											</FormItem>
+										)}
+									/>
+
+									<FormField
+										control={form.control}
+										name="dokployBackup"
+										render={({ field }) => (
+											<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
+												<div className="space-y-0.5">
+													<FormLabel>Dokploy Backup</FormLabel>
+													<FormDescription>
+														Trigger the action when a Dokploy backup is created.
+													</FormDescription>
+												</div>
+												<FormControl>
+													<Switch
+														checked={field.value}
+														onCheckedChange={field.onChange}
+													/>
+												</FormControl>
+											</FormItem>
+										)}
+									/>
+
+									<FormField
+										control={form.control}
+										name="volumeBackup"
+										render={({ field }) => (
+											<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
+												<div className="space-y-0.5">
+													<FormLabel>Volume Backup</FormLabel>
+													<FormDescription>
+														Trigger the action when a volume backup is created.
+													</FormDescription>
+												</div>
+												<FormControl>
+													<Switch
+														checked={field.value}
+														onCheckedChange={field.onChange}
+													/>
+												</FormControl>
+											</FormItem>
+										)}
+									/>
+
+									<FormField
+										control={form.control}
+										name="dockerCleanup"
+										render={({ field }) => (
+											<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
+												<div className="space-y-0.5">
+													<FormLabel>Docker Cleanup</FormLabel>
+													<FormDescription>
+														Trigger the action when Docker cleanup is performed.
+													</FormDescription>
+												</div>
+												<FormControl>
+													<Switch
+														checked={field.value}
+														onCheckedChange={field.onChange}
+													/>
+												</FormControl>
+											</FormItem>
+										)}
+									/>
+
+									{!isCloud && (
+										<FormField
+											control={form.control}
+											name="dokployRestart"
+											render={({ field }) => (
+												<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
+													<div className="space-y-0.5">
+														<FormLabel>Dokploy Restart</FormLabel>
+														<FormDescription>
+															Trigger the action when Dokploy is restarted.
+														</FormDescription>
+													</div>
+													<FormControl>
+														<Switch
+															checked={field.value}
+															onCheckedChange={field.onChange}
+														/>
+													</FormControl>
+												</FormItem>
+											)}
+										/>
+									)}
+
+									<FormField
+										control={form.control}
+										name="scheduleFailure"
+										render={({ field }) => (
+											<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm gap-2">
+												<div className="space-y-0.5">
+													<FormLabel>Schedule Failure</FormLabel>
+													<FormDescription>
+														Trigger the action when a scheduled job fails.
+													</FormDescription>
+												</div>
+												<FormControl>
+													<Switch
+														checked={field.value}
+														onCheckedChange={field.onChange}
+													/>
+												</FormControl>
+											</FormItem>
+										)}
+									/>
+
+									{isCloud && (
+										<FormField
+											control={form.control}
+											name="serverThreshold"
+											render={({ field }) => (
+												<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
+													<div className="space-y-0.5">
+														<FormLabel>Server Threshold</FormLabel>
+														<FormDescription>
+															Trigger the action when the server threshold is
+															reached.
+														</FormDescription>
+													</div>
+													<FormControl>
+														<Switch
+															checked={field.value}
+															onCheckedChange={field.onChange}
+														/>
+													</FormControl>
+												</FormItem>
+											)}
+										/>
+									)}
+								</div>
+							)}
 						</div>
 					</form>
 
@@ -2384,6 +2564,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 								isLoadingResend ||
 								isLoadingSendly ||
 								isLoadingNotifly ||
+								isLoadingUptimely ||
 								isLoadingGotify ||
 								isLoadingNtfy ||
 								isLoadingMattermost ||
@@ -2444,6 +2625,13 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											apiKey: data.apiKey,
 											workflowKey: data.workflowKey,
 											subscriberId: data.subscriberId || "",
+											baseUrl: data.baseUrl,
+										});
+									} else if (data.type === "uptimely") {
+										// Read-only: proves the key and project, declares nothing.
+										await testUptimelyConnection({
+											apiKey: data.apiKey,
+											projectId: data.projectId,
 											baseUrl: data.baseUrl,
 										});
 									} else if (data.type === "gotify") {

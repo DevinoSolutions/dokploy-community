@@ -14,6 +14,7 @@ import {
 	createSlackNotification,
 	createTeamsNotification,
 	createTelegramNotification,
+	createUptimelyChannelNotification,
 	findNotificationById,
 	getWebServerSettings,
 	IS_CLOUD,
@@ -33,6 +34,7 @@ import {
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
+	testUptimelyConnection,
 	updateCustomNotification,
 	updateDiscordNotification,
 	updateEmailNotification,
@@ -47,6 +49,7 @@ import {
 	updateSlackNotification,
 	updateTeamsNotification,
 	updateTelegramNotification,
+	updateUptimelyChannelNotification,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { TRPCError } from "@trpc/server";
@@ -73,6 +76,7 @@ import {
 	apiCreateSlack,
 	apiCreateTeams,
 	apiCreateTelegram,
+	apiCreateUptimelyChannel,
 	apiFindOneNotification,
 	apiTestCustomConnection,
 	apiTestDiscordConnection,
@@ -88,6 +92,7 @@ import {
 	apiTestSlackConnection,
 	apiTestTeamsConnection,
 	apiTestTelegramConnection,
+	apiTestUptimelyChannelConnection,
 	apiUpdateCustom,
 	apiUpdateDiscord,
 	apiUpdateEmail,
@@ -102,6 +107,7 @@ import {
 	apiUpdateSlack,
 	apiUpdateTeams,
 	apiUpdateTelegram,
+	apiUpdateUptimelyChannel,
 	notifications,
 	server,
 } from "@/server/db/schema";
@@ -574,6 +580,78 @@ export const notificationRouter = createTRPCRouter({
 				});
 			}
 		}),
+	createUptimely: withPermission("notification", "create")
+		.input(apiCreateUptimelyChannel)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				await createUptimelyChannelNotification(
+					input,
+					ctx.session.activeOrganizationId,
+				);
+				await audit(ctx, {
+					action: "create",
+					resourceType: "notification",
+					resourceName: input.name,
+				});
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error creating the notification",
+					cause: error,
+				});
+			}
+		}),
+	updateUptimely: withPermission("notification", "update")
+		.input(apiUpdateUptimelyChannel)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				const notification = await findNotificationById(input.notificationId);
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not authorized to update this notification",
+					});
+				}
+				const result = await updateUptimelyChannelNotification({
+					...input,
+					organizationId: ctx.session.activeOrganizationId,
+				});
+				await audit(ctx, {
+					action: "update",
+					resourceType: "notification",
+					resourceId: input.notificationId,
+					resourceName: notification.name,
+				});
+				return result;
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+					cause: error,
+				});
+			}
+		}),
+	// Read-only on purpose: a test must not declare an incident in a real
+	// Uptimely project. It proves the key, the base URL and the project id.
+	testUptimelyConnection: withPermission("notification", "create")
+		.input(apiTestUptimelyChannelConnection)
+		.mutation(async ({ input }) => {
+			try {
+				const result = await testUptimelyConnection(input);
+				if (!result.projectFound) {
+					throw new Error(
+						"The API key cannot access that project id. Check the project id.",
+					);
+				}
+				return true;
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: `${error instanceof Error ? error.message : "Unknown error"}`,
+					cause: error,
+				});
+			}
+		}),
 	remove: withPermission("notification", "delete")
 		.input(apiFindOneNotification)
 		.mutation(async ({ input, ctx }) => {
@@ -624,6 +702,7 @@ export const notificationRouter = createTRPCRouter({
 				resend: true,
 				sendly: true,
 				notifly: true,
+				uptimelyChannel: true,
 				gotify: true,
 				ntfy: true,
 				mattermost: true,

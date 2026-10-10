@@ -1,4 +1,8 @@
-import { NotiflyLogo, SendlyLogo } from "@/components/icons/product-logos";
+import {
+	NotiflyLogo,
+	SendlyLogo,
+	UptimelyLogo,
+} from "@/components/icons/product-logos";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -331,4 +335,9 @@ export const SendlyIcon = ({ className }: Props) => (
 /** Official Notifly brand mark (see `product-logos.tsx` for its source). */
 export const NotiflyIcon = ({ className }: Props) => (
 	<NotiflyLogo className={cn("size-8", className)} />
+);
+
+/** Official Uptimely brand mark (see `product-logos.tsx` for its source). */
+export const UptimelyIcon = ({ className }: Props) => (
+	<UptimelyLogo className={cn("size-8", className)} />
 );

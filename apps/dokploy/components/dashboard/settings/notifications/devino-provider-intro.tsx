@@ -1,4 +1,8 @@
-import { NotiflyIcon, SendlyIcon } from "@/components/icons/notification-icons";
+import {
+	NotiflyIcon,
+	SendlyIcon,
+	UptimelyIcon,
+} from "@/components/icons/notification-icons";
 import { LearnMoreLink } from "@/components/shared/learn-more-link";
 import { INTEGRATION_LEARN_MORE_URLS } from "../integrations/integration-links";
 
@@ -11,9 +15,14 @@ const PROVIDERS = {
 		Icon: NotiflyIcon,
 		description: "Trigger a Notifly workflow for each alert.",
 	},
+	uptimely: {
+		Icon: UptimelyIcon,
+		description:
+			"Declare an Uptimely incident when a deploy fails and resolve it when the next deploy succeeds.",
+	},
 } as const;
 
-/** Logo, one-line summary and "Learn more" link atop the Sendly/Notifly forms. */
+/** Logo, one-line summary and "Learn more" link atop the Sendly/Notifly/Uptimely forms. */
 export const DevinoProviderIntro = ({
 	provider,
 }: {
