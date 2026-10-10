@@ -177,6 +177,7 @@ const testButton = (
 			})
 		: caller.testNotiflyConnection({
 				workflowKey: "dokploy",
+				subscriberId: "",
 				...input,
 			});
 
