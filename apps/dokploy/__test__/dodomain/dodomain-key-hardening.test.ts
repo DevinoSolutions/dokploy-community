@@ -82,6 +82,11 @@ vi.mock("@dokploy/server/utils/dodomain/client", async (importOriginal) => ({
 				apps: { list: async () => ({ apps: [{ id: "app_1", name: "App" }] }) },
 				webhookEndpoints: {
 					update: async () => ({ id: "we_1", url: "https://x" }),
+					create: async (url: string) => ({
+						id: "we_2",
+						url,
+						secret: "whsec_new_secret",
+					}),
 					delete: async () => ({}),
 				},
 			};
