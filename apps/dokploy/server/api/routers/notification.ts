@@ -73,6 +73,7 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { redactSecrets, testFailure } from "@/server/api/utils/redact-secrets";
 import {
 	apiCreateCustom,
 	apiCreateDiscord,
@@ -166,17 +167,6 @@ const maskCustomHeaders = (row: NotificationWithProviders["custom"]) => {
 	};
 };
 
-/**
- * An error message from a failed test can echo the URL it called, and with it
- * the stored secret that was borrowed for the test. Hide those before the
- * message reaches the client.
- */
-const redactSecrets = (message: string, secrets: Array<string | undefined>) =>
-	secrets.reduce<string>(
-		(text, secret) => (secret ? text.split(secret).join("••••") : text),
-		message,
-	);
-
 const presentNotification = (notification: NotificationWithProviders) => {
 	const {
 		slack,
@@ -250,15 +240,23 @@ const resolveStoredSecret = async (params: {
 		notification: NotificationWithProviders,
 	) => string | null | undefined;
 	missing: string;
+	/** Collects the secret in use, to keep it out of an error message. */
+	track?: Array<string | undefined>;
 }) => {
-	if (params.value) return params.value;
+	if (params.value) {
+		params.track?.push(params.value);
+		return params.value;
+	}
 	if (params.notificationId) {
 		const notification = await findOwnNotification(
 			params.notificationId,
 			params.organizationId,
 		);
 		const stored = params.stored(notification);
-		if (stored) return stored;
+		if (stored) {
+			params.track?.push(stored);
+			return stored;
+		}
 	}
 	throw new TRPCError({
 		code: "BAD_REQUEST",
@@ -280,8 +278,13 @@ const resolveChannelTestKey = async (params: {
 		notification: NotificationWithProviders,
 	) => { apiKey: string; baseUrl: string } | null;
 	urlChangeMessage: string;
+	/** Collects the secret in use, to keep it out of an error message. */
+	track?: Array<string | undefined>;
 }) => {
-	if (params.apiKey || !params.notificationId) return params.apiKey;
+	if (params.apiKey || !params.notificationId) {
+		params.track?.push(params.apiKey);
+		return params.apiKey;
+	}
 	const notification = await findOwnNotification(
 		params.notificationId,
 		params.organizationId,
@@ -294,6 +297,7 @@ const resolveChannelTestKey = async (params: {
 			message: params.urlChangeMessage,
 		});
 	}
+	params.track?.push(channel.apiKey);
 	return channel.apiKey;
 };
 
@@ -351,8 +355,10 @@ export const notificationRouter = createTRPCRouter({
 	testSlackConnection: withPermission("notification", "create")
 		.input(apiTestSlackConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const webhookUrl = await resolveStoredSecret({
+					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
 					organizationId: ctx.session.activeOrganizationId,
@@ -368,12 +374,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createTelegram: withPermission("notification", "create")
@@ -517,8 +518,10 @@ export const notificationRouter = createTRPCRouter({
 	testDiscordConnection: withPermission("notification", "create")
 		.input(apiTestDiscordConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const webhookUrl = await resolveStoredSecret({
+					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
 					organizationId: ctx.session.activeOrganizationId,
@@ -539,12 +542,7 @@ export const notificationRouter = createTRPCRouter({
 
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createEmail: withPermission("notification", "create")
@@ -600,8 +598,10 @@ export const notificationRouter = createTRPCRouter({
 	testEmailConnection: withPermission("notification", "create")
 		.input(apiTestEmailConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [input.password];
 			try {
-				let password = input.password;
+				// Only spaces is blank, as when saving. Not trimmed otherwise.
+				let password = input.password?.trim() ? input.password : undefined;
 				if (!password && input.notificationId && input.username) {
 					const notification = await findOwnNotification(
 						input.notificationId,
@@ -617,6 +617,7 @@ export const notificationRouter = createTRPCRouter({
 							});
 						}
 						password = stored.password;
+						secrets.push(stored.password);
 					}
 				}
 				await sendEmailNotification(
@@ -626,12 +627,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createResend: withPermission("notification", "create")
@@ -687,8 +683,10 @@ export const notificationRouter = createTRPCRouter({
 	testResendConnection: withPermission("notification", "create")
 		.input(apiTestResendConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const apiKey = await resolveStoredSecret({
+					track: secrets,
 					value: input.apiKey,
 					notificationId: input.notificationId,
 					organizationId: ctx.session.activeOrganizationId,
@@ -702,12 +700,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createSendly: withPermission("notification", "create")
@@ -763,8 +756,10 @@ export const notificationRouter = createTRPCRouter({
 	testSendlyConnection: withPermission("notification", "create")
 		.input(apiTestSendlyConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const apiKey = await resolveChannelTestKey({
+					track: secrets,
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
 					baseUrl: input.baseUrl,
@@ -779,12 +774,7 @@ export const notificationRouter = createTRPCRouter({
 				await sendSendlyNotification({ ...input, apiKey }, subject, html);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createNotifly: withPermission("notification", "create")
@@ -843,8 +833,10 @@ export const notificationRouter = createTRPCRouter({
 	testNotiflyConnection: withPermission("notification", "create")
 		.input(apiTestNotiflyConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const apiKey = await resolveChannelTestKey({
+					track: secrets,
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
 					baseUrl: input.baseUrl,
@@ -865,12 +857,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createUptimely: withPermission("notification", "create")
@@ -931,8 +918,10 @@ export const notificationRouter = createTRPCRouter({
 	testUptimelyConnection: withPermission("notification", "create")
 		.input(apiTestUptimelyChannelConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const apiKey = await resolveChannelTestKey({
+					track: secrets,
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
 					baseUrl: input.baseUrl,
@@ -955,12 +944,7 @@ export const notificationRouter = createTRPCRouter({
 				}
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	remove: withPermission("notification", "delete")
@@ -1453,15 +1437,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message:
-						error instanceof Error
-							? redactSecrets(error.message, secrets)
-							: "Unknown error",
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createLark: withPermission("notification", "create")
@@ -1585,8 +1561,10 @@ export const notificationRouter = createTRPCRouter({
 	testTeamsConnection: withPermission("notification", "create")
 		.input(apiTestTeamsConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const webhookUrl = await resolveStoredSecret({
+					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
 					organizationId: ctx.session.activeOrganizationId,
@@ -1602,12 +1580,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: `${error instanceof Error ? error.message : "Unknown error"}`,
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createPushover: withPermission("notification", "create")

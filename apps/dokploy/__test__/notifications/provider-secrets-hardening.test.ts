@@ -126,6 +126,7 @@ const { sendBuildSuccessNotifications } = await import(
 const { sendEmailNotification, sendResendNotification } = await import(
 	"@dokploy/server/utils/notifications/utils"
 );
+const { redactSecrets } = await import("@/server/api/utils/redact-secrets");
 const { maskHeaderValues } = await import(
 	"@dokploy/server/utils/integrations/mask"
 );
@@ -746,6 +747,160 @@ describe.each(cases)("$type notification", (c) => {
 			).rejects.toMatchObject({ code: "NOT_FOUND" });
 			expect(mocks.sent).toEqual([]);
 		});
+
+		// Lark and Telegram swallow a sender failure, and Resend is not fetch.
+		it.skipIf(["lark", "telegram", "resend"].includes(c.type))(
+			"a failure that echoes the request does not hand the borrowed secret to the client",
+			async () => {
+				mocks.fetch.mockImplementationOnce(
+					async (url: string, init: { body?: unknown }) => {
+						throw new TypeError(
+							`Failed to parse URL from ${url} ${JSON.stringify(init)}`,
+						);
+					},
+				);
+
+				const failure = await test({ ...blank, notificationId: "n-1" }).catch(
+					(error: Error) => error,
+				);
+
+				expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+				for (const column of Object.keys(c.secrets)) {
+					expect((failure as Error).message).not.toContain(
+						c.row[column] as string,
+					);
+				}
+			},
+		);
+	});
+});
+
+describe.each([
+	["slack", "testSlackConnection", { channel: "#ops" }],
+	["discord", "testDiscordConnection", { decoration: true }],
+	["teams", "testTeamsConnection", {}],
+])("%s: a stored webhook that cannot be parsed", (type, procedure, extra) => {
+	const stored = "hooks.example.com/services/T000/B000/stored-secret-ab12";
+
+	beforeEach(() => {
+		const c = byType(type);
+		mocks.notification = storedNotification(c, {
+			[c.rowKey]: { ...c.row, webhookUrl: stored },
+		});
+		// What Node's fetch does with a URL that has no scheme.
+		mocks.fetch.mockImplementation(async (url: string) => {
+			throw new TypeError(`Failed to parse URL from ${url}`);
+		});
+	});
+
+	it("a blank webhook on Test does not return the stored webhook in the error", async () => {
+		const failure = await call(procedure, {
+			...extra,
+			webhookUrl: "",
+			notificationId: "n-1",
+		}).catch((error: Error) => error);
+
+		expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+		expect((failure as Error).message).toContain("Failed to parse URL from");
+		expect((failure as Error).message).not.toContain("stored-secret");
+		expect((failure as Error).message).not.toContain(stored);
+	});
+
+	it("an omitted webhook does the same", async () => {
+		const failure = await call(procedure, {
+			...extra,
+			notificationId: "n-1",
+		}).catch((error: Error) => error);
+
+		expect((failure as Error).message).not.toContain("stored-secret");
+	});
+});
+
+describe("redactSecrets", () => {
+	it("hides every occurrence of a secret", () => {
+		expect(redactSecrets("a abcd b abcd c", ["abcd"])).toBe("a •••• b •••• c");
+	});
+
+	it("does not touch a secret shorter than four characters", () => {
+		expect(redactSecrets("retry 1 of 1: 123", ["1", "abc", ""])).toBe(
+			"retry 1 of 1: 123",
+		);
+		expect(redactSecrets("retry 1 of 1: 123", ["1234"])).toBe(
+			"retry 1 of 1: 123",
+		);
+	});
+
+	it("hides a secret of exactly four characters", () => {
+		expect(redactSecrets("token=abcd", ["abcd"])).toBe("token=••••");
+	});
+
+	it("ignores values that are not strings", () => {
+		expect(redactSecrets("null 42 undefined", [null, 42, undefined, {}])).toBe(
+			"null 42 undefined",
+		);
+	});
+
+	it("a short header value does not wipe the message of a failed Custom test", async () => {
+		const c = byType("custom");
+		mocks.notification = storedNotification(c, {
+			custom: { ...c.row, headers: { "X-Retry": "1", "X-Env": "prod" } },
+		});
+		mocks.fetch.mockRejectedValueOnce(
+			new Error("Failed after 1 retry: 1 of 1"),
+		);
+
+		const failure = await call("testCustomConnection", {
+			endpoint: "",
+			headers: { "X-Retry": "" },
+			notificationId: "n-1",
+		}).catch((error: Error) => error);
+
+		expect((failure as Error).message).toBe("Failed after 1 retry: 1 of 1");
+	});
+});
+
+describe("email: a password of only spaces is blank on Test too", () => {
+	const c = byType("email");
+
+	beforeEach(() => {
+		mocks.notification = storedNotification(c);
+	});
+
+	it("borrows the stored password like Save keeps it", async () => {
+		await expect(
+			call("testEmailConnection", {
+				...c.testInput,
+				password: "   ",
+				notificationId: "n-1",
+			}),
+		).resolves.toBe(true);
+
+		expect(wire()).toContain(c.row.password as string);
+	});
+
+	it("a typed password is sent as typed, edge spaces included", async () => {
+		await call("testEmailConnection", {
+			...c.testInput,
+			password: " pass word ",
+			notificationId: "n-1",
+		});
+
+		expect(wire()).toContain(" pass word ");
+		expect(wire()).not.toContain(c.row.password as string);
+	});
+
+	it("spaces are not sent to the server as the password", async () => {
+		mocks.notification = storedNotification(c, {
+			email: { ...c.row, password: "" },
+		});
+
+		await call("testEmailConnection", {
+			...c.testInput,
+			password: "   ",
+			notificationId: "n-1",
+		});
+
+		expect(wire()).not.toContain('"pass":"   "');
 	});
 });
 
