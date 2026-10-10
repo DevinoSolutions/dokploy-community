@@ -40,9 +40,9 @@ import {
 	resolveMcpOrigin,
 } from "../services/mcp-oauth";
 import { removeOrganizationNotifications } from "../services/notification-channels";
-import { scimOptions } from "../services/proprietary/scim";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import { resolveOrganizationDefaultRole } from "../services/proprietary/license-key";
+import { scimOptions } from "../services/proprietary/scim";
 import {
 	getWebServerSettings,
 	updateWebServerSettings,

@@ -17,15 +17,15 @@ import {
 	verifyDoDomainSignature,
 } from "@dokploy/server/utils/dodomain/client";
 import {
-	integrationUrlChangeNeedsKeyMessage,
-	isSameIntegrationBaseUrl,
-} from "@dokploy/server/utils/integrations/base-url";
-import {
 	type DoDomainWebhookRefusalReason,
 	dodomainWebhookWarning,
 	isLikelyPrivateWebhookHost,
 	parseDoDomainWebhookRefusal,
 } from "@dokploy/server/utils/dodomain/webhook-reachability";
+import {
+	integrationUrlChangeNeedsKeyMessage,
+	isSameIntegrationBaseUrl,
+} from "@dokploy/server/utils/integrations/base-url";
 import { getRemotePublicIp, isPrivateIp } from "@dokploy/server/utils/ip";
 import { sendDomainVerificationFailedNotifications } from "@dokploy/server/utils/notifications/domain-verification";
 import { manageDomain } from "@dokploy/server/utils/traefik/domain";

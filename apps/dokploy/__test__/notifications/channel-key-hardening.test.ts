@@ -70,7 +70,8 @@ vi.mock("@dokploy/server/db", () => {
 				return {
 					// biome-ignore lint/suspicious/noThenProperty: awaited like a drizzle query
 					then: (resolve: (value: unknown) => void) => resolve(undefined),
-					returning: async () => (mocks.notification ? [mocks.notification] : []),
+					returning: async () =>
+						mocks.notification ? [mocks.notification] : [],
 				};
 			},
 		}),
@@ -425,12 +426,10 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 		});
 
 		it("update through the router keeps the specific message", async () => {
-			await expect(routerUpdate({ baseUrl: OTHER_URL })).rejects.toMatchObject(
-				{
-					code: "BAD_REQUEST",
-					message: expect.stringContaining("API key again"),
-				},
-			);
+			await expect(routerUpdate({ baseUrl: OTHER_URL })).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				message: expect.stringContaining("API key again"),
+			});
 		});
 
 		it("update through the router accepts a blank key on the same URL", async () => {
@@ -535,8 +534,8 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 	it("notification.one refuses another organization's notification", async () => {
 		mocks.notification = storedNotification(type, { organizationId: "org-2" });
 
-		await expect(
-			caller.one({ notificationId: "n-1" }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		await expect(caller.one({ notificationId: "n-1" })).rejects.toMatchObject({
+			code: "UNAUTHORIZED",
+		});
 	});
 });

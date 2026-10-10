@@ -121,6 +121,9 @@ describe("removeOrganizationNotifications", () => {
 		});
 
 		expect(mocks.transactions).toBe(1);
-		expect(mocks.deletes.map((d) => d.table)).toEqual(["notification", "sendly"]);
+		expect(mocks.deletes.map((d) => d.table)).toEqual([
+			"notification",
+			"sendly",
+		]);
 	});
 });

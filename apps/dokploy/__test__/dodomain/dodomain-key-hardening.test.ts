@@ -95,7 +95,9 @@ vi.mock("@dokploy/server/utils/dodomain/client", async (importOriginal) => ({
 }));
 
 vi.mock("@dokploy/server/services/mcp-oauth", async (importOriginal) => ({
-	...(await importOriginal<typeof import("@dokploy/server/services/mcp-oauth")>()),
+	...(await importOriginal<
+		typeof import("@dokploy/server/services/mcp-oauth")
+	>()),
 	resolveMcpOrigin: vi.fn(async () => "https://dok.example.com"),
 }));
 
@@ -125,7 +127,8 @@ beforeEach(() => {
 		appId: "app_1",
 		baseUrl: STORED_URL,
 		webhookEndpointId: "we_1",
-		webhookUrl: "https://dok.example.com/api/webhooks/dodomain?integration=dd-1",
+		webhookUrl:
+			"https://dok.example.com/api/webhooks/dodomain?integration=dd-1",
 		webhookSecret: WEBHOOK_SECRET,
 		createdAt: new Date(),
 	};
@@ -201,7 +204,9 @@ describe("the stored secret key is never replayed against another URL", () => {
 
 	it("update: the same URL, normalized, passes the rule", async () => {
 		await caller
-			.update({ baseUrl: `${STORED_URL.toUpperCase().replace("HTTPS", "https")}///` })
+			.update({
+				baseUrl: `${STORED_URL.toUpperCase().replace("HTTPS", "https")}///`,
+			})
 			.catch((error) => {
 				expect(error.message).not.toContain("secret key again");
 			});
