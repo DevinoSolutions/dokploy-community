@@ -1492,6 +1492,13 @@
       "when": 1791654800727,
       "tag": "0212_uptimely_heartbeat_channel",
       "breakpoints": true
+    },
+    {
+      "idx": 213,
+      "version": "7",
+      "when": 1791660075039,
+      "tag": "0213_snapvisor_compose_project",
+      "breakpoints": true
     }
   ]
 }

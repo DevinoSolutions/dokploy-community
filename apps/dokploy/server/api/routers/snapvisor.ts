@@ -1,15 +1,20 @@
 import {
 	createSnapvisor,
-	findApplicationById,
+	findApplicationSnapvisorTarget,
+	findComposeSnapvisorTarget,
 	findPreviewDeploymentById,
+	findPreviewSnapvisorTarget,
 	findSnapvisorByOrganizationId,
 	IS_CLOUD,
+	isSameSnapvisorBaseUrl,
 	listSnapvisorProjects,
 	maskSnapvisorAccessToken,
 	refreshPreviewBuild as refreshSnapvisorPreviewBuild,
 	removeSnapvisor,
-	setApplicationSnapvisorProject,
+	SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 	type SnapvisorIntegration,
+	setApplicationSnapvisorProject,
+	setComposeSnapvisorProject,
 	snapvisorBuildReviewUrl,
 	testSnapvisorConnection,
 	updateSnapvisor,
@@ -25,6 +30,7 @@ import { audit } from "@/server/api/utils/audit";
 import {
 	apiCreateSnapvisor,
 	apiSetSnapvisorApplicationProject,
+	apiSetSnapvisorComposeProject,
 	apiSnapvisorPreviewBuild,
 	apiTestSnapvisorConnection,
 	apiUpdateSnapvisor,
@@ -72,25 +78,44 @@ const asBadRequest = (error: unknown, fallback: string): never => {
 };
 
 /**
- * Loads the application behind a preview deployment and proves it belongs to
- * the caller's organization before any Snapvisor call. Shared by the two
- * procedures that take a `previewDeploymentId` instead of an `applicationId`.
+ * Loads the application or compose service behind a preview deployment and
+ * proves it belongs to the caller's organization before any Snapvisor call.
+ * Shared by the two procedures that take a `previewDeploymentId` instead of a
+ * service id.
  */
-const requirePreviewApplication = async (
+const requirePreviewService = async (
 	ctx: Parameters<typeof checkServicePermissionAndAccess>[0],
 	previewDeploymentId: string,
 ) => {
-	const previewDeployment = await findPreviewDeploymentById(previewDeploymentId);
-	if (!previewDeployment.applicationId) {
+	const previewDeployment =
+		await findPreviewDeploymentById(previewDeploymentId);
+	const serviceId =
+		previewDeployment.applicationId ?? previewDeployment.composeId;
+	if (!serviceId) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "Snapvisor visual testing only supports application previews",
+			message:
+				"Snapvisor visual testing only supports application and compose previews",
 		});
 	}
-	await checkServicePermissionAndAccess(ctx, previewDeployment.applicationId, {
+	await checkServicePermissionAndAccess(ctx, serviceId, {
 		service: ["read"],
 	});
 	return previewDeployment;
+};
+
+/** The organization check on top of `checkServicePermissionAndAccess`. */
+const assertTargetInOrganization = (
+	target: { organizationId: string },
+	organizationId: string,
+	noun: string,
+) => {
+	if (target.organizationId !== organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: `You are not authorized to access this ${noun}`,
+		});
+	}
 };
 
 /**
@@ -172,6 +197,16 @@ export const snapvisorRouter = createTRPCRouter({
 					ctx.session.activeOrganizationId,
 				);
 				accessToken = integration?.accessToken;
+				// Never replay the stored token against a URL typed into the form.
+				if (
+					integration &&
+					!isSameSnapvisorBaseUrl(input.baseUrl, integration.baseUrl)
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+					});
+				}
 			}
 			if (!accessToken) {
 				throw new TRPCError({
@@ -210,16 +245,12 @@ export const snapvisorRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
-			const application = await findApplicationById(input.applicationId);
-			if (
-				application.environment.project.organizationId !==
-				ctx.session.activeOrganizationId
-			) {
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not authorized to access this application",
-				});
-			}
+			const target = await findApplicationSnapvisorTarget(input.applicationId);
+			assertTargetInOrganization(
+				target,
+				ctx.session.activeOrganizationId,
+				"application",
+			);
 			const updated = await setApplicationSnapvisorProject(
 				input.applicationId,
 				input.projectName,
@@ -234,11 +265,40 @@ export const snapvisorRouter = createTRPCRouter({
 			return { projectName: updated.snapvisorProjectName };
 		}),
 
+	setComposeProject: protectedProcedure
+		.input(apiSetSnapvisorComposeProject)
+		.mutation(async ({ input, ctx }) => {
+			assertSelfHosted();
+			// Same gate as `setApplicationProject`: a service-management action on
+			// top of the org + service access check.
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["create"],
+			});
+			const target = await findComposeSnapvisorTarget(input.composeId);
+			assertTargetInOrganization(
+				target,
+				ctx.session.activeOrganizationId,
+				"compose service",
+			);
+			const updated = await setComposeSnapvisorProject(
+				input.composeId,
+				input.projectName,
+			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "snapvisor",
+				resourceId: input.composeId,
+				resourceName: updated.name,
+				metadata: { projectName: input.projectName },
+			});
+			return { projectName: updated.snapvisorProjectName };
+		}),
+
 	previewBuild: protectedProcedure
 		.input(apiSnapvisorPreviewBuild)
 		.query(async ({ input, ctx }) => {
 			assertSelfHosted();
-			const previewDeployment = await requirePreviewApplication(
+			const previewDeployment = await requirePreviewService(
 				ctx,
 				input.previewDeploymentId,
 			);
@@ -253,17 +313,15 @@ export const snapvisorRouter = createTRPCRouter({
 					reviewUrl: null as string | null,
 				};
 			}
-			const application = await findApplicationById(
-				previewDeployment.applicationId as string,
-			);
+			const target = await findPreviewSnapvisorTarget(previewDeployment);
 			return {
 				configured: true,
 				buildId: previewDeployment.snapvisorBuildId,
 				buildStatus: previewDeployment.snapvisorBuildStatus,
-				reviewUrl: application.snapvisorProjectName
+				reviewUrl: target?.snapvisorProjectName
 					? snapvisorBuildReviewUrl(
 							integration,
-							application.snapvisorProjectName,
+							target.snapvisorProjectName,
 							previewDeployment.snapvisorBuildId,
 						)
 					: null,
@@ -274,7 +332,7 @@ export const snapvisorRouter = createTRPCRouter({
 		.input(apiSnapvisorPreviewBuild)
 		.mutation(async ({ input, ctx }) => {
 			assertSelfHosted();
-			await requirePreviewApplication(ctx, input.previewDeploymentId);
+			await requirePreviewService(ctx, input.previewDeploymentId);
 			try {
 				return await refreshSnapvisorPreviewBuild({
 					previewDeploymentId: input.previewDeploymentId,

@@ -3,23 +3,38 @@ import {
 	type apiCreateSnapvisor,
 	type apiUpdateSnapvisor,
 	applications,
+	compose,
 	deployments,
 	snapvisorIntegration,
 } from "@dokploy/server/db/schema";
+import { maskApiKey } from "@dokploy/server/utils/integrations/mask";
+import { getGitCommitInfo } from "@dokploy/server/utils/providers/git";
 import {
 	createSnapvisorClient,
 	type SnapvisorBuild,
 	type SnapvisorClient,
 } from "@dokploy/server/utils/snapvisor/client";
-import { snapvisorWebBaseUrl } from "@dokploy/server/utils/snapvisor/urls";
+import {
+	isSameSnapvisorBaseUrl,
+	SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+	snapvisorWebBaseUrl,
+} from "@dokploy/server/utils/snapvisor/urls";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { findApplicationById } from "./application";
+import { updateDeployment } from "./deployment";
 import {
 	findPreviewDeploymentById,
+	type PreviewDeployment,
 	updatePreviewDeployment,
 } from "./preview-deployment";
+
+// Re-exported so the router reaches them through the `@dokploy/server` barrel.
+export {
+	isSameSnapvisorBaseUrl,
+	SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+} from "@dokploy/server/utils/snapvisor/urls";
 
 export type SnapvisorIntegration = typeof snapvisorIntegration.$inferSelect;
 
@@ -32,8 +47,7 @@ export const snapvisorClientFor = (
 	});
 
 /** Masks a stored access token down to its last four characters. */
-export const maskSnapvisorAccessToken = (accessToken: string) =>
-	accessToken.length > 4 ? `••••${accessToken.slice(-4)}` : "••••";
+export const maskSnapvisorAccessToken = maskApiKey;
 
 /**
  * Deep link to a build review in the Snapvisor dashboard. Path shape
@@ -97,6 +111,16 @@ export const updateSnapvisor = async (
 	organizationId: string,
 	input: z.infer<typeof apiUpdateSnapvisor>,
 ) => {
+	// The stored token must not be sent to a URL the caller just chose.
+	if (input.baseUrl !== undefined && !input.accessToken) {
+		const stored = await findSnapvisorByOrganizationId(organizationId);
+		if (stored && !isSameSnapvisorBaseUrl(input.baseUrl, stored.baseUrl)) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+			});
+		}
+	}
 	const values: Partial<SnapvisorIntegration> = {};
 	if (input.name !== undefined) values.name = input.name;
 	if (input.accessToken !== undefined) values.accessToken = input.accessToken;
@@ -144,8 +168,73 @@ export const listSnapvisorProjects = async (
 ) => snapvisorClientFor(integration).listProjects(integration.accountSlug);
 
 // ---------------------------------------------------------------------------
-// Per-application project link
+// Per-service project link (applications and compose services)
 // ---------------------------------------------------------------------------
+
+/**
+ * What Snapvisor needs to know about the service a preview belongs to,
+ * whatever its type: which Snapvisor project it posts to and which
+ * organization (and so which integration) owns it.
+ */
+export interface SnapvisorServiceTarget {
+	serviceId: string;
+	name: string;
+	snapvisorProjectName: string | null;
+	organizationId: string;
+}
+
+export const findApplicationSnapvisorTarget = async (
+	applicationId: string,
+): Promise<SnapvisorServiceTarget> => {
+	const application = await findApplicationById(applicationId);
+	return {
+		serviceId: application.applicationId,
+		name: application.name,
+		snapvisorProjectName: application.snapvisorProjectName,
+		organizationId: application.environment.project.organizationId,
+	};
+};
+
+/**
+ * Deliberately narrow: loading a full compose (findComposeById) drags in every
+ * relation just to read a project name and an organization.
+ */
+export const findComposeSnapvisorTarget = async (
+	composeId: string,
+): Promise<SnapvisorServiceTarget> => {
+	const row = await db.query.compose.findFirst({
+		where: eq(compose.composeId, composeId),
+		columns: { composeId: true, name: true, snapvisorProjectName: true },
+		with: {
+			environment: {
+				columns: { environmentId: true },
+				with: { project: { columns: { organizationId: true } } },
+			},
+		},
+	});
+	if (!row) {
+		throw new TRPCError({ code: "NOT_FOUND", message: "Compose not found" });
+	}
+	return {
+		serviceId: row.composeId,
+		name: row.name,
+		snapvisorProjectName: row.snapvisorProjectName,
+		organizationId: row.environment.project.organizationId,
+	};
+};
+
+/** The service a preview deployment belongs to, or `null` for an orphan row. */
+export const findPreviewSnapvisorTarget = async (
+	previewDeployment: Pick<PreviewDeployment, "applicationId" | "composeId">,
+) => {
+	if (previewDeployment.applicationId) {
+		return findApplicationSnapvisorTarget(previewDeployment.applicationId);
+	}
+	if (previewDeployment.composeId) {
+		return findComposeSnapvisorTarget(previewDeployment.composeId);
+	}
+	return null;
+};
 
 export const setApplicationSnapvisorProject = async (
 	applicationId: string,
@@ -158,7 +247,26 @@ export const setApplicationSnapvisorProject = async (
 		.returning()
 		.then((rows) => rows[0]);
 	if (!updated) {
-		throw new TRPCError({ code: "NOT_FOUND", message: "Application not found" });
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Application not found",
+		});
+	}
+	return updated;
+};
+
+export const setComposeSnapvisorProject = async (
+	composeId: string,
+	projectName: string | null,
+) => {
+	const updated = await db
+		.update(compose)
+		.set({ snapvisorProjectName: projectName })
+		.where(eq(compose.composeId, composeId))
+		.returning()
+		.then((rows) => rows[0]);
+	if (!updated) {
+		throw new TRPCError({ code: "NOT_FOUND", message: "Compose not found" });
 	}
 	return updated;
 };
@@ -169,11 +277,14 @@ export const setApplicationSnapvisorProject = async (
 
 /**
  * The commit sha of the code a preview deployment last built, read back from
- * the `Commit: <sha>` marker `deployPreviewApplication`/`rebuildPreviewApplication`
- * write onto the deployment row's `description` on success (the same
- * convention `deployApplication` uses for regular deploys).
+ * the `Commit: <sha>` marker `finalizePreviewBuildMetadata` writes onto the
+ * deployment row's `description` on success (the same convention
+ * `deployApplication`/`deployCompose` use for regular deploys). Application and
+ * compose previews share the marker.
  */
-export const findLatestPreviewCommitSha = async (previewDeploymentId: string) => {
+export const findLatestPreviewCommitSha = async (
+	previewDeploymentId: string,
+) => {
 	const deployment = await db.query.deployments.findFirst({
 		where: eq(deployments.previewDeploymentId, previewDeploymentId),
 		orderBy: desc(deployments.createdAt),
@@ -212,20 +323,22 @@ export const registerPreviewDeployment = async (params: {
 	const previewDeployment = await findPreviewDeploymentById(
 		params.previewDeploymentId,
 	);
-	if (!previewDeployment.applicationId) {
-		return { registered: false, reason: "Not an application preview" };
+	const target = await findPreviewSnapvisorTarget(previewDeployment);
+	if (!target) {
+		return { registered: false, reason: "Not a service preview" };
 	}
-	const application = await findApplicationById(previewDeployment.applicationId);
-	if (!application.snapvisorProjectName) {
+	if (!target.snapvisorProjectName) {
 		return { registered: false, reason: "Visual testing is off" };
 	}
 	const integration = await findSnapvisorByOrganizationId(
-		application.environment.project.organizationId,
+		target.organizationId,
 	);
 	if (!integration) {
 		return { registered: false, reason: "Snapvisor is not connected" };
 	}
-	const commitSha = await findLatestPreviewCommitSha(params.previewDeploymentId);
+	const commitSha = await findLatestPreviewCommitSha(
+		params.previewDeploymentId,
+	);
 	if (!commitSha) {
 		return { registered: false, reason: "No commit sha recorded yet" };
 	}
@@ -233,13 +346,16 @@ export const registerPreviewDeployment = async (params: {
 	const client = snapvisorClientFor(integration);
 	const builds = await client.listBuilds({
 		accountSlug: integration.accountSlug,
-		projectName: application.snapvisorProjectName,
+		projectName: target.snapvisorProjectName,
 		headSha: commitSha,
 		perPage: 1,
 	});
 	const build = builds[0];
 	if (!build) {
-		return { registered: false, reason: "No Snapvisor build for this commit yet" };
+		return {
+			registered: false,
+			reason: "No Snapvisor build for this commit yet",
+		};
 	}
 
 	await updatePreviewDeployment(params.previewDeploymentId, {
@@ -260,3 +376,48 @@ export const registerPreviewDeployment = async (params: {
 export const refreshPreviewBuild = async (params: {
 	previewDeploymentId: string;
 }): Promise<SnapvisorPreviewLinkResult> => registerPreviewDeployment(params);
+
+/**
+ * After a preview build succeeds: records the commit it built using the same
+ * `Commit: <sha>` marker the regular deploys write (read back by
+ * `findLatestPreviewCommitSha`), then best-effort links the Snapvisor build for
+ * that commit. Shared by application and compose previews, which keep their
+ * checkout under different base paths (`type`). Neither step may fail the
+ * deploy: commit extraction mirrors the existing non-preview convention
+ * exactly, and the Snapvisor call is fire-and-forget with its own `.catch`.
+ * `hasGitSource` is false for builds with no checkout to read a commit from
+ * (Docker-image applications).
+ */
+export const finalizePreviewBuildMetadata = async ({
+	type,
+	hasGitSource,
+	previewDeploymentId,
+	appName,
+	deploymentId,
+	serverId,
+}: {
+	type: "application" | "compose";
+	hasGitSource: boolean;
+	previewDeploymentId: string;
+	appName: string;
+	deploymentId: string;
+	serverId: string | null;
+}) => {
+	if (hasGitSource) {
+		try {
+			const commitInfo = await getGitCommitInfo({ appName, type, serverId });
+			if (commitInfo) {
+				await updateDeployment(deploymentId, {
+					title: commitInfo.message,
+					description: `Commit: ${commitInfo.hash}`,
+				});
+			}
+		} catch (error) {
+			console.error("Error recording the preview commit:", error);
+		}
+	}
+
+	registerPreviewDeployment({ previewDeploymentId }).catch((error) => {
+		console.error("Error registering the Snapvisor preview deployment:", error);
+	});
+};

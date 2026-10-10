@@ -43,6 +43,7 @@ import {
 	getPreviewCommentContext,
 	updatePreviewComment,
 } from "./preview-comment";
+import { finalizePreviewBuildMetadata } from "./snapvisor";
 import { getWebServerSettings } from "./web-server-settings";
 
 export type PreviewDeployment = typeof previewDeployments.$inferSelect;
@@ -798,6 +799,15 @@ const executeComposePreview = async ({
 		await runComposeBuild(entity, deployment, {
 			applyPatches: false,
 			cancellable: false,
+		});
+
+		await finalizePreviewBuildMetadata({
+			type: "compose",
+			hasGitSource: compose.sourceType !== "raw",
+			previewDeploymentId,
+			appName: previewDeployment.appName,
+			deploymentId: deployment.deploymentId,
+			serverId: compose.serverId,
 		});
 
 		await postComposePreviewComment(

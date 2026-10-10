@@ -46,6 +46,30 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+import { SnapvisorProjectPicker } from "../../settings/integrations/snapvisor/snapvisor-project-picker";
+
+/** Links the compose service to a Snapvisor project for its preview deployments. */
+const SnapvisorPreviewSettingSection = ({
+	composeId,
+}: {
+	composeId: string;
+}) => {
+	const { data: compose } = api.compose.one.useQuery({ composeId });
+	const utils = api.useUtils();
+	const { mutateAsync: setComposeProject } =
+		api.snapvisor.setComposeProject.useMutation();
+
+	return (
+		<SnapvisorProjectPicker
+			serviceNoun="compose service"
+			currentProjectName={compose?.snapvisorProjectName}
+			save={async (projectName) => {
+				await setComposeProject({ composeId, projectName });
+				await utils.compose.one.invalidate({ composeId });
+			}}
+		/>
+	);
+};
 
 const schema = z
 	.object({
@@ -475,6 +499,12 @@ export const ShowPreviewSettingsCompose = ({ composeId }: Props) => {
 													});
 											}}
 										/>
+									</div>
+								</div>
+
+								<div className="grid gap-4 lg:grid-cols-2">
+									<div className="col-span-2">
+										<SnapvisorPreviewSettingSection composeId={composeId} />
 									</div>
 								</div>
 

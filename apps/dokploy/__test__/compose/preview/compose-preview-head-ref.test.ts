@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
 	pdFindFirst: vi.fn(),
 	findComposeById: vi.fn(),
 	runComposeBuild: vi.fn(),
+	finalizePreviewBuildMetadata: vi.fn(),
 	createDeploymentPreview: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
 	removeDeploymentsByPreviewDeploymentId: vi.fn(),
@@ -37,6 +38,10 @@ vi.mock("@dokploy/server/db", () => ({
 vi.mock("@dokploy/server/services/compose", () => ({
 	findComposeById: mocks.findComposeById,
 	runComposeBuild: mocks.runComposeBuild,
+}));
+
+vi.mock("@dokploy/server/services/snapvisor", () => ({
+	finalizePreviewBuildMetadata: mocks.finalizePreviewBuildMetadata,
 }));
 
 vi.mock("@dokploy/server/services/deployment", async (importOriginal) => ({
@@ -140,5 +145,43 @@ describe("deployComposePreview head-ref checkout", () => {
 			"deployment-id",
 			"done",
 		);
+	});
+
+	it("records the built commit and links the Snapvisor build after a successful build", async () => {
+		await deployComposePreview({
+			composeId: "compose-1",
+			previewDeploymentId: "pd-1",
+			titleLog: "Preview Deployment",
+			descriptionLog: "",
+		});
+
+		expect(mocks.finalizePreviewBuildMetadata).toHaveBeenCalledTimes(1);
+		expect(mocks.finalizePreviewBuildMetadata).toHaveBeenCalledWith({
+			type: "compose",
+			hasGitSource: true,
+			previewDeploymentId: "pd-1",
+			appName: "preview-myapp-abc123",
+			deploymentId: "deployment-id",
+			serverId: null,
+		});
+		// After the build, before the preview is marked done.
+		expect(mocks.runComposeBuild.mock.invocationCallOrder[0]).toBeLessThan(
+			mocks.finalizePreviewBuildMetadata.mock.invocationCallOrder[0] as number,
+		);
+	});
+
+	it("does not look for a commit when the build fails", async () => {
+		mocks.runComposeBuild.mockRejectedValueOnce(new Error("build failed"));
+
+		await expect(
+			deployComposePreview({
+				composeId: "compose-1",
+				previewDeploymentId: "pd-1",
+				titleLog: "Preview Deployment",
+				descriptionLog: "",
+			}),
+		).rejects.toThrow("build failed");
+
+		expect(mocks.finalizePreviewBuildMetadata).not.toHaveBeenCalled();
 	});
 });

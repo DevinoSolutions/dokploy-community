@@ -37,6 +37,7 @@ import {
 import { api } from "@/utils/api";
 import { ShowDeploymentsModal } from "../../application/deployments/show-deployments-modal";
 import { BuildPreviewDeployment } from "../../application/preview-deployments/build-preview-deployment";
+import { SnapvisorPreviewBadge } from "../../settings/integrations/snapvisor/snapvisor-preview-badge";
 import { ShowModalLogs } from "../../settings/web-server/show-modal-logs";
 import { ShowPreviewSettingsCompose } from "./show-preview-settings";
 
@@ -191,6 +192,13 @@ export const ShowPreviewDeploymentsCompose = ({ composeId }: Props) => {
 												</div>
 
 												<div className="pl-8 space-y-3">
+													{data?.snapvisorProjectName && (
+														<SnapvisorPreviewBadge
+															previewDeploymentId={
+																deployment.previewDeploymentId
+															}
+														/>
+													)}
 													{previewDomains.map((domain) => {
 														const deploymentUrl = `${domain.https ? "https" : "http"}://${domain.host}${domain.path || "/"}`;
 														return (

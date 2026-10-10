@@ -127,6 +127,12 @@ export const compose = pgTable("compose", {
 	)
 		.notNull()
 		.default(true),
+	/**
+	 * Fork column (Snapvisor integration). Name of the Snapvisor project that
+	 * receives this compose service's preview-deployment builds; `null` means
+	 * visual testing is off. See services/snapvisor.ts.
+	 */
+	snapvisorProjectName: text("snapvisorProjectName"),
 	triggerType: triggerType("triggerType").default("push"),
 	composeStatus: applicationStatus("composeStatus").notNull().default("idle"),
 	icon: text("icon"),
@@ -339,7 +345,9 @@ export const apiUpdateCompose = createSchema
 		composeFile: z.string().optional(),
 		command: z.string().optional(),
 	})
-	.omit({ serverId: true });
+	// `snapvisorProjectName` only goes through `snapvisor.setComposeProject`,
+	// which validates the slug and checks the organization.
+	.omit({ serverId: true, snapvisorProjectName: true });
 
 export const apiSaveEnvironmentVariablesCompose = createSchema
 	.pick({

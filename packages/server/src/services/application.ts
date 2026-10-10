@@ -83,7 +83,7 @@ import {
 	updatePreviewDeployment,
 } from "./preview-deployment";
 import { validUniqueServerAppName } from "./project";
-import { registerPreviewDeployment } from "./snapvisor";
+import { finalizePreviewBuildMetadata } from "./snapvisor";
 export type Application = typeof applications.$inferSelect;
 
 export const createApplication = async (
@@ -786,47 +786,6 @@ const buildPreviewCommentWriter = ({
 	};
 };
 
-/**
- * After a preview build succeeds: records the commit it built using the same
- * `Commit: <sha>` marker `deployApplication`'s `finally` block writes for
- * regular deploys (read back by `findLatestPreviewCommitSha` in
- * `services/snapvisor.ts`), then best-effort links the Snapvisor build for
- * that commit. Neither step may fail the deploy: commit extraction mirrors
- * the existing non-preview convention exactly, and the Snapvisor call is
- * fire-and-forget with its own `.catch`.
- */
-const finalizePreviewBuildMetadata = async ({
-	application,
-	previewDeploymentId,
-	appName,
-	deploymentId,
-	serverId,
-}: {
-	application: Pick<Application, "sourceType">;
-	previewDeploymentId: string;
-	appName: string;
-	deploymentId: string;
-	serverId: string | null;
-}) => {
-	if (application.sourceType !== "docker") {
-		const commitInfo = await getGitCommitInfo({
-			appName,
-			type: "application",
-			serverId,
-		});
-		if (commitInfo) {
-			await updateDeployment(deploymentId, {
-				title: commitInfo.message,
-				description: `Commit: ${commitInfo.hash}`,
-			});
-		}
-	}
-
-	registerPreviewDeployment({ previewDeploymentId }).catch((error) => {
-		console.error("Error registering the Snapvisor preview deployment:", error);
-	});
-};
-
 export const deployPreviewApplication = async ({
 	applicationId,
 	titleLog = "Preview Deployment",
@@ -1019,7 +978,8 @@ export const deployPreviewApplication = async ({
 		await mechanizeDockerContainer(deployTarget);
 
 		await finalizePreviewBuildMetadata({
-			application,
+			type: "application",
+			hasGitSource: application.sourceType !== "docker",
 			previewDeploymentId,
 			appName: previewDeployment.appName,
 			deploymentId: deployment.deploymentId,
@@ -1250,7 +1210,8 @@ export const rebuildPreviewApplication = async ({
 		await mechanizeDockerContainer(deployTarget);
 
 		await finalizePreviewBuildMetadata({
-			application,
+			type: "application",
+			hasGitSource: application.sourceType !== "docker",
 			previewDeploymentId,
 			appName: previewDeployment.appName,
 			deploymentId: deployment.deploymentId,
