@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.14**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.15**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.14 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.15 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,14 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.15
+
+**postgres.js 3.4.9** ([#315](https://github.com/DevinoSolutions/dokploy-community/pull/315)). Updates postgres.js from 3.4.4 to 3.4.9, which fixes a `TimeoutNegativeWarning` logged at boot: the driver's reconnect delay went negative when a pooled connection slot was reused after the backoff. Upstream fixed it in 3.4.8. A regression test was added.
+
+**Deleting a registry cleans up its docker login** ([#316](https://github.com/DevinoSolutions/dokploy-community/pull/316)). Deleting a registry now also removes its per-registry docker login directory (`docker-config/<registryId>`, from #303) on the Dokploy host and on every server of the organization. It is best effort, and a failed `docker logout` no longer makes the delete fail.
+
+> No database migrations in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.14
 
@@ -670,7 +678,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.14
+export DOKPLOY_VERSION=v0.30.8-community.15
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -683,7 +691,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.14      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.15      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
