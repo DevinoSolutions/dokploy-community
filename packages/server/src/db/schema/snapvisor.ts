@@ -88,6 +88,12 @@ export const apiSetSnapvisorApplicationProject = z.object({
 	projectName: snapvisorSlugSchema.nullable(),
 });
 
+export const apiSetSnapvisorComposeProject = z.object({
+	composeId: z.string().min(1),
+	// `null` turns visual testing off for the compose service.
+	projectName: snapvisorSlugSchema.nullable(),
+});
+
 export const apiSnapvisorPreviewBuild = z.object({
 	previewDeploymentId: z.string().min(1),
 });

@@ -127,6 +127,12 @@ export const compose = pgTable("compose", {
 	)
 		.notNull()
 		.default(true),
+	/**
+	 * Fork column (Snapvisor integration). Name of the Snapvisor project that
+	 * receives this compose service's preview-deployment builds; `null` means
+	 * visual testing is off. See services/snapvisor.ts.
+	 */
+	snapvisorProjectName: text("snapvisorProjectName"),
 	triggerType: triggerType("triggerType").default("push"),
 	composeStatus: applicationStatus("composeStatus").notNull().default("idle"),
 	icon: text("icon"),
