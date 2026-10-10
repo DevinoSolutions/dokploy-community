@@ -89,6 +89,11 @@ vi.mock("@dokploy/server/utils/dodomain/client", async (importOriginal) => ({
 	),
 }));
 
+vi.mock("@dokploy/server/services/mcp-oauth", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@dokploy/server/services/mcp-oauth")>()),
+	resolveMcpOrigin: vi.fn(async () => "https://dok.example.com"),
+}));
+
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));

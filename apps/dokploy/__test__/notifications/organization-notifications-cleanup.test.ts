@@ -22,6 +22,7 @@ const tableName = (table: unknown) => {
 
 const boundValues = (node: unknown): unknown[] => {
 	if (!node || typeof node !== "object") return [];
+	if (Array.isArray(node)) return node.flatMap(boundValues);
 	const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
 	if (Array.isArray(chunks)) return chunks.flatMap(boundValues);
 	const value = (node as { value?: unknown }).value;
