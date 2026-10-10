@@ -17,7 +17,9 @@
 # or WSL; not Windows without WSL.
 #
 # Everything is keyed on the checkout directory, so each git worktree gets its
-# own instance and `up` is safe to run twice. Override with:
+# own instance and `up` is safe to run twice. One instance per checkout (the
+# Next.js dev server locks its .next directory); use git worktrees to run several.
+# Override with:
 #   DEV_INSTANCE_NAME      instance name (default: <directory>-<hash of path>)
 #   DEV_INSTANCE_PORT      first port to try for the app (default 3100)
 #   DEV_INSTANCE_PG_PORT   first port to try for Postgres (default 55432)
@@ -138,10 +140,14 @@ EOF
 	pnpm server:script >/dev/null
 
 	log "running migrations"
-	pnpm --filter=dokploy run migration:run 2>&1 | tee "$STATE_DIR/migration.log"
+	if ! pnpm --filter=dokploy run migration:run >"$STATE_DIR/migration.log" 2>&1; then
+		tail -n 30 "$STATE_DIR/migration.log" >&2
+		die "migration command failed"
+	fi
 	# migration.ts logs a failed batch but still exits 0 so production boots.
 	if grep -q "DATABASE MIGRATION FAILED" "$STATE_DIR/migration.log"; then
-		die "migrations failed, see above (instance left running; fix, then run 'down' and 'up')"
+		tail -n 30 "$STATE_DIR/migration.log" >&2
+		die "migrations failed (instance left running; fix, then run down and up)"
 	fi
 
 	if server_running; then
