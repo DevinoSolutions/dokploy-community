@@ -2,6 +2,7 @@ import { db } from "@dokploy/server/db";
 import {
 	hasValidLicense,
 	IS_CLOUD,
+	removeOrganizationNotifications,
 	sendInvitationEmail,
 } from "@dokploy/server/index";
 import { normalizeWildcardBaseDomain } from "@dokploy/server/utils/wildcard-domain-base";
@@ -339,9 +340,14 @@ export const organizationRouter = createTRPCRouter({
 				});
 			}
 
-			const result = await db
-				.delete(organization)
-				.where(eq(organization.id, input.organizationId));
+			// The notification rows would cascade away with the organization, and
+			// the provider rows (API keys, webhooks) they point at would stay.
+			const result = await db.transaction(async (tx) => {
+				await removeOrganizationNotifications(input.organizationId, tx);
+				return tx
+					.delete(organization)
+					.where(eq(organization.id, input.organizationId));
+			});
 
 			await audit(ctx, {
 				action: "delete",

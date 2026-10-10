@@ -55,6 +55,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
+import { deleteProviderRowsOf } from "./notification-channels";
 
 export type Notification = typeof notifications.$inferSelect;
 
@@ -1293,20 +1294,16 @@ export const findNotificationById = async (notificationId: string) => {
 };
 
 export const removeNotificationById = async (notificationId: string) => {
-	// One transaction: the Uptimely channel holds an API key and must not
-	// outlive its notification (its open-incident rows cascade).
+	// One transaction: the provider row holds the API key or webhook and must
+	// not outlive its notification (an Uptimely channel's open-incident rows
+	// cascade).
 	return db.transaction(async (tx) => {
 		const result = await tx
 			.delete(notifications)
 			.where(eq(notifications.notificationId, notificationId))
 			.returning();
 
-		const channelId = result[0]?.uptimelyChannelId;
-		if (channelId) {
-			await tx
-				.delete(uptimelyChannel)
-				.where(eq(uptimelyChannel.uptimelyChannelId, channelId));
-		}
+		await deleteProviderRowsOf(tx, result);
 
 		return result[0];
 	});
