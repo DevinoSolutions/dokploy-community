@@ -208,3 +208,31 @@ describe("snapvisor.update", () => {
 		expect(mocks.sets).toEqual([{ name: "Renamed" }]);
 	});
 });
+
+/**
+ * Pins how the shared `isSameIntegrationBaseUrl` plus the Snapvisor alias
+ * treat awkward URLs. "Same" means the stored token may be reused, so every
+ * case that could send it to another host must be "different".
+ */
+describe("isSameSnapvisorBaseUrl edge cases", () => {
+	it.each([
+		// Different host, scheme or port: the token must be typed again.
+		["https://api.snapvisor.io:8443", false, "other port"],
+		["http://api.snapvisor.io", false, "plain http"],
+		["https://api.snapvisor.io.", false, "trailing-dot host"],
+		["https://аpi.snapvisor.io", false, "IDN lookalike (Cyrillic a)"],
+		["https://evil.example", false, "other host"],
+		["https://api.snapvisor.io/v2", false, "other path"],
+		// The legacy web host only aliases when written exactly as stored.
+		["https://app.snapvisor.io:443", false, "app host with explicit port"],
+		// Same host: the credential still goes to api.snapvisor.io.
+		["https://evil.com@api.snapvisor.io", true, "userinfo on the same host"],
+		["https://api.snapvisor.io?x=1", true, "query string"],
+		["https://api.snapvisor.io#frag", true, "fragment"],
+		["https://api.snapvisor.io:443", true, "explicit default port"],
+		["https://API.Snapvisor.IO//", true, "case and trailing slashes"],
+		["https://app.snapvisor.io/", true, "legacy web host"],
+	])("%s -> same=%s (%s)", (candidate, same) => {
+		expect(isSameSnapvisorBaseUrl(candidate, STORED_URL)).toBe(same);
+	});
+});

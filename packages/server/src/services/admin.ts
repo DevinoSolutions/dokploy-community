@@ -8,6 +8,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
+import { removeOrganizationNotifications } from "./notification-channels";
 import { getWebServerSettings } from "./web-server-settings";
 
 export const findUserById = async (userId: string) => {
@@ -97,11 +98,22 @@ export const getUserByToken = async (token: string) => {
 };
 
 export const removeUserById = async (userId: string) => {
-	await db
-		.delete(user)
-		.where(eq(user.id, userId))
-		.returning()
-		.then((res) => res[0]);
+	await db.transaction(async (tx) => {
+		// The organizations the user owns are deleted with them, and so is
+		// everything the notification provider rows keep (API keys, webhooks).
+		const owned = await tx
+			.select({ id: organization.id })
+			.from(organization)
+			.where(eq(organization.ownerId, userId));
+		for (const { id } of owned) {
+			await removeOrganizationNotifications(id, tx);
+		}
+		await tx
+			.delete(user)
+			.where(eq(user.id, userId))
+			.returning()
+			.then((res) => res[0]);
+	});
 };
 
 export const getDokployUrl = async () => {

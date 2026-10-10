@@ -39,9 +39,10 @@ import {
 	normalizeMcpRegisterBody,
 	resolveMcpOrigin,
 } from "../services/mcp-oauth";
-import { scimOptions } from "../services/proprietary/scim";
+import { removeOrganizationNotifications } from "../services/notification-channels";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import { resolveOrganizationDefaultRole } from "../services/proprietary/license-key";
+import { scimOptions } from "../services/proprietary/scim";
 import {
 	getWebServerSettings,
 	updateWebServerSettings,
@@ -754,6 +755,14 @@ const createBetterAuth = () =>
 				dynamicAccessControl: {
 					enabled: true,
 					maximumRolesPerOrganization: 10,
+				},
+				organizationHooks: {
+					// The plugin's own delete endpoint: once the notification rows
+					// cascade away with the organization, nothing points at their
+					// provider rows (API keys, webhooks) any more.
+					beforeDeleteOrganization: async ({ organization: deleted }) => {
+						await removeOrganizationNotifications(deleted.id);
+					},
 				},
 				// Dokploy creates organizations itself (the plugin's create
 				// endpoint is disabled) and stores their owner. Declaring the

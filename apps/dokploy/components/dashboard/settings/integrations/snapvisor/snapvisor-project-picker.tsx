@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { toast } from "sonner";
 import { LearnMoreLink } from "@/components/shared/learn-more-link";
 import { FormDescription, FormLabel } from "@/components/ui/form";
@@ -34,8 +35,12 @@ export const SnapvisorProjectPicker = ({
 }) => {
 	const { data: integration, isPending: isLoadingIntegration } =
 		api.snapvisor.one.useQuery();
-	const { data: projects, isPending: isLoadingProjects } =
-		api.snapvisor.projects.useQuery(undefined, { enabled: !!integration });
+	const {
+		data: projects,
+		isPending: isLoadingProjects,
+		error: projectsError,
+	} = api.snapvisor.projects.useQuery(undefined, { enabled: !!integration });
+	const [isSaving, setIsSaving] = useState(false);
 
 	if (isLoadingIntegration) return null;
 
@@ -59,6 +64,7 @@ export const SnapvisorProjectPicker = ({
 
 	const onChange = async (value: string) => {
 		const projectName = value === SNAPVISOR_OFF ? null : value;
+		setIsSaving(true);
 		await save(projectName)
 			.then(() => {
 				toast.success(
@@ -71,7 +77,8 @@ export const SnapvisorProjectPicker = ({
 				toast.error("Error updating the Snapvisor project", {
 					description: error.message,
 				});
-			});
+			})
+			.finally(() => setIsSaving(false));
 	};
 
 	return (
@@ -91,7 +98,7 @@ export const SnapvisorProjectPicker = ({
 			<Select
 				value={currentProjectName ?? SNAPVISOR_OFF}
 				onValueChange={onChange}
-				disabled={isLoadingProjects}
+				disabled={isSaving || isLoadingProjects}
 			>
 				<SelectTrigger>
 					<SelectValue placeholder="Off" />
@@ -105,6 +112,11 @@ export const SnapvisorProjectPicker = ({
 					))}
 				</SelectContent>
 			</Select>
+			{projectsError && (
+				<p className="text-sm text-red-600" role="alert">
+					Could not load the Snapvisor projects: {projectsError.message}
+				</p>
+			)}
 			<div className="flex flex-row items-center justify-between gap-2">
 				<LearnMoreLink href={INTEGRATION_LEARN_MORE_URLS.snapvisor} />
 				<PoweredBySnapvisor />

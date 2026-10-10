@@ -464,6 +464,26 @@ describe("finalizePreviewBuildMetadata", () => {
 		expect(mocks.updateDeployment).not.toHaveBeenCalled();
 	});
 
+	it("never fails the deploy when recording the commit throws", async () => {
+		mocks.updateDeployment.mockRejectedValueOnce(new Error("db down"));
+		const consoleError = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => {});
+		await expect(
+			finalizePreviewBuildMetadata({
+				type: "compose",
+				hasGitSource: true,
+				previewDeploymentId: PREVIEW_ID,
+				appName: "preview-stack-abc123",
+				deploymentId: "deployment-1",
+				serverId: null,
+			}),
+		).resolves.toBeUndefined();
+		await flush();
+		expect(consoleError).toHaveBeenCalled();
+		consoleError.mockRestore();
+	});
+
 	it("never fails the deploy when the Snapvisor link-up throws", async () => {
 		mocks.findPreviewDeploymentById.mockRejectedValue(new Error("db down"));
 		const consoleError = vi

@@ -7,6 +7,7 @@ import {
 	deployments,
 	snapvisorIntegration,
 } from "@dokploy/server/db/schema";
+import { maskApiKey } from "@dokploy/server/utils/integrations/mask";
 import { getGitCommitInfo } from "@dokploy/server/utils/providers/git";
 import {
 	createSnapvisorClient,
@@ -46,8 +47,7 @@ export const snapvisorClientFor = (
 	});
 
 /** Masks a stored access token down to its last four characters. */
-export const maskSnapvisorAccessToken = (accessToken: string) =>
-	accessToken.length > 4 ? `••••${accessToken.slice(-4)}` : "••••";
+export const maskSnapvisorAccessToken = maskApiKey;
 
 /**
  * Deep link to a build review in the Snapvisor dashboard. Path shape
@@ -404,12 +404,16 @@ export const finalizePreviewBuildMetadata = async ({
 	serverId: string | null;
 }) => {
 	if (hasGitSource) {
-		const commitInfo = await getGitCommitInfo({ appName, type, serverId });
-		if (commitInfo) {
-			await updateDeployment(deploymentId, {
-				title: commitInfo.message,
-				description: `Commit: ${commitInfo.hash}`,
-			});
+		try {
+			const commitInfo = await getGitCommitInfo({ appName, type, serverId });
+			if (commitInfo) {
+				await updateDeployment(deploymentId, {
+					title: commitInfo.message,
+					description: `Commit: ${commitInfo.hash}`,
+				});
+			}
+		} catch (error) {
+			console.error("Error recording the preview commit:", error);
 		}
 	}
 

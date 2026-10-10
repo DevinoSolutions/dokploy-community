@@ -145,8 +145,7 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 						</div>
 						{isDockerImage && !data?.previewDockerImage && (
 							<AlertBlock type="warning">
-								Set a preview image template in the preview settings (for
-								example{" "}
+								Set a preview image template in the preview settings (for example{" "}
 								<code>{"ghcr.io/acme/app:pr-${{preview.prNumber}}"}</code>) to
 								create previews for this Docker image application.
 							</AlertBlock>
@@ -227,9 +226,7 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 												<div className="pl-8 space-y-3">
 													{data?.snapvisorProjectName && (
 														<SnapvisorPreviewBadge
-															previewDeploymentId={
-																deployment.previewDeploymentId
-															}
+															previewDeploymentId={deployment.previewDeploymentId}
 														/>
 													)}
 													<div className="relative grow">
@@ -251,10 +248,7 @@ export const ShowPreviewDeployments = ({ applicationId }: Props) => {
 																size="sm"
 																className="gap-2"
 																onClick={() =>
-																	window.open(
-																		deployment.pullRequestURL,
-																		"_blank",
-																	)
+																	window.open(deployment.pullRequestURL, "_blank")
 																}
 															>
 																<ChangeRequestIcon className="size-4" />

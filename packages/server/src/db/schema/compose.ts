@@ -345,7 +345,9 @@ export const apiUpdateCompose = createSchema
 		composeFile: z.string().optional(),
 		command: z.string().optional(),
 	})
-	.omit({ serverId: true });
+	// `snapvisorProjectName` only goes through `snapvisor.setComposeProject`,
+	// which validates the slug and checks the organization.
+	.omit({ serverId: true, snapvisorProjectName: true });
 
 export const apiSaveEnvironmentVariablesCompose = createSchema
 	.pick({

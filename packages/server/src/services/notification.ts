@@ -49,14 +49,29 @@ import {
 	uptimelyChannelIncident,
 } from "@dokploy/server/db/schema";
 import {
+	integrationUrlChangeNeedsKeyMessage,
+	isSameIntegrationBaseUrl,
+} from "@dokploy/server/utils/integrations/base-url";
+import {
 	isSameUptimelyBaseUrl,
 	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 } from "@dokploy/server/utils/uptimely/base-url";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
+import { deleteProviderRowsOf } from "./notification-channels";
 
 export type Notification = typeof notifications.$inferSelect;
+
+const withoutUndefined = <T extends Record<string, unknown>>(values: T) =>
+	Object.fromEntries(
+		Object.entries(values).filter(([, value]) => value !== undefined),
+	) as Partial<T>;
+
+export const SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE =
+	integrationUrlChangeNeedsKeyMessage("Sendly");
+export const NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE =
+	integrationUrlChangeNeedsKeyMessage("Notifly");
 
 export const createSlackNotification = async (
 	input: z.infer<typeof apiCreateSlack>,
@@ -608,6 +623,39 @@ export const updateSendlyNotification = async (
 	input: z.infer<typeof apiUpdateSendly>,
 ) => {
 	await db.transaction(async (tx) => {
+		// The channel is derived from the notification row, never from the
+		// client: the row must belong to the caller's organization and be a
+		// Sendly one.
+		const existing = await tx.query.notifications.findFirst({
+			where: eq(notifications.notificationId, input.notificationId),
+			with: { sendly: true },
+		});
+		if (
+			!existing ||
+			!input.organizationId ||
+			existing.organizationId !== input.organizationId ||
+			existing.notificationType !== "sendly" ||
+			!existing.sendly
+		) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "Sendly notification not found",
+			});
+		}
+		const stored = existing.sendly;
+
+		// The stored key must not be sent to a URL the caller just chose.
+		if (
+			input.baseUrl !== undefined &&
+			!input.apiKey?.trim() &&
+			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
+		) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+			});
+		}
+
 		const newDestination = await tx
 			.update(notifications)
 			.set({
@@ -634,17 +682,19 @@ export const updateSendlyNotification = async (
 			});
 		}
 
-		await tx
-			.update(sendly)
-			.set({
-				apiKey: input.apiKey,
-				fromAddress: input.fromAddress,
-				toAddresses: input.toAddresses,
-				baseUrl: input.baseUrl,
-			})
-			.where(eq(sendly.sendlyId, input.sendlyId))
-			.returning()
-			.then((value) => value[0]);
+		const channelValues = withoutUndefined({
+			// Blank or omitted keeps the stored key (it is write-only).
+			apiKey: input.apiKey?.trim() || undefined,
+			fromAddress: input.fromAddress,
+			toAddresses: input.toAddresses,
+			baseUrl: input.baseUrl,
+		});
+		if (Object.keys(channelValues).length > 0) {
+			await tx
+				.update(sendly)
+				.set(channelValues)
+				.where(eq(sendly.sendlyId, stored.sendlyId));
+		}
 
 		return newDestination;
 	});
@@ -708,6 +758,39 @@ export const updateNotiflyNotification = async (
 	input: z.infer<typeof apiUpdateNotifly>,
 ) => {
 	await db.transaction(async (tx) => {
+		// The channel is derived from the notification row, never from the
+		// client: the row must belong to the caller's organization and be a
+		// Notifly one.
+		const existing = await tx.query.notifications.findFirst({
+			where: eq(notifications.notificationId, input.notificationId),
+			with: { notifly: true },
+		});
+		if (
+			!existing ||
+			!input.organizationId ||
+			existing.organizationId !== input.organizationId ||
+			existing.notificationType !== "notifly" ||
+			!existing.notifly
+		) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "Notifly notification not found",
+			});
+		}
+		const stored = existing.notifly;
+
+		// The stored key must not be sent to a URL the caller just chose.
+		if (
+			input.baseUrl !== undefined &&
+			!input.apiKey?.trim() &&
+			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
+		) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+			});
+		}
+
 		const newDestination = await tx
 			.update(notifications)
 			.set({
@@ -734,17 +817,19 @@ export const updateNotiflyNotification = async (
 			});
 		}
 
-		await tx
-			.update(notifly)
-			.set({
-				apiKey: input.apiKey,
-				workflowKey: input.workflowKey,
-				subscriberId: input.subscriberId,
-				baseUrl: input.baseUrl,
-			})
-			.where(eq(notifly.notiflyId, input.notiflyId))
-			.returning()
-			.then((value) => value[0]);
+		const channelValues = withoutUndefined({
+			// Blank or omitted keeps the stored key (it is write-only).
+			apiKey: input.apiKey?.trim() || undefined,
+			workflowKey: input.workflowKey,
+			subscriberId: input.subscriberId,
+			baseUrl: input.baseUrl,
+		});
+		if (Object.keys(channelValues).length > 0) {
+			await tx
+				.update(notifly)
+				.set(channelValues)
+				.where(eq(notifly.notiflyId, stored.notiflyId));
+		}
 
 		return newDestination;
 	});
@@ -832,7 +917,7 @@ export const updateUptimelyChannelNotification = async (
 		// The stored key must not be sent to a URL the caller just chose.
 		if (
 			input.baseUrl !== undefined &&
-			!input.apiKey &&
+			!input.apiKey?.trim() &&
 			!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)
 		) {
 			throw new TRPCError({
@@ -865,7 +950,7 @@ export const updateUptimelyChannelNotification = async (
 		// Blank or omitted keeps the stored key (it is write-only).
 		const channelValues = Object.fromEntries(
 			Object.entries({
-				apiKey: input.apiKey || undefined,
+				apiKey: input.apiKey?.trim() || undefined,
 				projectId: input.projectId,
 				baseUrl: input.baseUrl,
 				// "" clears the override, undefined leaves it untouched.
@@ -1223,20 +1308,16 @@ export const findNotificationById = async (notificationId: string) => {
 };
 
 export const removeNotificationById = async (notificationId: string) => {
-	// One transaction: the Uptimely channel holds an API key and must not
-	// outlive its notification (its open-incident rows cascade).
+	// One transaction: the provider row holds the API key or webhook and must
+	// not outlive its notification (an Uptimely channel's open-incident rows
+	// cascade).
 	return db.transaction(async (tx) => {
 		const result = await tx
 			.delete(notifications)
 			.where(eq(notifications.notificationId, notificationId))
 			.returning();
 
-		const channelId = result[0]?.uptimelyChannelId;
-		if (channelId) {
-			await tx
-				.delete(uptimelyChannel)
-				.where(eq(uptimelyChannel.uptimelyChannelId, channelId));
-		}
+		await deleteProviderRowsOf(tx, result);
 
 		return result[0];
 	});

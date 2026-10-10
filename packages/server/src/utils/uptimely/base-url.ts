@@ -1,4 +1,7 @@
-import { isSameBaseUrl } from "../base-url";
+import {
+	integrationUrlChangeNeedsKeyMessage,
+	isSameIntegrationBaseUrl,
+} from "@dokploy/server/utils/integrations/base-url";
 
 /**
  * The stored Uptimely API key is write-only and is sent as a Bearer token to
@@ -6,6 +9,6 @@ import { isSameBaseUrl } from "../base-url";
  * whoever runs that URL, so a changed URL always needs the key typed again.
  */
 export const UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE =
-	"Enter the API key again to change the Uptimely URL.";
+	integrationUrlChangeNeedsKeyMessage("Uptimely");
 
-export const isSameUptimelyBaseUrl = isSameBaseUrl;
+export const isSameUptimelyBaseUrl = isSameIntegrationBaseUrl;

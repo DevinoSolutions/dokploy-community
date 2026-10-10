@@ -54,6 +54,9 @@ export const SnapvisorPreviewBadge = ({
 		{ previewDeploymentId },
 		{
 			refetchInterval: (query) => {
+				// A failing query (Snapvisor down, access revoked) would otherwise
+				// be retried every 15s forever; the refresh button stays available.
+				if (query.state.status === "error") return false;
 				const status = query.state.data?.buildStatus;
 				return status && SNAPVISOR_TERMINAL_STATUSES.has(status)
 					? false

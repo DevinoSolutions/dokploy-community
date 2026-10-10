@@ -8,6 +8,7 @@ import {
 	uptimelyIntegration,
 	uptimelyMonitorLink,
 } from "@dokploy/server/db/schema";
+import { maskApiKey } from "@dokploy/server/utils/integrations/mask";
 import {
 	isSameUptimelyBaseUrl,
 	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
@@ -57,8 +58,7 @@ export const uptimelyClientFor = (
 	});
 
 /** Masks a stored API key down to its last four characters. */
-export const maskUptimelyApiKey = (apiKey: string) =>
-	apiKey.length > 4 ? `••••${apiKey.slice(-4)}` : "••••";
+export const maskUptimelyApiKey = maskApiKey;
 
 /** Deep link to a monitor in the Uptimely dashboard. */
 export const uptimelyMonitorUrl = (
