@@ -51,3 +51,6 @@ yarn-error.log*
 # A Windows path (C:\...) handed to a POSIX shell becomes a relative file name
 # with fullwidth lookalikes for ":" and "\" (U+FF1A, U+FF3C); never real files.
 [A-Za-z]：*
+
+# Dev instance state (scripts/dev-instance.sh)
+.dev-instance
