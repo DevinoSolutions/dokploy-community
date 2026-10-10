@@ -1370,16 +1370,14 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	getEmailProviders: withPermission("notification", "read").query(
 		async ({ ctx }) => {
+			// The invitation dialog only lists the providers by name, so the
+			// provider rows (API keys, SMTP password) are never loaded.
 			return await db.query.notifications.findMany({
+				columns: { notificationId: true, name: true, notificationType: true },
 				where: eq(
 					notifications.organizationId,
 					ctx.session.activeOrganizationId,
 				),
-				with: {
-					email: true,
-					resend: true,
-					sendly: true,
-				},
 			});
 		},
 	),

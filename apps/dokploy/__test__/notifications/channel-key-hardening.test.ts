@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
 	}[],
 	deletes: [] as string[],
 	fetch: vi.fn(),
+	findManyArgs: [] as unknown[],
 }));
 
 const tableName = (table: unknown) => {
@@ -96,9 +97,10 @@ vi.mock("@dokploy/server/db", () => {
 							}
 						: {
 								findFirst: vi.fn(async () => mocks.notification ?? undefined),
-								findMany: vi.fn(async () =>
-									mocks.notification ? [mocks.notification] : [],
-								),
+								findMany: vi.fn(async (args: unknown) => {
+									mocks.findManyArgs.push(args);
+									return mocks.notification ? [mocks.notification] : [];
+								}),
 							},
 			}),
 			transaction: vi.fn(async (run: (tx: unknown) => unknown) => run(tx)),
@@ -207,6 +209,9 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 	const apiKey = API_KEYS[type];
 	const defaultUrl = DEFAULT_URLS[type];
 	const tableOfChannel = type;
+	const urlMessage = `Enter the API key again to change the ${
+		type === "sendly" ? "Sendly" : "Notifly"
+	} URL.`;
 
 	beforeEach(() => {
 		mocks.notification = storedNotification(type);
@@ -360,7 +365,7 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 				} as never),
 			).rejects.toMatchObject({
 				code: "BAD_REQUEST",
-				message: expect.stringContaining("API key again"),
+				message: urlMessage,
 			});
 
 			expect(mocks.updates).toEqual([]);
@@ -428,7 +433,7 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 		it("update through the router keeps the specific message", async () => {
 			await expect(routerUpdate({ baseUrl: OTHER_URL })).rejects.toMatchObject({
 				code: "BAD_REQUEST",
-				message: expect.stringContaining("API key again"),
+				message: urlMessage,
 			});
 		});
 
@@ -463,7 +468,7 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 				}),
 			).rejects.toMatchObject({
 				code: "BAD_REQUEST",
-				message: expect.stringContaining("API key again"),
+				message: urlMessage,
 			});
 
 			expect(mocks.fetch).not.toHaveBeenCalled();
@@ -537,5 +542,27 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 		await expect(caller.one({ notificationId: "n-1" })).rejects.toMatchObject({
 			code: "UNAUTHORIZED",
 		});
+	});
+});
+
+describe("notification.getEmailProviders", () => {
+	it("lists the providers by name without loading or returning any secret", async () => {
+		mocks.notification = storedNotification("sendly");
+		mocks.findManyArgs = [];
+
+		const result = await caller.getEmailProviders();
+
+		const args = mocks.findManyArgs.at(-1) as {
+			columns?: Record<string, boolean>;
+			with?: unknown;
+		};
+		expect(args.with).toBeUndefined();
+		expect(args.columns).toEqual({
+			notificationId: true,
+			name: true,
+			notificationType: true,
+		});
+		expect(result).toHaveLength(1);
+		expect(JSON.stringify(result)).not.toContain(API_KEYS.sendly);
 	});
 });

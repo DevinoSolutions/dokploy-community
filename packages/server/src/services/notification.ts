@@ -647,7 +647,7 @@ export const updateSendlyNotification = async (
 		// The stored key must not be sent to a URL the caller just chose.
 		if (
 			input.baseUrl !== undefined &&
-			!input.apiKey &&
+			!input.apiKey?.trim() &&
 			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
 		) {
 			throw new TRPCError({
@@ -684,7 +684,7 @@ export const updateSendlyNotification = async (
 
 		const channelValues = withoutUndefined({
 			// Blank or omitted keeps the stored key (it is write-only).
-			apiKey: input.apiKey || undefined,
+			apiKey: input.apiKey?.trim() || undefined,
 			fromAddress: input.fromAddress,
 			toAddresses: input.toAddresses,
 			baseUrl: input.baseUrl,
@@ -782,7 +782,7 @@ export const updateNotiflyNotification = async (
 		// The stored key must not be sent to a URL the caller just chose.
 		if (
 			input.baseUrl !== undefined &&
-			!input.apiKey &&
+			!input.apiKey?.trim() &&
 			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
 		) {
 			throw new TRPCError({
@@ -819,7 +819,7 @@ export const updateNotiflyNotification = async (
 
 		const channelValues = withoutUndefined({
 			// Blank or omitted keeps the stored key (it is write-only).
-			apiKey: input.apiKey || undefined,
+			apiKey: input.apiKey?.trim() || undefined,
 			workflowKey: input.workflowKey,
 			subscriberId: input.subscriberId,
 			baseUrl: input.baseUrl,
@@ -917,7 +917,7 @@ export const updateUptimelyChannelNotification = async (
 		// The stored key must not be sent to a URL the caller just chose.
 		if (
 			input.baseUrl !== undefined &&
-			!input.apiKey &&
+			!input.apiKey?.trim() &&
 			!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)
 		) {
 			throw new TRPCError({
@@ -950,7 +950,7 @@ export const updateUptimelyChannelNotification = async (
 		// Blank or omitted keeps the stored key (it is write-only).
 		const channelValues = Object.fromEntries(
 			Object.entries({
-				apiKey: input.apiKey || undefined,
+				apiKey: input.apiKey?.trim() || undefined,
 				projectId: input.projectId,
 				baseUrl: input.baseUrl,
 				// "" clears the override, undefined leaves it untouched.
