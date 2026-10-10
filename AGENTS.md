@@ -16,7 +16,7 @@ Run these from the repo root before every PR. CI runs the same three jobs (`.git
 2. `pnpm typecheck`
 3. `pnpm test` runs vitest. It watches when attached to a terminal; for a single run use `cd apps/dokploy && pnpm exec vitest run --config __test__/vitest.config.ts <test file>`.
 
-Also run `pnpm build` if you touched build config or Next.js pages, and `pnpm check` (Biome) to format what you changed.
+Also run `pnpm build` if you touched build config or Next.js pages, and format only the files you changed with `pnpm exec biome check --write <files you changed>`; do not reformat unrelated files (root `pnpm check` rewrites the whole repo).
 
 ### Database migrations
 

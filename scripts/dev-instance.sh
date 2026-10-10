@@ -37,6 +37,7 @@ LABEL="dokploy.dev-instance=$NAME"
 STATE_DIR="$ROOT/.dev-instance/$NAME"
 STATE_FILE="$STATE_DIR/state.env"
 PID_FILE="$STATE_DIR/server.pid"
+GROUP_FILE="$STATE_DIR/server.group" # exists when the recorded pid leads its own process group
 LOG_FILE="$STATE_DIR/server.log"
 PG_IMAGE="postgres:16" # same image packages/server/src/setup/postgres-setup.ts uses
 
@@ -159,7 +160,19 @@ EOF
 		command -v setsid >/dev/null && launcher=(setsid nohup)
 		NODE_ENV=development PORT="$APP_PORT" HOST=127.0.0.1 \
 			"${launcher[@]}" pnpm --filter=dokploy run dev >>"$LOG_FILE" 2>&1 &
-		echo $! >"$PID_FILE"
+		local pid=$!
+		echo "$pid" >"$PID_FILE"
+		rm -f "$GROUP_FILE"
+		if [ "${launcher[0]}" = setsid ]; then
+			# Record group mode only once the server is really its own group leader.
+			for _ in $(seq 1 20); do
+				if [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ]; then
+					echo 1 >"$GROUP_FILE"
+					break
+				fi
+				sleep 0.1
+			done
+		fi
 	fi
 
 	# The first request compiles the page, which can take a couple of minutes.
@@ -176,20 +189,27 @@ EOF
 	log "tear down with: scripts/dev-instance.sh down"
 }
 
+# Stops only what this instance recorded, never whatever holds its port now.
+stop_server() {
+	local pid="$1" target="$1" i
+	if [ -f "$GROUP_FILE" ]; then
+		target="-$pid" # the server was started with setsid: signal its whole process group
+		kill -TERM -- "$target" 2>/dev/null || return 0
+	else
+		kill_tree "$pid"
+	fi
+	for i in $(seq 1 10); do kill -0 -- "$target" 2>/dev/null || return 0; sleep 1; done
+	kill -KILL -- "$target" 2>/dev/null || true
+}
+
 cmd_down() {
 	if [ -f "$PID_FILE" ]; then
 		local pid
 		pid="$(cat "$PID_FILE")"
-		if kill -0 "$pid" 2>/dev/null; then
+		if kill -0 -- "$([ -f "$GROUP_FILE" ] && echo "-$pid" || echo "$pid")" 2>/dev/null; then
 			log "stopping dev server (pid $pid)"
-			kill_tree "$pid"
-			for _ in $(seq 1 10); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+			stop_server "$pid"
 		fi
-	fi
-	if [ -f "$STATE_FILE" ]; then
-		load_state
-		# Anything still listening on the app port is the dev server's orphaned child.
-		if command -v fuser >/dev/null && port_in_use "$APP_PORT"; then fuser -k -n tcp "$APP_PORT" >/dev/null 2>&1 || true; fi
 	fi
 	if container_exists; then
 		log "removing $CONTAINER"
