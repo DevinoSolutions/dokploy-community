@@ -27,6 +27,7 @@ export const UPTIMELY_MONITOR_KINDS = [
 	"port",
 	"ssl",
 	"domain",
+	"heartbeat",
 ] as const;
 
 export const uptimelyServiceType = pgEnum(
@@ -89,6 +90,10 @@ export const uptimelyMonitorLink = pgTable(
 		monitorId: text("monitorId").notNull(),
 		kind: uptimelyMonitorKind("kind").notNull(),
 		target: text("target").notNull(),
+		// Only set on `heartbeat` links: the secret of the Incoming Request
+		// monitor that a successful deploy pings. Plaintext like `apiKey`; it is
+		// write-only from the dashboard's perspective and never logged.
+		heartbeatKey: text("heartbeatKey"),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),
 	},
 	(table) => [
@@ -202,6 +207,53 @@ export const apiLinkUptimelyService = apiUptimelyService.extend({
 
 export const apiPreflightUptimelyService = apiUptimelyService.extend({
 	checkPath: uptimelyCheckPathSchema.optional(),
+});
+
+// The secret of an Incoming Request monitor is a UUID. People copy it either
+// bare or as the URL the monitor's Settings page shows, so both are accepted.
+const HEARTBEAT_KEY_PATTERN =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Extracts the heartbeat secret from what a person pasted: the bare key, or a
+ * `/heartbeat/<key>` / `/api/incoming-request/<key>` URL. Returns null when no
+ * UUID key can be read from it.
+ */
+export const parseUptimelyHeartbeatKey = (value: string): string | null => {
+	const trimmed = value.trim();
+	if (HEARTBEAT_KEY_PATTERN.test(trimmed)) return trimmed.toLowerCase();
+	try {
+		const segments = new URL(trimmed).pathname.split("/").filter(Boolean);
+		const last = segments.at(-1) ?? "";
+		const parent = segments.at(-2) ?? "";
+		if (
+			(parent === "heartbeat" || parent === "incoming-request") &&
+			HEARTBEAT_KEY_PATTERN.test(last)
+		) {
+			return last.toLowerCase();
+		}
+	} catch {
+		// Not a URL.
+	}
+	return null;
+};
+
+export const apiUptimelyHeartbeat = z.object({
+	// A deploy only exists for applications and compose services.
+	serviceType: z.enum(["application", "compose"]),
+	serviceId: z.string().min(1),
+});
+
+export const apiSetUptimelyHeartbeatKey = apiUptimelyHeartbeat.extend({
+	// The bare secret, or the heartbeat URL copied from Uptimely.
+	key: z
+		.string()
+		.trim()
+		.min(1)
+		.refine(
+			(value) => parseUptimelyHeartbeatKey(value) !== null,
+			"Paste the heartbeat URL or secret key from the monitor's Settings page in Uptimely",
+		),
 });
 
 export const apiRunUptimelyProbe = apiUptimelyService.extend({
