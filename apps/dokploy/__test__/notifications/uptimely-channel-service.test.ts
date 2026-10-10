@@ -12,7 +12,11 @@ const API_KEY = "uptimely-secret-key-1234";
 
 const mocks = vi.hoisted(() => ({
 	notification: null as Record<string, unknown> | null,
-	updates: [] as { table: string; values: Record<string, unknown> }[],
+	updates: [] as {
+		table: string;
+		values: Record<string, unknown>;
+		bound: unknown[];
+	}[],
 	deletes: [] as string[],
 	transactions: 0,
 	callTool: vi.fn(),
@@ -27,6 +31,16 @@ const tableName = (table: unknown) => {
 		: "unknown";
 };
 
+// The values a drizzle condition binds, e.g. the id in eq(column, id).
+const boundValues = (node: unknown): unknown[] => {
+	if (!node || typeof node !== "object") return [];
+	const chunks = (node as { queryChunks?: unknown[] }).queryChunks;
+	if (Array.isArray(chunks)) return chunks.flatMap(boundValues);
+	return "value" in node && !Array.isArray((node as { value: unknown }).value)
+		? [(node as { value: unknown }).value]
+		: [];
+};
+
 vi.mock("@dokploy/server/db", () => {
 	const tx = {
 		query: {
@@ -34,8 +48,12 @@ vi.mock("@dokploy/server/db", () => {
 		},
 		update: (table: unknown) => ({
 			set: (values: Record<string, unknown>) => ({
-				where: async () => {
-					mocks.updates.push({ table: tableName(table), values });
+				where: async (condition: unknown) => {
+					mocks.updates.push({
+						table: tableName(table),
+						values,
+						bound: boundValues(condition),
+					});
 				},
 			}),
 		}),
@@ -237,18 +255,32 @@ describe("the channel API key is write-only", () => {
 });
 
 describe("updateUptimelyChannelNotification", () => {
-	it("updates the channel of the notification row, not a client-supplied id", async () => {
+	it("updates the channel of the notification row, never another organization's channel id", async () => {
+		// A caller of org-1 names a channel that belongs to org-2.
 		await updateUptimelyChannelNotification({
 			notificationId: "n-1",
 			organizationId: "org-1",
-			uptimelyChannelId: "someone-elses-channel",
+			uptimelyChannelId: "chan-of-org-2",
+			apiKey: "attacker-key",
 			baseUrl: "https://uptimely.test",
 		});
 
-		// The where clause is built from the stored channel; the values prove
-		// the update ran, and the client id is not part of the schema output.
 		const channel = mocks.updates.find((u) => u.table === "uptimely_channel");
-		expect(channel?.values).toEqual({ baseUrl: "https://uptimely.test" });
+		expect(channel?.values).toMatchObject({ apiKey: "attacker-key" });
+		expect(channel?.bound).toContain("chan-1");
+		expect(channel?.bound).not.toContain("chan-of-org-2");
+	});
+
+	it("through the router, the client channel id cannot reach another organization's channel", async () => {
+		await caller.updateUptimely({
+			notificationId: "n-1",
+			uptimelyChannelId: "chan-of-org-2",
+			baseUrl: "https://uptimely.test",
+		});
+
+		const channel = mocks.updates.find((u) => u.table === "uptimely_channel");
+		expect(channel?.bound).toContain("chan-1");
+		expect(channel?.bound).not.toContain("chan-of-org-2");
 	});
 
 	it("refuses a notification of another organization", async () => {
@@ -289,9 +321,8 @@ describe("updateUptimelyChannelNotification", () => {
 			}),
 		).resolves.toBeUndefined();
 
-		expect(mocks.updates).toEqual([
-			{ table: "notification", values: { name: "Renamed" } },
-		]);
+		expect(mocks.updates.map((u) => u.table)).toEqual(["notification"]);
+		expect(mocks.updates[0]?.values).toEqual({ name: "Renamed" });
 	});
 
 	it("an update with nothing to set is a no-op, not an error", async () => {

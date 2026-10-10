@@ -10,8 +10,8 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
-import { INTEGRATION_LEARN_MORE_URLS } from "./integration-links";
 import { ShowDoDomain } from "./dodomain/show-dodomain";
+import { INTEGRATION_LEARN_MORE_URLS } from "./integration-links";
 import { ShowSnapvisor } from "./snapvisor/show-snapvisor";
 import { ShowUptimely } from "./uptimely/show-uptimely";
 
@@ -52,7 +52,9 @@ export const IntegrationsPage = () => {
 								<NotiflyLogo className="size-5 shrink-0" />
 							</span>
 							<p>
-								Sendly and Notifly are set up as notification channels in{" "}
+								Sendly, Notifly and the Uptimely incident channel (declares an
+								incident when a deploy fails, resolves it on the next success)
+								are set up as notification channels in{" "}
 								<Link
 									href="/dashboard/settings/notifications"
 									className="underline"
