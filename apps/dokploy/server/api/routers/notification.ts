@@ -18,9 +18,11 @@ import {
 	findNotificationById,
 	getWebServerSettings,
 	IS_CLOUD,
-	isSameUptimelyBaseUrl,
-	maskUptimelyApiKey,
+	isSameIntegrationBaseUrl,
+	maskApiKey,
+	NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	removeNotificationById,
+	SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	sendCustomNotification,
 	sendDiscordNotification,
 	sendEmailNotification,
@@ -112,29 +114,81 @@ import {
 	apiUpdateTelegram,
 	apiUpdateUptimelyChannel,
 	notifications,
+	type notifly,
+	type sendly,
 	server,
 	type uptimelyChannel,
 } from "@/server/db/schema";
 
 /**
- * Client-safe view of a notification: the Uptimely channel API key is
- * write-only, so it is replaced by its masked form (like the Uptimely
- * integration key).
+ * Client-safe view of a notification: the Sendly, Notifly and Uptimely channel
+ * API keys are write-only, so each is replaced by its masked form (like the
+ * Uptimely integration key).
  */
-type UptimelyChannelRow = typeof uptimelyChannel.$inferSelect;
+type ChannelWithKey = { apiKey: string };
+
+const maskChannelKey = <C extends ChannelWithKey>(channel: C | null) => {
+	if (!channel) return null;
+	const { apiKey, ...visible } = channel;
+	return { ...visible, apiKeyMasked: maskApiKey(apiKey) };
+};
 
 const presentNotification = <
-	T extends { uptimelyChannel: UptimelyChannelRow | null },
+	T extends {
+		sendly: typeof sendly.$inferSelect | null;
+		notifly: typeof notifly.$inferSelect | null;
+		uptimelyChannel: typeof uptimelyChannel.$inferSelect | null;
+	},
 >(
 	notification: T,
 ) => {
-	const { uptimelyChannel: channel, ...rest } = notification;
-	if (!channel) return { ...rest, uptimelyChannel: null };
-	const { apiKey, ...visible } = channel;
+	const {
+		sendly: sendlyChannel,
+		notifly: notiflyChannel,
+		uptimelyChannel: channel,
+		...rest
+	} = notification;
 	return {
 		...rest,
-		uptimelyChannel: { ...visible, apiKeyMasked: maskUptimelyApiKey(apiKey) },
+		sendly: maskChannelKey(sendlyChannel),
+		notifly: maskChannelKey(notiflyChannel),
+		uptimelyChannel: maskChannelKey(channel),
 	};
+};
+
+/**
+ * Edit flow of the "Test Notification" button: the key field is blank
+ * (write-only), so the test uses the stored key of the caller's own
+ * notification, never a key sent by the client. The stored key is never
+ * replayed against a URL typed into the form.
+ */
+const resolveChannelTestKey = async (params: {
+	apiKey?: string;
+	notificationId?: string;
+	baseUrl: string;
+	organizationId: string;
+	storedChannel: (
+		notification: Awaited<ReturnType<typeof findNotificationById>>,
+	) => { apiKey: string; baseUrl: string } | null;
+	urlChangeMessage: string;
+}) => {
+	if (params.apiKey || !params.notificationId) return params.apiKey;
+	const notification = await findNotificationById(params.notificationId);
+	if (notification.organizationId !== params.organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You are not authorized to access this notification",
+		});
+	}
+	const channel = params.storedChannel(notification);
+	if (!channel) return undefined;
+	if (!isSameIntegrationBaseUrl(params.baseUrl, channel.baseUrl)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: params.urlChangeMessage,
+		});
+	}
+	return channel.apiKey;
 };
 
 export const notificationRouter = createTRPCRouter({
@@ -514,6 +568,8 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
+				// Keep the specific refusals (not found, "enter the key again").
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
@@ -523,12 +579,24 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testSendlyConnection: withPermission("notification", "create")
 		.input(apiTestSendlyConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				const apiKey = await resolveChannelTestKey({
+					apiKey: input.apiKey,
+					notificationId: input.notificationId,
+					baseUrl: input.baseUrl,
+					organizationId: ctx.session.activeOrganizationId,
+					storedChannel: (notification) => notification.sendly,
+					urlChangeMessage: SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+				});
+				if (!apiKey) {
+					throw new Error("An API key is required to test the connection");
+				}
 				const { subject, html } = buildSendlyTestEmail();
-				await sendSendlyNotification(input, subject, html);
+				await sendSendlyNotification({ ...input, apiKey }, subject, html);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -580,6 +648,8 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
+				// Keep the specific refusals (not found, "enter the key again").
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
@@ -589,15 +659,30 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testNotiflyConnection: withPermission("notification", "create")
 		.input(apiTestNotiflyConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
-				await sendNotiflyNotification(input, {
-					event: "test",
-					message: "Hi, From Dokploy 👋",
-					timestamp: new Date().toISOString(),
+				const apiKey = await resolveChannelTestKey({
+					apiKey: input.apiKey,
+					notificationId: input.notificationId,
+					baseUrl: input.baseUrl,
+					organizationId: ctx.session.activeOrganizationId,
+					storedChannel: (notification) => notification.notifly,
+					urlChangeMessage: NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 				});
+				if (!apiKey) {
+					throw new Error("An API key is required to test the connection");
+				}
+				await sendNotiflyNotification(
+					{ ...input, apiKey },
+					{
+						event: "test",
+						message: "Hi, From Dokploy 👋",
+						timestamp: new Date().toISOString(),
+					},
+				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -664,34 +749,14 @@ export const notificationRouter = createTRPCRouter({
 		.input(apiTestUptimelyChannelConnection)
 		.mutation(async ({ input, ctx }) => {
 			try {
-				// Edit flow: the key field is blank (write-only), so test with the
-				// stored key of the caller's own notification.
-				let apiKey = input.apiKey;
-				if (!apiKey && input.notificationId) {
-					const notification = await findNotificationById(input.notificationId);
-					if (
-						notification.organizationId !== ctx.session.activeOrganizationId
-					) {
-						throw new TRPCError({
-							code: "UNAUTHORIZED",
-							message: "You are not authorized to access this notification",
-						});
-					}
-					apiKey = notification.uptimelyChannel?.apiKey;
-					// Never replay the stored key against a URL typed into the form.
-					if (
-						notification.uptimelyChannel &&
-						!isSameUptimelyBaseUrl(
-							input.baseUrl,
-							notification.uptimelyChannel.baseUrl,
-						)
-					) {
-						throw new TRPCError({
-							code: "BAD_REQUEST",
-							message: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
-						});
-					}
-				}
+				const apiKey = await resolveChannelTestKey({
+					apiKey: input.apiKey,
+					notificationId: input.notificationId,
+					baseUrl: input.baseUrl,
+					organizationId: ctx.session.activeOrganizationId,
+					storedChannel: (notification) => notification.uptimelyChannel,
+					urlChangeMessage: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+				});
 				if (!apiKey) {
 					throw new Error("An API key is required to test the connection");
 				}
@@ -1305,16 +1370,14 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	getEmailProviders: withPermission("notification", "read").query(
 		async ({ ctx }) => {
+			// The invitation dialog only lists the providers by name, so the
+			// provider rows (API keys, SMTP password) are never loaded.
 			return await db.query.notifications.findMany({
+				columns: { notificationId: true, name: true, notificationType: true },
 				where: eq(
 					notifications.organizationId,
 					ctx.session.activeOrganizationId,
 				),
-				with: {
-					email: true,
-					resend: true,
-					sendly: true,
-				},
 			});
 		},
 	),

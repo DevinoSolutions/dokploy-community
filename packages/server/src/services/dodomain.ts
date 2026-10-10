@@ -22,6 +22,10 @@ import {
 	isLikelyPrivateWebhookHost,
 	parseDoDomainWebhookRefusal,
 } from "@dokploy/server/utils/dodomain/webhook-reachability";
+import {
+	integrationUrlChangeNeedsKeyMessage,
+	isSameIntegrationBaseUrl,
+} from "@dokploy/server/utils/integrations/base-url";
 import { getRemotePublicIp, isPrivateIp } from "@dokploy/server/utils/ip";
 import { sendDomainVerificationFailedNotifications } from "@dokploy/server/utils/notifications/domain-verification";
 import { manageDomain } from "@dokploy/server/utils/traefik/domain";
@@ -54,6 +58,9 @@ import { getWebServerSettings } from "./web-server-settings";
 
 export type DoDomainIntegration = typeof dodomainIntegration.$inferSelect;
 export type DoDomainConnectSession = typeof dodomainConnectSession.$inferSelect;
+
+export const DODOMAIN_URL_CHANGE_NEEDS_KEY_MESSAGE =
+	integrationUrlChangeNeedsKeyMessage("DoDomain", "secret key");
 
 export const DODOMAIN_WEBHOOK_PATH = "/api/webhooks/dodomain";
 /** Raw webhook bodies above this are refused before verification. */
@@ -296,6 +303,17 @@ export const updateDoDomain = async (
 		throw new TRPCError({
 			code: "NOT_FOUND",
 			message: "DoDomain integration not found",
+		});
+	}
+	// The stored key must not be sent to a URL the caller just chose.
+	if (
+		input.baseUrl !== undefined &&
+		!input.secretKey &&
+		!isSameIntegrationBaseUrl(input.baseUrl, current.baseUrl)
+	) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: DODOMAIN_URL_CHANGE_NEEDS_KEY_MESSAGE,
 		});
 	}
 	const values: Partial<DoDomainIntegration> = {};
