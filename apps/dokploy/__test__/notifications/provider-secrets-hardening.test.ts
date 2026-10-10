@@ -126,6 +126,9 @@ const { sendBuildSuccessNotifications } = await import(
 const { sendEmailNotification, sendResendNotification } = await import(
 	"@dokploy/server/utils/notifications/utils"
 );
+const { maskHeaderValues } = await import(
+	"@dokploy/server/utils/integrations/mask"
+);
 
 const caller = createCallerFactory(notificationRouter)({
 	user: { id: "user-1", email: "owner@test.com", role: "owner" },
@@ -333,11 +336,11 @@ const cases: Case[] = [
 		row: {
 			ntfyId: "ntfy-1",
 			serverUrl: "https://ntfy.example.com",
-			topic: "deploys",
+			topic: "ntfy-secret-topic-ab12",
 			accessToken: "ntfy-secret-access-token-qr78",
 			priority: 3,
 		},
-		secrets: { accessToken: "••••qr78" },
+		secrets: { accessToken: "••••qr78", topic: "••••ab12" },
 		typed: { accessToken: "ntfy-typed-wxyz" },
 		plain: ["topic", "alerts"],
 		update: services.updateNtfyNotification,
@@ -407,15 +410,16 @@ const cases: Case[] = [
 		idKey: "customId",
 		row: {
 			customId: "custom-1",
-			endpoint: "https://hooks.example.com/ingest",
+			endpoint:
+				"https://hooks.example.com/ingest?token=custom-secret-endpoint-gh34",
 			headers: {
 				Authorization: "Bearer custom-secret-header-yz56",
 				"X-Env": "prod",
 			},
 		},
-		secrets: {},
+		secrets: { endpoint: "https://hooks.example.com/…gh34" },
 		typed: {},
-		plain: ["endpoint", "https://hooks.example.com/ingest"],
+		plain: ["endpoint", "https://hooks.example.com/ingest?token=new-ab12"],
 		update: services.updateCustomNotification,
 		routerUpdate: "updateCustom",
 		routerTest: "testCustomConnection",
@@ -1015,6 +1019,7 @@ describe("ntfy: the access token is optional and never replayed against another 
 				notificationId: "n-1",
 				organizationId: "org-1",
 				serverUrl: "https://attacker.example",
+				topic: "typed-topic",
 			}),
 		).rejects.toMatchObject({ code: "BAD_REQUEST", message });
 		expect(mocks.updates).toEqual([]);
@@ -1025,11 +1030,13 @@ describe("ntfy: the access token is optional and never replayed against another 
 			notificationId: "n-1",
 			organizationId: "org-1",
 			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
 			accessToken: "typed-token",
 		});
 
 		expect(providerUpdate(c)?.values).toEqual({
 			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
 			accessToken: "typed-token",
 		});
 	});
@@ -1039,11 +1046,13 @@ describe("ntfy: the access token is optional and never replayed against another 
 			notificationId: "n-1",
 			organizationId: "org-1",
 			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
 			clearAccessToken: true,
 		});
 
 		expect(providerUpdate(c)?.values).toEqual({
 			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
 			accessToken: null,
 		});
 	});
@@ -1079,10 +1088,12 @@ describe("ntfy: the access token is optional and never replayed against another 
 			notificationId: "n-1",
 			organizationId: "org-1",
 			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
 		});
 
 		expect(providerUpdate(c)?.values).toEqual({
 			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
 		});
 	});
 
@@ -1316,8 +1327,12 @@ describe("custom: header values are write-only and never replayed against anothe
 			Authorization: "••••yz56",
 			"X-Env": "••••",
 		});
-		expect(result.custom.endpoint).toBe("https://hooks.example.com/ingest");
+		expect(result.custom).not.toHaveProperty("endpoint");
+		expect(result.custom.endpointMasked).toBe(
+			"https://hooks.example.com/…gh34",
+		);
 		expect(JSON.stringify(result)).not.toContain("custom-secret-header");
+		expect(JSON.stringify(result)).not.toContain("custom-secret-endpoint");
 	});
 
 	it("notification.all masks them too", async () => {
@@ -1593,7 +1608,10 @@ describe("sending still uses the stored secrets", () => {
 
 			const secrets =
 				type === "custom"
-					? [(c.row.headers as Record<string, string>).Authorization as string]
+					? [
+							(c.row.headers as Record<string, string>).Authorization as string,
+							c.row.endpoint as string,
+						]
 					: Object.keys(c.secrets).map((column) => c.row[column] as string);
 			expect(secrets.length).toBeGreaterThan(0);
 			for (const secret of secrets) expect(wire()).toContain(secret);
@@ -1609,5 +1627,484 @@ describe("sending still uses the stored secrets", () => {
 
 		expect(wire()).toContain(email.row.password as string);
 		expect(wire()).toContain(resend.row.apiKey as string);
+	});
+});
+
+describe("maskHeaderValues", () => {
+	it("masks string values and hides a value that is not a string instead of throwing", () => {
+		const headers = {
+			Authorization: "Bearer secret-token-ab12",
+			"X-Null": null,
+			"X-Number": 42,
+			"X-Object": { nested: "secret" },
+			"X-Short": "ab",
+		} as unknown as Record<string, string>;
+
+		expect(maskHeaderValues(headers)).toEqual({
+			Authorization: "••••ab12",
+			"X-Null": "••••",
+			"X-Number": "••••",
+			"X-Object": "••••",
+			"X-Short": "••••",
+		});
+	});
+
+	it("handles a missing header map", () => {
+		expect(maskHeaderValues(null)).toEqual({});
+	});
+
+	it("notification.one survives a stored null header value", async () => {
+		const c = byType("custom");
+		mocks.notification = storedNotification(c, {
+			custom: { ...c.row, headers: { Authorization: null, "X-Env": "prod" } },
+		});
+
+		const result = await call("one", { notificationId: "n-1" });
+
+		expect(result.custom.headersMasked).toEqual({
+			Authorization: "••••",
+			"X-Env": "••••",
+		});
+	});
+});
+
+describe("email: a password of only spaces is blank", () => {
+	const c = byType("email");
+
+	beforeEach(() => {
+		mocks.notification = storedNotification(c);
+	});
+
+	it("keeps the stored password", async () => {
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			fromAddress: "other@example.com",
+			password: "   ",
+		});
+
+		expect(providerUpdate(c)?.values).toEqual({
+			fromAddress: "other@example.com",
+		});
+	});
+
+	it("does not count as the password typed again for a changed SMTP server", async () => {
+		await expect(
+			c.update({
+				notificationId: "n-1",
+				organizationId: "org-1",
+				smtpServer: "smtp.attacker.example",
+				password: "   ",
+			}),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message:
+				"Enter the SMTP password again to change the SMTP server or port.",
+		});
+		expect(mocks.updates).toEqual([]);
+	});
+
+	it("a typed password is stored as typed, edge spaces included", async () => {
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			password: " pass word ",
+		});
+
+		expect(providerUpdate(c)?.values).toEqual({ password: " pass word " });
+	});
+});
+
+describe("ntfy: the topic is a write-only secret", () => {
+	const c = byType("ntfy");
+	const storedTopic = c.row.topic as string;
+	const message = "Enter the topic again to change the ntfy server URL.";
+	// A test that names no topic of its own.
+	const { topic: _topic, ...testWithoutTopic } = c.testInput;
+
+	beforeEach(() => {
+		mocks.notification = storedNotification(c);
+	});
+
+	it("notification.one and .all show the masked topic and never the topic", async () => {
+		const one = await call("one", { notificationId: "n-1" });
+		const all = await call("all", undefined);
+
+		expect(one.ntfy).not.toHaveProperty("topic");
+		expect(one.ntfy.topicMasked).toBe("••••ab12");
+		expect(all[0].ntfy.topicMasked).toBe("••••ab12");
+		expect(JSON.stringify([one, all])).not.toContain("ntfy-secret-topic");
+	});
+
+	it("masks nothing for a row without a topic", async () => {
+		mocks.notification = storedNotification(c, {
+			ntfy: { ...c.row, topic: "" },
+		});
+
+		const one = await call("one", { notificationId: "n-1" });
+
+		expect(one.ntfy.topicMasked).toBeNull();
+	});
+
+	it("update: a blank, whitespace or omitted topic keeps the stored one", async () => {
+		await call("updateNtfy", { notificationId: "n-1", topic: "" });
+		await call("updateNtfy", { notificationId: "n-1", topic: "   " });
+		await call("updateNtfy", { notificationId: "n-1", priority: 4 });
+
+		for (const update of mocks.updates.filter((u) => u.table === "ntfy")) {
+			expect(update.values).not.toHaveProperty("topic");
+		}
+	});
+
+	it("update: a typed topic replaces it", async () => {
+		await call("updateNtfy", { notificationId: "n-1", topic: " new-topic " });
+
+		expect(providerUpdate(c)?.values).toEqual({ topic: "new-topic" });
+	});
+
+	it("update: a changed server URL needs the topic typed again, and writes nothing", async () => {
+		await expect(
+			c.update({
+				notificationId: "n-1",
+				organizationId: "org-1",
+				serverUrl: "https://attacker.example",
+				topic: "",
+				accessToken: "typed-token",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message });
+		expect(mocks.updates).toEqual([]);
+	});
+
+	it("update: a changed server URL with the topic typed again is accepted", async () => {
+		mocks.notification = storedNotification(c, {
+			ntfy: { ...c.row, accessToken: null },
+		});
+
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
+		});
+
+		expect(providerUpdate(c)?.values).toEqual({
+			serverUrl: "https://elsewhere.example",
+			topic: "typed-topic",
+		});
+	});
+
+	it("update: the same server URL (case, slash) keeps the topic", async () => {
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			serverUrl: "https://NTFY.example.com/",
+			topic: "",
+		});
+
+		expect(providerUpdate(c)?.values).toEqual({
+			serverUrl: "https://NTFY.example.com/",
+		});
+	});
+
+	it("update: another organization's notification is refused", async () => {
+		mocks.notification = storedNotification(c, { organizationId: "org-2" });
+
+		await expect(
+			call("updateNtfy", { notificationId: "n-1", topic: "hijack" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.updates).toEqual([]);
+	});
+
+	it("test: a blank topic tests with the stored one of the caller's notification", async () => {
+		await expect(
+			call("testNtfyConnection", {
+				...testWithoutTopic,
+				topic: "",
+				notificationId: "n-1",
+			}),
+		).resolves.toBe(true);
+
+		expect(wire()).toContain(`https://ntfy.example.com/${storedTopic}`);
+	});
+
+	it("test: a typed topic is used as is", async () => {
+		await call("testNtfyConnection", {
+			...testWithoutTopic,
+			topic: "typed-topic",
+			notificationId: "n-1",
+		});
+
+		expect(wire()).toContain("https://ntfy.example.com/typed-topic");
+		expect(wire()).not.toContain(storedTopic);
+	});
+
+	it("test: a blank topic without a notification has nothing to borrow", async () => {
+		await expect(
+			call("testNtfyConnection", { ...testWithoutTopic, topic: "" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.sent).toEqual([]);
+	});
+
+	it("test: the stored topic is not sent to a different server", async () => {
+		await expect(
+			call("testNtfyConnection", {
+				...testWithoutTopic,
+				serverUrl: "https://attacker.example",
+				topic: "",
+				accessToken: "typed-token",
+				notificationId: "n-1",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message });
+		expect(mocks.sent).toEqual([]);
+	});
+
+	it("test: will not borrow the topic of another organization's notification", async () => {
+		mocks.notification = storedNotification(c, { organizationId: "org-2" });
+
+		await expect(
+			call("testNtfyConnection", {
+				...testWithoutTopic,
+				topic: "",
+				notificationId: "n-1",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.sent).toEqual([]);
+	});
+
+	it("test: removing the token still borrows the topic but not the token", async () => {
+		await expect(
+			call("testNtfyConnection", {
+				...testWithoutTopic,
+				topic: "",
+				clearAccessToken: true,
+				notificationId: "n-1",
+			}),
+		).resolves.toBe(true);
+
+		expect(wire()).toContain(storedTopic);
+		expect(wire()).not.toContain("Bearer");
+	});
+
+	it("test: a failure that echoes the stored topic and token does not hand them to the client", async () => {
+		mocks.fetch.mockRejectedValueOnce(
+			new Error(
+				`Failed to parse URL from https://ntfy.example.com/${storedTopic} (${c.row.accessToken})`,
+			),
+		);
+
+		const failure = await call("testNtfyConnection", {
+			...testWithoutTopic,
+			topic: "",
+			notificationId: "n-1",
+		}).catch((error: Error) => error);
+
+		expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+		expect((failure as Error).message).not.toContain(storedTopic);
+		expect((failure as Error).message).not.toContain(
+			c.row.accessToken as string,
+		);
+		expect((failure as Error).message).toContain("Failed to parse URL");
+	});
+});
+
+describe("custom: the endpoint is a write-only secret", () => {
+	const c = byType("custom");
+	const storedEndpoint = c.row.endpoint as string;
+	const stored = c.row.headers as Record<string, string>;
+	const message =
+		"Enter the header values again to change the Custom webhook URL.";
+
+	beforeEach(() => {
+		mocks.notification = storedNotification(c);
+	});
+
+	it("notification.one and .all show the masked endpoint and never the endpoint", async () => {
+		const one = await call("one", { notificationId: "n-1" });
+		const all = await call("all", undefined);
+
+		expect(one.custom).not.toHaveProperty("endpoint");
+		expect(one.custom.endpointMasked).toBe("https://hooks.example.com/…gh34");
+		expect(all[0].custom.endpointMasked).toBe(
+			"https://hooks.example.com/…gh34",
+		);
+		expect(JSON.stringify([one, all])).not.toContain("custom-secret-endpoint");
+		expect(JSON.stringify([one, all])).not.toContain("token=");
+	});
+
+	it("update: a blank, whitespace or omitted endpoint keeps the stored one", async () => {
+		await c.update({ notificationId: "n-1", organizationId: "org-1" });
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			endpoint: "",
+		});
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			endpoint: "   ",
+			headers: { "X-Env": "staging" },
+		});
+
+		for (const update of mocks.updates.filter((u) => u.table === "custom")) {
+			expect(update.values).not.toHaveProperty("endpoint");
+		}
+	});
+
+	it("update: a blank endpoint does not make the stored header values re-typed", async () => {
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			endpoint: "",
+			headers: { Authorization: "" },
+		});
+
+		expect(providerUpdate(c)?.values).toEqual({
+			headers: { Authorization: stored.Authorization },
+		});
+	});
+
+	it("update: a typed endpoint on the same host and path replaces it and keeps the header values", async () => {
+		await c.update({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			endpoint: "https://hooks.example.com/ingest?token=rotated-cd56",
+			headers: { Authorization: "" },
+		});
+
+		expect(providerUpdate(c)?.values).toEqual({
+			endpoint: "https://hooks.example.com/ingest?token=rotated-cd56",
+			headers: { Authorization: stored.Authorization },
+		});
+	});
+
+	it("update: a typed endpoint elsewhere needs the header values typed again", async () => {
+		await expect(
+			call("updateCustom", {
+				notificationId: "n-1",
+				endpoint: "https://attacker.example/hook",
+				headers: { Authorization: "" },
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message });
+		expect(mocks.updates).toEqual([]);
+	});
+
+	it("update: another organization's notification is refused", async () => {
+		mocks.notification = storedNotification(c, { organizationId: "org-2" });
+
+		await expect(
+			call("updateCustom", {
+				notificationId: "n-1",
+				endpoint: "https://attacker.example/hook",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.updates).toEqual([]);
+	});
+
+	it("test: a blank endpoint tests with the stored one and its stored header values", async () => {
+		await expect(
+			call("testCustomConnection", {
+				endpoint: "",
+				headers: { Authorization: "", "X-Env": "" },
+				notificationId: "n-1",
+			}),
+		).resolves.toBe(true);
+
+		expect(wire()).toContain(storedEndpoint);
+		expect(wire()).toContain(stored.Authorization as string);
+	});
+
+	it("test: a blank endpoint with no headers sent still borrows the stored endpoint", async () => {
+		await call("testCustomConnection", { notificationId: "n-1" });
+
+		expect(wire()).toContain(storedEndpoint);
+		expect(wire()).not.toContain(stored.Authorization as string);
+	});
+
+	it("test: a blank endpoint without a notification has nothing to borrow", async () => {
+		await expect(
+			call("testCustomConnection", { endpoint: "" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.sent).toEqual([]);
+	});
+
+	it("test: a typed endpoint elsewhere does not get the stored header values", async () => {
+		await expect(
+			call("testCustomConnection", {
+				endpoint: "https://attacker.example/hook",
+				headers: { Authorization: "" },
+				notificationId: "n-1",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message });
+		expect(mocks.sent).toEqual([]);
+	});
+
+	it("test: will not borrow the endpoint of another organization's notification", async () => {
+		mocks.notification = storedNotification(c, { organizationId: "org-2" });
+
+		await expect(
+			call("testCustomConnection", { endpoint: "", notificationId: "n-1" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.sent).toEqual([]);
+	});
+
+	it("test: a failure that echoes the stored endpoint and header values does not hand them to the client", async () => {
+		mocks.fetch.mockRejectedValueOnce(
+			new Error(
+				`Failed to parse URL from ${storedEndpoint} with ${stored.Authorization}`,
+			),
+		);
+
+		const failure = await call("testCustomConnection", {
+			endpoint: "",
+			headers: { Authorization: "" },
+			notificationId: "n-1",
+		}).catch((error: Error) => error);
+
+		expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+		expect((failure as Error).message).not.toContain("custom-secret");
+		expect((failure as Error).message).toContain("Failed to parse URL");
+	});
+});
+
+describe("create: a failure logs the error name, never the error", () => {
+	it("keeps the bound provider secret out of the log and the client message", async () => {
+		const { db } = await import("@dokploy/server/db");
+		const secret = "https://hooks.slack.com/services/T0/B0/leaked-secret-ab12";
+		vi.mocked(db.transaction).mockRejectedValueOnce(
+			Object.assign(
+				new Error(
+					`insert into "slack" ("webhookUrl") values ($1) -- params: ${secret}`,
+				),
+				{ name: "DrizzleQueryError" },
+			),
+		);
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const failure = await call("createSlack", {
+			name: "Slack",
+			webhookUrl: secret,
+			channel: "#ops",
+			appBuildError: true,
+			databaseBackup: true,
+			dokployBackup: true,
+			volumeBackup: true,
+			dokployRestart: true,
+			appDeploy: true,
+			dockerCleanup: true,
+			scheduleFailure: true,
+			serverThreshold: true,
+		}).catch((e: Error) => e);
+
+		const logged = JSON.stringify([log.mock.calls, error.mock.calls]);
+		log.mockRestore();
+		error.mockRestore();
+
+		expect(failure).toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Error creating the notification",
+		});
+		expect(logged).not.toContain("leaked-secret");
+		expect(logged).toContain("DrizzleQueryError");
 	});
 });

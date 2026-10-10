@@ -188,7 +188,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 		.object({
 			type: z.literal("ntfy"),
 			serverUrl: z.string().min(1, { message: "Server URL is required" }),
-			topic: z.string().min(1, { message: "Topic is required" }),
+			// Required on create; blank keeps the stored topic when editing.
+			topic: z.string().optional(),
 			accessToken: z.string().optional(),
 			clearAccessToken: z.boolean().optional(),
 			priority: z.number().min(1).max(5).default(3),
@@ -217,7 +218,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("custom"),
-			endpoint: z.string().min(1, { message: "Endpoint URL is required" }),
+			// Required on create; blank keeps the stored endpoint when editing.
+			endpoint: z.string().optional(),
 			headers: z
 				.array(
 					z.object({
@@ -638,7 +640,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					type: notification.notificationType,
 					accessToken: "",
 					clearAccessToken: false,
-					topic: notification.ntfy?.topic,
+					topic: "",
 					priority: notification.ntfy?.priority,
 					serverUrl: notification.ntfy?.serverUrl,
 					name: notification.name,
@@ -701,7 +703,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					databaseBackup: notification.databaseBackup,
 					dokployBackup: notification.dokployBackup,
 					type: notification.notificationType,
-					endpoint: notification.custom?.endpoint || "",
+					endpoint: "",
 					// Header values are write-only: the names come back, the values stay blank.
 					headers: Object.keys(notification.custom?.headersMasked ?? {}).map(
 						(key) => ({ key, value: "" }),
@@ -966,6 +968,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "ntfy") {
+			if (!requireOnCreate("topic", data.topic, "Topic is required")) return;
 			promise = ntfyMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -976,7 +979,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				serverUrl: data.serverUrl,
 				accessToken: data.accessToken || "",
 				clearAccessToken: data.clearAccessToken || undefined,
-				topic: data.topic,
+				topic: data.topic ?? "",
 				priority: data.priority,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
@@ -1056,6 +1059,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "custom") {
+			if (
+				!requireOnCreate("endpoint", data.endpoint, "Endpoint URL is required")
+			)
+				return;
 			// Convert headers array to object
 			const headersRecord =
 				data.headers && data.headers.length > 0
@@ -1075,7 +1082,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				endpoint: data.endpoint,
+				endpoint: data.endpoint ?? "",
 				headers: headersRecord ?? (notificationId ? {} : undefined),
 				name: data.name,
 				dockerCleanup: dockerCleanup,
@@ -2066,8 +2073,19 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												<FormItem>
 													<FormLabel>Topic</FormLabel>
 													<FormControl>
-														<Input placeholder="deployments" {...field} />
+														<Input
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.ntfy?.topicMasked,
+																"deployments",
+															)}
+															{...field}
+															value={field.value ?? ""}
+														/>
 													</FormControl>
+													<FormDescription>
+														On a public server the topic is the secret.
+													</FormDescription>
 													<FormMessage />
 												</FormItem>
 											)}
@@ -2222,8 +2240,13 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Webhook URL</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="https://api.example.com/webhook"
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.custom?.endpointMasked,
+																"https://api.example.com/webhook",
+															)}
 															{...field}
+															value={field.value ?? ""}
 														/>
 													</FormControl>
 													<FormDescription>
@@ -2845,12 +2868,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 										});
 									} else if (data.type === "ntfy") {
 										await testNtfyConnection({
-											// Removing the token: nothing stored is borrowed.
-											notificationId: data.clearAccessToken
-												? undefined
-												: notificationId || undefined,
+											notificationId: notificationId || undefined,
+											// Removing the token: the stored one is not borrowed.
+											clearAccessToken: data.clearAccessToken || undefined,
 											serverUrl: data.serverUrl,
-											topic: data.topic,
+											topic: data.topic ?? "",
 											accessToken: data.accessToken || "",
 											priority: data.priority ?? 0,
 										});
@@ -2884,7 +2906,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												: undefined;
 										await testCustomConnection({
 											notificationId: notificationId || undefined,
-											endpoint: data.endpoint,
+											endpoint: data.endpoint ?? "",
 											headers:
 												headersRecord ?? (notificationId ? {} : undefined),
 										});

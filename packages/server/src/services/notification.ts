@@ -77,6 +77,8 @@ export const GOTIFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE =
 	integrationUrlChangeNeedsKeyMessage("Gotify", "app token");
 export const NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE =
 	integrationUrlChangeNeedsKeyMessage("ntfy", "access token");
+export const NTFY_URL_CHANGE_NEEDS_TOPIC_MESSAGE =
+	"Enter the topic again to change the ntfy server URL.";
 export const EMAIL_SERVER_CHANGE_NEEDS_PASSWORD_MESSAGE =
 	"Enter the SMTP password again to change the SMTP server or port.";
 export const CUSTOM_URL_CHANGE_NEEDS_HEADERS_MESSAGE =
@@ -502,7 +504,8 @@ export const updateEmailNotification = async (
 
 		// A blank username turns the authentication off, and the password with it.
 		const clearsAuth = input.username !== undefined && !input.username.trim();
-		const typedPassword = input.password || undefined;
+		// Not trimmed (a password may have edge spaces), but only spaces is blank.
+		const typedPassword = input.password?.trim() ? input.password : undefined;
 
 		// The stored password must not be sent to a server the caller just chose.
 		const username = input.username ?? stored.username ?? "";
@@ -1193,27 +1196,35 @@ export const updateNtfyNotification = async (
 		const stored = await findOwnedProvider(tx, input, "ntfy", "ntfy");
 
 		const typedToken = input.accessToken?.trim() || undefined;
+		const typedTopic = input.topic?.trim() || undefined;
 		const clearsToken = input.clearAccessToken === true && !typedToken;
 
-		// The stored token must not be sent to a server the caller just chose.
+		// The stored topic and token must not be sent to a server the caller just
+		// chose.
 		if (
 			input.serverUrl !== undefined &&
-			stored.accessToken &&
-			!typedToken &&
-			!clearsToken &&
 			!isSameIntegrationBaseUrl(input.serverUrl, stored.serverUrl)
 		) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
-			});
+			if (!typedTopic) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: NTFY_URL_CHANGE_NEEDS_TOPIC_MESSAGE,
+				});
+			}
+			if (stored.accessToken && !typedToken && !clearsToken) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+				});
+			}
 		}
 
 		await updateNotificationRow(tx, input);
 
 		const values = withoutUndefined({
 			serverUrl: input.serverUrl,
-			topic: input.topic,
+			// Blank or omitted keeps the stored topic (it is write-only).
+			topic: typedTopic,
 			// Blank or omitted keeps the stored token (it is write-only).
 			accessToken: clearsToken ? null : typedToken,
 			priority: input.priority,
@@ -1284,9 +1295,11 @@ export const updateCustomNotification = async (
 
 		// The stored header values must not be sent to an endpoint the caller
 		// just chose.
+		// The endpoint is write-only too: blank or omitted keeps the stored one.
+		const typedEndpoint = input.endpoint?.trim() || undefined;
 		const endpointChanged =
-			input.endpoint !== undefined &&
-			!isSameIntegrationBaseUrl(input.endpoint, stored.endpoint);
+			typedEndpoint !== undefined &&
+			!isSameIntegrationBaseUrl(typedEndpoint, stored.endpoint);
 		let headers: Record<string, string> | undefined;
 		if (input.headers === undefined) {
 			if (endpointChanged && Object.keys(stored.headers ?? {}).length > 0) {
@@ -1306,7 +1319,7 @@ export const updateCustomNotification = async (
 		await updateNotificationRow(tx, input);
 
 		const values = withoutUndefined({
-			endpoint: input.endpoint,
+			endpoint: typedEndpoint,
 			headers,
 		});
 		if (Object.keys(values).length > 0) {
