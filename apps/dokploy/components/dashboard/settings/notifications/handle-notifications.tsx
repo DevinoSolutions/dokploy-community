@@ -126,7 +126,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("sendly"),
-			apiKey: z.string().min(1, { message: "API Key is required" }),
+			// Required on create; blank keeps the stored key when editing.
+			apiKey: z.string().optional(),
 			fromAddress: z
 				.string()
 				.min(1, { message: "From Address is required" })
@@ -144,7 +145,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("notifly"),
-			apiKey: z.string().min(1, { message: "API Key is required" }),
+			// Required on create; blank keeps the stored key when editing.
+			apiKey: z.string().optional(),
 			workflowKey: z.string().min(1, { message: "Workflow Key is required" }),
 			subscriberId: z.string().optional(),
 			baseUrl: z.string().min(1, { message: "Base URL is required" }),
@@ -525,7 +527,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					apiKey: notification.sendly?.apiKey,
+					apiKey: "",
 					toAddresses: notification.sendly?.toAddresses,
 					fromAddress: notification.sendly?.fromAddress,
 					baseUrl: notification.sendly?.baseUrl,
@@ -543,7 +545,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					apiKey: notification.notifly?.apiKey,
+					apiKey: "",
 					workflowKey: notification.notifly?.workflowKey,
 					subscriberId: notification.notifly?.subscriberId || "",
 					baseUrl: notification.notifly?.baseUrl,
@@ -824,6 +826,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "sendly") {
+			if (!notificationId && !data.apiKey?.trim()) {
+				form.setError("apiKey", { message: "API Key is required" });
+				return;
+			}
 			promise = sendlyMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -831,7 +837,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				apiKey: data.apiKey,
+				// Blank keeps the stored key when editing.
+				apiKey: data.apiKey ?? "",
 				fromAddress: data.fromAddress,
 				toAddresses: data.toAddresses,
 				baseUrl: data.baseUrl,
@@ -843,6 +850,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "notifly") {
+			if (!notificationId && !data.apiKey?.trim()) {
+				form.setError("apiKey", { message: "API Key is required" });
+				return;
+			}
 			promise = notiflyMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -850,7 +861,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				apiKey: data.apiKey,
+				// Blank keeps the stored key when editing.
+				apiKey: data.apiKey ?? "",
 				workflowKey: data.workflowKey,
 				subscriberId: data.subscriberId || "",
 				baseUrl: data.baseUrl,
@@ -1564,7 +1576,12 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormControl>
 														<Input
 															type="password"
-															placeholder="sk_********"
+															autoComplete="off"
+															placeholder={
+																notification?.sendly?.apiKeyMasked
+																	? `${notification.sendly.apiKeyMasked} (leave blank to keep)`
+																	: "sk_********"
+															}
 															{...field}
 														/>
 													</FormControl>
@@ -1676,7 +1693,12 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormControl>
 														<Input
 															type="password"
-															placeholder="Notifly API key"
+															autoComplete="off"
+															placeholder={
+																notification?.notifly?.apiKeyMasked
+																	? `${notification.notifly.apiKeyMasked} (leave blank to keep)`
+																	: "Notifly API key"
+															}
 															{...field}
 														/>
 													</FormControl>
@@ -2626,14 +2648,16 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 										});
 									} else if (data.type === "sendly") {
 										await testSendlyConnection({
-											apiKey: data.apiKey,
+											apiKey: data.apiKey ?? "",
+											notificationId: notificationId || undefined,
 											fromAddress: data.fromAddress,
 											toAddresses: data.toAddresses,
 											baseUrl: data.baseUrl,
 										});
 									} else if (data.type === "notifly") {
 										await testNotiflyConnection({
-											apiKey: data.apiKey,
+											apiKey: data.apiKey ?? "",
+											notificationId: notificationId || undefined,
 											workflowKey: data.workflowKey,
 											subscriberId: data.subscriberId || "",
 											baseUrl: data.baseUrl,

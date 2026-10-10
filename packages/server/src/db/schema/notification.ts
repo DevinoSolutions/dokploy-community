@@ -553,16 +553,24 @@ export const apiCreateSendly = notificationsSchema
 
 export const apiUpdateSendly = apiCreateSendly.partial().extend({
 	notificationId: z.string().min(1),
-	sendlyId: z.string().min(1),
+	// Ignored: the channel is derived from the notification row.
+	sendlyId: z.string().optional(),
+	// Write-only: blank or omitted keeps the stored key.
+	apiKey: z.string().trim().optional(),
 	organizationId: z.string().optional(),
 });
 
-export const apiTestSendlyConnection = apiCreateSendly.pick({
-	apiKey: true,
-	fromAddress: true,
-	toAddresses: true,
-	baseUrl: true,
-});
+export const apiTestSendlyConnection = apiCreateSendly
+	.pick({
+		fromAddress: true,
+		toAddresses: true,
+		baseUrl: true,
+	})
+	.extend({
+		// Blank on the edit flow: the stored key of `notificationId` is used.
+		apiKey: z.string().trim().optional(),
+		notificationId: z.string().optional(),
+	});
 
 export const apiCreateNotifly = notificationsSchema
 	.pick({
@@ -587,16 +595,24 @@ export const apiCreateNotifly = notificationsSchema
 
 export const apiUpdateNotifly = apiCreateNotifly.partial().extend({
 	notificationId: z.string().min(1),
-	notiflyId: z.string().min(1),
+	// Ignored: the channel is derived from the notification row.
+	notiflyId: z.string().optional(),
+	// Write-only: blank or omitted keeps the stored key.
+	apiKey: z.string().trim().optional(),
 	organizationId: z.string().optional(),
 });
 
-export const apiTestNotiflyConnection = apiCreateNotifly.pick({
-	apiKey: true,
-	workflowKey: true,
-	subscriberId: true,
-	baseUrl: true,
-});
+export const apiTestNotiflyConnection = apiCreateNotifly
+	.pick({
+		workflowKey: true,
+		subscriberId: true,
+		baseUrl: true,
+	})
+	.extend({
+		// Blank on the edit flow: the stored key of `notificationId` is used.
+		apiKey: z.string().trim().optional(),
+		notificationId: z.string().optional(),
+	});
 
 export const apiCreateUptimelyChannel = notificationsSchema
 	.pick({

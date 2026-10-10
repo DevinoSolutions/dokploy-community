@@ -608,6 +608,39 @@ export const updateSendlyNotification = async (
 	input: z.infer<typeof apiUpdateSendly>,
 ) => {
 	await db.transaction(async (tx) => {
+		// The channel is derived from the notification row, never from the
+		// client: the row must belong to the caller's organization and be a
+		// Sendly one.
+		const existing = await tx.query.notifications.findFirst({
+			where: eq(notifications.notificationId, input.notificationId),
+			with: { sendly: true },
+		});
+		if (
+			!existing ||
+			!input.organizationId ||
+			existing.organizationId !== input.organizationId ||
+			existing.notificationType !== "sendly" ||
+			!existing.sendly
+		) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "Sendly notification not found",
+			});
+		}
+		const stored = existing.sendly;
+
+		// The stored key must not be sent to a URL the caller just chose.
+		if (
+			input.baseUrl !== undefined &&
+			!input.apiKey &&
+			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
+		) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+			});
+		}
+
 		const newDestination = await tx
 			.update(notifications)
 			.set({
@@ -634,17 +667,19 @@ export const updateSendlyNotification = async (
 			});
 		}
 
-		await tx
-			.update(sendly)
-			.set({
-				apiKey: input.apiKey,
-				fromAddress: input.fromAddress,
-				toAddresses: input.toAddresses,
-				baseUrl: input.baseUrl,
-			})
-			.where(eq(sendly.sendlyId, input.sendlyId))
-			.returning()
-			.then((value) => value[0]);
+		const channelValues = withoutUndefined({
+			// Blank or omitted keeps the stored key (it is write-only).
+			apiKey: input.apiKey || undefined,
+			fromAddress: input.fromAddress,
+			toAddresses: input.toAddresses,
+			baseUrl: input.baseUrl,
+		});
+		if (Object.keys(channelValues).length > 0) {
+			await tx
+				.update(sendly)
+				.set(channelValues)
+				.where(eq(sendly.sendlyId, stored.sendlyId));
+		}
 
 		return newDestination;
 	});
@@ -708,6 +743,39 @@ export const updateNotiflyNotification = async (
 	input: z.infer<typeof apiUpdateNotifly>,
 ) => {
 	await db.transaction(async (tx) => {
+		// The channel is derived from the notification row, never from the
+		// client: the row must belong to the caller's organization and be a
+		// Notifly one.
+		const existing = await tx.query.notifications.findFirst({
+			where: eq(notifications.notificationId, input.notificationId),
+			with: { notifly: true },
+		});
+		if (
+			!existing ||
+			!input.organizationId ||
+			existing.organizationId !== input.organizationId ||
+			existing.notificationType !== "notifly" ||
+			!existing.notifly
+		) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "Notifly notification not found",
+			});
+		}
+		const stored = existing.notifly;
+
+		// The stored key must not be sent to a URL the caller just chose.
+		if (
+			input.baseUrl !== undefined &&
+			!input.apiKey &&
+			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
+		) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+			});
+		}
+
 		const newDestination = await tx
 			.update(notifications)
 			.set({
@@ -734,17 +802,19 @@ export const updateNotiflyNotification = async (
 			});
 		}
 
-		await tx
-			.update(notifly)
-			.set({
-				apiKey: input.apiKey,
-				workflowKey: input.workflowKey,
-				subscriberId: input.subscriberId,
-				baseUrl: input.baseUrl,
-			})
-			.where(eq(notifly.notiflyId, input.notiflyId))
-			.returning()
-			.then((value) => value[0]);
+		const channelValues = withoutUndefined({
+			// Blank or omitted keeps the stored key (it is write-only).
+			apiKey: input.apiKey || undefined,
+			workflowKey: input.workflowKey,
+			subscriberId: input.subscriberId,
+			baseUrl: input.baseUrl,
+		});
+		if (Object.keys(channelValues).length > 0) {
+			await tx
+				.update(notifly)
+				.set(channelValues)
+				.where(eq(notifly.notiflyId, stored.notiflyId));
+		}
 
 		return newDestination;
 	});
