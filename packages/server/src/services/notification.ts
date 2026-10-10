@@ -49,6 +49,10 @@ import {
 	uptimelyChannelIncident,
 } from "@dokploy/server/db/schema";
 import {
+	integrationUrlChangeNeedsKeyMessage,
+	isSameIntegrationBaseUrl,
+} from "@dokploy/server/utils/integrations/base-url";
+import {
 	isSameUptimelyBaseUrl,
 	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 } from "@dokploy/server/utils/uptimely/base-url";
@@ -58,6 +62,16 @@ import type { z } from "zod";
 import { deleteProviderRowsOf } from "./notification-channels";
 
 export type Notification = typeof notifications.$inferSelect;
+
+const withoutUndefined = <T extends Record<string, unknown>>(values: T) =>
+	Object.fromEntries(
+		Object.entries(values).filter(([, value]) => value !== undefined),
+	) as Partial<T>;
+
+export const SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE =
+	integrationUrlChangeNeedsKeyMessage("Sendly");
+export const NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE =
+	integrationUrlChangeNeedsKeyMessage("Notifly");
 
 export const createSlackNotification = async (
 	input: z.infer<typeof apiCreateSlack>,
