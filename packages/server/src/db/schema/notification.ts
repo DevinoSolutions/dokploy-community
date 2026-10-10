@@ -265,7 +265,9 @@ export const uptimelyChannel = pgTable("uptimely_channel", {
 
 /**
  * The incident a channel declared for a service whose last deploy failed. The
- * row is deleted when the incident is resolved. `serviceKey` is
+ * row is deleted when the incident is resolved. A row with no `incidentId` is a
+ * claim taken by the failure that is declaring it, so concurrent failures of
+ * one service open a single incident. `serviceKey` is
  * `<application|compose>:<serviceId>`.
  */
 export const uptimelyChannelIncident = pgTable(
@@ -281,7 +283,9 @@ export const uptimelyChannelIncident = pgTable(
 				onDelete: "cascade",
 			}),
 		serviceKey: text("serviceKey").notNull(),
-		incidentId: text("incidentId").notNull(),
+		// Null while the row is a claim: the failure that inserted it is still
+		// declaring the incident.
+		incidentId: text("incidentId"),
 		createdAt: timestamp("createdAt").notNull().defaultNow(),
 	},
 	(table) => [
@@ -645,17 +649,25 @@ export const apiUpdateUptimelyChannel = apiCreateUptimelyChannel
 	.partial()
 	.extend({
 		notificationId: z.string().min(1),
-		uptimelyChannelId: z.string().min(1),
+		// Ignored: the channel is derived from the notification row.
+		uptimelyChannelId: z.string().optional(),
+		// Write-only: blank or omitted keeps the stored key.
+		apiKey: z.string().trim().optional(),
 		organizationId: z.string().optional(),
 	});
 
 // The test only reads the project (no incident is declared), so it needs the
 // connection fields alone.
-export const apiTestUptimelyChannelConnection = apiCreateUptimelyChannel.pick({
-	apiKey: true,
-	projectId: true,
-	baseUrl: true,
-});
+export const apiTestUptimelyChannelConnection = apiCreateUptimelyChannel
+	.pick({
+		projectId: true,
+		baseUrl: true,
+	})
+	.extend({
+		// Blank on the edit flow: the stored key of `notificationId` is used.
+		apiKey: z.string().trim().optional(),
+		notificationId: z.string().optional(),
+	});
 
 export const apiCreateGotify = notificationsSchema
 	.pick({

@@ -9573,7 +9573,7 @@
           "name": "incidentId",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "createdAt": {
           "name": "createdAt",

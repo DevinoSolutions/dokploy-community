@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS "uptimely_channel_incident" (
 	"channelIncidentId" text PRIMARY KEY NOT NULL,
 	"uptimelyChannelId" text NOT NULL,
 	"serviceKey" text NOT NULL,
-	"incidentId" text NOT NULL,
+	"incidentId" text,
 	"createdAt" timestamp DEFAULT now() NOT NULL
 );
 --> statement-breakpoint

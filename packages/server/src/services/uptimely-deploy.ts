@@ -1,6 +1,7 @@
 import { db } from "@dokploy/server/db";
 import {
 	notifications,
+	type UptimelyServiceType,
 	uptimelyChannelIncident,
 	uptimelyMonitorLink,
 } from "@dokploy/server/db/schema";
@@ -10,7 +11,7 @@ import {
 	UptimelyError,
 } from "@dokploy/server/utils/uptimely/client";
 import { pingUptimelyHeartbeat } from "@dokploy/server/utils/uptimely/heartbeat";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt } from "drizzle-orm";
 
 /**
  * Deploy-time Uptimely hooks: the heartbeat ping and the incident channel.
@@ -35,7 +36,7 @@ export interface UptimelyDeployContext {
 }
 
 export const uptimelyServiceKey = (
-	serviceType: UptimelyDeployServiceType,
+	serviceType: UptimelyServiceType,
 	serviceId: string,
 ) => `${serviceType}:${serviceId}`;
 
@@ -130,7 +131,7 @@ const findUptimelyChannels = (
 		with: { uptimelyChannel: true },
 	});
 
-const RESOLVED_STATE_NAME = /resolv/i;
+const RESOLVED_STATE_NAME = /^resolved$/i;
 const resolvedStateCache = new Map<string, string>();
 
 /**
@@ -169,10 +170,29 @@ const discoverResolvedStateId = async (
 /** Test hook: forgets the Resolved state ids learned from Uptimely. */
 export const resetUptimelyResolvedStateCache = () => resolvedStateCache.clear();
 
+/** A claim older than this belongs to a declare that never finished. */
+export const UPTIMELY_CLAIM_TTL_MS = 5 * 60_000;
+
+/**
+ * Uptimely answers an unknown or foreign incident id with a successful
+ * `{ error: "Incident not found or access denied." }`, which the client
+ * throws. Either way the incident is gone for this channel.
+ */
+export const isUptimelyIncidentGone = (error: unknown) =>
+	error instanceof UptimelyError &&
+	/not found|access denied/i.test(error.message);
+
+type UptimelyChannelRow = NonNullable<
+	Awaited<ReturnType<typeof findUptimelyChannels>>[number]["uptimelyChannel"]
+>;
+
+const forgetIncidentRow = (channelIncidentId: string) =>
+	db
+		.delete(uptimelyChannelIncident)
+		.where(eq(uptimelyChannelIncident.channelIncidentId, channelIncidentId));
+
 const declareFor = async (
-	channel: NonNullable<
-		Awaited<ReturnType<typeof findUptimelyChannels>>[number]["uptimelyChannel"]
-	>,
+	channel: UptimelyChannelRow,
 	context: UptimelyDeployContext,
 	failure: { errorMessage: string; buildLink: string },
 ) => {
@@ -186,38 +206,81 @@ const declareFor = async (
 		),
 	});
 	if (open) {
-		// Still open: a second failure is the same incident. One that was resolved
-		// or deleted in Uptimely by hand is forgotten and declared again.
-		const current = await client.callTool<{
-			state?: { isResolvedState?: boolean } | null;
-		}>("uptimely_incident_get", {
-			projectId: channel.projectId,
-			incidentId: open.incidentId,
-		});
-		if (!current.state?.isResolvedState) return;
-		await db
-			.delete(uptimelyChannelIncident)
-			.where(
-				eq(uptimelyChannelIncident.channelIncidentId, open.channelIncidentId),
-			);
+		if (!open.incidentId) {
+			// Another failure is declaring right now. Retake the claim only when it
+			// is stale (that declare died); the delete is atomic, so one caller wins.
+			const retaken = await db
+				.delete(uptimelyChannelIncident)
+				.where(
+					and(
+						eq(
+							uptimelyChannelIncident.channelIncidentId,
+							open.channelIncidentId,
+						),
+						isNull(uptimelyChannelIncident.incidentId),
+						lt(
+							uptimelyChannelIncident.createdAt,
+							new Date(Date.now() - UPTIMELY_CLAIM_TTL_MS),
+						),
+					),
+				)
+				.returning();
+			if (retaken.length === 0) return;
+		} else {
+			// Still open: a second failure is the same incident. One resolved, or
+			// deleted in Uptimely by hand, is forgotten and declared again.
+			let resolved = false;
+			try {
+				const current = await client.callTool<{
+					state?: { isResolvedState?: boolean } | null;
+				}>("uptimely_incident_get", {
+					projectId: channel.projectId,
+					incidentId: open.incidentId,
+				});
+				resolved = !!current.state?.isResolvedState;
+			} catch (error) {
+				if (!isUptimelyIncidentGone(error)) throw error;
+				resolved = true;
+			}
+			if (!resolved) return;
+			await forgetIncidentRow(open.channelIncidentId);
+		}
 	}
 
-	const declared = await client.callTool<{ incidentId: string }>(
-		"uptimely_incident_declare",
-		{
-			projectId: channel.projectId,
-			title: incidentTitle(context),
-			description: describeFailure(failure.errorMessage, failure.buildLink),
-		},
-	);
-	await db
+	// Claim the (channel, service) slot before declaring: only the insert that
+	// wins declares, so two concurrent failures cannot open two incidents.
+	const claim = await db
 		.insert(uptimelyChannelIncident)
 		.values({
 			uptimelyChannelId: channel.uptimelyChannelId,
 			serviceKey,
-			incidentId: declared.incidentId,
+			incidentId: null,
 		})
-		.onConflictDoNothing();
+		.onConflictDoNothing()
+		.returning()
+		.then((rows) => rows[0]);
+	if (!claim) return;
+
+	try {
+		const declared = await client.callTool<{ incidentId: string }>(
+			"uptimely_incident_declare",
+			{
+				projectId: channel.projectId,
+				title: incidentTitle(context),
+				description: describeFailure(failure.errorMessage, failure.buildLink),
+			},
+		);
+		await db
+			.update(uptimelyChannelIncident)
+			.set({ incidentId: declared.incidentId })
+			.where(
+				eq(uptimelyChannelIncident.channelIncidentId, claim.channelIncidentId),
+			);
+	} catch (error) {
+		// Release the claim so the next failure can try again.
+		await forgetIncidentRow(claim.channelIncidentId).catch(() => {});
+		throw error;
+	}
 };
 
 /**
@@ -255,9 +318,7 @@ export const reportDeployFailureToUptimely = async (
 };
 
 const resolveFor = async (
-	channel: NonNullable<
-		Awaited<ReturnType<typeof findUptimelyChannels>>[number]["uptimelyChannel"]
-	>,
+	channel: UptimelyChannelRow,
 	context: UptimelyDeployContext,
 ) => {
 	const open = await db.query.uptimelyChannelIncident.findFirst({
@@ -269,7 +330,9 @@ const resolveFor = async (
 			),
 		),
 	});
-	if (!open) return;
+	// No incident, or one still being declared by a concurrent failure.
+	if (!open?.incidentId) return;
+	const incidentId = open.incidentId;
 
 	const client = clientFor(channel);
 	const change = (incidentStateId: string) =>
@@ -277,7 +340,7 @@ const resolveFor = async (
 			"uptimely_incident_state_change",
 			{
 				projectId: channel.projectId,
-				incidentId: open.incidentId,
+				incidentId,
 				incidentStateId,
 				rootCause: "Resolved automatically: the next deployment succeeded.",
 			},
@@ -294,21 +357,32 @@ const resolveFor = async (
 	}
 
 	let changed: { changed: boolean; reason?: string } | null = null;
-	if (stateId) {
-		changed = await change(stateId);
-		if (changed.reason === "state_not_found") {
-			resolvedStateCache.delete(cacheKey);
-			changed = null;
+	try {
+		if (stateId) {
+			changed = await change(stateId);
+			if (changed.reason === "state_not_found") {
+				resolvedStateCache.delete(cacheKey);
+				changed = null;
+			}
+		} else {
+			// Last attempt: Uptimely is adding support for the state name. Today the
+			// input is a UUID, so a validation error here is expected and not fatal.
+			try {
+				changed = await change("resolved");
+				if (changed.reason === "state_not_found") changed = null;
+			} catch (error) {
+				if (isUptimelyIncidentGone(error)) throw error;
+				changed = null;
+			}
 		}
-	} else {
-		// Last attempt: Uptimely is adding support for the state name. Today the
-		// input is a UUID, so a validation error here is expected and not fatal.
-		try {
-			changed = await change("resolved");
-			if (changed.reason === "state_not_found") changed = null;
-		} catch {
-			changed = null;
+	} catch (error) {
+		if (isUptimelyIncidentGone(error)) {
+			// Deleted in Uptimely, or the key now sees another project: nothing
+			// left to resolve, so stop tracking it.
+			await forgetIncidentRow(open.channelIncidentId);
+			return;
 		}
+		throw error;
 	}
 	if (!changed) {
 		throw discoveryError instanceof Error
@@ -318,12 +392,9 @@ const resolveFor = async (
 					{ code: "RESOLVED_STATE_UNKNOWN" },
 				);
 	}
-	// Also true when the incident was already resolved in Uptimely.
-	await db
-		.delete(uptimelyChannelIncident)
-		.where(
-			eq(uptimelyChannelIncident.channelIncidentId, open.channelIncidentId),
-		);
+	// `changed: false` without a reason means the incident is already in the
+	// Resolved state (or gone), so there is nothing left to track either way.
+	await forgetIncidentRow(open.channelIncidentId);
 };
 
 /**
@@ -367,4 +438,42 @@ export const reportDeploySuccessToUptimely = async (
 		pingUptimelyDeployHeartbeat(context),
 		reportDeploySuccessToUptimelyIncidents(context),
 	]);
+};
+
+/**
+ * Forgets everything Dokploy stored about a deleted service: its heartbeat
+ * link and the incident it may have open on an Uptimely channel. The
+ * Uptimely-side monitors and incidents stay (Uptimely has no delete tool).
+ * Best effort: a failure here must not fail the deletion that called it.
+ */
+export const removeUptimelyServiceRows = async (
+	services: { serviceType: UptimelyServiceType; serviceId: string }[],
+): Promise<void> => {
+	if (services.length === 0) return;
+	try {
+		for (const serviceType of new Set(services.map((x) => x.serviceType))) {
+			const ids = services
+				.filter((x) => x.serviceType === serviceType)
+				.map((x) => x.serviceId);
+			await db
+				.delete(uptimelyMonitorLink)
+				.where(
+					and(
+						eq(uptimelyMonitorLink.serviceType, serviceType),
+						inArray(uptimelyMonitorLink.serviceId, ids),
+					),
+				);
+		}
+		await db.delete(uptimelyChannelIncident).where(
+			inArray(
+				uptimelyChannelIncident.serviceKey,
+				services.map((x) => uptimelyServiceKey(x.serviceType, x.serviceId)),
+			),
+		);
+	} catch (error) {
+		console.error(
+			"Uptimely rows of a deleted service could not be removed:",
+			error instanceof Error ? error.name : "unknown error",
+		);
+	}
 };

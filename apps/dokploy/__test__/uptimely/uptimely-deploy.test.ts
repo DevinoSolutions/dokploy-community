@@ -15,9 +15,15 @@ const mocks = vi.hoisted(() => ({
 	heartbeatLink: null as Record<string, unknown> | null,
 	linkLookupError: null as Error | null,
 	channels: [] as Record<string, unknown>[],
-	openIncident: null as Record<string, unknown> | null,
+	// uptimely_channel_incident, kept in memory so claims behave like the
+	// unique (channel, service) index.
+	rows: [] as Record<string, unknown>[],
+	hideRows: false,
+	claimStale: false,
 	inserted: [] as Record<string, unknown>[],
+	updates: [] as Record<string, unknown>[],
 	deletes: 0,
+	nextId: 1,
 }));
 
 vi.mock("@dokploy/server/db", () => ({
@@ -31,18 +37,60 @@ vi.mock("@dokploy/server/db", () => ({
 			},
 			notifications: { findMany: vi.fn(async () => mocks.channels) },
 			uptimelyChannelIncident: {
-				findFirst: vi.fn(async () => mocks.openIncident ?? undefined),
+				findFirst: vi.fn(async () =>
+					mocks.hideRows ? undefined : (mocks.rows[0] ?? undefined),
+				),
 			},
 		},
 		insert: vi.fn(() => ({
-			values: (row: Record<string, unknown>) => {
-				mocks.inserted.push(row);
-				return { onConflictDoNothing: async () => undefined };
-			},
+			values: (row: Record<string, unknown>) => ({
+				onConflictDoNothing: () => ({
+					returning: async () => {
+						if (
+							mocks.rows.some(
+								(r) =>
+									r.uptimelyChannelId === row.uptimelyChannelId &&
+									r.serviceKey === row.serviceKey,
+							)
+						) {
+							return [];
+						}
+						const created = {
+							channelIncidentId: `ci-new-${mocks.nextId++}`,
+							createdAt: new Date(),
+							...row,
+						};
+						mocks.rows.push(created);
+						mocks.inserted.push(row);
+						return [created];
+					},
+				}),
+			}),
+		})),
+		update: vi.fn(() => ({
+			set: (values: Record<string, unknown>) => ({
+				where: async () => {
+					mocks.updates.push(values);
+					const target = mocks.rows[mocks.rows.length - 1];
+					if (target) Object.assign(target, values);
+				},
+			}),
 		})),
 		delete: vi.fn(() => ({
-			where: async () => {
-				mocks.deletes++;
+			where: () => {
+				const remove = () => {
+					mocks.deletes++;
+					return mocks.rows.splice(0, 1);
+				};
+				return {
+					// A plain delete forgets the row.
+					// biome-ignore lint/suspicious/noThenProperty: awaited like a drizzle query
+					then: (resolve: (value: unknown) => void) => resolve(remove()),
+					catch: (onRejected: (reason: unknown) => unknown) =>
+						Promise.resolve(remove()).catch(onRejected),
+					// `returning` is the stale-claim retake: only a stale claim goes.
+					returning: async () => (mocks.claimStale ? remove() : []),
+				};
 			},
 		})),
 	},
@@ -66,6 +114,7 @@ const {
 	reportDeployFailureToUptimely,
 	reportDeploySuccessToUptimely,
 	reportDeploySuccessToUptimelyIncidents,
+	removeUptimelyServiceRows,
 	resetUptimelyResolvedStateCache,
 } = await import("@dokploy/server/services/uptimely-deploy");
 const { pingUptimelyHeartbeat, uptimelyHeartbeatUrl } = await import(
@@ -79,6 +128,14 @@ const context = {
 	projectName: "Devino",
 	serviceName: "web",
 };
+
+const openRow = (incidentId: string | null, id = "ci-1") => ({
+	channelIncidentId: id,
+	uptimelyChannelId: "chan-1",
+	serviceKey: "application:app-1",
+	incidentId,
+	createdAt: new Date(),
+});
 
 const channel = (overrides: Record<string, unknown> = {}) => ({
 	name: "Uptimely incidents",
@@ -103,9 +160,13 @@ beforeEach(() => {
 	mocks.heartbeatLink = null;
 	mocks.linkLookupError = null;
 	mocks.channels = [];
-	mocks.openIncident = null;
+	mocks.rows = [];
+	mocks.hideRows = false;
+	mocks.claimStale = false;
 	mocks.inserted = [];
+	mocks.updates = [];
 	mocks.deletes = 0;
+	mocks.nextId = 1;
 	fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
 	vi.stubGlobal("fetch", fetchMock);
 	errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -274,20 +335,19 @@ describe("reportDeployFailureToUptimely", () => {
 		expect(args.title).toBe("Deploy failed: Devino/web");
 		expect(args.description).toContain("docker build exited 1");
 		expect(args.description).toContain("https://dokploy.test/deployments");
+		// The slot is claimed first, then filled with the declared incident.
 		expect(mocks.inserted).toEqual([
 			{
 				uptimelyChannelId: "chan-1",
 				serviceKey: "application:app-1",
-				incidentId: "inc-1",
+				incidentId: null,
 			},
 		]);
+		expect(mocks.rows).toMatchObject([{ incidentId: "inc-1" }]);
 	});
 
 	it("does not declare a second incident while one is still open", async () => {
-		mocks.openIncident = {
-			channelIncidentId: "ci-1",
-			incidentId: "inc-1",
-		};
+		mocks.rows = [openRow("inc-1")];
 		mocks.callTool.mockResolvedValue({ state: { isResolvedState: false } });
 
 		await reportDeployFailureToUptimely(context, {
@@ -302,10 +362,7 @@ describe("reportDeployFailureToUptimely", () => {
 	});
 
 	it("declares again when the remembered incident was resolved in Uptimely", async () => {
-		mocks.openIncident = {
-			channelIncidentId: "ci-1",
-			incidentId: "inc-old",
-		};
+		mocks.rows = [openRow("inc-old")];
 		mocks.callTool.mockImplementation(async (tool: string) =>
 			tool === "uptimely_incident_get"
 				? { state: { isResolvedState: true } }
@@ -322,7 +379,7 @@ describe("reportDeployFailureToUptimely", () => {
 			"uptimely_incident_declare",
 		]);
 		expect(mocks.deletes).toBe(1);
-		expect(mocks.inserted[0]).toMatchObject({ incidentId: "inc-new" });
+		expect(mocks.rows).toMatchObject([{ incidentId: "inc-new" }]);
 	});
 
 	it("skips organizations without an Uptimely channel", async () => {
@@ -353,14 +410,15 @@ describe("reportDeployFailureToUptimely", () => {
 
 		expect(loggedText()).toContain("AI write operations are disabled");
 		expect(loggedText()).not.toContain("channel-api-key");
-		expect(mocks.inserted).toEqual([]);
+		// The claim is released so the next failure can declare.
+		expect(mocks.rows).toEqual([]);
 	});
 });
 
 describe("reportDeploySuccessToUptimelyIncidents", () => {
 	beforeEach(() => {
 		mocks.channels = [channel()];
-		mocks.openIncident = { channelIncidentId: "ci-1", incidentId: "inc-1" };
+		mocks.rows = [openRow("inc-1")];
 	});
 
 	it("resolves the open incident of the service, learning the Resolved state", async () => {
@@ -404,7 +462,7 @@ describe("reportDeploySuccessToUptimelyIncidents", () => {
 	});
 
 	it("does nothing when the service has no open incident", async () => {
-		mocks.openIncident = null;
+		mocks.rows = [];
 
 		await reportDeploySuccessToUptimelyIncidents(context);
 
@@ -474,13 +532,11 @@ describe("a failure followed by a success", () => {
 			errorMessage: "boom",
 			buildLink: "",
 		});
-		expect(mocks.inserted[0]).toMatchObject({
-			serviceKey: "application:app-1",
-			incidentId: "inc-7",
-		});
+		expect(mocks.rows).toMatchObject([
+			{ serviceKey: "application:app-1", incidentId: "inc-7" },
+		]);
 
 		// The row the failure stored is what the success finds.
-		mocks.openIncident = { channelIncidentId: "ci-7", incidentId: "inc-7" };
 		await reportDeploySuccessToUptimely(context);
 
 		const changed = mocks.callTool.mock.calls.find(
@@ -491,5 +547,205 @@ describe("a failure followed by a success", () => {
 			incidentStateId: RESOLVED_STATE,
 		});
 		expect(mocks.deletes).toBe(1);
+	});
+});
+
+const GONE = "Incident not found or access denied.";
+
+describe("an incident that is gone from Uptimely", () => {
+	beforeEach(() => {
+		mocks.channels = [channel()];
+	});
+
+	// The Uptimely client turns `{ error: "Incident not found or access denied." }`
+	// into a thrown UptimelyError.
+	const gone = async () => {
+		const { UptimelyError } = await import(
+			"@dokploy/server/utils/uptimely/client"
+		);
+		return new UptimelyError(GONE);
+	};
+
+	it("a failure forgets the row and declares a fresh incident", async () => {
+		mocks.rows = [openRow("inc-deleted")];
+		const error = await gone();
+		mocks.callTool.mockImplementation(async (tool: string) => {
+			if (tool === "uptimely_incident_get") throw error;
+			return { incidentId: "inc-fresh", declared: true };
+		});
+
+		await reportDeployFailureToUptimely(context, {
+			errorMessage: "boom",
+			buildLink: "",
+		});
+
+		expect(mocks.callTool.mock.calls.map((c) => c[0])).toEqual([
+			"uptimely_incident_get",
+			"uptimely_incident_declare",
+		]);
+		expect(mocks.rows).toMatchObject([{ incidentId: "inc-fresh" }]);
+		expect(loggedText()).toBe("");
+	});
+
+	it("a failure still surfaces other Uptimely errors and keeps the row", async () => {
+		mocks.rows = [openRow("inc-1")];
+		mocks.callTool.mockRejectedValue(new Error("Uptimely is down"));
+
+		await reportDeployFailureToUptimely(context, {
+			errorMessage: "boom",
+			buildLink: "",
+		});
+
+		expect(mocks.rows).toMatchObject([{ incidentId: "inc-1" }]);
+		expect(loggedText()).toContain("Uptimely is down");
+	});
+
+	it("a success clears the row instead of wedging on the error", async () => {
+		mocks.rows = [openRow("inc-deleted")];
+		const error = await gone();
+		mocks.callTool.mockImplementation(async (tool: string) => {
+			if (tool === "uptimely_incident_state_change") throw error;
+			return {
+				incidents: [{ state: { id: RESOLVED_STATE, name: "Resolved" } }],
+			};
+		});
+
+		await reportDeploySuccessToUptimelyIncidents(context);
+
+		expect(mocks.rows).toEqual([]);
+		expect(loggedText()).toBe("");
+	});
+});
+
+describe("concurrent failures of one service", () => {
+	const failure = (errorMessage: string) =>
+		reportDeployFailureToUptimely(context, { errorMessage, buildLink: "" });
+
+	it("open a single incident: the claim winner declares, the loser does nothing", async () => {
+		mocks.channels = [channel()];
+		// Both failures looked before either claimed.
+		mocks.hideRows = true;
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		mocks.callTool.mockImplementation(async () => {
+			await gate;
+			return { incidentId: "inc-1", declared: true };
+		});
+
+		const both = Promise.all([failure("a"), failure("b")]);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		release();
+		await both;
+
+		expect(
+			mocks.callTool.mock.calls.filter(
+				(c) => c[0] === "uptimely_incident_declare",
+			),
+		).toHaveLength(1);
+		expect(mocks.rows).toMatchObject([{ incidentId: "inc-1" }]);
+	});
+
+	it("releases the claim when the declare fails so the next failure retries", async () => {
+		mocks.channels = [channel()];
+		mocks.callTool.mockRejectedValueOnce(new Error("Uptimely is down"));
+
+		await failure("a");
+		expect(mocks.rows).toEqual([]);
+
+		mocks.callTool.mockResolvedValue({ incidentId: "inc-2", declared: true });
+		await failure("b");
+		expect(mocks.rows).toMatchObject([{ incidentId: "inc-2" }]);
+	});
+
+	it("leaves a fresh pending claim to the failure that holds it", async () => {
+		mocks.channels = [channel()];
+		mocks.rows = [openRow(null)];
+
+		await failure("b");
+
+		expect(mocks.callTool).not.toHaveBeenCalled();
+		expect(mocks.rows).toHaveLength(1);
+	});
+
+	it("retakes a stale pending claim whose declare never finished", async () => {
+		mocks.channels = [channel()];
+		mocks.rows = [openRow(null)];
+		mocks.claimStale = true;
+		mocks.callTool.mockResolvedValue({ incidentId: "inc-3", declared: true });
+
+		await failure("b");
+
+		expect(mocks.rows).toMatchObject([{ incidentId: "inc-3" }]);
+	});
+
+	it("a success ignores a claim that is still being declared", async () => {
+		mocks.channels = [channel()];
+		mocks.rows = [openRow(null)];
+
+		await reportDeploySuccessToUptimelyIncidents(context);
+
+		expect(mocks.callTool).not.toHaveBeenCalled();
+		expect(mocks.rows).toHaveLength(1);
+	});
+});
+
+describe("Resolved state matching and the success flag", () => {
+	beforeEach(() => {
+		mocks.channels = [channel()];
+		mocks.rows = [openRow("inc-1")];
+	});
+
+	it("matches the state name exactly, so Unresolved is not Resolved", async () => {
+		mocks.callTool.mockImplementation(async (tool: string) =>
+			tool === "uptimely_incident_list"
+				? {
+						incidents: [
+							{ state: { id: "state-unresolved", name: "Unresolved" } },
+							{ state: { id: RESOLVED_STATE, name: "RESOLVED" } },
+						],
+					}
+				: { changed: true },
+		);
+
+		await reportDeploySuccessToUptimelyIncidents(context);
+
+		const change = mocks.callTool.mock.calls.find(
+			(c) => c[0] === "uptimely_incident_state_change",
+		);
+		expect(change?.[1]).toMatchObject({ incidentStateId: RESOLVED_STATE });
+	});
+
+	it("keeps the row while Uptimely reports the change as not made", async () => {
+		mocks.channels = [channel({ resolvedStateId: RESOLVED_STATE })];
+		mocks.callTool.mockResolvedValue({
+			changed: false,
+			reason: "state_not_found",
+		});
+
+		await reportDeploySuccessToUptimelyIncidents(context);
+
+		expect(mocks.rows).toHaveLength(1);
+	});
+});
+
+describe("removeUptimelyServiceRows", () => {
+	it("deletes the heartbeat links and the channel incidents of deleted services", async () => {
+		mocks.rows = [openRow("inc-1")];
+
+		await removeUptimelyServiceRows([
+			{ serviceType: "application", serviceId: "app-1" },
+			{ serviceType: "compose", serviceId: "compose-1" },
+		]);
+
+		// One link delete per service type plus one incident delete.
+		expect(mocks.deletes).toBe(3);
+	});
+
+	it("does nothing for an empty list", async () => {
+		await removeUptimelyServiceRows([]);
+
+		expect(mocks.deletes).toBe(0);
 	});
 });
