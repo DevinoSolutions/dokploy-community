@@ -16,6 +16,7 @@ import type {
 } from "@dokploy/server/db/schema";
 import nodemailer from "nodemailer";
 import { Resend } from "resend";
+import { logSenderError, logSenderRefusal } from "./log-error";
 
 export const sendEmailNotification = async (
 	connection: typeof email.$inferInsert,
@@ -49,7 +50,7 @@ export const sendEmailNotification = async (
 			attachments,
 		});
 	} catch (err) {
-		console.log(err);
+		logSenderError("email", err, `smtp://${connection.smtpServer}`);
 		throw new Error(
 			`Failed to send email notification ${err instanceof Error ? err.message : "Unknown error"}`,
 		);
@@ -75,7 +76,7 @@ export const sendResendNotification = async (
 			throw new Error(result.error.message);
 		}
 	} catch (err) {
-		console.log(err);
+		logSenderError("resend", err, "https://api.resend.com");
 		throw new Error(
 			`Failed to send Resend notification ${err instanceof Error ? err.message : "Unknown error"}`,
 		);
@@ -125,7 +126,11 @@ export const sendSendlyNotification = async (
 			);
 		}
 	} catch (err) {
-		console.log(err);
+		logSenderError(
+			"sendly",
+			err,
+			connection.baseUrl || "https://app.sendly.now",
+		);
 		throw new Error(
 			`Failed to send Sendly notification ${err instanceof Error ? err.message : "Unknown error"}`,
 		);
@@ -233,7 +238,11 @@ export const sendNotiflyNotification = async (
 			);
 		}
 	} catch (err) {
-		console.log(err);
+		logSenderError(
+			"notifly",
+			err,
+			connection.baseUrl || "https://api.notifly.io",
+		);
 		// Already a finished one-line message: do not wrap it a second time.
 		if (err instanceof NotiflyRequestError) throw err;
 		throw new Error(
@@ -258,10 +267,22 @@ export const sendDiscordNotification = async (
 			);
 		}
 	} catch (err) {
-		console.log("error", err);
+		logSenderError("discord", err, connection.webhookUrl);
 		throw new Error(
 			`Failed to send discord notification ${err instanceof Error ? err.message : "Unknown error"}`,
 		);
+	}
+};
+
+const TELEGRAM_API = "https://api.telegram.org";
+
+/** The JSON body of a response, or null when it is empty or not JSON. */
+const readJsonBody = async <T extends object>(response: Response) => {
+	try {
+		const parsed: unknown = JSON.parse(await response.text());
+		return parsed && typeof parsed === "object" ? (parsed as T) : null;
+	} catch {
+		return null;
 	}
 };
 
@@ -273,9 +294,10 @@ export const sendTelegramNotification = async (
 		url: string;
 	}[][],
 ) => {
+	let response: Response;
 	try {
 		const url = `https://api.telegram.org/bot${connection.botToken}/sendMessage`;
-		await fetch(url, {
+		response = await fetch(url, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -290,7 +312,21 @@ export const sendTelegramNotification = async (
 			}),
 		});
 	} catch (err) {
-		console.log(err);
+		logSenderError("telegram", err, TELEGRAM_API);
+		throw new Error(
+			`Failed to send Telegram notification ${err instanceof Error ? err.message : "Unknown error"}`,
+		);
+	}
+
+	if (!response.ok) {
+		logSenderRefusal("telegram", `HTTP ${response.status}`, TELEGRAM_API);
+		// Telegram explains a refusal in `description` ("chat not found").
+		const body = await readJsonBody<{ description?: unknown }>(response);
+		const detail =
+			typeof body?.description === "string"
+				? capText(body.description, 200)
+				: response.statusText;
+		throw new Error(`Failed to send Telegram notification: ${detail}`);
 	}
 };
 
@@ -310,7 +346,7 @@ export const sendSlackNotification = async (
 			);
 		}
 	} catch (err) {
-		console.log("error", err);
+		logSenderError("slack", err, connection.webhookUrl);
 		throw new Error(
 			`Failed to send slack notification ${err instanceof Error ? err.message : "Unknown error"}`,
 		);
@@ -428,7 +464,7 @@ export const sendCustomNotification = async (
 
 		return response;
 	} catch (error) {
-		console.error("Error sending custom notification:", error);
+		logSenderError("custom", error, connection.endpoint);
 		throw error;
 	}
 };
@@ -437,14 +473,36 @@ export const sendLarkNotification = async (
 	connection: typeof lark.$inferInsert,
 	message: any,
 ) => {
+	let response: Response;
 	try {
-		await fetch(connection.webhookUrl, {
+		response = await fetch(connection.webhookUrl, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(message),
 		});
 	} catch (err) {
-		console.log(err);
+		logSenderError("lark", err, connection.webhookUrl);
+		throw new Error(
+			`Failed to send Lark notification ${err instanceof Error ? err.message : "Unknown error"}`,
+		);
+	}
+
+	if (!response.ok) {
+		logSenderRefusal("lark", `HTTP ${response.status}`, connection.webhookUrl);
+		throw new Error(`Failed to send Lark notification: ${response.statusText}`);
+	}
+
+	// A refused webhook (bad token, bad card) answers 200 with `code` set.
+	const body = await readJsonBody<{ code?: unknown; msg?: unknown }>(response);
+	if (typeof body?.code === "number" && body.code !== 0) {
+		logSenderRefusal("lark", `code ${body.code}`, connection.webhookUrl);
+		throw new Error(
+			`Failed to send Lark notification: ${
+				typeof body.msg === "string"
+					? capText(body.msg, 200)
+					: `code ${body.code}`
+			}`,
+		);
 	}
 };
 
@@ -519,7 +577,7 @@ export const sendTeamsNotification = async (
 			);
 		}
 	} catch (err) {
-		console.log(err);
+		logSenderError("teams", err, connection.webhookUrl);
 		throw new Error(
 			`Failed to send Teams notification ${err instanceof Error ? err.message : "Unknown error"}`,
 		);

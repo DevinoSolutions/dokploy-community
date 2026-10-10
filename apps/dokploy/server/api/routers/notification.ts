@@ -434,8 +434,10 @@ export const notificationRouter = createTRPCRouter({
 	testTelegramConnection: withPermission("notification", "create")
 		.input(apiTestTelegramConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const botToken = await resolveStoredSecret({
+					track: secrets,
 					value: input.botToken,
 					notificationId: input.notificationId,
 					organizationId: ctx.session.activeOrganizationId,
@@ -452,12 +454,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "Error testing the notification",
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createDiscord: withPermission("notification", "create")
@@ -1487,8 +1484,10 @@ export const notificationRouter = createTRPCRouter({
 	testLarkConnection: withPermission("notification", "create")
 		.input(apiTestLarkConnection)
 		.mutation(async ({ input, ctx }) => {
+			const secrets: Array<string | undefined> = [];
 			try {
 				const webhookUrl = await resolveStoredSecret({
+					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
 					organizationId: ctx.session.activeOrganizationId,
@@ -1506,12 +1505,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
-				if (error instanceof TRPCError) throw error;
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "Error testing the notification",
-					cause: error,
-				});
+				throw testFailure(error, secrets);
 			}
 		}),
 	createTeams: withPermission("notification", "create")

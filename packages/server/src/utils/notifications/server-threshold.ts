@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "../../db";
 import { notifications } from "../../db/schema";
 import ServerThresholdEmail from "../../emails/emails/server-threshold";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -414,7 +415,7 @@ export const sendServerThresholdNotifications = async (
 				});
 			}
 		} catch (error) {
-			console.log(error);
+			logSenderError("server threshold", error);
 		}
 	}
 };

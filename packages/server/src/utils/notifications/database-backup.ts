@@ -4,6 +4,7 @@ import DatabaseBackupEmail from "@dokploy/server/emails/emails/database-backup";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -484,7 +485,7 @@ export const sendDatabaseBackupNotifications = async ({
 				});
 			}
 		} catch (error) {
-			console.log(error);
+			logSenderError("database backup", error);
 		}
 	}
 };

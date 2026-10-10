@@ -4,6 +4,7 @@ import DokployRestartEmail from "@dokploy/server/emails/emails/dokploy-restart";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -194,7 +195,7 @@ export const sendDokployRestartNotifications = async () => {
 							type: "dokploy-restart",
 						});
 					} catch (error) {
-						console.log(error);
+						logSenderError("dokploy restart", error);
 					}
 				}
 
@@ -300,10 +301,10 @@ export const sendDokployRestartNotifications = async () => {
 					});
 				}
 			} catch (error) {
-				console.log(error);
+				logSenderError("dokploy restart", error);
 			}
 		}
 	} catch (error) {
-		console.error("[Dokploy] Restart notifications failed:", error);
+		logSenderError("restart notifications", error);
 	}
 };
