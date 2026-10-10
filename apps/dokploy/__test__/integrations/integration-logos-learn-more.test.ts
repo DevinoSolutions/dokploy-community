@@ -206,7 +206,7 @@ describe("integration Learn more targets", () => {
 			["uptimely"],
 		],
 		[
-			"components/dashboard/application/preview-deployments/show-preview-settings.tsx",
+			"components/dashboard/settings/integrations/snapvisor/snapvisor-project-picker.tsx",
 			["snapvisor"],
 		],
 		[
