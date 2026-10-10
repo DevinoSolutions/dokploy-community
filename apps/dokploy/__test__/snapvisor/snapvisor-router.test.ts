@@ -3,10 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Router-level scoping of the Snapvisor integration.
  *
- * `setApplicationProject`/`previewBuild`/`refreshPreviewBuild` take an
- * arbitrary `applicationId`/`previewDeploymentId`. Holding a role in the
- * active organization says nothing about that id, so every procedure must
- * prove the underlying application belongs to the caller's organization
+ * `setApplicationProject`/`setComposeProject`/`previewBuild`/
+ * `refreshPreviewBuild` take an arbitrary service/`previewDeploymentId`.
+ * Holding a role in the active organization says nothing about that id, so
+ * every procedure must prove the underlying application or compose service
+ * belongs to the caller's organization
  * BEFORE it touches the org's Snapvisor credentials or calls Snapvisor. The
  * access token must never be returned to the client.
  */
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 	memberRole: "owner" as string,
 	integration: null as Record<string, unknown> | null,
 	application: null as Record<string, unknown> | null,
+	compose: null as Record<string, unknown> | null,
 	previewDeployment: null as Record<string, unknown> | null,
 }));
 
@@ -75,6 +77,12 @@ vi.mock("@dokploy/server/db", () => {
 							findMany: vi.fn(async () => []),
 						};
 					}
+					if (table === "compose") {
+						return {
+							findFirst: vi.fn(async () => mocks.compose ?? undefined),
+							findMany: vi.fn(async () => []),
+						};
+					}
 					if (table === "previewDeployments") {
 						return {
 							findFirst: vi.fn(async () => mocks.previewDeployment ?? undefined),
@@ -92,7 +100,15 @@ vi.mock("@dokploy/server/db", () => {
 			),
 			select: vi.fn(() => chain({})),
 			insert: vi.fn(() => chain(mocks.integration ?? {})),
-			update: vi.fn(() => chain(mocks.application ?? mocks.integration ?? {})),
+			// Drizzle tables expose their columns as properties: `composeId`
+			// identifies the compose table.
+			update: vi.fn((table: Record<string, unknown>) =>
+				chain(
+					("composeId" in table ? mocks.compose : mocks.application) ??
+						mocks.integration ??
+						{},
+				),
+			),
 			delete: vi.fn(() => chain(mocks.integration ?? {})),
 		},
 		dbUrl: "postgres://mock:mock@localhost:5432/mock",
@@ -139,13 +155,28 @@ beforeEach(() => {
 		snapvisorProjectName: null,
 		environment: { project: { organizationId: "org-1" } },
 	};
+	mocks.compose = {
+		composeId: "compose-1",
+		name: "stack",
+		snapvisorProjectName: null,
+		environment: { project: { organizationId: "org-1" } },
+	};
 	mocks.previewDeployment = {
 		previewDeploymentId: "preview-1",
 		applicationId: "app-1",
+		composeId: null,
 		snapvisorBuildId: null,
 		snapvisorBuildStatus: null,
 	};
 });
+
+const useComposePreview = () => {
+	mocks.previewDeployment = {
+		...mocks.previewDeployment,
+		applicationId: null,
+		composeId: "compose-1",
+	};
+};
 
 describe("snapvisor router org scoping", () => {
 	it("rejects setApplicationProject for an application in another organization", async () => {
@@ -191,10 +222,11 @@ describe("snapvisor router org scoping", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects previewBuild for a compose preview (no applicationId)", async () => {
+	it("rejects previewBuild for a preview that belongs to no service", async () => {
 		mocks.previewDeployment = {
 			...mocks.previewDeployment,
 			applicationId: null,
+			composeId: null,
 		};
 		await expect(
 			caller().previewBuild({ previewDeploymentId: "preview-1" }),
@@ -219,6 +251,129 @@ describe("snapvisor router org scoping", () => {
 			buildStatus: null,
 			reviewUrl: null,
 		});
+	});
+});
+
+describe("snapvisor router compose services", () => {
+	it("rejects setComposeProject for a compose service in another organization", async () => {
+		mocks.serviceOrganizationId = "org-2";
+		await expect(
+			caller().setComposeProject({ composeId: "compose-x", projectName: "web" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects setComposeProject when the compose record disagrees with the service scope", async () => {
+		mocks.compose = {
+			...mocks.compose,
+			environment: { project: { organizationId: "org-2" } },
+		};
+		await expect(
+			caller().setComposeProject({
+				composeId: "compose-1",
+				projectName: "web",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
+
+	it("rejects setComposeProject for a member without access to the service", async () => {
+		mocks.memberRole = "member";
+		await expect(
+			caller("member").setComposeProject({
+				composeId: "compose-1",
+				projectName: "web",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
+
+	it("allows setComposeProject for an in-organization compose service", async () => {
+		const result = await caller().setComposeProject({
+			composeId: "compose-1",
+			projectName: "web",
+		});
+		expect(result).toEqual({ projectName: "web" });
+	});
+
+	it("turns visual testing off with a null project", async () => {
+		const result = await caller().setComposeProject({
+			composeId: "compose-1",
+			projectName: null,
+		});
+		expect(result).toEqual({ projectName: null });
+	});
+
+	it("rejects a project name that is a URL", async () => {
+		await expect(
+			caller().setComposeProject({
+				composeId: "compose-1",
+				projectName: "https://evil.example/x",
+			}),
+		).rejects.toThrow();
+	});
+
+	it("rejects previewBuild for a compose preview in another organization", async () => {
+		useComposePreview();
+		mocks.serviceOrganizationId = "org-2";
+		await expect(
+			caller().previewBuild({ previewDeploymentId: "preview-1" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects refreshPreviewBuild for a compose preview in another organization", async () => {
+		useComposePreview();
+		mocks.serviceOrganizationId = "org-2";
+		await expect(
+			caller().refreshPreviewBuild({ previewDeploymentId: "preview-1" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("serves previewBuild for a compose preview with no build yet", async () => {
+		useComposePreview();
+		const result = await caller().previewBuild({
+			previewDeploymentId: "preview-1",
+		});
+		expect(result).toEqual({
+			configured: true,
+			buildId: null,
+			buildStatus: null,
+			reviewUrl: null,
+		});
+	});
+
+	it("returns the status and review link of a linked compose preview build", async () => {
+		useComposePreview();
+		mocks.compose = { ...mocks.compose, snapvisorProjectName: "stack-web" };
+		mocks.previewDeployment = {
+			...mocks.previewDeployment,
+			snapvisorBuildId: "42",
+			snapvisorBuildStatus: "changes-detected",
+		};
+		const result = await caller().previewBuild({
+			previewDeploymentId: "preview-1",
+		});
+		expect(result).toEqual({
+			configured: true,
+			buildId: "42",
+			buildStatus: "changes-detected",
+			reviewUrl: "https://app.snapvisor.io/my-team/stack-web/builds/42",
+		});
+		expect(JSON.stringify(result)).not.toContain(SECRET_TOKEN);
+	});
+
+	it("hides the review link when the compose service has visual testing off", async () => {
+		useComposePreview();
+		mocks.previewDeployment = {
+			...mocks.previewDeployment,
+			snapvisorBuildId: "42",
+			snapvisorBuildStatus: "no-changes",
+		};
+		const result = await caller().previewBuild({
+			previewDeploymentId: "preview-1",
+		});
+		expect(result.reviewUrl).toBeNull();
+		expect(result.buildStatus).toBe("no-changes");
 	});
 });
 
