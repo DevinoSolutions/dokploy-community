@@ -3,10 +3,10 @@ import postgres from "postgres";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
- * postgres.js schedules a reconnect at `closedDate + backoff - performance.now()`.
+ * postgres.js schedules a reconnect at `closedTime + backoff - performance.now()`.
  * When a closed pool slot is reused after its backoff window is already over,
  * that is a negative delay and Node prints `TimeoutNegativeWarning` (seen once
- * on production boot). The pnpm patch for postgres@3.4.4 clamps it at zero.
+ * on production boot). postgres.js 3.4.8 and later clamp it at zero; 3.4.4 did not.
  *
  * The fake server answers the startup handshake and every simple query, and
  * hangs up on the first connection after its first answer.
