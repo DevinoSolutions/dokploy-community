@@ -625,6 +625,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "snapvisor-refreshPreviewBuild": "dokploy:admin",
   "snapvisor-remove": "dokploy:admin",
   "snapvisor-setApplicationProject": "dokploy:admin",
+  "snapvisor-setComposeProject": "dokploy:admin",
   "snapvisor-testConnection": "dokploy:admin",
   "snapvisor-update": "dokploy:admin",
   "sshKey-all": "dokploy:admin",
