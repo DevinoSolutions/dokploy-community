@@ -70,14 +70,16 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("slack"),
-			webhookUrl: z.string().min(1, { message: "Webhook URL is required" }),
+			// Required on create; blank keeps the stored webhook when editing.
+			webhookUrl: z.string().optional(),
 			channel: z.string(),
 		})
 		.merge(notificationBaseSchema),
 	z
 		.object({
 			type: z.literal("telegram"),
-			botToken: z.string().min(1, { message: "Bot Token is required" }),
+			// Required on create; blank keeps the stored token when editing.
+			botToken: z.string().optional(),
 			chatId: z.string().min(1, { message: "Chat ID is required" }),
 			messageThreadId: z.string().optional(),
 		})
@@ -85,7 +87,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("discord"),
-			webhookUrl: z.string().min(1, { message: "Webhook URL is required" }),
+			// Required on create; blank keeps the stored webhook when editing.
+			webhookUrl: z.string().optional(),
 			decoration: z.boolean().default(true),
 		})
 		.merge(notificationBaseSchema),
@@ -109,7 +112,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("resend"),
-			apiKey: z.string().min(1, { message: "API Key is required" }),
+			// Required on create; blank keeps the stored key when editing.
+			apiKey: z.string().optional(),
 			fromAddress: z
 				.string()
 				.min(1, { message: "From Address is required" })
@@ -174,7 +178,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 		.object({
 			type: z.literal("gotify"),
 			serverUrl: z.string().min(1, { message: "Server URL is required" }),
-			appToken: z.string().min(1, { message: "App Token is required" }),
+			// Required on create; blank keeps the stored token when editing.
+			appToken: z.string().optional(),
 			priority: z.number().min(1).max(10).default(5),
 			decoration: z.boolean().default(true),
 		})
@@ -185,13 +190,15 @@ export const notificationSchema = z.discriminatedUnion("type", [
 			serverUrl: z.string().min(1, { message: "Server URL is required" }),
 			topic: z.string().min(1, { message: "Topic is required" }),
 			accessToken: z.string().optional(),
+			clearAccessToken: z.boolean().optional(),
 			priority: z.number().min(1).max(5).default(3),
 		})
 		.merge(notificationBaseSchema),
 	z
 		.object({
 			type: z.literal("mattermost"),
-			webhookUrl: z.string().min(1, { message: "Webhook URL is required" }),
+			// Required on create; blank keeps the stored webhook when editing.
+			webhookUrl: z.string().optional(),
 			channel: z.string().optional(),
 			username: z.string().optional(),
 		})
@@ -199,8 +206,9 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("pushover"),
-			userKey: z.string().min(1, { message: "User Key is required" }),
-			apiToken: z.string().min(1, { message: "API Token is required" }),
+			// Required on create; blank keeps the stored keys when editing.
+			userKey: z.string().optional(),
+			apiToken: z.string().optional(),
 			priority: z.number().min(-2).max(2).default(0),
 			retry: z.number().min(30).nullish(),
 			expire: z.number().min(1).max(10800).nullish(),
@@ -224,13 +232,15 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("lark"),
-			webhookUrl: z.string().min(1, { message: "Webhook URL is required" }),
+			// Required on create; blank keeps the stored webhook when editing.
+			webhookUrl: z.string().optional(),
 		})
 		.merge(notificationBaseSchema),
 	z
 		.object({
 			type: z.literal("teams"),
-			webhookUrl: z.string().min(1, { message: "Webhook URL is required" }),
+			// Required on create; blank keeps the stored webhook when editing.
+			webhookUrl: z.string().optional(),
 		})
 		.merge(notificationBaseSchema),
 ]);
@@ -299,6 +309,21 @@ export const notificationsMap = {
 };
 
 export type NotificationSchema = z.infer<typeof notificationSchema>;
+
+/** Secrets are write-only: the field shows the masked stored value. */
+const keepBlankPlaceholder = (
+	masked: string | null | undefined,
+	fallback: string,
+) => (masked ? `${masked} (leave blank to keep)` : fallback);
+
+const headerValuePlaceholder = (
+	masked: Record<string, string> | undefined,
+	name: unknown,
+) =>
+	keepBlankPlaceholder(
+		typeof name === "string" && masked ? masked[name] : undefined,
+		"Value",
+	);
 
 interface Props {
 	notificationId?: string;
@@ -407,6 +432,18 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 	});
 	const type = form.watch("type");
 
+	// Secrets are write-only: required to create, blank keeps the stored one
+	// when editing.
+	const requireOnCreate = (
+		field: string,
+		value: string | undefined,
+		message: string,
+	) => {
+		if (notificationId || value?.trim()) return true;
+		form.setError(field as never, { message });
+		return false;
+	};
+
 	const { fields, append, remove } = useFieldArray({
 		control: form.control,
 		name: "toAddresses" as never,
@@ -441,7 +478,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					dockerCleanup: notification.dockerCleanup,
-					webhookUrl: notification.slack?.webhookUrl,
+					webhookUrl: "",
 					channel: notification.slack?.channel || "",
 					name: notification.name,
 					type: notification.notificationType,
@@ -456,7 +493,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					databaseBackup: notification.databaseBackup,
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
-					botToken: notification.telegram?.botToken,
+					botToken: "",
 					messageThreadId: notification.telegram?.messageThreadId || "",
 					chatId: notification.telegram?.chatId,
 					type: notification.notificationType,
@@ -474,7 +511,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					webhookUrl: notification.discord?.webhookUrl,
+					webhookUrl: "",
 					decoration: notification.discord?.decoration ?? undefined,
 					name: notification.name,
 					dockerCleanup: notification.dockerCleanup,
@@ -493,7 +530,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					smtpServer: notification.email?.smtpServer,
 					smtpPort: notification.email?.smtpPort,
 					username: notification.email?.username ?? undefined,
-					password: notification.email?.password ?? undefined,
+					password: "",
 					toAddresses: notification.email?.toAddresses,
 					fromAddress: notification.email?.fromAddress,
 					name: notification.name,
@@ -510,7 +547,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					apiKey: notification.resend?.apiKey,
+					apiKey: "",
 					toAddresses: notification.resend?.toAddresses,
 					fromAddress: notification.resend?.fromAddress,
 					name: notification.name,
@@ -581,7 +618,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					appToken: notification.gotify?.appToken,
+					appToken: "",
 					decoration: notification.gotify?.decoration ?? undefined,
 					priority: notification.gotify?.priority,
 					serverUrl: notification.gotify?.serverUrl,
@@ -599,7 +636,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					accessToken: notification.ntfy?.accessToken || "",
+					accessToken: "",
+					clearAccessToken: false,
 					topic: notification.ntfy?.topic,
 					priority: notification.ntfy?.priority,
 					serverUrl: notification.ntfy?.serverUrl,
@@ -617,7 +655,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					webhookUrl: notification.mattermost?.webhookUrl,
+					webhookUrl: "",
 					channel: notification.mattermost?.channel || "",
 					username: notification.mattermost?.username || "",
 					name: notification.name,
@@ -633,7 +671,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					databaseBackup: notification.databaseBackup,
 					dokployBackup: notification.dokployBackup,
 					type: notification.notificationType,
-					webhookUrl: notification.lark?.webhookUrl,
+					webhookUrl: "",
 					name: notification.name,
 					dockerCleanup: notification.dockerCleanup,
 					volumeBackup: notification.volumeBackup,
@@ -649,7 +687,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					webhookUrl: notification.teams?.webhookUrl,
+					webhookUrl: "",
 					name: notification.name,
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
@@ -664,14 +702,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					type: notification.notificationType,
 					endpoint: notification.custom?.endpoint || "",
-					headers: notification.custom?.headers
-						? Object.entries(notification.custom.headers).map(
-								([key, value]) => ({
-									key,
-									value,
-								}),
-							)
-						: [],
+					// Header values are write-only: the names come back, the values stay blank.
+					headers: Object.keys(notification.custom?.headersMasked ?? {}).map(
+						(key) => ({ key, value: "" }),
+					),
 					name: notification.name,
 					volumeBackup: notification.volumeBackup,
 					dockerCleanup: notification.dockerCleanup,
@@ -687,8 +721,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					userKey: notification.pushover?.userKey,
-					apiToken: notification.pushover?.apiToken,
+					userKey: "",
+					apiToken: "",
 					priority: notification.pushover?.priority,
 					retry: notification.pushover?.retry ?? undefined,
 					expire: notification.pushover?.expire ?? undefined,
@@ -735,6 +769,14 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 		} = data;
 		let promise: Promise<unknown> | null = null;
 		if (data.type === "slack") {
+			if (
+				!requireOnCreate(
+					"webhookUrl",
+					data.webhookUrl,
+					"Webhook URL is required",
+				)
+			)
+				return;
 			promise = slackMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -742,16 +784,17 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				webhookUrl: data.webhookUrl,
+				webhookUrl: data.webhookUrl ?? "",
 				channel: data.channel,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
-				slackId: notification?.slackId || "",
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "telegram") {
+			if (!requireOnCreate("botToken", data.botToken, "Bot Token is required"))
+				return;
 			promise = telegramMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -759,17 +802,24 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				botToken: data.botToken,
+				botToken: data.botToken ?? "",
 				messageThreadId: data.messageThreadId || "",
 				chatId: data.chatId,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				telegramId: notification?.telegramId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "discord") {
+			if (
+				!requireOnCreate(
+					"webhookUrl",
+					data.webhookUrl,
+					"Webhook URL is required",
+				)
+			)
+				return;
 			promise = discordMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -777,12 +827,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				webhookUrl: data.webhookUrl,
+				webhookUrl: data.webhookUrl ?? "",
 				decoration: data.decoration,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				discordId: notification?.discordId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
@@ -803,11 +852,12 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				emailId: notification?.emailId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "resend") {
+			if (!requireOnCreate("apiKey", data.apiKey, "API Key is required"))
+				return;
 			promise = resendMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -815,13 +865,12 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				apiKey: data.apiKey,
+				apiKey: data.apiKey ?? "",
 				fromAddress: data.fromAddress,
 				toAddresses: data.toAddresses,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				resendId: notification?.resendId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
@@ -845,7 +894,6 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				sendlyId: notification?.sendlyId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
@@ -869,7 +917,6 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				notiflyId: notification?.notiflyId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
@@ -895,11 +942,12 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				name: data.name,
 				dockerCleanup: false,
 				notificationId: notificationId || "",
-				uptimelyChannelId: notification?.uptimelyChannelId || "",
 				serverThreshold: false,
 				scheduleFailure: false,
 			});
 		} else if (data.type === "gotify") {
+			if (!requireOnCreate("appToken", data.appToken, "App Token is required"))
+				return;
 			promise = gotifyMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -908,14 +956,13 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
 				serverUrl: data.serverUrl,
-				appToken: data.appToken,
+				appToken: data.appToken ?? "",
 				priority: data.priority,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				decoration: data.decoration,
 				serverThreshold: serverThreshold,
 				notificationId: notificationId || "",
-				gotifyId: notification?.gotifyId || "",
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "ntfy") {
@@ -928,16 +975,24 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				volumeBackup: volumeBackup,
 				serverUrl: data.serverUrl,
 				accessToken: data.accessToken || "",
+				clearAccessToken: data.clearAccessToken || undefined,
 				topic: data.topic,
 				priority: data.priority,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				serverThreshold: serverThreshold,
 				notificationId: notificationId || "",
-				ntfyId: notification?.ntfyId || "",
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "mattermost") {
+			if (
+				!requireOnCreate(
+					"webhookUrl",
+					data.webhookUrl,
+					"Webhook URL is required",
+				)
+			)
+				return;
 			promise = mattermostMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -945,17 +1000,24 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				webhookUrl: data.webhookUrl,
+				webhookUrl: data.webhookUrl ?? "",
 				channel: data.channel || undefined,
 				username: data.username || undefined,
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				mattermostId: notification?.mattermostId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "lark") {
+			if (
+				!requireOnCreate(
+					"webhookUrl",
+					data.webhookUrl,
+					"Webhook URL is required",
+				)
+			)
+				return;
 			promise = larkMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -963,15 +1025,22 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				webhookUrl: data.webhookUrl,
+				webhookUrl: data.webhookUrl ?? "",
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				larkId: notification?.larkId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "teams") {
+			if (
+				!requireOnCreate(
+					"webhookUrl",
+					data.webhookUrl,
+					"Webhook URL is required",
+				)
+			)
+				return;
 			promise = teamsMutation.mutateAsync({
 				appBuildError: appBuildError,
 				appDeploy: appDeploy,
@@ -979,11 +1048,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				webhookUrl: data.webhookUrl,
+				webhookUrl: data.webhookUrl ?? "",
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",
-				teamsId: notification?.teamsId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
 			});
@@ -1008,14 +1076,17 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
 				endpoint: data.endpoint,
-				headers: headersRecord,
+				headers: headersRecord ?? (notificationId ? {} : undefined),
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				serverThreshold: serverThreshold,
 				notificationId: notificationId || "",
-				customId: notification?.customId || "",
 			});
 		} else if (data.type === "pushover") {
+			if (!requireOnCreate("userKey", data.userKey, "User Key is required"))
+				return;
+			if (!requireOnCreate("apiToken", data.apiToken, "API Token is required"))
+				return;
 			if (data.priority === 2 && (data.retry == null || data.expire == null)) {
 				toast.error("Retry and expire are required for emergency priority (2)");
 				return;
@@ -1027,8 +1098,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: databaseBackup,
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
-				userKey: data.userKey,
-				apiToken: data.apiToken,
+				userKey: data.userKey ?? "",
+				apiToken: data.apiToken ?? "",
 				priority: data.priority,
 				retry: data.priority === 2 ? data.retry : undefined,
 				expire: data.priority === 2 ? data.expire : undefined,
@@ -1036,7 +1107,6 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				dockerCleanup: dockerCleanup,
 				serverThreshold: serverThreshold,
 				notificationId: notificationId || "",
-				pushoverId: notification?.pushoverId || "",
 			});
 		}
 
@@ -1056,11 +1126,14 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 						await utils.notification.one.invalidate({ notificationId });
 					}
 				})
-				.catch(() => {
+				.catch((error) => {
 					toast.error(
 						notificationId
 							? "Error updating a notification"
 							: "Error creating a notification",
+						{
+							description: error instanceof Error ? error.message : undefined,
+						},
 					);
 				});
 		}
@@ -1183,7 +1256,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Webhook URL</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.slack?.webhookUrlMasked,
+																"https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -1220,7 +1297,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Bot Token</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="6660491268:AAFMGmajZOVewpMNZCgJr5H7cpXpoZPgvXw"
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.telegram?.botTokenMasked,
+																"6660491268:AAFMGmajZOVewpMNZCgJr5H7cpXpoZPgvXw",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -1275,7 +1356,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Webhook URL</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="https://discord.com/api/webhooks/123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.discord?.webhookUrlMasked,
+																"https://discord.com/api/webhooks/123456789/ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -1390,7 +1475,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 														<FormControl>
 															<Input
 																type="password"
-																placeholder="******************"
+																autoComplete="off"
+																placeholder={keepBlankPlaceholder(
+																	notification?.email?.passwordMasked,
+																	"******************",
+																)}
 																{...field}
 																value={field.value ?? ""}
 															/>
@@ -1485,7 +1574,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormControl>
 														<Input
 															type="password"
-															placeholder="re_********"
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.resend?.apiKeyMasked,
+																"re_********",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -1885,7 +1978,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>App Token</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="AzxcvbnmKjhgfdsa..."
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.gotify?.appTokenMasked,
+																"AzxcvbnmKjhgfdsa...",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -1983,7 +2080,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Access Token</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="AzxcvbnmKjhgfdsa..."
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.ntfy?.accessTokenMasked,
+																"AzxcvbnmKjhgfdsa...",
+															)}
 															{...field}
 															value={field.value ?? ""}
 														/>
@@ -1995,6 +2096,30 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												</FormItem>
 											)}
 										/>
+										{notification?.ntfy?.accessTokenMasked && (
+											<FormField
+												control={form.control}
+												name="clearAccessToken"
+												render={({ field }) => (
+													<FormItem className="flex items-center justify-between rounded-lg border p-3 shadow-xs">
+														<div className="space-y-0.5">
+															<FormLabel>Remove the stored token</FormLabel>
+															<FormDescription>
+																Send to this topic without an access token. A
+																stored token is otherwise kept, and needs to be
+																typed again to change the server URL.
+															</FormDescription>
+														</div>
+														<FormControl>
+															<Switch
+																checked={field.value ?? false}
+																onCheckedChange={field.onChange}
+															/>
+														</FormControl>
+													</FormItem>
+												)}
+											/>
+										)}
 										<FormField
 											control={form.control}
 											name="priority"
@@ -2038,7 +2163,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Webhook URL</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="https://your-mattermost.com/hooks/xxx-generatedkey-xxx"
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.mattermost?.webhookUrlMasked,
+																"https://your-mattermost.com/hooks/xxx-generatedkey-xxx",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -2138,7 +2267,16 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 															render={({ field }) => (
 																<FormItem className="flex-2">
 																	<FormControl>
-																		<Input placeholder="Value" {...field} />
+																		<Input
+																			autoComplete="off"
+																			placeholder={headerValuePlaceholder(
+																				notification?.custom?.headersMasked,
+																				form.watch(
+																					`headers.${index}.key` as never,
+																				),
+																			)}
+																			{...field}
+																		/>
 																	</FormControl>
 																</FormItem>
 															)}
@@ -2180,7 +2318,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Webhook URL</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="https://open.larksuite.com/open-apis/bot/v2/hook/xxxxxxxxxxxxxxxxxxxxxxxx"
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.lark?.webhookUrlMasked,
+																"https://open.larksuite.com/open-apis/bot/v2/hook/xxxxxxxxxxxxxxxxxxxxxxxx",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -2201,7 +2343,11 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormLabel>Webhook URL</FormLabel>
 													<FormControl>
 														<Input
-															placeholder="https://xxx.webhook.office.com/webhookb2/..."
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.teams?.webhookUrlMasked,
+																"https://xxx.webhook.office.com/webhookb2/...",
+															)}
 															{...field}
 														/>
 													</FormControl>
@@ -2225,7 +2371,14 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												<FormItem>
 													<FormLabel>User Key</FormLabel>
 													<FormControl>
-														<Input placeholder="ub3de9kl2q..." {...field} />
+														<Input
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.pushover?.userKeyMasked,
+																"ub3de9kl2q...",
+															)}
+															{...field}
+														/>
 													</FormControl>
 													<FormMessage />
 												</FormItem>
@@ -2238,7 +2391,14 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 												<FormItem>
 													<FormLabel>API Token</FormLabel>
 													<FormControl>
-														<Input placeholder="a3d9k2q7m4..." {...field} />
+														<Input
+															autoComplete="off"
+															placeholder={keepBlankPlaceholder(
+																notification?.pushover?.apiTokenMasked,
+																"a3d9k2q7m4...",
+															)}
+															{...field}
+														/>
 													</FormControl>
 													<FormMessage />
 												</FormItem>
@@ -2617,22 +2777,26 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 								try {
 									if (data.type === "slack") {
 										await testSlackConnection({
-											webhookUrl: data.webhookUrl,
+											notificationId: notificationId || undefined,
+											webhookUrl: data.webhookUrl ?? "",
 											channel: data.channel,
 										});
 									} else if (data.type === "telegram") {
 										await testTelegramConnection({
-											botToken: data.botToken,
+											notificationId: notificationId || undefined,
+											botToken: data.botToken ?? "",
 											chatId: data.chatId,
 											messageThreadId: data.messageThreadId || "",
 										});
 									} else if (data.type === "discord") {
 										await testDiscordConnection({
-											webhookUrl: data.webhookUrl,
+											notificationId: notificationId || undefined,
+											webhookUrl: data.webhookUrl ?? "",
 											decoration: data.decoration,
 										});
 									} else if (data.type === "email") {
 										await testEmailConnection({
+											notificationId: notificationId || undefined,
 											smtpServer: data.smtpServer,
 											smtpPort: data.smtpPort,
 											username: data.username || "",
@@ -2642,7 +2806,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 										});
 									} else if (data.type === "resend") {
 										await testResendConnection({
-											apiKey: data.apiKey,
+											notificationId: notificationId || undefined,
+											apiKey: data.apiKey ?? "",
 											fromAddress: data.fromAddress,
 											toAddresses: data.toAddresses,
 										});
@@ -2672,13 +2837,18 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 										});
 									} else if (data.type === "gotify") {
 										await testGotifyConnection({
+											notificationId: notificationId || undefined,
 											serverUrl: data.serverUrl,
-											appToken: data.appToken,
+											appToken: data.appToken ?? "",
 											priority: data.priority ?? 0,
 											decoration: data.decoration,
 										});
 									} else if (data.type === "ntfy") {
 										await testNtfyConnection({
+											// Removing the token: nothing stored is borrowed.
+											notificationId: data.clearAccessToken
+												? undefined
+												: notificationId || undefined,
 											serverUrl: data.serverUrl,
 											topic: data.topic,
 											accessToken: data.accessToken || "",
@@ -2686,17 +2856,20 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 										});
 									} else if (data.type === "mattermost") {
 										await testMattermostConnection({
-											webhookUrl: data.webhookUrl,
+											notificationId: notificationId || undefined,
+											webhookUrl: data.webhookUrl ?? "",
 											channel: data.channel || undefined,
 											username: data.username || undefined,
 										});
 									} else if (data.type === "lark") {
 										await testLarkConnection({
-											webhookUrl: data.webhookUrl,
+											notificationId: notificationId || undefined,
+											webhookUrl: data.webhookUrl ?? "",
 										});
 									} else if (data.type === "teams") {
 										await testTeamsConnection({
-											webhookUrl: data.webhookUrl,
+											notificationId: notificationId || undefined,
+											webhookUrl: data.webhookUrl ?? "",
 										});
 									} else if (data.type === "custom") {
 										const headersRecord =
@@ -2710,8 +2883,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													)
 												: undefined;
 										await testCustomConnection({
+											notificationId: notificationId || undefined,
 											endpoint: data.endpoint,
-											headers: headersRecord,
+											headers:
+												headersRecord ?? (notificationId ? {} : undefined),
 										});
 									} else if (data.type === "pushover") {
 										if (
@@ -2723,8 +2898,9 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											);
 										}
 										await testPushoverConnection({
-											userKey: data.userKey,
-											apiToken: data.apiToken,
+											notificationId: notificationId || undefined,
+											userKey: data.userKey ?? "",
+											apiToken: data.apiToken ?? "",
 											priority: data.priority ?? 0,
 											retry: data.priority === 2 ? data.retry : undefined,
 											expire: data.priority === 2 ? data.expire : undefined,

@@ -15,12 +15,18 @@ import {
 	createTeamsNotification,
 	createTelegramNotification,
 	createUptimelyChannelNotification,
+	EMAIL_SERVER_CHANGE_NEEDS_PASSWORD_MESSAGE,
 	findNotificationById,
+	GOTIFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 	getWebServerSettings,
-	IS_CLOUD,
 	isSameIntegrationBaseUrl,
+	isSameSmtpServer,
 	maskApiKey,
+	maskHeaderValues,
+	maskWebhookUrl,
+	mergeCustomHeaders,
 	NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+	NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 	removeNotificationById,
 	SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	sendCustomNotification,
@@ -114,53 +120,138 @@ import {
 	apiUpdateTelegram,
 	apiUpdateUptimelyChannel,
 	notifications,
-	type notifly,
-	type sendly,
 	server,
-	type uptimelyChannel,
 } from "@/server/db/schema";
 
 /**
- * Client-safe view of a notification: the Sendly, Notifly and Uptimely channel
- * API keys are write-only, so each is replaced by its masked form (like the
- * Uptimely integration key).
+ * Client-safe view of a notification: every provider secret is write-only, so
+ * it is replaced by its masked form (`<field>Masked`) and never returned. The
+ * senders read the provider rows from the database, not this view.
  */
-type ChannelWithKey = { apiKey: string };
+type NotificationWithProviders = Awaited<
+	ReturnType<typeof findNotificationById>
+>;
 
-const maskChannelKey = <C extends ChannelWithKey>(channel: C | null) => {
-	if (!channel) return null;
-	const { apiKey, ...visible } = channel;
-	return { ...visible, apiKeyMasked: maskApiKey(apiKey) };
+type Masked<C, K extends keyof C> = Omit<C, K> & {
+	[P in K as `${P & string}Masked`]: string | null;
 };
 
-const presentNotification = <
-	T extends {
-		sendly: typeof sendly.$inferSelect | null;
-		notifly: typeof notifly.$inferSelect | null;
-		uptimelyChannel: typeof uptimelyChannel.$inferSelect | null;
-	},
->(
-	notification: T,
+const maskSecrets = <C extends object, K extends keyof C & string>(
+	row: C | null | undefined,
+	keys: readonly K[],
+	mask: (value: string) => string = maskApiKey,
 ) => {
+	if (!row) return null;
+	const visible: Record<string, unknown> = {
+		...(row as Record<string, unknown>),
+	};
+	for (const key of keys) {
+		const value = visible[key];
+		delete visible[key];
+		visible[`${key}Masked`] =
+			typeof value === "string" && value ? mask(value) : null;
+	}
+	return visible as Masked<C, K>;
+};
+
+const maskCustomHeaders = (row: NotificationWithProviders["custom"]) => {
+	if (!row) return null;
+	const { headers, ...visible } = row;
+	return { ...visible, headersMasked: maskHeaderValues(headers) };
+};
+
+const presentNotification = (notification: NotificationWithProviders) => {
 	const {
-		sendly: sendlyChannel,
-		notifly: notiflyChannel,
-		uptimelyChannel: channel,
+		slack,
+		telegram,
+		discord,
+		email,
+		resend,
+		sendly,
+		notifly,
+		uptimelyChannel,
+		gotify,
+		ntfy,
+		mattermost,
+		custom,
+		lark,
+		pushover,
+		teams,
 		...rest
 	} = notification;
 	return {
 		...rest,
-		sendly: maskChannelKey(sendlyChannel),
-		notifly: maskChannelKey(notiflyChannel),
-		uptimelyChannel: maskChannelKey(channel),
+		slack: maskSecrets(slack, ["webhookUrl"], maskWebhookUrl),
+		telegram: maskSecrets(telegram, ["botToken"]),
+		discord: maskSecrets(discord, ["webhookUrl"], maskWebhookUrl),
+		// A password is hidden entirely: no tail, unlike the keys and tokens.
+		email: maskSecrets(email, ["password"], () => "••••••••"),
+		resend: maskSecrets(resend, ["apiKey"]),
+		sendly: maskSecrets(sendly, ["apiKey"]),
+		notifly: maskSecrets(notifly, ["apiKey"]),
+		uptimelyChannel: maskSecrets(uptimelyChannel, ["apiKey"]),
+		gotify: maskSecrets(gotify, ["appToken"]),
+		ntfy: maskSecrets(ntfy, ["accessToken"]),
+		mattermost: maskSecrets(mattermost, ["webhookUrl"], maskWebhookUrl),
+		custom: maskCustomHeaders(custom),
+		lark: maskSecrets(lark, ["webhookUrl"], maskWebhookUrl),
+		pushover: maskSecrets(pushover, ["userKey", "apiToken"]),
+		teams: maskSecrets(teams, ["webhookUrl"], maskWebhookUrl),
 	};
 };
 
 /**
- * Edit flow of the "Test Notification" button: the key field is blank
- * (write-only), so the test uses the stored key of the caller's own
- * notification, never a key sent by the client. The stored key is never
- * replayed against a URL typed into the form.
+ * The notification behind the "Test Notification" button of the edit form. It
+ * must belong to the caller's organization: the stored secrets of another
+ * organization's notification are never borrowed.
+ */
+const findOwnNotification = async (
+	notificationId: string,
+	organizationId: string,
+) => {
+	const notification = await findNotificationById(notificationId);
+	if (notification.organizationId !== organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You are not authorized to access this notification",
+		});
+	}
+	return notification;
+};
+
+/**
+ * Edit flow of the "Test Notification" button: the secret field is blank
+ * (write-only), so the test uses the stored secret of the caller's own
+ * notification, never one sent by the client. A typed secret is used as is.
+ */
+const resolveStoredSecret = async (params: {
+	value?: string | null;
+	notificationId?: string;
+	organizationId: string;
+	stored: (
+		notification: NotificationWithProviders,
+	) => string | null | undefined;
+	missing: string;
+}) => {
+	if (params.value) return params.value;
+	if (params.notificationId) {
+		const notification = await findOwnNotification(
+			params.notificationId,
+			params.organizationId,
+		);
+		const stored = params.stored(notification);
+		if (stored) return stored;
+	}
+	throw new TRPCError({
+		code: "BAD_REQUEST",
+		message: `${params.missing} is required to test the connection`,
+	});
+};
+
+/**
+ * Same for a secret that is sent to a configurable server URL: the stored
+ * secret is never replayed against a URL typed into the form. A provider
+ * without a stored secret (an optional token) resolves to undefined.
  */
 const resolveChannelTestKey = async (params: {
 	apiKey?: string;
@@ -168,18 +259,15 @@ const resolveChannelTestKey = async (params: {
 	baseUrl: string;
 	organizationId: string;
 	storedChannel: (
-		notification: Awaited<ReturnType<typeof findNotificationById>>,
+		notification: NotificationWithProviders,
 	) => { apiKey: string; baseUrl: string } | null;
 	urlChangeMessage: string;
 }) => {
 	if (params.apiKey || !params.notificationId) return params.apiKey;
-	const notification = await findNotificationById(params.notificationId);
-	if (notification.organizationId !== params.organizationId) {
-		throw new TRPCError({
-			code: "UNAUTHORIZED",
-			message: "You are not authorized to access this notification",
-		});
-	}
+	const notification = await findOwnNotification(
+		params.notificationId,
+		params.organizationId,
+	);
 	const channel = params.storedChannel(notification);
 	if (!channel) return undefined;
 	if (!isSameIntegrationBaseUrl(params.baseUrl, channel.baseUrl)) {
@@ -239,14 +327,25 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testSlackConnection: withPermission("notification", "create")
 		.input(apiTestSlackConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
-				await sendSlackNotification(input, {
-					channel: input.channel,
-					text: "Hi, From Dokploy 👋",
+				const webhookUrl = await resolveStoredSecret({
+					value: input.webhookUrl,
+					notificationId: input.notificationId,
+					organizationId: ctx.session.activeOrganizationId,
+					stored: (notification) => notification.slack?.webhookUrl,
+					missing: "A webhook URL",
 				});
+				await sendSlackNotification(
+					{ webhookUrl, channel: input.channel },
+					{
+						channel: input.channel,
+						text: "Hi, From Dokploy 👋",
+					},
+				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -299,6 +398,8 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
@@ -308,11 +409,26 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testTelegramConnection: withPermission("notification", "create")
 		.input(apiTestTelegramConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
-				await sendTelegramNotification(input, "Hi, From Dokploy 👋");
+				const botToken = await resolveStoredSecret({
+					value: input.botToken,
+					notificationId: input.notificationId,
+					organizationId: ctx.session.activeOrganizationId,
+					stored: (notification) => notification.telegram?.botToken,
+					missing: "A bot token",
+				});
+				await sendTelegramNotification(
+					{
+						botToken,
+						chatId: input.chatId,
+						messageThreadId: input.messageThreadId,
+					},
+					"Hi, From Dokploy 👋",
+				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",
@@ -365,6 +481,8 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
@@ -375,19 +493,30 @@ export const notificationRouter = createTRPCRouter({
 
 	testDiscordConnection: withPermission("notification", "create")
 		.input(apiTestDiscordConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				const webhookUrl = await resolveStoredSecret({
+					value: input.webhookUrl,
+					notificationId: input.notificationId,
+					organizationId: ctx.session.activeOrganizationId,
+					stored: (notification) => notification.discord?.webhookUrl,
+					missing: "A webhook URL",
+				});
 				const decorate = (decoration: string, text: string) =>
 					`${input.decoration ? decoration : ""} ${text}`.trim();
 
-				await sendDiscordNotification(input, {
-					title: decorate(">", "`🤚` - Test Notification"),
-					description: decorate(">", "Hi, From Dokploy 👋"),
-					color: 0xf3f7f4,
-				});
+				await sendDiscordNotification(
+					{ webhookUrl, decoration: input.decoration },
+					{
+						title: decorate(">", "`🤚` - Test Notification"),
+						description: decorate(">", "Hi, From Dokploy 👋"),
+						color: 0xf3f7f4,
+					},
+				);
 
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -436,6 +565,8 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
@@ -445,15 +576,34 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testEmailConnection: withPermission("notification", "create")
 		.input(apiTestEmailConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				let password = input.password;
+				if (!password && input.notificationId && input.username) {
+					const notification = await findOwnNotification(
+						input.notificationId,
+						ctx.session.activeOrganizationId,
+					);
+					const stored = notification.email;
+					if (stored?.password) {
+						// The stored password is never sent to a server typed into the form.
+						if (!isSameSmtpServer(input, stored)) {
+							throw new TRPCError({
+								code: "BAD_REQUEST",
+								message: EMAIL_SERVER_CHANGE_NEEDS_PASSWORD_MESSAGE,
+							});
+						}
+						password = stored.password;
+					}
+				}
 				await sendEmailNotification(
-					input,
+					{ ...input, password },
 					"Test Email",
 					"<p>Hi, From Dokploy 👋</p>",
 				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -502,6 +652,8 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
@@ -511,15 +663,23 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testResendConnection: withPermission("notification", "create")
 		.input(apiTestResendConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				const apiKey = await resolveStoredSecret({
+					value: input.apiKey,
+					notificationId: input.notificationId,
+					organizationId: ctx.session.activeOrganizationId,
+					stored: (notification) => notification.resend?.apiKey,
+					missing: "An API key",
+				});
 				await sendResendNotification(
-					input,
+					{ ...input, apiKey },
 					"Test Email",
 					"<p>Hi, From Dokploy 👋</p>",
 				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -928,10 +1088,7 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			try {
 				const notification = await findNotificationById(input.notificationId);
-				if (
-					IS_CLOUD &&
-					notification.organizationId !== ctx.session.activeOrganizationId
-				) {
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -954,15 +1111,36 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testGotifyConnection: withPermission("notification", "create")
 		.input(apiTestGotifyConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				const appToken = await resolveChannelTestKey({
+					apiKey: input.appToken,
+					notificationId: input.notificationId,
+					baseUrl: input.serverUrl,
+					organizationId: ctx.session.activeOrganizationId,
+					storedChannel: (notification) =>
+						notification.gotify
+							? {
+									apiKey: notification.gotify.appToken,
+									baseUrl: notification.gotify.serverUrl,
+								}
+							: null,
+					urlChangeMessage: GOTIFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+				});
+				if (!appToken) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "An app token is required to test the connection",
+					});
+				}
 				await sendGotifyNotification(
-					input,
+					{ ...input, appToken },
 					"Test Notification",
 					"Hi, From Dokploy 👋",
 				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",
@@ -993,10 +1171,7 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			try {
 				const notification = await findNotificationById(input.notificationId);
-				if (
-					IS_CLOUD &&
-					notification.organizationId !== ctx.session.activeOrganizationId
-				) {
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1019,10 +1194,25 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testNtfyConnection: withPermission("notification", "create")
 		.input(apiTestNtfyConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				// The token is optional (public topics): without one, none is sent.
+				const accessToken = await resolveChannelTestKey({
+					apiKey: input.accessToken,
+					notificationId: input.notificationId,
+					baseUrl: input.serverUrl,
+					organizationId: ctx.session.activeOrganizationId,
+					storedChannel: (notification) =>
+						notification.ntfy?.accessToken
+							? {
+									apiKey: notification.ntfy.accessToken,
+									baseUrl: notification.ntfy.serverUrl,
+								}
+							: null,
+					urlChangeMessage: NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+				});
 				await sendNtfyNotification(
-					input,
+					{ ...input, accessToken: accessToken || null },
 					"Test Notification",
 					"",
 					"view, visit Dokploy on Github, https://github.com/dokploy/dokploy, clear=true;",
@@ -1030,6 +1220,7 @@ export const notificationRouter = createTRPCRouter({
 				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message:
@@ -1066,10 +1257,7 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			try {
 				const notification = await findNotificationById(input.notificationId);
-				if (
-					IS_CLOUD &&
-					notification.organizationId !== ctx.session.activeOrganizationId
-				) {
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1092,15 +1280,26 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testMattermostConnection: withPermission("notification", "create")
 		.input(apiTestMattermostConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
-				await sendMattermostNotification(input, {
-					text: "Hi, From Dokploy 👋",
-					channel: input.channel,
-					username: input.username || "Dokploy Bot",
+				const webhookUrl = await resolveStoredSecret({
+					value: input.webhookUrl,
+					notificationId: input.notificationId,
+					organizationId: ctx.session.activeOrganizationId,
+					stored: (notification) => notification.mattermost?.webhookUrl,
+					missing: "A webhook URL",
 				});
+				await sendMattermostNotification(
+					{ webhookUrl, channel: input.channel, username: input.username },
+					{
+						text: "Hi, From Dokploy 👋",
+						channel: input.channel,
+						username: input.username || "Dokploy Bot",
+					},
+				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",
@@ -1154,15 +1353,35 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testCustomConnection: withPermission("notification", "create")
 		.input(apiTestCustomConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
-				await sendCustomNotification(input, {
-					title: "Test Notification",
-					message: "Hi, From Dokploy 👋",
-					timestamp: new Date().toISOString(),
-				});
+				let headers = input.headers;
+				if (headers && input.notificationId) {
+					const notification = await findOwnNotification(
+						input.notificationId,
+						ctx.session.activeOrganizationId,
+					);
+					const stored = notification.custom;
+					// Blank header values are the stored ones, which are never sent
+					// to an endpoint typed into the form.
+					headers = mergeCustomHeaders(
+						headers,
+						stored?.headers,
+						!stored ||
+							!isSameIntegrationBaseUrl(input.endpoint, stored.endpoint),
+					);
+				}
+				await sendCustomNotification(
+					{ endpoint: input.endpoint, headers },
+					{
+						title: "Test Notification",
+						message: "Hi, From Dokploy 👋",
+						timestamp: new Date().toISOString(),
+					},
+				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -1193,10 +1412,7 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			try {
 				const notification = await findNotificationById(input.notificationId);
-				if (
-					IS_CLOUD &&
-					notification.organizationId !== ctx.session.activeOrganizationId
-				) {
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1219,16 +1435,27 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testLarkConnection: withPermission("notification", "create")
 		.input(apiTestLarkConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
-				await sendLarkNotification(input, {
-					msg_type: "text",
-					content: {
-						text: "Hi, From Dokploy 👋",
-					},
+				const webhookUrl = await resolveStoredSecret({
+					value: input.webhookUrl,
+					notificationId: input.notificationId,
+					organizationId: ctx.session.activeOrganizationId,
+					stored: (notification) => notification.lark?.webhookUrl,
+					missing: "A webhook URL",
 				});
+				await sendLarkNotification(
+					{ webhookUrl },
+					{
+						msg_type: "text",
+						content: {
+							text: "Hi, From Dokploy 👋",
+						},
+					},
+				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",
@@ -1259,10 +1486,7 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			try {
 				const notification = await findNotificationById(input.notificationId);
-				if (
-					IS_CLOUD &&
-					notification.organizationId !== ctx.session.activeOrganizationId
-				) {
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1285,14 +1509,25 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testTeamsConnection: withPermission("notification", "create")
 		.input(apiTestTeamsConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
-				await sendTeamsNotification(input, {
-					title: "🤚 Test Notification",
-					facts: [{ name: "Message", value: "Hi, From Dokploy 👋" }],
+				const webhookUrl = await resolveStoredSecret({
+					value: input.webhookUrl,
+					notificationId: input.notificationId,
+					organizationId: ctx.session.activeOrganizationId,
+					stored: (notification) => notification.teams?.webhookUrl,
+					missing: "A webhook URL",
 				});
+				await sendTeamsNotification(
+					{ webhookUrl },
+					{
+						title: "🤚 Test Notification",
+						facts: [{ name: "Message", value: "Hi, From Dokploy 👋" }],
+					},
+				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: `${error instanceof Error ? error.message : "Unknown error"}`,
@@ -1326,10 +1561,7 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			try {
 				const notification = await findNotificationById(input.notificationId);
-				if (
-					IS_CLOUD &&
-					notification.organizationId !== ctx.session.activeOrganizationId
-				) {
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to update this notification",
@@ -1352,15 +1584,31 @@ export const notificationRouter = createTRPCRouter({
 		}),
 	testPushoverConnection: withPermission("notification", "create")
 		.input(apiTestPushoverConnection)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
+				const organizationId = ctx.session.activeOrganizationId;
+				const userKey = await resolveStoredSecret({
+					value: input.userKey,
+					notificationId: input.notificationId,
+					organizationId,
+					stored: (notification) => notification.pushover?.userKey,
+					missing: "A user key",
+				});
+				const apiToken = await resolveStoredSecret({
+					value: input.apiToken,
+					notificationId: input.notificationId,
+					organizationId,
+					stored: (notification) => notification.pushover?.apiToken,
+					missing: "An API token",
+				});
 				await sendPushoverNotification(
-					input,
+					{ ...input, userKey, apiToken },
 					"Test Notification",
 					"Hi, From Dokploy 👋",
 				);
 				return true;
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",

@@ -759,7 +759,10 @@ const createBetterAuth = () =>
 				organizationHooks: {
 					// The plugin's own delete endpoint: once the notification rows
 					// cascade away with the organization, nothing points at their
-					// provider rows (API keys, webhooks) any more.
+					// provider rows (API keys, webhooks) any more. Currently
+					// unreachable ("/organization/delete" is in disabledPaths; the
+					// organization router and services/admin.ts do this cleanup), so
+					// this is defense-in-depth only.
 					beforeDeleteOrganization: async ({ organization: deleted }) => {
 						await removeOrganizationNotifications(deleted.id);
 					},
