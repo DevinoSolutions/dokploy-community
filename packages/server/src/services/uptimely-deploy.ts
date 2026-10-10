@@ -261,8 +261,9 @@ const declareFor = async (
 		.then((rows) => rows[0]);
 	if (!claim) return;
 
+	let declared: { incidentId: string };
 	try {
-		const declared = await client.callTool<{ incidentId: string }>(
+		declared = await client.callTool<{ incidentId: string }>(
 			"uptimely_incident_declare",
 			{
 				projectId: channel.projectId,
@@ -270,6 +271,12 @@ const declareFor = async (
 				description: describeFailure(failure.errorMessage, failure.buildLink),
 			},
 		);
+	} catch (error) {
+		// Release the claim so the next failure can try again.
+		await forgetIncidentRow(claim.channelIncidentId).catch(() => {});
+		throw error;
+	}
+	try {
 		await db
 			.update(uptimelyChannelIncident)
 			.set({ incidentId: declared.incidentId })
@@ -277,7 +284,11 @@ const declareFor = async (
 				eq(uptimelyChannelIncident.channelIncidentId, claim.channelIncidentId),
 			);
 	} catch (error) {
-		// Release the claim so the next failure can try again.
+		// The incident exists in Uptimely but could not be remembered, so it will
+		// not be resolved automatically: say which one it is.
+		console.error(
+			`Uptimely incident ${declared.incidentId} was declared for ${context.serviceType} "${context.serviceName}" but could not be stored; resolve it in Uptimely by hand.`,
+		);
 		await forgetIncidentRow(claim.channelIncidentId).catch(() => {});
 		throw error;
 	}

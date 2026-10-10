@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
 	rows: [] as Record<string, unknown>[],
 	hideRows: false,
 	claimStale: false,
+	updateError: null as Error | null,
 	inserted: [] as Record<string, unknown>[],
 	updates: [] as Record<string, unknown>[],
 	deletes: 0,
@@ -70,6 +71,7 @@ vi.mock("@dokploy/server/db", () => ({
 		update: vi.fn(() => ({
 			set: (values: Record<string, unknown>) => ({
 				where: async () => {
+					if (mocks.updateError) throw mocks.updateError;
 					mocks.updates.push(values);
 					const target = mocks.rows[mocks.rows.length - 1];
 					if (target) Object.assign(target, values);
@@ -163,6 +165,7 @@ beforeEach(() => {
 	mocks.rows = [];
 	mocks.hideRows = false;
 	mocks.claimStale = false;
+	mocks.updateError = null;
 	mocks.inserted = [];
 	mocks.updates = [];
 	mocks.deletes = 0;
@@ -657,6 +660,19 @@ describe("concurrent failures of one service", () => {
 		mocks.callTool.mockResolvedValue({ incidentId: "inc-2", declared: true });
 		await failure("b");
 		expect(mocks.rows).toMatchObject([{ incidentId: "inc-2" }]);
+	});
+
+	it("logs the incident id when it was declared but could not be stored", async () => {
+		mocks.channels = [channel()];
+		mocks.updateError = new Error("db is down");
+		mocks.callTool.mockResolvedValue({ incidentId: "inc-9", declared: true });
+
+		await failure("a");
+
+		expect(loggedText()).toContain("inc-9");
+		expect(loggedText()).not.toContain("channel-api-key");
+		// The claim is released so the next failure is not blocked for minutes.
+		expect(mocks.rows).toEqual([]);
 	});
 
 	it("leaves a fresh pending claim to the failure that holds it", async () => {
