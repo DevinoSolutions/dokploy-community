@@ -59,6 +59,7 @@ exclude:
   - node_modules
   - vendor
   # Repository-meta Markdown that is not a public site page (still on GitHub)
+  - AGENTS.md
   - CONTRIBUTING.md
   - GUIDES.md
   - SECURITY.md
