@@ -4,10 +4,12 @@ import {
 	findPreviewDeploymentById,
 	findSnapvisorByOrganizationId,
 	IS_CLOUD,
+	isSameSnapvisorBaseUrl,
 	listSnapvisorProjects,
 	maskSnapvisorAccessToken,
 	refreshPreviewBuild as refreshSnapvisorPreviewBuild,
 	removeSnapvisor,
+	SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 	setApplicationSnapvisorProject,
 	type SnapvisorIntegration,
 	snapvisorBuildReviewUrl,
@@ -172,6 +174,16 @@ export const snapvisorRouter = createTRPCRouter({
 					ctx.session.activeOrganizationId,
 				);
 				accessToken = integration?.accessToken;
+				// Never replay the stored token against a URL typed into the form.
+				if (
+					integration &&
+					!isSameSnapvisorBaseUrl(input.baseUrl, integration.baseUrl)
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+					});
+				}
 			}
 			if (!accessToken) {
 				throw new TRPCError({

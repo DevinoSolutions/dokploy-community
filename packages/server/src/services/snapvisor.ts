@@ -11,7 +11,11 @@ import {
 	type SnapvisorBuild,
 	type SnapvisorClient,
 } from "@dokploy/server/utils/snapvisor/client";
-import { snapvisorWebBaseUrl } from "@dokploy/server/utils/snapvisor/urls";
+import {
+	isSameSnapvisorBaseUrl,
+	SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+	snapvisorWebBaseUrl,
+} from "@dokploy/server/utils/snapvisor/urls";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import type { z } from "zod";
@@ -97,6 +101,16 @@ export const updateSnapvisor = async (
 	organizationId: string,
 	input: z.infer<typeof apiUpdateSnapvisor>,
 ) => {
+	// The stored token must not be sent to a URL the caller just chose.
+	if (input.baseUrl !== undefined && !input.accessToken) {
+		const stored = await findSnapvisorByOrganizationId(organizationId);
+		if (stored && !isSameSnapvisorBaseUrl(input.baseUrl, stored.baseUrl)) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+			});
+		}
+	}
 	const values: Partial<SnapvisorIntegration> = {};
 	if (input.name !== undefined) values.name = input.name;
 	if (input.accessToken !== undefined) values.accessToken = input.accessToken;

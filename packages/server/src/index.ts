@@ -180,6 +180,7 @@ export * from "./utils/traefik/redirect";
 export * from "./utils/traefik/security";
 export * from "./utils/traefik/types";
 export * from "./utils/traefik/web-server";
+export * from "./utils/base-url";
 export * from "./utils/uptimely/base-url";
 export * from "./utils/uptimely/client";
 export * from "./utils/uptimely/heartbeat";
