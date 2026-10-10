@@ -276,6 +276,7 @@ describe("updateUptimelyChannelNotification", () => {
 			notificationId: "n-1",
 			uptimelyChannelId: "chan-of-org-2",
 			baseUrl: "https://uptimely.test",
+			apiKey: "typed-key",
 		});
 
 		const channel = mocks.updates.find((u) => u.table === "uptimely_channel");
@@ -367,6 +368,104 @@ describe("updateUptimelyChannelNotification", () => {
 		});
 
 		expect(mocks.deletes).toEqual([]);
+	});
+});
+
+describe("the stored key is never replayed against another URL", () => {
+	const OTHER_URL = "https://attacker.example";
+
+	it("update: a changed URL without a new key is rejected and nothing is written", async () => {
+		await expect(
+			updateUptimelyChannelNotification({
+				notificationId: "n-1",
+				organizationId: "org-1",
+				baseUrl: OTHER_URL,
+			}),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: expect.stringContaining("API key again"),
+		});
+
+		expect(mocks.updates).toEqual([]);
+		expect(mocks.deletes).toEqual([]);
+	});
+
+	it("update: a changed URL with a blank key is rejected too", async () => {
+		await expect(
+			updateUptimelyChannelNotification({
+				notificationId: "n-1",
+				organizationId: "org-1",
+				baseUrl: OTHER_URL,
+				apiKey: "",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+	});
+
+	it("update: a changed URL with a new key is accepted", async () => {
+		await updateUptimelyChannelNotification({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			baseUrl: "https://uptimely.test",
+			apiKey: "typed-key",
+		});
+
+		const channel = mocks.updates.find((u) => u.table === "uptimely_channel");
+		expect(channel?.values).toEqual({
+			apiKey: "typed-key",
+			baseUrl: "https://uptimely.test",
+		});
+	});
+
+	it("update: the same URL without a key is accepted, ignoring case and trailing slashes", async () => {
+		await updateUptimelyChannelNotification({
+			notificationId: "n-1",
+			organizationId: "org-1",
+			baseUrl: "https://APP.getuptimely.com//",
+		});
+
+		expect(mocks.deletes).toEqual([]);
+	});
+
+	it("update through the router keeps the specific message", async () => {
+		await expect(
+			caller.updateUptimely({ notificationId: "n-1", baseUrl: OTHER_URL }),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: expect.stringContaining("API key again"),
+		});
+	});
+
+	it("test: the stored key is not sent to a different URL", async () => {
+		await expect(
+			caller.testUptimelyConnection({
+				apiKey: "",
+				notificationId: "n-1",
+				projectId: PROJECT,
+				baseUrl: OTHER_URL,
+			}),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: expect.stringContaining("API key again"),
+		});
+
+		expect(mocks.clientKeys).toEqual([]);
+	});
+
+	it("test: a different URL with a typed key is fine", async () => {
+		mocks.callTool.mockResolvedValue({
+			projects: [{ id: PROJECT, name: "Devino", slug: "devino" }],
+		});
+
+		await expect(
+			caller.testUptimelyConnection({
+				apiKey: "typed-key",
+				notificationId: "n-1",
+				projectId: PROJECT,
+				baseUrl: OTHER_URL,
+			}),
+		).resolves.toBe(true);
+
+		expect(mocks.clientKeys).toEqual(["typed-key"]);
 	});
 });
 

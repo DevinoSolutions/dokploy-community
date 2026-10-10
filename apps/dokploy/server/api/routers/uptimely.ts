@@ -4,6 +4,7 @@ import {
 	getUptimelyServiceStatus,
 	hasUptimelyMonitorableTarget,
 	IS_CLOUD,
+	isSameUptimelyBaseUrl,
 	linkUptimelyHeartbeat,
 	linkUptimelyService,
 	listUptimelyStatusPages,
@@ -14,6 +15,7 @@ import {
 	runUptimelyProbe,
 	setUptimelyHeartbeatKey,
 	testUptimelyConnection,
+	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	type UptimelyIntegration,
 	unlinkUptimelyHeartbeat,
 	unlinkUptimelyService,
@@ -160,6 +162,16 @@ export const uptimelyRouter = createTRPCRouter({
 					ctx.session.activeOrganizationId,
 				);
 				apiKey = integration?.apiKey;
+				// Never replay the stored key against a URL typed into the form.
+				if (
+					integration &&
+					!isSameUptimelyBaseUrl(input.baseUrl, integration.baseUrl)
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+					});
+				}
 			}
 			if (!apiKey) {
 				throw new TRPCError({

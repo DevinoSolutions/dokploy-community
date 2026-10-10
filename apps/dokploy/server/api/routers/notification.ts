@@ -18,6 +18,7 @@ import {
 	findNotificationById,
 	getWebServerSettings,
 	IS_CLOUD,
+	isSameUptimelyBaseUrl,
 	maskUptimelyApiKey,
 	removeNotificationById,
 	sendCustomNotification,
@@ -36,6 +37,7 @@ import {
 	sendTeamsNotification,
 	sendTelegramNotification,
 	testUptimelyConnection,
+	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	updateCustomNotification,
 	updateDiscordNotification,
 	updateEmailNotification,
@@ -647,6 +649,8 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
+				// Keep the specific refusals (not found, "enter the key again").
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
@@ -674,6 +678,19 @@ export const notificationRouter = createTRPCRouter({
 						});
 					}
 					apiKey = notification.uptimelyChannel?.apiKey;
+					// Never replay the stored key against a URL typed into the form.
+					if (
+						notification.uptimelyChannel &&
+						!isSameUptimelyBaseUrl(
+							input.baseUrl,
+							notification.uptimelyChannel.baseUrl,
+						)
+					) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+						});
+					}
 				}
 				if (!apiKey) {
 					throw new Error("An API key is required to test the connection");

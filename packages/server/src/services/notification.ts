@@ -48,6 +48,10 @@ import {
 	uptimelyChannel,
 	uptimelyChannelIncident,
 } from "@dokploy/server/db/schema";
+import {
+	isSameUptimelyBaseUrl,
+	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+} from "@dokploy/server/utils/uptimely/base-url";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
@@ -825,6 +829,18 @@ export const updateUptimelyChannelNotification = async (
 		}
 		const stored = existing.uptimelyChannel;
 
+		// The stored key must not be sent to a URL the caller just chose.
+		if (
+			input.baseUrl !== undefined &&
+			!input.apiKey &&
+			!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)
+		) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+			});
+		}
+
 		const notificationValues = Object.fromEntries(
 			Object.entries({
 				name: input.name,
@@ -870,7 +886,8 @@ export const updateUptimelyChannelNotification = async (
 		// channel somewhere else would leave rows Uptimely can never resolve.
 		const retargeted =
 			(input.projectId !== undefined && input.projectId !== stored.projectId) ||
-			(input.baseUrl !== undefined && input.baseUrl !== stored.baseUrl) ||
+			(input.baseUrl !== undefined &&
+				!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)) ||
 			(!!input.apiKey && input.apiKey !== stored.apiKey);
 		if (retargeted) {
 			await tx

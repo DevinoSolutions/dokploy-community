@@ -9,6 +9,10 @@ import {
 	uptimelyMonitorLink,
 } from "@dokploy/server/db/schema";
 import {
+	isSameUptimelyBaseUrl,
+	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+} from "@dokploy/server/utils/uptimely/base-url";
+import {
 	createUptimelyClient,
 	type UptimelyClient,
 	UptimelyError,
@@ -119,6 +123,16 @@ export const updateUptimely = async (
 	organizationId: string,
 	input: z.infer<typeof apiUpdateUptimely>,
 ) => {
+	// The stored key must not be sent to a URL the caller just chose.
+	if (input.baseUrl !== undefined && !input.apiKey) {
+		const stored = await findUptimelyByOrganizationId(organizationId);
+		if (stored && !isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+			});
+		}
+	}
 	const values: Partial<UptimelyIntegration> = {};
 	if (input.name !== undefined) values.name = input.name;
 	if (input.apiKey !== undefined) values.apiKey = input.apiKey;
