@@ -46,6 +46,7 @@ import {
 	teams,
 	telegram,
 	uptimelyChannel,
+	uptimelyChannelIncident,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
@@ -803,9 +804,29 @@ export const updateUptimelyChannelNotification = async (
 	input: z.infer<typeof apiUpdateUptimelyChannel>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
+		// The channel is derived from the notification row, never from the
+		// client: the row must belong to the caller's organization and be an
+		// Uptimely one.
+		const existing = await tx.query.notifications.findFirst({
+			where: eq(notifications.notificationId, input.notificationId),
+			with: { uptimelyChannel: true },
+		});
+		if (
+			!existing ||
+			!input.organizationId ||
+			existing.organizationId !== input.organizationId ||
+			existing.notificationType !== "uptimely" ||
+			!existing.uptimelyChannel
+		) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "Uptimely notification not found",
+			});
+		}
+		const stored = existing.uptimelyChannel;
+
+		const notificationValues = Object.fromEntries(
+			Object.entries({
 				name: input.name,
 				appDeploy: input.appDeploy,
 				appBuildError: input.appBuildError,
@@ -814,25 +835,21 @@ export const updateUptimelyChannelNotification = async (
 				volumeBackup: input.volumeBackup,
 				dokployRestart: input.dokployRestart,
 				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
-
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+			}).filter(([, value]) => value !== undefined),
+		);
+		if (Object.keys(notificationValues).length > 0) {
+			await tx
+				.update(notifications)
+				.set(notificationValues)
+				.where(eq(notifications.notificationId, input.notificationId));
 		}
 
-		await tx
-			.update(uptimelyChannel)
-			.set({
-				apiKey: input.apiKey,
+		// Blank or omitted keeps the stored key (it is write-only).
+		const channelValues = Object.fromEntries(
+			Object.entries({
+				apiKey: input.apiKey || undefined,
 				projectId: input.projectId,
 				baseUrl: input.baseUrl,
 				// "" clears the override, undefined leaves it untouched.
@@ -840,12 +857,31 @@ export const updateUptimelyChannelNotification = async (
 					input.resolvedStateId === undefined
 						? undefined
 						: input.resolvedStateId || null,
-			})
-			.where(eq(uptimelyChannel.uptimelyChannelId, input.uptimelyChannelId))
-			.returning()
-			.then((value) => value[0]);
+			}).filter(([, value]) => value !== undefined),
+		);
+		if (Object.keys(channelValues).length > 0) {
+			await tx
+				.update(uptimelyChannel)
+				.set(channelValues)
+				.where(eq(uptimelyChannel.uptimelyChannelId, stored.uptimelyChannelId));
+		}
 
-		return newDestination;
+		// The remembered incidents belong to the old project/key: pointing the
+		// channel somewhere else would leave rows Uptimely can never resolve.
+		const retargeted =
+			(input.projectId !== undefined && input.projectId !== stored.projectId) ||
+			(input.baseUrl !== undefined && input.baseUrl !== stored.baseUrl) ||
+			(!!input.apiKey && input.apiKey !== stored.apiKey);
+		if (retargeted) {
+			await tx
+				.delete(uptimelyChannelIncident)
+				.where(
+					eq(
+						uptimelyChannelIncident.uptimelyChannelId,
+						stored.uptimelyChannelId,
+					),
+				);
+		}
 	});
 };
 
@@ -1170,20 +1206,23 @@ export const findNotificationById = async (notificationId: string) => {
 };
 
 export const removeNotificationById = async (notificationId: string) => {
-	const result = await db
-		.delete(notifications)
-		.where(eq(notifications.notificationId, notificationId))
-		.returning();
+	// One transaction: the Uptimely channel holds an API key and must not
+	// outlive its notification (its open-incident rows cascade).
+	return db.transaction(async (tx) => {
+		const result = await tx
+			.delete(notifications)
+			.where(eq(notifications.notificationId, notificationId))
+			.returning();
 
-	// The channel holds the Uptimely API key; its open-incident rows cascade.
-	const channelId = result[0]?.uptimelyChannelId;
-	if (channelId) {
-		await db
-			.delete(uptimelyChannel)
-			.where(eq(uptimelyChannel.uptimelyChannelId, channelId));
-	}
+		const channelId = result[0]?.uptimelyChannelId;
+		if (channelId) {
+			await tx
+				.delete(uptimelyChannel)
+				.where(eq(uptimelyChannel.uptimelyChannelId, channelId));
+		}
 
-	return result[0];
+		return result[0];
+	});
 };
 
 export const createLarkNotification = async (

@@ -153,7 +153,8 @@ export const notificationSchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("uptimely"),
-			apiKey: z.string().min(1, { message: "API Key is required" }),
+			// Required on create; blank keeps the stored key when editing.
+			apiKey: z.string().optional(),
 			projectId: z
 				.string()
 				.trim()
@@ -560,7 +561,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dokployBackup: notification.dokployBackup,
 					volumeBackup: notification.volumeBackup,
 					type: notification.notificationType,
-					apiKey: notification.uptimelyChannel?.apiKey,
+					apiKey: "",
 					projectId: notification.uptimelyChannel?.projectId,
 					baseUrl: notification.uptimelyChannel?.baseUrl,
 					resolvedStateId: notification.uptimelyChannel?.resolvedStateId || "",
@@ -861,6 +862,10 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				scheduleFailure: scheduleFailure,
 			});
 		} else if (data.type === "uptimely") {
+			if (!notificationId && !data.apiKey?.trim()) {
+				form.setError("apiKey", { message: "API Key is required" });
+				return;
+			}
 			// An Uptimely channel only reacts to deploys: "App Build Error"
 			// declares the incident, the next success resolves it.
 			promise = uptimelyMutation.mutateAsync({
@@ -870,7 +875,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				databaseBackup: false,
 				dokployBackup: false,
 				volumeBackup: false,
-				apiKey: data.apiKey,
+				// Blank keeps the stored key when editing.
+				apiKey: data.apiKey ?? "",
 				projectId: data.projectId,
 				baseUrl: data.baseUrl,
 				resolvedStateId: data.resolvedStateId || "",
@@ -1751,7 +1757,12 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 													<FormControl>
 														<Input
 															type="password"
-															placeholder="Uptimely project API key"
+															autoComplete="off"
+															placeholder={
+																notification?.uptimelyChannel?.apiKeyMasked
+																	? `${notification.uptimelyChannel.apiKeyMasked} (leave blank to keep)`
+																	: "Uptimely project API key"
+															}
 															{...field}
 														/>
 													</FormControl>
@@ -2630,7 +2641,8 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 									} else if (data.type === "uptimely") {
 										// Read-only: proves the key and project, declares nothing.
 										await testUptimelyConnection({
-											apiKey: data.apiKey,
+											apiKey: data.apiKey ?? "",
+											notificationId: notificationId || undefined,
 											projectId: data.projectId,
 											baseUrl: data.baseUrl,
 										});
