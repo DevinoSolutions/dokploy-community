@@ -117,6 +117,9 @@
 			"ssh2",
 			"tree-sitter",
 			"tree-sitter-json"
-		]
+		],
+		"patchedDependencies": {
+			"postgres@3.4.4": "patches/postgres@3.4.4.patch"
+		}
 	}
 }
