@@ -85,7 +85,9 @@ vi.mock("@dokploy/server/db", () => {
 					}
 					if (table === "previewDeployments") {
 						return {
-							findFirst: vi.fn(async () => mocks.previewDeployment ?? undefined),
+							findFirst: vi.fn(
+								async () => mocks.previewDeployment ?? undefined,
+							),
 							findMany: vi.fn(async () => []),
 						};
 					}
@@ -258,7 +260,10 @@ describe("snapvisor router compose services", () => {
 	it("rejects setComposeProject for a compose service in another organization", async () => {
 		mocks.serviceOrganizationId = "org-2";
 		await expect(
-			caller().setComposeProject({ composeId: "compose-x", projectName: "web" }),
+			caller().setComposeProject({
+				composeId: "compose-x",
+				projectName: "web",
+			}),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});

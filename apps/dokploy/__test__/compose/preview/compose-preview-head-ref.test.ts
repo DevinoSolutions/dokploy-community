@@ -165,9 +165,7 @@ describe("deployComposePreview head-ref checkout", () => {
 			serverId: null,
 		});
 		// After the build, before the preview is marked done.
-		expect(
-			mocks.runComposeBuild.mock.invocationCallOrder[0],
-		).toBeLessThan(
+		expect(mocks.runComposeBuild.mock.invocationCallOrder[0]).toBeLessThan(
 			mocks.finalizePreviewBuildMetadata.mock.invocationCallOrder[0] as number,
 		);
 	});

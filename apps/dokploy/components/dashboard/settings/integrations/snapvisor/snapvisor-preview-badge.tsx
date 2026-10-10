@@ -13,7 +13,10 @@ const SNAPVISOR_STATUS_PRESENTATION: Record<
 	pending: { label: "Pending", className: "text-muted-foreground" },
 	progress: { label: "Pending", className: "text-muted-foreground" },
 	"no-changes": { label: "No changes", className: "text-green-600" },
-	"changes-detected": { label: "Changes detected", className: "text-yellow-600" },
+	"changes-detected": {
+		label: "Changes detected",
+		className: "text-yellow-600",
+	},
 	accepted: { label: "Approved", className: "text-green-600" },
 	rejected: { label: "Rejected", className: "text-red-600" },
 	error: { label: "Error", className: "text-red-600" },

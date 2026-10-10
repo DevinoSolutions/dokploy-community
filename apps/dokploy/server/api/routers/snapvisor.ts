@@ -12,9 +12,9 @@ import {
 	refreshPreviewBuild as refreshSnapvisorPreviewBuild,
 	removeSnapvisor,
 	SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
+	type SnapvisorIntegration,
 	setApplicationSnapvisorProject,
 	setComposeSnapvisorProject,
-	type SnapvisorIntegration,
 	snapvisorBuildReviewUrl,
 	testSnapvisorConnection,
 	updateSnapvisor,
@@ -87,8 +87,10 @@ const requirePreviewService = async (
 	ctx: Parameters<typeof checkServicePermissionAndAccess>[0],
 	previewDeploymentId: string,
 ) => {
-	const previewDeployment = await findPreviewDeploymentById(previewDeploymentId);
-	const serviceId = previewDeployment.applicationId ?? previewDeployment.composeId;
+	const previewDeployment =
+		await findPreviewDeploymentById(previewDeploymentId);
+	const serviceId =
+		previewDeployment.applicationId ?? previewDeployment.composeId;
 	if (!serviceId) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",

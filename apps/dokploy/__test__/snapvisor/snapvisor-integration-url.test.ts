@@ -107,9 +107,9 @@ describe("isSameSnapvisorBaseUrl", () => {
 	});
 
 	it("treats the legacy app host as the API default", () => {
-		expect(
-			isSameSnapvisorBaseUrl("https://app.snapvisor.io", STORED_URL),
-		).toBe(true);
+		expect(isSameSnapvisorBaseUrl("https://app.snapvisor.io", STORED_URL)).toBe(
+			true,
+		);
 	});
 
 	it("tells different hosts and paths apart", () => {

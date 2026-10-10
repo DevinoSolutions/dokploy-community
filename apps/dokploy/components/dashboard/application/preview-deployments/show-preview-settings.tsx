@@ -13,7 +13,6 @@ import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
-import { LearnMoreLink } from "@/components/shared/learn-more-link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,7 +50,6 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
-import { INTEGRATION_LEARN_MORE_URLS } from "../../settings/integrations/integration-links";
 import { SnapvisorProjectPicker } from "../../settings/integrations/snapvisor/snapvisor-project-picker";
 
 /** Links the application to a Snapvisor project for its preview deployments. */
@@ -87,14 +85,12 @@ const schema = z
 		wildcardDomain: z
 			.string()
 			.refine(isValidPreviewWildcard, { message: PREVIEW_WILDCARD_GUIDANCE }),
-		previewDockerImage: z
-			.string()
-			.superRefine((value, ctx) => {
-				const message = getPreviewImageTemplateError(value);
-				if (message) {
-					ctx.addIssue({ code: "custom", message });
-				}
-			}),
+		previewDockerImage: z.string().superRefine((value, ctx) => {
+			const message = getPreviewImageTemplateError(value);
+			if (message) {
+				ctx.addIssue({ code: "custom", message });
+			}
+		}),
 		port: z.number(),
 		previewLimit: z.number(),
 		previewLabels: z.array(z.string()).optional(),
@@ -305,12 +301,12 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 															<code className="text-xs">
 																{PREVIEW_IMAGE_PLACEHOLDER}
 															</code>{" "}
-															once, in the tag, for the pull request
-															number or tag you deploy the preview for
-															(it cannot be used in the registry or
-															repository part). Registry credentials of this
-															application are used to pull it. Set the port
-															below to the one the image listens on.
+															once, in the tag, for the pull request number or
+															tag you deploy the preview for (it cannot be used
+															in the registry or repository part). Registry
+															credentials of this application are used to pull
+															it. Set the port below to the one the image
+															listens on.
 														</span>
 													</FormDescription>
 													<FormMessage />
@@ -396,8 +392,8 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 																	<p>
 																		Add a labels that will trigger a preview
 																		deployment for a pull request. If no labels
-																		are specified, all pull requests will trigger
-																		a preview deployment.
+																		are specified, all pull requests will
+																		trigger a preview deployment.
 																	</p>
 																</TooltipContent>
 															</Tooltip>
@@ -452,7 +448,10 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 																) as HTMLInputElement;
 																const label = input.value.trim();
 																if (label) {
-																	field.onChange([...(field.value || []), label]);
+																	field.onChange([
+																		...(field.value || []),
+																		label,
+																	]);
 																	input.value = "";
 																}
 															}}
@@ -585,7 +584,9 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 
 								<div className="grid gap-4 lg:grid-cols-2">
 									<div className="col-span-2">
-										<SnapvisorPreviewSettingSection applicationId={applicationId} />
+										<SnapvisorPreviewSettingSection
+											applicationId={applicationId}
+										/>
 									</div>
 								</div>
 
@@ -601,8 +602,8 @@ export const ShowPreviewSettings = ({ applicationId }: Props) => {
 															<>
 																<FormLabel>Require Member Access</FormLabel>
 																<FormDescription>
-																	Require a minimum GitLab access level to trigger
-																	preview deployments. Valid roles are:
+																	Require a minimum GitLab access level to
+																	trigger preview deployments. Valid roles are:
 																	<ul>
 																		<li>Owner</li>
 																		<li>Maintainer</li>

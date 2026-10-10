@@ -247,7 +247,10 @@ export const setApplicationSnapvisorProject = async (
 		.returning()
 		.then((rows) => rows[0]);
 	if (!updated) {
-		throw new TRPCError({ code: "NOT_FOUND", message: "Application not found" });
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Application not found",
+		});
 	}
 	return updated;
 };
@@ -279,7 +282,9 @@ export const setComposeSnapvisorProject = async (
  * `deployApplication`/`deployCompose` use for regular deploys). Application and
  * compose previews share the marker.
  */
-export const findLatestPreviewCommitSha = async (previewDeploymentId: string) => {
+export const findLatestPreviewCommitSha = async (
+	previewDeploymentId: string,
+) => {
 	const deployment = await db.query.deployments.findFirst({
 		where: eq(deployments.previewDeploymentId, previewDeploymentId),
 		orderBy: desc(deployments.createdAt),
@@ -331,7 +336,9 @@ export const registerPreviewDeployment = async (params: {
 	if (!integration) {
 		return { registered: false, reason: "Snapvisor is not connected" };
 	}
-	const commitSha = await findLatestPreviewCommitSha(params.previewDeploymentId);
+	const commitSha = await findLatestPreviewCommitSha(
+		params.previewDeploymentId,
+	);
 	if (!commitSha) {
 		return { registered: false, reason: "No commit sha recorded yet" };
 	}
@@ -345,7 +352,10 @@ export const registerPreviewDeployment = async (params: {
 	});
 	const build = builds[0];
 	if (!build) {
-		return { registered: false, reason: "No Snapvisor build for this commit yet" };
+		return {
+			registered: false,
+			reason: "No Snapvisor build for this commit yet",
+		};
 	}
 
 	await updatePreviewDeployment(params.previewDeploymentId, {

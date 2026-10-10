@@ -194,7 +194,9 @@ export const ShowPreviewDeploymentsCompose = ({ composeId }: Props) => {
 												<div className="pl-8 space-y-3">
 													{data?.snapvisorProjectName && (
 														<SnapvisorPreviewBadge
-															previewDeploymentId={deployment.previewDeploymentId}
+															previewDeploymentId={
+																deployment.previewDeploymentId
+															}
 														/>
 													)}
 													{previewDomains.map((domain) => {
