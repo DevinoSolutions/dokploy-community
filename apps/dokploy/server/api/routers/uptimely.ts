@@ -4,6 +4,7 @@ import {
 	getUptimelyServiceStatus,
 	hasUptimelyMonitorableTarget,
 	IS_CLOUD,
+	linkUptimelyHeartbeat,
 	linkUptimelyService,
 	listUptimelyStatusPages,
 	maskUptimelyApiKey,
@@ -11,11 +12,13 @@ import {
 	removeUptimely,
 	resolveUptimelyServiceTarget,
 	runUptimelyProbe,
+	setUptimelyHeartbeatKey,
 	testUptimelyConnection,
 	type UptimelyIntegration,
-	uptimelyBadgeUrl,
+	unlinkUptimelyHeartbeat,
 	unlinkUptimelyService,
 	updateUptimely,
+	uptimelyBadgeUrl,
 } from "@dokploy/server";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
@@ -30,8 +33,10 @@ import {
 	apiLinkUptimelyService,
 	apiPreflightUptimelyService,
 	apiRunUptimelyProbe,
+	apiSetUptimelyHeartbeatKey,
 	apiTestUptimelyConnection,
 	apiUpdateUptimely,
+	apiUptimelyHeartbeat,
 	apiUptimelyService,
 } from "@/server/db/schema";
 
@@ -336,6 +341,103 @@ export const uptimelyRouter = createTRPCRouter({
 				resourceId: input.serviceId,
 				metadata: {
 					serviceType: input.serviceType,
+					linksRemoved: removed.length,
+				},
+			});
+			return { removed: removed.length };
+		}),
+
+	/**
+	 * Deploy heartbeat: an `Incoming Request` monitor in Uptimely that Dokploy
+	 * pings after every successful deploy. Same gate as `linkService`.
+	 */
+	linkHeartbeat: protectedProcedure
+		.input(apiUptimelyHeartbeat)
+		.mutation(async ({ input, ctx }) => {
+			assertSelfHosted();
+			await checkServicePermissionAndAccess(ctx, input.serviceId, {
+				service: ["create"],
+			});
+			const integration = await requireIntegration(
+				ctx.session.activeOrganizationId,
+			);
+			try {
+				const result = await linkUptimelyHeartbeat({
+					integration,
+					serviceType: input.serviceType,
+					serviceId: input.serviceId,
+				});
+				if (result.created) {
+					await audit(ctx, {
+						action: "create",
+						resourceType: "uptimely",
+						resourceId: input.serviceId,
+						metadata: {
+							serviceType: input.serviceType,
+							kind: "heartbeat",
+						},
+					});
+				}
+				return {
+					created: result.created,
+					hasKey: !!result.link.heartbeatKey,
+				};
+			} catch (error) {
+				return asBadRequest(error, "Error creating the Uptimely heartbeat");
+			}
+		}),
+
+	setHeartbeatKey: protectedProcedure
+		.input(apiSetUptimelyHeartbeatKey)
+		.mutation(async ({ input, ctx }) => {
+			assertSelfHosted();
+			await checkServicePermissionAndAccess(ctx, input.serviceId, {
+				service: ["create"],
+			});
+			const integration = await requireIntegration(
+				ctx.session.activeOrganizationId,
+			);
+			try {
+				await setUptimelyHeartbeatKey({
+					integration,
+					serviceType: input.serviceType,
+					serviceId: input.serviceId,
+					key: input.key,
+				});
+			} catch (error) {
+				return asBadRequest(error, "Error saving the heartbeat key");
+			}
+			await audit(ctx, {
+				action: "update",
+				resourceType: "uptimely",
+				resourceId: input.serviceId,
+				metadata: { serviceType: input.serviceType, kind: "heartbeat" },
+			});
+			return true;
+		}),
+
+	unlinkHeartbeat: protectedProcedure
+		.input(apiUptimelyHeartbeat)
+		.mutation(async ({ input, ctx }) => {
+			assertSelfHosted();
+			await checkServicePermissionAndAccess(ctx, input.serviceId, {
+				service: ["create"],
+			});
+			const integration = await requireIntegration(
+				ctx.session.activeOrganizationId,
+			);
+			const removed = await unlinkUptimelyHeartbeat({
+				integration,
+				serviceType: input.serviceType,
+				serviceId: input.serviceId,
+			});
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "uptimely",
+				resourceId: input.serviceId,
+				metadata: {
+					serviceType: input.serviceType,
+					kind: "heartbeat",
 					linksRemoved: removed.length,
 				},
 			});

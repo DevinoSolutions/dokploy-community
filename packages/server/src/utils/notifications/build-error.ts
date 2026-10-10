@@ -1,6 +1,7 @@
 import { db } from "@dokploy/server/db";
 import { notifications } from "@dokploy/server/db/schema";
 import BuildFailedEmail from "@dokploy/server/emails/emails/build-failed";
+import { reportDeployFailureToUptimely } from "@dokploy/server/services/uptimely-deploy";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
@@ -28,6 +29,8 @@ interface Props {
 	errorMessage: string;
 	buildLink: string;
 	organizationId: string;
+	/** Id of the application or compose service, for the Uptimely channel. */
+	serviceId?: string;
 }
 
 /**
@@ -46,7 +49,26 @@ export const sendBuildErrorNotifications = async ({
 	errorMessage,
 	buildLink,
 	organizationId,
+	serviceId,
 }: Props) => {
+	// Declares an Uptimely incident. Not awaited and never rejects, so it
+	// cannot delay the failure handling of the deploy.
+	if (
+		serviceId &&
+		(applicationType === "application" || applicationType === "compose")
+	) {
+		void reportDeployFailureToUptimely(
+			{
+				organizationId,
+				serviceType: applicationType,
+				serviceId,
+				projectName,
+				serviceName: applicationName,
+			},
+			{ errorMessage, buildLink },
+		);
+	}
+
 	const date = new Date();
 	const unixDate = ~~(Number(date) / 1000);
 	const notificationList = await db.query.notifications.findMany({

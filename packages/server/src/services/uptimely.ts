@@ -2,6 +2,7 @@ import { db } from "@dokploy/server/db";
 import {
 	type apiCreateUptimely,
 	type apiUpdateUptimely,
+	parseUptimelyHeartbeatKey,
 	type UptimelyMonitorKind,
 	type UptimelyServiceType,
 	uptimelyIntegration,
@@ -17,7 +18,7 @@ import {
 	type UptimelyPreflightResult,
 } from "@dokploy/server/utils/uptimely/preflight";
 import { TRPCError } from "@trpc/server";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { z } from "zod";
 import { findApplicationById } from "./application";
 import { findComposeById } from "./compose";
@@ -40,6 +41,7 @@ const MONITOR_TYPE_BY_KIND: Record<UptimelyMonitorKind, string> = {
 	port: "Port",
 	ssl: "SSL Certificate",
 	domain: "Domain",
+	heartbeat: "Incoming Request",
 };
 
 export const uptimelyClientFor = (
@@ -517,7 +519,9 @@ export const preflightUptimelyTarget = async (
 
 /**
  * Removes the link rows only. Uptimely's MCP surface has no monitor delete
- * tool, so the monitors themselves stay in Uptimely until deleted there.
+ * tool, so the monitors themselves stay in Uptimely until deleted there. The
+ * deploy heartbeat is a separate opt-in and is left alone (see
+ * `unlinkUptimelyHeartbeat`).
  */
 export const unlinkUptimelyService = async (params: {
 	integration: UptimelyIntegration;
@@ -531,6 +535,187 @@ export const unlinkUptimelyService = async (params: {
 				eq(uptimelyMonitorLink.uptimelyId, params.integration.uptimelyId),
 				eq(uptimelyMonitorLink.serviceType, params.serviceType),
 				eq(uptimelyMonitorLink.serviceId, params.serviceId),
+				ne(uptimelyMonitorLink.kind, "heartbeat"),
+			),
+		)
+		.returning();
+
+// ---------------------------------------------------------------------------
+// Deploy heartbeat
+// ---------------------------------------------------------------------------
+
+export const UPTIMELY_HEARTBEAT_TARGET = "Deploy heartbeat";
+
+type HeartbeatServiceType = Extract<
+	UptimelyServiceType,
+	"application" | "compose"
+>;
+
+/**
+ * Pure: reads the heartbeat secret out of a `uptimely_monitor_create` result.
+ * Uptimely does not return it today (the key is only shown on the monitor's
+ * Settings page), so this looks at the field names a future version is most
+ * likely to use and returns null otherwise.
+ */
+export const extractUptimelyHeartbeatKey = (
+	result: Record<string, unknown>,
+): string | null => {
+	for (const field of [
+		"incomingRequestSecretKey",
+		"heartbeatKey",
+		"secretKey",
+		"heartbeatUrl",
+		"incomingRequestUrl",
+	]) {
+		const value = result[field];
+		if (typeof value === "string") {
+			const key = parseUptimelyHeartbeatKey(value);
+			if (key) return key;
+		}
+	}
+	return null;
+};
+
+export const findUptimelyHeartbeatLink = async (
+	uptimelyId: string,
+	serviceType: UptimelyServiceType,
+	serviceId: string,
+) => {
+	const link = await db.query.uptimelyMonitorLink.findFirst({
+		where: and(
+			eq(uptimelyMonitorLink.uptimelyId, uptimelyId),
+			eq(uptimelyMonitorLink.serviceType, serviceType),
+			eq(uptimelyMonitorLink.serviceId, serviceId),
+			eq(uptimelyMonitorLink.kind, "heartbeat"),
+		),
+	});
+	return link ?? null;
+};
+
+/**
+ * Creates the service's `Incoming Request` (heartbeat) monitor in Uptimely and
+ * stores it as a `heartbeat` link. When Uptimely does not hand back the secret
+ * key the link is saved without one and no ping is sent until it is set with
+ * `setUptimelyHeartbeatKey`. An existing heartbeat link is returned as is.
+ */
+export const linkUptimelyHeartbeat = async (params: {
+	integration: UptimelyIntegration;
+	serviceType: HeartbeatServiceType;
+	serviceId: string;
+}) => {
+	const { integration, serviceType, serviceId } = params;
+	const existing = await findUptimelyHeartbeatLink(
+		integration.uptimelyId,
+		serviceType,
+		serviceId,
+	);
+	if (existing) return { link: existing, created: false };
+
+	const target = await resolveUptimelyServiceTarget(serviceType, serviceId);
+	if (target.organizationId !== integration.organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You are not authorized to access this service",
+		});
+	}
+
+	let created: Record<string, unknown> & { monitorId: string };
+	try {
+		created = await uptimelyClientFor(integration).callTool<
+			Record<string, unknown> & { monitorId: string }
+		>("uptimely_monitor_create", {
+			projectId: integration.projectId,
+			name: `${target.projectName}/${target.serviceName} deploy heartbeat`,
+			monitorType: MONITOR_TYPE_BY_KIND.heartbeat,
+			description: `Pinged by Dokploy after every successful deploy of ${serviceType} "${target.serviceName}" (${target.projectName}).`,
+		});
+	} catch (error) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				error instanceof Error ? error.message : "Unknown Uptimely error",
+			cause: error,
+		});
+	}
+	if (typeof created.monitorId !== "string" || !created.monitorId) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Uptimely did not return the new monitor",
+		});
+	}
+
+	const link = await db
+		.insert(uptimelyMonitorLink)
+		.values({
+			uptimelyId: integration.uptimelyId,
+			serviceType,
+			serviceId,
+			monitorId: created.monitorId,
+			kind: "heartbeat",
+			target: UPTIMELY_HEARTBEAT_TARGET,
+			heartbeatKey: extractUptimelyHeartbeatKey(created),
+		})
+		.returning()
+		.then((rows) => rows[0]);
+	if (!link) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Error saving the Uptimely heartbeat link",
+		});
+	}
+	return { link, created: true };
+};
+
+/** Stores the secret key (or heartbeat URL) of the service's heartbeat monitor. */
+export const setUptimelyHeartbeatKey = async (params: {
+	integration: UptimelyIntegration;
+	serviceType: HeartbeatServiceType;
+	serviceId: string;
+	key: string;
+}) => {
+	const key = parseUptimelyHeartbeatKey(params.key);
+	if (!key) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				"Paste the heartbeat URL or secret key from the monitor's Settings page in Uptimely",
+		});
+	}
+	const link = await findUptimelyHeartbeatLink(
+		params.integration.uptimelyId,
+		params.serviceType,
+		params.serviceId,
+	);
+	if (!link) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "This service has no deploy heartbeat yet",
+		});
+	}
+	await db
+		.update(uptimelyMonitorLink)
+		.set({ heartbeatKey: key })
+		.where(eq(uptimelyMonitorLink.linkId, link.linkId));
+	return { linkId: link.linkId };
+};
+
+/**
+ * Deletes the heartbeat link row. Uptimely's MCP surface has no monitor delete
+ * tool, so the monitor stays in Uptimely until it is deleted there.
+ */
+export const unlinkUptimelyHeartbeat = async (params: {
+	integration: UptimelyIntegration;
+	serviceType: HeartbeatServiceType;
+	serviceId: string;
+}) =>
+	db
+		.delete(uptimelyMonitorLink)
+		.where(
+			and(
+				eq(uptimelyMonitorLink.uptimelyId, params.integration.uptimelyId),
+				eq(uptimelyMonitorLink.serviceType, params.serviceType),
+				eq(uptimelyMonitorLink.serviceId, params.serviceId),
+				eq(uptimelyMonitorLink.kind, "heartbeat"),
 			),
 		)
 		.returning();
@@ -743,12 +928,32 @@ export const getUptimelyServiceStatus = async (params: {
 	serviceId: string;
 }) => {
 	const { integration } = params;
-	const links = await findUptimelyLinks(
+	const allLinks = await findUptimelyLinks(
 		integration.uptimelyId,
 		params.serviceType,
 		params.serviceId,
 	);
+	// The deploy heartbeat is reported on its own, not as an uptime monitor.
+	const links = allLinks.filter((l) => l.kind !== "heartbeat");
+	const heartbeatLink = allLinks.find((l) => l.kind === "heartbeat");
 	const client = uptimelyClientFor(integration);
+	const heartbeatDetail = heartbeatLink
+		? await client
+				.callTool<UptimelyMonitorDetail>("uptimely_monitor_get", {
+					projectId: integration.projectId,
+					monitorId: heartbeatLink.monitorId,
+				})
+				.then(
+					(detail) => ({ detail, error: null }),
+					(error: unknown) => ({
+						detail: null,
+						error:
+							error instanceof Error
+								? error.message
+								: "Could not read the monitor from Uptimely",
+					}),
+				)
+		: null;
 	const results = await Promise.allSettled(
 		links.map((link) =>
 			client.callTool<UptimelyMonitorDetail>("uptimely_monitor_get", {
@@ -796,9 +1001,31 @@ export const getUptimelyServiceStatus = async (params: {
 		};
 	});
 
+	const heartbeat =
+		heartbeatLink && heartbeatDetail
+			? {
+					linkId: heartbeatLink.linkId,
+					monitorId: heartbeatLink.monitorId,
+					/** Whether the secret key is known; the key itself never leaves the server. */
+					hasKey: !!heartbeatLink.heartbeatKey,
+					status: heartbeatDetail.detail?.currentStatus ?? null,
+					/** Last time Uptimely received a ping, when it reports one. */
+					lastPingAt:
+						(heartbeatDetail.detail?.probes ?? [])
+							.map((p) => p.lastPingAt)
+							.filter((t): t is string => !!t)
+							.sort()
+							.at(-1) ?? null,
+					url: uptimelyMonitorUrl(integration, heartbeatLink.monitorId),
+					settingsUrl: `${uptimelyMonitorUrl(integration, heartbeatLink.monitorId)}/settings`,
+					error: heartbeatDetail.error,
+				}
+			: null;
+
 	return {
 		overall: worstUptimelyStatus(monitors.map((m) => m.status)),
 		monitors,
+		heartbeat,
 	};
 };
 
@@ -815,7 +1042,11 @@ export const runUptimelyProbe = async (params: {
 			params.serviceType,
 			params.serviceId,
 		)
-	).filter((l) => !params.linkId || l.linkId === params.linkId);
+	).filter(
+		// A heartbeat monitor is never probed: it only waits for deploy pings.
+		(l) =>
+			l.kind !== "heartbeat" && (!params.linkId || l.linkId === params.linkId),
+	);
 	if (links.length === 0) {
 		throw new TRPCError({
 			code: "NOT_FOUND",

@@ -217,6 +217,7 @@ export const reportBuildPolicyPlanFailure = async ({
 			projectName: application.environment.project.name,
 			applicationName: application.name,
 			applicationType: "application",
+			serviceId: application.applicationId,
 			errorMessage: message,
 			buildLink: `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/services/application/${application.applicationId}?tab=deployments`,
 			organizationId: application.environment.project.organizationId,

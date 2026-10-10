@@ -2,6 +2,7 @@ import { db } from "@dokploy/server/db";
 import { notifications } from "@dokploy/server/db/schema";
 import BuildSuccessEmail from "@dokploy/server/emails/emails/build-success";
 import type { Domain } from "@dokploy/server/services/domain";
+import { reportDeploySuccessToUptimely } from "@dokploy/server/services/uptimely-deploy";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
@@ -30,6 +31,8 @@ interface Props {
 	organizationId: string;
 	domains: Domain[];
 	environmentName: string;
+	/** Id of the application or compose service, for the Uptimely hooks. */
+	serviceId?: string;
 }
 
 export const sendBuildSuccessNotifications = async ({
@@ -40,7 +43,23 @@ export const sendBuildSuccessNotifications = async ({
 	organizationId,
 	domains,
 	environmentName,
+	serviceId,
 }: Props) => {
+	// Deploy heartbeat + incident resolution. Not awaited and never rejects: a
+	// slow or broken Uptimely must not delay or fail a deploy that succeeded.
+	if (
+		serviceId &&
+		(applicationType === "application" || applicationType === "compose")
+	) {
+		void reportDeploySuccessToUptimely({
+			organizationId,
+			serviceType: applicationType,
+			serviceId,
+			projectName,
+			serviceName: applicationName,
+		});
+	}
+
 	const date = new Date();
 	const unixDate = ~~(Number(date) / 1000);
 	const notificationList = await db.query.notifications.findMany({
