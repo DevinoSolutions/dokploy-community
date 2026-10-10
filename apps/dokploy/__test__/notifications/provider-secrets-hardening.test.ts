@@ -748,8 +748,54 @@ describe.each(cases)("$type notification", (c) => {
 			expect(mocks.sent).toEqual([]);
 		});
 
-		// Lark and Telegram swallow a sender failure, and Resend is not fetch.
-		it.skipIf(["lark", "telegram", "resend"].includes(c.type))(
+		// The Lark and Telegram senders used to swallow a failure: Test said yes.
+		it.skipIf(!["lark", "telegram"].includes(c.type))(
+			"a refused message fails the Test with the reason",
+			async () => {
+				mocks.fetch.mockImplementationOnce(async () => ({
+					ok: false,
+					status: 400,
+					statusText: "Bad Request",
+					text: async () => JSON.stringify({ description: "chat not found" }),
+				}));
+
+				const failure = await test({ ...blank, notificationId: "n-1" }).catch(
+					(error: Error) => error,
+				);
+
+				expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+				expect((failure as Error).message).toContain("Failed to send");
+				for (const column of Object.keys(c.secrets)) {
+					expect((failure as Error).message).not.toContain(
+						c.row[column] as string,
+					);
+				}
+			},
+		);
+
+		it.skipIf(!["lark", "telegram"].includes(c.type))(
+			"a network error fails the Test and does not echo the secret",
+			async () => {
+				mocks.fetch.mockImplementationOnce(async (url: string) => {
+					throw new TypeError(`Failed to parse URL from ${url}`);
+				});
+
+				const failure = await test({ ...blank, notificationId: "n-1" }).catch(
+					(error: Error) => error,
+				);
+
+				expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+				expect((failure as Error).message).toContain("Failed to parse URL");
+				for (const column of Object.keys(c.secrets)) {
+					expect((failure as Error).message).not.toContain(
+						c.row[column] as string,
+					);
+				}
+			},
+		);
+
+		// Resend goes through its own client, not fetch.
+		it.skipIf(c.type === "resend")(
 			"a failure that echoes the request does not hand the borrowed secret to the client",
 			async () => {
 				mocks.fetch.mockImplementationOnce(
