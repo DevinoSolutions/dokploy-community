@@ -413,7 +413,11 @@ describe("reportDeploySuccessToUptimelyIncidents", () => {
 	});
 
 	it("keeps the incident for the next success when it cannot be resolved", async () => {
-		mocks.callTool.mockResolvedValue({ incidents: [] });
+		mocks.callTool.mockImplementation(async (tool: string) => {
+			if (tool === "uptimely_incident_list") return { incidents: [] };
+			// Today the state input is a UUID, so the name fallback is refused.
+			throw new Error("INVALID_INPUT: incidentStateId must be a UUID");
+		});
 
 		await expect(
 			reportDeploySuccessToUptimelyIncidents(context),
@@ -421,6 +425,20 @@ describe("reportDeploySuccessToUptimelyIncidents", () => {
 
 		expect(loggedText()).toContain("Resolved incident state");
 		expect(mocks.deletes).toBe(0);
+	});
+
+	it("falls back to the state name when no Resolved state id can be found", async () => {
+		mocks.callTool.mockImplementation(async (tool: string) =>
+			tool === "uptimely_incident_list" ? { incidents: [] } : { changed: true },
+		);
+
+		await reportDeploySuccessToUptimelyIncidents(context);
+
+		const change = mocks.callTool.mock.calls.find(
+			(c) => c[0] === "uptimely_incident_state_change",
+		);
+		expect(change?.[1]).toMatchObject({ incidentStateId: "resolved" });
+		expect(mocks.deletes).toBe(1);
 	});
 
 	it("keeps the incident when Uptimely rejects the state id", async () => {

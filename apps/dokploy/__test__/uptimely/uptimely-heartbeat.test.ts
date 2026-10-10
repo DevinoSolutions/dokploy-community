@@ -237,7 +237,8 @@ describe("setUptimelyHeartbeatKey", () => {
 		mocks.existingLink = { linkId: "link-1", kind: "heartbeat" };
 
 		for (const pasted of [
-			HEARTBEAT_KEY.toUpperCase(),
+			HEARTBEAT_KEY,
+			`https://evil.example/heartbeat/${HEARTBEAT_KEY}`,
 			`https://app.getuptimely.com/heartbeat/${HEARTBEAT_KEY}`,
 			`https://app.getuptimely.com/api/incoming-request/${HEARTBEAT_KEY}`,
 		]) {
@@ -249,7 +250,9 @@ describe("setUptimelyHeartbeatKey", () => {
 			});
 		}
 
+		// Only the key is kept; a pasted URL's host is dropped.
 		expect(mocks.updates).toEqual([
+			{ heartbeatKey: HEARTBEAT_KEY },
 			{ heartbeatKey: HEARTBEAT_KEY },
 			{ heartbeatKey: HEARTBEAT_KEY },
 			{ heartbeatKey: HEARTBEAT_KEY },
@@ -317,6 +320,9 @@ describe("unlinking", () => {
 describe("heartbeat key parsing and input validation", () => {
 	it("parses bare keys and heartbeat URLs, rejects everything else", () => {
 		expect(parseUptimelyHeartbeatKey(` ${HEARTBEAT_KEY} `)).toBe(HEARTBEAT_KEY);
+		expect(parseUptimelyHeartbeatKey("Abc_123-xyz")).toBe("Abc_123-xyz");
+		expect(parseUptimelyHeartbeatKey("has space in it")).toBe(null);
+		expect(parseUptimelyHeartbeatKey("a".repeat(129))).toBe(null);
 		expect(
 			parseUptimelyHeartbeatKey(
 				`https://uptimely.test/heartbeat/${HEARTBEAT_KEY}?x=1`,

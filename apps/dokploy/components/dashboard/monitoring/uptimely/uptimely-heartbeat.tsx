@@ -181,9 +181,10 @@ export const UptimelyHeartbeat = ({
 			{heartbeat && !heartbeat.hasKey && (
 				<div className="flex flex-col gap-2">
 					<span className="text-xs text-muted-foreground">
-						Uptimely does not share the heartbeat secret over its API, so no
-						ping is sent yet. Open the monitor&apos;s Settings in Uptimely, copy
-						the heartbeat URL (or the secret key) and paste it here.
+						The heartbeat key comes from the monitor&apos;s Settings page in
+						Uptimely (Uptimely does not share it over its API). Copy the
+						heartbeat URL or the key from there and paste it here. No ping is
+						sent until it is saved.
 					</span>
 					{canManage && (
 						<div className="flex flex-row flex-wrap items-center gap-2">

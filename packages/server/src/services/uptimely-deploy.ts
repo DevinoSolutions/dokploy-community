@@ -272,23 +272,51 @@ const resolveFor = async (
 	if (!open) return;
 
 	const client = clientFor(channel);
-	const incidentStateId =
-		channel.resolvedStateId || (await discoverResolvedStateId(client, channel));
-	const changed = await client.callTool<{ changed: boolean; reason?: string }>(
-		"uptimely_incident_state_change",
-		{
-			projectId: channel.projectId,
-			incidentId: open.incidentId,
-			incidentStateId,
-			rootCause: "Resolved automatically: the next deployment succeeded.",
-		},
-	);
-	if (changed.reason === "state_not_found") {
-		resolvedStateCache.delete(`${channel.baseUrl}|${channel.projectId}`);
-		throw new UptimelyError(
-			"Uptimely does not know the Resolved incident state id. Set the Resolved state ID on the Uptimely notification.",
-			{ code: "RESOLVED_STATE_UNKNOWN" },
+	const change = (incidentStateId: string) =>
+		client.callTool<{ changed: boolean; reason?: string }>(
+			"uptimely_incident_state_change",
+			{
+				projectId: channel.projectId,
+				incidentId: open.incidentId,
+				incidentStateId,
+				rootCause: "Resolved automatically: the next deployment succeeded.",
+			},
 		);
+	const cacheKey = `${channel.baseUrl}|${channel.projectId}`;
+	let stateId = channel.resolvedStateId || null;
+	let discoveryError: unknown = null;
+	if (!stateId) {
+		try {
+			stateId = await discoverResolvedStateId(client, channel);
+		} catch (error) {
+			discoveryError = error;
+		}
+	}
+
+	let changed: { changed: boolean; reason?: string } | null = null;
+	if (stateId) {
+		changed = await change(stateId);
+		if (changed.reason === "state_not_found") {
+			resolvedStateCache.delete(cacheKey);
+			changed = null;
+		}
+	} else {
+		// Last attempt: Uptimely is adding support for the state name. Today the
+		// input is a UUID, so a validation error here is expected and not fatal.
+		try {
+			changed = await change("resolved");
+			if (changed.reason === "state_not_found") changed = null;
+		} catch {
+			changed = null;
+		}
+	}
+	if (!changed) {
+		throw discoveryError instanceof Error
+			? discoveryError
+			: new UptimelyError(
+					"Uptimely does not know the Resolved incident state id. Set the Resolved state ID on the Uptimely notification.",
+					{ code: "RESOLVED_STATE_UNKNOWN" },
+				);
 	}
 	// Also true when the incident was already resolved in Uptimely.
 	await db

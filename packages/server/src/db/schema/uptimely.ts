@@ -209,10 +209,11 @@ export const apiPreflightUptimelyService = apiUptimelyService.extend({
 	checkPath: uptimelyCheckPathSchema.optional(),
 });
 
-// The secret of an Incoming Request monitor is a UUID. People copy it either
+// The secret of an Incoming Request monitor (a UUID today) is copied either
 // bare or as the URL the monitor's Settings page shows, so both are accepted.
-const HEARTBEAT_KEY_PATTERN =
-	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Only the key is kept: the ping URL is always built from the integration's
+// own base URL, never from the host of a pasted URL.
+const HEARTBEAT_KEY_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 
 /**
  * Extracts the heartbeat secret from what a person pasted: the bare key, or a
@@ -221,7 +222,7 @@ const HEARTBEAT_KEY_PATTERN =
  */
 export const parseUptimelyHeartbeatKey = (value: string): string | null => {
 	const trimmed = value.trim();
-	if (HEARTBEAT_KEY_PATTERN.test(trimmed)) return trimmed.toLowerCase();
+	if (HEARTBEAT_KEY_PATTERN.test(trimmed)) return trimmed;
 	try {
 		const segments = new URL(trimmed).pathname.split("/").filter(Boolean);
 		const last = segments.at(-1) ?? "";
@@ -230,7 +231,7 @@ export const parseUptimelyHeartbeatKey = (value: string): string | null => {
 			(parent === "heartbeat" || parent === "incoming-request") &&
 			HEARTBEAT_KEY_PATTERN.test(last)
 		) {
-			return last.toLowerCase();
+			return last;
 		}
 	} catch {
 		// Not a URL.
