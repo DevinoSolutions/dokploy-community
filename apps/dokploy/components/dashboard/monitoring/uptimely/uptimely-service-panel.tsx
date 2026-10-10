@@ -11,11 +11,11 @@ import {
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { INTEGRATION_LEARN_MORE_URLS } from "@/components/dashboard/settings/integrations/integration-links";
 import {
 	PoweredByUptimely,
 	UptimelyMark,
 } from "@/components/dashboard/settings/integrations/uptimely/uptimely-logo";
-import { INTEGRATION_LEARN_MORE_URLS } from "@/components/dashboard/settings/integrations/integration-links";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { LearnMoreLink } from "@/components/shared/learn-more-link";
@@ -34,6 +34,7 @@ import {
 import { cn } from "@/lib/utils";
 import { api, type RouterInputs, type RouterOutputs } from "@/utils/api";
 import { useDebounce } from "@/utils/hooks/use-debounce";
+import { UptimelyHeartbeat } from "./uptimely-heartbeat";
 import {
 	CHECK_PATH_MAX_LENGTH,
 	checkPathError,
@@ -65,6 +66,7 @@ const KIND_LABEL: Record<ServiceStatus["monitors"][number]["kind"], string> = {
 	port: "Port",
 	ssl: "SSL",
 	domain: "Domain",
+	heartbeat: "Heartbeat",
 };
 
 const Shell = ({ children }: { children: React.ReactNode }) => (
@@ -393,6 +395,18 @@ export const UptimelyServicePanel = ({ serviceType, serviceId }: Props) => {
 		);
 	}
 
+	// Deploys only exist for applications and compose services.
+	const heartbeatSection =
+		serviceType === "application" || serviceType === "compose" ? (
+			<UptimelyHeartbeat
+				serviceType={serviceType}
+				serviceId={serviceId}
+				heartbeat={data.heartbeat}
+				canManage={canManage}
+				renderStatus={(status) => <UptimelyStatusPill status={status} />}
+			/>
+		) : null;
+
 	if (data.monitors.length === 0) {
 		return (
 			<Shell>
@@ -481,6 +495,7 @@ export const UptimelyServicePanel = ({ serviceType, serviceId }: Props) => {
 						</span>
 					)}
 				</div>
+				{heartbeatSection}
 				<PoweredByUptimely />
 			</Shell>
 		);
@@ -641,6 +656,8 @@ export const UptimelyServicePanel = ({ serviceType, serviceId }: Props) => {
 					</span>
 				)}
 			</div>
+
+			{heartbeatSection}
 
 			<div className="flex flex-row flex-wrap items-center justify-between gap-2">
 				{data.badgeUrl ? (

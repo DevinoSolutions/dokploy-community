@@ -11,8 +11,8 @@
 
 ## Features
 
-- [Integrations](https://dokploy-community.devino.ca/integrations/): Settings → Integrations setup for Uptimely uptime monitors, Snapvisor visual testing on preview deployments, DoDomain custom-domain DNS verification, and the Sendly and Notifly notification providers.
-- [Uptimely monitoring](https://dokploy-community.devino.ca/integrations/#uptimely-uptime-ssl-and-domain-monitoring): One Website monitor per HTTPS domain from a service's Monitoring tab, checked every 5 minutes, with a 30-day timeline.
+- [Integrations](https://dokploy-community.devino.ca/integrations/): Settings → Integrations setup for Uptimely uptime monitors, Snapvisor visual testing on preview deployments, DoDomain custom-domain DNS verification, and the Sendly, Notifly and Uptimely notification providers.
+- [Uptimely monitoring](https://dokploy-community.devino.ca/integrations/#uptimely-uptime-ssl-and-domain-monitoring): One Website monitor per HTTPS domain from a service's Monitoring tab, checked every 5 minutes, with a 30-day timeline, an optional deploy heartbeat pinged after each successful deploy, and an Uptimely notification channel that declares an incident when a deploy fails and resolves it on the next success.
 - [Snapvisor visual testing](https://dokploy-community.devino.ca/integrations/#snapvisor-visual-testing-on-preview-deployments): Visual-diff review status on preview deployments, looked up by commit SHA.
 - [DoDomain domain connect](https://dokploy-community.devino.ca/integrations/#dodomain-custom-domain-connect-and-dns-verification): Domain owners connect DNS through a hosted flow and Dokploy shows the verification state.
 - [Built-in MCP server](https://github.com/DevinoSolutions/dokploy-community#remote-mcp-server-with-oauth-fork-original): Dokploy serves its own remote MCP server at `https://<your-dokploy>/api/mcp` with OAuth sign-in, so Claude Code and other MCP clients need no local process and no API key: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then authenticate in the browser. An API key in the `x-api-key` header also works.

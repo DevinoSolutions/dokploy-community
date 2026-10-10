@@ -31,6 +31,7 @@ import {
 	removePreviewDeployment,
 	removeService,
 	removeTraefikConfig,
+	removeUptimelyServiceRows,
 	scanServiceForTransfer,
 	startService,
 	startServiceRemote,
@@ -423,6 +424,10 @@ export const applicationRouter = createTRPCRouter({
 				.delete(applications)
 				.where(eq(applications.applicationId, input.applicationId))
 				.returning();
+
+			await removeUptimelyServiceRows([
+				{ serviceType: "application", serviceId: input.applicationId },
+			]);
 
 			if (!IS_CLOUD) {
 				await cleanQueuesByApplication(input.applicationId);

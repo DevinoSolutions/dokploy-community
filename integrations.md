@@ -58,6 +58,15 @@ The Integrations page (`/dashboard/settings/integrations`) shows cards for Uptim
 - Monitors cannot be deleted from Dokploy, because Uptimely's API has no monitor delete. **Unlink** only makes Dokploy forget the monitors for that service. Disconnecting the integration removes the stored API key and every link. In both cases the monitors keep running in Uptimely until you delete them there.
 - One Uptimely project is connected per organization.
 
+**Deploy heartbeat (applications and compose stacks)**
+
+The panel has an optional **Deploy heartbeat**. Press **Add deploy heartbeat** to create an Incoming Request monitor in Uptimely. After every successful deploy, Dokploy pings that monitor, so Uptimely alerts you when a service stops deploying on schedule.
+
+- Uptimely does not share a heartbeat monitor's secret over its API. After the monitor is created, open it in Uptimely (**Open monitor settings**), copy the heartbeat URL or secret key, paste it into the panel and press **Save key**. No ping is sent until the key is saved.
+- A new heartbeat monitor expects a ping every 5 minutes. Set the interval and grace period that suit the service in the monitor's Settings in Uptimely, otherwise it reports **Offline** between deploys.
+- The ping is a short request that never fails or slows a deploy. If Uptimely is unreachable, Dokploy logs the failure without the key and carries on.
+- **Remove** deletes the link in Dokploy and stops the pings. Uptimely has no monitor delete tool, so the monitor stays in Uptimely until you delete it there. **Unlink** on the uptime monitors leaves the heartbeat alone.
+
 ## Snapvisor: visual testing on preview deployments
 
 [Snapvisor](https://snapvisor.io) diffs screenshots from your CI against a baseline and lets your team approve or reject the changes. With the integration, each preview deployment of an application shows the review status of its build.
@@ -122,6 +131,12 @@ Sendly and Notifly are notification providers, so they live in Settings → Noti
 **Sendly** ([sendly.now](https://sendly.now)) sends notifications as email. Fields: **Name**, **API Key**, **Base URL** (defaults to `https://app.sendly.now`, the base URL of your Sendly instance), **From Address** and one or more **To Addresses**.
 
 **Notifly** ([notifly.io](https://notifly.io)) triggers a Notifly workflow for each notification. Fields: **Name**, **API Key**, **Base URL** (defaults to `https://api.notifly.io`), **Workflow Key** (the identifier of the workflow to trigger) and an optional **Subscriber ID** that defaults to `dokploy`.
+
+**Uptimely** ([getuptimely.com](https://getuptimely.com)) is also a provider. Choose **Uptimely** under **Select a provider**. When a deploy fails it declares an incident in the Uptimely project, and the next successful deploy of the same service resolves it. Fields: **Name**, **API Key**, **Project ID**, **Base URL** (defaults to `https://app.getuptimely.com`) and an optional **Resolved state ID**. It only reacts to the **App Build Error** switch (a success always resolves an open incident).
+
+- The Uptimely project needs **AI write operations** turned on, or Uptimely refuses to declare and resolve incidents. Dokploy logs the refusal and the deploy carries on.
+- Uptimely has no tool that lists incident states, so Dokploy reads the Resolved state from the project's existing incidents. If no incident has been resolved there yet, set **Resolved state ID** (the id of the project's Resolved incident state).
+- **Test Notification** only checks that the key can see the project. It never declares an incident.
 
 ## Related
 

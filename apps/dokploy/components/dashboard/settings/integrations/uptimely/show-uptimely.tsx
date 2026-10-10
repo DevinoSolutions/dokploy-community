@@ -42,7 +42,10 @@ export const ShowUptimely = () => {
 						<span className="text-base font-medium">Uptimely</span>
 						<span className="text-sm text-muted-foreground">
 							Uptime, SSL certificate and domain monitors for your services,
-							created from each service&apos;s Monitoring tab.
+							created from each service&apos;s Monitoring tab, an optional
+							deploy heartbeat per service, and an Uptimely notification channel
+							that declares an incident when a deploy fails and resolves it on
+							the next success.
 						</span>
 					</div>
 				</div>

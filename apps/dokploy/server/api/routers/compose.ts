@@ -44,6 +44,7 @@ import {
 	removeComposeDirectory,
 	removeDeploymentsByComposeId,
 	removeDomainById,
+	removeUptimelyServiceRows,
 	scanServiceForTransfer,
 	startCompose,
 	stopCompose,
@@ -347,6 +348,10 @@ export const composeRouter = createTRPCRouter({
 				.delete(composeTable)
 				.where(eq(composeTable.composeId, input.composeId))
 				.returning();
+
+			await removeUptimelyServiceRows([
+				{ serviceType: "compose", serviceId: input.composeId },
+			]);
 
 			if (!IS_CLOUD) {
 				await cleanQueuesByCompose(input.composeId);

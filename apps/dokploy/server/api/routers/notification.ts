@@ -14,9 +14,12 @@ import {
 	createSlackNotification,
 	createTeamsNotification,
 	createTelegramNotification,
+	createUptimelyChannelNotification,
 	findNotificationById,
 	getWebServerSettings,
 	IS_CLOUD,
+	isSameUptimelyBaseUrl,
+	maskUptimelyApiKey,
 	removeNotificationById,
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -33,6 +36,8 @@ import {
 	sendSlackNotification,
 	sendTeamsNotification,
 	sendTelegramNotification,
+	testUptimelyConnection,
+	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	updateCustomNotification,
 	updateDiscordNotification,
 	updateEmailNotification,
@@ -47,6 +52,7 @@ import {
 	updateSlackNotification,
 	updateTeamsNotification,
 	updateTelegramNotification,
+	updateUptimelyChannelNotification,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { TRPCError } from "@trpc/server";
@@ -73,6 +79,7 @@ import {
 	apiCreateSlack,
 	apiCreateTeams,
 	apiCreateTelegram,
+	apiCreateUptimelyChannel,
 	apiFindOneNotification,
 	apiTestCustomConnection,
 	apiTestDiscordConnection,
@@ -88,6 +95,7 @@ import {
 	apiTestSlackConnection,
 	apiTestTeamsConnection,
 	apiTestTelegramConnection,
+	apiTestUptimelyChannelConnection,
 	apiUpdateCustom,
 	apiUpdateDiscord,
 	apiUpdateEmail,
@@ -102,9 +110,32 @@ import {
 	apiUpdateSlack,
 	apiUpdateTeams,
 	apiUpdateTelegram,
+	apiUpdateUptimelyChannel,
 	notifications,
 	server,
+	type uptimelyChannel,
 } from "@/server/db/schema";
+
+/**
+ * Client-safe view of a notification: the Uptimely channel API key is
+ * write-only, so it is replaced by its masked form (like the Uptimely
+ * integration key).
+ */
+type UptimelyChannelRow = typeof uptimelyChannel.$inferSelect;
+
+const presentNotification = <
+	T extends { uptimelyChannel: UptimelyChannelRow | null },
+>(
+	notification: T,
+) => {
+	const { uptimelyChannel: channel, ...rest } = notification;
+	if (!channel) return { ...rest, uptimelyChannel: null };
+	const { apiKey, ...visible } = channel;
+	return {
+		...rest,
+		uptimelyChannel: { ...visible, apiKeyMasked: maskUptimelyApiKey(apiKey) },
+	};
+};
 
 export const notificationRouter = createTRPCRouter({
 	createSlack: withPermission("notification", "create")
@@ -574,6 +605,116 @@ export const notificationRouter = createTRPCRouter({
 				});
 			}
 		}),
+	createUptimely: withPermission("notification", "create")
+		.input(apiCreateUptimelyChannel)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				await createUptimelyChannelNotification(
+					input,
+					ctx.session.activeOrganizationId,
+				);
+				await audit(ctx, {
+					action: "create",
+					resourceType: "notification",
+					resourceName: input.name,
+				});
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error creating the notification",
+					cause: error,
+				});
+			}
+		}),
+	updateUptimely: withPermission("notification", "update")
+		.input(apiUpdateUptimelyChannel)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				const notification = await findNotificationById(input.notificationId);
+				if (notification.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not authorized to update this notification",
+					});
+				}
+				const result = await updateUptimelyChannelNotification({
+					...input,
+					organizationId: ctx.session.activeOrganizationId,
+				});
+				await audit(ctx, {
+					action: "update",
+					resourceType: "notification",
+					resourceId: input.notificationId,
+					resourceName: notification.name,
+				});
+				return result;
+			} catch (error) {
+				// Keep the specific refusals (not found, "enter the key again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+					cause: error,
+				});
+			}
+		}),
+	// Read-only on purpose: a test must not declare an incident in a real
+	// Uptimely project. It proves the key, the base URL and the project id.
+	testUptimelyConnection: withPermission("notification", "create")
+		.input(apiTestUptimelyChannelConnection)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				// Edit flow: the key field is blank (write-only), so test with the
+				// stored key of the caller's own notification.
+				let apiKey = input.apiKey;
+				if (!apiKey && input.notificationId) {
+					const notification = await findNotificationById(input.notificationId);
+					if (
+						notification.organizationId !== ctx.session.activeOrganizationId
+					) {
+						throw new TRPCError({
+							code: "UNAUTHORIZED",
+							message: "You are not authorized to access this notification",
+						});
+					}
+					apiKey = notification.uptimelyChannel?.apiKey;
+					// Never replay the stored key against a URL typed into the form.
+					if (
+						notification.uptimelyChannel &&
+						!isSameUptimelyBaseUrl(
+							input.baseUrl,
+							notification.uptimelyChannel.baseUrl,
+						)
+					) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+						});
+					}
+				}
+				if (!apiKey) {
+					throw new Error("An API key is required to test the connection");
+				}
+				const result = await testUptimelyConnection({
+					apiKey,
+					projectId: input.projectId,
+					baseUrl: input.baseUrl,
+				});
+				if (!result.projectFound) {
+					throw new Error(
+						"The API key cannot access that project id. Check the project id.",
+					);
+				}
+				return true;
+			} catch (error) {
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: `${error instanceof Error ? error.message : "Unknown error"}`,
+					cause: error,
+				});
+			}
+		}),
 	remove: withPermission("notification", "delete")
 		.input(apiFindOneNotification)
 		.mutation(async ({ input, ctx }) => {
@@ -612,10 +753,10 @@ export const notificationRouter = createTRPCRouter({
 					message: "You are not authorized to access this notification",
 				});
 			}
-			return notification;
+			return presentNotification(notification);
 		}),
 	all: withPermission("notification", "read").query(async ({ ctx }) => {
-		return await db.query.notifications.findMany({
+		const list = await db.query.notifications.findMany({
 			with: {
 				slack: true,
 				telegram: true,
@@ -624,6 +765,7 @@ export const notificationRouter = createTRPCRouter({
 				resend: true,
 				sendly: true,
 				notifly: true,
+				uptimelyChannel: true,
 				gotify: true,
 				ntfy: true,
 				mattermost: true,
@@ -635,6 +777,7 @@ export const notificationRouter = createTRPCRouter({
 			orderBy: desc(notifications.createdAt),
 			where: eq(notifications.organizationId, ctx.session.activeOrganizationId),
 		});
+		return list.map(presentNotification);
 	}),
 	receiveNotification: publicProcedure
 		.input(

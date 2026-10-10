@@ -6,6 +6,8 @@ import {
 	pgEnum,
 	pgTable,
 	text,
+	timestamp,
+	uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
@@ -27,6 +29,7 @@ export const notificationType = pgEnum("notificationType", [
 	"teams",
 	"sendly",
 	"notifly",
+	"uptimely",
 ]);
 
 export const notifications = pgTable("notification", {
@@ -90,6 +93,10 @@ export const notifications = pgTable("notification", {
 	notiflyId: text("notiflyId").references(() => notifly.notiflyId, {
 		onDelete: "cascade",
 	}),
+	uptimelyChannelId: text("uptimelyChannelId").references(
+		() => uptimelyChannel.uptimelyChannelId,
+		{ onDelete: "cascade" },
+	),
 	organizationId: text("organizationId")
 		.notNull()
 		.references(() => organization.id, { onDelete: "cascade" }),
@@ -237,6 +244,58 @@ export const notifly = pgTable("notifly", {
 	baseUrl: text("baseUrl").notNull().default("https://api.notifly.io"),
 });
 
+/**
+ * Uptimely as a notification channel: a deploy failure declares an incident in
+ * the Uptimely project and the next success of the same service resolves it.
+ * Credentials live here (not on `uptimely_integration`) so a channel can target
+ * a different project than the organization's monitoring integration.
+ */
+export const uptimelyChannel = pgTable("uptimely_channel", {
+	uptimelyChannelId: text("uptimelyChannelId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	apiKey: text("apiKey").notNull(),
+	projectId: text("projectId").notNull(),
+	baseUrl: text("baseUrl").notNull().default("https://app.getuptimely.com"),
+	// No Uptimely tool lists incident states, so the Resolved state id is
+	// learned from the project's existing incidents; this overrides that.
+	resolvedStateId: text("resolvedStateId"),
+});
+
+/**
+ * The incident a channel declared for a service whose last deploy failed. The
+ * row is deleted when the incident is resolved. A row with no `incidentId` is a
+ * claim taken by the failure that is declaring it, so concurrent failures of
+ * one service open a single incident. `serviceKey` is
+ * `<application|compose>:<serviceId>`.
+ */
+export const uptimelyChannelIncident = pgTable(
+	"uptimely_channel_incident",
+	{
+		channelIncidentId: text("channelIncidentId")
+			.notNull()
+			.primaryKey()
+			.$defaultFn(() => nanoid()),
+		uptimelyChannelId: text("uptimelyChannelId")
+			.notNull()
+			.references(() => uptimelyChannel.uptimelyChannelId, {
+				onDelete: "cascade",
+			}),
+		serviceKey: text("serviceKey").notNull(),
+		// Null while the row is a claim: the failure that inserted it is still
+		// declaring the incident.
+		incidentId: text("incidentId"),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+	},
+	(table) => [
+		uniqueIndex("uptimely_channel_incident_service_unique").on(
+			table.uptimelyChannelId,
+			table.serviceKey,
+		),
+	],
+);
+
 export const notificationsRelations = relations(notifications, ({ one }) => ({
 	slack: one(slack, {
 		fields: [notifications.slackId],
@@ -293,6 +352,10 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 	notifly: one(notifly, {
 		fields: [notifications.notiflyId],
 		references: [notifly.notiflyId],
+	}),
+	uptimelyChannel: one(uptimelyChannel, {
+		fields: [notifications.uptimelyChannelId],
+		references: [uptimelyChannel.uptimelyChannelId],
 	}),
 	organization: one(organization, {
 		fields: [notifications.organizationId],
@@ -534,6 +597,77 @@ export const apiTestNotiflyConnection = apiCreateNotifly.pick({
 	subscriberId: true,
 	baseUrl: true,
 });
+
+export const apiCreateUptimelyChannel = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		scheduleFailure: true,
+		serverThreshold: true,
+	})
+	.extend({
+		apiKey: z.string().trim().min(1),
+		// Uptimely validates project ids as UUIDs on every tool call.
+		projectId: z.string().trim().uuid("The Uptimely project id is a UUID"),
+		baseUrl: z
+			.string()
+			.trim()
+			.url("Enter a valid URL")
+			.refine((value) => /^https?:\/\//i.test(value), "Use an http(s) URL")
+			.transform((value) => value.replace(/\/+$/, "")),
+		// Empty clears it; omitted leaves the Resolved state learned from Uptimely.
+		resolvedStateId: z
+			.string()
+			.trim()
+			.uuid("The incident state id is a UUID")
+			.or(z.literal(""))
+			.optional(),
+	})
+	.required({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		scheduleFailure: true,
+		serverThreshold: true,
+		apiKey: true,
+		projectId: true,
+		baseUrl: true,
+	});
+
+export const apiUpdateUptimelyChannel = apiCreateUptimelyChannel
+	.partial()
+	.extend({
+		notificationId: z.string().min(1),
+		// Ignored: the channel is derived from the notification row.
+		uptimelyChannelId: z.string().optional(),
+		// Write-only: blank or omitted keeps the stored key.
+		apiKey: z.string().trim().optional(),
+		organizationId: z.string().optional(),
+	});
+
+// The test only reads the project (no incident is declared), so it needs the
+// connection fields alone.
+export const apiTestUptimelyChannelConnection = apiCreateUptimelyChannel
+	.pick({
+		projectId: true,
+		baseUrl: true,
+	})
+	.extend({
+		// Blank on the edit flow: the stored key of `notificationId` is used.
+		apiKey: z.string().trim().optional(),
+		notificationId: z.string().optional(),
+	});
 
 export const apiCreateGotify = notificationsSchema
 	.pick({

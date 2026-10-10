@@ -14,6 +14,7 @@ import {
 	type apiCreateSlack,
 	type apiCreateTeams,
 	type apiCreateTelegram,
+	type apiCreateUptimelyChannel,
 	type apiUpdateCustom,
 	type apiUpdateDiscord,
 	type apiUpdateEmail,
@@ -28,6 +29,7 @@ import {
 	type apiUpdateSlack,
 	type apiUpdateTeams,
 	type apiUpdateTelegram,
+	type apiUpdateUptimelyChannel,
 	custom,
 	discord,
 	email,
@@ -43,7 +45,13 @@ import {
 	slack,
 	teams,
 	telegram,
+	uptimelyChannel,
+	uptimelyChannelIncident,
 } from "@dokploy/server/db/schema";
+import {
+	isSameUptimelyBaseUrl,
+	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+} from "@dokploy/server/utils/uptimely/base-url";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import type { z } from "zod";
@@ -742,6 +750,158 @@ export const updateNotiflyNotification = async (
 	});
 };
 
+export const createUptimelyChannelNotification = async (
+	input: z.infer<typeof apiCreateUptimelyChannel>,
+	organizationId: string,
+) => {
+	await db.transaction(async (tx) => {
+		const newChannel = await tx
+			.insert(uptimelyChannel)
+			.values({
+				apiKey: input.apiKey,
+				projectId: input.projectId,
+				baseUrl: input.baseUrl,
+				resolvedStateId: input.resolvedStateId || null,
+			})
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newChannel) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error input: Inserting uptimely channel",
+			});
+		}
+
+		const newDestination = await tx
+			.insert(notifications)
+			.values({
+				uptimelyChannelId: newChannel.uptimelyChannelId,
+				name: input.name,
+				appDeploy: input.appDeploy,
+				appBuildError: input.appBuildError,
+				databaseBackup: input.databaseBackup,
+				dokployBackup: input.dokployBackup,
+				volumeBackup: input.volumeBackup,
+				dokployRestart: input.dokployRestart,
+				dockerCleanup: input.dockerCleanup,
+				notificationType: "uptimely",
+				organizationId: organizationId,
+				serverThreshold: input.serverThreshold,
+				scheduleFailure: input.scheduleFailure,
+			})
+			.returning()
+			.then((value) => value[0]);
+
+		if (!newDestination) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error input: Inserting notification",
+			});
+		}
+
+		return newDestination;
+	});
+};
+
+export const updateUptimelyChannelNotification = async (
+	input: z.infer<typeof apiUpdateUptimelyChannel>,
+) => {
+	await db.transaction(async (tx) => {
+		// The channel is derived from the notification row, never from the
+		// client: the row must belong to the caller's organization and be an
+		// Uptimely one.
+		const existing = await tx.query.notifications.findFirst({
+			where: eq(notifications.notificationId, input.notificationId),
+			with: { uptimelyChannel: true },
+		});
+		if (
+			!existing ||
+			!input.organizationId ||
+			existing.organizationId !== input.organizationId ||
+			existing.notificationType !== "uptimely" ||
+			!existing.uptimelyChannel
+		) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: "Uptimely notification not found",
+			});
+		}
+		const stored = existing.uptimelyChannel;
+
+		// The stored key must not be sent to a URL the caller just chose.
+		if (
+			input.baseUrl !== undefined &&
+			!input.apiKey &&
+			!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)
+		) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+			});
+		}
+
+		const notificationValues = Object.fromEntries(
+			Object.entries({
+				name: input.name,
+				appDeploy: input.appDeploy,
+				appBuildError: input.appBuildError,
+				databaseBackup: input.databaseBackup,
+				dokployBackup: input.dokployBackup,
+				volumeBackup: input.volumeBackup,
+				dokployRestart: input.dokployRestart,
+				dockerCleanup: input.dockerCleanup,
+				serverThreshold: input.serverThreshold,
+				scheduleFailure: input.scheduleFailure,
+			}).filter(([, value]) => value !== undefined),
+		);
+		if (Object.keys(notificationValues).length > 0) {
+			await tx
+				.update(notifications)
+				.set(notificationValues)
+				.where(eq(notifications.notificationId, input.notificationId));
+		}
+
+		// Blank or omitted keeps the stored key (it is write-only).
+		const channelValues = Object.fromEntries(
+			Object.entries({
+				apiKey: input.apiKey || undefined,
+				projectId: input.projectId,
+				baseUrl: input.baseUrl,
+				// "" clears the override, undefined leaves it untouched.
+				resolvedStateId:
+					input.resolvedStateId === undefined
+						? undefined
+						: input.resolvedStateId || null,
+			}).filter(([, value]) => value !== undefined),
+		);
+		if (Object.keys(channelValues).length > 0) {
+			await tx
+				.update(uptimelyChannel)
+				.set(channelValues)
+				.where(eq(uptimelyChannel.uptimelyChannelId, stored.uptimelyChannelId));
+		}
+
+		// The remembered incidents belong to the old project/key: pointing the
+		// channel somewhere else would leave rows Uptimely can never resolve.
+		const retargeted =
+			(input.projectId !== undefined && input.projectId !== stored.projectId) ||
+			(input.baseUrl !== undefined &&
+				!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)) ||
+			(!!input.apiKey && input.apiKey !== stored.apiKey);
+		if (retargeted) {
+			await tx
+				.delete(uptimelyChannelIncident)
+				.where(
+					eq(
+						uptimelyChannelIncident.uptimelyChannelId,
+						stored.uptimelyChannelId,
+					),
+				);
+		}
+	});
+};
+
 export const createGotifyNotification = async (
 	input: z.infer<typeof apiCreateGotify>,
 	organizationId: string,
@@ -1043,6 +1203,7 @@ export const findNotificationById = async (notificationId: string) => {
 			resend: true,
 			sendly: true,
 			notifly: true,
+			uptimelyChannel: true,
 			gotify: true,
 			ntfy: true,
 			mattermost: true,
@@ -1062,12 +1223,23 @@ export const findNotificationById = async (notificationId: string) => {
 };
 
 export const removeNotificationById = async (notificationId: string) => {
-	const result = await db
-		.delete(notifications)
-		.where(eq(notifications.notificationId, notificationId))
-		.returning();
+	// One transaction: the Uptimely channel holds an API key and must not
+	// outlive its notification (its open-incident rows cascade).
+	return db.transaction(async (tx) => {
+		const result = await tx
+			.delete(notifications)
+			.where(eq(notifications.notificationId, notificationId))
+			.returning();
 
-	return result[0];
+		const channelId = result[0]?.uptimelyChannelId;
+		if (channelId) {
+			await tx
+				.delete(uptimelyChannel)
+				.where(eq(uptimelyChannel.uptimelyChannelId, channelId));
+		}
+
+		return result[0];
+	});
 };
 
 export const createLarkNotification = async (

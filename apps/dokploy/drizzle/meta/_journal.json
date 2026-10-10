@@ -1485,6 +1485,13 @@
       "when": 1791533152655,
       "tag": "0211_better_auth_1_7_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 212,
+      "version": "7",
+      "when": 1791654800727,
+      "tag": "0212_uptimely_heartbeat_channel",
+      "breakpoints": true
     }
   ]
 }
