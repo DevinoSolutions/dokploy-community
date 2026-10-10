@@ -5,6 +5,7 @@ import { reportDeployFailureToUptimely } from "@dokploy/server/services/uptimely
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -482,7 +483,7 @@ ${errorMessage}
 				});
 			}
 		} catch (error) {
-			console.log(error);
+			logSenderError("build error", error);
 		}
 	}
 };

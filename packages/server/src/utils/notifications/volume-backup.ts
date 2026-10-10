@@ -4,6 +4,7 @@ import { VolumeBackupEmail } from "@dokploy/server/emails/emails/volume-backup";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -514,7 +515,7 @@ export const sendVolumeBackupNotifications = async ({
 				});
 			}
 		} catch (error) {
-			console.log(error);
+			logSenderError("volume backup", error);
 		}
 	}
 };

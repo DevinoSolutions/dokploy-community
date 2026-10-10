@@ -4,6 +4,7 @@ import DokployBackupEmail from "@dokploy/server/emails/emails/dokploy-backup";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -436,7 +437,7 @@ export const sendDokployBackupNotifications = async ({
 				});
 			}
 		} catch (error) {
-			console.error(error);
+			logSenderError("dokploy backup", error);
 		}
 	}
 };

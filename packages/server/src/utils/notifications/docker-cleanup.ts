@@ -4,6 +4,7 @@ import DockerCleanupEmail from "@dokploy/server/emails/emails/docker-cleanup";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -310,7 +311,7 @@ export const sendDockerCleanupNotifications = async (
 				});
 			}
 		} catch (error) {
-			console.log(error);
+			logSenderError("docker cleanup", error);
 		}
 	}
 };

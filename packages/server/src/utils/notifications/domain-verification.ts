@@ -4,6 +4,7 @@ import BuildFailedEmail from "@dokploy/server/emails/emails/build-failed";
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -337,7 +338,7 @@ ${reason}
 				});
 			}
 		} catch (error) {
-			console.log(error);
+			logSenderError("domain verification", error);
 		}
 	}
 };

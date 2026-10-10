@@ -6,6 +6,7 @@ import { reportDeploySuccessToUptimely } from "@dokploy/server/services/uptimely
 import { render } from "@react-email/components";
 import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
+import { logSenderError } from "./log-error";
 import {
 	sendCustomNotification,
 	sendDiscordNotification,
@@ -473,7 +474,7 @@ export const sendBuildSuccessNotifications = async ({
 				});
 			}
 		} catch (error) {
-			console.log(error);
+			logSenderError("build success", error);
 		}
 	}
 };
