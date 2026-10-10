@@ -38,6 +38,7 @@ export const UptimelyHeartbeat = ({
 }: Props) => {
 	const [pasted, setPasted] = useState("");
 	const [error, setError] = useState<string | null>(null);
+	const [replacing, setReplacing] = useState(false);
 	const utils = api.useUtils();
 	const input = { serviceType, serviceId };
 	const refresh = () => utils.uptimely.serviceStatus.invalidate(input);
@@ -73,6 +74,7 @@ export const UptimelyHeartbeat = ({
 			.mutateAsync({ ...input, key: pasted })
 			.then(async () => {
 				setPasted("");
+				setReplacing(false);
 				toast.success("Heartbeat key saved");
 				await refresh();
 			})
@@ -178,13 +180,15 @@ export const UptimelyHeartbeat = ({
 				</>
 			)}
 
-			{heartbeat && !heartbeat.hasKey && (
+			{heartbeat && (!heartbeat.hasKey || replacing) && (
 				<div className="flex flex-col gap-2">
 					<span className="text-xs text-muted-foreground">
 						The heartbeat key comes from the monitor&apos;s Settings page in
 						Uptimely (Uptimely does not share it over its API). Copy the
-						heartbeat URL or the key from there and paste it here. No ping is
-						sent until it is saved.
+						heartbeat URL or the key from there and paste it here.{" "}
+						{heartbeat.hasKey
+							? "The new key replaces the saved one."
+							: "No ping is sent until it is saved."}
 					</span>
 					{canManage && (
 						<div className="flex flex-row flex-wrap items-center gap-2">
@@ -205,6 +209,19 @@ export const UptimelyHeartbeat = ({
 							>
 								Save key
 							</Button>
+							{heartbeat.hasKey && (
+								<Button
+									variant="ghost"
+									size="sm"
+									onClick={() => {
+										setReplacing(false);
+										setPasted("");
+										setError(null);
+									}}
+								>
+									Cancel
+								</Button>
+							)}
 							<a
 								href={heartbeat.settingsUrl}
 								target="_blank"
@@ -224,11 +241,21 @@ export const UptimelyHeartbeat = ({
 				</div>
 			)}
 
-			{heartbeat?.hasKey && (
-				<span className="text-xs text-muted-foreground">
+			{heartbeat?.hasKey && !replacing && (
+				<span className="flex flex-row flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
 					Pinged after every successful deploy
 					{lastPing ? ` · Last ping received ${lastPing}` : ""}. Set the
 					expected interval in the monitor&apos;s Settings in Uptimely.
+					{canManage && (
+						<Button
+							variant="link"
+							size="sm"
+							className="h-auto p-0 text-xs"
+							onClick={() => setReplacing(true)}
+						>
+							Change key
+						</Button>
+					)}
 				</span>
 			)}
 		</div>

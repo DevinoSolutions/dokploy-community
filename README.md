@@ -103,7 +103,7 @@ https://github.com/user-attachments/assets/94134095-5601-4279-be2f-219734c8e199
 
 ### Monitoring
 
-- **Uptimely integration** — per-service uptime, SSL and domain monitors from the monitoring tab, powered by [Uptimely](https://getuptimely.com): connect once in Settings → Integrations, then opt each application, compose stack or database in from its Monitoring tab
+- **Uptimely integration** — per-service uptime, SSL and domain monitors from the monitoring tab, powered by [Uptimely](https://getuptimely.com): connect once in Settings → Integrations, then opt each application, compose stack or database in from its Monitoring tab. An optional deploy heartbeat pings Uptimely after every successful deploy, and an Uptimely notification channel declares an incident when a deploy fails and resolves it on the next success
 - **Container resource breakdown** and **swap usage** in monitoring
 - **Remote-server stats** via a server selector
 - **Container healthcheck status** surfaced in the UI
@@ -398,7 +398,7 @@ Every item above is ported 1:1 and credited to its original upstream author. See
 
 **Native integrations for the Devino product lineup** — new **Settings → Integrations** page, four migrations (`0203`–`0206`, all idempotent), upgrades in place.
 
-- **Uptimely** — per-service uptime, SSL and domain monitors from the Monitoring tab of every application, compose stack and database, talking to Uptimely over its MCP endpoint with a project API key; status pill, 30-day timeline, run-probe, status-page badge. Monitor creation is opt-in per service and needs the project's "AI write operations" toggle ON in Uptimely ([#229](https://github.com/DevinoSolutions/dokploy-community/pull/229))
+- **Uptimely** — per-service uptime, SSL and domain monitors from the Monitoring tab of every application, compose stack and database, talking to Uptimely over its MCP endpoint with a project API key; status pill, 30-day timeline, run-probe, status-page badge. Monitor creation is opt-in per service and needs the project's "AI write operations" toggle ON in Uptimely. Also a per-service deploy heartbeat (Incoming Request monitor, pinged after each successful deploy) and an Uptimely notification channel (deploy failure declares an incident, the next success resolves it) ([#229](https://github.com/DevinoSolutions/dokploy-community/pull/229))
 - **Sendly and Notifly notification channels** — email through Sendly (`POST /api/emails`) and workflow triggers through Notifly (`POST /v1/events/trigger`), wired into every notification event alongside Slack, Discord, Telegram, Email and Resend ([#231](https://github.com/DevinoSolutions/dokploy-community/pull/231))
 - **DoDomain custom-domain connect** — "Check DNS" and "Send connect link" on domains; end users link their own domain through DoDomain's hosted flow, a signed webhook (`/api/webhooks/dodomain`, HMAC-verified, deduplicated) marks the domain verified and re-applies it through the normal Traefik path; failures fan out to notification channels ([#232](https://github.com/DevinoSolutions/dokploy-community/pull/232))
 - **Snapvisor visual testing on preview deployments** — pick a Snapvisor project per application; each preview shows the visual-diff status of the build for the deployed commit with a "Review in Snapvisor" link ([#233](https://github.com/DevinoSolutions/dokploy-community/pull/233))
