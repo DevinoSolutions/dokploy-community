@@ -15,6 +15,7 @@ import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import { deprovisionCloudflareForDomains } from "./cloudflare-provisioning";
 import { createProductionEnvironment } from "./environment";
+import { removeUptimelyServiceRows } from "./uptimely-deploy";
 
 export type Project = typeof projects.$inferSelect;
 
@@ -200,6 +201,20 @@ export const deleteProject = async (projectId: string) => {
 		.where(eq(projects.projectId, projectId))
 		.returning()
 		.then((value) => value[0]);
+
+	// The cascade drops the services without a hook: forget their Uptimely rows.
+	await removeUptimelyServiceRows(
+		(projectTree?.environments ?? []).flatMap((env) => [
+			...env.applications.map((application) => ({
+				serviceType: "application" as const,
+				serviceId: application.applicationId,
+			})),
+			...env.compose.map((compose) => ({
+				serviceType: "compose" as const,
+				serviceId: compose.composeId,
+			})),
+		]),
+	);
 
 	return project;
 };
