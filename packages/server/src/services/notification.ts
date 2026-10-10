@@ -787,7 +787,7 @@ export const updateNotiflyNotification = async (
 		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
+				message: NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 			});
 		}
 

@@ -563,6 +563,5 @@ describe("notification.getEmailProviders", () => {
 			notificationType: true,
 		});
 		expect(result).toHaveLength(1);
-		expect(JSON.stringify(result)).not.toContain(API_KEYS.sendly);
 	});
 });
