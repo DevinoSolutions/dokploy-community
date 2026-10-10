@@ -237,3 +237,67 @@ describe("uptimely router credentials", () => {
 		});
 	});
 });
+
+describe("uptimely router deploy heartbeat", () => {
+	const foreign = { serviceType: "application" as const, serviceId: "app-x" };
+	const KEY = "11111111-2222-4333-8444-555555555555";
+
+	it("rejects every heartbeat procedure for a service in another organization", async () => {
+		mocks.serviceOrganizationId = "org-2";
+		await expect(caller().linkHeartbeat(foreign)).rejects.toMatchObject({
+			code: "UNAUTHORIZED",
+		});
+		await expect(
+			caller().setHeartbeatKey({ ...foreign, key: KEY }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		await expect(caller().unlinkHeartbeat(foreign)).rejects.toMatchObject({
+			code: "UNAUTHORIZED",
+		});
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("only offers the heartbeat for applications and compose services", async () => {
+		await expect(
+			caller().linkHeartbeat({
+				serviceType: "redis",
+				serviceId: "r-1",
+			} as never),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects a heartbeat key that is not a secret key or heartbeat URL", async () => {
+		for (const key of [
+			"",
+			"   ",
+			"abc",
+			"https://uptimely.test/heartbeat/abc",
+		]) {
+			await expect(
+				caller().setHeartbeatKey({
+					serviceType: "application",
+					serviceId: "app-1",
+					key,
+				}),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		}
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps the heartbeat key out of the status response", async () => {
+		const result = await caller().serviceStatus({
+			serviceType: "application",
+			serviceId: "app-1",
+		});
+		expect(JSON.stringify(result)).not.toContain(KEY);
+	});
+
+	it("unlinks the heartbeat of an in-organization service", async () => {
+		await expect(
+			caller().unlinkHeartbeat({
+				serviceType: "compose",
+				serviceId: "cmp-1",
+			}),
+		).resolves.toEqual({ removed: 1 });
+	});
+});
