@@ -73,6 +73,150 @@ export const SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE =
 export const NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE =
 	integrationUrlChangeNeedsKeyMessage("Notifly");
 
+export const GOTIFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE =
+	integrationUrlChangeNeedsKeyMessage("Gotify", "app token");
+export const NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE =
+	integrationUrlChangeNeedsKeyMessage("ntfy", "access token");
+export const EMAIL_SERVER_CHANGE_NEEDS_PASSWORD_MESSAGE =
+	"Enter the SMTP password again to change the SMTP server or port.";
+export const CUSTOM_URL_CHANGE_NEEDS_HEADERS_MESSAGE =
+	"Enter the header values again to change the Custom webhook URL.";
+
+/** Host (any case) and port: the SMTP password only goes to this server. */
+export const isSameSmtpServer = (
+	a: { smtpServer: string; smtpPort: number },
+	b: { smtpServer: string; smtpPort: number },
+) =>
+	a.smtpServer.trim().toLowerCase() === b.smtpServer.trim().toLowerCase() &&
+	a.smtpPort === b.smtpPort;
+
+/**
+ * The header values of a Custom notification are write-only. A blank value of
+ * a header that is already stored keeps the stored value; a changed endpoint
+ * would hand that value to another URL, so it needs the value typed again.
+ */
+export const mergeCustomHeaders = (
+	headers: Record<string, string>,
+	stored: Record<string, string> | null | undefined,
+	endpointChanged: boolean,
+) => {
+	const known = stored ?? {};
+	return Object.fromEntries(
+		Object.entries(headers).map(([name, value]) => {
+			if (value !== "" || !Object.hasOwn(known, name)) {
+				return [name, value];
+			}
+			if (endpointChanged) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: CUSTOM_URL_CHANGE_NEEDS_HEADERS_MESSAGE,
+				});
+			}
+			return [name, known[name] as string];
+		}),
+	);
+};
+
+const PROVIDER_RELATIONS = {
+	slack: true,
+	telegram: true,
+	discord: true,
+	email: true,
+	resend: true,
+	sendly: true,
+	notifly: true,
+	uptimelyChannel: true,
+	gotify: true,
+	ntfy: true,
+	mattermost: true,
+	custom: true,
+	lark: true,
+	pushover: true,
+	teams: true,
+} as const;
+
+type ProviderKey = keyof typeof PROVIDER_RELATIONS;
+
+const findWithProviders = (
+	executor: Pick<typeof db, "query">,
+	notificationId: string,
+) =>
+	executor.query.notifications.findFirst({
+		where: eq(notifications.notificationId, notificationId),
+		with: PROVIDER_RELATIONS,
+	});
+
+type NotificationWithProviders = NonNullable<
+	Awaited<ReturnType<typeof findWithProviders>>
+>;
+
+/**
+ * The provider row of a notification, derived from the notification row and
+ * never from a client-sent id: the notification must belong to the caller's
+ * organization and be of the expected type.
+ */
+const findOwnedProvider = async <K extends ProviderKey>(
+	tx: Pick<typeof db, "query">,
+	input: { notificationId: string; organizationId?: string },
+	type: Notification["notificationType"],
+	key: K,
+) => {
+	const existing = await findWithProviders(tx, input.notificationId);
+	const provider = existing?.[key];
+	if (
+		!existing ||
+		!input.organizationId ||
+		existing.organizationId !== input.organizationId ||
+		existing.notificationType !== type ||
+		!provider
+	) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Notification not found",
+		});
+	}
+	return provider as NonNullable<NotificationWithProviders[K]>;
+};
+
+type NotificationRowInput = Partial<
+	Pick<
+		Notification,
+		| "name"
+		| "appDeploy"
+		| "appBuildError"
+		| "databaseBackup"
+		| "dokployBackup"
+		| "volumeBackup"
+		| "dokployRestart"
+		| "dockerCleanup"
+		| "serverThreshold"
+		| "scheduleFailure"
+	>
+> & { notificationId: string };
+
+const updateNotificationRow = async (
+	tx: Pick<typeof db, "update">,
+	input: NotificationRowInput,
+) => {
+	const values = withoutUndefined({
+		name: input.name,
+		appDeploy: input.appDeploy,
+		appBuildError: input.appBuildError,
+		databaseBackup: input.databaseBackup,
+		dokployBackup: input.dokployBackup,
+		volumeBackup: input.volumeBackup,
+		dokployRestart: input.dokployRestart,
+		dockerCleanup: input.dockerCleanup,
+		serverThreshold: input.serverThreshold,
+		scheduleFailure: input.scheduleFailure,
+	});
+	if (Object.keys(values).length === 0) return;
+	await tx
+		.update(notifications)
+		.set(values)
+		.where(eq(notifications.notificationId, input.notificationId));
+};
+
 export const createSlackNotification = async (
 	input: z.infer<typeof apiCreateSlack>,
 	organizationId: string,
@@ -129,43 +273,20 @@ export const updateSlackNotification = async (
 	input: z.infer<typeof apiUpdateSlack>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "slack", "slack");
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		const values = withoutUndefined({
+			// The webhook URL is the credential: blank or omitted keeps it.
+			webhookUrl: input.webhookUrl?.trim() || undefined,
+			channel: input.channel,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(slack)
+				.set(values)
+				.where(eq(slack.slackId, stored.slackId));
 		}
-
-		await tx
-			.update(slack)
-			.set({
-				channel: input.channel,
-				webhookUrl: input.webhookUrl,
-			})
-			.where(eq(slack.slackId, input.slackId))
-			.returning()
-			.then((value) => value[0]);
-
-		return newDestination;
 	});
 };
 
@@ -226,44 +347,21 @@ export const updateTelegramNotification = async (
 	input: z.infer<typeof apiUpdateTelegram>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "telegram", "telegram");
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		const values = withoutUndefined({
+			// Blank or omitted keeps the stored bot token (it is write-only).
+			botToken: input.botToken?.trim() || undefined,
+			chatId: input.chatId,
+			messageThreadId: input.messageThreadId,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(telegram)
+				.set(values)
+				.where(eq(telegram.telegramId, stored.telegramId));
 		}
-
-		await tx
-			.update(telegram)
-			.set({
-				botToken: input.botToken,
-				chatId: input.chatId,
-				messageThreadId: input.messageThreadId,
-			})
-			.where(eq(telegram.telegramId, input.telegramId))
-			.returning()
-			.then((value) => value[0]);
-
-		return newDestination;
 	});
 };
 
@@ -323,43 +421,20 @@ export const updateDiscordNotification = async (
 	input: z.infer<typeof apiUpdateDiscord>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "discord", "discord");
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		const values = withoutUndefined({
+			// The webhook URL is the credential: blank or omitted keeps it.
+			webhookUrl: input.webhookUrl?.trim() || undefined,
+			decoration: input.decoration,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(discord)
+				.set(values)
+				.where(eq(discord.discordId, stored.discordId));
 		}
-
-		await tx
-			.update(discord)
-			.set({
-				webhookUrl: input.webhookUrl,
-				decoration: input.decoration,
-			})
-			.where(eq(discord.discordId, input.discordId))
-			.returning()
-			.then((value) => value[0]);
-
-		return newDestination;
 	});
 };
 
@@ -423,47 +498,50 @@ export const updateEmailNotification = async (
 	input: z.infer<typeof apiUpdateEmail>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "email", "email");
 
-		if (!newDestination) {
+		// A blank username turns the authentication off, and the password with it.
+		const clearsAuth = input.username !== undefined && !input.username.trim();
+		const typedPassword = input.password || undefined;
+
+		// The stored password must not be sent to a server the caller just chose.
+		const username = input.username ?? stored.username ?? "";
+		if (
+			!typedPassword &&
+			!clearsAuth &&
+			stored.password &&
+			username.trim() &&
+			!isSameSmtpServer(
+				{
+					smtpServer: input.smtpServer ?? stored.smtpServer,
+					smtpPort: input.smtpPort ?? stored.smtpPort,
+				},
+				stored,
+			)
+		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Error Updating notification",
+				message: EMAIL_SERVER_CHANGE_NEEDS_PASSWORD_MESSAGE,
 			});
 		}
 
-		await tx
-			.update(email)
-			.set({
-				smtpServer: input.smtpServer,
-				smtpPort: input.smtpPort,
-				username: input.username,
-				password: input.password,
-				fromAddress: input.fromAddress,
-				toAddresses: input.toAddresses,
-			})
-			.where(eq(email.emailId, input.emailId))
-			.returning()
-			.then((value) => value[0]);
+		await updateNotificationRow(tx, input);
 
-		return newDestination;
+		const values = withoutUndefined({
+			smtpServer: input.smtpServer,
+			smtpPort: input.smtpPort,
+			username: input.username,
+			// Blank or omitted keeps the stored password (it is write-only).
+			password: clearsAuth ? "" : typedPassword,
+			fromAddress: input.fromAddress,
+			toAddresses: input.toAddresses,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(email)
+				.set(values)
+				.where(eq(email.emailId, stored.emailId));
+		}
 	});
 };
 
@@ -524,44 +602,21 @@ export const updateResendNotification = async (
 	input: z.infer<typeof apiUpdateResend>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "resend", "resend");
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		const values = withoutUndefined({
+			// Blank or omitted keeps the stored key (it is write-only).
+			apiKey: input.apiKey?.trim() || undefined,
+			fromAddress: input.fromAddress,
+			toAddresses: input.toAddresses,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(resend)
+				.set(values)
+				.where(eq(resend.resendId, stored.resendId));
 		}
-
-		await tx
-			.update(resend)
-			.set({
-				apiKey: input.apiKey,
-				fromAddress: input.fromAddress,
-				toAddresses: input.toAddresses,
-			})
-			.where(eq(resend.resendId, input.resendId))
-			.returning()
-			.then((value) => value[0]);
-
-		return newDestination;
 	});
 };
 
@@ -1045,43 +1100,35 @@ export const updateGotifyNotification = async (
 	input: z.infer<typeof apiUpdateGotify>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				serverThreshold: input.serverThreshold,
-				organizationId: input.organizationId,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "gotify", "gotify");
 
-		if (!newDestination) {
+		// The stored token must not be sent to a server the caller just chose.
+		if (
+			input.serverUrl !== undefined &&
+			!input.appToken?.trim() &&
+			!isSameIntegrationBaseUrl(input.serverUrl, stored.serverUrl)
+		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Error Updating notification",
+				message: GOTIFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 			});
 		}
 
-		await tx
-			.update(gotify)
-			.set({
-				serverUrl: input.serverUrl,
-				appToken: input.appToken,
-				priority: input.priority,
-				decoration: input.decoration,
-			})
-			.where(eq(gotify.gotifyId, input.gotifyId));
+		await updateNotificationRow(tx, input);
 
-		return newDestination;
+		const values = withoutUndefined({
+			serverUrl: input.serverUrl,
+			// Blank or omitted keeps the stored token (it is write-only).
+			appToken: input.appToken?.trim() || undefined,
+			priority: input.priority,
+			decoration: input.decoration,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(gotify)
+				.set(values)
+				.where(eq(gotify.gotifyId, stored.gotifyId));
+		}
 	});
 };
 
@@ -1143,43 +1190,37 @@ export const updateNtfyNotification = async (
 	input: z.infer<typeof apiUpdateNtfy>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				serverThreshold: input.serverThreshold,
-				organizationId: input.organizationId,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "ntfy", "ntfy");
 
-		if (!newDestination) {
+		const typedToken = input.accessToken?.trim() || undefined;
+		const clearsToken = input.clearAccessToken === true && !typedToken;
+
+		// The stored token must not be sent to a server the caller just chose.
+		if (
+			input.serverUrl !== undefined &&
+			stored.accessToken &&
+			!typedToken &&
+			!clearsToken &&
+			!isSameIntegrationBaseUrl(input.serverUrl, stored.serverUrl)
+		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Error Updating notification",
+				message: NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 			});
 		}
 
-		await tx
-			.update(ntfy)
-			.set({
-				serverUrl: input.serverUrl,
-				topic: input.topic,
-				accessToken: input.accessToken ?? null,
-				priority: input.priority,
-			})
-			.where(eq(ntfy.ntfyId, input.ntfyId));
+		await updateNotificationRow(tx, input);
 
-		return newDestination;
+		const values = withoutUndefined({
+			serverUrl: input.serverUrl,
+			topic: input.topic,
+			// Blank or omitted keeps the stored token (it is write-only).
+			accessToken: clearsToken ? null : typedToken,
+			priority: input.priority,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx.update(ntfy).set(values).where(eq(ntfy.ntfyId, stored.ntfyId));
+		}
 	});
 };
 
@@ -1239,65 +1280,46 @@ export const updateCustomNotification = async (
 	input: z.infer<typeof apiUpdateCustom>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "custom", "custom");
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		// The stored header values must not be sent to an endpoint the caller
+		// just chose.
+		const endpointChanged =
+			input.endpoint !== undefined &&
+			!isSameIntegrationBaseUrl(input.endpoint, stored.endpoint);
+		let headers: Record<string, string> | undefined;
+		if (input.headers === undefined) {
+			if (endpointChanged && Object.keys(stored.headers ?? {}).length > 0) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: CUSTOM_URL_CHANGE_NEEDS_HEADERS_MESSAGE,
+				});
+			}
+		} else {
+			headers = mergeCustomHeaders(
+				input.headers,
+				stored.headers,
+				endpointChanged,
+			);
 		}
 
-		await tx
-			.update(custom)
-			.set({
-				endpoint: input.endpoint,
-				headers: input.headers,
-			})
-			.where(eq(custom.customId, input.customId));
+		await updateNotificationRow(tx, input);
 
-		return newDestination;
+		const values = withoutUndefined({
+			endpoint: input.endpoint,
+			headers,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(custom)
+				.set(values)
+				.where(eq(custom.customId, stored.customId));
+		}
 	});
 };
 
 export const findNotificationById = async (notificationId: string) => {
-	const notification = await db.query.notifications.findFirst({
-		where: eq(notifications.notificationId, notificationId),
-		with: {
-			slack: true,
-			telegram: true,
-			discord: true,
-			email: true,
-			resend: true,
-			sendly: true,
-			notifly: true,
-			uptimelyChannel: true,
-			gotify: true,
-			ntfy: true,
-			mattermost: true,
-			custom: true,
-			lark: true,
-			pushover: true,
-			teams: true,
-		},
-	});
+	const notification = await findWithProviders(db, notificationId);
 	if (!notification) {
 		throw new TRPCError({
 			code: "NOT_FOUND",
@@ -1378,42 +1400,17 @@ export const updateLarkNotification = async (
 	input: z.infer<typeof apiUpdateLark>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "lark", "lark");
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		// The webhook URL is the credential: blank or omitted keeps it.
+		const webhookUrl = input.webhookUrl?.trim();
+		if (webhookUrl) {
+			await tx
+				.update(lark)
+				.set({ webhookUrl })
+				.where(eq(lark.larkId, stored.larkId));
 		}
-
-		await tx
-			.update(lark)
-			.set({
-				webhookUrl: input.webhookUrl,
-			})
-			.where(eq(lark.larkId, input.larkId))
-			.returning()
-			.then((value) => value[0]);
-
-		return newDestination;
 	});
 };
 
@@ -1472,42 +1469,17 @@ export const updateTeamsNotification = async (
 	input: z.infer<typeof apiUpdateTeams>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "teams", "teams");
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		// The webhook URL is the credential: blank or omitted keeps it.
+		const webhookUrl = input.webhookUrl?.trim();
+		if (webhookUrl) {
+			await tx
+				.update(teams)
+				.set({ webhookUrl })
+				.where(eq(teams.teamsId, stored.teamsId));
 		}
-
-		await tx
-			.update(teams)
-			.set({
-				webhookUrl: input.webhookUrl,
-			})
-			.where(eq(teams.teamsId, input.teamsId))
-			.returning()
-			.then((value) => value[0]);
-
-		return newDestination;
 	});
 };
 
@@ -1583,44 +1555,26 @@ export const updateMattermostNotification = async (
 	input: z.infer<typeof apiUpdateMattermost>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(
+			tx,
+			input,
+			"mattermost",
+			"mattermost",
+		);
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		const values = withoutUndefined({
+			// The webhook URL is the credential: blank or omitted keeps it.
+			webhookUrl: input.webhookUrl?.trim() || undefined,
+			channel: input.channel,
+			username: input.username,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(mattermost)
+				.set(values)
+				.where(eq(mattermost.mattermostId, stored.mattermostId));
 		}
-
-		await tx
-			.update(mattermost)
-			.set({
-				webhookUrl: input.webhookUrl,
-				channel: input.channel,
-				username: input.username,
-			})
-			.where(eq(mattermost.mattermostId, input.mattermostId))
-			.returning()
-			.then((value) => value[0]);
-
-		return newDestination;
 	});
 };
 
@@ -1683,43 +1637,22 @@ export const updatePushoverNotification = async (
 	input: z.infer<typeof apiUpdatePushover>,
 ) => {
 	await db.transaction(async (tx) => {
-		const newDestination = await tx
-			.update(notifications)
-			.set({
-				name: input.name,
-				appDeploy: input.appDeploy,
-				appBuildError: input.appBuildError,
-				databaseBackup: input.databaseBackup,
-				dokployBackup: input.dokployBackup,
-				volumeBackup: input.volumeBackup,
-				dokployRestart: input.dokployRestart,
-				dockerCleanup: input.dockerCleanup,
-				organizationId: input.organizationId,
-				serverThreshold: input.serverThreshold,
-				scheduleFailure: input.scheduleFailure,
-			})
-			.where(eq(notifications.notificationId, input.notificationId))
-			.returning()
-			.then((value) => value[0]);
+		const stored = await findOwnedProvider(tx, input, "pushover", "pushover");
+		await updateNotificationRow(tx, input);
 
-		if (!newDestination) {
-			throw new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error Updating notification",
-			});
+		const values = withoutUndefined({
+			// Blank or omitted keeps the stored keys (they are write-only).
+			userKey: input.userKey?.trim() || undefined,
+			apiToken: input.apiToken?.trim() || undefined,
+			priority: input.priority,
+			retry: input.retry,
+			expire: input.expire,
+		});
+		if (Object.keys(values).length > 0) {
+			await tx
+				.update(pushover)
+				.set(values)
+				.where(eq(pushover.pushoverId, stored.pushoverId));
 		}
-
-		await tx
-			.update(pushover)
-			.set({
-				userKey: input.userKey,
-				apiToken: input.apiToken,
-				priority: input.priority,
-				retry: input.retry,
-				expire: input.expire,
-			})
-			.where(eq(pushover.pushoverId, input.pushoverId));
-
-		return newDestination;
 	});
 };

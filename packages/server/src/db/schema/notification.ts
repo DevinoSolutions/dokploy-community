@@ -365,6 +365,24 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 
 export const notificationsSchema = createInsertSchema(notifications);
 
+// Write-only secrets (webhook URLs, tokens, keys, passwords): on update a blank
+// or omitted value keeps the stored one, and on the "Test" button of the edit
+// form it selects the stored value of `notificationId` (org-checked
+// server-side). A typed value always replaces / is used as is.
+const writeOnlySecret = z.string().trim().optional();
+const testNotificationId = z.string().optional();
+// Same, for a webhook that has to be a URL once one is typed.
+const optionalWebhookUrl = z
+	.string()
+	.trim()
+	.refine(
+		(value) => value === "" || z.string().url().safeParse(value).success,
+		{
+			message: "Invalid url",
+		},
+	)
+	.optional();
+
 export const apiCreateSlack = notificationsSchema
 	.pick({
 		appBuildError: true,
@@ -386,14 +404,20 @@ export const apiCreateSlack = notificationsSchema
 
 export const apiUpdateSlack = apiCreateSlack.partial().extend({
 	notificationId: z.string().min(1),
-	slackId: z.string(),
+	// Ignored: the provider row is derived from the notification row.
+	slackId: z.string().optional(),
+	webhookUrl: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
-export const apiTestSlackConnection = apiCreateSlack.pick({
-	webhookUrl: true,
-	channel: true,
-});
+export const apiTestSlackConnection = apiCreateSlack
+	.pick({
+		channel: true,
+	})
+	.extend({
+		webhookUrl: writeOnlySecret,
+		notificationId: testNotificationId,
+	});
 
 export const apiCreateTelegram = notificationsSchema
 	.pick({
@@ -417,15 +441,21 @@ export const apiCreateTelegram = notificationsSchema
 
 export const apiUpdateTelegram = apiCreateTelegram.partial().extend({
 	notificationId: z.string().min(1),
-	telegramId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	telegramId: z.string().optional(),
+	botToken: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
-export const apiTestTelegramConnection = apiCreateTelegram.pick({
-	botToken: true,
-	chatId: true,
-	messageThreadId: true,
-});
+export const apiTestTelegramConnection = apiCreateTelegram
+	.pick({
+		chatId: true,
+		messageThreadId: true,
+	})
+	.extend({
+		botToken: writeOnlySecret,
+		notificationId: testNotificationId,
+	});
 
 export const apiCreateDiscord = notificationsSchema
 	.pick({
@@ -448,17 +478,17 @@ export const apiCreateDiscord = notificationsSchema
 
 export const apiUpdateDiscord = apiCreateDiscord.partial().extend({
 	notificationId: z.string().min(1),
-	discordId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	discordId: z.string().optional(),
+	webhookUrl: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
-export const apiTestDiscordConnection = apiCreateDiscord
-	.pick({
-		webhookUrl: true,
-	})
-	.extend({
-		decoration: z.boolean().optional(),
-	});
+export const apiTestDiscordConnection = z.object({
+	webhookUrl: writeOnlySecret,
+	notificationId: testNotificationId,
+	decoration: z.boolean().optional(),
+});
 
 export const apiCreateEmail = notificationsSchema
 	.pick({
@@ -485,18 +515,26 @@ export const apiCreateEmail = notificationsSchema
 
 export const apiUpdateEmail = apiCreateEmail.partial().extend({
 	notificationId: z.string().min(1),
-	emailId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	emailId: z.string().optional(),
+	// Write-only: blank or omitted keeps the stored password (a blank username
+	// removes the authentication, and the password with it). Not trimmed.
+	password: z.string().optional(),
 	organizationId: z.string().optional(),
 });
 
-export const apiTestEmailConnection = apiCreateEmail.pick({
-	smtpServer: true,
-	smtpPort: true,
-	username: true,
-	password: true,
-	toAddresses: true,
-	fromAddress: true,
-});
+export const apiTestEmailConnection = apiCreateEmail
+	.pick({
+		smtpServer: true,
+		smtpPort: true,
+		username: true,
+		toAddresses: true,
+		fromAddress: true,
+	})
+	.extend({
+		password: z.string().optional(),
+		notificationId: testNotificationId,
+	});
 
 export const apiCreateResend = notificationsSchema
 	.pick({
@@ -520,15 +558,21 @@ export const apiCreateResend = notificationsSchema
 
 export const apiUpdateResend = apiCreateResend.partial().extend({
 	notificationId: z.string().min(1),
-	resendId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	resendId: z.string().optional(),
+	apiKey: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
-export const apiTestResendConnection = apiCreateResend.pick({
-	apiKey: true,
-	fromAddress: true,
-	toAddresses: true,
-});
+export const apiTestResendConnection = apiCreateResend
+	.pick({
+		fromAddress: true,
+		toAddresses: true,
+	})
+	.extend({
+		apiKey: writeOnlySecret,
+		notificationId: testNotificationId,
+	});
 
 export const apiCreateSendly = notificationsSchema
 	.pick({
@@ -708,17 +752,20 @@ export const apiCreateGotify = notificationsSchema
 
 export const apiUpdateGotify = apiCreateGotify.partial().extend({
 	notificationId: z.string().min(1),
-	gotifyId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	gotifyId: z.string().optional(),
+	appToken: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
 export const apiTestGotifyConnection = apiCreateGotify
 	.pick({
 		serverUrl: true,
-		appToken: true,
 		priority: true,
 	})
 	.extend({
+		appToken: writeOnlySecret,
+		notificationId: testNotificationId,
 		decoration: z.boolean().optional(),
 	});
 
@@ -745,16 +792,25 @@ export const apiCreateNtfy = notificationsSchema
 
 export const apiUpdateNtfy = apiCreateNtfy.partial().extend({
 	notificationId: z.string().min(1),
-	ntfyId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	ntfyId: z.string().optional(),
+	accessToken: writeOnlySecret,
+	// The token is optional (public topics), so a blank one means "keep":
+	// removing the stored token takes this explicit flag.
+	clearAccessToken: z.boolean().optional(),
 	organizationId: z.string().optional(),
 });
 
-export const apiTestNtfyConnection = apiCreateNtfy.pick({
-	serverUrl: true,
-	topic: true,
-	accessToken: true,
-	priority: true,
-});
+export const apiTestNtfyConnection = apiCreateNtfy
+	.pick({
+		serverUrl: true,
+		topic: true,
+		priority: true,
+	})
+	.extend({
+		accessToken: writeOnlySecret,
+		notificationId: testNotificationId,
+	});
 
 export const apiCreateMattermost = notificationsSchema
 	.pick({
@@ -790,17 +846,20 @@ export const apiCreateMattermost = notificationsSchema
 
 export const apiUpdateMattermost = apiCreateMattermost.partial().extend({
 	notificationId: z.string().min(1),
-	mattermostId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	mattermostId: z.string().optional(),
+	webhookUrl: optionalWebhookUrl,
 	organizationId: z.string().optional(),
 });
 
 export const apiTestMattermostConnection = apiCreateMattermost
 	.pick({
-		webhookUrl: true,
 		channel: true,
 		username: true,
 	})
 	.extend({
+		webhookUrl: optionalWebhookUrl,
+		notificationId: testNotificationId,
 		channel: z.string().optional(),
 		username: z.string().optional(),
 	});
@@ -829,13 +888,17 @@ export const apiCreateCustom = notificationsSchema
 
 export const apiUpdateCustom = apiCreateCustom.partial().extend({
 	notificationId: z.string().min(1),
-	customId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	customId: z.string().optional(),
 	organizationId: z.string().optional(),
 });
 
 export const apiTestCustomConnection = z.object({
 	endpoint: z.string().min(1),
+	// Header values are write-only: a blank value of a header that is stored
+	// under `notificationId` keeps the stored value.
 	headers: z.record(z.string(), z.string()).optional(),
+	notificationId: testNotificationId,
 });
 
 export const apiCreateLark = notificationsSchema
@@ -858,12 +921,15 @@ export const apiCreateLark = notificationsSchema
 
 export const apiUpdateLark = apiCreateLark.partial().extend({
 	notificationId: z.string().min(1),
-	larkId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	larkId: z.string().optional(),
+	webhookUrl: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
-export const apiTestLarkConnection = apiCreateLark.pick({
-	webhookUrl: true,
+export const apiTestLarkConnection = z.object({
+	webhookUrl: writeOnlySecret,
+	notificationId: testNotificationId,
 });
 
 export const apiCreateTeams = notificationsSchema
@@ -886,12 +952,15 @@ export const apiCreateTeams = notificationsSchema
 
 export const apiUpdateTeams = apiCreateTeams.partial().extend({
 	notificationId: z.string().min(1),
-	teamsId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	teamsId: z.string().optional(),
+	webhookUrl: writeOnlySecret,
 	organizationId: z.string().optional(),
 });
 
-export const apiTestTeamsConnection = apiCreateTeams.pick({
-	webhookUrl: true,
+export const apiTestTeamsConnection = z.object({
+	webhookUrl: writeOnlySecret,
+	notificationId: testNotificationId,
 });
 
 export const apiCreatePushover = notificationsSchema
@@ -925,10 +994,11 @@ export const apiCreatePushover = notificationsSchema
 
 export const apiUpdatePushover = z.object({
 	notificationId: z.string().min(1),
-	pushoverId: z.string().min(1),
+	// Ignored: the provider row is derived from the notification row.
+	pushoverId: z.string().optional(),
 	organizationId: z.string().optional(),
-	userKey: z.string().min(1).optional(),
-	apiToken: z.string().min(1).optional(),
+	userKey: writeOnlySecret,
+	apiToken: writeOnlySecret,
 	priority: z.number().min(-2).max(2).optional(),
 	retry: z.number().min(30).nullish(),
 	expire: z.number().min(1).max(10800).nullish(),
@@ -946,8 +1016,9 @@ export const apiUpdatePushover = z.object({
 
 export const apiTestPushoverConnection = z
 	.object({
-		userKey: z.string().min(1),
-		apiToken: z.string().min(1),
+		userKey: writeOnlySecret,
+		apiToken: writeOnlySecret,
+		notificationId: testNotificationId,
 		priority: z.number().min(-2).max(2),
 		retry: z.number().min(30).nullish(),
 		expire: z.number().min(1).max(10800).nullish(),
