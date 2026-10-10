@@ -2,6 +2,7 @@ import {
 	checkDoDomainHost,
 	createDoDomain,
 	createDoDomainConnectSession,
+	DODOMAIN_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	type DoDomainIntegration,
 	findDoDomainByOrganizationId,
 	findDomainById,
@@ -9,6 +10,7 @@ import {
 	getDoDomainConnectionStatus,
 	getDoDomainWebhookReachability,
 	IS_CLOUD,
+	isSameIntegrationBaseUrl,
 	maskDoDomainSecretKey,
 	removeDoDomain,
 	reverifyDoDomainDomain,
@@ -204,6 +206,16 @@ export const dodomainRouter = createTRPCRouter({
 				const integration = await findDoDomainByOrganizationId(
 					ctx.session.activeOrganizationId,
 				);
+				// Never replay the stored key against a URL typed into the form.
+				if (
+					integration &&
+					!isSameIntegrationBaseUrl(input.baseUrl, integration.baseUrl)
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: DODOMAIN_URL_CHANGE_NEEDS_KEY_MESSAGE,
+					});
+				}
 				secretKey = integration?.secretKey;
 				appId = appId ?? integration?.appId;
 			}
