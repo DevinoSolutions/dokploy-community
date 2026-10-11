@@ -5,14 +5,25 @@
  * again. Shared by every integration that stores a key next to a base URL.
  */
 
+/**
+ * Strips trailing slashes. A loop, not `replace(/\/+$/, "")`: that regular
+ * expression is quadratic on a long run of slashes, and this runs on stored
+ * URLs too.
+ */
+export const trimTrailingSlashes = (value: string) => {
+	let end = value.length;
+	while (end > 0 && value[end - 1] === "/") end--;
+	return value.slice(0, end);
+};
+
 /** Scheme, lowercased host (with port) and path without trailing slashes. */
 const normalizeBaseUrl = (value: string) => {
 	const trimmed = value.trim();
 	try {
 		const url = new URL(trimmed);
-		return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+		return `${url.protocol}//${url.host}${trimTrailingSlashes(url.pathname)}`;
 	} catch {
-		return trimmed.replace(/\/+$/, "").toLowerCase();
+		return trimTrailingSlashes(trimmed).toLowerCase();
 	}
 };
 

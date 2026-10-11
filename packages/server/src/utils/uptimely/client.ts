@@ -13,6 +13,8 @@
  * `external_uptimely_x(args)` in the Uptimely sandbox.
  */
 
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
+
 export const UPTIMELY_MCP_PROTOCOL_VERSION = "2025-03-26";
 export const UPTIMELY_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -54,7 +56,7 @@ interface ToolCallResult {
 }
 
 export const uptimelyMcpUrl = (baseUrl: string) =>
-	`${baseUrl.replace(/\/+$/, "")}/api/mcp`;
+	`${trimTrailingSlashes(baseUrl)}/api/mcp`;
 
 /**
  * Parses an SSE body (`event: message` / `data: {...}` frames separated by a
