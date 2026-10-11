@@ -89,10 +89,20 @@ The panel has an optional **Deploy heartbeat**. Press **Add deploy heartbeat** t
 2. Under **Visual testing (Snapvisor)**, pick the Snapvisor project. **Off** is the default.
 3. Each preview card now shows a Snapvisor badge: **Pending**, **No changes**, **Changes detected**, **Approved**, **Rejected**, **Error** or **Expired**, with a refresh button and a **Review in Snapvisor** link.
 
+**Branch and production deployments**
+
+The same link works for regular deployments. On the **Deployments** tab of an application or compose service, pick the Snapvisor project under **Visual testing (Snapvisor)** (it appears once Snapvisor is connected). Every finished deployment of that service that recorded its full commit SHA then shows the same badge, with a refresh button and a **Review in Snapvisor** link. A commit that has no build yet reads **No build yet**; an expired token, a rate limit or an unreachable Snapvisor reads **Unavailable** with the reason on hover. None of these affects the list. The commit is only trusted for git-sourced services (GitHub, GitLab, Bitbucket, Gitea, Git): for Docker-image, upload and raw-compose services the deployment text is free-form, so no badge or notification is produced from it.
+
+**Get notified when there are changes to review**
+
+Turn on **Snapvisor Visual Changes** on a notification channel (Settings → Notifications). When a deployment of a linked service, whether production, branch or preview, has a Snapvisor build for its commit and that build reaches **Changes detected**, the channel gets one message with the service, environment, branch, short commit, the number of changed snapshots and the review link.
+
+Dokploy finds out by asking Snapvisor itself (outbound, every few minutes), so it works on a panel that Snapvisor cannot reach. A deployed commit is watched for 6 hours; if its build never appears or never needs a review, nothing is sent. Each commit of a service is announced at most once, even across restarts and redeploys of the same commit.
+
 **Limits to know about**
 
 - The build is looked up by the full 40-character commit SHA of the preview's latest deployment. If your CI has not produced a build for that exact commit yet, the badge reads **Not registered**; refresh once the build exists.
-- The lookup applies to application previews. Dokploy polls while a build is still pending and stops once it reaches a final status.
+- The lookup applies to application and compose services. Dokploy polls while a build is still pending and stops once it reaches a final status.
 - Disconnecting removes the stored token and every application's project link. Builds already created in Snapvisor are unaffected.
 
 ## DoDomain: custom-domain connect and DNS verification

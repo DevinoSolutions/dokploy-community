@@ -2,6 +2,8 @@ import {
 	createSnapvisor,
 	findApplicationSnapvisorTarget,
 	findComposeSnapvisorTarget,
+	findDeploymentById,
+	findDeploymentSnapvisorTarget,
 	findPreviewDeploymentById,
 	findPreviewSnapvisorTarget,
 	findSnapvisorByOrganizationId,
@@ -11,6 +13,7 @@ import {
 	maskSnapvisorAccessToken,
 	refreshPreviewBuild as refreshSnapvisorPreviewBuild,
 	removeSnapvisor,
+	resolveDeploymentSnapvisorBuild,
 	SNAPVISOR_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 	type SnapvisorIntegration,
 	setApplicationSnapvisorProject,
@@ -31,6 +34,7 @@ import {
 	apiCreateSnapvisor,
 	apiSetSnapvisorApplicationProject,
 	apiSetSnapvisorComposeProject,
+	apiSnapvisorDeploymentBuild,
 	apiSnapvisorPreviewBuild,
 	apiTestSnapvisorConnection,
 	apiUpdateSnapvisor,
@@ -102,6 +106,31 @@ const requirePreviewService = async (
 		service: ["read"],
 	});
 	return previewDeployment;
+};
+
+/**
+ * Loads the deployment, then proves the caller may read the application or
+ * compose service it belongs to (same gate as the deployments list:
+ * `deployment: ["read"]`, org-scoped) before anything Snapvisor is asked.
+ * `null` target = a schedule, backup or server deployment, which has no
+ * Snapvisor link.
+ */
+const requireDeploymentService = async (
+	ctx: Parameters<typeof checkServicePermissionAndAccess>[0],
+	deploymentId: string,
+) => {
+	const deployment = await findDeploymentById(deploymentId);
+	const target = await findDeploymentSnapvisorTarget(deployment);
+	if (!target) return { deployment, target: null };
+	await checkServicePermissionAndAccess(ctx, target.serviceId, {
+		deployment: ["read"],
+	});
+	assertTargetInOrganization(
+		target,
+		ctx.session.activeOrganizationId,
+		"deployment",
+	);
+	return { deployment, target };
 };
 
 /** The organization check on top of `checkServicePermissionAndAccess`. */
@@ -326,6 +355,48 @@ export const snapvisorRouter = createTRPCRouter({
 						)
 					: null,
 			};
+		}),
+
+	/**
+	 * Snapvisor build for the commit a branch/production (or preview)
+	 * deployment shipped. Never throws on a Snapvisor problem: a missing build,
+	 * a bad token, a rate limit and an unreachable Snapvisor all come back as a
+	 * `state`, because the deployments list renders one of these per row and
+	 * must not break. Served through a short server-side cache (see
+	 * `createSnapvisorBuildLookup`).
+	 */
+	deploymentBuild: protectedProcedure
+		.input(apiSnapvisorDeploymentBuild)
+		.query(async ({ input, ctx }) => {
+			assertSelfHosted();
+			const { deployment, target } = await requireDeploymentService(
+				ctx,
+				input.deploymentId,
+			);
+			if (!target) return { state: "off" as const };
+			return resolveDeploymentSnapvisorBuild({
+				deployment,
+				target,
+				organizationId: ctx.session.activeOrganizationId,
+			});
+		}),
+
+	/** Same as `deploymentBuild`, skipping the cache (rate limited server-side). */
+	refreshDeploymentBuild: protectedProcedure
+		.input(apiSnapvisorDeploymentBuild)
+		.mutation(async ({ input, ctx }) => {
+			assertSelfHosted();
+			const { deployment, target } = await requireDeploymentService(
+				ctx,
+				input.deploymentId,
+			);
+			if (!target) return { state: "off" as const };
+			return resolveDeploymentSnapvisorBuild({
+				deployment,
+				target,
+				organizationId: ctx.session.activeOrganizationId,
+				force: true,
+			});
 		}),
 
 	refreshPreviewBuild: protectedProcedure

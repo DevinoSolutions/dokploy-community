@@ -228,6 +228,7 @@ type NotificationRowInput = Partial<
 		| "dockerCleanup"
 		| "serverThreshold"
 		| "scheduleFailure"
+		| "snapvisorChanges"
 	>
 > & { notificationId: string };
 
@@ -246,6 +247,7 @@ const updateNotificationRow = async (
 		dockerCleanup: input.dockerCleanup,
 		serverThreshold: input.serverThreshold,
 		scheduleFailure: input.scheduleFailure,
+		snapvisorChanges: input.snapvisorChanges,
 	});
 	if (Object.keys(values).length === 0) return;
 	await tx
@@ -291,6 +293,7 @@ export const createSlackNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -365,6 +368,7 @@ export const createTelegramNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -439,6 +443,7 @@ export const createDiscordNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -516,6 +521,7 @@ export const createEmailNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -621,6 +627,7 @@ export const createResendNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -697,6 +704,7 @@ export const createSendlyNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -764,6 +772,7 @@ export const updateSendlyNotification = async (
 				organizationId: input.organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.where(eq(notifications.notificationId, input.notificationId))
 			.returning()
@@ -833,6 +842,7 @@ export const createNotiflyNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -900,6 +910,7 @@ export const updateNotiflyNotification = async (
 				organizationId: input.organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.where(eq(notifications.notificationId, input.notificationId))
 			.returning()
@@ -969,6 +980,7 @@ export const createUptimelyChannelNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1034,6 +1046,7 @@ export const updateUptimelyChannelNotification = async (
 				dockerCleanup: input.dockerCleanup,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			}).filter(([, value]) => value !== undefined),
 		);
 		if (Object.keys(notificationValues).length > 0) {
@@ -1122,6 +1135,7 @@ export const createGotifyNotification = async (
 				notificationType: "gotify",
 				organizationId: organizationId,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1213,6 +1227,7 @@ export const createNtfyNotification = async (
 				notificationType: "ntfy",
 				organizationId: organizationId,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1312,6 +1327,7 @@ export const createCustomNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1434,6 +1450,7 @@ export const createLarkNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1503,6 +1520,7 @@ export const createTeamsNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1589,6 +1607,7 @@ export const createMattermostNotification = async (
 				organizationId: organizationId,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1670,6 +1689,7 @@ export const createPushoverNotification = async (
 				dockerCleanup: input.dockerCleanup,
 				serverThreshold: input.serverThreshold,
 				scheduleFailure: input.scheduleFailure,
+				snapvisorChanges: input.snapvisorChanges,
 				notificationType: "pushover",
 				organizationId: organizationId,
 			})
