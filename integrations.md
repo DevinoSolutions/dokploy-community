@@ -97,30 +97,31 @@ The panel has an optional **Deploy heartbeat**. Press **Add deploy heartbeat** t
 
 ## DoDomain: custom-domain connect and DNS verification
 
-[DoDomain](https://dodomain.io) lets the owner of a domain connect it to your service through a hosted flow: one-click Cloudflare sign-in, Domain Connect with the DNS provider, or guided manual DNS setup. DoDomain verifies the records and tells Dokploy through a webhook.
+[DoDomain](https://dodomain.io) lets the owner of a domain connect it to your service through a hosted flow: one-click Cloudflare sign-in, Domain Connect with the DNS provider, or guided manual DNS setup. DoDomain verifies the records, and Dokploy asks DoDomain for the result on its own, so it works on a panel that is not reachable from the internet. If the panel is public, DoDomain's webhooks add instant updates.
 
 **What you need**
 
 - A DoDomain app and its server-side secret key from the DoDomain dashboard.
-- The Dokploy panel reachable over HTTPS (Settings → Web Server). Saving the integration registers a webhook at `/api/webhooks/dodomain` on the panel's public URL, so DoDomain can report verification results.
+- Optional: the Dokploy panel on a public HTTPS URL (Settings → Web Server). Saving the integration then also registers a webhook at `/api/webhooks/dodomain`, so DoDomain can report results instantly. Without it, Dokploy polls DoDomain.
 
 **How to connect**
 
 1. Open Settings → Integrations and press **Connect DoDomain**.
 2. Fill in **Name**, **Secret key** and **App ID**. You can leave App ID blank and press **Test connection** to fill it in from the key.
 3. Leave **Base URL** at `https://app.dodomain.io` unless you run a self-hosted DoDomain.
-4. Press **Connect**. The card shows whether the webhook is registered.
+4. Press **Connect**. The card shows that status is polled and whether the optional webhook is registered.
 
 **How to use it**
 
 1. On a service's **Domains** tab, add the domain the customer owns. In the domain dialog, **Check DNS** shows which provider hosts it and how its owner will connect.
-2. In the domain's row, open the DoDomain actions menu and choose **Send connect link**. Dokploy shows the link, the DNS records it will request and when it expires. **Copy connect link** copies the active link and **Re-verify DNS** asks DoDomain to recheck an existing connection.
-3. Send the link to the domain's owner. When DoDomain reports back, the domain row shows **DNS verified**. Until then it shows **Awaiting domain owner**, and **DNS verification failed** when the records no longer match.
+2. In the domain's row, open the DoDomain actions menu and choose **Send connect link**. Dokploy shows the link, the DNS records it will request and when it expires. **Copy connect link** copies the active link and **Check now** asks DoDomain for the current state right away and shows the result.
+3. Send the link to the domain's owner. Dokploy checks DoDomain every couple of minutes, and the domain row shows **DNS verified** once the records match. Until then it shows **Awaiting domain owner**, and **DNS verification failed** when the records no longer match. Verified domains are re-checked every 30 minutes, so a broken connection is noticed and sent to your notification providers.
 
 **Limits to know about**
 
 - Only concrete hostnames can be connected. Wildcard hosts and generated `sslip.io` and `traefik.me` names cannot.
-- DoDomain only delivers webhooks to a public HTTPS address. If the panel is served on a private address (for example a Tailscale `*.ts.net` name, a `.local` or `.internal` host, or a private IP), DoDomain refuses to register the webhook or cannot deliver to it, so the domain status never updates by itself. Dokploy still saves the integration and shows a warning on the card and in the edit dialog. In that case, press **Re-verify DNS** to refresh a domain's status, or serve the panel on a public HTTPS URL to receive webhooks. **Re-verify DNS** is disabled until a connect link has been sent for the domain.
+- DoDomain only delivers webhooks to a public HTTPS address. If the panel is served on a private address (for example a Tailscale `*.ts.net` name, a `.local` or `.internal` host, or a private IP), DoDomain refuses to register the webhook or cannot deliver to it. Nothing breaks: Dokploy saves the integration, polls DoDomain for status, and the card says polling is in use. Serve the panel on a public HTTPS URL if you also want instant webhook updates. **Check now** is disabled until a connect link has been sent for the domain.
+- Connect links created before this polling existed carry no stored session token, so Dokploy cannot run the live DNS check for them; it still finds the connection once the owner finishes the flow. Send a new link to get the full polling behavior.
 - A DNS verification failure is sent to the notification providers that are subscribed to deploy failures.
 - Disconnecting removes the stored secret key and deletes the webhook endpoint from DoDomain. Domains keep their current verification state.
 

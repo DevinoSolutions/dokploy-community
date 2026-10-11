@@ -11,7 +11,15 @@
  *   `GET /api/v1/apps`, `GET|POST /api/v1/webhook-endpoints`,
  *   `PATCH|DELETE /api/v1/webhook-endpoints/:id`,
  *   `POST /api/v1/webhook-endpoints/:id/rotate-secret`,
- *   `GET /api/v1/connections/:id`, `POST /api/v1/connections/:id/reverify`.
+ *   `GET /api/v1/connections` (list, filters + cursor),
+ *   `GET /api/v1/connections/:id`, `POST /api/v1/connections/:id/reverify`,
+ *   `GET /api/v1/sessions/:sessionId` (integrator arm: secret-key auth,
+ *   addressed by the session ID, carries `connectionId` and `expired`).
+ * - Browser surfaces authenticated by the session token in the URL, not by the
+ *   secret key (README of `@dodomain/node`): `POST /api/v1/sessions/:token/verify`
+ *   (the live DNS check). The SDK deliberately omits them, so that path follows
+ *   DoDomain's MCP tool of the same name and is the one route here that could
+ *   not be checked against the SDK sources.
  * - `packages/node/src/public-types.ts`: request/response types.
  * - `packages/core/src/webhook.ts`: `verifyWebhook` (Stripe-style
  *   `t=<unixMs>,v1=<hex hmac of "${t}.${body}">`, 5 minute tolerance), copied
@@ -26,18 +34,49 @@ export const DODOMAIN_DELIVERY_ID_HEADER = "x-dodomain-delivery-id";
 /** Replay window of a signature timestamp (DoDomain's own default). */
 export const DODOMAIN_SIGNATURE_TOLERANCE_MS = 5 * 60 * 1000;
 
+/**
+ * Secret key and session token shapes. DoDomain's own error text could echo the
+ * credential it was called with, and these messages reach logs, Sentry and the
+ * browser, so they never carry one.
+ */
+const SECRET_PATTERN = /dd_(sk|sess)_[A-Za-z0-9_-]+/g;
+export const redactDoDomainSecrets = (text: string) =>
+	text.replace(SECRET_PATTERN, "dd_$1_••••");
+
 export class DoDomainError extends Error {
 	/** HTTP status; 0 when no request was sent. */
 	readonly status: number;
 	readonly body: unknown;
+	/** Seconds DoDomain asked us to wait (`Retry-After` / `details.retryAfterSeconds`). */
+	readonly retryAfterSeconds: number | null;
 
-	constructor(message: string, status: number, body: unknown = null) {
-		super(message);
+	constructor(
+		message: string,
+		status: number,
+		body: unknown = null,
+		retryAfterSeconds: number | null = null,
+	) {
+		super(redactDoDomainSecrets(message));
 		this.name = "DoDomainError";
 		this.status = status;
 		this.body = body;
+		this.retryAfterSeconds = retryAfterSeconds;
 	}
 }
+
+/** True for HTTP 429 (or a `rate_limited` error body) from DoDomain. */
+export const isDoDomainRateLimited = (error: unknown) =>
+	error instanceof DoDomainError &&
+	(error.status === 429 ||
+		(error.body as { error?: unknown } | null)?.error === "rate_limited");
+
+const readRetryAfterSeconds = (header: string | null, body: unknown) => {
+	const fromBody = (
+		body as { details?: { retryAfterSeconds?: unknown } } | null
+	)?.details?.retryAfterSeconds;
+	const candidate = typeof fromBody === "number" ? fromBody : Number(header);
+	return Number.isFinite(candidate) && candidate > 0 ? candidate : null;
+};
 
 export interface DoDomainCheckResult {
 	domain: string;
@@ -109,6 +148,43 @@ export interface DoDomainConnection {
 	createdAt: string;
 }
 
+/**
+ * A session read back by ID with the secret key (`GET /api/v1/sessions/:id`).
+ * `connectionId` is null until the session finalized; `expired` is derived at
+ * read time, so it is already true before `status` becomes `expired`.
+ */
+export interface DoDomainSessionState {
+	id: string;
+	appId: string;
+	domain: string;
+	status: string;
+	connectionId: string | null;
+	createdAt: string;
+	expiresAt: string;
+	expired: boolean;
+}
+
+/** Result of the live DNS check (`POST /api/v1/sessions/:token/verify`). */
+export interface DoDomainSessionVerification {
+	verified: boolean;
+	records: {
+		fqdn: string;
+		type: string;
+		present: boolean;
+		outcome:
+			| "verified"
+			| "propagating"
+			| "absent"
+			| "indeterminate"
+			| "domain_not_found";
+	}[];
+}
+
+export interface DoDomainConnectionPage {
+	connections: DoDomainConnection[];
+	nextCursor: string | null;
+}
+
 export interface DoDomainClientOptions {
 	secretKey: string;
 	baseUrl: string;
@@ -135,6 +211,9 @@ export const createDoDomainClient = (options: DoDomainClientOptions) => {
 		method: string,
 		path: string,
 		body?: unknown,
+		// Token-addressed browser routes authenticate by the token in the URL;
+		// the secret key is not sent to them.
+		auth = true,
 	): Promise<T> => {
 		const fetchImpl = options.fetchImpl ?? fetch;
 		let response: Response;
@@ -142,7 +221,7 @@ export const createDoDomainClient = (options: DoDomainClientOptions) => {
 			response = await fetchImpl(`${baseUrl}${path}`, {
 				method,
 				headers: {
-					authorization: `Bearer ${options.secretKey}`,
+					...(auth ? { authorization: `Bearer ${options.secretKey}` } : {}),
 					"content-type": "application/json",
 					accept: "application/json",
 				},
@@ -180,6 +259,7 @@ export const createDoDomainClient = (options: DoDomainClientOptions) => {
 						: `DoDomain request failed (HTTP ${response.status})`,
 				response.status,
 				json,
+				readRetryAfterSeconds(response.headers.get("retry-after"), json),
 			);
 		}
 		return json as T;
@@ -201,8 +281,49 @@ export const createDoDomainClient = (options: DoDomainClientOptions) => {
 				records: DoDomainRecord[];
 				returnUrl?: string;
 			}) => request<DoDomainSession>("POST", "/api/v1/sessions", input),
+			/** Reads a session by its ID (not its token) with the secret key. */
+			get: (sessionId: string) =>
+				request<DoDomainSessionState>(
+					"GET",
+					`/api/v1/sessions/${segment("session id", sessionId)}`,
+				),
+			/**
+			 * Runs the live DNS check for a session. Safe to repeat; once every
+			 * record matches DoDomain finalizes the connection and fires its
+			 * webhooks once. The token is the credential for this route.
+			 */
+			verify: (sessionToken: string) =>
+				request<DoDomainSessionVerification>(
+					"POST",
+					`/api/v1/sessions/${segment("session token", sessionToken)}/verify`,
+					undefined,
+					false,
+				),
 		},
 		connections: {
+			list: (
+				filter: {
+					appId?: string;
+					domain?: string;
+					cursor?: string;
+					limit?: number;
+					includeDisconnected?: boolean;
+				} = {},
+			) => {
+				const query = new URLSearchParams();
+				if (filter.appId) query.set("appId", filter.appId);
+				if (filter.domain) query.set("domain", filter.domain);
+				if (filter.cursor) query.set("cursor", filter.cursor);
+				if (filter.limit) query.set("limit", String(filter.limit));
+				if (filter.includeDisconnected !== undefined) {
+					query.set("includeDisconnected", String(filter.includeDisconnected));
+				}
+				const qs = query.toString();
+				return request<DoDomainConnectionPage>(
+					"GET",
+					`/api/v1/connections${qs ? `?${qs}` : ""}`,
+				);
+			},
 			get: (connectionId: string) =>
 				request<DoDomainConnection>(
 					"GET",

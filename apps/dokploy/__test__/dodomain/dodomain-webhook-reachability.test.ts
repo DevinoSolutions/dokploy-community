@@ -191,10 +191,10 @@ describe("parseDoDomainWebhookRefusal", () => {
 });
 
 describe("dodomainWebhookWarning", () => {
-	it("names the host and the Re-verify DNS fallback", () => {
+	it("names the host and says polling covers the status instead", () => {
 		const text = dodomainWebhookWarning("panel.tail1234.ts.net");
 		expect(text).toBe(
-			"DoDomain can't reach panel.tail1234.ts.net, so domain-status webhooks won't arrive. DNS status still updates when you press Re-verify DNS. Serve the panel on a public HTTPS URL to receive webhooks.",
+			"DoDomain can't reach panel.tail1234.ts.net, so it can't push webhooks here. Dokploy checks DoDomain for domain status on its own instead, so nothing else is needed. Serve the panel on a public HTTPS URL to also receive instant webhook updates.",
 		);
 	});
 });
@@ -267,7 +267,7 @@ describe("createDoDomain when DoDomain refuses the webhook URL", () => {
 	});
 
 	it("keeps another invalid_request as an error carrying DoDomain's message", async () => {
-		handler = (url, method) =>
+		handler = (_url, method) =>
 			method === "GET"
 				? json(200, { endpoints: [] })
 				: json(400, {
@@ -283,7 +283,7 @@ describe("createDoDomain when DoDomain refuses the webhook URL", () => {
 	});
 
 	it("surfaces DoDomain's message for an invalid_request with reason webhook_url_unresolvable", async () => {
-		handler = (url, method) =>
+		handler = (_url, method) =>
 			method === "GET"
 				? json(200, { endpoints: [] })
 				: json(400, {
@@ -319,6 +319,49 @@ describe("createDoDomain when DoDomain refuses the webhook URL", () => {
 	});
 });
 
+describe("createDoDomain without a usable public URL", () => {
+	const originalAuthUrl = process.env.BETTER_AUTH_URL;
+	const input = {
+		name: "DoDomain",
+		secretKey: "dd_sk_test_key",
+		appId: "app_1",
+		baseUrl: "https://dodomain.test",
+	};
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		mocks.inserted = [];
+		fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+	});
+
+	afterAll(() => {
+		if (originalAuthUrl === undefined) {
+			Reflect.deleteProperty(process.env, "BETTER_AUTH_URL");
+		} else {
+			process.env.BETTER_AUTH_URL = originalAuthUrl;
+		}
+		vi.unstubAllGlobals();
+	});
+
+	it("saves the integration without calling DoDomain and says status is polled", async () => {
+		process.env.BETTER_AUTH_URL = "http://panel.example.com";
+
+		const result = await createDoDomain(input, "org-1");
+
+		expect(result.integration).toMatchObject({
+			webhookEndpointId: null,
+			webhookUrl: null,
+			webhookSecret: null,
+		});
+		expect(result.webhookWarning).toContain(
+			"checks DoDomain for domain status",
+		);
+		expect(mocks.inserted).toHaveLength(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
 describe("DoDomain card Webhook row", () => {
 	const source = fs.readFileSync(
 		path.resolve(
@@ -329,14 +372,26 @@ describe("DoDomain card Webhook row", () => {
 	);
 
 	it("only shows the green check when registered and not likely private", () => {
-		const row = source.slice(source.indexOf("Webhook</dt>"));
+		const row = source.slice(source.indexOf("Webhook (optional)"));
 		const unregistered = row.indexOf("!integration.webhookRegistered");
 		const warning = row.indexOf("webhookReachability.likelyPrivate");
 		const check = row.indexOf("<CheckCircle2");
 		expect(unregistered).toBeGreaterThan(-1);
 		expect(warning).toBeGreaterThan(unregistered);
 		expect(check).toBeGreaterThan(warning);
-		expect(row).toContain("<AlertTriangle");
 		expect(row).toContain("DoDomain can&apos;t reach this address");
+	});
+
+	it("presents a missing or unreachable webhook as polling, not as a failure", () => {
+		const row = source.slice(
+			source.indexOf("Webhook (optional)"),
+			source.indexOf("Webhook (optional)") + 2500,
+		);
+		// No red cross and no warning triangle: nothing is broken.
+		expect(source).not.toContain("<XCircle");
+		expect(source).not.toContain("<AlertTriangle");
+		expect(source).not.toContain('type="warning"');
+		expect(row).toContain("polling is used");
+		expect(source).toContain("Status sync");
 	});
 });

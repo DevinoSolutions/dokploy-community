@@ -68,8 +68,15 @@ export const isDoDomainConnectableHost = (host: string) => {
 	);
 };
 
-const REVERIFY_DISABLED_REASON =
-	"Send a connect link first: there is no DoDomain connection to recheck yet.";
+const CHECK_NOW_DISABLED_REASON =
+	"Send a connect link first: there is nothing to check with DoDomain yet.";
+
+const STATUS_AFTER_CHECK: Record<string, string> = {
+	verified: "DNS verified",
+	pending: "still waiting for the domain owner",
+	failed: "DNS verification failed",
+	unverified: "the connect link expired",
+};
 
 const copyToClipboard = async (text: string, what: string) => {
 	try {
@@ -106,13 +113,13 @@ export const DoDomainVerificationBadge = ({
 						icon: <Clock className="size-3 mr-1" />,
 						label: "Awaiting domain owner",
 						className: "bg-yellow-500/10 text-yellow-600 dark:text-yellow-400",
-						tip: "A connect link was sent. The domain is verified once its owner finishes the DoDomain flow.",
+						tip: "A connect link was sent. The domain is verified once its owner finishes the DoDomain flow; Dokploy checks DoDomain every couple of minutes.",
 					}
 				: {
 						icon: <XCircle className="size-3 mr-1" />,
 						label: "DNS verification failed",
 						className: "bg-red-500/10 text-red-500",
-						tip: "DoDomain reported the DNS records no longer match (or the connect attempt failed). Send a new connect link or re-verify.",
+						tip: "DoDomain reported the DNS records no longer match (or the connect attempt failed). Send a new connect link or use Check now once it is fixed.",
 					};
 	return (
 		<TooltipProvider>
@@ -150,7 +157,8 @@ export const DoDomainConnectLinkDialog = ({
 				<DialogDescription>
 					Send this link to the owner of the domain. They sign in to their DNS
 					provider (or follow the guided steps) and DoDomain sets the records
-					below. Dokploy is notified and applies the domain once DNS verifies.
+					below. Dokploy checks DoDomain every couple of minutes and applies the
+					domain once DNS verifies.
 				</DialogDescription>
 			</DialogHeader>
 			{session && (
@@ -232,17 +240,18 @@ export const useDoDomainConnectLink = (onChanged?: () => void) => {
 
 /**
  * Row menu for a saved domain: send a connect link, copy the current one,
- * or ask DoDomain to recheck the DNS of an existing connection.
+ * or check with DoDomain right now (no waiting for the next background poll).
  */
 export const DoDomainDomainActions = ({
 	domainId,
 	host,
-	connectionId,
+	checkable,
 	onChanged,
 }: {
 	domainId: string;
 	host: string;
-	connectionId?: string | null;
+	/** The domain has a connect session or a connection to check. */
+	checkable: boolean;
 	onChanged?: () => void;
 }) => {
 	const utils = api.useUtils();
@@ -272,16 +281,24 @@ export const DoDomainDomainActions = ({
 			});
 	};
 
-	const handleReverify = async () => {
+	const handleCheckNow = async () => {
 		await reverify({ domainId })
-			.then(() => {
-				toast.success("Recheck requested", {
-					description:
-						"DoDomain rechecks the DNS now; the badge updates when its result arrives.",
-				});
+			.then(async (result) => {
+				await utils.dodomain.connectionStatus.invalidate({ domainId });
+				onChanged?.();
+				const outcome = STATUS_AFTER_CHECK[result.status] ?? "status unchanged";
+				if (result.message) {
+					toast.info(result.message, {
+						description: `Latest result: ${outcome}.`,
+					});
+				} else {
+					toast.success("Checked with DoDomain", {
+						description: `Result: ${outcome}.`,
+					});
+				}
 			})
 			.catch((e) => {
-				toast.error("Error requesting a recheck", { description: e.message });
+				toast.error("Error checking with DoDomain", { description: e.message });
 			});
 	};
 
@@ -315,10 +332,10 @@ export const DoDomainDomainActions = ({
 						<Copy className="size-4" />
 						Copy connect link
 					</DropdownMenuItem>
-					{connectionId ? (
-						<DropdownMenuItem onSelect={handleReverify}>
+					{checkable ? (
+						<DropdownMenuItem onSelect={handleCheckNow}>
 							<RefreshCw className="size-4" />
-							Re-verify DNS
+							Check now
 						</DropdownMenuItem>
 					) : (
 						// A disabled item swallows pointer events, so the tooltip hangs
@@ -331,16 +348,16 @@ export const DoDomainDomainActions = ({
 										<DropdownMenuItem disabled>
 											<RefreshCw className="size-4" />
 											<span className="flex flex-col">
-												Re-verify DNS
+												Check now
 												<span className="text-xs text-muted-foreground">
-													{REVERIFY_DISABLED_REASON}
+													{CHECK_NOW_DISABLED_REASON}
 												</span>
 											</span>
 										</DropdownMenuItem>
 									</div>
 								</TooltipTrigger>
 								<TooltipContent side="left" className="max-w-xs">
-									<p>{REVERIFY_DISABLED_REASON}</p>
+									<p>{CHECK_NOW_DISABLED_REASON}</p>
 								</TooltipContent>
 							</Tooltip>
 						</TooltipProvider>

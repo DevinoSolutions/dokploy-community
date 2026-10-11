@@ -4,6 +4,7 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import { organization } from "./account";
 import { domains } from "./domain";
+import { encryptedText } from "./utils";
 
 export const DODOMAIN_DEFAULT_BASE_URL = "https://app.dodomain.io";
 
@@ -73,6 +74,13 @@ export const dodomainConnectSession = pgTable("dodomain_connect_session", {
 	records: jsonb("records").$type<DoDomainRecord[]>().notNull(),
 	expiresAt: timestamp("expiresAt").notNull(),
 	createdAt: timestamp("createdAt").notNull().defaultNow(),
+	/**
+	 * The session token (`dd_sess_…`) DoDomain returns once at creation. The
+	 * panel needs it to run the live DNS check (`verify`) while polling, so it is
+	 * encrypted at rest like other stored secrets and never returned to the
+	 * browser or logged. Null for sessions created before polling existed.
+	 */
+	token: encryptedText("token"),
 });
 
 export const dodomainIntegrationRelations = relations(

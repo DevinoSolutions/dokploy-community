@@ -1499,6 +1499,13 @@
       "when": 1791660075039,
       "tag": "0213_snapvisor_compose_project",
       "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1791744752359,
+      "tag": "0214_dodomain_session_token",
+      "breakpoints": true
     }
   ]
 }
