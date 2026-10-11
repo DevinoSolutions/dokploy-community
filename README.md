@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.16**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.17**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.16 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.17 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,20 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.17
+
+**Write-only provider secrets** ([#322](https://github.com/DevinoSolutions/dokploy-community/pull/322)). The remaining notification provider secrets are write-only: they are masked in `notification.one` and `notification.all`, and the edit form keeps the stored value when a field is left blank.
+
+**Follow-ups and invitation scoping** ([#323](https://github.com/DevinoSolutions/dokploy-community/pull/323)). Review follow-ups, plus `sendInvitation` is now scoped to the active organization.
+
+**Safe sender-error logging** ([#324](https://github.com/DevinoSolutions/dokploy-community/pull/324), [#325](https://github.com/DevinoSolutions/dokploy-community/pull/325)). Failed notification sends and failed invitation emails log only safe details, and a failed Lark or Telegram Test now throws instead of reporting success.
+
+**Review follow-ups** ([#326](https://github.com/DevinoSolutions/dokploy-community/pull/326)). Telegram omits an empty `reply_markup`. A Test that borrows a stored secret needs `notification:update`. Update routes no longer leak raw errors, and `maskApiKey` shows the tail only for keys of 12 or more characters.
+
+**Error hardening** ([#327](https://github.com/DevinoSolutions/dokploy-community/pull/327)). Notification errors no longer carry a `cause`, and `receiveNotification` returns a generic error for every failure.
+
+> No database migrations in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.16
 
@@ -688,7 +702,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.16
+export DOKPLOY_VERSION=v0.30.8-community.17
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -701,7 +715,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.16      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.17      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
