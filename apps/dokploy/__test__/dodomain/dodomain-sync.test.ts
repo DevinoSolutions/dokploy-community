@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Outbound DoDomain status sync. The panel asks DoDomain what happened (poll)
@@ -288,6 +288,9 @@ vi.mock(
 const { DoDomainError, signDoDomainPayload } = await import(
 	"@dokploy/server/utils/dodomain/client"
 );
+const { setBackgroundErrorReporter } = await import(
+	"@dokploy/server/utils/process/background"
+);
 const {
 	createDoDomainConnectSession,
 	getDoDomainConnectionStatus,
@@ -296,7 +299,7 @@ const {
 const {
 	findDoDomainSyncCandidates,
 	reverifyDoDomainDomain,
-	resetDoDomainSyncBackoff,
+	resetDoDomainSyncState,
 	runDoDomainSyncCycle,
 	syncDoDomainDomain,
 } = await import("@dokploy/server/services/dodomain-sync");
@@ -347,11 +350,17 @@ const baseDomain = {
 	dnsVerifiedAt: null,
 };
 
+/** DoDomain's hosted link is `<origin>/connect/<token>`: it carries the token. */
+const connectUrlFor = (token: string) =>
+	`https://connect.dodomain.test/connect/${token}`;
+/** A link from before tokens were stored, with nothing token-shaped in it. */
+const LEGACY_CONNECT_URL = "https://connect.dodomain.test/s/abc123";
+
 const liveSession = (overrides: Row = {}) => ({
 	sessionId: "ses_1",
 	domainId: "dom-1",
 	dodomainId: "dd-1",
-	connectUrl: "https://connect.dodomain.test/s/abc123",
+	connectUrl: connectUrlFor(TOKEN),
 	records: [{ type: "A", host: "@", value: "203.0.113.10" }],
 	expiresAt: new Date(Date.now() + 3_600_000),
 	createdAt: new Date(),
@@ -398,6 +407,8 @@ let routes: Record<
 		status?: number;
 		body: unknown;
 		headers?: Record<string, string>;
+		/** The request never gets an answer (timeout, connection refused). */
+		networkError?: boolean;
 	}
 > = {};
 let logged: string[] = [];
@@ -434,7 +445,7 @@ const deliver = (type: string, data: Record<string, unknown>, id = "del_1") => {
 beforeEach(() => {
 	vi.restoreAllMocks();
 	vi.clearAllMocks();
-	resetDoDomainSyncBackoff();
+	resetDoDomainSyncState();
 	stubLogs();
 	mocks.integrations = [integration];
 	mocks.domains = { "dom-1": { ...baseDomain } };
@@ -471,7 +482,8 @@ beforeEach(() => {
 					status: 404,
 				});
 			}
-			const { status = 200, body, headers: extra } = route(call);
+			const { status = 200, body, headers: extra, networkError } = route(call);
+			if (networkError) throw new TypeError("fetch failed");
 			return new Response(JSON.stringify(body), {
 				status,
 				headers: { "content-type": "application/json", ...(extra ?? {}) },
@@ -813,7 +825,10 @@ describe("expired sessions", () => {
 
 describe("sessions created before the token was stored", () => {
 	it("maps the session to its connection through the connection list", async () => {
-		mocks.session = liveSession({ token: null });
+		mocks.session = liveSession({
+			token: null,
+			connectUrl: LEGACY_CONNECT_URL,
+		});
 		routes["GET /api/v1/sessions/ses_1"] = () => ({ body: sessionState() });
 		routes["GET /api/v1/connections"] = () => ({
 			body: {
@@ -841,7 +856,10 @@ describe("sessions created before the token was stored", () => {
 	});
 
 	it("waits (no error) when the session has no connection yet and no token", async () => {
-		mocks.session = liveSession({ token: null });
+		mocks.session = liveSession({
+			token: null,
+			connectUrl: LEGACY_CONNECT_URL,
+		});
 		routes["GET /api/v1/sessions/ses_1"] = () => ({ body: sessionState() });
 		routes["GET /api/v1/connections"] = () => ({
 			body: { connections: [], nextCursor: null },
@@ -851,11 +869,8 @@ describe("sessions created before the token was stored", () => {
 		expect(mocks.statements).toHaveLength(0);
 	});
 
-	it("recovers the token from a connect URL that carries it", async () => {
-		mocks.session = liveSession({
-			token: null,
-			connectUrl: `https://connect.dodomain.test/c/${TOKEN}`,
-		});
+	it("recovers the token from the connect link, which carries it", async () => {
+		mocks.session = liveSession({ token: null });
 		routes["GET /api/v1/sessions/ses_1"] = () => ({ body: sessionState() });
 		routes[`POST /api/v1/sessions/${TOKEN}/verify`] = () => ({
 			body: { verified: false, records: [], advisories: [] },
@@ -1025,7 +1040,7 @@ describe("the background cycle", () => {
 
 	it("keeps going after one domain fails and logs only ids and error classes", async () => {
 		routes["GET /api/v1/sessions/ses_1"] = () => ({
-			status: 500,
+			status: 400,
 			body: { error: "boom", message: `internal ${TOKEN} ${SECRET_KEY}` },
 		});
 		routes["GET /api/v1/connections/conn_2"] = () => ({
@@ -1042,7 +1057,7 @@ describe("the background cycle", () => {
 		expect(mocks.domains["dom-2"]?.dnsVerificationStatus).toBe("failed");
 		const output = logged.join("\n");
 		expect(output).toContain("dom-1");
-		expect(output).toContain("DoDomainError (HTTP 500)");
+		expect(output).toContain("DoDomainError (HTTP 400)");
 		expect(output).not.toContain(TOKEN);
 		expect(output).not.toContain(SECRET_KEY);
 		expect(output).not.toContain("internal");
@@ -1169,12 +1184,273 @@ describe("check now", () => {
 	});
 });
 
+describe("a disconnected connection", () => {
+	const failedWithConnection = (connectionId = "conn_1") => ({
+		...baseDomain,
+		dnsVerificationStatus: "failed",
+		dodomainConnectionId: connectionId,
+	});
+
+	it("is forgotten by the poller even when the domain already failed", async () => {
+		mocks.domains["dom-1"] = failedWithConnection();
+		routes["GET /api/v1/connections/conn_1"] = () => ({
+			body: connection({ disconnectedAt: "2026-10-11T11:00:00.000Z" }),
+		});
+
+		await syncDoDomainDomain("dom-1");
+
+		expect(domainRow()).toMatchObject({
+			dnsVerificationStatus: "failed",
+			dodomainConnectionId: null,
+		});
+		// It was already failed: the user was told then.
+		expect(mocks.notify).not.toHaveBeenCalled();
+	});
+
+	it("only drops the connection that was disconnected, never a newer one", async () => {
+		mocks.domains["dom-1"] = failedWithConnection("conn_new");
+		await deliver("connection.disconnected", {
+			sessionId: "ses_1",
+			connectionId: "conn_old",
+		});
+		expect(domainRow().dodomainConnectionId).toBe("conn_new");
+	});
+
+	it("check now goes straight to the sync and never asks DoDomain to recheck it", async () => {
+		mocks.domains["dom-1"] = {
+			...baseDomain,
+			dnsVerificationStatus: "verified",
+			dodomainConnectionId: "conn_1",
+		};
+		routes["POST /api/v1/connections/conn_1/reverify"] = () => ({
+			status: 400,
+			body: { error: "invalid_request", message: "connection disconnected" },
+		});
+		routes["GET /api/v1/connections/conn_1"] = () => ({
+			body: connection({ disconnectedAt: "2026-10-11T11:00:00.000Z" }),
+		});
+
+		const result = await reverifyDoDomainDomain({
+			integration: integration as never,
+			domainId: "dom-1",
+		});
+
+		expect(result).toMatchObject({
+			status: "failed",
+			connectionId: null,
+			recheck: "not_needed",
+		});
+		expect(calledKeys()).not.toContain(
+			"POST /api/v1/connections/conn_1/reverify",
+		);
+		expect(mocks.notify).toHaveBeenCalledTimes(1);
+	});
+
+	it("a failure webhook with a newer connection id updates a domain that already failed", async () => {
+		mocks.domains["dom-1"] = failedWithConnection("conn_old");
+		const result = await deliver("connection.failed", {
+			domain: "app.customer.com",
+			sessionId: "ses_1",
+			connectionId: "conn_new",
+			fqdn: "app.customer.com",
+			reason: "dns_drift",
+			scope: "connection",
+		});
+		expect(result.status).toBe(200);
+		expect(domainRow().dodomainConnectionId).toBe("conn_new");
+		expect(mocks.notify).not.toHaveBeenCalled();
+	});
+});
+
+describe("an unhealthy DoDomain instance", () => {
+	beforeEach(() => {
+		mocks.integrations = [
+			integration,
+			{
+				...integration,
+				dodomainId: "dd-2",
+				organizationId: "org-2",
+				secretKey: OTHER_SECRET_KEY,
+				appId: "app_2",
+				baseUrl: "https://other.dodomain.test",
+			},
+		];
+		mocks.apps["app-2"] = appFor("org-2", "app-2");
+		const verifiedWith = (
+			domainId: string,
+			connectionId: string,
+			app: string,
+		) => ({
+			...baseDomain,
+			domainId,
+			applicationId: app,
+			dnsVerificationStatus: "verified",
+			dodomainConnectionId: connectionId,
+		});
+		mocks.domains = {
+			"dom-1": verifiedWith("dom-1", "conn_1", "app-1"),
+			"dom-3": verifiedWith("dom-3", "conn_3", "app-1"),
+			"dom-2": verifiedWith("dom-2", "conn_2", "app-2"),
+		};
+		mocks.candidates = [
+			{ domainId: "dom-1" },
+			{ domainId: "dom-3" },
+			{ domainId: "dom-2" },
+		];
+		routes["GET /api/v1/connections/conn_3"] = () => ({
+			body: connection({ id: "conn_3" }),
+		});
+		routes["GET /api/v1/connections/conn_2"] = () => ({
+			body: connection({ id: "conn_2", status: "broken" }),
+		});
+	});
+
+	it("skips the rest of an organization after a 5xx, without stalling the others", async () => {
+		routes["GET /api/v1/connections/conn_1"] = () => ({
+			status: 503,
+			body: { error: "unavailable" },
+		});
+
+		const summary = await runDoDomainSyncCycle("slow");
+
+		expect(summary).toMatchObject({ failed: 1, skipped: 1, changed: 1 });
+		expect(calledKeys()).toEqual([
+			"GET /api/v1/connections/conn_1",
+			"GET /api/v1/connections/conn_2",
+		]);
+		expect(mocks.domains["dom-2"]?.dnsVerificationStatus).toBe("failed");
+	});
+
+	it("does the same after a network failure, and tries again once the pause is over", async () => {
+		let now = 5_000_000;
+		routes["GET /api/v1/connections/conn_1"] = () => ({
+			body: null,
+			networkError: true,
+		});
+
+		const first = await runDoDomainSyncCycle("slow", { now: () => now });
+		expect(first).toMatchObject({ failed: 1, skipped: 1 });
+		expect(logged.join("\n")).toContain("DoDomainError (HTTP 0)");
+
+		fetchCalls = [];
+		const second = await runDoDomainSyncCycle("slow", {
+			now: () => now + 120_000,
+		});
+		expect(second.failed).toBe(0);
+		expect(second.skipped).toBe(2);
+		expect(calledKeys().filter((key) => key.includes("conn_1"))).toHaveLength(
+			0,
+		);
+
+		routes["GET /api/v1/connections/conn_1"] = () => ({ body: connection() });
+		now += 6 * 60_000;
+		fetchCalls = [];
+		await runDoDomainSyncCycle("slow", { now: () => now });
+		expect(calledKeys()).toContain("GET /api/v1/connections/conn_1");
+		expect(calledKeys()).toContain("GET /api/v1/connections/conn_3");
+	});
+
+	it("a manual check is not held back by the pause the cron took", async () => {
+		routes["GET /api/v1/connections/conn_1"] = () => ({
+			status: 502,
+			body: { error: "bad_gateway" },
+		});
+		await runDoDomainSyncCycle("slow");
+		routes["GET /api/v1/connections/conn_1"] = () => ({ body: connection() });
+		const manual = await syncDoDomainDomain("dom-1");
+		expect(manual.outcome).toBe("unchanged");
+	});
+});
+
+describe("a failure that keeps repeating", () => {
+	const reports: unknown[] = [];
+
+	beforeEach(() => {
+		reports.length = 0;
+		setBackgroundErrorReporter((error) => reports.push(error));
+		mocks.candidates = [{ domainId: "dom-1" }];
+		routes["GET /api/v1/sessions/ses_1"] = () => ({
+			body: sessionState({ status: "verified", connectionId: "conn_1" }),
+		});
+		routes["GET /api/v1/connections/conn_1"] = () => ({ body: connection() });
+	});
+
+	afterEach(() => {
+		setBackgroundErrorReporter(undefined);
+	});
+
+	it("is reported once per domain until it succeeds, and the status is rolled back each time", async () => {
+		mocks.manageDomain
+			.mockRejectedValueOnce(new Error("traefik down"))
+			.mockRejectedValueOnce(new Error("traefik down"))
+			.mockRejectedValueOnce(new Error("traefik down"));
+		for (let i = 0; i < 3; i++) {
+			const summary = await runDoDomainSyncCycle("fast");
+			expect(summary.failed).toBe(1);
+			expect(domainRow().dnsVerificationStatus).toBe("pending");
+		}
+		expect(reports).toHaveLength(1);
+
+		// It recovers: the next failure is news again.
+		const ok = await runDoDomainSyncCycle("fast");
+		expect(ok.changed).toBe(1);
+		expect(domainRow().dnsVerificationStatus).toBe("verified");
+		mocks.domains["dom-1"] = { ...baseDomain };
+		mocks.manageDomain.mockRejectedValueOnce(new Error("traefik down again"));
+		await runDoDomainSyncCycle("fast");
+		expect(reports).toHaveLength(2);
+	});
+});
+
+describe("choosing the token to verify with", () => {
+	const verifyRoute = () => ({
+		body: { verified: false, records: [], advisories: [] },
+	});
+
+	it("does not trust a stored value that is not token-shaped (a failed decryption)", async () => {
+		mocks.session = liveSession({ token: "enc:v1:bm90LWEtdG9rZW4=" });
+		routes["GET /api/v1/sessions/ses_1"] = () => ({ body: sessionState() });
+		routes[`POST /api/v1/sessions/${TOKEN}/verify`] = verifyRoute;
+		await syncDoDomainDomain("dom-1");
+		expect(calledKeys()).toContain(`POST /api/v1/sessions/${TOKEN}/verify`);
+		expect(calledKeys().some((key) => key.includes("enc:v1"))).toBe(false);
+	});
+
+	it("uses the connection list when neither the column nor the link has a token", async () => {
+		mocks.session = liveSession({
+			token: "enc:v1:bm90LWEtdG9rZW4=",
+			connectUrl: LEGACY_CONNECT_URL,
+		});
+		routes["GET /api/v1/sessions/ses_1"] = () => ({ body: sessionState() });
+		routes["GET /api/v1/connections"] = () => ({
+			body: { connections: [connection()], nextCursor: null },
+		});
+		routes["GET /api/v1/connections/conn_1"] = () => ({ body: connection() });
+		const result = await syncDoDomainDomain("dom-1");
+		expect(result.outcome).toBe("verified");
+		expect(calledKeys().some((key) => key.endsWith("/verify"))).toBe(false);
+	});
+
+	it("falls back to the connection list when DoDomain does not know the token (404)", async () => {
+		routes["GET /api/v1/sessions/ses_1"] = () => ({ body: sessionState() });
+		// No verify route: the fetch stub answers 404.
+		routes["GET /api/v1/connections"] = () => ({
+			body: { connections: [connection()], nextCursor: null },
+		});
+		routes["GET /api/v1/connections/conn_1"] = () => ({ body: connection() });
+		const result = await syncDoDomainDomain("dom-1");
+		expect(calledKeys()).toContain(`POST /api/v1/sessions/${TOKEN}/verify`);
+		expect(calledKeys()).toContain("GET /api/v1/connections");
+		expect(result.outcome).toBe("verified");
+	});
+});
+
 describe("the session token stays secret", () => {
 	const sessionResponse = {
 		id: "ses_new",
 		token: TOKEN,
 		expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-		connectUrl: "https://connect.dodomain.test/s/abc123",
+		connectUrl: connectUrlFor(TOKEN),
 		records: [{ type: "A", host: "@", fqdn: "app.customer.com" }],
 	};
 
@@ -1195,7 +1471,12 @@ describe("the session token stays secret", () => {
 			(insert) => insert.table === "dodomain_connect_session",
 		);
 		expect(stored?.row.token).toBe(TOKEN);
-		expect(JSON.stringify(created)).not.toContain(TOKEN);
+		// The link itself embeds the token (it is what the domain owner opens), so
+		// that field is the one place it may appear; there is no `token` field.
+		expect(JSON.stringify({ ...created, connectUrl: undefined })).not.toContain(
+			TOKEN,
+		);
+		expect(created).not.toHaveProperty("token");
 		expect(Object.keys(created).sort()).toEqual([
 			"connectUrl",
 			"expiresAt",
@@ -1210,7 +1491,10 @@ describe("the session token stays secret", () => {
 			integration: integration as never,
 			domainId: "dom-1",
 		});
-		expect(JSON.stringify(status)).not.toContain(TOKEN);
+		expect(JSON.stringify({ ...status, connectUrl: undefined })).not.toContain(
+			TOKEN,
+		);
+		expect(status).not.toHaveProperty("token");
 	});
 
 	it("is not part of the check-now result and never appears in logs", async () => {
@@ -1222,7 +1506,10 @@ describe("the session token stays secret", () => {
 			integration: integration as never,
 			domainId: "dom-1",
 		});
-		expect(JSON.stringify(result)).not.toContain(TOKEN);
+		expect(JSON.stringify({ ...result, connectUrl: undefined })).not.toContain(
+			TOKEN,
+		);
+		expect(result).not.toHaveProperty("token");
 		expect(logged.join("\n")).not.toContain(TOKEN);
 	});
 

@@ -17,9 +17,11 @@
  *   addressed by the session ID, carries `connectionId` and `expired`).
  * - Browser surfaces authenticated by the session token in the URL, not by the
  *   secret key (README of `@dodomain/node`): `POST /api/v1/sessions/:token/verify`
- *   (the live DNS check). The SDK deliberately omits them, so that path follows
- *   DoDomain's MCP tool of the same name and is the one route here that could
- *   not be checked against the SDK sources.
+ *   (the live DNS check). The SDK deliberately omits them; the route was
+ *   confirmed from DoDomain's own source
+ *   (apps/web/src/app/api/v1/sessions/[token]/verify/route.ts): token-public,
+ *   410 once the session expired, rate limited per minute per IP and per token
+ *   (a 429 backs the sync off, see services/dodomain-sync.ts).
  * - `packages/node/src/public-types.ts`: request/response types.
  * - `packages/core/src/webhook.ts`: `verifyWebhook` (Stripe-style
  *   `t=<unixMs>,v1=<hex hmac of "${t}.${body}">`, 5 minute tolerance), copied

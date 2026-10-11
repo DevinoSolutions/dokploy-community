@@ -89,12 +89,14 @@ export interface DoDomainSyncOptions {
 }
 
 // ---------------------------------------------------------------------------
-// Rate-limit backoff (per integration, in memory)
+// Backoff (per integration, in memory)
 // ---------------------------------------------------------------------------
 
 const MIN_BACKOFF_SECONDS = 30;
 const DEFAULT_BACKOFF_SECONDS = 120;
 const MAX_BACKOFF_SECONDS = 15 * 60;
+/** After a timeout, a refused connection or a 5xx: the instance is unhealthy. */
+const UNREACHABLE_BACKOFF_SECONDS = 5 * 60;
 
 const backoffUntil = new Map<string, number>();
 
@@ -107,21 +109,42 @@ const backoffSecondsFor = (error: DoDomainError) =>
 		),
 	);
 
-export const resetDoDomainSyncBackoff = () => backoffUntil.clear();
+/**
+ * Domains whose last cycle failed with an unexpected (non-DoDomain) error and
+ * were already reported, so a persistent failure reaches Sentry once instead of
+ * every cycle. Cleared per domain on its next successful sync.
+ */
+const reportedFailures = new Set<string>();
+
+export const resetDoDomainSyncState = () => {
+	backoffUntil.clear();
+	reportedFailures.clear();
+};
+
+/** Network failure (status 0) or a 5xx: DoDomain, or this base URL, is down. */
+const isUnreachable = (error: unknown) =>
+	error instanceof DoDomainError && (error.status === 0 || error.status >= 500);
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const SESSION_TOKEN_PATTERN = /dd_sess_[A-Za-z0-9_-]+/;
+const SESSION_TOKEN_EXACT = new RegExp(`^${SESSION_TOKEN_PATTERN.source}$`);
 
 /**
  * The token to verify a session with. Sessions created after the token column
- * existed carry it; an older one may still have it inside its connect URL (the
- * hosted flow authenticates by the token in the URL). Null when neither does.
+ * existed carry it, but a column that failed to decrypt (the encryption secret
+ * changed) comes back as ciphertext, so it is only trusted when it looks like a
+ * token. Otherwise the token is read from the connect URL: DoDomain's hosted
+ * link is `/connect/<token>`, so it is there for every session, old or new.
  */
 const sessionTokenOf = (session: DoDomainConnectSession) =>
-	session.token || SESSION_TOKEN_PATTERN.exec(session.connectUrl)?.[0] || null;
+	(session.token && SESSION_TOKEN_EXACT.test(session.token)
+		? session.token
+		: null) ||
+	SESSION_TOKEN_PATTERN.exec(session.connectUrl)?.[0] ||
+	null;
 
 /** Short, secret-free description of a failure for logs. */
 export const describeDoDomainSyncError = (error: unknown) =>
@@ -186,6 +209,7 @@ const syncFromConnection = async (
 			{
 				kind: "failed",
 				reason: DODOMAIN_DISCONNECTED_REASON,
+				connectionId: connection.id,
 				dropConnection: true,
 			},
 			"failed",
@@ -254,7 +278,7 @@ const syncFromSession = async (
 	ctx: SyncContext,
 	canReset: boolean,
 ): Promise<DoDomainSyncResult> => {
-	const { domain, client, integration } = ctx;
+	const { domain, client } = ctx;
 
 	// A connection id is already known (session.completed, or an earlier tick):
 	// the connection is authoritative.
@@ -313,10 +337,12 @@ const syncFromSession = async (
 				await forceExpireSession(sessionId);
 				return resetExpiredSession(ctx);
 			}
-			// 404: DoDomain does not know this token; fall back to the listing.
-			if (!(error instanceof DoDomainError && error.status === 404)) {
-				throw error;
+			// 404: DoDomain does not know this token; map the session through the
+			// listing instead.
+			if (error instanceof DoDomainError && error.status === 404) {
+				return syncFromListing(ctx, sessionId);
 			}
+			throw error;
 		}
 		const finalized = await orNull(client.sessions.get(sessionId));
 		if (finalized?.connectionId) {
@@ -325,12 +351,22 @@ const syncFromSession = async (
 		return { outcome: "waiting" };
 	}
 
-	// No token (a session from before polling existed, whose URL does not carry
-	// one either): the listing is keyed by this very session, so it maps the
-	// session to its connection without one.
-	const { connections } = await client.connections.list({
-		appId: integration.appId,
-		domain: domain.host.toLowerCase(),
+	// No token (a stored one that no longer decrypts and a URL that does not
+	// carry one): the listing maps the session to its connection without one.
+	return syncFromListing(ctx, sessionId);
+};
+
+/**
+ * The connection list is keyed by session, so the connection of this very
+ * session is found without a token (and without trusting the hostname alone).
+ */
+const syncFromListing = async (
+	ctx: SyncContext,
+	sessionId: string,
+): Promise<DoDomainSyncResult> => {
+	const { connections } = await ctx.client.connections.list({
+		appId: ctx.integration.appId,
+		domain: ctx.domain.host.toLowerCase(),
 		limit: 100,
 	});
 	const match = connections.find(
@@ -406,6 +442,15 @@ export const syncDoDomainDomain = async (
 			backoffUntil.set(integration.dodomainId, now() + seconds * 1000);
 			return { outcome: "rate_limited", retryAfterSeconds: seconds };
 		}
+		// A dead or erroring instance (for example a custom base URL that times
+		// out) would otherwise cost every cycle one slow failure per domain, so
+		// the cron leaves this organization alone for a while.
+		if (options.respectBackoff && isUnreachable(error)) {
+			backoffUntil.set(
+				integration.dodomainId,
+				now() + UNREACHABLE_BACKOFF_SECONDS * 1000,
+			);
+		}
 		throw error;
 	}
 };
@@ -434,28 +479,8 @@ export const reverifyDoDomainDomain = async (params: {
 		});
 	}
 
-	let recheck: "requested" | "rate_limited" | "not_needed" = "not_needed";
-	if (domain.dodomainConnectionId) {
-		try {
-			await dodomainClientFor(params.integration).connections.reverify(
-				domain.dodomainConnectionId,
-			);
-			recheck = "requested";
-		} catch (error) {
-			if (!isDoDomainRateLimited(error)) {
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message:
-						error instanceof Error
-							? error.message
-							: "Error requesting a DoDomain recheck",
-					cause: error,
-				});
-			}
-			recheck = "rate_limited";
-		}
-	}
-
+	// Sync first: it learns whether the connection is still there. A
+	// disconnected one is dropped by the sync, and DoDomain refuses to recheck it.
 	let sync: DoDomainSyncResult;
 	try {
 		sync = await syncDoDomainDomain(domain.domainId);
@@ -472,6 +497,39 @@ export const reverifyDoDomainDomain = async (params: {
 			code: "TOO_MANY_REQUESTS",
 			message: DODOMAIN_RECHECK_RATE_LIMITED_MESSAGE,
 		});
+	}
+
+	// Only a connection that existed and survived the sync is rechecked; one
+	// that was just verified by the sync was checked a moment ago.
+	let recheck: "requested" | "rate_limited" | "not_needed" = "not_needed";
+	const connectionId = domain.dodomainConnectionId
+		? (await loadConnectableDomain(domain.domainId)).domain.dodomainConnectionId
+		: null;
+	if (connectionId) {
+		try {
+			await dodomainClientFor(params.integration).connections.reverify(
+				connectionId,
+			);
+			recheck = "requested";
+		} catch (error) {
+			if (isDoDomainRateLimited(error)) {
+				recheck = "rate_limited";
+			} else if (
+				!(
+					error instanceof DoDomainError &&
+					(error.status === 404 || error.status === 410)
+				)
+			) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						error instanceof Error
+							? error.message
+							: "Error requesting a DoDomain recheck",
+					cause: error,
+				});
+			}
+		}
 	}
 
 	return {
@@ -589,12 +647,19 @@ export const runDoDomainSyncCycle = async (
 			) {
 				summary.changed += 1;
 			}
+			reportedFailures.delete(domainId);
 		} catch (error) {
 			summary.failed += 1;
 			console.error(
 				`[dodomain] sync failed for domain ${domainId}: ${describeDoDomainSyncError(error)}`,
 			);
-			if (!(error instanceof DoDomainError)) {
+			// Once per domain until it succeeds again: a persistent failure (for
+			// example Traefik rejecting the config) would repeat every 2 minutes.
+			if (
+				!(error instanceof DoDomainError) &&
+				!reportedFailures.has(domainId)
+			) {
+				reportedFailures.add(domainId);
 				reportUnexpectedError(error, { handler: "dodomainSync" });
 			}
 		}
