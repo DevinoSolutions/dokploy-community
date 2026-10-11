@@ -370,6 +370,10 @@ export const notificationsSchema = createInsertSchema(notifications);
 // form it selects the stored value of `notificationId` (org-checked
 // server-side). A typed value always replaces / is used as is.
 const writeOnlySecret = z.string().trim().optional();
+// Defense in depth for the URLs that are redacted on read and compared on
+// update: nothing legitimate is longer.
+const MAX_URL_LENGTH = 2048;
+const urlTooLong = { message: "The URL is too long" };
 const testNotificationId = z.string().optional();
 // Same, for a webhook that has to be a URL once one is typed.
 const optionalWebhookUrl = z
@@ -591,7 +595,7 @@ export const apiCreateSendly = notificationsSchema
 		apiKey: z.string().min(1),
 		fromAddress: z.string().min(1),
 		toAddresses: z.array(z.string()).min(1),
-		baseUrl: z.string().min(1),
+		baseUrl: z.string().min(1).max(MAX_URL_LENGTH, urlTooLong),
 	})
 	.required();
 
@@ -633,7 +637,7 @@ export const apiCreateNotifly = notificationsSchema
 		apiKey: z.string().min(1),
 		workflowKey: z.string().min(1),
 		subscriberId: z.string().optional(),
-		baseUrl: z.string().min(1),
+		baseUrl: z.string().min(1).max(MAX_URL_LENGTH, urlTooLong),
 	})
 	.required();
 
@@ -678,6 +682,7 @@ export const apiCreateUptimelyChannel = notificationsSchema
 		baseUrl: z
 			.string()
 			.trim()
+			.max(MAX_URL_LENGTH, urlTooLong)
 			.url("Enter a valid URL")
 			.refine((value) => /^https?:\/\//i.test(value), "Use an http(s) URL")
 			.transform((value) => value.replace(/\/+$/, "")),
@@ -743,7 +748,7 @@ export const apiCreateGotify = notificationsSchema
 		serverThreshold: true,
 	})
 	.extend({
-		serverUrl: z.string().min(1),
+		serverUrl: z.string().min(1).max(MAX_URL_LENGTH, urlTooLong),
 		appToken: z.string().min(1),
 		priority: z.number().min(1),
 		decoration: z.boolean(),
@@ -783,7 +788,7 @@ export const apiCreateNtfy = notificationsSchema
 		serverThreshold: true,
 	})
 	.extend({
-		serverUrl: z.string().min(1),
+		serverUrl: z.string().min(1).max(MAX_URL_LENGTH, urlTooLong),
 		topic: z.string().min(1),
 		accessToken: z.string().optional(),
 		priority: z.number().min(1),

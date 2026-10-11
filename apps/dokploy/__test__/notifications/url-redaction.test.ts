@@ -22,6 +22,10 @@ const mocks = vi.hoisted(() => ({
 	clientUrls: [] as string[],
 	// What the Uptimely client throws, when set.
 	clientFailure: null as string | null,
+	// The API key each Uptimely client was created with.
+	clientKeys: [] as string[],
+	// "<resource>:<action>" pairs the caller's role does not grant.
+	denied: [] as string[],
 }));
 
 const tableName = (table: unknown) => {
@@ -89,22 +93,54 @@ vi.mock("@dokploy/server/utils/uptimely/client", async (importOriginal) => ({
 	...(await importOriginal<
 		typeof import("@dokploy/server/utils/uptimely/client")
 	>()),
-	createUptimelyClient: vi.fn((options: { baseUrl: string }) => {
-		mocks.clientUrls.push(options.baseUrl);
-		return {
-			callTool: async () => {
-				if (mocks.clientFailure) throw new Error(mocks.clientFailure);
-				return {
-					projects: [{ id: "22222222-2222-4222-8222-222222222222" }],
-				};
-			},
-		};
-	}),
+	createUptimelyClient: vi.fn(
+		(options: { baseUrl: string; apiKey: string }) => {
+			mocks.clientUrls.push(options.baseUrl);
+			mocks.clientKeys.push(options.apiKey);
+			return {
+				callTool: async () => {
+					if (mocks.clientFailure) throw new Error(mocks.clientFailure);
+					return {
+						projects: [{ id: "22222222-2222-4222-8222-222222222222" }],
+					};
+				},
+			};
+		},
+	),
 }));
 
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
+
+vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("@dokploy/server/services/permission")
+		>();
+	const { TRPCError } = await import("@trpc/server");
+	return {
+		...actual,
+		checkPermission: vi.fn(
+			async (
+				ctx: Parameters<typeof actual.checkPermission>[0],
+				permissions: Record<string, string[]>,
+			) => {
+				for (const [resource, actions] of Object.entries(permissions)) {
+					for (const action of actions) {
+						if (mocks.denied.includes(`${resource}:${action}`)) {
+							throw new TRPCError({
+								code: "UNAUTHORIZED",
+								message: "Permission denied",
+							});
+						}
+					}
+				}
+				return actual.checkPermission(ctx, permissions as never);
+			},
+		),
+	};
+});
 
 const { notificationRouter } = await import(
 	"@/server/api/routers/notification"
@@ -131,6 +167,8 @@ describe("redactUrl", () => {
 		"https://gotify.example.com/",
 		"http://gotify.example.com:8080/push",
 		"https://app.sendly.now/api",
+		"https://host.example/a@b",
+		"https://host.example/?flag=",
 		"gotify.example.com/push",
 		"not a url",
 		"",
@@ -143,7 +181,7 @@ describe("redactUrl", () => {
 			"https://••••@gotify.example.com/push",
 		);
 		expect(redactUrl("https://token@ntfy.example.com")).toBe(
-			"https://••••@ntfy.example.com",
+			"https://••••@ntfy.example.com/",
 		);
 	});
 
@@ -155,7 +193,7 @@ describe("redactUrl", () => {
 
 	it("hides a bare query token", () => {
 		expect(redactUrl("https://ntfy.example.com?abcdef123456")).toBe(
-			"https://ntfy.example.com?••••",
+			"https://ntfy.example.com/?••••",
 		);
 	});
 
@@ -171,18 +209,6 @@ describe("redactUrl", () => {
 		);
 	});
 
-	it("redacts a URL without a scheme", () => {
-		expect(redactUrl("u:p@host.example/push?k=v")).toBe(
-			"••••@host.example/push?k=••••",
-		);
-	});
-
-	it("keeps an @ in the path or query out of the host", () => {
-		expect(redactUrl("https://host.example/a@b")).toBe(
-			"https://host.example/a@b",
-		);
-	});
-
 	it("never contains the original secrets", () => {
 		const redacted = redactUrl(
 			"https://amin:hunter2@host.example/p?token=s3cr3t#frag-secret",
@@ -195,6 +221,68 @@ describe("redactUrl", () => {
 	it("is idempotent", () => {
 		const once = redactUrl("https://u:p@host.example/p?token=abc#f");
 		expect(redactUrl(once)).toBe(once);
+	});
+
+	describe("fails closed", () => {
+		it("redacts a URL with a line break in the fragment, query or userinfo", () => {
+			for (const url of [
+				"https://u:p@h/x#a\nb",
+				"https://u:p@h/x?k=a\nb#f",
+				"https://u:p@h/x#\n",
+				"https://u:p@h/x\r\n?k=v",
+			]) {
+				const redacted = redactUrl(url);
+				expect(redacted).not.toContain("u:p");
+				expect(redacted).not.toMatch(/=v|=a/);
+				expect(redacted).toContain("••••");
+			}
+		});
+
+		it.each([
+			"//u:p@host.example/x",
+			"u:p@host.example/push?k=v",
+			"ht!tp://u:p@host.example",
+			"https://u:p@",
+			"https://[::1/x?k=v",
+			"/relative?token=abc",
+			"just a token#secret",
+		])(
+			"masks the value %j, which does not parse as an http(s) URL",
+			(value) => {
+				const redacted = redactUrl(value);
+				expect(redacted).toBe("••••");
+			},
+		);
+
+		it("shows the host that fetch calls when a backslash ends the authority", () => {
+			expect(redactUrl("https://evil.com\\@trusted.com/x?t=1")).toBe(
+				"https://evil.com/@trusted.com/x?t=••••",
+			);
+			expect(redactUrl("https://trusted.com\\@evil.com/x#frag")).toBe(
+				"https://trusted.com/@evil.com/x#••••",
+			);
+		});
+
+		it("is linear: huge or hostile values finish fast and never come back raw", () => {
+			const size = 1_000_000;
+			const hostile = [
+				`https://${"a".repeat(size)}#\n`,
+				`https://${"a".repeat(size)}@host.example/x`,
+				`https://u:p@host.example/${"/".repeat(size)}x?k=v`,
+				`${"a".repeat(size)}#\n`,
+				`${"@".repeat(size)}`,
+				`https://host.example/?${"&".repeat(size)}`,
+			];
+			for (const value of hostile) {
+				const started = performance.now();
+				const redacted = redactUrl(value);
+				isRedactedUrlEcho(value, value);
+				isRedactedUrlEcho(`${"/".repeat(size)}x`, value);
+				expect(performance.now() - started).toBeLessThan(250);
+				expect(redacted).not.toContain("u:p");
+				expect(redacted).not.toContain("k=v");
+			}
+		});
 	});
 });
 
@@ -281,7 +369,7 @@ const providers: Provider[] = [
 		rowKey: "notifly",
 		urlKey: "baseUrl",
 		stored: "https://amin:hunter2@api.notifly.io?workspace=s3cr3t",
-		redacted: "https://••••@api.notifly.io?workspace=••••",
+		redacted: "https://••••@api.notifly.io/?workspace=••••",
 		row: {
 			notiflyId: "notifly-1",
 			apiKey: "notifly-secret-api-key-5678",
@@ -380,6 +468,18 @@ const storedNotification = (p: Provider) => ({
 	[p.rowKey]: { ...p.row, [p.urlKey]: p.stored },
 });
 
+// The stored secrets of each provider's row, which the Test button borrows.
+const wireSecrets: Record<string, string[]> = {
+	sendly: ["sendly-secret-api-key-1234"],
+	notifly: ["notifly-secret-api-key-5678"],
+	uptimely: ["uptimely-secret-api-key-9012"],
+	gotify: ["gotify-secret-app-token-3456"],
+	ntfy: ["ntfy-secret-topic-7890", "ntfy-secret-access-token-1357"],
+};
+
+// Everything the senders put on the wire: requests and Uptimely clients.
+const wire = () => JSON.stringify([mocks.fetch.mock.calls, mocks.clientKeys]);
+
 const urlSentOnTheWire = () =>
 	mocks.clientUrls.at(-1) ?? String(mocks.fetch.mock.calls.at(-1)?.[0]);
 const providerUpdate = (p: Provider) =>
@@ -392,6 +492,8 @@ beforeEach(() => {
 	mocks.updates = [];
 	mocks.clientUrls = [];
 	mocks.clientFailure = null;
+	mocks.clientKeys = [];
+	mocks.denied = [];
 	mocks.fetch.mockReset();
 	mocks.fetch.mockResolvedValue({
 		ok: true,
@@ -558,6 +660,32 @@ describe.each(providers)("$type URL", (p) => {
 			const url = urlSentOnTheWire();
 			expect(url).not.toContain("••••");
 			expect(url).toContain(new URL(p.stored).host);
+			for (const secret of wireSecrets[p.type] ?? []) {
+				expect(wire()).toContain(secret);
+			}
+		});
+
+		it("the echo of another organization's notification is refused and nothing is sent", async () => {
+			mocks.notification = {
+				...storedNotification(p),
+				organizationId: "org-2",
+			};
+
+			await expect(p.test(input({}))).rejects.toMatchObject({
+				code: "UNAUTHORIZED",
+			});
+			expect(mocks.fetch).not.toHaveBeenCalled();
+			expect(mocks.clientUrls).toEqual([]);
+		});
+
+		it("the echo needs the update permission, a create-only role is refused and nothing is sent", async () => {
+			mocks.denied = ["notification:update"];
+
+			await expect(p.test(input({}))).rejects.toMatchObject({
+				code: "UNAUTHORIZED",
+			});
+			expect(mocks.fetch).not.toHaveBeenCalled();
+			expect(mocks.clientUrls).toEqual([]);
 		});
 
 		it("a masked URL that is not the echo of the stored one is refused before any request", async () => {

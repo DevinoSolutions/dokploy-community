@@ -39,9 +39,6 @@ export const maskHeaderValues = (
 
 const URL_REDACTION = "••••";
 
-const URL_PARTS =
-	/^((?:[a-z][a-z\d+.-]*:)?\/\/)?([^/?#]*)([^?#]*)(?:\?([^#]*))?(?:#(.*))?$/i;
-
 const redactQuery = (query: string) =>
 	query
 		.split("&")
@@ -59,32 +56,51 @@ const redactQuery = (query: string) =>
  * userinfo (`https://user:pass@host`), the query values (`?token=...`) and the
  * fragment. Scheme, host, port, path and the query keys stay, and a URL
  * without any of them comes back exactly as stored, so the edit form shows it
- * as is. Idempotent. It works on the text, not on a parsed URL, so a value that
- * is not a valid URL is redacted the same way and nothing is normalized.
+ * as is. Idempotent.
+ *
+ * An http(s) URL is split the way `fetch` splits it (WHATWG, so `\` ends the
+ * host like `/` does), and the shown host is the one that is called. Anything
+ * else fails closed: a value that does not parse is returned as is only when
+ * it has no character that could carry a secret (`@ ? # \`), and fully masked
+ * otherwise. No regular expression runs over the value, so a huge or hostile
+ * value costs linear time.
  */
 export const redactUrl = (value: string) => {
-	const parts = URL_PARTS.exec(value);
-	if (!parts) return value;
-	const [, prefix = "", authority = "", path = "", query, fragment] = parts;
-
-	const at = authority.lastIndexOf("@");
-	const host =
-		at === -1 ? authority : `${URL_REDACTION}@${authority.slice(at + 1)}`;
-	return [
-		prefix,
-		host,
-		path,
-		query === undefined ? "" : `?${redactQuery(query)}`,
-		fragment === undefined ? "" : `#${fragment && URL_REDACTION}`,
-	].join("");
+	if (value === "") return value;
+	let url: URL | undefined;
+	try {
+		url = new URL(value);
+	} catch {
+		url = undefined;
+	}
+	if (url && (url.protocol === "http:" || url.protocol === "https:")) {
+		const userinfo = url.username || url.password ? `${URL_REDACTION}@` : "";
+		const search =
+			url.search.length > 1 ? `?${redactQuery(url.search.slice(1))}` : "";
+		const hash = url.hash.length > 1 ? `#${URL_REDACTION}` : "";
+		if (
+			!userinfo &&
+			!hash &&
+			search === (url.search.length > 1 ? url.search : "")
+		) {
+			return value;
+		}
+		return `${url.protocol}//${userinfo}${url.host}${url.pathname}${search}${hash}`;
+	}
+	return /[@?#\\]/.test(value) ? URL_REDACTION : value;
 };
 
 /** Whether a URL carries the redaction mark, i.e. is (an edit of) a redacted one. */
 export const containsUrlRedaction = (value: string) =>
 	value.includes(URL_REDACTION);
 
-const withoutTrailingSlashes = (value: string) =>
-	value.trim().replace(/\/+$/, "");
+// Not a regular expression: `/\/+$/` is quadratic on a long run of slashes.
+const withoutTrailingSlashes = (value: string) => {
+	const trimmed = value.trim();
+	let end = trimmed.length;
+	while (end > 0 && trimmed[end - 1] === "/") end--;
+	return trimmed.slice(0, end);
+};
 
 /**
  * The edit form shows the redacted URL and sends it back when it was not
