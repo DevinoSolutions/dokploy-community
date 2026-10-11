@@ -33,6 +33,7 @@ import {
 	resolvePermissions,
 } from "@dokploy/server/services/permission";
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
+import { logSenderError } from "@dokploy/server/utils/notifications/log-error";
 import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
 import { and, asc, desc, eq, gt, ne } from "drizzle-orm";
@@ -841,7 +842,7 @@ export const userRouter = createTRPCRouter({
 					);
 				}
 			} catch (error) {
-				console.log(error);
+				logSenderError("invitation email", error);
 				throw error;
 			}
 			await audit(ctx, {
