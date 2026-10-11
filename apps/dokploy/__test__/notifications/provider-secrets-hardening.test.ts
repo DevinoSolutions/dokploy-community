@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -2480,36 +2482,145 @@ describe("create: a database failure does not reach the client with its bound va
 });
 
 describe("create: a refusal of the service is passed through", () => {
-	it("a TRPCError of the service reaches the client unchanged", async () => {
-		const { db } = await import("@dokploy/server/db");
-		const { TRPCError } = await import("@trpc/server");
-		vi.mocked(db.transaction).mockRejectedValueOnce(
-			new TRPCError({
-				code: "BAD_REQUEST",
-				message: "Error input: Inserting slack",
-			}),
+	const secret = "typed-secret-for-the-passthrough";
+	const toggles = {
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		scheduleFailure: true,
+		serverThreshold: true,
+	};
+	// Every create route of the router, with a valid input for it.
+	const createRoutes: [string, Record<string, unknown>][] = [
+		["createSlack", { webhookUrl: secret, channel: "#ops" }],
+		[
+			"createTelegram",
+			{ botToken: secret, chatId: "431", messageThreadId: "" },
+		],
+		["createDiscord", { webhookUrl: secret, decoration: true }],
+		[
+			"createEmail",
+			{
+				smtpServer: "smtp.example.com",
+				smtpPort: 587,
+				username: "mailer",
+				password: secret,
+				fromAddress: "alerts@example.com",
+				toAddresses: ["team@example.com"],
+			},
+		],
+		[
+			"createResend",
+			{
+				apiKey: secret,
+				fromAddress: "alerts@example.com",
+				toAddresses: ["team@example.com"],
+			},
+		],
+		[
+			"createSendly",
+			{
+				apiKey: secret,
+				fromAddress: "alerts@example.com",
+				toAddresses: ["team@example.com"],
+				baseUrl: "https://app.sendly.now",
+			},
+		],
+		[
+			"createNotifly",
+			{
+				apiKey: secret,
+				workflowKey: "dokploy",
+				subscriberId: "",
+				baseUrl: "https://api.notifly.io",
+			},
+		],
+		[
+			"createUptimely",
+			{
+				apiKey: secret,
+				projectId: "22222222-2222-4222-8222-222222222222",
+				baseUrl: "https://app.getuptimely.com",
+			},
+		],
+		[
+			"createGotify",
+			{
+				serverUrl: "https://gotify.example.com",
+				appToken: secret,
+				priority: 5,
+				decoration: true,
+			},
+		],
+		[
+			"createNtfy",
+			{
+				serverUrl: "https://ntfy.example.com",
+				topic: secret,
+				accessToken: secret,
+				priority: 3,
+			},
+		],
+		[
+			"createMattermost",
+			{ webhookUrl: `https://mm.example.com/hooks/${secret}` },
+		],
+		[
+			"createCustom",
+			{
+				endpoint: "https://hooks.example.com/ingest",
+				headers: { Authorization: secret },
+			},
+		],
+		["createLark", { webhookUrl: secret }],
+		["createTeams", { webhookUrl: secret }],
+		["createPushover", { userKey: secret, apiToken: secret, priority: 0 }],
+	];
+
+	it("the table lists every create route of the router", () => {
+		const router = readFileSync(
+			fileURLToPath(
+				new URL("../../server/api/routers/notification.ts", import.meta.url),
+			),
+			"utf8",
+		);
+		const routes = [...router.matchAll(/^\t(create\w+): withPermission/gm)].map(
+			(match) => match[1],
 		);
 
-		await expect(
-			call("createSlack", {
-				name: "Slack",
-				webhookUrl: "https://hooks.slack.com/services/T0/B0/passthrough-ab12",
-				channel: "#ops",
-				appBuildError: true,
-				databaseBackup: true,
-				dokployBackup: true,
-				volumeBackup: true,
-				dokployRestart: true,
-				appDeploy: true,
-				dockerCleanup: true,
-				scheduleFailure: true,
-				serverThreshold: true,
-			}),
-		).rejects.toMatchObject({
-			code: "BAD_REQUEST",
-			message: "Error input: Inserting slack",
-		});
+		expect(routes).toHaveLength(15);
+		expect(createRoutes.map(([route]) => route).sort()).toEqual(routes.sort());
 	});
+
+	it.each(createRoutes)(
+		"%s: a TRPCError of the service reaches the client unchanged",
+		async (route, input) => {
+			const { db } = await import("@dokploy/server/db");
+			const { TRPCError } = await import("@trpc/server");
+			vi.mocked(db.transaction).mockRejectedValueOnce(
+				new TRPCError({
+					code: "CONFLICT",
+					message: `Refusal of ${route}`,
+				}),
+			);
+
+			const failure = await call(route, {
+				name: `${route} channel`,
+				...toggles,
+				...input,
+			}).catch((error: Error) => error);
+
+			expect(failure).toMatchObject({
+				code: "CONFLICT",
+				message: `Refusal of ${route}`,
+			});
+			expect((failure as Error).cause).toBeUndefined();
+		},
+	);
 });
 
 describe("receiveNotification: every failure answers the same", () => {
@@ -2630,4 +2741,81 @@ describe("Test Notification: borrowing a secret needs the update permission, for
 			expect(mocks.sent).toEqual([]);
 		},
 	);
+});
+
+describe("Mattermost: the optional channel and username can be cleared", () => {
+	const mattermost = byType("mattermost");
+
+	beforeEach(() => {
+		mocks.notification = storedNotification(mattermost);
+	});
+
+	it.each(["channel", "username"])(
+		"an empty %s clears the stored one",
+		async (field) => {
+			await call("updateMattermost", { notificationId: "n-1", [field]: "" });
+
+			expect(providerUpdate(mattermost)?.values).toEqual({ [field]: null });
+		},
+	);
+
+	it("a blank channel and username clear both, and leave the webhook alone", async () => {
+		await call("updateMattermost", {
+			notificationId: "n-1",
+			webhookUrl: "",
+			channel: "   ",
+			username: "",
+		});
+
+		expect(providerUpdate(mattermost)?.values).toEqual({
+			channel: null,
+			username: null,
+		});
+	});
+
+	it("an omitted channel and username keep the stored ones", async () => {
+		await call("updateMattermost", { notificationId: "n-1", name: "Renamed" });
+
+		expect(providerUpdate(mattermost)).toBeUndefined();
+	});
+
+	it("a typed channel and username replace the stored ones", async () => {
+		await call("updateMattermost", {
+			notificationId: "n-1",
+			channel: "alerts",
+			username: "deploy-bot",
+		});
+
+		expect(providerUpdate(mattermost)?.values).toEqual({
+			channel: "alerts",
+			username: "deploy-bot",
+		});
+	});
+
+	it("clearableText: undefined keeps, blank clears, text is kept as typed", () => {
+		expect(services.clearableText(undefined)).toBeUndefined();
+		expect(services.clearableText("")).toBeNull();
+		expect(services.clearableText("  ")).toBeNull();
+		expect(services.clearableText("#ops")).toBe("#ops");
+	});
+
+	it("the form sends an empty value for a cleared field, not undefined", () => {
+		const form = readFileSync(
+			fileURLToPath(
+				new URL(
+					"../../components/dashboard/settings/notifications/handle-notifications.tsx",
+					import.meta.url,
+				),
+			),
+			"utf8",
+		);
+		const start = form.indexOf("mattermostMutation.mutateAsync({");
+		const end = form.indexOf("});", start);
+		const submit = form.slice(start, end);
+
+		expect(start).toBeGreaterThan(-1);
+		expect(submit).toContain('channel: data.channel ?? ""');
+		expect(submit).toContain('username: data.username ?? ""');
+		expect(submit).not.toContain("|| undefined");
+	});
 });

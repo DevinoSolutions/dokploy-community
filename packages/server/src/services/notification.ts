@@ -53,6 +53,10 @@ import {
 	isSameIntegrationBaseUrl,
 } from "@dokploy/server/utils/integrations/base-url";
 import {
+	containsUrlRedaction,
+	isRedactedUrlEcho,
+} from "@dokploy/server/utils/integrations/mask";
+import {
 	isSameUptimelyBaseUrl,
 	UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 } from "@dokploy/server/utils/uptimely/base-url";
@@ -83,6 +87,37 @@ export const EMAIL_SERVER_CHANGE_NEEDS_PASSWORD_MESSAGE =
 	"Enter the SMTP password again to change the SMTP server or port.";
 export const CUSTOM_URL_CHANGE_NEEDS_HEADERS_MESSAGE =
 	"Enter the header values again to change the Custom webhook URL.";
+
+export const REDACTED_URL_MESSAGE =
+	"The URL is masked. Enter the full URL to change it.";
+
+/**
+ * A URL that carries userinfo or a query is returned redacted, and the edit
+ * form sends the redacted URL back when it was not edited. That echo is not a
+ * change: it resolves to the stored URL, which is never overwritten with its
+ * masked form. A masked URL that is not the echo of the stored one (an edited
+ * mask) cannot be stored either.
+ */
+export const resolveStoredUrl = (typed: string, stored: string) => {
+	if (isRedactedUrlEcho(typed, stored)) return stored;
+	if (containsUrlRedaction(typed)) {
+		throw new TRPCError({ code: "BAD_REQUEST", message: REDACTED_URL_MESSAGE });
+	}
+	return typed;
+};
+
+/** The URL of an update: undefined (omitted, or the echo) leaves it as stored. */
+const updatedUrl = (typed: string | undefined, stored: string) =>
+	typed === undefined || isRedactedUrlEcho(typed, stored)
+		? undefined
+		: resolveStoredUrl(typed, stored);
+
+/**
+ * An optional, non-secret text field of an update: undefined leaves it as
+ * stored, a blank value clears it (null), anything else replaces it.
+ */
+export const clearableText = (value: string | undefined) =>
+	value === undefined ? undefined : value.trim() === "" ? null : value;
 
 /** Host (any case) and port: the SMTP password only goes to this server. */
 export const isSameSmtpServer = (
@@ -701,12 +736,13 @@ export const updateSendlyNotification = async (
 			});
 		}
 		const stored = existing.sendly;
+		const baseUrl = updatedUrl(input.baseUrl, stored.baseUrl);
 
 		// The stored key must not be sent to a URL the caller just chose.
 		if (
-			input.baseUrl !== undefined &&
+			baseUrl !== undefined &&
 			!input.apiKey?.trim() &&
-			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
+			!isSameIntegrationBaseUrl(baseUrl, stored.baseUrl)
 		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
@@ -745,7 +781,7 @@ export const updateSendlyNotification = async (
 			apiKey: input.apiKey?.trim() || undefined,
 			fromAddress: input.fromAddress,
 			toAddresses: input.toAddresses,
-			baseUrl: input.baseUrl,
+			baseUrl,
 		});
 		if (Object.keys(channelValues).length > 0) {
 			await tx
@@ -836,12 +872,13 @@ export const updateNotiflyNotification = async (
 			});
 		}
 		const stored = existing.notifly;
+		const baseUrl = updatedUrl(input.baseUrl, stored.baseUrl);
 
 		// The stored key must not be sent to a URL the caller just chose.
 		if (
-			input.baseUrl !== undefined &&
+			baseUrl !== undefined &&
 			!input.apiKey?.trim() &&
-			!isSameIntegrationBaseUrl(input.baseUrl, stored.baseUrl)
+			!isSameIntegrationBaseUrl(baseUrl, stored.baseUrl)
 		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
@@ -880,7 +917,7 @@ export const updateNotiflyNotification = async (
 			apiKey: input.apiKey?.trim() || undefined,
 			workflowKey: input.workflowKey,
 			subscriberId: input.subscriberId,
-			baseUrl: input.baseUrl,
+			baseUrl,
 		});
 		if (Object.keys(channelValues).length > 0) {
 			await tx
@@ -971,12 +1008,13 @@ export const updateUptimelyChannelNotification = async (
 			});
 		}
 		const stored = existing.uptimelyChannel;
+		const baseUrl = updatedUrl(input.baseUrl, stored.baseUrl);
 
 		// The stored key must not be sent to a URL the caller just chose.
 		if (
-			input.baseUrl !== undefined &&
+			baseUrl !== undefined &&
 			!input.apiKey?.trim() &&
-			!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)
+			!isSameUptimelyBaseUrl(baseUrl, stored.baseUrl)
 		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
@@ -1010,7 +1048,7 @@ export const updateUptimelyChannelNotification = async (
 			Object.entries({
 				apiKey: input.apiKey?.trim() || undefined,
 				projectId: input.projectId,
-				baseUrl: input.baseUrl,
+				baseUrl,
 				// "" clears the override, undefined leaves it untouched.
 				resolvedStateId:
 					input.resolvedStateId === undefined
@@ -1029,8 +1067,8 @@ export const updateUptimelyChannelNotification = async (
 		// channel somewhere else would leave rows Uptimely can never resolve.
 		const retargeted =
 			(input.projectId !== undefined && input.projectId !== stored.projectId) ||
-			(input.baseUrl !== undefined &&
-				!isSameUptimelyBaseUrl(input.baseUrl, stored.baseUrl)) ||
+			(baseUrl !== undefined &&
+				!isSameUptimelyBaseUrl(baseUrl, stored.baseUrl)) ||
 			(!!input.apiKey && input.apiKey !== stored.apiKey);
 		if (retargeted) {
 			await tx
@@ -1104,12 +1142,13 @@ export const updateGotifyNotification = async (
 ) => {
 	await db.transaction(async (tx) => {
 		const stored = await findOwnedProvider(tx, input, "gotify", "gotify");
+		const serverUrl = updatedUrl(input.serverUrl, stored.serverUrl);
 
 		// The stored token must not be sent to a server the caller just chose.
 		if (
-			input.serverUrl !== undefined &&
+			serverUrl !== undefined &&
 			!input.appToken?.trim() &&
-			!isSameIntegrationBaseUrl(input.serverUrl, stored.serverUrl)
+			!isSameIntegrationBaseUrl(serverUrl, stored.serverUrl)
 		) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
@@ -1120,7 +1159,7 @@ export const updateGotifyNotification = async (
 		await updateNotificationRow(tx, input);
 
 		const values = withoutUndefined({
-			serverUrl: input.serverUrl,
+			serverUrl,
 			// Blank or omitted keeps the stored token (it is write-only).
 			appToken: input.appToken?.trim() || undefined,
 			priority: input.priority,
@@ -1194,6 +1233,7 @@ export const updateNtfyNotification = async (
 ) => {
 	await db.transaction(async (tx) => {
 		const stored = await findOwnedProvider(tx, input, "ntfy", "ntfy");
+		const serverUrl = updatedUrl(input.serverUrl, stored.serverUrl);
 
 		const typedToken = input.accessToken?.trim() || undefined;
 		const typedTopic = input.topic?.trim() || undefined;
@@ -1202,8 +1242,8 @@ export const updateNtfyNotification = async (
 		// The stored topic and token must not be sent to a server the caller just
 		// chose.
 		if (
-			input.serverUrl !== undefined &&
-			!isSameIntegrationBaseUrl(input.serverUrl, stored.serverUrl)
+			serverUrl !== undefined &&
+			!isSameIntegrationBaseUrl(serverUrl, stored.serverUrl)
 		) {
 			if (!typedTopic) {
 				throw new TRPCError({
@@ -1222,7 +1262,7 @@ export const updateNtfyNotification = async (
 		await updateNotificationRow(tx, input);
 
 		const values = withoutUndefined({
-			serverUrl: input.serverUrl,
+			serverUrl,
 			// Blank or omitted keeps the stored topic (it is write-only).
 			topic: typedTopic,
 			// Blank or omitted keeps the stored token (it is write-only).
@@ -1520,8 +1560,8 @@ export const createMattermostNotification = async (
 			.insert(mattermost)
 			.values({
 				webhookUrl: input.webhookUrl,
-				channel: input.channel,
-				username: input.username,
+				channel: clearableText(input.channel) ?? null,
+				username: clearableText(input.username) ?? null,
 			})
 			.returning()
 			.then((value) => value[0]);
@@ -1579,8 +1619,9 @@ export const updateMattermostNotification = async (
 		const values = withoutUndefined({
 			// The webhook URL is the credential: blank or omitted keeps it.
 			webhookUrl: input.webhookUrl?.trim() || undefined,
-			channel: input.channel,
-			username: input.username,
+			// Blank clears the optional fields, omitted keeps them.
+			channel: clearableText(input.channel),
+			username: clearableText(input.username),
 		});
 		if (Object.keys(values).length > 0) {
 			await tx

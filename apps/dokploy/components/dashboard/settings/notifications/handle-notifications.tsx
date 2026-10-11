@@ -1004,8 +1004,9 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				dokployBackup: dokployBackup,
 				volumeBackup: volumeBackup,
 				webhookUrl: data.webhookUrl ?? "",
-				channel: data.channel || undefined,
-				username: data.username || undefined,
+				// Empty clears the optional field on update; undefined would keep it.
+				channel: data.channel ?? "",
+				username: data.username ?? "",
 				name: data.name,
 				dockerCleanup: dockerCleanup,
 				notificationId: notificationId || "",

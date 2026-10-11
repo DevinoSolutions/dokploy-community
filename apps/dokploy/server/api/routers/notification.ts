@@ -1,5 +1,6 @@
 import {
 	buildSendlyTestEmail,
+	containsUrlRedaction,
 	createCustomNotification,
 	createDiscordNotification,
 	createEmailNotification,
@@ -19,6 +20,7 @@ import {
 	findNotificationById,
 	GOTIFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 	getWebServerSettings,
+	isRedactedUrlEcho,
 	isSameIntegrationBaseUrl,
 	isSameSmtpServer,
 	maskApiKey,
@@ -28,6 +30,8 @@ import {
 	NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	NTFY_URL_CHANGE_NEEDS_TOKEN_MESSAGE,
 	NTFY_URL_CHANGE_NEEDS_TOPIC_MESSAGE,
+	REDACTED_URL_MESSAGE,
+	redactUrl,
 	removeNotificationById,
 	SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 	sendCustomNotification,
@@ -160,6 +164,16 @@ const maskSecrets = <C extends object, K extends keyof C & string>(
 	return visible as Masked<C, K>;
 };
 
+/**
+ * A non-secret URL may still carry userinfo or a token in its query: those are
+ * redacted, and a plain URL is returned as stored. The edit form sends the
+ * redacted URL back when it was not edited, which keeps the stored one.
+ */
+const redactUrlField = <C extends Record<K, string>, K extends string>(
+	row: C | null,
+	key: K,
+) => (row ? ({ ...row, [key]: redactUrl(row[key]) } as C) : null);
+
 const maskCustomHeaders = (row: NotificationWithProviders["custom"]) => {
 	if (!row) return null;
 	const { headers, endpoint, ...visible } = row;
@@ -198,12 +212,18 @@ const presentNotification = (notification: NotificationWithProviders) => {
 		// A password is hidden entirely: no tail, unlike the keys and tokens.
 		email: maskSecrets(email, ["password"], () => "••••••••"),
 		resend: maskSecrets(resend, ["apiKey"]),
-		sendly: maskSecrets(sendly, ["apiKey"]),
-		notifly: maskSecrets(notifly, ["apiKey"]),
-		uptimelyChannel: maskSecrets(uptimelyChannel, ["apiKey"]),
-		gotify: maskSecrets(gotify, ["appToken"]),
+		sendly: redactUrlField(maskSecrets(sendly, ["apiKey"]), "baseUrl"),
+		notifly: redactUrlField(maskSecrets(notifly, ["apiKey"]), "baseUrl"),
+		uptimelyChannel: redactUrlField(
+			maskSecrets(uptimelyChannel, ["apiKey"]),
+			"baseUrl",
+		),
+		gotify: redactUrlField(maskSecrets(gotify, ["appToken"]), "serverUrl"),
 		// On a public server (ntfy.sh) the topic is the secret.
-		ntfy: maskSecrets(ntfy, ["accessToken", "topic"]),
+		ntfy: redactUrlField(
+			maskSecrets(ntfy, ["accessToken", "topic"]),
+			"serverUrl",
+		),
 		mattermost: maskSecrets(mattermost, ["webhookUrl"], maskWebhookUrl),
 		custom: maskCustomHeaders(custom),
 		lark: maskSecrets(lark, ["webhookUrl"], maskWebhookUrl),
@@ -268,6 +288,37 @@ const resolveStoredSecret = async (params: {
 		code: "BAD_REQUEST",
 		message: `${params.missing} is required to test the connection`,
 	});
+};
+
+/**
+ * The URL of the "Test Notification" button of the edit form: the form shows
+ * the redacted URL, and sends it back when it was not edited. That echo is the
+ * stored URL of the caller's own notification (collected in `track` to keep it
+ * out of an error message, it may carry userinfo). A masked URL that is not
+ * that echo cannot be called.
+ */
+const resolveTestUrl = async (params: {
+	url: string;
+	notificationId?: string;
+	ctx: PermissionCtx;
+	stored: (
+		notification: NotificationWithProviders,
+	) => string | null | undefined;
+	track?: Array<string | undefined>;
+}) => {
+	if (!containsUrlRedaction(params.url)) return params.url;
+	if (params.notificationId) {
+		const notification = await findOwnNotification(
+			params.notificationId,
+			params.ctx,
+		);
+		const stored = params.stored(notification);
+		if (stored && isRedactedUrlEcho(params.url, stored)) {
+			params.track?.push(stored);
+			return stored;
+		}
+	}
+	throw new TRPCError({ code: "BAD_REQUEST", message: REDACTED_URL_MESSAGE });
 };
 
 /**
@@ -761,11 +812,18 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const secrets: Array<string | undefined> = [];
 			try {
+				const baseUrl = await resolveTestUrl({
+					track: secrets,
+					url: input.baseUrl,
+					notificationId: input.notificationId,
+					ctx,
+					stored: (notification) => notification.sendly?.baseUrl,
+				});
 				const apiKey = await resolveChannelTestKey({
 					track: secrets,
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
-					baseUrl: input.baseUrl,
+					baseUrl,
 					ctx,
 					storedChannel: (notification) => notification.sendly,
 					urlChangeMessage: SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
@@ -774,7 +832,11 @@ export const notificationRouter = createTRPCRouter({
 					throw new Error("An API key is required to test the connection");
 				}
 				const { subject, html } = buildSendlyTestEmail();
-				await sendSendlyNotification({ ...input, apiKey }, subject, html);
+				await sendSendlyNotification(
+					{ ...input, baseUrl, apiKey },
+					subject,
+					html,
+				);
 				return true;
 			} catch (error) {
 				throw testFailure(error, secrets);
@@ -837,11 +899,18 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const secrets: Array<string | undefined> = [];
 			try {
+				const baseUrl = await resolveTestUrl({
+					track: secrets,
+					url: input.baseUrl,
+					notificationId: input.notificationId,
+					ctx,
+					stored: (notification) => notification.notifly?.baseUrl,
+				});
 				const apiKey = await resolveChannelTestKey({
 					track: secrets,
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
-					baseUrl: input.baseUrl,
+					baseUrl,
 					ctx,
 					storedChannel: (notification) => notification.notifly,
 					urlChangeMessage: NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
@@ -850,7 +919,7 @@ export const notificationRouter = createTRPCRouter({
 					throw new Error("An API key is required to test the connection");
 				}
 				await sendNotiflyNotification(
-					{ ...input, apiKey },
+					{ ...input, baseUrl, apiKey },
 					{
 						event: "test",
 						message: "Hi, From Dokploy 👋",
@@ -921,11 +990,18 @@ export const notificationRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const secrets: Array<string | undefined> = [];
 			try {
+				const baseUrl = await resolveTestUrl({
+					track: secrets,
+					url: input.baseUrl,
+					notificationId: input.notificationId,
+					ctx,
+					stored: (notification) => notification.uptimelyChannel?.baseUrl,
+				});
 				const apiKey = await resolveChannelTestKey({
 					track: secrets,
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
-					baseUrl: input.baseUrl,
+					baseUrl,
 					ctx,
 					storedChannel: (notification) => notification.uptimelyChannel,
 					urlChangeMessage: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
@@ -936,7 +1012,7 @@ export const notificationRouter = createTRPCRouter({
 				const result = await testUptimelyConnection({
 					apiKey,
 					projectId: input.projectId,
-					baseUrl: input.baseUrl,
+					baseUrl,
 				});
 				if (!result.projectFound) {
 					throw new Error(
@@ -1127,10 +1203,16 @@ export const notificationRouter = createTRPCRouter({
 		.input(apiTestGotifyConnection)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				const serverUrl = await resolveTestUrl({
+					url: input.serverUrl,
+					notificationId: input.notificationId,
+					ctx,
+					stored: (notification) => notification.gotify?.serverUrl,
+				});
 				const appToken = await resolveChannelTestKey({
 					apiKey: input.appToken,
 					notificationId: input.notificationId,
-					baseUrl: input.serverUrl,
+					baseUrl: serverUrl,
 					ctx,
 					storedChannel: (notification) =>
 						notification.gotify
@@ -1148,7 +1230,7 @@ export const notificationRouter = createTRPCRouter({
 					});
 				}
 				await sendGotifyNotification(
-					{ ...input, appToken },
+					{ ...input, serverUrl, appToken },
 					"Test Notification",
 					"Hi, From Dokploy 👋",
 				);
@@ -1219,12 +1301,19 @@ export const notificationRouter = createTRPCRouter({
 				input.accessToken,
 			];
 			try {
+				const serverUrl = await resolveTestUrl({
+					track: secrets,
+					url: input.serverUrl,
+					notificationId: input.notificationId,
+					ctx,
+					stored: (notification) => notification.ntfy?.serverUrl,
+				});
 				// The topic is write-only: a blank one is the stored topic, which is
 				// never sent to a server typed into the form.
 				const topic = await resolveChannelTestKey({
 					apiKey: input.topic,
 					notificationId: input.notificationId,
-					baseUrl: input.serverUrl,
+					baseUrl: serverUrl,
 					ctx,
 					storedChannel: (notification) =>
 						notification.ntfy
@@ -1248,7 +1337,7 @@ export const notificationRouter = createTRPCRouter({
 					notificationId: input.clearAccessToken
 						? undefined
 						: input.notificationId,
-					baseUrl: input.serverUrl,
+					baseUrl: serverUrl,
 					ctx,
 					storedChannel: (notification) =>
 						notification.ntfy?.accessToken
@@ -1261,7 +1350,7 @@ export const notificationRouter = createTRPCRouter({
 				});
 				secrets.push(accessToken);
 				await sendNtfyNotification(
-					{ ...input, topic, accessToken: accessToken || null },
+					{ ...input, serverUrl, topic, accessToken: accessToken || null },
 					"Test Notification",
 					"",
 					"view, visit Dokploy on Github, https://github.com/dokploy/dokploy, clear=true;",
