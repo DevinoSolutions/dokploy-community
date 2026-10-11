@@ -167,7 +167,8 @@ const CREDENTIAL_QUERIES = new Set([
 	// member.user joined unprojected → user.licenseKey
 	"user.one",
 	"user.all",
-	// all 12 notification provider relations unprojected → bot tokens, API keys
+	// the provider secrets come back masked (at most the last four characters),
+	// but the rest of the provider config is still returned, so keep it admin only
 	"notification.one",
 	"notification.all",
 	"notification.getEmailProviders",

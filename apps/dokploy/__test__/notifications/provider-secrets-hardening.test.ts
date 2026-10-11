@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
 	sent: [] as string[],
 	fetch: vi.fn(),
 	findManyResult: null as Record<string, unknown>[] | null,
+	// "<resource>:<action>" pairs the caller's role does not grant.
+	denied: [] as string[],
 }));
 
 const tableName = (table: unknown) => {
@@ -115,6 +117,35 @@ vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
 
+vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("@dokploy/server/services/permission")
+		>();
+	const { TRPCError } = await import("@trpc/server");
+	return {
+		...actual,
+		checkPermission: vi.fn(
+			async (
+				ctx: Parameters<typeof actual.checkPermission>[0],
+				permissions: Record<string, string[]>,
+			) => {
+				for (const [resource, actions] of Object.entries(permissions)) {
+					for (const action of actions) {
+						if (mocks.denied.includes(`${resource}:${action}`)) {
+							throw new TRPCError({
+								code: "UNAUTHORIZED",
+								message: "Permission denied",
+							});
+						}
+					}
+				}
+				return actual.checkPermission(ctx, permissions as never);
+			},
+		),
+	};
+});
+
 const { notificationRouter } = await import(
 	"@/server/api/routers/notification"
 );
@@ -127,7 +158,7 @@ const { sendEmailNotification, sendResendNotification } = await import(
 	"@dokploy/server/utils/notifications/utils"
 );
 const { redactSecrets } = await import("@/server/api/utils/redact-secrets");
-const { maskHeaderValues } = await import(
+const { maskApiKey, maskHeaderValues } = await import(
 	"@dokploy/server/utils/integrations/mask"
 );
 
@@ -460,6 +491,7 @@ beforeEach(() => {
 	mocks.updates = [];
 	mocks.sent = [];
 	mocks.findManyResult = null;
+	mocks.denied = [];
 	mocks.fetch.mockReset();
 	mocks.fetch.mockImplementation(
 		async (url: string, init: { body?: unknown } & Record<string, unknown>) => {
@@ -687,6 +719,23 @@ describe.each(cases)("$type notification", (c) => {
 			for (const column of Object.keys(c.secrets)) {
 				expect(wire()).toContain(c.row[column] as string);
 			}
+		});
+
+		it("borrowing the stored secret takes the update permission, not only create", async () => {
+			mocks.denied = ["notification:update"];
+
+			await expect(test({ notificationId: "n-1" })).rejects.toMatchObject({
+				code: "UNAUTHORIZED",
+			});
+			expect(mocks.sent).toEqual([]);
+		});
+
+		it("a typed secret needs no update permission", async () => {
+			mocks.denied = ["notification:update"];
+
+			await expect(test({ ...c.typed, notificationId: "n-1" })).resolves.toBe(
+				true,
+			);
 		});
 
 		it("a typed secret is used as is and the stored one is not sent", async () => {
@@ -1831,6 +1880,20 @@ describe("sending still uses the stored secrets", () => {
 	});
 });
 
+describe("maskApiKey", () => {
+	it("shows the last four characters of a long value", () => {
+		expect(maskApiKey("123456789012")).toBe("••••9012");
+		expect(maskApiKey("a-much-longer-api-key-wxyz")).toBe("••••wxyz");
+	});
+
+	it("hides a value shorter than twelve characters entirely", () => {
+		expect(maskApiKey("12345678901")).toBe("••••");
+		expect(maskApiKey("abcde")).toBe("••••");
+		expect(maskApiKey("abcd")).toBe("••••");
+		expect(maskApiKey("")).toBe("••••");
+	});
+});
+
 describe("maskHeaderValues", () => {
 	it("masks string values and hides a value that is not a string instead of throwing", () => {
 		const headers = {
@@ -2308,4 +2371,71 @@ describe("create: a failure logs the error name, never the error", () => {
 		expect(logged).not.toContain("leaked-secret");
 		expect(logged).toContain("DrizzleQueryError");
 	});
+});
+
+describe("update: a database failure does not reach the client with its bound values", () => {
+	const typedSecret = "typed-secret-for-the-failing-update";
+
+	it.each(cases.map((c) => c.type))(
+		"%s answers with a plain refusal and no cause",
+		async (type) => {
+			const { db } = await import("@dokploy/server/db");
+			const c = byType(type);
+			mocks.notification = storedNotification(c);
+			vi.mocked(db.transaction).mockRejectedValueOnce(
+				new Error(`update failed, params: ${typedSecret}`),
+			);
+
+			const failure = await call(c.routerUpdate, {
+				notificationId: "n-1",
+				name: "Renamed",
+			}).catch((error: Error) => error);
+
+			expect(failure).toMatchObject({
+				code: "BAD_REQUEST",
+				message: "Error updating the notification",
+			});
+			expect((failure as Error).cause).toBeUndefined();
+			expect(JSON.stringify(failure)).not.toContain(typedSecret);
+		},
+	);
+
+	it("keeps a specific refusal", async () => {
+		const c = byType("slack");
+		mocks.notification = storedNotification(c, { organizationId: "org-2" });
+
+		await expect(
+			call(c.routerUpdate, { notificationId: "n-1", name: "Hijack" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
+});
+
+describe("Test Notification: borrowing a secret needs the update permission, for the providers with their own flows", () => {
+	const { topic: _topic, ...ntfyWithoutTopic } = byType("ntfy").testInput;
+	const borrowing: [string, string, Record<string, unknown>][] = [
+		["ntfy", "testNtfyConnection", ntfyWithoutTopic],
+		[
+			"email",
+			"testEmailConnection",
+			{ ...byType("email").testInput, password: "" },
+		],
+		[
+			"custom",
+			"testCustomConnection",
+			{ endpoint: "", headers: { Authorization: "" } },
+		],
+	];
+
+	it.each(borrowing)(
+		"%s is refused without it and sends nothing",
+		async (type, routerTest, input) => {
+			mocks.notification = storedNotification(byType(type));
+			mocks.denied = ["notification:update"];
+
+			await expect(
+				call(routerTest, { ...input, notificationId: "n-1" }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			expect(mocks.sent).toEqual([]);
+		},
+	);
 });

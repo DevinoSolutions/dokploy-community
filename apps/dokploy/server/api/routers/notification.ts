@@ -64,6 +64,10 @@ import {
 	updateUptimelyChannelNotification,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import {
+	checkPermission,
+	type PermissionCtx,
+} from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
 import { desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -211,14 +215,16 @@ const presentNotification = (notification: NotificationWithProviders) => {
 /**
  * The notification behind the "Test Notification" button of the edit form. It
  * must belong to the caller's organization: the stored secrets of another
- * organization's notification are never borrowed.
+ * organization's notification are never borrowed. Borrowing one also takes the
+ * "update" permission: a test only needs "create", which never reads a secret.
  */
 const findOwnNotification = async (
 	notificationId: string,
-	organizationId: string,
+	ctx: PermissionCtx,
 ) => {
+	await checkPermission(ctx, { notification: ["update"] });
 	const notification = await findNotificationById(notificationId);
-	if (notification.organizationId !== organizationId) {
+	if (notification.organizationId !== ctx.session.activeOrganizationId) {
 		throw new TRPCError({
 			code: "UNAUTHORIZED",
 			message: "You are not authorized to access this notification",
@@ -235,7 +241,7 @@ const findOwnNotification = async (
 const resolveStoredSecret = async (params: {
 	value?: string | null;
 	notificationId?: string;
-	organizationId: string;
+	ctx: PermissionCtx;
 	stored: (
 		notification: NotificationWithProviders,
 	) => string | null | undefined;
@@ -250,7 +256,7 @@ const resolveStoredSecret = async (params: {
 	if (params.notificationId) {
 		const notification = await findOwnNotification(
 			params.notificationId,
-			params.organizationId,
+			params.ctx,
 		);
 		const stored = params.stored(notification);
 		if (stored) {
@@ -273,7 +279,7 @@ const resolveChannelTestKey = async (params: {
 	apiKey?: string;
 	notificationId?: string;
 	baseUrl: string;
-	organizationId: string;
+	ctx: PermissionCtx;
 	storedChannel: (
 		notification: NotificationWithProviders,
 	) => { apiKey: string; baseUrl: string } | null;
@@ -287,7 +293,7 @@ const resolveChannelTestKey = async (params: {
 	}
 	const notification = await findOwnNotification(
 		params.notificationId,
-		params.organizationId,
+		params.ctx,
 	);
 	const channel = params.storedChannel(notification);
 	if (!channel) return undefined;
@@ -349,7 +355,12 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testSlackConnection: withPermission("notification", "create")
@@ -361,7 +372,7 @@ export const notificationRouter = createTRPCRouter({
 					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					stored: (notification) => notification.slack?.webhookUrl,
 					missing: "A webhook URL",
 				});
@@ -427,7 +438,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -440,7 +450,7 @@ export const notificationRouter = createTRPCRouter({
 					track: secrets,
 					value: input.botToken,
 					notificationId: input.notificationId,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					stored: (notification) => notification.telegram?.botToken,
 					missing: "A bot token",
 				});
@@ -507,7 +517,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -521,7 +530,7 @@ export const notificationRouter = createTRPCRouter({
 					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					stored: (notification) => notification.discord?.webhookUrl,
 					missing: "A webhook URL",
 				});
@@ -588,7 +597,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -602,7 +610,7 @@ export const notificationRouter = createTRPCRouter({
 				if (!password && input.notificationId && input.username) {
 					const notification = await findOwnNotification(
 						input.notificationId,
-						ctx.session.activeOrganizationId,
+						ctx,
 					);
 					const stored = notification.email;
 					if (stored?.password) {
@@ -673,7 +681,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -686,7 +693,7 @@ export const notificationRouter = createTRPCRouter({
 					track: secrets,
 					value: input.apiKey,
 					notificationId: input.notificationId,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					stored: (notification) => notification.resend?.apiKey,
 					missing: "An API key",
 				});
@@ -746,7 +753,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -760,7 +766,7 @@ export const notificationRouter = createTRPCRouter({
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
 					baseUrl: input.baseUrl,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					storedChannel: (notification) => notification.sendly,
 					urlChangeMessage: SENDLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 				});
@@ -823,7 +829,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -837,7 +842,7 @@ export const notificationRouter = createTRPCRouter({
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
 					baseUrl: input.baseUrl,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					storedChannel: (notification) => notification.notifly,
 					urlChangeMessage: NOTIFLY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 				});
@@ -906,7 +911,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -922,7 +926,7 @@ export const notificationRouter = createTRPCRouter({
 					apiKey: input.apiKey,
 					notificationId: input.notificationId,
 					baseUrl: input.baseUrl,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					storedChannel: (notification) => notification.uptimelyChannel,
 					urlChangeMessage: UPTIMELY_URL_CHANGE_NEEDS_KEY_MESSAGE,
 				});
@@ -1110,7 +1114,12 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testGotifyConnection: withPermission("notification", "create")
@@ -1121,7 +1130,7 @@ export const notificationRouter = createTRPCRouter({
 					apiKey: input.appToken,
 					notificationId: input.notificationId,
 					baseUrl: input.serverUrl,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					storedChannel: (notification) =>
 						notification.gotify
 							? {
@@ -1193,7 +1202,12 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testNtfyConnection: withPermission("notification", "create")
@@ -1211,7 +1225,7 @@ export const notificationRouter = createTRPCRouter({
 					apiKey: input.topic,
 					notificationId: input.notificationId,
 					baseUrl: input.serverUrl,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					storedChannel: (notification) =>
 						notification.ntfy
 							? {
@@ -1235,7 +1249,7 @@ export const notificationRouter = createTRPCRouter({
 						? undefined
 						: input.notificationId,
 					baseUrl: input.serverUrl,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					storedChannel: (notification) =>
 						notification.ntfy?.accessToken
 							? {
@@ -1310,7 +1324,12 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testMattermostConnection: withPermission("notification", "create")
@@ -1320,7 +1339,7 @@ export const notificationRouter = createTRPCRouter({
 				const webhookUrl = await resolveStoredSecret({
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					stored: (notification) => notification.mattermost?.webhookUrl,
 					missing: "A webhook URL",
 				});
@@ -1383,7 +1402,12 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testCustomConnection: withPermission("notification", "create")
@@ -1397,7 +1421,7 @@ export const notificationRouter = createTRPCRouter({
 				if (input.notificationId && (!endpoint || headers)) {
 					const notification = await findOwnNotification(
 						input.notificationId,
-						ctx.session.activeOrganizationId,
+						ctx,
 					);
 					const stored = notification.custom;
 					// A blank endpoint is the stored one.
@@ -1478,7 +1502,12 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testLarkConnection: withPermission("notification", "create")
@@ -1490,7 +1519,7 @@ export const notificationRouter = createTRPCRouter({
 					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					stored: (notification) => notification.lark?.webhookUrl,
 					missing: "A webhook URL",
 				});
@@ -1549,7 +1578,12 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testTeamsConnection: withPermission("notification", "create")
@@ -1561,7 +1595,7 @@ export const notificationRouter = createTRPCRouter({
 					track: secrets,
 					value: input.webhookUrl,
 					notificationId: input.notificationId,
-					organizationId: ctx.session.activeOrganizationId,
+					ctx,
 					stored: (notification) => notification.teams?.webhookUrl,
 					missing: "A webhook URL",
 				});
@@ -1621,25 +1655,29 @@ export const notificationRouter = createTRPCRouter({
 				});
 				return result;
 			} catch (error) {
-				throw error;
+				// Keep the specific refusals (not found, "enter the secret again").
+				if (error instanceof TRPCError) throw error;
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Error updating the notification",
+				});
 			}
 		}),
 	testPushoverConnection: withPermission("notification", "create")
 		.input(apiTestPushoverConnection)
 		.mutation(async ({ input, ctx }) => {
 			try {
-				const organizationId = ctx.session.activeOrganizationId;
 				const userKey = await resolveStoredSecret({
 					value: input.userKey,
 					notificationId: input.notificationId,
-					organizationId,
+					ctx,
 					stored: (notification) => notification.pushover?.userKey,
 					missing: "A user key",
 				});
 				const apiToken = await resolveStoredSecret({
 					value: input.apiToken,
 					notificationId: input.notificationId,
-					organizationId,
+					ctx,
 					stored: (notification) => notification.pushover?.apiToken,
 					missing: "An API token",
 				});

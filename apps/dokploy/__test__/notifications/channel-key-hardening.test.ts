@@ -27,6 +27,8 @@ const mocks = vi.hoisted(() => ({
 	deletes: [] as string[],
 	fetch: vi.fn(),
 	findManyArgs: [] as unknown[],
+	// "<resource>:<action>" pairs the caller's role does not grant.
+	denied: [] as string[],
 }));
 
 const tableName = (table: unknown) => {
@@ -114,6 +116,35 @@ vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
 
+vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("@dokploy/server/services/permission")
+		>();
+	const { TRPCError } = await import("@trpc/server");
+	return {
+		...actual,
+		checkPermission: vi.fn(
+			async (
+				ctx: Parameters<typeof actual.checkPermission>[0],
+				permissions: Record<string, string[]>,
+			) => {
+				for (const [resource, actions] of Object.entries(permissions)) {
+					for (const action of actions) {
+						if (mocks.denied.includes(`${resource}:${action}`)) {
+							throw new TRPCError({
+								code: "UNAUTHORIZED",
+								message: "Permission denied",
+							});
+						}
+					}
+				}
+				return actual.checkPermission(ctx, permissions as never);
+			},
+		),
+	};
+});
+
 const { notificationRouter } = await import(
 	"@/server/api/routers/notification"
 );
@@ -192,6 +223,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.updates = [];
 	mocks.deletes = [];
+	mocks.denied = [];
 	mocks.fetch.mockReset();
 	mocks.fetch.mockResolvedValue({
 		ok: true,
@@ -344,6 +376,59 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 				} as never),
 			).rejects.toMatchObject({ code: "NOT_FOUND" });
 			expect(mocks.updates).toEqual([]);
+		});
+	});
+
+	describe("the stored key and database failures", () => {
+		it("test: borrowing the stored key takes the update permission, not only create", async () => {
+			mocks.denied = ["notification:update"];
+
+			await expect(
+				testButton(type, {
+					apiKey: "",
+					notificationId: "n-1",
+					baseUrl: defaultUrl,
+				}),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			expect(mocks.fetch).not.toHaveBeenCalled();
+		});
+
+		it("test: a typed key needs no update permission", async () => {
+			mocks.denied = ["notification:update"];
+
+			await expect(
+				testButton(type, {
+					apiKey: "typed-key",
+					notificationId: "n-1",
+					baseUrl: defaultUrl,
+				}),
+			).resolves.toBe(true);
+		});
+
+		it("update: a database failure answers with a plain refusal and no cause", async () => {
+			const { db } = await import("@dokploy/server/db");
+			const typedSecret = "typed-secret-for-the-failing-update";
+			vi.mocked(db.transaction).mockRejectedValueOnce(
+				new Error(`update failed, params: ${typedSecret}`),
+			);
+
+			const failure = await (type === "sendly"
+				? caller.updateSendly({
+						notificationId: "n-1",
+						name: "Renamed",
+					} as never)
+				: caller.updateNotifly({
+						notificationId: "n-1",
+						name: "Renamed",
+					} as never)
+			).catch((error: Error) => error);
+
+			expect(failure).toMatchObject({
+				code: "BAD_REQUEST",
+				message: "Error updating the notification",
+			});
+			expect((failure as Error).cause).toBeUndefined();
+			expect(JSON.stringify(failure)).not.toContain(typedSecret);
 		});
 	});
 
