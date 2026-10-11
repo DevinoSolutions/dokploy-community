@@ -1065,8 +1065,9 @@ export const notificationRouter = createTRPCRouter({
 					...input,
 					ServerName,
 				});
-			} catch (error) {
-				if (error instanceof TRPCError) throw error;
+			} catch {
+				// Public endpoint: every failure answers the same, so a caller cannot
+				// tell a bad token from a good one whose send failed.
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error sending the notification",

@@ -2479,6 +2479,61 @@ describe("create: a database failure does not reach the client with its bound va
 	);
 });
 
+describe("create: a refusal of the service is passed through", () => {
+	it("a TRPCError of the service reaches the client unchanged", async () => {
+		const { db } = await import("@dokploy/server/db");
+		const { TRPCError } = await import("@trpc/server");
+		vi.mocked(db.transaction).mockRejectedValueOnce(
+			new TRPCError({
+				code: "BAD_REQUEST",
+				message: "Error input: Inserting slack",
+			}),
+		);
+
+		await expect(
+			call("createSlack", {
+				name: "Slack",
+				webhookUrl: "https://hooks.slack.com/services/T0/B0/passthrough-ab12",
+				channel: "#ops",
+				appBuildError: true,
+				databaseBackup: true,
+				dokployBackup: true,
+				volumeBackup: true,
+				dokployRestart: true,
+				appDeploy: true,
+				dockerCleanup: true,
+				scheduleFailure: true,
+				serverThreshold: true,
+			}),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Error input: Inserting slack",
+		});
+	});
+});
+
+describe("receiveNotification: every failure answers the same", () => {
+	it("an invalid token gets the generic message, not 'Token not found'", async () => {
+		mocks.notification = storedNotification(byType("slack"));
+
+		const failure = await call("receiveNotification", {
+			ServerType: "Dokploy",
+			Type: "CPU",
+			Value: 99,
+			Threshold: 80,
+			Message: "High CPU",
+			Timestamp: "2026-10-11T00:00:00Z",
+			Token: "not-a-valid-token",
+		}).catch((error: Error) => error);
+
+		expect(failure).toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Error sending the notification",
+		});
+		expect((failure as Error).cause).toBeUndefined();
+	});
+});
+
 describe("Test Notification: a failed send does not keep the transport error as cause", () => {
 	const cases_: [string, Record<string, unknown>][] = [
 		["gotify", { appToken: "gotify-typed-token-wxyz" }],
