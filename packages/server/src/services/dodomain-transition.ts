@@ -174,13 +174,27 @@ export const applyDoDomainTransition = async (params: {
 				expected,
 			);
 			if (!updated) {
-				// Already failed; a disconnect still has to forget the connection.
-				if (transition.dropConnection && !expected) {
+				// Already failed. Neither follow-up is a status change, so both are
+				// safe for the poller too (they guard on the row, not on a read):
+				// - a disconnect still has to forget the dead connection, or the slow
+				//   poll would ask DoDomain about it forever;
+				// - a webhook may carry a newer connection id than the stored one.
+				if (transition.dropConnection) {
 					await updateDomainWhere(
 						domain.domainId,
 						{ dodomainConnectionId: null },
 						eq(domains.dnsVerificationStatus, "failed"),
-						isNotNull(domains.dodomainConnectionId),
+						// Only the connection that was disconnected, never a newer one.
+						transition.connectionId
+							? eq(domains.dodomainConnectionId, transition.connectionId)
+							: isNotNull(domains.dodomainConnectionId),
+					);
+				} else if (transition.connectionId && !expected) {
+					await updateDomainWhere(
+						domain.domainId,
+						{ dodomainConnectionId: transition.connectionId },
+						eq(domains.dnsVerificationStatus, "failed"),
+						connectionIsNot(transition.connectionId),
 					);
 				}
 				return unchanged;

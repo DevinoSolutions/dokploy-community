@@ -76,9 +76,13 @@ export const dodomainConnectSession = pgTable("dodomain_connect_session", {
 	createdAt: timestamp("createdAt").notNull().defaultNow(),
 	/**
 	 * The session token (`dd_sess_…`) DoDomain returns once at creation. The
-	 * panel needs it to run the live DNS check (`verify`) while polling, so it is
-	 * encrypted at rest like other stored secrets and never returned to the
-	 * browser or logged. Null for sessions created before polling existed.
+	 * panel needs it to run the live DNS check (`verify`) while polling. It is
+	 * encrypted at rest like other stored secrets, never returned as a field of
+	 * any API output and never logged. Be clear about what that buys: DoDomain's
+	 * hosted link is `<origin>/connect/<token>`, so the token is already inside
+	 * `connectUrl`, which is stored in plaintext and shown to the user by design.
+	 * The encryption adds no confidentiality beyond what that link already has.
+	 * Null for sessions created before polling existed.
 	 */
 	token: encryptedText("token"),
 });
