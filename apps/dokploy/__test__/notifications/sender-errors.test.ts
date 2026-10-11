@@ -502,4 +502,20 @@ describe("the notification code never logs a raw error", () => {
 
 		expect(offenders).toEqual([]);
 	});
+
+	it("does not log the raw error of a failed invitation email", () => {
+		const router = readFileSync(
+			fileURLToPath(
+				new URL("../../server/api/routers/user.ts", import.meta.url),
+			),
+			"utf8",
+		);
+		const start = router.indexOf("sendInvitation:");
+		const end = router.indexOf("getBookmarkedTemplates:", start);
+		const procedure = router.slice(start, end);
+
+		expect(start).toBeGreaterThan(-1);
+		expect(procedure).toContain('logSenderError("invitation email", error)');
+		expect(procedure).not.toMatch(/console\./);
+	});
 });
