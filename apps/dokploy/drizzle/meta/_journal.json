@@ -1506,6 +1506,13 @@
       "when": 1791744752359,
       "tag": "0214_dodomain_session_token",
       "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1791746463215,
+      "tag": "0215_snapvisor_build_checks",
+      "breakpoints": true
     }
   ]
 }
