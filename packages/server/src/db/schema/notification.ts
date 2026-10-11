@@ -47,6 +47,7 @@ export const notifications = pgTable("notification", {
 	dockerCleanup: boolean("dockerCleanup").notNull().default(false),
 	serverThreshold: boolean("serverThreshold").notNull().default(false),
 	scheduleFailure: boolean("scheduleFailure").notNull().default(false),
+	snapvisorChanges: boolean("snapvisorChanges").notNull().default(false),
 	notificationType: notificationType("notificationType").notNull(),
 	createdAt: text("createdAt")
 		.notNull()
@@ -375,6 +376,13 @@ const writeOnlySecret = z.string().trim().optional();
 const MAX_URL_LENGTH = 2048;
 const urlTooLong = { message: "The URL is too long" };
 const testNotificationId = z.string().optional();
+/**
+ * The Snapvisor event flag is optional on create (absent = off) so API and MCP
+ * clients written before it existed keep working; the create schemas are
+ * otherwise `.required()`, which would make it mandatory.
+ */
+const snapvisorChangesField = { snapvisorChanges: z.boolean().optional() };
+
 // Same, for a webhook that has to be a URL once one is typed.
 const optionalWebhookUrl = z
 	.string()
@@ -404,7 +412,8 @@ export const apiCreateSlack = notificationsSchema
 		webhookUrl: z.string().min(1),
 		channel: z.string(),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateSlack = apiCreateSlack.partial().extend({
 	notificationId: z.string().min(1),
@@ -441,7 +450,8 @@ export const apiCreateTelegram = notificationsSchema
 		chatId: z.string().min(1),
 		messageThreadId: z.string(),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateTelegram = apiCreateTelegram.partial().extend({
 	notificationId: z.string().min(1),
@@ -478,7 +488,8 @@ export const apiCreateDiscord = notificationsSchema
 		webhookUrl: z.string().min(1),
 		decoration: z.boolean(),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateDiscord = apiCreateDiscord.partial().extend({
 	notificationId: z.string().min(1),
@@ -515,7 +526,8 @@ export const apiCreateEmail = notificationsSchema
 		fromAddress: z.string().min(1),
 		toAddresses: z.array(z.string()).min(1),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateEmail = apiCreateEmail.partial().extend({
 	notificationId: z.string().min(1),
@@ -558,7 +570,8 @@ export const apiCreateResend = notificationsSchema
 		fromAddress: z.string().min(1),
 		toAddresses: z.array(z.string()).min(1),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateResend = apiCreateResend.partial().extend({
 	notificationId: z.string().min(1),
@@ -597,7 +610,8 @@ export const apiCreateSendly = notificationsSchema
 		toAddresses: z.array(z.string()).min(1),
 		baseUrl: z.string().min(1).max(MAX_URL_LENGTH, urlTooLong),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateSendly = apiCreateSendly.partial().extend({
 	notificationId: z.string().min(1),
@@ -639,7 +653,8 @@ export const apiCreateNotifly = notificationsSchema
 		subscriberId: z.string().optional(),
 		baseUrl: z.string().min(1).max(MAX_URL_LENGTH, urlTooLong),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateNotifly = apiCreateNotifly.partial().extend({
 	notificationId: z.string().min(1),
@@ -673,6 +688,7 @@ export const apiCreateUptimelyChannel = notificationsSchema
 		appDeploy: true,
 		dockerCleanup: true,
 		scheduleFailure: true,
+		snapvisorChanges: true,
 		serverThreshold: true,
 	})
 	.extend({
@@ -753,7 +769,8 @@ export const apiCreateGotify = notificationsSchema
 		priority: z.number().min(1),
 		decoration: z.boolean(),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateGotify = apiCreateGotify.partial().extend({
 	notificationId: z.string().min(1),
@@ -793,7 +810,8 @@ export const apiCreateNtfy = notificationsSchema
 		accessToken: z.string().optional(),
 		priority: z.number().min(1),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateNtfy = apiCreateNtfy.partial().extend({
 	notificationId: z.string().min(1),
@@ -832,6 +850,7 @@ export const apiCreateMattermost = notificationsSchema
 		appDeploy: true,
 		dockerCleanup: true,
 		scheduleFailure: true,
+		snapvisorChanges: true,
 		serverThreshold: true,
 	})
 	.extend({
@@ -888,6 +907,7 @@ export const apiCreateCustom = notificationsSchema
 		appDeploy: true,
 		dockerCleanup: true,
 		scheduleFailure: true,
+		snapvisorChanges: true,
 		serverThreshold: true,
 	})
 	.extend({
@@ -928,7 +948,8 @@ export const apiCreateLark = notificationsSchema
 	.extend({
 		webhookUrl: z.string().min(1),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateLark = apiCreateLark.partial().extend({
 	notificationId: z.string().min(1),
@@ -959,7 +980,8 @@ export const apiCreateTeams = notificationsSchema
 	.extend({
 		webhookUrl: z.string().min(1),
 	})
-	.required();
+	.required()
+	.extend(snapvisorChangesField);
 
 export const apiUpdateTeams = apiCreateTeams.partial().extend({
 	notificationId: z.string().min(1),
@@ -985,6 +1007,7 @@ export const apiCreatePushover = notificationsSchema
 		appDeploy: true,
 		dockerCleanup: true,
 		scheduleFailure: true,
+		snapvisorChanges: true,
 		serverThreshold: true,
 	})
 	.extend({
@@ -1023,6 +1046,7 @@ export const apiUpdatePushover = z.object({
 	dockerCleanup: z.boolean().optional(),
 	serverThreshold: z.boolean().optional(),
 	scheduleFailure: z.boolean().optional(),
+	snapvisorChanges: z.boolean().optional(),
 });
 
 export const apiTestPushoverConnection = z

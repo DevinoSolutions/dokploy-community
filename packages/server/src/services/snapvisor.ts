@@ -10,8 +10,13 @@ import {
 import { maskApiKey } from "@dokploy/server/utils/integrations/mask";
 import { getGitCommitInfo } from "@dokploy/server/utils/providers/git";
 import {
+	createSnapvisorBuildLookup,
+	type SnapvisorUnavailableReason,
+} from "@dokploy/server/utils/snapvisor/build-lookup";
+import {
 	createSnapvisorClient,
 	type SnapvisorBuild,
+	type SnapvisorBuildStatus,
 	type SnapvisorClient,
 } from "@dokploy/server/utils/snapvisor/client";
 import {
@@ -23,7 +28,7 @@ import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { findApplicationById } from "./application";
-import { updateDeployment } from "./deployment";
+import { type Deployment, updateDeployment } from "./deployment";
 import {
 	findPreviewDeploymentById,
 	type PreviewDeployment,
@@ -289,10 +294,20 @@ export const findLatestPreviewCommitSha = async (
 		where: eq(deployments.previewDeploymentId, previewDeploymentId),
 		orderBy: desc(deployments.createdAt),
 	});
-	// Snapvisor's `headSha` filter matches on the full SHA1, so a short/abbreviated
-	// hash would silently return zero builds; require all 40 hex characters.
-	const match = deployment?.description?.match(/Commit:\s*([0-9a-f]{40})/i);
-	return match?.[1] ?? null;
+	return commitShaFromDescription(deployment?.description);
+};
+
+/**
+ * The full commit sha recorded in a deployment's `description` (the
+ * `Commit: <sha>` marker every git deploy writes). Snapvisor's `headSha`
+ * filter matches on the full SHA1, so a short/abbreviated hash would silently
+ * return zero builds; require all 40 hex characters.
+ */
+export const commitShaFromDescription = (
+	description: string | null | undefined,
+) => {
+	const match = description?.match(/Commit:\s*([0-9a-f]{40})/i);
+	return match?.[1]?.toLowerCase() ?? null;
 };
 
 export interface SnapvisorPreviewLinkResult {
@@ -420,4 +435,117 @@ export const finalizePreviewBuildMetadata = async ({
 	registerPreviewDeployment({ previewDeploymentId }).catch((error) => {
 		console.error("Error registering the Snapvisor preview deployment:", error);
 	});
+};
+
+// ---------------------------------------------------------------------------
+// Build status of a regular (branch/production) deployment
+// ---------------------------------------------------------------------------
+
+/**
+ * Every outcome of "what does Snapvisor say about this deployment's commit"
+ * is a value the deployments list can render quietly; none of them throws.
+ * `off`, `not-connected` and `no-commit` render nothing.
+ */
+export type DeploymentSnapvisorBuild =
+	| { state: "off" | "not-connected" | "no-commit" }
+	| { state: "no-build" }
+	| { state: "unavailable"; reason: SnapvisorUnavailableReason }
+	| {
+			state: "ready";
+			buildNumber: number;
+			buildStatus: SnapvisorBuildStatus;
+			changedSnapshots: number | null;
+			reviewUrl: string;
+	  };
+
+/**
+ * One cache for the whole process: the deployments list of every browser tab
+ * and every row funnels through it (see `createSnapvisorBuildLookup`).
+ */
+export const snapvisorBuildLookup = createSnapvisorBuildLookup();
+
+/**
+ * The application or compose service a deployment row belongs to, whether it
+ * is a regular deploy or a preview's; `null` for schedule, backup and server
+ * rows, which have no Snapvisor link.
+ */
+export const findDeploymentSnapvisorTarget = async (
+	deployment: Pick<
+		Deployment,
+		"applicationId" | "composeId" | "previewDeploymentId"
+	>,
+): Promise<SnapvisorServiceTarget | null> => {
+	if (deployment.applicationId) {
+		return findApplicationSnapvisorTarget(deployment.applicationId);
+	}
+	if (deployment.composeId) {
+		return findComposeSnapvisorTarget(deployment.composeId);
+	}
+	if (deployment.previewDeploymentId) {
+		return findPreviewSnapvisorTarget(
+			await findPreviewDeploymentById(deployment.previewDeploymentId),
+		);
+	}
+	return null;
+};
+
+/**
+ * Looks up the Snapvisor build for the commit a deployment shipped. The
+ * caller has already proven the caller may read the deployment's service;
+ * `organizationId` is only used to pick the integration and to key the cache,
+ * so a service of another organization can never be answered with this
+ * organization's token.
+ */
+export const resolveDeploymentSnapvisorBuild = async ({
+	deployment,
+	target,
+	organizationId,
+	force = false,
+}: {
+	deployment: Pick<Deployment, "description">;
+	target: SnapvisorServiceTarget;
+	organizationId: string;
+	force?: boolean;
+}): Promise<DeploymentSnapvisorBuild> => {
+	if (target.organizationId !== organizationId) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You are not authorized to access this deployment",
+		});
+	}
+	const projectName = target.snapvisorProjectName;
+	if (!projectName) return { state: "off" };
+	const commitSha = commitShaFromDescription(deployment.description);
+	if (!commitSha) return { state: "no-commit" };
+	const integration = await findSnapvisorByOrganizationId(organizationId);
+	if (!integration) return { state: "not-connected" };
+
+	const result = await snapvisorBuildLookup.lookup(
+		`${organizationId}:${projectName}:${commitSha}`,
+		async () => {
+			const builds = await snapvisorClientFor(integration).listBuilds({
+				accountSlug: integration.accountSlug,
+				projectName,
+				headSha: commitSha,
+				perPage: 1,
+			});
+			return builds[0] ?? null;
+		},
+		{ force },
+	);
+	if (result.kind === "none") return { state: "no-build" };
+	if (result.kind === "unavailable") {
+		return { state: "unavailable", reason: result.reason };
+	}
+	return {
+		state: "ready",
+		buildNumber: result.build.number,
+		buildStatus: result.build.status,
+		changedSnapshots: result.build.stats?.changed ?? null,
+		reviewUrl: snapvisorBuildReviewUrl(
+			integration,
+			projectName,
+			result.build.number,
+		),
+	};
 };

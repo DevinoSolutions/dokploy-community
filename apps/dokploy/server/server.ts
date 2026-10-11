@@ -10,6 +10,7 @@ import {
 	initializeNetwork,
 	initMcpTokenPurgeCronJob,
 	initSchedules,
+	initSnapvisorBuildChecks,
 	initVolumeBackupsCronJobs,
 	isMcpDisabled,
 	sendDokployRestartNotifications,
@@ -134,6 +135,8 @@ void app
 			if (!isMcpDisabled()) {
 				initMcpTokenPurgeCronJob();
 			}
+
+			initSnapvisorBuildChecks();
 
 			if (!IS_CLOUD) {
 				console.log("Starting Deployment Worker");

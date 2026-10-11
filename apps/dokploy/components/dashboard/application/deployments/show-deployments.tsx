@@ -29,6 +29,9 @@ import {
 	CardTitle,
 } from "@/components/ui/card";
 import { api, type RouterOutputs } from "@/utils/api";
+import { deploymentCanHaveSnapvisorBuild } from "../../settings/integrations/snapvisor/snapvisor-badge-state";
+import { SnapvisorDeploymentBadge } from "../../settings/integrations/snapvisor/snapvisor-deployment-badge";
+import { SnapvisorServiceLink } from "../../settings/integrations/snapvisor/snapvisor-service-link";
 import { ShowRollbackSettings } from "../rollbacks/show-rollback-settings";
 import { CancelQueues } from "./cancel-queues";
 import { ClearDeployments } from "./clear-deployments";
@@ -85,6 +88,22 @@ export const ShowDeployments = ({
 		);
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+
+	// The service page already loads these; the query is shared, not repeated.
+	const { data: application } = api.application.one.useQuery(
+		{ applicationId: id },
+		{ enabled: !!id && type === "application" },
+	);
+	const { data: composeService } = api.compose.one.useQuery(
+		{ composeId: id },
+		{ enabled: !!id && type === "compose" },
+	);
+	const snapvisorProjectName =
+		type === "application"
+			? application?.snapvisorProjectName
+			: type === "compose"
+				? composeService?.snapvisorProjectName
+				: null;
 
 	const { mutateAsync: rollback, isPending: isRollingBack } =
 		api.rollback.rollback.useMutation();
@@ -297,6 +316,14 @@ export const ShowDeployments = ({
 					</div>
 				)}
 
+				{(type === "application" || type === "compose") && (
+					<SnapvisorServiceLink
+						type={type}
+						id={id}
+						snapvisorProjectName={snapvisorProjectName}
+					/>
+				)}
+
 				{isLoadingDeployments ? (
 					<div className="flex w-full flex-row items-center justify-center gap-3 pt-10 min-h-[25vh]">
 						<Loader2 className="size-6 text-muted-foreground animate-spin" />
@@ -438,6 +465,13 @@ export const ShowDeployments = ({
 												</Badge>
 											)}
 										</div>
+
+										{snapvisorProjectName &&
+											deploymentCanHaveSnapvisorBuild(deployment) && (
+												<SnapvisorDeploymentBadge
+													deploymentId={deployment.deploymentId}
+												/>
+											)}
 
 										<div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:justify-end">
 											{deployment.pid && deployment.status === "running" && (

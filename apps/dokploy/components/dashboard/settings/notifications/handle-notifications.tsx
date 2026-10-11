@@ -64,6 +64,7 @@ const notificationBaseSchema = z.object({
 	dockerCleanup: z.boolean().default(false),
 	serverThreshold: z.boolean().default(false),
 	scheduleFailure: z.boolean().default(false),
+	snapvisorChanges: z.boolean().default(false),
 });
 
 export const notificationSchema = z.discriminatedUnion("type", [
@@ -486,6 +487,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					type: notification.notificationType,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "telegram") {
 				form.reset({
@@ -503,6 +505,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "discord") {
 				form.reset({
@@ -519,6 +522,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "email") {
 				form.reset({
@@ -539,6 +543,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "resend") {
 				form.reset({
@@ -556,6 +561,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "sendly") {
 				form.reset({
@@ -574,6 +580,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "notifly") {
 				form.reset({
@@ -592,6 +599,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "uptimely") {
 				form.reset({
@@ -610,6 +618,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "gotify") {
 				form.reset({
@@ -628,6 +637,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "ntfy") {
 				form.reset({
@@ -647,6 +657,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "mattermost") {
 				form.reset({
@@ -664,6 +675,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "lark") {
 				form.reset({
@@ -679,6 +691,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					volumeBackup: notification.volumeBackup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "teams") {
 				form.reset({
@@ -694,6 +707,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "custom") {
 				form.reset({
@@ -713,6 +727,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			} else if (notification.notificationType === "pushover") {
 				form.reset({
@@ -732,6 +747,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 					dockerCleanup: notification.dockerCleanup,
 					serverThreshold: notification.serverThreshold,
 					scheduleFailure: notification.scheduleFailure,
+					snapvisorChanges: notification.snapvisorChanges,
 				});
 			}
 		} else {
@@ -768,6 +784,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 			dockerCleanup,
 			serverThreshold,
 			scheduleFailure,
+			snapvisorChanges,
 		} = data;
 		let promise: Promise<unknown> | null = null;
 		if (data.type === "slack") {
@@ -793,6 +810,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "telegram") {
 			if (!requireOnCreate("botToken", data.botToken, "Bot Token is required"))
@@ -812,6 +830,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "discord") {
 			if (
@@ -836,6 +855,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "email") {
 			promise = emailMutation.mutateAsync({
@@ -856,6 +876,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "resend") {
 			if (!requireOnCreate("apiKey", data.apiKey, "API Key is required"))
@@ -875,6 +896,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "sendly") {
 			if (!notificationId && !data.apiKey?.trim()) {
@@ -898,6 +920,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "notifly") {
 			if (!notificationId && !data.apiKey?.trim()) {
@@ -921,6 +944,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "uptimely") {
 			if (!notificationId && !data.apiKey?.trim()) {
@@ -946,6 +970,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: false,
 				scheduleFailure: false,
+				snapvisorChanges: false,
 			});
 		} else if (data.type === "gotify") {
 			if (!requireOnCreate("appToken", data.appToken, "App Token is required"))
@@ -966,6 +991,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				serverThreshold: serverThreshold,
 				notificationId: notificationId || "",
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "ntfy") {
 			if (!requireOnCreate("topic", data.topic, "Topic is required")) return;
@@ -986,6 +1012,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				serverThreshold: serverThreshold,
 				notificationId: notificationId || "",
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "mattermost") {
 			if (
@@ -1012,6 +1039,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "lark") {
 			if (
@@ -1035,6 +1063,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "teams") {
 			if (
@@ -1058,6 +1087,7 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 				notificationId: notificationId || "",
 				serverThreshold: serverThreshold,
 				scheduleFailure: scheduleFailure,
+				snapvisorChanges: snapvisorChanges,
 			});
 		} else if (data.type === "custom") {
 			if (
@@ -2742,6 +2772,30 @@ export const HandleNotifications = ({ notificationId }: Props) => {
 											</FormItem>
 										)}
 									/>
+
+									{!isCloud && (
+										<FormField
+											control={form.control}
+											name="snapvisorChanges"
+											render={({ field }) => (
+												<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs gap-2">
+													<div className="space-y-0.5">
+														<FormLabel>Snapvisor Visual Changes</FormLabel>
+														<FormDescription>
+															Trigger the action when Snapvisor finds visual
+															changes to review for a deployed commit.
+														</FormDescription>
+													</div>
+													<FormControl>
+														<Switch
+															checked={field.value}
+															onCheckedChange={field.onChange}
+														/>
+													</FormControl>
+												</FormItem>
+											)}
+										/>
+									)}
 
 									{isCloud && (
 										<FormField

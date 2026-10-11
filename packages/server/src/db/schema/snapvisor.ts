@@ -1,5 +1,12 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import {
+	index,
+	integer,
+	pgTable,
+	text,
+	timestamp,
+	uniqueIndex,
+} from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { organization } from "./account";
@@ -45,6 +52,62 @@ export const snapvisorIntegrationRelations = relations(
 		}),
 	}),
 );
+
+/**
+ * One deployed commit of a Snapvisor-linked service whose build is being
+ * watched for visual changes (see services/snapvisor-checks.ts).
+ *
+ * Its own table, not columns on `application`/`compose`: the application
+ * table is at Postgres' 100-argument limit for eager-loaded relational
+ * queries. There is deliberately no foreign key to the service or the
+ * deployment: the row is also the record that a notification was sent, and
+ * must outlive a deployment cleaned up by log retention (or a redeploy of the
+ * same commit would be notified twice). Stale rows are pruned by age; the
+ * organization FK cleans up with the organization.
+ *
+ * `state`: `pending` (still watching), `notified` (changes found, the
+ * notification was claimed), `settled` (reached a state that needs no
+ * notification, or the link was removed) or `expired` (gave up after the
+ * watch window).
+ */
+export const snapvisorBuildCheck = pgTable(
+	"snapvisor_build_check",
+	{
+		checkId: text("checkId")
+			.notNull()
+			.primaryKey()
+			.$defaultFn(() => nanoid()),
+		organizationId: text("organizationId")
+			.notNull()
+			.references(() => organization.id, { onDelete: "cascade" }),
+		serviceType: text("serviceType").notNull(),
+		serviceId: text("serviceId").notNull(),
+		deploymentId: text("deploymentId"),
+		commitSha: text("commitSha").notNull(),
+		state: text("state").notNull().default("pending"),
+		attempts: integer("attempts").notNull().default(0),
+		errorStreak: integer("errorStreak").notNull().default(0),
+		buildNumber: integer("buildNumber"),
+		buildStatus: text("buildStatus"),
+		nextCheckAt: timestamp("nextCheckAt").notNull().defaultNow(),
+		expiresAt: timestamp("expiresAt").notNull(),
+		notifiedAt: timestamp("notifiedAt"),
+		createdAt: timestamp("createdAt").notNull().defaultNow(),
+	},
+	(table) => ({
+		// One watch (and one notification) per commit of a service, however many
+		// times it is redeployed.
+		serviceCommitUnique: uniqueIndex(
+			"snapvisor_build_check_service_commit_unique",
+		).on(table.serviceId, table.commitSha),
+		dueIdx: index("snapvisor_build_check_due_idx").on(
+			table.state,
+			table.nextCheckAt,
+		),
+	}),
+);
+
+export type SnapvisorBuildCheck = typeof snapvisorBuildCheck.$inferSelect;
 
 const snapvisorBaseUrlSchema = z
 	.string()
@@ -96,4 +159,8 @@ export const apiSetSnapvisorComposeProject = z.object({
 
 export const apiSnapvisorPreviewBuild = z.object({
 	previewDeploymentId: z.string().min(1),
+});
+
+export const apiSnapvisorDeploymentBuild = z.object({
+	deploymentId: z.string().min(1),
 });

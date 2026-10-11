@@ -671,6 +671,7 @@ table notification {
   dokployRestart boolean [not null, default: false]
   dockerCleanup boolean [not null, default: false]
   serverThreshold boolean [not null, default: false]
+  snapvisorChanges boolean [not null, default: false]
   notificationType notificationType [not null]
   createdAt text [not null]
   slackId text

@@ -18,13 +18,39 @@ import { normalizeSnapvisorApiBaseUrl } from "./urls";
 
 export class SnapvisorError extends Error {
 	readonly status?: number;
+	/** Seconds Snapvisor asked us to wait (`Retry-After` on a 429), if it did. */
+	readonly retryAfterSeconds?: number;
 
-	constructor(message: string, options: { status?: number } = {}) {
+	constructor(
+		message: string,
+		options: { status?: number; retryAfterSeconds?: number } = {},
+	) {
 		super(message);
 		this.name = "SnapvisorError";
 		this.status = options.status;
+		this.retryAfterSeconds = options.retryAfterSeconds;
 	}
 }
+
+/**
+ * `Retry-After` is either a number of seconds or an HTTP date. Anything else,
+ * or a non-positive value, means "no usable hint".
+ */
+export const parseRetryAfterSeconds = (
+	value: string | null | undefined,
+	nowMs: number = Date.now(),
+): number | undefined => {
+	if (!value) return undefined;
+	const trimmed = value.trim();
+	if (/^\d+$/.test(trimmed)) {
+		const seconds = Number(trimmed);
+		return seconds > 0 ? seconds : undefined;
+	}
+	const at = Date.parse(trimmed);
+	if (Number.isNaN(at)) return undefined;
+	const seconds = Math.ceil((at - nowMs) / 1000);
+	return seconds > 0 ? seconds : undefined;
+};
 
 export interface SnapvisorClientOptions {
 	baseUrl: string;
@@ -170,6 +196,14 @@ export const createSnapvisorClient = (
 			if (response.status === 404) {
 				throw new SnapvisorError("Snapvisor project not found", {
 					status: 404,
+				});
+			}
+			if (response.status === 429) {
+				throw new SnapvisorError("Snapvisor is rate limiting requests", {
+					status: 429,
+					retryAfterSeconds: parseRetryAfterSeconds(
+						response.headers?.get?.("retry-after"),
+					),
 				});
 			}
 			let message = `Snapvisor responded with HTTP ${response.status}`;
