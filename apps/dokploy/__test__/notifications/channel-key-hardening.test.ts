@@ -405,6 +405,64 @@ describe.each(["sendly", "notifly"] as const)("%s channel", (type) => {
 			).resolves.toBe(true);
 		});
 
+		it("test: a failed send does not keep the transport error as cause", async () => {
+			const typedKey = "typed-key-for-the-failing-test";
+			mocks.fetch.mockRejectedValue(
+				new Error(`Failed to parse URL from ${typedKey}`),
+			);
+
+			const failure = await testButton(type, {
+				apiKey: typedKey,
+				baseUrl: defaultUrl,
+			}).catch((error: Error) => error);
+
+			expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+			expect((failure as Error).cause).toBeUndefined();
+			expect((failure as Error).message).not.toContain(typedKey);
+		});
+
+		it("create: a database failure answers with a plain refusal and no cause", async () => {
+			const { db } = await import("@dokploy/server/db");
+			const typedSecret = "typed-secret-for-the-failing-create";
+			vi.mocked(db.transaction).mockRejectedValueOnce(
+				new Error(`insert failed, params: ${typedSecret}`),
+			);
+			const base = {
+				name: `${type} channel`,
+				appBuildError: true,
+				databaseBackup: true,
+				dokployBackup: true,
+				volumeBackup: true,
+				dokployRestart: true,
+				appDeploy: true,
+				dockerCleanup: true,
+				scheduleFailure: true,
+				serverThreshold: true,
+				apiKey: typedSecret,
+				baseUrl: defaultUrl,
+			};
+
+			const failure = await (type === "sendly"
+				? caller.createSendly({
+						...base,
+						fromAddress: "alerts@example.com",
+						toAddresses: ["team@example.com"],
+					})
+				: caller.createNotifly({
+						...base,
+						workflowKey: "dokploy",
+						subscriberId: "",
+					})
+			).catch((error: Error) => error);
+
+			expect(failure).toMatchObject({
+				code: "BAD_REQUEST",
+				message: "Error creating the notification",
+			});
+			expect((failure as Error).cause).toBeUndefined();
+			expect(JSON.stringify(failure)).not.toContain(typedSecret);
+		});
+
 		it("update: a database failure answers with a plain refusal and no cause", async () => {
 			const { db } = await import("@dokploy/server/db");
 			const typedSecret = "typed-secret-for-the-failing-update";

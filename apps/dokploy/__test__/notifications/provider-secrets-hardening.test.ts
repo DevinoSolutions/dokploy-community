@@ -2373,6 +2373,143 @@ describe("create: a failure logs the error name, never the error", () => {
 	});
 });
 
+describe("create: a database failure does not reach the client with its bound values", () => {
+	const typedSecret = "typed-secret-for-the-failing-create";
+	const toggles = {
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		scheduleFailure: true,
+		serverThreshold: true,
+	};
+	const createInputs: Record<string, [string, Record<string, unknown>]> = {
+		slack: ["createSlack", { webhookUrl: typedSecret, channel: "#ops" }],
+		discord: ["createDiscord", { webhookUrl: typedSecret, decoration: true }],
+		teams: ["createTeams", { webhookUrl: typedSecret }],
+		lark: ["createLark", { webhookUrl: typedSecret }],
+		mattermost: [
+			"createMattermost",
+			{ webhookUrl: `https://mm.example.com/hooks/${typedSecret}` },
+		],
+		telegram: [
+			"createTelegram",
+			{ botToken: typedSecret, chatId: "431", messageThreadId: "" },
+		],
+		resend: [
+			"createResend",
+			{
+				apiKey: typedSecret,
+				fromAddress: "alerts@example.com",
+				toAddresses: ["team@example.com"],
+			},
+		],
+		gotify: [
+			"createGotify",
+			{
+				serverUrl: "https://gotify.example.com",
+				appToken: typedSecret,
+				priority: 5,
+				decoration: true,
+			},
+		],
+		ntfy: [
+			"createNtfy",
+			{
+				serverUrl: "https://ntfy.example.com",
+				topic: typedSecret,
+				accessToken: typedSecret,
+				priority: 3,
+			},
+		],
+		pushover: [
+			"createPushover",
+			{ userKey: typedSecret, apiToken: typedSecret, priority: 0 },
+		],
+		email: [
+			"createEmail",
+			{
+				smtpServer: "smtp.example.com",
+				smtpPort: 587,
+				username: "mailer",
+				password: typedSecret,
+				fromAddress: "alerts@example.com",
+				toAddresses: ["team@example.com"],
+			},
+		],
+		custom: [
+			"createCustom",
+			{
+				endpoint: "https://hooks.example.com/ingest",
+				headers: { Authorization: typedSecret },
+			},
+		],
+	};
+
+	it.each(cases.map((c) => c.type))(
+		"%s answers with a plain refusal and no cause",
+		async (type) => {
+			const { db } = await import("@dokploy/server/db");
+			const [procedure, input] = createInputs[type] as [
+				string,
+				Record<string, unknown>,
+			];
+			const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+			vi.mocked(db.transaction).mockRejectedValueOnce(
+				new Error(`insert failed, params: ${typedSecret}`),
+			);
+
+			const failure = await call(procedure, {
+				name: `${type} channel`,
+				...toggles,
+				...input,
+			}).catch((error: Error) => error);
+			errorLog.mockRestore();
+
+			expect(failure).toMatchObject({
+				code: "BAD_REQUEST",
+				message: "Error creating the notification",
+			});
+			expect((failure as Error).cause).toBeUndefined();
+			expect(JSON.stringify(failure)).not.toContain(typedSecret);
+		},
+	);
+});
+
+describe("Test Notification: a failed send does not keep the transport error as cause", () => {
+	const cases_: [string, Record<string, unknown>][] = [
+		["gotify", { appToken: "gotify-typed-token-wxyz" }],
+		["mattermost", { webhookUrl: "https://mm.example.com/hooks/typed-wxyz" }],
+		["ntfy", { topic: "ntfy-typed-topic", accessToken: "ntfy-typed-wxyz" }],
+		[
+			"pushover",
+			{ userKey: "pushover-typed-user-wxyz", apiToken: "pushover-typed-wxyz" },
+		],
+		["custom", { endpoint: "https://hooks.example.com/typed-wxyz" }],
+	];
+
+	it.each(cases_)("%s", async (type, typed) => {
+		const c = byType(type);
+		mocks.fetch.mockRejectedValue(
+			new Error(`Failed to parse URL from ${Object.values(typed).join(" ")}`),
+		);
+
+		const failure = await call(c.routerTest, {
+			...c.testInput,
+			...typed,
+		}).catch((error: Error) => error);
+
+		expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+		expect((failure as Error).cause).toBeUndefined();
+		for (const secret of Object.values(typed)) {
+			expect((failure as Error).message).not.toContain(secret);
+		}
+	});
+});
+
 describe("update: a database failure does not reach the client with its bound values", () => {
 	const typedSecret = "typed-secret-for-the-failing-update";
 

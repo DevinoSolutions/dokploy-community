@@ -271,6 +271,21 @@ describe("the channel API key is write-only", () => {
 		expect(mocks.clientKeys).toEqual([API_KEY]);
 	});
 
+	it("a failed test does not keep the transport error as cause", async () => {
+		mocks.callTool.mockRejectedValue(new Error("Uptimely rejected the key."));
+
+		const failure = await caller
+			.testUptimelyConnection({
+				apiKey: "typed-key",
+				projectId: PROJECT,
+				baseUrl: "https://app.getuptimely.com",
+			})
+			.catch((error: Error) => error);
+
+		expect(failure).toMatchObject({ code: "BAD_REQUEST" });
+		expect((failure as Error).cause).toBeUndefined();
+	});
+
 	it("borrowing the stored key takes the update permission, not only create", async () => {
 		mocks.denied = ["notification:update"];
 
@@ -344,6 +359,39 @@ describe("updateUptimelyChannelNotification", () => {
 		const channel = mocks.updates.find((u) => u.table === "uptimely_channel");
 		expect(channel?.bound).toContain("chan-1");
 		expect(channel?.bound).not.toContain("chan-of-org-2");
+	});
+
+	it("a failed create answers with a plain refusal and no cause", async () => {
+		const { db } = await import("@dokploy/server/db");
+		const typedSecret = "typed-secret-for-the-failing-create";
+		vi.mocked(db.transaction).mockRejectedValueOnce(
+			new Error(`insert failed, params: ${typedSecret}`),
+		);
+
+		const failure = await caller
+			.createUptimely({
+				name: "Uptimely incidents",
+				appBuildError: true,
+				databaseBackup: true,
+				dokployBackup: true,
+				volumeBackup: true,
+				dokployRestart: true,
+				appDeploy: true,
+				dockerCleanup: true,
+				scheduleFailure: true,
+				serverThreshold: true,
+				apiKey: typedSecret,
+				projectId: PROJECT,
+				baseUrl: "https://app.getuptimely.com",
+			})
+			.catch((error: Error) => error);
+
+		expect(failure).toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Error creating the notification",
+		});
+		expect((failure as Error).cause).toBeUndefined();
+		expect(JSON.stringify(failure)).not.toContain(typedSecret);
 	});
 
 	it("a database failure answers with a plain refusal and no cause", async () => {

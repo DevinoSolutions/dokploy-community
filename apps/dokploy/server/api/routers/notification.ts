@@ -325,10 +325,10 @@ export const notificationRouter = createTRPCRouter({
 					"Error creating the Slack notification:",
 					error instanceof Error ? error.name : "unknown error",
 				);
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -402,10 +402,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -481,10 +481,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -562,10 +562,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -646,10 +646,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -718,10 +718,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -794,10 +794,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -876,10 +876,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1066,10 +1066,10 @@ export const notificationRouter = createTRPCRouter({
 					ServerName,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error sending the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1084,10 +1084,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1157,7 +1157,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1172,10 +1171,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1276,7 +1275,6 @@ export const notificationRouter = createTRPCRouter({
 						error instanceof Error
 							? `Error testing the notification: ${redactSecrets(error.message, secrets)}`
 							: "Error testing the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1294,10 +1292,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1357,7 +1355,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1372,10 +1369,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1472,10 +1469,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1548,10 +1545,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1625,10 +1622,10 @@ export const notificationRouter = createTRPCRouter({
 					resourceName: input.name,
 				});
 			} catch (error) {
+				if (error instanceof TRPCError) throw error;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error creating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -1692,7 +1689,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error testing the notification",
-					cause: error,
 				});
 			}
 		}),

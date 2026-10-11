@@ -34,5 +34,4 @@ export const testFailure = (error: unknown, secrets: ReadonlyArray<unknown>) =>
 					error instanceof Error
 						? redactSecrets(error.message, secrets)
 						: "Unknown error",
-				cause: error,
 			});
