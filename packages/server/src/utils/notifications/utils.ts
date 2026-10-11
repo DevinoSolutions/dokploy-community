@@ -306,9 +306,10 @@ export const sendTelegramNotification = async (
 				text: messageText,
 				parse_mode: "HTML",
 				disable_web_page_preview: true,
-				reply_markup: {
-					inline_keyboard: inlineButton,
-				},
+				// An empty keyboard is pointless and may be refused: send one only with buttons.
+				...(inlineButton?.length
+					? { reply_markup: { inline_keyboard: inlineButton } }
+					: {}),
 			}),
 		});
 	} catch (err) {

@@ -1,6 +1,9 @@
-/** Masks a stored API key down to its last four characters. */
+/**
+ * Masks a stored API key down to its last four characters. A shorter value
+ * would mostly give itself away, so it is hidden entirely.
+ */
 export const maskApiKey = (apiKey: string) =>
-	apiKey.length > 4 ? `••••${apiKey.slice(-4)}` : "••••";
+	apiKey.length >= 12 ? `••••${apiKey.slice(-4)}` : "••••";
 
 /**
  * Masks a webhook URL (where the URL itself is the credential) down to its

@@ -340,6 +340,28 @@ describe("telegram throws when the call fails", () => {
 		).resolves.toBeUndefined();
 		expect(console_.error).not.toHaveBeenCalled();
 	});
+
+	describe("reply_markup", () => {
+		const sentBody = async (buttons?: { text: string; url: string }[][]) => {
+			mocks.fetch.mockResolvedValue(response(200, "OK", { ok: true }));
+			await senders.sendTelegramNotification(connection, "hi", buttons);
+			return JSON.parse(mocks.fetch.mock.calls[0]?.[1].body);
+		};
+
+		it("is left out without buttons", async () => {
+			expect(await sentBody()).not.toHaveProperty("reply_markup");
+			mocks.fetch.mockClear();
+			expect(await sentBody([])).not.toHaveProperty("reply_markup");
+		});
+
+		it("carries the buttons when there are some", async () => {
+			const buttons = [[{ text: "Open", url: "https://example.test/deploy" }]];
+
+			expect((await sentBody(buttons)).reply_markup).toEqual({
+				inline_keyboard: buttons,
+			});
+		});
+	});
 });
 
 describe("lark throws when the call fails", () => {
