@@ -18,6 +18,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+import { DoDomainDnsCard } from "./dodomain-dns-card";
 import { HandleDnsProvider } from "./handle-dns-provider";
 
 const providerLabels: Record<string, string> = {
@@ -166,6 +167,7 @@ export const ShowDnsProviders = () => {
 								})}
 							</ul>
 						)}
+						<DoDomainDnsCard />
 					</CardContent>
 				</div>
 			</Card>
