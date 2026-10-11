@@ -91,7 +91,7 @@ The panel has an optional **Deploy heartbeat**. Press **Add deploy heartbeat** t
 
 **Branch and production deployments**
 
-The same link works for regular deployments. On the **Deployments** tab of an application or compose service, pick the Snapvisor project under **Visual testing (Snapvisor)** (it appears once Snapvisor is connected). Every finished deployment of that service that recorded its full commit SHA then shows the same badge, with a refresh button and a **Review in Snapvisor** link. A commit that has no build yet reads **No build yet**; an expired token, a rate limit or an unreachable Snapvisor reads **Unavailable** with the reason on hover. None of these affects the list.
+The same link works for regular deployments. On the **Deployments** tab of an application or compose service, pick the Snapvisor project under **Visual testing (Snapvisor)** (it appears once Snapvisor is connected). Every finished deployment of that service that recorded its full commit SHA then shows the same badge, with a refresh button and a **Review in Snapvisor** link. A commit that has no build yet reads **No build yet**; an expired token, a rate limit or an unreachable Snapvisor reads **Unavailable** with the reason on hover. None of these affects the list. The commit is only trusted for git-sourced services (GitHub, GitLab, Bitbucket, Gitea, Git): for Docker-image, upload and raw-compose services the deployment text is free-form, so no badge or notification is produced from it.
 
 **Get notified when there are changes to review**
 

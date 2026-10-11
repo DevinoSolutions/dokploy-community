@@ -12,12 +12,57 @@ const mocks = vi.hoisted(() => ({
 	applications: [] as Record<string, unknown>[],
 	composes: [] as Record<string, unknown>[],
 	integrations: [] as Record<string, unknown>[],
+	checks: [] as Record<string, unknown>[],
 	inserted: [] as Record<string, unknown>[],
 	insertConflict: vi.fn(),
-	updateReturning: [] as unknown[],
+	deploymentsFindMany: vi.fn(),
+	// `null`: return the rows the conditional update really changed.
+	updateReturning: [] as unknown[] | null,
 	updateSet: vi.fn(),
 	updateWhere: vi.fn(),
 }));
+
+/**
+ * Applies the simple `"column" <op> $n` conditions of a compiled `where` to an
+ * in-memory row, so the tests can check what a query keeps and what it drops
+ * (behaviour) instead of which column names appear in the SQL text.
+ */
+const matchesWhere = (where: unknown, row: Record<string, unknown>) => {
+	if (!where) return true;
+	const { sql, params } = new PgDialect().sqlToQuery(where as never);
+	const normalize = (value: unknown) =>
+		value instanceof Date
+			? value.getTime()
+			: typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value)
+				? Date.parse(value)
+				: value;
+	return [
+		...sql.matchAll(/"(\w+)"\s*(<=|>=|=|<|>|like)\s*\$(\d+)/gi),
+	].every(([, column, op, index]) => {
+		const actual = normalize(row[column as string]) as number;
+		const wanted = normalize(params[Number(index) - 1]) as number;
+		switch ((op as string).toLowerCase()) {
+			case "=":
+				return actual === wanted;
+			case "<":
+				return actual < wanted;
+			case "<=":
+				return actual <= wanted;
+			case ">":
+				return actual > wanted;
+			case ">=":
+				return actual >= wanted;
+			default:
+				return (
+					typeof actual === "string" &&
+					(actual as string).startsWith(String(wanted).replace(/%$/, ""))
+				);
+		}
+	});
+};
+
+const filterRows = (rows: Record<string, unknown>[], where: unknown) =>
+	rows.filter((row) => matchesWhere(where, row));
 
 vi.mock("@dokploy/server/db", () => {
 	const table = (rows: () => unknown[]) => ({
@@ -27,7 +72,24 @@ vi.mock("@dokploy/server/db", () => {
 	return {
 		db: {
 			query: {
-				deployments: table(() => mocks.deployments),
+				deployments: {
+					findMany: vi.fn(async (args: { where?: unknown }) => {
+						mocks.deploymentsFindMany();
+						return filterRows(mocks.deployments, args?.where);
+					}),
+					findFirst: vi.fn(),
+				},
+				snapvisorBuildCheck: {
+					findMany: vi.fn(async (args: { where?: unknown; limit?: number }) =>
+						filterRows(mocks.checks, args?.where)
+							.sort(
+								(a, b) =>
+									(a.nextCheckAt as Date).getTime() -
+									(b.nextCheckAt as Date).getTime(),
+							)
+							.slice(0, args?.limit),
+					),
+				},
 				previewDeployments: table(() => mocks.previews),
 				applications: table(() => mocks.applications),
 				compose: table(() => mocks.composes),
@@ -55,7 +117,12 @@ vi.mock("@dokploy/server/db", () => {
 						where: vi.fn((where: unknown) => {
 							mocks.updateWhere(where);
 							return {
-								returning: vi.fn(async () => mocks.updateReturning),
+								returning: vi.fn(async () => {
+									if (mocks.updateReturning) return mocks.updateReturning;
+									const changed = filterRows(mocks.checks, where);
+									for (const row of changed) Object.assign(row, values);
+									return changed.map((row) => ({ checkId: row.checkId }));
+								}),
 							};
 						}),
 					};
@@ -77,6 +144,7 @@ const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000);
 
 const deployment = (overrides: Record<string, unknown> = {}) => ({
 	deploymentId: "dep-1",
+	status: "done",
 	applicationId: "app-1",
 	composeId: null,
 	previewDeploymentId: null,
@@ -89,6 +157,7 @@ const deployment = (overrides: Record<string, unknown> = {}) => ({
 const linkedApplication = (overrides: Record<string, unknown> = {}) => ({
 	applicationId: "app-1",
 	snapvisorProjectName: "web-app",
+	sourceType: "github",
 	environment: { project: { organizationId: "org-1" } },
 	...overrides,
 });
@@ -100,6 +169,7 @@ beforeEach(() => {
 	mocks.applications = [linkedApplication()];
 	mocks.composes = [];
 	mocks.integrations = [{ organizationId: "org-1" }];
+	mocks.checks = [];
 	mocks.inserted = [];
 	mocks.updateReturning = [];
 });
@@ -136,6 +206,7 @@ describe("discover", () => {
 			{
 				composeId: "compose-1",
 				snapvisorProjectName: "stack-app",
+				sourceType: "git",
 				environment: { project: { organizationId: "org-1" } },
 			},
 		];
@@ -220,6 +291,85 @@ describe("discover", () => {
 		await expect(createSnapvisorCheckStore().discover(NOW)).resolves.toBe(0);
 	});
 
+	it("does not start a watch for a deployment that failed or is still running", async () => {
+		mocks.deployments = [
+			deployment({ deploymentId: "dep-error", status: "error" }),
+			deployment({
+				deploymentId: "dep-running",
+				status: "running",
+				description: `Commit: ${SHA_B}`,
+			}),
+		];
+
+		await expect(createSnapvisorCheckStore().discover(NOW)).resolves.toBe(0);
+		expect(mocks.inserted).toEqual([]);
+
+		// Of two deploys of different commits only the finished one is watched.
+		mocks.deployments = [
+			deployment({
+				deploymentId: "dep-running",
+				status: "running",
+				description: `Commit: ${SHA_B}`,
+			}),
+			deployment({ deploymentId: "dep-done" }),
+		];
+		await createSnapvisorCheckStore().discover(NOW);
+		expect(mocks.inserted.map((v) => [v.commitSha, v.deploymentId])).toEqual([
+			[SHA_A, "dep-done"],
+		]);
+	});
+
+	it("stores the commit in lower case however the marker was written", async () => {
+		mocks.deployments = [
+			deployment({ description: `Commit: ${SHA_A.toUpperCase()}` }),
+		];
+
+		await createSnapvisorCheckStore().discover(NOW);
+
+		expect(mocks.inserted).toMatchObject([{ commitSha: SHA_A }]);
+	});
+
+	it("does not trust a commit marker on a service that is not git-sourced", async () => {
+		for (const sourceType of ["docker", "drop"]) {
+			mocks.deployments = [deployment()];
+			mocks.applications = [linkedApplication({ sourceType })];
+			await expect(createSnapvisorCheckStore().discover(NOW)).resolves.toBe(0);
+		}
+
+		mocks.deployments = [
+			deployment({ applicationId: null, composeId: "compose-1" }),
+		];
+		mocks.applications = [];
+		mocks.composes = [
+			{
+				composeId: "compose-1",
+				snapvisorProjectName: "stack-app",
+				sourceType: "raw",
+				environment: { project: { organizationId: "org-1" } },
+			},
+		];
+		await expect(createSnapvisorCheckStore().discover(NOW)).resolves.toBe(0);
+		expect(mocks.inserted).toEqual([]);
+	});
+
+	it.each(["git", "github", "gitlab", "bitbucket", "gitea"])(
+		"watches a %s-sourced service",
+		async (sourceType) => {
+			mocks.deployments = [deployment()];
+			mocks.applications = [linkedApplication({ sourceType })];
+
+			await expect(createSnapvisorCheckStore().discover(NOW)).resolves.toBe(1);
+		},
+	);
+
+	it("does not even scan deployments while no organization has Snapvisor connected", async () => {
+		mocks.deployments = [deployment()];
+		mocks.integrations = [];
+
+		await expect(createSnapvisorCheckStore().discover(NOW)).resolves.toBe(0);
+		expect(mocks.deploymentsFindMany).not.toHaveBeenCalled();
+	});
+
 	it("does nothing when nothing was deployed", async () => {
 		await expect(createSnapvisorCheckStore().discover(NOW)).resolves.toBe(0);
 		expect(mocks.insertConflict).not.toHaveBeenCalled();
@@ -267,5 +417,85 @@ describe("expireOverdue", () => {
 		);
 		expect(query.sql).toContain('"expiresAt"');
 		expect(query.params[0]).toBe("pending");
+	});
+});
+
+const pendingCheck = (
+	checkId: string,
+	overrides: Record<string, unknown> = {},
+) => ({
+	checkId,
+	state: "pending",
+	nextCheckAt: minutesAgo(1),
+	expiresAt: new Date(NOW.getTime() + 60 * 60_000),
+	...overrides,
+});
+
+describe("giving up on a build that never shows up", () => {
+	beforeEach(() => {
+		mocks.updateReturning = null;
+	});
+
+	it("expires only pending checks whose window has passed", async () => {
+		mocks.checks = [
+			pendingCheck("overdue", { expiresAt: minutesAgo(1) }),
+			pendingCheck("closing-now", { expiresAt: NOW }),
+			pendingCheck("in-window"),
+			pendingCheck("already-notified", {
+				state: "notified",
+				expiresAt: minutesAgo(30),
+			}),
+			pendingCheck("settled", { state: "settled", expiresAt: minutesAgo(30) }),
+		];
+
+		await expect(createSnapvisorCheckStore().expireOverdue(NOW)).resolves.toBe(
+			2,
+		);
+
+		expect(
+			Object.fromEntries(mocks.checks.map((c) => [c.checkId, c.state])),
+		).toEqual({
+			overdue: "expired",
+			"closing-now": "expired",
+			"in-window": "pending",
+			"already-notified": "notified",
+			settled: "settled",
+		});
+	});
+
+	it("never hands out a check past its window, even if it was not expired yet", async () => {
+		mocks.checks = [
+			pendingCheck("overdue-but-pending", { expiresAt: minutesAgo(1) }),
+			pendingCheck("closing-now", { expiresAt: NOW }),
+			pendingCheck("in-window"),
+		];
+
+		const due = await createSnapvisorCheckStore().listDue(NOW, 10);
+
+		expect(due.map((c) => c.checkId)).toEqual(["in-window"]);
+	});
+
+	it("hands out only pending checks that are due, oldest first, up to the limit", async () => {
+		mocks.checks = [
+			pendingCheck("later", { nextCheckAt: minutesAgo(1) }),
+			pendingCheck("oldest", { nextCheckAt: minutesAgo(30) }),
+			pendingCheck("not-yet", {
+				nextCheckAt: new Date(NOW.getTime() + 60_000),
+			}),
+			pendingCheck("notified", { state: "notified" }),
+			pendingCheck("middle", { nextCheckAt: minutesAgo(10) }),
+		];
+
+		const store = createSnapvisorCheckStore();
+
+		expect((await store.listDue(NOW, 10)).map((c) => c.checkId)).toEqual([
+			"oldest",
+			"middle",
+			"later",
+		]);
+		expect((await store.listDue(NOW, 2)).map((c) => c.checkId)).toEqual([
+			"oldest",
+			"middle",
+		]);
 	});
 });

@@ -6,11 +6,11 @@ import {
 	previewDeployments,
 	type SnapvisorBuildCheck,
 	snapvisorBuildCheck,
-	snapvisorIntegration,
 } from "@dokploy/server/db/schema";
 import { sendSnapvisorChangesNotifications } from "@dokploy/server/utils/notifications/snapvisor-changes";
 import { backgroundJob } from "@dokploy/server/utils/process/background";
 import {
+	isSnapvisorOrganizationWideFailure,
 	isTerminalSnapvisorStatus,
 	SNAPVISOR_CHANGES_STATUS,
 } from "@dokploy/server/utils/snapvisor/build-lookup";
@@ -35,6 +35,7 @@ import { IS_CLOUD } from "../constants";
 import {
 	commitShaFromDescription,
 	findSnapvisorByOrganizationId,
+	isGitSourceType,
 	type SnapvisorIntegration,
 	snapvisorBuildReviewUrl,
 	snapvisorClientFor,
@@ -186,8 +187,10 @@ export const runSnapvisorCheckCycle = async (
 	await deps.prune(new Date(startedAt.getTime() - RETENTION_MS));
 
 	const due = await deps.listDue(startedAt, MAX_CHECKS_PER_CYCLE);
-	// An organization whose Snapvisor call just failed is left alone for the
-	// rest of the cycle: its other checks were pushed back with it.
+	// An organization whose Snapvisor access just failed (token, rate limit,
+	// outage) is left alone for the rest of the cycle: its other checks were
+	// pushed back with it. A failure of one project or build only defers that
+	// check, so a renamed project cannot hold back its healthy neighbours.
 	const failedOrganizations = new Set<string>();
 
 	for (const check of due) {
@@ -207,7 +210,8 @@ export const runSnapvisorCheckCycle = async (
 			build = await deps.findBuild(context, check.commitSha);
 		} catch (error) {
 			summary.failed++;
-			failedOrganizations.add(check.organizationId);
+			const organizationWide = isSnapvisorOrganizationWideFailure(error);
+			if (organizationWide) failedOrganizations.add(check.organizationId);
 			const errorStreak = check.errorStreak + 1;
 			const until = new Date(
 				now.getTime() +
@@ -223,7 +227,9 @@ export const runSnapvisorCheckCycle = async (
 				errorStreak,
 				nextCheckAt: until,
 			});
-			await deps.deferOrganization(check.organizationId, until);
+			if (organizationWide) {
+				await deps.deferOrganization(check.organizationId, until);
+			}
 			console.error(
 				`[snapvisor] build check deferred: ${describeFailure(error)}`,
 			);
@@ -308,6 +314,15 @@ export const runSnapvisorCheckCycle = async (
 
 export const createSnapvisorCheckStore = (): SnapvisorCheckStore => ({
 	async discover(now) {
+		// Most panels have no Snapvisor integration: skip the deployments scan.
+		const connected = await db.query.snapvisorIntegration.findMany({
+			columns: { organizationId: true },
+		});
+		if (connected.length === 0) return 0;
+		const connectedOrganizations = new Set(
+			connected.map((row) => row.organizationId),
+		);
+
 		const since = new Date(now.getTime() - SNAPVISOR_WATCH_WINDOW_MS);
 		const rows = await db.query.deployments.findMany({
 			where: and(
@@ -389,7 +404,11 @@ export const createSnapvisorCheckStore = (): SnapvisorCheckStore => ({
 			applicationIds.length
 				? db.query.applications.findMany({
 						where: inArray(applications.applicationId, applicationIds),
-						columns: { applicationId: true, snapvisorProjectName: true },
+						columns: {
+							applicationId: true,
+							snapvisorProjectName: true,
+							sourceType: true,
+						},
 						with: {
 							environment: {
 								columns: { environmentId: true },
@@ -401,7 +420,11 @@ export const createSnapvisorCheckStore = (): SnapvisorCheckStore => ({
 			composeIds.length
 				? db.query.compose.findMany({
 						where: inArray(compose.composeId, composeIds),
-						columns: { composeId: true, snapvisorProjectName: true },
+						columns: {
+							composeId: true,
+							snapvisorProjectName: true,
+							sourceType: true,
+						},
 						with: {
 							environment: {
 								columns: { environmentId: true },
@@ -412,8 +435,10 @@ export const createSnapvisorCheckStore = (): SnapvisorCheckStore => ({
 				: [],
 		]);
 		const organizationByService = new Map<string, string>();
+		// Only a git deploy writes the `Commit:` marker itself; on a Docker,
+		// upload or raw service the description is free text, so it is not trusted.
 		for (const row of linkedApplications) {
-			if (row.snapvisorProjectName) {
+			if (row.snapvisorProjectName && isGitSourceType(row.sourceType)) {
 				organizationByService.set(
 					row.applicationId,
 					row.environment.project.organizationId,
@@ -421,7 +446,7 @@ export const createSnapvisorCheckStore = (): SnapvisorCheckStore => ({
 			}
 		}
 		for (const row of linkedComposes) {
-			if (row.snapvisorProjectName) {
+			if (row.snapvisorProjectName && isGitSourceType(row.sourceType)) {
 				organizationByService.set(
 					row.composeId,
 					row.environment.project.organizationId,
@@ -429,16 +454,6 @@ export const createSnapvisorCheckStore = (): SnapvisorCheckStore => ({
 			}
 		}
 		if (organizationByService.size === 0) return 0;
-
-		const connected = await db.query.snapvisorIntegration.findMany({
-			where: inArray(snapvisorIntegration.organizationId, [
-				...new Set(organizationByService.values()),
-			]),
-			columns: { organizationId: true },
-		});
-		const connectedOrganizations = new Set(
-			connected.map((row) => row.organizationId),
-		);
 
 		const values = new Map<string, typeof snapvisorBuildCheck.$inferInsert>();
 		for (const row of wanted) {
@@ -617,6 +632,8 @@ const createDatabaseDeps = (): SnapvisorCheckDeps => {
 		},
 
 		async findBuild(context, commitSha) {
+			// Assumes Snapvisor lists the newest build first, so the one build
+			// asked for (`perPage: 1`) is the latest for this head sha.
 			const builds = await snapvisorClientFor(context.integration).listBuilds({
 				accountSlug: context.integration.accountSlug,
 				projectName: context.snapvisorProjectName,

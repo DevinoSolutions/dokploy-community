@@ -174,6 +174,7 @@ const world = (store: ReturnType<typeof memoryStore>) => {
 		now: new Date(T0),
 		outcome: null as Outcome,
 		byOrganization: {} as Record<string, Outcome>,
+		byCommit: {} as Record<string, Outcome>,
 		context: (check: SnapvisorBuildCheck): SnapvisorCheckContext | null => ({
 			snapvisorProjectName: "web-app",
 			serviceName: "web",
@@ -195,7 +196,10 @@ const world = (store: ReturnType<typeof memoryStore>) => {
 		findBuild: async (context, commitSha) => {
 			const organizationId = context.integration.organizationId;
 			state.calls.push({ organizationId, commitSha });
-			const outcome = state.byOrganization[organizationId] ?? state.outcome;
+			const outcome =
+				state.byCommit[commitSha] ??
+				state.byOrganization[organizationId] ??
+				state.outcome;
 			if (outcome instanceof Error) throw outcome;
 			return outcome;
 		},
@@ -566,6 +570,125 @@ describe("rate limiting and outages", () => {
 		expect(w.state.notifications.map((n) => n.organizationId)).toEqual([
 			"org-2",
 		]);
+	});
+
+	describe("a failure that is only about one project", () => {
+		const A = "a".repeat(40);
+		const B = "b".repeat(40);
+		const twoServicesOfOneOrganization = () =>
+			memoryStore([
+				check({ checkId: "a", serviceId: "app-a", commitSha: A }),
+				check({
+					checkId: "b",
+					serviceId: "app-b",
+					commitSha: B,
+					nextCheckAt: new Date(T0.getTime() + 1_000),
+				}),
+			]);
+
+		it("defers only that check when its project no longer exists, and still checks and notifies the healthy one", async () => {
+			const store = twoServicesOfOneOrganization();
+			const deferOrganization = vi.spyOn(store, "deferOrganization");
+			const w = world(store);
+			w.state.now = new Date(T0.getTime() + 5_000);
+			w.state.byCommit = {
+				[A]: new SnapvisorError("project not found", { status: 404 }),
+				[B]: build("changes-detected"),
+			};
+
+			const summary = await runSnapvisorCheckCycle(w.deps());
+
+			expect(summary).toMatchObject({ checked: 2, failed: 1, notified: 1 });
+			expect(w.state.calls.map((c) => c.commitSha)).toEqual([A, B]);
+			expect(w.state.notifications.map((n) => n.commitSha)).toEqual([B]);
+			expect(deferOrganization).not.toHaveBeenCalled();
+			expect(store.rows.get("b")?.state).toBe("notified");
+			expect(store.rows.get("a")).toMatchObject({
+				state: "pending",
+				errorStreak: 1,
+			});
+			expect((store.rows.get("a")?.nextCheckAt as Date).getTime()).toBe(
+				w.state.now.getTime() + 5 * MIN,
+			);
+		});
+
+		it("keeps asking about the healthy check on later cycles while the broken one backs off on its own streak", async () => {
+			const store = memoryStore([
+				check({ checkId: "a", serviceId: "app-a", commitSha: A }),
+				check({ checkId: "b", serviceId: "app-b", commitSha: B }),
+			]);
+			const w = world(store);
+			w.state.byCommit = {
+				[A]: new SnapvisorError("project not found", { status: 404 }),
+				[B]: null,
+			};
+
+			const gaps: number[] = [];
+			for (let i = 0; i < 4; i++) {
+				const before = w.state.now.getTime();
+				await runSnapvisorCheckCycle(w.deps());
+				gaps.push(
+					(store.rows.get("a")?.nextCheckAt as Date).getTime() - before,
+				);
+				// Jump to when the broken check is due again.
+				w.advance(gaps[i] as number);
+			}
+
+			expect(gaps).toEqual([5, 10, 20, 40].map((m) => m * MIN));
+			// The healthy check was asked on every cycle it was due, never held
+			// back by the broken neighbour.
+			expect(
+				w.state.calls.filter((c) => c.commitSha === B).length,
+			).toBeGreaterThanOrEqual(4);
+			expect(store.rows.get("a")?.errorStreak).toBe(4);
+			expect(store.rows.get("b")?.errorStreak).toBe(0);
+		});
+
+		it.each([400, 404, 422])(
+			"treats HTTP %i as belonging to the check alone",
+			async (status) => {
+				const store = twoServicesOfOneOrganization();
+				const w = world(store);
+				w.state.now = new Date(T0.getTime() + 5_000);
+				w.state.byCommit = {
+					[A]: new SnapvisorError("nope", { status }),
+					[B]: build("changes-detected"),
+				};
+
+				await runSnapvisorCheckCycle(w.deps());
+
+				expect(w.state.notifications).toHaveLength(1);
+				expect(store.rows.get("b")?.state).toBe("notified");
+			},
+		);
+
+		it.each([
+			["401", new SnapvisorError("x", { status: 401 })],
+			["403", new SnapvisorError("x", { status: 403 })],
+			["429", new SnapvisorError("x", { status: 429 })],
+			["500", new SnapvisorError("x", { status: 500 })],
+			["502", new SnapvisorError("x", { status: 502 })],
+			["a network error", new TypeError("fetch failed")],
+		])(
+			"still holds the whole organization back for %s",
+			async (_name, error) => {
+				const store = twoServicesOfOneOrganization();
+				const w = world(store);
+				w.state.now = new Date(T0.getTime() + 5_000);
+				w.state.byCommit = {
+					[A]: error,
+					[B]: build("changes-detected"),
+				};
+
+				await runSnapvisorCheckCycle(w.deps());
+
+				expect(w.state.calls).toHaveLength(1);
+				expect(w.state.notifications).toHaveLength(0);
+				expect((store.rows.get("b")?.nextCheckAt as Date).getTime()).toBe(
+					w.state.now.getTime() + 5 * MIN,
+				);
+			},
+		);
 	});
 
 	it.each([

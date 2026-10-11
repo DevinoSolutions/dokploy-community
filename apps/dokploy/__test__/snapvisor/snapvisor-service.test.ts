@@ -35,6 +35,11 @@ vi.mock("@dokploy/server/db", () => {
 					if (table === "compose") {
 						return { findFirst: mocks.composeFindFirst, findMany: vi.fn() };
 					}
+					// The application target finder reads a narrow row straight from
+					// the table; the fixtures below are that row.
+					if (table === "applications") {
+						return { findFirst: mocks.findApplicationById, findMany: vi.fn() };
+					}
 					if (table === "snapvisorIntegration") {
 						return {
 							findFirst: mocks.integrationFindFirst,
@@ -99,6 +104,7 @@ const application = (overrides: Record<string, unknown> = {}) => ({
 	applicationId: "app-1",
 	name: "web-app",
 	snapvisorProjectName: "web",
+	sourceType: "github",
 	environment: { project: { organizationId: ORG } },
 	...overrides,
 });

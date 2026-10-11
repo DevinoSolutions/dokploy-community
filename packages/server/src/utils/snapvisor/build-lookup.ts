@@ -53,6 +53,24 @@ export const classifySnapvisorError = (
 	return "unreachable";
 };
 
+/**
+ * Whether a failed call says something about the whole organization's
+ * Snapvisor access (bad or revoked token, rate limit, outage, no network) as
+ * opposed to one project or one build (a renamed project, a rejected query).
+ * Only the first kind may hold back the other services of the organization.
+ */
+export const isSnapvisorOrganizationWideFailure = (error: unknown) => {
+	if (!(error instanceof SnapvisorError)) return true;
+	const status = error.status;
+	return (
+		status === undefined ||
+		status === 401 ||
+		status === 403 ||
+		status === 429 ||
+		status >= 500
+	);
+};
+
 export interface SnapvisorBuildLookupOptions {
 	now?: () => number;
 	/** A build that can no longer change. */
@@ -63,6 +81,8 @@ export interface SnapvisorBuildLookupOptions {
 	noneTtlMs?: number;
 	/** Auth, project, unreachable (a 429 uses Retry-After when it is longer). */
 	errorTtlMs?: number;
+	/** The longest a `Retry-After` can stretch a cached failure. */
+	retryAfterCapMs?: number;
 	/** A forced refresh within this window of the last live call is served from cache. */
 	forceMinIntervalMs?: number;
 	maxEntries?: number;
@@ -95,6 +115,7 @@ export const createSnapvisorBuildLookup = (
 	const activeTtlMs = options.activeTtlMs ?? 30_000;
 	const noneTtlMs = options.noneTtlMs ?? 30_000;
 	const errorTtlMs = options.errorTtlMs ?? 60_000;
+	const retryAfterCapMs = options.retryAfterCapMs ?? 10 * 60_000;
 	const forceMinIntervalMs = options.forceMinIntervalMs ?? 5_000;
 	const maxEntries = options.maxEntries ?? 500;
 
@@ -132,7 +153,10 @@ export const createSnapvisorBuildLookup = (
 			result = { kind: "unavailable", reason: classifySnapvisorError(error) };
 			ttl = errorTtlMs;
 			if (error instanceof SnapvisorError && error.retryAfterSeconds) {
-				ttl = Math.max(ttl, error.retryAfterSeconds * 1000);
+				ttl = Math.max(
+					ttl,
+					Math.min(error.retryAfterSeconds * 1000, retryAfterCapMs),
+				);
 			}
 		}
 		const at = now();

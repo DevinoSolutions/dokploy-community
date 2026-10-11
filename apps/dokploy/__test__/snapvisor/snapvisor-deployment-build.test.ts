@@ -68,6 +68,15 @@ vi.mock("@dokploy/server/db", () => {
 				},
 			}),
 			// Service → organization resolver used by assertServiceInOrganization.
+			// Integration edits and removals (`updateSnapvisor`, `removeSnapvisor`).
+			update: vi.fn(() => ({
+				set: () => ({
+					where: () => ({ returning: async () => [mocks.integration] }),
+				}),
+			})),
+			delete: vi.fn(() => ({
+				where: () => ({ returning: async () => [mocks.integration] }),
+			})),
 			execute: vi.fn(async () =>
 				mocks.serviceOrganizationId
 					? [{ organizationId: mocks.serviceOrganizationId }]
@@ -122,9 +131,13 @@ vi.stubGlobal("fetch", fetchMock);
 
 const { snapvisorRouter } = await import("@/server/api/routers/snapvisor");
 const { createCallerFactory } = await import("@/server/api/trpc");
-const { snapvisorBuildLookup } = await import(
-	"@dokploy/server/services/snapvisor"
-);
+const {
+	commitShaFromDescription,
+	removeSnapvisor,
+	resolveDeploymentSnapvisorBuild,
+	snapvisorBuildLookup,
+	updateSnapvisor,
+} = await import("@dokploy/server/services/snapvisor");
 
 const createCaller = createCallerFactory(snapvisorRouter);
 const caller = (role = "owner") =>
@@ -154,12 +167,14 @@ beforeEach(() => {
 		applicationId: "app-1",
 		name: "web",
 		snapvisorProjectName: "web-app",
+		sourceType: "github",
 		environment: { project: { organizationId: "org-1" } },
 	};
 	mocks.compose = {
 		composeId: "compose-1",
 		name: "stack",
 		snapvisorProjectName: "stack-app",
+		sourceType: "git",
 		environment: { project: { organizationId: "org-1" } },
 	};
 	mocks.previewDeployment = {
@@ -338,6 +353,41 @@ describe("snapvisor.deploymentBuild result", () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it("does not trust a commit marker on a service that is not git-sourced", async () => {
+		// A Docker-image deploy never writes the marker itself: the description
+		// is whatever the deployer typed.
+		for (const sourceType of ["docker", "drop"]) {
+			mocks.application = { ...mocks.application, sourceType };
+			await expect(
+				caller().deploymentBuild({ deploymentId: "dep-1" }),
+			).resolves.toEqual({ state: "no-commit" });
+		}
+
+		mocks.deployment = {
+			...mocks.deployment,
+			applicationId: null,
+			composeId: "compose-1",
+		};
+		mocks.compose = { ...mocks.compose, sourceType: "raw" };
+		await expect(
+			caller().deploymentBuild({ deploymentId: "dep-1" }),
+		).resolves.toEqual({ state: "no-commit" });
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("looks up a mixed-case marker by the lower-case sha, sharing the cache", async () => {
+		mocks.deployment = {
+			...mocks.deployment,
+			description: `Commit: ${SHA.toUpperCase()}`,
+		};
+		await caller().deploymentBuild({ deploymentId: "dep-1" });
+		expect(fetchMock.mock.calls[0]?.[0]).toContain(`headSha=${SHA}`);
+
+		mocks.deployment = { ...mocks.deployment, description: `Commit: ${SHA}` };
+		await caller().deploymentBuild({ deploymentId: "dep-1" });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
 	it("is a quiet 'no-build' while Snapvisor has no build for the commit", async () => {
 		fetchMock.mockResolvedValue(listPage([]));
 		await expect(
@@ -434,5 +484,89 @@ describe("snapvisor.deploymentBuild throttling", () => {
 		// Inside the minimum interval a refresh is still served from cache.
 		await caller().refreshDeploymentBuild({ deploymentId: "dep-1" });
 		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("resolveDeploymentSnapvisorBuild on its own", () => {
+	const target = (overrides: Record<string, unknown> = {}) => ({
+		serviceId: "app-1",
+		name: "web",
+		snapvisorProjectName: "web-app",
+		organizationId: "org-1",
+		sourceType: "github",
+		...overrides,
+	});
+
+	it("refuses a service of another organization before using any token", async () => {
+		// The router checks this too; the service must not rely on it.
+		await expect(
+			resolveDeploymentSnapvisorBuild({
+				deployment: { description: `Commit: ${SHA}` },
+				target: target({ organizationId: "org-2" }),
+				organizationId: "org-1",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("answers for a service of the caller's organization", async () => {
+		await expect(
+			resolveDeploymentSnapvisorBuild({
+				deployment: { description: `Commit: ${SHA}` },
+				target: target(),
+				organizationId: "org-1",
+			}),
+		).resolves.toMatchObject({ state: "ready", buildNumber: 7 });
+	});
+});
+
+describe("commitShaFromDescription", () => {
+	it("returns the full sha in lower case", () => {
+		expect(commitShaFromDescription(`Commit: ${SHA.toUpperCase()}`)).toBe(SHA);
+		expect(commitShaFromDescription(`Commit: ${SHA}`)).toBe(SHA);
+	});
+
+	it("ignores an abbreviated or missing sha", () => {
+		expect(commitShaFromDescription("Commit: abc1234")).toBeNull();
+		expect(commitShaFromDescription(null)).toBeNull();
+	});
+});
+
+describe("the cache and an edited integration", () => {
+	it("asks again when the integration points at another account or URL", async () => {
+		await caller().deploymentBuild({ deploymentId: "dep-1" });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+
+		mocks.integration = { ...mocks.integration, accountSlug: "other-team" };
+		await caller().deploymentBuild({ deploymentId: "dep-1" });
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+
+		mocks.integration = {
+			...mocks.integration,
+			baseUrl: "https://snapvisor.example.com/api",
+		};
+		await caller().deploymentBuild({ deploymentId: "dep-1" });
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("forgets cached answers, failures included, when the integration is updated", async () => {
+		fetchMock.mockResolvedValue(jsonResponse(401, {}));
+		await expect(
+			caller().deploymentBuild({ deploymentId: "dep-1" }),
+		).resolves.toEqual({ state: "unavailable", reason: "auth" });
+
+		await updateSnapvisor("org-1", { accessToken: "fresh-token" } as never);
+		fetchMock.mockResolvedValue(listPage([build()]));
+
+		await expect(
+			caller().deploymentBuild({ deploymentId: "dep-1" }),
+		).resolves.toMatchObject({ state: "ready" });
+	});
+
+	it("forgets cached answers when the integration is removed", async () => {
+		await caller().deploymentBuild({ deploymentId: "dep-1" });
+		await removeSnapvisor("org-1");
+		await caller().deploymentBuild({ deploymentId: "dep-1" });
+		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 });

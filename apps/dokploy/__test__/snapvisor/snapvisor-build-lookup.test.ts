@@ -146,6 +146,26 @@ describe("createSnapvisorBuildLookup", () => {
 		expect(fetchBuild).toHaveBeenCalledTimes(2);
 	});
 
+	it("caps how long a Retry-After can keep a failure cached at ten minutes", async () => {
+		const time = clock();
+		const lookup = createSnapvisorBuildLookup({ now: time.now });
+		const fetchBuild = vi.fn(async () => {
+			throw new SnapvisorError("slow down", {
+				status: 429,
+				retryAfterSeconds: 24 * 60 * 60,
+			});
+		});
+
+		await lookup.lookup("k", fetchBuild);
+		time.advance(9 * 60_000);
+		await lookup.lookup("k", fetchBuild);
+		expect(fetchBuild).toHaveBeenCalledTimes(1);
+
+		time.advance(2 * 60_000);
+		await lookup.lookup("k", fetchBuild);
+		expect(fetchBuild).toHaveBeenCalledTimes(2);
+	});
+
 	it("never throws, whatever the fetcher throws", async () => {
 		const lookup = createSnapvisorBuildLookup();
 		await expect(

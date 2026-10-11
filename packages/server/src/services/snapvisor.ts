@@ -27,7 +27,6 @@ import {
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import type { z } from "zod";
-import { findApplicationById } from "./application";
 import { type Deployment, updateDeployment } from "./deployment";
 import {
 	findPreviewDeploymentById,
@@ -109,6 +108,7 @@ export const createSnapvisor = async (
 			message: "Error creating the Snapvisor integration",
 		});
 	}
+	snapvisorBuildLookup.clear();
 	return created;
 };
 
@@ -143,6 +143,8 @@ export const updateSnapvisor = async (
 			message: "Snapvisor integration not found",
 		});
 	}
+	// Answers (and cached failures) fetched with the old token or URL are stale.
+	snapvisorBuildLookup.clear();
 	return updated;
 };
 
@@ -152,6 +154,7 @@ export const removeSnapvisor = async (organizationId: string) => {
 		.where(eq(snapvisorIntegration.organizationId, organizationId))
 		.returning()
 		.then((rows) => rows[0]);
+	snapvisorBuildLookup.clear();
 	return removed ?? null;
 };
 
@@ -186,17 +189,62 @@ export interface SnapvisorServiceTarget {
 	name: string;
 	snapvisorProjectName: string | null;
 	organizationId: string;
+	/** `application.sourceType` / `compose.sourceType`. */
+	sourceType: string;
 }
 
+/**
+ * Source types whose deploys read the commit back from a git checkout and
+ * write it into the deployment as `Commit: <sha>`. For every other source
+ * (Docker image, upload, raw compose) the deployment `description` is free
+ * text the deployer controls, so a `Commit:` line there proves nothing.
+ */
+const GIT_SOURCE_TYPES: ReadonlySet<string> = new Set([
+	"git",
+	"github",
+	"gitlab",
+	"bitbucket",
+	"gitea",
+]);
+
+export const isGitSourceType = (sourceType: string | null | undefined) =>
+	!!sourceType && GIT_SOURCE_TYPES.has(sourceType);
+
+/**
+ * Deliberately narrow, like the compose finder below: `findApplicationById`
+ * eager-loads domains, deployments, mounts and the git providers just to read
+ * a name, a project link and an organization.
+ */
 export const findApplicationSnapvisorTarget = async (
 	applicationId: string,
 ): Promise<SnapvisorServiceTarget> => {
-	const application = await findApplicationById(applicationId);
+	const row = await db.query.applications.findFirst({
+		where: eq(applications.applicationId, applicationId),
+		columns: {
+			applicationId: true,
+			name: true,
+			snapvisorProjectName: true,
+			sourceType: true,
+		},
+		with: {
+			environment: {
+				columns: { environmentId: true },
+				with: { project: { columns: { organizationId: true } } },
+			},
+		},
+	});
+	if (!row) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Application not found",
+		});
+	}
 	return {
-		serviceId: application.applicationId,
-		name: application.name,
-		snapvisorProjectName: application.snapvisorProjectName,
-		organizationId: application.environment.project.organizationId,
+		serviceId: row.applicationId,
+		name: row.name,
+		snapvisorProjectName: row.snapvisorProjectName,
+		organizationId: row.environment.project.organizationId,
+		sourceType: row.sourceType,
 	};
 };
 
@@ -209,7 +257,12 @@ export const findComposeSnapvisorTarget = async (
 ): Promise<SnapvisorServiceTarget> => {
 	const row = await db.query.compose.findFirst({
 		where: eq(compose.composeId, composeId),
-		columns: { composeId: true, name: true, snapvisorProjectName: true },
+		columns: {
+			composeId: true,
+			name: true,
+			snapvisorProjectName: true,
+			sourceType: true,
+		},
 		with: {
 			environment: {
 				columns: { environmentId: true },
@@ -225,6 +278,7 @@ export const findComposeSnapvisorTarget = async (
 		name: row.name,
 		snapvisorProjectName: row.snapvisorProjectName,
 		organizationId: row.environment.project.organizationId,
+		sourceType: row.sourceType,
 	};
 };
 
@@ -515,14 +569,26 @@ export const resolveDeploymentSnapvisorBuild = async ({
 	}
 	const projectName = target.snapvisorProjectName;
 	if (!projectName) return { state: "off" };
+	// Only a git deploy writes the marker itself; elsewhere it is free text.
+	if (!isGitSourceType(target.sourceType)) return { state: "no-commit" };
 	const commitSha = commitShaFromDescription(deployment.description);
 	if (!commitSha) return { state: "no-commit" };
 	const integration = await findSnapvisorByOrganizationId(organizationId);
 	if (!integration) return { state: "not-connected" };
 
+	// The key carries what the call depends on besides the commit, so an
+	// edited integration (another account or URL) never reads an old answer.
 	const result = await snapvisorBuildLookup.lookup(
-		`${organizationId}:${projectName}:${commitSha}`,
+		[
+			organizationId,
+			integration.baseUrl,
+			integration.accountSlug,
+			projectName,
+			commitSha,
+		].join(":"),
 		async () => {
+			// Assumes Snapvisor lists the newest build first, so the one build
+			// asked for (`perPage: 1`) is the latest for this head sha.
 			const builds = await snapvisorClientFor(integration).listBuilds({
 				accountSlug: integration.accountSlug,
 				projectName,
