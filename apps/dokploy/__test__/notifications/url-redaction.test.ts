@@ -152,6 +152,8 @@ const {
 	isRedactedUrlEcho,
 	isSameIntegrationBaseUrl,
 	redactUrl,
+	uptimelyHeartbeatUrl,
+	uptimelyMcpUrl,
 } = await import("@dokploy/server");
 
 const caller = createCallerFactory(notificationRouter)({
@@ -317,6 +319,41 @@ describe("isRedactedUrlEcho", () => {
 
 	it("is not a URL change for the re-enter-the-key rules", () => {
 		expect(isSameIntegrationBaseUrl(redactUrl(stored), stored)).toBe(true);
+	});
+});
+
+describe("stored URLs with a long run of slashes", () => {
+	const size = 1_000_000;
+	const slashes = "/".repeat(size);
+
+	it("isSameIntegrationBaseUrl compares them in linear time", () => {
+		for (const [a, b] of [
+			[`https://host.example${slashes}`, "https://host.example"],
+			[`host.example${slashes}`, `host.example${slashes}x`],
+			[`https://host.example/${slashes}x`, `https://host.example/${slashes}x/`],
+		] as const) {
+			const started = performance.now();
+			isSameIntegrationBaseUrl(a, b);
+			isSameIntegrationBaseUrl(b, a);
+			expect(performance.now() - started).toBeLessThan(250);
+		}
+		expect(
+			isSameIntegrationBaseUrl(
+				`https://host.example${slashes}`,
+				"https://host.example",
+			),
+		).toBe(true);
+	});
+
+	it("the Uptimely URLs built from a stored base URL are linear too", () => {
+		const started = performance.now();
+		expect(uptimelyMcpUrl(`https://host.example${slashes}`)).toBe(
+			"https://host.example/api/mcp",
+		);
+		expect(uptimelyHeartbeatUrl(`https://host.example${slashes}`, "key")).toBe(
+			"https://host.example/heartbeat/key",
+		);
+		expect(performance.now() - started).toBeLessThan(250);
 	});
 });
 

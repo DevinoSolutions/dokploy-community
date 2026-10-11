@@ -7,10 +7,12 @@
  * is never logged (only the service and the failure class are).
  */
 
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
+
 export const UPTIMELY_HEARTBEAT_TIMEOUT_MS = 5_000;
 
 export const uptimelyHeartbeatUrl = (baseUrl: string, secretKey: string) =>
-	`${baseUrl.replace(/\/+$/, "")}/heartbeat/${encodeURIComponent(secretKey)}`;
+	`${trimTrailingSlashes(baseUrl)}/heartbeat/${encodeURIComponent(secretKey)}`;
 
 export interface PingUptimelyHeartbeatOptions {
 	baseUrl: string;

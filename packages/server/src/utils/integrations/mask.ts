@@ -1,3 +1,5 @@
+import { trimTrailingSlashes } from "./base-url";
+
 /**
  * Masks a stored API key down to its last four characters. A shorter value
  * would mostly give itself away, so it is hidden entirely.
@@ -94,13 +96,8 @@ export const redactUrl = (value: string) => {
 export const containsUrlRedaction = (value: string) =>
 	value.includes(URL_REDACTION);
 
-// Not a regular expression: `/\/+$/` is quadratic on a long run of slashes.
-const withoutTrailingSlashes = (value: string) => {
-	const trimmed = value.trim();
-	let end = trimmed.length;
-	while (end > 0 && trimmed[end - 1] === "/") end--;
-	return trimmed.slice(0, end);
-};
+const withoutTrailingSlashes = (value: string) =>
+	trimTrailingSlashes(value.trim());
 
 /**
  * The edit form shows the redacted URL and sends it back when it was not
