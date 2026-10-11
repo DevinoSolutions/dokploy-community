@@ -513,7 +513,10 @@ export const ShowDomains = ({ id, type }: Props) => {
 																<DoDomainDomainActions
 																	domainId={item.domainId}
 																	host={item.host}
-																	connectionId={item.dodomainConnectionId}
+																	checkable={
+																		!!item.dodomainConnectionId ||
+																		!!item.dodomainSessionId
+																	}
 																	onChanged={() => refetch()}
 																/>
 															)}

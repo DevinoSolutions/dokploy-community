@@ -115,14 +115,16 @@ export const HandleDoDomain = ({ editing = false }: Props) => {
 		await action
 			.then(async (saved) => {
 				if (saved.webhookWarning) {
-					// Saved, but DoDomain refused this panel's webhook URL.
-					toast.warning(
-						`DoDomain ${editing ? "updated" : "connected"}, without webhooks`,
-						{ description: saved.webhookWarning, duration: 15_000 },
-					);
+					// Saved without a webhook (private panel, or DoDomain refused the
+					// URL): status is polled, so this is informational.
+					toast.success(`DoDomain ${editing ? "updated" : "connected"}`, {
+						description: saved.webhookWarning,
+						duration: 15_000,
+					});
 				} else {
 					toast.success(`DoDomain ${editing ? "updated" : "connected"}`, {
-						description: "The webhook endpoint is registered with DoDomain.",
+						description:
+							"Domain status is polled, and the webhook endpoint is registered for instant updates.",
 					});
 				}
 				await utils.dodomain.one.invalidate();
@@ -216,13 +218,16 @@ export const HandleDoDomain = ({ editing = false }: Props) => {
 						</AlertBlock>
 					)}
 					<AlertBlock type="info" className="w-full">
-						Saving registers a webhook endpoint on this panel&apos;s public URL
-						(<span className="font-mono">/api/webhooks/dodomain</span>) so
-						DoDomain can report verification results. The panel must be
-						reachable over https (Settings → Web Server).
+						Dokploy checks DoDomain for domain status by itself (every couple of
+						minutes while a connect link is pending, then every 30 minutes), so
+						this works on any panel, including one on a private network. If the
+						panel is served on a public HTTPS URL, saving also registers a
+						webhook endpoint (
+						<span className="font-mono">/api/webhooks/dodomain</span>) for
+						instant updates.
 					</AlertBlock>
 					{editing && integration?.webhookReachability.warning && (
-						<AlertBlock type="warning" className="w-full">
+						<AlertBlock type="info" className="w-full">
 							{integration.webhookReachability.warning}
 						</AlertBlock>
 					)}
@@ -279,8 +284,8 @@ export const HandleDoDomain = ({ editing = false }: Props) => {
 												DoDomain dashboard
 											</a>
 											, copy your app&apos;s server-side secret key (starts with{" "}
-											<span className="font-mono">dd_sk_</span>). It is stored on
-											this server and never shown again here.
+											<span className="font-mono">dd_sk_</span>). It is stored
+											on this server and never shown again here.
 										</FormDescription>
 										<FormMessage />
 									</FormItem>
