@@ -348,7 +348,9 @@ export const createColumns = ({
 							<DoDomainDomainActions
 								domainId={domain.domainId}
 								host={domain.host}
-								connectionId={domain.dodomainConnectionId}
+								checkable={
+									!!domain.dodomainConnectionId || !!domain.dodomainSessionId
+								}
 								onChanged={onDoDomainChanged}
 							/>
 						)}

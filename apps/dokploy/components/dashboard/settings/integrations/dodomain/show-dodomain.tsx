@@ -1,10 +1,10 @@
 import {
-	AlertTriangle,
 	CheckCircle2,
 	ExternalLink,
+	Info,
 	Loader2,
+	RefreshCw,
 	Trash2,
-	XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { AlertBlock } from "@/components/shared/alert-block";
@@ -111,24 +111,42 @@ export const ShowDoDomain = () => {
 						</dd>
 					</div>
 					<div className="flex flex-col sm:col-span-2">
-						<dt className="text-xs text-muted-foreground">Webhook</dt>
+						<dt className="text-xs text-muted-foreground">Status sync</dt>
+						<dd className="flex items-center gap-1">
+							<RefreshCw
+								className="size-3.5 shrink-0 text-green-600"
+								aria-hidden="true"
+							/>
+							<span>
+								Polling: Dokploy asks DoDomain every couple of minutes while a
+								link is pending, then every 30 minutes
+							</span>
+						</dd>
+					</div>
+					<div className="flex flex-col sm:col-span-2">
+						<dt className="text-xs text-muted-foreground">
+							Webhook (optional)
+						</dt>
 						<dd className="flex items-center gap-1 break-all">
 							{!integration.webhookRegistered ? (
 								<>
-									<XCircle
-										className="size-3.5 shrink-0 text-red-500"
-										aria-hidden="true"
-									/>
-									<span className="sr-only">Not registered</span>
-								</>
-							) : integration.webhookReachability.likelyPrivate ? (
-								<>
-									<AlertTriangle
-										className="size-3.5 shrink-0 text-yellow-600"
+									<Info
+										className="size-3.5 shrink-0 text-muted-foreground"
 										aria-hidden="true"
 									/>
 									<span className="sr-only">
-										Registered, but DoDomain can&apos;t reach this address
+										Not registered, polling is used
+									</span>
+								</>
+							) : integration.webhookReachability.likelyPrivate ? (
+								<>
+									<Info
+										className="size-3.5 shrink-0 text-muted-foreground"
+										aria-hidden="true"
+									/>
+									<span className="sr-only">
+										Registered, but DoDomain can&apos;t reach this address;
+										polling is used
 									</span>
 								</>
 							) : (
@@ -144,7 +162,7 @@ export const ShowDoDomain = () => {
 								className="font-mono text-xs"
 								aria-hidden={!integration.webhookUrl}
 							>
-								{integration.webhookUrl || "Not registered"}
+								{integration.webhookUrl || "Not used"}
 							</span>
 						</dd>
 					</div>
@@ -168,17 +186,17 @@ export const ShowDoDomain = () => {
 			)}
 
 			{integration?.webhookReachability.warning ? (
-				<AlertBlock type="warning" className="w-full">
+				<AlertBlock type="info" className="w-full">
 					{integration.webhookReachability.warning}
 				</AlertBlock>
 			) : (
 				integration &&
 				!integration.webhookRegistered && (
-					<AlertBlock type="warning" className="w-full">
-						DoDomain did not accept this panel&apos;s webhook URL, so
-						domain-status webhooks won&apos;t arrive. DNS status still updates
-						when you press Re-verify DNS. Save the integration again once the
-						panel is served on a public HTTPS URL.
+					<AlertBlock type="info" className="w-full">
+						No webhook is registered (the panel has no public HTTPS URL, or
+						DoDomain did not accept it), so domain status is polled instead.
+						Nothing else is needed. Save the integration again once the panel is
+						served on a public HTTPS URL to also get instant webhook updates.
 					</AlertBlock>
 				)
 			)}

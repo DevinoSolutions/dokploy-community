@@ -128,10 +128,19 @@ export const dodomainRouter = createTRPCRouter({
 			ctx.session.activeOrganizationId,
 		);
 		if (!integration) return null;
+		const webhookReachability = await getDoDomainWebhookReachability();
+		const presented = presentIntegration(integration);
 		return {
-			...presentIntegration(integration),
+			...presented,
 			// Whether DoDomain can reach this panel's webhook URL (host-based).
-			webhookReachability: await getDoDomainWebhookReachability(),
+			webhookReachability,
+			// How domain status reaches the panel: the panel always polls DoDomain;
+			// webhooks only add a fast path when DoDomain can deliver them.
+			statusSync: {
+				polling: true as const,
+				webhooks:
+					presented.webhookRegistered && !webhookReachability.likelyPrivate,
+			},
 		};
 	}),
 

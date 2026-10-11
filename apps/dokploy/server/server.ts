@@ -6,6 +6,7 @@ import {
 	IS_CLOUD,
 	initCancelDeployments,
 	initCronJobs,
+	initDoDomainSyncCronJobs,
 	initEnterpriseBackupCronJobs,
 	initializeNetwork,
 	initMcpTokenPurgeCronJob,
@@ -127,6 +128,8 @@ void app
 				await initSchedules();
 				await initCancelDeployments();
 				await initVolumeBackupsCronJobs();
+				// Outbound DoDomain status polling; webhooks are only a fast path.
+				initDoDomainSyncCronJobs();
 				await sendDokployRestartNotifications();
 			}
 			await initEnterpriseBackupCronJobs();

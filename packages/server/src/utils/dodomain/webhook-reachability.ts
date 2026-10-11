@@ -3,9 +3,11 @@
  *
  * DoDomain refuses to register (and dead-letters deliveries to) webhook URLs
  * that resolve to non-public addresses. A panel served on a Tailscale
- * `*.ts.net` name, a `.local` host or a private IP never receives them. These
- * helpers are pure on purpose: a hostname-only heuristic ("likely private"),
- * used to warn early, plus the parser of DoDomain's registration refusal.
+ * `*.ts.net` name, a `.local` host or a private IP never receives them, which
+ * is fine: the panel polls DoDomain for status (services/dodomain-sync.ts) and
+ * webhooks are only a fast path. These helpers are pure on purpose: a
+ * hostname-only heuristic ("likely private"), used to tell the user polling is
+ * in use, plus the parser of DoDomain's registration refusal.
  */
 
 const PRIVATE_HOST_SUFFIXES = [
@@ -127,9 +129,12 @@ export const parseDoDomainWebhookRefusal = (error: {
 	return DODOMAIN_WEBHOOK_REFUSAL_REASONS.find((r) => r === reason) ?? null;
 };
 
-const WEBHOOK_WARNING_TAIL =
-	"DNS status still updates when you press Re-verify DNS. Serve the panel on a public HTTPS URL to receive webhooks.";
+const WEBHOOK_NOTE_TAIL =
+	"Dokploy checks DoDomain for domain status on its own instead, so nothing else is needed. Serve the panel on a public HTTPS URL to also receive instant webhook updates.";
 
-/** The readable warning for a private (or refused) webhook host. */
+/**
+ * Why a private (or refused) webhook host is fine. Webhooks are optional: the
+ * panel polls DoDomain for status regardless. Informational, not a warning.
+ */
 export const dodomainWebhookWarning = (host: string) =>
-	`DoDomain can't reach ${host}, so domain-status webhooks won't arrive. ${WEBHOOK_WARNING_TAIL}`;
+	`DoDomain can't reach ${host}, so it can't push webhooks here. ${WEBHOOK_NOTE_TAIL}`;

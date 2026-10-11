@@ -27,8 +27,6 @@ import {
 	isSameIntegrationBaseUrl,
 } from "@dokploy/server/utils/integrations/base-url";
 import { getRemotePublicIp, isPrivateIp } from "@dokploy/server/utils/ip";
-import { sendDomainVerificationFailedNotifications } from "@dokploy/server/utils/notifications/domain-verification";
-import { manageDomain } from "@dokploy/server/utils/traefik/domain";
 import { getPublicIpWithFallback } from "@dokploy/server/wss/utils";
 import { TRPCError } from "@trpc/server";
 import {
@@ -44,9 +42,15 @@ import {
 } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import type { z } from "zod";
-import { getDokployUrl } from "./admin";
 import { findApplicationById } from "./application";
 import { findComposeById } from "./compose";
+import {
+	applyDoDomainTransition,
+	DODOMAIN_DISCONNECTED_REASON,
+	type DoDomainTransition,
+	doDomainConnectFailedReason,
+	doDomainDriftReason,
+} from "./dodomain-transition";
 import {
 	type Domain,
 	findDomainById,
@@ -93,27 +97,36 @@ const asBadRequest = (error: unknown, fallback: string): never => {
 // ---------------------------------------------------------------------------
 
 /**
- * The public URL DoDomain delivers this integration's webhooks to. Uses the
- * same deterministic public origin as the MCP discovery documents
- * (`BETTER_AUTH_URL`, else the configured panel host over https); never the
- * request's Host header. DoDomain only delivers to https URLs.
+ * The public URL DoDomain delivers this integration's webhooks to, or why there
+ * is none. Webhooks are an optional fast path (the panel polls DoDomain for
+ * status regardless), so a panel without a public https URL is not an error:
+ * the integration is saved without an endpoint and `note` says polling is in
+ * use. Uses the same deterministic public origin as the MCP discovery
+ * documents (`BETTER_AUTH_URL`, else the configured panel host over https);
+ * never the request's Host header. DoDomain only delivers to https URLs.
  */
-export const resolveDoDomainWebhookUrl = async (dodomainId: string) => {
-	const origin = await resolveMcpOrigin({});
+export const resolveDoDomainWebhookUrl = async (
+	dodomainId: string,
+): Promise<{ url: string } | { note: string }> => {
+	let origin: string | null = null;
+	try {
+		origin = await resolveMcpOrigin({});
+	} catch {
+		origin = null;
+	}
 	if (!origin) {
-		throw new TRPCError({
-			code: "BAD_REQUEST",
-			message:
-				"DoDomain needs a public URL to send webhooks to. Set the panel domain under Settings → Web Server (or set BETTER_AUTH_URL), then connect again.",
-		});
+		return {
+			note: "This panel has no public URL configured, so no webhook endpoint was registered. Dokploy checks DoDomain for domain status on its own instead.",
+		};
 	}
 	if (!origin.startsWith("https://")) {
-		throw new TRPCError({
-			code: "BAD_REQUEST",
-			message: `DoDomain only delivers webhooks over https, but this panel's public URL is ${origin}. Serve the panel over https first.`,
-		});
+		return {
+			note: `DoDomain only delivers webhooks over https, but this panel's public URL is ${origin}, so no webhook endpoint was registered. Dokploy checks DoDomain for domain status on its own instead.`,
+		};
 	}
-	return `${origin}${DODOMAIN_WEBHOOK_PATH}?integration=${encodeURIComponent(dodomainId)}`;
+	return {
+		url: `${origin}${DODOMAIN_WEBHOOK_PATH}?integration=${encodeURIComponent(dodomainId)}`,
+	};
 };
 
 // ---------------------------------------------------------------------------
@@ -214,7 +227,7 @@ const registerWebhookEndpoint = async (params: {
 		};
 	} catch (error) {
 		// A refused URL (host resolving to private addresses) is not an error: the
-		// integration is still useful (Re-verify DNS works without webhooks).
+		// integration is still useful (status is polled without webhooks).
 		const refusal = refusalOf(error);
 		if (refusal) return { refusal };
 		if (!(error instanceof DoDomainError) || error.status !== 400) {
@@ -256,11 +269,15 @@ export const createDoDomain = async (
 	// The id is minted here so the webhook URL can carry it before the row
 	// exists (the endpoint must be registered first: its secret is show-once).
 	const dodomainId = nanoid();
-	const url = await resolveDoDomainWebhookUrl(dodomainId);
+	const target = await resolveDoDomainWebhookUrl(dodomainId);
 	const client = dodomainClientFor(input);
-	const registration = await registerWebhookEndpoint({ client, url }).catch(
-		(error) => asBadRequest(error, "Error registering the DoDomain webhook"),
-	);
+	const registration: WebhookRegistration | { note: string } =
+		"url" in target
+			? await registerWebhookEndpoint({ client, url: target.url }).catch(
+					(error) =>
+						asBadRequest(error, "Error registering the DoDomain webhook"),
+				)
+			: target;
 	const webhook = "webhook" in registration ? registration.webhook : null;
 	try {
 		const created = await db
@@ -272,8 +289,8 @@ export const createDoDomain = async (
 				appId: input.appId,
 				baseUrl: input.baseUrl,
 				organizationId,
-				// Refused webhook URL: the integration is still saved without an
-				// endpoint (Re-verify DNS works without webhooks).
+				// No usable webhook URL (private panel, refused by DoDomain, or no
+				// public https URL): saved without an endpoint, status is polled.
 				...(webhook ?? NO_WEBHOOK),
 			})
 			.returning()
@@ -281,7 +298,12 @@ export const createDoDomain = async (
 		if (!created) throw new Error("Error creating the DoDomain integration");
 		return {
 			integration: created,
-			webhookWarning: "refusal" in registration ? refusalWarning(url) : null,
+			webhookWarning:
+				"refusal" in registration && "url" in target
+					? refusalWarning(target.url)
+					: "note" in registration
+						? registration.note
+						: null,
 		};
 	} catch (error) {
 		// Never leave an endpoint DoDomain would deliver to with no receiver.
@@ -325,12 +347,17 @@ export const updateDoDomain = async (
 	const next = { ...current, ...values };
 	const credentialsChanged =
 		next.secretKey !== current.secretKey || next.baseUrl !== current.baseUrl;
-	const url = await resolveDoDomainWebhookUrl(current.dodomainId);
+	const target = await resolveDoDomainWebhookUrl(current.dodomainId);
+	const url = "url" in target ? target.url : null;
 	let webhookWarning: string | null = null;
+	if (!url) {
+		webhookWarning = "note" in target ? target.note : null;
+		// New credentials cannot address the old endpoint.
+		if (credentialsChanged) Object.assign(values, NO_WEBHOOK);
+	}
 	if (
-		credentialsChanged ||
-		url !== current.webhookUrl ||
-		!current.webhookSecret
+		url &&
+		(credentialsChanged || url !== current.webhookUrl || !current.webhookSecret)
 	) {
 		const registration = await registerWebhookEndpoint({
 			client: dodomainClientFor(next),
@@ -348,11 +375,11 @@ export const updateDoDomain = async (
 			// credentials the old endpoint (if any) is left as it was.
 			if (credentialsChanged) Object.assign(values, NO_WEBHOOK);
 		}
-		if (credentialsChanged && current.webhookEndpointId) {
-			await dodomainClientFor(current)
-				.webhookEndpoints.delete(current.webhookEndpointId)
-				.catch(() => {});
-		}
+	}
+	if (credentialsChanged && current.webhookEndpointId) {
+		await dodomainClientFor(current)
+			.webhookEndpoints.delete(current.webhookEndpointId)
+			.catch(() => {});
 	}
 
 	const updated = await db
@@ -545,7 +572,7 @@ export const planDoDomainRecords = (params: {
 	});
 };
 
-const loadConnectableDomain = async (domainId: string) => {
+export const loadConnectableDomain = async (domainId: string) => {
 	const domain = await findDomainById(domainId);
 	const service = await resolveDoDomainService(domain);
 	if (!service) {
@@ -558,7 +585,7 @@ const loadConnectableDomain = async (domainId: string) => {
 	return { domain, service };
 };
 
-const assertSameOrganization = (
+export const assertSameOrganization = (
 	integration: DoDomainIntegration,
 	service: DoDomainServiceContext,
 ) => {
@@ -705,6 +732,9 @@ export const createDoDomainConnectSession = async (params: {
 		connectUrl: session.connectUrl,
 		records,
 		expiresAt: new Date(session.expiresAt),
+		// Secret: lets the poller run the live DNS check. Encrypted by the column,
+		// never part of what this function returns.
+		token: session.token,
 	});
 	await updateDomainById(domain.domainId, {
 		dodomainSessionId: session.id,
@@ -721,35 +751,6 @@ export const createDoDomainConnectSession = async (params: {
 		records,
 		warnings: session.warnings ?? [],
 	};
-};
-
-/** Queues a DNS recheck; the verdict arrives later as a webhook. */
-export const reverifyDoDomainDomain = async (params: {
-	integration: DoDomainIntegration;
-	domainId: string;
-}) => {
-	const { domain, service } = await loadConnectableDomain(params.domainId);
-	assertSameOrganization(params.integration, service);
-	if (!domain.dodomainConnectionId) {
-		throw new TRPCError({
-			code: "BAD_REQUEST",
-			message:
-				"This domain has no DoDomain connection yet. Send a connect link and let the domain owner finish it first.",
-		});
-	}
-	await dodomainClientFor(params.integration)
-		.connections.reverify(domain.dodomainConnectionId)
-		.catch((error) => {
-			if (error instanceof DoDomainError && error.status === 429) {
-				throw new TRPCError({
-					code: "TOO_MANY_REQUESTS",
-					message:
-						"DoDomain checked this domain less than 10 minutes ago. Try again later.",
-				});
-			}
-			return asBadRequest(error, "Error requesting a DoDomain recheck");
-		});
-	return { accepted: true as const };
 };
 
 export const getDoDomainConnectionStatus = async (params: {
@@ -869,9 +870,7 @@ const findDomainForEvent = async (data: WebhookEnvelope["data"]) => {
 };
 
 const describeFailure = (type: string, data: WebhookEnvelope["data"]) => {
-	if (type === "connection.disconnected") {
-		return "The DoDomain connection was disconnected; DoDomain no longer monitors this domain's DNS.";
-	}
+	if (type === "connection.disconnected") return DODOMAIN_DISCONNECTED_REASON;
 	if (data.scope === "session" || data.reason === "session_failed") {
 		const step =
 			data.failedStep === "oauth_authorize"
@@ -879,27 +878,42 @@ const describeFailure = (type: string, data: WebhookEnvelope["data"]) => {
 				: data.failedStep === "record_write"
 					? "writing the DNS records"
 					: "the connect flow";
-		return `The domain owner's connect attempt failed at ${step}${
-			data.error ? `: ${data.error}` : "."
-		} They can retry from the same connect link.`;
+		return doDomainConnectFailedReason(step, data.error);
 	}
-	return `The DNS records for ${data.fqdn ?? data.domain ?? "the domain"} no longer match what Dokploy expects (DNS drift).`;
+	return doDomainDriftReason(data.fqdn ?? data.domain ?? "the domain");
 };
 
-const domainsLink = async (service: DoDomainServiceContext) =>
-	`${await getDokployUrl()}/dashboard/project/${service.projectId}/environment/${service.environmentId}/services/${service.kind}/${service.serviceId}?tab=domains`;
-
-/** Re-applies a verified domain the same way saving it does. */
-const applyVerifiedDomain = async (
-	service: DoDomainServiceContext,
-	domain: Domain,
-) => {
-	// Applications route through Traefik's file provider: rewriting the router
-	// (with its certResolver when https) makes Traefik request the certificate
-	// now that DNS points here. Compose domains are docker labels and only
-	// change on the next deploy.
-	if (service.kind === "application" && service.application) {
-		await manageDomain(service.application, domain);
+/** What a webhook event means for the domain, or null when it carries nothing to apply. */
+const transitionForEvent = (
+	envelope: WebhookEnvelope,
+): { transition: DoDomainTransition } | { ignored: string } => {
+	const { type, data } = envelope;
+	switch (type) {
+		case "connection.verified":
+			return {
+				transition: { kind: "verified", connectionId: data.connectionId },
+			};
+		case "connection.failed":
+		case "connection.disconnected":
+			return {
+				transition: {
+					kind: "failed",
+					reason: describeFailure(type, data),
+					connectionId: data.connectionId,
+					dropConnection: type === "connection.disconnected",
+				},
+			};
+		case "session.completed":
+			return data.connectionId
+				? { transition: { kind: "linked", connectionId: data.connectionId } }
+				: { ignored: "no_connection" };
+		case "session.abandoned":
+			return data.sessionId
+				? { transition: { kind: "abandoned", sessionId: data.sessionId } }
+				: { ignored: "stale_session" };
+		default:
+			// Forward-compatible: unknown event types are acknowledged.
+			return { ignored: "unhandled_event" };
 	}
 };
 
@@ -907,8 +921,7 @@ const applyEvent = async (
 	integration: DoDomainIntegration,
 	envelope: WebhookEnvelope,
 ) => {
-	const { type, data } = envelope;
-	const domain = await findDomainForEvent(data);
+	const domain = await findDomainForEvent(envelope.data);
 	if (!domain) return { applied: false, reason: "unknown_domain" };
 	const service = await resolveDoDomainService(domain);
 	// Cross-tenant guard: a delivery signed with one organization's secret may
@@ -917,66 +930,20 @@ const applyEvent = async (
 		return { applied: false, reason: "foreign_domain" };
 	}
 
-	switch (type) {
-		case "connection.verified": {
-			const updated = await updateDomainById(domain.domainId, {
-				dnsVerificationStatus: "verified",
-				dnsVerifiedAt: new Date(),
-				...(data.connectionId
-					? { dodomainConnectionId: data.connectionId }
-					: {}),
-			});
-			await applyVerifiedDomain(service, { ...domain, ...(updated ?? {}) });
-			return { applied: true };
-		}
-		case "connection.failed":
-		case "connection.disconnected": {
-			await updateDomainById(domain.domainId, {
-				dnsVerificationStatus: "failed",
-				...(type === "connection.disconnected"
-					? { dodomainConnectionId: null }
-					: data.connectionId
-						? { dodomainConnectionId: data.connectionId }
-						: {}),
-			});
-			await sendDomainVerificationFailedNotifications({
-				organizationId: service.organizationId,
-				projectName: service.projectName,
-				serviceName: service.serviceName,
-				host: domain.host,
-				reason: describeFailure(type, data),
-				domainLink: await domainsLink(service),
-			}).catch((error) => {
-				console.error("[dodomain] failure notification error:", error);
-			});
-			return { applied: true };
-		}
-		case "session.completed": {
-			if (!data.connectionId)
-				return { applied: false, reason: "no_connection" };
-			await updateDomainById(domain.domainId, {
-				dodomainConnectionId: data.connectionId,
-			});
-			return { applied: true };
-		}
-		case "session.abandoned": {
-			// Strict: only the domain still carrying THIS session is reset, so a
-			// stale event cannot clear a newer session.
-			if (!data.sessionId || domain.dodomainSessionId !== data.sessionId) {
-				return { applied: false, reason: "stale_session" };
-			}
-			await updateDomainById(domain.domainId, {
-				dodomainSessionId: null,
-				...(domain.dnsVerificationStatus === "pending"
-					? { dnsVerificationStatus: "unverified" as const }
-					: {}),
-			});
-			return { applied: true };
-		}
-		default:
-			// Forward-compatible: unknown event types are acknowledged.
-			return { applied: false, reason: "unhandled_event" };
+	const decision = transitionForEvent(envelope);
+	if ("ignored" in decision) {
+		return { applied: false, reason: decision.ignored };
 	}
+	// The same function the poller uses: a delivery that repeats what a poll
+	// already applied (or the reverse) changes nothing and notifies nobody.
+	const result = await applyDoDomainTransition({
+		service,
+		domain,
+		transition: decision.transition,
+	});
+	return result.applied
+		? { applied: true }
+		: { applied: false, reason: result.reason };
 };
 
 /**
