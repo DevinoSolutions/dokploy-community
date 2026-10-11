@@ -438,7 +438,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -518,7 +517,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -599,7 +597,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -684,7 +681,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -757,7 +753,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -834,7 +829,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),
@@ -917,7 +911,6 @@ export const notificationRouter = createTRPCRouter({
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error updating the notification",
-					cause: error,
 				});
 			}
 		}),

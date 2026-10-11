@@ -2376,34 +2376,29 @@ describe("create: a failure logs the error name, never the error", () => {
 describe("update: a database failure does not reach the client with its bound values", () => {
 	const typedSecret = "typed-secret-for-the-failing-update";
 
-	it.each([
-		"slack",
-		"gotify",
-		"ntfy",
-		"mattermost",
-		"custom",
-		"lark",
-		"teams",
-		"pushover",
-	])("%s answers with a plain refusal and no cause", async (type) => {
-		const c = byType(type);
-		mocks.notification = storedNotification(c);
-		vi.mocked(db.transaction).mockRejectedValueOnce(
-			new Error(`update failed, params: ${typedSecret}`),
-		);
+	it.each(cases.map((c) => c.type))(
+		"%s answers with a plain refusal and no cause",
+		async (type) => {
+			const { db } = await import("@dokploy/server/db");
+			const c = byType(type);
+			mocks.notification = storedNotification(c);
+			vi.mocked(db.transaction).mockRejectedValueOnce(
+				new Error(`update failed, params: ${typedSecret}`),
+			);
 
-		const failure = await call(c.routerUpdate, {
-			notificationId: "n-1",
-			name: "Renamed",
-		}).catch((error: Error) => error);
+			const failure = await call(c.routerUpdate, {
+				notificationId: "n-1",
+				name: "Renamed",
+			}).catch((error: Error) => error);
 
-		expect(failure).toMatchObject({
-			code: "BAD_REQUEST",
-			message: "Error updating the notification",
-		});
-		expect((failure as Error).cause).toBeUndefined();
-		expect(JSON.stringify(failure)).not.toContain(typedSecret);
-	});
+			expect(failure).toMatchObject({
+				code: "BAD_REQUEST",
+				message: "Error updating the notification",
+			});
+			expect((failure as Error).cause).toBeUndefined();
+			expect(JSON.stringify(failure)).not.toContain(typedSecret);
+		},
+	);
 
 	it("keeps a specific refusal", async () => {
 		const c = byType("slack");
@@ -2413,4 +2408,34 @@ describe("update: a database failure does not reach the client with its bound va
 			call(c.routerUpdate, { notificationId: "n-1", name: "Hijack" }),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 	});
+});
+
+describe("Test Notification: borrowing a secret needs the update permission, for the providers with their own flows", () => {
+	const { topic: _topic, ...ntfyWithoutTopic } = byType("ntfy").testInput;
+	const borrowing: [string, string, Record<string, unknown>][] = [
+		["ntfy", "testNtfyConnection", ntfyWithoutTopic],
+		[
+			"email",
+			"testEmailConnection",
+			{ ...byType("email").testInput, password: "" },
+		],
+		[
+			"custom",
+			"testCustomConnection",
+			{ endpoint: "", headers: { Authorization: "" } },
+		],
+	];
+
+	it.each(borrowing)(
+		"%s is refused without it and sends nothing",
+		async (type, routerTest, input) => {
+			mocks.notification = storedNotification(byType(type));
+			mocks.denied = ["notification:update"];
+
+			await expect(
+				call(routerTest, { ...input, notificationId: "n-1" }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			expect(mocks.sent).toEqual([]);
+		},
+	);
 });

@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
 	transactions: 0,
 	callTool: vi.fn(),
 	clientKeys: [] as string[],
+	// "<resource>:<action>" pairs the caller's role does not grant.
+	denied: [] as string[],
 }));
 
 const tableName = (table: unknown) => {
@@ -121,6 +123,35 @@ vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
 
+vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("@dokploy/server/services/permission")
+		>();
+	const { TRPCError } = await import("@trpc/server");
+	return {
+		...actual,
+		checkPermission: vi.fn(
+			async (
+				ctx: Parameters<typeof actual.checkPermission>[0],
+				permissions: Record<string, string[]>,
+			) => {
+				for (const [resource, actions] of Object.entries(permissions)) {
+					for (const action of actions) {
+						if (mocks.denied.includes(`${resource}:${action}`)) {
+							throw new TRPCError({
+								code: "UNAUTHORIZED",
+								message: "Permission denied",
+							});
+						}
+					}
+				}
+				return actual.checkPermission(ctx, permissions as never);
+			},
+		),
+	};
+});
+
 const { notificationRouter } = await import(
 	"@/server/api/routers/notification"
 );
@@ -160,6 +191,7 @@ beforeEach(() => {
 	mocks.deletes = [];
 	mocks.transactions = 0;
 	mocks.clientKeys = [];
+	mocks.denied = [];
 });
 
 describe("the channel API key is write-only", () => {
@@ -239,6 +271,36 @@ describe("the channel API key is write-only", () => {
 		expect(mocks.clientKeys).toEqual([API_KEY]);
 	});
 
+	it("borrowing the stored key takes the update permission, not only create", async () => {
+		mocks.denied = ["notification:update"];
+
+		await expect(
+			caller.testUptimelyConnection({
+				apiKey: "",
+				notificationId: "n-1",
+				projectId: PROJECT,
+				baseUrl: "https://app.getuptimely.com",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.clientKeys).toEqual([]);
+	});
+
+	it("a typed key needs no update permission", async () => {
+		mocks.denied = ["notification:update"];
+		mocks.callTool.mockResolvedValue({
+			projects: [{ id: PROJECT, name: "Devino", slug: "devino" }],
+		});
+
+		await expect(
+			caller.testUptimelyConnection({
+				apiKey: "typed-key",
+				notificationId: "n-1",
+				projectId: PROJECT,
+				baseUrl: "https://app.getuptimely.com",
+			}),
+		).resolves.toBe(true);
+	});
+
 	it("will not borrow the stored key of another organization's notification", async () => {
 		mocks.notification = stored({ organizationId: "org-2" });
 
@@ -282,6 +344,25 @@ describe("updateUptimelyChannelNotification", () => {
 		const channel = mocks.updates.find((u) => u.table === "uptimely_channel");
 		expect(channel?.bound).toContain("chan-1");
 		expect(channel?.bound).not.toContain("chan-of-org-2");
+	});
+
+	it("a database failure answers with a plain refusal and no cause", async () => {
+		const { db } = await import("@dokploy/server/db");
+		const typedSecret = "typed-secret-for-the-failing-update";
+		vi.mocked(db.transaction).mockRejectedValueOnce(
+			new Error(`update failed, params: ${typedSecret}`),
+		);
+
+		const failure = await caller
+			.updateUptimely({ notificationId: "n-1", name: "Renamed" } as never)
+			.catch((error: Error) => error);
+
+		expect(failure).toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Error updating the notification",
+		});
+		expect((failure as Error).cause).toBeUndefined();
+		expect(JSON.stringify(failure)).not.toContain(typedSecret);
 	});
 
 	it("refuses a notification of another organization", async () => {
