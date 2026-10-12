@@ -80,6 +80,28 @@ export const findPreviewDeploymentById = async (
 	return application;
 };
 
+// Only what locating the owner's host needs: the log readers call this per
+// drawer open, so it skips the domains that findPreviewDeploymentById loads.
+export const findPreviewDeploymentLogOwner = async (
+	previewDeploymentId: string,
+) => {
+	const preview = await db.query.previewDeployments.findFirst({
+		where: eq(previewDeployments.previewDeploymentId, previewDeploymentId),
+		columns: { previewDeploymentId: true },
+		with: {
+			application: { columns: { serverId: true, buildServerId: true } },
+			compose: { columns: { serverId: true } },
+		},
+	});
+	if (!preview) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Preview Deployment not found",
+		});
+	}
+	return preview;
+};
+
 export const removePreviewDeployment = async (previewDeploymentId: string) => {
 	try {
 		const previewDeployment =

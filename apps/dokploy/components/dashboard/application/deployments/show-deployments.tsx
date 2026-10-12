@@ -70,7 +70,7 @@ export const ShowDeployments = ({
 	serverId,
 }: Props) => {
 	const [activeLog, setActiveLog] = useState<
-		RouterOutputs["deployment"]["allByType"][number] | null
+		RouterOutputs["deployment"]["all"][number] | null
 	>(null);
 	const [removingDeploymentIds, setRemovingDeploymentIds] = useState<
 		Set<string>
@@ -104,6 +104,17 @@ export const ShowDeployments = ({
 			: type === "compose"
 				? composeService?.snapvisorProjectName
 				: null;
+
+	// Where the open log lives is decided server-side (a preview built before
+	// the build server was recorded has to be found); the drawer waits for it
+	// rather than opening on a guess. If the lookup fails it falls back to the
+	// recorded build server, then the serving host.
+	const { data: logHost, isError: logHostFailed } =
+		api.deployment.logHost.useQuery(
+			{ deploymentId: activeLog?.deploymentId ?? "" },
+			{ enabled: !!activeLog?.logPath, gcTime: 0 },
+		);
+	const logHostResolved = logHost !== undefined || logHostFailed;
 
 	const { mutateAsync: rollback, isPending: isRollingBack } =
 		api.rollback.rollback.useMutation();
@@ -608,8 +619,14 @@ export const ShowDeployments = ({
 					</div>
 				)}
 				<ShowDeployment
-					serverId={activeLog?.logServerId || serverId}
-					open={Boolean(activeLog && activeLog.logPath !== null)}
+					serverId={
+						(logHost
+							? logHost.serverId
+							: activeLog?.buildServerId || serverId) || undefined
+					}
+					open={Boolean(
+						activeLog && activeLog.logPath !== null && logHostResolved,
+					)}
 					onClose={() => setActiveLog(null)}
 					logPath={activeLog?.logPath || ""}
 					errorMessage={activeLog?.errorMessage || ""}
