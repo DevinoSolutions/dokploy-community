@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { relations } from "drizzle-orm";
 import {
 	index,
@@ -114,7 +115,7 @@ const snapvisorBaseUrlSchema = z
 	.trim()
 	.url("Enter a valid URL")
 	.refine((value) => /^https?:\/\//i.test(value), "Use an http(s) URL")
-	.transform((value) => value.replace(/\/+$/, ""));
+	.transform((value) => trimTrailingSlashes(value));
 
 // Snapvisor account/project slugs are URL path segments.
 const snapvisorSlugSchema = z

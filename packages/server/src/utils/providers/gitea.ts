@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import {
@@ -247,9 +248,8 @@ export const testGiteaConnection = async (input: { giteaId: string }) => {
 			});
 		}
 
-		const baseUrl = (provider.giteaInternalUrl || provider.giteaUrl).replace(
-			/\/+$/,
-			"",
+		const baseUrl = trimTrailingSlashes(
+			provider.giteaInternalUrl || provider.giteaUrl,
 		);
 
 		// Use /user/repos to get authenticated user's repositories with pagination
@@ -307,9 +307,9 @@ export const getGiteaRepositories = async (giteaId?: string) => {
 	await refreshGiteaToken(giteaId);
 	const giteaProvider = await findGiteaById(giteaId);
 
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		giteaProvider.giteaInternalUrl || giteaProvider.giteaUrl
-	).replace(/\/+$/, "");
+	));
 
 	// Use /user/repos to get authenticated user's repositories with pagination
 	let allRepositories: any[] = [];
@@ -374,9 +374,9 @@ export const getGiteaBranches = async (input: {
 
 	const giteaProvider = await findGiteaById(input.giteaId);
 
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		giteaProvider.giteaInternalUrl || giteaProvider.giteaUrl
-	).replace(/\/+$/, "");
+	));
 
 	// Handle pagination for branches
 	let allBranches: any[] = [];
@@ -436,10 +436,7 @@ const getGiteaApiBaseUrl = (giteaProvider: {
 	giteaUrl: string;
 	giteaInternalUrl?: string | null;
 }) =>
-	(giteaProvider.giteaInternalUrl || giteaProvider.giteaUrl).replace(
-		/\/+$/,
-		"",
-	);
+	trimTrailingSlashes(giteaProvider.giteaInternalUrl || giteaProvider.giteaUrl);
 
 interface GiteaApiRequestOptions {
 	method?: "GET" | "POST" | "PATCH" | "DELETE";

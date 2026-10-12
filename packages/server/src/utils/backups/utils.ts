@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import {
 	ADDITIONAL_FLAG_REGEX,
 	GENERIC_RCLONE_PROVIDER,
@@ -104,7 +105,7 @@ export const getBackupTimestamp = () =>
 
 export const normalizeS3Path = (prefix: string) => {
 	// Trim whitespace and remove leading/trailing slashes
-	const normalizedPrefix = prefix.trim().replace(/^\/+|\/+$/g, "");
+	const normalizedPrefix = trimTrailingSlashes(prefix.trim().replace(/^\/+/, ""));
 	// Return empty string if prefix is empty, otherwise append trailing slash
 	return normalizedPrefix ? `${normalizedPrefix}/` : "";
 };

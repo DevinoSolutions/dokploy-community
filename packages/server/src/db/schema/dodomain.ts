@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { relations } from "drizzle-orm";
 import { jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
@@ -140,7 +141,7 @@ const dodomainBaseUrlSchema = z
 		isSecureDoDomainBaseUrl,
 		"Use an https URL (http is only allowed for localhost)",
 	)
-	.transform((value) => value.replace(/\/+$/, ""));
+	.transform((value) => trimTrailingSlashes(value));
 
 export const apiCreateDoDomain = z.object({
 	name: z.string().trim().min(1),

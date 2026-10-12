@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
 import {
@@ -373,7 +374,7 @@ export const canonicalizeMcpResource = (
 	if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
 	if (parsed.search !== "" || parsed.hash !== "") return null;
 	if (parsed.username !== "" || parsed.password !== "") return null;
-	if (parsed.pathname.replace(/\/+$/, "") !== MCP_ENDPOINT_PATH) return null;
+	if (trimTrailingSlashes(parsed.pathname) !== MCP_ENDPOINT_PATH) return null;
 	const host = parsed.host.toLowerCase();
 	const known =
 		host === advertised.host.toLowerCase() ||

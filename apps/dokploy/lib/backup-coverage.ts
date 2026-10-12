@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 // Pure helpers shared by the Backup Center coverage tree (client) and the
 // `backupPolicy.composeChildren` query (server). No React / DB imports here so
 // the logic stays unit-testable.
@@ -306,7 +307,7 @@ export const isComposeVolumeCovered = (
  * as a directory. An empty prefix lists the bucket root.
  */
 export const buildBackupListPrefix = (prefix: string): string => {
-	const normalized = prefix.trim().replace(/^\/+|\/+$/g, "");
+	const normalized = trimTrailingSlashes(prefix.trim().replace(/^\/+/, ""));
 	return normalized ? `${normalized}/` : "";
 };
 

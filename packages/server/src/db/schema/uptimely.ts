@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { relations } from "drizzle-orm";
 import {
 	pgEnum,
@@ -137,7 +138,7 @@ const uptimelyBaseUrlSchema = z
 	.trim()
 	.url("Enter a valid URL")
 	.refine((value) => /^https?:\/\//i.test(value), "Use an http(s) URL")
-	.transform((value) => value.replace(/\/+$/, ""));
+	.transform((value) => trimTrailingSlashes(value));
 
 // Slugs appear in a URL path; keep them to the shape Uptimely generates.
 const uptimelyStatusPageSlugSchema = z

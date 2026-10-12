@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import type { scalewayVaultConfigSchema } from "@dokploy/server/db/schema";
 import type { z } from "zod";
 import { type VaultClient, vaultFetch } from "./types";
@@ -9,7 +10,7 @@ const PAGE_SIZE = 100;
 const MAX_LISTED_SECRETS = 500;
 
 const baseUrl = (config: ScalewayConfig) =>
-	`${config.apiUrl.replace(/\/+$/, "")}/secret-manager/v1beta1/regions/${config.region}`;
+	`${trimTrailingSlashes(config.apiUrl)}/secret-manager/v1beta1/regions/${config.region}`;
 
 /**
  * Refs are `[folder/]name[:field]`, mirroring how Scaleway splits a secret into
@@ -27,7 +28,7 @@ export const parseScalewayRef = (ref: string) => {
 		);
 	}
 	const path = slashIndex === -1 ? "/" : `/${fullName.slice(0, slashIndex)}`;
-	return { path: path.replace(/\/+$/, "") || "/", name, field };
+	return { path: trimTrailingSlashes(path) || "/", name, field };
 };
 
 const request = async (
@@ -159,7 +160,7 @@ export const scalewayClient: VaultClient<ScalewayConfig> = {
 			};
 			const secrets = data.secrets ?? [];
 			for (const secret of secrets) {
-				const folder = (secret.path ?? "/").replace(/^\/+|\/+$/g, "");
+				const folder = trimTrailingSlashes((secret.path ?? "/").replace(/^\/+/, ""));
 				names.push(folder ? `${folder}/${secret.name}` : secret.name);
 			}
 			if (secrets.length < PAGE_SIZE) {

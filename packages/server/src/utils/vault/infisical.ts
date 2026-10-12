@@ -1,10 +1,11 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import type { infisicalVaultConfigSchema } from "@dokploy/server/db/schema";
 import type { z } from "zod";
 import { type VaultClient, vaultFetch } from "./types";
 
 type InfisicalConfig = z.infer<typeof infisicalVaultConfigSchema>;
 
-const baseUrl = (config: InfisicalConfig) => config.siteUrl.replace(/\/+$/, "");
+const baseUrl = (config: InfisicalConfig) => trimTrailingSlashes(config.siteUrl);
 
 const login = async (config: InfisicalConfig) => {
 	const response = await vaultFetch(
@@ -59,7 +60,7 @@ const resolveSecretPath = (config: InfisicalConfig, refPath: string | null) => {
 	if (refPath.startsWith("/")) {
 		return refPath;
 	}
-	const base = config.secretPath.replace(/\/+$/, "");
+	const base = trimTrailingSlashes(config.secretPath);
 	return `${base}/${refPath}`;
 };
 

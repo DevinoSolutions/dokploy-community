@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreateUptimely,
@@ -65,14 +66,14 @@ export const uptimelyMonitorUrl = (
 	integration: Pick<UptimelyIntegration, "baseUrl" | "projectId">,
 	monitorId: string,
 ) =>
-	`${integration.baseUrl.replace(/\/+$/, "")}/dashboard/${integration.projectId}/monitors/${monitorId}`;
+	`${trimTrailingSlashes(integration.baseUrl)}/dashboard/${integration.projectId}/monitors/${monitorId}`;
 
 /** Public, unauthenticated SVG badge of an Uptimely status page. */
 export const uptimelyBadgeUrl = (
 	integration: Pick<UptimelyIntegration, "baseUrl" | "statusPageSlug">,
 ) =>
 	integration.statusPageSlug
-		? `${integration.baseUrl.replace(/\/+$/, "")}/status/${encodeURIComponent(integration.statusPageSlug)}/badge`
+		? `${trimTrailingSlashes(integration.baseUrl)}/status/${encodeURIComponent(integration.statusPageSlug)}/badge`
 		: null;
 
 // ---------------------------------------------------------------------------
@@ -266,7 +267,7 @@ export const httpsUrlsFromDomains = (
 					: `/${domain.path}`
 				: "";
 		const url = checkPath
-			? `https://${host}${path.replace(/\/+$/, "")}${checkPath}`
+			? `https://${host}${trimTrailingSlashes(path)}${checkPath}`
 			: `https://${host}${path}`;
 		// Defense in depth: whatever the path says, the host must stay the
 		// service's own.
