@@ -393,7 +393,7 @@ describe("volume backups", () => {
 			"",
 			"application",
 		);
-		expect(command).toContain("tar xvf /backup/");
+		expect(command).toMatch(/tar xv?f [/]backup[/]my-app[/]/);
 		expect(command).toContain("rclone copyto");
 	});
 });
