@@ -231,12 +231,12 @@ export const runCommand = async (scheduleId: string) => {
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
 			const command = `
 				set -euo pipefail
-				echo "Running script" >> ${deployment.logPath};
-				bash -c ${fullPath}/script.sh 2>&1 | tee -a ${deployment.logPath} || {
-					echo "❌ Command failed" >> ${deployment.logPath};
+				echo "Running script" >> ${quote([deployment.logPath])};
+				bash -c ${quote([`${fullPath}/script.sh`])} 2>&1 | tee -a ${quote([deployment.logPath])} || {
+					echo "❌ Command failed" >> ${quote([deployment.logPath])};
 					exit 1;
 				  }
-				echo "✅ Command executed successfully" >> ${deployment.logPath};
+				echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 			`;
 			await execAsyncRemote(serverId, command, async (data) => {
 				// we need to extract the PID and Schedule ID from the data

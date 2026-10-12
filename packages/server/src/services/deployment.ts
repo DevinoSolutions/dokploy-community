@@ -16,7 +16,10 @@ import {
 	environments,
 	projects,
 } from "@dokploy/server/db/schema";
-import { APP_NAME_REGEX } from "@dokploy/server/db/schema/utils";
+import {
+	APP_NAME_REGEX,
+	isPlainAppName,
+} from "@dokploy/server/db/schema/utils";
 import { removeDirectoryIfExistsContent } from "@dokploy/server/utils/filesystem/directory";
 import {
 	execAsync,
@@ -509,6 +512,11 @@ export const createDeploymentSchedule = async (
 	>,
 ) => {
 	const schedule = await findScheduleById(deployment.scheduleId);
+	// Rows written before appName stopped being client input can hold anything;
+	// it names directories that are created and written to below.
+	if (!isPlainAppName(schedule.appName)) {
+		throw new Error("Invalid schedule app name");
+	}
 
 	const serverId =
 		schedule.application?.serverId ||
@@ -538,8 +546,8 @@ export const createDeploymentSchedule = async (
 			const server = await findServerById(serverId);
 
 			const command = `
-				mkdir -p ${SCHEDULES_PATH}/${schedule.appName};
-            	echo "Initializing schedule" >> ${logFilePath};
+				mkdir -p ${quote([`${SCHEDULES_PATH}/${schedule.appName}`])};
+            	echo "Initializing schedule" >> ${quote([logFilePath])};
 			`;
 
 			await execAsyncRemote(server.serverId, command);
