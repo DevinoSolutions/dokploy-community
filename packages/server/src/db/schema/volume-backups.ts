@@ -143,6 +143,9 @@ export const createVolumeBackupSchema = createInsertSchema(volumeBackups, {
 	serviceName: backupPathSchema.nullish(),
 }).omit({
 	volumeBackupId: true,
+	// Generated on the server: it names the log and archive directories that
+	// backup commands write to.
+	appName: true,
 });
 
 export const updateVolumeBackupSchema = createVolumeBackupSchema.extend({
