@@ -33,25 +33,37 @@ export interface TraefikOptions {
 	}[];
 }
 
-export const initializeStandaloneTraefik = async ({
-	env,
-	serverId,
-	additionalPorts = [],
-}: TraefikOptions = {}) => {
-	const { MAIN_TRAEFIK_PATH, DYNAMIC_TRAEFIK_PATH } = paths(!!serverId);
-	const imageName = `traefik:v${TRAEFIK_VERSION}`;
-	const containerName = "dokploy-traefik";
+type PortBinding = { HostPort: string; HostIp: string };
 
+export const applyAdditionalPortBindings = (
+	exposedPorts: Record<string, {}>,
+	portBindings: Record<string, PortBinding[]>,
+	additionalPorts: NonNullable<TraefikOptions["additionalPorts"]>,
+) => {
+	for (const port of additionalPorts) {
+		const portKey = `${port.targetPort}/${port.protocol ?? "tcp"}`;
+		exposedPorts[portKey] = {};
+		const hostPort = port.publishedPort.toString();
+		const bindings = portBindings[portKey] ?? [];
+		// Several published ports can share one target port, so append instead of
+		// replacing, but never bind the same host port twice.
+		if (!bindings.some((binding) => binding.HostPort === hostPort)) {
+			bindings.push({ HostPort: hostPort, HostIp: TRAEFIK_BIND_IP });
+		}
+		portBindings[portKey] = bindings;
+	}
+};
+
+export const buildStandalonePortBindings = (
+	additionalPorts: NonNullable<TraefikOptions["additionalPorts"]>,
+) => {
 	const exposedPorts: Record<string, {}> = {
 		[`${TRAEFIK_PORT}/tcp`]: {},
 		[`${TRAEFIK_SSL_PORT}/tcp`]: {},
 		[`${TRAEFIK_HTTP3_PORT}/udp`]: {},
 	};
 
-	const portBindings: Record<
-		string,
-		Array<{ HostPort: string; HostIp: string }>
-	> = {
+	const portBindings: Record<string, PortBinding[]> = {
 		[`${TRAEFIK_PORT}/tcp`]: [
 			{ HostPort: TRAEFIK_PORT.toString(), HostIp: TRAEFIK_BIND_IP },
 		],
@@ -67,18 +79,34 @@ export const initializeStandaloneTraefik = async ({
 		(port) => port.targetPort === 8080,
 	);
 
+	// The dashboard binding is only a fallback: when 8080/tcp is itself one of the
+	// additional ports, its published port(s) decide the host binding.
+	const dashboardIsAdditional = additionalPorts.some(
+		(port) => port.targetPort === 8080 && (port.protocol ?? "tcp") === "tcp",
+	);
 	if (enableDashboard) {
 		exposedPorts["8080/tcp"] = {};
-		portBindings["8080/tcp"] = [{ HostPort: "8080", HostIp: TRAEFIK_BIND_IP }];
+		portBindings["8080/tcp"] = dashboardIsAdditional
+			? []
+			: [{ HostPort: "8080", HostIp: TRAEFIK_BIND_IP }];
 	}
 
-	for (const port of additionalPorts) {
-		const portKey = `${port.targetPort}/${port.protocol ?? "tcp"}`;
-		exposedPorts[portKey] = {};
-		portBindings[portKey] = [
-			{ HostPort: port.publishedPort.toString(), HostIp: TRAEFIK_BIND_IP },
-		];
-	}
+	applyAdditionalPortBindings(exposedPorts, portBindings, additionalPorts);
+
+	return { exposedPorts, portBindings };
+};
+
+export const initializeStandaloneTraefik = async ({
+	env,
+	serverId,
+	additionalPorts = [],
+}: TraefikOptions = {}) => {
+	const { MAIN_TRAEFIK_PATH, DYNAMIC_TRAEFIK_PATH } = paths(!!serverId);
+	const imageName = `traefik:v${TRAEFIK_VERSION}`;
+	const containerName = "dokploy-traefik";
+
+	const { exposedPorts, portBindings } =
+		buildStandalonePortBindings(additionalPorts);
 
 	const settings: ContainerCreateOptions = {
 		name: containerName,

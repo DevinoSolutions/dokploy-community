@@ -82,6 +82,25 @@ describe("readPorts (standalone container)", () => {
 		]);
 	});
 
+	it("returns every distinct host port published for one target port", async () => {
+		mockDocker({
+			resourceType: "standalone",
+			ports: {
+				"5000/tcp": [
+					{ HostIp: "0.0.0.0", HostPort: "8085" },
+					{ HostIp: "::", HostPort: "8085" },
+					{ HostIp: "0.0.0.0", HostPort: "8888" },
+				],
+				"3000/tcp": [{ HostIp: "0.0.0.0", HostPort: "" }],
+			},
+		});
+
+		await expect(readPorts("dokploy-traefik")).resolves.toEqual([
+			{ targetPort: 5000, publishedPort: 8085, protocol: "tcp" },
+			{ targetPort: 5000, publishedPort: 8888, protocol: "tcp" },
+		]);
+	});
+
 	it("throws a DockerResourceNotFoundError when the resource does not exist", async () => {
 		mockDocker({ resourceType: "unknown" });
 
