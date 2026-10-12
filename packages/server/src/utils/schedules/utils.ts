@@ -14,12 +14,35 @@ import {
 } from "@dokploy/server/services/schedule";
 import { scheduledJobs, scheduleJob as scheduleJobNode } from "node-schedule";
 import { quote } from "shell-quote";
-import { getComposeContainer, getServiceContainer } from "../docker/utils";
 import { sendScheduleFailureNotifications } from "../notifications/schedule-failure";
 import { execAsyncRemote } from "../process/execAsync";
 import { spawnAsync } from "../process/spawnAsync";
+import {
+	createSchedulePidCapture,
+	remoteRunOutputToLog,
+	resolveScheduleContainer,
+	SCHEDULE_RUN_ENV,
+	SCHEDULE_RUN_WRAPPER,
+} from "./container-run";
 
 type ScheduleExtended = Awaited<ReturnType<typeof findScheduleById>>;
+
+// Records the in-container pid of an application/compose run so it can be
+// cancelled (see cancel.ts). The returned function hands back its input with the
+// pid marker line removed.
+const capturePid = (deploymentId: string) =>
+	createSchedulePidCapture((pid) => {
+		void (async () => {
+			try {
+				await updateDeployment(deploymentId, { pid });
+			} catch (error) {
+				console.error(
+					`Failed to record the pid of run ${deploymentId}:`,
+					error,
+				);
+			}
+		})();
+	});
 
 const handleScheduleError = async (
 	schedule: ScheduleExtended,
@@ -113,21 +136,8 @@ export const runCommand = async (scheduleId: string) => {
 
 	try {
 		if (scheduleType === "application" || scheduleType === "compose") {
-			let containerId = "";
-			let serverId = "";
-			if (scheduleType === "application" && application) {
-				const container = await getServiceContainer(
-					application.appName,
-					application.serverId,
-				);
-				containerId = container?.Id || "";
-				serverId = application.serverId || "";
-			}
-			if (scheduleType === "compose" && compose) {
-				const container = await getComposeContainer(compose, serviceName || "");
-				containerId = container?.Id || "";
-				serverId = compose.serverId || "";
-			}
+			const { containerId, serverId } =
+				await resolveScheduleContainer(schedule);
 
 			if (!containerId) {
 				const target =
@@ -151,23 +161,28 @@ export const runCommand = async (scheduleId: string) => {
 			}
 
 			if (serverId) {
+				// Only the pid line comes back over ssh; the output goes to the log.
 				await execAsyncRemote(
 					serverId,
 					`
 					set -e
+					set -o pipefail
 					echo "Running scheduled command" >> ${quote([deployment.logPath])};
-					docker exec ${quote([containerId])} ${quote([shellType])} -c ${quote([command])} >> ${quote([deployment.logPath])} 2>> ${quote([deployment.logPath])} || {
+					docker exec -e ${quote([`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`])} ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_RUN_WRAPPER])} ${quote([shellType])} ${quote([command])} 2>&1 | ${remoteRunOutputToLog(quote([deployment.logPath]))} || {
 						echo "❌ Command failed" >> ${quote([deployment.logPath])};
 						exit 1;
 					}
 					echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 					`,
+					capturePid(deployment.deploymentId),
+					{ streamOnly: true },
 				);
 			} else {
 				const writeStream = createWriteStream(deployment.logPath, {
 					flags: "a",
 				});
 
+				const capture = capturePid(deployment.deploymentId);
 				try {
 					if (IS_CLOUD) {
 						writeStream.write(
@@ -182,10 +197,21 @@ export const runCommand = async (scheduleId: string) => {
 					);
 					await spawnAsync(
 						"docker",
-						["exec", containerId, shellType, "-c", command],
+						[
+							"exec",
+							"-e",
+							`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`,
+							containerId,
+							shellType,
+							"-c",
+							SCHEDULE_RUN_WRAPPER,
+							shellType,
+							command,
+						],
 						(data) => {
-							if (writeStream.writable) {
-								writeStream.write(data);
+							const output = capture(data);
+							if (output && writeStream.writable) {
+								writeStream.write(output);
 							}
 						},
 					);

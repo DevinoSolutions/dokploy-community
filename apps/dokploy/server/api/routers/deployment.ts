@@ -1,5 +1,6 @@
 import {
 	cancelBuildServerDeploymentById,
+	cancelScheduleRun,
 	execAsync,
 	execAsyncRemote,
 	findAllDeploymentsByApplicationId,
@@ -228,6 +229,25 @@ export const deploymentRouter = createTRPCRouter({
 					code: "BAD_REQUEST",
 					message: "Deployment has an invalid process id",
 				});
+			}
+
+			const { schedule } = deployment;
+			if (
+				schedule &&
+				(schedule.scheduleType === "application" ||
+					schedule.scheduleType === "compose")
+			) {
+				// The pid is that of a process inside the service's container, where it
+				// may belong to something else by now: stop the run by its tag instead.
+				// A container that is gone has nothing left to stop.
+				await cancelScheduleRun(schedule.scheduleId, deployment.deploymentId);
+				await updateDeploymentStatus(deployment.deploymentId, "error");
+				await audit(ctx, {
+					action: "cancel",
+					resourceType: "deployment",
+					resourceId: deployment.deploymentId,
+				});
+				return;
 			}
 
 			const command = `kill -9 ${deployment.pid}`;
