@@ -38,6 +38,16 @@ import { fetchDeployApiJobs, type QueueJobRow } from "@/server/utils/deploy";
 import { resolveDeploymentAllByTypeAuthTarget } from "@/server/utils/deployment-all-by-type-target";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
 
+// The remote server that runs a deployment, or null for the Dokploy host.
+const deploymentHostServerId = (
+	deployment: Awaited<ReturnType<typeof findDeploymentById>>,
+) =>
+	deployment.serverId ||
+	deployment.schedule?.serverId ||
+	deployment.application?.serverId ||
+	deployment.compose?.serverId ||
+	null;
+
 export const deploymentRouter = createTRPCRouter({
 	all: protectedProcedure
 		.input(apiFindAllByApplication)
@@ -209,9 +219,23 @@ export const deploymentRouter = createTRPCRouter({
 				});
 			}
 
+			// `pid` is a free text column and ends up in a shell command.
+			if (!/^\d+$/.test(deployment.pid)) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Deployment has an invalid process id",
+				});
+			}
+
 			const command = `kill -9 ${deployment.pid}`;
-			if (deployment.schedule?.serverId) {
-				await execAsyncRemote(deployment.schedule.serverId, command);
+			const serverId = deploymentHostServerId(deployment);
+			if (serverId) {
+				await execAsyncRemote(serverId, command);
+			} else if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Deployment has no server to stop it on",
+				});
 			} else {
 				await execAsync(command);
 			}
@@ -258,11 +282,7 @@ export const deploymentRouter = createTRPCRouter({
 			}
 
 			const command = `tail -n ${input.tail} ${quote([deployment.logPath])} 2>/dev/null || echo ""`;
-			const serverId =
-				deployment.serverId ||
-				deployment.schedule?.serverId ||
-				deployment.application?.serverId ||
-				deployment.compose?.serverId;
+			const serverId = deploymentHostServerId(deployment);
 			if (serverId) {
 				const { stdout } = await execAsyncRemote(serverId, command);
 				return stdout;
