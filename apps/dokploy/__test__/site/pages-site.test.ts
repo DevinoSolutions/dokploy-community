@@ -143,6 +143,10 @@ describe("pages site: repository files", () => {
 			expect(exclude).toContain("node_modules");
 		});
 
+		it("keeps the changelog off the site (README, integrations and FAQ only)", () => {
+			expect(exclude).toContain("CHANGELOG.md");
+		});
+
 		it("does not set a theme (keeps the default one)", () => {
 			expect(config).not.toHaveProperty("theme");
 			expect(config).not.toHaveProperty("remote_theme");
@@ -387,7 +391,7 @@ describe("pages site: repository files", () => {
 			}
 		});
 
-		it("answers how to move a service with the scan, copy-based cutover and restart-on-failure facts from the README", () => {
+		it("answers how to move a service with the scan, copy-based cutover and restart-on-failure facts from the changelog", () => {
 			const answer = faqPage.mainEntity.find((q) =>
 				/move a Dokploy service/.test(q.name),
 			)?.acceptedAnswer.text;
@@ -399,7 +403,7 @@ describe("pages site: repository files", () => {
 			expect(answer).toMatch(/copy-based cutover/);
 			expect(answer).toMatch(/restarted/);
 			expect(body).toContain(`](${REPO_URL}/pull/148)`);
-			expect(read("README.md")).toContain(
+			expect(read("CHANGELOG.md")).toContain(
 				"**Move a service to another server**",
 			);
 		});
