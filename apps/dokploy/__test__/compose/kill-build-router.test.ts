@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
+	claimScheduleRunCancel: vi.fn(),
+	revertScheduleRunCancel: vi.fn(),
 	audit: vi.fn(),
 }));
 
@@ -34,6 +36,9 @@ vi.mock("@dokploy/server", () => ({
 	execAsync: mocks.execAsync,
 	execAsyncRemote: mocks.execAsyncRemote,
 	updateDeploymentStatus: mocks.updateDeploymentStatus,
+	claimScheduleRunCancel: mocks.claimScheduleRunCancel,
+	revertScheduleRunCancel: mocks.revertScheduleRunCancel,
+	isMissingProcessError: () => false,
 }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({
@@ -76,6 +81,7 @@ beforeEach(() => {
 		warnings: [],
 	});
 	mocks.cancelBuildServerDeploymentById.mockResolvedValue(null);
+	mocks.claimScheduleRunCancel.mockResolvedValue(true);
 });
 
 describe("compose.killBuild", () => {
@@ -217,7 +223,6 @@ describe("deployment.killProcess", () => {
 		["deployment.serverId", { serverId: "srv-1" }],
 		["application.serverId", { application: { serverId: "srv-1" } }],
 		["compose.serverId", { compose: { serverId: "srv-1" } }],
-		["schedule.serverId", { schedule: { serverId: "srv-1" } }],
 	])("kills the pid on the remote host given by %s", async (_name, extra) => {
 		mocks.findDeploymentById.mockResolvedValue(
 			deployment({ pid: "4242", ...extra }),
@@ -228,6 +233,26 @@ describe("deployment.killProcess", () => {
 		expect(mocks.execAsyncRemote).toHaveBeenCalledWith("srv-1", "kill -9 4242");
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+		expect(mocks.audit).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({ action: "cancel", resourceId: "dep-1" }),
+		);
+	});
+
+	it("kills the pid of a schedule run on the remote host given by schedule.serverId, and marks it cancelled", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			deployment({
+				pid: "4242",
+				schedule: { scheduleType: "server", serverId: "srv-1" },
+			}),
+		);
+
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+
+		expect(mocks.claimScheduleRunCancel).toHaveBeenCalledWith("dep-1");
+		expect(mocks.execAsyncRemote).toHaveBeenCalledWith("srv-1", "kill -9 4242");
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
 		expect(mocks.audit).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.objectContaining({ action: "cancel", resourceId: "dep-1" }),

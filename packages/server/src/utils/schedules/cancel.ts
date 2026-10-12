@@ -62,3 +62,16 @@ export const cancelScheduleRun = async (
 	}
 	return { containerFound: true };
 };
+
+/**
+ * True when `kill` failed because the process is already gone. Both the local
+ * and the remote exec errors carry what `kill` wrote to stderr; dash and bash
+ * both say "No such process".
+ */
+export const isMissingProcessError = (error: unknown): boolean => {
+	if (typeof error !== "object" || error === null) return false;
+	const { message, stderr } = error as { message?: unknown; stderr?: unknown };
+	return [message, stderr].some(
+		(text) => typeof text === "string" && /No such process/i.test(text),
+	);
+};

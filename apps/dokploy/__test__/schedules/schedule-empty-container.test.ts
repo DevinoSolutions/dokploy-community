@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => ({
 	findScheduleOrganizationId: vi.fn(),
 	createDeploymentSchedule: vi.fn(),
 	updateDeployment: vi.fn(),
-	updateDeploymentStatus: vi.fn(),
+	finishScheduleRun: vi.fn(),
 	getDokployUrl: vi.fn(),
 	getServiceContainer: vi.fn(),
 	getComposeContainer: vi.fn(),
@@ -48,7 +48,13 @@ vi.mock("@dokploy/server/services/schedule", () => ({
 vi.mock("@dokploy/server/services/deployment", () => ({
 	createDeploymentSchedule: mocks.createDeploymentSchedule,
 	updateDeployment: mocks.updateDeployment,
-	updateDeploymentStatus: mocks.updateDeploymentStatus,
+}));
+
+// How a run ends is recorded by a conditional update (see run-status.ts); it is
+// covered by schedule-run-cancelled.test.ts.
+vi.mock("@dokploy/server/utils/schedules/run-status", () => ({
+	finishScheduleRun: mocks.finishScheduleRun,
+	isScheduleRunCancelled: vi.fn(async () => false),
 }));
 
 vi.mock("@dokploy/server/services/admin", () => ({
@@ -125,7 +131,7 @@ const primeMocks = () => {
 		deploymentId: "dep-1",
 		logPath: "/tmp/dep-1.log",
 	});
-	mocks.updateDeploymentStatus.mockResolvedValue(undefined);
+	mocks.finishScheduleRun.mockResolvedValue("recorded");
 	mocks.findScheduleOrganizationId.mockResolvedValue("org-1");
 	mocks.getDokployUrl.mockResolvedValue("https://dokploy.test");
 	mocks.sendScheduleFailureNotifications.mockResolvedValue(undefined);
@@ -157,8 +163,8 @@ describe("runCommand — target container not running (DOKPLOY-COMMUNITY-1/2)", 
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 
 		// It is recorded as a proper schedule failure, not a success.
-		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
-		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalledWith(
+		expect(mocks.finishScheduleRun).toHaveBeenCalledWith("dep-1", "error");
+		expect(mocks.finishScheduleRun).not.toHaveBeenCalledWith(
 			"dep-1",
 			"done",
 		);
@@ -182,7 +188,7 @@ describe("runCommand — target container not running (DOKPLOY-COMMUNITY-1/2)", 
 
 		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
-		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+		expect(mocks.finishScheduleRun).toHaveBeenCalledWith("dep-1", "error");
 		expect(loggedOutput()).toContain("service 'web'");
 		expect(loggedOutput()).toContain("my-compose");
 	});
@@ -216,7 +222,7 @@ describe("scheduleJob — cron callback must not leak rejections", () => {
 		await expect(registeredCallback()).resolves.toBeUndefined();
 
 		// The failure is still recorded and notified.
-		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+		expect(mocks.finishScheduleRun).toHaveBeenCalledWith("dep-1", "error");
 		expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
 		consoleErrorSpy.mockRestore();
 	});

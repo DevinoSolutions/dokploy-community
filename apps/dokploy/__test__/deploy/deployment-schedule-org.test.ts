@@ -47,6 +47,13 @@ vi.mock("@dokploy/server/services/deployment", async (importOriginal) => ({
 	updateDeploymentStatus: vi.fn(),
 }));
 
+// Claiming a run as cancelled is a database update (see run-status.ts).
+vi.mock("@dokploy/server/utils/schedules/run-status", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	claimScheduleRunCancel: vi.fn(async () => true),
+	revertScheduleRunCancel: vi.fn(async () => undefined),
+}));
+
 vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 	...(await importOriginal<object>()),
 	execAsync: mocks.execAsync,

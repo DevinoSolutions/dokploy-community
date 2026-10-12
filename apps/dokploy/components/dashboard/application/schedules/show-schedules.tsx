@@ -61,6 +61,8 @@ export const ShowSchedules = ({ id, scheduleType = "application" }: Props) => {
 			const result = await runManually({ scheduleId });
 			if (result.status === "error") {
 				toast.error("Schedule run failed, check the deployment logs");
+			} else if (result.status === "cancelled") {
+				toast.info("Schedule run was cancelled");
 			} else {
 				toast.success("Schedule run successfully");
 			}
