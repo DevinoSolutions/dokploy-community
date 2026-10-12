@@ -28,6 +28,15 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 	execAsyncRemote: mocks.execAsyncRemote,
 }));
 
+vi.mock("@dokploy/server/services/preview-deployment", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	findPreviewDeploymentById: vi.fn(async () => ({
+		previewDeploymentId: "preview-1",
+		applicationId: "app-1",
+		composeId: null,
+	})),
+}));
+
 vi.mock("@dokploy/server/services/permission", async (importOriginal) => ({
 	...(await importOriginal<object>()),
 	checkServicePermissionAndAccess: vi.fn(async () => {}),
@@ -91,6 +100,22 @@ describe("deployment.readLogs on a build server", () => {
 		await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
 
 		expect(mocks.execAsyncRemote.mock.calls[0]?.[0]).toBe("build-1");
+	});
+
+	it("reads a preview deployment's log from the build server it was built on", async () => {
+		mocks.deployment = {
+			deploymentId: "dep-1",
+			previewDeploymentId: "preview-1",
+			logPath,
+			serverId: "server-1",
+			buildServerId: "build-1",
+			application: null,
+		};
+
+		await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
+
+		expect(mocks.execAsyncRemote.mock.calls[0]?.[0]).toBe("build-1");
+		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 
 	it("still reads from the running host when there is no build server", async () => {
