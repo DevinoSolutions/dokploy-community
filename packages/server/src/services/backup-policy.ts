@@ -20,6 +20,7 @@ import { applications } from "../db/schema/application";
 import { compose } from "../db/schema/compose";
 import { redis } from "../db/schema/redis";
 import { VOLUME_NAME_REGEX } from "../db/schema/utils";
+import { isSafeBackupPath } from "../db/validations/backup";
 import { logger } from "../lib/logger";
 import { removeScheduleBackup, scheduleBackup } from "../utils/backups/utils";
 import {
@@ -409,7 +410,22 @@ const enumerateServices = async (
 type BackupInsert = typeof backups.$inferInsert;
 type VolumeInsert = typeof volumeBackups.$inferInsert;
 
-const buildDesiredBackupRows = (
+// The service name is stored on the materialized row and reaches backup
+// commands, so a row is only created for names the backup forms would accept.
+const hasSafeServiceName = (policy: BackupPolicy, service: ScopedService) => {
+	if (isSafeBackupPath(service.name)) return true;
+	logger.warn(
+		{
+			policyId: policy.backupPolicyId,
+			serviceId: service.id,
+			serviceName: service.name,
+		},
+		"[BackupPolicy] Skipping service with an invalid name",
+	);
+	return false;
+};
+
+export const buildDesiredBackupRows = (
 	policy: BackupPolicy,
 	enumerated: EnumeratedServices,
 ): MaterializedRowPlan<BackupInsert>[] => {
@@ -418,6 +434,7 @@ const buildDesiredBackupRows = (
 		const services = enumerated.dump[type];
 		if (!services) continue;
 		for (const service of services) {
+			if (!hasSafeServiceName(policy, service)) continue;
 			const prefix = computeServicePrefix(
 				policy.prefix,
 				service.projectName,
@@ -465,6 +482,7 @@ export const buildDesiredVolumeRows = async (
 		const services = enumerated.volume[type];
 		if (!services) continue;
 		for (const service of services) {
+			if (!hasSafeServiceName(policy, service)) continue;
 			const mounts = await findMountsByApplicationId(service.id, type);
 			const namedVolumes = mounts
 				.filter((mount) => mount.type === "volume" && mount.volumeName)

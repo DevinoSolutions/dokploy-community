@@ -15,12 +15,14 @@ import {
 	apiRestoreBackup,
 	apiUpdateBackup,
 	createVolumeBackupSchema,
+	updateVolumeBackupSchema,
 } from "@dokploy/server/db/schema";
 import { apiCreateBackupPolicy } from "@dokploy/server/db/schema/backup-policy";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import { keepLatestNBackups } from "@dokploy/server/utils/backups";
 import {
 	buildRcloneRcatCommand,
+	getBackupCommand,
 	getComposeContainerCommand,
 	getRclonePathAndFlags,
 	getServiceContainerCommand,
@@ -28,7 +30,11 @@ import {
 } from "@dokploy/server/utils/backups/utils";
 import { backupVolume } from "@dokploy/server/utils/volume-backups/backup";
 import { restoreVolume } from "@dokploy/server/utils/volume-backups/restore";
+import { quote } from "shell-quote";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+
+// Every case spawns bash a few times, which is slow on Windows.
+vi.setConfig({ testTimeout: 30_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
@@ -94,7 +100,9 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 
 // Git Bash on Windows wants /c/Users/... instead of C:\Users\...
 const toPosix = (value: string) =>
-	value.replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replace(/\\/g, "/");
+	value
+		.replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`)
+		.replace(/\\/g, "/");
 
 const root = mkdtempSync(path.join(tmpdir(), "dokploy-rclone-inject-"));
 mocks.root = toPosix(root);
@@ -121,6 +129,9 @@ beforeAll(() => {
 		`if [ "$1" = lsf ]; then printf '%s\\n' a.sql.gz b.sql.gz c.sql.gz d.sql.gz; exit 0; fi\n${record}`,
 	);
 	stub("docker", record);
+	// Only the log readers call tail with a file; the retention pipeline pipes
+	// `tail -n +N` and gets the real binary.
+	stub("tail", `case "$*" in *+*) exec /usr/bin/tail "$@" ;; esac\n${record}`);
 });
 
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -149,13 +160,13 @@ const runStubbed = (command: string) => {
 };
 
 const payloads = [
-	`x$(touch pwned)`,
-	`x\`touch pwned\``,
+	"x$(touch pwned)",
+	"x`touch pwned`",
 	`x"; touch pwned; echo "`,
 	`x'; touch pwned; '`,
-	`x; touch pwned`,
-	`x\ntouch pwned\n`,
-	`x$(touch pwned)/y z`,
+	"x; touch pwned",
+	"x\ntouch pwned\n",
+	"x$(touch pwned)/y z",
 ];
 
 const s3Destination = {
@@ -175,7 +186,11 @@ const s3Destination = {
 
 describe("rclone rcat destination built from the backup prefix", () => {
 	const upload = async (prefix: string) => {
-		const { flags, path: destination, envVars } = await getRclonePathAndFlags(
+		const {
+			flags,
+			path: destination,
+			envVars,
+		} = await getRclonePathAndFlags(
 			// biome-ignore lint/suspicious/noExplicitAny: minimal destination fixture
 			s3Destination as any,
 			`${normalizeS3Path(prefix)}2026-10-12.sql.gz`,
@@ -227,14 +242,14 @@ describe("rclone rcat destination built from the backup prefix", () => {
 	it("shell-quotes a hostile bucket the same way", async () => {
 		const { flags, path: destination } = await getRclonePathAndFlags(
 			// biome-ignore lint/suspicious/noExplicitAny: minimal destination fixture
-			{ ...s3Destination, bucket: `b$(touch pwned)` } as any,
+			{ ...s3Destination, bucket: "b$(touch pwned)" } as any,
 			"f.sql.gz",
 		);
 		const { calls, pwned } = runStubbed(
 			buildRcloneRcatCommand(flags, destination),
 		);
 		expect(pwned).toBe(false);
-		expect(calls[0]?.at(-1)).toBe(`:s3:b$(touch pwned)/f.sql.gz`);
+		expect(calls[0]?.at(-1)).toBe(":s3:b$(touch pwned)/f.sql.gz");
 	});
 });
 
@@ -284,14 +299,14 @@ describe("docker label filters", () => {
 	it("keeps a hostile compose service name inert", () => {
 		for (const type of ["docker-compose", "stack"] as const) {
 			const { calls, pwned } = runStubbed(
-				`CID=$(${getComposeContainerCommand("app", `web$(touch pwned)\`touch pwned\``, type)})`,
+				`CID=$(${getComposeContainerCommand("app", "web$(touch pwned)`touch pwned`", type)})`,
 			);
 			expect(pwned).toBe(false);
 			expect(calls).toHaveLength(1);
 			expect(calls[0]).toContain(
 				type === "stack"
-					? `label=com.docker.swarm.service.name=app_web$(touch pwned)\`touch pwned\``
-					: `label=com.docker.compose.service=web$(touch pwned)\`touch pwned\``,
+					? "label=com.docker.swarm.service.name=app_web$(touch pwned)`touch pwned`"
+					: "label=com.docker.compose.service=web$(touch pwned)`touch pwned`",
 			);
 		}
 	});
@@ -346,7 +361,9 @@ describe("volume backups", () => {
 
 			expect(pwned).toBe(false);
 			const upload = calls.find((call) => call[0] === "copyto");
-			expect(upload?.at(-1)).toContain(`:s3:my-bucket/${normalizeS3Path(payload)}`);
+			expect(upload?.at(-1)).toContain(
+				`:s3:my-bucket/${normalizeS3Path(payload)}`,
+			);
 			const run = calls.find((call) => call[0] === "run");
 			expect(run).toContain(`${payload}:/volume_data`);
 		});
@@ -366,7 +383,7 @@ describe("volume backups", () => {
 				volumeBackup({
 					serviceType: "compose",
 					turnOff: true,
-					serviceName: `web$(touch pwned)\`touch pwned\``,
+					serviceName: "web$(touch pwned)`touch pwned`",
 					application: undefined,
 					compose: { appName: "stack-app", composeId: "c1", serverId: null },
 				}),
@@ -376,25 +393,173 @@ describe("volume backups", () => {
 		}
 	});
 
-	it("refuses to restore a file name a shell would interpret", async () => {
-		for (const name of [`a$(touch pwned).tar`, "a`id`.tar", 'a".tar', "a\\b.tar", "a'b.tar", "a\nb.tar"]) {
+	it("refuses restore names a shell would interpret or that leave the volume directory", async () => {
+		const bs = String.fromCharCode(92);
+		const newline = String.fromCharCode(10);
+		for (const name of [
+			"a$(touch pwned).tar",
+			"a`id`.tar",
+			'a".tar',
+			`a${bs}b.tar`,
+			`a${newline}b.tar`,
+			"../../etc/cron.d/x.tar",
+			"a/../../b.tar",
+			"/etc/cron.d/x.tar",
+			"my-app/vol.sql.gz",
+			"my-app/vol.tar.gz",
+		]) {
 			await expect(
 				restoreVolume("app-1", "dest-1", "my-volume", name, "", "application"),
 			).rejects.toThrow("Invalid backup file name");
 		}
 	});
 
-	it("still restores an ordinary file name", async () => {
+	it("restores names that look unusual but are safe", async () => {
+		// The command is built and run with stubbed docker and rclone; the inner
+		// script is then run for real against temp directories.
+		for (const name of [
+			"my-app/my-volume-2026-10-12T00-00-00-000Z.tar",
+			"Bob's backups/vol-1.tar",
+			"a b/vol;touch pwned.tar",
+			"x&y/(vol).tar",
+			"a..b/vol.tar",
+		]) {
+			const command = await restoreVolume(
+				"app-1",
+				"dest-1",
+				"my-volume",
+				name,
+				"",
+				"application",
+			);
+			const { calls, pwned } = runStubbed(command);
+			expect(pwned).toBe(false);
+
+			const run = calls.find((call) => call[0] === "run");
+			expect(run).toContain(`BACKUP_FILE_NAME=${name}`);
+			const script = run?.at(-1) ?? "";
+			expect(script).toContain('tar xf "/backup/$BACKUP_FILE_NAME" .');
+
+			// Run the inner script the way the container would, with the volume
+			// and backup directories pointed at temp dirs.
+			const volumeDir = path.join(root, "restore-volume");
+			const backupDir = path.join(root, "restore-backup");
+			rmSync(volumeDir, { recursive: true, force: true });
+			rmSync(backupDir, { recursive: true, force: true });
+			mkdirSync(volumeDir, { recursive: true });
+			mkdirSync(path.join(backupDir, path.dirname(name)), { recursive: true });
+			writeFileSync(path.join(root, "payload.txt"), "data");
+			// Relative paths inside bash: GNU tar reads `C:` as a remote host.
+			execFileSync("bash", [
+				"-c",
+				'mkdir -p "$1/restore-src" && cp "$1/payload.txt" "$1/restore-src/" && cd "$1" && tar cf "$2" -C restore-src .',
+				"_",
+				toPosix(root),
+				`restore-backup/${name}`,
+			]);
+			execFileSync(
+				"bash",
+				[
+					"-c",
+					script
+						.replace("/volume_data", toPosix(volumeDir))
+						.replace("/backup", toPosix(backupDir)),
+				],
+				{ cwd: root, env: { ...process.env, BACKUP_FILE_NAME: name } },
+			);
+			expect(readFileSync(path.join(volumeDir, "payload.txt"), "utf8")).toBe(
+				"data",
+			);
+			expect(existsSync(marker)).toBe(false);
+		}
+	});
+
+	it("keeps the restore echo lines and rclone path inert", async () => {
 		const command = await restoreVolume(
 			"app-1",
 			"dest-1",
 			"my-volume",
-			"my-app/my-volume-2026-10-12T00-00-00-000Z.tar",
+			"a b/vol;touch pwned.tar",
 			"",
 			"application",
 		);
-		expect(command).toMatch(/tar xv?f [/]backup[/]my-app[/]/);
-		expect(command).toContain("rclone copyto");
+		const { calls, pwned } = runStubbed(command);
+		expect(pwned).toBe(false);
+		const download = calls.find((call) => call[0] === "copyto");
+		expect(download?.at(-2)).toBe(":s3:my-bucket/a b/vol;touch pwned.tar");
+	});
+
+	it("ignores a client-supplied app name", async () => {
+		const input = {
+			name: "vb",
+			volumeName: "my-volume",
+			prefix: "p",
+			serviceType: "application",
+			cronExpression: "0 0 * * *",
+			destinationId: "dest-1",
+			appName: "x$(touch pwned)",
+		} as const;
+		const created = createVolumeBackupSchema.safeParse(input);
+		expect(created.success).toBe(true);
+		expect(created.data).not.toHaveProperty("appName");
+		const updated = updateVolumeBackupSchema.safeParse({
+			...input,
+			volumeBackupId: "vb-1",
+			appName: "$(id)",
+		});
+		expect(updated.success).toBe(true);
+		expect(updated.data).not.toHaveProperty("appName");
+	});
+});
+
+describe("log paths", () => {
+	const hostile = "/logs/app/a$(touch pwned)`touch pwned`.log";
+
+	it("reads a log tail without evaluating the path", async () => {
+		const { readBackupLogTail } = await import(
+			"@dokploy/server/utils/backups/log-tail"
+		);
+		mocks.execAsync.mockReset();
+		mocks.execAsync.mockResolvedValue({ stdout: "", stderr: "" });
+		await readBackupLogTail(hostile, null);
+		const command = mocks.execAsync.mock.calls[0]?.[0] as string;
+		const { calls, pwned } = runStubbed(command);
+		expect(pwned).toBe(false);
+		expect(calls[0]?.at(-1)).toBe(hostile);
+	});
+
+	it("reads a deployment error tail over ssh without evaluating the path", async () => {
+		const { getDeploymentErrorMessage } = await import(
+			"@dokploy/server/services/deployment"
+		);
+		mocks.execAsyncRemote.mockReset();
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		await getDeploymentErrorMessage({
+			logPath: hostile,
+			serverId: "server-1",
+			fallback: "none",
+		});
+		const command = mocks.execAsyncRemote.mock.calls[0]?.[1] as string;
+		const { calls, pwned } = runStubbed(command);
+		expect(pwned).toBe(false);
+		expect(calls[0]?.at(-1)).toBe(hostile);
+	});
+
+	it("appends backup progress to a quoted log path", () => {
+		const script = getBackupCommand(
+			{
+				backupType: "database",
+				databaseType: "postgres",
+				database: "app",
+				postgres: { appName: "pg", databaseUser: "u" },
+				destination: { provider: "AWS" },
+				// biome-ignore lint/suspicious/noExplicitAny: minimal backup fixture
+			} as any,
+			"rclone rcat :s3:b/x.sql.gz",
+			hostile,
+		);
+		expect(script).toContain(`>> ${quote([hostile])};`);
+		expect(script).not.toContain(`>> ${hostile}`);
 	});
 });
 
@@ -533,8 +698,10 @@ describe("backup path validation", () => {
 			destinationId: "dest-1",
 		} as const;
 		expect(
-			apiRestoreBackup.safeParse({ ...restore, metadata: { serviceName: "web" } })
-				.success,
+			apiRestoreBackup.safeParse({
+				...restore,
+				metadata: { serviceName: "web" },
+			}).success,
 		).toBe(true);
 		expect(
 			apiRestoreBackup.safeParse({

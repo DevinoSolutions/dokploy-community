@@ -1,6 +1,9 @@
 import { apiCreateMount, apiUpdateMount } from "@dokploy/server/db/schema";
 import { logger } from "@dokploy/server/lib/logger";
-import { buildDesiredVolumeRows } from "@dokploy/server/services/backup-policy";
+import {
+	buildDesiredBackupRows,
+	buildDesiredVolumeRows,
+} from "@dokploy/server/services/backup-policy";
 import { findMountsByApplicationId } from "@dokploy/server/services/mount";
 import { describe, expect, it, vi } from "vitest";
 
@@ -100,5 +103,44 @@ describe("mount volume name validation", () => {
 				apiUpdateMount.safeParse({ mountId: "m-1", volumeName }).success,
 			).toBe(false);
 		}
+	});
+});
+
+describe("backup policy service names", () => {
+	it("skips services whose name the backup forms would reject, and logs them", async () => {
+		vi.mocked(logger.warn).mockClear();
+		vi.mocked(findMountsByApplicationId).mockResolvedValue([
+			{ type: "volume", volumeName: "data" },
+			// biome-ignore lint/suspicious/noExplicitAny: minimal mount fixture
+		] as any);
+		const services = [
+			service,
+			{ ...service, id: "app-2", name: "My \"App\"" },
+			{ ...service, id: "app-3", name: "cost $(id)" },
+			{ ...service, id: "app-4", name: "My App 2" },
+		];
+
+		const dumps = buildDesiredBackupRows(policy, {
+			dump: { postgres: services },
+			volume: {},
+		});
+		expect(dumps.map((plan) => plan.insert.serviceName)).toEqual([
+			"web",
+			"My App 2",
+		]);
+
+		const volumes = await buildDesiredVolumeRows(policy, {
+			dump: {},
+			volume: { application: services },
+		});
+		expect(volumes.map((plan) => plan.insert.serviceName)).toEqual([
+			"web",
+			"My App 2",
+		]);
+		expect(logger.warn).toHaveBeenCalledTimes(4);
+		expect(logger.warn).toHaveBeenCalledWith(
+			expect.objectContaining({ serviceName: "cost $(id)" }),
+			expect.stringContaining("invalid name"),
+		);
 	});
 });
