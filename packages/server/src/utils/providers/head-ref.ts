@@ -41,8 +41,11 @@ export const buildPreviewHeadRef = (
 
 /**
  * Shell sequence that checks `headRef` out of the *base* repository
- * (`cloneUrl`, credentials already embedded) into an existing empty
- * `outputPath` — the shallow-clone equivalent of `git clone --branch <branch>`.
+ * (`cloneUrl`, no credentials in it) into an existing empty `outputPath` — the
+ * shallow-clone equivalent of `git clone --branch <branch>`. `authConfig` is the
+ * `-c http.<origin>/.extraHeader=...` argument from `getGitBasicAuthConfig`;
+ * it goes on every command that talks to the remote (fetch, submodule update)
+ * so the token is never stored in the remote URL or `.git/config`.
  *
  * The PR head ref is fetched first, with a fallback to `branch` so a server
  * that does not advertise the ref (or a row whose stored PR number is not a
@@ -56,24 +59,27 @@ export const buildHeadRefCheckoutCommand = ({
 	headRef,
 	outputPath,
 	enableSubmodules,
+	authConfig,
 }: {
 	cloneUrl: string;
 	branch: string;
 	headRef: string;
 	outputPath: string;
 	enableSubmodules: boolean;
+	authConfig?: string;
 }): string => {
 	const dir = quote([outputPath]);
+	const git = authConfig ? `git ${authConfig}` : "git";
 	let command = "";
 
 	command += `echo ${quote([`Checking out ${headRef} into ${outputPath}: ✅`])};`;
 	command += `git init -q ${dir};`;
 	command += `git -C ${dir} remote add origin ${quote([cloneUrl])};`;
-	command += `git -C ${dir} fetch --progress --depth 1 origin -- ${quote([headRef])} || git -C ${dir} fetch --progress --depth 1 origin -- ${quote([branch])};`;
+	command += `${git} -C ${dir} fetch --progress --depth 1 origin -- ${quote([headRef])} || ${git} -C ${dir} fetch --progress --depth 1 origin -- ${quote([branch])};`;
 	command += `git -C ${dir} checkout -q FETCH_HEAD;`;
 
 	if (enableSubmodules) {
-		command += `git -C ${dir} submodule update --init --recursive;`;
+		command += `${git} -C ${dir} submodule update --init --recursive;`;
 	}
 
 	return command;

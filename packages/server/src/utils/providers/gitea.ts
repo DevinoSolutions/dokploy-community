@@ -209,6 +209,7 @@ export const cloneGiteaRepository = async ({
 			headRef,
 			outputPath: String(outputPath ?? ""),
 			enableSubmodules,
+			authConfig: getGitTokenAuthConfig(cloneUrl, giteaProvider.accessToken!),
 		});
 		return command;
 	}

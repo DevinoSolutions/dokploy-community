@@ -252,6 +252,7 @@ export const cloneGithubRepository = async ({
 			headRef,
 			outputPath: String(outputPath ?? ""),
 			enableSubmodules,
+			authConfig: getGitTokenAuthConfig(cloneUrl, token),
 		});
 		return command;
 	}

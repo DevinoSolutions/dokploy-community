@@ -180,6 +180,7 @@ export const cloneGitlabRepository = async ({
 			headRef,
 			outputPath: String(outputPath ?? ""),
 			enableSubmodules,
+			authConfig: getGitTokenAuthConfig(cloneUrl, String(gitlab?.accessToken)),
 		});
 		return command;
 	}

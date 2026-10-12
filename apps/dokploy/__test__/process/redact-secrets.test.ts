@@ -180,6 +180,20 @@ describe("redactSecrets", () => {
 		);
 	});
 
+	it("redacts the Authorization header a git clone passes with -c", () => {
+		const b64 = Buffer.from("oauth2:ghs_FAKEFAKEFAKEFAKEFAKEFAKEFAKE").toString(
+			"base64",
+		);
+		// shell-quote single-quotes the value (it contains a space).
+		const redacted = redactSecrets(
+			`git -c 'http.https://github.com/.extraHeader=Authorization: Basic ${b64}' clone --branch main --depth 1 https://github.com/org/repo.git /code`,
+		);
+		expect(redacted).not.toContain(b64);
+		expect(redacted).toContain(
+			"git -c 'http.https://github.com/.extraHeader=Authorization: [REDACTED]' clone --branch main",
+		);
+	});
+
 	it("redacts basic-auth passwords in any URL but keeps user and host", () => {
 		const redacted = redactSecrets(
 			"docker login https://user:appPassFAKE@registry.example.com:5000/v2/",
