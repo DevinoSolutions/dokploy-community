@@ -543,6 +543,10 @@ export const addDokployNetworkToService = (
 	const hadExplicitNetworks = networkService !== undefined;
 	if (!networks) {
 		networks = [];
+	} else if (Array.isArray(networks)) {
+		networks = [...networks];
+	} else if (typeof networks === "object") {
+		networks = { ...networks };
 	}
 
 	if (Array.isArray(networks)) {

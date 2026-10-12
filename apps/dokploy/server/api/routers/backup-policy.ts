@@ -999,6 +999,7 @@ export const backupPolicyRouter = createTRPCRouter({
 				if (composeService.sourceType === "raw") {
 					spec = parse(composeService.composeFile ?? "", {
 						maxAliasCount: 10000,
+						merge: true,
 					});
 				} else if (composeService.serverId) {
 					spec = await loadDockerComposeRemote(composeService);
