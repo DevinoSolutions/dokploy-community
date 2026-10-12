@@ -6,6 +6,7 @@ import { getAllServers } from "@dokploy/server/services/server";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { eq } from "drizzle-orm";
 import { scheduleJob } from "node-schedule";
+import { quote } from "shell-quote";
 import { db } from "../../db/index";
 import { startLogCleanup } from "../access-log/handler";
 import { cleanupAll } from "../docker/utils";
@@ -146,12 +147,12 @@ export const keepLatestNBackups = async (
 		);
 
 		// --include "*.bson.gz" or "*.sql.gz" or "*.zip" ensures nothing else other than the dokploy backup files are touched by rclone
-		const rcloneList = `rclone lsf ${rcloneFlags.join(" ")} --include "*${backup.databaseType === "web-server" ? ".zip" : ".{sql.gz,bson.gz}"}" "${backupFilesPath}"`;
+		const rcloneList = `rclone lsf ${rcloneFlags.join(" ")} --include "*${backup.databaseType === "web-server" ? ".zip" : ".{sql.gz,bson.gz}"}" ${quote([backupFilesPath])}`;
 		// when we pipe the above command with this one, we only get the list of files we want to delete
 		const sortAndPickUnwantedBackups = `sort -r | tail -n +$((${backup.keepLatestCount}+1)) | xargs -I{}`;
 		// this command deletes the files
 		// to test the deletion before actually deleting we can add --dry-run before ${backupFilesPath}{}
-		const rcloneDelete = `rclone delete ${rcloneFlags.join(" ")} "${backupFilesPath}{}"`;
+		const rcloneDelete = `rclone delete ${rcloneFlags.join(" ")} ${quote([`${backupFilesPath}{}`])}`;
 
 		// When encryption is enabled we export the crypt passwords so every rclone
 		// invocation in the pipeline inherits them — including the `rclone delete`

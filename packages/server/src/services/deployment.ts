@@ -16,6 +16,7 @@ import {
 	environments,
 	projects,
 } from "@dokploy/server/db/schema";
+import { APP_NAME_REGEX } from "@dokploy/server/db/schema/utils";
 import { removeDirectoryIfExistsContent } from "@dokploy/server/utils/filesystem/directory";
 import {
 	execAsync,
@@ -24,6 +25,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
 	type Application,
@@ -78,7 +80,7 @@ export const getDeploymentErrorMessage = async ({
 		if (serverId) {
 			const { stdout } = await execAsyncRemote(
 				serverId,
-				`tail -n ${maxLines} ${logPath}`,
+				`tail -n ${maxLines} ${quote([logPath])}`,
 			);
 			content = stdout;
 		} else {
@@ -450,8 +452,8 @@ export const createDeploymentBackup = async (
 			const server = await findServerById(serverId);
 
 			const command = `
-mkdir -p ${LOGS_PATH}/${backup.appName};
-echo "Initializing backup\n" >> ${logFilePath};
+mkdir -p ${quote([`${LOGS_PATH}/${backup.appName}`])};
+echo "Initializing backup\n" >> ${quote([logFilePath])};
 `;
 
 			await execAsyncRemote(server.serverId, command);
@@ -595,6 +597,14 @@ export const createDeploymentVolumeBackup = async (
 	>,
 ) => {
 	const volumeBackup = await findVolumeBackupById(deployment.volumeBackupId);
+	// Rows written before appName stopped being client input can hold anything;
+	// it names directories that are created and cleaned up below.
+	if (
+		!APP_NAME_REGEX.test(volumeBackup.appName) ||
+		/^\.+$/.test(volumeBackup.appName)
+	) {
+		throw new Error("Invalid volume backup app name");
+	}
 
 	const serverId =
 		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
@@ -617,8 +627,8 @@ export const createDeploymentVolumeBackup = async (
 			const server = await findServerById(serverId);
 
 			const command = `
-				mkdir -p ${VOLUME_BACKUPS_PATH}/${volumeBackup.appName};
-            	echo "Initializing volume backup" >> ${logFilePath};
+				mkdir -p ${quote([`${VOLUME_BACKUPS_PATH}/${volumeBackup.appName}`])};
+            	echo "Initializing volume backup" >> ${quote([logFilePath])};
 			`;
 
 			await execAsyncRemote(server.serverId, command);
@@ -686,7 +696,7 @@ export const removeDeployment = async (deploymentId: string) => {
 
 		const logPath = path.join(deployment.logPath);
 		if (logPath && logPath !== ".") {
-			const command = `rm -f ${logPath};`;
+			const command = `rm -f ${quote([logPath])};`;
 			if (deployment.serverId) {
 				await execAsyncRemote(deployment.serverId, command);
 			} else {
@@ -772,7 +782,7 @@ const removeLastTenDeployments = async (
 					}
 
 					if (logPath && logPath !== ".") {
-						command += `rm -rf ${logPath};`;
+						command += `rm -rf ${quote([logPath])};`;
 					}
 					await removeDeployment(oldDeployment.deploymentId);
 				} catch (err) {

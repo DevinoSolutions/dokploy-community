@@ -19,6 +19,9 @@ import {
 import { applications } from "../db/schema/application";
 import { compose } from "../db/schema/compose";
 import { redis } from "../db/schema/redis";
+import { VOLUME_NAME_REGEX } from "../db/schema/utils";
+import { isSafeBackupPath } from "../db/validations/backup";
+import { logger } from "../lib/logger";
 import { removeScheduleBackup, scheduleBackup } from "../utils/backups/utils";
 import {
 	removeVolumeBackupJob,
@@ -407,7 +410,24 @@ const enumerateServices = async (
 type BackupInsert = typeof backups.$inferInsert;
 type VolumeInsert = typeof volumeBackups.$inferInsert;
 
-const buildDesiredBackupRows = (
+// The service name is stored on the materialized row and reaches backup
+// commands. A name the backup forms would reject is not stored (the row keeps
+// its coverage; `serviceName` only matters for compose services), so the row
+// stays editable and nothing unsafe reaches a command.
+const safeServiceName = (policy: BackupPolicy, service: ScopedService) => {
+	if (isSafeBackupPath(service.name)) return service.name;
+	logger.warn(
+		{
+			policyId: policy.backupPolicyId,
+			serviceId: service.id,
+			serviceName: service.name,
+		},
+		"[BackupPolicy] Not storing a service name with an invalid name",
+	);
+	return null;
+};
+
+export const buildDesiredBackupRows = (
 	policy: BackupPolicy,
 	enumerated: EnumeratedServices,
 ): MaterializedRowPlan<BackupInsert>[] => {
@@ -416,6 +436,7 @@ const buildDesiredBackupRows = (
 		const services = enumerated.dump[type];
 		if (!services) continue;
 		for (const service of services) {
+			const serviceName = safeServiceName(policy, service);
 			const prefix = computeServicePrefix(
 				policy.prefix,
 				service.projectName,
@@ -427,7 +448,7 @@ const buildDesiredBackupRows = (
 				enabled: policy.enabled,
 				database,
 				prefix,
-				serviceName: service.name,
+				serviceName,
 				destinationId: policy.destinationId,
 				keepLatestCount: policy.keepLatestCount ?? null,
 				backupType: "database",
@@ -452,7 +473,7 @@ const buildDesiredBackupRows = (
 	return plans;
 };
 
-const buildDesiredVolumeRows = async (
+export const buildDesiredVolumeRows = async (
 	policy: BackupPolicy,
 	enumerated: EnumeratedServices,
 ): Promise<MaterializedRowPlan<VolumeInsert>[]> => {
@@ -463,10 +484,24 @@ const buildDesiredVolumeRows = async (
 		const services = enumerated.volume[type];
 		if (!services) continue;
 		for (const service of services) {
+			const serviceName = safeServiceName(policy, service);
 			const mounts = await findMountsByApplicationId(service.id, type);
 			const namedVolumes = mounts
 				.filter((mount) => mount.type === "volume" && mount.volumeName)
-				.map((mount) => mount.volumeName as string);
+				.map((mount) => mount.volumeName as string)
+				.filter((volumeName) => {
+					if (VOLUME_NAME_REGEX.test(volumeName)) return true;
+					// Docker rejects such names, and they would reach backup commands.
+					logger.warn(
+						{
+							policyId: policy.backupPolicyId,
+							serviceId: service.id,
+							volumeName,
+						},
+						"[BackupPolicy] Skipping volume with an invalid name",
+					);
+					return false;
+				});
 			// De-duplicate volume names (defensive; a service should not declare the
 			// same named volume twice).
 			for (const volumeName of [...new Set(namedVolumes)]) {
@@ -480,7 +515,7 @@ const buildDesiredVolumeRows = async (
 					volumeName,
 					prefix,
 					serviceType: type,
-					serviceName: service.name,
+					serviceName,
 					turnOff: false,
 					cronExpression: policy.schedule,
 					keepLatestCount: policy.keepLatestCount ?? null,

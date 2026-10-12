@@ -13,6 +13,7 @@ import {
 	updateDeploymentStatus,
 } from "@dokploy/server/services/deployment";
 import { findDestinationById } from "@dokploy/server/services/destination";
+import { quote } from "shell-quote";
 import { sendDokployBackupNotifications } from "../notifications/dokploy-backup";
 import { execAsync } from "../process/execAsync";
 import { redactRcloneCredentials } from "./redact";
@@ -126,7 +127,7 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 			}
 
 			const uploadCommand = buildRcloneCommand(
-				`rclone copyto ${rcloneFlags.join(" ")} "${zipPath}" "${s3Path}"`,
+				`rclone copyto ${rcloneFlags.join(" ")} ${quote([zipPath])} ${quote([s3Path])}`,
 				envVars,
 			);
 			const destinationType = ["sftp", "ftp"].includes(

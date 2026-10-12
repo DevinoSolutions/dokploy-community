@@ -1,6 +1,6 @@
-import { logger } from "@dokploy/server/lib/logger";
 import path from "node:path";
 import { paths } from "@dokploy/server/constants";
+import { logger } from "@dokploy/server/lib/logger";
 import {
 	createDeploymentVolumeBackup,
 	updateDeploymentStatus,
@@ -12,6 +12,7 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { scheduledJobs, scheduleJob } from "node-schedule";
+import { quote } from "shell-quote";
 import { withBackupSlot } from "../backups/concurrency";
 import {
 	buildBackupErrorMessage,
@@ -113,9 +114,9 @@ const cleanupOldVolumeBackups = async (
 			path: backupFilesPath,
 			envVars,
 		} = await getRclonePathAndFlags(destination, effectivePrefix);
-		const listCommand = `rclone lsf ${rcloneFlags.join(" ")} --include \"${volumeName}-*.tar\" ${backupFilesPath}`;
+		const listCommand = `rclone lsf ${rcloneFlags.join(" ")} --include ${quote([`${volumeName}-*.tar`])} ${quote([backupFilesPath])}`;
 		const sortAndPick = `sort -r | tail -n +$((${keepLatestCount}+1)) | xargs -I{}`;
-		const deleteCommand = `rclone delete ${rcloneFlags.join(" ")} ${backupFilesPath}{}`;
+		const deleteCommand = `rclone delete ${rcloneFlags.join(" ")} ${quote([`${backupFilesPath}{}`])}`;
 		// Export crypt passwords so the xargs-spawned `rclone delete` inherits them.
 		const envPrefix = envVars ? `export ${envVars}; ` : "";
 		const fullCommand = `${envPrefix}${listCommand} | ${sortAndPick} ${deleteCommand}`;
@@ -144,7 +145,7 @@ export const runVolumeBackup = async (volumeBackupId: string) => {
 	try {
 		const command = await backupVolume(volumeBackup);
 
-		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
+		const commandWithLog = `(${command}) >> ${quote([deployment.logPath])} 2>&1`;
 		if (serverId) {
 			await execAsyncRemote(serverId, commandWithLog);
 		} else {
@@ -196,7 +197,7 @@ export const runVolumeBackup = async (volumeBackupId: string) => {
 		);
 		// delete all the .tar files. Best-effort: a cleanup failure must not
 		// swallow the original error or leave the deployment stuck on "running".
-		const command = `rm -rf ${volumeBackupPath}/*.tar`;
+		const command = `rm -rf ${quote([volumeBackupPath])}/*.tar`;
 		try {
 			if (serverId) {
 				await execAsyncRemote(serverId, command);
