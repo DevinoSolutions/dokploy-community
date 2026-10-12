@@ -23,6 +23,10 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import { assertDeploymentAccess } from "@dokploy/server/services/deployment-access";
+import {
+	resolveDeploymentLogReadHost,
+	withDeploymentLogServerId,
+} from "@dokploy/server/services/deployment-log-host";
 import { findServerById } from "@dokploy/server/services/server";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
@@ -190,7 +194,8 @@ export const deploymentRouter = createTRPCRouter({
 					rollback: true,
 				},
 			});
-			return deploymentsList;
+			// The log drawer opens the file on `logServerId` (the build server).
+			return withDeploymentLogServerId(deploymentsList);
 		}),
 	killProcess: protectedProcedure
 		.input(
@@ -346,9 +351,21 @@ export const deploymentRouter = createTRPCRouter({
 			const command = `tail -n ${input.tail} ${quote([deployment.logPath])} 2>/dev/null || echo ""`;
 			// An application built on a build server writes its log there, not on
 			// the host that runs it (the log drawer reads it the same way).
-			const serverId =
-				deployment.buildServerId || deploymentHostServerId(deployment);
+			// Preview rows written before the build server was recorded are
+			// resolved through their owner.
+			const serverId = await resolveDeploymentLogReadHost(
+				deployment,
+				deploymentHostServerId(deployment),
+			);
 			if (serverId) {
+				// The log drawer's websocket refuses a foreign server; so does this.
+				const logServer = await findServerById(serverId);
+				if (logServer.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server.",
+					});
+				}
 				const { stdout } = await execAsyncRemote(serverId, command);
 				return stdout;
 			}

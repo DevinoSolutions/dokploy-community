@@ -70,7 +70,7 @@ export const ShowDeployments = ({
 	serverId,
 }: Props) => {
 	const [activeLog, setActiveLog] = useState<
-		RouterOutputs["deployment"]["all"][number] | null
+		RouterOutputs["deployment"]["allByType"][number] | null
 	>(null);
 	const [removingDeploymentIds, setRemovingDeploymentIds] = useState<
 		Set<string>
@@ -608,7 +608,7 @@ export const ShowDeployments = ({
 					</div>
 				)}
 				<ShowDeployment
-					serverId={activeLog?.buildServerId || serverId}
+					serverId={activeLog?.logServerId || serverId}
 					open={Boolean(activeLog && activeLog.logPath !== null)}
 					onClose={() => setActiveLog(null)}
 					logPath={activeLog?.logPath || ""}
