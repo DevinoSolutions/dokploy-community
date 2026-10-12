@@ -360,12 +360,9 @@ describe("killProcess on an application schedule run", () => {
 		expect(mocks.claimScheduleRunCancel).not.toHaveBeenCalled();
 	});
 
-	it.each([
-		["application", () => applicationSchedule("srv-1"), "my-app"],
-		["compose", () => composeSchedule("srv-1"), "my-compose"],
-	])(
+	it.each(["application", "compose"] as const)(
 		"cancels a %s run whose pid is not recorded yet, by its tag",
-		async (scheduleType, makeSchedule) => {
+		async (scheduleType) => {
 			mocks.findDeploymentById.mockResolvedValue(
 				deployment({
 					pid: null,
@@ -376,7 +373,11 @@ describe("killProcess on an application schedule run", () => {
 					},
 				}),
 			);
-			mocks.findScheduleById.mockResolvedValue(makeSchedule());
+			mocks.findScheduleById.mockResolvedValue(
+				scheduleType === "application"
+					? applicationSchedule("srv-1")
+					: composeSchedule("srv-1"),
+			);
 			mocks.getServiceContainer.mockResolvedValue({ Id: "cont-1" });
 			mocks.getComposeContainer.mockResolvedValue({ Id: "cont-1" });
 
