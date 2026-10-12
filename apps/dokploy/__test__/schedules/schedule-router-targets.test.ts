@@ -213,6 +213,14 @@ describe("schedule.create", () => {
 		expect(mocks.createSchedule).not.toHaveBeenCalled();
 	});
 
+	it("treats an omitted scheduleType as an application schedule", async () => {
+		await expect(
+			caller().create({ ...base, composeId: "comp-own" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		await caller().create({ ...base, applicationId: "app-own" });
+		expect(mocks.createSchedule).toHaveBeenCalledTimes(1);
+	});
+
 	it("takes the organization of a dokploy-server schedule from the session", async () => {
 		await caller().create({
 			...base,

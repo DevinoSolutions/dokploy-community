@@ -30,7 +30,8 @@ import { removeJob, schedule, updateJob } from "@/server/utils/backup";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
 type ScheduleTarget = {
-	scheduleType: ScheduleType;
+	// The column defaults to "application" when a create request leaves it out.
+	scheduleType?: ScheduleType;
 	applicationId?: string | null;
 	composeId?: string | null;
 	serverId?: string | null;
@@ -40,19 +41,20 @@ type ScheduleTarget = {
 // scheduleType names. Otherwise the id that was access-checked is not the one
 // the run uses (runCommand follows the relation that matches the type).
 const assertScheduleTarget = (target: ScheduleTarget) => {
+	const scheduleType = target.scheduleType ?? "application";
 	const checks = [
 		["application", "application", target.applicationId],
 		["compose", "compose", target.composeId],
 		["server", "server", target.serverId],
 	] as const;
 	for (const [type, label, id] of checks) {
-		const expected = target.scheduleType === type;
+		const expected = scheduleType === type;
 		if (expected !== !!id) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
 				message: expected
-					? `A ${target.scheduleType} schedule needs a ${label} id.`
-					: `A ${target.scheduleType} schedule cannot reference a ${label}.`,
+					? `A ${scheduleType} schedule needs a ${label} id.`
+					: `A ${scheduleType} schedule cannot reference a ${label}.`,
 			});
 		}
 	}
@@ -75,7 +77,11 @@ const assertScheduleTargetAccess = async (
 	}
 	await checkPermission(ctx, { schedule: [action] });
 	// For a server schedule this also verifies the server's organization.
-	await assertHostScheduleAccess(ctx, target.scheduleType, target.serverId);
+	await assertHostScheduleAccess(
+		ctx,
+		target.scheduleType ?? "application",
+		target.serverId,
+	);
 };
 
 export const scheduleRouter = createTRPCRouter({
