@@ -70,7 +70,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 - **[Uptimely](https://getuptimely.com)** — per-service uptime, SSL and domain monitors from the Monitoring tab, an optional deploy heartbeat, and a notification channel that declares an incident when a deploy fails and resolves it on the next success
 - **[Snapvisor](https://snapvisor.io)** — visual-diff review status (pending, changes detected, approved, rejected) on preview deployments
 - **[Sendly](https://sendly.now) and [Notifly](https://notifly.io)** notification channels, plus container crash-loop and scheduled-job failure alerts
-- Container resource breakdown and swap usage in the monitoring tab
+- Container resource breakdown, swap usage and remote-server stats (with a server selector) in the monitoring tab
 
 ### Backups
 
