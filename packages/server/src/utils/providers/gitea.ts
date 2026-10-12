@@ -10,6 +10,7 @@ import type { InferResultType } from "@dokploy/server/types/with";
 import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
+import { getGitTokenAuthConfig } from "./git";
 
 export const getErrorCloneRequirements = (entity: {
 	giteaRepository?: string | null;
@@ -101,14 +102,13 @@ export const refreshGiteaToken = async (giteaProviderId: string) => {
 
 const buildGiteaCloneUrl = (
 	giteaUrl: string,
-	accessToken: string,
 	owner: string,
 	repository: string,
 ) => {
 	const protocol = giteaUrl.startsWith("http://") ? "http" : "https";
 	const baseUrl = giteaUrl.replace(/^https?:\/\//, "");
 	const repoClone = `${owner}/${repository}.git`;
-	const cloneUrl = `${protocol}://oauth2:${accessToken}@${baseUrl}/${repoClone}`;
+	const cloneUrl = `${protocol}://${baseUrl}/${repoClone}`;
 	return cloneUrl;
 };
 
@@ -197,7 +197,6 @@ export const cloneGiteaRepository = async ({
 	const repoClone = `${giteaOwner}/${giteaRepository}.git`;
 	const cloneUrl = buildGiteaCloneUrl(
 		giteaProvider.giteaInternalUrl || giteaProvider.giteaUrl,
-		giteaProvider.accessToken!,
 		giteaOwner!,
 		giteaRepository!,
 	);
@@ -213,7 +212,7 @@ export const cloneGiteaRepository = async ({
 		});
 		return command;
 	}
-	command += `git clone --branch ${quote([String(giteaBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	command += `git ${getGitTokenAuthConfig(cloneUrl, giteaProvider.accessToken!)} clone --branch ${quote([String(giteaBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
 	return command;
 };
 
