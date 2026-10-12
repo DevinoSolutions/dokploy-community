@@ -11,6 +11,8 @@ import { maskApiKey } from "@dokploy/server/utils/integrations/mask";
 import { getGitCommitInfo } from "@dokploy/server/utils/providers/git";
 import {
 	createSnapvisorBuildLookup,
+	pickLatestSnapvisorBuild,
+	SNAPVISOR_BUILD_LOOKUP_PAGE_SIZE,
 	type SnapvisorUnavailableReason,
 } from "@dokploy/server/utils/snapvisor/build-lookup";
 import {
@@ -417,9 +419,9 @@ export const registerPreviewDeployment = async (params: {
 		accountSlug: integration.accountSlug,
 		projectName: target.snapvisorProjectName,
 		headSha: commitSha,
-		perPage: 1,
+		perPage: SNAPVISOR_BUILD_LOOKUP_PAGE_SIZE,
 	});
-	const build = builds[0];
+	const build = pickLatestSnapvisorBuild(builds);
 	if (!build) {
 		return {
 			registered: false,
@@ -587,15 +589,15 @@ export const resolveDeploymentSnapvisorBuild = async ({
 			commitSha,
 		].join(":"),
 		async () => {
-			// Assumes Snapvisor lists the newest build first, so the one build
-			// asked for (`perPage: 1`) is the latest for this head sha.
+			// Snapvisor lists builds "most recent first" (listBuilds API docs), but
+			// the newest is picked by build number so the order is not load-bearing.
 			const builds = await snapvisorClientFor(integration).listBuilds({
 				accountSlug: integration.accountSlug,
 				projectName,
 				headSha: commitSha,
-				perPage: 1,
+				perPage: SNAPVISOR_BUILD_LOOKUP_PAGE_SIZE,
 			});
-			return builds[0] ?? null;
+			return pickLatestSnapvisorBuild(builds);
 		},
 		{ force },
 	);

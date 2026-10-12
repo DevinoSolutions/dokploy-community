@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
 	findMany: vi.fn(),
 	fetch: vi.fn(),
 	sendMail: vi.fn(),
+	renderFails: false,
 }));
 
 vi.mock("nodemailer", () => ({
@@ -27,8 +28,10 @@ vi.mock("@dokploy/server/emails/emails/snapvisor-changes", () => ({
 }));
 
 vi.mock("@react-email/components", () => ({
-	render: async (element: { props: Record<string, unknown> }) =>
-		`EMAIL ${JSON.stringify(element.props)}`,
+	render: async (element: { props: Record<string, unknown> }) => {
+		if (mocks.renderFails) throw new Error("render exploded");
+		return `EMAIL ${JSON.stringify(element.props)}`;
+	},
 }));
 
 vi.mock("@dokploy/server/db", () => ({
@@ -120,6 +123,7 @@ const expectFullMessage = (text: string) => {
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.rows = [];
+	mocks.renderFails = false;
 	mocks.findMany.mockImplementation(async () => mocks.rows);
 	mocks.fetch.mockReset();
 	mocks.fetch.mockResolvedValue(ok());
@@ -408,6 +412,35 @@ describe("a failing channel", () => {
 		expect(logged).toContain("snapvisor changes");
 		expect(logged).not.toContain("webhook-secret");
 		expect(logged).not.toContain("tg-secret");
+	});
+});
+
+describe("an email that cannot be rendered", () => {
+	it("is logged without the error and does not stop the next channel", async () => {
+		mocks.renderFails = true;
+		mocks.rows = [
+			channel("email", {
+				smtpServer: "smtp.example.com",
+				smtpPort: 587,
+				username: "u",
+				password: "p",
+				fromAddress: "from@example.com",
+				toAddresses: ["to@example.com"],
+			}),
+			channel("telegram", { botToken: "123456:tg-secret", chatId: "431" }),
+		];
+
+		await expect(
+			sendSnapvisorChangesNotifications(payload),
+		).resolves.toBeUndefined();
+
+		expect(mocks.sendMail).not.toHaveBeenCalled();
+		expect(mocks.fetch).toHaveBeenCalledTimes(1);
+		const logged = JSON.stringify(
+			(console.error as unknown as ReturnType<typeof vi.fn>).mock.calls,
+		);
+		expect(logged).toContain("snapvisor changes");
+		expect(logged).not.toContain("render exploded");
 	});
 });
 

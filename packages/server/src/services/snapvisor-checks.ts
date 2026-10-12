@@ -12,6 +12,8 @@ import { backgroundJob } from "@dokploy/server/utils/process/background";
 import {
 	isSnapvisorOrganizationWideFailure,
 	isTerminalSnapvisorStatus,
+	pickLatestSnapvisorBuild,
+	SNAPVISOR_BUILD_LOOKUP_PAGE_SIZE,
 	SNAPVISOR_CHANGES_STATUS,
 } from "@dokploy/server/utils/snapvisor/build-lookup";
 import {
@@ -632,15 +634,15 @@ const createDatabaseDeps = (): SnapvisorCheckDeps => {
 		},
 
 		async findBuild(context, commitSha) {
-			// Assumes Snapvisor lists the newest build first, so the one build
-			// asked for (`perPage: 1`) is the latest for this head sha.
+			// Snapvisor lists builds "most recent first" (listBuilds API docs), but
+			// the newest is picked by build number so the order is not load-bearing.
 			const builds = await snapvisorClientFor(context.integration).listBuilds({
 				accountSlug: context.integration.accountSlug,
 				projectName: context.snapvisorProjectName,
 				headSha: commitSha,
-				perPage: 1,
+				perPage: SNAPVISOR_BUILD_LOOKUP_PAGE_SIZE,
 			});
-			return builds[0] ?? null;
+			return pickLatestSnapvisorBuild(builds);
 		},
 
 		notify: (payload) => sendSnapvisorChangesNotifications(payload),
