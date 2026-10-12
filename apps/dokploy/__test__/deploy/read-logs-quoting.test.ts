@@ -38,6 +38,14 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 	execAsyncRemote: mocks.execAsyncRemote,
 }));
 
+vi.mock("@dokploy/server/services/server", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	findServerById: vi.fn(async (serverId: string) => ({
+		serverId,
+		organizationId: "org-1",
+	})),
+}));
+
 vi.mock("@dokploy/server/services/permission", async (importOriginal) => ({
 	...(await importOriginal<object>()),
 	checkServicePermissionAndAccess: vi.fn(async () => {}),
