@@ -2,18 +2,16 @@ import { appendFile } from "node:fs/promises";
 import { db } from "@dokploy/server/db";
 import {
 	type DeploymentQueueJobRow,
-	deployments,
 	deploymentQueueJobs,
+	deployments,
 } from "@dokploy/server/db/schema";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { updateApplicationStatus } from "./application";
 import { updateCompose } from "./compose";
-import {
-	findPreviewDeploymentById,
-	updatePreviewDeployment,
-} from "./preview-deployment";
+import { resolveDeploymentLogHost } from "./deployment-log-host";
+import { updatePreviewDeployment } from "./preview-deployment";
 
 /**
  * Persistence for the deployment queue journal (table `deployment_queue_job`).
@@ -149,33 +147,6 @@ const withDeadline = async (task: Promise<unknown>, ms: number) => {
 };
 
 /**
- * The host a deployment's log file lives on. Preview rows written before the
- * build server was recorded on them have no `buildServerId`, so those are
- * derived the way createDeploymentPreview does: build server, else the
- * application's server, else the compose server. Null means a local file;
- * undefined means the host cannot be told (skip the write).
- */
-const resolveLogHost = async (row: {
-	serverId: string | null;
-	buildServerId: string | null;
-	previewDeploymentId: string | null;
-}): Promise<string | null | undefined> => {
-	if (row.buildServerId) return row.buildServerId;
-	if (!row.previewDeploymentId) return row.serverId ?? null;
-	try {
-		const preview = await findPreviewDeploymentById(row.previewDeploymentId);
-		return (
-			preview.application?.buildServerId ||
-			preview.application?.serverId ||
-			preview.compose?.serverId ||
-			null
-		);
-	} catch {
-		return undefined;
-	}
-};
-
-/**
  * Put the service (or preview) back to `idle` so it is not stuck on "running"
  * when the job that owned that state died with the previous process. Works from
  * whatever ids the payload carries, so an unreadable payload is still reset.
@@ -243,7 +214,7 @@ export const markInterruptedQueueDeployments = async (
 				notes.push(
 					withDeadline(
 						(async () => {
-							const host = await resolveLogHost(row);
+							const host = await resolveDeploymentLogHost(row);
 							if (host === undefined) return;
 							await appendLogLine(
 								row.logPath,

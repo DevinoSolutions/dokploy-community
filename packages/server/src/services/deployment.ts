@@ -37,6 +37,7 @@ import {
 } from "./application";
 import { findBackupById } from "./backup";
 import { type Compose, findComposeById, updateCompose } from "./compose";
+import { resolveDeploymentLogHost } from "./deployment-log-host";
 import {
 	findPreviewDeploymentById,
 	type PreviewDeployment,
@@ -700,10 +701,10 @@ export const removeDeployment = async (deploymentId: string) => {
 		if (logPath && logPath !== ".") {
 			const command = `rm -f ${quote([logPath])};`;
 			// A build-server log lives on the build server, not the serving host.
-			const logHostId = deployment.buildServerId || deployment.serverId;
+			const logHostId = await logHostForRemoval(deployment);
 			if (logHostId) {
 				await execAsyncRemote(logHostId, command);
-			} else {
+			} else if (logHostId === null) {
 				await execAsync(command);
 			}
 		}
@@ -761,6 +762,22 @@ export const removeDeployments = async (application: Application) => {
 	await removeDeploymentsByApplicationId(applicationId);
 };
 
+type LogHostRow = {
+	serverId: string | null;
+	buildServerId: string | null;
+	previewDeploymentId: string | null;
+};
+
+// The host to remove a row's log on: a server id, null for a local file, or
+// undefined when it cannot be told (a legacy preview row whose preview is gone
+// and that has no server). Undefined means leave the file alone: guessing
+// "local" would run the delete on the wrong host for a remote log.
+const logHostForRemoval = async (row: LogHostRow) => {
+	const host = await resolveDeploymentLogHost(row);
+	if (host !== undefined) return host;
+	return row.serverId || undefined;
+};
+
 // Keeps the 10 newest deployments of a service and drops the rest, rows and
 // log files. A log lives on the host that built the deployment, which is the
 // build server when there is one and the serving host otherwise, so each old
@@ -785,6 +802,19 @@ const removeLastTenDeployments = async (
 		const deploymentsToDelete = deploymentList.slice(10);
 		// Remote log paths grouped by host: one command per host.
 		const remoteLogPaths = new Map<string, string[]>();
+		// Legacy preview rows resolve their host through the preview, once per
+		// preview rather than once per row.
+		const legacyHosts = new Map<string, ReturnType<typeof logHostForRemoval>>();
+		const cachedLogHost = (row: LogHostRow) => {
+			if (row.buildServerId || !row.previewDeploymentId) {
+				return logHostForRemoval(row);
+			}
+			const cached = legacyHosts.get(row.previewDeploymentId);
+			if (cached) return cached;
+			const lookup = logHostForRemoval(row);
+			legacyHosts.set(row.previewDeploymentId, lookup);
+			return lookup;
+		};
 
 		for (const oldDeployment of deploymentsToDelete) {
 			try {
@@ -792,9 +822,16 @@ const removeLastTenDeployments = async (
 					await removeRollbackById(oldDeployment.rollbackId);
 				}
 				const logPath = path.join(oldDeployment.logPath);
-				const hostId = oldDeployment.buildServerId || oldDeployment.serverId;
+				const hostId = await cachedLogHost(oldDeployment);
 
-				if (hostId) {
+				if (hostId === undefined) {
+					console.error(
+						`Cannot tell which host holds the log of deployment ${oldDeployment.deploymentId}, leaving the file`,
+					);
+					await db
+						.delete(deployments)
+						.where(eq(deployments.deploymentId, oldDeployment.deploymentId));
+				} else if (hostId) {
 					if (logPath && logPath !== ".") {
 						remoteLogPaths.set(hostId, [
 							...(remoteLogPaths.get(hostId) ?? []),

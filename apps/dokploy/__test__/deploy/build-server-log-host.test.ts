@@ -235,6 +235,7 @@ const row = (n: number, extra: Record<string, unknown>) => ({
 	errorMessage: null,
 	serverId: null,
 	buildServerId: null,
+	previewDeploymentId: null,
 	...extra,
 });
 
@@ -393,6 +394,78 @@ describe("old deployment cleanup", () => {
 
 		expect(rmCalls()).toHaveLength(1);
 		expect(rmCalls()[0]?.[0]).toBe("srv-c");
+	});
+});
+
+describe("cleanup of preview rows that predate the recorded build server", () => {
+	const legacy = (n: number, extra: Record<string, unknown> = {}) =>
+		row(n, { serverId: "srv-1", previewDeploymentId: "preview-1", ...extra });
+	const owner = previewRow({
+		applicationId: "app-1",
+		serverId: "srv-1",
+		buildServerId: "build-1",
+	});
+
+	it("removes their logs on the preview owner's build server, looking the owner up once", async () => {
+		mocks.findPreviewDeploymentById.mockResolvedValue(owner);
+		mocks.rows = [...keptRows(), legacy(90), legacy(91), legacy(92)];
+
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
+
+		expect(rmCalls()).toHaveLength(1);
+		expect(rmCalls()[0]?.[0]).toBe("build-1");
+		expect(rmCalls()[0]?.[1]).toContain(logFile("web-90.log"));
+		expect(rmCalls()[0]?.[1]).toContain(logFile("web-92.log"));
+		// Once for the new deployment, once for all the old rows.
+		expect(mocks.findPreviewDeploymentById).toHaveBeenCalledTimes(2);
+		expect(mocks.deletedIds.sort()).toEqual(["dep-90", "dep-91", "dep-92"]);
+	});
+
+	it("falls back to the row's server when the preview owner cannot be read", async () => {
+		mocks.findPreviewDeploymentById
+			.mockResolvedValueOnce(owner)
+			.mockRejectedValue(new Error("gone"));
+		mocks.rows = [...keptRows(), legacy(93)];
+
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
+
+		expect(rmCalls().map(([host]) => host)).toEqual(["srv-1"]);
+	});
+
+	it("never deletes locally when it cannot tell where a remote log is", async () => {
+		mocks.findPreviewDeploymentById
+			.mockResolvedValueOnce(owner)
+			.mockRejectedValue(new Error("gone"));
+		mocks.rows = [...keptRows(), legacy(94, { serverId: null })];
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
+
+		errorSpy.mockRestore();
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(rmCalls()).toHaveLength(0);
+		expect(mocks.deletedIds).toEqual(["dep-94"]);
+	});
+
+	it("removeDeployment deletes a legacy preview log on the build server", async () => {
+		mocks.findPreviewDeploymentById.mockResolvedValue(owner);
+		mocks.rows = [legacy(95)];
+
+		await removeDeployment("dep-95");
+
+		expect(remoteCalls()).toEqual([
+			["build-1", `rm -f ${quote([logFile("web-95.log")])};`],
+		]);
+		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 });
 
