@@ -19,6 +19,7 @@ import { execAsyncRemote } from "../process/execAsync";
 import { spawnAsync } from "../process/spawnAsync";
 import {
 	createSchedulePidCapture,
+	remoteRunOutputToLog,
 	resolveScheduleContainer,
 	SCHEDULE_RUN_ENV,
 	SCHEDULE_RUN_WRAPPER,
@@ -160,15 +161,14 @@ export const runCommand = async (scheduleId: string) => {
 			}
 
 			if (serverId) {
-				// The output goes through tee so that the pid line reaches this
-				// process as well as the log.
+				// Only the pid line comes back over ssh; the output goes to the log.
 				await execAsyncRemote(
 					serverId,
 					`
 					set -e
 					set -o pipefail
 					echo "Running scheduled command" >> ${quote([deployment.logPath])};
-					docker exec -e ${quote([`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`])} ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_RUN_WRAPPER])} ${quote([shellType])} ${quote([command])} 2>&1 | tee -a ${quote([deployment.logPath])} || {
+					docker exec -e ${quote([`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`])} ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_RUN_WRAPPER])} ${quote([shellType])} ${quote([command])} 2>&1 | ${remoteRunOutputToLog(quote([deployment.logPath]))} || {
 						echo "❌ Command failed" >> ${quote([deployment.logPath])};
 						exit 1;
 					}

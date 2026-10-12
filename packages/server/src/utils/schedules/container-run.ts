@@ -21,16 +21,29 @@ export const SCHEDULE_RUN_WRAPPER = `printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$";
 // before they are killed so a looping command cannot fork a replacement while
 // the others are being killed. A process is only touched when its environment
 // has exactly this run's tag, so nothing unrelated can be hit.
-export const SCHEDULE_KILL_SCRIPT = `scan() { for d in /proc/[0-9]*; do p=\${d#/proc/}; [ "$p" = "$$" ] && continue; tr '\\0' '\\n' < "$d/environ" 2>/dev/null | grep -Fxq "${SCHEDULE_RUN_ENV}=$1" && echo "$p"; done; }
+export const SCHEDULE_KILL_SCRIPT = `scan() { for d in /proc/[0-9]*; do p=\${d#/proc/}; [ "$p" = "$$" ] && continue; { tr '\\0' '\\n' < "$d/environ"; } 2>/dev/null | grep -Fxq "${SCHEDULE_RUN_ENV}=$1" && echo "$p"; done; }
 pids=$(scan "$1")
 [ -n "$pids" ] && kill -STOP $pids 2>/dev/null
 pids=$(scan "$1")
 [ -n "$pids" ] && kill -9 $pids 2>/dev/null
 exit 0`;
 
+// Reads the output of a remote run from a pipe. Only the pid marker line goes
+// to stdout, which is what `execAsyncRemote` hands back; everything else is
+// appended to the log. Output of the command therefore never travels back over
+// ssh, where a failure would put it in error messages. The marker is looked for
+// in the first lines only: it is printed first, but docker may deliver a line
+// the command wrote to stderr ahead of it. The exit status of the pipeline is
+// the one of docker exec (the caller sets pipefail).
+export const remoteRunOutputToLog = (quotedLogPath: string) =>
+	`{ n=0; while [ $n -lt ${MARKER_SEARCH_LINES} ] && { IFS= read -r l || [ -n "$l" ]; }; do case "$l" in ${SCHEDULE_PID_MARKER}=*) printf '%s\\n' "$l"; break ;; *) printf '%s\\n' "$l" >> ${quotedLogPath} ;; esac; n=$((n+1)); done; cat >> ${quotedLogPath}; }`;
+
 // A deployment id is a nanoid; anything else never reaches a shell.
 export const isSafeDeploymentId = (deploymentId: string) =>
 	/^[A-Za-z0-9_-]{1,64}$/.test(deploymentId);
+
+// How many lines the remote run looks at for the marker.
+const MARKER_SEARCH_LINES = 20;
 
 const MARKER_LINE = new RegExp(`(^|\\n)${SCHEDULE_PID_MARKER}=(\\d+)\\r?\\n`);
 // The marker is the first thing the run prints; give up if it never shows up.

@@ -1,5 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -80,6 +82,7 @@ import {
 import { runCommand } from "@dokploy/server/utils/schedules/utils";
 
 const MARKER = "__DOKPLOY_SCHEDULE_PID__";
+const LOG_FILE = "run.log";
 
 const schedule = (serverId: string | null) => ({
 	scheduleId: "sch-1",
@@ -98,25 +101,50 @@ const schedule = (serverId: string | null) => ({
 	},
 });
 
-// Runs a generated shell command with `docker` replaced by a function that
-// prints its arguments, to see exactly what docker would be called with.
-const dockerArgs = (command: string) => {
+// Runs a generated remote command in bash, in a scratch directory, with
+// `docker` replaced by a function body. Returns what ssh would hand back
+// (stdout), the exit status and the content of the deployment log.
+let workDir = "";
+const runRemote = (command: string, dockerBody: string) => {
 	const result = spawnSync(
 		"bash",
-		["-c", `docker() { printf '%s\\0' "$@"; }\n${command}`],
-		{ encoding: "utf8" },
+		[
+			"-c",
+			`docker() { ${dockerBody}; }
+${command}`,
+		],
+		{
+			encoding: "utf8",
+			cwd: workDir,
+		},
 	);
-	return result.stdout.split("\0").slice(0, -1);
+	const logFile = join(workDir, LOG_FILE);
+	return {
+		stdout: result.stdout,
+		status: result.status,
+		log: existsSync(logFile) ? readFileSync(logFile, "utf8") : "",
+	};
 };
+
+// What docker would be called with, once the shell has unquoted the command.
+const dockerArgs = (command: string) => {
+	runRemote(command, String.raw`printf '%s\0' "$@" > args.bin`);
+	return readFileSync(join(workDir, "args.bin"), "utf8")
+		.split("\0")
+		.slice(0, -1);
+};
+
+const remoteCommand = () => mocks.execAsyncRemote.mock.calls[0]?.[1] as string;
 
 const loggedOutput = () =>
 	mocks.logWrite.mock.calls.map((call) => String(call[0])).join("");
 
 beforeEach(() => {
+	workDir = mkdtempSync(join(tmpdir(), "schedule-run-pid-"));
 	vi.clearAllMocks();
 	mocks.createDeploymentSchedule.mockResolvedValue({
 		deploymentId: "dep-1",
-		logPath: "/dev/null",
+		logPath: LOG_FILE,
 	});
 	mocks.updateDeploymentStatus.mockResolvedValue(undefined);
 	mocks.updateDeployment.mockResolvedValue(undefined);
@@ -129,6 +157,10 @@ beforeEach(() => {
 		end: vi.fn(),
 		writable: true,
 	});
+});
+
+afterEach(() => {
+	rmSync(workDir, { recursive: true, force: true });
 });
 
 describe("runCommand pid capture on a remote server", () => {
@@ -152,7 +184,7 @@ describe("runCommand pid capture on a remote server", () => {
 			.calls[0] as [string, string, unknown, unknown];
 		expect(serverId).toBe("srv-1");
 		expect(command).toContain("set -o pipefail");
-		expect(command).toContain("| tee -a /dev/null");
+		expect(command).not.toContain("tee");
 		expect(command).toContain("Command executed successfully");
 		expect(options).toEqual({ streamOnly: true });
 		// What docker receives once the shell has unquoted the command: the user
@@ -168,6 +200,101 @@ describe("runCommand pid capture on a remote server", () => {
 			"bash",
 			`echo "it's $HOME"`,
 		]);
+	});
+
+	describe("output of the generated remote command", () => {
+		const prime = async () => {
+			mocks.findScheduleById.mockResolvedValue(schedule("srv-1"));
+			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+			await runCommand("sch-1");
+			return remoteCommand();
+		};
+
+		it("sends only the pid line over ssh and writes everything else to the log", async () => {
+			const command = await prime();
+
+			const run = runRemote(
+				command,
+				String.raw`printf '${MARKER}=7\nhello\n'; echo oops >&2`,
+			);
+
+			expect(run.stdout).toBe(`${MARKER}=7
+`);
+			expect(run.status).toBe(0);
+			expect(run.log).not.toContain(MARKER);
+			expect(run.log).toContain("hello\n");
+			expect(run.log).toContain("oops\n");
+			expect(run.log).toContain("Running scheduled command");
+			expect(run.log).toContain("✅ Command executed successfully");
+		});
+
+		it("fails with exit 1 and no command output on stdout when the command fails", async () => {
+			const command = await prime();
+
+			const run = runRemote(
+				command,
+				String.raw`printf '${MARKER}=7\nsecret output\n'; echo secret error >&2; return 3`,
+			);
+
+			expect(run.status).toBe(1);
+			expect(run.stdout).toBe(`${MARKER}=7
+`);
+			expect(run.stdout).not.toContain("secret");
+			expect(run.log).toContain("secret output\n");
+			expect(run.log).toContain("secret error\n");
+			expect(run.log).toContain("❌ Command failed");
+			expect(run.log).not.toContain("✅");
+		});
+
+		it("logs a first line that is not the marker, such as a docker error, instead of sending it", async () => {
+			const command = await prime();
+
+			const run = runRemote(
+				command,
+				"echo 'Error response from daemon: boom' >&2; return 1",
+			);
+
+			expect(run.status).toBe(1);
+			expect(run.stdout).toBe("");
+			expect(run.log).toContain("Error response from daemon: boom\n");
+			expect(run.log).toContain("❌ Command failed");
+		});
+
+		it("still finds the pid line when docker delivers a stderr line ahead of it", async () => {
+			const command = await prime();
+
+			const run = runRemote(
+				command,
+				`echo early >&2; printf '${MARKER}=7\\nhello\\n${MARKER}=9\\n'`,
+			);
+
+			expect(run.stdout).toBe(`${MARKER}=7\n`);
+			expect(run.log).toContain("early\n");
+			expect(run.log).toContain("hello\n");
+			// A later marker line is the command's own output: logged, never sent.
+			expect(run.log).toContain(`${MARKER}=9\n`);
+			expect(run.log).not.toContain(`${MARKER}=7`);
+			expect(run.status).toBe(0);
+		});
+
+		it("keeps a last line that has no newline", async () => {
+			const command = await prime();
+
+			const run = runRemote(command, `printf '${MARKER}=7\npartial'`);
+
+			expect(run.log).toContain("partial");
+			expect(run.log).not.toContain(MARKER);
+			expect(run.status).toBe(0);
+		});
+
+		it("keeps output that has no newline at all", async () => {
+			const command = await prime();
+
+			const run = runRemote(command, "printf 'no newline'");
+
+			expect(run.stdout).toBe("");
+			expect(run.log).toContain("no newline");
+		});
 	});
 
 	it("keeps the first pid when the command prints PID: lines or another marker", async () => {
