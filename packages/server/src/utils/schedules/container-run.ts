@@ -12,6 +12,10 @@ export const SCHEDULE_RUN_ENV = "DOKPLOY_SCHEDULE_RUN";
 
 const SCHEDULE_PID_MARKER = "__DOKPLOY_SCHEDULE_PID__";
 
+// Printed by the kill script when no process carries the tag of the run: the
+// command has not started (yet), or it is over.
+export const SCHEDULE_NONE_MARKER = "__DOKPLOY_SCHEDULE_NONE__";
+
 // Run as `<shell> -c <wrapper> <shell> <command>`: $0 is the shell, $1 the user
 // command, which is never interpolated into the script. It prints the pid that
 // the command will have (exec keeps it), then replaces itself with the command.
@@ -23,7 +27,8 @@ export const SCHEDULE_RUN_WRAPPER = `printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$";
 // has exactly this run's tag, so nothing unrelated can be hit.
 export const SCHEDULE_KILL_SCRIPT = `scan() { for d in /proc/[0-9]*; do p=\${d#/proc/}; [ "$p" = "$$" ] && continue; { tr '\\0' '\\n' < "$d/environ"; } 2>/dev/null | grep -Fxq "${SCHEDULE_RUN_ENV}=$1" && echo "$p"; done; }
 pids=$(scan "$1")
-[ -n "$pids" ] && kill -STOP $pids 2>/dev/null
+if [ -z "$pids" ]; then echo "${SCHEDULE_NONE_MARKER}"; exit 0; fi
+kill -STOP $pids 2>/dev/null
 pids=$(scan "$1")
 [ -n "$pids" ] && kill -9 $pids 2>/dev/null
 exit 0`;

@@ -92,7 +92,7 @@ const ctx = {
 	user: { id: "user-1", email: "user@example.com", role: "owner" },
 };
 
-const { SCHEDULE_KILL_SCRIPT } = await import(
+const { SCHEDULE_KILL_SCRIPT, SCHEDULE_NONE_MARKER } = await import(
 	"@dokploy/server/utils/schedules/container-run"
 );
 const { deploymentRouter } = await import("@/server/api/routers/deployment");
@@ -454,6 +454,96 @@ describe("killProcess on an application schedule run", () => {
 
 		expect(mocks.claimScheduleRunCancel).not.toHaveBeenCalled();
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+	});
+
+	describe("when the command has not been started yet, or is over", () => {
+		const nothingFound = () =>
+			mocks.execAsyncRemote.mockResolvedValue({
+				stdout: `${SCHEDULE_NONE_MARKER}\n`,
+				stderr: "",
+			});
+
+		beforeEach(() => {
+			mocks.findDeploymentById.mockResolvedValue(deployment());
+			mocks.findScheduleById.mockResolvedValue(applicationSchedule("srv-1"));
+			mocks.getServiceContainer.mockResolvedValue({ Id: "cont-1" });
+			nothingFound();
+		});
+
+		it("undoes the claim and asks to retry while the run is still going", async () => {
+			mocks.revertScheduleRunCancel.mockResolvedValue(true);
+
+			await expect(
+				caller.killProcess({ deploymentId: "dep_1-A" }),
+			).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				message: "The run is still starting, try again in a moment",
+			});
+
+			expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith(
+				"dep_1-A",
+				"claim-1",
+			);
+			expect(mocks.audit).not.toHaveBeenCalled();
+			expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
+		});
+
+		it("succeeds when the run ended meanwhile, so its claim cannot be undone", async () => {
+			mocks.revertScheduleRunCancel.mockResolvedValue(false);
+
+			await expect(
+				caller.killProcess({ deploymentId: "dep_1-A" }),
+			).resolves.toBeUndefined();
+
+			expect(mocks.revertScheduleRunCancel).toHaveBeenCalledTimes(1);
+			expect(mocks.audit).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.objectContaining({ action: "cancel", resourceId: "dep_1-A" }),
+			);
+			expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
+		});
+
+		it("does not undo anything when the kill found and stopped the run", async () => {
+			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+			await caller.killProcess({ deploymentId: "dep_1-A" });
+
+			expectCancelled();
+		});
+
+		it("keeps a gone container as cancelled, with nothing to undo", async () => {
+			mocks.getServiceContainer.mockResolvedValue(null);
+
+			await caller.killProcess({ deploymentId: "dep_1-A" });
+
+			expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+			expectCancelled();
+		});
+
+		it("does the same for a compose run on the Dokploy host", async () => {
+			mocks.findDeploymentById.mockResolvedValue(
+				deployment({
+					schedule: {
+						scheduleId: "sch-1",
+						scheduleType: "compose",
+						serverId: null,
+					},
+				}),
+			);
+			mocks.findScheduleById.mockResolvedValue(composeSchedule(null));
+			mocks.getComposeContainer.mockResolvedValue({ Id: "cont-2" });
+			mocks.execAsync.mockResolvedValue({
+				stdout: `${SCHEDULE_NONE_MARKER}\n`,
+				stderr: "",
+			});
+			mocks.revertScheduleRunCancel.mockResolvedValue(true);
+
+			await expect(
+				caller.killProcess({ deploymentId: "dep_1-A" }),
+			).rejects.toMatchObject({
+				message: "The run is still starting, try again in a moment",
+			});
+		});
 	});
 
 	it("refuses a deployment id that could reach a shell", async () => {

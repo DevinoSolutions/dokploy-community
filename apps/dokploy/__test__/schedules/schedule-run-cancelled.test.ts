@@ -121,10 +121,13 @@ const killed = () =>
 		exitCode: 137,
 	});
 
-// The run is cancelled while it executes: finishing it is refused.
+// The run is cancelled while it executes (it was not yet when it was about to
+// start): finishing it is refused.
 const cancelledMeanwhile = () => {
 	mocks.finishScheduleRun.mockResolvedValue("cancelled");
-	mocks.isScheduleRunCancelled.mockResolvedValue(true);
+	mocks.isScheduleRunCancelled
+		.mockResolvedValueOnce(false)
+		.mockResolvedValue(true);
 };
 
 const CANCEL_LINE = "Run cancelled by user";
@@ -144,6 +147,8 @@ beforeEach(() => {
 	});
 	mocks.updateDeployment.mockResolvedValue(undefined);
 	mocks.finishScheduleRun.mockResolvedValue("recorded");
+	// Also drops the answers a test queued and did not use.
+	mocks.isScheduleRunCancelled.mockReset();
 	mocks.isScheduleRunCancelled.mockResolvedValue(false);
 	mocks.appendFile.mockResolvedValue(undefined);
 	mocks.findScheduleOrganizationId.mockResolvedValue("org-1");
@@ -494,6 +499,152 @@ describe("the failure line of a remote run", () => {
 		});
 
 		expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
+		consoleErrorSpy.mockRestore();
+	});
+});
+
+// A cancel that is accepted before `docker exec` starts finds nothing to kill,
+// so the run must not go on to start the command.
+describe("a run cancelled before its command starts", () => {
+	const cancelledBeforeStart = () => {
+		mocks.finishScheduleRun.mockResolvedValue("cancelled");
+		mocks.isScheduleRunCancelled.mockResolvedValue(true);
+	};
+
+	it.each([
+		["application", "application"],
+		["compose", "compose"],
+	] as const)(
+		"a %s run on a remote server never runs the command and ends cancelled",
+		async (_label, scheduleType) => {
+			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, "srv-1"));
+			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+			cancelledBeforeStart();
+
+			await expect(runCommand("sch-1")).resolves.toMatchObject({
+				status: "cancelled",
+			});
+
+			// Only the cancel line was sent: no script, so no `docker exec`.
+			expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
+			expect(String(mocks.execAsyncRemote.mock.calls[0]?.[1])).toContain(
+				CANCEL_LINE,
+			);
+			expect(logged()).not.toContain("docker exec");
+			expect(logged()).not.toContain("Command failed");
+			expect(mocks.finishScheduleRun).toHaveBeenCalledWith("dep-1", "error");
+			expect(mocks.sendScheduleFailureNotifications).not.toHaveBeenCalled();
+		},
+	);
+
+	it("an application run on the Dokploy host never runs the command and ends cancelled", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("application", null));
+		cancelledBeforeStart();
+
+		await expect(runCommand("sch-1")).resolves.toMatchObject({
+			status: "cancelled",
+		});
+
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
+		expect(logged()).toContain(CANCEL_LINE);
+		expect(logged()).not.toContain("docker exec");
+		expect(logged()).not.toContain("Command failed");
+		expect(mocks.sendScheduleFailureNotifications).not.toHaveBeenCalled();
+	});
+
+	it("starts the command when the run is not cancelled", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("application", "srv-1"));
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+		await expect(runCommand("sch-1")).resolves.toMatchObject({
+			status: "done",
+		});
+
+		expect(String(mocks.execAsyncRemote.mock.calls[0]?.[1])).toContain(
+			"docker exec",
+		);
+	});
+});
+
+// The end of a failed run is recorded, logged and notified in that order, and
+// a status that cannot be written hides none of it.
+describe("the end of a failed run", () => {
+	it("logs the failure line before the failure notification goes out", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("server", "srv-1"));
+		mocks.execAsyncRemote.mockRejectedValueOnce(new Error("exit 1"));
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+		await runCommand("sch-1");
+
+		const failedLine = mocks.execAsyncRemote.mock.calls.findIndex((call) =>
+			String(call[1]).includes("Command failed"),
+		);
+		expect(failedLine).toBeGreaterThan(-1);
+		expect(
+			mocks.execAsyncRemote.mock.invocationCallOrder[failedLine],
+		).toBeLessThan(
+			mocks.sendScheduleFailureNotifications.mock
+				.invocationCallOrder[0] as number,
+		);
+	});
+
+	it.each([
+		["server", "server", "srv-1", "remote"],
+		["application", "application", "srv-1", "remote"],
+		["dokploy-server", "dokploy-server", null, "local"],
+	] as const)(
+		"a failing %s run whose status cannot be written is still logged and notified, with its own error",
+		async (_label, scheduleType, serverId, where) => {
+			mocks.findScheduleById.mockResolvedValue(
+				schedule(scheduleType, serverId),
+			);
+			if (where === "remote") {
+				mocks.execAsyncRemote.mockRejectedValueOnce(new Error("exit 1"));
+				mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+			} else {
+				mocks.spawnAsync.mockRejectedValue(new Error("exit 1"));
+			}
+			mocks.finishScheduleRun.mockRejectedValue(new Error("db down"));
+			const consoleErrorSpy = vi
+				.spyOn(console, "error")
+				.mockImplementation(() => undefined);
+
+			await expect(runCommand("sch-1")).resolves.toMatchObject({
+				status: "error",
+			});
+
+			expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
+			expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledWith(
+				expect.objectContaining({ errorMessage: "exit 1" }),
+			);
+			if (where === "remote") {
+				expect(logged()).toContain("Command failed");
+			}
+			expect(consoleErrorSpy).toHaveBeenCalledWith(
+				expect.stringContaining("dep-1"),
+				expect.objectContaining({ message: "db down" }),
+			);
+			consoleErrorSpy.mockRestore();
+		},
+	);
+
+	it("a failing run is still logged and notified when the status write fails after the failure line", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("server", "srv-1"));
+		mocks.execAsyncRemote.mockRejectedValueOnce(new Error("exit 1"));
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.finishScheduleRun.mockRejectedValue(new Error("db down"));
+		const consoleErrorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+
+		await runCommand("sch-1");
+
+		// Not the DB error: the line of the command that failed.
+		expect(
+			mocks.execAsyncRemote.mock.calls.filter((call) =>
+				String(call[1]).includes("Command failed"),
+			),
+		).toHaveLength(1);
 		consoleErrorSpy.mockRestore();
 	});
 });

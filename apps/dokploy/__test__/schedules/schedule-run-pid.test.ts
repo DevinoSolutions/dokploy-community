@@ -83,6 +83,7 @@ vi.mock("node-schedule", () => ({
 import {
 	createSchedulePidCapture,
 	SCHEDULE_KILL_SCRIPT,
+	SCHEDULE_NONE_MARKER,
 	SCHEDULE_RUN_WRAPPER,
 } from "@dokploy/server/utils/schedules/container-run";
 import { runCommand } from "@dokploy/server/utils/schedules/utils";
@@ -528,6 +529,8 @@ describe.skipIf(process.platform !== "linux")(
 					RUN_ID,
 				]);
 				expect(kill.status).toBe(0);
+				// It found the run, so it does not say there was nothing to stop.
+				expect(kill.stdout.toString()).not.toContain(SCHEDULE_NONE_MARKER);
 				await exited;
 
 				expect(
@@ -547,9 +550,10 @@ describe.skipIf(process.platform !== "linux")(
 			await until(() => alive(run.pid as number));
 
 			for (const id of [RUN_ID, "test"]) {
-				expect(
-					spawnSync("sh", ["-c", SCHEDULE_KILL_SCRIPT, "sh", id]).status,
-				).toBe(0);
+				const kill = spawnSync("sh", ["-c", SCHEDULE_KILL_SCRIPT, "sh", id]);
+				expect(kill.status).toBe(0);
+				// Nothing carries this tag: said apart from a kill that found the run.
+				expect(kill.stdout.toString()).toContain(SCHEDULE_NONE_MARKER);
 			}
 			await new Promise((resolve) => setTimeout(resolve, 200));
 

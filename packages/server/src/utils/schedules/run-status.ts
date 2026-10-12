@@ -43,13 +43,14 @@ export const claimScheduleRunCancel = async (
  * undone: a run that ended on its own after the claim had its end noted on the
  * row by `finishScheduleRun`, which moved the finish time off the claim's, so
  * that run stays `cancelled` instead of coming back to `running` with nobody
- * left to end it.
+ * left to end it. True when the claim was undone, false when it was not (the
+ * run ended in the meantime, or was reverted already).
  */
 export const revertScheduleRunCancel = async (
 	deploymentId: string,
 	claim: string,
-): Promise<void> => {
-	await db
+): Promise<boolean> => {
+	const reverted = await db
 		.update(deployments)
 		.set({ status: "running", finishedAt: null })
 		.where(
@@ -58,7 +59,9 @@ export const revertScheduleRunCancel = async (
 				eq(deployments.status, "cancelled"),
 				eq(deployments.finishedAt, claim),
 			),
-		);
+		)
+		.returning({ deploymentId: deployments.deploymentId });
+	return reverted.length > 0;
 };
 
 /**
@@ -92,17 +95,25 @@ export const isScheduleRunCancelled = async (
 export type ScheduleRunEnd = "recorded" | "cancelled" | "missing";
 
 /**
+ * The finish time of a run that ended on a cancelled row. A claim is written as
+ * `toISOString()` (`...Z`) and this is the same kind of instant with a
+ * `+00:00` offset, so the two can never be equal whatever the clocks say, and
+ * both stay valid dates.
+ */
+const endedFinishTime = (): string =>
+	new Date().toISOString().replace(/Z$/, "+00:00");
+
+/**
  * Notes on a cancelled row that its run has ended, by moving its finish time
  * (which is also when the run really ended) off the claim's, which is what
- * `revertScheduleRunCancel` looks for. The extra millisecond keeps the two
- * apart when the run ends within the millisecond of the claim.
+ * `revertScheduleRunCancel` looks for.
  */
 const markCancelledRunEnded = async (
 	deploymentId: string,
 ): Promise<boolean> => {
 	const marked = await db
 		.update(deployments)
-		.set({ finishedAt: new Date(Date.now() + 1).toISOString() })
+		.set({ finishedAt: endedFinishTime() })
 		.where(
 			and(
 				eq(deployments.deploymentId, deploymentId),

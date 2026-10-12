@@ -176,7 +176,11 @@ describe("isScheduleRunCancelled", () => {
 
 describe("revertScheduleRunCancel", () => {
 	it("puts only a still-claimed run back to running and clears its finish time", async () => {
-		await revertScheduleRunCancel("dep-1", "claim-1");
+		mocks.returning.mockResolvedValue([{ deploymentId: "dep-1" }]);
+
+		await expect(revertScheduleRunCancel("dep-1", "claim-1")).resolves.toBe(
+			true,
+		);
 
 		expect(mocks.set).toHaveBeenCalledWith({
 			status: "running",
@@ -186,6 +190,16 @@ describe("revertScheduleRunCancel", () => {
 		expect(sql).toContain('"status" = $2');
 		expect(sql).toContain('"finishedAt" = $3');
 		expect(params).toEqual(["dep-1", "cancelled", "claim-1"]);
+	});
+});
+
+describe("revertScheduleRunCancel, when there was nothing to undo", () => {
+	it("is false", async () => {
+		mocks.returning.mockResolvedValue([]);
+
+		await expect(revertScheduleRunCancel("dep-1", "claim-1")).resolves.toBe(
+			false,
+		);
 	});
 });
 
@@ -209,6 +223,42 @@ describe("a cancel racing the natural end of the run", () => {
 
 		expect(mocks.row?.status).toBe("cancelled");
 		expect(mocks.row?.finishedAt).not.toBeNull();
+	});
+
+	it("tells a revert whether it undid the claim", async () => {
+		const claim = (await claimScheduleRunCancel("dep-1")) as string;
+		await finishScheduleRun("dep-1", "done");
+		await expect(revertScheduleRunCancel("dep-1", claim)).resolves.toBe(false);
+
+		mocks.row = { status: "running", finishedAt: null };
+		const second = (await claimScheduleRunCancel("dep-1")) as string;
+		await expect(revertScheduleRunCancel("dep-1", second)).resolves.toBe(true);
+	});
+
+	it("notes the end of the run with a finish time that is a valid date but never a claim", async () => {
+		vi.useFakeTimers();
+		// A claim written by a clock that is ahead, behind or equal cannot match.
+		try {
+			for (const offsetMs of [-5000, 0, 5000]) {
+				vi.setSystemTime(new Date("2026-10-12T12:00:00.000Z"));
+				mocks.row = { status: "running", finishedAt: null };
+				const claim = (await claimScheduleRunCancel("dep-1")) as string;
+				vi.setSystemTime(new Date(Date.parse(claim) + offsetMs));
+
+				await finishScheduleRun("dep-1", "error");
+				await finishScheduleRun("dep-1", "error");
+
+				const ended = mocks.row?.finishedAt as string;
+				expect(ended).not.toBe(claim);
+				expect(Number.isNaN(Date.parse(ended))).toBe(false);
+				await expect(revertScheduleRunCancel("dep-1", claim)).resolves.toBe(
+					false,
+				);
+				expect(mocks.row?.status).toBe("cancelled");
+			}
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("does the same when the run ends within the millisecond of the claim", async () => {

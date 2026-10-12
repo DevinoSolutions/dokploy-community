@@ -7,6 +7,7 @@ import {
 	isSafeDeploymentId,
 	resolveScheduleContainer,
 	SCHEDULE_KILL_SCRIPT,
+	SCHEDULE_NONE_MARKER,
 } from "./container-run";
 
 /**
@@ -17,11 +18,13 @@ import {
  * processes that carry exactly that tag stops the command and its children and
  * can never hit an unrelated process. The container is looked up again, the way
  * the run did. `containerFound: false` means it is gone, so is the run.
+ * `found: false` means the container is there but no process carries the tag:
+ * the command has not been started yet, or it is over.
  */
 export const cancelScheduleRun = async (
 	scheduleId: string,
 	deploymentId: string,
-): Promise<{ containerFound: boolean }> => {
+): Promise<{ containerFound: boolean; found: boolean }> => {
 	if (!isSafeDeploymentId(deploymentId)) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
@@ -51,16 +54,17 @@ export const cancelScheduleRun = async (
 	}
 
 	const { containerId } = await resolveScheduleContainer(schedule);
-	if (!containerId) return { containerFound: false };
+	if (!containerId) return { containerFound: false, found: false };
 
 	const { shellType } = schedule;
 	const command = `docker exec ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_KILL_SCRIPT])} ${quote([shellType])} ${quote([deploymentId])}`;
-	if (serverId) {
-		await execAsyncRemote(serverId, command);
-	} else {
-		await execAsync(command);
-	}
-	return { containerFound: true };
+	const result = serverId
+		? await execAsyncRemote(serverId, command)
+		: await execAsync(command);
+	return {
+		containerFound: true,
+		found: !String(result?.stdout ?? "").includes(SCHEDULE_NONE_MARKER),
+	};
 };
 
 /**

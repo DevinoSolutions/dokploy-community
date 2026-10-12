@@ -48,6 +48,15 @@ const capturePid = (deploymentId: string) =>
 const CANCELLED_LOG_LINE = "⛔ Run cancelled by user.";
 const FAILED_LOG_LINE = "❌ Command failed";
 
+// A cancel that came in before the command was started finds nothing to kill
+// (see cancel.ts), so the run must not start it: ending with this error makes
+// the run end as cancelled, like a killed one.
+const assertNotCancelled = async (deploymentId: string) => {
+	if (await isScheduleRunCancelled(deploymentId)) {
+		throw new Error("The run was cancelled before it started");
+	}
+};
+
 // Best effort: the log is where the run's output went (the server it ran on, or
 // this host), and a log that cannot be written must not fail the run's end.
 const appendRunLog = async (
@@ -71,20 +80,31 @@ const appendRunLog = async (
 
 // A run that a user cancelled ends with a failing exit status (the kill), which
 // is not a failure: it stays `cancelled` and nobody is notified. A run whose row
-// is gone is not cancelled, so its failure is still reported.
-const handleScheduleError = async (
-	schedule: ScheduleExtended,
+// is gone is not cancelled, so its failure is still reported. A status that
+// cannot be written does not hide the failure either: it is logged and the run
+// counts as failed.
+const endFailedRun = async (
 	deploymentId: string,
-	error: unknown,
 ): Promise<"error" | "cancelled"> => {
-	if ((await finishScheduleRun(deploymentId, "error")) === "cancelled") {
-		return "cancelled";
+	try {
+		return (await finishScheduleRun(deploymentId, "error")) === "cancelled"
+			? "cancelled"
+			: "error";
+	} catch (error) {
+		console.error(`Failed to record the end of run ${deploymentId}:`, error);
+		return "error";
 	}
+};
+
+const notifyScheduleFailure = async (
+	schedule: ScheduleExtended,
+	error: unknown,
+) => {
 	try {
 		const organizationId = await findScheduleOrganizationId(
 			schedule.scheduleId,
 		);
-		if (!organizationId) return "error";
+		if (!organizationId) return;
 
 		const projectName =
 			schedule.application?.environment?.project?.name ||
@@ -112,7 +132,6 @@ const handleScheduleError = async (
 	} catch (notifyError) {
 		console.log("Failed to send schedule failure notification:", notifyError);
 	}
-	return "error";
 };
 
 export const scheduleJob = (schedule: Schedule) => {
@@ -132,7 +151,7 @@ export const scheduleJob = (schedule: Schedule) => {
 				await runCommand(scheduleId);
 			} catch (error) {
 				// runCommand already logs to the deployment log and fires the
-				// failure notification via handleScheduleError. Swallow here so a
+				// failure notification itself. Swallow here so a
 				// failing scheduled run does not become an unhandledRejection from
 				// node-schedule's async callback.
 				console.error(`Scheduled job ${scheduleId} failed:`, error);
@@ -198,6 +217,7 @@ export const runCommand = async (scheduleId: string) => {
 			}
 
 			if (serverId) {
+				await assertNotCancelled(deployment.deploymentId);
 				logFailureAfterwards = true;
 				// Only the pid line comes back over ssh; the output goes to the log.
 				await execAsyncRemote(
@@ -227,6 +247,7 @@ export const runCommand = async (scheduleId: string) => {
 						await finishScheduleRun(deployment.deploymentId, "error");
 						return { ...deployment, status: "error" as const };
 					}
+					await assertNotCancelled(deployment.deploymentId);
 					writeStream.write(
 						`docker exec ${containerId} ${shellType} -c ${command}\n`,
 					);
@@ -320,17 +341,17 @@ export const runCommand = async (scheduleId: string) => {
 		}
 		return { ...deployment, status: "done" } as const;
 	} catch (error) {
-		// `handleScheduleError` marks the deployment as errored and fans out the
-		// schedule-failure notifications, unless the run was cancelled.
-		const status = await handleScheduleError(
-			schedule,
-			deployment.deploymentId,
-			error,
-		);
+		// The run is marked as errored unless it was cancelled, which is logged
+		// instead; a failure is logged before the schedule-failure notifications
+		// go out.
+		const status = await endFailedRun(deployment.deploymentId);
 		if (status === "cancelled") {
 			await appendRunLog(logServerId, deployment.logPath, CANCELLED_LOG_LINE);
-		} else if (logFailureAfterwards) {
-			await appendRunLog(logServerId, deployment.logPath, FAILED_LOG_LINE);
+		} else {
+			if (logFailureAfterwards) {
+				await appendRunLog(logServerId, deployment.logPath, FAILED_LOG_LINE);
+			}
+			await notifyScheduleFailure(schedule, error);
 		}
 		return { ...deployment, status } as const;
 	}

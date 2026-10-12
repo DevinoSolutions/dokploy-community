@@ -278,6 +278,7 @@ export const deploymentRouter = createTRPCRouter({
 						message: "Deployment is not running",
 					});
 				}
+				let nothingToStop = false;
 				try {
 					if (
 						schedule.scheduleType === "application" ||
@@ -287,10 +288,11 @@ export const deploymentRouter = createTRPCRouter({
 						// where it may belong to something else by now: stop the run by
 						// its tag instead. A container that is gone has nothing left to
 						// stop.
-						await cancelScheduleRun(
+						const stopped = await cancelScheduleRun(
 							schedule.scheduleId,
 							deployment.deploymentId,
 						);
+						nothingToStop = stopped.containerFound && !stopped.found;
 					} else {
 						try {
 							await killOnHost();
@@ -313,6 +315,20 @@ export const deploymentRouter = createTRPCRouter({
 							),
 					);
 					throw error;
+				}
+				// The container is there but nothing in it carries the run's tag: the
+				// command has not started yet, or it is over. A run that is still
+				// going gets its claim undone and the user a retry; one that ended
+				// meanwhile (its end was noted on the row, so the revert does not
+				// apply) is cancelled as far as anyone can tell.
+				if (
+					nothingToStop &&
+					(await revertScheduleRunCancel(deployment.deploymentId, claim))
+				) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "The run is still starting, try again in a moment",
+					});
 				}
 				await audit(ctx, {
 					action: "cancel",
