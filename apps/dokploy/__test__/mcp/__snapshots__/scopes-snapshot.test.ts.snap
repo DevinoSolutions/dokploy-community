@@ -163,6 +163,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "deployment-allByType": "dokploy:read",
   "deployment-allCentralized": "dokploy:read",
   "deployment-killProcess": "dokploy:deploy",
+  "deployment-logHost": "dokploy:read",
   "deployment-queueList": "dokploy:read",
   "deployment-readLogs": "dokploy:read",
   "deployment-removeDeployment": "dokploy:deploy",

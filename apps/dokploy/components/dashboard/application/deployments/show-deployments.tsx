@@ -105,6 +105,24 @@ export const ShowDeployments = ({
 				? composeService?.snapvisorProjectName
 				: null;
 
+	// Only a preview built before the build server was recorded needs asking.
+	const needsLogHost = Boolean(
+		activeLog?.logPath &&
+			activeLog.previewDeploymentId &&
+			!activeLog.buildServerId,
+	);
+	// Where the open log lives is decided server-side (a preview built before
+	// the build server was recorded has to be found); the drawer waits for it
+	// rather than opening on a guess. If the lookup fails it falls back to the
+	// recorded build server, then the serving host.
+	const { data: logHost, isError: logHostFailed } =
+		api.deployment.logHost.useQuery(
+			{ deploymentId: activeLog?.deploymentId ?? "" },
+			{ enabled: needsLogHost, gcTime: 0, retry: false },
+		);
+	const logHostResolved =
+		!needsLogHost || logHost !== undefined || logHostFailed;
+
 	const { mutateAsync: rollback, isPending: isRollingBack } =
 		api.rollback.rollback.useMutation();
 	const { mutateAsync: killProcess, isPending: isKillingProcess } =
@@ -608,8 +626,14 @@ export const ShowDeployments = ({
 					</div>
 				)}
 				<ShowDeployment
-					serverId={activeLog?.buildServerId || serverId}
-					open={Boolean(activeLog && activeLog.logPath !== null)}
+					serverId={
+						(needsLogHost && logHost
+							? logHost.serverId
+							: activeLog?.buildServerId || serverId) || undefined
+					}
+					open={Boolean(
+						activeLog && activeLog.logPath !== null && logHostResolved,
+					)}
 					onClose={() => setActiveLog(null)}
 					logPath={activeLog?.logPath || ""}
 					errorMessage={activeLog?.errorMessage || ""}

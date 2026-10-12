@@ -23,6 +23,7 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import { assertDeploymentAccess } from "@dokploy/server/services/deployment-access";
+import { locateDeploymentLogHost } from "@dokploy/server/services/deployment-log-host";
 import { findServerById } from "@dokploy/server/services/server";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
@@ -328,6 +329,22 @@ export const deploymentRouter = createTRPCRouter({
 			return result;
 		}),
 
+	// The host the log drawer opens a deployment's log on: the same answer
+	// readLogs reads from. Null is this host.
+	logHost: protectedProcedure
+		.input(z.object({ deploymentId: z.string().min(1) }))
+		.query(async ({ input, ctx }) => {
+			const deployment = await findDeploymentById(input.deploymentId);
+			await assertDeploymentAccess(ctx, deployment, "read");
+			return {
+				serverId: await locateDeploymentLogHost(
+					deployment,
+					deploymentHostServerId(deployment),
+					ctx.session.activeOrganizationId,
+				),
+			};
+		}),
+
 	readLogs: protectedProcedure
 		.input(
 			z.object({
@@ -346,9 +363,20 @@ export const deploymentRouter = createTRPCRouter({
 			const command = `tail -n ${input.tail} ${quote([deployment.logPath])} 2>/dev/null || echo ""`;
 			// An application built on a build server writes its log there, not on
 			// the host that runs it (the log drawer reads it the same way).
-			const serverId =
-				deployment.buildServerId || deploymentHostServerId(deployment);
+			const serverId = await locateDeploymentLogHost(
+				deployment,
+				deploymentHostServerId(deployment),
+				ctx.session.activeOrganizationId,
+			);
 			if (serverId) {
+				// The log drawer's websocket refuses a foreign server; so does this.
+				const logServer = await findServerById(serverId);
+				if (logServer.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server.",
+					});
+				}
 				const { stdout } = await execAsyncRemote(serverId, command);
 				return stdout;
 			}
