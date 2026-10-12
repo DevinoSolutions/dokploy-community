@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.20**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.21**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.20 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.21 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,16 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.21
+
+**Deployment cancel targets the right host** ([#359](https://github.com/DevinoSolutions/dokploy-community/pull/359)). Cancelling a deployment that runs a recorded process now stops it on the server that runs it, resolved the same way as the deployment log, instead of on the Dokploy host. Only running deployments with a valid process id can be stopped, and Dokploy Cloud never runs the kill on its own host.
+
+**Ported upstream fixes.** Each is ported 1:1 with credit to its original author:
+- [#357](https://github.com/DevinoSolutions/dokploy-community/pull/357): [Dokploy/dokploy#5655](https://github.com/Dokploy/dokploy/pull/5655) by @ahmedisam99 (concurrent GitLab token refreshes share one request)
+- [#358](https://github.com/DevinoSolutions/dokploy-community/pull/358): [Dokploy/dokploy#5654](https://github.com/Dokploy/dokploy/pull/5654) by @olivier-drieux (restore dialog keeps the service name when the database type changes)
+
+> No database migrations in this release (the count stays at 219). The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.20
 
@@ -740,7 +750,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.20
+export DOKPLOY_VERSION=v0.30.8-community.21
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -753,7 +763,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.20      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.21      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
