@@ -10,7 +10,7 @@ Short answers to common questions about [Dokploy Community Edition](https://dokp
 
 ## What is Dokploy Community Edition?
 
-Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.30.8 plus 100+ community features and fixes that have not landed upstream yet, each ported 1:1 with credit to its original author, plus fork-only security hardening.
+Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.30.8 plus features upstream does not have and fixes ported from open upstream PRs, each ported 1:1 with credit to its original author, plus fork-only security hardening.
 
 [What is different in this fork](https://dokploy-community.devino.ca/)
 
@@ -137,7 +137,7 @@ It reports unhandled backend errors, meaning crashes and internal server errors,
       "name": "What is Dokploy Community Edition?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.30.8 plus 100+ community features and fixes that have not landed upstream yet, each ported 1:1 with credit to its original author, plus fork-only security hardening."
+        "text": "Dokploy Community Edition is a community fork of Dokploy, the self-hosted platform for deploying applications, databases and Docker Compose stacks. It includes everything in upstream Dokploy v0.30.8 plus features upstream does not have and fixes ported from open upstream PRs, each ported 1:1 with credit to its original author, plus fork-only security hardening."
       }
     },
     {
