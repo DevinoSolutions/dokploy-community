@@ -1,5 +1,8 @@
 import path from "node:path";
-import { isSafeBackupPath } from "@dokploy/server/db/validations/backup";
+import {
+	isSafeBackupPath,
+	isSafeRestoreFilePath,
+} from "@dokploy/server/db/validations/backup";
 import { quote } from "shell-quote";
 import {
 	findApplicationById,
@@ -17,12 +20,15 @@ export const restoreVolume = async (
 	serverId: string,
 	serviceType: "application" | "compose",
 ) => {
-	// The file name reaches the echo lines and the double-quoted `bash -c` script
-	// below, so refuse a name a shell would still interpret there. Files written
-	// by volume backups never contain these characters.
-	if (!isSafeBackupPath(backupFileName) || backupFileName.includes("'")) {
+	// Volume backups only write `<prefix>/<volume>-<timestamp>.tar` below the
+	// destination root, and prefixes cannot hold these characters. Anything else
+	// is not one of our archives, and the name is also used as a local path.
+	if (
+		!isSafeBackupPath(backupFileName) ||
+		!isSafeRestoreFilePath(backupFileName)
+	) {
 		throw new Error(
-			"Invalid backup file name: control characters, quotes, backticks, $ and backslashes are not allowed",
+			"Invalid backup file name: it must be a relative .tar path without .. segments, control characters, backticks, $, double quotes or backslashes",
 		);
 	}
 	const destination = await findDestinationById(destinationId);
@@ -43,19 +49,20 @@ export const restoreVolume = async (
 	// Base restore command that creates the volume and restores data
 	const baseRestoreCommand = `
 	set -e
-	echo "Volume name: ${volumeName}"
-	echo "Backup file name: ${backupFileName}"
-	echo "Volume backup path: ${volumeBackupPath}"
+	echo ${quote([`Volume name: ${volumeName}`])}
+	echo ${quote([`Backup file name: ${backupFileName}`])}
+	echo ${quote([`Volume backup path: ${volumeBackupPath}`])}
 	echo "Downloading backup from destination..."
-	mkdir -p ${volumeBackupPath}
+	mkdir -p ${quote([volumeBackupPath])}
 	${downloadCommand}
 	echo "Download completed ✅"
 	echo "Creating new volume and restoring data..."
 	docker run --rm \
-		-v ${volumeName}:/volume_data \
-		-v ${volumeBackupPath}:/backup \
+		-v ${quote([`${volumeName}:/volume_data`])} \
+		-v ${quote([`${volumeBackupPath}:/backup`])} \
+		-e BACKUP_FILE_NAME=${quote([backupFileName])} \
 		ubuntu \
-		bash -c "cd /volume_data && tar xf /backup/${quote([backupFileName])} ."
+		bash -c 'cd /volume_data && tar xf "/backup/$BACKUP_FILE_NAME" .'
 	echo "Volume restore completed ✅"
 	`;
 

@@ -24,3 +24,13 @@ export const isSafeBackupPath = (value: string) => {
 export const backupPathSchema = z
 	.string()
 	.refine(isSafeBackupPath, BACKUP_PATH_ERROR);
+
+/**
+ * A restorable volume backup is a relative `.tar` path below the destination
+ * root. Rejects `..` segments and a leading slash, which would otherwise point
+ * the download target outside the volume backups directory.
+ */
+export const isSafeRestoreFilePath = (value: string) =>
+	value.endsWith(".tar") &&
+	!value.startsWith("/") &&
+	!value.split("/").includes("..");
