@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 /**
  * Minimal DoDomain REST client + webhook signature verification.
  *
@@ -206,7 +207,7 @@ export const createDoDomainClient = (options: DoDomainClientOptions) => {
 	if (!options.secretKey?.startsWith("dd_sk_")) {
 		throw new DoDomainError("A DoDomain secret key (dd_sk_…) is required", 0);
 	}
-	const baseUrl = options.baseUrl.replace(/\/+$/, "");
+	const baseUrl = trimTrailingSlashes(options.baseUrl);
 	const timeoutMs = options.timeoutMs ?? DODOMAIN_REQUEST_TIMEOUT_MS;
 
 	const request = async <T>(

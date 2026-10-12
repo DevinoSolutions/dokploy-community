@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { db } from "@dokploy/server/db";
 import { ai, organization } from "@dokploy/server/db/schema";
 import { aiCustomProviderSchema } from "@dokploy/server/db/schema/ai";
@@ -95,7 +96,7 @@ export const saveCustomAiProviders = async (
 	return providers;
 };
 
-const normalizeApiUrl = (url: string) => url.trim().replace(/\/+$/, "");
+const normalizeApiUrl = (url: string) => trimTrailingSlashes(url.trim());
 
 export const saveAiSettings = async (organizationId: string, settings: any) => {
 	const aiId = settings.aiId;

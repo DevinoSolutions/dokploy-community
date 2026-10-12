@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import {
 	integrationUrlChangeNeedsKeyMessage,
 	isSameIntegrationBaseUrl,
@@ -7,7 +8,7 @@ import {
 export const SNAPVISOR_DEFAULT_BASE_URL = "https://api.snapvisor.io";
 export const SNAPVISOR_WEB_URL = "https://app.snapvisor.io";
 
-const stripTrailingSlashes = (value: string) => value.replace(/\/+$/, "");
+const stripTrailingSlashes = (value: string) => trimTrailingSlashes(value);
 
 /**
  * Integrations saved before the default moved to the API host store

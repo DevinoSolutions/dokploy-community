@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 /**
  * Default `watchPaths` for a unit that has none (spec 5.2.6): derive them from
  * the unit's build path, the Dockerfile directory and the compose file
@@ -89,11 +90,12 @@ const normalizeDir = (value: string | null | undefined): string | null => {
 	if (typeof value !== "string") return null;
 	const trimmed = value.trim();
 	if (!trimmed) return null;
-	const cleaned = trimmed
-		.replace(/\\/g, "/")
-		.replace(/^\.\//, "")
-		.replace(/^\/+/, "")
-		.replace(/\/+$/, "");
+	const cleaned = trimTrailingSlashes(
+		trimmed
+			.replace(/\\/g, "/")
+			.replace(/^\.\//, "")
+			.replace(/^\/+/, ""),
+	);
 	if (cleaned === "" || cleaned === ".") return "";
 	return cleaned;
 };

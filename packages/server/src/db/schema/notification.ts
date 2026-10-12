@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { relations } from "drizzle-orm";
 import {
 	boolean,
@@ -701,7 +702,7 @@ export const apiCreateUptimelyChannel = notificationsSchema
 			.max(MAX_URL_LENGTH, urlTooLong)
 			.url("Enter a valid URL")
 			.refine((value) => /^https?:\/\//i.test(value), "Use an http(s) URL")
-			.transform((value) => value.replace(/\/+$/, "")),
+			.transform((value) => trimTrailingSlashes(value)),
 		// Empty clears it; omitted leaves the Resolved state learned from Uptimely.
 		resolvedStateId: z
 			.string()

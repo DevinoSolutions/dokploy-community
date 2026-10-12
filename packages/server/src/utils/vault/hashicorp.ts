@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import type { hashicorpVaultConfigSchema } from "@dokploy/server/db/schema";
 import type { z } from "zod";
 import { type VaultClient, vaultFetch } from "./types";
@@ -27,7 +28,7 @@ const buildHeaders = (config: HashicorpConfig) => {
 	return headers;
 };
 
-const baseUrl = (config: HashicorpConfig) => config.url.replace(/\/+$/, "");
+const baseUrl = (config: HashicorpConfig) => trimTrailingSlashes(config.url);
 
 const encodePath = (path: string) =>
 	path.split("/").map(encodeURIComponent).join("/");
@@ -94,7 +95,7 @@ export const hashicorpClient: VaultClient<HashicorpConfig> = {
 		const names: string[] = [];
 
 		const listKeys = async (path: string) => {
-			const cleanPath = path.replace(/\/+$/, "");
+			const cleanPath = trimTrailingSlashes(path);
 			const suffix = cleanPath ? `/${encodePath(cleanPath)}` : "";
 			const response = await vaultFetch(
 				`${baseUrl(config)}/v1/${encodeURIComponent(config.mount)}/metadata${suffix}?list=true`,

@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { apiGitlabTestConnection } from "@dokploy/server/db/schema";
@@ -251,9 +252,9 @@ export const getGitlabBranches = async (input: {
 	const allBranches = [];
 	let page = 1;
 	const perPage = 100; // GitLab's max per page is 100
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	while (true) {
 		const branchesResponse = await fetch(
@@ -328,9 +329,9 @@ export const getGitlabMergeRequests = async (input: {
 	const allMergeRequests: GitlabMergeRequest[] = [];
 	let page = 1;
 	const perPage = 100; // GitLab's max per page is 100
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	while (true) {
 		const mergeRequestsResponse = await fetch(
@@ -416,9 +417,9 @@ export const validateGitlabProvider = async (gitlabProvider: Gitlab) => {
 		const allProjects = [];
 		let page = 1;
 		const perPage = 100; // GitLab's max per page is 100
-		const baseUrl = (
+		const baseUrl = trimTrailingSlashes((
 			gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-		).replace(/\/+$/, "");
+		));
 
 		while (true) {
 			const response = await fetch(
@@ -465,9 +466,9 @@ export const checkGitlabMemberPermissions = async (
 ): Promise<{ hasWriteAccess: boolean; accessLevel: number | null }> => {
 	await refreshGitlabToken(gitlabId);
 	const gitlabProvider = await findGitlabById(gitlabId);
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	// Resolve username → user ID
 	const userResponse = await fetch(
@@ -531,9 +532,9 @@ export const checkGitlabMemberPermissionsByUserId = async (
 }> => {
 	await refreshGitlabToken(gitlabId);
 	const gitlabProvider = await findGitlabById(gitlabId);
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	const memberResponse = await fetch(
 		`${baseUrl}/api/v4/projects/${projectId}/members/all/${userId}`,
@@ -567,9 +568,9 @@ export const mrNoteExists = async (
 ): Promise<boolean> => {
 	await refreshGitlabToken(gitlabId);
 	const gitlabProvider = await findGitlabById(gitlabId);
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	const response = await fetch(
 		`${baseUrl}/api/v4/projects/${projectId}/merge_requests/${mrIid}/notes/${noteId}`,
@@ -587,9 +588,9 @@ export const hasExistingSecurityMRNote = async (
 ): Promise<boolean> => {
 	await refreshGitlabToken(gitlabId);
 	const gitlabProvider = await findGitlabById(gitlabId);
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	let page = 1;
 	while (true) {
@@ -621,9 +622,9 @@ export const createMergeRequestNote = async (
 ): Promise<number> => {
 	await refreshGitlabToken(gitlabId);
 	const gitlabProvider = await findGitlabById(gitlabId);
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	const response = await fetch(
 		`${baseUrl}/api/v4/projects/${projectId}/merge_requests/${mrIid}/notes`,
@@ -654,9 +655,9 @@ export const updateMergeRequestNote = async (
 ): Promise<void> => {
 	await refreshGitlabToken(gitlabId);
 	const gitlabProvider = await findGitlabById(gitlabId);
-	const baseUrl = (
+	const baseUrl = trimTrailingSlashes((
 		gitlabProvider.gitlabInternalUrl || gitlabProvider.gitlabUrl
-	).replace(/\/+$/, "");
+	));
 
 	const response = await fetch(
 		`${baseUrl}/api/v4/projects/${projectId}/merge_requests/${mrIid}/notes/${noteId}`,

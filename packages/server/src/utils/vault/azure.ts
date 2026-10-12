@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import type { azureVaultConfigSchema } from "@dokploy/server/db/schema";
 import type { z } from "zod";
 import { type VaultClient, vaultFetch } from "./types";
@@ -6,7 +7,7 @@ type AzureConfig = z.infer<typeof azureVaultConfigSchema>;
 
 const API_VERSION = "7.4";
 
-const baseUrl = (config: AzureConfig) => config.vaultUri.replace(/\/+$/, "");
+const baseUrl = (config: AzureConfig) => trimTrailingSlashes(config.vaultUri);
 
 const getAccessToken = async (config: AzureConfig) => {
 	const body = new URLSearchParams({

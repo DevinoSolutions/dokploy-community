@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { and, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
 import { IS_CLOUD } from "../constants";
@@ -67,7 +68,7 @@ export const computeServicePrefix = (
 	projectName: string,
 	serviceName: string,
 ): string => {
-	const base = (basePrefix ?? "").trim().replace(/^\/+|\/+$/g, "");
+	const base = trimTrailingSlashes((basePrefix ?? "").trim().replace(/^\/+/, ""));
 	const segments = [
 		...base.split("/").map((s) => sanitizePrefixSegment(s)),
 		sanitizePrefixSegment(projectName),

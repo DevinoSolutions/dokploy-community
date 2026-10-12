@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import { CheckCircle2, PenBoxIcon, PlugZap, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -102,7 +103,7 @@ export const HandleUptimely = ({ editing = false }: Props) => {
 
 	const baseUrl = form.watch("baseUrl") || UPTIMELY_DEFAULT_BASE_URL;
 	const projectId = form.watch("projectId");
-	const apiKeysUrl = `${baseUrl.replace(/\/+$/, "")}/dashboard/${
+	const apiKeysUrl = `${trimTrailingSlashes(baseUrl)}/dashboard/${
 		projectId || "default"
 	}/settings/api-keys`;
 

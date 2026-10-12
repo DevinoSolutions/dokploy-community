@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import type { phaseVaultConfigSchema } from "@dokploy/server/db/schema";
 import type { z } from "zod";
 import { type VaultClient, vaultFetch } from "./types";
@@ -10,7 +11,7 @@ type PhaseSecret = {
 	path?: string;
 };
 
-const baseUrl = (config: PhaseConfig) => config.apiUrl.replace(/\/+$/, "");
+const baseUrl = (config: PhaseConfig) => trimTrailingSlashes(config.apiUrl);
 
 const authHeaders = (config: PhaseConfig) => ({
 	Authorization: `Bearer ServiceAccount ${config.token}`,

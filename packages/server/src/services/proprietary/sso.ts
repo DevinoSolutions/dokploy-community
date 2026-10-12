@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import { db } from "@dokploy/server/db";
 import { organization } from "@dokploy/server/db/schema";
 import { eq } from "drizzle-orm";
@@ -33,7 +34,7 @@ export const requestToHeaders = (req: {
 export const normalizeTrustedOrigin = (value: string): string => {
 	// Keep it simple: trim and remove trailing slashes.
 	// e.g. "https://example.com/" -> "https://example.com"
-	return value.trim().replace(/\/+$/, "");
+	return trimTrailingSlashes(value.trim());
 };
 
 export const getOrganizationOwnerId = async (organizationId: string) => {

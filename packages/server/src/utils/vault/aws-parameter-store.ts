@@ -1,3 +1,4 @@
+import { trimTrailingSlashes } from "@dokploy/server/utils/integrations/base-url";
 import {
 	DescribeParametersCommand,
 	GetParametersCommand,
@@ -22,7 +23,7 @@ const normalizeParameterPath = (path: string | undefined) => {
 	if (trimmed === "/") {
 		return trimmed;
 	}
-	return trimmed.replace(/\/+$/, "");
+	return trimTrailingSlashes(trimmed);
 };
 
 const describeParametersInput = (config: AwsParameterStoreConfig) => {
