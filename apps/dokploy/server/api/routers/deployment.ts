@@ -305,7 +305,10 @@ export const deploymentRouter = createTRPCRouter({
 			}
 
 			const command = `tail -n ${input.tail} ${quote([deployment.logPath])} 2>/dev/null || echo ""`;
-			const serverId = deploymentHostServerId(deployment);
+			// An application built on a build server writes its log there, not on
+			// the host that runs it (the log drawer reads it the same way).
+			const serverId =
+				deployment.buildServerId || deploymentHostServerId(deployment);
 			if (serverId) {
 				const { stdout } = await execAsyncRemote(serverId, command);
 				return stdout;
