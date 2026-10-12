@@ -38,6 +38,11 @@ const customNanoid = customAlphabet(alphabet, 6);
 /** App name: letters, numbers, dots, underscores, hyphens only (no spaces). Safe for shell/Docker. */
 export const APP_NAME_REGEX = /^[a-zA-Z0-9._-]+$/;
 
+// An app name that is safe to use as a single directory name: the regex above
+// also matches "." and "..", which would point outside the parent directory.
+export const isPlainAppName = (appName: string) =>
+	APP_NAME_REGEX.test(appName) && !/^[.]+$/.test(appName);
+
 export const APP_NAME_MESSAGE =
 	"App name can only contain letters, numbers, dots, underscores and hyphens";
 

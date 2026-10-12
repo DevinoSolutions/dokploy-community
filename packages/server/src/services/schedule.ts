@@ -1,6 +1,7 @@
 import path from "node:path";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
+import { quote } from "shell-quote";
 import type { z } from "zod";
 import { IS_CLOUD, paths } from "../constants";
 import { db } from "../db";
@@ -9,6 +10,7 @@ import type {
 	updateScheduleSchema,
 } from "../db/schema/schedule";
 import { type Schedule, schedules } from "../db/schema/schedule";
+import { isPlainAppName } from "../db/schema/utils";
 import { encodeBase64 } from "../utils/docker/utils";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
 import { findMemberByUserId } from "./permission";
@@ -156,12 +158,16 @@ export const deleteSchedule = async (scheduleId: string) => {
 		schedule?.compose?.serverId;
 	const { SCHEDULES_PATH } = paths(!!serverId);
 
-	const fullPath = path.join(SCHEDULES_PATH, schedule?.appName || "");
-	const command = `rm -rf ${fullPath}`;
-	if (serverId) {
-		await execAsyncRemote(serverId, command);
-	} else {
-		await execAsync(command);
+	// A row written before appName stopped being client input can hold anything;
+	// never turn it into a path to delete. The row itself is still removed.
+	if (isPlainAppName(schedule?.appName || "")) {
+		const fullPath = path.join(SCHEDULES_PATH, schedule.appName);
+		const command = `rm -rf ${quote([fullPath])}`;
+		if (serverId) {
+			await execAsyncRemote(serverId, command);
+		} else {
+			await execAsync(command);
+		}
 	}
 
 	const scheduleResult = await db
@@ -205,8 +211,15 @@ export const updateSchedule = async (
 };
 
 const handleScript = async (schedule: Schedule) => {
+	if (!isPlainAppName(schedule?.appName || "")) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Invalid schedule app name",
+		});
+	}
 	const { SCHEDULES_PATH } = paths(!!schedule?.serverId);
-	const fullPath = path.join(SCHEDULES_PATH, schedule?.appName || "");
+	const fullPath = path.join(SCHEDULES_PATH, schedule.appName);
+	const scriptPath = quote([`${fullPath}/script.sh`]);
 
 	// Add PID and Schedule ID echo by default to all scripts
 	const scriptWithPid = `echo "PID: $$ | Schedule ID: ${schedule.scheduleId}"
@@ -214,11 +227,11 @@ ${schedule?.script || ""}`;
 
 	const encodedContent = encodeBase64(scriptWithPid);
 	const script = `
-	 	 mkdir -p ${fullPath}
-	 	 rm -f ${fullPath}/script.sh
-		 touch ${fullPath}/script.sh
-		 chmod +x ${fullPath}/script.sh
-		 echo "${encodedContent}" | base64 -d > ${fullPath}/script.sh
+	 	 mkdir -p ${quote([fullPath])}
+	 	 rm -f ${scriptPath}
+		 touch ${scriptPath}
+		 chmod +x ${scriptPath}
+		 echo "${encodedContent}" | base64 -d > ${scriptPath}
 	`;
 
 	if (schedule?.scheduleType === "dokploy-server") {
