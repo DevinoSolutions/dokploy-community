@@ -12,6 +12,7 @@ import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/hea
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import type { z } from "zod";
+import { getGitTokenAuthConfig } from "./git";
 
 export const refreshGitlabToken = async (gitlabProviderId: string) => {
 	const gitlabProvider = await findGitlabById(gitlabProviderId);
@@ -111,7 +112,7 @@ const getGitlabRepoClone = (
 const getGitlabCloneUrl = (gitlab: GitlabInfo, repoClone: string) => {
 	const url = gitlab?.gitlabInternalUrl || gitlab?.gitlabUrl;
 	const isSecure = url?.startsWith("https://");
-	const cloneUrl = `http${isSecure ? "s" : ""}://oauth2:${gitlab?.accessToken}@${repoClone}`;
+	const cloneUrl = `http${isSecure ? "s" : ""}://${repoClone}`;
 	return cloneUrl;
 };
 
@@ -179,10 +180,11 @@ export const cloneGitlabRepository = async ({
 			headRef,
 			outputPath: String(outputPath ?? ""),
 			enableSubmodules,
+			authConfig: getGitTokenAuthConfig(cloneUrl, String(gitlab?.accessToken)),
 		});
 		return command;
 	}
-	command += `git clone --branch ${quote([String(gitlabBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	command += `git ${getGitTokenAuthConfig(cloneUrl, String(gitlab?.accessToken))} clone --branch ${quote([String(gitlabBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
 	return command;
 };
 

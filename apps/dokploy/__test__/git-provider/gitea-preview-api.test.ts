@@ -251,7 +251,7 @@ describe("cloneGiteaRepository", () => {
 		});
 
 		expect(command).toContain("not authorized");
-		expect(command).not.toContain("git clone");
+		expect(command).not.toContain(" clone --branch");
 	});
 
 	it("fails instead of cloning a repository with a missing owner", async () => {
@@ -266,7 +266,7 @@ describe("cloneGiteaRepository", () => {
 		});
 
 		expect(command).toContain("Owner not specified");
-		expect(command).not.toContain("git clone");
+		expect(command).not.toContain(" clone --branch");
 	});
 
 	it("clones the preview branch of the configured repository", async () => {
@@ -281,8 +281,10 @@ describe("cloneGiteaRepository", () => {
 		});
 
 		expect(command).toContain("--branch feature/thing");
+		expect(command).toContain("gitea.example.com/acme/web.git");
+		expect(command).not.toContain("gitea-token");
 		expect(command).toContain(
-			"oauth2\\:gitea-token\\@gitea.example.com/acme/web.git",
+			`Authorization: Basic ${Buffer.from("oauth2:gitea-token").toString("base64")}`,
 		);
 	});
 });

@@ -87,7 +87,7 @@ describe("buildHeadRefCheckoutCommand", () => {
 			"origin -- refs/pull/7/head || git -C /code/preview fetch --progress --depth 1 origin -- feature/thing;",
 		);
 		expect(command).toContain("git -C /code/preview checkout -q FETCH_HEAD;");
-		expect(command).not.toContain("git clone");
+		expect(command).not.toContain(" clone --branch");
 	});
 
 	it("never lets a branch name that looks like an option reach git as a flag", () => {
@@ -171,16 +171,21 @@ describe("clone helpers with a head ref", () => {
 
 		// shell-quote backslash-escapes the URL; strip them for the host check
 		// (same normalization as github-clone-host.test.ts).
-		expect(command.replace(/\\/g, "")).toContain(
-			"https://oauth2:gh-token@github.com/acme/web.git",
+		const plain = command.replace(/\\/g, "");
+		expect(plain).toContain(
+			"remote add origin https://github.com/acme/web.git",
+		);
+		expect(plain).not.toContain("gh-token@");
+		expect(plain).toContain(
+			`http.https://github.com/.extraHeader=Authorization: Basic ${Buffer.from("oauth2:gh-token").toString("base64")}`,
 		);
 		expect(command).toContain(
 			"fetch --progress --depth 1 origin -- refs/pull/7/head",
 		);
-		expect(command).toContain("origin -- refs/pull/7/head || git -C");
+		expect(command).toContain("origin -- refs/pull/7/head || git -c ");
 		expect(command).toContain("origin -- feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");
-		expect(command).not.toContain("git clone");
+		expect(command).not.toContain(" clone --branch");
 	});
 
 	it("checks out a Gitea PR head from the base repository", async () => {
@@ -200,7 +205,7 @@ describe("clone helpers with a head ref", () => {
 		);
 		expect(command).toContain("origin -- feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");
-		expect(command).not.toContain("git clone");
+		expect(command).not.toContain(" clone --branch");
 	});
 
 	it("checks out a GitLab MR head from the base project", async () => {
@@ -227,7 +232,7 @@ describe("clone helpers with a head ref", () => {
 		);
 		expect(command).toContain("origin -- feature/thing;");
 		expect(command).toContain("checkout -q FETCH_HEAD;");
-		expect(command).not.toContain("git clone");
+		expect(command).not.toContain(" clone --branch");
 	});
 
 	it("keeps the plain branch clone when no head ref is given", async () => {
@@ -241,7 +246,7 @@ describe("clone helpers with a head ref", () => {
 			serverId: null,
 		});
 
-		expect(command).toContain("git clone --branch main");
+		expect(command).toContain(" clone --branch main");
 		expect(command).not.toContain("git init -q");
 		expect(command).not.toContain("FETCH_HEAD");
 	});

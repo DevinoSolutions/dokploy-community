@@ -18,6 +18,21 @@ interface CloneGitRepository {
 	outputPathOverride?: string;
 }
 
+// Header auth keeps the token out of build logs and `.git/config`. The value is
+// scoped to the clone host (`http.<origin>/.extraHeader`) and passed with `-c`,
+// so it also reaches submodule clones and is never written into the checkout.
+export const getGitBasicAuthConfig = (
+	cloneUrl: string,
+	username: string,
+	secret: string,
+) => {
+	const credentials = Buffer.from(`${username}:${secret}`).toString("base64");
+	return `-c ${quote([`http.${new URL(cloneUrl).origin}/.extraHeader=Authorization: Basic ${credentials}`])}`;
+};
+
+export const getGitTokenAuthConfig = (cloneUrl: string, token: string) =>
+	getGitBasicAuthConfig(cloneUrl, "oauth2", token);
+
 export const cloneGitRepository = async ({
 	type = "application",
 	...entity
