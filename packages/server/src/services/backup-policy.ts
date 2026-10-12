@@ -19,6 +19,8 @@ import {
 import { applications } from "../db/schema/application";
 import { compose } from "../db/schema/compose";
 import { redis } from "../db/schema/redis";
+import { VOLUME_NAME_REGEX } from "../db/schema/utils";
+import { logger } from "../lib/logger";
 import { removeScheduleBackup, scheduleBackup } from "../utils/backups/utils";
 import {
 	removeVolumeBackupJob,
@@ -452,7 +454,7 @@ const buildDesiredBackupRows = (
 	return plans;
 };
 
-const buildDesiredVolumeRows = async (
+export const buildDesiredVolumeRows = async (
 	policy: BackupPolicy,
 	enumerated: EnumeratedServices,
 ): Promise<MaterializedRowPlan<VolumeInsert>[]> => {
@@ -466,7 +468,20 @@ const buildDesiredVolumeRows = async (
 			const mounts = await findMountsByApplicationId(service.id, type);
 			const namedVolumes = mounts
 				.filter((mount) => mount.type === "volume" && mount.volumeName)
-				.map((mount) => mount.volumeName as string);
+				.map((mount) => mount.volumeName as string)
+				.filter((volumeName) => {
+					if (VOLUME_NAME_REGEX.test(volumeName)) return true;
+					// Docker rejects such names, and they would reach backup commands.
+					logger.warn(
+						{
+							policyId: policy.backupPolicyId,
+							serviceId: service.id,
+							volumeName,
+						},
+						"[BackupPolicy] Skipping volume with an invalid name",
+					);
+					return false;
+				});
 			// De-duplicate volume names (defensive; a service should not declare the
 			// same named volume twice).
 			for (const volumeName of [...new Set(namedVolumes)]) {

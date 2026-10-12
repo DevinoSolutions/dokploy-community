@@ -1,3 +1,4 @@
+import { backupPathSchema } from "@dokploy/server/db/validations/backup";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import {
 	CheckIcon,
@@ -85,7 +86,7 @@ const Schema = z
 		serviceTypeFilter: z.array(z.enum(SERVICE_TYPES)),
 		destinationId: z.string().min(1, "Destination is required"),
 		schedule: z.string().min(1, "Schedule (Cron) is required"),
-		prefix: z.string().optional(),
+		prefix: backupPathSchema.optional(),
 		keepLatestCount: z.coerce.number().optional(),
 		enabled: z.boolean(),
 	})
