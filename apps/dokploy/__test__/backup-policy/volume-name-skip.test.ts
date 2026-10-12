@@ -107,7 +107,7 @@ describe("mount volume name validation", () => {
 });
 
 describe("backup policy service names", () => {
-	it("skips services whose name the backup forms would reject, and logs them", async () => {
+	it("keeps coverage for services with unsafe names but does not store the name", async () => {
 		vi.mocked(logger.warn).mockClear();
 		vi.mocked(findMountsByApplicationId).mockResolvedValue([
 			{ type: "volume", volumeName: "data" },
@@ -126,6 +126,8 @@ describe("backup policy service names", () => {
 		});
 		expect(dumps.map((plan) => plan.insert.serviceName)).toEqual([
 			"web",
+			null,
+			null,
 			"My App 2",
 		]);
 
@@ -135,6 +137,8 @@ describe("backup policy service names", () => {
 		});
 		expect(volumes.map((plan) => plan.insert.serviceName)).toEqual([
 			"web",
+			null,
+			null,
 			"My App 2",
 		]);
 		expect(logger.warn).toHaveBeenCalledTimes(4);

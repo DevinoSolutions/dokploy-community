@@ -411,18 +411,20 @@ type BackupInsert = typeof backups.$inferInsert;
 type VolumeInsert = typeof volumeBackups.$inferInsert;
 
 // The service name is stored on the materialized row and reaches backup
-// commands, so a row is only created for names the backup forms would accept.
-const hasSafeServiceName = (policy: BackupPolicy, service: ScopedService) => {
-	if (isSafeBackupPath(service.name)) return true;
+// commands. A name the backup forms would reject is not stored (the row keeps
+// its coverage; `serviceName` only matters for compose services), so the row
+// stays editable and nothing unsafe reaches a command.
+const safeServiceName = (policy: BackupPolicy, service: ScopedService) => {
+	if (isSafeBackupPath(service.name)) return service.name;
 	logger.warn(
 		{
 			policyId: policy.backupPolicyId,
 			serviceId: service.id,
 			serviceName: service.name,
 		},
-		"[BackupPolicy] Skipping service with an invalid name",
+		"[BackupPolicy] Not storing a service name with an invalid name",
 	);
-	return false;
+	return null;
 };
 
 export const buildDesiredBackupRows = (
@@ -434,7 +436,7 @@ export const buildDesiredBackupRows = (
 		const services = enumerated.dump[type];
 		if (!services) continue;
 		for (const service of services) {
-			if (!hasSafeServiceName(policy, service)) continue;
+			const serviceName = safeServiceName(policy, service);
 			const prefix = computeServicePrefix(
 				policy.prefix,
 				service.projectName,
@@ -446,7 +448,7 @@ export const buildDesiredBackupRows = (
 				enabled: policy.enabled,
 				database,
 				prefix,
-				serviceName: service.name,
+				serviceName,
 				destinationId: policy.destinationId,
 				keepLatestCount: policy.keepLatestCount ?? null,
 				backupType: "database",
@@ -482,7 +484,7 @@ export const buildDesiredVolumeRows = async (
 		const services = enumerated.volume[type];
 		if (!services) continue;
 		for (const service of services) {
-			if (!hasSafeServiceName(policy, service)) continue;
+			const serviceName = safeServiceName(policy, service);
 			const mounts = await findMountsByApplicationId(service.id, type);
 			const namedVolumes = mounts
 				.filter((mount) => mount.type === "volume" && mount.volumeName)
@@ -513,7 +515,7 @@ export const buildDesiredVolumeRows = async (
 					volumeName,
 					prefix,
 					serviceType: type,
-					serviceName: service.name,
+					serviceName,
 					turnOff: false,
 					cronExpression: policy.schedule,
 					keepLatestCount: policy.keepLatestCount ?? null,
