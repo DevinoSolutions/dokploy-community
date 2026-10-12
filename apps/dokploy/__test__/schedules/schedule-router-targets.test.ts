@@ -127,7 +127,7 @@ const stored = (
 	applicationId: null,
 	composeId: null,
 	serverId: null,
-	organizationId: null,
+	organizationId: scheduleType === "dokploy-server" ? "org-1" : null,
 	cronExpression: "0 0 * * *",
 	enabled: false,
 	...ids,
@@ -366,7 +366,7 @@ describe("schedule.update", () => {
 		expect(mocks.updateSchedule).toHaveBeenCalledTimes(1);
 	});
 
-	it("ignores a client-supplied organizationId", async () => {
+	it("takes the organization from the session, not the request", async () => {
 		mocks.existing = stored("dokploy-server");
 		await caller().update({
 			...base,
@@ -374,8 +374,8 @@ describe("schedule.update", () => {
 			scheduleType: "dokploy-server",
 			organizationId: "org-2",
 		} as never);
-		expect(mocks.updateSchedule.mock.calls[0]?.[0]).not.toHaveProperty(
-			"organizationId",
-		);
+		expect(mocks.updateSchedule.mock.calls[0]?.[0]).toMatchObject({
+			organizationId: "org-1",
+		});
 	});
 });

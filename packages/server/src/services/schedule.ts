@@ -58,6 +58,26 @@ export const assertHostScheduleAccess = async (
 	}
 };
 
+// A dokploy-server schedule has no service or server to scope it by; its
+// organizationId is the only thing tying it to a caller.
+export const assertScheduleOrganization = (
+	ctx: { session: { activeOrganizationId: string } },
+	schedule: {
+		scheduleType: Schedule["scheduleType"];
+		organizationId: string | null;
+	},
+) => {
+	if (
+		schedule.scheduleType === "dokploy-server" &&
+		schedule.organizationId !== ctx.session.activeOrganizationId
+	) {
+		throw new TRPCError({
+			code: "UNAUTHORIZED",
+			message: "You don't have access to this schedule.",
+		});
+	}
+};
+
 export const createSchedule = async (
 	input: z.infer<typeof createScheduleSchema> & { organizationId?: string },
 ) => {
@@ -184,7 +204,9 @@ export const deleteSchedule = async (scheduleId: string) => {
 };
 
 export const updateSchedule = async (
-	input: z.infer<typeof updateScheduleSchema>,
+	input: z.infer<typeof updateScheduleSchema> & {
+		organizationId?: string | null;
+	},
 ) => {
 	const { scheduleId, ...rest } = input;
 	const [updatedSchedule] = await db
