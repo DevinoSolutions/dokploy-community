@@ -180,6 +180,7 @@ describe("deployment.killProcess", () => {
 		applicationId: "a1",
 		composeId: null,
 		pid: null,
+		status: "running",
 		schedule: null,
 		...extra,
 	});
@@ -266,6 +267,23 @@ describe("deployment.killProcess", () => {
 			deploymentCaller.killProcess({ deploymentId: "dep-1" }),
 		).rejects.toMatchObject({ message: "Deployment is not running" });
 	});
+
+	it.each(["done", "error", "cancelled"])(
+		"refuses a %s deployment that still has a pid, which may belong to another process by now",
+		async (status) => {
+			mocks.findDeploymentById.mockResolvedValue(
+				deployment({ pid: "4242", status, serverId: "srv-1" }),
+			);
+
+			await expect(
+				deploymentCaller.killProcess({ deploymentId: "dep-1" }),
+			).rejects.toMatchObject({ message: "Deployment is not running" });
+			expect(mocks.execAsync).not.toHaveBeenCalled();
+			expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+			expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
+			expect(mocks.audit).not.toHaveBeenCalled();
+		},
+	);
 
 	it("a build-server deployment that already finished is not reported as cancelled", async () => {
 		mocks.findDeploymentById.mockResolvedValue(deployment());

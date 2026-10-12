@@ -52,6 +52,7 @@ const deployment = (extra = {}) => ({
 	applicationId: "a1",
 	composeId: null,
 	pid: "4242",
+	status: "running",
 	schedule: null,
 	...extra,
 });

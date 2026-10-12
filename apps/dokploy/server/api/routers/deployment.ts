@@ -212,7 +212,8 @@ export const deploymentRouter = createTRPCRouter({
 				return;
 			}
 
-			if (!deployment.pid) {
+			// A pid left on a finished deployment may since belong to another process.
+			if (deployment.status !== "running" || !deployment.pid) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Deployment is not running",
