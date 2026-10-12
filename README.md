@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.19**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.20**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.19 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.20 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,30 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.20
+
+**Security hardening.** Backup, volume-backup and restore commands now shell-quote user-supplied prefixes, service names, S3 paths and restore file names, and restore paths are checked for traversal ([#336](https://github.com/DevinoSolutions/dokploy-community/pull/336)). Schedules no longer accept a client-supplied app name ([#349](https://github.com/DevinoSolutions/dokploy-community/pull/349)), and schedule targets and organization are validated on create and update ([#352](https://github.com/DevinoSolutions/dokploy-community/pull/352), [#353](https://github.com/DevinoSolutions/dokploy-community/pull/353)). Deployment log, cancel and remove routes authorize every deployment kind ([#355](https://github.com/DevinoSolutions/dokploy-community/pull/355)). Git provider tokens are kept out of clone URLs and `.git/config` and sent as a host-scoped auth header instead ([#335](https://github.com/DevinoSolutions/dokploy-community/pull/335), port of [Dokploy/dokploy#5619](https://github.com/Dokploy/dokploy/pull/5619) by @Souvik-Cyclic). Dependency updates clear the two remaining Dependabot advisories ([#334](https://github.com/DevinoSolutions/dokploy-community/pull/334)).
+
+**Registry reliability** ([#354](https://github.com/DevinoSolutions/dokploy-community/pull/354)). Image pushes are retried with backoff on transient registry or storage errors (5xx responses and dropped connections).
+
+**Ported upstream fixes.** Each is ported 1:1 with credit to its original author:
+- [#337](https://github.com/DevinoSolutions/dokploy-community/pull/337): [Dokploy/dokploy#5626](https://github.com/Dokploy/dokploy/pull/5626) by @olivier-drieux
+- [#338](https://github.com/DevinoSolutions/dokploy-community/pull/338): [Dokploy/dokploy#5631](https://github.com/Dokploy/dokploy/pull/5631) by @moataz-hjaiji
+- [#339](https://github.com/DevinoSolutions/dokploy-community/pull/339): [Dokploy/dokploy#5632](https://github.com/Dokploy/dokploy/pull/5632) by @Totopo27
+- [#340](https://github.com/DevinoSolutions/dokploy-community/pull/340): [Dokploy/dokploy#5633](https://github.com/Dokploy/dokploy/pull/5633) by @Totopo27
+- [#341](https://github.com/DevinoSolutions/dokploy-community/pull/341): [Dokploy/dokploy#5583](https://github.com/Dokploy/dokploy/pull/5583) by @cevheri
+- [#342](https://github.com/DevinoSolutions/dokploy-community/pull/342): [Dokploy/dokploy#5553](https://github.com/Dokploy/dokploy/pull/5553) by @Souvik-Cyclic
+- [#343](https://github.com/DevinoSolutions/dokploy-community/pull/343): [Dokploy/dokploy#5593](https://github.com/Dokploy/dokploy/pull/5593) by @tarikyalcinkaya
+- [#344](https://github.com/DevinoSolutions/dokploy-community/pull/344): [Dokploy/dokploy#5623](https://github.com/Dokploy/dokploy/pull/5623) by @lucasdu4rte
+- [#345](https://github.com/DevinoSolutions/dokploy-community/pull/345): [Dokploy/dokploy#5627](https://github.com/Dokploy/dokploy/pull/5627) by @olivier-drieux
+- [#346](https://github.com/DevinoSolutions/dokploy-community/pull/346): [Dokploy/dokploy#5566](https://github.com/Dokploy/dokploy/pull/5566) by @jhthompson
+- [#347](https://github.com/DevinoSolutions/dokploy-community/pull/347): [Dokploy/dokploy#5559](https://github.com/Dokploy/dokploy/pull/5559) by @Tyagiquamar and [Dokploy/dokploy#5570](https://github.com/Dokploy/dokploy/pull/5570) by @boysandri8-jpg
+- [#348](https://github.com/DevinoSolutions/dokploy-community/pull/348): [Dokploy/dokploy#5587](https://github.com/Dokploy/dokploy/pull/5587) by @ahmedisam99
+
+**Fixes.** Trailing-slash trimming runs in linear time everywhere ([#350](https://github.com/DevinoSolutions/dokploy-community/pull/350)). Snapvisor builds are picked by build number, and email render errors are contained ([#351](https://github.com/DevinoSolutions/dokploy-community/pull/351)).
+
+> No database migrations in this release (the count stays at 219). The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.19
 
@@ -716,7 +740,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.19
+export DOKPLOY_VERSION=v0.30.8-community.20
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -729,7 +753,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.19      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.20      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
