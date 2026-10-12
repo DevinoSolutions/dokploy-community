@@ -136,6 +136,33 @@ describe("handleGiteaApplicationPullRequestEvent", () => {
 		);
 	});
 
+	it("queues the preview on the server of the application", async () => {
+		await handleGiteaApplicationPullRequestEvent({
+			application: createApplication({ serverId: "server-1" }) as any,
+			body: createBody(),
+		});
+
+		expect(mocks.queueAdd).toHaveBeenCalledWith(
+			"deployments",
+			expect.objectContaining({
+				applicationId: "app-1",
+				applicationType: "application-preview",
+				serverId: "server-1",
+			}),
+			expect.anything(),
+		);
+	});
+
+	it("leaves serverId off the preview job of a local application", async () => {
+		await handleGiteaApplicationPullRequestEvent({
+			application: createApplication() as any,
+			body: createBody(),
+		});
+
+		const job = mocks.queueAdd.mock.calls[0]?.[1];
+		expect(job.serverId).toBeUndefined();
+	});
+
 	it("redeploys the existing preview on 'synchronized' without creating a second one", async () => {
 		mocks.findPreviewDeploymentByApplicationId.mockResolvedValue({
 			previewDeploymentId: "preview-existing",
@@ -496,6 +523,23 @@ describe("handleGiteaComposePullRequestEvent", () => {
 				composeId: "compose-1",
 				applicationType: "compose-preview",
 				previewDeploymentId: "compose-preview-1",
+			}),
+			expect.anything(),
+		);
+	});
+
+	it("queues the compose preview on the server of the compose", async () => {
+		await handleGiteaComposePullRequestEvent({
+			compose: createCompose({ serverId: "server-1" }) as any,
+			body: createBody(),
+		});
+
+		expect(mocks.queueAdd).toHaveBeenCalledWith(
+			"deployments",
+			expect.objectContaining({
+				composeId: "compose-1",
+				applicationType: "compose-preview",
+				serverId: "server-1",
 			}),
 			expect.anything(),
 		);
