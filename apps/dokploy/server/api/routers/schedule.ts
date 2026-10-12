@@ -15,6 +15,7 @@ import {
 } from "@dokploy/server/services/permission";
 import {
 	assertHostScheduleAccess,
+	assertScheduleOrganization,
 	createSchedule,
 	deleteSchedule,
 	findScheduleById,
@@ -159,6 +160,7 @@ export const scheduleRouter = createTRPCRouter({
 				existingSchedule.scheduleType,
 				existingSchedule.serverId,
 			);
+			assertScheduleOrganization(ctx, existingSchedule);
 			if (
 				input.scheduleType &&
 				input.scheduleType !== existingSchedule.scheduleType
@@ -179,6 +181,16 @@ export const scheduleRouter = createTRPCRouter({
 			} else {
 				await checkPermission(ctx, { schedule: ["update"] });
 			}
+
+			// Only dokploy-server schedules carry an organizationId: set it from the
+			// session when a schedule becomes one, and clear it when it stops being one.
+			const nextType = input.scheduleType ?? existingSchedule.scheduleType;
+			const organizationUpdate =
+				nextType === "dokploy-server"
+					? { organizationId: ctx.session.activeOrganizationId }
+					: existingSchedule.scheduleType === "dokploy-server"
+						? { organizationId: null }
+						: {};
 
 			// The target the schedule will have after this update. Ids that are not
 			// part of the input keep their stored value.
@@ -201,7 +213,10 @@ export const scheduleRouter = createTRPCRouter({
 				},
 				"update",
 			);
-			const updatedSchedule = await updateSchedule(input);
+			const updatedSchedule = await updateSchedule({
+				...input,
+				...organizationUpdate,
+			});
 
 			if (IS_CLOUD) {
 				if (updatedSchedule?.enabled) {
@@ -245,6 +260,7 @@ export const scheduleRouter = createTRPCRouter({
 				scheduleItem.scheduleType,
 				scheduleItem.serverId,
 			);
+			assertScheduleOrganization(ctx, scheduleItem);
 
 			const serviceId = scheduleItem.applicationId || scheduleItem.composeId;
 			if (serviceId) {
@@ -372,6 +388,12 @@ export const scheduleRouter = createTRPCRouter({
 			} else {
 				await checkPermission(ctx, { schedule: ["read"] });
 
+				if (schedule.scheduleType === "dokploy-server") {
+					// Same gate as list: owners and admins of the owning organization.
+					await assertHostScheduleAccess(ctx, schedule.scheduleType, null);
+					assertScheduleOrganization(ctx, schedule);
+				}
+
 				if (schedule.scheduleType === "server" && schedule.serverId) {
 					const targetServer = await findServerById(schedule.serverId);
 					if (
@@ -396,6 +418,7 @@ export const scheduleRouter = createTRPCRouter({
 				scheduleItem.scheduleType,
 				scheduleItem.serverId,
 			);
+			assertScheduleOrganization(ctx, scheduleItem);
 
 			const serviceId = scheduleItem.applicationId || scheduleItem.composeId;
 			if (serviceId) {

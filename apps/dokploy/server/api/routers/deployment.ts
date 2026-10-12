@@ -18,6 +18,10 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
+import {
+	assertHostScheduleAccess,
+	assertScheduleOrganization,
+} from "@dokploy/server/services/schedule";
 import { findServerById } from "@dokploy/server/services/server";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
@@ -190,6 +194,10 @@ export const deploymentRouter = createTRPCRouter({
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					deployment: ["cancel"],
 				});
+			} else if (deployment.schedule?.scheduleType === "dokploy-server") {
+				// Runs on the Dokploy host: owners and admins of the owning organization.
+				await assertHostScheduleAccess(ctx, "dokploy-server", null);
+				assertScheduleOrganization(ctx, deployment.schedule);
 			} else if (deployment.schedule?.serverId) {
 				const targetServer = await findServerById(deployment.schedule.serverId);
 				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
@@ -249,6 +257,10 @@ export const deploymentRouter = createTRPCRouter({
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					deployment: ["cancel"],
 				});
+			} else if (deployment.schedule?.scheduleType === "dokploy-server") {
+				// Runs on the Dokploy host: owners and admins of the owning organization.
+				await assertHostScheduleAccess(ctx, "dokploy-server", null);
+				assertScheduleOrganization(ctx, deployment.schedule);
 			} else if (deployment.schedule?.serverId) {
 				const targetServer = await findServerById(deployment.schedule.serverId);
 				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
@@ -281,6 +293,10 @@ export const deploymentRouter = createTRPCRouter({
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					deployment: ["read"],
 				});
+			} else if (deployment.schedule?.scheduleType === "dokploy-server") {
+				// Runs on the Dokploy host: owners and admins of the owning organization.
+				await assertHostScheduleAccess(ctx, "dokploy-server", null);
+				assertScheduleOrganization(ctx, deployment.schedule);
 			} else if (deployment.schedule?.serverId) {
 				const targetServer = await findServerById(deployment.schedule.serverId);
 				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
