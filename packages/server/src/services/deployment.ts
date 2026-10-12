@@ -187,11 +187,7 @@ export const createDeployment = async (
 	options?: { buildServerId?: string | null },
 ) => {
 	const application = await findApplicationById(deployment.applicationId);
-	await removeLastTenDeployments(
-		deployment.applicationId,
-		"application",
-		application.serverId,
-	);
+	await removeLastTenDeployments(deployment.applicationId, "application");
 	try {
 		const buildServerId = options?.buildServerId ?? application.buildServerId;
 		const serverId = buildServerId || application.serverId;
@@ -271,25 +267,30 @@ export const createDeploymentPreview = async (
 	const previewDeployment = await findPreviewDeploymentById(
 		deployment.previewDeploymentId,
 	);
+	// The build server proper (policy-forced, else the application's own); what
+	// goes on the row. Separate from the host the log is written on, which also
+	// falls back to the serving host when nothing builds elsewhere.
 	const buildServerId =
 		options?.buildServerId ||
 		previewDeployment?.application?.buildServerId ||
+		null;
+	const logHostId =
+		buildServerId ||
 		previewDeployment?.application?.serverId ||
 		previewDeployment?.compose?.serverId;
 	await removeLastTenDeployments(
 		deployment.previewDeploymentId,
 		"previewDeployment",
-		buildServerId,
 	);
 	try {
 		const appName = `${previewDeployment.appName}`;
-		const { LOGS_PATH } = paths(!!buildServerId);
+		const { LOGS_PATH } = paths(!!logHostId);
 		const formattedDateTime = format(new Date(), "yyyy-MM-dd:HH:mm:ss");
 		const fileName = `${appName}-${formattedDateTime}.log`;
 		const logFilePath = path.join(LOGS_PATH, appName, fileName);
 
-		if (buildServerId) {
-			const server = await findServerById(buildServerId);
+		if (logHostId) {
+			const server = await findServerById(logHostId);
 
 			const command = `
 				mkdir -p ${LOGS_PATH}/${appName};
@@ -316,6 +317,7 @@ export const createDeploymentPreview = async (
 					previewDeployment?.application?.serverId ??
 					previewDeployment?.compose?.serverId,
 				startedAt: new Date().toISOString(),
+				...(buildServerId && { buildServerId }),
 			})
 			.returning();
 		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
@@ -357,11 +359,7 @@ export const createDeploymentCompose = async (
 	>,
 ) => {
 	const compose = await findComposeById(deployment.composeId);
-	await removeLastTenDeployments(
-		deployment.composeId,
-		"compose",
-		compose.serverId,
-	);
+	await removeLastTenDeployments(deployment.composeId, "compose");
 	try {
 		const { LOGS_PATH } = paths(!!compose.serverId);
 		const formattedDateTime = format(new Date(), "yyyy-MM-dd:HH:mm:ss");
@@ -444,7 +442,7 @@ export const createDeploymentBackup = async (
 	} else if (backup.backupType === "compose") {
 		serverId = backup.compose?.serverId;
 	}
-	await removeLastTenDeployments(deployment.backupId, "backup", serverId);
+	await removeLastTenDeployments(deployment.backupId, "backup");
 	try {
 		const { LOGS_PATH } = paths(!!serverId);
 		const formattedDateTime = format(new Date(), "yyyy-MM-dd:HH:mm:ss");
@@ -522,7 +520,7 @@ export const createDeploymentSchedule = async (
 		schedule.application?.serverId ||
 		schedule.compose?.serverId ||
 		schedule.server?.serverId;
-	await removeLastTenDeployments(deployment.scheduleId, "schedule", serverId);
+	await removeLastTenDeployments(deployment.scheduleId, "schedule");
 	await db
 		.update(deployments)
 		.set({
@@ -616,11 +614,7 @@ export const createDeploymentVolumeBackup = async (
 
 	const serverId =
 		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
-	await removeLastTenDeployments(
-		deployment.volumeBackupId,
-		"volumeBackup",
-		serverId,
-	);
+	await removeLastTenDeployments(deployment.volumeBackupId, "volumeBackup");
 	try {
 		const { VOLUME_BACKUPS_PATH } = paths(!!serverId);
 		const formattedDateTime = format(new Date(), "yyyy-MM-dd:HH:mm:ss");
@@ -705,8 +699,10 @@ export const removeDeployment = async (deploymentId: string) => {
 		const logPath = path.join(deployment.logPath);
 		if (logPath && logPath !== ".") {
 			const command = `rm -f ${quote([logPath])};`;
-			if (deployment.serverId) {
-				await execAsyncRemote(deployment.serverId, command);
+			// A build-server log lives on the build server, not the serving host.
+			const logHostId = deployment.buildServerId || deployment.serverId;
+			if (logHostId) {
+				await execAsyncRemote(logHostId, command);
 			} else {
 				await execAsync(command);
 			}
@@ -765,6 +761,11 @@ export const removeDeployments = async (application: Application) => {
 	await removeDeploymentsByApplicationId(applicationId);
 };
 
+// Keeps the 10 newest deployments of a service and drops the rest, rows and
+// log files. A log lives on the host that built the deployment, which is the
+// build server when there is one and the serving host otherwise, so each old
+// row is cleaned on its own host. Never throws: a host that cannot be reached
+// must not fail (or block) the deployment that triggered the cleanup.
 const removeLastTenDeployments = async (
 	id: string,
 	type:
@@ -775,42 +776,36 @@ const removeLastTenDeployments = async (
 		| "previewDeployment"
 		| "backup"
 		| "volumeBackup",
-	serverId?: string | null,
 ) => {
-	const deploymentList = await getDeploymentsByType(id, type);
-	if (deploymentList.length > 10) {
+	try {
+		const deploymentList = await getDeploymentsByType(id, type);
+		if (deploymentList.length <= 10) {
+			return;
+		}
 		const deploymentsToDelete = deploymentList.slice(10);
-		if (serverId) {
-			let command = "";
-			for (const oldDeployment of deploymentsToDelete) {
-				try {
-					const logPath = path.join(oldDeployment.logPath);
-					if (oldDeployment.rollbackId) {
-						await removeRollbackById(oldDeployment.rollbackId);
-					}
+		// Remote log paths grouped by host: one command per host.
+		const remoteLogPaths = new Map<string, string[]>();
 
-					if (logPath && logPath !== ".") {
-						command += `rm -rf ${quote([logPath])};`;
-					}
-					await removeDeployment(oldDeployment.deploymentId);
-				} catch (err) {
-					console.error(
-						`Failed to remove deployment ${oldDeployment.deploymentId} during cleanup:`,
-						err,
-					);
+		for (const oldDeployment of deploymentsToDelete) {
+			try {
+				if (oldDeployment.rollbackId) {
+					await removeRollbackById(oldDeployment.rollbackId);
 				}
-			}
+				const logPath = path.join(oldDeployment.logPath);
+				const hostId = oldDeployment.buildServerId || oldDeployment.serverId;
 
-			if (command) {
-				await execAsyncRemote(serverId, command);
-			}
-		} else {
-			for (const oldDeployment of deploymentsToDelete) {
-				try {
-					if (oldDeployment.rollbackId) {
-						await removeRollbackById(oldDeployment.rollbackId);
+				if (hostId) {
+					if (logPath && logPath !== ".") {
+						remoteLogPaths.set(hostId, [
+							...(remoteLogPaths.get(hostId) ?? []),
+							logPath,
+						]);
 					}
-					const logPath = path.join(oldDeployment.logPath);
+					// The log is removed per host below, so only the row goes here.
+					await db
+						.delete(deployments)
+						.where(eq(deployments.deploymentId, oldDeployment.deploymentId));
+				} else {
 					if (
 						logPath &&
 						logPath !== "." &&
@@ -820,14 +815,30 @@ const removeLastTenDeployments = async (
 						await fsPromises.unlink(logPath);
 					}
 					await removeDeployment(oldDeployment.deploymentId);
-				} catch (err) {
-					console.error(
-						`Failed to remove deployment ${oldDeployment.deploymentId} during cleanup:`,
-						err,
-					);
 				}
+			} catch (err) {
+				console.error(
+					`Failed to remove deployment ${oldDeployment.deploymentId} during cleanup:`,
+					err,
+				);
 			}
 		}
+
+		for (const [hostId, logPaths] of remoteLogPaths) {
+			try {
+				await execAsyncRemote(
+					hostId,
+					logPaths.map((logPath) => `rm -rf ${quote([logPath])};`).join(""),
+				);
+			} catch (err) {
+				console.error(
+					`Failed to remove old deployment logs on server ${hostId}:`,
+					err,
+				);
+			}
+		}
+	} catch (err) {
+		console.error(`Failed to clean up old ${type} deployments:`, err);
 	}
 };
 

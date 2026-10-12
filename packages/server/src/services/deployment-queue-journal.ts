@@ -149,10 +149,11 @@ const withDeadline = async (task: Promise<unknown>, ms: number) => {
 };
 
 /**
- * The host a deployment's log file lives on. Previews do not store their build
- * server on the row, so it is derived the way createDeploymentPreview does:
- * build server, else the application's server, else the compose server. Null
- * means a local file; undefined means the host cannot be told (skip the write).
+ * The host a deployment's log file lives on. Preview rows written before the
+ * build server was recorded on them have no `buildServerId`, so those are
+ * derived the way createDeploymentPreview does: build server, else the
+ * application's server, else the compose server. Null means a local file;
+ * undefined means the host cannot be told (skip the write).
  */
 const resolveLogHost = async (row: {
 	serverId: string | null;

@@ -240,6 +240,35 @@ describe("Docker image application previews", () => {
 		["deploy", deployPreviewApplication],
 		["rebuild", rebuildPreviewApplication],
 	])(
+		"writes the %s failure to the host the deployment was built on",
+		async (_, fn) => {
+			vi.mocked(db.query.applications.findFirst).mockResolvedValue({
+				...structuredClone(application),
+				previewDockerImage: null,
+			} as never);
+			// A build server the application itself does not carry (policy-forced):
+			// only the deployment row knows where its log is.
+			vi.mocked(deploymentService.createDeploymentPreview).mockResolvedValue({
+				deploymentId: "deployment-id",
+				logPath: "/tmp/preview.log",
+				serverId: "serving-server",
+				buildServerId: "build-server",
+			} as never);
+
+			await expect(run(fn)).rejects.toThrow();
+
+			expect(execProcess.execAsyncRemote).toHaveBeenCalledTimes(1);
+			expect(execProcess.execAsyncRemote).toHaveBeenCalledWith(
+				"build-server",
+				expect.stringContaining("/tmp/preview.log"),
+			);
+		},
+	);
+
+	it.each([
+		["deploy", deployPreviewApplication],
+		["rebuild", rebuildPreviewApplication],
+	])(
 		"refuses to pull a stored template that puts the placeholder in the registry during %s",
 		async (_, fn) => {
 			vi.mocked(db.query.applications.findFirst).mockResolvedValue({

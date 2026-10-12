@@ -999,7 +999,8 @@ export const deployPreviewApplication = async ({
 			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
 		}
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		const buildServerId = application.buildServerId || application.serverId;
+		// The log lives where the deployment was built; the row records it.
+		const buildServerId = deployment.buildServerId || deployment.serverId;
 		try {
 			if (buildServerId) {
 				await execAsyncRemote(buildServerId, command);
@@ -1234,7 +1235,8 @@ export const rebuildPreviewApplication = async ({
 		}
 
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		const serverId = application.buildServerId || application.serverId;
+		// The log lives where the deployment was built; the row records it.
+		const serverId = deployment.buildServerId || deployment.serverId;
 		if (serverId) {
 			await execAsyncRemote(serverId, command);
 		} else {
