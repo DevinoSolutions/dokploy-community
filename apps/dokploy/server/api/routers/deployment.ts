@@ -18,10 +18,7 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
-import {
-	assertHostScheduleAccess,
-	assertScheduleOrganization,
-} from "@dokploy/server/services/schedule";
+import { assertDeploymentAccess } from "@dokploy/server/services/deployment-access";
 import { findServerById } from "@dokploy/server/services/server";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
@@ -189,24 +186,7 @@ export const deploymentRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
-			const serviceId = deployment.applicationId || deployment.composeId;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					deployment: ["cancel"],
-				});
-			} else if (deployment.schedule?.scheduleType === "dokploy-server") {
-				// Runs on the Dokploy host: owners and admins of the owning organization.
-				await assertHostScheduleAccess(ctx, "dokploy-server", null);
-				assertScheduleOrganization(ctx, deployment.schedule);
-			} else if (deployment.schedule?.serverId) {
-				const targetServer = await findServerById(deployment.schedule.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You don't have access to this deployment.",
-					});
-				}
-			}
+			await assertDeploymentAccess(ctx, deployment, "cancel");
 
 			// A build that runs on a build server has no local pid: it is stopped
 			// there, by deployment (see deployment-cancel.ts).
@@ -252,24 +232,7 @@ export const deploymentRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
-			const serviceId = deployment.applicationId || deployment.composeId;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					deployment: ["cancel"],
-				});
-			} else if (deployment.schedule?.scheduleType === "dokploy-server") {
-				// Runs on the Dokploy host: owners and admins of the owning organization.
-				await assertHostScheduleAccess(ctx, "dokploy-server", null);
-				assertScheduleOrganization(ctx, deployment.schedule);
-			} else if (deployment.schedule?.serverId) {
-				const targetServer = await findServerById(deployment.schedule.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You don't have access to this deployment.",
-					});
-				}
-			}
+			await assertDeploymentAccess(ctx, deployment, "cancel");
 			const result = await removeDeployment(input.deploymentId);
 			await audit(ctx, {
 				action: "delete",
@@ -288,24 +251,7 @@ export const deploymentRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
-			const serviceId = deployment.applicationId || deployment.composeId;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					deployment: ["read"],
-				});
-			} else if (deployment.schedule?.scheduleType === "dokploy-server") {
-				// Runs on the Dokploy host: owners and admins of the owning organization.
-				await assertHostScheduleAccess(ctx, "dokploy-server", null);
-				assertScheduleOrganization(ctx, deployment.schedule);
-			} else if (deployment.schedule?.serverId) {
-				const targetServer = await findServerById(deployment.schedule.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You don't have access to this deployment.",
-					});
-				}
-			}
+			await assertDeploymentAccess(ctx, deployment, "read");
 
 			if (!deployment.logPath) {
 				return "";

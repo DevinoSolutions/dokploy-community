@@ -77,6 +77,7 @@ const deploymentOf = (organizationId: string | null) => ({
 	serverId: null,
 	pid: "4242",
 	logPath: "",
+	scheduleId: "sch-1",
 	schedule: {
 		scheduleType: "dokploy-server",
 		serverId: null,
