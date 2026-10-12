@@ -4,14 +4,12 @@ import {
 	type Registry,
 } from "@dokploy/server/services/registry";
 import { createRollback } from "@dokploy/server/services/rollbacks";
-import {
-	dockerWithConfig,
-	getRegistryConfigDir,
-} from "@dokploy/server/utils/process/dockerConfig";
+import { getRegistryConfigDir } from "@dokploy/server/utils/process/dockerConfig";
 import {
 	type LoginCancelable,
 	runDockerLogin,
 } from "@dokploy/server/utils/process/dockerLogin";
+import { buildDockerPushWithRetry } from "@dokploy/server/utils/process/dockerPush";
 import { quote } from "shell-quote";
 import { getECRAuthToken } from "../aws/ecr";
 import type { ApplicationNested } from "../builders";
@@ -218,7 +216,7 @@ docker tag ${quote([imageName])} ${quote([registryTag])} || {
 	exit 1;
 }
 echo "✅ Image Tagged" ;
-${dockerWithConfig(configDir)} push ${quote([registryTag])} || {
+${buildDockerPushWithRetry(registryTag, configDir)} || {
 	echo "❌ Error pushing image" ;
 	exit 1;
 }

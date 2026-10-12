@@ -1,5 +1,8 @@
 import { dirname } from "node:path";
-import { dockerWithConfig } from "@dokploy/server/utils/process/dockerConfig";
+import {
+	getDockerPushRetryCall,
+	getDockerPushRetryFunction,
+} from "@dokploy/server/utils/process/dockerPush";
 import { quote } from "shell-quote";
 import { stringify } from "yaml";
 import {
@@ -207,9 +210,10 @@ export const getTagAndPushCommand = ({
 	/** The registry's own docker config (see loginDockerRegistry), if any. */
 	configDir?: string;
 }) => {
-	const docker = dockerWithConfig(configDir);
 	const lines: string[] = [
 		"set -e;",
+		// Defined once for the whole script: every push below retries through it.
+		getDockerPushRetryFunction(),
 		`echo ${quote([`🔑 Logging in to registry ${registryLabel}`])};`,
 		'echo "✅ Registry Login Success";',
 	];
@@ -222,8 +226,8 @@ export const getTagAndPushCommand = ({
 			`docker image inspect ${local} >/dev/null 2>&1 || { echo ${quote([`❌ The build did not produce image ${image.localImage} for service ${image.service}`])}; exit 1; }`,
 			`docker tag ${local} ${ref} || { echo "❌ Error tagging image"; exit 1; }`,
 			`docker tag ${local} ${latest} || { echo "❌ Error tagging image"; exit 1; }`,
-			`${docker} push ${ref} || { echo "❌ Error pushing image"; exit 1; }`,
-			`${docker} push ${latest} || { echo "❌ Error pushing image"; exit 1; }`,
+			`${getDockerPushRetryCall(image.ref, configDir)} || { echo "❌ Error pushing image"; exit 1; }`,
+			`${getDockerPushRetryCall(image.latestRef, configDir)} || { echo "❌ Error pushing image"; exit 1; }`,
 			`echo ${quote([`✅ ${image.service} pushed`])};`,
 		);
 	}

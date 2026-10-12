@@ -7,7 +7,7 @@ import {
 } from "@dokploy/server/utils/cluster/upload";
 import { encodeBase64 } from "@dokploy/server/utils/docker/utils";
 import { sendBuildErrorNotifications } from "@dokploy/server/utils/notifications/build-error";
-import { dockerWithConfig } from "@dokploy/server/utils/process/dockerConfig";
+import { buildDockerPushWithRetry } from "@dokploy/server/utils/process/dockerPush";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -312,7 +312,7 @@ docker tag ${quote([`${appName}:latest`])} "$DOKPLOY_BP_TAG" || {
 	echo "❌ [build-policy] Tagging the image by sha failed" ;
 	exit 1;
 }
-${dockerWithConfig(configDir)} push "$DOKPLOY_BP_TAG" || {
+${buildDockerPushWithRetry('"$DOKPLOY_BP_TAG"', configDir, { rawShellRef: true })} || {
 	echo "❌ [build-policy] Pushing the image to the organization registry failed" ;
 	exit 1;
 }

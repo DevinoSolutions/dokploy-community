@@ -166,7 +166,7 @@ describe("uploadImageRemoteCommand", () => {
 			undefined,
 			{ stdin: OTHER_PASSWORD },
 		);
-		expect(script).toMatch(/\ndocker push /);
+		expect(script).toMatch(/\ndokploy_push_retry docker push /);
 		expect(script).toContain(`docker --config ${CONFIG_2} push `);
 		expect(script).not.toContain(`docker --config ${CONFIG_1}`);
 		expectNoSecretIn(script, ...executedCommands());
