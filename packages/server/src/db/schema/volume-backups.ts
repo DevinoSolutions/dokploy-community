@@ -9,6 +9,7 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import { backupPathSchema } from "../validations/backup";
 import { applications } from "./application";
 import { backupPolicies } from "./backup-policy";
 import { compose } from "./compose";
@@ -138,8 +139,13 @@ export const volumeBackupsRelations = relations(
 
 export const createVolumeBackupSchema = createInsertSchema(volumeBackups, {
 	volumeName: z.string().regex(VOLUME_NAME_REGEX, VOLUME_NAME_MESSAGE),
+	prefix: backupPathSchema,
+	serviceName: backupPathSchema.nullish(),
 }).omit({
 	volumeBackupId: true,
+	// Generated on the server: it names the log and archive directories that
+	// backup commands write to.
+	appName: true,
 });
 
 export const updateVolumeBackupSchema = createVolumeBackupSchema.extend({

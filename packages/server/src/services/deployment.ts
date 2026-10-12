@@ -16,7 +16,10 @@ import {
 	environments,
 	projects,
 } from "@dokploy/server/db/schema";
-import { isPlainAppName } from "@dokploy/server/db/schema/utils";
+import {
+	APP_NAME_REGEX,
+	isPlainAppName,
+} from "@dokploy/server/db/schema/utils";
 import { removeDirectoryIfExistsContent } from "@dokploy/server/utils/filesystem/directory";
 import {
 	execAsync,
@@ -452,8 +455,8 @@ export const createDeploymentBackup = async (
 			const server = await findServerById(serverId);
 
 			const command = `
-mkdir -p ${LOGS_PATH}/${backup.appName};
-echo "Initializing backup\n" >> ${logFilePath};
+mkdir -p ${quote([`${LOGS_PATH}/${backup.appName}`])};
+echo "Initializing backup\n" >> ${quote([logFilePath])};
 `;
 
 			await execAsyncRemote(server.serverId, command);
@@ -602,6 +605,14 @@ export const createDeploymentVolumeBackup = async (
 	>,
 ) => {
 	const volumeBackup = await findVolumeBackupById(deployment.volumeBackupId);
+	// Rows written before appName stopped being client input can hold anything;
+	// it names directories that are created and cleaned up below.
+	if (
+		!APP_NAME_REGEX.test(volumeBackup.appName) ||
+		/^\.+$/.test(volumeBackup.appName)
+	) {
+		throw new Error("Invalid volume backup app name");
+	}
 
 	const serverId =
 		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
@@ -624,8 +635,8 @@ export const createDeploymentVolumeBackup = async (
 			const server = await findServerById(serverId);
 
 			const command = `
-				mkdir -p ${VOLUME_BACKUPS_PATH}/${volumeBackup.appName};
-            	echo "Initializing volume backup" >> ${logFilePath};
+				mkdir -p ${quote([`${VOLUME_BACKUPS_PATH}/${volumeBackup.appName}`])};
+            	echo "Initializing volume backup" >> ${quote([logFilePath])};
 			`;
 
 			await execAsyncRemote(server.serverId, command);

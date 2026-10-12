@@ -170,7 +170,6 @@ const queueDeployment = async (
 	jobData: DeploymentJob,
 ): Promise<HandlerResult> => {
 	if (IS_CLOUD && resource.serverId) {
-		jobData.serverId = resource.serverId;
 		deploy(jobData).catch((error) => {
 			console.error("Background deployment failed:", error);
 		});
@@ -467,6 +466,7 @@ export const handleGiteaApplicationPullRequestEvent = async ({
 				type: "deploy",
 				applicationType: "application-preview",
 				server: !!application.serverId,
+				serverId: application.serverId ?? undefined,
 				previewDeploymentId,
 			}),
 		},
@@ -499,6 +499,7 @@ export const handleGiteaComposePullRequestEvent = async ({
 				type: "deploy",
 				applicationType: "compose-preview",
 				server: !!compose.serverId,
+				serverId: compose.serverId ?? undefined,
 				previewDeploymentId,
 			}),
 		},

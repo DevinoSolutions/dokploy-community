@@ -1,3 +1,4 @@
+import { backupPathSchema } from "@dokploy/server/db/validations/backup";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import { DatabaseZap, PenBoxIcon, PlusCircle, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -55,7 +56,7 @@ const formSchema = z
 				/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
 				"Invalid volume name. Use letters, numbers, '._-' and start with a letter/number.",
 			),
-		prefix: z.string(),
+		prefix: backupPathSchema,
 		keepLatestCount: z.coerce
 			.number()
 			.int()

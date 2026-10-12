@@ -59,7 +59,10 @@ beforeAll(() => {
 case "$1" in
   volume) exit 0 ;;
   run)
-    while [ "$#" -gt 0 ] && [ "$1" != "bash" ]; do shift; done
+    while [ "$#" -gt 0 ] && [ "$1" != "bash" ]; do
+      if [ "$1" = "-e" ]; then export "$2"; shift; fi
+      shift
+    done
     shift 2
     volume_path=/volume_data
     backup_path=/backup

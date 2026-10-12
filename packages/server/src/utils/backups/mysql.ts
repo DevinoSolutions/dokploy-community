@@ -10,7 +10,7 @@ import { findProjectById } from "@dokploy/server/services/project";
 import { sendDatabaseBackupNotifications } from "../notifications/database-backup";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import {
-	buildRcloneCommand,
+	buildRcloneRcatCommand,
 	getBackupCommand,
 	getBackupTimestamp,
 	getRclonePathAndFlags,
@@ -38,8 +38,9 @@ export const runMySqlBackup = async (mysql: MySql, backup: BackupSchedule) => {
 			envVars,
 		} = await getRclonePathAndFlags(destination, bucketDestination);
 
-		const rcloneCommand = buildRcloneCommand(
-			`rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`,
+		const rcloneCommand = buildRcloneRcatCommand(
+			rcloneFlags,
+			rcloneDestination,
 			envVars,
 		);
 

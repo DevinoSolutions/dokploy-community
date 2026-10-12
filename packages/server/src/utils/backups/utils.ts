@@ -15,8 +15,8 @@ import { quote } from "shell-quote";
 
 const execFileP = promisify(execFile);
 
-import { keepLatestNBackups } from ".";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
+import { keepLatestNBackups } from ".";
 import { runComposeBackup } from "./compose";
 import { withBackupSlot } from "./concurrency";
 import { runLibsqlBackup } from "./libsql";
@@ -257,6 +257,23 @@ export const buildRcloneCommand = (
 	envVars?: string,
 ): string => (envVars ? `${envVars} ${command}` : command);
 
+/**
+ * `rclone rcat` of a streamed backup into `rcloneDestination`. The destination
+ * is built from the destination bucket and the user-supplied backup prefix, so
+ * it is shell-quoted as one argument instead of being placed in double quotes,
+ * where `$(...)` and backticks would still run. getBackupCommand swaps the
+ * `rclone rcat ` verb for `deletefile` when cleaning up a partial upload.
+ */
+export const buildRcloneRcatCommand = (
+	rcloneFlags: string[],
+	rcloneDestination: string,
+	envVars?: string,
+): string =>
+	buildRcloneCommand(
+		`rclone rcat ${rcloneFlags.join(" ")} ${quote([rcloneDestination])}`,
+		envVars,
+	);
+
 // User-controlled values (database name, user, password) are passed to the
 // container as environment variables via `docker exec -e VAR=<escaped>` and
 // referenced as "$VAR" inside the inner shell, so they never appear in the
@@ -313,8 +330,10 @@ export const getLibsqlBackupCommand = (database: string) => {
 	return `docker exec -e DB_NAME=${quote([database])} -i $CONTAINER_ID sh -c 'tar cf - -C /var/lib/sqld "$DB_NAME" | gzip'`;
 };
 
+// `appName` and `serviceName` end up in docker label filters; shell-quote each
+// filter so a value that carries shell syntax stays one inert argument.
 export const getServiceContainerCommand = (appName: string) => {
-	return `docker ps -q --filter "status=running" --filter "label=com.docker.swarm.service.name=${appName}" | head -n 1`;
+	return `docker ps -q --filter "status=running" --filter ${quote([`label=com.docker.swarm.service.name=${appName}`])} | head -n 1`;
 };
 
 export const getComposeContainerCommand = (
@@ -323,9 +342,9 @@ export const getComposeContainerCommand = (
 	composeType: "stack" | "docker-compose" | undefined,
 ) => {
 	if (composeType === "stack") {
-		return `docker ps -q --filter "status=running" --filter "label=com.docker.stack.namespace=${appName}" --filter "label=com.docker.swarm.service.name=${appName}_${serviceName}" | head -n 1`;
+		return `docker ps -q --filter "status=running" --filter ${quote([`label=com.docker.stack.namespace=${appName}`])} --filter ${quote([`label=com.docker.swarm.service.name=${appName}_${serviceName}`])} | head -n 1`;
 	}
-	return `docker ps -q --filter "status=running" --filter "label=com.docker.compose.project=${appName}" --filter "label=com.docker.compose.service=${serviceName}" | head -n 1`;
+	return `docker ps -q --filter "status=running" --filter ${quote([`label=com.docker.compose.project=${appName}`])} --filter ${quote([`label=com.docker.compose.service=${serviceName}`])} | head -n 1`;
 };
 
 const getContainerSearchCommand = (backup: BackupSchedule) => {
@@ -384,7 +403,9 @@ export const getBackupServerId = (backup: BackupSchedule): string | null => {
 // Returns null when the target can't be resolved (web-server backups, missing
 // appName/serviceName) — the caller then treats the state as unknown and runs
 // the backup as before.
-const getBackupTargetSearchCommand = (backup: BackupSchedule): string | null => {
+const getBackupTargetSearchCommand = (
+	backup: BackupSchedule,
+): string | null => {
 	const {
 		backupType,
 		databaseType,
@@ -602,6 +623,8 @@ export const getBackupCommand = (
 	rcloneCommand: string,
 	logPath: string,
 ) => {
+	// The path comes from the backup's app name; quote it like the other paths.
+	const quotedLogPath = quote([logPath]);
 	const containerSearch = getContainerSearchCommand(backup);
 	const backupCommand = generateBackupCommand(backup);
 	const destinationType = ["sftp", "ftp"].includes(
@@ -624,7 +647,7 @@ export const getBackupCommand = (
 			)} >/dev/null 2>&1 || true;`
 		: "";
 	const cleanupPartialUpload = rcloneCleanupCommand
-		? `echo "[$(date)] Cleaning up partial upload from ${destinationType}..." >> ${logPath};
+		? `echo "[$(date)] Cleaning up partial upload from ${destinationType}..." >> ${quotedLogPath};
 		${rcloneCleanupCommand}`
 		: "";
 
@@ -640,17 +663,17 @@ export const getBackupCommand = (
 
 	return `
 	set -eo pipefail;
-	echo "[$(date)] Starting backup process..." >> ${logPath};
-	echo "[$(date)] Executing backup command..." >> ${logPath};
+	echo "[$(date)] Starting backup process..." >> ${quotedLogPath};
+	echo "[$(date)] Executing backup command..." >> ${quotedLogPath};
 	CONTAINER_ID=$(${containerSearch})
 
 	if [ -z "$CONTAINER_ID" ]; then
-		echo "[$(date)] ❌ Error: Container not found" >> ${logPath};
+		echo "[$(date)] ❌ Error: Container not found" >> ${quotedLogPath};
 		exit 1;
 	fi
 
-	echo "[$(date)] Container Up: $CONTAINER_ID" >> ${logPath};
-	echo "[$(date)] Streaming backup to ${destinationType}..." >> ${logPath};
+	echo "[$(date)] Container Up: $CONTAINER_ID" >> ${quotedLogPath};
+	echo "[$(date)] Streaming backup to ${destinationType}..." >> ${quotedLogPath};
 
 	# Stream the dump straight to the destination. The dump runs ONCE; "set -o
 	# pipefail" makes the pipeline fail if the dump (not just rclone) fails, so a
@@ -670,21 +693,21 @@ export const getBackupCommand = (
 
 	if [ "$DUMP_STATUS" != "0" ]; then
 		# Dump failure takes precedence: a failed dump also fails the upload stage.
-		echo "[$(date)] ❌ Error: Backup failed" >> ${logPath};
-		echo "Error: $(cat "$DUMP_ERROR_FILE")" >> ${logPath};
+		echo "[$(date)] ❌ Error: Backup failed" >> ${quotedLogPath};
+		echo "Error: $(cat "$DUMP_ERROR_FILE")" >> ${quotedLogPath};
 		${cleanupPartialUpload}
 		exit 1;
 	fi
 
 	if [ "$UPLOAD_FAILED" != "0" ]; then
-		echo "[$(date)] ❌ Error: Upload to ${destinationType} failed" >> ${logPath};
-		echo "Error: $UPLOAD_OUTPUT" >> ${logPath};
+		echo "[$(date)] ❌ Error: Upload to ${destinationType} failed" >> ${quotedLogPath};
+		echo "Error: $UPLOAD_OUTPUT" >> ${quotedLogPath};
 		${cleanupPartialUpload}
 		exit 1;
 	fi
 
-	echo "[$(date)] ✅ Upload to ${destinationType} completed successfully" >> ${logPath};
-	echo "Backup done ✅" >> ${logPath};
+	echo "[$(date)] ✅ Upload to ${destinationType} completed successfully" >> ${quotedLogPath};
+	echo "Backup done ✅" >> ${quotedLogPath};
 	`;
 };
 

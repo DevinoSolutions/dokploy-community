@@ -1,8 +1,6 @@
-import {
-	MAX_EXEC_OUTPUT_TAIL,
-	truncateOutputTail,
-} from "../process/ExecError";
-import { execAsync, ExecError, execAsyncRemote } from "../process/execAsync";
+import { quote } from "shell-quote";
+import { MAX_EXEC_OUTPUT_TAIL, truncateOutputTail } from "../process/ExecError";
+import { ExecError, execAsync, execAsyncRemote } from "../process/execAsync";
 import { redactSecrets } from "../process/redactSecrets";
 
 // Backup pipelines redirect ALL of their output (stdout AND stderr) into the
@@ -32,7 +30,7 @@ export const readBackupLogTail = async (
 	if (!logPath) {
 		return "";
 	}
-	const command = `tail -c ${limit} "${logPath}"`;
+	const command = `tail -c ${limit} ${quote([logPath])}`;
 	try {
 		const { stdout } = serverId
 			? await execAsyncRemote(serverId, command)

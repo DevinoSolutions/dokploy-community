@@ -174,6 +174,11 @@ export const setupDockerStatsMonitoringSocketServer = (
 		// files; overlapping invocations would race on those writes (lost samples,
 		// possible JSON corruption). If a tick is still running we skip this one.
 		let inFlight = false;
+
+		if (ws.readyState !== ws.OPEN) {
+			return;
+		}
+
 		let intervalId: ReturnType<typeof setInterval> | null = null;
 		intervalId = setInterval(async () => {
 			if (inFlight) return;

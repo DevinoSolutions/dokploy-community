@@ -10,6 +10,7 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import { backupPathSchema } from "../validations/backup";
 import { organization } from "./account";
 import { backups } from "./backups";
 import { destinations } from "./destination";
@@ -107,7 +108,7 @@ const createSchema = createInsertSchema(backupPolicies, {
 	serviceTypeFilter: serviceTypeFilterSchema.default([]),
 	destinationId: z.string().min(1),
 	schedule: z.string().min(1),
-	prefix: z.string().optional(),
+	prefix: backupPathSchema.optional(),
 	keepLatestCount: z.number().optional(),
 	enabled: z.boolean().optional(),
 });

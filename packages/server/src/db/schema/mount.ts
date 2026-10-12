@@ -11,6 +11,7 @@ import { mongo } from "./mongo";
 import { mysql } from "./mysql";
 import { postgres } from "./postgres";
 import { redis } from "./redis";
+import { VOLUME_NAME_MESSAGE, VOLUME_NAME_REGEX } from "./utils";
 
 export const serviceType = pgEnum("serviceType", [
 	"application",
@@ -109,7 +110,15 @@ const createSchema = createInsertSchema(mounts, {
 	applicationId: z.string(),
 	type: z.enum(["bind", "volume", "file"]),
 	hostPath: z.string().optional(),
-	volumeName: z.string().optional(),
+	// Bind and file mounts leave this empty; a named volume must be a valid
+	// docker volume name, which is also what backups of it pass to the shell.
+	volumeName: z
+		.string()
+		.refine(
+			(value) => !value || VOLUME_NAME_REGEX.test(value),
+			VOLUME_NAME_MESSAGE,
+		)
+		.optional(),
 	content: z.string().optional(),
 	mountPath: z.string().min(1),
 	mountId: z.string().optional(),
