@@ -1,5 +1,5 @@
 import { quote } from "shell-quote";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Preview deployments written before `buildServerId` was recorded have no
@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
 	deployment: null as Record<string, unknown> | null,
 	// Hosts (null = this host) that hold the log file.
 	filesOn: new Set<string | null>(),
+	// Hosts whose probe never answers.
+	hanging: new Set<string>(),
+	isCloud: false,
 	findPreviewDeploymentById: vi.fn(),
 	findPreviewDeploymentLogOwner: vi.fn(),
 	findServerById: vi.fn(),
@@ -45,6 +48,13 @@ vi.mock(
 		findPreviewDeploymentLogOwner: mocks.findPreviewDeploymentLogOwner,
 	}),
 );
+
+vi.mock("@dokploy/server/constants", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	get IS_CLOUD() {
+		return mocks.isCloud;
+	},
+}));
 
 vi.mock("@dokploy/server/services/server", async (importOriginal) => ({
 	...(await importOriginal<object>()),
@@ -111,6 +121,8 @@ const tailedHosts = () =>
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.filesOn = new Set();
+	mocks.hanging = new Set();
+	mocks.isCloud = false;
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
 	mocks.findPreviewDeploymentById.mockResolvedValue({
 		previewDeploymentId: "preview-1",
@@ -127,6 +139,7 @@ beforeEach(() => {
 	mocks.execAsyncRemote.mockImplementation(
 		async (host: string, command: string) => {
 			if (command === probe) {
+				if (mocks.hanging.has(host)) return new Promise(() => {});
 				if (mocks.filesOn.has(host)) return { stdout: "", stderr: "" };
 				throw new Error("not found");
 			}
@@ -150,7 +163,7 @@ describe("deployment.readLogs for a legacy preview deployment", () => {
 		const out = await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
 
 		expect(out).toBe("built on build-1\n");
-		expect(probedHosts()).toEqual(["build-1"]);
+		expect(probedHosts()).toEqual(expect.arrayContaining(["build-1"]));
 		expect(tailedHosts()).toEqual(["build-1"]);
 	});
 
@@ -161,7 +174,7 @@ describe("deployment.readLogs for a legacy preview deployment", () => {
 		const out = await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
 
 		expect(out).toBe("built on server-1\n");
-		expect(probedHosts()).toEqual(["build-1", "server-1"]);
+		expect(probedHosts()).toEqual(expect.arrayContaining(["build-1", "server-1"]));
 		expect(tailedHosts()).toEqual(["server-1"]);
 	});
 
@@ -218,7 +231,7 @@ describe("deployment.readLogs for a legacy preview deployment", () => {
 
 		await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
 
-		expect(probedHosts()).toEqual(["server-1"]);
+		expect(probedHosts()).toEqual(expect.arrayContaining(["server-1"]));
 		expect(tailedHosts()).toEqual(["server-1"]);
 	});
 
@@ -244,6 +257,73 @@ describe("deployment.readLogs for a legacy preview deployment", () => {
 			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 		expect(tailedHosts()).toEqual([]);
+	});
+});
+
+describe("probe timeouts and cloud", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("does not wait on a hanging candidate: the next one wins after the timeout", async () => {
+		vi.useFakeTimers();
+		mocks.deployment = legacyPreviewRow();
+		mocks.hanging.add("build-1");
+		mocks.filesOn.add("server-1");
+
+		const pending = caller().readLogs({ deploymentId: "dep-1", tail: 10 });
+		await vi.advanceTimersByTimeAsync(5000);
+
+		await expect(pending).resolves.toBe("built on server-1\n");
+		// Both were probed together, not one after the other.
+		expect(probedHosts()).toEqual(expect.arrayContaining(["build-1", "server-1"]));
+	});
+
+	it("answers at once when the first candidate has the file, though a later one hangs", async () => {
+		vi.useFakeTimers();
+		mocks.deployment = legacyPreviewRow();
+		mocks.hanging.add("server-1");
+		mocks.filesOn.add("build-1");
+
+		const pending = caller().readLogs({ deploymentId: "dep-1", tail: 10 });
+		await vi.advanceTimersByTimeAsync(5000);
+
+		await expect(pending).resolves.toBe("built on build-1\n");
+	});
+
+	it("keeps the owner's host first when several hosts have the file", async () => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.filesOn.add("build-1").add("server-1").add(null);
+
+		await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
+
+		expect(tailedHosts()).toEqual(["build-1"]);
+	});
+
+	it("falls back when every candidate hangs", async () => {
+		vi.useFakeTimers();
+		mocks.deployment = legacyPreviewRow();
+		mocks.hanging.add("build-1").add("server-1");
+
+		const pending = caller().readLogs({ deploymentId: "dep-1", tail: 10 });
+		await vi.advanceTimersByTimeAsync(5000);
+
+		await expect(pending).resolves.toBe("built on server-1\n");
+	});
+
+	it("never probes this host in the cloud, whichever source named it", async () => {
+		mocks.isCloud = true;
+		mocks.deployment = legacyPreviewRow({ serverId: null });
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: null, buildServerId: null }),
+		);
+		mocks.filesOn.add(null).add("server-2");
+		mocks.deployment.application = { applicationId: "app-1", serverId: "server-2" };
+
+		await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
+
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(tailedHosts()).toEqual(["server-2"]);
 	});
 });
 

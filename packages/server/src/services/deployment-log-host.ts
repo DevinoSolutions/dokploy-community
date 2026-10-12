@@ -14,7 +14,10 @@ type LogHostRow = {
 };
 
 type PreviewOwner = {
-	application?: { serverId: string | null; buildServerId: string | null } | null;
+	application?: {
+		serverId: string | null;
+		buildServerId: string | null;
+	} | null;
 	compose?: { serverId: string | null } | null;
 };
 
@@ -46,16 +49,42 @@ export const resolveDeploymentLogHost = async (
 	}
 };
 
-const logExistsOn = async (host: string | null, logPath: string) => {
-	const command = `test -f ${quote([logPath])}`;
-	try {
-		if (host) await execAsyncRemote(host, command);
-		else await execAsync(command);
-		return true;
-	} catch {
-		return false;
-	}
+// A dead or hung server must not stall a read: a probe that takes longer than
+// this counts as "not there".
+const PROBE_TIMEOUT_MS = 5000;
+
+const withTimeout = <T>(work: Promise<T>, fallback: T): Promise<T> => {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(fallback), PROBE_TIMEOUT_MS);
+	});
+	return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 };
+
+// Does `host` (null = this host) belong to the organization and hold the log?
+const logExistsOn = (
+	host: string | null,
+	logPath: string,
+	organizationId: string,
+): Promise<boolean> =>
+	withTimeout(
+		(async () => {
+			const command = `test -f ${quote([logPath])}`;
+			try {
+				if (host) {
+					const server = await findServerById(host);
+					if (server.organizationId !== organizationId) return false;
+					await execAsyncRemote(host, command);
+				} else {
+					await execAsync(command);
+				}
+				return true;
+			} catch {
+				return false;
+			}
+		})(),
+		false,
+	);
 
 /**
  * Where to read a deployment's log. Every row but a legacy preview row (one
@@ -64,9 +93,10 @@ const logExistsOn = async (host: string | null, logPath: string) => {
  *
  * A legacy preview row's log is on whichever host built it, and the owner may
  * have gained or lost a build server since: so the candidates (the owner's
- * current host, the row's server, the fallback, then this host) are probed for
- * the file and the first that has it wins. A candidate outside the
- * organization is never contacted. When none has the file the answer is
+ * current host, the row's server, the fallback, then this host) are probed
+ * together, each with a short timeout, and the first in that order that has the
+ * file wins. A candidate outside the organization is never contacted. A build
+ * server the owner no longer has is not a candidate. When none has the file the answer is
  * `fallbackHost`, as before.
  */
 export const locateDeploymentLogHost = async (
@@ -86,18 +116,20 @@ export const locateDeploymentLogHost = async (
 		ownerHost = undefined;
 	}
 
+	// Candidates in preference order. Without a local filesystem (cloud) a
+	// local candidate, from any source, cannot hold the file.
 	const candidates = new Set<string | null>();
 	if (ownerHost !== undefined) candidates.add(ownerHost);
 	candidates.add(row.serverId);
 	candidates.add(fallbackHost);
-	if (!IS_CLOUD) candidates.add(null);
+	candidates.add(null);
+	const hosts = [...candidates].filter((host) => host || !IS_CLOUD);
 
-	for (const host of candidates) {
-		if (host) {
-			const server = await findServerById(host).catch(() => null);
-			if (server?.organizationId !== organizationId) continue;
-		}
-		if (await logExistsOn(host, row.logPath)) return host;
-	}
-	return fallbackHost;
+	// Probed together, so a slow host costs one timeout, not one per candidate;
+	// the first hit in candidate order wins.
+	const found = await Promise.all(
+		hosts.map((host) => logExistsOn(host, row.logPath, organizationId)),
+	);
+	const hit = found.indexOf(true);
+	return hit === -1 ? fallbackHost : (hosts[hit] ?? null);
 };

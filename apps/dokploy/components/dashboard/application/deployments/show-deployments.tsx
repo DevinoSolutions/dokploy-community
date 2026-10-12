@@ -105,6 +105,12 @@ export const ShowDeployments = ({
 				? composeService?.snapvisorProjectName
 				: null;
 
+	// Only a preview built before the build server was recorded needs asking.
+	const needsLogHost = Boolean(
+		activeLog?.logPath &&
+			activeLog.previewDeploymentId &&
+			!activeLog.buildServerId,
+	);
 	// Where the open log lives is decided server-side (a preview built before
 	// the build server was recorded has to be found); the drawer waits for it
 	// rather than opening on a guess. If the lookup fails it falls back to the
@@ -112,9 +118,10 @@ export const ShowDeployments = ({
 	const { data: logHost, isError: logHostFailed } =
 		api.deployment.logHost.useQuery(
 			{ deploymentId: activeLog?.deploymentId ?? "" },
-			{ enabled: !!activeLog?.logPath, gcTime: 0 },
+			{ enabled: needsLogHost, gcTime: 0, retry: false },
 		);
-	const logHostResolved = logHost !== undefined || logHostFailed;
+	const logHostResolved =
+		!needsLogHost || logHost !== undefined || logHostFailed;
 
 	const { mutateAsync: rollback, isPending: isRollingBack } =
 		api.rollback.rollback.useMutation();
@@ -620,7 +627,7 @@ export const ShowDeployments = ({
 				)}
 				<ShowDeployment
 					serverId={
-						(logHost
+						(needsLogHost && logHost
 							? logHost.serverId
 							: activeLog?.buildServerId || serverId) || undefined
 					}
