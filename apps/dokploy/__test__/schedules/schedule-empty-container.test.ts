@@ -54,6 +54,7 @@ vi.mock("@dokploy/server/services/deployment", () => ({
 // covered by schedule-run-cancelled.test.ts.
 vi.mock("@dokploy/server/utils/schedules/run-status", () => ({
 	finishScheduleRun: mocks.finishScheduleRun,
+	isScheduleRunCancelled: vi.fn(async () => false),
 }));
 
 vi.mock("@dokploy/server/services/admin", () => ({
@@ -130,7 +131,7 @@ const primeMocks = () => {
 		deploymentId: "dep-1",
 		logPath: "/tmp/dep-1.log",
 	});
-	mocks.finishScheduleRun.mockResolvedValue(true);
+	mocks.finishScheduleRun.mockResolvedValue("recorded");
 	mocks.findScheduleOrganizationId.mockResolvedValue("org-1");
 	mocks.getDokployUrl.mockResolvedValue("https://dokploy.test");
 	mocks.sendScheduleFailureNotifications.mockResolvedValue(undefined);

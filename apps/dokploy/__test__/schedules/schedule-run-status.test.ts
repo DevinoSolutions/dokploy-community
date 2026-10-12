@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 	returning: vi.fn(),
 	where: vi.fn(),
 	set: vi.fn(),
+	findFirst: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => {
@@ -28,12 +29,18 @@ vi.mock("@dokploy/server/db", () => {
 		// biome-ignore lint/suspicious/noThenProperty: mimics a drizzle query
 		then: (resolve: (value: unknown) => void) => resolve(undefined),
 	};
-	return { db: { update: () => chain } };
+	return {
+		db: {
+			update: () => chain,
+			query: { deployments: { findFirst: mocks.findFirst } },
+		},
+	};
 });
 
 import {
 	claimScheduleRunCancel,
 	finishScheduleRun,
+	isScheduleRunCancelled,
 	revertScheduleRunCancel,
 } from "@dokploy/server/utils/schedules/run-status";
 
@@ -74,7 +81,7 @@ describe("finishScheduleRun", () => {
 		async (status) => {
 			mocks.returning.mockResolvedValue([{ deploymentId: "dep-1" }]);
 
-			await expect(finishScheduleRun("dep-1", status)).resolves.toBe(true);
+			await expect(finishScheduleRun("dep-1", status)).resolves.toBe("recorded");
 
 			expect(mocks.set).toHaveBeenCalledWith({
 				status,
@@ -87,10 +94,42 @@ describe("finishScheduleRun", () => {
 		},
 	);
 
-	it("is false, and changes nothing, for a cancelled run", async () => {
+	it("reports a run whose row is cancelled as cancelled", async () => {
 		mocks.returning.mockResolvedValue([]);
+		mocks.findFirst.mockResolvedValue({ status: "cancelled" });
 
-		await expect(finishScheduleRun("dep-1", "error")).resolves.toBe(false);
+		await expect(finishScheduleRun("dep-1", "error")).resolves.toBe(
+			"cancelled",
+		);
+	});
+
+	it("reports a run whose row no longer exists as missing, not as cancelled", async () => {
+		mocks.returning.mockResolvedValue([]);
+		mocks.findFirst.mockResolvedValue(undefined);
+
+		await expect(finishScheduleRun("dep-1", "error")).resolves.toBe("missing");
+	});
+
+	it("does not take a failed lookup for a cancel", async () => {
+		mocks.returning.mockResolvedValue([]);
+		mocks.findFirst.mockRejectedValue(new Error("db down"));
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+		await expect(finishScheduleRun("dep-1", "error")).resolves.toBe("missing");
+
+		warn.mockRestore();
+	});
+});
+
+describe("isScheduleRunCancelled", () => {
+	it.each([
+		["cancelled", true],
+		["running", false],
+		["error", false],
+	])("is %s -> %s", async (status, expected) => {
+		mocks.findFirst.mockResolvedValue({ status });
+
+		await expect(isScheduleRunCancelled("dep-1")).resolves.toBe(expected);
 	});
 });
 

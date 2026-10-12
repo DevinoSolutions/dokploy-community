@@ -1,4 +1,5 @@
 import { createWriteStream } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Schedule } from "@dokploy/server/db/schema/schedule";
@@ -23,7 +24,7 @@ import {
 	SCHEDULE_RUN_ENV,
 	SCHEDULE_RUN_WRAPPER,
 } from "./container-run";
-import { finishScheduleRun } from "./run-status";
+import { finishScheduleRun, isScheduleRunCancelled } from "./run-status";
 
 type ScheduleExtended = Awaited<ReturnType<typeof findScheduleById>>;
 
@@ -44,14 +45,40 @@ const capturePid = (deploymentId: string) =>
 		})();
 	});
 
+const CANCELLED_LOG_LINE = "⛔ Run cancelled by user.";
+
+// Best effort: the log is where the run's output went (the server it ran on, or
+// this host), and a log that cannot be written must not fail the run's end.
+const appendRunLog = async (
+	logServerId: string | null,
+	logPath: string,
+	line: string,
+) => {
+	try {
+		if (logServerId) {
+			await execAsyncRemote(
+				logServerId,
+				`echo ${quote([line])} >> ${quote([logPath])}`,
+			);
+		} else {
+			await appendFile(logPath, `${line}\n`);
+		}
+	} catch (error) {
+		console.error(`Failed to write to the log ${logPath}:`, error);
+	}
+};
+
 // A run that a user cancelled ends with a failing exit status (the kill), which
-// is not a failure: it stays `cancelled` and nobody is notified.
+// is not a failure: it stays `cancelled` and nobody is notified. A run whose row
+// is gone is not cancelled, so its failure is still reported.
 const handleScheduleError = async (
 	schedule: ScheduleExtended,
 	deploymentId: string,
 	error: unknown,
 ): Promise<"error" | "cancelled"> => {
-	if (!(await finishScheduleRun(deploymentId, "error"))) return "cancelled";
+	if ((await finishScheduleRun(deploymentId, "error")) === "cancelled") {
+		return "cancelled";
+	}
 	try {
 		const organizationId = await findScheduleOrganizationId(
 			schedule.scheduleId,
@@ -136,6 +163,9 @@ export const runCommand = async (scheduleId: string) => {
 		title: "Schedule",
 		description: "Schedule",
 	});
+	// Where the run's log lives: on the server it runs on, else on this host.
+	const logServerId =
+		application?.serverId || compose?.serverId || serverId || null;
 
 	try {
 		if (scheduleType === "application" || scheduleType === "compose") {
@@ -222,10 +252,13 @@ export const runCommand = async (scheduleId: string) => {
 					writeStream.write("✅ Command executed successfully\n");
 					writeStream.end();
 				} catch (error) {
-					writeStream.write("❌ Command failed\n");
-					writeStream.write(
-						error instanceof Error ? error.message : "Unknown error",
-					);
+					// A cancel is not a failure: the end of `runCommand` says so in the log.
+					if (!(await isScheduleRunCancelled(deployment.deploymentId))) {
+						writeStream.write("❌ Command failed\n");
+						writeStream.write(
+							error instanceof Error ? error.message : "Unknown error",
+						);
+					}
 					writeStream.end();
 					throw error;
 				}
@@ -278,8 +311,12 @@ export const runCommand = async (scheduleId: string) => {
 			});
 		}
 		// A command that traps the kill can still exit 0: a cancelled run stays so.
-		const recorded = await finishScheduleRun(deployment.deploymentId, "done");
-		return { ...deployment, status: recorded ? "done" : "cancelled" } as const;
+		const end = await finishScheduleRun(deployment.deploymentId, "done");
+		if (end === "cancelled") {
+			await appendRunLog(logServerId, deployment.logPath, CANCELLED_LOG_LINE);
+			return { ...deployment, status: "cancelled" } as const;
+		}
+		return { ...deployment, status: "done" } as const;
 	} catch (error) {
 		// `handleScheduleError` marks the deployment as errored and fans out the
 		// schedule-failure notifications, unless the run was cancelled.
@@ -288,6 +325,9 @@ export const runCommand = async (scheduleId: string) => {
 			deployment.deploymentId,
 			error,
 		);
+		if (status === "cancelled") {
+			await appendRunLog(logServerId, deployment.logPath, CANCELLED_LOG_LINE);
+		}
 		return { ...deployment, status } as const;
 	}
 };

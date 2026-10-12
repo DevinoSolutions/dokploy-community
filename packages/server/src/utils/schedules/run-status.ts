@@ -53,14 +53,45 @@ export const revertScheduleRunCancel = async (
 };
 
 /**
- * Records how a schedule run ended, unless it was cancelled meanwhile. Returns
- * false for a cancelled run: its status stays `cancelled` and the caller must
- * not report a failure.
+ * True once the run has been cancelled. A failed lookup counts as "not
+ * cancelled": it is used on failure paths, which must never lose the real error
+ * or swallow a failure alert.
+ */
+export const isScheduleRunCancelled = async (
+	deploymentId: string,
+): Promise<boolean> => {
+	try {
+		const row = await db.query.deployments.findFirst({
+			where: eq(deployments.deploymentId, deploymentId),
+			columns: { status: true },
+		});
+		return row?.status === "cancelled";
+	} catch (error) {
+		console.warn(
+			`Could not read the status of run ${deploymentId}:`,
+			error instanceof Error ? error.message : error,
+		);
+		return false;
+	}
+};
+
+/**
+ * How a run ended up being recorded: `recorded`, `cancelled` (the row is
+ * cancelled and stays so) or `missing` (the row is gone, e.g. pruned by a newer
+ * run or deleted, so nothing was recorded).
+ */
+export type ScheduleRunEnd = "recorded" | "cancelled" | "missing";
+
+/**
+ * Records how a schedule run ended, unless it was cancelled meanwhile. Only a
+ * row that is really `cancelled` is reported as such, so the caller reports no
+ * failure for it; a row that no longer exists is `missing`, and a genuine
+ * failure of such a run is still reported.
  */
 export const finishScheduleRun = async (
 	deploymentId: string,
 	status: "done" | "error",
-): Promise<boolean> => {
+): Promise<ScheduleRunEnd> => {
 	const updated = await db
 		.update(deployments)
 		.set({ status, finishedAt: new Date().toISOString() })
@@ -71,5 +102,7 @@ export const finishScheduleRun = async (
 			),
 		)
 		.returning({ deploymentId: deployments.deploymentId });
-	return updated.length > 0;
+	if (updated.length > 0) return "recorded";
+	// No row matched: the run is cancelled, or its row is gone.
+	return (await isScheduleRunCancelled(deploymentId)) ? "cancelled" : "missing";
 };

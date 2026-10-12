@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
 	findScheduleOrganizationId: vi.fn(),
 	createDeploymentSchedule: vi.fn(),
 	updateDeployment: vi.fn(),
-	finishScheduleRun: vi.fn(async () => true),
+	finishScheduleRun: vi.fn(async () => "recorded"),
 	getDokployUrl: vi.fn(),
 	getServiceContainer: vi.fn(),
 	getComposeContainer: vi.fn(),
@@ -60,6 +60,7 @@ vi.mock("@dokploy/server/services/deployment", () => ({
 // covered by schedule-run-cancelled.test.ts.
 vi.mock("@dokploy/server/utils/schedules/run-status", () => ({
 	finishScheduleRun: mocks.finishScheduleRun,
+	isScheduleRunCancelled: vi.fn(async () => false),
 }));
 
 vi.mock("@dokploy/server/services/admin", () => ({
