@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.23**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.24**
 
 Everything in upstream Dokploy **v0.30.8**, plus **100+ community features and fixes** that haven't landed upstream yet — each one ported **1:1 with credit to its original author** — plus **fork-only security hardening**. When a fix exists as an open upstream PR or issue, we port it now instead of waiting for it to merge; when it merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.23 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.24 \
   --with-registry-auth \
   dokploy
 ```
@@ -131,6 +131,24 @@ Beyond the ported features, this fork carries **7 direct security commits** and 
 Every item above is ported 1:1 and credited to its original upstream author. See the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** for the complete, per-PR credited list, migration details, and known caveats.
 
 > Concurrent deployments — previously a fork-only feature — shipped natively in upstream Dokploy v0.29.11, so this fork now uses the official implementation.
+
+### New in v0.30.8-community.24
+
+**Logs of older previews** ([#367](https://github.com/DevinoSolutions/dokploy-community/pull/367)). Preview deployments created before community.23 did not record the build server that holds their log. The log drawer and the `deployment.readLogs` API now look for such a log on the preview owner's build server, its serving server and the Dokploy host, and read it from the first one that has it. Each check gives up after 5 seconds, so a server that is down cannot stall the drawer. Every remote log read now also checks that the server belongs to your organization. Logs on a build server that has since been removed still can't be found.
+
+**Cleaner cancelled schedule runs** ([#368](https://github.com/DevinoSolutions/dokploy-community/pull/368)).
+- Cancelled runs on remote servers and server schedules no longer show "Command failed" above the cancel line.
+- A cancel that lands just as the run ends no longer leaves the run stuck as `running`.
+- Application and compose runs can be cancelled before their process id is recorded. A cancel that lands before the command starts stops it from starting, instead of reporting success while the command runs.
+- Server schedules that have not reported a process id yet answer "The run is still starting, try again in a moment".
+- A database error while a failed run is ending no longer loses its failure notification.
+
+**Ported upstream fixes.** Each is ported 1:1 with credit to its original author:
+- [#369](https://github.com/DevinoSolutions/dokploy-community/pull/369): [Dokploy/dokploy#5656](https://github.com/Dokploy/dokploy/pull/5656) by @Totopo27 (long service card descriptions wrap and are clamped on the environment page)
+- [#370](https://github.com/DevinoSolutions/dokploy-community/pull/370): [Dokploy/dokploy#5657](https://github.com/Dokploy/dokploy/pull/5657) by @Totopo27 (the Projects card on the home dashboard links to the projects page)
+- [#371](https://github.com/DevinoSolutions/dokploy-community/pull/371): [Dokploy/dokploy#5614](https://github.com/Dokploy/dokploy/pull/5614) by @tomron (optional zone on the OVH DNS provider, enforced on record operations)
+
+> No database migrations in this release (the count stays at 219). The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
 
 ### New in v0.30.8-community.23
 
@@ -766,7 +784,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.23
+export DOKPLOY_VERSION=v0.30.8-community.24
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -779,7 +797,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.23      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.24      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
