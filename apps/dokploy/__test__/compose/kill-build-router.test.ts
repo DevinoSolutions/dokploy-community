@@ -233,8 +233,7 @@ describe("deployment.killProcess", () => {
 		);
 	});
 
-	it.each(["1; rm -rf /", "42 43", "$(id)", "-9", "4242
-"])(
+	it.each(["1; rm -rf /", "42 43", "$(id)", "-9", "4242\n"])(
 		"refuses the non-numeric pid %j without running anything",
 		async (pid) => {
 			mocks.findDeploymentById.mockResolvedValue(
