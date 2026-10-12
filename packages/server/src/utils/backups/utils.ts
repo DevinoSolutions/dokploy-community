@@ -257,6 +257,23 @@ export const buildRcloneCommand = (
 	envVars?: string,
 ): string => (envVars ? `${envVars} ${command}` : command);
 
+/**
+ * `rclone rcat` of a streamed backup into `rcloneDestination`. The destination
+ * is built from the destination bucket and the user-supplied backup prefix, so
+ * it is shell-quoted as one argument instead of being placed in double quotes,
+ * where `$(...)` and backticks would still run. getBackupCommand swaps the
+ * `rclone rcat ` verb for `deletefile` when cleaning up a partial upload.
+ */
+export const buildRcloneRcatCommand = (
+	rcloneFlags: string[],
+	rcloneDestination: string,
+	envVars?: string,
+): string =>
+	buildRcloneCommand(
+		`rclone rcat ${rcloneFlags.join(" ")} ${quote([rcloneDestination])}`,
+		envVars,
+	);
+
 // User-controlled values (database name, user, password) are passed to the
 // container as environment variables via `docker exec -e VAR=<escaped>` and
 // referenced as "$VAR" inside the inner shell, so they never appear in the
@@ -313,8 +330,10 @@ export const getLibsqlBackupCommand = (database: string) => {
 	return `docker exec -e DB_NAME=${quote([database])} -i $CONTAINER_ID sh -c 'tar cf - -C /var/lib/sqld "$DB_NAME" | gzip'`;
 };
 
+// `appName` and `serviceName` end up in docker label filters; shell-quote each
+// filter so a value that carries shell syntax stays one inert argument.
 export const getServiceContainerCommand = (appName: string) => {
-	return `docker ps -q --filter "status=running" --filter "label=com.docker.swarm.service.name=${appName}" | head -n 1`;
+	return `docker ps -q --filter "status=running" --filter ${quote([`label=com.docker.swarm.service.name=${appName}`])} | head -n 1`;
 };
 
 export const getComposeContainerCommand = (
@@ -323,9 +342,9 @@ export const getComposeContainerCommand = (
 	composeType: "stack" | "docker-compose" | undefined,
 ) => {
 	if (composeType === "stack") {
-		return `docker ps -q --filter "status=running" --filter "label=com.docker.stack.namespace=${appName}" --filter "label=com.docker.swarm.service.name=${appName}_${serviceName}" | head -n 1`;
+		return `docker ps -q --filter "status=running" --filter ${quote([`label=com.docker.stack.namespace=${appName}`])} --filter ${quote([`label=com.docker.swarm.service.name=${appName}_${serviceName}`])} | head -n 1`;
 	}
-	return `docker ps -q --filter "status=running" --filter "label=com.docker.compose.project=${appName}" --filter "label=com.docker.compose.service=${serviceName}" | head -n 1`;
+	return `docker ps -q --filter "status=running" --filter ${quote([`label=com.docker.compose.project=${appName}`])} --filter ${quote([`label=com.docker.compose.service=${serviceName}`])} | head -n 1`;
 };
 
 const getContainerSearchCommand = (backup: BackupSchedule) => {

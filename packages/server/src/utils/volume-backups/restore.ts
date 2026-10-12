@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isSafeBackupPath } from "@dokploy/server/db/validations/backup";
 import { quote } from "shell-quote";
 import {
 	findApplicationById,
@@ -16,6 +17,14 @@ export const restoreVolume = async (
 	serverId: string,
 	serviceType: "application" | "compose",
 ) => {
+	// The file name reaches the echo lines and the double-quoted `bash -c` script
+	// below, so refuse a name a shell would still interpret there. Files written
+	// by volume backups never contain these characters.
+	if (!isSafeBackupPath(backupFileName) || backupFileName.includes("'")) {
+		throw new Error(
+			"Invalid backup file name: control characters, quotes, backticks, $ and backslashes are not allowed",
+		);
+	}
 	const destination = await findDestinationById(destinationId);
 	const { VOLUME_BACKUPS_PATH } = paths(!!serverId);
 	const volumeBackupPath = path.join(VOLUME_BACKUPS_PATH, volumeName);

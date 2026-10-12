@@ -12,6 +12,7 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { scheduledJobs, scheduleJob } from "node-schedule";
+import { quote } from "shell-quote";
 import { withBackupSlot } from "../backups/concurrency";
 import {
 	buildBackupErrorMessage,
@@ -113,9 +114,9 @@ const cleanupOldVolumeBackups = async (
 			path: backupFilesPath,
 			envVars,
 		} = await getRclonePathAndFlags(destination, effectivePrefix);
-		const listCommand = `rclone lsf ${rcloneFlags.join(" ")} --include \"${volumeName}-*.tar\" ${backupFilesPath}`;
+		const listCommand = `rclone lsf ${rcloneFlags.join(" ")} --include ${quote([`${volumeName}-*.tar`])} ${quote([backupFilesPath])}`;
 		const sortAndPick = `sort -r | tail -n +$((${keepLatestCount}+1)) | xargs -I{}`;
-		const deleteCommand = `rclone delete ${rcloneFlags.join(" ")} ${backupFilesPath}{}`;
+		const deleteCommand = `rclone delete ${rcloneFlags.join(" ")} ${quote([`${backupFilesPath}{}`])}`;
 		// Export crypt passwords so the xargs-spawned `rclone delete` inherits them.
 		const envPrefix = envVars ? `export ${envVars}; ` : "";
 		const fullCommand = `${envPrefix}${listCommand} | ${sortAndPick} ${deleteCommand}`;

@@ -11,6 +11,7 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import { backupPathSchema } from "../validations/backup";
 import { generateAppName } from ".";
 import { backupPolicies } from "./backup-policy";
 import { compose } from "./compose";
@@ -157,7 +158,8 @@ const createSchema = createInsertSchema(backups, {
 	backupId: z.string(),
 	destinationId: z.string(),
 	enabled: z.boolean().optional(),
-	prefix: z.string().min(1),
+	prefix: backupPathSchema.min(1),
+	serviceName: backupPathSchema.nullish(),
 	database: z.string(),
 	schedule: z.string(),
 	keepLatestCount: z.number().optional(),
@@ -262,7 +264,7 @@ export const apiRestoreBackup = z.object({
 	destinationId: z.string().min(1),
 	metadata: z
 		.object({
-			serviceName: z.string().optional(),
+			serviceName: backupPathSchema.optional(),
 			postgres: z
 				.object({
 					databaseUser: z.string(),
