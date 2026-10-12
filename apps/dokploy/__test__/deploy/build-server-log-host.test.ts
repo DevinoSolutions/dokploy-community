@@ -1,4 +1,5 @@
 import path from "node:path";
+import { quote } from "shell-quote";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -69,10 +70,13 @@ vi.mock("@dokploy/server/services/compose", async (importOriginal) => ({
 	findComposeById: mocks.findComposeById,
 }));
 
-vi.mock("@dokploy/server/services/preview-deployment", async (importOriginal) => ({
-	...(await importOriginal<object>()),
-	findPreviewDeploymentById: mocks.findPreviewDeploymentById,
-}));
+vi.mock(
+	"@dokploy/server/services/preview-deployment",
+	async (importOriginal) => ({
+		...(await importOriginal<object>()),
+		findPreviewDeploymentById: mocks.findPreviewDeploymentById,
+	}),
+);
 
 vi.mock("@dokploy/server/services/rollbacks", async (importOriginal) => ({
 	...(await importOriginal<object>()),
@@ -123,10 +127,17 @@ beforeEach(() => {
 describe("createDeploymentPreview records the build server", () => {
 	it("records the application's build server and keeps the serving host on the row", async () => {
 		mocks.findPreviewDeploymentById.mockResolvedValue(
-			previewRow({ applicationId: "app-1", serverId: "srv-1", buildServerId: "build-1" }),
+			previewRow({
+				applicationId: "app-1",
+				serverId: "srv-1",
+				buildServerId: "build-1",
+			}),
 		);
 
-		await createDeploymentPreview({ previewDeploymentId: "preview-1", title: "t" } as never);
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
 
 		expect(mocks.inserted).toHaveLength(1);
 		expect(mocks.inserted[0]).toMatchObject({
@@ -140,7 +151,11 @@ describe("createDeploymentPreview records the build server", () => {
 
 	it("records a policy-forced build server the application does not carry", async () => {
 		mocks.findPreviewDeploymentById.mockResolvedValue(
-			previewRow({ applicationId: "app-1", serverId: "srv-1", buildServerId: null }),
+			previewRow({
+				applicationId: "app-1",
+				serverId: "srv-1",
+				buildServerId: null,
+			}),
 		);
 
 		await createDeploymentPreview(
@@ -157,10 +172,17 @@ describe("createDeploymentPreview records the build server", () => {
 
 	it("records a build server for a preview that is served locally", async () => {
 		mocks.findPreviewDeploymentById.mockResolvedValue(
-			previewRow({ applicationId: "app-1", serverId: null, buildServerId: "build-1" }),
+			previewRow({
+				applicationId: "app-1",
+				serverId: null,
+				buildServerId: "build-1",
+			}),
 		);
 
-		await createDeploymentPreview({ previewDeploymentId: "preview-1", title: "t" } as never);
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
 
 		expect(mocks.inserted[0]?.buildServerId).toBe("build-1");
 		expect(mocks.inserted[0]?.serverId ?? null).toBeNull();
@@ -169,10 +191,17 @@ describe("createDeploymentPreview records the build server", () => {
 
 	it("does not record the serving host as a build server", async () => {
 		mocks.findPreviewDeploymentById.mockResolvedValue(
-			previewRow({ applicationId: "app-1", serverId: "srv-1", buildServerId: null }),
+			previewRow({
+				applicationId: "app-1",
+				serverId: "srv-1",
+				buildServerId: null,
+			}),
 		);
 
-		await createDeploymentPreview({ previewDeploymentId: "preview-1", title: "t" } as never);
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
 
 		expect(mocks.inserted[0]).toMatchObject({ serverId: "srv-1" });
 		expect(mocks.inserted[0]).not.toHaveProperty("buildServerId");
@@ -185,7 +214,10 @@ describe("createDeploymentPreview records the build server", () => {
 			previewRow(null, { composeId: "compose-1", serverId: "srv-c" }),
 		);
 
-		await createDeploymentPreview({ previewDeploymentId: "preview-1", title: "t" } as never);
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
 
 		expect(mocks.inserted[0]).toMatchObject({ serverId: "srv-c" });
 		expect(mocks.inserted[0]).not.toHaveProperty("buildServerId");
@@ -255,7 +287,7 @@ describe("old deployment cleanup", () => {
 
 		expect(rmCalls()).toHaveLength(0);
 		expect(mocks.execAsync).toHaveBeenCalledWith(
-			expect.stringContaining(`rm -f '${logFile("web-30.log")}'`),
+			expect.stringContaining(`rm -f ${quote([logFile("web-30.log")])}`),
 		);
 		expect(mocks.deletedIds).toEqual(["dep-30"]);
 	});
@@ -272,7 +304,7 @@ describe("old deployment cleanup", () => {
 		await deploy();
 
 		expect(rmCalls()[0]?.[1]).toContain(
-			`rm -rf '${logFile("a b;touch x.log")}';`,
+			`rm -rf ${quote([logFile("a b;touch x.log")])};`,
 		);
 	});
 
@@ -295,9 +327,16 @@ describe("old deployment cleanup", () => {
 		errorSpy.mockRestore();
 		expect(created).toMatchObject({ deploymentId: "new-deployment" });
 		const hosts = rmCalls().map(([host]) => host);
-		expect(hosts).toEqual(expect.arrayContaining(["build-down", "srv-1", "build-1"]));
+		expect(hosts).toEqual(
+			expect.arrayContaining(["build-down", "srv-1", "build-1"]),
+		);
 		// Every row is gone, including the one whose host could not be reached.
-		expect(mocks.deletedIds.sort()).toEqual(["dep-50", "dep-51", "dep-52", "dep-53"]);
+		expect(mocks.deletedIds.sort()).toEqual([
+			"dep-50",
+			"dep-51",
+			"dep-52",
+			"dep-53",
+		]);
 		expect(mocks.execAsync).toHaveBeenCalledWith(
 			expect.stringContaining("web-53.log"),
 		);
@@ -310,21 +349,30 @@ describe("old deployment cleanup", () => {
 		);
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await expect(deploy()).resolves.toMatchObject({ deploymentId: "new-deployment" });
+		await expect(deploy()).resolves.toMatchObject({
+			deploymentId: "new-deployment",
+		});
 
 		errorSpy.mockRestore();
 	});
 
 	it("cleans a build-server preview's old logs on the build server", async () => {
 		mocks.findPreviewDeploymentById.mockResolvedValue(
-			previewRow({ applicationId: "app-1", serverId: "srv-1", buildServerId: "build-1" }),
+			previewRow({
+				applicationId: "app-1",
+				serverId: "srv-1",
+				buildServerId: "build-1",
+			}),
 		);
 		mocks.rows = [
 			...keptRows(),
 			row(60, { serverId: "srv-1", buildServerId: "build-1" }),
 		];
 
-		await createDeploymentPreview({ previewDeploymentId: "preview-1", title: "t" } as never);
+		await createDeploymentPreview({
+			previewDeploymentId: "preview-1",
+			title: "t",
+		} as never);
 
 		expect(rmCalls()).toHaveLength(1);
 		expect(rmCalls()[0]?.[0]).toBe("build-1");
@@ -338,7 +386,10 @@ describe("old deployment cleanup", () => {
 		});
 		mocks.rows = [...keptRows(), row(70, { serverId: "srv-c" })];
 
-		await createDeploymentCompose({ composeId: "compose-1", title: "t" } as never);
+		await createDeploymentCompose({
+			composeId: "compose-1",
+			title: "t",
+		} as never);
 
 		expect(rmCalls()).toHaveLength(1);
 		expect(rmCalls()[0]?.[0]).toBe("srv-c");
@@ -352,7 +403,7 @@ describe("removeDeployment", () => {
 		await removeDeployment("dep-80");
 
 		expect(remoteCalls()).toEqual([
-			["build-1", `rm -f '${logFile("web-80.log")}';`],
+			["build-1", `rm -f ${quote([logFile("web-80.log")])};`],
 		]);
 	});
 
@@ -362,7 +413,7 @@ describe("removeDeployment", () => {
 		await removeDeployment("dep-81");
 
 		expect(remoteCalls()).toEqual([
-			["srv-1", `rm -f '${logFile("web-81.log")}';`],
+			["srv-1", `rm -f ${quote([logFile("web-81.log")])};`],
 		]);
 	});
 });
