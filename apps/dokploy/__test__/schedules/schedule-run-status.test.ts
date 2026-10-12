@@ -47,6 +47,7 @@ vi.mock("@dokploy/server/db", () => {
 
 import {
 	claimScheduleRunCancel,
+	endScheduleRunCancelled,
 	finishScheduleRun,
 	isScheduleRunCancelled,
 	revertScheduleRunCancel,
@@ -63,13 +64,20 @@ const applyLastUpdate = () => {
 	const row = mocks.row;
 	if (!row) return [];
 	const { sql, params } = lastWhere();
-	const matches = [
+	const comparisons = [
 		...sql.matchAll(/"(status|finishedAt)" (=|<>) \$(\d+)/g),
 	].every(([, column, operator, index]) => {
 		const equal =
 			row[column as "status" | "finishedAt"] === params[Number(index) - 1];
 		return operator === "=" ? equal : !equal;
 	});
+	const memberships = [...sql.matchAll(/"status" in \(([^)]*)\)/g)].every(
+		([, list]) =>
+			[...(list as string).matchAll(/\$(\d+)/g)].some(
+				([, index]) => row.status === params[Number(index) - 1],
+			),
+	);
+	const matches = comparisons && memberships;
 	if (!matches) return [];
 	Object.assign(row, mocks.set.mock.calls.at(-1)?.[0]);
 	return [{ deploymentId: "dep-1" }];
@@ -207,6 +215,28 @@ describe("a cancel racing the natural end of the run", () => {
 	beforeEach(() => {
 		mocks.emulate = true;
 		mocks.row = { status: "running", finishedAt: null };
+	});
+
+	it("ends a run whose cancel was undone as cancelled, and one still cancelled too", async () => {
+		const claim = (await claimScheduleRunCancel("dep-1")) as string;
+		await revertScheduleRunCancel("dep-1", claim);
+		expect(mocks.row?.status).toBe("running");
+
+		await endScheduleRunCancelled("dep-1");
+
+		expect(mocks.row?.status).toBe("cancelled");
+		expect(mocks.row?.finishedAt).toMatch(/\+00:00$/);
+
+		await endScheduleRunCancelled("dep-1");
+		expect(mocks.row?.status).toBe("cancelled");
+	});
+
+	it("does not touch a run that already ended", async () => {
+		await finishScheduleRun("dep-1", "done");
+
+		await endScheduleRunCancelled("dep-1");
+
+		expect(mocks.row?.status).toBe("done");
 	});
 
 	it("claim, run ends, kill fails, revert: the run stays cancelled, not stuck running", async () => {

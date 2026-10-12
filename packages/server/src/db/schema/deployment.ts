@@ -53,6 +53,9 @@ export const deployments = pgTable("deployment", {
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
 	startedAt: text("startedAt"),
+	// Parse with new Date(): the finish time of a cancelled schedule run carries a
+	// "+00:00" offset as a token (see utils/schedules/run-status.ts), so it must
+	// not be compared or sorted as a string.
 	finishedAt: text("finishedAt"),
 	errorMessage: text("errorMessage"),
 	scheduleId: text("scheduleId").references(

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
 	createDeploymentSchedule: vi.fn(),
 	updateDeployment: vi.fn(),
 	finishScheduleRun: vi.fn(),
+	endScheduleRunCancelled: vi.fn(),
 	isScheduleRunCancelled: vi.fn(),
 	appendFile: vi.fn(),
 	getDokployUrl: vi.fn(),
@@ -42,6 +43,7 @@ vi.mock("@dokploy/server/services/deployment", () => ({
 
 vi.mock("@dokploy/server/utils/schedules/run-status", () => ({
 	finishScheduleRun: mocks.finishScheduleRun,
+	endScheduleRunCancelled: mocks.endScheduleRunCancelled,
 	isScheduleRunCancelled: mocks.isScheduleRunCancelled,
 }));
 
@@ -147,6 +149,7 @@ beforeEach(() => {
 	});
 	mocks.updateDeployment.mockResolvedValue(undefined);
 	mocks.finishScheduleRun.mockResolvedValue("recorded");
+	mocks.endScheduleRunCancelled.mockResolvedValue(undefined);
 	// Also drops the answers a test queued and did not use.
 	mocks.isScheduleRunCancelled.mockReset();
 	mocks.isScheduleRunCancelled.mockResolvedValue(false);
@@ -532,7 +535,8 @@ describe("a run cancelled before its command starts", () => {
 			);
 			expect(logged()).not.toContain("docker exec");
 			expect(logged()).not.toContain("Command failed");
-			expect(mocks.finishScheduleRun).toHaveBeenCalledWith("dep-1", "error");
+			expect(mocks.endScheduleRunCancelled).toHaveBeenCalledWith("dep-1");
+			expect(mocks.finishScheduleRun).not.toHaveBeenCalled();
 			expect(mocks.sendScheduleFailureNotifications).not.toHaveBeenCalled();
 		},
 	);
@@ -568,6 +572,60 @@ describe("a run cancelled before its command starts", () => {
 
 // The end of a failed run is recorded, logged and notified in that order, and
 // a status that cannot be written hides none of it.
+describe("a run cancelled before it started, whose cancel was undone meanwhile", () => {
+	// The kill found nothing and reverted the claim before the run looked at its
+	// row again: it reads as running at the end, but it never started.
+	const revertedMeanwhile = () => {
+		mocks.isScheduleRunCancelled
+			.mockResolvedValueOnce(true)
+			.mockResolvedValue(false);
+		mocks.finishScheduleRun.mockResolvedValue("recorded");
+	};
+
+	it.each([
+		["application on a remote server", "application", "srv-1"],
+		["compose on a remote server", "compose", "srv-1"],
+		["application on the Dokploy host", "application", null],
+	] as const)(
+		"%s ends cancelled, with the cancel line and no failure alert",
+		async (_label, scheduleType, serverId) => {
+			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, serverId));
+			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+			revertedMeanwhile();
+
+			await expect(runCommand("sch-1")).resolves.toMatchObject({
+				status: "cancelled",
+			});
+
+			expect(mocks.endScheduleRunCancelled).toHaveBeenCalledWith("dep-1");
+			expect(mocks.finishScheduleRun).not.toHaveBeenCalled();
+			expect(mocks.sendScheduleFailureNotifications).not.toHaveBeenCalled();
+			expect(mocks.findScheduleOrganizationId).not.toHaveBeenCalled();
+			expect(mocks.spawnAsync).not.toHaveBeenCalled();
+			expect(logged()).toContain(CANCEL_LINE);
+			expect(logged()).not.toContain("Command failed");
+			expect(logged()).not.toContain("docker exec");
+		},
+	);
+
+	it("still ends cancelled when the row cannot be updated", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("application", "srv-1"));
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		revertedMeanwhile();
+		mocks.endScheduleRunCancelled.mockRejectedValue(new Error("db down"));
+		const consoleErrorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+
+		await expect(runCommand("sch-1")).resolves.toMatchObject({
+			status: "cancelled",
+		});
+
+		expect(mocks.sendScheduleFailureNotifications).not.toHaveBeenCalled();
+		consoleErrorSpy.mockRestore();
+	});
+});
+
 describe("the end of a failed run", () => {
 	it("logs the failure line before the failure notification goes out", async () => {
 		mocks.findScheduleById.mockResolvedValue(schedule("server", "srv-1"));

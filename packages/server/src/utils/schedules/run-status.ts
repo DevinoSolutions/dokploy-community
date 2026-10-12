@@ -1,6 +1,6 @@
 import { db } from "@dokploy/server/db";
 import { deployments } from "@dokploy/server/db/schema";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 
 /**
  * Status changes of a schedule run that a user can cancel.
@@ -98,7 +98,9 @@ export type ScheduleRunEnd = "recorded" | "cancelled" | "missing";
  * The finish time of a run that ended on a cancelled row. A claim is written as
  * `toISOString()` (`...Z`) and this is the same kind of instant with a
  * `+00:00` offset, so the two can never be equal whatever the clocks say, and
- * both stay valid dates.
+ * both stay valid dates. The offset makes these finish times tokens, not just
+ * timestamps: parse a `finishedAt` with `new Date()`, never compare or sort it as
+ * a string.
  */
 const endedFinishTime = (): string =>
 	new Date().toISOString().replace(/Z$/, "+00:00");
@@ -122,6 +124,25 @@ const markCancelledRunEnded = async (
 		)
 		.returning({ deploymentId: deployments.deploymentId });
 	return marked.length > 0;
+};
+
+/**
+ * Ends a run that was cancelled before its command started as `cancelled`,
+ * whether its row still is (the end is noted, as in `finishScheduleRun`) or a
+ * revert has put it back to `running`. A run that already ended is left alone.
+ */
+export const endScheduleRunCancelled = async (
+	deploymentId: string,
+): Promise<void> => {
+	await db
+		.update(deployments)
+		.set({ status: "cancelled", finishedAt: endedFinishTime() })
+		.where(
+			and(
+				eq(deployments.deploymentId, deploymentId),
+				inArray(deployments.status, ["running", "cancelled"]),
+			),
+		);
 };
 
 /**

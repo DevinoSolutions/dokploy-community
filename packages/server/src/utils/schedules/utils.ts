@@ -24,7 +24,11 @@ import {
 	SCHEDULE_RUN_ENV,
 	SCHEDULE_RUN_WRAPPER,
 } from "./container-run";
-import { finishScheduleRun, isScheduleRunCancelled } from "./run-status";
+import {
+	endScheduleRunCancelled,
+	finishScheduleRun,
+	isScheduleRunCancelled,
+} from "./run-status";
 
 type ScheduleExtended = Awaited<ReturnType<typeof findScheduleById>>;
 
@@ -50,10 +54,18 @@ const FAILED_LOG_LINE = "❌ Command failed";
 
 // A cancel that came in before the command was started finds nothing to kill
 // (see cancel.ts), so the run must not start it: ending with this error makes
-// the run end as cancelled, like a killed one.
+// the run end as cancelled, like a killed one. It has its own class because the
+// cancel may already have been undone by the time the run looks at its row (the
+// kill found nothing and reverted), and the run must still never end as failed.
+class CancelledBeforeStartError extends Error {
+	constructor() {
+		super("The run was cancelled before it started");
+	}
+}
+
 const assertNotCancelled = async (deploymentId: string) => {
 	if (await isScheduleRunCancelled(deploymentId)) {
-		throw new Error("The run was cancelled before it started");
+		throw new CancelledBeforeStartError();
 	}
 };
 
@@ -94,6 +106,17 @@ const endFailedRun = async (
 		console.error(`Failed to record the end of run ${deploymentId}:`, error);
 		return "error";
 	}
+};
+
+// A run that was cancelled before it started ends as cancelled whatever its row
+// says now: a revert may have put it back to running.
+const endCancelledRun = async (deploymentId: string): Promise<"cancelled"> => {
+	try {
+		await endScheduleRunCancelled(deploymentId);
+	} catch (error) {
+		console.error(`Failed to record the end of run ${deploymentId}:`, error);
+	}
+	return "cancelled";
 };
 
 const notifyScheduleFailure = async (
@@ -276,7 +299,10 @@ export const runCommand = async (scheduleId: string) => {
 					writeStream.end();
 				} catch (error) {
 					// A cancel is not a failure: the end of `runCommand` says so in the log.
-					if (!(await isScheduleRunCancelled(deployment.deploymentId))) {
+					if (
+						!(error instanceof CancelledBeforeStartError) &&
+						!(await isScheduleRunCancelled(deployment.deploymentId))
+					) {
 						writeStream.write(`${FAILED_LOG_LINE}\n`);
 						writeStream.write(
 							error instanceof Error ? error.message : "Unknown error",
@@ -344,7 +370,10 @@ export const runCommand = async (scheduleId: string) => {
 		// The run is marked as errored unless it was cancelled, which is logged
 		// instead; a failure is logged before the schedule-failure notifications
 		// go out.
-		const status = await endFailedRun(deployment.deploymentId);
+		const status =
+			error instanceof CancelledBeforeStartError
+				? await endCancelledRun(deployment.deploymentId)
+				: await endFailedRun(deployment.deploymentId);
 		if (status === "cancelled") {
 			await appendRunLog(logServerId, deployment.logPath, CANCELLED_LOG_LINE);
 		} else {
