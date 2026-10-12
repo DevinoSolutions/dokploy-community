@@ -76,6 +76,7 @@ const deploymentOf = (organizationId: string | null) => ({
 	composeId: null,
 	serverId: null,
 	pid: "4242",
+	status: "running",
 	logPath: "",
 	scheduleId: "sch-1",
 	schedule: {
