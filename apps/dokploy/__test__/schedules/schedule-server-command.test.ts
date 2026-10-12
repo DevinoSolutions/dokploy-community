@@ -103,7 +103,7 @@ mocks.root = toPosix(root);
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 describe("server schedule command", () => {
-  it("runs the script and logs to a hostile log path without evaluating it", async () => {
+	it("runs the script and logs to a hostile log path without evaluating it", async () => {
 		const appName = "schedule-hack-open-source-bus-AbC123";
 		mkdirSync(path.join(root, "schedules", appName), { recursive: true });
 		mkdirSync(path.join(root, "logs"), { recursive: true });
@@ -142,5 +142,44 @@ describe("server schedule command", () => {
 		expect(log).toContain("Running script");
 		expect(log).toContain("script-ran");
 		expect(log).toContain("Command executed successfully");
+	}, 30_000);
+
+	it("leaves the failure line to runCommand: the script of a failing run exits 1 without logging it", async () => {
+		const appName = "schedule-failing-AbC123";
+		mkdirSync(path.join(root, "schedules", appName), { recursive: true });
+		const scriptFile = path.join(root, "schedules", appName, "script.sh");
+		writeFileSync(scriptFile, "#!/bin/bash\necho before-failure\nexit 3\n");
+		chmodSync(scriptFile, 0o755);
+		const logPath = `${mocks.root}/failing.log`;
+
+		mocks.findScheduleById.mockResolvedValue({
+			scheduleId: "sch-1",
+			name: "Server task",
+			scheduleType: "server",
+			command: "",
+			shellType: "bash",
+			appName,
+			serviceName: null,
+			serverId: "server-1",
+			application: null,
+			compose: null,
+		});
+		mocks.createDeploymentSchedule.mockResolvedValue({
+			deploymentId: "dep-2",
+			logPath,
+		});
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+		await runCommand("sch-1");
+
+		const command = mocks.execAsyncRemote.mock.calls.at(-1)?.[1] as string;
+		expect(() =>
+			execFileSync("bash", ["-c", command], { cwd: root, stdio: "ignore" }),
+		).toThrow();
+
+		const log = readFileSync(path.join(root, "failing.log"), "utf8");
+		expect(log).toContain("before-failure");
+		expect(log).not.toContain("Command failed");
+		expect(log).not.toContain("Command executed successfully");
 	}, 30_000);
 });

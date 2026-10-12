@@ -83,6 +83,7 @@ vi.mock("node-schedule", () => ({
 import {
 	createSchedulePidCapture,
 	SCHEDULE_KILL_SCRIPT,
+	SCHEDULE_NONE_MARKER,
 	SCHEDULE_RUN_WRAPPER,
 } from "@dokploy/server/utils/schedules/container-run";
 import { runCommand } from "@dokploy/server/utils/schedules/utils";
@@ -248,7 +249,9 @@ describe("runCommand pid capture on a remote server", () => {
 			expect(run.stdout).not.toContain("secret");
 			expect(run.log).toContain("secret output\n");
 			expect(run.log).toContain("secret error\n");
-			expect(run.log).toContain("❌ Command failed");
+			// The failure line is left to runCommand, which knows whether the run was
+			// cancelled (see schedule-run-cancelled.test.ts).
+			expect(run.log).not.toContain("Command failed");
 			expect(run.log).not.toContain("✅");
 		});
 
@@ -263,7 +266,7 @@ describe("runCommand pid capture on a remote server", () => {
 			expect(run.status).toBe(1);
 			expect(run.stdout).toBe("");
 			expect(run.log).toContain("Error response from daemon: boom\n");
-			expect(run.log).toContain("❌ Command failed");
+			expect(run.log).not.toContain("Command failed");
 		});
 
 		it("still finds the pid line when docker delivers a stderr line ahead of it", async () => {
@@ -526,6 +529,8 @@ describe.skipIf(process.platform !== "linux")(
 					RUN_ID,
 				]);
 				expect(kill.status).toBe(0);
+				// It found the run, so it does not say there was nothing to stop.
+				expect(kill.stdout.toString()).not.toContain(SCHEDULE_NONE_MARKER);
 				await exited;
 
 				expect(
@@ -545,9 +550,10 @@ describe.skipIf(process.platform !== "linux")(
 			await until(() => alive(run.pid as number));
 
 			for (const id of [RUN_ID, "test"]) {
-				expect(
-					spawnSync("sh", ["-c", SCHEDULE_KILL_SCRIPT, "sh", id]).status,
-				).toBe(0);
+				const kill = spawnSync("sh", ["-c", SCHEDULE_KILL_SCRIPT, "sh", id]);
+				expect(kill.status).toBe(0);
+				// Nothing carries this tag: said apart from a kill that found the run.
+				expect(kill.stdout.toString()).toContain(SCHEDULE_NONE_MARKER);
 			}
 			await new Promise((resolve) => setTimeout(resolve, 200));
 
