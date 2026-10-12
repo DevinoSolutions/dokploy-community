@@ -59,7 +59,7 @@ export const assertHostScheduleAccess = async (
 };
 
 export const createSchedule = async (
-	input: z.infer<typeof createScheduleSchema>,
+	input: z.infer<typeof createScheduleSchema> & { organizationId?: string },
 ) => {
 	const { scheduleId, ...rest } = input;
 	const [newSchedule] = await db

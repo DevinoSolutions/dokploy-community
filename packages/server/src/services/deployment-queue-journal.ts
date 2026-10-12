@@ -7,6 +7,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { quote } from "shell-quote";
 import { updateApplicationStatus } from "./application";
 import { updateCompose } from "./compose";
 import {
@@ -123,7 +124,7 @@ const appendLogLine = async (
 	if (serverId) {
 		await execAsyncRemote(
 			serverId,
-			`printf '%s\\n' '${line.replace(/'/g, "")}' >> "${logPath}"`,
+			`printf '%s\\n' '${line.replace(/'/g, "")}' >> ${quote([logPath])}`,
 		);
 		return;
 	}
