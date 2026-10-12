@@ -85,6 +85,9 @@ export const createScheduleSchema = createInsertSchema(schedules, {
 	// Generated on the server: it names the directory the script and the run
 	// logs live in, and ends up in shell commands.
 	appName: true,
+	// Set from the session for dokploy-server schedules; a client must not pick
+	// the organization a schedule belongs to.
+	organizationId: true,
 });
 
 export const updateScheduleSchema = createScheduleSchema.extend({

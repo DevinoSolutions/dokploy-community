@@ -21,6 +21,7 @@ import {
 import { findServerById } from "@dokploy/server/services/server";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
+import { quote } from "shell-quote";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import {
@@ -294,7 +295,7 @@ export const deploymentRouter = createTRPCRouter({
 				return "";
 			}
 
-			const command = `tail -n ${input.tail} "${deployment.logPath}" 2>/dev/null || echo ""`;
+			const command = `tail -n ${input.tail} ${quote([deployment.logPath])} 2>/dev/null || echo ""`;
 			const serverId =
 				deployment.serverId ||
 				deployment.schedule?.serverId ||

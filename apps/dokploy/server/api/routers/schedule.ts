@@ -6,6 +6,7 @@ import {
 	schedules,
 	updateScheduleSchema,
 } from "@dokploy/server/db/schema/schedule";
+import type { ScheduleType } from "@dokploy/server/db/schema/schedule";
 import { runCommand } from "@dokploy/server/index";
 import {
 	checkPermission,
@@ -28,17 +29,65 @@ import { assertScheduledJobLimit } from "@/server/api/utils/plan-limits";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 
+type ScheduleTarget = {
+	scheduleType: ScheduleType;
+	applicationId?: string | null;
+	composeId?: string | null;
+	serverId?: string | null;
+};
+
+// A schedule runs against exactly one target, and it has to be the one its
+// scheduleType names. Otherwise the id that was access-checked is not the one
+// the run uses (runCommand follows the relation that matches the type).
+const assertScheduleTarget = (target: ScheduleTarget) => {
+	const checks = [
+		["application", "application", target.applicationId],
+		["compose", "compose", target.composeId],
+		["server", "server", target.serverId],
+	] as const;
+	for (const [type, label, id] of checks) {
+		const expected = target.scheduleType === type;
+		if (expected !== !!id) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: expected
+					? `A ${target.scheduleType} schedule needs a ${label} id.`
+					: `A ${target.scheduleType} schedule cannot reference a ${label}.`,
+			});
+		}
+	}
+};
+
+// Checks the target a schedule points at against the caller's active
+// organization and their access to it.
+const assertScheduleTargetAccess = async (
+	ctx: Parameters<typeof checkPermission>[0],
+	target: ScheduleTarget,
+	action: "create" | "update",
+) => {
+	assertScheduleTarget(target);
+	const serviceId = target.applicationId || target.composeId;
+	if (serviceId) {
+		await checkServicePermissionAndAccess(ctx, serviceId, {
+			schedule: [action],
+		});
+		return;
+	}
+	await checkPermission(ctx, { schedule: [action] });
+	// For a server schedule this also verifies the server's organization.
+	await assertHostScheduleAccess(ctx, target.scheduleType, target.serverId);
+};
+
 export const scheduleRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(createScheduleSchema)
 		.mutation(async ({ input, ctx }) => {
 			await assertHostScheduleAccess(ctx, input.scheduleType, input.serverId);
 
+			await assertScheduleTargetAccess(ctx, input, "create");
+
 			const serviceId = input.applicationId || input.composeId;
 			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					schedule: ["create"],
-				});
 				if (IS_CLOUD) {
 					await assertScheduledJobLimit(
 						ctx.session.activeOrganizationId,
@@ -47,8 +96,6 @@ export const scheduleRouter = createTRPCRouter({
 					);
 				}
 			} else {
-				await checkPermission(ctx, { schedule: ["create"] });
-
 				if (IS_CLOUD && input.scheduleType === "server" && input.serverId) {
 					await assertScheduledJobLimit(
 						ctx.session.activeOrganizationId,
@@ -126,6 +173,28 @@ export const scheduleRouter = createTRPCRouter({
 			} else {
 				await checkPermission(ctx, { schedule: ["update"] });
 			}
+
+			// The target the schedule will have after this update. Ids that are not
+			// part of the input keep their stored value.
+			await assertScheduleTargetAccess(
+				ctx,
+				{
+					scheduleType: input.scheduleType ?? existingSchedule.scheduleType,
+					applicationId:
+						input.applicationId !== undefined
+							? input.applicationId
+							: existingSchedule.applicationId,
+					composeId:
+						input.composeId !== undefined
+							? input.composeId
+							: existingSchedule.composeId,
+					serverId:
+						input.serverId !== undefined
+							? input.serverId
+							: existingSchedule.serverId,
+				},
+				"update",
+			);
 			const updatedSchedule = await updateSchedule(input);
 
 			if (IS_CLOUD) {
