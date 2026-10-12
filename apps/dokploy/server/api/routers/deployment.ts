@@ -1,6 +1,7 @@
 import {
 	cancelBuildServerDeploymentById,
 	cancelScheduleRun,
+	claimScheduleRunCancel,
 	execAsync,
 	execAsyncRemote,
 	findAllDeploymentsByApplicationId,
@@ -9,8 +10,10 @@ import {
 	findAllDeploymentsCentralized,
 	findDeploymentById,
 	IS_CLOUD,
+	isMissingProcessError,
 	removeDeployment,
 	resolveServicePath,
+	revertScheduleRunCancel,
 	updateDeploymentStatus,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -231,17 +234,65 @@ export const deploymentRouter = createTRPCRouter({
 				});
 			}
 
+			const killOnHost = async () => {
+				const command = `kill -9 ${deployment.pid}`;
+				const serverId = deploymentHostServerId(deployment);
+				if (serverId) {
+					await execAsyncRemote(serverId, command);
+				} else if (IS_CLOUD) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "Deployment has no server to stop it on",
+					});
+				} else {
+					await execAsync(command);
+				}
+			};
+
 			const { schedule } = deployment;
-			if (
-				schedule &&
-				(schedule.scheduleType === "application" ||
-					schedule.scheduleType === "compose")
-			) {
-				// The pid is that of a process inside the service's container, where it
-				// may belong to something else by now: stop the run by its tag instead.
-				// A container that is gone has nothing left to stop.
-				await cancelScheduleRun(schedule.scheduleId, deployment.deploymentId);
-				await updateDeploymentStatus(deployment.deploymentId, "error");
+			if (schedule) {
+				// A cancelled run is not a failed one: it is marked `cancelled` before
+				// anything is killed, so the run's own error handling (which fires as
+				// soon as the kill lands) leaves it alone and sends no failure alert.
+				// This also refuses a run that finished since it was read above.
+				if (!(await claimScheduleRunCancel(deployment.deploymentId))) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "Deployment is not running",
+					});
+				}
+				try {
+					if (
+						schedule.scheduleType === "application" ||
+						schedule.scheduleType === "compose"
+					) {
+						// The pid is that of a process inside the service's container,
+						// where it may belong to something else by now: stop the run by
+						// its tag instead. A container that is gone has nothing left to
+						// stop.
+						await cancelScheduleRun(schedule.scheduleId, deployment.deploymentId);
+					} else {
+						try {
+							await killOnHost();
+						} catch (error) {
+							// The process already exited (or its row was orphaned by a
+							// restart): there is nothing left to stop, so the run stays
+							// cancelled.
+							if (!isMissingProcessError(error)) throw error;
+						}
+					}
+				} catch (error) {
+					// The run was not stopped: show it as running again so it can be
+					// cancelled again, and surface why.
+					await revertScheduleRunCancel(deployment.deploymentId).catch(
+						(revertError) =>
+							console.error(
+								`Failed to restore run ${deployment.deploymentId} after a failed cancel:`,
+								revertError,
+							),
+					);
+					throw error;
+				}
 				await audit(ctx, {
 					action: "cancel",
 					resourceType: "deployment",
@@ -250,19 +301,7 @@ export const deploymentRouter = createTRPCRouter({
 				return;
 			}
 
-			const command = `kill -9 ${deployment.pid}`;
-			const serverId = deploymentHostServerId(deployment);
-			if (serverId) {
-				await execAsyncRemote(serverId, command);
-			} else if (IS_CLOUD) {
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "Deployment has no server to stop it on",
-				});
-			} else {
-				await execAsync(command);
-			}
-
+			await killOnHost();
 			await updateDeploymentStatus(deployment.deploymentId, "error");
 			await audit(ctx, {
 				action: "cancel",

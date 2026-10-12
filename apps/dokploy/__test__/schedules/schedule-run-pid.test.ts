@@ -16,7 +16,7 @@ const mocks = vi.hoisted(() => ({
 	findScheduleOrganizationId: vi.fn(),
 	createDeploymentSchedule: vi.fn(),
 	updateDeployment: vi.fn(),
-	updateDeploymentStatus: vi.fn(),
+	finishScheduleRun: vi.fn(),
 	getDokployUrl: vi.fn(),
 	getServiceContainer: vi.fn(),
 	getComposeContainer: vi.fn(),
@@ -40,7 +40,12 @@ vi.mock("@dokploy/server/services/schedule", () => ({
 vi.mock("@dokploy/server/services/deployment", () => ({
 	createDeploymentSchedule: mocks.createDeploymentSchedule,
 	updateDeployment: mocks.updateDeployment,
-	updateDeploymentStatus: mocks.updateDeploymentStatus,
+}));
+
+// How a run ends is recorded by a conditional update (see run-status.ts); it is
+// covered by schedule-run-cancelled.test.ts.
+vi.mock("@dokploy/server/utils/schedules/run-status", () => ({
+	finishScheduleRun: mocks.finishScheduleRun,
 }));
 
 vi.mock("@dokploy/server/services/admin", () => ({
@@ -146,7 +151,7 @@ beforeEach(() => {
 		deploymentId: "dep-1",
 		logPath: LOG_FILE,
 	});
-	mocks.updateDeploymentStatus.mockResolvedValue(undefined);
+	mocks.finishScheduleRun.mockResolvedValue(true);
 	mocks.updateDeployment.mockResolvedValue(undefined);
 	mocks.findScheduleOrganizationId.mockResolvedValue("org-1");
 	mocks.getDokployUrl.mockResolvedValue("https://dokploy.test");
@@ -343,7 +348,7 @@ describe("runCommand pid capture on a remote server", () => {
 		});
 
 		expect(mocks.updateDeployment).toHaveBeenCalledWith("dep-1", { pid: "77" });
-		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+		expect(mocks.finishScheduleRun).toHaveBeenCalledWith("dep-1", "error");
 		expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
 	});
 

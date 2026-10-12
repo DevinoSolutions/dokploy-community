@@ -24,7 +24,7 @@ const mocks = vi.hoisted(() => ({
 	findScheduleOrganizationId: vi.fn(),
 	createDeploymentSchedule: vi.fn(),
 	updateDeployment: vi.fn(),
-	updateDeploymentStatus: vi.fn(),
+	finishScheduleRun: vi.fn(async () => true),
 	getDokployUrl: vi.fn(),
 	getServiceContainer: vi.fn(),
 	getComposeContainer: vi.fn(),
@@ -54,7 +54,12 @@ vi.mock("@dokploy/server/services/schedule", () => ({
 vi.mock("@dokploy/server/services/deployment", () => ({
 	createDeploymentSchedule: mocks.createDeploymentSchedule,
 	updateDeployment: mocks.updateDeployment,
-	updateDeploymentStatus: mocks.updateDeploymentStatus,
+}));
+
+// How a run ends is recorded by a conditional update (see run-status.ts); it is
+// covered by schedule-run-cancelled.test.ts.
+vi.mock("@dokploy/server/utils/schedules/run-status", () => ({
+	finishScheduleRun: mocks.finishScheduleRun,
 }));
 
 vi.mock("@dokploy/server/services/admin", () => ({

@@ -352,7 +352,9 @@ export const ShowDeployments = ({
 								deployment.deploymentId,
 							);
 							const canDelete =
-								deployment.status === "done" || deployment.status === "error";
+								deployment.status === "done" ||
+								deployment.status === "error" ||
+								deployment.status === "cancelled";
 
 							return (
 								<div

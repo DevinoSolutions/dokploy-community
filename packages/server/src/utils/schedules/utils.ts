@@ -6,7 +6,6 @@ import { getDokployUrl } from "@dokploy/server/services/admin";
 import {
 	createDeploymentSchedule,
 	updateDeployment,
-	updateDeploymentStatus,
 } from "@dokploy/server/services/deployment";
 import {
 	findScheduleById,
@@ -24,6 +23,7 @@ import {
 	SCHEDULE_RUN_ENV,
 	SCHEDULE_RUN_WRAPPER,
 } from "./container-run";
+import { finishScheduleRun } from "./run-status";
 
 type ScheduleExtended = Awaited<ReturnType<typeof findScheduleById>>;
 
@@ -44,17 +44,19 @@ const capturePid = (deploymentId: string) =>
 		})();
 	});
 
+// A run that a user cancelled ends with a failing exit status (the kill), which
+// is not a failure: it stays `cancelled` and nobody is notified.
 const handleScheduleError = async (
 	schedule: ScheduleExtended,
 	deploymentId: string,
 	error: unknown,
-) => {
-	await updateDeploymentStatus(deploymentId, "error");
+): Promise<"error" | "cancelled"> => {
+	if (!(await finishScheduleRun(deploymentId, "error"))) return "cancelled";
 	try {
 		const organizationId = await findScheduleOrganizationId(
 			schedule.scheduleId,
 		);
-		if (!organizationId) return;
+		if (!organizationId) return "error";
 
 		const projectName =
 			schedule.application?.environment?.project?.name ||
@@ -82,6 +84,7 @@ const handleScheduleError = async (
 	} catch (notifyError) {
 		console.log("Failed to send schedule failure notification:", notifyError);
 	}
+	return "error";
 };
 
 export const scheduleJob = (schedule: Schedule) => {
@@ -189,7 +192,7 @@ export const runCommand = async (scheduleId: string) => {
 							"This feature is not available in the cloud version.",
 						);
 						writeStream.end();
-						await updateDeploymentStatus(deployment.deploymentId, "error");
+						await finishScheduleRun(deployment.deploymentId, "error");
 						return { ...deployment, status: "error" as const };
 					}
 					writeStream.write(
@@ -274,12 +277,17 @@ export const runCommand = async (scheduleId: string) => {
 				}
 			});
 		}
-		await updateDeploymentStatus(deployment.deploymentId, "done");
-		return { ...deployment, status: "done" as const };
+		// A command that traps the kill can still exit 0: a cancelled run stays so.
+		const recorded = await finishScheduleRun(deployment.deploymentId, "done");
+		return { ...deployment, status: recorded ? "done" : "cancelled" } as const;
 	} catch (error) {
 		// `handleScheduleError` marks the deployment as errored and fans out the
-		// schedule-failure notifications.
-		await handleScheduleError(schedule, deployment.deploymentId, error);
-		return { ...deployment, status: "error" as const };
+		// schedule-failure notifications, unless the run was cancelled.
+		const status = await handleScheduleError(
+			schedule,
+			deployment.deploymentId,
+			error,
+		);
+		return { ...deployment, status } as const;
 	}
 };

@@ -10,6 +10,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * `DOKPLOY_SCHEDULE_RUN=<deploymentId>` tag that `runCommand` gives their
  * process tree. The real `cancelScheduleRun` runs here; only the shell,
  * database and docker lookups are mocked.
+ *
+ * A cancelled run ends as `cancelled`, never `error`: the run is claimed
+ * (`running` -> `cancelled`) before the kill is sent, so the run's own error
+ * handling, which fires as soon as the kill lands, leaves it alone.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -19,6 +23,8 @@ const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
+	claimScheduleRunCancel: vi.fn(),
+	revertScheduleRunCancel: vi.fn(),
 	findScheduleById: vi.fn(),
 	getServiceContainer: vi.fn(),
 	getComposeContainer: vi.fn(),
@@ -52,7 +58,7 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 }));
 
 vi.mock("@dokploy/server", async () => {
-	const { cancelScheduleRun } = await import(
+	const { cancelScheduleRun, isMissingProcessError } = await import(
 		"@dokploy/server/utils/schedules/cancel"
 	);
 	return {
@@ -60,6 +66,9 @@ vi.mock("@dokploy/server", async () => {
 			return mocks.state.cloud;
 		},
 		cancelScheduleRun,
+		isMissingProcessError,
+		claimScheduleRunCancel: mocks.claimScheduleRunCancel,
+		revertScheduleRunCancel: mocks.revertScheduleRunCancel,
 		findDeploymentById: mocks.findDeploymentById,
 		cancelBuildServerDeploymentById: mocks.cancelBuildServerDeploymentById,
 		execAsync: mocks.execAsync,
@@ -128,8 +137,11 @@ const composeSchedule = (serverId: string | null) => ({
 	compose: { appName: "my-compose", composeType: "docker-compose", serverId },
 });
 
+// The run is claimed before anything is killed and is never marked errored.
 const expectCancelled = () => {
-	expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep_1-A", "error");
+	expect(mocks.claimScheduleRunCancel).toHaveBeenCalledWith("dep_1-A");
+	expect(mocks.revertScheduleRunCancel).not.toHaveBeenCalled();
+	expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
 	expect(mocks.audit).toHaveBeenCalledWith(
 		expect.anything(),
 		expect.objectContaining({ action: "cancel", resourceId: "dep_1-A" }),
@@ -140,6 +152,8 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.state.cloud = false;
 	mocks.cancelBuildServerDeploymentById.mockResolvedValue(null);
+	mocks.claimScheduleRunCancel.mockResolvedValue(true);
+	mocks.revertScheduleRunCancel.mockResolvedValue(undefined);
 	mocks.execAsync.mockResolvedValue({ stdout: "", stderr: "" });
 	mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
 });
@@ -229,6 +243,8 @@ describe("killProcess on an application schedule run", () => {
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
+		// Nothing was stopped, so the run is not left cancelled.
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith("dep_1-A");
 	});
 
 	it("still kills on the remote server on Dokploy Cloud", async () => {
@@ -247,7 +263,7 @@ describe("killProcess on an application schedule run", () => {
 		expectCancelled();
 	});
 
-	it("marks the run as errored without running anything when its container is gone", async () => {
+	it("marks the run as cancelled without running anything when its container is gone", async () => {
 		mocks.findDeploymentById.mockResolvedValue(deployment());
 		mocks.findScheduleById.mockResolvedValue(applicationSchedule("srv-1"));
 		mocks.getServiceContainer.mockResolvedValue(null);
@@ -259,7 +275,19 @@ describe("killProcess on an application schedule run", () => {
 		expectCancelled();
 	});
 
-	it("leaves the run running when the kill itself fails", async () => {
+	it("claims the run as cancelled before the kill is sent", async () => {
+		mocks.findDeploymentById.mockResolvedValue(deployment());
+		mocks.findScheduleById.mockResolvedValue(applicationSchedule("srv-1"));
+		mocks.getServiceContainer.mockResolvedValue({ Id: "cont-1" });
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expect(
+			mocks.claimScheduleRunCancel.mock.invocationCallOrder[0],
+		).toBeLessThan(mocks.execAsyncRemote.mock.invocationCallOrder[0] as number);
+	});
+
+	it("restores the run and reports the error when the kill itself fails", async () => {
 		mocks.findDeploymentById.mockResolvedValue(deployment());
 		mocks.findScheduleById.mockResolvedValue(applicationSchedule("srv-1"));
 		mocks.getServiceContainer.mockResolvedValue({ Id: "cont-1" });
@@ -269,7 +297,41 @@ describe("killProcess on an application schedule run", () => {
 			caller.killProcess({ deploymentId: "dep_1-A" }),
 		).rejects.toThrow("ssh down");
 
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith("dep_1-A");
 		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("still reports the kill error when the run cannot be restored either", async () => {
+		mocks.findDeploymentById.mockResolvedValue(deployment());
+		mocks.findScheduleById.mockResolvedValue(applicationSchedule("srv-1"));
+		mocks.getServiceContainer.mockResolvedValue({ Id: "cont-1" });
+		mocks.execAsyncRemote.mockRejectedValue(new Error("ssh down"));
+		mocks.revertScheduleRunCancel.mockRejectedValue(new Error("db down"));
+		const consoleErrorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toThrow("ssh down");
+
+		consoleErrorSpy.mockRestore();
+	});
+
+	it("kills nothing when the run ended or was cancelled since it was read", async () => {
+		mocks.findDeploymentById.mockResolvedValue(deployment());
+		mocks.findScheduleById.mockResolvedValue(applicationSchedule("srv-1"));
+		mocks.getServiceContainer.mockResolvedValue({ Id: "cont-1" });
+		mocks.claimScheduleRunCancel.mockResolvedValue(false);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		expect(mocks.revertScheduleRunCancel).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
 	});
 
@@ -288,6 +350,7 @@ describe("killProcess on an application schedule run", () => {
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
+		expect(mocks.claimScheduleRunCancel).not.toHaveBeenCalled();
 	});
 
 	it("refuses a deployment id that could reach a shell", async () => {
@@ -374,5 +437,122 @@ describe("killProcess on host-level schedule runs", () => {
 		expect(mocks.execAsync).toHaveBeenCalledWith("kill -9 4242");
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 		expectCancelled();
+	});
+
+	it.each(["server", "dokploy-server"])(
+		"treats a %s run whose process already exited as cancelled, not as a failure",
+		async (scheduleType) => {
+			mocks.findDeploymentById.mockResolvedValue(
+				deployment({
+					schedule: { scheduleId: "sch-1", scheduleType, serverId: "srv-1" },
+				}),
+			);
+			mocks.execAsyncRemote.mockRejectedValue(
+				Object.assign(new Error("Remote command failed with exit code 1"), {
+					stderr: "sh: 1: kill: No such process\n",
+				}),
+			);
+
+			await expect(
+				caller.killProcess({ deploymentId: "dep_1-A" }),
+			).resolves.toBeUndefined();
+
+			expectCancelled();
+		},
+	);
+
+	it("treats a vanished process on the Dokploy host the same way", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			deployment({
+				schedule: {
+					scheduleId: "sch-1",
+					scheduleType: "dokploy-server",
+					serverId: null,
+				},
+			}),
+		);
+		mocks.execAsync.mockRejectedValue(
+			new Error(
+				"Command execution failed: Command failed: kill -9 4242\n/bin/sh: kill: (4242) - No such process",
+			),
+		);
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expectCancelled();
+	});
+
+	it("restores the run and reports any other failure of the pid kill", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			deployment({
+				schedule: {
+					scheduleId: "sch-1",
+					scheduleType: "server",
+					serverId: "srv-1",
+				},
+			}),
+		);
+		mocks.execAsyncRemote.mockRejectedValue(
+			Object.assign(new Error("Remote command failed with exit code 1"), {
+				stderr: "sh: 1: kill: Operation not permitted",
+			}),
+		);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toThrow("exit code 1");
+
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith("dep_1-A");
+		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("claims a host-level run before the kill is sent", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			deployment({
+				schedule: {
+					scheduleId: "sch-1",
+					scheduleType: "server",
+					serverId: "srv-1",
+				},
+			}),
+		);
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expect(
+			mocks.claimScheduleRunCancel.mock.invocationCallOrder[0],
+		).toBeLessThan(mocks.execAsyncRemote.mock.invocationCallOrder[0] as number);
+	});
+});
+
+describe("killProcess on a deployment that is not a schedule run", () => {
+	it("keeps the plain pid kill and the errored status", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			deployment({ schedule: null, serverId: "srv-1" }),
+		);
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expect(mocks.execAsyncRemote).toHaveBeenCalledWith("srv-1", "kill -9 4242");
+		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith(
+			"dep_1-A",
+			"error",
+		);
+		expect(mocks.claimScheduleRunCancel).not.toHaveBeenCalled();
+		expect(mocks.revertScheduleRunCancel).not.toHaveBeenCalled();
+	});
+
+	it("does not touch the status when its kill fails", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			deployment({ schedule: null, serverId: "srv-1" }),
+		);
+		mocks.execAsyncRemote.mockRejectedValue(new Error("ssh down"));
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toThrow("ssh down");
+
+		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
 	});
 });
