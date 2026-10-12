@@ -26,6 +26,25 @@ export const isTerminalSnapvisorStatus = (status: SnapvisorBuildStatus) =>
 export const SNAPVISOR_CHANGES_STATUS: SnapvisorBuildStatus =
 	"changes-detected";
 
+/**
+ * How many builds a per-commit lookup asks for. Snapvisor documents
+ * `listBuilds` as "most recent first", but a commit can carry several builds
+ * (one per build name), so the lookup takes a few and picks by build number
+ * rather than trusting the page order.
+ */
+export const SNAPVISOR_BUILD_LOOKUP_PAGE_SIZE = 5;
+
+/** The build with the highest number: the newest, whatever order they came in. */
+export const pickLatestSnapvisorBuild = (
+	builds: readonly SnapvisorBuild[],
+): SnapvisorBuild | null => {
+	let latest: SnapvisorBuild | null = null;
+	for (const build of builds) {
+		if (!latest || build.number > latest.number) latest = build;
+	}
+	return latest;
+};
+
 export type SnapvisorUnavailableReason =
 	| "auth"
 	| "rate-limited"

@@ -2,6 +2,7 @@ import {
 	classifySnapvisorError,
 	createSnapvisorBuildLookup,
 	isTerminalSnapvisorStatus,
+	pickLatestSnapvisorBuild,
 } from "@dokploy/server/utils/snapvisor/build-lookup";
 import {
 	createSnapvisorClient,
@@ -294,5 +295,30 @@ describe("Retry-After", () => {
 		await expect(
 			client.listBuilds({ accountSlug: "t", projectName: "p", headSha: "x" }),
 		).rejects.toMatchObject({ status: 429, retryAfterSeconds: 45 });
+	});
+});
+
+describe("pickLatestSnapvisorBuild", () => {
+	const numbered = (number: number): SnapvisorBuild => ({
+		...build("changes-detected"),
+		id: `b${number}`,
+		number,
+	});
+
+	it("picks the highest build number whatever order the page came in", () => {
+		expect(
+			pickLatestSnapvisorBuild([numbered(3), numbered(9), numbered(5)])?.number,
+		).toBe(9);
+		expect(
+			pickLatestSnapvisorBuild([numbered(1), numbered(2), numbered(3)])?.number,
+		).toBe(3);
+		expect(
+			pickLatestSnapvisorBuild([numbered(3), numbered(2), numbered(1)])?.number,
+		).toBe(3);
+	});
+
+	it("returns the only build, and null for none", () => {
+		expect(pickLatestSnapvisorBuild([numbered(4)])?.number).toBe(4);
+		expect(pickLatestSnapvisorBuild([])).toBeNull();
 	});
 });
