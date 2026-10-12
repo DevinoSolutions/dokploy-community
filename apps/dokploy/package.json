@@ -1,6 +1,6 @@
 {
 	"name": "dokploy",
-	"version": "v0.30.8-community.22",
+	"version": "v0.30.8-community.23",
 	"private": true,
 	"license": "Apache-2.0",
 	"type": "module",
