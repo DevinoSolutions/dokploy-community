@@ -46,6 +46,7 @@ const capturePid = (deploymentId: string) =>
 	});
 
 const CANCELLED_LOG_LINE = "⛔ Run cancelled by user.";
+const FAILED_LOG_LINE = "❌ Command failed";
 
 // Best effort: the log is where the run's output went (the server it ran on, or
 // this host), and a log that cannot be written must not fail the run's end.
@@ -166,6 +167,9 @@ export const runCommand = async (scheduleId: string) => {
 	// Where the run's log lives: on the server it runs on, else on this host.
 	const logServerId =
 		application?.serverId || compose?.serverId || serverId || null;
+	// Set for the runs whose shell script leaves the failure line to us: the
+	// script cannot tell a failure from the kill of a cancel, we can.
+	let logFailureAfterwards = false;
 
 	try {
 		if (scheduleType === "application" || scheduleType === "compose") {
@@ -194,6 +198,7 @@ export const runCommand = async (scheduleId: string) => {
 			}
 
 			if (serverId) {
+				logFailureAfterwards = true;
 				// Only the pid line comes back over ssh; the output goes to the log.
 				await execAsyncRemote(
 					serverId,
@@ -201,10 +206,7 @@ export const runCommand = async (scheduleId: string) => {
 					set -e
 					set -o pipefail
 					echo "Running scheduled command" >> ${quote([deployment.logPath])};
-					docker exec -e ${quote([`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`])} ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_RUN_WRAPPER])} ${quote([shellType])} ${quote([command])} 2>&1 | ${remoteRunOutputToLog(quote([deployment.logPath]))} || {
-						echo "❌ Command failed" >> ${quote([deployment.logPath])};
-						exit 1;
-					}
+					docker exec -e ${quote([`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`])} ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_RUN_WRAPPER])} ${quote([shellType])} ${quote([command])} 2>&1 | ${remoteRunOutputToLog(quote([deployment.logPath]))} || exit 1
 					echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 					`,
 					capturePid(deployment.deploymentId),
@@ -254,7 +256,7 @@ export const runCommand = async (scheduleId: string) => {
 				} catch (error) {
 					// A cancel is not a failure: the end of `runCommand` says so in the log.
 					if (!(await isScheduleRunCancelled(deployment.deploymentId))) {
-						writeStream.write("❌ Command failed\n");
+						writeStream.write(`${FAILED_LOG_LINE}\n`);
 						writeStream.write(
 							error instanceof Error ? error.message : "Unknown error",
 						);
@@ -289,15 +291,13 @@ export const runCommand = async (scheduleId: string) => {
 				},
 			);
 		} else if (scheduleType === "server") {
+			logFailureAfterwards = true;
 			const { SCHEDULES_PATH } = paths(true);
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
 			const command = `
 				set -euo pipefail
 				echo "Running script" >> ${quote([deployment.logPath])};
-				bash -c ${quote([`${fullPath}/script.sh`])} 2>&1 | tee -a ${quote([deployment.logPath])} || {
-					echo "❌ Command failed" >> ${quote([deployment.logPath])};
-					exit 1;
-				  }
+				bash -c ${quote([`${fullPath}/script.sh`])} 2>&1 | tee -a ${quote([deployment.logPath])} || exit 1
 				echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 			`;
 			await execAsyncRemote(serverId, command, async (data) => {
@@ -310,6 +310,8 @@ export const runCommand = async (scheduleId: string) => {
 				}
 			});
 		}
+		// The script came through: a failure from here on is not its failure.
+		logFailureAfterwards = false;
 		// A command that traps the kill can still exit 0: a cancelled run stays so.
 		const end = await finishScheduleRun(deployment.deploymentId, "done");
 		if (end === "cancelled") {
@@ -327,6 +329,8 @@ export const runCommand = async (scheduleId: string) => {
 		);
 		if (status === "cancelled") {
 			await appendRunLog(logServerId, deployment.logPath, CANCELLED_LOG_LINE);
+		} else if (logFailureAfterwards) {
+			await appendRunLog(logServerId, deployment.logPath, FAILED_LOG_LINE);
 		}
 		return { ...deployment, status } as const;
 	}

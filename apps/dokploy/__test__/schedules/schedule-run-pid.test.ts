@@ -248,7 +248,9 @@ describe("runCommand pid capture on a remote server", () => {
 			expect(run.stdout).not.toContain("secret");
 			expect(run.log).toContain("secret output\n");
 			expect(run.log).toContain("secret error\n");
-			expect(run.log).toContain("❌ Command failed");
+			// The failure line is left to runCommand, which knows whether the run was
+			// cancelled (see schedule-run-cancelled.test.ts).
+			expect(run.log).not.toContain("Command failed");
 			expect(run.log).not.toContain("✅");
 		});
 
@@ -263,7 +265,7 @@ describe("runCommand pid capture on a remote server", () => {
 			expect(run.status).toBe(1);
 			expect(run.stdout).toBe("");
 			expect(run.log).toContain("Error response from daemon: boom\n");
-			expect(run.log).toContain("❌ Command failed");
+			expect(run.log).not.toContain("Command failed");
 		});
 
 		it("still finds the pid line when docker delivers a stderr line ahead of it", async () => {

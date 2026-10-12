@@ -217,17 +217,34 @@ export const deploymentRouter = createTRPCRouter({
 			}
 
 			// A pid left on a finished deployment may since belong to another process.
-			if (deployment.status !== "running" || !deployment.pid) {
+			if (deployment.status !== "running") {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Deployment is not running",
 				});
 			}
 
+			const { schedule } = deployment;
+			// The run of an application or compose schedule is stopped by its tag,
+			// not by its pid (see below), so it can be cancelled before the pid is
+			// recorded.
+			const stoppedByTag =
+				schedule?.scheduleType === "application" ||
+				schedule?.scheduleType === "compose";
+
+			if (!stoppedByTag && !deployment.pid) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: schedule
+						? "The run is still starting, try again in a moment"
+						: "Deployment is not running",
+				});
+			}
+
 			// `pid` is a free text column and ends up in a shell command: only a
 			// plain decimal pid >= 2 is accepted (`kill -9 0` signals our own
 			// process group and `kill -9 1` signals init).
-			if (!/^(?:[2-9]|[1-9]\d+)$/.test(deployment.pid)) {
+			if (!stoppedByTag && !/^(?:[2-9]|[1-9]\d+)$/.test(deployment.pid ?? "")) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Deployment has an invalid process id",
@@ -249,13 +266,13 @@ export const deploymentRouter = createTRPCRouter({
 				}
 			};
 
-			const { schedule } = deployment;
 			if (schedule) {
 				// A cancelled run is not a failed one: it is marked `cancelled` before
 				// anything is killed, so the run's own error handling (which fires as
 				// soon as the kill lands) leaves it alone and sends no failure alert.
 				// This also refuses a run that finished since it was read above.
-				if (!(await claimScheduleRunCancel(deployment.deploymentId))) {
+				const claim = await claimScheduleRunCancel(deployment.deploymentId);
+				if (!claim) {
 					throw new TRPCError({
 						code: "BAD_REQUEST",
 						message: "Deployment is not running",
@@ -270,7 +287,10 @@ export const deploymentRouter = createTRPCRouter({
 						// where it may belong to something else by now: stop the run by
 						// its tag instead. A container that is gone has nothing left to
 						// stop.
-						await cancelScheduleRun(schedule.scheduleId, deployment.deploymentId);
+						await cancelScheduleRun(
+							schedule.scheduleId,
+							deployment.deploymentId,
+						);
 					} else {
 						try {
 							await killOnHost();
@@ -283,8 +303,9 @@ export const deploymentRouter = createTRPCRouter({
 					}
 				} catch (error) {
 					// The run was not stopped: show it as running again so it can be
-					// cancelled again, and surface why.
-					await revertScheduleRunCancel(deployment.deploymentId).catch(
+					// cancelled again, and surface why. A run that has ended on its own
+					// since the claim is not brought back: it has nobody left to end it.
+					await revertScheduleRunCancel(deployment.deploymentId, claim).catch(
 						(revertError) =>
 							console.error(
 								`Failed to restore run ${deployment.deploymentId} after a failed cancel:`,

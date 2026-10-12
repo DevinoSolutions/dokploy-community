@@ -169,9 +169,13 @@ describe("a schedule run that was killed by a user cancel", () => {
 	] as const)(
 		"%s stays cancelled and sends no failure notification",
 		async (_label, scheduleType, serverId, where) => {
-			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, serverId));
-			(where === "remote" ? mocks.execAsyncRemote : mocks.spawnAsync)
-				.mockRejectedValue(killed());
+			mocks.findScheduleById.mockResolvedValue(
+				schedule(scheduleType, serverId),
+			);
+			(where === "remote"
+				? mocks.execAsyncRemote
+				: mocks.spawnAsync
+			).mockRejectedValue(killed());
 			cancelledMeanwhile();
 
 			await expect(runCommand("sch-1")).resolves.toMatchObject({
@@ -240,9 +244,13 @@ describe("a schedule run that was killed by a user cancel", () => {
 	] as const)(
 		"a %s command that traps the signal and exits 0 does not overwrite cancelled",
 		async (_label, scheduleType, serverId, where) => {
-			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, serverId));
-			(where === "remote" ? mocks.execAsyncRemote : mocks.spawnAsync)
-				.mockResolvedValue({ stdout: "", stderr: "" });
+			mocks.findScheduleById.mockResolvedValue(
+				schedule(scheduleType, serverId),
+			);
+			(where === "remote"
+				? mocks.execAsyncRemote
+				: mocks.spawnAsync
+			).mockResolvedValue({ stdout: "", stderr: "" });
 			cancelledMeanwhile();
 
 			await expect(runCommand("sch-1")).resolves.toMatchObject({
@@ -264,9 +272,13 @@ describe("a schedule run that was not cancelled", () => {
 	] as const)(
 		"a failing %s run still ends as error and notifies",
 		async (_label, scheduleType, serverId, where) => {
-			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, serverId));
-			(where === "remote" ? mocks.execAsyncRemote : mocks.spawnAsync)
-				.mockRejectedValue(new Error("exit 1"));
+			mocks.findScheduleById.mockResolvedValue(
+				schedule(scheduleType, serverId),
+			);
+			(where === "remote"
+				? mocks.execAsyncRemote
+				: mocks.spawnAsync
+			).mockRejectedValue(new Error("exit 1"));
 
 			await expect(runCommand("sch-1")).resolves.toMatchObject({
 				status: "error",
@@ -292,9 +304,13 @@ describe("a schedule run that was not cancelled", () => {
 	] as const)(
 		"a failing %s run whose row is gone still notifies, it was not cancelled",
 		async (_label, scheduleType, serverId, where) => {
-			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, serverId));
-			(where === "remote" ? mocks.execAsyncRemote : mocks.spawnAsync)
-				.mockRejectedValue(new Error("exit 1"));
+			mocks.findScheduleById.mockResolvedValue(
+				schedule(scheduleType, serverId),
+			);
+			(where === "remote"
+				? mocks.execAsyncRemote
+				: mocks.spawnAsync
+			).mockRejectedValue(new Error("exit 1"));
 			mocks.finishScheduleRun.mockResolvedValue("missing");
 
 			await expect(runCommand("sch-1")).resolves.toMatchObject({
@@ -351,5 +367,133 @@ describe("a schedule run that was not cancelled", () => {
 
 		expect(mocks.finishScheduleRun).toHaveBeenCalledWith("dep-1", "error");
 		expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
+	});
+});
+
+// The shell scripts of a remote application/compose run and of a server run
+// leave the failure line to runCommand: only it knows if the non-zero exit is a
+// failure or the kill of a cancel.
+describe("the failure line of a remote run", () => {
+	const FAILED_LINE = "❌ Command failed";
+	const remoteCalls = () =>
+		mocks.execAsyncRemote.mock.calls.map(
+			(call) => [call[0], String(call[1])] as const,
+		);
+	const failedLineCalls = () =>
+		remoteCalls().filter(([, command]) => command.includes(FAILED_LINE));
+
+	it.each([
+		["application", "application"],
+		["compose", "compose"],
+		["server", "server"],
+	] as const)(
+		"a %s run killed by a cancel has no failure line, only the cancel line",
+		async (_label, scheduleType) => {
+			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, "srv-1"));
+			mocks.execAsyncRemote.mockRejectedValueOnce(killed());
+			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+			cancelledMeanwhile();
+
+			await expect(runCommand("sch-1")).resolves.toMatchObject({
+				status: "cancelled",
+			});
+
+			expect(failedLineCalls()).toEqual([]);
+			expect(remoteCalls()).toHaveLength(2);
+			expect(remoteCalls()[1]).toEqual([
+				"srv-1",
+				expect.stringContaining(CANCEL_LINE),
+			]);
+		},
+	);
+
+	it.each([
+		["application", "application"],
+		["compose", "compose"],
+		["server", "server"],
+	] as const)(
+		"a %s run that really fails still gets the failure line, once, on its server",
+		async (_label, scheduleType) => {
+			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, "srv-1"));
+			mocks.execAsyncRemote.mockRejectedValueOnce(new Error("exit 1"));
+			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+			await expect(runCommand("sch-1")).resolves.toMatchObject({
+				status: "error",
+			});
+
+			expect(failedLineCalls()).toHaveLength(1);
+			const [serverId, command] = failedLineCalls()[0] as readonly [
+				string,
+				string,
+			];
+			expect(serverId).toBe("srv-1");
+			// Quoted for the shell, appended to the log of the run.
+			expect(command).toMatch(/^echo .*Command failed.* >> run\.log$/);
+			expect(failedLineCalls()[0]).toEqual(remoteCalls().at(-1));
+			expect(logged()).not.toContain(CANCEL_LINE);
+			expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it("a failing run whose row is gone still gets the failure line", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("server", "srv-1"));
+		mocks.execAsyncRemote.mockRejectedValueOnce(new Error("exit 1"));
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.finishScheduleRun.mockResolvedValue("missing");
+
+		await runCommand("sch-1");
+
+		expect(failedLineCalls()).toHaveLength(1);
+	});
+
+	it("a run that succeeds gets neither line", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("application", "srv-1"));
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+		await runCommand("sch-1");
+
+		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
+		expect(failedLineCalls()).toEqual([]);
+	});
+
+	it("a run that succeeded but could not be recorded gets no failure line", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("server", "srv-1"));
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.finishScheduleRun.mockRejectedValueOnce(new Error("db down"));
+		mocks.finishScheduleRun.mockResolvedValue("recorded");
+
+		await runCommand("sch-1");
+
+		expect(failedLineCalls()).toEqual([]);
+	});
+
+	it("a missing container keeps its own line and gets no second one", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("application", "srv-1"));
+		mocks.getServiceContainer.mockResolvedValue(null);
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+		await expect(runCommand("sch-1")).resolves.toMatchObject({
+			status: "error",
+		});
+
+		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
+		expect(remoteCalls()[0]?.[1]).toContain("Container not found");
+		expect(failedLineCalls()).toEqual([]);
+	});
+
+	it("does not lose the real failure when the failure line cannot be written", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("server", "srv-1"));
+		mocks.execAsyncRemote.mockRejectedValue(new Error("ssh down"));
+		const consoleErrorSpy = vi
+			.spyOn(console, "error")
+			.mockImplementation(() => undefined);
+
+		await expect(runCommand("sch-1")).resolves.toMatchObject({
+			status: "error",
+		});
+
+		expect(mocks.sendScheduleFailureNotifications).toHaveBeenCalledTimes(1);
+		consoleErrorSpy.mockRestore();
 	});
 });
