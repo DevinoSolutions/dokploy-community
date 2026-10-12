@@ -219,8 +219,10 @@ export const deploymentRouter = createTRPCRouter({
 				});
 			}
 
-			// `pid` is a free text column and ends up in a shell command.
-			if (!/^\d+$/.test(deployment.pid)) {
+			// `pid` is a free text column and ends up in a shell command: only a
+			// plain decimal pid >= 2 is accepted (`kill -9 0` signals our own
+			// process group and `kill -9 1` signals init).
+			if (!/^(?:[2-9]|[1-9]\d+)$/.test(deployment.pid)) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Deployment has an invalid process id",
