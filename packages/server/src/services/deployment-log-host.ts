@@ -83,9 +83,23 @@ const withTimeout = <T>(
 const isNotFound = (error: unknown) =>
 	error instanceof TRPCError && error.code === "NOT_FOUND";
 
-// `test -f` answers a missing file with exit status 1.
+// Only stat's own "No such file or directory" says the file is not there. Its
+// exit status 1 alone does not: permission denied and other filesystem errors
+// share it, and a shell's 127 / ssh's 255 mean the question was never asked.
 const isFileMissing = (error: unknown) =>
-	error instanceof ExecError && error.exitCode === 1;
+	error instanceof ExecError &&
+	error.exitCode === 1 &&
+	/No such file or directory/.test(error.stderr || error.message);
+
+// stat -c %F names the kind of file; the log must be a regular file. Anything
+// else printed on success is not an answer.
+const fileKind = (stdout: string | undefined): Probe => {
+	const kind = String(stdout ?? "").trim();
+	if (kind === "regular file" || kind === "regular empty file") {
+		return "present";
+	}
+	return kind ? "absent" : "unknown";
+};
 
 // Does `host` (null = this host) belong to the organization and hold the log?
 const probeLog = (
@@ -94,17 +108,19 @@ const probeLog = (
 	organizationId: string,
 ): Promise<Probe> =>
 	withTimeout<Probe>(async (signal) => {
-		const command = `test -f ${quote([logPath])}`;
+		const command = `LC_ALL=C stat -c %F -- ${quote([logPath])}`;
 		try {
 			if (host) {
 				const server = await findServerById(host);
 				// Never contacted, so nothing is known about the file there.
 				if (server.organizationId !== organizationId) return "unknown";
-				await execAsyncRemote(host, command, undefined, { signal });
-			} else {
-				await execAsync(command);
+				const { stdout } = await execAsyncRemote(host, command, undefined, {
+					signal,
+				});
+				return fileKind(stdout);
 			}
-			return "present";
+			const { stdout } = await execAsync(command);
+			return fileKind(stdout);
 		} catch (error) {
 			return isNotFound(error) || isFileMissing(error) ? "absent" : "unknown";
 		}

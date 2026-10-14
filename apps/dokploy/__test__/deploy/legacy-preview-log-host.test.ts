@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
 	hanging: new Set<string>(),
 	// Hosts that cannot be reached at all (no answer about the file).
 	unreachable: new Set<string | null>(),
+	// Hosts whose probe fails with this error.
+	failures: new Map<string | null, Error>(),
 	isCloud: false,
 	findPreviewDeploymentById: vi.fn(),
 	findPreviewDeploymentLogOwner: vi.fn(),
@@ -89,7 +91,9 @@ const caller = () =>
 	} as never);
 
 const logPath = "/etc/dokploy/logs/web-pr-4/web-pr-4-2026-10-12:12:00:00.log";
-const probe = `test -f ${quote([logPath])}`;
+const probe = `LC_ALL=C stat -c %F -- ${quote([logPath])}`;
+// What stat prints for the log when it is there.
+const REGULAR_FILE = "regular file\n";
 
 const legacyPreviewRow = (overrides: Record<string, unknown> = {}) => ({
 	deploymentId: "dep-1",
@@ -122,18 +126,26 @@ const tailedHosts = () =>
 		.filter(([, command]) => command !== probe)
 		.map(([host]) => host as string);
 
-// What `test -f` reports for a file that is not there.
-const missingFile = () =>
-	new ExecError("Remote command failed with exit code 1", {
+const probeFailure = (exitCode: number, stderr: string) =>
+	new ExecError(`Remote command failed with exit code ${exitCode}: ${stderr}`, {
 		command: probe,
-		exitCode: 1,
+		stderr,
+		exitCode,
 	});
+
+// What stat reports for a file that is not there.
+const missingFile = () =>
+	probeFailure(
+		1,
+		`stat: cannot statx '${logPath}': No such file or directory`,
+	);
 
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.filesOn = new Set();
 	mocks.hanging = new Set();
 	mocks.unreachable = new Set();
+	mocks.failures = new Map();
 	mocks.isCloud = false;
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
 	mocks.findPreviewDeploymentById.mockResolvedValue({
@@ -153,7 +165,8 @@ beforeEach(() => {
 			if (command === probe) {
 				if (mocks.hanging.has(host)) return new Promise(() => {});
 				if (mocks.unreachable.has(host)) throw new Error("connection refused");
-				if (mocks.filesOn.has(host)) return { stdout: "", stderr: "" };
+				if (mocks.failures.has(host)) throw mocks.failures.get(host);
+				if (mocks.filesOn.has(host)) return { stdout: REGULAR_FILE, stderr: "" };
 				throw missingFile();
 			}
 			return { stdout: `built on ${host}\n`, stderr: "" };
@@ -162,7 +175,8 @@ beforeEach(() => {
 	mocks.execAsync.mockImplementation(async (command: string) => {
 		if (command === probe) {
 			if (mocks.unreachable.has(null)) throw new Error("spawn failed");
-			if (mocks.filesOn.has(null)) return { stdout: "", stderr: "" };
+			if (mocks.failures.has(null)) throw mocks.failures.get(null);
+			if (mocks.filesOn.has(null)) return { stdout: REGULAR_FILE, stderr: "" };
 			throw missingFile();
 		}
 		return { stdout: "local\n", stderr: "" };
@@ -480,6 +494,45 @@ describe("a log that is on no connected server", () => {
 		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toMatchObject(
 			{ unavailable: message },
 		);
+	});
+
+	it.each([
+		["permission denied", probeFailure(1, `stat: cannot statx '${logPath}': Permission denied`)],
+		["a filesystem error", probeFailure(1, "stat: cannot statx: Input/output error")],
+		["a path component that is not a directory", probeFailure(1, "stat: cannot statx: Not a directory")],
+		["a missing stat", probeFailure(127, "sh: 1: stat: not found")],
+		["an ssh failure", probeFailure(255, "ssh: connect to host: Connection refused")],
+		["an exit status 1 with no output", probeFailure(1, "")],
+		["a connection error", new Error("SSH connection error: read ECONNRESET")],
+		["an authentication error", new ExecError("Authentication failed: Invalid SSH private key.", { command: probe })],
+	])("never counts %s as a missing file", async (_label, failure) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: "server-1", buildServerId: null }),
+		);
+		mocks.failures.set("server-1", failure);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).resolves.toBe("built on server-1\n");
+	});
+
+	it("never counts a local permission error as a missing file", async () => {
+		mocks.deployment = legacyPreviewRow({ serverId: null });
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: null, buildServerId: null }),
+		);
+		mocks.failures.set(
+			null,
+			probeFailure(1, "stat: cannot statx: Permission denied"),
+		);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: null,
+		});
 	});
 
 	it("is not unavailable while one candidate could not be asked", async () => {
