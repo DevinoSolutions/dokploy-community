@@ -214,6 +214,48 @@ describe("a schedule run that was killed by a user cancel", () => {
 		);
 	});
 
+	it.each([
+		["server", "srv-1"],
+		["dokploy-server", null],
+	] as const)(
+		"a %s run cancelled before its script started never starts it",
+		async (scheduleType, serverId) => {
+			mocks.findScheduleById.mockResolvedValue(
+				schedule(scheduleType, serverId),
+			);
+			mocks.isScheduleRunCancelled.mockResolvedValue(true);
+
+			await expect(runCommand("sch-1")).resolves.toMatchObject({
+				status: "cancelled",
+			});
+
+			expect(mocks.spawnAsync).not.toHaveBeenCalled();
+			expect(mocks.execAsyncRemote).not.toHaveBeenCalledWith(
+				"srv-1",
+				expect.stringContaining("script.sh"),
+				expect.anything(),
+			);
+			expect(mocks.endScheduleRunCancelled).toHaveBeenCalledWith("dep-1");
+			expect(mocks.sendScheduleFailureNotifications).not.toHaveBeenCalled();
+		},
+	);
+
+	it("tags a dokploy-server run with its id, so a cancel can find it without a pid", async () => {
+		mocks.findScheduleById.mockResolvedValue(schedule("dokploy-server", null));
+		mocks.spawnAsync.mockResolvedValue({});
+
+		await runCommand("sch-1");
+
+		expect(mocks.spawnAsync).toHaveBeenCalledWith(
+			"bash",
+			["-c", "./script.sh"],
+			expect.any(Function),
+			expect.objectContaining({
+				env: expect.objectContaining({ DOKPLOY_SCHEDULE_RUN: "dep-1" }),
+			}),
+		);
+	});
+
 	it("logs it on the server the run lives on", async () => {
 		mocks.findScheduleById.mockResolvedValue(schedule("server", "srv-1"));
 		mocks.execAsyncRemote.mockRejectedValueOnce(killed());

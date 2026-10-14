@@ -68,6 +68,52 @@ export const cancelScheduleRun = async (
 };
 
 /**
+ * How long a run may take to start its command. Past this, a run that has no
+ * pid and no process carrying its tag is not "still starting" any more: its
+ * cancel ends it instead of asking the user to retry.
+ */
+export const SCHEDULE_START_GRACE_MS = 30_000;
+
+/** True once a run is older than `SCHEDULE_START_GRACE_MS`. An unreadable start time is not. */
+export const isPastStartGrace = (
+	startedAt: string | null | undefined,
+	now = Date.now(),
+): boolean => {
+	const started = startedAt ? new Date(startedAt).getTime() : Number.NaN;
+	return Number.isFinite(started) && now - started >= SCHEDULE_START_GRACE_MS;
+};
+
+/**
+ * Stops a run of a server or dokploy-server schedule by its tag, for a run that
+ * never printed its pid. The run is tagged like a container run (see
+ * `runCommand`), so the same kill script finds its processes on the host that
+ * runs it: `serverId`, or the Dokploy host when null. `found: false` means no
+ * process carries the tag: the command has not started, or it is over.
+ */
+export const cancelHostScheduleRun = async (
+	serverId: string | null,
+	deploymentId: string,
+): Promise<{ found: boolean }> => {
+	if (!isSafeDeploymentId(deploymentId)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Deployment has an invalid id",
+		});
+	}
+	if (!serverId && IS_CLOUD) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Deployment has no server to stop it on",
+		});
+	}
+	const command = `sh -c ${quote([SCHEDULE_KILL_SCRIPT])} sh ${quote([deploymentId])}`;
+	const result = serverId
+		? await execAsyncRemote(serverId, command)
+		: await execAsync(command);
+	return { found: !String(result?.stdout ?? "").includes(SCHEDULE_NONE_MARKER) };
+};
+
+/**
  * True when `kill` failed because the process is already gone. Both the local
  * and the remote exec errors carry what `kill` wrote to stderr; dash and bash
  * both say "No such process".

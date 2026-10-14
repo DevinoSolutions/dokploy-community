@@ -25,6 +25,7 @@ vi.mock("@dokploy/server", () => ({
 	execAsync: mocks.execAsync,
 	execAsyncRemote: mocks.execAsyncRemote,
 	updateDeploymentStatus: mocks.updateDeploymentStatus,
+	isPastStartGrace: () => false,
 }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({

@@ -1,5 +1,4 @@
 import { createWriteStream } from "node:fs";
-import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Schedule } from "@dokploy/server/db/schema/schedule";
@@ -24,6 +23,7 @@ import {
 	SCHEDULE_RUN_ENV,
 	SCHEDULE_RUN_WRAPPER,
 } from "./container-run";
+import { appendRunLog } from "./run-log";
 import {
 	endScheduleRunCancelled,
 	finishScheduleRun,
@@ -66,27 +66,6 @@ class CancelledBeforeStartError extends Error {
 const assertNotCancelled = async (deploymentId: string) => {
 	if (await isScheduleRunCancelled(deploymentId)) {
 		throw new CancelledBeforeStartError();
-	}
-};
-
-// Best effort: the log is where the run's output went (the server it ran on, or
-// this host), and a log that cannot be written must not fail the run's end.
-const appendRunLog = async (
-	logServerId: string | null,
-	logPath: string,
-	line: string,
-) => {
-	try {
-		if (logServerId) {
-			await execAsyncRemote(
-				logServerId,
-				`echo ${quote([line])} >> ${quote([logPath])}`,
-			);
-		} else {
-			await appendFile(logPath, `${line}\n`);
-		}
-	} catch (error) {
-		console.error(`Failed to write to the log ${logPath}:`, error);
 	}
 };
 
@@ -313,6 +292,7 @@ export const runCommand = async (scheduleId: string) => {
 				}
 			}
 		} else if (scheduleType === "dokploy-server") {
+			await assertNotCancelled(deployment.deploymentId);
 			const writeStream = createWriteStream(deployment.logPath, { flags: "a" });
 			const { SCHEDULES_PATH } = paths();
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
@@ -335,6 +315,8 @@ export const runCommand = async (scheduleId: string) => {
 				},
 				{
 					cwd: fullPath,
+					// The tag lets a cancel find the run when it has no pid (see cancel.ts).
+					env: { ...process.env, [SCHEDULE_RUN_ENV]: deployment.deploymentId },
 				},
 			);
 		} else if (scheduleType === "server") {
@@ -343,10 +325,12 @@ export const runCommand = async (scheduleId: string) => {
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
 			const command = `
 				set -euo pipefail
+				export ${SCHEDULE_RUN_ENV}=${quote([deployment.deploymentId])}
 				echo "Running script" >> ${quote([deployment.logPath])};
 				bash -c ${quote([`${fullPath}/script.sh`])} 2>&1 | tee -a ${quote([deployment.logPath])} || exit 1
 				echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 			`;
+			await assertNotCancelled(deployment.deploymentId);
 			await execAsyncRemote(serverId, command, async (data) => {
 				// we need to extract the PID and Schedule ID from the data
 				const pid = data?.match(/PID: (\d+)/)?.[1];

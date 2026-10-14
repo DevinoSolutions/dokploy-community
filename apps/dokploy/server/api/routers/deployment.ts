@@ -1,7 +1,9 @@
 import {
 	cancelBuildServerDeploymentById,
+	cancelHostScheduleRun,
 	cancelScheduleRun,
 	claimScheduleRunCancel,
+	endScheduleRunWithoutProcess,
 	execAsync,
 	execAsyncRemote,
 	findAllDeploymentsByApplicationId,
@@ -11,6 +13,7 @@ import {
 	findDeploymentById,
 	IS_CLOUD,
 	isMissingProcessError,
+	isPastStartGrace,
 	removeDeployment,
 	resolveServicePath,
 	revertScheduleRunCancel,
@@ -233,7 +236,17 @@ export const deploymentRouter = createTRPCRouter({
 				schedule?.scheduleType === "application" ||
 				schedule?.scheduleType === "compose";
 
-			if (!stoppedByTag && !deployment.pid) {
+			// A run of a server or dokploy-server schedule whose script never printed
+			// its pid is stopped by its tag too, once it is older than it takes to
+			// start: asking for a retry would never end.
+			const pastStartGrace = isPastStartGrace(
+				deployment.startedAt ?? deployment.createdAt,
+			);
+			const stoppedByTagWithoutPid =
+				Boolean(schedule) && !stoppedByTag && !deployment.pid && pastStartGrace;
+			const stoppedByPid = !stoppedByTag && !stoppedByTagWithoutPid;
+
+			if (stoppedByPid && !deployment.pid) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: schedule
@@ -245,7 +258,7 @@ export const deploymentRouter = createTRPCRouter({
 			// `pid` is a free text column and ends up in a shell command: only a
 			// plain decimal pid >= 2 is accepted (`kill -9 0` signals our own
 			// process group and `kill -9 1` signals init).
-			if (!stoppedByTag && !/^(?:[2-9]|[1-9]\d+)$/.test(deployment.pid ?? "")) {
+			if (stoppedByPid && !/^(?:[2-9]|[1-9]\d+)$/.test(deployment.pid ?? "")) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Deployment has an invalid process id",
@@ -294,6 +307,12 @@ export const deploymentRouter = createTRPCRouter({
 							deployment.deploymentId,
 						);
 						nothingToStop = stopped.containerFound && !stopped.found;
+					} else if (stoppedByTagWithoutPid) {
+						const stopped = await cancelHostScheduleRun(
+							deploymentHostServerId(deployment),
+							deployment.deploymentId,
+						);
+						nothingToStop = !stopped.found;
 					} else {
 						try {
 							await killOnHost();
@@ -321,8 +340,16 @@ export const deploymentRouter = createTRPCRouter({
 				// command has not started yet, or it is over. A run that is still
 				// going gets its claim undone and the user a retry; one that ended
 				// meanwhile (its end was noted on the row, so the revert does not
-				// apply) is cancelled as far as anyone can tell.
-				if (
+				// apply) is cancelled as far as anyone can tell. A run past the time it
+				// takes to start has nothing coming: it ends cancelled, with a line in
+				// its log, instead of asking for another retry.
+				if (nothingToStop && pastStartGrace) {
+					await endScheduleRunWithoutProcess(
+						deployment.deploymentId,
+						deploymentHostServerId(deployment),
+						deployment.logPath,
+					);
+				} else if (
 					nothingToStop &&
 					(await revertScheduleRunCancel(deployment.deploymentId, claim))
 				) {
