@@ -61,7 +61,9 @@ describe("addDomainToCompose domain validation errors", () => {
 
 		expect(error).toBeInstanceOf(TRPCError);
 		expect(error.code).toBe("BAD_REQUEST");
-		expect(error.message).toBe('Domain "example.com" is missing a service name');
+		expect(error.message).toBe(
+			'Domain "example.com" is missing a service name',
+		);
 	});
 
 	it("still labels a domain attached to an existing service", async () => {
