@@ -805,6 +805,9 @@ const executeComposePreview = async ({
 			),
 			suffix: previewSuffix,
 			randomize: true,
+			// The deploy guardrails are configured for the production service (its
+			// health check URL would probe the wrong deployment for a preview).
+			deployGuardrails: null,
 			isolatedDeployment: false,
 			isolatedDeploymentsVolume: false,
 			env: resolvePreviewTemplateVariables(

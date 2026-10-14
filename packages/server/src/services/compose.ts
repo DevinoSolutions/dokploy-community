@@ -18,6 +18,10 @@ import {
 	getComposeBuildOverridePath,
 	getRollbackMarkerProbeCommand,
 } from "@dokploy/server/utils/builders/compose";
+import {
+	getPhaseLogLine,
+	resolveDeployGuardrails,
+} from "@dokploy/server/utils/builders/compose-guardrails";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	cloneCompose,
@@ -159,6 +163,70 @@ export const didRollbackSucceed = async (
 	}
 };
 
+const formatElapsedSeconds = (startedAt: number) =>
+	`${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+
+/**
+ * Opt-in "phase timestamps" guardrail for the steps Dokploy itself drives
+ * (fetch, patches, build-server build, final status). Each boundary becomes a
+ * UTC-stamped line in the deploy log, written by the host that holds the log,
+ * with the elapsed seconds of the phase. The phases that run inside the deploy
+ * script (pull, compose up, health check) stamp themselves, see
+ * utils/builders/compose-guardrails.ts.
+ *
+ * Disabled (the default): `run` is a plain call and nothing is ever written.
+ * Enabled: a log write that fails is reported to the console and never fails
+ * the deployment.
+ */
+export const createComposePhaseLogger = (
+	entity: { serverId: string | null; deployGuardrails?: unknown },
+	logPath: string,
+) => {
+	const enabled =
+		resolveDeployGuardrails(entity.deployGuardrails)?.phaseTimestamps === true;
+	const note = async (message: string) => {
+		if (!enabled || !logPath || logPath === ".") return;
+		const command = `${getPhaseLogLine(message)} >> ${quote([logPath])}`;
+		try {
+			if (entity.serverId) {
+				await execAsyncRemote(entity.serverId, command);
+			} else {
+				await execAsync(command);
+			}
+		} catch (error) {
+			console.error(
+				"Could not write a phase timestamp to the deploy log",
+				error,
+			);
+		}
+	};
+	const run = async <T>(name: string, step: () => Promise<T>): Promise<T> => {
+		if (!enabled) return step();
+		const startedAt = Date.now();
+		await note(`${name}: started`);
+		try {
+			const result = await step();
+			await note(`${name}: finished after ${formatElapsedSeconds(startedAt)}`);
+			return result;
+		} catch (error) {
+			await note(`${name}: failed after ${formatElapsedSeconds(startedAt)}`);
+			throw error;
+		}
+	};
+	// Shell for the failure path, which writes the log in one command of its own.
+	const failedCommand = (startedAt: number) =>
+		enabled
+			? `${getPhaseLogLine(`Deployment failed (total ${formatElapsedSeconds(startedAt)})`)} >> ${quote([logPath])};`
+			: "";
+	return {
+		enabled,
+		note,
+		run,
+		elapsed: formatElapsedSeconds,
+		failedCommand,
+	};
+};
+
 /**
  * Shared clone → patches → (optional fresh-volumes down) → build pipeline used
  * by both `deployCompose` and the compose-preview deploy path. Extracting it
@@ -188,6 +256,7 @@ export const runComposeBuild = async (
 ) => {
 	const { freshVolumes = false, applyPatches = true, cancellable } = options;
 	const serverId = entity.serverId;
+	const phases = createComposePhaseLogger(entity, deployment.logPath);
 
 	const runStep = async (rawCommand: string) => {
 		const commandWithLog = `(${rawCommand}) >> ${deployment.logPath} 2>&1`;
@@ -216,7 +285,10 @@ export const runComposeBuild = async (
 	} else if (entity.sourceType === "raw") {
 		command += getCreateComposeFileCommand(entity);
 	}
-	await runStep(command);
+	await phases.run(
+		entity.sourceType === "raw" ? "Write compose file" : "Fetch source",
+		() => runStep(command),
+	);
 
 	if (applyPatches && entity.sourceType !== "raw") {
 		command = "set -e;";
@@ -225,7 +297,7 @@ export const runComposeBuild = async (
 			type: "compose",
 			serverId: entity.serverId,
 		});
-		await runStep(command);
+		await phases.run("Apply patches", () => runStep(command));
 	}
 
 	// >>> build-policy hook (compose): required-checks gate, between the clone
@@ -240,14 +312,18 @@ export const runComposeBuild = async (
 	// Build-server composes build and push their images before the running
 	// release is touched, so a failed build never reaches `down --volumes`.
 	// A no-op (undefined) for every compose without a `buildServerId`.
-	const remoteBuild = await prepareComposeBuildServerDeploy({
-		entity,
-		deployment,
-		runStep,
-		applyPatches,
-		freshVolumes,
-		cancellable,
-	});
+	const prepareBuildServer = () =>
+		prepareComposeBuildServerDeploy({
+			entity,
+			deployment,
+			runStep,
+			applyPatches,
+			freshVolumes,
+			cancellable,
+		});
+	const remoteBuild = entity.buildServerId
+		? await phases.run("Build images on the build server", prepareBuildServer)
+		: await prepareBuildServer();
 
 	if (freshVolumes && entity.composeType === "docker-compose") {
 		const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
@@ -510,6 +586,9 @@ export const deployCompose = async ({
 		description: descriptionLog,
 	});
 
+	const phases = createComposePhaseLogger(compose, deployment.logPath);
+	const deployStartedAt = Date.now();
+
 	try {
 		const entity = {
 			...compose,
@@ -517,6 +596,9 @@ export const deployCompose = async ({
 		};
 
 		await runComposeBuild(entity, deployment, { freshVolumes });
+		await phases.note(
+			`Deployment finished (total ${phases.elapsed(deployStartedAt)})`,
+		);
 
 		// A cancel that landed during the pull/up cannot be honoured (the release
 		// is already running); it stays recorded as cancelled, not "done".
@@ -579,6 +661,7 @@ export const deployCompose = async ({
 		) {
 			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
+		command += phases.failedCommand(deployStartedAt);
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		if (compose.serverId) {
 			await execAsyncRemote(compose.serverId, command);
@@ -646,6 +729,8 @@ export const rebuildCompose = async ({
 		title: titleLog,
 		description: descriptionLog,
 	});
+	const phases = createComposePhaseLogger(compose, deployment.logPath);
+	const deployStartedAt = Date.now();
 
 	try {
 		// Snapshot before the raw-file rewrite / patch application below.
@@ -657,11 +742,13 @@ export const rebuildCompose = async ({
 		}
 
 		let commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
+		await phases.run("Prepare compose file", async () => {
+			if (compose.serverId) {
+				await execAsyncRemote(compose.serverId, commandWithLog);
+			} else {
+				await execAsync(commandWithLog);
+			}
+		});
 
 		if (compose.sourceType !== "raw") {
 			command = "set -e;";
@@ -671,11 +758,13 @@ export const rebuildCompose = async ({
 				serverId: compose.serverId,
 			});
 			commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-			if (compose.serverId) {
-				await execAsyncRemote(compose.serverId, commandWithLog);
-			} else {
-				await execAsync(commandWithLog);
-			}
+			await phases.run("Apply patches", async () => {
+				if (compose.serverId) {
+					await execAsyncRemote(compose.serverId, commandWithLog);
+				} else {
+					await execAsync(commandWithLog);
+				}
+			});
 		}
 
 		// >>> build-policy hook (compose rebuild): the same required-checks gate
@@ -703,15 +792,19 @@ export const rebuildCompose = async ({
 				await execAsync(stepWithLog);
 			}
 		};
-		const remoteBuild = await prepareComposeBuildServerDeploy({
-			entity: compose,
-			deployment,
-			runStep: runRebuildStep,
-			freshVolumes,
-			// A rebuild does not pull on the serving host, so it must not
-			// build newer code on the build server either.
-			reuseClone: true,
-		});
+		const prepareBuildServer = () =>
+			prepareComposeBuildServerDeploy({
+				entity: compose,
+				deployment,
+				runStep: runRebuildStep,
+				freshVolumes,
+				// A rebuild does not pull on the serving host, so it must not
+				// build newer code on the build server either.
+				reuseClone: true,
+			});
+		const remoteBuild = compose.buildServerId
+			? await phases.run("Build images on the build server", prepareBuildServer)
+			: await prepareBuildServer();
 
 		if (freshVolumes && compose.composeType === "docker-compose") {
 			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
@@ -735,6 +828,9 @@ export const rebuildCompose = async ({
 		} else {
 			await execAsync(commandWithLog);
 		}
+		await phases.note(
+			`Deployment finished (total ${phases.elapsed(deployStartedAt)})`,
+		);
 
 		// See deployCompose: a cancel during the pull/up stays cancelled.
 		let finished = true;
@@ -784,6 +880,7 @@ export const rebuildCompose = async ({
 		) {
 			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
+		command += phases.failedCommand(deployStartedAt);
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		if (compose.serverId) {
 			await execAsyncRemote(compose.serverId, command);
