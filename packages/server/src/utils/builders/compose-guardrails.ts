@@ -25,6 +25,8 @@ export const DOCKER_EVENTS_MAX_LINES = 500;
  * them are impossible.
  */
 export const DOCKER_EVENTS_SAFETY_TIMEOUT_SECONDS = 3600;
+/** The watchdog gives up after this long, so a recycled pid cannot keep it alive forever. */
+export const DOCKER_EVENTS_WATCHDOG_LIFETIME_SECONDS = 3700;
 /** How often the watchdog checks that the deploy shell still exists. */
 export const DOCKER_EVENTS_WATCHDOG_INTERVAL_SECONDS = 2;
 /**
@@ -115,10 +117,12 @@ export const getEventsLabelFilter = (composeType: string, appName: string) =>
  * whose action holds the exec'd command line), and the action is cut at the
  * first `:` when printed as a second guard.
  *
- * The process always ends: the explicit stop calls around `up`, the EXIT trap
- * (success, failure and `exit 1`), a parent watchdog that notices when the
- * deploy shell is gone (a `kill -9` skips every trap, and `timeout` may not
- * exist), and `timeout` as a last resort where it is available.
+ * The capture is started BY the watchdog subshell, so there is no window in
+ * which it runs unwatched: the watchdog ends it when the deploy shell is gone
+ * (a `kill -9` skips every trap, and `timeout` may not exist), when the capture
+ * exits, or after its own lifetime bound. The explicit stop around `up` and the
+ * EXIT trap (success, failure and `exit 1`) end it through the same watchdog
+ * (SIGTERM), and `timeout` is a last resort where it is available.
  * `--since` makes the capture independent of how long the CLI takes to attach.
  */
 export const getDockerEventsStartScript = (
@@ -136,6 +140,9 @@ export const getDockerEventsStartScript = (
 	const header = quote([
 		`Docker events for ${appName} during the compose up window (UTC)`,
 	]);
+	const disabled = quote([
+		"Docker events capture skipped: could not create a private temporary directory on this host",
+	]);
 	const empty = quote([
 		`No docker events were recorded for ${appName} during the compose up window`,
 	]);
@@ -144,22 +151,28 @@ export const getDockerEventsStartScript = (
 	const format = quote([
 		"{{.TimeNano}}|{{.Type}}|{{.Action}}|{{.Actor.Attributes.name}}",
 	]);
-	const eventsCommand = `docker events --since "$DOKPLOY_EVENTS_SINCE" ${filters} --format ${format} > "$DOKPLOY_EVENTS_FILE" 2>/dev/null </dev/null &`;
+	const eventsCommand = `docker events --since "$DOKPLOY_EVENTS_SINCE" ${filters} --format ${format} > "$DOKPLOY_EVENTS_DIR/events" 2>/dev/null </dev/null &`;
+	// Everything lives in a private mktemp -d directory. If it cannot be created
+	// the capture is skipped: a predictable /tmp path could be pre-created as a
+	// symlink or hold an attacker-chosen pid.
 	return `
-		DOKPLOY_EVENTS_FILE=$(mktemp 2>/dev/null || echo "/tmp/dokploy-events-$$");
-		DOKPLOY_EVENTS_PID="";
-		DOKPLOY_EVENTS_WATCHDOG_PID="";
+		DOKPLOY_EVENTS_DIR=$(mktemp -d 2>/dev/null) || DOKPLOY_EVENTS_DIR="";
+		DOKPLOY_EVENTS_WD_PID="";
 		dokploy_events_stop() {
-			if [ -n "$DOKPLOY_EVENTS_WATCHDOG_PID" ]; then kill "$DOKPLOY_EVENTS_WATCHDOG_PID" 2>/dev/null || true; wait "$DOKPLOY_EVENTS_WATCHDOG_PID" 2>/dev/null || true; DOKPLOY_EVENTS_WATCHDOG_PID=""; fi;
-			if [ -n "$DOKPLOY_EVENTS_PID" ]; then kill "$DOKPLOY_EVENTS_PID" 2>/dev/null || true; wait "$DOKPLOY_EVENTS_PID" 2>/dev/null || true; DOKPLOY_EVENTS_PID=""; fi;
+			if [ -n "$DOKPLOY_EVENTS_WD_PID" ]; then kill "$DOKPLOY_EVENTS_WD_PID" 2>/dev/null || true; wait "$DOKPLOY_EVENTS_WD_PID" 2>/dev/null || true; DOKPLOY_EVENTS_WD_PID=""; fi;
+		};
+		dokploy_events_cleanup() {
+			dokploy_events_stop;
+			if [ -n "$DOKPLOY_EVENTS_DIR" ]; then rm -rf "$DOKPLOY_EVENTS_DIR" 2>/dev/null || true; fi;
 		};
 		dokploy_events_flush() {
 			dokploy_events_stop;
-			if [ -s "$DOKPLOY_EVENTS_FILE" ]; then
-				EV_TOTAL=$(wc -l < "$DOKPLOY_EVENTS_FILE" | tr -d ' ');
+			if [ -z "$DOKPLOY_EVENTS_DIR" ]; then return 0; fi;
+			if [ -s "$DOKPLOY_EVENTS_DIR/events" ]; then
+				EV_TOTAL=$(wc -l < "$DOKPLOY_EVENTS_DIR/events" | tr -d ' ');
 				echo ${TS} ${header};
 				if [ "$EV_TOTAL" -gt ${maxLines} ]; then echo "(truncated: showing the last ${maxLines} of $EV_TOTAL events)"; fi;
-				tail -n ${maxLines} "$DOKPLOY_EVENTS_FILE" | while IFS='|' read -r EV_NS EV_TYPE EV_ACTION EV_NAME; do
+				tail -n ${maxLines} "$DOKPLOY_EVENTS_DIR/events" | while IFS='|' read -r EV_NS EV_TYPE EV_ACTION EV_NAME; do
 					EV_SHOWN=\${EV_ACTION%%:*};
 					case "$EV_ACTION" in "health_status: healthy"|"health_status: unhealthy"|"health_status: starting") EV_SHOWN=$EV_ACTION;; esac;
 					EV_SECS=\${EV_NS%?????????}; EV_FRAC=\${EV_NS#$EV_SECS}; EV_MS=\${EV_FRAC%??????};
@@ -168,39 +181,49 @@ export const getDockerEventsStartScript = (
 			else
 				echo ${TS} ${empty};
 			fi;
-			rm -f "$DOKPLOY_EVENTS_FILE" 2>/dev/null || true;
+			rm -rf "$DOKPLOY_EVENTS_DIR" 2>/dev/null || true;
+			DOKPLOY_EVENTS_DIR="";
 		};
-		trap 'dokploy_events_stop; rm -f "$DOKPLOY_EVENTS_FILE" 2>/dev/null || true' EXIT;
-		DOKPLOY_EVENTS_SINCE=$(date +%s);
-		if command -v timeout >/dev/null 2>&1; then
-			timeout ${DOCKER_EVENTS_SAFETY_TIMEOUT_SECONDS} ${eventsCommand}
+		trap 'dokploy_events_cleanup' EXIT;
+		if [ -z "$DOKPLOY_EVENTS_DIR" ]; then
+			echo ${TS} ${disabled};
 		else
-			${eventsCommand}
+			DOKPLOY_EVENTS_SINCE=$(date +%s);
+			sh -c 'echo $PPID' > "$DOKPLOY_EVENTS_DIR/shell.pid" 2>/dev/null;
+			DOKPLOY_SHELL_PID=$(cat "$DOKPLOY_EVENTS_DIR/shell.pid" 2>/dev/null || echo "$$");
+			(
+				trap 'kill "$DOKPLOY_CAPTURE_PID" 2>/dev/null || true; exit 0' TERM;
+				DOKPLOY_CAPTURE_PID="";
+				kill -0 "$DOKPLOY_SHELL_PID" 2>/dev/null || exit 0;
+				if command -v timeout >/dev/null 2>&1; then
+					timeout ${DOCKER_EVENTS_SAFETY_TIMEOUT_SECONDS} ${eventsCommand}
+				else
+					${eventsCommand}
+				fi;
+				DOKPLOY_CAPTURE_PID=$!;
+				# Wall clock (date +%s): a host clock jump can stretch or shorten this bound.
+				DOKPLOY_WD_END=$(( $(date +%s) + ${DOCKER_EVENTS_WATCHDOG_LIFETIME_SECONDS} ));
+				while kill -0 "$DOKPLOY_SHELL_PID" 2>/dev/null && kill -0 "$DOKPLOY_CAPTURE_PID" 2>/dev/null && [ "$(date +%s)" -lt "$DOKPLOY_WD_END" ]; do
+					sleep ${DOCKER_EVENTS_WATCHDOG_INTERVAL_SECONDS} & wait $!;
+				done;
+				kill "$DOKPLOY_CAPTURE_PID" 2>/dev/null || true;
+			) >/dev/null 2>&1 </dev/null &
+			DOKPLOY_EVENTS_WD_PID=$!;
 		fi;
-		DOKPLOY_EVENTS_PID=$!;
-		DOKPLOY_SHELL_PID_FILE=$(mktemp 2>/dev/null || echo "/tmp/dokploy-shell-$$");
-		sh -c 'echo $PPID' > "$DOKPLOY_SHELL_PID_FILE" 2>/dev/null;
-		DOKPLOY_SHELL_PID=$(cat "$DOKPLOY_SHELL_PID_FILE" 2>/dev/null || echo "$$");
-		rm -f "$DOKPLOY_SHELL_PID_FILE" 2>/dev/null || true;
-		(
-			while kill -0 "$DOKPLOY_SHELL_PID" 2>/dev/null; do sleep ${DOCKER_EVENTS_WATCHDOG_INTERVAL_SECONDS}; done;
-			kill "$DOKPLOY_EVENTS_PID" 2>/dev/null || true;
-			rm -f "$DOKPLOY_EVENTS_FILE" 2>/dev/null || true;
-		) >/dev/null 2>&1 </dev/null &
-		DOKPLOY_EVENTS_WATCHDOG_PID=$!;
 		`;
 };
 
 export const DOCKER_EVENTS_FLUSH_COMMAND = "dokploy_events_flush;";
 
 /**
- * The URL as shown in the deploy log: scheme, host and path only. The query
- * string (tokens are often passed there) and the fragment are never logged.
+ * The URL as shown in the deploy log: scheme and host only. The path and query
+ * (webhook-style URLs carry their token there) and the fragment are never
+ * logged; `/…` marks that a path was configured.
  */
 export const getHealthCheckDisplayUrl = (rawUrl: string) => {
 	try {
 		const url = new URL(rawUrl);
-		return `${url.protocol}//${url.host}${url.pathname}${url.search ? "?…" : ""}`;
+		return `${url.protocol}//${url.host}${url.pathname !== "/" || url.search ? "/…" : ""}`;
 	} catch {
 		return "(invalid URL)";
 	}
@@ -216,7 +239,7 @@ export const HEALTH_CHECK_STACK_SKIPPED_MESSAGE =
  * exits non-zero WITHOUT touching the running release (no rollback).
  *
  * The URL reaches the shell only through shell-quote, and only its
- * scheme/host/path are printed.
+ * scheme and host are printed.
  *
  * A status counts only when curl itself succeeded (a stalled or truncated body
  * leaves the status line at 200 but curl non-zero) and the deadline has not
@@ -257,6 +280,7 @@ export const getHealthCheckScript = (
 			${phaseTimestamps ? getPhaseEndCommand("failed") : ""}
 			exit 1;
 		fi
+		# Wall clock (date +%s): a host clock jump can stretch or shorten the timeout.
 		HC_START=$(date +%s);
 		HC_DEADLINE=$(( HC_START + ${timeout} ));
 		HC_OK=0;
@@ -274,7 +298,7 @@ export const getHealthCheckScript = (
 			if HC_CODE=$(curl -s -L --globoff --max-redirs 5 --proto =http,https --proto-redir =http,https -o /dev/null -w '%{http_code}' --connect-timeout "$HC_CONNECT" --max-time "$HC_MAX" ${url} 2>/dev/null); then HC_RC=0; else HC_RC=$?; fi
 			HC_NOW=$(date +%s);
 			if [ "$HC_RC" = "0" ]; then HC_LAST="HTTP $HC_CODE"; else HC_LAST="no valid answer (curl exit $HC_RC)"; fi
-			if [ "$HC_RC" = "0" ] && [ "$HC_NOW" -le "$HC_DEADLINE" ]; then
+			if [ "$HC_RC" = "0" ] && [ "$HC_NOW" -lt "$HC_DEADLINE" ]; then
 				case "$HC_CODE" in ${expected}) HC_OK=1; break;; esac
 			fi
 			if [ "$HC_LAST" != "$HC_PREV" ]; then echo "Health check: $HC_LAST"; HC_PREV="$HC_LAST"; HC_BEAT=$HC_NOW; fi

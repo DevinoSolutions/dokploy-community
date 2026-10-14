@@ -216,11 +216,13 @@ describe("docker events capture", () => {
 
 	it("has a trap, a parent watchdog and a hard timeout as safety nets", async () => {
 		const command = await build({ deployGuardrails: { dockerEvents: true } });
-		expect(command).toContain(
-			`trap 'dokploy_events_stop; rm -f "$DOKPLOY_EVENTS_FILE" 2>/dev/null || true' EXIT;`,
-		);
+		expect(command).toContain(`trap 'dokploy_events_cleanup' EXIT;`);
 		expect(command).toContain("timeout 3600 docker events");
 		expect(command).toContain('while kill -0 "$DOKPLOY_SHELL_PID"');
+		// The capture is started by the watchdog, in a private mktemp -d dir.
+		expect(command).toContain("mktemp -d");
+		expect(command).not.toContain("/tmp/dokploy");
+		expect(command).toContain("DOKPLOY_WD_END");
 		// Also without `timeout` installed.
 		expect(command).toMatch(/else\s+docker events --since/);
 	});
@@ -285,7 +287,7 @@ describe("health check script generation", () => {
 		expect(check).toBeGreaterThan(up);
 		expect(lastGood).toBeGreaterThan(check);
 		expect(deployed).toBeGreaterThan(lastGood);
-		expect(command).toContain("http://localhost:3000/health");
+		expect(command).toContain(quote([healthCheck.url]));
 		// 2 s between attempts, any 2xx by default, no rollback on failure.
 		expect(command).toContain("HC_SLEEP=2;");
 		expect(command).toContain("2??) HC_OK=1");
@@ -318,7 +320,7 @@ describe("health check script generation", () => {
 		);
 		expect(command).toContain("if HC_CODE=$(curl -s -L --globoff");
 		expect(command).toContain(
-			'if [ "$HC_RC" = "0" ] && [ "$HC_NOW" -le "$HC_DEADLINE" ]',
+			'if [ "$HC_RC" = "0" ] && [ "$HC_NOW" -lt "$HC_DEADLINE" ]',
 		);
 	});
 
@@ -348,8 +350,31 @@ describe("health check script generation", () => {
 		const lines = command.split("\n").filter((l) => l.includes("SECRET123"));
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain("curl ");
-		expect(command).toContain("https://example.com:8443/up?…");
+		expect(command).toContain("https://example.com:8443/…");
 		expect(command).not.toContain("#frag'");
+	});
+
+	it("logs scheme and host only: a token in the path never reaches the log", async () => {
+		const command = await build({
+			deployGuardrails: {
+				healthCheck: {
+					url: "https://example.com/hook/PATHTOKEN",
+					timeoutSeconds: 10,
+				},
+			},
+		});
+		const lines = command
+			.split(String.fromCharCode(10))
+			.filter((l) => l.includes("PATHTOKEN"));
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("curl ");
+		expect(command).toContain("waiting up to 10s for https://example.com/…");
+	});
+
+	it("rejects a success in the last second of the deadline (strict comparison)", async () => {
+		const command = await build({ deployGuardrails: { healthCheck } });
+		expect(command).toContain('[ "$HC_NOW" -lt "$HC_DEADLINE" ]');
+		expect(command).toContain("Wall clock (date +%s)");
 	});
 
 	it("says the release was left running when the check fails", async () => {
@@ -492,6 +517,9 @@ esac`,
 		return out;
 	};
 
+	const hasPid = () =>
+		existsSync(pidFile) && readFileSync(pidFile, "utf8").trim() !== "";
+
 	const processIsGone = async () => {
 		const pid = readFileSync(pidFile, "utf8").trim();
 		for (let i = 0; i < 20; i++) {
@@ -571,7 +599,6 @@ esac`,
 			[
 				writeScript(
 					`echo $$ > ${toShellPath(parentFile)}; ${getDockerEventsStartScript("docker-compose", "my-app")}
-touch ${toShellPath(parentFile)}.ready
 sleep 20`,
 				),
 			],
@@ -584,13 +611,13 @@ sleep 20`,
 			},
 		);
 		try {
-			for (let i = 0; i < 100 && !existsSync(`${parentFile}.ready`); i++) {
+			for (let i = 0; i < 100 && !hasPid(); i++) {
 				await new Promise((resolve) => setTimeout(resolve, 100));
 			}
-			expect(existsSync(`${parentFile}.ready`)).toBe(true);
+			expect(hasPid()).toBe(true);
+			// Killed the moment the capture exists: no trap runs for SIGKILL and the
+			// rest of the startup never happens, only the watchdog can stop it.
 			const eventsPid = readFileSync(pidFile, "utf8").trim();
-			expect(sh(`kill -0 ${eventsPid}`).status).toBe(0);
-			// No trap runs for SIGKILL: only the watchdog can stop the capture.
 			const parentPid = readFileSync(parentFile, "utf8").trim();
 			expect(sh(`kill -9 ${parentPid}`).status).toBe(0);
 			let gone = false;
@@ -619,7 +646,6 @@ sleep 20`,
 			[
 				writeScript(
 					`echo $$ > ${toShellPath(parentFile)}; ${script}
-touch ${toShellPath(parentFile)}.ready
 sleep 20`,
 				),
 			],
@@ -632,7 +658,7 @@ sleep 20`,
 			},
 		);
 		try {
-			for (let i = 0; i < 100 && !existsSync(`${parentFile}.ready`); i++) {
+			for (let i = 0; i < 100 && !hasPid(); i++) {
 				await new Promise((resolve) => setTimeout(resolve, 100));
 			}
 			const eventsPid = readFileSync(pidFile, "utf8").trim();
@@ -664,6 +690,26 @@ dokploy_events_flush;`;
 		expect(result.stdout).toContain("container start web7");
 		expect(result.stdout).not.toContain("container start web4");
 		expect(await processIsGone()).toBe(true);
+	});
+
+	it("skips the capture instead of using a predictable path when mktemp fails", {
+		timeout: 30_000,
+	}, async () => {
+		installDocker({ upExit: 0, events: 1 });
+		rmSync(pidFile, { force: true });
+		writeBin("mktemp", "exit 1");
+		try {
+			const result = await runStackDeploy({ dockerEvents: true });
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain(
+				"Docker events capture skipped: could not create a private temporary directory",
+			);
+			expect(result.stdout).toContain("Docker Compose Deployed: ✅");
+			// docker events was never started.
+			expect(existsSync(pidFile)).toBe(false);
+		} finally {
+			rmSync(join(binDir, "mktemp"), { force: true });
+		}
 	});
 
 	it("stops the events process when up fails too, and still fails the deploy", async () => {
@@ -724,7 +770,7 @@ dokploy_events_flush;`;
 		});
 		expect(result.status).toBe(1);
 		expect(result.stdout).toContain(
-			"Error: ❌ Health check failed: http://localhost:8080/up did not answer 2xx within 5s, last result: HTTP 503. The new release was left running; no automatic rollback was performed.",
+			"Error: ❌ Health check failed: http://localhost:8080/… did not answer 2xx within 5s, last result: HTTP 503. The new release was left running; no automatic rollback was performed.",
 		);
 		expect(result.stdout).toContain("Health check: failed after");
 		// The deploy is not reported as done and nothing was rolled back.
@@ -802,7 +848,7 @@ dokploy_events_flush;`;
 		expect(args).toContain("http://localhost:8080/up?a[]=1&b={x}");
 		// The query never reaches the deploy log.
 		expect(result.stdout).not.toContain("a[]=1");
-		expect(result.stdout).toContain("http://localhost:8080/up?…");
+		expect(result.stdout).toContain("http://localhost:8080/…");
 	});
 
 	it("skips the health check for a swarm stack and says so", {
