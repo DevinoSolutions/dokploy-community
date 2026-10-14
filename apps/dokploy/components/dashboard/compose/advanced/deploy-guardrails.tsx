@@ -1,9 +1,19 @@
 import {
 	type DeployGuardrails,
 	deployHealthCheckSchema,
+	deployStallSnapshotSchema,
 	HEALTH_CHECK_TIMEOUT_DEFAULT_SECONDS,
 	HEALTH_CHECK_TIMEOUT_MAX_SECONDS,
 	HEALTH_CHECK_TIMEOUT_MIN_SECONDS,
+	STALL_SNAPSHOT_AFTER_DEFAULT_SECONDS,
+	STALL_SNAPSHOT_AFTER_MAX_SECONDS,
+	STALL_SNAPSHOT_AFTER_MIN_SECONDS,
+	STALL_SNAPSHOT_EVERY_DEFAULT_SECONDS,
+	STALL_SNAPSHOT_EVERY_MAX_SECONDS,
+	STALL_SNAPSHOT_EVERY_MIN_SECONDS,
+	STALL_SNAPSHOT_MAX_DEFAULT,
+	STALL_SNAPSHOT_MAX_MAX,
+	STALL_SNAPSHOT_MAX_MIN,
 } from "@dokploy/server/db/validations/compose-guardrails";
 import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
 import { useEffect } from "react";
@@ -43,25 +53,53 @@ const schema = z
 		healthCheckUrl: z.string(),
 		healthCheckTimeout: z.string(),
 		healthCheckStatus: z.string(),
+		stallSnapshotEnabled: z.boolean(),
+		stallSnapshotAfter: z.string(),
+		stallSnapshotEvery: z.string(),
+		stallSnapshotMax: z.string(),
 	})
 	.superRefine((values, ctx) => {
-		if (!values.healthCheckEnabled) return;
-		const parsed = deployHealthCheckSchema.safeParse(toHealthCheck(values));
-		if (parsed.success) return;
-		const fields: Record<
-			string,
-			"healthCheckUrl" | "healthCheckTimeout" | "healthCheckStatus"
-		> = {
-			url: "healthCheckUrl",
-			timeoutSeconds: "healthCheckTimeout",
-			expectedStatus: "healthCheckStatus",
-		};
-		for (const issue of parsed.error.issues) {
-			ctx.addIssue({
-				code: "custom",
-				message: issue.message,
-				path: [fields[String(issue.path[0])] ?? "healthCheckUrl"],
-			});
+		if (values.healthCheckEnabled) {
+			const parsed = deployHealthCheckSchema.safeParse(toHealthCheck(values));
+			if (!parsed.success) {
+				const fields: Record<
+					string,
+					"healthCheckUrl" | "healthCheckTimeout" | "healthCheckStatus"
+				> = {
+					url: "healthCheckUrl",
+					timeoutSeconds: "healthCheckTimeout",
+					expectedStatus: "healthCheckStatus",
+				};
+				for (const issue of parsed.error.issues) {
+					ctx.addIssue({
+						code: "custom",
+						message: issue.message,
+						path: [fields[String(issue.path[0])] ?? "healthCheckUrl"],
+					});
+				}
+			}
+		}
+		if (values.stallSnapshotEnabled) {
+			const parsed = deployStallSnapshotSchema.safeParse(
+				toStallSnapshot(values),
+			);
+			if (!parsed.success) {
+				const fields: Record<
+					string,
+					"stallSnapshotAfter" | "stallSnapshotEvery" | "stallSnapshotMax"
+				> = {
+					afterSeconds: "stallSnapshotAfter",
+					everySeconds: "stallSnapshotEvery",
+					maxSnapshots: "stallSnapshotMax",
+				};
+				for (const issue of parsed.error.issues) {
+					ctx.addIssue({
+						code: "custom",
+						message: issue.message,
+						path: [fields[String(issue.path[0])] ?? "stallSnapshotAfter"],
+					});
+				}
+			}
 		}
 	});
 
@@ -81,6 +119,26 @@ const toHealthCheck = (values: {
 		: undefined,
 });
 
+// An empty input falls back to the default; anything else is validated as typed.
+const toNumber = (value: string, fallback: number) =>
+	value.trim() ? Number(value) : fallback;
+
+const toStallSnapshot = (values: {
+	stallSnapshotAfter: string;
+	stallSnapshotEvery: string;
+	stallSnapshotMax: string;
+}) => ({
+	afterSeconds: toNumber(
+		values.stallSnapshotAfter,
+		STALL_SNAPSHOT_AFTER_DEFAULT_SECONDS,
+	),
+	everySeconds: toNumber(
+		values.stallSnapshotEvery,
+		STALL_SNAPSHOT_EVERY_DEFAULT_SECONDS,
+	),
+	maxSnapshots: toNumber(values.stallSnapshotMax, STALL_SNAPSHOT_MAX_DEFAULT),
+});
+
 // The health check does not apply to swarm stacks, so a stack never saves one
 // (a stale value from before the type changed is dropped on the next save).
 const toGuardrails = (
@@ -88,13 +146,21 @@ const toGuardrails = (
 	isStack: boolean,
 ): DeployGuardrails | null => {
 	const healthCheckEnabled = values.healthCheckEnabled && !isStack;
-	if (!values.phaseTimestamps && !values.dockerEvents && !healthCheckEnabled) {
+	if (
+		!values.phaseTimestamps &&
+		!values.dockerEvents &&
+		!healthCheckEnabled &&
+		!values.stallSnapshotEnabled
+	) {
 		return null;
 	}
 	return {
 		phaseTimestamps: values.phaseTimestamps,
 		dockerEvents: values.dockerEvents,
 		healthCheck: healthCheckEnabled ? toHealthCheck(values) : null,
+		stallSnapshot: values.stallSnapshotEnabled
+			? toStallSnapshot(values)
+			: null,
 	};
 };
 
@@ -105,6 +171,10 @@ const defaultValues: Schema = {
 	healthCheckUrl: "",
 	healthCheckTimeout: String(HEALTH_CHECK_TIMEOUT_DEFAULT_SECONDS),
 	healthCheckStatus: "",
+	stallSnapshotEnabled: false,
+	stallSnapshotAfter: String(STALL_SNAPSHOT_AFTER_DEFAULT_SECONDS),
+	stallSnapshotEvery: String(STALL_SNAPSHOT_EVERY_DEFAULT_SECONDS),
+	stallSnapshotMax: String(STALL_SNAPSHOT_MAX_DEFAULT),
 };
 
 export const DeployGuardrailsCompose = ({ composeId }: Props) => {
@@ -136,11 +206,24 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 					guardrails?.healthCheck?.expectedStatus !== undefined
 						? String(guardrails.healthCheck.expectedStatus)
 						: "",
+				stallSnapshotEnabled: !!guardrails?.stallSnapshot,
+				stallSnapshotAfter: String(
+					guardrails?.stallSnapshot?.afterSeconds ??
+						STALL_SNAPSHOT_AFTER_DEFAULT_SECONDS,
+				),
+				stallSnapshotEvery: String(
+					guardrails?.stallSnapshot?.everySeconds ??
+						STALL_SNAPSHOT_EVERY_DEFAULT_SECONDS,
+				),
+				stallSnapshotMax: String(
+					guardrails?.stallSnapshot?.maxSnapshots ?? STALL_SNAPSHOT_MAX_DEFAULT,
+				),
 			});
 		}
 	}, [form, data]);
 
 	const healthCheckEnabled = form.watch("healthCheckEnabled");
+	const stallSnapshotEnabled = form.watch("stallSnapshotEnabled");
 	const isStack = data?.composeType === "stack";
 
 	const onSubmit = async (values: Schema) => {
@@ -218,6 +301,101 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 								</FormItem>
 							)}
 						/>
+						<div className="flex flex-col gap-4 rounded-lg border p-3 shadow-sm">
+							<FormField
+								control={form.control}
+								name="stallSnapshotEnabled"
+								render={({ field }) => (
+									<FormItem className="flex flex-row items-center justify-between">
+										<div className="space-y-0.5">
+											<FormLabel>Stall snapshots</FormLabel>
+											<FormDescription>
+												Logs the project's container states while{" "}
+												<code>compose up</code> is slow. Observe only.
+											</FormDescription>
+										</div>
+										<FormControl>
+											<Switch
+												checked={field.value}
+												onCheckedChange={field.onChange}
+											/>
+										</FormControl>
+									</FormItem>
+								)}
+							/>
+							{stallSnapshotEnabled && (
+								<div className="grid gap-4 md:grid-cols-3">
+									<FormField
+										control={form.control}
+										name="stallSnapshotAfter"
+										render={({ field }) => (
+											<FormItem>
+												<FormLabel>Start after (seconds)</FormLabel>
+												<FormControl>
+													<Input
+														type="number"
+														min={STALL_SNAPSHOT_AFTER_MIN_SECONDS}
+														max={STALL_SNAPSHOT_AFTER_MAX_SECONDS}
+														{...field}
+													/>
+												</FormControl>
+												<FormDescription>
+													{STALL_SNAPSHOT_AFTER_MIN_SECONDS} to{" "}
+													{STALL_SNAPSHOT_AFTER_MAX_SECONDS}.
+												</FormDescription>
+												<FormMessage />
+											</FormItem>
+										)}
+									/>
+									<FormField
+										control={form.control}
+										name="stallSnapshotEvery"
+										render={({ field }) => (
+											<FormItem>
+												<FormLabel>Repeat every (seconds)</FormLabel>
+												<FormControl>
+													<Input
+														type="number"
+														min={STALL_SNAPSHOT_EVERY_MIN_SECONDS}
+														max={STALL_SNAPSHOT_EVERY_MAX_SECONDS}
+														{...field}
+													/>
+												</FormControl>
+												<FormDescription>
+													{STALL_SNAPSHOT_EVERY_MIN_SECONDS} to{" "}
+													{STALL_SNAPSHOT_EVERY_MAX_SECONDS}.
+												</FormDescription>
+												<FormMessage />
+											</FormItem>
+										)}
+									/>
+									<FormField
+										control={form.control}
+										name="stallSnapshotMax"
+										render={({ field }) => (
+											<FormItem>
+												<FormLabel>Maximum snapshots</FormLabel>
+												<FormControl>
+													<Input
+														type="number"
+														min={STALL_SNAPSHOT_MAX_MIN}
+														max={STALL_SNAPSHOT_MAX_MAX}
+														{...field}
+													/>
+												</FormControl>
+												<FormDescription>
+													{STALL_SNAPSHOT_MAX_MIN} to {STALL_SNAPSHOT_MAX_MAX}.
+													Each lists at most 200 lines and stops when{" "}
+													<code>up</code> returns. It runs on the host that
+													runs <code>up</code>.
+												</FormDescription>
+												<FormMessage />
+											</FormItem>
+										)}
+									/>
+								</div>
+							)}
+						</div>
 						{isStack ? (
 							<p className="rounded-lg border p-3 text-sm text-muted-foreground shadow-sm">
 								The health check is not available for Docker Swarm stacks:{" "}
