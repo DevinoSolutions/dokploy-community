@@ -637,6 +637,9 @@ export const ShowDeployments = ({
 					onClose={() => setActiveLog(null)}
 					logPath={activeLog?.logPath || ""}
 					errorMessage={activeLog?.errorMessage || ""}
+					unavailableMessage={
+						needsLogHost ? logHost?.unavailable : undefined
+					}
 				/>
 			</CardContent>
 		</Card>

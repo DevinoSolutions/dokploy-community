@@ -21,6 +21,8 @@ interface Props {
 	onClose: () => void;
 	serverId?: string;
 	errorMessage?: string;
+	// Set when the log no longer exists on any server: shown in place of the log.
+	unavailableMessage?: string;
 }
 export const ShowDeployment = ({
 	logPath,
@@ -28,6 +30,7 @@ export const ShowDeployment = ({
 	onClose,
 	serverId,
 	errorMessage,
+	unavailableMessage,
 }: Props) => {
 	const [data, setData] = useState("");
 	const [showExtraLogs, setShowExtraLogs] = useState(false);
@@ -52,7 +55,7 @@ export const ShowDeployment = ({
 	};
 
 	useEffect(() => {
-		if (!open || !logPath) return;
+		if (!open || !logPath || unavailableMessage) return;
 
 		setData("");
 		const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -79,7 +82,7 @@ export const ShowDeployment = ({
 				wsRef.current = null;
 			}
 		};
-	}, [logPath, open]);
+	}, [logPath, open, unavailableMessage]);
 
 	useEffect(() => {
 		const logs = parseLogs(data);
@@ -194,7 +197,11 @@ export const ShowDeployment = ({
 					className="h-[720px] overflow-y-auto space-y-0 border p-4 bg-background rounded custom-logs-scrollbar"
 				>
 					{" "}
-					{filteredLogs.length > 0 ? (
+					{unavailableMessage ? (
+						<div className="flex justify-center items-center h-full text-muted-foreground">
+							{unavailableMessage}
+						</div>
+					) : filteredLogs.length > 0 ? (
 						filteredLogs.map((log: LogLine, index: number) => (
 							<TerminalLine
 								key={`${log.rawTimestamp ?? ""}-${index}`}

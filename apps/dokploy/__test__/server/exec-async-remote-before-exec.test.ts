@@ -132,6 +132,38 @@ describe("execAsyncRemote with a beforeExec check", () => {
 		expect(ssh.clients[0].calls).toEqual(["end"]);
 	});
 
+	it("rejects once, destroys the connection and never sends the command when aborted while the check is pending", async () => {
+		const controller = new AbortController();
+		const unhandled = vi.fn();
+		process.on("unhandledRejection", unhandled);
+		let finishCheck: () => void = () => {};
+		const pending = new Promise<void>((resolve) => {
+			finishCheck = resolve;
+		});
+		try {
+			const call = execAsyncRemote("server-1", "echo hi", undefined, {
+				signal: controller.signal,
+				beforeExec: () => pending,
+			});
+			const settled = expect(call).rejects.toThrow("aborted");
+			await vi.waitFor(() => expect(ssh.clients).toHaveLength(1));
+			await new Promise((resolve) => setImmediate(resolve));
+
+			controller.abort();
+			await settled;
+			// The check finishes afterwards: nothing more happens.
+			finishCheck();
+			await new Promise((resolve) => setImmediate(resolve));
+			await new Promise((resolve) => setImmediate(resolve));
+		} finally {
+			process.off("unhandledRejection", unhandled);
+		}
+
+		expect(ssh.clients[0].execs).toEqual([]);
+		expect(ssh.clients[0].calls).toEqual(["destroy"]);
+		expect(unhandled).not.toHaveBeenCalled();
+	});
+
 	it("is not involved when it is not given", async () => {
 		await execAsyncRemote("server-1", "echo hi");
 
