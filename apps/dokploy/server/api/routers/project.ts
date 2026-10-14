@@ -1311,6 +1311,9 @@ export const projectRouter = createTRPCRouter({
 									domains,
 									appName,
 									refreshToken,
+									// Not copied: the health check URL points at the original
+									// service, and a copy starts with every guardrail off.
+									deployGuardrails: _deployGuardrails,
 									...compose
 								} = await findComposeById(id);
 

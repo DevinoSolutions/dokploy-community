@@ -1513,6 +1513,13 @@
       "when": 1791746463215,
       "tag": "0215_snapvisor_build_checks",
       "breakpoints": true
+    },
+    {
+      "idx": 216,
+      "version": "7",
+      "when": 1791965442421,
+      "tag": "0216_compose_deploy_guardrails",
+      "breakpoints": true
     }
   ]
 }

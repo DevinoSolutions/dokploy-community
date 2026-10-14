@@ -32,6 +32,7 @@ import { ShowSchedules } from "@/components/dashboard/application/schedules/show
 import { ShowVolumeBackups } from "@/components/dashboard/application/volume-backups/show-volume-backups";
 import { AddCommandCompose } from "@/components/dashboard/compose/advanced/add-command";
 import { IsolatedDeploymentTab } from "@/components/dashboard/compose/advanced/add-isolation";
+import { DeployGuardrailsCompose } from "@/components/dashboard/compose/advanced/deploy-guardrails";
 import { PullImagesCompose } from "@/components/dashboard/compose/advanced/pull-images";
 import { ShowComposeBuildServer } from "@/components/dashboard/compose/advanced/show-build-server";
 import { ShowComposeContainers } from "@/components/dashboard/compose/containers/show-compose-containers";
@@ -585,6 +586,7 @@ const Service = (
 												/>
 												<PullImagesCompose composeId={composeId} />
 												<ShowComposeBuildServer composeId={composeId} />
+												<DeployGuardrailsCompose composeId={composeId} />
 											</div>
 										</TabsContent>
 									)}
