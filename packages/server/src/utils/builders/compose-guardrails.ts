@@ -258,8 +258,13 @@ export const STALL_SNAPSHOT_KILL_GRACE_SECONDS = 2;
  * after a short grace, both when it times out and when the deploy shell is
  * gone. The watcher's own TERM handler only raises a flag that is checked
  * after every wait, so a TERM between starting the command and recording its
- * pid cannot orphan it. A watcher that finished by itself leaves a `done`
- * marker, and the shell then never signals its (possibly reused) pid.
+ * pid cannot orphan it (it also drops a stop file that the per-command killer
+ * polls, because a TERM before the wait starts does not interrupt it). After
+ * the last snapshot the watcher stays alive, napping, until the shell stops it,
+ * the shell or its directory is gone, or the lifetime bound passes, so the
+ * directory is removed even if the shell is killed later. Only a watcher that
+ * hit the lifetime bound with the shell alive leaves a `done` marker, and the
+ * shell then never signals its (possibly reused) pid.
  *
  * For a swarm stack, `docker stack deploy` usually returns before the tasks
  * converge, so the deploy rarely lasts long enough for a snapshot to fire.
@@ -325,10 +330,10 @@ export const getStallSnapshotStartScript = (
 			(
 				set +e;
 				DOKPLOY_STALL_SLEEP_PID=""; DOKPLOY_STALL_CMD_PID=""; DOKPLOY_STALL_KILLER_PID=""; DOKPLOY_STALL_STOP=0;
-				# TERM only raises a flag. The main flow checks it after every wait, so a TERM
-				# that lands between starting the state command and recording its pid cannot
-				# leave the command behind.
-				trap 'DOKPLOY_STALL_STOP=1' TERM;
+				# TERM only raises a flag (and drops a stop file for the per-command killer).
+				# The main flow checks the flag after every wait, so a TERM that lands between
+				# starting the state command and recording its pid cannot leave the command behind.
+				trap 'DOKPLOY_STALL_STOP=1; : > "$DOKPLOY_STALL_DIR/stop" 2>/dev/null' TERM;
 				# SIGTERM, then SIGKILL after a short grace if the process ignores it. The
 				# process is a child of this subshell: it is waited for, so it is reaped too.
 				dokploy_stall_reap() {
@@ -371,16 +376,19 @@ export const getStallSnapshotStartScript = (
 					DOKPLOY_STALL_CMD_PID=$!;
 					# A TERM that arrived before the pid was recorded is only seen now.
 					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
-					# Bounds the command, and ends it early when the deploy shell is gone.
+					# Bounds the command, and ends it early when the deploy shell is gone or the
+					# watcher was told to stop (stop file, or its directory removed). That covers a
+					# TERM that lands before the wait below starts, which does not interrupt it.
 					(
 						DOKPLOY_STALL_I=0;
-						while [ "$DOKPLOY_STALL_I" -lt ${STALL_SNAPSHOT_COMMAND_TIMEOUT_SECONDS} ] && kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null; do sleep 1; DOKPLOY_STALL_I=$(( DOKPLOY_STALL_I + 1 )); done;
+						while [ "$DOKPLOY_STALL_I" -lt ${STALL_SNAPSHOT_COMMAND_TIMEOUT_SECONDS} ] && kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null && [ -d "$DOKPLOY_STALL_DIR" ] && [ ! -e "$DOKPLOY_STALL_DIR/stop" ]; do sleep 1; DOKPLOY_STALL_I=$(( DOKPLOY_STALL_I + 1 )); done;
 						kill -TERM "$DOKPLOY_STALL_CMD_PID" 2>/dev/null || exit 0;
 						DOKPLOY_STALL_G=0;
 						while [ "$DOKPLOY_STALL_G" -lt ${STALL_SNAPSHOT_KILL_GRACE_SECONDS} ] && kill -0 "$DOKPLOY_STALL_CMD_PID" 2>/dev/null; do sleep 1; DOKPLOY_STALL_G=$(( DOKPLOY_STALL_G + 1 )); done;
 						if kill -0 "$DOKPLOY_STALL_CMD_PID" 2>/dev/null; then kill -KILL "$DOKPLOY_STALL_CMD_PID" 2>/dev/null; fi;
 					) >/dev/null 2>&1 </dev/null &
 					DOKPLOY_STALL_KILLER_PID=$!;
+					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
 					wait "$DOKPLOY_STALL_CMD_PID" 2>/dev/null; DOKPLOY_STALL_RC=$?;
 					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
 					kill "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null; wait "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null;
@@ -408,17 +416,26 @@ export const getStallSnapshotStartScript = (
 					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
 					cat "$DOKPLOY_STALL_DIR/block" 2>/dev/null;
 					# Scheduled from the previous deadline, so the time a command took does not
-					# stretch the interval. A deadline already in the past means one immediate
-					# snapshot, not a burst; maxSnapshots bounds the total either way.
+					# stretch the interval. A deadline already reached (the command took
+					# at least as long as the interval) restarts the interval from now, so snapshots
+					# never run back to back; maxSnapshots bounds the total either way.
 					DOKPLOY_STALL_NEXT=$(( DOKPLOY_STALL_NEXT + ${every} ));
 					DOKPLOY_STALL_NOW=$(date +%s);
-					if [ "$DOKPLOY_STALL_NEXT" -lt "$DOKPLOY_STALL_NOW" ]; then DOKPLOY_STALL_NEXT=$DOKPLOY_STALL_NOW; fi;
+					if [ "$DOKPLOY_STALL_NEXT" -le "$DOKPLOY_STALL_NOW" ]; then DOKPLOY_STALL_NEXT=$(( DOKPLOY_STALL_NOW + ${every} )); fi;
+				done;
+				# All snapshots taken (or the shell or lifetime ended the loop). Stay around so
+				# the shell can simply signal this process, until it is told to stop, the shell
+				# or the private dir is gone, or the lifetime bound passes. Then remove the dir.
+				while [ "$DOKPLOY_STALL_STOP" != "1" ] && kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null && [ -d "$DOKPLOY_STALL_DIR" ] && [ "$(date +%s)" -lt "$DOKPLOY_STALL_END" ]; do
+					sleep ${STALL_SNAPSHOT_POLL_INTERVAL_SECONDS} & DOKPLOY_STALL_SLEEP_PID=$!;
+					wait "$DOKPLOY_STALL_SLEEP_PID" 2>/dev/null;
+					DOKPLOY_STALL_SLEEP_PID="";
 				done;
 				if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
-				# Finished on its own. With the deploy shell alive, leave a marker in the
-				# private dir (the shell removes it) so the shell never signals this pid
-				# after it may have been reused; with the shell gone, nobody will, so remove it.
-				if kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null; then
+				if kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null && [ -d "$DOKPLOY_STALL_DIR" ]; then
+					# Lifetime bound passed with the shell still alive: leave a marker (the shell
+					# removes the dir) so the shell never signals this pid after it may have been
+					# reused.
 					: > "$DOKPLOY_STALL_DIR/done" 2>/dev/null;
 					rm -f "$DOKPLOY_STALL_DIR/ps" "$DOKPLOY_STALL_DIR/block" "$DOKPLOY_STALL_DIR/shell.pid" 2>/dev/null;
 					kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null || rm -rf "$DOKPLOY_STALL_DIR" 2>/dev/null;
