@@ -158,9 +158,7 @@ const toGuardrails = (
 		phaseTimestamps: values.phaseTimestamps,
 		dockerEvents: values.dockerEvents,
 		healthCheck: healthCheckEnabled ? toHealthCheck(values) : null,
-		stallSnapshot: values.stallSnapshotEnabled
-			? toStallSnapshot(values)
-			: null,
+		stallSnapshot: values.stallSnapshotEnabled ? toStallSnapshot(values) : null,
 	};
 };
 
@@ -312,6 +310,14 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 											<FormDescription>
 												Logs the project's container states while{" "}
 												<code>compose up</code> is slow. Observe only.
+												{isStack && (
+													<>
+														{" "}
+														For Docker Swarm stacks,{" "}
+														<code>docker stack deploy</code> usually returns
+														before the tasks converge, so snapshots rarely fire.
+													</>
+												)}
 											</FormDescription>
 										</div>
 										<FormControl>
@@ -386,8 +392,8 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 												<FormDescription>
 													{STALL_SNAPSHOT_MAX_MIN} to {STALL_SNAPSHOT_MAX_MAX}.
 													Each lists at most 200 lines and stops when{" "}
-													<code>up</code> returns. It runs on the host that
-													runs <code>up</code>.
+													<code>up</code> returns. It runs on the host that runs{" "}
+													<code>up</code>.
 												</FormDescription>
 												<FormMessage />
 											</FormItem>

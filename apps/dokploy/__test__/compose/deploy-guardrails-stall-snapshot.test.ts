@@ -62,9 +62,7 @@ describe("stall snapshot script generation", () => {
 		});
 		const start = command.indexOf("DOKPLOY_STALL_DIR=$(mktemp -d");
 		const up = command.indexOf("up -d --build --remove-orphans", start);
-		const failureCleanup = command.indexOf(
-			"|| { dokploy_stall_cleanup; echo",
-		);
+		const failureCleanup = command.indexOf("|| { dokploy_stall_cleanup; echo");
 		const successCleanup = command.indexOf(
 			"\n\t\tdokploy_stall_cleanup;\n",
 			failureCleanup,
@@ -77,7 +75,9 @@ describe("stall snapshot script generation", () => {
 		expect(command).toContain(
 			`docker ps -a --filter ${quote(["label=com.docker.compose.project=my-app"])} --format ${quote(["{{.Names}}|{{.State}}|{{.Status}}|{{.CreatedAt}}"])}`,
 		);
-		expect(command).toContain("DOKPLOY_STALL_NEXT=$(( DOKPLOY_STALL_T0 + 15 ))");
+		expect(command).toContain(
+			"DOKPLOY_STALL_NEXT=$(( DOKPLOY_STALL_T0 + 15 ))",
+		);
 		expect(command).toContain('"$DOKPLOY_STALL_N" -lt 5 ]');
 		expect(command).toContain("head -n 200");
 		expect(command).toContain("mktemp -d");
@@ -124,9 +124,7 @@ describe("stall snapshot script generation", () => {
 			deployGuardrails: { dockerEvents: true, stallSnapshot: stall },
 		});
 		const events = command.indexOf("docker events --since");
-		const eventsTrap = command.indexOf(
-			"trap 'dokploy_events_cleanup' EXIT;",
-		);
+		const eventsTrap = command.indexOf("trap 'dokploy_events_cleanup' EXIT;");
 		const stallTrap = command.indexOf(
 			"trap 'dokploy_stall_cleanup; if command -v dokploy_events_cleanup",
 		);
@@ -135,7 +133,9 @@ describe("stall snapshot script generation", () => {
 		expect(stallTrap).toBeGreaterThan(eventsTrap);
 		expect(up).toBeGreaterThan(stallTrap);
 		// Both are ended around up.
-		expect(command).toContain("|| { dokploy_stall_cleanup; dokploy_events_flush;");
+		expect(command).toContain(
+			"|| { dokploy_stall_cleanup; dokploy_events_flush;",
+		);
 	});
 
 	it("runs where up runs: after the pull of a build-server deploy", async () => {
@@ -152,20 +152,18 @@ describe("stall snapshot script generation", () => {
 	});
 
 	it("reaches the shell only through shell-quote", () => {
-		const script = getStallSnapshotStartScript("docker-compose", "app; rm -rf /", {
-			...stall,
-		});
+		const script = getStallSnapshotStartScript(
+			"docker-compose",
+			"app; rm -rf /",
+			{
+				...stall,
+			},
+		);
 		expect(script).toContain(
 			`--filter ${quote(["label=com.docker.compose.project=app; rm -rf /"])}`,
 		);
-		expect(script).toContain(
-			`DOKPLOY_STALL_APP=${quote(["app; rm -rf /"])};`,
-		);
-		const swarm = getStallSnapshotStartScript(
-			"stack",
-			"app; rm -rf /",
-			stall,
-		);
+		expect(script).toContain(`DOKPLOY_STALL_APP=${quote(["app; rm -rf /"])};`);
+		const swarm = getStallSnapshotStartScript("stack", "app; rm -rf /", stall);
 		expect(swarm).toContain(`docker stack ps ${quote(["app; rm -rf /"])} `);
 	});
 });
@@ -233,7 +231,7 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 		upExit?: number;
 		psBody?: string;
 		psExit?: number;
-		psHang?: boolean;
+		psHang?: boolean | "ignore-term";
 	}) => {
 		writeBin(
 			"docker",
@@ -242,7 +240,7 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
     if [ "$1" = "stack" ] && [ "$2" != "ps" ]; then sleep ${upSleep}; exit ${upExit}; fi
     printf '%s\\n' "$@" >> ${toShellPath(psArgsFile)}
     printf '%s\\n' ---- >> ${toShellPath(psArgsFile)}
-    ${psHang ? `echo $$ > ${toShellPath(psPidFile)}; exec sleep 300` : psBody}
+    ${psHang === "ignore-term" ? `trap '' TERM; echo $$ > ${toShellPath(psPidFile)}; while :; do sleep 1; done` : psHang ? `echo $$ > ${toShellPath(psPidFile)}; exec sleep 300` : psBody}
     exit ${psExit} ;;
   events)
     echo $$ > ${toShellPath(eventsPidFile)}
@@ -409,7 +407,9 @@ dokploy_stall_cleanup`,
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("docker stack deploy still running");
 		expect(result.stdout).toContain("TASK|CURRENT STATE|DESIRED STATE|NODE");
-		expect(result.stdout).toContain("my-app_web.1|Running 3 seconds ago|Running|node-1");
+		expect(result.stdout).toContain(
+			"my-app_web.1|Running 3 seconds ago|Running|node-1",
+		);
 		const first = readFileSync(psArgsFile, "utf8").split("----\n")[0];
 		expect(first?.split("\n").filter(Boolean).slice(0, 3)).toEqual([
 			"stack",
@@ -439,7 +439,9 @@ dokploy_stall_cleanup`,
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("c4|running|Up|t");
 		expect(result.stdout).not.toContain("c5|running|Up|t");
-		expect(result.stdout).toContain("(truncated: showing the first 5 of 12 lines)");
+		expect(result.stdout).toContain(
+			"(truncated: showing the first 5 of 12 lines)",
+		);
 	});
 
 	it("reports an empty, failing or hanging state command without failing the deploy", {
@@ -473,11 +475,9 @@ dokploy_stall_cleanup`,
 		expect(failing.stdout + failing.stderr).not.toContain("SECRET-STDERR");
 
 		installDocker({ upSleep: 0, psHang: true });
-		const script = getStallSnapshotStartScript(
-			"docker-compose",
-			"my-app",
-			one,
-		).replace("-lt 20 ]", "-lt 2 ]").replace("-ge 20 ]", "-ge 2 ]");
+		const script = getStallSnapshotStartScript("docker-compose", "my-app", one)
+			.replace("-lt 20 ]", "-lt 2 ]")
+			.replace("-ge 20 ]", "-ge 2 ]");
 		const hanging = sh(
 			`${script}
 sleep 7;
@@ -559,57 +559,203 @@ exit 1`,
 		const stallDir = readFileSync(dirFile, "utf8").trim();
 		const wd = readFileSync(wdFile, "utf8").trim();
 		expect(stallDir).not.toBe("");
-		await sleepMs(500);
+		// The shell only asks the watcher to stop (it does not wait for it).
+		for (
+			let i = 0;
+			i < 50 && sh(`kill -0 ${wd} 2>/dev/null`).status === 0;
+			i++
+		) {
+			await sleepMs(100);
+		}
 		expect(sh(`test -d ${quote([stallDir])}`).status).not.toBe(0);
 		expect(sh(`kill -0 ${wd} 2>/dev/null`).status).not.toBe(0);
 	});
 
-	it("leaves no watcher or directory when the deploy shell is killed with SIGKILL", {
-		timeout: 60_000,
-	}, async () => {
-		installDocker({ upSleep: 0, psHang: true });
-		const parentFile = join(dir, "kill-parent.pid");
-		const dirFile = join(dir, "kill-dir.txt");
-		const wdFile = join(dir, "kill-wd.txt");
-		for (const f of [parentFile, dirFile, wdFile, psPidFile]) {
-			rmSync(f, { force: true });
-		}
-		const child = spawn(
-			"sh",
-			[
-				writeScript(
-					`echo $$ > ${toShellPath(parentFile)}; ${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
+	it.each([
+		["hangs", true],
+		["ignores SIGTERM", "ignore-term"],
+	] as const)(
+		"leaves no watcher, state command or directory when the deploy shell is killed with SIGKILL and the state command %s",
+		{
+			timeout: 60_000,
+		},
+		async (_name, psHang) => {
+			installDocker({ upSleep: 0, psHang });
+			const parentFile = join(dir, "kill-parent.pid");
+			const dirFile = join(dir, "kill-dir.txt");
+			const wdFile = join(dir, "kill-wd.txt");
+			for (const f of [parentFile, dirFile, wdFile, psPidFile]) {
+				rmSync(f, { force: true });
+			}
+			const child = spawn(
+				"sh",
+				[
+					writeScript(
+						`echo $$ > ${toShellPath(parentFile)}; ${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
 echo "$DOKPLOY_STALL_DIR" > ${toShellPath(dirFile)}
 echo "$DOKPLOY_STALL_WD_PID" > ${toShellPath(wdFile)}
 sleep 60`,
-				),
-			],
-			{ env: { ...process.env, ...env() }, stdio: "ignore" },
-		);
-		try {
-			// Wait for the watcher to be inside a hanging state command.
-			for (let i = 0; i < 100 && !existsSync(psPidFile); i++) await sleepMs(100);
-			expect(existsSync(psPidFile)).toBe(true);
-			const stallDir = readFileSync(dirFile, "utf8").trim();
-			const wd = readFileSync(wdFile, "utf8").trim();
-			const psPid = readFileSync(psPidFile, "utf8").trim();
-			const parent = readFileSync(parentFile, "utf8").trim();
-			expect(sh(`test -d ${quote([stallDir])}`).status).toBe(0);
-			expect(sh(`kill -0 ${wd} 2>/dev/null`).status).toBe(0);
-			expect(sh(`kill -9 ${parent}`).status).toBe(0);
-			const gone = async (check: string) => {
-				for (let i = 0; i < 100; i++) {
+					),
+				],
+				{ env: { ...process.env, ...env() }, stdio: "ignore" },
+			);
+			try {
+				// Wait for the watcher to be inside a hanging state command.
+				for (let i = 0; i < 100 && !existsSync(psPidFile); i++)
 					await sleepMs(100);
-					if (sh(check).status !== 0) return true;
-				}
-				return false;
-			};
-			expect(await gone(`kill -0 ${wd} 2>/dev/null`)).toBe(true);
-			expect(await gone(`kill -0 ${psPid} 2>/dev/null`)).toBe(true);
-			expect(await gone(`test -d ${quote([stallDir])}`)).toBe(true);
-		} finally {
-			child.kill();
-		}
+				expect(existsSync(psPidFile)).toBe(true);
+				const stallDir = readFileSync(dirFile, "utf8").trim();
+				const wd = readFileSync(wdFile, "utf8").trim();
+				const psPid = readFileSync(psPidFile, "utf8").trim();
+				const parent = readFileSync(parentFile, "utf8").trim();
+				expect(sh(`test -d ${quote([stallDir])}`).status).toBe(0);
+				expect(sh(`kill -0 ${wd} 2>/dev/null`).status).toBe(0);
+				expect(sh(`kill -9 ${parent}`).status).toBe(0);
+				const gone = async (check: string) => {
+					for (let i = 0; i < 100; i++) {
+						await sleepMs(100);
+						if (sh(check).status !== 0) return true;
+					}
+					return false;
+				};
+				expect(await gone(`kill -0 ${wd} 2>/dev/null`)).toBe(true);
+				expect(await gone(`kill -0 ${psPid} 2>/dev/null`)).toBe(true);
+				expect(await gone(`test -d ${quote([stallDir])}`)).toBe(true);
+			} finally {
+				child.kill();
+			}
+		},
+	);
+
+	it("sends SIGKILL to a state command that ignores SIGTERM, and the deploy shell is not held", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upSleep: 0, psHang: "ignore-term" });
+		rmSync(psPidFile, { force: true });
+		const script = getStallSnapshotStartScript("docker-compose", "my-app", {
+			afterSeconds: 1,
+			everySeconds: 30,
+			maxSnapshots: 1,
+		})
+			.replace("-lt 20 ]", "-lt 2 ]")
+			.replace("-ge 20 ]", "-ge 2 ]");
+		const started = Date.now();
+		// Timeout 2 s + grace 2 s after the command starts at ~1 s: reaped by ~5 s,
+		// checked at 8 s, before any cleanup could be responsible for it.
+		const result = sh(
+			`${script}
+sleep 8;
+if kill -0 "$(cat ${toShellPath(psPidFile)})" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi
+T0=$(date +%s);
+dokploy_stall_cleanup;
+echo "CLEANUP-TOOK $(( $(date +%s) - T0 ))"`,
+			env(),
+		);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("REAPED");
+		expect(result.stdout).not.toContain("STILL-ALIVE");
+		expect(result.stdout).toContain(
+			"(the state command did not return within 20s and was stopped)",
+		);
+		// The shell's cleanup does not wait for the watcher.
+		expect(result.stdout).toContain("CLEANUP-TOOK 0");
+		expect(Date.now() - started).toBeLessThan(30_000);
+	});
+
+	it("does not leave the state command behind when TERM lands before its pid is recorded", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upSleep: 0, psHang: true });
+		rmSync(psPidFile, { force: true });
+		const dirFile = join(dir, "race-dir.txt");
+		const wdFile = join(dir, "race-wd.txt");
+		// Deterministic race: the watcher TERMs itself right after starting the
+		// command and before `$!` is recorded, which is where a trap that only
+		// looks at the pid would see nothing to kill.
+		const raced = getStallSnapshotStartScript(
+			"docker-compose",
+			"my-app",
+			fast,
+		).replace(
+			"DOKPLOY_STALL_CMD_PID=$!;",
+			`sh -c 'echo $PPID' > "$DOKPLOY_STALL_DIR/self"; sleep 1; kill -TERM "$(cat "$DOKPLOY_STALL_DIR/self")"; DOKPLOY_STALL_CMD_PID=$!;`,
+		);
+		expect(raced).toContain('kill -TERM "$(cat');
+		const result = sh(
+			`${raced}
+echo "$DOKPLOY_STALL_DIR" > ${toShellPath(dirFile)}
+echo "$DOKPLOY_STALL_WD_PID" > ${toShellPath(wdFile)}
+sleep 5;
+echo SHELL-DONE`,
+			env(),
+		);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("SHELL-DONE");
+		expect(countBlocks(result.stdout)).toBe(0);
+		expect(existsSync(psPidFile)).toBe(true);
+		const psPid = readFileSync(psPidFile, "utf8").trim();
+		const wd = readFileSync(wdFile, "utf8").trim();
+		const stallDir = readFileSync(dirFile, "utf8").trim();
+		// The state command was started, then put down by the watcher itself
+		// (the shell had not asked for anything yet).
+		expect(sh(`kill -0 ${psPid} 2>/dev/null`).status).not.toBe(0);
+		expect(sh(`kill -0 ${wd} 2>/dev/null`).status).not.toBe(0);
+		expect(sh(`test -d ${quote([stallDir])}`).status).not.toBe(0);
+	});
+
+	it("does not signal the watcher once it finished on its own", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upSleep: 0 });
+		const logFile = join(dir, "done-kill.log");
+		rmSync(logFile, { force: true });
+		const result = sh(
+			`${getStallSnapshotStartScript("docker-compose", "my-app", {
+				afterSeconds: 1,
+				everySeconds: 10,
+				maxSnapshots: 1,
+			})}
+sleep 5;
+if [ -e "$DOKPLOY_STALL_DIR/done" ]; then echo DONE-MARKER; fi
+kill() { echo "KILL $*" >> ${toShellPath(logFile)}; command kill "$@"; }
+dokploy_stall_cleanup;
+echo "DIR-AFTER:$DOKPLOY_STALL_DIR:"`,
+			env(),
+		);
+		expect(result.status).toBe(0);
+		expect(countBlocks(result.stdout)).toBe(1);
+		expect(result.stdout).toContain("DONE-MARKER");
+		// Nothing was signalled, and the directory is gone.
+		expect(existsSync(logFile)).toBe(false);
+		expect(result.stdout).toContain("DIR-AFTER::");
+	});
+
+	it("schedules from the previous deadline: a slow state command does not stretch the interval", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upSleep: 0, psBody: "sleep 2; echo 'c|running|Up|t'" });
+		const result = sh(
+			`${getStallSnapshotStartScript("docker-compose", "my-app", {
+				afterSeconds: 1,
+				everySeconds: 4,
+				maxSnapshots: 3,
+			})}
+sleep 14;
+dokploy_stall_cleanup`,
+			env(),
+		);
+		expect(result.status).toBe(0);
+		const elapsed = [
+			...result.stdout.matchAll(/Stall snapshot \d\/3: .* after (\d+)s,/g),
+		].map((m) => Number(m[1]));
+		expect(elapsed).toHaveLength(3);
+		// Commands start at 1, 5 and 9 s and take 2 s: 3, 7, 11 (+-1 for the clock).
+		// Rescheduling from "now + every" would give 3, 9, 15.
+		[3, 7, 11].forEach((expected, i) => {
+			expect(Math.abs((elapsed[i] as number) - expected)).toBeLessThanOrEqual(
+				1,
+			);
+		});
 	});
 
 	it("cleans up both the stall watcher and the events capture, whichever is killed with the shell", {
@@ -639,8 +785,10 @@ sleep 60`,
 			{ env: { ...process.env, ...env() }, stdio: "ignore" },
 		);
 		try {
-			for (let i = 0; i < 100 && !existsSync(eventsDirFile); i++) await sleepMs(100);
-			for (let i = 0; i < 100 && !existsSync(eventsPidFile); i++) await sleepMs(100);
+			for (let i = 0; i < 100 && !existsSync(eventsDirFile); i++)
+				await sleepMs(100);
+			for (let i = 0; i < 100 && !existsSync(eventsPidFile); i++)
+				await sleepMs(100);
 			const stallDir = readFileSync(stallDirFile, "utf8").trim();
 			const wd = readFileSync(stallWdFile, "utf8").trim();
 			const eventsDir = readFileSync(eventsDirFile, "utf8").trim();
