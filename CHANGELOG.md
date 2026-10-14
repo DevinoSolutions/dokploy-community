@@ -2,6 +2,24 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.25
+
+**Opt-in Compose deploy guardrails** ([#375](https://github.com/DevinoSolutions/dokploy-community/pull/375), issue [#374](https://github.com/DevinoSolutions/dokploy-community/issues/374)). A compose deploy was marked done as soon as `docker compose up` returned, with no readiness check and little in the log to show where the time went (in #374, web was down for about 135 s while the old container was being removed). Three guardrails, configured per compose, are now available. All are off by default, so existing composes deploy exactly as before.
+- **Phase timestamps.** Each deploy phase is logged with a UTC timestamp and the seconds elapsed since the previous one.
+- **Docker events capture.** While `docker compose up` runs, container lifecycle events (create, start, die, health status) for the project are written to the deploy log. The capture is size-capped and cleaned up by a watchdog if the deploy shell goes away.
+- **Health check.** An optional HTTP(S) URL is polled before the deploy is marked done. If it does not return a success status before the timeout, the deploy is marked `error` and the failure notification fires.
+
+To enable them, open the compose service, go to **Advanced** and use the **Deploy guardrails** card. The same settings are available through `compose.update` (`deployGuardrails`).
+
+Limits to know about:
+- The events capture covers only `compose up`, not the image pull.
+- The health check does not run for swarm stacks, and cannot be saved for one.
+- There is no automatic rollback: when the health check fails, the new release is left running so you can inspect it.
+- The timeout is wall-clock time for the whole health check, not per request.
+- Preview deployments are never guarded, duplicating a compose does not copy its guardrails, and project exports leave out the health check URL unless secrets are included.
+
+> One database migration in this release (`0216_compose_deploy_guardrails`, a nullable `jsonb` column). The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
 ### New in v0.30.8-community.24
 
 **Logs of older previews** ([#367](https://github.com/DevinoSolutions/dokploy-community/pull/367)). Preview deployments created before community.23 did not record the build server that holds their log. The log drawer and the `deployment.readLogs` API now look for such a log on the preview owner's build server, its serving server and the Dokploy host, and read it from the first one that has it. Each check gives up after 5 seconds, so a server that is down cannot stall the drawer. Every remote log read now also checks that the server belongs to your organization. Logs on a build server that has since been removed still can't be found.
