@@ -3,6 +3,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 
 export const getContainers = async (serverId?: string | null) => {
@@ -481,14 +482,41 @@ export const getContainerLogs = async (
 	}
 };
 
+/**
+ * A container id the UI still lists can be gone by the time an action runs
+ * (removed or recreated by a redeploy). Docker reports that as "No such
+ * container"; surface it as NOT_FOUND so it is not reported as a server error.
+ */
+const execContainerCommand = async (
+	command: string,
+	containerId: string,
+	serverId?: string,
+) => {
+	try {
+		return serverId
+			? await execAsyncRemote(serverId, command)
+			: await execAsync(command);
+	} catch (error) {
+		if (
+			error instanceof ExecError &&
+			/No such container/i.test(`${error.stderr ?? ""} ${error.message}`)
+		) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message: `Container ${containerId} no longer exists. Refresh the list and try again.`,
+				cause: error,
+			});
+		}
+		throw error;
+	}
+};
+
 export const containerRestart = async (
 	containerId: string,
 	serverId?: string,
 ) => {
 	const command = `docker container restart ${containerId}`;
-	const { stderr } = serverId
-		? await execAsyncRemote(serverId, command)
-		: await execAsync(command);
+	const { stderr } = await execContainerCommand(command, containerId, serverId);
 
 	if (stderr) {
 		console.error(`Error: ${stderr}`);
@@ -501,9 +529,7 @@ export const containerStart = async (
 	serverId?: string,
 ) => {
 	const command = `docker container start ${containerId}`;
-	const { stderr } = serverId
-		? await execAsyncRemote(serverId, command)
-		: await execAsync(command);
+	const { stderr } = await execContainerCommand(command, containerId, serverId);
 
 	if (stderr) {
 		console.error(`Error: ${stderr}`);
@@ -513,9 +539,7 @@ export const containerStart = async (
 
 export const containerStop = async (containerId: string, serverId?: string) => {
 	const command = `docker container stop ${containerId}`;
-	const { stderr } = serverId
-		? await execAsyncRemote(serverId, command)
-		: await execAsync(command);
+	const { stderr } = await execContainerCommand(command, containerId, serverId);
 
 	if (stderr) {
 		console.error(`Error: ${stderr}`);
@@ -525,9 +549,7 @@ export const containerStop = async (containerId: string, serverId?: string) => {
 
 export const containerKill = async (containerId: string, serverId?: string) => {
 	const command = `docker container kill ${containerId}`;
-	const { stderr } = serverId
-		? await execAsyncRemote(serverId, command)
-		: await execAsync(command);
+	const { stderr } = await execContainerCommand(command, containerId, serverId);
 
 	if (stderr) {
 		console.error(`Error: ${stderr}`);
@@ -540,9 +562,7 @@ export const containerRemove = async (
 	serverId?: string,
 ) => {
 	const command = `docker rm -f ${containerId}`;
-	const { stderr } = serverId
-		? await execAsyncRemote(serverId, command)
-		: await execAsync(command);
+	const { stderr } = await execContainerCommand(command, containerId, serverId);
 
 	if (stderr) {
 		console.error(`Error: ${stderr}`);
