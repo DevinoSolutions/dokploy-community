@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -44,20 +44,17 @@ const baseCompose = {
 } as unknown as Compose;
 
 const build = (overrides: Record<string, unknown> = {}, remote = false) =>
-	getBuildComposeCommand(
-		{ ...baseCompose, ...overrides } as Compose,
-		{
-			deploymentId: "dep-1",
-			...(remote
-				? {
-						remoteBuild: {
-							images: [{ service: "web", image: "registry.example/web:1" }],
-							servingHostLabel: "the serving host",
-						},
-					}
-				: {}),
-		},
-	);
+	getBuildComposeCommand({ ...baseCompose, ...overrides } as Compose, {
+		deploymentId: "dep-1",
+		...(remote
+			? {
+					remoteBuild: {
+						images: [{ service: "web", image: "registry.example/web:1" }],
+						servingHostLabel: "the serving host",
+					},
+				}
+			: {}),
+	});
 
 const remoteOverrides = { buildServerId: "build-1" };
 
@@ -82,33 +79,34 @@ describe("guardrails off: the deploy script is untouched", () => {
 		["a malformed value", { healthCheck: { url: "ftp://nope" } }],
 	];
 
-	it.each(offValues)("%s produces the same script as no setting", async (_name, value) => {
-		for (const [overrides, remote] of [
-			[{}, false],
-			[{ composeType: "stack" }, false],
-			[{ isolatedDeployment: true }, false],
-			[remoteOverrides, true],
-		] as Array<[Record<string, unknown>, boolean]>) {
-			const reference = await build(overrides, remote);
-			const withValue = await build(
-				{ ...overrides, deployGuardrails: value },
-				remote,
-			);
-			expect(withValue).toBe(reference);
-			for (const marker of GUARDRAIL_MARKERS) {
-				expect(withValue).not.toContain(marker);
+	it.each(offValues)(
+		"%s produces the same script as no setting",
+		async (_name, value) => {
+			for (const [overrides, remote] of [
+				[{}, false],
+				[{ composeType: "stack" }, false],
+				[{ isolatedDeployment: true }, false],
+				[remoteOverrides, true],
+			] as Array<[Record<string, unknown>, boolean]>) {
+				const reference = await build(overrides, remote);
+				const withValue = await build(
+					{ ...overrides, deployGuardrails: value },
+					remote,
+				);
+				expect(withValue).toBe(reference);
+				for (const marker of GUARDRAIL_MARKERS) {
+					expect(withValue).not.toContain(marker);
+				}
 			}
-		}
-	});
+		},
+	);
 
 	it("keeps the docker line and its failure branch exactly as before", async () => {
 		const command = await build();
 		expect(command).toContain(
 			'env -i PATH="$PATH" HOME="$HOME"  docker compose -p my-app',
 		);
-		expect(command).toContain(
-			'|| { echo "Error: ❌ Docker command failed"; ',
-		);
+		expect(command).toContain('|| { echo "Error: ❌ Docker command failed"; ');
 		expect(command).not.toContain("trap");
 	});
 });
@@ -176,9 +174,7 @@ describe("docker events capture", () => {
 		const command = await build({ deployGuardrails: { dockerEvents: true } });
 		const start = command.indexOf("docker events --since");
 		const up = command.indexOf("up -d --build --remove-orphans", start);
-		const failureFlush = command.indexOf(
-			"|| { dokploy_events_flush; echo",
-		);
+		const failureFlush = command.indexOf("|| { dokploy_events_flush; echo");
 		const successFlush = command.indexOf(
 			"\n\t\tdokploy_events_flush;\n",
 			failureFlush,
@@ -188,7 +184,7 @@ describe("docker events capture", () => {
 			`--filter ${quote(["label=com.docker.compose.project=my-app"])}`,
 		);
 		expect(command).toContain(
-			"--format '{{.TimeNano}} {{.Type}} {{.Action}} {{.Actor.Attributes.name}}'",
+			`--format ${quote(["{{.TimeNano}}|{{.Type}}|{{.Action}}|{{.Actor.Attributes.name}}"])}`,
 		);
 		expect(up).toBeGreaterThan(start);
 		// Flushed (and the process stopped) on the failure branch, before the
@@ -200,12 +196,40 @@ describe("docker events capture", () => {
 		expect(command).toContain("(truncated: showing the last 500 of");
 	});
 
-	it("always has a trap and a hard timeout as safety nets", async () => {
+	it("only records an allow-list of container events, never exec_*", async () => {
+		const command = await build({ deployGuardrails: { dockerEvents: true } });
+		expect(command).toContain(`--filter ${quote(["type=container"])}`);
+		for (const action of [
+			"create",
+			"start",
+			"die",
+			"kill",
+			"stop",
+			"destroy",
+			"health_status",
+			"oom",
+		]) {
+			expect(command).toContain(`--filter ${quote([`event=${action}`])}`);
+		}
+		expect(command).not.toContain("exec_");
+	});
+
+	it("has a trap, a parent watchdog and a hard timeout as safety nets", async () => {
 		const command = await build({ deployGuardrails: { dockerEvents: true } });
 		expect(command).toContain(
-			`trap 'dokploy_events_stop; rm -f "$DOKPLOY_EVENTS_FILE"' EXIT;`,
+			`trap 'dokploy_events_stop; rm -f "$DOKPLOY_EVENTS_FILE" 2>/dev/null || true' EXIT;`,
 		);
-		expect(command).toContain("timeout 7200 docker events");
+		expect(command).toContain("timeout 3600 docker events");
+		expect(command).toContain('while kill -0 "$DOKPLOY_SHELL_PID"');
+		// Also without `timeout` installed.
+		expect(command).toMatch(/else\s+docker events --since/);
+	});
+
+	it("builds the empty-events message entirely through quote()", () => {
+		const script = getDockerEventsStartScript("docker-compose", 'a"b$(x)');
+		expect(script).toContain(
+			`echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)]" ${quote(['No docker events were recorded for a"b$(x) during the compose up window'])};`,
+		);
 	});
 
 	it("scopes a swarm stack on its namespace label", async () => {
@@ -234,7 +258,10 @@ describe("docker events capture", () => {
 	});
 
 	it("quotes the app name used in the filter", () => {
-		const script = getDockerEventsStartScript("docker-compose", "app; rm -rf /");
+		const script = getDockerEventsStartScript(
+			"docker-compose",
+			"app; rm -rf /",
+		);
 		expect(script).toContain(
 			`--filter ${quote(["label=com.docker.compose.project=app; rm -rf /"])}`,
 		);
@@ -250,22 +277,26 @@ describe("health check script generation", () => {
 	it("polls with curl after up, before the deploy is marked successful", async () => {
 		const command = await build({ deployGuardrails: { healthCheck } });
 		const up = command.indexOf("up -d --build --remove-orphans");
-		const check = command.indexOf("curl -s -o /dev/null");
-		const lastGood = command.indexOf("Could not refresh the last-good snapshot");
+		const check = command.indexOf("curl -s -L");
+		const lastGood = command.indexOf(
+			"Could not refresh the last-good snapshot",
+		);
 		const deployed = command.indexOf('echo "Docker Compose Deployed: ✅"');
 		expect(check).toBeGreaterThan(up);
 		expect(lastGood).toBeGreaterThan(check);
 		expect(deployed).toBeGreaterThan(lastGood);
 		expect(command).toContain("http://localhost:3000/health");
 		// 2 s between attempts, any 2xx by default, no rollback on failure.
-		expect(command).toContain("sleep 2;");
+		expect(command).toContain("HC_SLEEP=2;");
 		expect(command).toContain("2??) HC_OK=1");
 		expect(command).not.toContain("dokploy_events");
 	});
 
 	it("matches an exact status when one is configured", async () => {
 		const command = await build({
-			deployGuardrails: { healthCheck: { ...healthCheck, expectedStatus: 204 } },
+			deployGuardrails: {
+				healthCheck: { ...healthCheck, expectedStatus: 204 },
+			},
 		});
 		expect(command).toContain("204) HC_OK=1");
 		expect(command).toContain("to answer 204");
@@ -280,11 +311,71 @@ describe("health check script generation", () => {
 		);
 	});
 
+	it("hardens curl: globoff, bounded redirects, http(s) only, exit status checked", async () => {
+		const command = await build({ deployGuardrails: { healthCheck } });
+		expect(command).toContain(
+			"curl -s -L --globoff --max-redirs 5 --proto =http,https --proto-redir =http,https",
+		);
+		expect(command).toContain("if HC_CODE=$(curl -s -L --globoff");
+		expect(command).toContain(
+			'if [ "$HC_RC" = "0" ] && [ "$HC_NOW" -le "$HC_DEADLINE" ]',
+		);
+	});
+
+	it("caps every request and sleep to the time that is left", async () => {
+		const command = await build({ deployGuardrails: { healthCheck } });
+		expect(command).toContain('--max-time "$HC_MAX"');
+		expect(command).toContain("HC_REMAIN=$(( HC_DEADLINE - HC_NOW ))");
+		expect(command).toContain('sleep "$HC_SLEEP"');
+	});
+
+	it("prints a heartbeat while polling", async () => {
+		const command = await build({ deployGuardrails: { healthCheck } });
+		expect(command).toContain("-ge 30 ]");
+		expect(command).toContain("Health check: still waiting");
+	});
+
+	it("never prints the query string or fragment of the URL", async () => {
+		const command = await build({
+			deployGuardrails: {
+				healthCheck: {
+					url: "https://example.com:8443/up?token=SECRET123#frag",
+					timeoutSeconds: 10,
+				},
+			},
+		});
+		// Only the curl argument itself carries the query.
+		const lines = command.split("\n").filter((l) => l.includes("SECRET123"));
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("curl ");
+		expect(command).toContain("https://example.com:8443/up?…");
+		expect(command).not.toContain("#frag'");
+	});
+
+	it("says the release was left running when the check fails", async () => {
+		const command = await build({ deployGuardrails: { healthCheck } });
+		expect(command).toContain(
+			"The new release was left running; no automatic rollback was performed.",
+		);
+	});
+
+	it("is skipped with a log line for a swarm stack", async () => {
+		const command = await build({
+			composeType: "stack",
+			deployGuardrails: { healthCheck },
+		});
+		expect(command).toContain(
+			"Health check skipped: docker stack deploy returns",
+		);
+		expect(command).not.toContain("curl");
+		expect(command).not.toContain("HC_DEADLINE");
+	});
+
 	it("falls back to the default timeout when parsed from a minimal object", async () => {
 		const command = await build({
 			deployGuardrails: { healthCheck: { url: "http://localhost/h" } },
 		});
-		expect(command).toContain("+ 60 ))");
+		expect(command).toContain("HC_START + 60 ))");
 	});
 });
 
@@ -293,8 +384,27 @@ describe("health check script generation", () => {
 // Skipped where no usable `sh` exists.
 // ---------------------------------------------------------------------------
 
+// The shell sees MSYS paths on Windows; keep scripts in a path both agree on.
+const toShellPath = (path: string) =>
+	process.platform === "win32"
+		? path
+				.replace(/^([A-Za-z]):/, (_m, d: string) => `/${d.toLowerCase()}`)
+				.replace(/\\/g, "/")
+		: path;
+
+// Windows' argv quoting mangles quotes and backslashes in a long `sh -c`
+// string, so scripts are run from a file instead (as the real thing is run
+// through a shell too, not through argv).
+const scriptDir = mkdtempSync(join(tmpdir(), "dokploy-guardrails-scripts-"));
+let scriptCount = 0;
+const writeScript = (script: string) => {
+	const path = join(scriptDir, `script-${scriptCount++}.sh`);
+	writeFileSync(path, script, { mode: 0o755 });
+	return toShellPath(path);
+};
+
 const sh = (script: string, env: Record<string, string> = {}) =>
-	spawnSync("sh", ["-c", script], {
+	spawnSync("sh", [writeScript(script)], {
 		encoding: "utf8",
 		env: { ...process.env, ...env },
 		timeout: 60_000,
@@ -309,17 +419,12 @@ const hasSh = (() => {
 	}
 })();
 
-// The shell sees MSYS paths on Windows; keep scripts in a path both agree on.
-const toShellPath = (path: string) =>
-	process.platform === "win32"
-		? path.replace(/^([A-Za-z]):/, (_m, d: string) => `/${d.toLowerCase()}`).replace(/\\/g, "/")
-		: path;
-
 describe.skipIf(!hasSh)("executed in a real shell", () => {
 	let dir = "";
 	let binDir = "";
 	let pidFile = "";
 	let argsFile = "";
+	let eventsArgsFile = "";
 	let pwnedFile = "";
 
 	const writeBin = (name: string, body: string) => {
@@ -332,14 +437,22 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 		upExit,
 		upSleep = 1,
 		events = 3,
-	}: { upExit: number; upSleep?: number; events?: number }) => {
+		extraEvents = "",
+	}: {
+		upExit: number;
+		upSleep?: number;
+		events?: number;
+		extraEvents?: string;
+	}) => {
 		writeBin(
 			"docker",
 			`case "$1" in
   events)
     echo $$ > ${toShellPath(pidFile)}
+    printf '%s\\n' "$@" > ${toShellPath(eventsArgsFile)}
     i=0
-    while [ $i -lt ${events} ]; do echo "17000000$((10 + i))123456789 container start web$i"; i=$((i + 1)); done
+    while [ $i -lt ${events} ]; do echo "17000000$((10 + i))123456789|container|start|web$i"; i=$((i + 1)); done
+    ${extraEvents}
     exec sleep 300 ;;
   stack|compose) sleep ${upSleep}; exit ${upExit} ;;
   *) exit 0 ;;
@@ -347,10 +460,13 @@ esac`,
 		);
 	};
 
-	const installCurl = (status: string) => {
+	const installCurl = (
+		status: string,
+		{ exit = 0, delay = 0 }: { exit?: number; delay?: number } = {},
+	) => {
 		writeBin(
 			"curl",
-			`printf '%s\\n' "$@" > ${toShellPath(argsFile)}\nprintf '${status}'`,
+			`printf '%s\\n' "$@" >> ${toShellPath(argsFile)}\n${delay ? `sleep ${delay}\n` : ""}printf '${status}'\nexit ${exit}`,
 		);
 	};
 
@@ -358,8 +474,9 @@ esac`,
 		deployGuardrails: unknown,
 		overrides: Record<string, unknown> = {},
 	) => {
+		rmSync(argsFile, { force: true });
 		const command = await build({
-			composeType: "stack",
+			composeType: "docker-compose",
 			deployGuardrails,
 			...overrides,
 		});
@@ -390,10 +507,12 @@ esac`,
 		mkdirSync(binDir);
 		pidFile = join(dir, "events.pid");
 		argsFile = join(dir, "curl.args");
+		eventsArgsFile = join(dir, "events.args");
 		pwnedFile = join(dir, "pwned");
 	});
 
 	afterAll(() => {
+		rmSync(scriptDir, { recursive: true, force: true });
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -411,6 +530,122 @@ esac`,
 		);
 		expect(result.stdout).not.toContain("truncated");
 		expect(await processIsGone()).toBe(true);
+	});
+
+	it("passes docker an allow-list filter and never prints an exec command line", async () => {
+		installDocker({
+			upExit: 0,
+			events: 1,
+			// Defence in depth: even if an exec event slipped through, only the
+			// part before the first ':' is printed; the health status survives.
+			extraEvents: [
+				`echo "1700000099123456789|container|exec_start: sh -c 'psql postgres://u:SECRETPW@db/x'|web0"`,
+				`echo "1700000100123456789|container|health_status: unhealthy|web0"`,
+				`echo "1700000101123456789|container|health_status: rm -rf SECRETPW|web0"`,
+			].join("\n"),
+		});
+		const result = await runStackDeploy({ dockerEvents: true });
+		expect(result.status).toBe(0);
+		expect(result.stdout).not.toContain("SECRETPW");
+		expect(result.stdout).not.toContain("psql");
+		expect(result.stdout).toContain("container exec_start web0");
+		expect(result.stdout).toContain("container health_status: unhealthy web0");
+		expect(result.stdout).toContain("container health_status web0");
+		const args = readFileSync(eventsArgsFile, "utf8").split("\n");
+		expect(args).toContain("type=container");
+		expect(args).toContain("event=die");
+		expect(args).toContain("event=health_status");
+		expect(args.some((arg) => arg.startsWith("event=exec"))).toBe(false);
+		expect(args).toContain("label=com.docker.compose.project=my-app");
+		expect(await processIsGone()).toBe(true);
+	});
+
+	it("ends the events process when the deploy shell is killed with SIGKILL", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upExit: 0, events: 1 });
+		const parentFile = join(dir, "parent.pid");
+		rmSync(pidFile, { force: true });
+		const child = spawn(
+			"sh",
+			[
+				writeScript(
+					`echo $$ > ${toShellPath(parentFile)}; ${getDockerEventsStartScript("docker-compose", "my-app")}
+touch ${toShellPath(parentFile)}.ready
+sleep 20`,
+				),
+			],
+			{
+				env: {
+					...process.env,
+					PATH: `${toShellPath(binDir)}:${process.env.PATH ?? ""}`,
+				},
+				stdio: "ignore",
+			},
+		);
+		try {
+			for (let i = 0; i < 100 && !existsSync(`${parentFile}.ready`); i++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+			expect(existsSync(`${parentFile}.ready`)).toBe(true);
+			const eventsPid = readFileSync(pidFile, "utf8").trim();
+			expect(sh(`kill -0 ${eventsPid}`).status).toBe(0);
+			// No trap runs for SIGKILL: only the watchdog can stop the capture.
+			const parentPid = readFileSync(parentFile, "utf8").trim();
+			expect(sh(`kill -9 ${parentPid}`).status).toBe(0);
+			let gone = false;
+			for (let i = 0; i < 100 && !gone; i++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				gone = sh(`kill -0 ${eventsPid} 2>/dev/null`).status !== 0;
+			}
+			expect(gone).toBe(true);
+		} finally {
+			child.kill();
+		}
+	});
+
+	it("still works without `timeout` on the PATH (watchdog only)", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upExit: 0, events: 1 });
+		const parentFile = join(dir, "parent2.pid");
+		rmSync(pidFile, { force: true });
+		const script = getDockerEventsStartScript(
+			"docker-compose",
+			"my-app",
+		).replace("command -v timeout", "command -v no-such-timeout");
+		const child = spawn(
+			"sh",
+			[
+				writeScript(
+					`echo $$ > ${toShellPath(parentFile)}; ${script}
+touch ${toShellPath(parentFile)}.ready
+sleep 20`,
+				),
+			],
+			{
+				env: {
+					...process.env,
+					PATH: `${toShellPath(binDir)}:${process.env.PATH ?? ""}`,
+				},
+				stdio: "ignore",
+			},
+		);
+		try {
+			for (let i = 0; i < 100 && !existsSync(`${parentFile}.ready`); i++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+			const eventsPid = readFileSync(pidFile, "utf8").trim();
+			sh(`kill -9 ${readFileSync(parentFile, "utf8").trim()}`);
+			let gone = false;
+			for (let i = 0; i < 100 && !gone; i++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				gone = sh(`kill -0 ${eventsPid} 2>/dev/null`).status !== 0;
+			}
+			expect(gone).toBe(true);
+		} finally {
+			child.kill();
+		}
 	});
 
 	it("caps the appended events and says so", async () => {
@@ -440,7 +675,9 @@ dokploy_events_flush;`;
 		expect(await processIsGone()).toBe(true);
 	});
 
-	it("stops the events process when the health check aborts the script", { timeout: 30_000 }, async () => {
+	it("stops the events process when the health check aborts the script", {
+		timeout: 30_000,
+	}, async () => {
 		installDocker({ upExit: 0 });
 		installCurl("503");
 		const result = await runStackDeploy({
@@ -456,14 +693,16 @@ dokploy_events_flush;`;
 		const result = await runStackDeploy({ phaseTimestamps: true });
 		expect(result.status).toBe(0);
 		expect(result.stdout).toMatch(
-			/\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\] Deploy stack \(docker stack deploy\): started/,
+			/\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\] Build and start containers \(compose up\): started/,
 		);
 		expect(result.stdout).toMatch(
-			/\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\] Deploy stack \(docker stack deploy\): finished after [1-9]\d*s/,
+			/\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\] Build and start containers \(compose up\): finished after [1-9]\d*s/,
 		);
 	});
 
-	it("passes when the URL answers 2xx and reports the phase", { timeout: 60_000 }, async () => {
+	it("passes when the URL answers 2xx and reports the phase", {
+		timeout: 60_000,
+	}, async () => {
 		installDocker({ upExit: 0, upSleep: 0 });
 		installCurl("204");
 		const result = await runStackDeploy({
@@ -485,13 +724,103 @@ dokploy_events_flush;`;
 		});
 		expect(result.status).toBe(1);
 		expect(result.stdout).toContain(
-			"Error: ❌ Health check failed: http://localhost:8080/up did not answer 2xx within 5s, last result: HTTP 503",
+			"Error: ❌ Health check failed: http://localhost:8080/up did not answer 2xx within 5s, last result: HTTP 503. The new release was left running; no automatic rollback was performed.",
 		);
 		expect(result.stdout).toContain("Health check: failed after");
 		// The deploy is not reported as done and nothing was rolled back.
 		expect(result.stdout).not.toContain("Docker Compose Deployed: ✅");
-		expect(result.stdout).not.toContain("Restoring previous working deployment");
+		expect(result.stdout).not.toContain(
+			"Restoring previous working deployment",
+		);
 	}, 30_000);
+
+	it("does not accept a 200 when curl itself failed (stalled or truncated body)", {
+		timeout: 30_000,
+	}, async () => {
+		installDocker({ upExit: 0, upSleep: 0 });
+		installCurl("200", { exit: 18 });
+		const result = await runStackDeploy({
+			healthCheck: { url: "http://localhost:8080/up", timeoutSeconds: 5 },
+		});
+		expect(result.status).toBe(1);
+		expect(result.stdout).toContain("no valid answer (curl exit 18)");
+		expect(result.stdout).not.toContain("Health check passed");
+	});
+
+	it("does not accept a success that arrives after the deadline", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upExit: 0, upSleep: 0 });
+		// Ignores --max-time on purpose: a request that overruns the deadline.
+		installCurl("200", { delay: 7 });
+		const started = Date.now();
+		const result = await runStackDeploy({
+			healthCheck: { url: "http://localhost:8080/up", timeoutSeconds: 5 },
+		});
+		expect(result.status).toBe(1);
+		expect(result.stdout).not.toContain("Health check passed");
+		// One overrunning request, then the loop stops instead of retrying.
+		expect(Date.now() - started).toBeLessThan(20_000);
+		expect(
+			readFileSync(argsFile, "utf8")
+				.split("\n")
+				.filter((a) => a === "--max-time"),
+		).toHaveLength(1);
+	});
+
+	it("caps each request to the time that is left and hardens curl", {
+		timeout: 60_000,
+	}, async () => {
+		installDocker({ upExit: 0, upSleep: 0 });
+		installCurl("503");
+		const result = await runStackDeploy({
+			healthCheck: {
+				url: "http://localhost:8080/up?a[]=1&b={x}",
+				timeoutSeconds: 5,
+			},
+		});
+		expect(result.status).toBe(1);
+		const args = readFileSync(argsFile, "utf8").split("\n");
+		const maxTimes = args
+			.map((arg, i) => (arg === "--max-time" ? Number(args[i + 1]) : null))
+			.filter((v): v is number => v !== null);
+		expect(maxTimes.length).toBeGreaterThanOrEqual(2);
+		expect(maxTimes[0]).toBe(5);
+		for (const value of maxTimes) expect(value).toBeLessThanOrEqual(5);
+		expect(maxTimes[maxTimes.length - 1]).toBeLessThan(5);
+		for (const flag of [
+			"-L",
+			"--globoff",
+			"--max-redirs",
+			"5",
+			"--proto",
+			"=http,https",
+			"--proto-redir",
+		]) {
+			expect(args).toContain(flag);
+		}
+		expect(args).toContain("http://localhost:8080/up?a[]=1&b={x}");
+		// The query never reaches the deploy log.
+		expect(result.stdout).not.toContain("a[]=1");
+		expect(result.stdout).toContain("http://localhost:8080/up?…");
+	});
+
+	it("skips the health check for a swarm stack and says so", {
+		timeout: 30_000,
+	}, async () => {
+		installDocker({ upExit: 0, upSleep: 0 });
+		installCurl("503");
+		const result = await runStackDeploy(
+			{ healthCheck: { url: "http://localhost:8080/up", timeoutSeconds: 5 } },
+			{ composeType: "stack" },
+		);
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain(
+			"Health check skipped: docker stack deploy returns",
+		);
+		expect(result.stdout).toContain("Docker Compose Deployed: ✅");
+		expect(existsSync(argsFile)).toBe(false);
+	});
 
 	it("only accepts the configured status", async () => {
 		installDocker({ upExit: 0, upSleep: 0 });
@@ -507,7 +836,9 @@ dokploy_events_flush;`;
 		expect(result.stdout).toContain("did not answer 204");
 	}, 30_000);
 
-	it("passes the URL to curl as one literal argument and never runs injected commands", { timeout: 120_000 }, async () => {
+	it("passes the URL to curl as one literal argument and never runs injected commands", {
+		timeout: 120_000,
+	}, async () => {
 		installDocker({ upExit: 0, upSleep: 0 });
 		installCurl("200");
 		// No whitespace (the schema refuses it), so `${IFS}` stands in for spaces.
@@ -545,9 +876,9 @@ describe("health check URL quoting (string level)", () => {
 		);
 		const curlLine = script
 			.split("\n")
-			.find((line) => line.includes("curl -s -o /dev/null"));
+			.find((line) => line.includes("curl -s -L"));
 		expect(curlLine).toBeDefined();
-		const urlPart = (curlLine as string).split("--max-time 5 ")[1];
+		const urlPart = (curlLine as string).split('--max-time "$HC_MAX" ')[1];
 		// One single-quoted word: nothing inside it is interpreted by the shell.
 		expect(urlPart).toMatch(/^'[^']*' 2>\/dev\/null/);
 	});

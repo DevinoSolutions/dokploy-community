@@ -15,6 +15,7 @@ import {
 	DOCKER_EVENTS_FLUSH_COMMAND,
 	getDockerEventsStartScript,
 	getHealthCheckScript,
+	HEALTH_CHECK_STACK_SKIPPED_MESSAGE,
 	getPhaseEndCommand,
 	getPhaseHelpersScript,
 	getPhaseStartCommand,
@@ -494,8 +495,12 @@ Compose Type: ${composeType} ✅`;
 		.filter(Boolean)
 		.map((part) => `${part}\n\t\t`)
 		.join("");
+	// `docker stack deploy` returns before any task runs, so the check would pass
+	// vacuously: say so in the log instead of pretending to gate the release.
 	const healthCheckSection = guardrails?.healthCheck
-		? getHealthCheckScript(guardrails.healthCheck, { phaseTimestamps })
+		? composeType === "stack"
+			? `echo ${quote([HEALTH_CHECK_STACK_SKIPPED_MESSAGE])};\n\t\t`
+			: getHealthCheckScript(guardrails.healthCheck, { phaseTimestamps })
 		: "";
 
 	// Without a build server this is the single docker line it always was.
