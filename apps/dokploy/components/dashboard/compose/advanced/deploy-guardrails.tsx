@@ -81,18 +81,20 @@ const toHealthCheck = (values: {
 		: undefined,
 });
 
-const toGuardrails = (values: Schema): DeployGuardrails | null => {
-	if (
-		!values.phaseTimestamps &&
-		!values.dockerEvents &&
-		!values.healthCheckEnabled
-	) {
+// The health check does not apply to swarm stacks, so a stack never saves one
+// (a stale value from before the type changed is dropped on the next save).
+const toGuardrails = (
+	values: Schema,
+	isStack: boolean,
+): DeployGuardrails | null => {
+	const healthCheckEnabled = values.healthCheckEnabled && !isStack;
+	if (!values.phaseTimestamps && !values.dockerEvents && !healthCheckEnabled) {
 		return null;
 	}
 	return {
 		phaseTimestamps: values.phaseTimestamps,
 		dockerEvents: values.dockerEvents,
-		healthCheck: values.healthCheckEnabled ? toHealthCheck(values) : null,
+		healthCheck: healthCheckEnabled ? toHealthCheck(values) : null,
 	};
 };
 
@@ -123,7 +125,8 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 			form.reset({
 				phaseTimestamps: guardrails?.phaseTimestamps ?? false,
 				dockerEvents: guardrails?.dockerEvents ?? false,
-				healthCheckEnabled: !!guardrails?.healthCheck,
+				healthCheckEnabled:
+					!!guardrails?.healthCheck && data.composeType !== "stack",
 				healthCheckUrl: guardrails?.healthCheck?.url ?? "",
 				healthCheckTimeout: String(
 					guardrails?.healthCheck?.timeoutSeconds ??
@@ -143,7 +146,7 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 	const onSubmit = async (values: Schema) => {
 		await mutateAsync({
 			composeId,
-			deployGuardrails: toGuardrails(values),
+			deployGuardrails: toGuardrails(values, isStack),
 		})
 			.then(async () => {
 				await refetch();
@@ -222,99 +225,99 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 								ready, so it could not tell whether the release is healthy.
 							</p>
 						) : (
-						<div className="flex flex-col gap-4 rounded-lg border p-3 shadow-sm">
-							<FormField
-								control={form.control}
-								name="healthCheckEnabled"
-								render={({ field }) => (
-									<FormItem className="flex flex-row items-center justify-between">
-										<div className="space-y-0.5">
-											<FormLabel>Health check before done</FormLabel>
-											<FormDescription>
-												After <code>compose up</code> returns, poll a URL from
-												the same host every 2 seconds. The deployment is only
-												marked done once it answers. On timeout it is marked
-												error and the failure notifications are sent. The new
-												release is left running; it is not rolled back.
-											</FormDescription>
-										</div>
-										<FormControl>
-											<Switch
-												checked={field.value}
-												onCheckedChange={field.onChange}
-											/>
-										</FormControl>
-									</FormItem>
+							<div className="flex flex-col gap-4 rounded-lg border p-3 shadow-sm">
+								<FormField
+									control={form.control}
+									name="healthCheckEnabled"
+									render={({ field }) => (
+										<FormItem className="flex flex-row items-center justify-between">
+											<div className="space-y-0.5">
+												<FormLabel>Health check before done</FormLabel>
+												<FormDescription>
+													After <code>compose up</code> returns, poll a URL from
+													the same host every 2 seconds. The deployment is only
+													marked done once it answers. On timeout it is marked
+													error and the failure notifications are sent. The new
+													release is left running; it is not rolled back.
+												</FormDescription>
+											</div>
+											<FormControl>
+												<Switch
+													checked={field.value}
+													onCheckedChange={field.onChange}
+												/>
+											</FormControl>
+										</FormItem>
+									)}
+								/>
+								{healthCheckEnabled && (
+									<div className="grid gap-4 md:grid-cols-3">
+										<FormField
+											control={form.control}
+											name="healthCheckUrl"
+											render={({ field }) => (
+												<FormItem className="md:col-span-3">
+													<FormLabel>URL</FormLabel>
+													<FormControl>
+														<Input
+															placeholder="http://localhost:3000/health"
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription>
+														http or https, as reachable from the host that runs
+														the deployment. Up to 5 redirects are followed. Only
+														the scheme, host and path are written to the log.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+										<FormField
+											control={form.control}
+											name="healthCheckTimeout"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Timeout (seconds)</FormLabel>
+													<FormControl>
+														<Input
+															type="number"
+															min={HEALTH_CHECK_TIMEOUT_MIN_SECONDS}
+															max={HEALTH_CHECK_TIMEOUT_MAX_SECONDS}
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription>
+														{HEALTH_CHECK_TIMEOUT_MIN_SECONDS} to{" "}
+														{HEALTH_CHECK_TIMEOUT_MAX_SECONDS}.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+										<FormField
+											control={form.control}
+											name="healthCheckStatus"
+											render={({ field }) => (
+												<FormItem>
+													<FormLabel>Expected status</FormLabel>
+													<FormControl>
+														<Input
+															type="number"
+															placeholder="Any 2xx"
+															{...field}
+														/>
+													</FormControl>
+													<FormDescription>
+														Leave empty to accept any 2xx.
+													</FormDescription>
+													<FormMessage />
+												</FormItem>
+											)}
+										/>
+									</div>
 								)}
-							/>
-							{healthCheckEnabled && (
-								<div className="grid gap-4 md:grid-cols-3">
-									<FormField
-										control={form.control}
-										name="healthCheckUrl"
-										render={({ field }) => (
-											<FormItem className="md:col-span-3">
-												<FormLabel>URL</FormLabel>
-												<FormControl>
-													<Input
-														placeholder="http://localhost:3000/health"
-														{...field}
-													/>
-												</FormControl>
-												<FormDescription>
-													http or https, as reachable from the host that runs
-													the deployment. Up to 5 redirects are followed. Only the
-														scheme, host and path are written to the log.
-												</FormDescription>
-												<FormMessage />
-											</FormItem>
-										)}
-									/>
-									<FormField
-										control={form.control}
-										name="healthCheckTimeout"
-										render={({ field }) => (
-											<FormItem>
-												<FormLabel>Timeout (seconds)</FormLabel>
-												<FormControl>
-													<Input
-														type="number"
-														min={HEALTH_CHECK_TIMEOUT_MIN_SECONDS}
-														max={HEALTH_CHECK_TIMEOUT_MAX_SECONDS}
-														{...field}
-													/>
-												</FormControl>
-												<FormDescription>
-													{HEALTH_CHECK_TIMEOUT_MIN_SECONDS} to{" "}
-													{HEALTH_CHECK_TIMEOUT_MAX_SECONDS}.
-												</FormDescription>
-												<FormMessage />
-											</FormItem>
-										)}
-									/>
-									<FormField
-										control={form.control}
-										name="healthCheckStatus"
-										render={({ field }) => (
-											<FormItem>
-												<FormLabel>Expected status</FormLabel>
-												<FormControl>
-													<Input
-														type="number"
-														placeholder="Any 2xx"
-														{...field}
-													/>
-												</FormControl>
-												<FormDescription>
-													Leave empty to accept any 2xx.
-												</FormDescription>
-												<FormMessage />
-											</FormItem>
-										)}
-									/>
-								</div>
-							)}
-						</div>
+							</div>
 						)}
 						<div className="flex w-full items-end justify-end">
 							<Button
