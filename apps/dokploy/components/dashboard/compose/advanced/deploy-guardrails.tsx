@@ -138,6 +138,7 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 	}, [form, data]);
 
 	const healthCheckEnabled = form.watch("healthCheckEnabled");
+	const isStack = data?.composeType === "stack";
 
 	const onSubmit = async (values: Schema) => {
 		await mutateAsync({
@@ -214,6 +215,13 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 								</FormItem>
 							)}
 						/>
+						{isStack ? (
+							<p className="rounded-lg border p-3 text-sm text-muted-foreground shadow-sm">
+								The health check is not available for Docker Swarm stacks:{" "}
+								<code>docker stack deploy</code> returns before the services are
+								ready, so it could not tell whether the release is healthy.
+							</p>
+						) : (
 						<div className="flex flex-col gap-4 rounded-lg border p-3 shadow-sm">
 							<FormField
 								control={form.control}
@@ -227,7 +235,7 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 												the same host every 2 seconds. The deployment is only
 												marked done once it answers. On timeout it is marked
 												error and the failure notifications are sent. The new
-												release is not rolled back.
+												release is left running; it is not rolled back.
 											</FormDescription>
 										</div>
 										<FormControl>
@@ -255,7 +263,8 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 												</FormControl>
 												<FormDescription>
 													http or https, as reachable from the host that runs
-													the deployment. Redirects are not followed.
+													the deployment. Up to 5 redirects are followed. Only the
+														scheme, host and path are written to the log.
 												</FormDescription>
 												<FormMessage />
 											</FormItem>
@@ -306,6 +315,7 @@ export const DeployGuardrailsCompose = ({ composeId }: Props) => {
 								</div>
 							)}
 						</div>
+						)}
 						<div className="flex w-full items-end justify-end">
 							<Button
 								form="deploy-guardrails-form"
