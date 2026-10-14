@@ -5,6 +5,7 @@ import { db } from "@dokploy/server/db";
 import { network, patch } from "@dokploy/server/db/schema";
 import type { Compose } from "@dokploy/server/services/compose";
 import type { Domain } from "@dokploy/server/services/domain";
+import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
@@ -258,12 +259,18 @@ export const addDomainToCompose = async (
 	for (const domain of domains.filter((d) => d.enabled)) {
 		const { serviceName, https } = domain;
 		if (!serviceName) {
-			throw new Error(`Domain "${domain.host}" is missing a service name`);
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: `Domain "${domain.host}" is missing a service name`,
+			});
 		}
 		if (!result?.services?.[serviceName]) {
-			throw new Error(
-				`Domain "${domain.host}" is attached to service "${serviceName}" which does not exist in the compose`,
-			);
+			// A domain pointing at a service the compose file no longer defines is
+			// a configuration problem the user fixes, not a server failure.
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: `Domain "${domain.host}" is attached to service "${serviceName}" which does not exist in the compose`,
+			});
 		}
 
 		const httpLabels = createDomainLabels(
