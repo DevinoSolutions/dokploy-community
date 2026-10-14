@@ -1,3 +1,5 @@
+import { TRPCError } from "@trpc/server";
+import { ExecError } from "@dokploy/server/utils/process/ExecError";
 import { quote } from "shell-quote";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +17,8 @@ const mocks = vi.hoisted(() => ({
 	filesOn: new Set<string | null>(),
 	// Hosts whose probe never answers.
 	hanging: new Set<string>(),
+	// Hosts that cannot be reached at all (no answer about the file).
+	unreachable: new Set<string | null>(),
 	isCloud: false,
 	findPreviewDeploymentById: vi.fn(),
 	findPreviewDeploymentLogOwner: vi.fn(),
@@ -118,10 +122,18 @@ const tailedHosts = () =>
 		.filter(([, command]) => command !== probe)
 		.map(([host]) => host as string);
 
+// What `test -f` reports for a file that is not there.
+const missingFile = () =>
+	new ExecError("Remote command failed with exit code 1", {
+		command: probe,
+		exitCode: 1,
+	});
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.filesOn = new Set();
 	mocks.hanging = new Set();
+	mocks.unreachable = new Set();
 	mocks.isCloud = false;
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
 	mocks.findPreviewDeploymentById.mockResolvedValue({
@@ -140,16 +152,18 @@ beforeEach(() => {
 		async (host: string, command: string) => {
 			if (command === probe) {
 				if (mocks.hanging.has(host)) return new Promise(() => {});
+				if (mocks.unreachable.has(host)) throw new Error("connection refused");
 				if (mocks.filesOn.has(host)) return { stdout: "", stderr: "" };
-				throw new Error("not found");
+				throw missingFile();
 			}
 			return { stdout: `built on ${host}\n`, stderr: "" };
 		},
 	);
 	mocks.execAsync.mockImplementation(async (command: string) => {
 		if (command === probe) {
+			if (mocks.unreachable.has(null)) throw new Error("spawn failed");
 			if (mocks.filesOn.has(null)) return { stdout: "", stderr: "" };
-			throw new Error("not found");
+			throw missingFile();
 		}
 		return { stdout: "local\n", stderr: "" };
 	});
@@ -215,8 +229,9 @@ describe("deployment.readLogs for a legacy preview deployment", () => {
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 	});
 
-	it("falls back to the host that runs it when no candidate has the file", async () => {
+	it("falls back to the host that runs it when no candidate can be reached", async () => {
 		mocks.deployment = legacyPreviewRow();
+		mocks.unreachable.add("build-1").add("server-1").add(null);
 
 		const out = await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
 
@@ -400,8 +415,9 @@ describe("deployment.logHost", () => {
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 
-	it("answers the old fallback when no candidate has the file", async () => {
+	it("answers the old fallback when no candidate can be reached", async () => {
 		mocks.deployment = legacyPreviewRow();
+		mocks.unreachable.add("build-1").add("server-1").add(null);
 
 		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
 			serverId: "server-1",
@@ -424,5 +440,109 @@ describe("deployment.logHost", () => {
 		);
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 		expect(mocks.findPreviewDeploymentLogOwner).not.toHaveBeenCalled();
+	});
+});
+
+describe("a log that is on no connected server", () => {
+	const message =
+		"This deployment's log is no longer available on any connected server.";
+
+	it("readLogs answers a clear not-found instead of an empty or wrong log", async () => {
+		mocks.deployment = legacyPreviewRow();
+
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).rejects.toMatchObject({ code: "NOT_FOUND", message });
+		expect(tailedHosts()).toEqual([]);
+	});
+
+	it("logHost flags the log as unavailable, keeping the fallback host", async () => {
+		mocks.deployment = legacyPreviewRow();
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+			unavailable: message,
+		});
+	});
+
+	it("counts a deleted candidate server as a definite no", async () => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findServerById.mockImplementation(async (serverId: string) => {
+			if (serverId === "server-1") {
+				throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
+			}
+			return { serverId, organizationId: "org-1" };
+		});
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: null, buildServerId: null }),
+		);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toMatchObject(
+			{ unavailable: message },
+		);
+	});
+
+	it("is not unavailable while one candidate could not be asked", async () => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.unreachable.add("server-1");
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+	});
+
+	it("is not unavailable when a probe timed out", async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.deployment = legacyPreviewRow();
+			mocks.hanging.add("build-1");
+
+			const pending = caller().logHost({ deploymentId: "dep-1" });
+			await vi.advanceTimersByTimeAsync(5000);
+
+			await expect(pending).resolves.toEqual({ serverId: "server-1" });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("is not unavailable when the owner could not be looked up", async () => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockRejectedValue(new Error("gone"));
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+	});
+
+	it("never reports rows that are not legacy previews as unavailable", async () => {
+		mocks.deployment = legacyPreviewRow({ buildServerId: "build-9" });
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "build-9",
+		});
+	});
+
+	it("aborts the SSH probe of a candidate that times out", async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.deployment = legacyPreviewRow();
+			mocks.hanging.add("build-1");
+			mocks.filesOn.add("server-1");
+
+			const pending = caller().logHost({ deploymentId: "dep-1" });
+			await vi.advanceTimersByTimeAsync(5000);
+			await pending;
+
+			const signals = new Map(
+				mocks.execAsyncRemote.mock.calls
+					.filter(([, command]) => command === probe)
+					.map(([host, , , options]) => [host, options?.signal as AbortSignal]),
+			);
+			expect(signals.get("build-1")?.aborted).toBe(true);
+			expect(signals.get("server-1")?.aborted).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
