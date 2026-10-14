@@ -11,6 +11,15 @@ import {
 	prepareEnvironmentVariablesForFile,
 } from "../docker/utils";
 import { withResolvedVaultRefs } from "../vault";
+import {
+	DOCKER_EVENTS_FLUSH_COMMAND,
+	getDockerEventsStartScript,
+	getHealthCheckScript,
+	getPhaseEndCommand,
+	getPhaseHelpersScript,
+	getPhaseStartCommand,
+	resolveDeployGuardrails,
+} from "./compose-guardrails";
 
 export type ComposeNested = InferResultType<
 	"compose",
@@ -338,6 +347,11 @@ export const getBuildComposeCommand = async (
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const { sourceType, appName, mounts, composeType, domains } = compose;
 	const projectPath = join(COMPOSE_PATH, compose.appName, "code");
+	// Opt-in deploy guardrails (null = all off). Every piece below is an empty
+	// string when its flag is off, so a compose that did not opt in gets the
+	// same script as before.
+	const guardrails = resolveDeployGuardrails(compose.deployGuardrails);
+	const phaseTimestamps = guardrails?.phaseTimestamps === true;
 	if (compose.buildServerId && !remoteBuild) {
 		// Fail closed: a compose that opted into a build server must never fall
 		// back to building on the serving host.
@@ -437,19 +451,57 @@ Compose Type: ${composeType} ✅`;
 		// Services that share one image share one reference: pull it once.
 		const refs = [...new Set(remoteBuild.images.map((image) => image.image))];
 		const pulls = refs.map((ref) => `docker pull ${quote([ref])}`).join(" && ");
+		const pullPhaseStart = phaseTimestamps
+			? `\n\t\t${getPhaseStartCommand("Pull images")}`
+			: "";
+		const pullPhaseEnd = phaseTimestamps
+			? `\n\t\tif [ "$PULL_OK" = "1" ]; then ${getPhaseEndCommand("finished")} else ${getPhaseEndCommand("failed")} fi`
+			: "";
 		remotePullBlock = `
 		PULL_OK=1;
-		echo ${quote([`Pulling images on ${remoteBuild.servingHostLabel} (${refs.length} built on the build server)`])};
-		if [ "$PULL_OK" = "1" ]; then { ${pulls}; } 2>&1 || PULL_OK=0; fi`;
+		echo ${quote([`Pulling images on ${remoteBuild.servingHostLabel} (${refs.length} built on the build server)`])};${pullPhaseStart}
+		if [ "$PULL_OK" = "1" ]; then { ${pulls}; } 2>&1 || PULL_OK=0; fi${pullPhaseEnd}`;
 	}
 	const upLine = remotePullBlock
 		? `if [ "$PULL_OK" = "1" ]; then env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${command.split(" ").join(" ")} 2>&1; else false; fi`
 		: `env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${command.split(" ").join(" ")} 2>&1`;
 
+	// Guardrails around the docker line: the phase helpers go first, the docker
+	// events capture starts right before `up`, and both are closed right after
+	// it returns (on the failure branch as well, before the restore runs).
+	const upPhaseName = remotePullBlock
+		? "Start containers (compose up)"
+		: composeType === "stack"
+			? "Deploy stack (docker stack deploy)"
+			: "Build and start containers (compose up)";
+	const helpersBlock = phaseTimestamps
+		? `${getPhaseHelpersScript()}\n\t\t`
+		: "";
+	const preUp = [
+		phaseTimestamps ? getPhaseStartCommand(upPhaseName) : "",
+		guardrails?.dockerEvents
+			? getDockerEventsStartScript(composeType, appName)
+			: "",
+	]
+		.filter(Boolean)
+		.map((part) => `${part}\n\t\t`)
+		.join("");
+	const upFailureGuardrails = `${guardrails?.dockerEvents ? `${DOCKER_EVENTS_FLUSH_COMMAND} ` : ""}${phaseTimestamps ? `${getPhaseEndCommand("failed")} ` : ""}`;
+	const upSuccessBlock = [
+		guardrails?.dockerEvents ? DOCKER_EVENTS_FLUSH_COMMAND : "",
+		phaseTimestamps ? getPhaseEndCommand("finished") : "",
+	]
+		.filter(Boolean)
+		.map((part) => `${part}\n\t\t`)
+		.join("");
+	const healthCheckSection = guardrails?.healthCheck
+		? getHealthCheckScript(guardrails.healthCheck, { phaseTimestamps })
+		: "";
+
 	// Without a build server this is the single docker line it always was.
 	const upSection = remotePullBlock
-		? `${remotePullBlock}\n\t\t${upLine}`
-		: upLine;
+		? `${remotePullBlock}\n\t\t${preUp}${upLine}`
+		: `${preUp}${upLine}`;
 
 	const bashCommand = `
 	set -e
@@ -472,9 +524,9 @@ Compose Type: ${composeType} ✅`;
 			fi`
 				: ""
 		}
-		${upSection} || { echo "Error: ❌ Docker command failed"; ${restoreCommands} exit 1; }
-		${compose.isolatedDeployment ? `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1` : ""}
-		${persistLastGood}
+		${helpersBlock}${upSection} || { ${upFailureGuardrails}echo "Error: ❌ Docker command failed"; ${restoreCommands} exit 1; }
+		${upSuccessBlock}${compose.isolatedDeployment ? `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1` : ""}
+		${healthCheckSection}${persistLastGood}
 
 		echo "Docker Compose Deployed: ✅";
 	} || {
