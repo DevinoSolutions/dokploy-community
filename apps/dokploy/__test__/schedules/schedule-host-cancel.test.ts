@@ -59,14 +59,17 @@ vi.mock("@dokploy/server/db", () => {
 	return { db: { update: () => chain, query: {} } };
 });
 
-const { SCHEDULE_START_GRACE_MS, cancelHostScheduleRun, isPastStartGrace } =
-	await import("@dokploy/server/utils/schedules/cancel");
+const {
+	SCHEDULE_LAUNCH_SETTLE_MS,
+	SCHEDULE_STRANDED_MS,
+	cancelHostScheduleRun,
+	decideRunWithoutProcess,
+} = await import("@dokploy/server/utils/schedules/cancel");
 const { SCHEDULE_KILL_SCRIPT, SCHEDULE_NONE_MARKER } = await import(
 	"@dokploy/server/utils/schedules/container-run"
 );
-const { NO_PROCESS_LOG_LINE, endScheduleRunWithoutProcess } = await import(
-	"@dokploy/server/utils/schedules/run-status"
-);
+const { NO_PROCESS_LOG_LINE, STRANDED_LOG_LINE, endScheduleRunWithoutProcess } =
+	await import("@dokploy/server/utils/schedules/run-status");
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -76,28 +79,50 @@ beforeEach(() => {
 	mocks.appendFile.mockResolvedValue(undefined);
 });
 
-describe("isPastStartGrace", () => {
+describe("decideRunWithoutProcess", () => {
 	const now = Date.parse("2026-10-14T12:00:00.000Z");
 	const before = (ms: number) => new Date(now - ms).toISOString();
 
-	it("is false until the grace period has passed, true from then on", () => {
-		expect(isPastStartGrace(before(1_000), now)).toBe(false);
-		expect(isPastStartGrace(before(SCHEDULE_START_GRACE_MS - 1), now)).toBe(
-			false,
-		);
-		expect(isPastStartGrace(before(SCHEDULE_START_GRACE_MS), now)).toBe(true);
-		expect(isPastStartGrace(before(24 * 3600_000), now)).toBe(true);
+	it("a run that was not launched yet keeps its cancel, however slow the connect", () => {
+		for (const age of [1_000, 60_000, SCHEDULE_STRANDED_MS - 1]) {
+			expect(
+				decideRunWithoutProcess({
+					launchedAt: undefined,
+					startedAt: before(age),
+					now,
+				}),
+			).toBe("claim");
+		}
 	});
 
-	it("is false when the start time is missing or unreadable", () => {
-		expect(isPastStartGrace(null, now)).toBe(false);
-		expect(isPastStartGrace(undefined, now)).toBe(false);
-		expect(isPastStartGrace("", now)).toBe(false);
-		expect(isPastStartGrace("yesterday-ish", now)).toBe(false);
+	it("a run launched moments ago is retried, one launched a while ago is gone", () => {
+		const launched = (ms: number) =>
+			decideRunWithoutProcess({
+				launchedAt: now - ms,
+				startedAt: before(60 * 60_000),
+				now,
+			});
+
+		expect(launched(0)).toBe("retry");
+		expect(launched(SCHEDULE_LAUNCH_SETTLE_MS - 1)).toBe("retry");
+		expect(launched(SCHEDULE_LAUNCH_SETTLE_MS)).toBe("gone");
+		expect(launched(5 * 60_000)).toBe("gone");
 	});
 
-	it("is a bounded wait: 30 seconds", () => {
-		expect(SCHEDULE_START_GRACE_MS).toBe(30_000);
+	it("a run with no launch record that is older than the stranded bound was left behind", () => {
+		const stranded = (startedAt: string | null | undefined) =>
+			decideRunWithoutProcess({ launchedAt: undefined, startedAt, now });
+
+		expect(stranded(before(SCHEDULE_STRANDED_MS))).toBe("stranded");
+		expect(stranded(before(24 * 3600_000))).toBe("stranded");
+		expect(stranded(null)).toBe("claim");
+		expect(stranded(undefined)).toBe("claim");
+		expect(stranded("yesterday-ish")).toBe("claim");
+	});
+
+	it("uses bounds that sit well apart: 10 seconds to settle, 10 minutes to strand", () => {
+		expect(SCHEDULE_LAUNCH_SETTLE_MS).toBe(10_000);
+		expect(SCHEDULE_STRANDED_MS).toBe(600_000);
 	});
 });
 
@@ -171,6 +196,22 @@ describe("endScheduleRunWithoutProcess", () => {
 			`${NO_PROCESS_LOG_LINE}\n`,
 		);
 		expect(NO_PROCESS_LOG_LINE).toMatch(/cancelled/i);
+	});
+
+	it("says it was left behind for a stranded run", async () => {
+		await endScheduleRunWithoutProcess(
+			"dep-1",
+			null,
+			"/logs/run.log",
+			STRANDED_LOG_LINE,
+		);
+
+		expect(mocks.appendFile).toHaveBeenCalledWith(
+			"/logs/run.log",
+			`${STRANDED_LOG_LINE}
+`,
+		);
+		expect(STRANDED_LOG_LINE).toMatch(/restart/i);
 	});
 
 	it("logs on the server the run lives on", async () => {

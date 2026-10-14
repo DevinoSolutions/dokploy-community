@@ -68,19 +68,44 @@ export const cancelScheduleRun = async (
 };
 
 /**
- * How long a run may take to start its command. Past this, a run that has no
- * pid and no process carrying its tag is not "still starting" any more: its
- * cancel ends it instead of asking the user to retry.
+ * How long after its launch a run may still be registering its processes: a
+ * cancel that finds no tagged process within this is asked to retry.
  */
-export const SCHEDULE_START_GRACE_MS = 30_000;
+export const SCHEDULE_LAUNCH_SETTLE_MS = 10_000;
 
-/** True once a run is older than `SCHEDULE_START_GRACE_MS`. An unreadable start time is not. */
-export const isPastStartGrace = (
-	startedAt: string | null | undefined,
+/**
+ * A running row that has no launch record and is older than this was stranded
+ * (Dokploy restarted under it), far above any ssh connect time.
+ */
+export const SCHEDULE_STRANDED_MS = 10 * 60_000;
+
+/**
+ * What a cancel does for a `server` / `dokploy-server` run that has no pid and
+ * no process carrying its tag:
+ * - `claim`: not launched yet. The cancel stands; the launch point re-checks it
+ *   and never starts the command.
+ * - `retry`: launched moments ago, its processes may not exist yet.
+ * - `gone`: launched a while ago and nothing carries the tag: it already exited
+ *   or cannot be tracked.
+ * - `stranded`: never launched by a process we know of, and too old to still be
+ *   on its way: left behind by a restart.
+ */
+export const decideRunWithoutProcess = ({
+	launchedAt,
+	startedAt,
 	now = Date.now(),
-): boolean => {
+}: {
+	launchedAt: number | undefined;
+	startedAt: string | null | undefined;
+	now?: number;
+}): "claim" | "retry" | "gone" | "stranded" => {
+	if (launchedAt !== undefined) {
+		return now - launchedAt < SCHEDULE_LAUNCH_SETTLE_MS ? "retry" : "gone";
+	}
 	const started = startedAt ? new Date(startedAt).getTime() : Number.NaN;
-	return Number.isFinite(started) && now - started >= SCHEDULE_START_GRACE_MS;
+	return Number.isFinite(started) && now - started >= SCHEDULE_STRANDED_MS
+		? "stranded"
+		: "claim";
 };
 
 /**
@@ -88,7 +113,11 @@ export const isPastStartGrace = (
  * never printed its pid. The run is tagged like a container run (see
  * `runCommand`), so the same kill script finds its processes on the host that
  * runs it: `serverId`, or the Dokploy host when null. `found: false` means no
- * process carries the tag: the command has not started, or it is over.
+ * process carries the tag (see `decideRunWithoutProcess`).
+ *
+ * The tag is an environment variable, so a daemon the run spawned (pm2, tmux)
+ * inherits it and is killed with the run, and a `sudo` with env_reset drops it
+ * from the processes it starts, which this cannot find.
  */
 export const cancelHostScheduleRun = async (
 	serverId: string | null,
@@ -110,7 +139,9 @@ export const cancelHostScheduleRun = async (
 	const result = serverId
 		? await execAsyncRemote(serverId, command)
 		: await execAsync(command);
-	return { found: !String(result?.stdout ?? "").includes(SCHEDULE_NONE_MARKER) };
+	return {
+		found: !String(result?.stdout ?? "").includes(SCHEDULE_NONE_MARKER),
+	};
 };
 
 /**

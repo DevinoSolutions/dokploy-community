@@ -16,8 +16,7 @@ export const appendRunLog = async (
 				`echo ${quote([line])} >> ${quote([logPath])}`,
 			);
 		} else {
-			await appendFile(logPath, `${line}
-`);
+			await appendFile(logPath, `${line}\n`);
 		}
 	} catch (error) {
 		console.error(`Failed to write to the log ${logPath}:`, error);

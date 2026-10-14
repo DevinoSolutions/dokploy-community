@@ -23,6 +23,7 @@ import {
 	SCHEDULE_RUN_ENV,
 	SCHEDULE_RUN_WRAPPER,
 } from "./container-run";
+import { forgetScheduleRunLaunch, markScheduleRunLaunched } from "./launch";
 import { appendRunLog } from "./run-log";
 import {
 	endScheduleRunCancelled,
@@ -62,6 +63,16 @@ class CancelledBeforeStartError extends Error {
 		super("The run was cancelled before it started");
 	}
 }
+
+// The last point before a `server` / `dokploy-server` command is handed over
+// for execution (right before the local spawn, or once the ssh channel is
+// ready). It is recorded first and the cancel looked at after, so a cancel that
+// saw no launch is always seen here, and the command never starts (see
+// launch.ts and the cancel in the deployment router).
+const launchPoint = async (deploymentId: string) => {
+	markScheduleRunLaunched(deploymentId);
+	await assertNotCancelled(deploymentId);
+};
 
 const assertNotCancelled = async (deploymentId: string) => {
 	if (await isScheduleRunCancelled(deploymentId)) {
@@ -292,7 +303,7 @@ export const runCommand = async (scheduleId: string) => {
 				}
 			}
 		} else if (scheduleType === "dokploy-server") {
-			await assertNotCancelled(deployment.deploymentId);
+			await launchPoint(deployment.deploymentId);
 			const writeStream = createWriteStream(deployment.logPath, { flags: "a" });
 			const { SCHEDULES_PATH } = paths();
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
@@ -315,7 +326,9 @@ export const runCommand = async (scheduleId: string) => {
 				},
 				{
 					cwd: fullPath,
-					// The tag lets a cancel find the run when it has no pid (see cancel.ts).
+					// The tag lets a cancel find the run when it has no pid (see
+					// cancel.ts). The script's children inherit it, and so do daemons it
+					// leaves behind (pm2, tmux), which a cancel then kills too.
 					env: { ...process.env, [SCHEDULE_RUN_ENV]: deployment.deploymentId },
 				},
 			);
@@ -325,21 +338,29 @@ export const runCommand = async (scheduleId: string) => {
 			const fullPath = path.join(SCHEDULES_PATH, appName || "");
 			const command = `
 				set -euo pipefail
+				# The tag a cancel finds the run by when it has no pid (see cancel.ts).
+				# Inherited by daemons the script leaves behind (pm2, tmux); a sudo
+				# with env_reset drops it from what it starts.
 				export ${SCHEDULE_RUN_ENV}=${quote([deployment.deploymentId])}
 				echo "Running script" >> ${quote([deployment.logPath])};
 				bash -c ${quote([`${fullPath}/script.sh`])} 2>&1 | tee -a ${quote([deployment.logPath])} || exit 1
 				echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 			`;
 			await assertNotCancelled(deployment.deploymentId);
-			await execAsyncRemote(serverId, command, async (data) => {
-				// we need to extract the PID and Schedule ID from the data
-				const pid = data?.match(/PID: (\d+)/)?.[1];
-				if (pid) {
-					await updateDeployment(deployment.deploymentId, {
-						pid,
-					});
-				}
-			});
+			await execAsyncRemote(
+				serverId,
+				command,
+				async (data) => {
+					// we need to extract the PID and Schedule ID from the data
+					const pid = data?.match(/PID: (\d+)/)?.[1];
+					if (pid) {
+						await updateDeployment(deployment.deploymentId, {
+							pid,
+						});
+					}
+				},
+				{ beforeExec: () => launchPoint(deployment.deploymentId) },
+			);
 		}
 		// The script came through: a failure from here on is not its failure.
 		logFailureAfterwards = false;
@@ -367,5 +388,7 @@ export const runCommand = async (scheduleId: string) => {
 			await notifyScheduleFailure(schedule, error);
 		}
 		return { ...deployment, status } as const;
+	} finally {
+		forgetScheduleRunLaunch(deployment.deploymentId);
 	}
 };

@@ -287,6 +287,13 @@ export const execAsyncRemote = async (
 		 * `command`: the command line is visible to every user on the host.
 		 */
 		stdin?: string;
+		/**
+		 * Runs once the connection is up, right before the command is sent. If it
+		 * throws, the command is not sent, the connection is closed and the call
+		 * rejects with that error. For a last check that the command should
+		 * still run after a slow connect.
+		 */
+		beforeExec?: () => void | Promise<void>;
 	} = {},
 ): Promise<{ stdout: string; stderr: string }> => {
 	if (!serverId) return { stdout: "", stderr: "" };
@@ -329,7 +336,16 @@ export const execAsyncRemote = async (
 
 		sleep(1000);
 		conn
-			.once("ready", () => {
+			.once("ready", async () => {
+				if (options.beforeExec) {
+					try {
+						await options.beforeExec();
+					} catch (error) {
+						conn.end();
+						reject(error);
+						return;
+					}
+				}
 				conn.exec(remoteCommand, (err, stream) => {
 					if (err) {
 						onData?.(err.message);

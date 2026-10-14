@@ -39,7 +39,6 @@ vi.mock("@dokploy/server", () => ({
 	claimScheduleRunCancel: mocks.claimScheduleRunCancel,
 	revertScheduleRunCancel: mocks.revertScheduleRunCancel,
 	isMissingProcessError: () => false,
-	isPastStartGrace: () => false,
 }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({

@@ -631,7 +631,9 @@ describe("a run cancelled before it started, whose cancel was undone meanwhile",
 	] as const)(
 		"%s ends cancelled, with the cancel line and no failure alert",
 		async (_label, scheduleType, serverId) => {
-			mocks.findScheduleById.mockResolvedValue(schedule(scheduleType, serverId));
+			mocks.findScheduleById.mockResolvedValue(
+				schedule(scheduleType, serverId),
+			);
 			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
 			revertedMeanwhile();
 
