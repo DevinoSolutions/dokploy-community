@@ -593,12 +593,15 @@ esac`,
 	}, async () => {
 		installDocker({ upExit: 0, events: 1 });
 		const parentFile = join(dir, "parent.pid");
+		const dirFile = join(dir, "events-dir.txt");
+		rmSync(dirFile, { force: true });
 		rmSync(pidFile, { force: true });
 		const child = spawn(
 			"sh",
 			[
 				writeScript(
 					`echo $$ > ${toShellPath(parentFile)}; ${getDockerEventsStartScript("docker-compose", "my-app")}
+echo "$DOKPLOY_EVENTS_DIR" > ${toShellPath(dirFile)}
 sleep 20`,
 				),
 			],
@@ -611,10 +614,13 @@ sleep 20`,
 			},
 		);
 		try {
-			for (let i = 0; i < 100 && !hasPid(); i++) {
+			for (let i = 0; i < 100 && !(hasPid() && existsSync(dirFile)); i++) {
 				await new Promise((resolve) => setTimeout(resolve, 100));
 			}
 			expect(hasPid()).toBe(true);
+			const eventsDir = readFileSync(dirFile, "utf8").trim();
+			expect(eventsDir).not.toBe("");
+			expect(sh(`test -d ${quote([eventsDir])}`).status).toBe(0);
 			// Killed the moment the capture exists: no trap runs for SIGKILL and the
 			// rest of the startup never happens, only the watchdog can stop it.
 			const eventsPid = readFileSync(pidFile, "utf8").trim();
@@ -626,6 +632,13 @@ sleep 20`,
 				gone = sh(`kill -0 ${eventsPid} 2>/dev/null`).status !== 0;
 			}
 			expect(gone).toBe(true);
+			// The watchdog also removes the private directory (events file, shell.pid).
+			let dirGone = false;
+			for (let i = 0; i < 100 && !dirGone; i++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				dirGone = sh(`test -d ${quote([eventsDir])}`).status !== 0;
+			}
+			expect(dirGone).toBe(true);
 		} finally {
 			child.kill();
 		}

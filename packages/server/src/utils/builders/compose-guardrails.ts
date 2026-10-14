@@ -207,6 +207,10 @@ export const getDockerEventsStartScript = (
 					sleep ${DOCKER_EVENTS_WATCHDOG_INTERVAL_SECONDS} & wait $!;
 				done;
 				kill "$DOKPLOY_CAPTURE_PID" 2>/dev/null || true;
+				# Deploy shell gone (killed before its EXIT trap ran) or lifetime bound hit:
+				# nobody will flush, so remove the private directory. When only the capture
+				# exited the shell still flushes and removes it.
+				if ! kill -0 "$DOKPLOY_SHELL_PID" 2>/dev/null || [ "$(date +%s)" -ge "$DOKPLOY_WD_END" ]; then rm -rf "$DOKPLOY_EVENTS_DIR" 2>/dev/null || true; fi;
 			) >/dev/null 2>&1 </dev/null &
 			DOKPLOY_EVENTS_WD_PID=$!;
 		fi;
