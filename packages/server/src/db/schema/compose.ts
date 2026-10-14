@@ -1,4 +1,8 @@
 import {
+	type DeployGuardrails,
+	deployGuardrailsSchema,
+} from "@dokploy/server/db/validations/compose-guardrails";
+import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
 } from "@dokploy/server/utils/preview-wildcard";
@@ -188,6 +192,12 @@ export const compose = pgTable("compose", {
 			}>
 		>()
 		.default([]),
+	/**
+	 * Fork column: opt-in deploy guardrails (phase timestamps, docker events
+	 * capture, pre-done health check). `null` = everything off, which is every
+	 * existing row. See utils/builders/compose-guardrails.ts.
+	 */
+	deployGuardrails: jsonb("deployGuardrails").$type<DeployGuardrails>(),
 });
 
 export const composeRelations = relations(compose, ({ one, many }) => ({
@@ -288,6 +298,7 @@ const createSchema = createInsertSchema(compose, {
 			}),
 		)
 		.optional(),
+	deployGuardrails: deployGuardrailsSchema.nullable().optional(),
 });
 
 export const apiCreateCompose = createSchema.pick({
