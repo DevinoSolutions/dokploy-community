@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.24**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.25**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.24 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.25 \
   --with-registry-auth \
   dokploy
 ```
@@ -90,11 +90,10 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.24
+## What's new in v0.30.8-community.25
 
-- Preview deployments created before community.23 now find their build log on the owner's build server, the serving server or the Dokploy host ([#367](https://github.com/DevinoSolutions/dokploy-community/pull/367)).
-- Cancelled schedule runs no longer show "Command failed" or get stuck as `running` ([#368](https://github.com/DevinoSolutions/dokploy-community/pull/368)).
-- Three more upstream fixes ported ([#369](https://github.com/DevinoSolutions/dokploy-community/pull/369), [#370](https://github.com/DevinoSolutions/dokploy-community/pull/370), [#371](https://github.com/DevinoSolutions/dokploy-community/pull/371)). No database migrations.
+- Opt-in Compose deploy guardrails, off by default and set per compose in the Advanced tab: UTC phase timestamps in the deploy log, a `docker events` capture during `compose up`, and an HTTP(S) health check that marks the deploy as failed if it does not pass in time. No automatic rollback ([#375](https://github.com/DevinoSolutions/dokploy-community/pull/375)).
+- One database migration (`0216_compose_deploy_guardrails`). Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -109,7 +108,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.24
+export DOKPLOY_VERSION=v0.30.8-community.25
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -122,7 +121,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.24      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.25      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -141,7 +140,7 @@ The standard [`DO_NOT_TRACK=1`](https://consoledonottrack.com) convention is als
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.24` is the 24th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.25` is the 25th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
