@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
 	unreachable: new Set<string | null>(),
 	// Hosts whose probe fails with this error.
 	failures: new Map<string | null, Error>(),
+	// What a host's probe prints, when it is not just the kind of file.
+	stdout: new Map<string | null, string>(),
 	isCloud: false,
 	findPreviewDeploymentById: vi.fn(),
 	findPreviewDeploymentLogOwner: vi.fn(),
@@ -146,6 +148,7 @@ beforeEach(() => {
 	mocks.hanging = new Set();
 	mocks.unreachable = new Set();
 	mocks.failures = new Map();
+	mocks.stdout = new Map();
 	mocks.isCloud = false;
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
 	mocks.findPreviewDeploymentById.mockResolvedValue({
@@ -166,7 +169,8 @@ beforeEach(() => {
 				if (mocks.hanging.has(host)) return new Promise(() => {});
 				if (mocks.unreachable.has(host)) throw new Error("connection refused");
 				if (mocks.failures.has(host)) throw mocks.failures.get(host);
-				if (mocks.filesOn.has(host)) return { stdout: REGULAR_FILE, stderr: "" };
+				if (mocks.filesOn.has(host))
+					return { stdout: mocks.stdout.get(host) ?? REGULAR_FILE, stderr: "" };
 				throw missingFile();
 			}
 			return { stdout: `built on ${host}\n`, stderr: "" };
@@ -176,7 +180,8 @@ beforeEach(() => {
 		if (command === probe) {
 			if (mocks.unreachable.has(null)) throw new Error("spawn failed");
 			if (mocks.failures.has(null)) throw mocks.failures.get(null);
-			if (mocks.filesOn.has(null)) return { stdout: REGULAR_FILE, stderr: "" };
+			if (mocks.filesOn.has(null))
+				return { stdout: mocks.stdout.get(null) ?? REGULAR_FILE, stderr: "" };
 			throw missingFile();
 		}
 		return { stdout: "local\n", stderr: "" };
@@ -532,6 +537,61 @@ describe("a log that is on no connected server", () => {
 
 		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
 			serverId: null,
+		});
+	});
+
+	it.each([
+		["a login banner", "Welcome to srv\nLast login: today\nregular file\n"],
+		["CRLF output after a banner", "motd line\r\nregular empty file\r\n"],
+		["a banner that mentions a directory", "directory listing off\nregular file\n"],
+	])("still finds an existing log behind %s", async (_label, stdout) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.filesOn.add("server-1");
+		mocks.stdout.set("server-1", stdout);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).resolves.toBe("built on server-1\n");
+	});
+
+	it.each([
+		"directory",
+		"fifo",
+		"symbolic link",
+		"socket",
+		"character special file",
+		"block special file",
+	])("counts a %s at the path as not the log", async (kind) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: "server-1", buildServerId: null }),
+		);
+		mocks.filesOn.add("server-1");
+		mocks.stdout.set("server-1", `banner\n${kind}\n`);
+
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+	});
+
+	it.each([
+		["only a banner", "Welcome to srv\n"],
+		["no output", ""],
+		["a banner after the answer", "regular file\nGoodbye\n"],
+		["an unknown kind", "weird thing\n"],
+	])("never counts %s as a missing file", async (_label, stdout) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: "server-1", buildServerId: null }),
+		);
+		mocks.filesOn.add("server-1");
+		mocks.stdout.set("server-1", stdout);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
 		});
 	});
 

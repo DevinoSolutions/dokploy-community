@@ -91,14 +91,30 @@ const isFileMissing = (error: unknown) =>
 	error.exitCode === 1 &&
 	/No such file or directory/.test(error.stderr || error.message);
 
-// stat -c %F names the kind of file; the log must be a regular file. Anything
-// else printed on success is not an answer.
+// What stat -c %F prints for a file that exists but is not a regular file.
+const NON_REGULAR_KINDS = new Set([
+	"directory",
+	"fifo",
+	"symbolic link",
+	"socket",
+	"character special file",
+	"block special file",
+]);
+
+// stat -c %F names the kind of file; the log must be a regular file. A login
+// banner or profile output can come before it on a remote shell, so only the
+// last non-empty line is the answer, and a line that is not a kind stat knows
+// is no answer at all.
 const fileKind = (stdout: string | undefined): Probe => {
-	const kind = String(stdout ?? "").trim();
+	const lines = String(stdout ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	const kind = lines.at(-1);
 	if (kind === "regular file" || kind === "regular empty file") {
 		return "present";
 	}
-	return kind ? "absent" : "unknown";
+	return kind && NON_REGULAR_KINDS.has(kind) ? "absent" : "unknown";
 };
 
 // Does `host` (null = this host) belong to the organization and hold the log?
