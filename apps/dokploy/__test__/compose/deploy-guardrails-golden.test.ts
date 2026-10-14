@@ -66,6 +66,17 @@ describe("golden build command (guardrails off)", () => {
 			{ phaseTimestamps: false, dockerEvents: false, healthCheck: null },
 			true,
 		],
+		[
+			"every flag false, stallSnapshot null",
+			{
+				phaseTimestamps: false,
+				dockerEvents: false,
+				healthCheck: null,
+				stallSnapshot: null,
+			},
+			true,
+		],
+		["only stallSnapshot null", { stallSnapshot: null }, true],
 		["an empty object", {}, true],
 	];
 
@@ -80,6 +91,9 @@ describe("golden build command (guardrails off)", () => {
 
 	it("a guardrail that is on does change the script", async () => {
 		expect(await render("compose", { phaseTimestamps: true })).not.toBe(
+			golden.compose,
+		);
+		expect(await render("compose", { stallSnapshot: {} })).not.toBe(
 			golden.compose,
 		);
 	});
