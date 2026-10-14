@@ -140,7 +140,7 @@ The standard [`DO_NOT_TRACK=1`](https://consoledonottrack.com) convention is als
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.27` is the 26th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.27` is the 27th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
