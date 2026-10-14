@@ -23,7 +23,11 @@ import {
 	SCHEDULE_RUN_ENV,
 	SCHEDULE_RUN_WRAPPER,
 } from "./container-run";
-import { forgetScheduleRunLaunch, markScheduleRunLaunched } from "./launch";
+import {
+	forgetScheduleRunLaunch,
+	markScheduleRunChecking,
+	markScheduleRunLaunched,
+} from "./launch";
 import { appendRunLog } from "./run-log";
 import {
 	endScheduleRunCancelled,
@@ -66,12 +70,15 @@ class CancelledBeforeStartError extends Error {
 
 // The last point before a `server` / `dokploy-server` command is handed over
 // for execution (right before the local spawn, or once the ssh channel is
-// ready). It is recorded first and the cancel looked at after, so a cancel that
-// saw no launch is always seen here, and the command never starts (see
-// launch.ts and the cancel in the deployment router).
+// ready). The run is marked as checking, then looks at the cancel, then is
+// marked as launched in the same step it hands the command over. A cancel that
+// finds no mark is seen by that look; one that finds "checking" cannot know
+// which way it goes and asks the user to retry (see launch.ts and the cancel in
+// the deployment router).
 const launchPoint = async (deploymentId: string) => {
-	markScheduleRunLaunched(deploymentId);
+	markScheduleRunChecking(deploymentId);
 	await assertNotCancelled(deploymentId);
+	markScheduleRunLaunched(deploymentId);
 };
 
 const assertNotCancelled = async (deploymentId: string) => {

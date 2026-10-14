@@ -6,7 +6,7 @@ import {
 	type RemoteBuildCancelTarget,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
-import { Client } from "ssh2";
+import { Client, type ClientCallback } from "ssh2";
 import { registerRemoteBuild } from "./remote-build-registry";
 import {
 	ExecError,
@@ -334,6 +334,18 @@ export const execAsyncRemote = async (
 			conn.once("close", unregister);
 		}
 
+		// The connection can drop while `beforeExec` is pending, which makes
+		// `conn.exec` throw "Not connected": reject the call instead of leaving an
+		// unhandled rejection behind.
+		const execOrReject = (cmd: string, callback: ClientCallback) => {
+			try {
+				conn.exec(cmd, callback);
+			} catch (error) {
+				conn.end();
+				reject(error);
+			}
+		};
+
 		sleep(1000);
 		conn
 			.once("ready", async () => {
@@ -346,7 +358,7 @@ export const execAsyncRemote = async (
 						return;
 					}
 				}
-				conn.exec(remoteCommand, (err, stream) => {
+				execOrReject(remoteCommand, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
 						reject(

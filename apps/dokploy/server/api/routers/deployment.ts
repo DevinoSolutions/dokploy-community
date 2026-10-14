@@ -12,7 +12,7 @@ import {
 	findAllDeploymentsByServerId,
 	findAllDeploymentsCentralized,
 	findDeploymentById,
-	getScheduleRunLaunchedAt,
+	getScheduleRunLaunch,
 	IS_CLOUD,
 	isMissingProcessError,
 	removeDeployment,
@@ -315,7 +315,7 @@ export const deploymentRouter = createTRPCRouter({
 						);
 						if (!stopped.found) {
 							noProcessOutcome = decideRunWithoutProcess({
-								launchedAt: getScheduleRunLaunchedAt(deployment.deploymentId),
+								launch: getScheduleRunLaunch(deployment.deploymentId),
 								startedAt: deployment.startedAt ?? deployment.createdAt,
 							});
 						}

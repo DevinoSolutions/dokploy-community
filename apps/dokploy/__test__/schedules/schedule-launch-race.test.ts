@@ -82,9 +82,10 @@ vi.mock("node-schedule", () => ({
 	scheduledJobs: {},
 }));
 
+import { decideRunWithoutProcess } from "@dokploy/server/utils/schedules/cancel";
 import {
 	forgetScheduleRunLaunch,
-	getScheduleRunLaunchedAt,
+	getScheduleRunLaunch,
 } from "@dokploy/server/utils/schedules/launch";
 import { runCommand } from "@dokploy/server/utils/schedules/utils";
 
@@ -148,7 +149,7 @@ describe("a server run cancelled during a slow connect", () => {
 		const run = runCommand("sch-1");
 		await vi.waitFor(() => expect(mocks.execAsyncRemote).toHaveBeenCalled());
 		// Not launched yet: nothing in the registry for a cancel to find.
-		expect(getScheduleRunLaunchedAt("dep-1")).toBeUndefined();
+		expect(getScheduleRunLaunch("dep-1")).toBeUndefined();
 
 		// The user cancels, long after the run started, while it is connecting.
 		mocks.isScheduleRunCancelled.mockResolvedValue(true);
@@ -164,11 +165,11 @@ describe("a server run cancelled during a slow connect", () => {
 		);
 	});
 
-	it("records the launch before it looks at the cancel", async () => {
+	it("marks the run as checking while it looks at the cancel, and as launched once that passed", async () => {
 		mocks.findScheduleById.mockResolvedValue(remoteRun("srv-1"));
-		const seenAtCheck: Array<number | undefined> = [];
+		const seenAtCheck: Array<ReturnType<typeof getScheduleRunLaunch>> = [];
 		mocks.isScheduleRunCancelled.mockImplementation(async () => {
-			seenAtCheck.push(getScheduleRunLaunchedAt("dep-1"));
+			seenAtCheck.push(getScheduleRunLaunch("dep-1"));
 			return false;
 		});
 		mocks.execAsyncRemote.mockImplementation(
@@ -185,9 +186,86 @@ describe("a server run cancelled during a slow connect", () => {
 
 		await runCommand("sch-1");
 
-		// The early check precedes the launch; the launch point's does not.
+		// The early check precedes the launch point; the launch point's own look
+		// happens while the run is marked as checking.
 		expect(seenAtCheck[0]).toBeUndefined();
-		expect(seenAtCheck.at(-1)).toBeTypeOf("number");
+		expect(seenAtCheck.at(-1)).toEqual({ state: "checking" });
+		expect(getScheduleRunLaunch("dep-1")).toBeUndefined();
+	});
+
+	it("is already launched when the command is handed over", async () => {
+		mocks.findScheduleById.mockResolvedValue(remoteRun("srv-1"));
+		let atHandoff: ReturnType<typeof getScheduleRunLaunch>;
+		mocks.execAsyncRemote.mockImplementation(
+			async (
+				_serverId: string,
+				command: string,
+				_onData: unknown,
+				options?: { beforeExec?: () => Promise<void> },
+			) => {
+				await options?.beforeExec?.();
+				if (command.includes("script.sh")) {
+					atHandoff = getScheduleRunLaunch("dep-1");
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+
+		await runCommand("sch-1");
+
+		expect(atHandoff).toEqual({ state: "launched", at: expect.any(Number) });
+	});
+
+	it("a cancel that arrives while the last look stalls for more than 10 s never ends the run behind the command's back", async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.findScheduleById.mockResolvedValue(remoteRun("srv-1"));
+			let releaseCheck: (cancelled: boolean) => void = () => {};
+			let checks = 0;
+			mocks.isScheduleRunCancelled.mockImplementation(() => {
+				checks++;
+				// The early check answers at once; the launch point's stalls.
+				if (checks === 1) return Promise.resolve(false);
+				return new Promise<boolean>((resolve) => {
+					releaseCheck = resolve;
+				});
+			});
+			const sent = vi.fn();
+			mocks.execAsyncRemote.mockImplementation(
+				async (
+					_serverId: string,
+					command: string,
+					_onData: unknown,
+					options?: { beforeExec?: () => Promise<void> },
+				) => {
+					await options?.beforeExec?.();
+					if (command.includes("script.sh")) sent(command);
+					return { stdout: "", stderr: "" };
+				},
+			);
+
+			const run = runCommand("sch-1");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(getScheduleRunLaunch("dep-1")).toEqual({ state: "checking" });
+
+			// A cancel comes in and finds no process, well after 10 s of stalling:
+			// the run is still undecided, which is not "launched long ago".
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(
+				decideRunWithoutProcess({
+					launch: getScheduleRunLaunch("dep-1"),
+					startedAt: new Date(Date.now() - 30_000).toISOString(),
+				}),
+			).toBe("retry");
+			expect(sent).not.toHaveBeenCalled();
+
+			// The look finally answers: the claim was committed, so it says cancelled.
+			releaseCheck(true);
+			await expect(run).resolves.toMatchObject({ status: "cancelled" });
+			expect(sent).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("forgets the launch when the run is over", async () => {
@@ -200,14 +278,16 @@ describe("a server run cancelled during a slow connect", () => {
 				options?: { beforeExec?: () => Promise<void> },
 			) => {
 				await options?.beforeExec?.();
-				expect(getScheduleRunLaunchedAt("dep-1")).toBeTypeOf("number");
+				expect(getScheduleRunLaunch("dep-1")).toMatchObject({
+					state: "launched",
+				});
 				return { stdout: "", stderr: "" };
 			},
 		);
 
 		await runCommand("sch-1");
 
-		expect(getScheduleRunLaunchedAt("dep-1")).toBeUndefined();
+		expect(getScheduleRunLaunch("dep-1")).toBeUndefined();
 	});
 
 	it("also forgets it when the run fails", async () => {
@@ -227,7 +307,7 @@ describe("a server run cancelled during a slow connect", () => {
 
 		await runCommand("sch-1");
 
-		expect(getScheduleRunLaunchedAt("dep-1")).toBeUndefined();
+		expect(getScheduleRunLaunch("dep-1")).toBeUndefined();
 	});
 });
 
@@ -252,7 +332,9 @@ describe("a dokploy-server run cancelled before the spawn", () => {
 			scheduleType: "dokploy-server",
 		});
 		mocks.spawnAsync.mockImplementation(async () => {
-			expect(getScheduleRunLaunchedAt("dep-1")).toBeTypeOf("number");
+			expect(getScheduleRunLaunch("dep-1")).toMatchObject({
+				state: "launched",
+			});
 			return {};
 		});
 

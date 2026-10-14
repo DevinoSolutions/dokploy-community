@@ -9,6 +9,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const ssh = vi.hoisted(() => ({
 	clients: [] as any[],
 	onExec: (_channel: any) => {},
+	// What conn.exec throws, like ssh2 does on a connection that is gone.
+	execThrows: null as Error | null,
 }));
 
 vi.mock("ssh2", async () => {
@@ -28,6 +30,7 @@ vi.mock("ssh2", async () => {
 			return this;
 		}
 		exec(command: string, callback: (err: Error | undefined, ch: any) => void) {
+			if (ssh.execThrows) throw ssh.execThrows;
 			this.execs.push(command);
 			const channel = new FakeChannel();
 			callback(undefined, channel);
@@ -58,6 +61,7 @@ vi.mock("@dokploy/server/services/server", () => ({
 
 beforeEach(() => {
 	ssh.clients = [];
+	ssh.execThrows = null;
 	ssh.onExec = (channel) => queueMicrotask(() => channel.emit("close", 0));
 });
 
@@ -105,6 +109,27 @@ describe("execAsyncRemote with a beforeExec check", () => {
 		).rejects.toThrow("no");
 
 		expect(ssh.clients[0].execs).toEqual([]);
+	});
+
+	it("rejects once, without an unhandled rejection, when the connection dropped while the check was pending", async () => {
+		const unhandled = vi.fn();
+		process.on("unhandledRejection", unhandled);
+		ssh.execThrows = new Error("Not connected");
+		try {
+			await expect(
+				execAsyncRemote("server-1", "echo hi", undefined, {
+					beforeExec: async () => {
+						await new Promise((resolve) => setImmediate(resolve));
+					},
+				}),
+			).rejects.toThrow("Not connected");
+			await new Promise((resolve) => setImmediate(resolve));
+		} finally {
+			process.off("unhandledRejection", unhandled);
+		}
+
+		expect(unhandled).not.toHaveBeenCalled();
+		expect(ssh.clients[0].calls).toEqual(["end"]);
 	});
 
 	it("is not involved when it is not given", async () => {

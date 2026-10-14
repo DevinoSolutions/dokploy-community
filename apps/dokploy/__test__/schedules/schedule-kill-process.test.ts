@@ -65,7 +65,7 @@ vi.mock("@dokploy/server", async () => {
 		decideRunWithoutProcess,
 		isMissingProcessError,
 	} = await import("@dokploy/server/utils/schedules/cancel");
-	const { getScheduleRunLaunchedAt } = await import(
+	const { getScheduleRunLaunch } = await import(
 		"@dokploy/server/utils/schedules/launch"
 	);
 	return {
@@ -75,7 +75,7 @@ vi.mock("@dokploy/server", async () => {
 		cancelHostScheduleRun,
 		cancelScheduleRun,
 		decideRunWithoutProcess,
-		getScheduleRunLaunchedAt,
+		getScheduleRunLaunch,
 		isMissingProcessError,
 		STRANDED_LOG_LINE: "stranded-line",
 		endScheduleRunWithoutProcess: mocks.endScheduleRunWithoutProcess,
@@ -107,9 +107,11 @@ const ctx = {
 const { SCHEDULE_KILL_SCRIPT, SCHEDULE_NONE_MARKER } = await import(
 	"@dokploy/server/utils/schedules/container-run"
 );
-const { forgetScheduleRunLaunch, markScheduleRunLaunched } = await import(
-	"@dokploy/server/utils/schedules/launch"
-);
+const {
+	forgetScheduleRunLaunch,
+	markScheduleRunChecking,
+	markScheduleRunLaunched,
+} = await import("@dokploy/server/utils/schedules/launch");
 const { deploymentRouter } = await import("@/server/api/routers/deployment");
 const caller = deploymentRouter.createCaller(
 	ctx as Parameters<typeof deploymentRouter.createCaller>[0],
@@ -830,6 +832,31 @@ describe("a server run that never printed its pid", () => {
 		);
 		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("at its last look at the cancel, however long that has taken: undoes the claim and asks to retry, never ends the run", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { startedAt: ago(5 * 60_000) }),
+		);
+		nothingFound();
+		markScheduleRunChecking("dep_1-A");
+		mocks.revertScheduleRunCancel.mockResolvedValue(true);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toMatchObject({
+			message: "The run is still starting, try again in a moment",
+		});
+
+		// The claim is committed before the kill script and the record are read.
+		expect(
+			mocks.claimScheduleRunCancel.mock.invocationCallOrder[0],
+		).toBeLessThan(mocks.execAsyncRemote.mock.invocationCallOrder[0] as number);
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith(
+			"dep_1-A",
+			"claim-1",
+		);
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
 	});
 
 	it("launched moments ago but already ended: the cancel succeeds", async () => {

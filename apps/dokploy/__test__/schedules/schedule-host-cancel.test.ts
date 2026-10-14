@@ -87,7 +87,7 @@ describe("decideRunWithoutProcess", () => {
 		for (const age of [1_000, 60_000, SCHEDULE_STRANDED_MS - 1]) {
 			expect(
 				decideRunWithoutProcess({
-					launchedAt: undefined,
+					launch: undefined,
 					startedAt: before(age),
 					now,
 				}),
@@ -98,7 +98,7 @@ describe("decideRunWithoutProcess", () => {
 	it("a run launched moments ago is retried, one launched a while ago is gone", () => {
 		const launched = (ms: number) =>
 			decideRunWithoutProcess({
-				launchedAt: now - ms,
+				launch: { state: "launched", at: now - ms },
 				startedAt: before(60 * 60_000),
 				now,
 			});
@@ -111,7 +111,7 @@ describe("decideRunWithoutProcess", () => {
 
 	it("a run with no launch record that is older than the stranded bound was left behind", () => {
 		const stranded = (startedAt: string | null | undefined) =>
-			decideRunWithoutProcess({ launchedAt: undefined, startedAt, now });
+			decideRunWithoutProcess({ launch: undefined, startedAt, now });
 
 		expect(stranded(before(SCHEDULE_STRANDED_MS))).toBe("stranded");
 		expect(stranded(before(24 * 3600_000))).toBe("stranded");
