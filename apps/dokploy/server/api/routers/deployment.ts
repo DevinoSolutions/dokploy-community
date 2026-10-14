@@ -1,7 +1,10 @@
 import {
 	cancelBuildServerDeploymentById,
+	cancelHostScheduleRun,
 	cancelScheduleRun,
 	claimScheduleRunCancel,
+	decideRunWithoutProcess,
+	endScheduleRunWithoutProcess,
 	execAsync,
 	execAsyncRemote,
 	findAllDeploymentsByApplicationId,
@@ -9,11 +12,13 @@ import {
 	findAllDeploymentsByServerId,
 	findAllDeploymentsCentralized,
 	findDeploymentById,
+	getScheduleRunLaunch,
 	IS_CLOUD,
 	isMissingProcessError,
 	removeDeployment,
 	resolveServicePath,
 	revertScheduleRunCancel,
+	STRANDED_LOG_LINE,
 	updateDeploymentStatus,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
@@ -236,7 +241,13 @@ export const deploymentRouter = createTRPCRouter({
 				schedule?.scheduleType === "application" ||
 				schedule?.scheduleType === "compose";
 
-			if (!stoppedByTag && !deployment.pid) {
+			// A run of a server or dokploy-server schedule whose script never printed
+			// its pid is stopped by its tag too: asking for a retry would never end.
+			const stoppedByTagWithoutPid =
+				Boolean(schedule) && !stoppedByTag && !deployment.pid;
+			const stoppedByPid = !stoppedByTag && !stoppedByTagWithoutPid;
+
+			if (stoppedByPid && !deployment.pid) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: schedule
@@ -248,7 +259,7 @@ export const deploymentRouter = createTRPCRouter({
 			// `pid` is a free text column and ends up in a shell command: only a
 			// plain decimal pid >= 2 is accepted (`kill -9 0` signals our own
 			// process group and `kill -9 1` signals init).
-			if (!stoppedByTag && !/^(?:[2-9]|[1-9]\d+)$/.test(deployment.pid ?? "")) {
+			if (stoppedByPid && !/^(?:[2-9]|[1-9]\d+)$/.test(deployment.pid ?? "")) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Deployment has an invalid process id",
@@ -283,6 +294,9 @@ export const deploymentRouter = createTRPCRouter({
 					});
 				}
 				let nothingToStop = false;
+				let noProcessOutcome: ReturnType<
+					typeof decideRunWithoutProcess
+				> | null = null;
 				try {
 					if (
 						schedule.scheduleType === "application" ||
@@ -297,6 +311,17 @@ export const deploymentRouter = createTRPCRouter({
 							deployment.deploymentId,
 						);
 						nothingToStop = stopped.containerFound && !stopped.found;
+					} else if (stoppedByTagWithoutPid) {
+						const stopped = await cancelHostScheduleRun(
+							deploymentHostServerId(deployment),
+							deployment.deploymentId,
+						);
+						if (!stopped.found) {
+							noProcessOutcome = decideRunWithoutProcess({
+								launch: getScheduleRunLaunch(deployment.deploymentId),
+								startedAt: deployment.startedAt ?? deployment.createdAt,
+							});
+						}
 					} else {
 						try {
 							await killOnHost();
@@ -325,7 +350,31 @@ export const deploymentRouter = createTRPCRouter({
 				// going gets its claim undone and the user a retry; one that ended
 				// meanwhile (its end was noted on the row, so the revert does not
 				// apply) is cancelled as far as anyone can tell.
-				if (
+				//
+				// A server run with no pid and no tagged process (see
+				// decideRunWithoutProcess): not launched yet, the cancel stands and
+				// the launch point stops the command; launched moments ago, the claim
+				// is undone for a retry; launched long ago or stranded by a restart,
+				// nothing is left to stop, so it ends cancelled with a line in its log
+				// instead of looping.
+				if (noProcessOutcome === "retry") {
+					if (await revertScheduleRunCancel(deployment.deploymentId, claim)) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: "The run is still starting, try again in a moment",
+						});
+					}
+				} else if (
+					noProcessOutcome === "gone" ||
+					noProcessOutcome === "stranded"
+				) {
+					await endScheduleRunWithoutProcess(
+						deployment.deploymentId,
+						deploymentHostServerId(deployment),
+						deployment.logPath,
+						noProcessOutcome === "stranded" ? STRANDED_LOG_LINE : undefined,
+					);
+				} else if (
 					nothingToStop &&
 					(await revertScheduleRunCancel(deployment.deploymentId, claim))
 				) {

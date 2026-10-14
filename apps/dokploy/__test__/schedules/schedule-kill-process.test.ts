@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * `deployment.killProcess` for a run of an application or compose schedule.
@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
 	updateDeploymentStatus: vi.fn(),
 	claimScheduleRunCancel: vi.fn(),
 	revertScheduleRunCancel: vi.fn(),
+	endScheduleRunWithoutProcess: vi.fn(),
 	findScheduleById: vi.fn(),
 	getServiceContainer: vi.fn(),
 	getComposeContainer: vi.fn(),
@@ -58,15 +59,26 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 }));
 
 vi.mock("@dokploy/server", async () => {
-	const { cancelScheduleRun, isMissingProcessError } = await import(
-		"@dokploy/server/utils/schedules/cancel"
+	const {
+		cancelHostScheduleRun,
+		cancelScheduleRun,
+		decideRunWithoutProcess,
+		isMissingProcessError,
+	} = await import("@dokploy/server/utils/schedules/cancel");
+	const { getScheduleRunLaunch } = await import(
+		"@dokploy/server/utils/schedules/launch"
 	);
 	return {
 		get IS_CLOUD() {
 			return mocks.state.cloud;
 		},
+		cancelHostScheduleRun,
 		cancelScheduleRun,
+		decideRunWithoutProcess,
+		getScheduleRunLaunch,
 		isMissingProcessError,
+		STRANDED_LOG_LINE: "stranded-line",
+		endScheduleRunWithoutProcess: mocks.endScheduleRunWithoutProcess,
 		claimScheduleRunCancel: mocks.claimScheduleRunCancel,
 		revertScheduleRunCancel: mocks.revertScheduleRunCancel,
 		findDeploymentById: mocks.findDeploymentById,
@@ -95,6 +107,11 @@ const ctx = {
 const { SCHEDULE_KILL_SCRIPT, SCHEDULE_NONE_MARKER } = await import(
 	"@dokploy/server/utils/schedules/container-run"
 );
+const {
+	forgetScheduleRunLaunch,
+	markScheduleRunChecking,
+	markScheduleRunLaunched,
+} = await import("@dokploy/server/utils/schedules/launch");
 const { deploymentRouter } = await import("@/server/api/routers/deployment");
 const caller = deploymentRouter.createCaller(
 	ctx as Parameters<typeof deploymentRouter.createCaller>[0],
@@ -407,30 +424,6 @@ describe("killProcess on an application schedule run", () => {
 		expectCancelled();
 	});
 
-	it.each(["server", "dokploy-server"])(
-		"tells the user a %s run without a pid is still starting",
-		async (scheduleType) => {
-			mocks.findDeploymentById.mockResolvedValue(
-				deployment({
-					pid: null,
-					schedule: { scheduleId: "sch-1", scheduleType, serverId: "srv-1" },
-				}),
-			);
-
-			await expect(
-				caller.killProcess({ deploymentId: "dep_1-A" }),
-			).rejects.toMatchObject({
-				code: "BAD_REQUEST",
-				message: "The run is still starting, try again in a moment",
-			});
-
-			expect(mocks.claimScheduleRunCancel).not.toHaveBeenCalled();
-			expect(mocks.execAsync).not.toHaveBeenCalled();
-			expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
-			expect(mocks.audit).not.toHaveBeenCalled();
-		},
-	);
-
 	it("keeps the pid validation for the runs that are killed by pid", async () => {
 		for (const pid of ["1; reboot", "1", "0", "-9", "12 34"]) {
 			mocks.findDeploymentById.mockResolvedValue(
@@ -719,6 +712,336 @@ describe("killProcess on host-level schedule runs", () => {
 		expect(
 			mocks.claimScheduleRunCancel.mock.invocationCallOrder[0],
 		).toBeLessThan(mocks.execAsyncRemote.mock.invocationCallOrder[0] as number);
+	});
+});
+
+describe("a server run that never printed its pid", () => {
+	const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+	const LOG = "/etc/dokploy/schedules/s/s-run.log";
+	const noPid = (
+		scheduleType: string,
+		serverId: string | null,
+		extra: Record<string, unknown> = {},
+	) =>
+		deployment({
+			pid: null,
+			startedAt: ago(60_000),
+			logPath: LOG,
+			schedule: { scheduleId: "sch-1", scheduleType, serverId },
+			...extra,
+		});
+	const found = () =>
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+	const nothingFound = () => {
+		const result = { stdout: `${SCHEDULE_NONE_MARKER}\n`, stderr: "" };
+		mocks.execAsyncRemote.mockResolvedValue(result);
+		mocks.execAsync.mockResolvedValue(result);
+	};
+	const launchedAgo = (ms: number) =>
+		markScheduleRunLaunched("dep_1-A", Date.now() - ms);
+
+	afterEach(() => {
+		forgetScheduleRunLaunch("dep_1-A");
+	});
+
+	it("is stopped by its tag on its server, whatever its age, and cancelled", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { startedAt: ago(1_000) }),
+		);
+		found();
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
+		const [serverId, command] = mocks.execAsyncRemote.mock.calls[0] as [
+			string,
+			string,
+		];
+		expect(serverId).toBe("srv-1");
+		expect(command).toMatch(/^sh -c /);
+		// The kill script and the run id reach the shell as separate arguments.
+		expect(dockerArgs(command.replace(/^sh /, "docker "))).toEqual([
+			"-c",
+			SCHEDULE_KILL_SCRIPT,
+			"sh",
+			"dep_1-A",
+		]);
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
+		expectCancelled();
+	});
+
+	it("is stopped by its tag on the Dokploy host for a dokploy-server run", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("dokploy-server", null, { serverId: null }),
+		);
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expect(mocks.execAsync).toHaveBeenCalledTimes(1);
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		expect(mocks.execAsync.mock.calls[0]?.[0]).toContain("dep_1-A");
+		expectCancelled();
+	});
+
+	it.each([
+		["server", "srv-1"],
+		["dokploy-server", null],
+	])(
+		"not launched yet (a slow ssh connect): a %s cancel stands for the launch point to stop, even long after the run started",
+		async (scheduleType, serverId) => {
+			mocks.findDeploymentById.mockResolvedValue(
+				noPid(scheduleType, serverId, {
+					serverId,
+					startedAt: ago(5 * 60_000),
+				}),
+			);
+			nothingFound();
+
+			await expect(
+				caller.killProcess({ deploymentId: "dep_1-A" }),
+			).resolves.toBeUndefined();
+
+			expect(mocks.claimScheduleRunCancel).toHaveBeenCalledWith("dep_1-A");
+			// The claim is kept, and the run is not ended behind its back: the
+			// launch point sees the cancel and ends it.
+			expect(mocks.revertScheduleRunCancel).not.toHaveBeenCalled();
+			expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
+			expect(mocks.audit).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.objectContaining({ action: "cancel", resourceId: "dep_1-A" }),
+			);
+		},
+	);
+
+	it("launched moments ago: undoes the claim and asks to retry, the process may not exist yet", async () => {
+		mocks.findDeploymentById.mockResolvedValue(noPid("server", "srv-1"));
+		nothingFound();
+		launchedAgo(3_000);
+		mocks.revertScheduleRunCancel.mockResolvedValue(true);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: "The run is still starting, try again in a moment",
+		});
+
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith(
+			"dep_1-A",
+			"claim-1",
+		);
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("at its last look at the cancel, however long that has taken: undoes the claim and asks to retry, never ends the run", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { startedAt: ago(5 * 60_000) }),
+		);
+		nothingFound();
+		markScheduleRunChecking("dep_1-A");
+		mocks.revertScheduleRunCancel.mockResolvedValue(true);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toMatchObject({
+			message: "The run is still starting, try again in a moment",
+		});
+
+		// The claim is committed before the kill script and the record are read.
+		expect(
+			mocks.claimScheduleRunCancel.mock.invocationCallOrder[0],
+		).toBeLessThan(mocks.execAsyncRemote.mock.invocationCallOrder[0] as number);
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith(
+			"dep_1-A",
+			"claim-1",
+		);
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
+	});
+
+	it("launched moments ago but already ended: the cancel succeeds", async () => {
+		mocks.findDeploymentById.mockResolvedValue(noPid("server", "srv-1"));
+		nothingFound();
+		launchedAgo(3_000);
+		mocks.revertScheduleRunCancel.mockResolvedValue(false);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).resolves.toBeUndefined();
+		expect(mocks.audit).toHaveBeenCalled();
+	});
+
+	it.each([
+		["server", "srv-1"],
+		["dokploy-server", null],
+	])(
+		"launched long ago and nothing carries the tag: a %s run ends cancelled with a log line",
+		async (scheduleType, serverId) => {
+			mocks.findDeploymentById.mockResolvedValue(
+				noPid(scheduleType, serverId, { serverId }),
+			);
+			nothingFound();
+			launchedAgo(60_000);
+
+			await expect(
+				caller.killProcess({ deploymentId: "dep_1-A" }),
+			).resolves.toBeUndefined();
+
+			expect(mocks.endScheduleRunWithoutProcess).toHaveBeenCalledWith(
+				"dep_1-A",
+				serverId,
+				LOG,
+				undefined,
+			);
+			expect(mocks.revertScheduleRunCancel).not.toHaveBeenCalled();
+			expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
+			expect(mocks.audit).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.objectContaining({ action: "cancel", resourceId: "dep_1-A" }),
+			);
+		},
+	);
+
+	it("never launched by this process and older than the stranded bound: ends cancelled, saying it was left behind", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { startedAt: ago(11 * 60_000) }),
+		);
+		nothingFound();
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).resolves.toBeUndefined();
+
+		expect(mocks.endScheduleRunWithoutProcess).toHaveBeenCalledWith(
+			"dep_1-A",
+			"srv-1",
+			LOG,
+			"stranded-line",
+		);
+		expect(mocks.revertScheduleRunCancel).not.toHaveBeenCalled();
+	});
+
+	it("a start time that cannot be read is never treated as stranded", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { startedAt: "not a date", createdAt: null }),
+		);
+		nothingFound();
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
+		expectCancelled();
+	});
+
+	it("restores the run and reports the failure when the tag kill fails", async () => {
+		mocks.findDeploymentById.mockResolvedValue(noPid("server", "srv-1"));
+		mocks.execAsyncRemote.mockRejectedValue(new Error("ssh down"));
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toThrow("ssh down");
+
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith(
+			"dep_1-A",
+			"claim-1",
+		);
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("refuses a dokploy-server run in the cloud, which has no host to stop it on", async () => {
+		mocks.state.cloud = true;
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("dokploy-server", null, { serverId: null }),
+		);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: "Deployment has no server to stop it on",
+		});
+
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalled();
+	});
+
+	it("never hands an unsafe run id to a shell", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { deploymentId: "x'; reboot; '" }),
+		);
+
+		await expect(
+			caller.killProcess({ deploymentId: "x" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+	});
+
+	it("keeps the pid kill when the run did print its pid, however old", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { pid: "4242" }),
+		);
+
+		await caller.killProcess({ deploymentId: "dep_1-A" });
+
+		expect(mocks.execAsyncRemote).toHaveBeenCalledWith("srv-1", "kill -9 4242");
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
+		expectCancelled();
+	});
+
+	it("still validates a recorded pid", async () => {
+		mocks.findDeploymentById.mockResolvedValue(
+			noPid("server", "srv-1", { pid: "1; reboot" }),
+		);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toMatchObject({
+			message: "Deployment has an invalid process id",
+		});
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+	});
+});
+
+describe("a container run with nothing to stop keeps its old behaviour", () => {
+	const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+	// Another replica may be the one the run used, so "nothing found" in the
+	// container looked up now proves nothing, however old the run is.
+	it.each([
+		["a young run", 5_000],
+		["an old run", 60 * 60_000],
+	])("%s: undoes the claim and asks to retry", async (_label, age) => {
+		mocks.findDeploymentById.mockResolvedValue(
+			deployment({
+				startedAt: ago(age),
+				logPath: "/l.log",
+				schedule: {
+					scheduleId: "sch-1",
+					scheduleType: "application",
+					serverId: "srv-1",
+				},
+			}),
+		);
+		mocks.findScheduleById.mockResolvedValue(applicationSchedule("srv-1"));
+		mocks.getServiceContainer.mockResolvedValue({ Id: "cont-1" });
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: `${SCHEDULE_NONE_MARKER}\n`,
+			stderr: "",
+		});
+		mocks.revertScheduleRunCancel.mockResolvedValue(true);
+
+		await expect(
+			caller.killProcess({ deploymentId: "dep_1-A" }),
+		).rejects.toMatchObject({
+			message: "The run is still starting, try again in a moment",
+		});
+
+		expect(mocks.revertScheduleRunCancel).toHaveBeenCalledWith(
+			"dep_1-A",
+			"claim-1",
+		);
+		expect(mocks.endScheduleRunWithoutProcess).not.toHaveBeenCalled();
 	});
 });
 

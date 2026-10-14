@@ -6,13 +6,13 @@ import {
 	type RemoteBuildCancelTarget,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
-import { Client } from "ssh2";
-import { registerRemoteBuild } from "./remote-build-registry";
+import { Client, type ClientCallback } from "ssh2";
 import {
 	ExecError,
 	MAX_EXEC_OUTPUT_TAIL,
 	truncateOutputTail,
 } from "./ExecError";
+import { registerRemoteBuild } from "./remote-build-registry";
 
 export class WriteFileRemoteError extends Error {
 	constructor(
@@ -288,9 +288,17 @@ export const execAsyncRemote = async (
 		 */
 		stdin?: string;
 		/**
+		 * Runs once the connection is up, right before the command is sent. If it
+		 * throws, the command is not sent, the connection is closed and the call
+		 * rejects with that error. For a last check that the command should
+		 * still run after a slow connect.
+		 */
+		beforeExec?: () => void | Promise<void>;
+		/**
 		 * Aborting drops the SSH connection and rejects the command, so a caller
 		 * that stops waiting (a probe that timed out) does not leave a connection
-		 * running until it ends by itself.
+		 * running until it ends by itself. Also while `beforeExec` is pending: the
+		 * command is then never sent.
 		 */
 		signal?: AbortSignal;
 	} = {},
@@ -351,14 +359,37 @@ export const execAsyncRemote = async (
 			conn.once("close", unregister);
 		}
 
+		// The connection can drop while `beforeExec` is pending, which makes
+		// `conn.exec` throw "Not connected": reject the call instead of leaving an
+		// unhandled rejection behind.
+		const execOrReject = (cmd: string, callback: ClientCallback) => {
+			try {
+				conn.exec(cmd, callback);
+			} catch (error) {
+				conn.end();
+				reject(error);
+			}
+		};
+
 		sleep(1000);
 		conn
-			.once("ready", () => {
+			.once("ready", async () => {
 				if (signal?.aborted) {
 					conn.destroy();
 					return;
 				}
-				conn.exec(remoteCommand, (err, stream) => {
+				if (options.beforeExec) {
+					try {
+						await options.beforeExec();
+					} catch (error) {
+						conn.end();
+						reject(error);
+						return;
+					}
+					// Aborted while the check was pending: already destroyed and rejected.
+					if (signal?.aborted) return;
+				}
+				execOrReject(remoteCommand, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
 						reject(

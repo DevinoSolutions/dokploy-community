@@ -137,6 +137,8 @@ describe("server schedule command", () => {
 		expect(command).toBeTypeOf("string");
 		execFileSync("bash", ["-c", command], { cwd: root, stdio: "ignore" });
 
+		// The run is tagged so a cancel can find it when it never prints a pid.
+		expect(command).toContain("export DOKPLOY_SCHEDULE_RUN=dep-1");
 		expect(existsSync(path.join(root, "pwned"))).toBe(false);
 		const log = readFileSync(path.join(root, "logs", logName), "utf8");
 		expect(log).toContain("Running script");

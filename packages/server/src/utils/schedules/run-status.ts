@@ -1,6 +1,7 @@
 import { db } from "@dokploy/server/db";
 import { deployments } from "@dokploy/server/db/schema";
 import { and, eq, inArray, ne } from "drizzle-orm";
+import { appendRunLog } from "./run-log";
 
 /**
  * Status changes of a schedule run that a user can cancel.
@@ -143,6 +144,27 @@ export const endScheduleRunCancelled = async (
 				inArray(deployments.status, ["running", "cancelled"]),
 			),
 		);
+};
+
+export const NO_PROCESS_LOG_LINE =
+	"⛔ Run cancelled by user: no process of this run was found, so it already exited or cannot be tracked.";
+export const STRANDED_LOG_LINE =
+	"⛔ Run cancelled by user: this run was left behind (Dokploy restarted while it was running) and has no process.";
+
+/**
+ * Ends a run whose cancel found nothing to stop as `cancelled`, and says why in
+ * its log (`line`), instead of leaving it for the user to retry forever. The row
+ * may still hold the cancel's claim or have been put back to `running`; either
+ * way it ends cancelled, and a run that already ended is left alone.
+ */
+export const endScheduleRunWithoutProcess = async (
+	deploymentId: string,
+	logServerId: string | null,
+	logPath: string | null,
+	line: string = NO_PROCESS_LOG_LINE,
+): Promise<void> => {
+	await endScheduleRunCancelled(deploymentId);
+	if (logPath) await appendRunLog(logServerId, logPath, line);
 };
 
 /**
