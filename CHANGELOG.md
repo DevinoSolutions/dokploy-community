@@ -4,7 +4,7 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### New in v0.30.8-community.25
 
-**Opt-in Compose deploy guardrails** ([#375](https://github.com/DevinoSolutions/dokploy-community/pull/375), issue [#374](https://github.com/DevinoSolutions/dokploy-community/issues/374)). A compose deploy could be marked done while its containers were crash-looping or not answering, with little in the log to show where the time went. Three guardrails, configured per compose, are now available. All are off by default, so existing composes deploy exactly as before.
+**Opt-in Compose deploy guardrails** ([#375](https://github.com/DevinoSolutions/dokploy-community/pull/375), issue [#374](https://github.com/DevinoSolutions/dokploy-community/issues/374)). A compose deploy was marked done as soon as `docker compose up` returned, with no readiness check and little in the log to show where the time went (in #374, web was down for about 135 s while the old container was being removed). Three guardrails, configured per compose, are now available. All are off by default, so existing composes deploy exactly as before.
 - **Phase timestamps.** Each deploy phase is logged with a UTC timestamp and the seconds elapsed since the previous one.
 - **Docker events capture.** While `docker compose up` runs, container lifecycle events (create, start, die, health status) for the project are written to the deploy log. The capture is size-capped and cleaned up by a watchdog if the deploy shell goes away.
 - **Health check.** An optional HTTP(S) URL is polled before the deploy is marked done. If it does not return a success status before the timeout, the deploy is marked `error` and the failure notification fires.
