@@ -65,6 +65,9 @@ const GUARDRAIL_MARKERS = [
 	"DOKPLOY_EVENTS",
 	"curl",
 	"Health check",
+	"dokploy_stall",
+	"DOKPLOY_STALL",
+	"Stall snapshot",
 ];
 
 describe("guardrails off: the deploy script is untouched", () => {
@@ -76,6 +79,8 @@ describe("guardrails off: the deploy script is untouched", () => {
 			"every flag false",
 			{ phaseTimestamps: false, dockerEvents: false, healthCheck: null },
 		],
+		["stallSnapshot null", { stallSnapshot: null }],
+		["a malformed stallSnapshot", { stallSnapshot: { afterSeconds: 1 } }],
 		["a malformed value", { healthCheck: { url: "ftp://nope" } }],
 	];
 

@@ -19,7 +19,9 @@ import {
 	getPhaseEndCommand,
 	getPhaseHelpersScript,
 	getPhaseStartCommand,
+	getStallSnapshotStartScript,
 	resolveDeployGuardrails,
+	STALL_SNAPSHOT_CLEANUP_COMMAND,
 } from "./compose-guardrails";
 
 export type ComposeNested = InferResultType<
@@ -468,8 +470,8 @@ Compose Type: ${composeType} ✅`;
 		: `env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${command.split(" ").join(" ")} 2>&1`;
 
 	// Guardrails around the docker line: the phase helpers go first, the docker
-	// events capture starts right before `up`, and both are closed right after
-	// it returns (on the failure branch as well, before the restore runs).
+	// events capture and the stall snapshots start right before `up`, and all
+	// are closed right after it returns (on the failure branch as well, before the restore runs).
 	const upPhaseName = remotePullBlock
 		? "Start containers (compose up)"
 		: composeType === "stack"
@@ -483,12 +485,21 @@ Compose Type: ${composeType} ✅`;
 		guardrails?.dockerEvents
 			? getDockerEventsStartScript(composeType, appName)
 			: "",
+		// After the events capture: both share the EXIT trap (see the generator).
+		guardrails?.stallSnapshot
+			? getStallSnapshotStartScript(
+					composeType,
+					appName,
+					guardrails.stallSnapshot,
+				)
+			: "",
 	]
 		.filter(Boolean)
 		.map((part) => `${part}\n\t\t`)
 		.join("");
-	const upFailureGuardrails = `${guardrails?.dockerEvents ? `${DOCKER_EVENTS_FLUSH_COMMAND} ` : ""}${phaseTimestamps ? `${getPhaseEndCommand("failed")} ` : ""}`;
+	const upFailureGuardrails = `${guardrails?.stallSnapshot ? `${STALL_SNAPSHOT_CLEANUP_COMMAND} ` : ""}${guardrails?.dockerEvents ? `${DOCKER_EVENTS_FLUSH_COMMAND} ` : ""}${phaseTimestamps ? `${getPhaseEndCommand("failed")} ` : ""}`;
 	const upSuccessBlock = [
+		guardrails?.stallSnapshot ? STALL_SNAPSHOT_CLEANUP_COMMAND : "",
 		guardrails?.dockerEvents ? DOCKER_EVENTS_FLUSH_COMMAND : "",
 		phaseTimestamps ? getPhaseEndCommand("finished") : "",
 	]
