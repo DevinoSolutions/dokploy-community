@@ -496,9 +496,13 @@ dokploy_stall_cleanup`,
 		timeout: 60_000,
 	}, async () => {
 		installDocker({ upSleep: 0 });
+		rmSync(psArgsFile, { force: true });
 		const result = sh(
+			// Waits for the first state command instead of a fixed sleep: under a loaded
+			// CI runner the first snapshot can take longer than a few seconds to fire.
 			`${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
-sleep 4;
+i=0; while [ "$i" -lt 30 ] && ! grep -q -- ---- ${toShellPath(psArgsFile)} 2>/dev/null; do sleep 1; i=$((i + 1)); done;
+sleep 2;
 dokploy_stall_cleanup`,
 			env({
 				DB_PASSWORD: "hunter2-super-secret",
