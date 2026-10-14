@@ -496,6 +496,7 @@ dokploy_stall_cleanup`,
 		timeout: 60_000,
 	}, async () => {
 		installDocker({ upSleep: 0 });
+		rmSync(psArgsFile, { force: true });
 		const result = sh(
 			// Waits for the first state command instead of a fixed sleep: under a loaded
 			// CI runner the first snapshot can take longer than a few seconds to fire.
