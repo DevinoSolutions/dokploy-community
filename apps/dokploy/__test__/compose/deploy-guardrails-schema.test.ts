@@ -1,8 +1,9 @@
+import { redactProjectSecrets } from "@dokploy/server";
+import { apiUpdateCompose } from "@dokploy/server/db/schema";
 import {
 	deployGuardrailsSchema,
 	deployHealthCheckSchema,
 } from "@dokploy/server/db/validations/compose-guardrails";
-import { apiUpdateCompose } from "@dokploy/server/db/schema";
 import { resolveDeployGuardrails } from "@dokploy/server/utils/builders/compose-guardrails";
 import { describe, expect, it } from "vitest";
 
@@ -86,7 +87,9 @@ describe("resolveDeployGuardrails", () => {
 	});
 
 	it("treats a malformed stored value as off instead of failing a deploy", () => {
-		expect(resolveDeployGuardrails({ healthCheck: { url: "ftp://x" } })).toBeNull();
+		expect(
+			resolveDeployGuardrails({ healthCheck: { url: "ftp://x" } }),
+		).toBeNull();
 		expect(resolveDeployGuardrails("garbage")).toBeNull();
 		expect(resolveDeployGuardrails({ phaseTimestamps: "yes" })).toBeNull();
 	});
@@ -146,5 +149,63 @@ describe("compose.update input", () => {
 
 	it("parses through the guardrails schema directly", () => {
 		expect(deployGuardrailsSchema.safeParse({}).success).toBe(true);
+	});
+});
+
+describe("project export", () => {
+	const payload = () => ({
+		project: { name: "p", description: null, env: null },
+		environments: [
+			{
+				name: "prod",
+				description: null,
+				env: null,
+				services: {
+					applications: [{ name: "app", healthCheckSwarm: { Test: ["CMD"] } }],
+					compose: [
+						{
+							name: "stack",
+							deployGuardrails: {
+								phaseTimestamps: true,
+								dockerEvents: true,
+								healthCheck: {
+									url: "https://example.com/hook/SECRET?t=1",
+									timeoutSeconds: 30,
+								},
+							},
+						},
+					],
+					postgres: [],
+					mysql: [],
+					mariadb: [],
+					mongo: [],
+					redis: [],
+					libsql: [],
+				},
+			},
+		],
+	});
+
+	it("drops the health check URL unless secrets are included, keeps the flags", () => {
+		const result = redactProjectSecrets(payload(), false);
+		const services = result.environments[0]?.services;
+		expect(services?.compose[0]).toMatchObject({
+			deployGuardrails: {
+				phaseTimestamps: true,
+				dockerEvents: true,
+				healthCheck: null,
+			},
+		});
+		expect(JSON.stringify(result)).not.toContain("SECRET");
+		// Unrelated health check settings are not touched.
+		expect(services?.applications[0]).toMatchObject({
+			healthCheckSwarm: { Test: ["CMD"] },
+		});
+	});
+
+	it("keeps it with includeSecrets", () => {
+		expect(JSON.stringify(redactProjectSecrets(payload(), true))).toContain(
+			"https://example.com/hook/SECRET?t=1",
+		);
 	});
 });

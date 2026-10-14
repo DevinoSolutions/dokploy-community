@@ -28,6 +28,17 @@ const SECRET_KEY_PATTERN =
  */
 const ENV_KEY_PATTERN = /^env$/i;
 
+/**
+ * A compose's deploy guardrails keep their on/off flags, but the health check
+ * (its URL may carry a token in the path or query) is treated like `env`.
+ */
+const redactDeployGuardrails = (value: unknown): unknown => {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		return value;
+	}
+	return { ...(value as Record<string, unknown>), healthCheck: null };
+};
+
 const redactValue = (value: unknown): unknown => {
 	if (Array.isArray(value)) {
 		return value.map(redactValue);
@@ -37,6 +48,8 @@ const redactValue = (value: unknown): unknown => {
 		for (const [key, item] of Object.entries(value)) {
 			if (SECRET_KEY_PATTERN.test(key) || ENV_KEY_PATTERN.test(key)) {
 				result[key] = null;
+			} else if (key === "deployGuardrails") {
+				result[key] = redactDeployGuardrails(item);
 			} else {
 				result[key] = redactValue(item);
 			}
