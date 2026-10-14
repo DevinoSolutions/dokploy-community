@@ -14,6 +14,7 @@ import {
 	initSnapvisorBuildChecks,
 	initVolumeBackupsCronJobs,
 	isMcpDisabled,
+	isNotSwarmManagerError,
 	sendDokployRestartNotifications,
 	setBackgroundErrorReporter,
 	setupDirectories,
@@ -122,8 +123,16 @@ void app
 				} catch (e) {
 					// Do not skip the cron/schedule setup below because the overlay
 					// network could not be created.
-					console.error("Failed to initialize dokploy-network", e);
-					captureError(e, { handler: "initializeNetwork" });
+					if (isNotSwarmManagerError(e)) {
+						// Operator setup problem, not a bug: say how to fix it and keep
+						// it out of error reporting.
+						console.warn(
+							"Skipped creating dokploy-network: this Docker node is not a swarm manager. Run `docker swarm init` on this host (or point Dokploy at the manager node).",
+						);
+					} else {
+						console.error("Failed to initialize dokploy-network", e);
+						captureError(e, { handler: "initializeNetwork" });
+					}
 				}
 				await initCronJobs();
 				await initSchedules();

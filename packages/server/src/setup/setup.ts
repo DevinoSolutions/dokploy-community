@@ -23,6 +23,15 @@ export const dockerSwarmInitialized = async () => {
 	}
 };
 
+/**
+ * Docker answers HTTP 403 "This node is not a swarm manager" to overlay network
+ * calls when the daemon Dokploy talks to is not a swarm manager (swarm never
+ * initialised, or the node left it). That is a host setup problem the operator
+ * fixes with `docker swarm init`, not a Dokploy bug.
+ */
+export const isNotSwarmManagerError = (error: unknown) =>
+	error instanceof Error && /not a swarm manager/i.test(error.message);
+
 export const initializeNetwork = async () => {
 	const networkInitialized = await dockerNetworkInitialized();
 	if (networkInitialized) {
