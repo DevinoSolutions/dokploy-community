@@ -11,6 +11,7 @@ import {
 	recreateDirectoryRemote,
 } from "../filesystem/directory";
 import { execAsyncRemote } from "../process/execAsync";
+import { assertServerHasSshKey } from "../process/MissingSshKeyError";
 
 export const unzipDrop = async (zipFile: File, application: Application) => {
 	let sftp: SFTPWrapper | null = null;
@@ -109,7 +110,7 @@ export const unzipDrop = async (zipFile: File, application: Application) => {
 
 const getSFTPConnection = async (serverId: string): Promise<SFTPWrapper> => {
 	const server = await findServerById(serverId);
-	if (!server.sshKeyId) throw new Error("No SSH key available for this server");
+	assertServerHasSshKey(server);
 
 	return new Promise((resolve, reject) => {
 		const conn = new Client();

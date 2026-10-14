@@ -12,6 +12,7 @@ import {
 	MAX_EXEC_OUTPUT_TAIL,
 	truncateOutputTail,
 } from "./ExecError";
+import { assertServerHasSshKey } from "./MissingSshKeyError";
 import { registerRemoteBuild } from "./remote-build-registry";
 
 export class WriteFileRemoteError extends Error {
@@ -305,7 +306,7 @@ export const execAsyncRemote = async (
 ): Promise<{ stdout: string; stderr: string }> => {
 	if (!serverId) return { stdout: "", stderr: "" };
 	const server = await findServerById(serverId);
-	if (!server.sshKeyId) throw new Error("No SSH key available for this server");
+	assertServerHasSshKey(server);
 
 	const stdoutOutput = new OutputCollector(options.streamOnly);
 	const stderrOutput = new OutputCollector(options.streamOnly);
@@ -530,7 +531,7 @@ export const openRemoteInputSession = async (
 	} = {},
 ): Promise<RemoteInputSession> => {
 	const server = await findServerById(serverId);
-	if (!server.sshKeyId) throw new Error("No SSH key available for this server");
+	assertServerHasSshKey(server);
 
 	return new Promise((resolve, reject) => {
 		const conn = new Client();
@@ -681,7 +682,7 @@ export const writeFileRemote = async (
 	content: string,
 ): Promise<void> => {
 	const server = await findServerById(serverId);
-	if (!server.sshKeyId) throw new Error("No SSH key available for this server");
+	assertServerHasSshKey(server);
 
 	return new Promise((resolve, reject) => {
 		const conn = new Client();
