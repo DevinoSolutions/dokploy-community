@@ -1,3 +1,5 @@
+import { TRPCError } from "@trpc/server";
+import { ExecError } from "@dokploy/server/utils/process/ExecError";
 import { quote } from "shell-quote";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -15,6 +17,12 @@ const mocks = vi.hoisted(() => ({
 	filesOn: new Set<string | null>(),
 	// Hosts whose probe never answers.
 	hanging: new Set<string>(),
+	// Hosts that cannot be reached at all (no answer about the file).
+	unreachable: new Set<string | null>(),
+	// Hosts whose probe fails with this error.
+	failures: new Map<string | null, Error>(),
+	// What a host's probe prints, when it is not just the kind of file.
+	stdout: new Map<string | null, string>(),
 	isCloud: false,
 	findPreviewDeploymentById: vi.fn(),
 	findPreviewDeploymentLogOwner: vi.fn(),
@@ -85,7 +93,9 @@ const caller = () =>
 	} as never);
 
 const logPath = "/etc/dokploy/logs/web-pr-4/web-pr-4-2026-10-12:12:00:00.log";
-const probe = `test -f ${quote([logPath])}`;
+const probe = `LC_ALL=C stat -c %F -- ${quote([logPath])}`;
+// What stat prints for the log when it is there.
+const REGULAR_FILE = "regular file\n";
 
 const legacyPreviewRow = (overrides: Record<string, unknown> = {}) => ({
 	deploymentId: "dep-1",
@@ -118,10 +128,27 @@ const tailedHosts = () =>
 		.filter(([, command]) => command !== probe)
 		.map(([host]) => host as string);
 
+const probeFailure = (exitCode: number, stderr: string) =>
+	new ExecError(`Remote command failed with exit code ${exitCode}: ${stderr}`, {
+		command: probe,
+		stderr,
+		exitCode,
+	});
+
+// What stat reports for a file that is not there.
+const missingFile = () =>
+	probeFailure(
+		1,
+		`stat: cannot statx '${logPath}': No such file or directory`,
+	);
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.filesOn = new Set();
 	mocks.hanging = new Set();
+	mocks.unreachable = new Set();
+	mocks.failures = new Map();
+	mocks.stdout = new Map();
 	mocks.isCloud = false;
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
 	mocks.findPreviewDeploymentById.mockResolvedValue({
@@ -140,16 +167,22 @@ beforeEach(() => {
 		async (host: string, command: string) => {
 			if (command === probe) {
 				if (mocks.hanging.has(host)) return new Promise(() => {});
-				if (mocks.filesOn.has(host)) return { stdout: "", stderr: "" };
-				throw new Error("not found");
+				if (mocks.unreachable.has(host)) throw new Error("connection refused");
+				if (mocks.failures.has(host)) throw mocks.failures.get(host);
+				if (mocks.filesOn.has(host))
+					return { stdout: mocks.stdout.get(host) ?? REGULAR_FILE, stderr: "" };
+				throw missingFile();
 			}
 			return { stdout: `built on ${host}\n`, stderr: "" };
 		},
 	);
 	mocks.execAsync.mockImplementation(async (command: string) => {
 		if (command === probe) {
-			if (mocks.filesOn.has(null)) return { stdout: "", stderr: "" };
-			throw new Error("not found");
+			if (mocks.unreachable.has(null)) throw new Error("spawn failed");
+			if (mocks.failures.has(null)) throw mocks.failures.get(null);
+			if (mocks.filesOn.has(null))
+				return { stdout: mocks.stdout.get(null) ?? REGULAR_FILE, stderr: "" };
+			throw missingFile();
 		}
 		return { stdout: "local\n", stderr: "" };
 	});
@@ -215,8 +248,9 @@ describe("deployment.readLogs for a legacy preview deployment", () => {
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 	});
 
-	it("falls back to the host that runs it when no candidate has the file", async () => {
+	it("falls back to the host that runs it when no candidate can be reached", async () => {
 		mocks.deployment = legacyPreviewRow();
+		mocks.unreachable.add("build-1").add("server-1").add(null);
 
 		const out = await caller().readLogs({ deploymentId: "dep-1", tail: 10 });
 
@@ -400,8 +434,9 @@ describe("deployment.logHost", () => {
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 
-	it("answers the old fallback when no candidate has the file", async () => {
+	it("answers the old fallback when no candidate can be reached", async () => {
 		mocks.deployment = legacyPreviewRow();
+		mocks.unreachable.add("build-1").add("server-1").add(null);
 
 		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
 			serverId: "server-1",
@@ -424,5 +459,203 @@ describe("deployment.logHost", () => {
 		);
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 		expect(mocks.findPreviewDeploymentLogOwner).not.toHaveBeenCalled();
+	});
+});
+
+describe("a log that is on no connected server", () => {
+	const message =
+		"This deployment's log is no longer available on any connected server.";
+
+	it("readLogs answers a clear not-found instead of an empty or wrong log", async () => {
+		mocks.deployment = legacyPreviewRow();
+
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).rejects.toMatchObject({ code: "NOT_FOUND", message });
+		expect(tailedHosts()).toEqual([]);
+	});
+
+	it("logHost flags the log as unavailable, keeping the fallback host", async () => {
+		mocks.deployment = legacyPreviewRow();
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+			unavailable: message,
+		});
+	});
+
+	it("counts a deleted candidate server as a definite no", async () => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findServerById.mockImplementation(async (serverId: string) => {
+			if (serverId === "server-1") {
+				throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
+			}
+			return { serverId, organizationId: "org-1" };
+		});
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: null, buildServerId: null }),
+		);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toMatchObject(
+			{ unavailable: message },
+		);
+	});
+
+	it.each([
+		["permission denied", probeFailure(1, `stat: cannot statx '${logPath}': Permission denied`)],
+		["a filesystem error", probeFailure(1, "stat: cannot statx: Input/output error")],
+		["a path component that is not a directory", probeFailure(1, "stat: cannot statx: Not a directory")],
+		["a missing stat", probeFailure(127, "sh: 1: stat: not found")],
+		["an ssh failure", probeFailure(255, "ssh: connect to host: Connection refused")],
+		["an exit status 1 with no output", probeFailure(1, "")],
+		["a connection error", new Error("SSH connection error: read ECONNRESET")],
+		["an authentication error", new ExecError("Authentication failed: Invalid SSH private key.", { command: probe })],
+	])("never counts %s as a missing file", async (_label, failure) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: "server-1", buildServerId: null }),
+		);
+		mocks.failures.set("server-1", failure);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).resolves.toBe("built on server-1\n");
+	});
+
+	it("never counts a local permission error as a missing file", async () => {
+		mocks.deployment = legacyPreviewRow({ serverId: null });
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: null, buildServerId: null }),
+		);
+		mocks.failures.set(
+			null,
+			probeFailure(1, "stat: cannot statx: Permission denied"),
+		);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: null,
+		});
+	});
+
+	it.each([
+		["a login banner", "Welcome to srv\nLast login: today\nregular file\n"],
+		["CRLF output after a banner", "motd line\r\nregular empty file\r\n"],
+		["a banner that mentions a directory", "directory listing off\nregular file\n"],
+	])("still finds an existing log behind %s", async (_label, stdout) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.filesOn.add("server-1");
+		mocks.stdout.set("server-1", stdout);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).resolves.toBe("built on server-1\n");
+	});
+
+	it.each([
+		"directory",
+		"fifo",
+		"symbolic link",
+		"socket",
+		"character special file",
+		"block special file",
+	])("counts a %s at the path as not the log", async (kind) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: "server-1", buildServerId: null }),
+		);
+		mocks.filesOn.add("server-1");
+		mocks.stdout.set("server-1", `banner\n${kind}\n`);
+
+		await expect(
+			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+	});
+
+	it.each([
+		["only a banner", "Welcome to srv\n"],
+		["no output", ""],
+		["a banner after the answer", "regular file\nGoodbye\n"],
+		["an unknown kind", "weird thing\n"],
+	])("never counts %s as a missing file", async (_label, stdout) => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockResolvedValue(
+			ownedBy({ serverId: "server-1", buildServerId: null }),
+		);
+		mocks.filesOn.add("server-1");
+		mocks.stdout.set("server-1", stdout);
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+	});
+
+	it("is not unavailable while one candidate could not be asked", async () => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.unreachable.add("server-1");
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+	});
+
+	it("is not unavailable when a probe timed out", async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.deployment = legacyPreviewRow();
+			mocks.hanging.add("build-1");
+
+			const pending = caller().logHost({ deploymentId: "dep-1" });
+			await vi.advanceTimersByTimeAsync(5000);
+
+			await expect(pending).resolves.toEqual({ serverId: "server-1" });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("is not unavailable when the owner could not be looked up", async () => {
+		mocks.deployment = legacyPreviewRow();
+		mocks.findPreviewDeploymentLogOwner.mockRejectedValue(new Error("gone"));
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "server-1",
+		});
+	});
+
+	it("never reports rows that are not legacy previews as unavailable", async () => {
+		mocks.deployment = legacyPreviewRow({ buildServerId: "build-9" });
+
+		await expect(caller().logHost({ deploymentId: "dep-1" })).resolves.toEqual({
+			serverId: "build-9",
+		});
+	});
+
+	it("aborts the SSH probe of a candidate that times out", async () => {
+		vi.useFakeTimers();
+		try {
+			mocks.deployment = legacyPreviewRow();
+			mocks.hanging.add("build-1");
+			mocks.filesOn.add("server-1");
+
+			const pending = caller().logHost({ deploymentId: "dep-1" });
+			await vi.advanceTimersByTimeAsync(5000);
+			await pending;
+
+			const signals = new Map(
+				mocks.execAsyncRemote.mock.calls
+					.filter(([, command]) => command === probe)
+					.map(([host, , , options]) => [host, options?.signal as AbortSignal]),
+			);
+			expect(signals.get("build-1")?.aborted).toBe(true);
+			expect(signals.get("server-1")?.aborted).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

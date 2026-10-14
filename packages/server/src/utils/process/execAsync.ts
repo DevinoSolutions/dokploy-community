@@ -287,6 +287,12 @@ export const execAsyncRemote = async (
 		 * `command`: the command line is visible to every user on the host.
 		 */
 		stdin?: string;
+		/**
+		 * Aborting drops the SSH connection and rejects the command, so a caller
+		 * that stops waiting (a probe that timed out) does not leave a connection
+		 * running until it ends by itself.
+		 */
+		signal?: AbortSignal;
 	} = {},
 ): Promise<{ stdout: string; stderr: string }> => {
 	if (!serverId) return { stdout: "", stderr: "" };
@@ -307,8 +313,26 @@ export const execAsyncRemote = async (
 	const remoteCommand = cancelable
 		? wrapCancelableRemoteBuild(command, cancelable)
 		: command;
-	return new Promise((resolve, reject) => {
+	const { signal } = options;
+	let detachAbort = () => {};
+	return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
 		const conn = new Client();
+		if (signal) {
+			const onAbort = () => {
+				conn.destroy();
+				reject(
+					new ExecError("Remote command was aborted", { command, serverId }),
+				);
+			};
+			if (signal.aborted) {
+				reject(
+					new ExecError("Remote command was aborted", { command, serverId }),
+				);
+				return;
+			}
+			signal.addEventListener("abort", onAbort, { once: true });
+			detachAbort = () => signal.removeEventListener("abort", onAbort);
+		}
 		if (cancelable) {
 			// Dropping the connection rejects this command so the deployment job
 			// ends; the build on the server is stopped separately, by pid file.
@@ -330,6 +354,10 @@ export const execAsyncRemote = async (
 		sleep(1000);
 		conn
 			.once("ready", () => {
+				if (signal?.aborted) {
+					conn.destroy();
+					return;
+				}
 				conn.exec(remoteCommand, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
@@ -435,7 +463,7 @@ export const execAsyncRemote = async (
 				privateKey: server.sshKey?.privateKey,
 				timeout: 99999,
 			});
-	});
+	}).finally(() => detachAbort());
 };
 
 /** A command on a remote server that reads its input from a caller. */
