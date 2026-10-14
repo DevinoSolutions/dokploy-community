@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.26**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.27**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.26 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.27 \
   --with-registry-auth \
   dokploy
 ```
@@ -90,11 +90,10 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.26
+## What's new in v0.30.8-community.27
 
-- Preview deployments whose log is no longer on any connected server now say so, instead of showing an empty or wrong log ([#380](https://github.com/DevinoSolutions/dokploy-community/pull/380)).
-- Cancelling a schedule run on a server or the Dokploy host whose script never reported a process ID now works, including runs stranded by a Dokploy restart ([#381](https://github.com/DevinoSolutions/dokploy-community/pull/381)).
-- Clearer errors for a compose domain pointing at a missing service ([#377](https://github.com/DevinoSolutions/dokploy-community/pull/377)) and for container actions on a container that no longer exists ([#378](https://github.com/DevinoSolutions/dokploy-community/pull/378)). No database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Opt-in stall snapshots for slow Compose deploys: while `docker compose up` is still running after a set delay, the deploy log gets periodic snapshots of the project's container states. It only observes and never stops the deploy. Off by default; enable it under **Advanced** > **Deploy guardrails** ([#383](https://github.com/DevinoSolutions/dokploy-community/pull/383)).
+- No database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -109,7 +108,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.26
+export DOKPLOY_VERSION=v0.30.8-community.27
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -122,7 +121,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.26      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.27      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -141,7 +140,7 @@ The standard [`DO_NOT_TRACK=1`](https://consoledonottrack.com) convention is als
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.26` is the 26th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.27` is the 26th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 

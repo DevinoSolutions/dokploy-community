@@ -2,6 +2,18 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.27
+
+**Stall snapshots for slow Compose deploys** ([#383](https://github.com/DevinoSolutions/dokploy-community/pull/383), issue [#374](https://github.com/DevinoSolutions/dokploy-community/issues/374)). A fourth opt-in deploy guardrail. While `docker compose up` is still running after a set delay, the deploy log gets a snapshot of the project's container states (name, state, status, created) at a fixed interval, up to a set number of snapshots. For swarm stacks the snapshot uses `docker stack ps`.
+- Settings: start after 15-1800 s (default 60), repeat every 10-600 s (default 30), 1-20 snapshots (default 5).
+- It only observes: it never stops, kills or times out the deploy.
+- Each snapshot is capped at 200 lines, and a state command that does not return within 20 s is stopped.
+- For stacks, `docker stack deploy` usually returns before tasks converge, so snapshots rarely fire there.
+
+It is off by default. Enable it in the compose service under **Advanced** > **Deploy guardrails** (**Stall snapshots**), or through `compose.update` (`deployGuardrails.stallSnapshot`).
+
+> No database migrations in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
 ### New in v0.30.8-community.26
 
 **Log of removed-server previews** ([#380](https://github.com/DevinoSolutions/dokploy-community/pull/380)). Preview deployments created before community.23 whose log is no longer on any connected server (for example because their build server was removed) now show "This deployment's log is no longer available on any connected server" instead of an empty or wrong log. Log-host probes that time out now close their SSH connection.
