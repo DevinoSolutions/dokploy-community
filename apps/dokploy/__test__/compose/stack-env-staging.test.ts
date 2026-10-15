@@ -203,7 +203,7 @@ describe("getCleanEnvPrefix", () => {
 	it("loads the staged file and puts no value on the command line", () => {
 		const prefix = getCleanEnvPrefix("/etc/dokploy/compose/app/.dokploy-x");
 		expect(prefix).toBe(
-			`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' sh /etc/dokploy/compose/app/.dokploy-x`,
+			`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh /etc/dokploy/compose/app/.dokploy-x`,
 		);
 	});
 
@@ -300,7 +300,7 @@ describe("stack deploy script", () => {
 		}
 		// The docker line loads the staged file; nothing is exported on it.
 		expect(command).toContain(
-			`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' sh ${stagedPath} docker stack deploy -c docker-compose.yml stack-app --prune --with-registry-auth 2>&1`,
+			`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh ${stagedPath} docker stack deploy -c docker-compose.yml stack-app --prune --with-registry-auth 2>&1`,
 		);
 		// 0600 before it holds the secrets.
 		const prepare = remoteCommands()[0]!;
@@ -395,7 +395,7 @@ describe("stack env on the build server", () => {
 			getComposeBuildCommand(compose, "/code", undefined, file),
 		]) {
 			expect(command).toContain(
-				`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' sh ${file} docker compose`,
+				`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh ${file} docker compose`,
 			);
 			expect(command).not.toContain("A=");
 		}

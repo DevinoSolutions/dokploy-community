@@ -846,9 +846,15 @@ export const stageStackEnvFile = async (
  * Words that load the staged stack env into the command that follows them:
  * `sh` sources the file with every assignment exported, then `exec`s the
  * command. Only the file's path is on the command line, never a value.
+ *
+ * `|| exit 1` keeps a missing or unreadable file fatal on every `sh`, not only
+ * on those where a failed `.` already ends the shell, so docker never runs
+ * without the stack's variables. A variable the target `sh` keeps read-only
+ * (`UID`, `PPID` when `sh` is bash) fails the deploy as well; `env KEY=value`
+ * used to pass those through.
  */
 const getStackEnvLoader = (stagedPath: string) =>
-	`sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' sh ${quote([stagedPath])}`;
+	`sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh ${quote([stagedPath])}`;
 
 /**
  * `env -i` prefix every docker invocation of a deploy runs under: the host's
