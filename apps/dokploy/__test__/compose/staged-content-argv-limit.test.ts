@@ -76,6 +76,17 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs/promises")>();
 	return {
 		...actual,
+		// The names `statFailsFor` fails on are listed first, whatever order the
+		// filesystem lists in, so the test does not depend on it.
+		readdir: async (path: string, ...rest: unknown[]) => {
+			const names = (await (actual.readdir as (...args: unknown[]) => unknown)(
+				path,
+				...rest,
+			)) as string[];
+			const failing = (name: string) =>
+				[...mocks.statFailsFor].some((suffix) => name.endsWith(suffix));
+			return [...names.filter(failing), ...names.filter((n) => !failing(n))];
+		},
 		// A concurrent deploy consuming a file between readdir and stat.
 		stat: async (path: string, ...rest: unknown[]) => {
 			for (const name of mocks.statFailsFor) {
@@ -596,13 +607,13 @@ describe("staging housekeeping", () => {
 	it("keeps sweeping when one file vanishes between readdir and stat", async () => {
 		const dir = `${tmp}/compose/big-app`;
 		mkdirSync(dir, { recursive: true });
-		const gone = `${dir}/.dokploy-stage-a-gone`;
-		const stale = `${dir}/.dokploy-stage-b-stale`;
+		const gone = `${dir}/.dokploy-stage-z-gone`;
+		const stale = `${dir}/.dokploy-stage-a-stale`;
 		for (const file of [gone, stale]) writeFileSync(file, "x");
 		const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
 		for (const file of [gone, stale])
 			utimesSync(file, twoHoursAgo, twoHoursAgo);
-		mocks.statFailsFor.add(".dokploy-stage-a-gone");
+		mocks.statFailsFor.add(".dokploy-stage-z-gone");
 
 		await stageFiles({
 			directory: dir,

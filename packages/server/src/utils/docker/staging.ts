@@ -83,7 +83,9 @@ const removeStaleStagedFiles = async (directory: string) => {
 			const file = join(directory, name);
 			const { mtimeMs } = await stat(file);
 			if (mtimeMs < cutoff) await unlink(file);
-		} catch {}
+		} catch {
+			// Housekeeping only: the next deploy sweeps what is left.
+		}
 	}
 };
 
