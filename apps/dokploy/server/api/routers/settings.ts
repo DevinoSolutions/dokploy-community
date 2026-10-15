@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
 	backgroundJob,
 	CLEANUP_CRON_JOB,
@@ -87,6 +88,35 @@ import {
 	protectedProcedure,
 	publicProcedure,
 } from "../trpc";
+
+/**
+ * Confines a caller-supplied Traefik file path to the Traefik configuration
+ * directory (MAIN_TRAEFIK_PATH). The read/write Traefik file endpoints only
+ * expose files listed under this directory, but the raw path was passed
+ * straight to the filesystem helpers, letting a user with the `traefikFiles`
+ * permission read or overwrite arbitrary files on the host (for example
+ * `/etc/dokploy/.env` or `~/.ssh/authorized_keys`) via an absolute path or
+ * `../` traversal. Reject anything that escapes the directory.
+ */
+const resolveTraefikFilePath = (
+	filePath: string,
+	serverId?: string | null,
+): string => {
+	const { MAIN_TRAEFIK_PATH } = paths(!!serverId);
+	// Remote servers are Linux hosts, so their paths use posix semantics no
+	// matter which platform this process runs on.
+	const pathApi = serverId ? path.posix : path;
+	const base = pathApi.resolve(MAIN_TRAEFIK_PATH);
+	const resolved = pathApi.resolve(base, filePath);
+	if (resolved !== base && !resolved.startsWith(`${base}${pathApi.sep}`)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				"Invalid path: file must be inside the Traefik configuration directory",
+		});
+	}
+	return resolved;
+};
 
 export const settingsRouter = createTRPCRouter({
 	getWebServerSettings: protectedProcedure.query(async () => {
@@ -707,8 +737,9 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			const safePath = resolveTraefikFilePath(input.path, input?.serverId);
 			await writeTraefikConfigInPath(
-				input.path,
+				safePath,
 				input.traefikConfig,
 				input?.serverId,
 			);
@@ -729,7 +760,8 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 
-			return readConfigInPath(input.path, input.serverId);
+			const safePath = resolveTraefikFilePath(input.path, input.serverId);
+			return readConfigInPath(safePath, input.serverId);
 		}),
 	getIp: protectedProcedure.query(async () => {
 		if (IS_CLOUD) {
