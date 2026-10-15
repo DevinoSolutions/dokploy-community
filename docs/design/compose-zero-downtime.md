@@ -90,9 +90,14 @@ compose (non-selected services) still goes through a normal
 same labels Dokploy already uses elsewhere
 (`com.docker.compose.project`, `com.docker.compose.service`,
 `utils/backups/utils.ts:348`, `utils/docker/utils.ts:1052-1053`). A service
-whose config hash is unchanged
-(`docker compose config --hash svc` against the container's
-`com.docker.compose.config-hash` label) is skipped, so a web-only change does
+is skipped only if both hold: its `com.docker.compose.config-hash` label equals
+`docker compose config --hash svc`, and the container's image id
+(`docker inspect -f '{{.Image}}'`) equals the id of the service's image after
+the build/pull step. Otherwise it is rolled. The hash alone is not enough: it
+covers only the service config, so a source change behind a `build:` service,
+or a floating tag with `--pull always`, leaves it unchanged while Compose
+itself would recreate the container (it also compares the image id, label
+`com.docker.compose.image`). With both checks, a web-only change still does
 not roll mastra or iii.
 
 Traefik:
@@ -374,7 +379,8 @@ Tests (no real docker in CI):
 - Behaviour with a stub `docker` first on `PATH`, as
   `deploy-guardrails-stall-snapshot.test.ts` does: healthy path, unhealthy
   timeout (new replica removed, old untouched, non-zero exit), leftover
-  replica reconciliation, unchanged-hash skip.
+  replica reconciliation, skip when hash and image id both match, and roll
+  when the hash is unchanged but the image id changed.
 - Service level: the setting is read, and the fall-back-with-warning path when
   a selected service became ineligible.
 - Manual, before release: a throwaway compose on a non-customer docker host
