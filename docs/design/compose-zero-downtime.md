@@ -175,7 +175,7 @@ with `up`, which is itself a recreate
 services, services already rolled stay on the new release when a later one
 fails; that is a mixed state and must be logged as such. Because the
 transactional restore would recreate the already-rolled services, it should
-not run for rolled services (see open questions).
+not run for rolled services (see decision 3).
 
 Interrupted deploys (cancel, host reboot) can leave two replicas. The next
 deploy must detect more than one container for a selected service and
@@ -381,10 +381,10 @@ Behaviour:
   intended. `persistLastGood` (`builders/compose.ts:577`) and the
   isolated-deployment `docker network connect` (`builders/compose.ts:576`) still
   run on the rolling path. Phase timestamps and docker events from the existing
-  guardrails wrap it when enabled. The Traefik retry middleware (option e) is
-  the only mitigation of the stop-grace window in this PR, so the first PR
-  either ships it as an opt-in label on rolled services or documents it as a
-  manual step (open question 5).
+  guardrails wrap it when enabled.
+  The Traefik retry middleware (option e) is the only mitigation of the
+  stop-grace window in this PR. It is not injected; the first PR documents it
+  as a manual step (decision 5).
 - Timeout or unhealthy new replica: remove the new replica, keep the old
   container, mark the deployment as an error with the reason, fire the
   existing failure notification. No transactional restore for rolled services.
@@ -398,12 +398,9 @@ Where:
   `getRollingEligibility(spec, serviceName)` returning blockers.
 - Hook at the single place the `up` line is composed
   (`builders/compose.ts:496-498`, `550-552`), only when enabled.
-- Setting storage: a new key inside the existing `deployGuardrails` jsonb
-  column (`packages/server/src/db/schema/compose.ts:200`, validation in
-  `packages/server/src/db/validations/compose-guardrails.ts`) avoids a
-  migration, but mixes an acting feature into an observe-only column. A
-  separate column needs a migration and the idempotency gate. See open
-  question 1.
+- Setting storage: a separate column with a migration and the idempotency gate
+  (decision 1). `deployGuardrails` stays guardrails-only, so no key is added
+  to it.
 - UI: a section next to the existing Deploy guardrails card
   (`apps/dokploy/components/dashboard/compose/advanced/deploy-guardrails.tsx`)
   with the service picker and the soft-risk warning text.
@@ -439,31 +436,27 @@ Tests (no real docker in CI):
   with a probe loop against the public URL during a deploy, confirming zero
   failed requests and measuring the stop race.
 
-Not in the first PR: stack-type changes, blue-green, stateful services, auto-detecting singletons. Whether the Traefik retry middleware is injected or documented as a manual step is open question 5.
+Not in the first PR: stack-type changes, blue-green, stateful services, auto-detecting singletons. The Traefik retry middleware is documented as a manual step, not injected (decision 5). Preview deployments are not rolled (decision 8).
 
-## Open questions for Amin
+## Decisions
 
-1. Storage: reuse the `deployGuardrails` jsonb key (no migration, semantically
-   "guardrails" but this one acts), or a new column with a migration?
-2. Deploy-time drift: fall back to a normal recreate with a warning (proposed)
-   or fail the deploy?
-3. Partial failure with several services: keep earlier services on the new
-   release and report an error (proposed), or add a revert-roll for them in a
-   later PR?
-4. Healthcheck requirement: refuse services without a compose-level
-   healthcheck (proposed), or also allow a fixed "wait N seconds" readiness
-   for apps that cannot define one?
-5. Should the stop race be covered in the same PR by injecting a Traefik
-   retry middleware on rolled services, or left to a later step and to the
-   user?
-6. Is (c) enough of an answer for users who can adopt swarm, i.e. is a
-   documentation page plus the stack preflight warning acceptable, or should
-   Dokploy also inject `update_config: start-first` for stack composes that do
-   not set one (a behaviour change for existing stacks)?
-7. Do we want to try stack type on a copy of the uNotes compose to see whether
-   its named volumes carry over, before pointing the reporter at (c)?
-8. Should rolling apply to compose preview deployments? They share the
-   `compose:<id>` queue group (`apps/dokploy/server/queues/in-memory-queue.ts:60-63`)
-   but have their own deploy path.
-9. When a deploy is cancelled or killed mid-rollout, should the cancel path
-   also remove the extra replica, or is reconcile-on-next-deploy enough?
+The open questions were answered as follows; the first PR follows them.
+
+1. Storage: a new column with a migration. `deployGuardrails` stays for
+   guardrails only.
+2. Deploy-time drift: fall back to a normal recreate with a clear warning. Drift
+   never fails the deploy.
+3. Partial failure with several services: earlier services stay on the new
+   release and the deploy reports an error. A revert-roll is a later PR.
+4. Healthcheck requirement: services without a compose-level healthcheck are
+   refused. There is no fixed "wait N seconds" readiness.
+5. Traefik retry middleware: not injected in the first PR. The manual step
+   (adding a retry middleware to the rolled service's router) is documented.
+6. Stack type: a documentation page plus the stack preflight warning. Dokploy
+   does not inject `update_config` for stack composes.
+7. Before pointing the #374 reporter at (c), stack type is tried on a copy of
+   the uNotes compose, off production, to check whether its named volumes carry
+   over.
+8. Preview deployments: no rolling in the first PR.
+9. Cancel or kill mid-rollout: the cancel path also removes the extra replica.
+   Reconcile-on-next-deploy stays as the safety net.
