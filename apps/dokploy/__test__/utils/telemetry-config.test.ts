@@ -1,6 +1,7 @@
 import {
 	buildTelemetryConfig,
 	parseSampleRate,
+	resolveReplayDsn,
 } from "@/server/utils/telemetry-config";
 import { SENTRY_DSN } from "@/server/sentry-config";
 import { describe, expect, it } from "vitest";
@@ -172,5 +173,72 @@ describe("parseSampleRate", () => {
 		expect(parseSampleRate("0.5", 0.1)).toBe(0.5);
 		expect(parseSampleRate("1", 0.1)).toBe(1);
 		expect(parseSampleRate("50", 0.1)).toBe(1);
+	});
+});
+
+describe("DOKPLOY_SESSION_REPLAY_SENTRY_DSN override", () => {
+	const own = "https://abc123@sentry.example.com/7";
+	const withDsn = (value: string) =>
+		({
+			...on,
+			DOKPLOY_SESSION_REPLAY_SENTRY_DSN: value,
+		}) as NodeJS.ProcessEnv;
+
+	it("uses the built-in DSN when unset or blank", () => {
+		expect(resolveReplayDsn(on)).toBe(SENTRY_DSN);
+		expect(resolveReplayDsn(withDsn("   "))).toBe(SENTRY_DSN);
+	});
+
+	it("uses a valid https override instead of the built-in DSN", () => {
+		expect(resolveReplayDsn(withDsn(` ${own} `))).toBe(own);
+		expect(buildTelemetryConfig(withDsn(own), "1.0.0")).toMatchObject({
+			enabled: true,
+			sentry: { dsn: own },
+		});
+		expect(JSON.stringify(buildTelemetryConfig(withDsn(own), "1.0.0"))).not.toContain(
+			SENTRY_DSN,
+		);
+	});
+
+	it("never falls back to the built-in DSN when the override is invalid", () => {
+		for (const bad of [
+			"http://abc@sentry.example.com/7",
+			"https://sentry.example.com/7",
+			"https://abc@sentry.example.com/",
+			"https://abc@sentry.example.com/project",
+			"not a url",
+		]) {
+			expect(resolveReplayDsn(withDsn(bad))).toBeNull();
+			expect(buildTelemetryConfig(withDsn(bad), "1.0.0")).toEqual({
+				enabled: false,
+			});
+		}
+	});
+
+	it("keeps PostHog running when only the Sentry override is invalid", () => {
+		const config = buildTelemetryConfig(
+			{
+				...withPosthog,
+				DOKPLOY_SESSION_REPLAY_SENTRY_DSN: "nope",
+			} as NodeJS.ProcessEnv,
+			"1.0.0",
+		);
+		expect(config).toMatchObject({
+			enabled: true,
+			sentry: null,
+			posthog: { key: "phc_abc" },
+		});
+	});
+
+	it("is ignored when the switch is off", () => {
+		expect(
+			buildTelemetryConfig(
+				{
+					...prod,
+					DOKPLOY_SESSION_REPLAY_SENTRY_DSN: own,
+				} as NodeJS.ProcessEnv,
+				"1.0.0",
+			),
+		).toEqual({ enabled: false });
 	});
 });

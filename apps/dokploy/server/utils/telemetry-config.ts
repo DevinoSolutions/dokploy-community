@@ -29,6 +29,31 @@ export const parseSampleRate = (
 	return Math.min(1, Math.max(0, value));
 };
 
+/**
+ * DOKPLOY_SESSION_REPLAY_SENTRY_DSN lets an operator send replays and browser
+ * errors to their own Sentry. Unset means the built-in DSN. A set but invalid
+ * value yields null (no Sentry replay) rather than silently falling back to the
+ * built-in DSN, which would send the operator's sessions to the fork maintainers.
+ */
+export const resolveReplayDsn = (env: NodeJS.ProcessEnv): string | null => {
+	const override = env.DOKPLOY_SESSION_REPLAY_SENTRY_DSN?.trim();
+	if (!override) {
+		return SENTRY_DSN.startsWith("https://") ? SENTRY_DSN : null;
+	}
+	try {
+		const url = new URL(override);
+		if (
+			url.protocol === "https:" &&
+			url.username &&
+			url.hostname &&
+			/\/\d+$/.test(url.pathname)
+		) {
+			return override;
+		}
+	} catch {}
+	return null;
+};
+
 const parseHost = (raw: string | undefined): string | null => {
 	const value = raw?.trim();
 	if (!value) return null;
@@ -71,8 +96,9 @@ export const buildTelemetryConfig = (
 		DEFAULT_ON_ERROR_SAMPLE_RATE,
 	);
 
-	const sentry = SENTRY_DSN.startsWith("https://")
-		? { dsn: SENTRY_DSN, release, sessionSampleRate, onErrorSampleRate }
+	const dsn = resolveReplayDsn(env);
+	const sentry = dsn
+		? { dsn, release, sessionSampleRate, onErrorSampleRate }
 		: null;
 
 	const posthogKey = env.DOKPLOY_POSTHOG_KEY?.trim();

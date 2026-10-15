@@ -353,7 +353,7 @@ export const Enable2FA = () => {
 											<img
 												src={data.qrCodeUrl}
 												alt="2FA QR Code"
-												className="rounded-lg w-48 h-48"
+												className="ph-no-capture rounded-lg w-48 h-48"
 											/>
 											<div className="flex flex-col gap-2 text-center">
 												<span className="text-sm text-muted-foreground">

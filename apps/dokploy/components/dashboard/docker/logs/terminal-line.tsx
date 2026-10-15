@@ -90,7 +90,7 @@ export function TerminalLine({ log, noTimestamp, searchTerm }: LogLineProps) {
 	return (
 		<div
 			className={cn(
-				"font-mono text-xs flex flex-col sm:flex-row gap-1 sm:gap-3 py-2 sm:py-0.5 group",
+				"ph-no-capture font-mono text-xs flex flex-col sm:flex-row gap-1 sm:gap-3 py-2 sm:py-0.5 group",
 				type === "error"
 					? "bg-red-500/10 hover:bg-red-500/15"
 					: type === "warning"
