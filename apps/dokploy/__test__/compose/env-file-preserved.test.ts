@@ -42,7 +42,10 @@ describe("getBuildComposeCommand createEnvFile toggle", () => {
 			createEnvFile: false,
 		});
 
-		expect(command).not.toContain("/.env");
+		// (the transactional backup/restore snapshot names the .env path whatever
+		// the toggle is; what must not appear is a staged or installed env)
+		expect(command).not.toContain("dokploy-stage-env");
+		expect(command).not.toContain("base64");
 		expect(stageFiles).not.toHaveBeenCalled();
 	});
 
