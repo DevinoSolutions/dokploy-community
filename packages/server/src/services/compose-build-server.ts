@@ -361,6 +361,7 @@ const buildImagesOnBuildServer = async (
 		const writeCompose = await writeDomainsToCompose(
 			buildEntity,
 			buildEntity.domains,
+			{ deploymentId: deployment.deploymentId },
 		);
 		const envCommand = buildEntity.createEnvFile
 			? getCreateEnvFileCommand(buildEntity)

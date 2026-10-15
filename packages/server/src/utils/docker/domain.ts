@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import fs, { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { network, patch } from "@dokploy/server/db/schema";
@@ -10,7 +12,7 @@ import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
 import { wildcardHostRegexp } from "../hostname-validation";
-import { execAsyncRemote } from "../process/execAsync";
+import { execAsyncRemote, writeFileRemote } from "../process/execAsync";
 import { cloneBitbucketRepository } from "../providers/bitbucket";
 import { cloneGitRepository } from "../providers/git";
 import { cloneGiteaRepository } from "../providers/gitea";
@@ -24,7 +26,6 @@ import type {
 	DefinitionsService,
 	PropertiesNetworks,
 } from "./types";
-import { encodeBase64 } from "./utils";
 
 export const cloneCompose = async (compose: Compose) => {
 	let command = "set -e;";
@@ -114,33 +115,162 @@ export const readComposeFile = async (compose: Compose) => {
 	return null;
 };
 
-export const writeDomainsToCompose = async (
+const STAGED_COMPOSE_PREFIX = ".dokploy-compose-";
+const STAGED_COMPOSE_SUFFIX = ".yml";
+// A staged file is consumed seconds after it is written. Anything older is the
+// leftover of a deploy that died between staging and running its script.
+const STAGED_COMPOSE_MAX_AGE_MINUTES = 60;
+
+/**
+ * Where the expanded compose waits before the deploy script copies it into
+ * place. Next to `code/` (not inside it) so the clone, which wipes `code/`,
+ * can never delete it, and unique per deployment so two runs never share it.
+ */
+export const getStagedComposePath = (
+	compose: Pick<Compose, "appName" | "serverId">,
+	deploymentId?: string,
+) => {
+	const { COMPOSE_PATH } = paths(!!compose.serverId);
+	const id =
+		(deploymentId ?? "").replace(/[^A-Za-z0-9_-]/g, "") || randomUUID();
+	return join(
+		COMPOSE_PATH,
+		compose.appName,
+		`${STAGED_COMPOSE_PREFIX}${id}${STAGED_COMPOSE_SUFFIX}`,
+	);
+};
+
+const removeStaleStagedComposeFiles = async (directory: string) => {
+	const cutoff = Date.now() - STAGED_COMPOSE_MAX_AGE_MINUTES * 60_000;
+	try {
+		for (const name of await readdir(directory)) {
+			if (
+				!name.startsWith(STAGED_COMPOSE_PREFIX) ||
+				!name.endsWith(STAGED_COMPOSE_SUFFIX)
+			) {
+				continue;
+			}
+			const file = join(directory, name);
+			const { mtimeMs } = await stat(file);
+			if (mtimeMs < cutoff) await unlink(file);
+		}
+	} catch {
+		// Housekeeping only: it must never fail the deploy.
+	}
+};
+
+/**
+ * Writes the compose to a staging file on the host that will run the deploy
+ * script (`compose.serverId`, or this machine when unset) and returns its path.
+ * The content goes through SFTP or `fs`, never through a command line: a single
+ * argument to `sh -c` is capped at 128 KB (MAX_ARG_STRLEN) on Linux, and an
+ * expanded compose can be larger than that. The file is created 0600 before it
+ * is filled.
+ */
+export const stageComposeFile = async ({
+	compose,
+	content,
+	deploymentId,
+}: {
+	compose: Pick<Compose, "appName" | "serverId">;
+	content: string;
+	deploymentId?: string;
+}) => {
+	const stagedPath = getStagedComposePath(compose, deploymentId);
+	const directory = dirname(stagedPath);
+
+	if (compose.serverId) {
+		const { serverId } = compose;
+		const qDirectory = quote([directory]);
+		const qStaged = quote([stagedPath]);
+		await execAsyncRemote(
+			serverId,
+			`mkdir -p ${qDirectory} && { find ${qDirectory} -maxdepth 1 -name '${STAGED_COMPOSE_PREFIX}*${STAGED_COMPOSE_SUFFIX}' -mmin +${STAGED_COMPOSE_MAX_AGE_MINUTES} -exec rm -f {} + 2>/dev/null || true; } && (umask 077 && : > ${qStaged})`,
+		);
+		try {
+			await writeFileRemote(serverId, stagedPath, content);
+		} catch (error) {
+			await execAsyncRemote(serverId, `rm -f ${qStaged}`).catch(() => {});
+			throw error;
+		}
+		return stagedPath;
+	}
+
+	await mkdir(directory, { recursive: true });
+	await removeStaleStagedComposeFiles(directory);
+	await writeFile(stagedPath, content, { mode: 0o600 });
+	return stagedPath;
+};
+
+/**
+ * Shell snippet that copies the staged compose over the compose file and
+ * removes the staged file. It is removed on the failure path too, so a staged
+ * compose is never left behind; a failed copy aborts the script.
+ */
+export const getInstallStagedComposeCommand = (
+	stagedPath: string,
+	composePath: string,
+) => {
+	const qStaged = quote([stagedPath]);
+	const qComposePath = quote([composePath]);
+	return `{ cat ${qStaged} > ${qComposePath} && rm -f ${qStaged}; } || { rm -f ${qStaged}; echo "❌ Error: Could not write the compose file"; exit 1; };`;
+};
+
+/**
+ * Builds the compose file the deploy runs (domain labels, randomize, isolated
+ * deployment). `content` is the YAML; `errorCommand` is the shell snippet that
+ * reports why there is none and stops the script.
+ */
+export const renderComposeWithDomains = async (
 	compose: Compose,
 	domains: Domain[],
-) => {
+): Promise<{ content: string } | { errorCommand: string }> => {
 	try {
 		const composeConverted = await addDomainToCompose(compose, domains);
-		const path = getComposePath(compose);
 
 		if (!composeConverted) {
-			return `
+			return {
+				errorCommand: `
 echo "❌ Error: Compose file not found";
 exit 1;
-			`;
+			`,
+			};
 		}
 
-		const composeString = stringify(composeConverted, { lineWidth: 1000 });
-		const encodedContent = encodeBase64(composeString);
-		return `echo "${encodedContent}" | base64 -d > "${path}";`;
+		return { content: stringify(composeConverted, { lineWidth: 1000 }) };
 	} catch (error) {
 		const message =
 			error instanceof Error ? error.message : String(error ?? "");
 		// The error message embeds user-controlled fields (e.g. serviceName) and is
 		// executed as part of the compose build shell script, so it must be escaped.
-		return `echo ${quote([`❌ Has occurred an error: ${message}`])};
+		return {
+			errorCommand: `echo ${quote([`❌ Has occurred an error: ${message}`])};
 exit 1;
-		`;
+		`,
+		};
 	}
+};
+
+/**
+ * Shell snippet for the deploy script that puts the rendered compose in place.
+ * The compose itself is staged out of band (see `stageComposeFile`): embedding
+ * it in the script used to fail with "Argument list too long" once the
+ * expanded compose passed ~96 KB.
+ */
+export const writeDomainsToCompose = async (
+	compose: Compose,
+	domains: Domain[],
+	options: { deploymentId?: string } = {},
+) => {
+	const rendered = await renderComposeWithDomains(compose, domains);
+	if ("errorCommand" in rendered) return rendered.errorCommand;
+
+	const stagedPath = await stageComposeFile({
+		compose,
+		content: rendered.content,
+		deploymentId: options.deploymentId,
+	});
+	return getInstallStagedComposeCommand(stagedPath, getComposePath(compose));
 };
 export const applyComposeFilePatch = async (
 	compose: Compose,
