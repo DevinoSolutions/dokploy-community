@@ -230,16 +230,16 @@ const getRestoreCommands = (
 		command,
 		deploymentId,
 		isTransactional,
-		exportEnvCommand,
 		projectPath,
 	}: {
 		command: string;
 		deploymentId?: string;
 		isTransactional: boolean;
-		exportEnvCommand: string;
 		projectPath: string;
 	},
 ) => {
+	// Only `docker compose` deploys are transactional, never a stack, so the
+	// restore has no stack env to load.
 	if (!isTransactional) return "";
 	const backupDir = getComposeBackupDir(compose);
 	const qComposeFile = quote([getComposeFilePath(compose)]);
@@ -268,7 +268,7 @@ const getRestoreCommands = (
 	// `failureMessage` is only ever overridden by the build-server branch; the
 	// default stays the literal string every other compose has always logged.
 	const runRestore = (restoreArgs: string, failureMessage?: string) =>
-		`env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${restoreArgs} 2>&1 && echo ${qRollbackMarker} || echo ${failureMessage ? quote([failureMessage]) : '"Warning: ⚠️ Automatic restore failed, manual intervention may be required"'};`;
+		`${getCleanEnvPrefix()} docker ${restoreArgs} 2>&1 && echo ${qRollbackMarker} || echo ${failureMessage ? quote([failureMessage]) : '"Warning: ⚠️ Automatic restore failed, manual intervention may be required"'};`;
 
 	let upRestore = runRestore(restoreCommand);
 	let overrideRestore = "";
@@ -337,7 +337,6 @@ export const getRestoreAfterFailedBuildCommand = async (
 		}),
 		deploymentId: options.deploymentId,
 		isTransactional,
-		exportEnvCommand: getExportEnvCommand(compose),
 		projectPath: effectiveProjectPath,
 	});
 	if (!restore) return restore;
@@ -380,22 +379,27 @@ export const getBuildComposeCommand = async (
 				}
 			: undefined,
 	);
-	const exportEnvCommand = getExportEnvCommand(compose);
 
-	// The env file and the compose are staged on the host before the script
-	// runs; if the second cannot be, the first is not left behind.
+	// The stack env, the env file and the compose are staged on the host before
+	// the script runs; if a later one cannot be, the earlier ones are not left
+	// behind.
 	const staged: string[] = [];
 	const stageOptions = {
 		deploymentId,
 		onStaged: (stagedPaths: string[]) => staged.push(...stagedPaths),
 	};
+	let stackEnvFile: string | undefined;
 	let envCommand = "";
 	let newCompose = "";
 	try {
+		stackEnvFile = await stageStackEnvFile(compose, stageOptions);
 		envCommand = compose.createEnvFile
-			? await getCreateEnvFileCommand(compose, stageOptions)
+			? await getCreateEnvFileCommand(compose, {
+					...stageOptions,
+					alsoRemove: [...staged],
+				})
 			: "";
-		// The staged env goes with the compose step if that one stops the script.
+		// The staged envs go with the compose step if that one stops the script.
 		newCompose = await writeDomainsToCompose(compose, domains, {
 			...stageOptions,
 			alsoRemove: [...staged],
@@ -444,7 +448,6 @@ Compose Type: ${composeType} ✅`;
 		command,
 		deploymentId,
 		isTransactional,
-		exportEnvCommand,
 		projectPath: mounts.length > 0 ? projectPath : "",
 	});
 
@@ -489,9 +492,13 @@ Compose Type: ${composeType} ✅`;
 		echo ${quote([`Pulling images on ${remoteBuild.servingHostLabel} (${refs.length} built on the build server)`])};${pullPhaseStart}
 		if [ "$PULL_OK" = "1" ]; then { ${pulls}; } 2>&1 || PULL_OK=0; fi${pullPhaseEnd}`;
 	}
+	const cleanEnvPrefix = getCleanEnvPrefix(stackEnvFile);
 	const upLine = remotePullBlock
-		? `if [ "$PULL_OK" = "1" ]; then env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${command.split(" ").join(" ")} 2>&1; else false; fi`
-		: `env -i PATH="$PATH" HOME="$HOME" ${exportEnvCommand} docker ${command.split(" ").join(" ")} 2>&1`;
+		? `if [ "$PULL_OK" = "1" ]; then ${cleanEnvPrefix} docker ${command.split(" ").join(" ")} 2>&1; else false; fi`
+		: `${cleanEnvPrefix} docker ${command.split(" ").join(" ")} 2>&1`;
+	// The staged stack env is removed once `up` is done with it: before the
+	// script stops on the failure branch, right after `up` on the success one.
+	const stackEnvCleanup = stackEnvFile ? `rm -f ${quote([stackEnvFile])};` : "";
 
 	// Guardrails around the docker line: the phase helpers go first, the docker
 	// events capture and the stall snapshots start right before `up`, and all
@@ -523,6 +530,7 @@ Compose Type: ${composeType} ✅`;
 		.join("");
 	const upFailureGuardrails = `${guardrails?.stallSnapshot ? `${STALL_SNAPSHOT_CLEANUP_COMMAND} ` : ""}${guardrails?.dockerEvents ? `${DOCKER_EVENTS_FLUSH_COMMAND} ` : ""}${phaseTimestamps ? `${getPhaseEndCommand("failed")} ` : ""}`;
 	const upSuccessBlock = [
+		stackEnvCleanup,
 		guardrails?.stallSnapshot ? STALL_SNAPSHOT_CLEANUP_COMMAND : "",
 		guardrails?.dockerEvents ? DOCKER_EVENTS_FLUSH_COMMAND : "",
 		phaseTimestamps ? getPhaseEndCommand("finished") : "",
@@ -564,7 +572,7 @@ Compose Type: ${composeType} ✅`;
 			fi`
 				: ""
 		}
-		${helpersBlock}${upSection} || { ${upFailureGuardrails}echo "Error: ❌ Docker command failed"; ${restoreCommands} exit 1; }
+		${helpersBlock}${upSection} || { ${upFailureGuardrails}echo "Error: ❌ Docker command failed"; ${restoreCommands} ${stackEnvCleanup ? `${stackEnvCleanup} ` : ""}exit 1; }
 		${upSuccessBlock}${compose.isolatedDeployment ? `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1` : ""}
 		${healthCheckSection}${persistLastGood}
 
@@ -714,7 +722,10 @@ export const createCommand = (
  */
 export const getCreateEnvFileCommand = async (
 	compose: ComposeNested,
-	options: StageOptions = {},
+	options: StageOptions & {
+		/** Other files staged for the same script, removed if this step stops it. */
+		alsoRemove?: string[];
+	} = {},
 ) => {
 	const { env, appName } = compose;
 	const envFilePath = getComposeEnvFilePath(compose);
@@ -764,22 +775,86 @@ ${getInstallStagedFileCommand({
 	staged: stagedPath,
 	destination: envFilePath,
 	failureMessage: "❌ Error: Could not write the environment file",
+	alsoRemove: options.alsoRemove,
 	prepare: `touch ${quote([envFilePath])}`,
 })}
 	`;
 };
 
-export const getExportEnvCommand = (compose: ComposeNested) => {
+const ENV_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Single quotes: the only quoting that leaves `$`, backticks and newlines alone. */
+const singleQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+
+/**
+ * Content of the file that carries a stack's environment: one `KEY='value'`
+ * per line, sourced under `set -a` by the loader `getCleanEnvPrefix` emits.
+ * A name that is not a valid shell identifier is left out: `docker stack
+ * deploy` can only interpolate identifiers, and any other name would not
+ * survive being sourced.
+ */
+export const buildStackEnvFileContent = (envVars: Record<string, string>) =>
+	Object.entries(envVars)
+		.filter(([key]) => ENV_VARIABLE_NAME.test(key))
+		.map(([key, value]) => `${key}=${singleQuote(value)}\n`)
+		.join("");
+
+/** Empty when the compose is not a stack or has no variables. */
+export const getStackEnvFileContent = (compose: ComposeNested) => {
 	if (compose.composeType !== "stack") return "";
 
-	const envVars = getEnvironmentVariablesObject(
-		compose.env,
-		compose.environment.project.env,
-		compose.environment.env,
+	return buildStackEnvFileContent(
+		getEnvironmentVariablesObject(
+			compose.env,
+			compose.environment.project.env,
+			compose.environment.env,
+		),
 	);
-	const exports = Object.entries(envVars)
-		.map(([key, value]) => `${key}=${quote([value])}`)
-		.join(" ");
-
-	return exports ? `${exports}` : "";
 };
+
+/**
+ * Stages a stack's environment as a 0600 file next to the compose directory
+ * and returns its path (`undefined` when there is nothing to stage). Embedding
+ * the variables in the deploy script put them in the host's process list and
+ * counted them, up to three times, toward the 128 KB limit on one shell
+ * argument. The script that uses the file removes it.
+ */
+export const stageStackEnvFile = async (
+	compose: ComposeNested,
+	options: StageOptions = {},
+) => {
+	const content = getStackEnvFileContent(compose);
+	if (!content) return undefined;
+
+	const { COMPOSE_PATH } = paths(!!compose.serverId);
+	const directory = join(COMPOSE_PATH, compose.appName);
+	const stagedPath = getStagedFilePath({
+		directory,
+		kind: "stack-env",
+		deploymentId: options.deploymentId,
+	});
+	await stageFiles({
+		serverId: compose.serverId,
+		directory,
+		files: [{ path: stagedPath, content }],
+	});
+	options.onStaged?.([stagedPath]);
+	return stagedPath;
+};
+
+/**
+ * Words that load the staged stack env into the command that follows them:
+ * `sh` sources the file with every assignment exported, then `exec`s the
+ * command. Only the file's path is on the command line, never a value.
+ */
+const getStackEnvLoader = (stagedPath: string) =>
+	`sh -c 'set -a; . "$1"; set +a; shift; exec "$@"' sh ${quote([stagedPath])}`;
+
+/**
+ * `env -i` prefix every docker invocation of a deploy runs under: the host's
+ * environment is dropped except PATH and HOME (docker needs HOME for its
+ * registry credentials), and a stack gets its own variables from the staged
+ * env file. `docker ...` follows it.
+ */
+export const getCleanEnvPrefix = (stackEnvFile?: string) =>
+	`env -i PATH="$PATH" HOME="$HOME" ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;

@@ -7,8 +7,8 @@ import { quote } from "shell-quote";
 import { stringify } from "yaml";
 import {
 	type ComposeNested,
+	getCleanEnvPrefix,
 	getComposeBaseArgs,
-	getExportEnvCommand,
 	type RemoteBuildImage,
 } from "./compose";
 
@@ -170,28 +170,29 @@ export const buildComposeOverrideYaml = (
 export const getWriteFileCommand = (path: string, content: string) =>
 	`mkdir -p ${quote([dirname(path)])} && echo "${Buffer.from(content, "utf8").toString("base64")}" | base64 -d > ${quote([path])};`;
 
-const getComposeRunPrefix = (compose: ComposeNested) =>
-	`env -i PATH="$PATH" HOME="$HOME" ${getExportEnvCommand(compose)}`;
-
 /**
  * Runs on the build server: prints the resolved compose configuration. The
  * output goes back to Dokploy for parsing and is deliberately never written to
- * the deployment log (it contains the resolved environment).
+ * the deployment log (it contains the resolved environment). `stackEnvFile` is
+ * the staged stack env (see `stageStackEnvFile`), loaded instead of passing the
+ * variables on the command line.
  */
 export const getComposeConfigJsonCommand = (
 	compose: ComposeNested,
 	codePath: string,
 	projectPath?: string,
+	stackEnvFile?: string,
 ) =>
-	`cd ${quote([codePath])} && ${getComposeRunPrefix(compose)} docker ${getComposeBaseArgs(compose, projectPath)} config --format json`;
+	`cd ${quote([codePath])} && ${getCleanEnvPrefix(stackEnvFile)} docker ${getComposeBaseArgs(compose, projectPath)} config --format json`;
 
 /** Runs on the build server: `docker compose ... build` for every service. */
 export const getComposeBuildCommand = (
 	compose: ComposeNested,
 	codePath: string,
 	projectPath?: string,
+	stackEnvFile?: string,
 ) =>
-	`set -e; cd ${quote([codePath])}; echo "🔨 Building images with docker compose build"; ${getComposeRunPrefix(compose)} docker ${getComposeBaseArgs(compose, projectPath)} build 2>&1;`;
+	`set -e; cd ${quote([codePath])}; echo "🔨 Building images with docker compose build"; ${getCleanEnvPrefix(stackEnvFile)} docker ${getComposeBaseArgs(compose, projectPath)} build 2>&1;`;
 
 /**
  * Runs on the build server after a successful build (and the registry login,
