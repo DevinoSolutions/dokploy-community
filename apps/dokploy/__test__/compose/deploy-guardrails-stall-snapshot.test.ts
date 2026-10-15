@@ -284,13 +284,20 @@ esac`,
 	// up) only apply to stored settings, so a script test can use 1 s steps.
 	const fast = { afterSeconds: 1, everySeconds: 1, maxSnapshots: 3 };
 
+	// Waits (up to 40 s) until the state command has started `n` times, then 2 s for
+	// the quick ones to print, instead of a fixed sleep that races a loaded runner.
+	// The caller removes psArgsFile first.
+	const waitForSnapshots = (n: number) =>
+		`i=0; while [ "$i" -lt 160 ] && [ "$(grep -c -- '^----$' ${toShellPath(psArgsFile)} 2>/dev/null)" -lt ${n} ]; do sleep 0.25; i=$((i + 1)); done;
+sleep 2;`;
+
 	it("prints delimited, timestamped snapshots while up is slow, at most maxSnapshots", {
 		timeout: 60_000,
 	}, async () => {
 		installDocker({ upSleep: 0 });
 		rmSync(psArgsFile, { force: true });
 		const script = `${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
-sleep 9;
+${waitForSnapshots(3)}
 dokploy_stall_cleanup;
 echo UP-DONE`;
 		const result = sh(script, env());
@@ -339,13 +346,14 @@ echo UP-DONE`,
 		expect(quick.stdout).toContain("UP-DONE");
 
 		// Up returns after the first snapshot: the rest never appear.
+		rmSync(psArgsFile, { force: true });
 		const slow = sh(
 			`${getStallSnapshotStartScript("docker-compose", "my-app", {
 				afterSeconds: 1,
 				everySeconds: 4,
 				maxSnapshots: 5,
 			})}
-sleep 3;
+${waitForSnapshots(1)}
 dokploy_stall_cleanup;
 sleep 8;
 echo UP-DONE`,
@@ -407,7 +415,7 @@ echo UP-DONE`,
 		rmSync(psArgsFile, { force: true });
 		const result = sh(
 			`${getStallSnapshotStartScript("stack", "my-app", fast)}
-sleep 3;
+${waitForSnapshots(1)}
 dokploy_stall_cleanup`,
 			env(),
 		);
@@ -432,6 +440,7 @@ dokploy_stall_cleanup`,
 			upSleep: 0,
 			psBody: `i=0; while [ $i -lt 12 ]; do echo "c$i|running|Up|t"; i=$((i + 1)); done`,
 		});
+		rmSync(psArgsFile, { force: true });
 		const result = sh(
 			`${getStallSnapshotStartScript(
 				"docker-compose",
@@ -439,7 +448,7 @@ dokploy_stall_cleanup`,
 				{ afterSeconds: 1, everySeconds: 10, maxSnapshots: 1 },
 				{ maxLines: 5 },
 			)}
-sleep 4;
+${waitForSnapshots(1)}
 dokploy_stall_cleanup`,
 			env(),
 		);
@@ -456,9 +465,10 @@ dokploy_stall_cleanup`,
 	}, async () => {
 		const one = { afterSeconds: 1, everySeconds: 10, maxSnapshots: 1 };
 		installDocker({ upSleep: 0, psBody: "true" });
+		rmSync(psArgsFile, { force: true });
 		const empty = sh(
 			`${getStallSnapshotStartScript("docker-compose", "my-app", one)}
-sleep 4;
+${waitForSnapshots(1)}
 dokploy_stall_cleanup`,
 			env(),
 		);
@@ -468,9 +478,10 @@ dokploy_stall_cleanup`,
 		);
 
 		installDocker({ upSleep: 0, psBody: "echo SECRET-STDERR >&2", psExit: 3 });
+		rmSync(psArgsFile, { force: true });
 		const failing = sh(
 			`${getStallSnapshotStartScript("docker-compose", "my-app", one)}
-sleep 4;
+${waitForSnapshots(1)}
 dokploy_stall_cleanup`,
 			env(),
 		);
@@ -485,9 +496,13 @@ dokploy_stall_cleanup`,
 		const script = getStallSnapshotStartScript("docker-compose", "my-app", one)
 			.replace("-lt 20 ]", "-lt 2 ]")
 			.replace("-ge 20 ]", "-ge 2 ]");
+		rmSync(psPidFile, { force: true });
 		const hanging = sh(
 			`${script}
-sleep 7;
+i=0; while [ "$i" -lt 100 ] && [ ! -s ${toShellPath(psPidFile)} ]; do sleep 0.2; i=$((i + 1)); done;
+HP=$(cat ${toShellPath(psPidFile)});
+i=0; while [ "$i" -lt 160 ] && kill -0 "$HP" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
+sleep 1;
 dokploy_stall_cleanup`,
 			env(),
 		);
@@ -720,7 +735,7 @@ echo SHELL-DONE`,
 	});
 
 	it("does not signal a watcher that hit its lifetime bound with the shell alive", {
-		timeout: 60_000,
+		timeout: 90_000,
 	}, async () => {
 		installDocker({ upSleep: 0 });
 		const logFile = join(dir, "done-kill.log");
@@ -728,16 +743,16 @@ echo SHELL-DONE`,
 		// Shorten the lifetime bound so the test does not wait for the real one.
 		const script = getStallSnapshotStartScript("docker-compose", "my-app", {
 			afterSeconds: 1,
-			everySeconds: 10,
+			everySeconds: 30,
 			maxSnapshots: 1,
 		}).replace(
 			/(DOKPLOY_STALL_END=\$\(\( DOKPLOY_STALL_T0 \+ )\d+/,
-			(_m, head: string) => `${head}4`,
+			(_m, head: string) => `${head}10`,
 		);
 		const result = sh(
 			`${script}
-sleep 8;
-if [ -e "$DOKPLOY_STALL_DIR/done" ]; then echo DONE-MARKER; fi
+i=0; while [ "$i" -lt 160 ] && [ ! -e "$DOKPLOY_STALL_DIR/done" ]; do sleep 0.25; i=$((i + 1)); done;
+if [ -e "$DOKPLOY_STALL_DIR/done" ]; then echo DONE-MARKER; else echo TIMEOUT-WAITING-FOR-DONE; fi
 kill() { echo "KILL $*" >> ${toShellPath(logFile)}; command kill "$@"; }
 dokploy_stall_cleanup;
 echo "DIR-AFTER:$DOKPLOY_STALL_DIR:"`,
