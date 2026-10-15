@@ -704,8 +704,10 @@ sleep 20`,
 	});
 
 	it("caps the appended events and says so", async () => {
-		installDocker({ upExit: 0, events: 8, awaitEvents: true });
+		installDocker({ upExit: 0, events: 8 });
+		// No `up` here, so wait for the events stub's ready marker in the script.
 		const script = `${getDockerEventsStartScript("stack", "my-app", { maxLines: 3 })}
+i=0; while [ ! -e ${toShellPath(eventsReadyFile)} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done;
 sleep 1;
 dokploy_events_flush;`;
 		const result = sh(script, {

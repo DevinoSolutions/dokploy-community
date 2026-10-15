@@ -57,9 +57,9 @@ const stall = { afterSeconds: 15, everySeconds: 10, maxSnapshots: 5 };
 
 // `date +%s` has one-second granularity and a cleanup forks a few processes, so a
 // loaded runner can report 1 to 3 s for a cleanup that did not wait for anything.
-// A cleanup blocked on the watcher would wait out its timeout or lifetime (about
-// 20 s or much more in the tests using this bound), well past it. The test where
-// the wait would only be the 2 s kill grace is guarded by ALIVE-IN-GRACE instead.
+// A cleanup that waits for a watcher parked in its idle nap would take until the
+// lifetime bound (about 100 s). Where the watcher is busy with a stubborn command
+// the wait is only the 2 s grace, so that test also asserts ALIVE-IN-GRACE.
 const cleanupSeconds = (stdout: string) => {
 	const match = /CLEANUP-TOOK (\d+)/.exec(stdout);
 	if (!match) throw new Error(`no CLEANUP-TOOK line in:\n${stdout}`);
