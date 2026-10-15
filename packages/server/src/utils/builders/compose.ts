@@ -5,7 +5,13 @@ import boxen from "boxen";
 import { quote } from "shell-quote";
 import { writeDomainsToCompose } from "../docker/domain";
 import {
-	encodeBase64,
+	getInstallStagedFileCommand,
+	getStagedFilePath,
+	removeStagedFiles,
+	type StageOptions,
+	stageFiles,
+} from "../docker/staging";
+import {
 	getEnvironmentVariablesObject,
 	prepareEnvironmentVariables,
 	prepareEnvironmentVariablesForFile,
@@ -374,14 +380,26 @@ export const getBuildComposeCommand = async (
 				}
 			: undefined,
 	);
-	const envCommand = compose.createEnvFile
-		? getCreateEnvFileCommand(compose)
-		: "";
 	const exportEnvCommand = getExportEnvCommand(compose);
 
-	const newCompose = await writeDomainsToCompose(compose, domains, {
+	// The env file and the compose are staged on the host before the script
+	// runs; if the second cannot be, the first is not left behind.
+	const staged: string[] = [];
+	const stageOptions = {
 		deploymentId,
-	});
+		onStaged: (stagedPaths: string[]) => staged.push(...stagedPaths),
+	};
+	let envCommand = "";
+	let newCompose = "";
+	try {
+		envCommand = compose.createEnvFile
+			? await getCreateEnvFileCommand(compose, stageOptions)
+			: "";
+		newCompose = await writeDomainsToCompose(compose, domains, stageOptions);
+	} catch (error) {
+		await removeStagedFiles(compose.serverId, staged);
+		throw error;
+	}
 	const logContent = `
 App Name: ${appName}
 Build Compose 🐳
@@ -684,7 +702,16 @@ export const createCommand = (
 	return command;
 };
 
-export const getCreateEnvFileCommand = (compose: ComposeNested) => {
+/**
+ * Shell snippet that writes the compose `.env`. The content (it holds the
+ * service's secrets) is staged out of band, 0600, instead of being embedded in
+ * the script: a large env counts toward the 128 KB limit on a single shell
+ * argument, and an embedded value would show in the host's process list.
+ */
+export const getCreateEnvFileCommand = async (
+	compose: ComposeNested,
+	options: StageOptions = {},
+) => {
 	const { env, appName } = compose;
 	const envFilePath = getComposeEnvFilePath(compose);
 
@@ -713,10 +740,28 @@ export const getCreateEnvFileCommand = (compose: ComposeNested) => {
 				)
 	).join("\n");
 
-	const encodedContent = encodeBase64(envFileContent);
+	const { COMPOSE_PATH } = paths(!!compose.serverId);
+	const stageDirectory = join(COMPOSE_PATH, appName);
+	const stagedPath = getStagedFilePath({
+		directory: stageDirectory,
+		kind: "env",
+		deploymentId: options.deploymentId,
+	});
+	await stageFiles({
+		serverId: compose.serverId,
+		directory: stageDirectory,
+		files: [{ path: stagedPath, content: envFileContent }],
+	});
+	options.onStaged?.([stagedPath]);
+
+	// `touch` + `cat >` keeps the mode and owner of an existing `.env`.
 	return `
-touch ${quote([envFilePath])};
-echo "${encodedContent}" | base64 -d > ${quote([envFilePath])};
+${getInstallStagedFileCommand({
+	staged: stagedPath,
+	destination: envFilePath,
+	failureMessage: "❌ Error: Could not write the environment file",
+	prepare: `touch ${quote([envFilePath])}`,
+})}
 	`;
 };
 

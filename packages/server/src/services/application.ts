@@ -298,11 +298,14 @@ export const deployApplication = async ({
 		}
 
 		if (application.sourceType !== "docker") {
-			command += await generateApplyPatchesCommand({
-				id: application.applicationId,
-				type: "application",
-				serverId,
-			});
+			command += await generateApplyPatchesCommand(
+				{
+					id: application.applicationId,
+					type: "application",
+					serverId,
+				},
+				{ deploymentId: deployment.deploymentId },
+			);
 		}
 
 		// >>> build-policy hook 2a/4: the required-checks gate, between the clone

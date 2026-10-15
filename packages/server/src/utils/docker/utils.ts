@@ -17,6 +17,12 @@ import type { RedisNested } from "../databases/redis";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { spawnAsync } from "../process/spawnAsync";
 import { getRemoteDocker } from "../servers/remote-docker";
+import {
+	getInstallStagedFileCommand,
+	getStagedFilePath,
+	type StageOptions,
+	stageFiles,
+} from "./staging";
 
 interface RegistryAuth {
 	username: string;
@@ -903,6 +909,11 @@ export const createFile = async (
 export const encodeBase64 = (content: string) =>
 	Buffer.from(content, "utf-8").toString("base64");
 
+/**
+ * Inline variant: the content travels inside the script, so it is only for
+ * small, fixed content (the static builder's nginx.conf / Dockerfile). User
+ * content (file mounts) goes through `getCreateFilesCommand`.
+ */
 export const getCreateFileCommand = (
 	outputPath: string,
 	filePath: string,
@@ -919,6 +930,83 @@ export const getCreateFileCommand = (
 		mkdir -p ${quote([directory])};
 		echo "${encodedContent}" | base64 -d > ${quote([fullPath])};
 	`;
+};
+
+/**
+ * Shell commands that create `files` under `outputPath` on the host that runs
+ * them (`serverId`, or this machine when unset). A `filePath` ending in `/` is
+ * a directory. File content is staged out of band (see `./staging`) and copied
+ * in with `cat >`, so it never counts toward the 128 KB limit on a single shell
+ * argument, no matter how many files a script creates. The staged files sit
+ * next to `outputPath`, not in it: it is bind-mounted into containers.
+ */
+export const getCreateFilesCommand = async ({
+	serverId,
+	outputPath,
+	files,
+	replaceDirectory = false,
+	deploymentId,
+	onStaged,
+}: {
+	serverId?: string | null;
+	outputPath: string;
+	files: { filePath: string; content: string }[];
+	/** Remove a directory that sits where a file is to be written. */
+	replaceDirectory?: boolean;
+} & StageOptions) => {
+	const stageDirectory = path.dirname(outputPath);
+	const entries = files.map((file) => {
+		const fullPath = path.join(outputPath, file.filePath);
+		return {
+			fullPath,
+			content: file.content,
+			isDirectory: fullPath.endsWith(path.sep) || file.filePath.endsWith("/"),
+		};
+	});
+
+	const toStage = entries.filter((entry) => !entry.isDirectory);
+	const stagedPaths = toStage.map((_, index) =>
+		getStagedFilePath({
+			directory: stageDirectory,
+			kind: "mount",
+			deploymentId,
+			index,
+		}),
+	);
+	await stageFiles({
+		serverId,
+		directory: stageDirectory,
+		files: toStage.map((entry, index) => ({
+			path: stagedPaths[index] as string,
+			content: entry.content,
+		})),
+	});
+	if (stagedPaths.length > 0) onStaged?.(stagedPaths);
+
+	let stagedIndex = 0;
+	let command = "";
+	for (const entry of entries) {
+		if (entry.isDirectory) {
+			command += `mkdir -p ${quote([entry.fullPath])};`;
+			continue;
+		}
+		const qFullPath = quote([entry.fullPath]);
+		const makeDirectory = `mkdir -p ${quote([path.dirname(entry.fullPath)])}`;
+		command += `
+		${getInstallStagedFileCommand({
+			staged: stagedPaths[stagedIndex] as string,
+			destination: entry.fullPath,
+			failureMessage: "❌ Error: Could not write a file mount",
+			prepare: replaceDirectory
+				? `${makeDirectory} && { if [ -d ${qFullPath} ]; then rm -rf ${qFullPath}; fi; }`
+				: makeDirectory,
+			// A failed write stops the script: the rest never get consumed.
+			alsoRemove: stagedPaths,
+		})}
+	`;
+		stagedIndex++;
+	}
+	return command;
 };
 
 export const getServiceContainer = async (

@@ -30,8 +30,12 @@ import {
 } from "@dokploy/server/utils/cluster/upload";
 import { writeDomainsToCompose } from "@dokploy/server/utils/docker/domain";
 import {
+	removeStagedFiles,
+	type StageOptions,
+} from "@dokploy/server/utils/docker/staging";
+import {
 	encodeBase64,
-	getCreateFileCommand,
+	getCreateFilesCommand,
 } from "@dokploy/server/utils/docker/utils";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
@@ -194,7 +198,10 @@ type ComposeBuildEntity = ComposeNested & {
 	server?: { name: string } | null;
 };
 
-const getCloneCommand = async (entity: ComposeNested) => {
+const getCloneCommand = async (
+	entity: ComposeNested,
+	stageOptions: StageOptions,
+) => {
 	switch (entity.sourceType) {
 		case "github":
 			return cloneGithubRepository({ ...entity, type: "compose" });
@@ -207,7 +214,7 @@ const getCloneCommand = async (entity: ComposeNested) => {
 		case "gitea":
 			return cloneGiteaRepository({ ...entity, type: "compose" });
 		case "raw":
-			return getCreateComposeFileCommand(entity);
+			return getCreateComposeFileCommand(entity, stageOptions);
 		default:
 			return "";
 	}
@@ -246,6 +253,14 @@ const buildImagesOnBuildServer = async (
 	const projectPath = resolved.mounts.length > 0 ? codePath : undefined;
 
 	const log = createDeploymentLogWriter(entity.serverId, deployment.logPath);
+	// Content that may be large or secret (a raw compose, patches, the .env, file
+	// mounts) is staged on the build server instead of being embedded in a
+	// command. Whatever a failed or cancelled build leaves staged is removed.
+	const staged: string[] = [];
+	const stageOptions: StageOptions = {
+		deploymentId: deployment.deploymentId,
+		onStaged: (paths) => staged.push(...paths),
+	};
 	// Every command runs in its own session with a pid file keyed by the
 	// deployment id, so a cancel can stop exactly this deployment's build. The
 	// cancel flag is checked before each step: a cancel between two steps (no
@@ -339,15 +354,21 @@ const buildImagesOnBuildServer = async (
 			if (reuseClone) {
 				log.line(`No reusable clone on ${buildServer.name}, cloning`);
 			}
-			await run(`set -e;${await getCloneCommand(buildEntity)}`);
+			// A cancel has to land before anything is staged, not after.
+			await checkpoint();
+			await run(`set -e;${await getCloneCommand(buildEntity, stageOptions)}`);
 		}
 
 		if (applyPatches && entity.sourceType !== "raw") {
-			const patches = await generateApplyPatchesCommand({
-				id: entity.composeId,
-				type: "compose",
-				serverId: buildServerId,
-			});
+			await checkpoint();
+			const patches = await generateApplyPatchesCommand(
+				{
+					id: entity.composeId,
+					type: "compose",
+					serverId: buildServerId,
+				},
+				stageOptions,
+			);
 			if (patches) await run(`set -e;${patches}`);
 		}
 
@@ -358,13 +379,14 @@ const buildImagesOnBuildServer = async (
 
 		// Same compose file the serving host will run (domains, randomize,
 		// isolated deployment), and the same .env, so build args interpolate alike.
+		await checkpoint();
 		const writeCompose = await writeDomainsToCompose(
 			buildEntity,
 			buildEntity.domains,
-			{ deploymentId: deployment.deploymentId },
+			stageOptions,
 		);
 		const envCommand = buildEntity.createEnvFile
-			? getCreateEnvFileCommand(buildEntity)
+			? await getCreateEnvFileCommand(buildEntity, stageOptions)
 			: "";
 		await run(`set -e;${writeCompose}${envCommand}`);
 
@@ -376,17 +398,17 @@ const buildImagesOnBuildServer = async (
 			(mount) => mount.type === "file" && mount.filePath,
 		);
 		if (fileMounts.length > 0) {
-			await run(
-				`set -e;${fileMounts
-					.map((mount) =>
-						getCreateFileCommand(
-							filesDir,
-							mount.filePath || "",
-							mount.content || "",
-						),
-					)
-					.join("")}`,
-			);
+			await checkpoint();
+			const mountsCommand = await getCreateFilesCommand({
+				serverId: buildServerId,
+				outputPath: filesDir,
+				files: fileMounts.map((mount) => ({
+					filePath: mount.filePath || "",
+					content: mount.content || "",
+				})),
+				...stageOptions,
+			});
+			await run(`set -e;${mountsCommand}`);
 		}
 
 		// Not streamed: the resolved configuration contains the environment.
@@ -446,6 +468,9 @@ const buildImagesOnBuildServer = async (
 		// (--with-registry-auth), so that login stays in the default config.
 		await login(entity.serverId, false, undefined);
 		return { images };
+	} catch (error) {
+		await removeStagedFiles(buildServerId, staged);
+		throw error;
 	} finally {
 		await log.close();
 	}

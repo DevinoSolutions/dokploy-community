@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
+	writeFileRemote: vi.fn(),
 	findServerById: vi.fn(),
 	findRegistryByIdWithCredentials: vi.fn(),
 	loginDockerRegistry: vi.fn(),
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	execAsyncRemote: mocks.execAsyncRemote,
+	writeFileRemote: mocks.writeFileRemote,
 	execAsync: vi.fn(),
 }));
 vi.mock("@dokploy/server/services/server", () => ({
@@ -176,6 +178,7 @@ describe("prepareComposeBuildServerDeploy", () => {
 		mocks.cloneGitRepository.mockResolvedValue("echo clone;");
 		mocks.generateApplyPatchesCommand.mockResolvedValue("");
 		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.writeFileRemote.mockResolvedValue(undefined);
 	});
 
 	const callsOn = (serverId: string) =>
@@ -327,11 +330,20 @@ describe("prepareComposeBuildServerDeploy", () => {
 		);
 		expect(mountIndex).toBeGreaterThan(-1);
 		expect(mountIndex).toBeLessThan(configIndex);
-		// The content travels base64-encoded, never as plain text in the command.
-		expect(commands[mountIndex]).toContain(
+		// The content is staged over SFTP: it is in no command, plain or encoded.
+		expect(commands[mountIndex]).not.toContain("base64");
+		expect(commands[mountIndex]).not.toContain(
 			Buffer.from("SECRET=hunter2").toString("base64"),
 		);
 		expect(commands[mountIndex]).not.toContain("hunter2");
+		expect(mocks.writeFileRemote).toHaveBeenCalledTimes(1);
+		const [stagedServer, stagedPath, stagedContent] =
+			mocks.writeFileRemote.mock.calls[0]!;
+		expect(stagedServer).toBe("build-1");
+		expect((stagedPath as string).replaceAll("\\", "/")).toBe(
+			"/etc/dokploy/compose/my-app/.dokploy-stage-mount-dep1-0",
+		);
+		expect(stagedContent).toBe("SECRET=hunter2");
 		expect(commands.some((c) => c.includes("/srv/data"))).toBe(false);
 	});
 

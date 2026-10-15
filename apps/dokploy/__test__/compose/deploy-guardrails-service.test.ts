@@ -44,6 +44,8 @@ vi.mock("@dokploy/server/utils/process/execAsync", async () => {
 		...actual,
 		execAsync: mocks.execAsync,
 		execAsyncRemote: mocks.execAsyncRemote,
+		// A raw compose is staged over SFTP on a remote host.
+		writeFileRemote: vi.fn().mockResolvedValue(undefined),
 	};
 });
 vi.mock("@dokploy/server/utils/builders/compose", () => ({

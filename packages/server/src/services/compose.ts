@@ -283,7 +283,9 @@ export const runComposeBuild = async (
 	} else if (entity.sourceType === "gitea") {
 		command += await cloneGiteaRepository(entity);
 	} else if (entity.sourceType === "raw") {
-		command += getCreateComposeFileCommand(entity);
+		command += await getCreateComposeFileCommand(entity, {
+			deploymentId: deployment.deploymentId,
+		});
 	}
 	await phases.run(
 		entity.sourceType === "raw" ? "Write compose file" : "Fetch source",
@@ -292,11 +294,14 @@ export const runComposeBuild = async (
 
 	if (applyPatches && entity.sourceType !== "raw") {
 		command = "set -e;";
-		command += await generateApplyPatchesCommand({
-			id: entity.composeId,
-			type: "compose",
-			serverId: entity.serverId,
-		});
+		command += await generateApplyPatchesCommand(
+			{
+				id: entity.composeId,
+				type: "compose",
+				serverId: entity.serverId,
+			},
+			{ deploymentId: deployment.deploymentId },
+		);
 		await phases.run("Apply patches", () => runStep(command));
 	}
 
@@ -738,7 +743,9 @@ export const rebuildCompose = async ({
 
 		let command = "set -e;";
 		if (compose.sourceType === "raw") {
-			command += getCreateComposeFileCommand(compose);
+			command += await getCreateComposeFileCommand(compose, {
+				deploymentId: deployment.deploymentId,
+			});
 		}
 
 		let commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
@@ -752,11 +759,14 @@ export const rebuildCompose = async ({
 
 		if (compose.sourceType !== "raw") {
 			command = "set -e;";
-			command += await generateApplyPatchesCommand({
-				id: compose.composeId,
-				type: "compose",
-				serverId: compose.serverId,
-			});
+			command += await generateApplyPatchesCommand(
+				{
+					id: compose.composeId,
+					type: "compose",
+					serverId: compose.serverId,
+				},
+				{ deploymentId: deployment.deploymentId },
+			);
 			commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 			await phases.run("Apply patches", async () => {
 				if (compose.serverId) {
