@@ -2,6 +2,20 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.28
+
+**Large Compose files deploy again** ([#390](https://github.com/DevinoSolutions/dokploy-community/pull/390)). Since the YAML merge-key fix, an expanded Compose file over about 96 KB (more than 128 KB once base64-encoded, the Linux per-argument limit) failed on build-server and serving-host deploys with "Argument list too long". The file is now written to a staging file over SFTP or the local filesystem and copied into place.
+
+**Opt-in browser session replay** ([#389](https://github.com/DevinoSolutions/dokploy-community/pull/389)). Off by default. It is enabled only with `DOKPLOY_SESSION_REPLAY=true` at runtime, with optional `DOKPLOY_POSTHOG_KEY` and `DOKPLOY_POSTHOG_HOST`, sample-rate variables and a `DOKPLOY_SESSION_REPLAY_SENTRY_DSN` override. All text and inputs are masked, media is blocked, URLs are stripped of query strings, credential pages are never recorded, and the log, terminal and editor views are blocked. Details are in the README section **Browser session replay**.
+
+Fixes and ports:
+- A remote server with no SSH key now reports a precondition error instead of a 500 ([#386](https://github.com/DevinoSolutions/dokploy-community/pull/386)).
+- The Railpack versions list serves the last cached list when GitHub fails, instead of a 500 ([#385](https://github.com/DevinoSolutions/dokploy-community/pull/385)).
+- Members can list servers in the server pickers; without `server.read` they see only name and IP ([#388](https://github.com/DevinoSolutions/dokploy-community/pull/388), port of upstream #5613).
+- Template tags are capped so the Create button stays visible ([#387](https://github.com/DevinoSolutions/dokploy-community/pull/387), port of upstream #5661).
+
+> No database migrations in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
 ### New in v0.30.8-community.27
 
 **Stall snapshots for slow Compose deploys** ([#383](https://github.com/DevinoSolutions/dokploy-community/pull/383), issue [#374](https://github.com/DevinoSolutions/dokploy-community/issues/374)). A fourth opt-in deploy guardrail. While `docker compose up` is still running after a set delay, the deploy log gets a snapshot of the project's container states (name, state, status, created) at a fixed interval, up to a set number of snapshots. For swarm stacks the snapshot uses `docker stack ps`.
