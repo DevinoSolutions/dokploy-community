@@ -455,6 +455,7 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 	let pidFile = "";
 	let argsFile = "";
 	let eventsArgsFile = "";
+	let eventsReadyFile = "";
 	let pwnedFile = "";
 
 	const writeBin = (name: string, body: string) => {
@@ -468,12 +469,17 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 		upSleep = 1,
 		events = 3,
 		extraEvents = "",
+		awaitEvents = false,
 	}: {
 		upExit: number;
 		upSleep?: number;
 		events?: number;
 		extraEvents?: string;
+		// Makes `up` wait until the backgrounded events stub has written its lines,
+		// so a loaded runner cannot stop the capture before they exist.
+		awaitEvents?: boolean;
 	}) => {
+		rmSync(eventsReadyFile, { force: true });
 		writeBin(
 			"docker",
 			`case "$1" in
@@ -483,8 +489,11 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
     i=0
     while [ $i -lt ${events} ]; do echo "17000000$((10 + i))123456789|container|start|web$i"; i=$((i + 1)); done
     ${extraEvents}
+    : > ${toShellPath(eventsReadyFile)}
     exec sleep 300 ;;
-  stack|compose) sleep ${upSleep}; exit ${upExit} ;;
+  stack|compose)
+    ${awaitEvents ? `i=0; while [ ! -e ${toShellPath(eventsReadyFile)} ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done` : ":"}
+    sleep ${upSleep}; exit ${upExit} ;;
   *) exit 0 ;;
 esac`,
 		);
@@ -527,7 +536,7 @@ esac`,
 
 	const processIsGone = async () => {
 		const pid = readFileSync(pidFile, "utf8").trim();
-		for (let i = 0; i < 20; i++) {
+		for (let i = 0; i < 100; i++) {
 			if (sh(`kill -0 ${pid} 2>/dev/null`).status !== 0) return true;
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
@@ -541,6 +550,7 @@ esac`,
 		pidFile = join(dir, "events.pid");
 		argsFile = join(dir, "curl.args");
 		eventsArgsFile = join(dir, "events.args");
+		eventsReadyFile = join(dir, "events.ready");
 		pwnedFile = join(dir, "pwned");
 	});
 
@@ -550,7 +560,7 @@ esac`,
 	});
 
 	it("appends readable, capped docker events and stops the process after a successful up", async () => {
-		installDocker({ upExit: 0, events: 3 });
+		installDocker({ upExit: 0, events: 3, awaitEvents: true });
 		const result = await runStackDeploy({ dockerEvents: true });
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("Docker Compose Deployed: ✅");
@@ -569,6 +579,7 @@ esac`,
 		installDocker({
 			upExit: 0,
 			events: 1,
+			awaitEvents: true,
 			// Defence in depth: even if an exec event slipped through, only the
 			// part before the first ':' is printed; the health status survives.
 			extraEvents: [
@@ -693,7 +704,7 @@ sleep 20`,
 	});
 
 	it("caps the appended events and says so", async () => {
-		installDocker({ upExit: 0, events: 8 });
+		installDocker({ upExit: 0, events: 8, awaitEvents: true });
 		const script = `${getDockerEventsStartScript("stack", "my-app", { maxLines: 3 })}
 sleep 1;
 dokploy_events_flush;`;
@@ -731,7 +742,7 @@ dokploy_events_flush;`;
 	});
 
 	it("stops the events process when up fails too, and still fails the deploy", async () => {
-		installDocker({ upExit: 1 });
+		installDocker({ upExit: 1, awaitEvents: true });
 		const result = await runStackDeploy({ dockerEvents: true });
 		expect(result.status).toBe(1);
 		expect(result.stdout).toContain("Error: ❌ Docker command failed");

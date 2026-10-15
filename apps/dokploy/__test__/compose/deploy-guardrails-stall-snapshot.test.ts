@@ -57,10 +57,20 @@ const stall = { afterSeconds: 15, everySeconds: 10, maxSnapshots: 5 };
 
 // `date +%s` has one-second granularity and a cleanup forks a few processes, so a
 // loaded runner can report 1 to 3 s for a cleanup that did not wait for anything.
-// A cleanup held by the watcher or a stubborn command would wait out its timeout
-// and grace, well past this bound.
-const cleanupSeconds = (stdout: string) =>
-	Number(/CLEANUP-TOOK (\d+)/.exec(stdout)?.[1] ?? Number.NaN);
+// A cleanup blocked on the watcher would wait out its timeout or lifetime (about
+// 20 s or much more in the tests using this bound), well past it. The test where
+// the wait would only be the 2 s kill grace is guarded by ALIVE-IN-GRACE instead.
+const cleanupSeconds = (stdout: string) => {
+	const match = /CLEANUP-TOOK (\d+)/.exec(stdout);
+	if (!match) throw new Error(`no CLEANUP-TOOK line in:\n${stdout}`);
+	return Number(match[1]);
+};
+
+const reapSeconds = (stdout: string) => {
+	const match = /REAP-TOOK (\d+)/.exec(stdout);
+	if (!match) throw new Error(`no REAP-TOOK line in:\n${stdout}`);
+	return Number(match[1]);
+};
 
 describe("stall snapshot script generation", () => {
 	it("watches compose up and only touches the stall snapshot pieces", async () => {
@@ -284,12 +294,12 @@ esac`,
 	// up) only apply to stored settings, so a script test can use 1 s steps.
 	const fast = { afterSeconds: 1, everySeconds: 1, maxSnapshots: 3 };
 
-	// Waits (up to 40 s) until the state command has started `n` times, then 2 s for
-	// the quick ones to print, instead of a fixed sleep that races a loaded runner.
-	// The caller removes psArgsFile first.
+	// Waits (up to 40 s) until snapshot block `n` is written, then 1 s for the watcher
+	// to print it, instead of a fixed sleep that races a loaded runner. Reads the
+	// watcher's own block file, so it needs neither psArgsFile nor integer compares.
 	const waitForSnapshots = (n: number) =>
-		`i=0; while [ "$i" -lt 160 ] && [ "$(grep -c -- '^----$' ${toShellPath(psArgsFile)} 2>/dev/null)" -lt ${n} ]; do sleep 0.25; i=$((i + 1)); done;
-sleep 2;`;
+		`i=0; while [ "$i" -lt 160 ] && ! grep -q -- "End of stall snapshot ${n}/" "$DOKPLOY_STALL_DIR/block" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
+sleep 1;`;
 
 	it("prints delimited, timestamped snapshots while up is slow, at most maxSnapshots", {
 		timeout: 60_000,
@@ -326,18 +336,18 @@ echo UP-DONE`;
 	});
 
 	it("stops as soon as up returns: no snapshot when up is fast, none after it", {
-		timeout: 60_000,
+		timeout: 120_000,
 	}, async () => {
 		installDocker({ upSleep: 0 });
 		const quick = sh(
 			`${getStallSnapshotStartScript("docker-compose", "my-app", {
-				afterSeconds: 5,
+				afterSeconds: 8,
 				everySeconds: 1,
 				maxSnapshots: 3,
 			})}
 sleep 1;
 dokploy_stall_cleanup;
-sleep 8;
+sleep 10;
 echo UP-DONE`,
 			env(),
 		);
@@ -350,7 +360,7 @@ echo UP-DONE`,
 		const slow = sh(
 			`${getStallSnapshotStartScript("docker-compose", "my-app", {
 				afterSeconds: 1,
-				everySeconds: 4,
+				everySeconds: 6,
 				maxSnapshots: 5,
 			})}
 ${waitForSnapshots(1)}
@@ -366,10 +376,10 @@ echo UP-DONE`,
 	it("through the real deploy script: snapshots while up runs, none once it returned", {
 		timeout: 90_000,
 	}, async () => {
-		installDocker({ upSleep: 20 });
+		installDocker({ upSleep: 25 });
 		const command = await build({
 			deployGuardrails: {
-				stallSnapshot: { afterSeconds: 15, everySeconds: 10, maxSnapshots: 5 },
+				stallSnapshot: { afterSeconds: 15, everySeconds: 20, maxSnapshots: 5 },
 			},
 		});
 		const runnable = command.replace(
@@ -379,7 +389,7 @@ echo UP-DONE`,
 		const result = sh(`set -e;${runnable}`, env());
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("Docker Compose Deployed: ✅");
-		// up took 20 s, the first snapshot is due at 15 s, the second at 25 s.
+		// up takes 25 s, the first snapshot is due at 15 s, the second at 35 s.
 		expect(countBlocks(result.stdout)).toBe(1);
 		expect(result.stdout).toContain("Stall snapshot 1/5");
 		// The block comes before the success line, never after the deploy ended.
@@ -461,7 +471,7 @@ dokploy_stall_cleanup`,
 	});
 
 	it("reports an empty, failing or hanging state command without failing the deploy", {
-		timeout: 60_000,
+		timeout: 120_000,
 	}, async () => {
 		const one = { afterSeconds: 1, everySeconds: 10, maxSnapshots: 1 };
 		installDocker({ upSleep: 0, psBody: "true" });
@@ -499,10 +509,7 @@ dokploy_stall_cleanup`,
 		rmSync(psPidFile, { force: true });
 		const hanging = sh(
 			`${script}
-i=0; while [ "$i" -lt 100 ] && [ ! -s ${toShellPath(psPidFile)} ]; do sleep 0.2; i=$((i + 1)); done;
-HP=$(cat ${toShellPath(psPidFile)});
-i=0; while [ "$i" -lt 160 ] && kill -0 "$HP" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
-sleep 1;
+${waitForSnapshots(1)}
 dokploy_stall_cleanup`,
 			env(),
 		);
@@ -588,7 +595,7 @@ exit 1`,
 		// The shell only asks the watcher to stop (it does not wait for it).
 		for (
 			let i = 0;
-			i < 50 && sh(`kill -0 ${wd} 2>/dev/null`).status === 0;
+			i < 100 && sh(`kill -0 ${wd} 2>/dev/null`).status === 0;
 			i++
 		) {
 			await sleepMs(100);
@@ -665,7 +672,6 @@ sleep 60`,
 		})
 			.replace("-lt 20 ]", "-lt 2 ]")
 			.replace("-ge 20 ]", "-ge 2 ]");
-		const started = Date.now();
 		// Timeout 2 s + grace 2 s after the command starts at ~1 s. Instead of a fixed
 		// sleep, wait for the state command to start, then poll (up to 40 s) for it to
 		// be reaped, so a loaded runner only makes the test slower, not wrong. Cleanup
@@ -674,9 +680,11 @@ sleep 60`,
 		const result = sh(
 			`${script}
 i=0; while [ "$i" -lt 100 ] && [ ! -s ${toShellPath(psPidFile)} ]; do sleep 0.2; i=$((i + 1)); done;
-PSPID=$(cat ${toShellPath(psPidFile)});
-i=0; while [ "$i" -lt 80 ] && kill -0 "$PSPID" 2>/dev/null; do sleep 0.5; i=$((i + 1)); done;
+PSPID=$(cat ${toShellPath(psPidFile)} 2>/dev/null); [ -n "$PSPID" ] || echo NO-PID;
+T1=$(date +%s);
+i=0; while [ "$i" -lt 160 ] && kill -0 "$PSPID" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
 if kill -0 "$PSPID" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi
+echo "REAP-TOOK $(( $(date +%s) - T1 ))"
 T0=$(date +%s);
 dokploy_stall_cleanup;
 echo "CLEANUP-TOOK $(( $(date +%s) - T0 ))"`,
@@ -685,12 +693,15 @@ echo "CLEANUP-TOOK $(( $(date +%s) - T0 ))"`,
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("REAPED");
 		expect(result.stdout).not.toContain("STILL-ALIVE");
+		expect(result.stdout).not.toContain("NO-PID");
 		expect(result.stdout).toContain(
 			"(the state command did not return within 20s and was stopped)",
 		);
+		// Expected about 4 s (timeout 2 + grace 2). A timeout or grace that does not
+		// apply gives 20 s or more.
+		expect(reapSeconds(result.stdout)).toBeLessThanOrEqual(15);
 		// The shell's cleanup does not wait for the watcher.
 		expect(cleanupSeconds(result.stdout)).toBeLessThanOrEqual(5);
-		expect(Date.now() - started).toBeLessThan(30_000);
 	});
 
 	it("does not leave the state command behind when TERM lands before its pid is recorded", {
@@ -716,7 +727,8 @@ echo "CLEANUP-TOOK $(( $(date +%s) - T0 ))"`,
 			`${raced}
 echo "$DOKPLOY_STALL_DIR" > ${toShellPath(dirFile)}
 echo "$DOKPLOY_STALL_WD_PID" > ${toShellPath(wdFile)}
-sleep 5;
+i=0; while [ "$i" -lt 160 ] && [ -d "$DOKPLOY_STALL_DIR" ]; do sleep 0.25; i=$((i + 1)); done;
+sleep 1;
 echo SHELL-DONE`,
 			env(),
 		);
@@ -780,7 +792,7 @@ echo "DIR-AFTER:$DOKPLOY_STALL_DIR:"`,
 			})}
 echo "$DOKPLOY_STALL_WD_PID" > ${toShellPath(wdFile)}
 echo "$DOKPLOY_STALL_DIR" > ${toShellPath(dirFile)}
-sleep 5;
+${waitForSnapshots(1)}
 if kill -0 "$DOKPLOY_STALL_WD_PID" 2>/dev/null; then echo IDLE-ALIVE; fi
 if [ -d "$DOKPLOY_STALL_DIR" ] && [ ! -e "$DOKPLOY_STALL_DIR/done" ]; then echo DIR-KEPT; fi
 T0=$(date +%s);
@@ -875,13 +887,20 @@ sleep 60`,
 		// then 2 s grace: gone by ~5 s. Without the stop file it would live to ~21 s.
 		const result = sh(
 			`${raced}
-sleep 8;
-if kill -0 "$(cat ${toShellPath(psPidFile)})" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi`,
+i=0; while [ "$i" -lt 100 ] && [ ! -s ${toShellPath(psPidFile)} ]; do sleep 0.2; i=$((i + 1)); done;
+PSPID=$(cat ${toShellPath(psPidFile)} 2>/dev/null); [ -n "$PSPID" ] || echo NO-PID;
+T1=$(date +%s);
+i=0; while [ "$i" -lt 160 ] && kill -0 "$PSPID" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
+if kill -0 "$PSPID" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi
+echo "REAP-TOOK $(( $(date +%s) - T1 ))"`,
 			env(),
 		);
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("REAPED");
 		expect(result.stdout).not.toContain("STILL-ALIVE");
+		expect(result.stdout).not.toContain("NO-PID");
+		// Expected about 4 s; without the stop file the command lives to about 21 s.
+		expect(reapSeconds(result.stdout)).toBeLessThanOrEqual(15);
 		expect(countBlocks(result.stdout)).toBe(0);
 	});
 
@@ -896,13 +915,13 @@ if kill -0 "$(cat ${toShellPath(psPidFile)})" 2>/dev/null; then echo STILL-ALIVE
 				everySeconds: 30,
 				maxSnapshots: 1,
 			})}
-sleep 3;
+i=0; while [ "$i" -lt 100 ] && [ ! -s ${toShellPath(psPidFile)} ]; do sleep 0.2; i=$((i + 1)); done;
 PSPID=$(cat ${toShellPath(psPidFile)});
 T0=$(date +%s);
 dokploy_stall_cleanup;
 echo "CLEANUP-TOOK $(( $(date +%s) - T0 ))"
 if kill -0 "$PSPID" 2>/dev/null; then echo ALIVE-IN-GRACE; fi
-sleep 5;
+i=0; while [ "$i" -lt 80 ] && kill -0 "$PSPID" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
 if kill -0 "$PSPID" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi`,
 			env(),
 		);
@@ -930,7 +949,7 @@ if kill -0 "$PSPID" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi`,
 				maxSnapshots: 3,
 			})}
 i=0; while [ "$i" -lt 160 ] && [ "$(grep -c '^E ' ${toShellPath(timesFile)} 2>/dev/null)" != 3 ]; do sleep 0.25; i=$((i + 1)); done;
-sleep 3;
+sleep 5;
 dokploy_stall_cleanup`,
 			env(),
 		);
@@ -1068,13 +1087,20 @@ exit 0`,
 			env(),
 		);
 		expect(result.status).toBe(0);
-		await sleepMs(500);
+		const eventsPid = readFileSync(eventsPidFile, "utf8").trim();
+		// The events capture is stopped asynchronously (timeout forwards the TERM).
+		for (
+			let i = 0;
+			i < 100 && sh(`kill -0 ${eventsPid} 2>/dev/null`).status === 0;
+			i++
+		) {
+			await sleepMs(100);
+		}
 		for (const file of [stallDirFile, eventsDirFile]) {
 			const d = readFileSync(file, "utf8").trim();
 			expect(d).not.toBe("");
 			expect(sh(`test -d ${quote([d])}`).status).not.toBe(0);
 		}
-		const eventsPid = readFileSync(eventsPidFile, "utf8").trim();
 		expect(sh(`kill -0 ${eventsPid} 2>/dev/null`).status).not.toBe(0);
 	});
 });
