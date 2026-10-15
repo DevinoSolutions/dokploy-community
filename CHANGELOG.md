@@ -2,6 +2,12 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.29
+
+**Embedded deploy content no longer goes through the shell command line** ([#392](https://github.com/DevinoSolutions/dokploy-community/pull/392)). File mounts, patches, raw Compose sources and the Compose `.env` were embedded in the deploy shell command, so a large one could fail with "Argument list too long" on build-server and serving-host deploys. They are now written to a staging file over SFTP or the local filesystem and copied into place, as Compose files already were in community.28.
+
+> No database migrations in this release. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
 ### New in v0.30.8-community.28
 
 **Large Compose files deploy again** ([#390](https://github.com/DevinoSolutions/dokploy-community/pull/390)). Since the YAML merge-key fix, an expanded Compose file over about 96 KB (more than 128 KB once base64-encoded, the Linux per-argument limit) failed on build-server and serving-host deploys with "Argument list too long". The file is now written to a staging file over SFTP or the local filesystem and copied into place.
