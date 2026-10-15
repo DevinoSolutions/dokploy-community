@@ -7,6 +7,7 @@ import {
 	getCreateEnvFileCommand,
 	getRestoreAfterFailedBuildCommand,
 	type RemoteBuildDeployInfo,
+	stageStackEnvFile,
 } from "@dokploy/server/utils/builders/compose";
 import {
 	buildComposeOverrideYaml,
@@ -257,6 +258,7 @@ const buildImagesOnBuildServer = async (
 	// mounts) is staged on the build server instead of being embedded in a
 	// command. Whatever a failed or cancelled build leaves staged is removed.
 	const staged: string[] = [];
+	const stackEnvStaged: string[] = [];
 	const stageOptions: StageOptions = {
 		deploymentId: deployment.deploymentId,
 		onStaged: (paths) => staged.push(...paths),
@@ -411,12 +413,21 @@ const buildImagesOnBuildServer = async (
 			await run(`set -e;${mountsCommand}`);
 		}
 
+		// A stack's environment is staged once for the config and the build
+		// commands; it is removed below whatever the outcome.
+		await checkpoint();
+		const stackEnvFile = await stageStackEnvFile(buildEntity, {
+			deploymentId: deployment.deploymentId,
+			onStaged: (paths) => stackEnvStaged.push(...paths),
+		});
+
 		// Not streamed: the resolved configuration contains the environment.
 		await checkpoint();
 		const configCommand = getComposeConfigJsonCommand(
 			buildEntity,
 			codePath,
 			projectPath,
+			stackEnvFile,
 		);
 		const { stdout } = await execOnBuildServer(configCommand);
 		const builtServices = parseBuiltServices(stdout, entity.appName);
@@ -428,7 +439,9 @@ const buildImagesOnBuildServer = async (
 			return { images: [] };
 		}
 
-		await run(getComposeBuildCommand(buildEntity, codePath, projectPath));
+		await run(
+			getComposeBuildCommand(buildEntity, codePath, projectPath, stackEnvFile),
+		);
 
 		const tag = getBuiltImageTag(
 			deployment.deploymentId ?? Date.now().toString(36),
@@ -472,6 +485,7 @@ const buildImagesOnBuildServer = async (
 		await removeStagedFiles(buildServerId, staged);
 		throw error;
 	} finally {
+		await removeStagedFiles(buildServerId, stackEnvStaged);
 		await log.close();
 	}
 };

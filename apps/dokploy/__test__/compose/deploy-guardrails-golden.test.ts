@@ -32,7 +32,9 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
  * not opt in must keep getting exactly these scripts. The one later change is
  * how the `.env` is written: staged on the host and copied in with `cat`, no
  * longer embedded as base64 (an embedded env counts toward the 128 KB limit on
- * a single shell argument).
+ * a single shell argument). The stack cases changed once more: their
+ * environment is staged and loaded from a file instead of being exported on the
+ * docker line, and the file is removed after `up`.
  */
 const golden: Record<string, string> = JSON.parse(
 	readFileSync(
