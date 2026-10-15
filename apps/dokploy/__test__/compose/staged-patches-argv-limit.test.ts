@@ -176,7 +176,7 @@ describe("generateApplyPatchesCommand", () => {
 			`cat /etc/dokploy/compose/big-app/.dokploy-stage-patch-dep-1-0 > ${codePath}/src/a.env`,
 		);
 		expect(command).toContain(`mkdir -p ${codePath}/src/deep`);
-		expect(command).toContain(`rm -f "${codePath}/old.txt"`);
+		expect(command).toContain(`rm -f ${codePath}/old.txt;`);
 	});
 
 	it("stages application patches next to the application's code directory", async () => {
@@ -221,7 +221,7 @@ describe("generateApplyPatchesCommand", () => {
 			serverId: "srv-1",
 		});
 		expect(command).toContain(
-			'rm -f "/etc/dokploy/compose/big-app/code/old.txt"',
+			"rm -f /etc/dokploy/compose/big-app/code/old.txt;",
 		);
 		expect(mocks.writeFileRemote).not.toHaveBeenCalled();
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
@@ -241,6 +241,21 @@ describe("generateApplyPatchesCommand", () => {
 		expect(command).toContain(
 			"mkdir -p '/etc/dokploy/compose/big-app/code/a b'",
 		);
+	});
+
+	it("keeps a hostile delete path a single shell word", async () => {
+		mocks.findPatches.mockResolvedValue([
+			patchRow('x";touch /tmp/pwned;"', "", "delete"),
+		]);
+		const command = await generateApplyPatchesCommand({
+			id: "c1",
+			type: "compose",
+			serverId: "srv-1",
+		});
+		expect(command).toContain(
+			`rm -f '/etc/dokploy/compose/big-app/code/x";touch /tmp/pwned;"';`,
+		);
+		expect(command).not.toContain('rm -f "');
 	});
 
 	it("removes what it staged and rethrows when an upload fails", async () => {
@@ -302,6 +317,28 @@ describe("applying the staged patches with a real shell", () => {
 			expect(existsSync(`${code}/old.txt`)).toBe(false);
 			expect(existsSync(`${code}/disabled.cfg`)).toBe(false);
 			expect(stagedIn(`${tmp}/compose/big-app`)).toEqual([]);
+		},
+	);
+
+	itWithSh(
+		"a hostile delete path removes nothing else and runs nothing",
+		async () => {
+			const code = `${tmp}/compose/big-app/code`;
+			mkdirSync(code, { recursive: true });
+			const bait = `${tmp}/pwned`;
+			mocks.findPatches.mockResolvedValue([
+				patchRow(`x";touch ${bait};"`, "", "delete"),
+				patchRow("$(touch " + bait + ")", "", "delete"),
+			]);
+			const command = await generateApplyPatchesCommand(
+				{ id: "c1", type: "compose", serverId: null },
+				{ deploymentId: "dep-evil" },
+			);
+
+			const result = run(command);
+
+			expect(result.status).toBe(0);
+			expect(existsSync(bait)).toBe(false);
 		},
 	);
 

@@ -68,15 +68,22 @@ const isStagedFileName = (name: string) =>
 
 const removeStaleStagedFiles = async (directory: string) => {
 	const cutoff = Date.now() - STAGED_MAX_AGE_MINUTES * 60_000;
+	let names: string[];
 	try {
-		for (const name of await readdir(directory)) {
-			if (!isStagedFileName(name)) continue;
+		names = await readdir(directory);
+	} catch {
+		// Housekeeping only: it must never fail the deploy.
+		return;
+	}
+	for (const name of names) {
+		if (!isStagedFileName(name)) continue;
+		// Per file: a concurrent deploy consuming one between readdir and stat
+		// must not stop the sweep of the others.
+		try {
 			const file = join(directory, name);
 			const { mtimeMs } = await stat(file);
 			if (mtimeMs < cutoff) await unlink(file);
-		}
-	} catch {
-		// Housekeeping only: it must never fail the deploy.
+		} catch {}
 	}
 };
 
@@ -128,8 +135,10 @@ export const stageFiles = async ({
 		} catch (error) {
 			// An ExecError is not written to the deployment log; a plain Error is.
 			// The prepare command holds paths only, so its output is safe to show.
+			// The cause stays attached: remote-unreachable detection walks it.
 			throw new Error(
 				`Could not prepare ${directory} on the server to stage files: ${describeExecFailure(error)}`,
+				{ cause: error },
 			);
 		}
 		try {

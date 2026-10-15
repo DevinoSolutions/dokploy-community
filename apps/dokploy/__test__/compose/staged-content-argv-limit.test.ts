@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => ({
 	deploymentStatus: vi.fn(),
 	mountRow: vi.fn(),
 	localBase: { path: "" },
+	statFailsFor: new Set<string>(),
 }));
 
 // Same layout as every other test: forward slashes whatever OS runs the suite.
@@ -71,6 +72,23 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 		writeFileRemote: mocks.writeFileRemote,
 	};
 });
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs/promises")>();
+	return {
+		...actual,
+		// A concurrent deploy consuming a file between readdir and stat.
+		stat: async (path: string, ...rest: unknown[]) => {
+			for (const name of mocks.statFailsFor) {
+				if (String(path).endsWith(name)) {
+					throw Object.assign(new Error("ENOENT: no such file"), {
+						code: "ENOENT",
+					});
+				}
+			}
+			return (actual.stat as (...args: unknown[]) => unknown)(path, ...rest);
+		},
+	};
+});
 vi.mock("@dokploy/server/db", () => ({
 	db: {
 		query: {
@@ -103,7 +121,10 @@ import {
 	createFileMount,
 	updateFileMount,
 } from "@dokploy/server/services/mount";
-import { getCreateEnvFileCommand } from "@dokploy/server/utils/builders/compose";
+import {
+	getBuildComposeCommand,
+	getCreateEnvFileCommand,
+} from "@dokploy/server/utils/builders/compose";
 import { writeDomainsToCompose } from "@dokploy/server/utils/docker/domain";
 import {
 	getInstallStagedFileCommand,
@@ -169,6 +190,7 @@ beforeEach(() => {
 	mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
 	mocks.writeFileRemote.mockResolvedValue(undefined);
 	mocks.deploymentStatus.mockResolvedValue({ status: "running" });
+	mocks.statFailsFor.clear();
 });
 afterAll(() => {
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
@@ -571,6 +593,26 @@ describe("staging housekeeping", () => {
 		expect(prepare).toContain("-mmin +60");
 	});
 
+	it("keeps sweeping when one file vanishes between readdir and stat", async () => {
+		const dir = `${tmp}/compose/big-app`;
+		mkdirSync(dir, { recursive: true });
+		const gone = `${dir}/.dokploy-stage-a-gone`;
+		const stale = `${dir}/.dokploy-stage-b-stale`;
+		for (const file of [gone, stale]) writeFileSync(file, "x");
+		const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+		for (const file of [gone, stale])
+			utimesSync(file, twoHoursAgo, twoHoursAgo);
+		mocks.statFailsFor.add(".dokploy-stage-a-gone");
+
+		await stageFiles({
+			directory: dir,
+			files: [{ path: `${dir}/.dokploy-stage-env-new`, content: "n" }],
+		});
+
+		expect(existsSync(stale)).toBe(false);
+		expect(existsSync(`${dir}/.dokploy-stage-env-new`)).toBe(true);
+	});
+
 	it("removeStagedFiles never throws", async () => {
 		mocks.execAsyncRemote.mockRejectedValue(new Error("ssh down"));
 		await expect(
@@ -613,6 +655,21 @@ describe("a failed remote prepare step", () => {
 		expect(mocks.writeFileRemote).not.toHaveBeenCalled();
 	});
 
+	it("keeps the original failure as the cause", async () => {
+		const original = prepareFailure();
+		mocks.execAsyncRemote.mockRejectedValue(original);
+
+		const error = await getCreateEnvFileCommand(
+			{ ...baseCompose, env: "TOKEN=hunter2", serverId: "srv-1" },
+			{ deploymentId: "dep-1" },
+		).catch((e: unknown) => e);
+
+		// Remote-unreachable detection walks the cause chain.
+		expect((error as Error).cause).toBe(original);
+		expect((error as Error).message).not.toContain("umask");
+		expect((error as Error).message).not.toContain("hunter2");
+	});
+
 	it("does the same for the compose file staged by writeDomainsToCompose", async () => {
 		mocks.execAsyncRemote.mockRejectedValue(prepareFailure());
 		const error = await writeDomainsToCompose(
@@ -632,6 +689,102 @@ describe("a failed remote prepare step", () => {
 		).catch((e: unknown) => e);
 		expect((error as Error).message).toContain("connect ETIMEDOUT");
 	});
+});
+
+describe("files staged for a script that stops early", () => {
+	const run = (script: string) =>
+		spawnSync(
+			"sh",
+			[
+				"-c",
+				`set -e
+${script}`,
+			],
+			{ encoding: "utf8" },
+		);
+	const hasShHere = spawnSync("sh", ["-c", "true"]).status === 0;
+	const itSh = hasShHere ? it : it.skip;
+	const stagedNames = (dir: string) =>
+		readdirSync(dir).filter((name) => name.startsWith(".dokploy-"));
+
+	itSh(
+		"removes the staged .env when there is no compose file to write",
+		async () => {
+			const compose = { ...baseCompose, env: bigText("ENVSECRET", 20) };
+			const envCommand = await getCreateEnvFileCommand(compose, {
+				deploymentId: "dep-e",
+			});
+			const staged = `${tmp}/compose/big-app/.dokploy-stage-env-dep-e`;
+			expect(existsSync(staged)).toBe(true);
+
+			const composeCommand = await writeDomainsToCompose(
+				{ ...compose, composeFile: "" },
+				[],
+				{ deploymentId: "dep-e", alsoRemove: [staged] },
+			);
+			const result = run(`${composeCommand}
+${envCommand}
+echo should-not-run`);
+
+			expect(result.status).toBe(1);
+			expect(result.stdout).toContain("Compose file not found");
+			expect(result.stdout).not.toContain("should-not-run");
+			expect(stagedNames(`${tmp}/compose/big-app`)).toEqual([]);
+		},
+	);
+
+	itSh("removes the staged .env when the compose copy fails", async () => {
+		const compose = { ...baseCompose, env: bigText("ENVSECRET", 20) };
+		await getCreateEnvFileCommand(compose, { deploymentId: "dep-c" });
+		const staged = `${tmp}/compose/big-app/.dokploy-stage-env-dep-c`;
+
+		// No code/ directory, so the copy of the compose cannot succeed.
+		const composeCommand = await writeDomainsToCompose(compose, [], {
+			deploymentId: "dep-c",
+			alsoRemove: [staged],
+		});
+		const result = run(`${composeCommand}
+echo should-not-run`);
+
+		expect(result.status).toBe(1);
+		expect(result.stdout).toContain("Could not write the compose file");
+		expect(stagedNames(`${tmp}/compose/big-app`)).toEqual([]);
+	});
+
+	it("getBuildComposeCommand hands the staged .env to the compose step", async () => {
+		const command = await getBuildComposeCommand(
+			{ ...baseCompose, env: "TOKEN=hunter2", serverId: "srv-1" },
+			{ deploymentId: "dep-b" },
+		);
+		const env = "/etc/dokploy/compose/big-app/.dokploy-stage-env-dep-b";
+		// The failure branch of the compose copy removes the staged env too.
+		expect(command).toContain(
+			`rm -f /etc/dokploy/compose/big-app/.dokploy-compose-dep-b.yml ${env};`,
+		);
+	});
+
+	itSh(
+		"getBuildComposeCommand leaves no staged .env behind when the compose is missing",
+		async () => {
+			const command = await getBuildComposeCommand(
+				{
+					...baseCompose,
+					composeFile: "",
+					env: bigText("ENVSECRET", 20),
+				},
+				{ deploymentId: "dep-m" },
+			);
+			expect(
+				existsSync(`${tmp}/compose/big-app/.dokploy-stage-env-dep-m`),
+			).toBe(true);
+
+			const result = run(command);
+
+			expect(result.status).toBe(1);
+			expect(result.stdout).toContain("Compose file not found");
+			expect(stagedNames(`${tmp}/compose/big-app`)).toEqual([]);
+		},
+	);
 });
 
 describe("build-server step", () => {

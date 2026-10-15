@@ -175,11 +175,13 @@ export const stageComposeFile = async ({
 export const getInstallStagedComposeCommand = (
 	stagedPath: string,
 	composePath: string,
+	alsoRemove: string[] = [],
 ) =>
 	getInstallStagedFileCommand({
 		staged: stagedPath,
 		destination: composePath,
 		failureMessage: "❌ Error: Could not write the compose file",
+		alsoRemove,
 	});
 
 /**
@@ -226,10 +228,19 @@ exit 1;
 export const writeDomainsToCompose = async (
 	compose: Compose,
 	domains: Domain[],
-	options: StageOptions = {},
+	options: StageOptions & {
+		/** Other files staged for the same script, removed if it stops early. */
+		alsoRemove?: string[];
+	} = {},
 ) => {
+	const alsoRemove = options.alsoRemove ?? [];
 	const rendered = await renderComposeWithDomains(compose, domains);
-	if ("errorCommand" in rendered) return rendered.errorCommand;
+	if ("errorCommand" in rendered) {
+		// The script stops here: files staged for it would never be consumed.
+		return alsoRemove.length > 0
+			? `rm -f ${quote(alsoRemove)};${rendered.errorCommand}`
+			: rendered.errorCommand;
+	}
 
 	const stagedPath = await stageComposeFile({
 		compose,
@@ -237,7 +248,11 @@ export const writeDomainsToCompose = async (
 		deploymentId: options.deploymentId,
 		onStaged: options.onStaged,
 	});
-	return getInstallStagedComposeCommand(stagedPath, getComposePath(compose));
+	return getInstallStagedComposeCommand(
+		stagedPath,
+		getComposePath(compose),
+		alsoRemove,
+	);
 };
 export const applyComposeFilePatch = async (
 	compose: Compose,

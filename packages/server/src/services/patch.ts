@@ -193,7 +193,7 @@ export const generateApplyPatchesCommand = async (
 
 		if (p.type === "delete") {
 			command += `
-			rm -f "${filePath}";
+			rm -f ${quote([filePath])};
 			`;
 		} else {
 			command += `

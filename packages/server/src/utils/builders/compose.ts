@@ -395,7 +395,11 @@ export const getBuildComposeCommand = async (
 		envCommand = compose.createEnvFile
 			? await getCreateEnvFileCommand(compose, stageOptions)
 			: "";
-		newCompose = await writeDomainsToCompose(compose, domains, stageOptions);
+		// The staged env goes with the compose step if that one stops the script.
+		newCompose = await writeDomainsToCompose(compose, domains, {
+			...stageOptions,
+			alsoRemove: [...staged],
+		});
 	} catch (error) {
 		await removeStagedFiles(compose.serverId, staged);
 		throw error;
