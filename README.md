@@ -138,6 +138,27 @@ docker service update --env-add DOKPLOY_DISABLE_SENTRY=true dokploy
 
 The standard [`DO_NOT_TRACK=1`](https://consoledonottrack.com) convention is also respected.
 
+### Browser session replay (opt-in, off by default)
+
+The dashboard never records your browser sessions unless the instance operator turns it on. With nothing set, no replay or product-analytics code is downloaded, and nothing is sent. It is meant for operators who want to watch their own dashboard sessions to debug UX problems; it only runs in production builds, and `DOKPLOY_DISABLE_SENTRY=true` or `DO_NOT_TRACK=1` force it off even when enabled.
+
+Set these on the `dokploy` service (they are read at runtime, so the same image works everywhere):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOKPLOY_SESSION_REPLAY` | unset (off) | Master switch. Only the exact value `true` turns replay on. |
+| `DOKPLOY_SESSION_REPLAY_SAMPLE_RATE` | `0.1` | Share of sessions recorded from the start, clamped to 0 to 1. |
+| `DOKPLOY_SESSION_REPLAY_ON_ERROR_SAMPLE_RATE` | `1.0` | Share of sessions that hit an error whose replay is kept, clamped to 0 to 1. |
+| `DOKPLOY_POSTHOG_KEY`, `DOKPLOY_POSTHOG_HOST` | unset | Also record sessions and page views in a PostHog project (for example `https://posthog.example.com`). Used only when the switch is on and both are set. |
+
+```bash
+docker service update --env-add DOKPLOY_SESSION_REPLAY=true dokploy
+```
+
+What is recorded: the page structure and interactions (clicks, scrolling, navigation), plus page views and browser errors. What is masked: all text and all form inputs are replaced with placeholders, images and media are blocked, console output is dropped, and network request and response bodies are not captured. Deploy logs, environment values and container output are rendered as text in the dashboard, so they are masked too. PostHog autocapture is off and users are never identified.
+
+Replays are sent to, and stored by, the servers you point it at: the Sentry project behind the built-in DSN, and the PostHog host you configure. Roughly 10% session sampling keeps the volume low; lower `DOKPLOY_SESSION_REPLAY_SAMPLE_RATE` to reduce it further. Add the class `ph-no-capture` to an element to exclude it from the recording entirely.
+
 ## Versioning
 
 Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.27` is the 27th fork release on top of Dokploy v0.30.8.
