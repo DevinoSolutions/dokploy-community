@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.28**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.29**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -17,7 +17,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.28 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.29 \
   --with-registry-auth \
   dokploy
 ```
@@ -90,12 +90,9 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.28
+## What's new in v0.30.8-community.29
 
-- Compose files over about 96 KB deploy again on build servers and serving hosts; the file is now staged instead of passed as one shell argument ([#390](https://github.com/DevinoSolutions/dokploy-community/pull/390)).
-- Opt-in browser session replay (Sentry and PostHog), off by default and enabled only with `DOKPLOY_SESSION_REPLAY=true`. Text and inputs are masked and credential pages are never recorded; see **Browser session replay** below ([#389](https://github.com/DevinoSolutions/dokploy-community/pull/389)).
-- A remote server with no SSH key reports a precondition error instead of a 500 ([#386](https://github.com/DevinoSolutions/dokploy-community/pull/386)), and the Railpack versions list falls back to its last cached list when GitHub fails ([#385](https://github.com/DevinoSolutions/dokploy-community/pull/385)).
-- Members can list servers in the server pickers ([#388](https://github.com/DevinoSolutions/dokploy-community/pull/388)), and template tags are capped so the Create button stays visible ([#387](https://github.com/DevinoSolutions/dokploy-community/pull/387)).
+- Large file mounts, patches, raw Compose sources and Compose `.env` files no longer fail with "Argument list too long" on build-server and serving-host deploys; they are staged instead of passed on the shell command line ([#392](https://github.com/DevinoSolutions/dokploy-community/pull/392)).
 - No database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
@@ -111,7 +108,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.28
+export DOKPLOY_VERSION=v0.30.8-community.29
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -124,7 +121,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.28      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.29      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -167,7 +164,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.28` is the 28th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.29` is the 29th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
