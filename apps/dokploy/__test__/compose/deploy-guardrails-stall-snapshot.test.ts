@@ -976,8 +976,7 @@ dokploy_stall_cleanup`,
 		);
 		expect(result.status).toBe(0);
 		expect(countBlocks(result.stdout)).toBe(3);
-		const lines = readFileSync(timesFile, "utf8").trim().split("
-");
+		const lines = readFileSync(timesFile, "utf8").trim().split("\n");
 		const at = (tag: string) =>
 			lines
 				.filter((l) => l.startsWith(`${tag} `))
