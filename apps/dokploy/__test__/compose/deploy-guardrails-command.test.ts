@@ -840,7 +840,10 @@ dokploy_events_flush;`;
 		const result = await runStackDeploy({
 			healthCheck: {
 				url: "http://localhost:8080/up?a[]=1&b={x}",
-				timeoutSeconds: 5,
+				// 10 s leaves several seconds of slack: on a loaded runner the first
+				// attempt can start late, and with a 5 s budget that shrinks its cap
+				// below 5 (or leaves room for only one attempt).
+				timeoutSeconds: 10,
 			},
 		});
 		expect(result.status).toBe(1);
@@ -849,6 +852,7 @@ dokploy_events_flush;`;
 			.map((arg, i) => (arg === "--max-time" ? Number(args[i + 1]) : null))
 			.filter((v): v is number => v !== null);
 		expect(maxTimes.length).toBeGreaterThanOrEqual(2);
+		// The per-request cap is 5 s even though 10 s are left.
 		expect(maxTimes[0]).toBe(5);
 		for (const value of maxTimes) expect(value).toBeLessThanOrEqual(5);
 		expect(maxTimes[maxTimes.length - 1]).toBeLessThan(5);
