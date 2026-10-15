@@ -379,7 +379,9 @@ export const getBuildComposeCommand = async (
 		: "";
 	const exportEnvCommand = getExportEnvCommand(compose);
 
-	const newCompose = await writeDomainsToCompose(compose, domains);
+	const newCompose = await writeDomainsToCompose(compose, domains, {
+		deploymentId,
+	});
 	const logContent = `
 App Name: ${appName}
 Build Compose 🐳
