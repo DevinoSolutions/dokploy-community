@@ -120,7 +120,7 @@ export const DockerTerminal: React.FC<Props> = ({
 			)}
 			{hasContainer ? (
 				<div className="w-full h-[420px] rounded-lg p-2 bg-transparent border">
-					<div id={id} ref={termRef} className="h-full" />
+					<div id={id} ref={termRef} className="ph-no-capture h-full" />
 				</div>
 			) : (
 				<div className="flex h-[420px] w-full items-center justify-center rounded-lg border border-dashed p-4 text-center text-sm text-muted-foreground">

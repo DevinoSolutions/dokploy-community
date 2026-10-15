@@ -8,6 +8,7 @@ import NextTopLoader from "nextjs-toploader";
 import type { ReactElement, ReactNode } from "react";
 import { SearchCommand } from "@/components/dashboard/search-command";
 import { Analytics } from "@/components/shared/analytics";
+import { SessionReplay } from "@/components/shared/session-replay";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
@@ -48,6 +49,7 @@ const MyApp = ({
 				>
 					<NextTopLoader color="hsl(var(--sidebar-ring))" />
 					<Analytics />
+					<SessionReplay />
 					<Toaster richColors />
 					<SearchCommand />
 					{getLayout(<Component {...pageProps} />)}

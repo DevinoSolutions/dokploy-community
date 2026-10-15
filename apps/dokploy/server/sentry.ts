@@ -6,6 +6,7 @@ import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import * as Sentry from "@sentry/node";
 import type { ErrorEvent } from "@sentry/node";
 import packageInfo from "../package.json";
+import { isTelemetryOptedOut, SENTRY_DSN } from "./sentry-config";
 
 // Defense in depth: even though ExecError scrubs its own fields, strip
 // credentials from every event field an embedded command could reach (exception
@@ -28,15 +29,7 @@ const scrubEvent = (event: ErrorEvent): ErrorEvent => {
 	return event;
 };
 
-// Public ingest-only DSN for the fork's error tracker. A DSN can only submit
-// events — it grants no read access to the project — so it is safe in source.
-const SENTRY_DSN =
-	"https://d98cecf413db8997128f3519f26e3620@sentry.devino.ca/59";
-
-const optedOut =
-	process.env.DOKPLOY_DISABLE_SENTRY === "true" ||
-	process.env.DO_NOT_TRACK === "1" ||
-	process.env.DO_NOT_TRACK === "true";
+const optedOut = isTelemetryOptedOut(process.env);
 
 export const isSentryEnabled =
 	process.env.NODE_ENV === "production" &&

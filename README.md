@@ -138,6 +138,30 @@ docker service update --env-add DOKPLOY_DISABLE_SENTRY=true dokploy
 
 The standard [`DO_NOT_TRACK=1`](https://consoledonottrack.com) convention is also respected.
 
+### Browser session replay (opt-in, off by default)
+
+The dashboard never records your browser sessions unless the instance operator turns it on. With nothing set, no replay or product-analytics code is downloaded, and nothing is sent. It only runs in production builds, and `DOKPLOY_DISABLE_SENTRY=true` or `DO_NOT_TRACK=1` force it off even when enabled.
+
+**Where the data goes.** When you enable it, by default session replays and browser errors are sent to the fork maintainers' Sentry (the built-in DSN), and, if you configure one, to the PostHog host you set. To keep the data on infrastructure you control, set `DOKPLOY_SESSION_REPLAY_SENTRY_DSN` to your own Sentry project's DSN; an invalid value disables the Sentry part instead of falling back to the built-in DSN. Do not enable it on an instance whose dashboard sessions you are not entitled to send to those servers.
+
+Set these on the `dokploy` service (they are read at runtime, so the same image works everywhere):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOKPLOY_SESSION_REPLAY` | unset (off) | Master switch. Only the exact value `true` turns replay on. |
+| `DOKPLOY_SESSION_REPLAY_SAMPLE_RATE` | `0.1` | Share of sessions recorded from the start, clamped to 0 to 1. |
+| `DOKPLOY_SESSION_REPLAY_ON_ERROR_SAMPLE_RATE` | `1.0` | Share of sessions that hit an error whose replay is kept, clamped to 0 to 1. |
+| `DOKPLOY_SESSION_REPLAY_SENTRY_DSN` | built-in DSN | Optional `https://<key>@<host>/<project-id>` DSN of your own Sentry project. |
+| `DOKPLOY_POSTHOG_KEY`, `DOKPLOY_POSTHOG_HOST` | unset | Also record sessions and page views in a PostHog project (for example `https://posthog.example.com`). Used only when the switch is on and both are set. The browser loads PostHog's recorder script from `<host>/static`, so that host must serve it. |
+
+```bash
+docker service update --env-add DOKPLOY_SESSION_REPLAY=true dokploy
+```
+
+What is recorded: the page structure and interactions (clicks, scrolling, navigation), plus page views and browser errors. What is masked or left out: all text and all form inputs are replaced with placeholders, images, video and other media are blocked, console output is dropped, network request and response bodies and headers are not captured, and query strings and hashes are removed from every URL that is sent. Log viewers, terminals and code and environment editors are excluded from the recording entirely. Pages that carry credentials (password reset, invitations, registration, the MCP authorization screen, and any URL with a token, code or state parameter) are never recorded. Browser errors are scrubbed of secrets before they are sent. PostHog autocapture is off and users are never identified. The page URL recorded inside a Sentry replay can still include query strings (Sentry 10.72 has no hook for that event), which is why credential pages are never recorded.
+
+Replays are stored by the servers you point it at. Roughly 10% session sampling keeps the volume low; lower `DOKPLOY_SESSION_REPLAY_SAMPLE_RATE` to reduce it further. Add the class `ph-no-capture` to an element to exclude it from the recording entirely.
+
 ## Versioning
 
 Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.27` is the 27th fork release on top of Dokploy v0.30.8.

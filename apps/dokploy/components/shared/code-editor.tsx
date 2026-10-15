@@ -174,7 +174,7 @@ export const CodeEditor = ({
 }: Props) => {
 	const { resolvedTheme } = useTheme();
 	return (
-		<div className={cn("overflow-auto", wrapperClassName)}>
+		<div className={cn("overflow-auto ph-no-capture", wrapperClassName)}>
 			<CodeMirror
 				basicSetup={{
 					lineNumbers,

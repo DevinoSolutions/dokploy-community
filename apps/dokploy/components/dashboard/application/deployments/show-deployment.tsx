@@ -194,7 +194,7 @@ export const ShowDeployment = ({
 				<div
 					ref={scrollRef}
 					onScroll={handleScroll}
-					className="h-[720px] overflow-y-auto space-y-0 border p-4 bg-background rounded custom-logs-scrollbar"
+					className="ph-no-capture h-[720px] overflow-y-auto space-y-0 border p-4 bg-background rounded custom-logs-scrollbar"
 				>
 					{" "}
 					{unavailableMessage ? (
