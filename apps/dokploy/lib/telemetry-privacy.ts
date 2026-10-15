@@ -11,7 +11,7 @@ export const stripUrl = (url: string): string => {
 };
 
 const URL_WITH_QUERY_IN_TEXT =
-	/((?:https?:\/\/[^\s"'<>`?#]+)|(?:\/api\/[^\s"'<>`?#]*))[?#][^\s"'<>`]*/g;
+	/((?:https?:\/\/[^\s"'<>`?#]+)|(?:\/api\/[^\s"'<>`?#]*))[?#](?:\{[^}]*\}|[^\s"'<>`])*/g;
 
 /** Strips the query and hash from URLs embedded in free text such as error messages. */
 export const stripUrlsInText = (text: string): string =>
@@ -52,10 +52,11 @@ export const isSensitiveLocation = (url: string): boolean => {
 	const beforeHash = hashIndex === -1 ? relative : relative.slice(0, hashIndex);
 	const hash = hashIndex === -1 ? "" : relative.slice(hashIndex + 1);
 	const queryIndex = beforeHash.indexOf("?");
-	const rawPath = queryIndex === -1 ? beforeHash : beforeHash.slice(0, queryIndex);
+	const rawPath =
+		queryIndex === -1 ? beforeHash : beforeHash.slice(0, queryIndex);
 	const query = queryIndex === -1 ? "" : beforeHash.slice(queryIndex + 1);
 
-	const path = (rawPath.toLowerCase().replace(/\/+$/, "") || "/");
+	const path = rawPath.toLowerCase().replace(/\/+$/, "") || "/";
 	if (
 		SENSITIVE_PATH_PREFIXES.some(
 			(prefix) => path === prefix || path.startsWith(`${prefix}/`),

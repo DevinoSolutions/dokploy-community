@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-	isSensitiveLocation,
-	scrubUrlProperties,
-	stripUrl,
-	stripUrlsInText,
-} from "@/lib/telemetry-privacy";
+	maskAttribute,
+	maskNetworkRequest,
+} from "@/lib/session-replay-posthog";
 import {
 	scrubBreadcrumb,
 	scrubErrorEvent,
@@ -12,9 +10,11 @@ import {
 	scrubRecordingEvent,
 } from "@/lib/session-replay-sentry";
 import {
-	maskAttribute,
-	maskNetworkRequest,
-} from "@/lib/session-replay-posthog";
+	isSensitiveLocation,
+	scrubUrlProperties,
+	stripUrl,
+	stripUrlsInText,
+} from "@/lib/telemetry-privacy";
 
 describe("stripUrl", () => {
 	it("drops query and hash but keeps origin and path", () => {
@@ -24,7 +24,9 @@ describe("stripUrl", () => {
 		expect(stripUrl("/api/trpc/user.getUserByToken?input=%7B%7D")).toBe(
 			"/api/trpc/user.getUserByToken",
 		);
-		expect(stripUrl("/reset-password#access_token=abc")).toBe("/reset-password");
+		expect(stripUrl("/reset-password#access_token=abc")).toBe(
+			"/reset-password",
+		);
 	});
 
 	it("drops credentials in the authority", () => {
@@ -42,6 +44,19 @@ describe("stripUrl", () => {
 });
 
 describe("stripUrlsInText", () => {
+	it("removes an unencoded JSON input entirely", () => {
+		expect(
+			stripUrlsInText(
+				'GET /api/trpc/user.getUserByToken?input={"token":"abc","n":{"a":1}} failed',
+			),
+		).not.toContain("abc");
+		expect(
+			stripUrlsInText(
+				'GET /api/trpc/user.getUserByToken?input={"token":"abc"} failed',
+			),
+		).toBe("GET /api/trpc/user.getUserByToken failed");
+	});
+
 	it("strips queries from absolute URLs and /api paths inside messages", () => {
 		expect(
 			stripUrlsInText(
@@ -70,9 +85,9 @@ describe("isSensitiveLocation", () => {
 	});
 
 	it("flags token-bearing params anywhere, including the hash", () => {
-		expect(isSensitiveLocation("/dashboard/settings/git-providers?code=1&state=2")).toBe(
-			true,
-		);
+		expect(
+			isSensitiveLocation("/dashboard/settings/git-providers?code=1&state=2"),
+		).toBe(true);
 		expect(isSensitiveLocation("/dashboard/home?token=abc")).toBe(true);
 		expect(isSensitiveLocation("/dashboard/home#access_token=abc")).toBe(true);
 	});
@@ -110,7 +125,9 @@ describe("scrubUrlProperties", () => {
 
 describe("Sentry scrubbers", () => {
 	it("drops console breadcrumbs and strips URLs from the rest", () => {
-		expect(scrubBreadcrumb({ category: "console", message: "logs" })).toBeNull();
+		expect(
+			scrubBreadcrumb({ category: "console", message: "logs" }),
+		).toBeNull();
 		expect(
 			scrubBreadcrumb({
 				category: "fetch",
@@ -126,9 +143,9 @@ describe("Sentry scrubbers", () => {
 		expect(
 			scrubBreadcrumb({
 				category: "navigation",
-				data: { from: "/a?token=1", to: "/b#x" },
+				data: { from: "/a?token=1", to: "/b#x", previous: "/c?code=2" },
 			})?.data,
-		).toEqual({ from: "/a", to: "/b" });
+		).toEqual({ from: "/a", to: "/b", previous: "/c" });
 	});
 
 	it("strips request and replay urls from events", () => {
@@ -143,12 +160,18 @@ describe("Sentry scrubbers", () => {
 			},
 			urls: ["https://d.example.com/p?token=t", "/q#h"],
 		} as never) as never as {
-			request: { url: string; query_string?: string; headers: Record<string, string> };
+			request: {
+				url: string;
+				query_string?: string;
+				headers: Record<string, string>;
+			};
 			urls: string[];
 		};
 		expect(event.request.url).toBe("https://d.example.com/reset-password");
 		expect(event.request.query_string).toBeUndefined();
-		expect(event.request.headers.Referer).toBe("https://d.example.com/invitation");
+		expect(event.request.headers.Referer).toBe(
+			"https://d.example.com/invitation",
+		);
 		expect(event.request.headers["User-Agent"]).toBe("ua");
 		expect(event.urls).toEqual(["https://d.example.com/p", "/q"]);
 	});
@@ -169,9 +192,9 @@ describe("Sentry scrubbers", () => {
 		} as never);
 		expect(event.message).toBe("failed https://d.example.com/api/x");
 		expect(event.exception?.values?.[0]?.value).not.toContain("hunter2");
-		expect(event.exception?.values?.[0]?.stacktrace?.frames?.[0]?.filename).toBe(
-			"https://d.example.com/_next/a.js",
-		);
+		expect(
+			event.exception?.values?.[0]?.stacktrace?.frames?.[0]?.filename,
+		).toBe("https://d.example.com/_next/a.js");
 	});
 
 	it("strips urls from custom replay frames", () => {
@@ -184,7 +207,9 @@ describe("Sentry scrubbers", () => {
 				},
 			},
 		});
-		expect(span.data.payload.description).toBe("https://d.example.com/api/trpc/x");
+		expect(span.data.payload.description).toBe(
+			"https://d.example.com/api/trpc/x",
+		);
 		expect(span.data.payload.data).toEqual({ url: "/y" });
 	});
 });

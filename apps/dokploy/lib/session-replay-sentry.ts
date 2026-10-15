@@ -24,7 +24,7 @@ const scrubText = (text: string) => redactSecrets(stripUrlsInText(text));
 const scrubData = (data: Record<string, unknown> | undefined) => {
 	if (!data) return data;
 	const next = { ...data };
-	for (const key of ["url", "from", "to"]) {
+	for (const key of ["url", "from", "to", "previous"]) {
 		const value = next[key];
 		if (typeof value === "string") next[key] = stripUrl(value);
 	}

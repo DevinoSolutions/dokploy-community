@@ -50,6 +50,17 @@ export const startPostHogReplay = (config: PostHogReplayConfig) => {
 		capture_pageview: "history_change",
 		person_profiles: "identified_only",
 		respect_dnt: true,
+		// The rrweb Meta event records the page href; this strips these query params.
+		mask_personal_data_properties: true,
+		custom_personal_data_properties: [
+			"q",
+			"search",
+			"serverId",
+			"projectId",
+			"environmentId",
+			"applicationId",
+			"composeId",
+		],
 		disable_session_recording: false,
 		enable_recording_console_log: false,
 		// Pinned off locally so a remote project setting cannot switch them on.
