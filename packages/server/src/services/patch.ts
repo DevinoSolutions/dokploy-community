@@ -1,11 +1,17 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { type apiCreatePatch, patch } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
+import { quote } from "shell-quote";
 import type { z } from "zod";
-import { encodeBase64 } from "../utils/docker/utils";
+import {
+	getInstallStagedFileCommand,
+	getStagedFilePath,
+	type StageOptions,
+	stageFiles,
+} from "../utils/docker/staging";
 import { findApplicationById } from "./application";
 import { findComposeById } from "./compose";
 
@@ -133,11 +139,17 @@ interface ApplyPatchesOptions {
 	serverId: string | null;
 }
 
-export const generateApplyPatchesCommand = async ({
-	id,
-	type,
-	serverId,
-}: ApplyPatchesOptions) => {
+/**
+ * Shell commands that apply the enabled patches to the checkout. Each patch's
+ * content is staged out of band (see `utils/docker/staging`) and copied into
+ * place: a patch embedded in the script counts toward the 128 KB limit on a
+ * single shell argument. The staged files sit next to `code/`, which a clone
+ * wipes.
+ */
+export const generateApplyPatchesCommand = async (
+	{ id, type, serverId }: ApplyPatchesOptions,
+	options: StageOptions = {},
+) => {
 	const entity =
 		type === "application"
 			? await findApplicationById(id)
@@ -153,22 +165,48 @@ export const generateApplyPatchesCommand = async ({
 		return "";
 	}
 
+	const stageDirectory = join(basePath, entity.appName);
+	const written = patches.filter((p) => p.type !== "delete");
+	const stagedPaths = written.map((_, index) =>
+		getStagedFilePath({
+			directory: stageDirectory,
+			kind: "patch",
+			deploymentId: options.deploymentId,
+			index,
+		}),
+	);
+	await stageFiles({
+		serverId,
+		directory: stageDirectory,
+		files: written.map((p, index) => ({
+			path: stagedPaths[index] as string,
+			content: p.content,
+		})),
+	});
+	if (stagedPaths.length > 0) options.onStaged?.(stagedPaths);
+
 	let command = `echo "Applying ${patches.length} patch(es)...";`;
 
+	let stagedIndex = 0;
 	for (const p of patches) {
 		const filePath = join(codePath, p.filePath);
 
 		if (p.type === "delete") {
 			command += `
-			rm -f "${filePath}";
+			rm -f ${quote([filePath])};
 			`;
 		} else {
 			command += `
-file="${filePath}"
-dir="$(dirname "$file")"
-mkdir -p "$dir"
-echo "${encodeBase64(p.content)}" | base64 -d > "$file"
+${getInstallStagedFileCommand({
+	staged: stagedPaths[stagedIndex] as string,
+	destination: filePath,
+	failureMessage: "❌ Error: Could not write a patch file",
+	prepare: `mkdir -p ${quote([dirname(filePath)])}`,
+	// A failed patch stops the script: the rest never get consumed.
+	alsoRemove: stagedPaths,
+})}
 `;
+			stagedIndex++;
 		}
 	}
 

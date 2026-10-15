@@ -5,7 +5,8 @@ import { getCreateEnvFileCommand } from "@dokploy/server/utils/builders/compose"
 import { afterEach, describe, expect, it } from "vitest";
 
 // Regression coverage for https://github.com/Dokploy/dokploy/issues/4694 —
-// values must survive Docker Compose's own `.env` parsing, not just base64 decode.
+// values must survive Docker Compose's own `.env` parsing, not just the copy
+// from the staged file.
 const appName = `env-file-literals-${process.pid}`;
 const projectPath = join(process.cwd(), ".docker", "compose", appName);
 const codePath = join(projectPath, "code");
@@ -67,14 +68,14 @@ const hasDocker = () => {
 // in the generated command as relative POSIX paths and writes mangled-name
 // files into the repo. The command targets a POSIX host, so only run it there.
 describe.skipIf(process.platform === "win32" || !hasDocker())("getCreateEnvFileCommand", () => {
-	it("writes special environment values that Docker Compose reads back literally", () => {
+	it("writes special environment values that Docker Compose reads back literally", async () => {
 		mkdirSync(codePath, { recursive: true });
 
 		const serviceEnv = Object.entries(inputEncoding)
 			.map(([key, value]) => `${key}=${value}`)
 			.join("\n");
 
-		const command = getCreateEnvFileCommand({
+		const command = await getCreateEnvFileCommand({
 			appName,
 			composePath: "docker-compose.yml",
 			env: serviceEnv,

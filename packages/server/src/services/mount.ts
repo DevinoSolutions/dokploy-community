@@ -7,10 +7,10 @@ import {
 	type ServiceType,
 	shEscape,
 } from "@dokploy/server/db/schema";
+import { removeStagedFiles } from "@dokploy/server/utils/docker/staging";
 import {
 	createFile,
-	encodeBase64,
-	getCreateFileCommand,
+	getCreateFilesCommand,
 } from "@dokploy/server/utils/docker/utils";
 import { removeFileOrDirectory } from "@dokploy/server/utils/filesystem/directory";
 import {
@@ -211,12 +211,21 @@ export const createFileMount = async (mountId: string) => {
 		const serverId = await getServerId(mount);
 
 		if (serverId) {
-			const command = getCreateFileCommand(
-				baseFilePath,
-				mount.filePath || "",
-				mount.content || "",
-			);
-			await execAsyncRemote(serverId, command);
+			const staged: string[] = [];
+			const command = await getCreateFilesCommand({
+				serverId,
+				outputPath: baseFilePath,
+				files: [
+					{ filePath: mount.filePath || "", content: mount.content || "" },
+				],
+				onStaged: (paths) => staged.push(...paths),
+			});
+			try {
+				await execAsyncRemote(serverId, command);
+			} catch (error) {
+				await removeStagedFiles(serverId, staged);
+				throw error;
+			}
 		} else {
 			await createFile(baseFilePath, mount.filePath || "", mount.content || "");
 		}
@@ -389,21 +398,26 @@ export const updateFileMount = async (mountId: string) => {
 	const mount = await findMountById(mountId);
 	if (!mount || !mount.filePath) return;
 	const basePath = await getBaseFilesPath(mountId);
-	const fullPath = path.join(basePath, mount.filePath);
-	const directory = path.dirname(fullPath);
 
 	try {
 		const serverId = await getServerId(mount);
-		const encodedContent = encodeBase64(mount.content || "");
-		const command = `
-			mkdir -p ${quote([directory])};
-			if [ -d ${quote([fullPath])} ]; then rm -rf ${quote([fullPath])}; fi;
-			echo "${encodedContent}" | base64 -d > ${quote([fullPath])};
-		`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
+		const staged: string[] = [];
+		const command = await getCreateFilesCommand({
+			serverId,
+			outputPath: basePath,
+			files: [{ filePath: mount.filePath, content: mount.content || "" }],
+			replaceDirectory: true,
+			onStaged: (paths) => staged.push(...paths),
+		});
+		try {
+			if (serverId) {
+				await execAsyncRemote(serverId, command);
+			} else {
+				await execAsync(command);
+			}
+		} catch (error) {
+			await removeStagedFiles(serverId, staged);
+			throw error;
 		}
 	} catch (error) {
 		console.log(`Error updating the file mount: ${error}`);

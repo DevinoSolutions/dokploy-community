@@ -1,6 +1,4 @@
-import { randomUUID } from "node:crypto";
 import fs, { existsSync, readFileSync } from "node:fs";
-import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
@@ -12,7 +10,7 @@ import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
 import { wildcardHostRegexp } from "../hostname-validation";
-import { execAsyncRemote, writeFileRemote } from "../process/execAsync";
+import { execAsyncRemote } from "../process/execAsync";
 import { cloneBitbucketRepository } from "../providers/bitbucket";
 import { cloneGitRepository } from "../providers/git";
 import { cloneGiteaRepository } from "../providers/gitea";
@@ -21,6 +19,14 @@ import { cloneGitlabRepository } from "../providers/gitlab";
 import { getCreateComposeFileCommand } from "../providers/raw";
 import { randomizeDeployableSpecificationFile } from "./collision";
 import { randomizeSpecificationFile } from "./compose";
+import {
+	getInstallStagedFileCommand,
+	STAGED_COMPOSE_PREFIX,
+	STAGED_COMPOSE_SUFFIX,
+	type StageOptions,
+	sanitizeStageId,
+	stageFiles,
+} from "./staging";
 import type {
 	ComposeSpecification,
 	DefinitionsService,
@@ -44,7 +50,7 @@ export const cloneCompose = async (compose: Compose) => {
 	} else if (compose.sourceType === "gitea") {
 		command += await cloneGiteaRepository(entity);
 	} else if (compose.sourceType === "raw") {
-		command += getCreateComposeFileCommand(compose);
+		command += await getCreateComposeFileCommand(compose);
 	}
 	return command;
 };
@@ -115,12 +121,6 @@ export const readComposeFile = async (compose: Compose) => {
 	return null;
 };
 
-const STAGED_COMPOSE_PREFIX = ".dokploy-compose-";
-const STAGED_COMPOSE_SUFFIX = ".yml";
-// A staged file is consumed seconds after it is written. Anything older is the
-// leftover of a deploy that died between staging and running its script.
-const STAGED_COMPOSE_MAX_AGE_MINUTES = 60;
-
 /**
  * Where the expanded compose waits before the deploy script copies it into
  * place. Next to `code/` (not inside it) so the clone, which wipes `code/`,
@@ -131,32 +131,11 @@ export const getStagedComposePath = (
 	deploymentId?: string,
 ) => {
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
-	const id =
-		(deploymentId ?? "").replace(/[^A-Za-z0-9_-]/g, "") || randomUUID();
 	return join(
 		COMPOSE_PATH,
 		compose.appName,
-		`${STAGED_COMPOSE_PREFIX}${id}${STAGED_COMPOSE_SUFFIX}`,
+		`${STAGED_COMPOSE_PREFIX}${sanitizeStageId(deploymentId)}${STAGED_COMPOSE_SUFFIX}`,
 	);
-};
-
-const removeStaleStagedComposeFiles = async (directory: string) => {
-	const cutoff = Date.now() - STAGED_COMPOSE_MAX_AGE_MINUTES * 60_000;
-	try {
-		for (const name of await readdir(directory)) {
-			if (
-				!name.startsWith(STAGED_COMPOSE_PREFIX) ||
-				!name.endsWith(STAGED_COMPOSE_SUFFIX)
-			) {
-				continue;
-			}
-			const file = join(directory, name);
-			const { mtimeMs } = await stat(file);
-			if (mtimeMs < cutoff) await unlink(file);
-		}
-	} catch {
-		// Housekeeping only: it must never fail the deploy.
-	}
 };
 
 /**
@@ -171,34 +150,20 @@ export const stageComposeFile = async ({
 	compose,
 	content,
 	deploymentId,
+	onStaged,
 }: {
 	compose: Pick<Compose, "appName" | "serverId">;
 	content: string;
 	deploymentId?: string;
+	onStaged?: StageOptions["onStaged"];
 }) => {
 	const stagedPath = getStagedComposePath(compose, deploymentId);
-	const directory = dirname(stagedPath);
-
-	if (compose.serverId) {
-		const { serverId } = compose;
-		const qDirectory = quote([directory]);
-		const qStaged = quote([stagedPath]);
-		await execAsyncRemote(
-			serverId,
-			`mkdir -p ${qDirectory} && { find ${qDirectory} -maxdepth 1 -name '${STAGED_COMPOSE_PREFIX}*${STAGED_COMPOSE_SUFFIX}' -mmin +${STAGED_COMPOSE_MAX_AGE_MINUTES} -exec rm -f {} + 2>/dev/null || true; } && (umask 077 && : > ${qStaged})`,
-		);
-		try {
-			await writeFileRemote(serverId, stagedPath, content);
-		} catch (error) {
-			await execAsyncRemote(serverId, `rm -f ${qStaged}`).catch(() => {});
-			throw error;
-		}
-		return stagedPath;
-	}
-
-	await mkdir(directory, { recursive: true });
-	await removeStaleStagedComposeFiles(directory);
-	await writeFile(stagedPath, content, { mode: 0o600 });
+	await stageFiles({
+		serverId: compose.serverId,
+		directory: dirname(stagedPath),
+		files: [{ path: stagedPath, content }],
+	});
+	onStaged?.([stagedPath]);
 	return stagedPath;
 };
 
@@ -210,11 +175,14 @@ export const stageComposeFile = async ({
 export const getInstallStagedComposeCommand = (
 	stagedPath: string,
 	composePath: string,
-) => {
-	const qStaged = quote([stagedPath]);
-	const qComposePath = quote([composePath]);
-	return `{ cat ${qStaged} > ${qComposePath} && rm -f ${qStaged}; } || { rm -f ${qStaged}; echo "❌ Error: Could not write the compose file"; exit 1; };`;
-};
+	alsoRemove: string[] = [],
+) =>
+	getInstallStagedFileCommand({
+		staged: stagedPath,
+		destination: composePath,
+		failureMessage: "❌ Error: Could not write the compose file",
+		alsoRemove,
+	});
 
 /**
  * Builds the compose file the deploy runs (domain labels, randomize, isolated
@@ -260,17 +228,31 @@ exit 1;
 export const writeDomainsToCompose = async (
 	compose: Compose,
 	domains: Domain[],
-	options: { deploymentId?: string } = {},
+	options: StageOptions & {
+		/** Other files staged for the same script, removed if it stops early. */
+		alsoRemove?: string[];
+	} = {},
 ) => {
+	const alsoRemove = options.alsoRemove ?? [];
 	const rendered = await renderComposeWithDomains(compose, domains);
-	if ("errorCommand" in rendered) return rendered.errorCommand;
+	if ("errorCommand" in rendered) {
+		// The script stops here: files staged for it would never be consumed.
+		return alsoRemove.length > 0
+			? `rm -f ${quote(alsoRemove)};${rendered.errorCommand}`
+			: rendered.errorCommand;
+	}
 
 	const stagedPath = await stageComposeFile({
 		compose,
 		content: rendered.content,
 		deploymentId: options.deploymentId,
+		onStaged: options.onStaged,
 	});
-	return getInstallStagedComposeCommand(stagedPath, getComposePath(compose));
+	return getInstallStagedComposeCommand(
+		stagedPath,
+		getComposePath(compose),
+		alsoRemove,
+	);
 };
 export const applyComposeFilePatch = async (
 	compose: Compose,
