@@ -103,9 +103,12 @@ const resolveTraefikFilePath = (
 	serverId?: string | null,
 ): string => {
 	const { MAIN_TRAEFIK_PATH } = paths(!!serverId);
-	const base = path.resolve(MAIN_TRAEFIK_PATH);
-	const resolved = path.resolve(base, filePath);
-	if (resolved !== base && !resolved.startsWith(`${base}${path.sep}`)) {
+	// Remote servers are Linux hosts, so their paths use posix semantics no
+	// matter which platform this process runs on.
+	const pathApi = serverId ? path.posix : path;
+	const base = pathApi.resolve(MAIN_TRAEFIK_PATH);
+	const resolved = pathApi.resolve(base, filePath);
+	if (resolved !== base && !resolved.startsWith(`${base}${pathApi.sep}`)) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message:

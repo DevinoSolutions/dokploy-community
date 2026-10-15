@@ -18,7 +18,9 @@ vi.mock("@dokploy/server/services/permission", () => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
-	paths: () => ({ MAIN_TRAEFIK_PATH: traefikPath }),
+	paths: (isServer?: boolean) => ({
+		MAIN_TRAEFIK_PATH: isServer ? "/etc/dokploy/traefik" : traefikPath,
+	}),
 	...mocks,
 }));
 
@@ -47,6 +49,9 @@ const caller = settingsRouter.createCaller({
 } as Parameters<typeof settingsRouter.createCaller>[0]);
 
 const filePath = path.join(traefikPath, "dynamic/app.yml");
+// Remote servers are Linux hosts: their Traefik directory is always posix.
+const remoteFilePath = "dynamic/app.yml";
+const remoteResolvedPath = "/etc/dokploy/traefik/dynamic/app.yml";
 
 describe("traefik file endpoints scope remote servers to the active organization", () => {
 	beforeEach(() => {
@@ -69,7 +74,7 @@ describe("traefik file endpoints scope remote servers to the active organization
 	it("rejects writing to a server from another organization", async () => {
 		await expect(
 			caller.updateTraefikFile({
-				path: filePath,
+				path: remoteFilePath,
 				traefikConfig: "http: {}",
 				serverId: "server-b",
 			}),
@@ -79,24 +84,30 @@ describe("traefik file endpoints scope remote servers to the active organization
 
 	it("rejects reading from a server from another organization", async () => {
 		await expect(
-			caller.readTraefikFile({ path: filePath, serverId: "server-b" }),
+			caller.readTraefikFile({ path: remoteFilePath, serverId: "server-b" }),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 		expect(mocks.readConfigInPath).not.toHaveBeenCalled();
 	});
 
 	it("allows servers of the active organization", async () => {
 		await caller.readDirectories({ serverId: "server-a" });
-		await caller.readTraefikFile({ path: filePath, serverId: "server-a" });
+		await caller.readTraefikFile({ path: remoteFilePath, serverId: "server-a" });
 		await caller.updateTraefikFile({
-			path: filePath,
+			path: remoteFilePath,
 			traefikConfig: "http: {}",
 			serverId: "server-a",
 		});
 
-		expect(mocks.readDirectory).toHaveBeenCalledWith(traefikPath, "server-a");
-		expect(mocks.readConfigInPath).toHaveBeenCalledWith(filePath, "server-a");
+		expect(mocks.readDirectory).toHaveBeenCalledWith(
+			"/etc/dokploy/traefik",
+			"server-a",
+		);
+		expect(mocks.readConfigInPath).toHaveBeenCalledWith(
+			remoteResolvedPath,
+			"server-a",
+		);
 		expect(mocks.writeTraefikConfigInPath).toHaveBeenCalledWith(
-			filePath,
+			remoteResolvedPath,
 			"http: {}",
 			"server-a",
 		);
@@ -111,7 +122,7 @@ describe("traefik file endpoints scope remote servers to the active organization
 
 		expect(mocks.findServerById).not.toHaveBeenCalled();
 		expect(mocks.writeTraefikConfigInPath).toHaveBeenCalledWith(
-			filePath,
+			path.resolve(filePath),
 			"http: {}",
 			undefined,
 		);
