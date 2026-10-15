@@ -455,6 +455,7 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 	let pidFile = "";
 	let argsFile = "";
 	let eventsArgsFile = "";
+	let eventsReadyFile = "";
 	let pwnedFile = "";
 
 	const writeBin = (name: string, body: string) => {
@@ -468,12 +469,17 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 		upSleep = 1,
 		events = 3,
 		extraEvents = "",
+		awaitEvents = false,
 	}: {
 		upExit: number;
 		upSleep?: number;
 		events?: number;
 		extraEvents?: string;
+		// Makes `up` wait until the backgrounded events stub has written its lines,
+		// so a loaded runner cannot stop the capture before they exist.
+		awaitEvents?: boolean;
 	}) => {
+		rmSync(eventsReadyFile, { force: true });
 		writeBin(
 			"docker",
 			`case "$1" in
@@ -483,8 +489,11 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
     i=0
     while [ $i -lt ${events} ]; do echo "17000000$((10 + i))123456789|container|start|web$i"; i=$((i + 1)); done
     ${extraEvents}
+    : > ${toShellPath(eventsReadyFile)}
     exec sleep 300 ;;
-  stack|compose) sleep ${upSleep}; exit ${upExit} ;;
+  stack|compose)
+    ${awaitEvents ? `i=0; while [ ! -e ${toShellPath(eventsReadyFile)} ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done` : ":"}
+    sleep ${upSleep}; exit ${upExit} ;;
   *) exit 0 ;;
 esac`,
 		);
@@ -527,7 +536,7 @@ esac`,
 
 	const processIsGone = async () => {
 		const pid = readFileSync(pidFile, "utf8").trim();
-		for (let i = 0; i < 20; i++) {
+		for (let i = 0; i < 100; i++) {
 			if (sh(`kill -0 ${pid} 2>/dev/null`).status !== 0) return true;
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
@@ -541,6 +550,7 @@ esac`,
 		pidFile = join(dir, "events.pid");
 		argsFile = join(dir, "curl.args");
 		eventsArgsFile = join(dir, "events.args");
+		eventsReadyFile = join(dir, "events.ready");
 		pwnedFile = join(dir, "pwned");
 	});
 
@@ -550,7 +560,7 @@ esac`,
 	});
 
 	it("appends readable, capped docker events and stops the process after a successful up", async () => {
-		installDocker({ upExit: 0, events: 3 });
+		installDocker({ upExit: 0, events: 3, awaitEvents: true });
 		const result = await runStackDeploy({ dockerEvents: true });
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("Docker Compose Deployed: ✅");
@@ -569,6 +579,7 @@ esac`,
 		installDocker({
 			upExit: 0,
 			events: 1,
+			awaitEvents: true,
 			// Defence in depth: even if an exec event slipped through, only the
 			// part before the first ':' is printed; the health status survives.
 			extraEvents: [
@@ -694,7 +705,9 @@ sleep 20`,
 
 	it("caps the appended events and says so", async () => {
 		installDocker({ upExit: 0, events: 8 });
+		// No `up` here, so wait for the events stub's ready marker in the script.
 		const script = `${getDockerEventsStartScript("stack", "my-app", { maxLines: 3 })}
+i=0; while [ ! -e ${toShellPath(eventsReadyFile)} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done;
 sleep 1;
 dokploy_events_flush;`;
 		const result = sh(script, {
@@ -731,7 +744,7 @@ dokploy_events_flush;`;
 	});
 
 	it("stops the events process when up fails too, and still fails the deploy", async () => {
-		installDocker({ upExit: 1 });
+		installDocker({ upExit: 1, awaitEvents: true });
 		const result = await runStackDeploy({ dockerEvents: true });
 		expect(result.status).toBe(1);
 		expect(result.stdout).toContain("Error: ❌ Docker command failed");
@@ -840,7 +853,10 @@ dokploy_events_flush;`;
 		const result = await runStackDeploy({
 			healthCheck: {
 				url: "http://localhost:8080/up?a[]=1&b={x}",
-				timeoutSeconds: 5,
+				// 10 s leaves several seconds of slack: on a loaded runner the first
+				// attempt can start late, and with a 5 s budget that shrinks its cap
+				// below 5 (or leaves room for only one attempt).
+				timeoutSeconds: 10,
 			},
 		});
 		expect(result.status).toBe(1);
@@ -849,6 +865,7 @@ dokploy_events_flush;`;
 			.map((arg, i) => (arg === "--max-time" ? Number(args[i + 1]) : null))
 			.filter((v): v is number => v !== null);
 		expect(maxTimes.length).toBeGreaterThanOrEqual(2);
+		// The per-request cap is 5 s even though 10 s are left.
 		expect(maxTimes[0]).toBe(5);
 		for (const value of maxTimes) expect(value).toBeLessThanOrEqual(5);
 		expect(maxTimes[maxTimes.length - 1]).toBeLessThan(5);
