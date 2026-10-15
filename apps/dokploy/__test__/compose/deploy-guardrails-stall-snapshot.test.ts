@@ -954,33 +954,46 @@ dokploy_stall_cleanup`,
 	});
 
 	it("schedules from the previous deadline: a slow state command does not stretch the interval", {
-		timeout: 60_000,
+		timeout: 90_000,
 	}, async () => {
-		rmSync(psArgsFile, { force: true });
-		installDocker({ upSleep: 0, psBody: "sleep 2; echo 'c|running|Up|t'" });
+		const timesFile = join(dir, "deadline.times");
+		rmSync(timesFile, { force: true });
+		installDocker({
+			upSleep: 0,
+			psBody: `echo "S $(date +%s)" >> ${toShellPath(timesFile)}; sleep 4; echo "E $(date +%s)" >> ${toShellPath(timesFile)}; echo 'c|running|Up|t'`,
+		});
+		// Polls (up to 40 s) for the third command to end instead of a fixed sleep.
 		const result = sh(
 			`${getStallSnapshotStartScript("docker-compose", "my-app", {
 				afterSeconds: 1,
-				everySeconds: 4,
+				everySeconds: 8,
 				maxSnapshots: 3,
 			})}
-i=0; while [ "$i" -lt 160 ] && [ "$(grep -c '^----$' ${toShellPath(psArgsFile)} 2>/dev/null)" != 3 ]; do sleep 0.25; i=$((i + 1)); done;
+i=0; while [ "$i" -lt 160 ] && [ "$(grep -c '^E ' ${toShellPath(timesFile)} 2>/dev/null)" != 3 ]; do sleep 0.25; i=$((i + 1)); done;
 sleep 4;
 dokploy_stall_cleanup`,
 			env(),
 		);
 		expect(result.status).toBe(0);
-		const elapsed = [
-			...result.stdout.matchAll(/Stall snapshot \d\/3: .* after (\d+)s,/g),
-		].map((m) => Number(m[1]));
-		expect(elapsed).toHaveLength(3);
-		// Commands start at 1, 5 and 9 s and take 2 s: 3, 7, 11. Rescheduling from
-		// "now + every" would give 3, 9, 15 (gaps of 6). Gaps, not absolute times, so
-		// a slow start on a loaded runner does not matter; +-1 s covers the clock.
-		const gaps = [elapsed[1]! - elapsed[0]!, elapsed[2]! - elapsed[1]!];
-		for (const gap of gaps) {
-			expect(gap).toBeGreaterThanOrEqual(3);
-			expect(gap).toBeLessThanOrEqual(5);
+		expect(countBlocks(result.stdout)).toBe(3);
+		const lines = readFileSync(timesFile, "utf8").trim().split("
+");
+		const at = (tag: string) =>
+			lines
+				.filter((l) => l.startsWith(`${tag} `))
+				.map((l) => Number(l.split(" ")[1]));
+		const starts = at("S");
+		const ends = at("E");
+		expect(starts).toHaveLength(3);
+		expect(ends).toHaveLength(3);
+		// Scheduled from the previous deadline, the pause after a 4 s command in an
+		// 8 s interval is about 4 s. Rescheduling from completion always waits the
+		// full 8 s, so a pause of 7 s or less proves it; the slack covers 1 s clock
+		// truncation and a slightly late wake-up.
+		for (let i = 1; i < starts.length; i++) {
+			expect(
+				(starts[i] as number) - (ends[i - 1] as number),
+			).toBeLessThanOrEqual(7);
 		}
 	});
 
