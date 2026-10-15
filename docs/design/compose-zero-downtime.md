@@ -439,8 +439,7 @@ Tests (no real docker in CI):
   with a probe loop against the public URL during a deploy, confirming zero
   failed requests and measuring the stop race.
 
-Not in the first PR: stack-type changes, blue-green, automatic retry
-middleware injection, stateful services, auto-detecting singletons.
+Not in the first PR: stack-type changes, blue-green, stateful services, auto-detecting singletons. Whether the Traefik retry middleware is injected or documented as a manual step is open question 5.
 
 ## Open questions for Amin
 
