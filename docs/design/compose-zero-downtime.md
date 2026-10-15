@@ -75,18 +75,31 @@ How it works, per selected service `svc`:
 
 1. Build or pull the new image first (`docker compose build svc`, or the
    existing pull step on a build server). Nothing running is touched.
-2. `docker compose ... up -d --no-deps --no-recreate --scale svc=2 svc`.
+2. Record the ids of the service's containers (label filter
+   `com.docker.compose.project` and `com.docker.compose.service`, all states),
+   then run `docker compose ... up -d --no-deps --no-recreate --scale svc=2 svc`.
    `--no-recreate` keeps the old container as is; the second replica is
-   created from the new config and image.
+   created from the new config and image. The new replica is the id that is not
+   in the recorded set.
 3. Wait until the new replica is healthy (Docker healthcheck status), up to a
    timeout.
-4. Stop and remove the old container by id (graceful stop, its own grace
+4. Stop and remove the old ids explicitly (graceful stop, its own grace
    period), then `up -d --no-deps --no-recreate --scale svc=1 svc`.
+
+Old and new must be told apart by id, never by Compose's scale-down: scaling
+from 2 to 1 removes the highest-numbered container, which is the new one. After
+step 4 the survivor keeps its number (`-2`, `-3`, ...), which is cosmetic. If no
+old container is running (first deploy, service stopped or exited), that
+service uses the normal `up` instead of a rollout.
 
 What Dokploy would generate: a shell block replacing the single `up` line at
 `builders/compose.ts:496-498` for the selected services. The rest of the
-compose (non-selected services) still goes through a normal
-`up -d --no-deps <others>` first. Old and new container ids are found with the
+compose (non-selected services) goes through `up -d --no-deps <others>` first.
+That step is emitted only when the non-selected set is non-empty, and services
+are always named explicitly on every `up` line: with no service arguments
+(for example when every service is selected) `up` would bring up the whole
+project as a plain recreate, selected services included. Old and new container
+ids are found with the
 same labels Dokploy already uses elsewhere
 (`com.docker.compose.project`, `com.docker.compose.service`,
 `utils/backups/utils.ts:348`, `utils/docker/utils.ts:1052-1053`). A service
@@ -107,14 +120,21 @@ Traefik:
   one load balancer with the same router/service names, so no label change is
   needed.
 - Healthcheck-aware routing is what makes step 3 safe: the new replica only
-  joins the pool when `healthy`. Therefore a Docker healthcheck on the service
-  is a hard requirement.
-- There is a short race when the old container is stopped (Traefik drops it on
-  the die event; an in-flight connection can still fail). Stop with the app's
-  own graceful shutdown and optionally add a Traefik retry middleware for the
-  connection-error case (option e).
-- Container-to-container traffic by service DNS name resolves to both
-  replicas during the overlap.
+  joins the pool when `healthy`. Traefik also leaves out a container whose
+  health is `starting`, not only `unhealthy`, so a long `start_period` delays
+  routing. Therefore a Docker healthcheck on the service is a hard requirement,
+  and the health timeout must exceed `start_period` plus `interval` times
+  `retries`; the setting is validated against the service's healthcheck.
+- Traefik removes the old backend only on the `die` event, so for the whole
+  stop grace period it still receives new requests while the app shuts down.
+  The new replica being healthy does not cover this window. The drain delay in
+  the first PR is a wait between "new replica healthy" and "stop old". It does
+  not make the old container unroutable, and the Traefik retry middleware
+  (option e) is the only mitigation for this window.
+- Docker DNS ignores health for non-swarm containers, so container-to-container
+  traffic by service name reaches the not-yet-healthy replica too; this path is
+  not gated during the overlap. It resolves to both replicas for the length of
+  the overlap.
 
 Constraints:
 
@@ -122,6 +142,15 @@ Constraints:
 - Published host ports (`ports: "8080:80"`): the second replica cannot bind.
   Blocker. `expose:` and Traefik-only access are fine.
 - `network_mode: host` or `service:x`: blocker.
+- `scale:` or `deploy.replicas` greater than 1: `--scale svc=2` would shrink
+  or conflict with it. Blocker (or use 2xN; the first PR refuses).
+- Static `ipv4_address`, `ipv6_address` or `mac_address`: the second replica
+  cannot take it. Blocker.
+- Any other service that points at the rolled one with `network_mode:
+  service:<svc>`, `pid: service:<svc>`, `ipc: service:<svc>` or
+  `volumes_from: <svc>`: replacing the service breaks the dependent. Blocker.
+- Exclusive devices (`devices:`, GPU reservations) and resource limits are
+  doubled during the overlap. Not reliably detectable; listed as a soft risk.
 - Singleton workers (queue consumers, cron runners, anything that must run
   once): two copies run during the overlap. Not detectable from the file.
 - DB migrations at container start: the new version migrates while the old
@@ -293,7 +322,10 @@ match what Compose will see):
 | `container_name` set | scale to 2 impossible |
 | any `ports:` entry with a published host port | second replica cannot bind |
 | `network_mode: host` or `service:`/`container:` | shared netns |
-| no `healthcheck` on the service | no readiness signal; Traefik would route to a booting container (an image-level `HEALTHCHECK` is not visible in the spec; v1 requires it in the compose, or checks `docker image inspect` on the host) |
+| `scale:` or `deploy.replicas` > 1 | `--scale svc=2` would conflict |
+| static `ipv4_address`, `ipv6_address` or `mac_address` | second replica cannot take it |
+| another service uses `network_mode`/`pid`/`ipc: service:<svc>` or `volumes_from: <svc>` on this one | replacing it breaks the dependent |
+| no `healthcheck` on the service, or `healthcheck: { disable: true }` / `test: ["NONE"]` | no readiness signal; Traefik would route to a booting container (an image-level `HEALTHCHECK` is not visible in the spec; v1 requires it in the compose, or checks `docker image inspect` on the host) |
 | compose has a custom `command` (`builders/compose.ts:687`) | Dokploy does not control what runs |
 | `composeType: "stack"` | use (c) |
 | fresh-volumes deploy (`freshVolumes`, `builders/compose.ts:432`) | destructive by design |
@@ -301,7 +333,8 @@ match what Compose will see):
 
 Soft risks, documented in the UI next to the service picker, not detected:
 singleton workers, migrations at start, exclusive-lock volumes, services that
-register themselves externally on boot.
+register themselves externally on boot, exclusive devices and resource limits
+(doubled during the overlap).
 
 Detection runs at two points:
 
@@ -334,13 +367,24 @@ Behaviour:
   script (same guarantee the guardrails keep with their golden test,
   `apps/dokploy/__test__/compose/deploy-guardrails-golden.test.ts`).
 - Per compose setting: a list of service names to roll, a health timeout, and
-  a stop grace/drain delay. Only `docker-compose` type, no custom command, no
-  fresh-volumes.
-- Deploy script order: build/pull as today; `up -d --no-deps` for the
-  non-selected services; for each selected, changed, eligible service the
-  sequence from option (a); final `up -d --remove-orphans --no-recreate` to
-  reconcile orphans. Phase timestamps and docker events from the existing
-  guardrails wrap it when enabled.
+  a drain delay (a wait between "new replica healthy" and "stop old"; it does
+  not make the old container unroutable, see the Traefik notes in option a).
+  Only `docker-compose` type, no custom command, no fresh-volumes.
+- Deploy script order: build/pull as today; `up -d --no-deps <others>` for the
+  non-selected services, emitted only when that set is non-empty; for each
+  selected, changed (hash and image id, see option a), eligible service the
+  sequence from option (a); then a final `up -d --no-recreate
+  --remove-orphans` with an explicit service list (the output of
+  `docker compose config --services`, which respects active profiles) to
+  reconcile orphans without starting services of inactive profiles. It does
+  start a stopped non-selected container, as a plain `up` does; that is
+  intended. `persistLastGood` (`builders/compose.ts:577`) and the
+  isolated-deployment `docker network connect` (`builders/compose.ts:576`) still
+  run on the rolling path. Phase timestamps and docker events from the existing
+  guardrails wrap it when enabled. The Traefik retry middleware (option e) is
+  the only mitigation of the stop-grace window in this PR, so the first PR
+  either ships it as an opt-in label on rolled services or documents it as a
+  manual step (open question 5).
 - Timeout or unhealthy new replica: remove the new replica, keep the old
   container, mark the deployment as an error with the reason, fire the
   existing failure notification. No transactional restore for rolled services.
@@ -366,8 +410,16 @@ Where:
 
 Tests (no real docker in CI):
 
-- Eligibility matrix: one case per hard blocker, plus a clean service, plus
-  the randomize/isolated-deployment renames.
+- Eligibility matrix: one case per hard blocker (including `scale`/`replicas`
+  > 1, static addresses, a dependent service pointing at the rolled one, and
+  a disabled healthcheck), plus a clean service, plus the
+  randomize/isolated-deployment renames.
+- All services selected: no `up -d --no-deps <others>` line is emitted and no
+  `up` line lacks explicit service names.
+- No running old container: that service falls back to a plain `up`.
+- Old and new containers are told apart by recorded ids: the old id is the one
+  stopped and removed, never the highest-numbered container.
+- Health timeout validation against `start_period`, `interval` and `retries`.
 - Schema: bounds and defaults for the new setting, and that malformed stored
   data resolves to "off".
 - Golden: feature off produces the same script as before; the existing
@@ -411,3 +463,8 @@ middleware injection, stateful services, auto-detecting singletons.
    not set one (a behaviour change for existing stacks)?
 7. Do we want to try stack type on a copy of the uNotes compose to see whether
    its named volumes carry over, before pointing the reporter at (c)?
+8. Should rolling apply to compose preview deployments? They share the
+   `compose:<id>` queue group (`apps/dokploy/server/queues/in-memory-queue.ts:60-63`)
+   but have their own deploy path.
+9. When a deploy is cancelled or killed mid-rollout, should the cancel path
+   also remove the extra replica, or is reconcile-on-next-deploy enough?
