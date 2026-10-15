@@ -175,7 +175,7 @@ with `up`, which is itself a recreate
 services, services already rolled stay on the new release when a later one
 fails; that is a mixed state and must be logged as such. Because the
 transactional restore would recreate the already-rolled services, it should
-not run for rolled services (see open questions).
+not run for rolled services (see decision 3).
 
 Interrupted deploys (cancel, host reboot) can leave two replicas. The next
 deploy must detect more than one container for a selected service and
@@ -381,10 +381,10 @@ Behaviour:
   intended. `persistLastGood` (`builders/compose.ts:577`) and the
   isolated-deployment `docker network connect` (`builders/compose.ts:576`) still
   run on the rolling path. Phase timestamps and docker events from the existing
-  guardrails wrap it when enabled. The Traefik retry middleware (option e) is
-  the only mitigation of the stop-grace window in this PR, so the first PR
-  either ships it as an opt-in label on rolled services or documents it as a
-  manual step (open question 5).
+  guardrails wrap it when enabled.
+  The Traefik retry middleware (option e) is the only mitigation of the
+  stop-grace window in this PR. It is not injected; the first PR documents it
+  as a manual step (decision 5).
 - Timeout or unhealthy new replica: remove the new replica, keep the old
   container, mark the deployment as an error with the reason, fire the
   existing failure notification. No transactional restore for rolled services.
@@ -398,12 +398,9 @@ Where:
   `getRollingEligibility(spec, serviceName)` returning blockers.
 - Hook at the single place the `up` line is composed
   (`builders/compose.ts:496-498`, `550-552`), only when enabled.
-- Setting storage: a new key inside the existing `deployGuardrails` jsonb
-  column (`packages/server/src/db/schema/compose.ts:200`, validation in
-  `packages/server/src/db/validations/compose-guardrails.ts`) avoids a
-  migration, but mixes an acting feature into an observe-only column. A
-  separate column needs a migration and the idempotency gate. See open
-  question 1.
+- Setting storage: a separate column with a migration and the idempotency gate
+  (decision 1). `deployGuardrails` stays guardrails-only, so no key is added
+  to it.
 - UI: a section next to the existing Deploy guardrails card
   (`apps/dokploy/components/dashboard/compose/advanced/deploy-guardrails.tsx`)
   with the service picker and the soft-risk warning text.
