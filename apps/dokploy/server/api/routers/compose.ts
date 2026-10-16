@@ -109,6 +109,10 @@ import {
 import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
+import {
+	assertCanPrioritize,
+	recordPriorityUse,
+} from "../utils/deploy-priority";
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -554,6 +558,7 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
+			if (input.priority) await assertCanPrioritize(ctx);
 			const compose = await findComposeById(input.composeId);
 
 			const jobData: DeploymentJob = {
@@ -565,6 +570,9 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
 				freshVolumes: input.freshVolumes,
+				...(input.priority
+					? { priority: true, priorityBy: ctx.user.email }
+					: {}),
 			};
 
 			if (IS_CLOUD && compose.serverId) {
@@ -579,7 +587,7 @@ export const composeRouter = createTRPCRouter({
 				});
 				return true;
 			}
-			await myQueue.add(
+			const queued = await myQueue.add(
 				"deployments",
 				{ ...jobData },
 				{
@@ -593,10 +601,21 @@ export const composeRouter = createTRPCRouter({
 				resourceId: input.composeId,
 				resourceName: compose.name,
 			});
+			const priority = input.priority
+				? await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "deploy",
+						jobId: queued.id,
+						outcome: queued.priority,
+					})
+				: undefined;
 			return {
 				success: true,
 				message: "Deployment queued",
 				composeId: compose.composeId,
+				...(priority ? { priority } : {}),
 			};
 		}),
 	redeploy: protectedProcedure
@@ -605,6 +624,7 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
+			if (input.priority) await assertCanPrioritize(ctx);
 			const compose = await findComposeById(input.composeId);
 			const jobData: DeploymentJob = {
 				composeId: input.composeId,
@@ -615,6 +635,9 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
 				freshVolumes: input.freshVolumes,
+				...(input.priority
+					? { priority: true, priorityBy: ctx.user.email }
+					: {}),
 			};
 			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
@@ -628,7 +651,7 @@ export const composeRouter = createTRPCRouter({
 				});
 				return true;
 			}
-			await myQueue.add(
+			const queued = await myQueue.add(
 				"deployments",
 				{ ...jobData },
 				{
@@ -642,10 +665,21 @@ export const composeRouter = createTRPCRouter({
 				resourceId: input.composeId,
 				resourceName: compose.name,
 			});
+			const priority = input.priority
+				? await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "redeploy",
+						jobId: queued.id,
+						outcome: queued.priority,
+					})
+				: undefined;
 			return {
 				success: true,
 				message: "Redeployment queued",
 				composeId: compose.composeId,
+				...(priority ? { priority } : {}),
 			};
 		}),
 	stop: protectedProcedure

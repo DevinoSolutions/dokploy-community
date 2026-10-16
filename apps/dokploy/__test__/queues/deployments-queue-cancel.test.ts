@@ -80,7 +80,7 @@ describe("processDeploymentJob", () => {
 	it("a cancelled compose deployment resolves and is not marked error", async () => {
 		mocks.deployCompose.mockRejectedValue(cancelled("done"));
 
-		await expect(processDeploymentJob(composeJob)).resolves.toBeUndefined();
+		await expect(processDeploymentJob(composeJob)).resolves.toBe("cancelled");
 
 		// Only "running" is written unconditionally; nothing is flipped to error.
 		expect(composeStatuses()).toEqual(["running"]);
@@ -124,7 +124,7 @@ describe("processDeploymentJob", () => {
 	it("does not restore anything when the settled status is unknown", async () => {
 		mocks.deployCompose.mockRejectedValue(cancelled());
 
-		await expect(processDeploymentJob(composeJob)).resolves.toBeUndefined();
+		await expect(processDeploymentJob(composeJob)).resolves.toBe("cancelled");
 
 		expect(mocks.restoreServiceStatusIfUnchanged).not.toHaveBeenCalled();
 	});
@@ -133,7 +133,7 @@ describe("processDeploymentJob", () => {
 		mocks.readServiceStatus.mockRejectedValue(new Error("db down"));
 		mocks.deployCompose.mockRejectedValue(cancelled("done"));
 
-		await expect(processDeploymentJob(composeJob)).resolves.toBeUndefined();
+		await expect(processDeploymentJob(composeJob)).resolves.toBe("cancelled");
 
 		expect(composeStatuses()).toEqual(["running"]);
 		expect(mocks.restoreServiceStatusIfUnchanged).not.toHaveBeenCalled();
@@ -144,13 +144,15 @@ describe("processDeploymentJob", () => {
 		mocks.restoreServiceStatusIfUnchanged.mockRejectedValue(new Error("db"));
 		mocks.deployCompose.mockRejectedValue(cancelled("done"));
 
-		await expect(processDeploymentJob(composeJob)).resolves.toBeUndefined();
+		await expect(processDeploymentJob(composeJob)).resolves.toBe("cancelled");
 	});
 
 	it("a cancelled application deployment resolves and is not marked error", async () => {
 		mocks.deployApplication.mockRejectedValue(cancelled("done"));
 
-		await expect(processDeploymentJob(applicationJob)).resolves.toBeUndefined();
+		await expect(processDeploymentJob(applicationJob)).resolves.toBe(
+			"cancelled",
+		);
 
 		expect(mocks.updateApplicationStatus.mock.calls).toEqual([
 			["a1", "running"],

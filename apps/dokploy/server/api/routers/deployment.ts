@@ -11,6 +11,8 @@ import {
 	findAllDeploymentsByComposeId,
 	findAllDeploymentsByServerId,
 	findAllDeploymentsCentralized,
+	findApplicationById,
+	findComposeById,
 	findDeploymentById,
 	getScheduleRunLaunch,
 	IS_CLOUD,
@@ -22,22 +24,26 @@ import {
 	updateDeploymentStatus,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
-import {
-	checkPermission,
-	checkServicePermissionAndAccess,
-	findMemberByUserId,
-} from "@dokploy/server/services/permission";
 import { assertDeploymentAccess } from "@dokploy/server/services/deployment-access";
 import {
 	LOG_UNAVAILABLE_MESSAGE,
 	locateDeploymentLog,
 } from "@dokploy/server/services/deployment-log-host";
+import {
+	checkPermission,
+	checkServicePermissionAndAccess,
+	findMemberByUserId,
+} from "@dokploy/server/services/permission";
 import { findServerById } from "@dokploy/server/services/server";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import {
+	assertCanPrioritize,
+	recordPriorityUse,
+} from "@/server/api/utils/deploy-priority";
 import {
 	apiFindAllByApplication,
 	apiFindAllByCompose,
@@ -150,6 +156,62 @@ export const deploymentRouter = createTRPCRouter({
 			})),
 		);
 	}),
+
+	// Flag a deploy that is already waiting so it goes ahead of the jobs before
+	// it (see docs/deploy-queue-priority.md). The id is the one queueList shows.
+	prioritizeQueued: protectedProcedure
+		.input(z.object({ jobId: z.string().min(1) }))
+		.mutation(async ({ input, ctx }) => {
+			await assertCanPrioritize(ctx);
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Cloud deploys do not wait in a local queue",
+				});
+			}
+			// A missing job and one the caller may not touch answer alike, so the
+			// queue (which is shared) cannot be probed for other organizations' jobs.
+			const notWaiting = new TRPCError({
+				code: "NOT_FOUND",
+				message:
+					"No waiting deploy with that id. It may have started, finished or been cancelled.",
+			});
+			const waiting = await myQueue.getJobs(["waiting"]);
+			const job = waiting.find(
+				(candidate) => String(candidate.id) === input.jobId,
+			);
+			if (!job) throw notWaiting;
+			const data = job.data as { composeId?: string; applicationId?: string };
+			const serviceId = data.composeId ?? data.applicationId;
+			if (!serviceId) throw notWaiting;
+			try {
+				await checkServicePermissionAndAccess(ctx, serviceId, {
+					deployment: ["create"],
+				});
+			} catch {
+				throw notWaiting;
+			}
+
+			const outcome = myQueue.prioritize(job.id, ctx.user.email);
+			if (!outcome) throw notWaiting;
+
+			const isCompose = Boolean(data.composeId);
+			const service = isCompose
+				? await findComposeById(serviceId)
+				: await findApplicationById(serviceId);
+			const priority = await recordPriorityUse(ctx, {
+				resourceType: isCompose ? "compose" : "application",
+				resourceId: serviceId,
+				resourceName:
+					"appName" in service
+						? service.appName
+						: (service as { name: string }).name,
+				via: "prioritizeQueued",
+				jobId: job.id,
+				outcome,
+			});
+			return { success: true, jobId: job.id, priority };
+		}),
 
 	allByType: protectedProcedure
 		.input(apiFindAllByType)

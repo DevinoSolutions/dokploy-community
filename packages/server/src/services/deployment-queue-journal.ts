@@ -39,6 +39,20 @@ export const insertQueueJob = async (
 		.onConflictDoNothing();
 };
 
+/**
+ * Replace the payload of a job that is still journaled (a waiting job flagged
+ * for priority). A job that is gone is simply not updated.
+ */
+export const updateQueueJobPayload = async (
+	jobId: string,
+	payload: QueueJobPayload,
+) => {
+	await db
+		.update(deploymentQueueJobs)
+		.set({ payload })
+		.where(eq(deploymentQueueJobs.jobId, jobId));
+};
+
 export const markQueueJobActive = async (jobId: string) => {
 	await db
 		.update(deploymentQueueJobs)

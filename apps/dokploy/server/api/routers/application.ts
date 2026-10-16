@@ -64,6 +64,10 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import {
+	assertCanPrioritize,
+	recordPriorityUse,
+} from "@/server/api/utils/deploy-priority";
 import { getRailpackVersions } from "@/server/api/utils/railpack-versions";
 import {
 	apiCreateApplication,
@@ -510,6 +514,7 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["create"],
 			});
+			if (input.priority) await assertCanPrioritize(ctx);
 			const application = await findApplicationById(input.applicationId);
 			const jobData: DeploymentJob = {
 				applicationId: input.applicationId,
@@ -519,6 +524,9 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 				serverId: application.serverId ?? undefined,
+				...(input.priority
+					? { priority: true, priorityBy: ctx.user.email }
+					: {}),
 			};
 
 			if (IS_CLOUD && application.serverId) {
@@ -533,7 +541,7 @@ export const applicationRouter = createTRPCRouter({
 				});
 				return true;
 			}
-			await myQueue.add(
+			const queued = await myQueue.add(
 				"deployments",
 				{ ...jobData },
 				{
@@ -547,6 +555,21 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: application.applicationId,
 				resourceName: application.appName,
 			});
+			if (!input.priority) return;
+			const priority = await recordPriorityUse(ctx, {
+				resourceType: "application",
+				resourceId: application.applicationId,
+				resourceName: application.appName,
+				via: "redeploy",
+				jobId: queued.id,
+				outcome: queued.priority,
+			});
+			return {
+				success: true,
+				message: "Redeployment queued",
+				applicationId: application.applicationId,
+				priority,
+			};
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariables)
@@ -956,6 +979,7 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["create"],
 			});
+			if (input.priority) await assertCanPrioritize(ctx);
 			const application = await findApplicationById(input.applicationId);
 			// Allow overriding the Docker image/tag at deploy time for
 			// Docker-source applications. This mirrors the manual "save Docker
@@ -974,6 +998,9 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 				serverId: application.serverId ?? undefined,
+				...(input.priority
+					? { priority: true, priorityBy: ctx.user.email }
+					: {}),
 			};
 			if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {
@@ -987,7 +1014,7 @@ export const applicationRouter = createTRPCRouter({
 				});
 				return true;
 			}
-			await myQueue.add(
+			const queued = await myQueue.add(
 				"deployments",
 				{ ...jobData },
 				{
@@ -1001,6 +1028,21 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: application.applicationId,
 				resourceName: application.appName,
 			});
+			if (!input.priority) return;
+			const priority = await recordPriorityUse(ctx, {
+				resourceType: "application",
+				resourceId: application.applicationId,
+				resourceName: application.appName,
+				via: "deploy",
+				jobId: queued.id,
+				outcome: queued.priority,
+			});
+			return {
+				success: true,
+				message: "Deployment queued",
+				applicationId: application.applicationId,
+				priority,
+			};
 		}),
 
 	cleanQueues: protectedProcedure

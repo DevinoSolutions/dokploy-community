@@ -19,6 +19,12 @@ import type { DeploymentJob } from "./queue-types";
  * so it can be gated by the enterprise license at run time (a non-licensed
  * instance always resolves to 1).
  *
+ * Priority lane (docs/design/deploy-queue-priority.md): a job whose payload
+ * carries `priority: true` may be picked ahead of the jobs waiting before it
+ * when a slot is free. It never adds a slot, never starts a second job of a
+ * running group, and at most one such "jump" runs in a lane at a time, with a
+ * plain FIFO start between two jumps so the normal lane cannot starve.
+ *
  * The public surface (`add`, `getJobs`, `close`, `on`) mirrors the subset of
  * BullMQ used by the routers so it can be a drop-in replacement.
  *
@@ -44,11 +50,36 @@ export interface InMemoryJob {
 	processedOn?: number;
 	finishedOn?: number;
 	failedReason?: string;
+	/** Waiting jobs this one was started ahead of (0 unless it jumped). */
+	wentAheadOf?: number;
 	getState: () => Promise<JobState>;
 	remove: () => Promise<void>;
 }
 
-type Processor = (job: InMemoryJob) => Promise<void>;
+/**
+ * What a processor may report about a job that ended early. A cancelled or
+ * failed priority job gives its lane's cooldown back (see `jumpedLast`).
+ */
+export type JobOutcome = "cancelled" | "failed";
+
+type Processor = (job: InMemoryJob) => Promise<unknown>;
+
+export type PriorityReason = "nothing-waiting" | "priority-busy";
+
+/** What a priority request did (or will do) to the job it was asked for. */
+export interface PriorityOutcome {
+	requested: true;
+	/** The job is ahead of the jobs that were waiting, or will be when it starts. */
+	applied: boolean;
+	/** Waiting jobs in the lane that the job is ahead of. */
+	wentAheadOf: number;
+	reason?: PriorityReason;
+}
+
+const withoutPriority = (data: DeploymentJob): DeploymentJob => {
+	const { priority: _priority, priorityBy: _by, ...rest } = data;
+	return rest as DeploymentJob;
+};
 
 /** Resolve the partition key (serverId) a job belongs to. */
 export const getPartition = (data: DeploymentJob): string =>
@@ -77,6 +108,9 @@ interface InternalJob {
 	state: JobState;
 	partition: string;
 	group: string;
+	/** Started ahead of waiting jobs through the priority lane. */
+	jumped: boolean;
+	wentAheadOf: number;
 }
 
 interface Partition {
@@ -84,6 +118,12 @@ interface Partition {
 	/** Groups currently running in this partition. */
 	activeGroups: Set<string>;
 	active: InternalJob[];
+	/**
+	 * The last job started in this partition jumped the queue. Cleared by the
+	 * next plain start, when the waiting list drains, or when that job is
+	 * cancelled or fails, so a priority job is never followed directly by another.
+	 */
+	jumpedLast: boolean;
 }
 
 /**
@@ -100,6 +140,8 @@ export interface QueueJournal {
 	started(journalId: string): void;
 	/** The job completed, failed or was removed from the queue. */
 	settled(journalIds: string[]): void;
+	/** A waiting job's payload changed (it was flagged for priority). */
+	updated?(journalId: string, data: DeploymentJob): void;
 }
 
 /** A job read back from the journal after a restart. */
@@ -143,7 +185,12 @@ export class InMemoryQueue {
 	private getPartitionState(key: string): Partition {
 		let partition = this.partitions.get(key);
 		if (!partition) {
-			partition = { waiting: [], activeGroups: new Set(), active: [] };
+			partition = {
+				waiting: [],
+				activeGroups: new Set(),
+				active: [],
+				jumpedLast: false,
+			};
 			this.partitions.set(key, partition);
 		}
 		return partition;
@@ -179,11 +226,23 @@ export class InMemoryQueue {
 		return Promise.resolve();
 	}
 
-	async add(data: DeploymentJob): Promise<{ id: string }> {
+	async add(
+		requested: DeploymentJob,
+	): Promise<{ id: string; priority?: PriorityOutcome }> {
+		const partition = this.getPartitionState(getPartition(requested));
+		const priority =
+			requested.priority === true
+				? this.assessPriority(partition, partition.waiting.length)
+				: undefined;
+		// Nothing to go ahead of: the flag would only be noise in the journal.
+		const data =
+			priority?.reason === "nothing-waiting"
+				? withoutPriority(requested)
+				: requested;
 		const job = this.createJob(data, randomUUID(), this.now());
 		// In memory first and synchronously: FIFO order is the call order even
 		// when the journal write below is slow.
-		this.getPartitionState(job.partition).waiting.push(job);
+		partition.waiting.push(job);
 		this.schedule();
 		const journal = this.journal;
 		if (journal) {
@@ -193,7 +252,62 @@ export class InMemoryQueue {
 				// Never block a deploy on the journal; it reports its own failures.
 			}
 		}
-		return { id: job.id };
+		return priority ? { id: job.id, priority } : { id: job.id };
+	}
+
+	/**
+	 * Flag a job that is already waiting so it may go ahead of the jobs before
+	 * it. Returns null when the job is not waiting (running, finished or gone).
+	 * The job keeps its place; the flag only matters when a slot frees.
+	 */
+	prioritize(id: string, by?: string): PriorityOutcome | null {
+		for (const partition of this.partitions.values()) {
+			const index = partition.waiting.findIndex((job) => job.id === id);
+			if (index === -1) continue;
+			const job = partition.waiting[index] as InternalJob;
+			// First in line: nothing to go ahead of.
+			if (index === 0) return this.assessPriority(partition, 0);
+			if (job.data.priority !== true) {
+				job.data = {
+					...job.data,
+					priority: true,
+					...(by ? { priorityBy: by } : {}),
+				};
+				const journal = this.journal;
+				if (journal?.updated) {
+					const { journalId, data } = job;
+					const update = journal.updated.bind(journal);
+					this.notify(() => update(journalId, data));
+				}
+			}
+			return this.assessPriority(partition, index);
+		}
+		return null;
+	}
+
+	/** A jump is not allowed while one runs, nor straight after one started. */
+	private jumpBlocked(partition: Partition): boolean {
+		return partition.jumpedLast || partition.active.some((job) => job.jumped);
+	}
+
+	private assessPriority(partition: Partition, ahead: number): PriorityOutcome {
+		if (ahead === 0) {
+			return {
+				requested: true,
+				applied: false,
+				wentAheadOf: 0,
+				reason: "nothing-waiting",
+			};
+		}
+		if (this.jumpBlocked(partition)) {
+			return {
+				requested: true,
+				applied: false,
+				wentAheadOf: 0,
+				reason: "priority-busy",
+			};
+		}
+		return { requested: true, applied: true, wentAheadOf: ahead };
 	}
 
 	/**
@@ -242,6 +356,8 @@ export class InMemoryQueue {
 			state: "waiting",
 			partition: getPartition(data),
 			group: getGroup(data),
+			jumped: false,
+			wentAheadOf: 0,
 		};
 	}
 
@@ -268,6 +384,7 @@ export class InMemoryQueue {
 			timestamp: job.timestamp,
 			processedOn: job.processedOn,
 			finishedOn: job.finishedOn,
+			wentAheadOf: job.wentAheadOf,
 			getState: () => Promise.resolve(job.state),
 			remove: () => this.remove(job.id),
 		};
@@ -405,14 +522,14 @@ export class InMemoryQueue {
 			!this.paused &&
 			partition.active.length < concurrency
 		) {
-			// First waiting job whose group is not already running.
-			const index = partition.waiting.findIndex(
-				(job) => !partition.activeGroups.has(job.group),
-			);
-			if (index === -1) break;
+			const pick = this.pickNext(partition);
+			if (!pick) break;
 
-			const job = partition.waiting.splice(index, 1)[0];
+			const job = partition.waiting.splice(pick.index, 1)[0];
 			if (!job) break;
+			job.jumped = pick.jumped;
+			job.wentAheadOf = pick.jumped ? pick.index : 0;
+			partition.jumpedLast = pick.jumped;
 			job.state = "active";
 			job.processedOn = this.now();
 			partition.activeGroups.add(job.group);
@@ -422,12 +539,41 @@ export class InMemoryQueue {
 			if (journal) this.notify(() => journal.started(job.journalId));
 			void this.runJob(job);
 		}
+		// A drained lane has nothing left to be fair to.
+		if (partition.waiting.length === 0) partition.jumpedLast = false;
+	}
+
+	/**
+	 * Which waiting job takes a free slot: the first one whose group is not
+	 * already running, unless a priority-flagged job further down (also with a
+	 * free group) may jump it. A flagged job that is first in line anyway is a
+	 * plain start, not a jump.
+	 */
+	private pickNext(
+		partition: Partition,
+	): { index: number; jumped: boolean } | null {
+		const isFree = (job: InternalJob) => !partition.activeGroups.has(job.group);
+		const first = partition.waiting.findIndex(isFree);
+		if (first === -1) return null;
+		if (!this.jumpBlocked(partition)) {
+			// The oldest flagged job wins; if that is the first one anyway, nothing
+			// is jumped.
+			const flagged = partition.waiting.findIndex(
+				(job, index) =>
+					index >= first && job.data.priority === true && isFree(job),
+			);
+			if (flagged > first) return { index: flagged, jumped: true };
+		}
+		return { index: first, jumped: false };
 	}
 
 	private async runJob(job: InternalJob) {
+		let outcome: JobOutcome | undefined;
 		try {
-			await this.processor?.(this.toPublic(job));
+			const result = await this.processor?.(this.toPublic(job));
+			if (result === "cancelled" || result === "failed") outcome = result;
 		} catch (error) {
+			outcome = "failed";
 			job.failedReason = error instanceof Error ? error.message : String(error);
 			console.error("In-memory deployment job failed", error);
 		} finally {
@@ -436,6 +582,9 @@ export class InMemoryQueue {
 			if (partition) {
 				partition.active = partition.active.filter((j) => j.id !== job.id);
 				partition.activeGroups.delete(job.group);
+				// A priority job that did not complete frees the "one ahead"
+				// allowance for a retry; it is held for exactly as long as the slot.
+				if (job.jumped && outcome) partition.jumpedLast = false;
 			}
 			this.settle([job]);
 			if (this.activeCount() === 0) {

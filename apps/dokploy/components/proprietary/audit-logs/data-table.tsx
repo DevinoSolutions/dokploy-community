@@ -51,6 +51,7 @@ const ACTION_OPTIONS = [
 	{ value: "deploy", label: "Deployed" },
 	{ value: "cancel", label: "Cancelled" },
 	{ value: "redeploy", label: "Redeployed" },
+	{ value: "prioritize", label: "Deployed with priority" },
 	{ value: "login", label: "Login" },
 	{ value: "logout", label: "Logout" },
 ];
@@ -83,6 +84,7 @@ type AuditAction =
 	| "deploy"
 	| "cancel"
 	| "redeploy"
+	| "prioritize"
 	| "login"
 	| "logout";
 type AuditResourceType =
