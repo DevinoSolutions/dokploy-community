@@ -10,6 +10,7 @@
 #   cfg/newhealth.<svc>              healthy | unhealthy | never | none | noneonce | delay:<n>
 #   cfg/up.fail.<svc>                `up` naming the service fails
 #   cfg/stop.noop, cfg/rm.fail       stop does nothing / rm fails
+#   cfg/stop.slow                    stop takes 3 s before it acts
 #   calls.log                        one line per invocation
 #   violations.log                   `up` without service names
 D="$(cd "$(dirname "$0")/.." && pwd)/state"
@@ -99,6 +100,7 @@ case "$cmd" in
     ;;
   stop)
     [ -f "$D/cfg/stop.noop" ] && exit 0
+    [ -f "$D/cfg/stop.slow" ] && sleep 3
     for id in "$@"; do
       case "$id" in -*) continue;; esac
       if exists "$id"; then cset "$id" running false; fi

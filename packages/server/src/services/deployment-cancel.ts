@@ -448,10 +448,6 @@ const stopReleaseStep = async (
 }> => {
 	const { serverId } = releaseHost;
 	const cancelKey = getReleaseCancelKey(deploymentId);
-	// Nothing of this deployment is waiting on a release step in this process:
-	// the signal is only a precaution (a deploy this process no longer tracks),
-	// so a host that does not answer is not worth a warning.
-	const expected = hasRunningRemoteBuild(cancelKey);
 	const command = getKillRemoteBuildCommand(
 		getReleaseCancelTarget(deploymentId, !!serverId),
 		RELEASE_KILL_GRACE_SECONDS,
@@ -499,12 +495,6 @@ const stopReleaseStep = async (
 		return { result };
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
-		if (!expected) {
-			console.warn(
-				`Cancelling deployment ${deploymentId}: could not reach ${where} to look for a release step (${reason})`,
-			);
-			return { result: "UNREACHABLE" };
-		}
 		return {
 			result: "UNREACHABLE",
 			warning: `Could not reach ${where} to stop the release step (${reason}). The deployment is cancelled here, but a rolling replace may keep running there until it finishes.`,
@@ -588,11 +578,16 @@ export const cancelBuildServerDeployment = async (
 		warning = `Could not reach the build server to stop the build (${reason}). The deployment is cancelled here, but the build may keep running on the build server until it finishes.`;
 	}
 
-	// The images are built and the serving host is running the release (the
-	// rolling replace): the build server had nothing to kill, signal the host
-	// that is running it. Skipped when a build was just killed.
+	// The images are built and this process is waiting on the release script
+	// (the rolling replace) on the serving host: the build server had nothing
+	// to kill, signal the host that is running it. Skipped when a build was
+	// just killed, and when no release step is running (no extra ssh call).
 	let releaseStopped = false;
-	if (releaseHost && result !== "KILLED") {
+	if (
+		releaseHost &&
+		result !== "KILLED" &&
+		hasRunningRemoteBuild(getReleaseCancelKey(deploymentId))
+	) {
 		const release = await stopReleaseStep(releaseHost, deploymentId);
 		releaseStopped = release.result === "KILLED";
 		if (release.warning) {
