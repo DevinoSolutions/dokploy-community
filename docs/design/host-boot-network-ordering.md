@@ -26,7 +26,7 @@ attaches timed out. Docker logs the error and never retries a failed start.
 Proposed fix: one oneshot systemd unit, `dokploy-boot-recover.service`, ordered after
 `docker.service`. It starts exactly the containers Docker itself recorded as "wanted
 running, failed to attach in this daemon run". It is idempotent, rate-limited, logged, and
-ships in `dry-run` mode first.
+ships in `dry-run` mode first. Lead Gen stacks are excluded by default (5.7).
 
 ---
 
@@ -66,7 +66,8 @@ Facts that narrow the cause:
 - State left behind is machine-readable. A failed container keeps `State.ExitCode=255`,
   `State.FinishedAt` = restore time and `State.Error` =
   `failed to set up container networking: attaching to network failed ...`. Five such
-  containers are still down on prod as of this writing.
+  containers were still down at 10:15Z; by 10:30Z two had been started by hand and three
+  remained (one ordinary stack and two Lead Gen stacks).
 - Same signature on the previous reboot: 40 failures between 18:05:17 and 18:05:49 on
   2026-10-14 (`dockerd` started 18:03:47).
 - Scale: 16 cores, 217 GiB RAM, 175 swarm services, 638 containers (431 running). Userspace
@@ -178,15 +179,15 @@ Dokploy stop, `compose stop`) never writes the networking error, so it can never
 A dry run of the selector on prod (read-only) returned exactly the 5 containers that are
 down with that error and none of the cleanly stopped ones.
 
-Selection uses no names, projects or labels other than the swarm-task label. The Lead Gen
-System stacks get exactly the same treatment as every other stack. See 8 for what that
-means today.
+The only name-based rule is the exclusion list in 5.7. Everything else is decided by what
+Docker recorded about the container.
 
 ### 5.3 What it does
 
 1. Wait (up to 300 s) for swarm `active`, `ControlAvailable`, and a node that is
    `Ready Leader`. Then settle 20 s.
-2. Select candidates (5.2). In `dry-run` mode, log them and exit 0.
+2. Select candidates (5.2) and drop the excluded ones (5.7, each logged as `EXCLUDED
+   (lead-gen) <name>`). In `dry-run` mode, log the rest and exit 0.
 3. In `enforce` mode, `docker start` them in batches of 6 (the original failure was 53 at
    once), each with a 90 s timeout.
 4. Up to 4 passes, 45 s apart. A pass also re-queues containers this run started that
@@ -260,7 +261,46 @@ Both are built in; neither is optional.
   Docker's 10 s grace window before its own restart policy engages. Exhausting the attempts
   exits non-zero and logs at `err`, so the failure is visible instead of silent.
 
-### 5.7 Files
+### 5.7 Lead Gen exclusion (default on)
+
+Decision from Amin (2026-10-16): Lead Gen containers are never started by this unit unless
+Amin opts them in. The mechanism stays generic (one exclusion list, no per-stack code):
+
+- The script reads `DOKPLOY_BOOT_RECOVER_EXCLUDE`, a space separated list of shell globs. A
+  candidate is excluded if any glob matches its **container name** or its **compose project**
+  (the `com.docker.compose.project` label, which Dokploy sets to the stack's `appName`), or
+  if the glob equals a prefix of the container name followed by `-`. Excluded containers are
+  not started in any mode and are logged as `EXCLUDED (lead-gen) <name>` on every run.
+- Built-in default when the variable is unset: `*lead-gen* *leadgen*`. A missing or broken
+  env file therefore still excludes the obvious names. Set to an empty string it excludes
+  nothing; that is the only way to opt everything in.
+- The globs alone are not enough, because some Lead Gen stacks have generated names (an
+  application called `app-input-online-monitor-xxxxxx` belongs to the "Lead Gen System"
+  project). The authoritative list comes from Dokploy's database.
+
+How the list is built: `dokploy-boot-recover-exclusions` (5.8) runs **one read-only joined
+query** in the `dokploy-postgres` container: `compose` and `application` `appName` ->
+`environment` -> `project`, keeping projects whose name matches `%lead%gen%` or `%leadgen%`
+(case-insensitive). It selects only the `appName`, writes nothing, and prints the resulting
+`DOKPLOY_BOOT_RECOVER_EXCLUDE='...'` line to stdout. A human reviews it and pastes it into
+`/etc/default/dokploy-boot-recover`. On 2026-10-16 it produced the two globs plus 17
+`appName` values across 8 projects (Instagram, TikTok, GitHub, Google, Google Maps, Upwork
+and Wellfound Lead Gen, and Lead Gen System). A Lead Gen project whose name does not match
+that pattern is not found. The appNames themselves are not committed here; they are
+generated on the host at install time.
+
+How it is refreshed: on demand, not automatically. Re-run the helper and update the env file
+(a) when a Lead Gen stack or project is added or renamed, (b) before switching to `enforce`,
+and (c) after any change to the project list. A stack missing from the list is only
+protected if its name matches the globs. This is the main weakness of the design (see 7),
+and the reason `dry-run` prints the `EXCLUDED` lines: during the dry-run phase, check them
+against the Lead Gen project list.
+
+Opting a stack in: remove its entry from the line in `/etc/default/dokploy-boot-recover`
+(for a stack that only a glob covers, remove the glob and list the stacks that must stay
+excluded by `appName`). No restart or reload; the file is read at each unit start.
+
+### 5.8 Files
 
 `/etc/systemd/system/dokploy-boot-recover.service`
 
@@ -284,11 +324,13 @@ SyslogIdentifier=dokploy-boot-recover
 WantedBy=docker.service
 ```
 
-`/etc/default/dokploy-boot-recover` (ships as `dry-run`; flip to `enforce` after step 4 of
-the rollout)
+`/etc/default/dokploy-boot-recover` (ships as `dry-run`; flip to `enforce` after step 5 of
+the rollout). The `EXCLUDE` line is replaced with the helper's output at install time (5.7);
+the value shown is the safe floor.
 
 ```sh
 DOKPLOY_BOOT_RECOVER_MODE=dry-run
+DOKPLOY_BOOT_RECOVER_EXCLUDE='*lead-gen* *leadgen*'
 ```
 
 `/usr/local/sbin/dokploy-boot-recover` (mode 0755, root)
@@ -304,6 +346,10 @@ DOKPLOY_BOOT_RECOVER_MODE=dry-run
 #   exited + restart policy != no + not a swarm task + State.Error is the attach failure
 #   + the failure happened in the current dockerd run.
 # A container a user stopped has an empty State.Error and is never selected.
+#
+# Containers whose compose project or name matches DOKPLOY_BOOT_RECOVER_EXCLUDE (space
+# separated shell globs) are never started; they are logged as "EXCLUDED (lead-gen) <name>".
+# Opting a stack in means removing its entry from that list.
 set -u
 
 LOG_TAG=dokploy-boot-recover
@@ -314,9 +360,16 @@ MAX_PASSES=${DOKPLOY_BOOT_RECOVER_MAX_PASSES:-4}
 PASS_PAUSE=${DOKPLOY_BOOT_RECOVER_PASS_PAUSE:-45}
 BATCH=${DOKPLOY_BOOT_RECOVER_BATCH:-6}                    # parallel docker start
 START_TIMEOUT=${DOKPLOY_BOOT_RECOVER_START_TIMEOUT:-90}   # s per docker start
+# Space separated globs matched on container name and compose project. Unset = the two name
+# globs below (so a missing env file still excludes Lead Gen); set but empty = exclude nothing.
+EXCLUDE=${DOKPLOY_BOOT_RECOVER_EXCLUDE-*lead-gen* *leadgen*}
+NO_JOURNAL=${DOKPLOY_BOOT_RECOVER_NO_JOURNAL:-0}          # 1 = stdout only (manual dry runs)
 MARKER='attaching to network failed|failed to set up container networking'
 
-log() { logger -t "$LOG_TAG" -p "${2:-user.info}" -- "$1"; echo "$1"; }
+log() {
+  [ "$NO_JOURNAL" = 1 ] || logger -t "$LOG_TAG" -p "${2:-user.info}" -- "$1"
+  echo "$1"
+}
 
 LOCK=${DOKPLOY_BOOT_RECOVER_LOCK:-/run/dokploy-boot-recover.lock}
 exec 9>"$LOCK"
@@ -334,31 +387,60 @@ daemon_start_epoch() {
   [ -n "$ts" ] && date -d "$ts" +%s 2>/dev/null
 }
 
-# Print "id|name|finishedAt" for every container the daemon wanted running but failed to attach.
-candidates() {
-  docker ps -aq --no-trunc --filter status=exited 2>/dev/null | xargs -r docker inspect --format \
-    '{{.Id}}|{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.FinishedAt}}|{{index .Config.Labels "com.docker.swarm.task"}}|{{.State.Error}}' 2>/dev/null |
-    awk -F'|' -v m="$MARKER" '$3 != "no" && $3 != "" && $5 == "" && $6 ~ m { print $1 "|" substr($2, 2) "|" $4 }'
+# True if the container (name, compose project) matches an entry of the exclusion list.
+excluded() {
+  local e rc=1
+  set -f
+  for e in $EXCLUDE; do
+    case "$2" in $e) rc=0; break ;; esac
+    case "$1" in $e | $e-*) rc=0; break ;; esac
+  done
+  set +f
+  return $rc
 }
 
-# Same, restricted to failures of the current dockerd run.
-current_candidates() {
-  local id name fin
-  while IFS='|' read -r id name fin; do
+# Print "id|name|finishedAt|project" for every container the daemon wanted running but failed
+# to attach (any run, any stack). Docker renders a missing label as "<no value>" for some
+# template shapes (seen on 29.9.0 when .Id comes first), hence the normalisation in awk.
+candidates() {
+  docker ps -aq --no-trunc --filter status=exited 2>/dev/null | xargs -r docker inspect --format     '{{.Id}}|{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.FinishedAt}}|{{index .Config.Labels "com.docker.swarm.task"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.State.Error}}' 2>/dev/null |
+    awk -F'|' -v OFS='|' -v m="$MARKER" '{ if ($5 == "<no value>") $5 = ""; if ($6 == "<no value>") $6 = "" }
+      $3 != "no" && $3 != "" && $5 == "" && $7 ~ m { print $1, substr($2, 2), $4, $6 }'
+}
+
+# Same, restricted to failures of the current dockerd run: "id|name|project".
+current_candidates_all() {
+  local id name fin project
+  while IFS='|' read -r id name fin project; do
     [ -n "$id" ] || continue
     if [ "$(date -d "$fin" +%s 2>/dev/null || echo 0)" -ge $((DSTART - 10)) ]; then
-      echo "$id|$name"
+      echo "$id|$name|$project"
     fi
   done < <(candidates)
 }
 
+# What we may start: "id|name".
+current_candidates() {
+  local id name project
+  while IFS='|' read -r id name project; do
+    excluded "$name" "$project" || echo "$id|$name"
+  done < <(current_candidates_all)
+}
+
+log_excluded() {
+  local id name project
+  while IFS='|' read -r id name project; do
+    excluded "$name" "$project" && log "EXCLUDED (lead-gen) $name" user.notice
+  done < <(current_candidates_all)
+}
+
 # Containers that exited 255 at restore, with a restart policy, but not by the attach failure.
 log_unclassified() {
-  docker ps -aq --no-trunc --filter status=exited 2>/dev/null | xargs -r docker inspect --format \
-    '{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.ExitCode}}|{{.State.FinishedAt}}|{{index .Config.Labels "com.docker.swarm.task"}}|{{.State.Error}}' 2>/dev/null |
-    awk -F'|' -v m="$MARKER" '$2 != "no" && $2 != "" && $3 == 255 && $5 == "" && $6 !~ m { print substr($1, 2) "|" $4 }' |
-    while IFS='|' read -r name fin; do
-      if [ "$(date -d "$fin" +%s 2>/dev/null || echo 0)" -ge $((DSTART - 10)) ]; then
+  docker ps -aq --no-trunc --filter status=exited 2>/dev/null | xargs -r docker inspect --format     '{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.ExitCode}}|{{.State.FinishedAt}}|{{index .Config.Labels "com.docker.swarm.task"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.State.Error}}' 2>/dev/null |
+    awk -F'|' -v OFS='|' -v m="$MARKER" '{ if ($5 == "<no value>") $5 = ""; if ($6 == "<no value>") $6 = "" }
+      $2 != "no" && $2 != "" && $3 == 255 && $5 == "" && $7 !~ m { print substr($1, 2), $4, $6 }' |
+    while IFS='|' read -r name fin project; do
+      if [ "$(date -d "$fin" +%s 2>/dev/null || echo 0)" -ge $((DSTART - 10)) ] && ! excluded "$name" "$project"; then
         log "UNCLASSIFIED exit-255 restart-policy container (not touched): $name" user.warning
       fi
     done
@@ -383,6 +465,7 @@ DSTART=$(daemon_start_epoch)
 [ -n "$DSTART" ] || { log "cannot determine dockerd start time, giving up" user.err; exit 2; }
 sleep "$SETTLE"
 log "swarm ready, mode=$MODE, dockerd started $(date -u -d "@$DSTART" +%FT%TZ)"
+log_excluded
 
 declare -A attempts=() # id -> start attempts this run
 declare -A names=()
@@ -437,6 +520,38 @@ log "done: $recovered running after recovery, 0 still failing"
 exit 0
 ```
 
+`/usr/local/sbin/dokploy-boot-recover-exclusions` (mode 0755, root; run by hand, never by
+the unit)
+
+```bash
+#!/usr/bin/env bash
+# dokploy-boot-recover-exclusions: print the DOKPLOY_BOOT_RECOVER_EXCLUDE line for the Lead Gen
+# stacks, read from Dokploy's own database. Read-only: one SELECT, nothing is written, nothing
+# secret is selected (project name and appName only). Review the output, then paste it into
+# /etc/default/dokploy-boot-recover. See docs/design/host-boot-network-ordering.md.
+set -eu
+PG=$(docker ps --filter name=dokploy-postgres -q | head -n 1)
+[ -n "$PG" ] || { echo "dokploy-postgres container not found" >&2; exit 1; }
+
+# compose/application appName -> environment -> project, one joined query.
+names=$(docker exec -i "$PG" psql -U dokploy -d dokploy -At <<'SQL'
+select x."appName"
+from project p
+join environment e on e."projectId" = p."projectId"
+join (
+  select "environmentId", "appName" from compose
+  union all
+  select "environmentId", "appName" from application
+) x on x."environmentId" = e."environmentId"
+where p.name ilike '%lead%gen%' or p.name ilike '%leadgen%'
+order by x."appName";
+SQL
+)
+printf "DOKPLOY_BOOT_RECOVER_EXCLUDE='*lead-gen* *leadgen*"
+for n in $names; do printf ' %s' "$n"; done
+printf "'\n"
+```
+
 ---
 
 ## 6. Rollout, rollback, testing
@@ -444,13 +559,15 @@ exit 0
 ### 6.1 Rollout
 
 1. Review and merge this document. (Merging is separate from installing.)
-2. Install the three files on `devino-first`. `systemctl daemon-reload` and
+2. Install the four files on `devino-first`, run `dokploy-boot-recover-exclusions` and put
+   its output in `/etc/default/dokploy-boot-recover`. `systemctl daemon-reload` and
    `systemctl enable dokploy-boot-recover.service`. Do **not** start it yet. No restart of
    Docker or Dokploy is involved, and the deploy queue is not touched.
 3. Prove the selector on the live host, no side effects: `systemctl start
    dokploy-boot-recover.service` in `dry-run`. Expected: `DRY-RUN would start` lines for
-   exactly the containers currently down with the networking error (5 as of 2026-10-16),
-   nothing started. Compare with `docker ps -a --filter status=exited`.
+   exactly the non-Lead-Gen containers currently down with the networking error, plus one
+   `EXCLUDED (lead-gen) <name>` line per excluded container that is down. Nothing is started.
+   Compare with `docker ps -a --filter status=exited`.
 4. Leave it in `dry-run` through the next reboot or Docker restart. After it, compare
    its `DRY-RUN` list with the ground truth from the Docker log
    (`journalctl -b -u docker | grep "failed to start swarm container"`, same containers).
@@ -460,7 +577,7 @@ exit 0
 
 ### 6.2 Rollback
 
-`systemctl disable --now dokploy-boot-recover.service`, then remove the three files and
+`systemctl disable --now dokploy-boot-recover.service`, then remove the four files and
 `systemctl daemon-reload`. Instant neutralisation without touching systemd: set the mode
 back to `dry-run`. Rolling back returns the host to today's behaviour (manual recovery).
 The unit changes no Docker or Dokploy configuration, so nothing else needs undoing.
@@ -479,17 +596,44 @@ window.
 
 Done:
 
-- **T1, selector on the live host (read-only).** The exact `docker inspect` + `awk` filter
-  from `candidates()` was run against prod. It selected 5 containers, matching the 5 that
-  are `Exited (255)` with the networking error, and none of the cleanly stopped or
-  one-shot (exit 0) containers.
-- **T2, script logic against a stub `docker` (local, no host touched).** 12 fixture
-  containers. Dry run listed 6 and started none. Enforce started all 6 (one needed a
+- **T1, manual dry-run on the live host (read-only).** This is a manual dry-run of the
+  final script, not a Docker-restart dry-run. The script text was piped over `ssh` stdin
+  (`bash -c "$(cat)"`, nothing copied to the host) with the mode forced to `dry-run`, no
+  journal writes and no lock file. It ran at about 10:35Z on 2026-10-16, with the exclusion
+  list generated by the helper from the live database (stack names replaced here, as this
+  repository is public):
+
+  ```
+  swarm ready, mode=dry-run, dockerd started 2026-10-16T07:23:03Z
+  EXCLUDED (lead-gen) <lead-gen stack 1>-app-1
+  EXCLUDED (lead-gen) <lead-gen stack 2>-api-1
+  pass 1: 1 candidate(s)
+  DRY-RUN would start <ordinary stack>-<service>-1
+  ```
+
+  Controls: with an empty exclusion list the same run offered 3 containers (the two Lead
+  Gen ones plus the one above). With the two globs removed so only the 17 `appName` entries
+  remained, the output was identical to the above. Two containers that had been down at
+  10:15Z had been started by hand by then, so they were correctly not listed. Nothing was
+  started and nothing was left on the host. `bash -s` is not usable for this, because
+  `docker` and `xargs` inside the script read the same stdin and swallow the rest of the
+  script, hence `bash -c "$(cat)"`.
+- **T1b, a bug found by T1.** A first run of T1 said "nothing to do" while 3 candidates
+  existed. Cause: on Docker 29.9.0 a `--format` template that starts with `{{.Id}}` renders
+  a missing label as `<no value>` instead of an empty string, so the "no swarm-task label"
+  test failed for every container. The script now normalises `<no value>`. The stub emits
+  the same quirk, so T2 covers it.
+- **T2, script logic against a stub `docker` (local, no host touched).** 17 fixture
+  containers. Dry run listed 5 and started none. Enforce started those 5 (one needed a
   third attempt because it failed twice, one needed a second start because it died
   immediately). It left alone: a container stopped before boot, one stopped after boot,
-  an old failure from an earlier daemon run, a swarm task, a `no`-policy container, and an
-  `exit 255` container without the networking error (logged as `UNCLASSIFIED`). A third run
-  found nothing to do. Also run: `bash -n` on the script.
+  an old failure from an earlier daemon run, a swarm task, a `no`-policy container, an
+  `exit 255` container without the networking error (logged as `UNCLASSIFIED`), and six
+  excluded containers (matched by compose project, by name prefix, by generated `appName`,
+  and by glob), each logged as `EXCLUDED (lead-gen)`. A third run found nothing to do. The
+  unset-versus-empty behaviour of the exclusion variable was checked as well. One
+  deliberate over-match: a project called `lead-generation-docs` is excluded by
+  `*lead-gen*`, which is the safe direction. Also run: `bash -n` on both scripts.
 
 Not done (needs a host, and the brief said not to apply anything anywhere):
 
@@ -525,18 +669,16 @@ Not done (needs a host, and the brief said not to apply anything anywhere):
 | Docker changes the error wording on upgrade. Recovery silently stops. | Medium over time. | The pattern is two phrases. The `UNCLASSIFIED` warning fires when containers exit 255 at restore without it. Check after every Docker upgrade. |
 | Unit fails at boot (swarm never ready). | Low. | Gives up after 300 s with exit 2, logs at `err`, blocks nothing. Nothing is `After=` it. |
 | A start fails with a legitimate non-network error (bad mount, missing image). | Possible. | Logged by name with the Docker error and retried at most 4 times. |
-| Applies to Lead Gen System containers like any other. | Certain, by design. | See 8. |
+| A Lead Gen stack is missing from the exclusion list and gets started. | Low to medium. New or renamed Lead Gen projects, or a project not named "... Lead Gen", are only protected by the name globs. | Dry-run first and review the `EXCLUDED` lines. Re-run the helper after any change to Lead Gen stacks and before `enforce`. |
+| Excluded Lead Gen containers stay down after a reboot. | Certain, by decision. | They are logged on every run so the owner can start them. Opting in is a one-line edit (5.7). |
 | Root cause remains: attaches still time out. | Certain. | This fix removes the outage, not the timeout. Long term options are in 4 (c) and 6.3. |
 
 ---
 
 ## 8. Decisions needed
 
-- **Lead Gen System.** The mechanism has no per-stack logic, as required. Two Lead Gen
-  containers are among the 5 down right now with the networking error. Enabling this unit
-  means they would be started after a boot exactly as Docker's own restart policy would
-  have started them. If the standing "never touch Lead Gen" rule should also forbid that,
-  say so before moving from `dry-run` to `enforce`.
+- **Lead Gen (decided):** excluded by default, see 5.7. Still open: who starts the excluded
+  Lead Gen containers after a reboot, and whether any should be opted in later.
 - Whether to move from `dry-run` to `enforce` after step 4, or straight after step 3.
 - Whether to open a task for the stale swarm advertise address (6.3).
 - Whether to report this upstream. The standing rule is not to post upstream, so the
