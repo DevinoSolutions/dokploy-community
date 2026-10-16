@@ -19,6 +19,7 @@ import {
 	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
+	escapeHtml,
 	sendTelegramNotification,
 } from "./utils";
 
@@ -60,10 +61,6 @@ export const describeSnapvisorSnapshots = ({
 	].filter(Boolean);
 	return parts.length > 0 ? parts.join(", ") : null;
 };
-
-// Telegram sends the text as HTML; service and branch names are user data.
-const escapeHtml = (value: string) =>
-	value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 export const sendSnapvisorChangesNotifications = async ({
 	organizationId,

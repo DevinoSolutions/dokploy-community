@@ -19,6 +19,8 @@ import {
 	sendSendlyNotification,
 	sendSlackNotification,
 	sendTeamsNotification,
+	escapeHtml,
+	formatTelegramErrorMessage,
 	sendTelegramNotification,
 } from "./utils";
 
@@ -216,7 +218,7 @@ export const sendScheduleFailureNotifications = async ({
 
 				await sendTelegramNotification(
 					telegram,
-					`<b>⏰ Scheduled Job Failed</b>\n\n<b>Project:</b> ${projectName}\n<b>Schedule:</b> ${scheduleName}\n<b>Type:</b> ${scheduleType}\n<b>Date:</b> ${format(date, "PP")}\n<b>Time:</b> ${format(date, "pp")}\n\n<b>Error:</b>\n<pre>${errorMessage}</pre>`,
+					`<b>⏰ Scheduled Job Failed</b>\n\n<b>Project:</b> ${escapeHtml(projectName)}\n<b>Schedule:</b> ${escapeHtml(scheduleName)}\n<b>Type:</b> ${escapeHtml(scheduleType)}\n<b>Date:</b> ${format(date, "PP")}\n<b>Time:</b> ${format(date, "pp")}\n\n<b>Error:</b>\n<pre>${formatTelegramErrorMessage(errorMessage)}</pre>`,
 					inlineButton,
 				);
 			}
