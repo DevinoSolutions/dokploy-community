@@ -17,7 +17,10 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import {
 	abortRemoteBuild,
+	beginReleaseCancel,
+	discardReleaseCancel,
 	hasRunningRemoteBuild,
+	takeReleaseCancel,
 } from "@dokploy/server/utils/process/remote-build-registry";
 import { and, eq, ne } from "drizzle-orm";
 
@@ -344,12 +347,29 @@ export const runReleaseScript = async ({
 				"Deployment cancelled: the release step was stopped.",
 				{
 					duringRelease: true,
-					releaseKilled: getExitCode(error) === SIGKILL_EXIT_CODE,
+					releaseKilled: await wasReleaseKilled(error, cancelable.deploymentId),
 				},
 			);
 		}
 		throw error;
+	} finally {
+		discardReleaseCancel(cancelable.deploymentId);
 	}
+};
+
+/**
+ * Whether the release step had to be SIGKILLed. The exit status says so only
+ * when the launching shell reports it (137); under a plain `sh` it dies of the
+ * TERM itself and reports 143 either way, so what the cancel side saw decides.
+ */
+const wasReleaseKilled = async (
+	error: unknown,
+	releaseKey: string,
+): Promise<boolean> => {
+	if (getExitCode(error) === SIGKILL_EXIT_CODE) return true;
+	// Waits at most as long as the kill script's own timeout, plus a moment.
+	const cancel = await takeReleaseCancel(releaseKey, KILL_TIMEOUT_MS + 5_000);
+	return cancel?.hardKilled === true;
 };
 
 /** Exit statuses of a shell whose command was ended by INT, KILL or TERM. */
@@ -481,6 +501,27 @@ const stopReleaseStep = async (
 	result: RemoteBuildKillResult | "UNREACHABLE";
 	warning?: string;
 }> => {
+	// Announced before the signal: the deploy side sees its command end while
+	// the kill script is still finishing, and waits for this outcome.
+	const settle = beginReleaseCancel(getReleaseCancelKey(deploymentId));
+	let hardKilled = false;
+	try {
+		const stopped = await signalReleaseStep(releaseHost, deploymentId);
+		hardKilled = stopped.hardKilled === true;
+		return stopped;
+	} finally {
+		settle({ hardKilled });
+	}
+};
+
+const signalReleaseStep = async (
+	releaseHost: { serverId: string | null },
+	deploymentId: string,
+): Promise<{
+	result: RemoteBuildKillResult | "UNREACHABLE";
+	warning?: string;
+	hardKilled?: boolean;
+}> => {
 	const { serverId } = releaseHost;
 	const cancelKey = getReleaseCancelKey(deploymentId);
 	const command = getKillRemoteBuildCommand(
@@ -522,6 +563,7 @@ const stopReleaseStep = async (
 				// cleanup did not finish, and a shielded `docker compose up` it had
 				// started may still be running on its own.
 				result: "KILLED",
+				hardKilled: true,
 				warning: `The release step on ${where} did not finish its cleanup within ${RELEASE_KILL_GRACE_SECONDS}s of the cancel and was killed. A replica it had not promoted may be left over, and a docker compose step it had started may still be running on its own; the next deploy reconciles the replica.`,
 			};
 		}

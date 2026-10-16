@@ -1168,7 +1168,9 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				);
 
 				expect(kill.stdout.trim()).toBe("KILLED");
-				expect(await exited).toBe(137);
+				// 137 when $SHELL execs the command; 143 under a plain sh (no $SHELL, as
+				// in the Dokploy container), which dies of the TERM itself.
+				expect([137, 143]).toContain(await exited);
 				expect(existsSync(pidFile)).toBe(false);
 			});
 

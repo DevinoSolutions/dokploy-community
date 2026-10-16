@@ -66,7 +66,11 @@ import {
 	RELEASE_KILL_GRACE_SECONDS,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
 import { ExecError } from "@dokploy/server/utils/process/ExecError";
-import { registerRemoteBuild } from "@dokploy/server/utils/process/remote-build-registry";
+import {
+	beginReleaseCancel,
+	registerRemoteBuild,
+	takeReleaseCancel,
+} from "@dokploy/server/utils/process/remote-build-registry";
 
 const isKill = (command: unknown) => String(command).includes("kill -s TERM");
 
@@ -335,6 +339,18 @@ describe("cancelBuildServerDeployment with a release host", () => {
 		expect(mocks.updateSets.some((set) => set.errorMessage === warning)).toBe(
 			true,
 		);
+	});
+
+	it("records for the deploy side whether the step had to be SIGKILLed", async () => {
+		const key = getReleaseCancelKey("dep-1");
+
+		answers("NONE", "KILLED_HARD");
+		await cancelBuildServerDeployment(target);
+		expect(await takeReleaseCancel(key, 10)).toEqual({ hardKilled: true });
+
+		answers("NONE", "KILLED");
+		await cancelBuildServerDeployment(target);
+		expect(await takeReleaseCancel(key, 10)).toEqual({ hardKilled: false });
 	});
 
 	it("a release step that stopped on SIGTERM has no warning", async () => {
@@ -756,6 +772,108 @@ describe("runReleaseScript", () => {
 			expect(error).toMatchObject({ duringRelease: true, releaseKilled });
 		},
 	);
+
+	describe("whether the release step was killed, as the cancel side saw it", () => {
+		const key = getReleaseCancelKey("dep-1");
+
+		// Under a plain sh (no $SHELL, the Dokploy container) the launcher dies of
+		// the TERM itself and reports 143 whether or not the step was SIGKILLed.
+		const endsWith143 = (afterMs?: () => void) =>
+			mocks.execAsyncRemote.mockImplementation(async () => {
+				cancelled();
+				afterMs?.();
+				throw new ExecError("Remote command failed with exit code 143", {
+					command: "x",
+					exitCode: 143,
+				});
+			});
+
+		const run = () =>
+			runReleaseScript({
+				serverId: "serving-1",
+				command: "echo release",
+				deploymentId: "dep-1",
+			}).catch((e) => e);
+
+		it("exit 143 and the cancel side saw a SIGKILL: releaseKilled, even when the outcome arrives after the command ended", async () => {
+			notCancelled();
+			const settle = beginReleaseCancel(key);
+			endsWith143(() => {
+				setTimeout(() => settle({ hardKilled: true }), 50);
+			});
+
+			const error = await run();
+
+			expect(error).toMatchObject({ duringRelease: true, releaseKilled: true });
+			expect(await takeReleaseCancel(key, 10)).toBeUndefined();
+		});
+
+		it("exit 143 and the step stopped on SIGTERM: not releaseKilled", async () => {
+			notCancelled();
+			const settle = beginReleaseCancel(key);
+			endsWith143(() => {
+				setTimeout(() => settle({ hardKilled: false }), 50);
+			});
+
+			const error = await run();
+
+			expect(error).toMatchObject({
+				duringRelease: true,
+				releaseKilled: false,
+			});
+		});
+
+		it("exit 143 with no cancel announced (a signal from elsewhere): not releaseKilled", async () => {
+			notCancelled();
+			endsWith143();
+
+			const error = await run();
+
+			expect(error).toMatchObject({
+				duringRelease: true,
+				releaseKilled: false,
+			});
+		});
+
+		it("exit 137 is releaseKilled whatever the cancel side said", async () => {
+			notCancelled();
+			const settle = beginReleaseCancel(key);
+			settle({ hardKilled: false });
+			mocks.execAsyncRemote.mockImplementation(async () => {
+				cancelled();
+				throw new ExecError("Remote command failed with exit code 137", {
+					command: "x",
+					exitCode: 137,
+				});
+			});
+
+			const error = await run();
+
+			expect(error).toMatchObject({ releaseKilled: true });
+			expect(await takeReleaseCancel(key, 10)).toBeUndefined();
+		});
+
+		it("does not leak an outcome when the release command ended on its own", async () => {
+			notCancelled();
+			beginReleaseCancel(key);
+			mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+			await runReleaseScript({
+				serverId: "serving-1",
+				command: "echo release",
+				deploymentId: "dep-1",
+			});
+
+			expect(await takeReleaseCancel(key, 10)).toBeUndefined();
+		});
+
+		it("stops waiting for a cancel that never reports", async () => {
+			beginReleaseCancel(key);
+
+			expect(await takeReleaseCancel(key, 20)).toBeUndefined();
+			expect(await takeReleaseCancel(key, 20)).toBeUndefined();
+		});
+	});
 
 	it("a dropped connection after a cancel is the cancellation too", async () => {
 		notCancelled();
