@@ -45,14 +45,14 @@ takes 5 to 8 seconds, before any layer is touched.
     Docker Hub). Logs for 16 older failed deploys were not found on devino-first or devino-third, so the earlier
     history is incomplete.
 - So the fix is not build-server only. devino-first, devino-third and devino-second
-  all egress through 74.12.17.251 and share one bucket.
+  all egress through the site's shared public egress IP and share one bucket.
 - Naming: Dokploy has two build servers. `devino-third Build Server` is
   devino-third (192.168.2.229, `saZ6E_4nv0Ue2nUdm2GOi`), which runs the app builds.
   `Main Build Server` is devino-second (192.168.2.217, `z23s7X5TGtmf0VRFc3Q43`);
   its ssh alias is `devino-second`. devino-first (192.168.2.16) is the Dokploy host
   and builds composes locally.
-- The shared bucket is 100 requests per hour (`ratelimit-limit: 100;w=3600`, source
-  74.12.17.251), not per host. Both build servers and anything else behind that
+- The shared bucket is 100 requests per hour (`ratelimit-limit: 100;w=3600`, keyed on
+  the site's shared public egress IP), not per host. Both build servers and anything else behind that
   address (devino-first, other devino hosts, the workstation) draw from it together.
   It was checked from devino-third and devino-second, both reporting the same
   remaining count (94).
@@ -65,11 +65,13 @@ takes 5 to 8 seconds, before any layer is touched.
 | 429 on 2026-10-16 | yes, 16 compose deploys (deploy logs) | yes, 12 app builds; dockerd journal 12:56:01 to 12:58:32Z | none seen |
 | Docker | 29.9.0, `live-restore=false` | 28.5.0, overlay2, `live-restore=false` | 29.6.1, overlay2, `live-restore=false` |
 | `/etc/docker/daemon.json` | nvidia runtime, `default-address-pools`, `dns`, `node-generic-resources`, `min-api-version`, `features` | does not exist (`/etc/docker` is empty) | `{"insecure-registries": ["192.168.2.217:5001", "127.0.0.1:5001"]}` |
-| `registry-mirrors` | none | none | none |
+| `docker info` mirrors | `[]` | `null` | `[]` |
 | `~/.docker/config.json` auths | only `localhost:5000` | only `localhost:5000`; no `index.docker.io` | none |
 | buildx | `default*` driver `docker` (BuildKit 0.34.0) only | `default*` driver `docker` (0.25.0) only | `default*` driver `docker` (0.31.1) and `devino-remote` driver `remote` (`tcp://192.168.2.217:1234`, container `buildkitd` 0.33.0) |
-| Running containers | 435 | 0 (pure build box) | registry-proxy, buildkitd, others |
-| Public IP | 74.12.17.251 | 74.12.17.251 | 74.12.17.251 |
+| Running containers | hundreds (435 to 525 counted during this session) | 0 (pure build box) | 2 (registry-proxy, buildkitd) |
+| `/etc/docker/certs.d` (would hold a docker.io `hosts.toml`) | absent | absent | absent |
+| `dockerd --validate` on the current file | configuration OK | no file | configuration OK |
+| Public egress IP | the shared site IP | the shared site IP | the shared site IP |
 
 - All three hosts sit behind the same public IP, so they draw from one anonymous
   Docker Hub bucket. devino-second just did not build a docker.io image in that
@@ -77,7 +79,7 @@ takes 5 to 8 seconds, before any layer is touched.
   workstation) draws from the same bucket.
 - One `ratelimitpreview/test` HEAD each from devino-third and devino-second after 13:17Z returned the
   same state: `ratelimit-limit: 100;w=3600`, `ratelimit-remaining: 94;w=3600`,
-  `docker-ratelimit-source: 74.12.17.251`. The bucket has mostly recovered, which
+  `docker-ratelimit-source` equal to the shared egress IP. The bucket has mostly recovered, which
   is why this looks intermittent: it empties during a burst of builds and refills.
   Marka deploys web and marka-ai on every merge, and every build resolves its
   docker.io bases again: web alone ran 6 builds between 04:43Z and 12:58Z on 2026-10-16.
@@ -91,9 +93,13 @@ takes 5 to 8 seconds, before any layer is touched.
 - The `registry-proxy` config comment refers to a "Docker Hub mirror
   (k8s/dockerhub-mirror.yaml)". I could not find that manifest in any local
   checkout I searched, so I did not rely on it.
-- mirror.gcr.io has what we need: from devino-third, HEAD requests for
+- mirror.gcr.io serves what we need today: from devino-third, HEAD requests for
   `library/node` tags `24-alpine`, `22-alpine` and `22.23.2-alpine3.23` all
   returned 200 with a digest. These requests do not touch our Docker Hub budget.
+  That is the whole evidence that it still works in 2026. Google's own page says
+  it caches "frequently-accessed public" images and gives no SLA, no cache
+  guarantee and no deprecation statement, so it could change or drop a tag
+  without notice.
 
 ## Options
 
@@ -106,8 +112,9 @@ metadata HEAD that failed here) and falls back to Docker Hub if the mirror
 errors or lacks the image. Only docker.io is affected; ghcr.io, `localhost:5000`
 and the LAN registry are untouched. mirror.gcr.io is Google's cache of popular
 Docker Hub images, so a miss for a rare image or a brand-new tag still goes to
-Docker Hub and still spends budget. There is no SLA and cached tags can lag
-slightly, which is fine for base images.
+Docker Hub and still spends budget. There is no SLA or cache guarantee, and cached
+tags can lag slightly, which is fine for base images. If the mirror is down or
+errors, Docker falls back to Docker Hub, so the worst case is today's behavior.
 
 daemon.json diff, devino-third (new file):
 
@@ -140,8 +147,11 @@ elided here, and make sure the preceding line gets its comma):
 ```
 
 None of the three hosts sets `data-root` or `log-opts`, so there is nothing else to
-preserve. On devino-first, edit a copy, run the validation below, and only then move it
-into place.
+preserve. Before editing, copy the file (`cp -a /etc/docker/daemon.json
+/etc/docker/daemon.json.bak` on first and second; third has no file, so there is
+nothing to back up). On devino-first, edit a copy, run the validation below, and only
+then move it into place. Apply with `systemctl reload docker` only, never
+`restart`: devino-first runs hundreds of containers with `live-restore=false`.
 
 ### (b) Local pull-through cache for docker.io
 
@@ -165,7 +175,7 @@ pinned digest from the existing container.
 - TLS: an HTTP endpoint on the LAN needs `192.168.2.217:5002` in
   `insecure-registries` on every client (devino-second already follows this
   pattern for `:5001`). Do not expose the port beyond the LAN.
-- Serves both build servers over the LAN. devino-second may use `127.0.0.1:5002`
+- Serves all three hosts over the LAN. devino-second may use `127.0.0.1:5002`
   or the LAN address.
 - Its upstream pulls are still anonymous and come from the same public IP, so it
   saves budget only through cache hits. Tag revalidation still contacts Docker
@@ -204,8 +214,9 @@ when both miss. It is the most robust end state and the most to maintain.
 +  "registry-mirrors": ["http://192.168.2.217:5002", "https://mirror.gcr.io"],
 ```
 
-(devino-third: the new file from (b) with that mirrors line; devino-first: the same two keys added to its existing file; devino-second:
-the merged file from (b) with that mirrors line.)
+(devino-third: the new file from (b) with that mirrors line; devino-first: the same
+two keys added to its existing file; devino-second: the merged file from (b) with that
+mirrors line.)
 
 ### (d) Dockerfile rewrites
 
@@ -218,25 +229,29 @@ fallback.
 
 - `live-restore` is `false` on all three hosts, so a full `systemctl restart docker`
   would kill running containers and any in-flight build. devino-third runs 0
-  containers; devino-second does run some; devino-first runs 435, including
-  Dokploy itself, so a restart there must never be the plan.
-- Not needed. All three units define `ExecReload=/bin/kill -s HUP $MAINPID`, and the
-  dockerd reference (via Context7, docs.docker.com/reference/cli/dockerd) lists
-  `registry-mirrors` and `insecure-registries` among the options reconfigured on
-  SIGHUP without a restart. So `systemctl reload docker` applies the change and
-  does not touch running containers or builds. If dockerd finds an error in
-  `daemon.json` during reload it logs it and keeps the old configuration.
-- Open point: I could not verify from docs that the embedded BuildKit re-reads
-  the mirror list after a reload. The check below settles it. If the first build
-  still goes to `registry-1.docker.io`, a restart in an empty-queue window is the
-  fallback. On devino-third that is safe once nothing is building, since it runs
-  0 containers. On devino-first it is not available at all: if the reload does
-  not take effect there, stop and decide separately.
-- Rollout order: devino-third first (it carries the app builds and tolerates a
-  restart if the open point goes wrong), verify, then devino-first, then
-  devino-second. The devino-first reload follows the standing rule for that host:
-  empty deploy queue, two empty checks, and a `pg_dump` first, even though a
-  SIGHUP reload does not restart Dokploy.
+  containers; devino-second runs 2; devino-first runs hundreds, including Dokploy
+  itself, so a restart there must never be the plan. Every apply and rollback step in
+  this note is a reload.
+- A reload is enough. All three units define `ExecReload=/bin/kill -s HUP $MAINPID`,
+  and the dockerd reference (via Context7, docs.docker.com/reference/cli/dockerd)
+  lists `registry-mirrors` and `insecure-registries` among the options reconfigured
+  on SIGHUP without a restart. `systemctl reload docker` does not touch running
+  containers or builds. If dockerd finds an error in `daemon.json` during reload it
+  logs it and keeps the old configuration.
+- Embedded BuildKit picks the new mirrors up on reload, with no restart. Per review
+  of moby's builder code (not tested here), `Daemon.RegistryHosts` reads the
+  registry service config on every call and builds the docker.io mirror hosts from
+  it. Caveat: this holds only while `/etc/docker/certs.d/docker.io/hosts.toml` is
+  absent. It is absent on all three hosts (`/etc/docker/certs.d` does not exist).
+  The first-build check below still confirms it empirically.
+- Reload on devino-first with the nvidia runtime and `features` keys: the reloadable
+  list includes `runtimes`, `default-runtime` and `features`, which are present and
+  unchanged, so the reload re-applies identical values; non-reloadable keys
+  (`default-address-pools`, `dns`, `node-generic-resources`, `min-api-version`) are
+  not applied on reload. `dockerd --validate --config-file=/etc/docker/daemon.json` on the
+  current file returned "configuration OK" on devino-first and devino-second, so
+  run it again on the edited copy and expect the same.
+- Rollout order: devino-third first, verify, then devino-first, then devino-second.
 
 ## BuildKit and buildx
 
@@ -256,10 +271,24 @@ fallback.
 ## Safe window
 
 The deploy queue is read through the Dokploy MCP tool `deployment-queueList`
-(read-only). Apply when no job is `active`, ideally also none `waiting`. A reload
-interrupts nothing, but an empty queue gives a clean first build to verify with.
-For this fleet that means devino-first's queue, not a per-server queue.
-At the time of writing it held 2 active and 3 waiting jobs, none for Marka.
+(read-only). It is one queue on devino-first, not a per-server queue. At the time
+of writing it held 2 active and 3 waiting jobs, none for Marka. A reload interrupts
+nothing, so these windows are about a clean first build to verify with and about
+never being caught mid-change if a restart is ever needed.
+
+- **devino-third:** host-level idle check: `docker ps -q` prints nothing, and
+  `pgrep -c -f '[d]ocker.* build'` prints 0 (count only, never `-a`, since argv can
+  hold tokens; the bracket stops the pattern matching its own shell). A reload is
+  harmless even mid-build. A restart, by contrast, kills an in-flight embedded-BuildKit
+  build, so if a restart is ever required here, stop new deploys to this server
+  first and wait for the idle check.
+- **devino-first:** the standing rule. Deploy queue empty on two checks, and a
+  `pg_dump` first. A reload does not stop containers, but a compose build in flight
+  could see the registry config change underneath it, so wait for the queue to drain.
+  Reload only, never restart.
+- **devino-second:** no active build for it in the queue, and the same idle check as
+  devino-third (it also runs the `registry-proxy` and `buildkitd` containers, which a
+  reload leaves alone).
 
 ## Verification
 
@@ -267,7 +296,7 @@ At the time of writing it held 2 active and 3 waiting jobs, none for Marka.
 2. `systemctl reload docker`, then `journalctl -u docker --since '-2min'` shows
    no config error.
 3. `docker info --format '{{json .RegistryConfig.Mirrors}}'` lists the new mirror
-   (it prints `null` or `[]` today on all three hosts).
+   (it prints `[]` on first and second and `null` on third today).
 4. Pull a small, otherwise unused docker.io image on the host and confirm its layers
    came through the mirror (for (b)/(c), `docker logs registry-dockerhub`
    shows the request; for (a) a pull of an image missing from the local store
@@ -279,12 +308,50 @@ At the time of writing it held 2 active and 3 waiting jobs, none for Marka.
 
 ## Rollback
 
+Do not roll back by deleting the file or restoring a `.bak` that lacks the key and
+then reloading. On reload dockerd only changes the mirror list if `registry-mirrors`
+is present in the file (it starts from the live configuration), so the mirror would
+stay active. Write the key explicitly as an empty list first, keeping every other key,
+then validate, reload and confirm, and only then tidy the file. The same rule applies
+to `insecure-registries` if option (b)/(c) added an entry: write the old list out
+explicitly. Every step is a reload; never restart.
+
+devino-third (no file existed originally):
+
 ```
-cp -a /etc/docker/daemon.json /etc/docker/daemon.json.bak   # before editing (devino-second)
-# devino-third has no file today: rollback is deleting it
-rm /etc/docker/daemon.json   # or: mv /etc/docker/daemon.json.bak /etc/docker/daemon.json
+printf '{\n  "registry-mirrors": []\n}\n' > /etc/docker/daemon.json
+dockerd --validate --config-file=/etc/docker/daemon.json
 systemctl reload docker
-docker info --format '{{json .RegistryConfig.Mirrors}}'      # back to null
+docker info --format '{{json .RegistryConfig.Mirrors}}'    # must now print []
+rm /etc/docker/daemon.json     # only after the line above shows []
+```
+
+devino-second (keep `insecure-registries`; a bare `rm` would drop it):
+
+```
+cat > /etc/docker/daemon.json <<'JSON'
+{
+  "insecure-registries": ["192.168.2.217:5001", "127.0.0.1:5001"],
+  "registry-mirrors": []
+}
+JSON
+dockerd --validate --config-file=/etc/docker/daemon.json
+systemctl reload docker
+docker info --format '{{json .RegistryConfig.Mirrors}}'    # must print []
+mv /etc/docker/daemon.json.bak /etc/docker/daemon.json     # original, no mirror key
+```
+
+devino-first (keep the nvidia runtime, address pools, dns, features and the rest; a
+lost file here would be catastrophic at the next restart):
+
+```
+cp -a /etc/docker/daemon.json.bak /tmp/daemon.rollback.json
+# edit the copy: set  "registry-mirrors": []  and change nothing else
+dockerd --validate --config-file=/tmp/daemon.rollback.json
+cp /tmp/daemon.rollback.json /etc/docker/daemon.json
+systemctl reload docker          # RELOAD ONLY. Never restart: hundreds of containers, live-restore=false
+docker info --format '{{json .RegistryConfig.Mirrors}}'    # must print []
+cp -a /etc/docker/daemon.json.bak /etc/docker/daemon.json  # original, no mirror key
 ```
 
 For (b)/(c), also `docker stop registry-dockerhub` once no client lists it.
@@ -292,8 +359,8 @@ For (b)/(c), also `docker stop registry-dockerhub` once no client lists it.
 ## Docker Hub login (alternative)
 
 An authenticated pull uses a per-account bucket instead of the shared IP bucket.
-Docker's published figure for a free personal account is 200 pulls per 6 hours;
-paid plans raise or lift it. Where it would go:
+The figure I recall for a free personal account is 200 pulls per 6 hours (not
+re-verified here; check Docker's current limits page); paid plans raise or lift it. Where it would go:
 
 - `docker login` on devino-third and devino-second (writes `/root/.docker/config.json`,
   used by the daemon and BuildKit for docker.io), or
@@ -306,6 +373,6 @@ Docker Hub credential, which Amin decides on. Nothing in (a) to (c) requires one
 
 ## Recommendation
 
-Do (a) on all three hosts now (devino-third, devino-first, devino-second): one key, `systemctl reload docker`, no restart, no new
-service. It removes the Docker Hub HEAD/GET from the common case, which is
+Do (a) on all three hosts now (devino-third, devino-first, devino-second): one key,
+`systemctl reload docker`, no restart, no new service. It removes the Docker Hub HEAD/GET from the common case, which is
 exactly what failed. Revisit (c) only if 429s recur with the mirror in place.
