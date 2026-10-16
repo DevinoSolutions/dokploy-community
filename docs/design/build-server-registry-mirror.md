@@ -46,6 +46,16 @@ takes 5 to 8 seconds, before any layer is touched.
     history is incomplete.
 - So the fix is not build-server only. devino-first, devino-third and devino-second
   all egress through 74.12.17.251 and share one bucket.
+- Naming: Dokploy has two build servers. `devino-third Build Server` is
+  devino-third (192.168.2.229, `saZ6E_4nv0Ue2nUdm2GOi`), which runs the app builds.
+  `Main Build Server` is devino-second (192.168.2.217, `z23s7X5TGtmf0VRFc3Q43`);
+  its ssh alias is `devino-second`. devino-first (192.168.2.16) is the Dokploy host
+  and builds composes locally.
+- The shared bucket is 100 requests per hour (`ratelimit-limit: 100;w=3600`, source
+  74.12.17.251), not per host. Both build servers and anything else behind that
+  address (devino-first, other devino hosts, the workstation) draw from it together.
+  It was checked from devino-third and devino-second, both reporting the same
+  remaining count (94).
 
 ## Findings
 
