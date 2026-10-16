@@ -623,6 +623,159 @@ describe("a compose that builds on its serving host (no build server)", () => {
 			expect(killsOn("serving-1")).toHaveLength(1);
 		});
 
+		describe("a compose with a rolling replace, before its release step exists (T-2721)", () => {
+			const ROLLING = {
+				enabled: true,
+				services: ["web"],
+				healthTimeoutSeconds: 60,
+				drainSeconds: 0,
+			};
+			const rollingCompose = () =>
+				mocks.composeFindFirst.mockResolvedValue({
+					buildServerId: null,
+					serverId: "serving-1",
+					rollingReplace: ROLLING,
+				});
+			const runningRow = {
+				deploymentId: "dep-1",
+				logPath: "/l/dep-1.log",
+				composeId: "c1",
+				applicationId: null,
+				buildServerId: null,
+			};
+
+			it("compose.killBuild's cancel claims the deployment while it is still cloning or patching", async () => {
+				rollingCompose();
+				mocks.deploymentsFindMany.mockResolvedValue([
+					{ deploymentId: "dep-1", logPath: "/l/dep-1.log" },
+				]);
+
+				const outcome = await cancelBuildServerDeploymentsForService({
+					type: "compose",
+					composeId: "c1",
+				});
+
+				// Claimed (the deploy sees it at its next step) but not stopped: the
+				// caller keeps its generic stop, which a plain `up` still needs.
+				expect(outcome).toEqual({
+					usesBuildServer: false,
+					cancelled: 1,
+					stopped: 0,
+					warnings: [],
+				});
+				expect(mocks.updateSets[0]).toMatchObject({ status: "cancelled" });
+				expect(killsOn("serving-1")).toHaveLength(0);
+				expect(decodedLogLines()).toContain(
+					"A step already in progress (fetching the source, applying patches) is let finish",
+				);
+			});
+
+			it("deployment.killProcess' cancel claims it too, and needs no generic stop", async () => {
+				rollingCompose();
+				mocks.deploymentsFindFirst.mockResolvedValue(runningRow);
+
+				const outcome = await cancelBuildServerDeploymentById("dep-1");
+
+				expect(outcome).toMatchObject({
+					status: "cancelled",
+					result: "NONE",
+					genericStopNeeded: false,
+				});
+				expect(mocks.updateSets[0]).toMatchObject({ status: "cancelled" });
+				expect(killsOn("serving-1")).toHaveLength(0);
+			});
+
+			it("a deployment that already ended is not claimed", async () => {
+				rollingCompose();
+				mocks.returning.mockResolvedValue([]);
+				mocks.deploymentsFindFirst.mockResolvedValue(runningRow);
+
+				await expect(cancelBuildServerDeploymentById("dep-1")).resolves.toEqual(
+					{ status: "not-running" },
+				);
+				expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+			});
+
+			it("once the release step runs, the cancel still goes through the release launcher", async () => {
+				rollingCompose();
+				startWaitingOnRelease();
+				mocks.deploymentsFindMany.mockResolvedValue([
+					{ deploymentId: "dep-1", logPath: "/l/dep-1.log" },
+				]);
+
+				const outcome = await cancelBuildServerDeploymentsForService({
+					type: "compose",
+					composeId: "c1",
+				});
+
+				expect(outcome).toMatchObject({ cancelled: 1, stopped: 1 });
+				expect(killsOn("serving-1")).toHaveLength(1);
+			});
+
+			it("a release step that could not be signalled still needs the generic stop", async () => {
+				rollingCompose();
+				startWaitingOnRelease();
+				answers("NONE", "NONE");
+				mocks.deploymentsFindFirst.mockResolvedValue(runningRow);
+
+				const outcome = await cancelBuildServerDeploymentById("dep-1");
+
+				expect(outcome).toMatchObject({
+					status: "cancelled",
+					genericStopNeeded: true,
+				});
+			});
+
+			it("a build-server compose does not go through this path", async () => {
+				mocks.composeFindFirst.mockResolvedValue({
+					buildServerId: "build-1",
+					serverId: "serving-1",
+					rollingReplace: ROLLING,
+				});
+				mocks.deploymentsFindMany.mockResolvedValue([
+					{ deploymentId: "dep-1", logPath: "/l/dep-1.log" },
+				]);
+
+				const outcome = await cancelBuildServerDeploymentsForService({
+					type: "compose",
+					composeId: "c1",
+				});
+
+				expect(outcome).toMatchObject({ usesBuildServer: true, cancelled: 1 });
+				// The build server is asked first, as before.
+				expect(
+					mocks.execAsyncRemote.mock.calls.filter(
+						(call) => call[0] === "build-1" && isKill(call[1]),
+					),
+				).toHaveLength(1);
+			});
+
+			it("a compose with the rolling replace switched off is left to the caller", async () => {
+				mocks.composeFindFirst.mockResolvedValue({
+					buildServerId: null,
+					serverId: "serving-1",
+					rollingReplace: { ...ROLLING, enabled: false },
+				});
+				mocks.deploymentsFindMany.mockResolvedValue([
+					{ deploymentId: "dep-1", logPath: "/l/dep-1.log" },
+				]);
+
+				const outcome = await cancelBuildServerDeploymentsForService({
+					type: "compose",
+					composeId: "c1",
+				});
+
+				expect(outcome).toMatchObject({ cancelled: 0, stopped: 0 });
+				expect(mocks.updateSets).toHaveLength(0);
+				await expect(
+					(async () => {
+						mocks.deploymentsFindFirst.mockResolvedValue(runningRow);
+						return cancelBuildServerDeploymentById("dep-1");
+					})(),
+				).resolves.toBeNull();
+			});
+		});
+
 		it("deployment.killProcess keeps its pid kill for a compose deploy that is not in a rolling replace", async () => {
 			mocks.deploymentsFindFirst.mockResolvedValue({
 				deploymentId: "dep-1",

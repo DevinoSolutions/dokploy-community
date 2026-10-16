@@ -67,6 +67,7 @@ import {
 } from "./deployment";
 import {
 	appendLogLine,
+	assertDeploymentNotCancelled,
 	CANCELLED_THEN_FAILED_NOTE,
 	CANCELLED_TOO_LATE_NOTE,
 	DeploymentCancelledError,
@@ -258,6 +259,31 @@ const usesDeploymentCancel = (
 	resolveComposeRolling(entity.rollingReplace) !== null;
 
 /**
+ * The cancel check between the steps of a compose with a rolling replace that
+ * builds on its serving host. A cancel that lands while a step runs (fetching
+ * the source, applying patches) has no release step to signal yet: it only
+ * claims the deployment row (see `cancelRollingReleases`), and the deploy
+ * stops here, at the next step boundary, with a `DeploymentCancelledError`.
+ * A no-op for every other compose (a build server has its own checkpoints, see
+ * `prepareComposeBuildServerDeploy`; the rest keeps the generic stop) and for
+ * a deployment that cannot be cancelled (a preview).
+ */
+const createCancelCheckpoint = (
+	entity: Pick<Compose, "buildServerId" | "rollingReplace">,
+	deploymentId: string | undefined,
+	cancellable = true,
+) => {
+	const enabled =
+		cancellable &&
+		Boolean(deploymentId) &&
+		!entity.buildServerId &&
+		resolveComposeRolling(entity.rollingReplace) !== null;
+	return async () => {
+		if (enabled) await assertDeploymentNotCancelled(deploymentId);
+	};
+};
+
+/**
  * Shared clone → patches → (optional fresh-volumes down) → build pipeline used
  * by both `deployCompose` and the compose-preview deploy path. Extracting it
  * keeps `deployCompose` behavior identical while letting a preview run the same
@@ -287,6 +313,11 @@ export const runComposeBuild = async (
 	const { freshVolumes = false, applyPatches = true, cancellable } = options;
 	const serverId = entity.serverId;
 	const phases = createComposePhaseLogger(entity, deployment.logPath);
+	const checkpoint = createCancelCheckpoint(
+		entity,
+		deployment.deploymentId,
+		cancellable,
+	);
 
 	const runStep = async (rawCommand: string) => {
 		const commandWithLog = `(${rawCommand}) >> ${deployment.logPath} 2>&1`;
@@ -296,6 +327,8 @@ export const runComposeBuild = async (
 			await execAsync(commandWithLog);
 		}
 	};
+
+	await checkpoint();
 
 	// Must run before the clone / raw-file rewrite below overwrites the code
 	// directory, otherwise there is nothing left to roll back to.
@@ -321,6 +354,7 @@ export const runComposeBuild = async (
 		entity.sourceType === "raw" ? "Write compose file" : "Fetch source",
 		() => runStep(command),
 	);
+	await checkpoint();
 
 	if (applyPatches && entity.sourceType !== "raw") {
 		command = "set -e;";
@@ -333,6 +367,7 @@ export const runComposeBuild = async (
 			{ deploymentId: deployment.deploymentId },
 		);
 		await phases.run("Apply patches", () => runStep(command));
+		await checkpoint();
 	}
 
 	// >>> build-policy hook (compose): required-checks gate, between the clone
@@ -343,6 +378,7 @@ export const runComposeBuild = async (
 	// See packages/server/src/services/build-policy/README.md
 	await waitForComposeRequiredChecks({ compose: entity, serverId });
 	// <<< build-policy hook (compose)
+	await checkpoint();
 
 	// Build-server composes build and push their images before the running
 	// release is touched, so a failed build never reaches `down --volumes`.
@@ -783,8 +819,11 @@ export const rebuildCompose = async ({
 	});
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
+	const checkpoint = createCancelCheckpoint(compose, deployment.deploymentId);
 
 	try {
+		await checkpoint();
+
 		// Snapshot before the raw-file rewrite / patch application below.
 		await backupCurrentDeployment(compose, deployment.logPath);
 
@@ -803,6 +842,7 @@ export const rebuildCompose = async ({
 				await execAsync(commandWithLog);
 			}
 		});
+		await checkpoint();
 
 		if (compose.sourceType !== "raw") {
 			command = "set -e;";
@@ -822,6 +862,7 @@ export const rebuildCompose = async ({
 					await execAsync(commandWithLog);
 				}
 			});
+			await checkpoint();
 		}
 
 		// >>> build-policy hook (compose rebuild): the same required-checks gate
@@ -839,6 +880,7 @@ export const rebuildCompose = async ({
 			serverId: compose.serverId,
 		});
 		// <<< build-policy hook (compose rebuild)
+		await checkpoint();
 
 		// Build-server composes: build and push first (see runComposeBuild).
 		const runRebuildStep = async (rawCommand: string) => {

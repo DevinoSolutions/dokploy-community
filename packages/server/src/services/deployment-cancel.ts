@@ -1,6 +1,7 @@
 import { appendFile } from "node:fs/promises";
 import { db } from "@dokploy/server/db";
 import { applications, compose, deployments } from "@dokploy/server/db/schema";
+import { resolveComposeRolling } from "@dokploy/server/utils/builders/compose-rolling";
 import {
 	getKillRemoteBuildCommand,
 	getReleaseCancelKey,
@@ -481,10 +482,12 @@ export type CancelOutcome =
 			warning?: string;
 			/**
 			 * True for a deployment with no build server whose release step was
-			 * not actually stopped (no pid file, no launcher, no /proc, the host
-			 * unreachable, a process that survived SIGKILL): the row is cancelled,
-			 * but the caller still has to run the generic stop it had before the
-			 * release step became cancelable.
+			 * running but was not actually stopped (no pid file, no launcher, no
+			 * /proc, the host unreachable, a process that survived SIGKILL): the
+			 * row is cancelled, but the caller still has to run the generic stop
+			 * it had before the release step became cancelable. False when no
+			 * release step was running: the deploy has not reached it, and stops
+			 * at its next step because the row says cancelled.
 			 */
 			genericStopNeeded?: boolean;
 	  };
@@ -699,11 +702,13 @@ export const cancelBuildServerDeployment = async (
 	// to kill, signal the host that is running it. Skipped when a build was
 	// just killed, and when no release step is running (no extra ssh call).
 	let releaseStopped = false;
-	if (
-		releaseHost &&
+	// Read once, after the claim above: a release step that registers later
+	// checks the row before it starts (see `runReleaseScript`) and stops itself.
+	const releaseRunning =
+		!!releaseHost &&
 		result !== "KILLED" &&
-		hasRunningRemoteBuild(getReleaseCancelKey(deploymentId))
-	) {
+		hasRunningRemoteBuild(getReleaseCancelKey(deploymentId));
+	if (releaseHost && releaseRunning) {
 		const release = await stopReleaseStep(releaseHost, deploymentId);
 		releaseStopped = release.result === "KILLED";
 		if (release.warning) {
@@ -736,31 +741,44 @@ export const cancelBuildServerDeployment = async (
 					? "✅ Build stopped on the build server."
 					: buildServerId
 						? "ℹ️ No build was running on the build server (it had not started, or had just finished). Nothing more will be built or deployed."
-						: "ℹ️ No release step was running (it had not started, or had just finished). Nothing more will be deployed.",
+						: "ℹ️ No release step was running (it had not started, or had just finished). A step already in progress (fetching the source, applying patches) is let finish; the deployment then stops, and nothing more will be deployed.",
 		);
 	}
 	return {
 		status: "cancelled",
 		result: releaseStopped ? "KILLED" : result,
 		warning,
-		genericStopNeeded: !buildServerId && !releaseStopped,
+		genericStopNeeded: !buildServerId && releaseRunning && !releaseStopped,
 	};
 };
 
 /**
- * Cancels the deployments of a compose without a build server that are inside
- * their rolling replace right now (this process is waiting on the cancelable
- * release step). A deployment that is anywhere else (cloning, a plain `up`)
- * is left alone and keeps the caller's generic stop.
+ * True for a compose without a build server that has a rolling replace: its
+ * deploy flow checks the cancel flag between its steps and runs the release
+ * step cancelable, so a cancel claims the row whatever step it is in.
+ */
+const hasRollingReplace = (owner: { rollingReplace?: unknown }) =>
+	resolveComposeRolling(owner.rollingReplace) !== null;
+
+/**
+ * Cancels the running deployments of a compose with a rolling replace and no
+ * build server, wherever they are in the flow. Inside the rolling replace
+ * (this process is waiting on the cancelable release step) the release script
+ * is signalled; before it (fetching the source, applying patches) there is no
+ * release step yet, so the claim alone stops the deploy: it checks the row
+ * before each step and before it starts the release step. Any other
+ * deployment (no rolling replace configured, no release step running) is left
+ * alone and keeps the caller's generic stop.
  */
 const cancelRollingReleases = async (
 	composeId: string,
-	owner: { serverId: string | null } | undefined,
+	owner: { serverId: string | null; rollingReplace?: unknown } | undefined,
 ): Promise<{ cancelled: number; stopped: number; warnings: string[] }> => {
 	const warnings: string[] = [];
 	let cancelled = 0;
 	let stopped = 0;
 	if (!owner) return { cancelled, stopped, warnings };
+	const rolling = hasRollingReplace(owner);
 	const running = await db.query.deployments.findMany({
 		where: and(
 			eq(deployments.composeId, composeId),
@@ -769,7 +787,12 @@ const cancelRollingReleases = async (
 		columns: { deploymentId: true, logPath: true },
 	});
 	for (const row of running) {
-		if (!hasRunningRemoteBuild(getReleaseCancelKey(row.deploymentId))) continue;
+		if (
+			!rolling &&
+			!hasRunningRemoteBuild(getReleaseCancelKey(row.deploymentId))
+		) {
+			continue;
+		}
 		const outcome = await cancelBuildServerDeployment({
 			deploymentId: row.deploymentId,
 			logPath: row.logPath,
@@ -779,7 +802,10 @@ const cancelRollingReleases = async (
 		});
 		if (outcome.status === "cancelled") {
 			cancelled++;
-			if (!outcome.genericStopNeeded) stopped++;
+			// Only a release step that was really signalled counts as stopped: the
+			// caller keeps its generic stop otherwise (a rolling compose can still
+			// run a plain `up`, which only that stop interrupts).
+			if (outcome.result === "KILLED") stopped++;
 			if (outcome.warning) warnings.push(outcome.warning);
 		}
 	}
@@ -850,7 +876,7 @@ export const cancelBuildServerDeploymentsForService = async (
 
 	const owner = await db.query.compose.findFirst({
 		where: eq(compose.composeId, service.composeId),
-		columns: { buildServerId: true, serverId: true },
+		columns: { buildServerId: true, serverId: true, rollingReplace: true },
 	});
 	if (!owner?.buildServerId) {
 		const rolling = await cancelRollingReleases(service.composeId, owner);
@@ -912,7 +938,7 @@ export const cancelBuildServerDeploymentById = async (
 	if (row.composeId) {
 		const owner = await db.query.compose.findFirst({
 			where: eq(compose.composeId, row.composeId),
-			columns: { buildServerId: true, serverId: true },
+			columns: { buildServerId: true, serverId: true, rollingReplace: true },
 		});
 		if (owner?.buildServerId) {
 			return cancelBuildServerDeployment({
@@ -923,9 +949,14 @@ export const cancelBuildServerDeploymentById = async (
 				releaseHost: { serverId: owner.serverId },
 			});
 		}
-		// Without a build server only a rolling replace that is running has
-		// something to signal; any other compose deploy keeps its generic stop.
-		if (owner && hasRunningRemoteBuild(getReleaseCancelKey(row.deploymentId))) {
+		// Without a build server only a compose with a rolling replace is
+		// cancelled through its row (signalling its release step if it is
+		// running); any other compose deploy keeps its generic stop.
+		if (
+			owner &&
+			(hasRunningRemoteBuild(getReleaseCancelKey(row.deploymentId)) ||
+				hasRollingReplace(owner))
+		) {
 			return cancelBuildServerDeployment({
 				deploymentId: row.deploymentId,
 				logPath: row.logPath,

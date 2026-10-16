@@ -132,10 +132,15 @@ deploy is never failed because of drift.
     cancel first looks at the build server and signals the serving host when
     there is nothing to kill there. The log says the release step was
     stopped; services that were already replaced stay on the new release.
-  - A compose without a build server is cancelled this way only while its
-    rolling script is running. In the steps before it (fetching the source,
-    applying patches) the cancel finds no release step, so nothing is
-    interrupted and the deploy goes on.
+  - A compose without a build server that has a rolling replace is
+    cancelled through its deployment row, whatever step it is in. While the
+    rolling script is running it is signalled as above. In the steps before it
+    (fetching the source, applying patches, the required-checks wait) there is
+    no release step to signal, so the cancel marks the deployment cancelled and
+    the deploy stops at the next step boundary: a step already in progress
+    (for example a clone) is let finish, then nothing more is fetched, pulled
+    or started and the previous release keeps serving. The new compose files
+    that step wrote stay on disk until the next deploy.
   - A script without a rolling replace (a plain `up`) is not started through
     the launcher. With a build server it runs to completion, like a cancel
     that arrives too late. Without one it keeps the generic stop, described
