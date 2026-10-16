@@ -301,6 +301,15 @@ esac`,
 		`i=0; while [ "$i" -lt 160 ] && ! grep -q -- "End of stall snapshot ${n}/" "$DOKPLOY_STALL_DIR/block" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
 sleep 1;`;
 
+	// Waits (up to 60 s) until docker has been asked for the state `n` times. The
+	// watcher runs one state command at a time and prints its block before it starts
+	// the next, so call `n` proves that blocks 1 to n-1 are already on stdout. The
+	// stub records a call when the command starts, long before its block is built and
+	// printed, so waiting for the first call and then a fixed sleep let a cleanup
+	// (which makes the watcher drop an unprinted block) win on a loaded runner.
+	const waitForPsCalls = (n: number) =>
+		`i=0; while [ "$i" -lt 240 ] && [ "$(grep -- '^----$' ${toShellPath(psArgsFile)} 2>/dev/null | wc -l | tr -d ' ')" -lt ${n} ]; do sleep 0.25; i=$((i + 1)); done;`;
+
 	it("prints delimited, timestamped snapshots while up is slow, at most maxSnapshots", {
 		timeout: 60_000,
 	}, async () => {
@@ -527,11 +536,10 @@ dokploy_stall_cleanup`,
 		installDocker({ upSleep: 0 });
 		rmSync(psArgsFile, { force: true });
 		const result = sh(
-			// Waits for the first state command instead of a fixed sleep: under a loaded
-			// CI runner the first snapshot can take longer than a few seconds to fire.
+			// Waits for the second state command, which only starts once the first block
+			// was printed: see waitForPsCalls.
 			`${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
-i=0; while [ "$i" -lt 30 ] && ! grep -q -- ---- ${toShellPath(psArgsFile)} 2>/dev/null; do sleep 1; i=$((i + 1)); done;
-sleep 2;
+${waitForPsCalls(2)}
 dokploy_stall_cleanup`,
 			env({
 				DB_PASSWORD: "hunter2-super-secret",
