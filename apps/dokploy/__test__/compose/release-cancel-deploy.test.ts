@@ -919,7 +919,10 @@ describe("a cancel while the required checks are awaited (T-2838)", () => {
 		}: {
 			assertNotCancelled?: () => Promise<void>;
 		}) => {
-			await assertNotCancelled?.();
+			// A wait that is handed no hook cannot be cancelled: fail loudly.
+			if (!assertNotCancelled)
+				throw new Error("no cancel hook given to the wait");
+			await assertNotCancelled();
 		}) as any);
 
 	/** The cancel lands during the wait: the nth cancel check throws. */
@@ -960,6 +963,9 @@ describe("a cancel while the required checks are awaited (T-2838)", () => {
 
 		expect(outcome).toMatchObject({ deploymentCancelled: true });
 		expect(mocks.waitForComposeRequiredChecks).toHaveBeenCalledTimes(1);
+		expect(mocks.waitForComposeRequiredChecks.mock.calls[0]?.[0]).toMatchObject(
+			{ assertNotCancelled: expect.any(Function) },
+		);
 		expect(
 			ranCommands().filter((c) => c.includes("RESTORE_PREVIOUS;")),
 		).toHaveLength(1);
@@ -979,6 +985,9 @@ describe("a cancel while the required checks are awaited (T-2838)", () => {
 		const outcome = await rebuild().catch((error) => error);
 
 		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(mocks.waitForComposeRequiredChecks.mock.calls[0]?.[0]).toMatchObject(
+			{ assertNotCancelled: expect.any(Function) },
+		);
 		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
 		expect(statuses().deployment).not.toContain("error");
 		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
