@@ -5,7 +5,10 @@
 type PriorityFields = {
 	/** May be picked ahead of the waiting jobs in its lane; see in-memory-queue. */
 	priority?: boolean;
-	/** Email of the user who asked for priority, shown in the deployment. */
+	/**
+	 * Id of the user who asked for priority (not the email: queueList returns
+	 * the payload). The deployment note resolves it to an email.
+	 */
 	priorityBy?: string;
 };
 

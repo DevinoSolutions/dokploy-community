@@ -192,7 +192,7 @@ export const deploymentRouter = createTRPCRouter({
 				throw notWaiting;
 			}
 
-			const outcome = myQueue.prioritize(job.id, ctx.user.email);
+			const outcome = myQueue.prioritize(job.id, ctx.user.id);
 			if (!outcome) throw notWaiting;
 
 			const isCompose = Boolean(data.composeId);

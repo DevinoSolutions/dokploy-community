@@ -24,7 +24,22 @@ const app = (applicationId: string, extra: Partial<DeploymentJob> = {}) =>
 	}) as DeploymentJob;
 
 const prio = (id: string) =>
-	app(id, { priority: true, priorityBy: "ops@x.io" });
+	app(id, { priority: true, priorityBy: "user-1" });
+
+const comp = (composeId: string, extra: Partial<DeploymentJob> = {}) =>
+	({
+		composeId,
+		titleLog: composeId,
+		descriptionLog: "",
+		type: "deploy",
+		applicationType: "compose",
+		...extra,
+	}) as DeploymentJob;
+
+const idOf = (data: DeploymentJob) =>
+	(data as { applicationId?: string }).applicationId ??
+	(data as { composeId?: string }).composeId ??
+	"";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -48,7 +63,7 @@ const harness = (
 	queue.process(
 		(job) =>
 			new Promise<JobOutcome | undefined>((resolve) => {
-				const id = (job.data as { applicationId: string }).applicationId;
+				const id = idOf(job.data);
 				started.push(id);
 				jobs.set(id, job);
 				running.set(id, resolve);
@@ -341,13 +356,26 @@ describe("no-op and bump", () => {
 		const h = harness(1, journal);
 		const added = await behind(h, "blocker", [app("b"), app("c")]);
 
+		// Others wait behind it, so it is "first in line", not "nothing waiting".
+		expect(h.queue.prioritize(added[0]?.id as string)).toEqual({
+			requested: true,
+			applied: false,
+			wentAheadOf: 0,
+			reason: "first-in-line",
+		});
+		expect(journal.updated).not.toHaveBeenCalled();
+	});
+
+	it("flagging a job that is first in line and alone says nothing is waiting", async () => {
+		const h = harness(1);
+		const added = await behind(h, "blocker", [app("b")]);
+
 		expect(h.queue.prioritize(added[0]?.id as string)).toEqual({
 			requested: true,
 			applied: false,
 			wentAheadOf: 0,
 			reason: "nothing-waiting",
 		});
-		expect(journal.updated).not.toHaveBeenCalled();
 	});
 
 	it("cannot flag a job that is running or gone", async () => {
@@ -370,6 +398,194 @@ describe("no-op and bump", () => {
 		h.queue.prioritize(added[1]?.id as string);
 		h.queue.prioritize(added[1]?.id as string);
 		expect(journal.updated).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("a flagged job never passes an older job of its own service", () => {
+	// Deploy-hook jobs carry a pinned image and compose jobs may reset volumes:
+	// running the newer one first would leave the service on the older state.
+	it("D2 (flagged) does not run before D1 of the same service", async () => {
+		const h = harness(1);
+		await behind(h, "blocker", [
+			app("b"),
+			app("d", {
+				pinnedImage: { ref: "r/d", tag: null, digest: "sha256:old" },
+			} as Partial<DeploymentJob>),
+			app("c"),
+		]);
+		const d2 = await h.queue.add(prio("d"));
+		await flush();
+
+		await h.finish("blocker");
+		expect(h.started).toEqual(["blocker", "b"]);
+		await h.finish("b");
+		expect(h.started).toEqual(["blocker", "b", "d"]);
+		expect(d2.priority?.reason).toBe("older-same-service");
+	});
+
+	it("the older job of the service always starts first, then the flagged one may pass others", async () => {
+		const h = harness(1);
+		await behind(h, "blocker", [app("b"), app("d"), app("c"), prio("d")]);
+
+		await h.finish("blocker");
+		await h.finish("b");
+		await h.finish("d"); // D1
+		// D2 is now the oldest of its service and may go ahead of c.
+		expect(h.started).toEqual(["blocker", "b", "d", "d"]);
+		await h.finish("d");
+		expect(h.started).toEqual(["blocker", "b", "d", "d", "c"]);
+	});
+
+	it("applies to compose services (fresh volumes) the same way", async () => {
+		const h = harness(1);
+		await behind(h, "blocker", [
+			comp("s", { freshVolumes: true } as Partial<DeploymentJob>),
+			app("other"),
+			comp("s", { priority: true } as Partial<DeploymentJob>),
+		]);
+
+		await h.finish("blocker");
+		// The older compose job is first in line; the flagged one cannot pass it.
+		expect(h.started).toEqual(["blocker", "s"]);
+		await h.finish("s");
+		// Now the flagged one is the oldest of its service and passes "other".
+		expect(h.started).toEqual(["blocker", "s", "s"]);
+	});
+
+	it("flagging a waiting job that has an older job of its service reports it and stores the flag", async () => {
+		const journal = {
+			enqueued: vi.fn(),
+			started: vi.fn(),
+			settled: vi.fn(),
+			updated: vi.fn(),
+		};
+		const h = harness(1, journal);
+		const added = await behind(h, "blocker", [app("d"), app("b"), app("d")]);
+
+		expect(h.queue.prioritize(added[2]?.id as string, "user-1")).toEqual({
+			requested: true,
+			applied: false,
+			wentAheadOf: 0,
+			reason: "older-same-service",
+		});
+		expect(journal.updated).toHaveBeenCalledTimes(1);
+
+		await h.finish("blocker");
+		expect(h.started).toEqual(["blocker", "d"]);
+	});
+
+	it("does not stop it passing jobs of other services", async () => {
+		const h = harness(1);
+		await behind(h, "blocker", [app("x"), app("y"), prio("d")]);
+		await h.finish("blocker");
+		expect(h.started).toEqual(["blocker", "d"]);
+	});
+});
+
+describe("the reported outcome is accurate", () => {
+	it("does not count a waiting job that is blocked by its own running service", async () => {
+		const h = harness(2);
+		await h.queue.add(app("a"));
+		await h.queue.add(app("z"));
+		await flush();
+		// a2 cannot start while a runs, so p does not pass it.
+		await h.queue.add(app("a"));
+		await h.queue.add(app("b"));
+		const p = await h.queue.add(prio("p"));
+
+		expect(p.priority).toEqual({
+			requested: true,
+			applied: true,
+			wentAheadOf: 1,
+		});
+		await h.finish("z");
+		expect(h.started.at(-1)).toBe("p");
+		expect(h.jobs.get("p")?.wentAheadOf).toBe(1);
+	});
+
+	it("is not applied when only blocked jobs wait and a slot is free anyway", async () => {
+		const h = harness(2);
+		await h.queue.add(app("a"));
+		await flush();
+		await h.queue.add(app("a")); // blocked behind the running a
+		const p = await h.queue.add(prio("p"));
+		await flush();
+
+		expect(p.priority).toEqual({
+			requested: true,
+			applied: false,
+			wentAheadOf: 0,
+			reason: "first-in-line",
+		});
+		expect(h.started).toEqual(["a", "p"]);
+		expect(h.jobs.get("p")?.wentAheadOf).toBe(0);
+	});
+
+	it("is not applied when the waiting jobs ahead will take the free slots anyway", async () => {
+		const h = harness(2);
+		// Both added before the queue has ticked: x and y fill the two slots.
+		await h.queue.add(app("x"));
+		const y = await h.queue.add(prio("y"));
+		await flush();
+
+		expect(y.priority?.applied).toBe(false);
+		expect(h.started).toEqual(["x", "y"]);
+		expect(h.jobs.get("y")?.wentAheadOf).toBe(0);
+	});
+});
+
+describe("the cooldown at a concurrency of 2", () => {
+	it("a plain job starts between two priority starts, even when the first has already finished", async () => {
+		const h = harness(2);
+		await h.queue.add(app("x"));
+		await h.queue.add(app("y"));
+		await flush();
+		for (const job of [app("b1"), app("b2"), prio("p1"), prio("p2")]) {
+			await h.queue.add(job);
+		}
+		await flush();
+
+		await h.finish("x");
+		expect(h.started).toEqual(["x", "y", "p1"]);
+		// p1 completes while y still runs: the slot goes to a plain job, not p2.
+		await h.finish("p1");
+		expect(h.started).toEqual(["x", "y", "p1", "b1"]);
+		// Now p2 may go ahead of b2.
+		await h.finish("y");
+		expect(h.started).toEqual(["x", "y", "p1", "b1", "p2"]);
+		await h.finish("p2");
+		expect(h.started).toEqual(["x", "y", "p1", "b1", "p2", "b2"]);
+	});
+
+	it("only one priority job runs at a time even with a free slot", async () => {
+		const h = harness(2);
+		await h.queue.add(app("x"));
+		await h.queue.add(app("y"));
+		await flush();
+		for (const job of [app("b1"), prio("p1"), prio("p2")]) {
+			await h.queue.add(job);
+		}
+		await flush();
+
+		await h.finish("x");
+		await h.finish("y");
+		// p1 runs; the second slot goes to b1, not to p2.
+		expect(h.started).toEqual(["x", "y", "p1", "b1"]);
+	});
+
+	it("a failed priority job returns the cooldown, so a second one can follow it at once (documented)", async () => {
+		const h = harness(2);
+		await h.queue.add(app("x"));
+		await h.queue.add(app("y"));
+		await flush();
+		for (const job of [app("b1"), prio("p1"), prio("p2")]) {
+			await h.queue.add(job);
+		}
+		await flush();
+
+		await h.finish("x");
+		await h.finish("p1", "failed");
+		expect(h.started).toEqual(["x", "y", "p1", "p2"]);
 	});
 });
 

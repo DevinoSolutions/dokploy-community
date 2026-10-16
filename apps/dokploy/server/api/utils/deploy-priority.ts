@@ -57,6 +57,12 @@ const messageFor = (outcome: PriorityOutcome | undefined): string => {
 	if (outcome.reason === "nothing-waiting") {
 		return "No other job was waiting in this queue, so it was queued normally and the priority flag was not stored.";
 	}
+	if (outcome.reason === "first-in-line") {
+		return "Nothing ahead of this job could start before it (it is next in line, or the jobs ahead are waiting on a running job of their own service), so there was nothing to go ahead of.";
+	}
+	if (outcome.reason === "older-same-service") {
+		return "An older deploy of the same service is still waiting, and a priority deploy never goes ahead of its own service's older work. This job keeps its priority flag and may go ahead of other services' jobs once the older deploy has run.";
+	}
 	return "Another priority deploy is running or has just started in this queue. This job keeps its priority flag and goes ahead of the waiting jobs as soon as that is allowed.";
 };
 

@@ -40,8 +40,9 @@ export const insertQueueJob = async (
 };
 
 /**
- * Replace the payload of a job that is still journaled (a waiting job flagged
- * for priority). A job that is gone is simply not updated.
+ * Replace the payload of a job that is still waiting (a waiting job flagged
+ * for priority). A job that has started keeps the payload it started with, and
+ * one that finished or was cancelled has no row any more: neither is touched.
  */
 export const updateQueueJobPayload = async (
 	jobId: string,
@@ -50,7 +51,12 @@ export const updateQueueJobPayload = async (
 	await db
 		.update(deploymentQueueJobs)
 		.set({ payload })
-		.where(eq(deploymentQueueJobs.jobId, jobId));
+		.where(
+			and(
+				eq(deploymentQueueJobs.jobId, jobId),
+				eq(deploymentQueueJobs.state, "waiting"),
+			),
+		);
 };
 
 export const markQueueJobActive = async (jobId: string) => {

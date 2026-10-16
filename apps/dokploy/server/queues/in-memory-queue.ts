@@ -64,14 +64,31 @@ export type JobOutcome = "cancelled" | "failed";
 
 type Processor = (job: InMemoryJob) => Promise<unknown>;
 
-export type PriorityReason = "nothing-waiting" | "priority-busy";
+/**
+ * Why a priority request did not put a job ahead:
+ * - nothing-waiting: no other job waits in the lane, so there is nothing to pass.
+ * - first-in-line: nothing ahead of it could start before it (the jobs ahead are
+ *   blocked by a running job of their own service, or will take free slots).
+ * - older-same-service: an older job of the same service waits, and a flagged job
+ *   never passes its own service's older work.
+ * - priority-busy: another priority job runs or has just started in the lane.
+ */
+export type PriorityReason =
+	| "nothing-waiting"
+	| "first-in-line"
+	| "older-same-service"
+	| "priority-busy";
 
 /** What a priority request did (or will do) to the job it was asked for. */
 export interface PriorityOutcome {
 	requested: true;
 	/** The job is ahead of the jobs that were waiting, or will be when it starts. */
 	applied: boolean;
-	/** Waiting jobs in the lane that the job is ahead of. */
+	/**
+	 * Waiting jobs in the lane that it goes ahead of: those ahead of it that could
+	 * start now (their service is not running) and will not simply take a free
+	 * slot first.
+	 */
 	wentAheadOf: number;
 	reason?: PriorityReason;
 }
@@ -124,6 +141,8 @@ interface Partition {
 	 * cancelled or fails, so a priority job is never followed directly by another.
 	 */
 	jumpedLast: boolean;
+	/** The concurrency cap seen by the last scheduling tick (unset before). */
+	concurrency?: number;
 }
 
 /**
@@ -232,9 +251,14 @@ export class InMemoryQueue {
 		const partition = this.getPartitionState(getPartition(requested));
 		const priority =
 			requested.priority === true
-				? this.assessPriority(partition, partition.waiting.length)
+				? this.assessPriority(
+						partition,
+						partition.waiting.length,
+						getGroup(requested),
+						false,
+					)
 				: undefined;
-		// Nothing to go ahead of: the flag would only be noise in the journal.
+		// Nothing waits at all: the flag would only be noise in the journal.
 		const data =
 			priority?.reason === "nothing-waiting"
 				? withoutPriority(requested)
@@ -265,8 +289,14 @@ export class InMemoryQueue {
 			const index = partition.waiting.findIndex((job) => job.id === id);
 			if (index === -1) continue;
 			const job = partition.waiting[index] as InternalJob;
-			// First in line: nothing to go ahead of.
-			if (index === 0) return this.assessPriority(partition, 0);
+			const outcome = this.assessPriority(
+				partition,
+				index,
+				job.group,
+				partition.waiting.length > 1,
+			);
+			// First in line: it starts next anyway, so no flag is stored.
+			if (index === 0) return outcome;
 			if (job.data.priority !== true) {
 				job.data = {
 					...job.data,
@@ -280,7 +310,7 @@ export class InMemoryQueue {
 					this.notify(() => update(journalId, data));
 				}
 			}
-			return this.assessPriority(partition, index);
+			return outcome;
 		}
 		return null;
 	}
@@ -290,24 +320,68 @@ export class InMemoryQueue {
 		return partition.jumpedLast || partition.active.some((job) => job.jumped);
 	}
 
-	private assessPriority(partition: Partition, ahead: number): PriorityOutcome {
-		if (ahead === 0) {
-			return {
-				requested: true,
-				applied: false,
-				wentAheadOf: 0,
-				reason: "nothing-waiting",
-			};
+	/**
+	 * Slots that waiting jobs are about to take anyway: free right now while the
+	 * queue is actually starting jobs. A job that would get one of these is not
+	 * going ahead of anything.
+	 */
+	private freeSlots(partition: Partition): number {
+		if (!this.running || this.paused || !this.processor) return 0;
+		return Math.max(0, (partition.concurrency ?? 1) - partition.active.length);
+	}
+
+	/** Waiting jobs before `index` that could start now (their service is idle). */
+	private startableBefore(partition: Partition, index: number): number {
+		let count = 0;
+		for (let i = 0; i < index; i++) {
+			const job = partition.waiting[i] as InternalJob;
+			if (!partition.activeGroups.has(job.group)) count++;
 		}
-		if (this.jumpBlocked(partition)) {
-			return {
-				requested: true,
-				applied: false,
-				wentAheadOf: 0,
-				reason: "priority-busy",
-			};
+		return count;
+	}
+
+	/** An older job of the same service waits before `index`. */
+	private hasOlderOfGroup(
+		partition: Partition,
+		index: number,
+		group: string,
+	): boolean {
+		for (let i = 0; i < index; i++) {
+			if ((partition.waiting[i] as InternalJob).group === group) return true;
 		}
-		return { requested: true, applied: true, wentAheadOf: ahead };
+		return false;
+	}
+
+	/**
+	 * What a priority request for the job at `index` (the end of the list for a
+	 * job that is being added) does. `othersBehind` says whether other jobs wait
+	 * after it, which tells a job that is first in line from one that is alone.
+	 */
+	private assessPriority(
+		partition: Partition,
+		index: number,
+		group: string,
+		othersBehind: boolean,
+	): PriorityOutcome {
+		const none = (reason: PriorityReason): PriorityOutcome => ({
+			requested: true,
+			applied: false,
+			wentAheadOf: 0,
+			reason,
+		});
+		if (index === 0) {
+			return none(othersBehind ? "first-in-line" : "nothing-waiting");
+		}
+		if (this.hasOlderOfGroup(partition, index, group)) {
+			return none("older-same-service");
+		}
+		const wentAheadOf = Math.max(
+			0,
+			this.startableBefore(partition, index) - this.freeSlots(partition),
+		);
+		if (wentAheadOf === 0) return none("first-in-line");
+		if (this.jumpBlocked(partition)) return none("priority-busy");
+		return { requested: true, applied: true, wentAheadOf };
 	}
 
 	/**
@@ -515,6 +589,7 @@ export class InMemoryQueue {
 		if (!partition || !this.processor) return;
 
 		const concurrency = Math.max(1, await this.resolveConcurrency(key));
+		partition.concurrency = concurrency;
 
 		// A shutdown can land while the concurrency was being resolved.
 		while (
@@ -525,10 +600,13 @@ export class InMemoryQueue {
 			const pick = this.pickNext(partition);
 			if (!pick) break;
 
+			const wentAheadOf = pick.jumped
+				? this.startableBefore(partition, pick.index)
+				: 0;
 			const job = partition.waiting.splice(pick.index, 1)[0];
 			if (!job) break;
 			job.jumped = pick.jumped;
-			job.wentAheadOf = pick.jumped ? pick.index : 0;
+			job.wentAheadOf = wentAheadOf;
 			partition.jumpedLast = pick.jumped;
 			job.state = "active";
 			job.processedOn = this.now();
@@ -545,9 +623,10 @@ export class InMemoryQueue {
 
 	/**
 	 * Which waiting job takes a free slot: the first one whose group is not
-	 * already running, unless a priority-flagged job further down (also with a
-	 * free group) may jump it. A flagged job that is first in line anyway is a
-	 * plain start, not a jump.
+	 * already running, unless a priority-flagged job further down may jump it. A
+	 * flagged job that is first in line anyway is a plain start, not a jump. A
+	 * flagged job never jumps while an older job of its own service waits: that
+	 * older work (a pinned image, a fresh-volumes redeploy) has to run first.
 	 */
 	private pickNext(
 		partition: Partition,
@@ -556,13 +635,21 @@ export class InMemoryQueue {
 		const first = partition.waiting.findIndex(isFree);
 		if (first === -1) return null;
 		if (!this.jumpBlocked(partition)) {
-			// The oldest flagged job wins; if that is the first one anyway, nothing
-			// is jumped.
-			const flagged = partition.waiting.findIndex(
-				(job, index) =>
-					index >= first && job.data.priority === true && isFree(job),
-			);
-			if (flagged > first) return { index: flagged, jumped: true };
+			// The oldest eligible flagged job wins; if that is the first one anyway,
+			// nothing is jumped.
+			const seen = new Set<string>();
+			for (let index = 0; index < partition.waiting.length; index++) {
+				const job = partition.waiting[index] as InternalJob;
+				if (
+					index > first &&
+					job.data.priority === true &&
+					isFree(job) &&
+					!seen.has(job.group)
+				) {
+					return { index, jumped: true };
+				}
+				seen.add(job.group);
+			}
 		}
 		return { index: first, jumped: false };
 	}

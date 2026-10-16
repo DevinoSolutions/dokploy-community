@@ -5,6 +5,7 @@ import {
 	// build-policy hook: see the pinnedImage branch below.
 	deployPinnedApplicationImage,
 	deployPreviewApplication,
+	findUserById,
 	isDeploymentCancelledError,
 	readServiceStatus,
 	rebuildApplication,
@@ -43,15 +44,30 @@ const isRestorableStatus = (
 	status === "idle" || status === "done" || status === "error";
 
 /**
+ * The payload carries the requester's user id (the queue list shows payloads, so
+ * no email there); the deployment note names them by email, falling back to the
+ * id when the user is gone.
+ */
+const requesterLabel = async (userId: string): Promise<string> => {
+	try {
+		return (await findUserById(userId)).email || userId;
+	} catch {
+		return userId;
+	}
+};
+
+/**
  * The description recorded on the deployment. A job that went ahead of waiting
  * jobs through the priority lane says so (and for whom), since that is what the
  * person reading the deployment will wonder about.
  */
-export const describeJob = (job: InMemoryJob): string => {
+export const describeJob = async (job: InMemoryJob): Promise<string> => {
 	const base = job.data.descriptionLog;
 	const ahead = job.wentAheadOf ?? 0;
 	if (ahead <= 0) return base;
-	const by = job.data.priorityBy ? `, requested by ${job.data.priorityBy}` : "";
+	const by = job.data.priorityBy
+		? `, requested by ${await requesterLabel(job.data.priorityBy)}`
+		: "";
 	const note = `Deployed ahead of ${ahead} waiting job${ahead === 1 ? "" : "s"} (priority${by})`;
 	return base ? `${base} - ${note}` : note;
 };
@@ -67,7 +83,7 @@ export const processDeploymentJob = async (
 	job: InMemoryJob,
 ): Promise<JobOutcome | undefined> => {
 	let statusBeforeJob: string | undefined;
-	const descriptionLog = describeJob(job);
+	const descriptionLog = await describeJob(job);
 	try {
 		statusBeforeJob = await readStatusBeforeJob(job);
 		if (job.data.applicationType === "application") {

@@ -524,9 +524,6 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 				serverId: application.serverId ?? undefined,
-				...(input.priority
-					? { priority: true, priorityBy: ctx.user.email }
-					: {}),
 			};
 
 			if (IS_CLOUD && application.serverId) {
@@ -539,11 +536,30 @@ export const applicationRouter = createTRPCRouter({
 					resourceId: application.applicationId,
 					resourceName: application.appName,
 				});
-				return true;
+				if (!input.priority) return true;
+				// Cloud runs the deploy straight away: there is no queue to go ahead
+				// in, and the caller is told so rather than left to assume.
+				return {
+					success: true,
+					message: "Redeployment started",
+					applicationId: application.applicationId,
+					priority: await recordPriorityUse(ctx, {
+						resourceType: "application",
+						resourceId: application.applicationId,
+						resourceName: application.appName,
+						via: "redeploy",
+						outcome: undefined,
+					}),
+				};
 			}
 			const queued = await myQueue.add(
 				"deployments",
-				{ ...jobData },
+				{
+					...jobData,
+					...(input.priority
+						? { priority: true, priorityBy: ctx.user.id }
+						: {}),
+				},
 				{
 					removeOnComplete: true,
 					removeOnFail: true,
@@ -998,9 +1014,6 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 				serverId: application.serverId ?? undefined,
-				...(input.priority
-					? { priority: true, priorityBy: ctx.user.email }
-					: {}),
 			};
 			if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {
@@ -1012,11 +1025,30 @@ export const applicationRouter = createTRPCRouter({
 					resourceId: application.applicationId,
 					resourceName: application.appName,
 				});
-				return true;
+				if (!input.priority) return true;
+				// Cloud runs the deploy straight away: there is no queue to go ahead
+				// in, and the caller is told so rather than left to assume.
+				return {
+					success: true,
+					message: "Deployment started",
+					applicationId: application.applicationId,
+					priority: await recordPriorityUse(ctx, {
+						resourceType: "application",
+						resourceId: application.applicationId,
+						resourceName: application.appName,
+						via: "deploy",
+						outcome: undefined,
+					}),
+				};
 			}
 			const queued = await myQueue.add(
 				"deployments",
-				{ ...jobData },
+				{
+					...jobData,
+					...(input.priority
+						? { priority: true, priorityBy: ctx.user.id }
+						: {}),
+				},
 				{
 					removeOnComplete: true,
 					removeOnFail: true,

@@ -570,9 +570,6 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
 				freshVolumes: input.freshVolumes,
-				...(input.priority
-					? { priority: true, priorityBy: ctx.user.email }
-					: {}),
 			};
 
 			if (IS_CLOUD && compose.serverId) {
@@ -585,11 +582,30 @@ export const composeRouter = createTRPCRouter({
 					resourceId: input.composeId,
 					resourceName: compose.name,
 				});
-				return true;
+				if (!input.priority) return true;
+				// Cloud runs the deploy straight away: there is no queue to go ahead
+				// in, and the caller is told so rather than left to assume.
+				return {
+					success: true,
+					message: "Deployment started",
+					composeId: compose.composeId,
+					priority: await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "deploy",
+						outcome: undefined,
+					}),
+				};
 			}
 			const queued = await myQueue.add(
 				"deployments",
-				{ ...jobData },
+				{
+					...jobData,
+					...(input.priority
+						? { priority: true, priorityBy: ctx.user.id }
+						: {}),
+				},
 				{
 					removeOnComplete: true,
 					removeOnFail: true,
@@ -635,9 +651,6 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
 				freshVolumes: input.freshVolumes,
-				...(input.priority
-					? { priority: true, priorityBy: ctx.user.email }
-					: {}),
 			};
 			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
@@ -649,11 +662,30 @@ export const composeRouter = createTRPCRouter({
 					resourceId: input.composeId,
 					resourceName: compose.name,
 				});
-				return true;
+				if (!input.priority) return true;
+				// Cloud runs the deploy straight away: there is no queue to go ahead
+				// in, and the caller is told so rather than left to assume.
+				return {
+					success: true,
+					message: "Redeployment started",
+					composeId: compose.composeId,
+					priority: await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "redeploy",
+						outcome: undefined,
+					}),
+				};
 			}
 			const queued = await myQueue.add(
 				"deployments",
-				{ ...jobData },
+				{
+					...jobData,
+					...(input.priority
+						? { priority: true, priorityBy: ctx.user.id }
+						: {}),
+				},
 				{
 					removeOnComplete: true,
 					removeOnFail: true,

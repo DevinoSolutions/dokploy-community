@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const mocks = vi.hoisted(() => ({
+	cloud: { value: false },
+	cloudDeploy: vi.fn(),
 	findApplicationById: vi.fn(),
 	findComposeById: vi.fn(),
 	checkPermission: vi.fn(),
@@ -21,8 +23,12 @@ vi.mock("@dokploy/server/services/permission", () => ({
 	checkServicePermissionAndAccess: mocks.checkServicePermissionAndAccess,
 }));
 
+vi.mock("@/server/utils/deploy", () => ({ deploy: mocks.cloudDeploy }));
+
 vi.mock("@dokploy/server", () => ({
-	IS_CLOUD: false,
+	get IS_CLOUD() {
+		return mocks.cloud.value;
+	},
 	findApplicationById: mocks.findApplicationById,
 	findComposeById: mocks.findComposeById,
 }));
@@ -65,6 +71,8 @@ const applied = { requested: true, applied: true, wentAheadOf: 3 };
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.cloud.value = false;
+	mocks.cloudDeploy.mockResolvedValue({});
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	mocks.checkPermission.mockResolvedValue(undefined);
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
@@ -108,7 +116,7 @@ describe("application.deploy and redeploy with priority", () => {
 				expect.objectContaining({
 					applicationId: "a1",
 					priority: true,
-					priorityBy: "ops@example.com",
+					priorityBy: "user-1",
 				}),
 				expect.anything(),
 			);
@@ -167,6 +175,72 @@ describe("application.deploy and redeploy with priority", () => {
 		expect(result).toBeUndefined();
 	});
 
+	it("stores the requester's user id in the job, never the email (queueList returns the payload)", async () => {
+		await applicationCaller.deploy({ applicationId: "a1", priority: true });
+
+		const queued = mocks.add.mock.calls[0]?.[1];
+		expect(queued.priorityBy).toBe("user-1");
+		expect(JSON.stringify(queued)).not.toContain("ops@example.com");
+	});
+
+	it.each(["deploy", "redeploy"] as const)(
+		"%s on Cloud with a server answers that nothing was queued, audits it and sends no flag to the deploy server",
+		async (method) => {
+			mocks.cloud.value = true;
+			mocks.findApplicationById.mockResolvedValue({
+				applicationId: "a1",
+				appName: "app-1",
+				serverId: "s1",
+				sourceType: "github",
+			});
+
+			const result = await applicationCaller[method]({
+				applicationId: "a1",
+				priority: true,
+			});
+
+			expect(mocks.add).not.toHaveBeenCalled();
+			const sent = mocks.cloudDeploy.mock.calls[0]?.[0];
+			expect(sent).not.toHaveProperty("priority");
+			expect(sent).not.toHaveProperty("priorityBy");
+			expect(result).toMatchObject({
+				success: true,
+				applicationId: "a1",
+				priority: {
+					requested: true,
+					applied: false,
+					wentAheadOf: 0,
+					reason: "not-queued",
+				},
+			});
+			expect(mocks.audit).toHaveBeenCalledWith(
+				ctx,
+				expect.objectContaining({
+					action: "prioritize",
+					resourceId: "a1",
+					metadata: expect.objectContaining({
+						via: method,
+						applied: false,
+						reason: "not-queued",
+					}),
+				}),
+			);
+		},
+	);
+
+	it("a plain deploy on Cloud with a server still answers true", async () => {
+		mocks.cloud.value = true;
+		mocks.findApplicationById.mockResolvedValue({
+			applicationId: "a1",
+			appName: "app-1",
+			serverId: "s1",
+			sourceType: "github",
+		});
+
+		expect(await applicationCaller.deploy({ applicationId: "a1" })).toBe(true);
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+	});
+
 	it("tells the caller when nothing was waiting", async () => {
 		mocks.add.mockResolvedValue({
 			id: "job-9",
@@ -213,7 +287,7 @@ describe("compose.deploy and redeploy with priority", () => {
 				expect.objectContaining({
 					composeId: "c1",
 					priority: true,
-					priorityBy: "ops@example.com",
+					priorityBy: "user-1",
 				}),
 				expect.anything(),
 			);
@@ -231,6 +305,44 @@ describe("compose.deploy and redeploy with priority", () => {
 				composeId: "c1",
 				priority: { applied: true, wentAheadOf: 3 },
 			});
+		},
+	);
+
+	it.each(["deploy", "redeploy"] as const)(
+		"%s on Cloud with a server answers that nothing was queued and audits it",
+		async (method) => {
+			mocks.cloud.value = true;
+			mocks.findComposeById.mockResolvedValue({
+				composeId: "c1",
+				name: "stack",
+				serverId: "s1",
+			});
+
+			const result = await composeCaller[method]({
+				composeId: "c1",
+				priority: true,
+			});
+
+			expect(mocks.add).not.toHaveBeenCalled();
+			const sent = mocks.cloudDeploy.mock.calls[0]?.[0];
+			expect(sent).not.toHaveProperty("priority");
+			expect(sent).not.toHaveProperty("priorityBy");
+			expect(result).toMatchObject({
+				success: true,
+				composeId: "c1",
+				priority: { applied: false, reason: "not-queued" },
+			});
+			expect(mocks.audit).toHaveBeenCalledWith(
+				ctx,
+				expect.objectContaining({
+					action: "prioritize",
+					resourceType: "compose",
+					metadata: expect.objectContaining({
+						via: method,
+						reason: "not-queued",
+					}),
+				}),
+			);
 		},
 	);
 
@@ -280,7 +392,7 @@ describe("deployment.prioritizeQueued", () => {
 	it("flags a waiting application deploy, audits it and reports the outcome", async () => {
 		const result = await deploymentCaller.prioritizeQueued({ jobId: "job-5" });
 
-		expect(mocks.prioritize).toHaveBeenCalledWith("job-5", "ops@example.com");
+		expect(mocks.prioritize).toHaveBeenCalledWith("job-5", "user-1");
 		expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledWith(
 			ctx,
 			"a1",

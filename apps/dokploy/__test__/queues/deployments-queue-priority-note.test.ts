@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
 	deployCompose: vi.fn(),
 	deployApplication: vi.fn(),
+	findUserById: vi.fn(),
 	updateCompose: vi.fn(),
 	updateApplicationStatus: vi.fn(),
 }));
@@ -19,6 +20,7 @@ vi.mock("@dokploy/server", () => ({
 	deployComposePreview: vi.fn(),
 	deployPinnedApplicationImage: vi.fn(),
 	deployPreviewApplication: vi.fn(),
+	findUserById: mocks.findUserById,
 	isDeploymentCancelledError: () => false,
 	readServiceStatus: vi.fn(),
 	rebuildApplication: vi.fn(),
@@ -52,27 +54,41 @@ const job = (extra: Record<string, unknown> = {}, wentAheadOf?: number) =>
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.updateApplicationStatus.mockResolvedValue(undefined);
+	mocks.findUserById.mockResolvedValue({ email: "ops@x.io" });
 	vi.spyOn(console, "log").mockImplementation(() => {});
 });
 
 describe("describeJob", () => {
-	it("leaves the description alone for a job that did not go ahead", () => {
-		expect(describeJob(job({}, 0))).toBe("maintenance");
-		expect(describeJob(job({ priority: true }, undefined))).toBe("maintenance");
+	it("leaves the description alone for a job that did not go ahead", async () => {
+		expect(await describeJob(job({}, 0))).toBe("maintenance");
+		expect(await describeJob(job({ priority: true }, undefined))).toBe(
+			"maintenance",
+		);
+		expect(mocks.findUserById).not.toHaveBeenCalled();
 	});
 
-	it("says how many waiting jobs it went ahead of, and for whom", () => {
+	it("says how many waiting jobs it went ahead of, and for whom (email resolved from the stored user id)", async () => {
 		expect(
-			describeJob(job({ priority: true, priorityBy: "ops@x.io" }, 4)),
+			await describeJob(job({ priority: true, priorityBy: "user-1" }, 4)),
 		).toBe(
 			"maintenance - Deployed ahead of 4 waiting jobs (priority, requested by ops@x.io)",
 		);
+		expect(mocks.findUserById).toHaveBeenCalledWith("user-1");
 	});
 
-	it("uses the singular and an empty base description", () => {
-		expect(describeJob(job({ descriptionLog: "", priority: true }, 1))).toBe(
-			"Deployed ahead of 1 waiting job (priority)",
+	it("falls back to the user id when the user can no longer be found", async () => {
+		mocks.findUserById.mockRejectedValue(new Error("User not found"));
+		expect(
+			await describeJob(job({ priority: true, priorityBy: "user-9" }, 2)),
+		).toBe(
+			"maintenance - Deployed ahead of 2 waiting jobs (priority, requested by user-9)",
 		);
+	});
+
+	it("uses the singular and an empty base description", async () => {
+		expect(
+			await describeJob(job({ descriptionLog: "", priority: true }, 1)),
+		).toBe("Deployed ahead of 1 waiting job (priority)");
 	});
 });
 
@@ -81,7 +97,7 @@ describe("processDeploymentJob", () => {
 		mocks.deployApplication.mockResolvedValue(undefined);
 
 		await expect(
-			processDeploymentJob(job({ priority: true, priorityBy: "ops@x.io" }, 2)),
+			processDeploymentJob(job({ priority: true, priorityBy: "user-1" }, 2)),
 		).resolves.toBeUndefined();
 
 		expect(mocks.deployApplication).toHaveBeenCalledWith({
