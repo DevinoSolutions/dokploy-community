@@ -115,6 +115,8 @@ const BACKUP_ROUTERS = new Set([
 const OVERRIDES: Record<string, DokployMcpScope> = {
 	"deployment.removeDeployment": "dokploy:deploy",
 	"deployment.killProcess": "dokploy:deploy",
+	// Moves a waiting deploy ahead of the queue; gated by deployment:priority.
+	"deployment.prioritizeQueued": "dokploy:deploy",
 	"application.clearDeployments": "dokploy:deploy",
 	"application.cleanQueues": "dokploy:deploy",
 	"application.dropDeployment": "dokploy:deploy",

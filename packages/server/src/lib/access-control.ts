@@ -31,7 +31,7 @@ export const statements = {
 
 	// Enterprise-only resources (custom roles only)
 	volume: ["read", "create", "delete"],
-	deployment: ["read", "create", "cancel"],
+	deployment: ["read", "create", "cancel", "priority"],
 	envVars: ["read", "write"],
 	projectEnvVars: ["read", "write"],
 	environmentEnvVars: ["read", "write"],
@@ -104,7 +104,7 @@ export const ownerRole = ac.newRole({
 	traefikFiles: ["read", "write"],
 	api: ["read"],
 	volume: ["read", "create", "delete"],
-	deployment: ["read", "create", "cancel"],
+	deployment: ["read", "create", "cancel", "priority"],
 	envVars: ["read", "write"],
 	projectEnvVars: ["read", "write"],
 	environmentEnvVars: ["read", "write"],
@@ -145,7 +145,7 @@ export const adminRole = ac.newRole({
 	traefikFiles: ["read", "write"],
 	api: ["read"],
 	volume: ["read", "create", "delete"],
-	deployment: ["read", "create", "cancel"],
+	deployment: ["read", "create", "cancel", "priority"],
 	envVars: ["read", "write"],
 	projectEnvVars: ["read", "write"],
 	environmentEnvVars: ["read", "write"],

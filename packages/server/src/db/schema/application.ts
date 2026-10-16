@@ -1,8 +1,7 @@
+import { deployPriorityInput } from "@dokploy/server/db/validations/deploy-priority";
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import { VALID_GIT_URL_REGEX } from "@dokploy/server/utils/git-url-validation";
-import {
-	getPreviewImageTemplateError,
-} from "@dokploy/server/utils/preview-image";
+import { getPreviewImageTemplateError } from "@dokploy/server/utils/preview-image";
 import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
@@ -459,6 +458,7 @@ export const apiDeployApplication = createSchema
 		// Docker-source applications (e.g. deploy a freshly built tag from CI
 		// without a separate "save Docker provider" call).
 		dockerImage: z.string().optional(),
+		priority: deployPriorityInput,
 	});
 
 export const apiRedeployApplication = createSchema
@@ -469,6 +469,7 @@ export const apiRedeployApplication = createSchema
 		applicationId: z.string().min(1),
 		title: z.string().optional(),
 		description: z.string().optional(),
+		priority: deployPriorityInput,
 	});
 
 export const apiReloadApplication = createSchema

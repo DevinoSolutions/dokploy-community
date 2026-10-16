@@ -39,6 +39,26 @@ export const insertQueueJob = async (
 		.onConflictDoNothing();
 };
 
+/**
+ * Replace the payload of a job that is still waiting (a waiting job flagged
+ * for priority). A job that has started keeps the payload it started with, and
+ * one that finished or was cancelled has no row any more: neither is touched.
+ */
+export const updateQueueJobPayload = async (
+	jobId: string,
+	payload: QueueJobPayload,
+) => {
+	await db
+		.update(deploymentQueueJobs)
+		.set({ payload })
+		.where(
+			and(
+				eq(deploymentQueueJobs.jobId, jobId),
+				eq(deploymentQueueJobs.state, "waiting"),
+			),
+		);
+};
+
 export const markQueueJobActive = async (jobId: string) => {
 	await db
 		.update(deploymentQueueJobs)

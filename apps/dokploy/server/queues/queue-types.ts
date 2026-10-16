@@ -1,3 +1,17 @@
+/**
+ * Priority lane fields, carried in the job payload so the journal keeps them.
+ * See docs/design/deploy-queue-priority.md.
+ */
+type PriorityFields = {
+	/** May be picked ahead of the waiting jobs in its lane; see in-memory-queue. */
+	priority?: boolean;
+	/**
+	 * Id of the user who asked for priority (not the email: queueList returns
+	 * the payload). The deployment note resolves it to an email.
+	 */
+	priorityBy?: string;
+};
+
 type DeployJob =
 	| {
 			applicationId: string;
@@ -45,4 +59,4 @@ type DeployJob =
 			serverId?: string;
 	  };
 
-export type DeploymentJob = DeployJob;
+export type DeploymentJob = DeployJob & PriorityFields;

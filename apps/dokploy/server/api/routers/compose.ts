@@ -109,6 +109,10 @@ import {
 import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
+import {
+	assertCanPrioritize,
+	recordPriorityUse,
+} from "../utils/deploy-priority";
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -554,6 +558,7 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
+			if (input.priority) await assertCanPrioritize(ctx);
 			const compose = await findComposeById(input.composeId);
 
 			const jobData: DeploymentJob = {
@@ -577,11 +582,30 @@ export const composeRouter = createTRPCRouter({
 					resourceId: input.composeId,
 					resourceName: compose.name,
 				});
-				return true;
+				if (!input.priority) return true;
+				// Cloud runs the deploy straight away: there is no queue to go ahead
+				// in, and the caller is told so rather than left to assume.
+				return {
+					success: true,
+					message: "Deployment started",
+					composeId: compose.composeId,
+					priority: await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "deploy",
+						outcome: undefined,
+					}),
+				};
 			}
-			await myQueue.add(
+			const queued = await myQueue.add(
 				"deployments",
-				{ ...jobData },
+				{
+					...jobData,
+					...(input.priority
+						? { priority: true, priorityBy: ctx.user.id }
+						: {}),
+				},
 				{
 					removeOnComplete: true,
 					removeOnFail: true,
@@ -593,10 +617,21 @@ export const composeRouter = createTRPCRouter({
 				resourceId: input.composeId,
 				resourceName: compose.name,
 			});
+			const priority = input.priority
+				? await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "deploy",
+						jobId: queued.id,
+						outcome: queued.priority,
+					})
+				: undefined;
 			return {
 				success: true,
 				message: "Deployment queued",
 				composeId: compose.composeId,
+				...(priority ? { priority } : {}),
 			};
 		}),
 	redeploy: protectedProcedure
@@ -605,6 +640,7 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
+			if (input.priority) await assertCanPrioritize(ctx);
 			const compose = await findComposeById(input.composeId);
 			const jobData: DeploymentJob = {
 				composeId: input.composeId,
@@ -626,11 +662,30 @@ export const composeRouter = createTRPCRouter({
 					resourceId: input.composeId,
 					resourceName: compose.name,
 				});
-				return true;
+				if (!input.priority) return true;
+				// Cloud runs the deploy straight away: there is no queue to go ahead
+				// in, and the caller is told so rather than left to assume.
+				return {
+					success: true,
+					message: "Redeployment started",
+					composeId: compose.composeId,
+					priority: await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "redeploy",
+						outcome: undefined,
+					}),
+				};
 			}
-			await myQueue.add(
+			const queued = await myQueue.add(
 				"deployments",
-				{ ...jobData },
+				{
+					...jobData,
+					...(input.priority
+						? { priority: true, priorityBy: ctx.user.id }
+						: {}),
+				},
 				{
 					removeOnComplete: true,
 					removeOnFail: true,
@@ -642,10 +697,21 @@ export const composeRouter = createTRPCRouter({
 				resourceId: input.composeId,
 				resourceName: compose.name,
 			});
+			const priority = input.priority
+				? await recordPriorityUse(ctx, {
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+						via: "redeploy",
+						jobId: queued.id,
+						outcome: queued.priority,
+					})
+				: undefined;
 			return {
 				success: true,
 				message: "Redeployment queued",
 				composeId: compose.composeId,
+				...(priority ? { priority } : {}),
 			};
 		}),
 	stop: protectedProcedure

@@ -7,6 +7,7 @@ import {
 	markInterruptedFromJournal,
 	markQueueJobActive,
 	requeueInterruptedQueueJobs,
+	updateQueueJobPayload,
 } from "@dokploy/server";
 // Type-only, erased at build time: no second module copy.
 import type { DeploymentQueueJobRow } from "@dokploy/server/db/schema";
@@ -42,6 +43,7 @@ export const WRITE_TIMEOUT_MS = 5_000;
 export interface JournalStore {
 	insert(jobId: string, payload: Record<string, unknown>): Promise<void>;
 	markActive(jobId: string): Promise<void>;
+	updatePayload(jobId: string, payload: Record<string, unknown>): Promise<void>;
 	remove(jobIds: string[]): Promise<void>;
 	list(): Promise<DeploymentQueueJobRow[]>;
 	requeueInterrupted(jobIds: string[]): Promise<void>;
@@ -56,6 +58,8 @@ export interface JournalStore {
 export const dbJournalStore: JournalStore = {
 	insert: async (jobId, payload) => insertQueueJob(jobId, payload),
 	markActive: async (jobId) => markQueueJobActive(jobId),
+	updatePayload: async (jobId, payload) =>
+		updateQueueJobPayload(jobId, payload),
 	remove: async (jobIds) => deleteQueueJobs(jobIds),
 	list: async () => listQueueJobs(),
 	requeueInterrupted: async (jobIds) => requeueInterruptedQueueJobs(jobIds),
@@ -200,6 +204,16 @@ export const createQueueJournal = (
 		},
 		started: (journalId) => {
 			void run("start", () => store.markActive(journalId));
+		},
+		updated: (journalId, data) => {
+			// Queued behind the job's insert on the serial chain, so it lands on the
+			// row the insert created.
+			void run("update", () =>
+				store.updatePayload(
+					journalId,
+					data as unknown as Record<string, unknown>,
+				),
+			);
 		},
 		settled: (journalIds) => {
 			void run("settle", async () => {

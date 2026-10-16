@@ -11,7 +11,11 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import { resolveBuildsConcurrency } from "./concurrency";
 import { processDeploymentJob } from "./deployments-queue";
-import { type InMemoryJob, InMemoryQueue } from "./in-memory-queue";
+import {
+	type InMemoryJob,
+	InMemoryQueue,
+	type PriorityOutcome,
+} from "./in-memory-queue";
 import { gateWorkerUntilRestored, registerShutdownHandler } from "./lifecycle";
 import {
 	createQueueJournal,
@@ -38,7 +42,9 @@ interface DeploymentQueue {
 		name: string,
 		data: DeploymentJob,
 		opts?: Record<string, unknown>,
-	) => Promise<{ id: string }>;
+	) => Promise<{ id: string; priority?: PriorityOutcome }>;
+	/** Flag a waiting job for priority; null when it is not waiting. */
+	prioritize: (id: string, by?: string) => PriorityOutcome | null;
 	getJobs: (states?: Array<"waiting" | "active">) => Promise<InMemoryJob[]>;
 	close: () => Promise<void>;
 	on: (...args: unknown[]) => void;
@@ -53,6 +59,7 @@ interface DeploymentQueue {
 
 const createNoopQueue = (): DeploymentQueue => ({
 	add: () => Promise.resolve({ id: "noop" }),
+	prioritize: () => null,
 	getJobs: () => Promise.resolve([]),
 	close: () => Promise.resolve(),
 	on: () => {},
@@ -103,6 +110,7 @@ const createInMemoryQueue = (): DeploymentQueue => {
 
 	return {
 		add: (_name, data) => queue.add(data),
+		prioritize: (id, by) => queue.prioritize(id, by),
 		getJobs: (states) => queue.getJobs(states),
 		close: () => queue.close(),
 		on: () => {},

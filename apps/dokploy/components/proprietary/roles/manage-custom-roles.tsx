@@ -290,6 +290,11 @@ const ACTION_META: Record<
 			description: "Trigger new deployments manually",
 		},
 		cancel: { label: "Cancel", description: "Cancel running deployments" },
+		priority: {
+			label: "Priority",
+			description:
+				"Deploy ahead of the waiting queue (one at a time, never above the build limit)",
+		},
 	},
 	envVars: {
 		read: { label: "Read", description: "View environment variable values" },

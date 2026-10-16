@@ -14,6 +14,7 @@ vi.mock("@dokploy/server", () => ({
 	markInterruptedFromJournal: vi.fn(),
 	markQueueJobActive: vi.fn(),
 	requeueInterruptedQueueJobs: vi.fn(),
+	updateQueueJobPayload: vi.fn(),
 }));
 
 import { InMemoryQueue } from "../../server/queues/in-memory-queue";
@@ -88,6 +89,10 @@ const makeStore = (rows: DeploymentQueueJobRow[] = []) => {
 			}
 		}),
 		markInterrupted: vi.fn(async () => 0),
+		updatePayload: vi.fn(async (jobId, payload) => {
+			const r = rows.find((x) => x.jobId === jobId);
+			if (r) r.payload = payload;
+		}),
 	};
 	return store;
 };

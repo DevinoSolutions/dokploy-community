@@ -30,6 +30,28 @@ describe("MCP tool scope table", () => {
 		}
 	});
 
+	it("exposes the deploy queue priority lane to MCP clients", () => {
+		const byName = new Map(tools.map((tool) => [tool.name, tool]));
+		for (const name of [
+			"application-deploy",
+			"application-redeploy",
+			"compose-deploy",
+			"compose-redeploy",
+		]) {
+			const properties = byName.get(name)?.inputSchema.properties as
+				| Record<string, { type?: string; description?: string }>
+				| undefined;
+			expect(properties?.priority?.type, name).toBe("boolean");
+			expect(properties?.priority?.description, name).toContain(
+				"ahead of the jobs already waiting",
+			);
+			expect(byName.get(name)?.scope, name).toBe("dokploy:deploy");
+		}
+		const bump = byName.get("deployment-prioritizeQueued");
+		expect(bump?.scope).toBe("dokploy:deploy");
+		expect(bump?.inputSchema.required).toEqual(["jobId"]);
+	});
+
 	it("tool → scope snapshot", () => {
 		const table = Object.fromEntries(
 			tools

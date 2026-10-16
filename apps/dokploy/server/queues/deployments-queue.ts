@@ -5,6 +5,7 @@ import {
 	// build-policy hook: see the pinnedImage branch below.
 	deployPinnedApplicationImage,
 	deployPreviewApplication,
+	findUserById,
 	isDeploymentCancelledError,
 	readServiceStatus,
 	rebuildApplication,
@@ -16,7 +17,7 @@ import {
 	updateCompose,
 	updatePreviewDeployment,
 } from "@dokploy/server";
-import type { InMemoryJob } from "./in-memory-queue";
+import type { InMemoryJob, JobOutcome } from "./in-memory-queue";
 
 /**
  * The status a service had before this job flipped it to "running", so a
@@ -43,11 +44,46 @@ const isRestorableStatus = (
 	status === "idle" || status === "done" || status === "error";
 
 /**
+ * The payload carries the requester's user id (the queue list shows payloads, so
+ * no email there); the deployment note names them by email, falling back to the
+ * id when the user is gone.
+ */
+const requesterLabel = async (userId: string): Promise<string> => {
+	try {
+		return (await findUserById(userId)).email || userId;
+	} catch {
+		return userId;
+	}
+};
+
+/**
+ * The description recorded on the deployment. A job that went ahead of waiting
+ * jobs through the priority lane says so (and for whom), since that is what the
+ * person reading the deployment will wonder about.
+ */
+export const describeJob = async (job: InMemoryJob): Promise<string> => {
+	const base = job.data.descriptionLog;
+	const ahead = job.wentAheadOf ?? 0;
+	if (ahead <= 0) return base;
+	const by = job.data.priorityBy
+		? `, requested by ${await requesterLabel(job.data.priorityBy)}`
+		: "";
+	const note = `Deployed ahead of ${ahead} waiting job${ahead === 1 ? "" : "s"} (priority${by})`;
+	return base ? `${base} - ${note}` : note;
+};
+
+/**
  * Processes a single deployment job. Shared by the in-memory queue worker and
  * (in cloud) the direct background execution path.
+ *
+ * Returns "cancelled" or "failed" when the job ended early, so the queue can
+ * hand back a priority job's cooldown; nothing on success.
  */
-export const processDeploymentJob = async (job: InMemoryJob) => {
+export const processDeploymentJob = async (
+	job: InMemoryJob,
+): Promise<JobOutcome | undefined> => {
 	let statusBeforeJob: string | undefined;
+	const descriptionLog = await describeJob(job);
 	try {
 		statusBeforeJob = await readStatusBeforeJob(job);
 		if (job.data.applicationType === "application") {
@@ -60,20 +96,20 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 					applicationId: job.data.applicationId,
 					pinnedImage: job.data.pinnedImage,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 				});
 			} else if (job.data.type === "redeploy") {
 				// <<< build-policy hook
 				await rebuildApplication({
 					applicationId: job.data.applicationId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 				});
 			} else if (job.data.type === "deploy") {
 				await deployApplication({
 					applicationId: job.data.applicationId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 				});
 			}
 		} else if (job.data.applicationType === "compose") {
@@ -84,14 +120,14 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 				await deployCompose({
 					composeId: job.data.composeId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 					freshVolumes: job.data.freshVolumes,
 				});
 			} else if (job.data.type === "redeploy") {
 				await rebuildCompose({
 					composeId: job.data.composeId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 					freshVolumes: job.data.freshVolumes,
 				});
 			}
@@ -104,14 +140,14 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 				await rebuildPreviewApplication({
 					applicationId: job.data.applicationId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 					previewDeploymentId: job.data.previewDeploymentId,
 				});
 			} else if (job.data.type === "deploy") {
 				await deployPreviewApplication({
 					applicationId: job.data.applicationId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 					previewDeploymentId: job.data.previewDeploymentId,
 				});
 			}
@@ -124,14 +160,14 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 				await rebuildComposePreview({
 					composeId: job.data.composeId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 					previewDeploymentId: job.data.previewDeploymentId,
 				});
 			} else if (job.data.type === "deploy") {
 				await deployComposePreview({
 					composeId: job.data.composeId,
 					titleLog: job.data.titleLog,
-					descriptionLog: job.data.descriptionLog,
+					descriptionLog,
 					previewDeploymentId: job.data.previewDeploymentId,
 				});
 			}
@@ -167,7 +203,7 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 					).catch(() => {});
 				}
 			}
-			return;
+			return "cancelled";
 		}
 		console.log("Error", error);
 		// Roll back the status set at the start of the job so a failed deployment
@@ -188,5 +224,6 @@ export const processDeploymentJob = async (job: InMemoryJob) => {
 				previewStatus: "error",
 			}).catch(() => {});
 		}
+		return "failed";
 	}
 };

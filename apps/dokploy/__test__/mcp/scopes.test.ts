@@ -57,6 +57,9 @@ describe("resolveToolScope", () => {
 	it("explicit overrides beat the patterns", () => {
 		expect(m("deployment", "removeDeployment")).toBe("dokploy:deploy");
 		expect(m("deployment", "killProcess")).toBe("dokploy:deploy");
+		// Does not match the deploy pattern, so without the override it would be
+		// "edit services".
+		expect(m("deployment", "prioritizeQueued")).toBe("dokploy:deploy");
 		expect(m("application", "clearDeployments")).toBe("dokploy:deploy");
 		expect(m("application", "cleanQueues")).toBe("dokploy:deploy");
 		expect(m("compose", "deployTemplate")).toBe("dokploy:services:write");

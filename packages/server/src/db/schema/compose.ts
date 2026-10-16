@@ -6,6 +6,7 @@ import {
 	type ComposeRollingReplace,
 	composeRollingReplaceSchema,
 } from "@dokploy/server/db/validations/compose-rolling";
+import { deployPriorityInput } from "@dokploy/server/db/validations/deploy-priority";
 import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
@@ -342,6 +343,7 @@ export const apiDeployCompose = z.object({
 	title: z.string().optional(),
 	description: z.string().optional(),
 	freshVolumes: z.boolean().optional(),
+	priority: deployPriorityInput,
 });
 
 export const apiRedeployCompose = z.object({
@@ -349,6 +351,7 @@ export const apiRedeployCompose = z.object({
 	title: z.string().optional(),
 	description: z.string().optional(),
 	freshVolumes: z.boolean().optional(),
+	priority: deployPriorityInput,
 });
 
 export const apiDeleteCompose = z.object({
