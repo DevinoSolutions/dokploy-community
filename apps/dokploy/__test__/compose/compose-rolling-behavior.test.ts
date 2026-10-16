@@ -255,7 +255,6 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		const scaleUp = indexOfCall(log, "--scale web=2 web");
 		const stopOld = indexOfCall(log, `docker stop ${OLD}`);
 		const removeOld = indexOfCall(log, `docker rm -f ${OLD}`);
-		const settle = indexOfCall(log, "--scale web=1 web");
 		const final = indexOfCall(
 			log,
 			"up -d --no-recreate --no-build --remove-orphans web api",
@@ -267,8 +266,9 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		expect(healthCheck).toBeGreaterThan(scaleUp);
 		expect(stopOld).toBeGreaterThan(healthCheck);
 		expect(removeOld).toBeGreaterThan(stopOld);
-		expect(settle).toBeGreaterThan(removeOld);
-		expect(final).toBeGreaterThan(settle);
+		expect(final).toBeGreaterThan(removeOld);
+		// Compose's scale-down is never used.
+		expect(indexOfCall(log, "--scale web=1")).toBe(-1);
 
 		// One container is left and it is the new one, never the old id.
 		const left = containersOf(world, "web");
@@ -554,7 +554,37 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		const world = createWorld(changedWeb({ flags: ["stop.noop", "rm.fail"] }));
 		const result = runRoll(world);
 		expect(result.rc).toBe(1);
-		expect(result.stdout).toContain("still running after it was stopped");
+		expect(result.stdout).toContain("could not be removed");
+	});
+
+	it("an old container that cannot be removed keeps the new replica serving and runs no compose up", {
+		timeout: 90_000,
+	}, () => {
+		// The old container sorts first, like the lowest-numbered one in Compose:
+		// a scale-down would remove the new replica and start the old one again.
+		const OLD_FIRST = "aa-old-web";
+		const world = createWorld(
+			changedWeb({
+				flags: ["rm.fail"],
+				containers: [
+					{ id: OLD_FIRST, service: "web", hash: "H1", image: "sha256:OLD-web" },
+					{ id: "aa-api", service: "api", hash: "A1", image: "sha256:NEW-api" },
+				],
+			}),
+		);
+		const result = runRoll(world);
+		const log = calls(world);
+		expect(result.rc).not.toBe(0);
+		expect(result.stdout).toContain("could not be removed");
+		expect(result.stdout).not.toContain("replaced");
+		// The new replica is the only one running; the old one is stopped.
+		const running = runningOf(world, "web");
+		expect(running).toHaveLength(1);
+		expect(running).not.toContain(OLD_FIRST);
+		// No compose up after the failed removal.
+		const stopOld = indexOfCall(log, `docker stop ${OLD_FIRST}`);
+		expect(stopOld).toBeGreaterThan(-1);
+		expect(indexOfCall(log, " up ", stopOld)).toBe(-1);
 	});
 
 	it("waits the drain delay between healthy and stopping the old container", {

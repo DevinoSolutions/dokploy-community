@@ -696,7 +696,13 @@ export const getRollingReplaceScript = ({
 			fi;${drainBlock}
 			DOKPLOY_ROLL_PROMOTING="$DR_OLD"; DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTED=1;
 			dokploy_roll_log "$1: stopping and removing the old container";
-			dokploy_roll_remove $DR_OLD || dokploy_roll_log "$1: the old container could not be removed, the next deploy removes it";
+			dokploy_roll_remove $DR_OLD || dokploy_roll_log "$1: the old container could not be removed, retrying";
+			DR_LEFT=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_NEW" || true);
+			if [ -n "$DR_LEFT" ]; then docker rm -f $DR_LEFT >/dev/null 2>&1 || true; DR_LEFT=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_NEW" || true); fi;
+			if [ -n "$DR_LEFT" ]; then
+				echo "Error: ❌ Rolling replace of $1: the old container could not be removed ($DR_LEFT). The new replica $DR_NEW is serving. No compose up is run for this service: Compose would scale back to one container and keep the lowest-numbered (old) one. The next deploy reconciles it.";
+				return 1;
+			fi;
 			for DR_C in $DR_OLD; do
 				if [ "$(docker inspect -f '{{.State.Running}}' "$DR_C" 2>/dev/null)" = "true" ]; then
 					echo "Error: ❌ Rolling replace of $1: the old container $DR_C is still running after it was stopped, so both releases are serving.";
@@ -704,7 +710,6 @@ export const getRollingReplaceScript = ({
 				fi;
 			done;
 			DOKPLOY_ROLL_PROMOTING="";
-			dokploy_roll_compose up -d --no-deps --no-recreate --no-build --scale "$1=1" "$1" 2>&1 || dokploy_roll_log "$1: could not settle the replica count, the service is running the new release";
 			dokploy_roll_log "$1: replaced";
 			return 0;
 		};

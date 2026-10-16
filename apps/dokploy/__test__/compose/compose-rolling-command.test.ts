@@ -291,7 +291,6 @@ describe("rolling replace: the generated script", () => {
 			'dokploy_roll_wait_healthy "$DR_NEW"',
 			"waiting 5s before the old container is stopped",
 			"dokploy_roll_remove $DR_OLD",
-			'--scale "$1=1" "$1"',
 			"--remove-orphans $DR_ALL",
 		];
 		let at = definitions.indexOf("dokploy_roll_service() {");
@@ -334,8 +333,9 @@ describe("rolling replace: the generated script", () => {
 		const { definitions } = script();
 		expect(definitions).not.toMatch(/--scale "\$1=2"[^\n]*docker rm/);
 		expect(definitions).toContain("dokploy_roll_remove $DR_OLD");
-		// The only scale-down is the no-op settle after the old container is gone.
-		expect(definitions.match(/--scale "\$1=1"/g)).toHaveLength(1);
+		// Compose would scale down by removing the highest-numbered container, so no
+		// scale-down is ever issued.
+		expect(definitions).not.toMatch(/--scale "\$1=1"/);
 	});
 
 	it("hostile names: the script still parses and the names are quoted data", () => {

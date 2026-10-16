@@ -148,6 +148,15 @@ case "$cmd" in
         for svc in $names; do
           if [ -f "$D/cfg/up.fail.$svc" ]; then echo "up failed for $svc" >&2; exit 1; fi
           have=$(ids_of "$svc" all | grep -c .)
+          if [ -z "$scale" ]; then
+            # Without --scale Compose converges to the default of one container
+            # and removes the highest-numbered one, whatever its state or release.
+            while [ "$have" -gt 1 ]; do
+              last=$(ids_of "$svc" all | tail -n 1)
+              rm -rf "$D/containers/$last"
+              have=$((have - 1))
+            done
+          fi
           if [ -n "$scale" ]; then
             want=$(echo "$scale" | cut -d= -f2)
             while [ "$have" -lt "$want" ]; do create "$svc" > /dev/null; have=$((have + 1)); done
