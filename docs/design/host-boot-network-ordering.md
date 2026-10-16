@@ -182,8 +182,9 @@ One mechanism: `dokploy-boot-recover.service` running `/usr/local/sbin/dokploy-b
   an auto-restart after a crash (`Restart=always`). `BindsTo` marks it inactive when docker
   stops, so the next docker start runs it again. `docker.service` itself is not edited
   (`systemctl enable` only adds a symlink under `docker.service.wants/`).
-- `After=boot-traefik-fix.service` keeps the two boot jobs from fighting over the manager.
-  It only matters at boot; the existing unit is not changed.
+- `After=boot-traefik-fix.service` keeps the two boot jobs from loading the swarm manager at
+  the same time (about two minutes of delay at boot). It is ordering only, not a dependency,
+  and the existing unit is not changed. See 6.6 for what that unit is.
 
 ### 5.2 Which containers it starts
 
@@ -800,6 +801,65 @@ Not done (needs a host, and the brief said not to apply anything anywhere):
   `State.Error` set.
 - Time from `docker.service` active to the last container running is under 5 minutes.
 - `EXCLUDED (lead-gen)` lines list exactly the Lead Gen containers that were down.
+
+### 6.6 Existing boot units on devino-first, and how this unit relates to them
+
+Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`, `stat`).
+
+**`boot-traefik-fix.service`** (the one named in `After=`):
+
+- *What it is.* A oneshot, `After=docker.service tailscaled.service`, `WantedBy=
+  multi-user.target`, running `/usr/local/bin/boot-traefik-fix.sh`. Its purpose is stated in
+  the script: Tailscale Serve binds `100.x:443`, which makes Docker Swarm's host-mode publish
+  of Traefik on `0.0.0.0:443` fail with `EADDRINUSE`. So it stops `tailscaled`, waits for port
+  443 to be free, runs `docker service update --force dokploy-traefik`, waits until Traefik
+  is running and bound to 443, then starts `tailscaled` again (and deliberately does not
+  re-enable Tailscale Serve on 443, because of the 2026-09-22 outage).
+- *Who and when.* The host does not record who installed it (root-owned files, no package or
+  git metadata). The unit file was created 2026-05-19 13:27Z (the `multi-user.target.wants`
+  symlink is dated 2026-05-10), and the script was last changed 2026-09-22 03:25Z, which
+  matches the outage its comments mention. Ask the people who did the 2026-09-22 work; I did
+  not guess.
+- *Did it run at 07:22Z?* It ran at 07:25:44Z, when `docker.service` became active (that
+  is its `After=`), and finished at 07:27:41Z with status 0. Its journal shows `docker service
+  update --force dokploy-traefik` at 07:26:05Z followed by about 1.5 minutes of `no suitable
+  node (host-mode port already in use on 1 node)` until Traefik bound 443 at about 07:27:38Z.
+  The previous boot (2026-10-14) shows the same script: a 15 s wait warning, a failed first
+  service update that it retried, Traefik up at 18:07:22Z. So **Traefik itself was not
+  serving until 07:27:41Z on 2026-10-16, independently of the 53 containers.** That is a
+  second, smaller contribution to the outage window and is not addressed by this design.
+- *Overlap or conflict with `dokploy-boot-recover`?* No overlap: it acts on one swarm service
+  (`dokploy-traefik`) and on `tailscaled`; this unit acts on standalone containers and never
+  touches either. There is a shared resource, the swarm manager, which is busy during
+  Traefik's forced update. `After=boot-traefik-fix.service` orders recovery after it, so the
+  two never run together. Cost: recovery starts about two minutes later than it could (the
+  script took 1 min 57 s at 07:25:44Z). Benefit: recovered containers come up behind a working
+  Traefik and the manager is not loaded by two jobs at once. It is only ordering, not
+  `Requires=`/`Wants=`: if `boot-traefik-fix` fails or is removed, recovery still runs, and
+  its own `TimeoutStartSec=300` bounds the wait.
+- *Should it be folded in?* No. Different failure (port 443 ownership vs. network attach),
+  different object, and the working unit should not be made riskier. Two observations for its
+  owners, outside this fix: `tee: /dev/stderr: No such device or address` in its journal, and
+  a `service update paused` message on 07:27:02Z followed by success.
+
+**`devino-container-maintenance-recovery.service`** (not named in `After=`, but relevant):
+
+- A oneshot installed 2026-10-14 17:59Z, `Requires=docker.service`, guarded by
+  `ConditionPathExists=/root/devino-maintenance-20261014/container-recovery-pending.json`,
+  running a Python script from the same directory with the argument `restore`.
+- On 2026-10-14 it ran at 18:07Z, after that day's maintenance reboot, and logged `restored:
+  true, tracked: 326`. The containers that failed on 10-14 have a `StartedAt` of 18:07Z, so it
+  most likely recovered them; I did not read the script, so this is inference.
+- On 2026-10-16 it was skipped at 07:25:44Z (`start condition unmet`): the pending file no
+  longer exists, because that mechanism is a one-off created by hand for a planned
+  maintenance. The 10-16 reboot was unplanned (a Windows update), which is why nothing
+  restored these containers.
+- Relationship: it is the same idea (start what should be running after boot) but driven by a
+  hand-made inventory for one maintenance window. This design is the permanent, selection-by-
+  evidence version for the unplanned case. They do not conflict: if the inventory restore ever
+  runs again it starts containers by name from its own list, and `dokploy-boot-recover` then
+  finds them `running` and does nothing. The one-off could be retired once this unit is
+  proven.
 
 ---
 
