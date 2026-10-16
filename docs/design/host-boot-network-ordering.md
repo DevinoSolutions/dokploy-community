@@ -138,7 +138,7 @@ What was ruled out:
 |---|---|
 | **a1.** Order units so the network exists before containers start (drop-in on `docker.service`, earlier swarm). | Not viable. The overlay is created by `dockerd` after swarm init, inside the daemon. Docker already postpones those containers until then. The failure is the 20 s attach budget, not the order. |
 | **a2.** Replace `dokploy-network` with a non-swarm bridge. | Not viable. Dokploy runs Traefik and all applications as swarm services (175 here), and swarm services can only join swarm-scope networks. A bridge cannot connect Traefik to them. Also a rewrite of Dokploy's network model. |
-| **a3.** Make the manager faster or the herd smaller (fewer services, staggered start). | No Docker knob. `swarmRequestTimeout` is a compile-time constant, and `max-concurrent-*` settings only cover image transfers. Reducing the service count is not a fix we control. |
+| **a3.** Lower the burst: make Docker attach fewer containers at a time (or stagger them), so each attach finishes inside the 20 s budget. | Not available. `RestartSwarmContainers` limits its parallelism with `adjustParallelLimit(len(containers), 128*runtime.NumCPU())` (moby `daemon/daemon.go`). That is 128 x 16 cores = 2048 on this host, so all 53 run at once, and there is no `daemon.json` key or flag for it (the only `max-concurrent-*` keys are image downloads and uploads). `swarmRequestTimeout` is also a constant. The source comment says the multiplier was benchmarked and should not be changed, so a patched or self-built `dockerd` is not something to take on. Even if a knob existed, it would only make the race less likely, not remove it: any attach that still exceeds 20 s would be lost the same way. Our recovery handles every failure, whatever the cause. Reducing the number of services on the host is not a fix we control. |
 | **a4.** `live-restore: true`. | Does not apply to a host reboot, and does not cover swarm services. |
 | **c.** Dokploy-side reconcile on startup (server code uses the compose status in the DB to start what should be running). | Knows user intent precisely, but needs a release and a deploy, only covers Dokploy-managed stacks, and depends on Dokploy itself being up, which is itself one of the things restarting at that moment. Worth revisiting later; not the first fix. |
 | **b.** One host-level oneshot after `docker.service` that starts the containers Docker failed to attach. | **Chosen.** Smallest blast radius, no change to Docker or Dokploy, uses state Docker already records, trivially rolled back. |
@@ -206,7 +206,61 @@ removes, stops or restarts anything that is running, never edits Docker or Dokpl
 and never prints environment or argv. A `docker start` on a container that Dokploy removed
 meanwhile fails harmlessly with "No such container".
 
-### 5.4 Files
+### 5.4 Behaviour on a plain `systemctl restart docker`
+
+The unit is not boot-only. With `live-restore` off, restarting the daemon stops every
+container and then runs the same restore path as a reboot (restore, skip swarm-endpoint
+containers, swarm init, `RestartSwarmContainers`), so the same attach race can happen.
+
+- `systemctl restart docker` is a restart of a unit that `dokploy-boot-recover.service`
+  has `BindsTo=` and `After=`. systemd stops our unit first (if the script is mid-run it
+  is terminated with the rest of its cgroup, and the lock is released) and starts it again
+  after `docker.service` is active, because of `WantedBy=docker.service`. The same happens
+  for `systemctl stop docker` followed by `start`, and for a crash restart (`Restart=always`).
+  This is documented systemd behaviour for `BindsTo`/`Requires`; it has not been exercised
+  on the host. Step 4 of the rollout checks it at the first real Docker restart or reboot,
+  in `dry-run`.
+- The script reads the start time of the running `dockerd` (`ExecMainStartTimestamp`), so
+  after a restart it only considers failures that belong to the new daemon run. Leftovers
+  from an earlier run are ignored.
+- Nothing about the selection changes: a clean `docker stop` leaves no networking error, so
+  containers stopped before the restart are not started. Containers that Docker restores
+  without trouble are `running`, so they are never candidates.
+- Idempotent: running it twice, or once per restart, is safe; a started container no longer
+  carries the error.
+- It can also be run by hand at any time with `systemctl restart dokploy-boot-recover`
+  (use `dry-run` to look first). Restarting Docker on prod is still governed by the
+  existing rule that nothing restarts Dokploy while the deploy queue has jobs; this unit
+  neither changes nor bypasses that.
+
+### 5.5 Dry run first
+
+The script's mode is `dry-run` unless `DOKPLOY_BOOT_RECOVER_MODE` is exactly `enforce`.
+A missing, empty or mistyped environment file therefore also gives a dry run. In
+`dry-run` the script waits for swarm, selects candidates, logs one `DRY-RUN would start
+<name>` line per container plus any `UNCLASSIFIED` warnings, and exits 0 without running
+any `docker start`. The files install in `dry-run`, and the first run after approval is
+a dry run (rollout steps 3 and 4). Moving to `enforce` is a separate, explicit edit.
+
+### 5.6 Pause and retry with backoff: included
+
+Both are built in; neither is optional.
+
+- **Pause.** The unit waits for `Ready Leader`, then sleeps 20 s. On this host it would
+  start after `docker.service` is active, which in the incident was 07:25:44, about 91 s
+  after the manager became leader, and the burst of attaches (07:24:21 to 07:25:33) was
+  already over. The 20 s settle is margin, not the mechanism; the real protection is that
+  the unit only starts after Docker has finished its own attempt.
+- **Retry with backoff.** A single attempt is not assumed to be enough. A `docker start`
+  that fails again is retried in the next pass, passes are 45 s apart, a container is
+  started at most 4 times per run, and starts run 6 at a time so we do not recreate the
+  burst. This is a fixed pause, not exponential, because each attempt already carries its
+  own 20 s attach budget inside Docker and the number of candidates is small (at most
+  tens). It also covers the second failure mode, containers that start and die within
+  Docker's 10 s grace window before its own restart policy engages. Exhausting the attempts
+  exits non-zero and logs at `err`, so the failure is visible instead of silent.
+
+### 5.7 Files
 
 `/etc/systemd/system/dokploy-boot-recover.service`
 
