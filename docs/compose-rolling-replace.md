@@ -124,12 +124,23 @@ deploy is never failed because of drift.
 - **Cancel mid-rollout** (`compose.killBuild` sends SIGINT to the local deploy
   process): the new replica that was not promoted yet is removed at once with
   `docker rm -f`, and the old container keeps serving. Limits:
-  - On a compose that deploys through a build server, cancel only signals the
-    build-server commands. The rolling script runs on the serving host and is
-    not interrupted, so a rollout that already started runs to completion, like
-    the single `up` it replaces.
-  - `deployment.killProcess` sends `kill -9`, which cannot be caught: it can
-    leave two containers until the next deploy reconciles them.
+  - On a compose that deploys through a build server, the deploy script runs
+    on the serving host (the Dokploy host when the compose has no server), not
+    on the build server. When it contains a rolling replace it is started in
+    its own session with a pid file there, and a cancel
+    (`compose.killBuild` or `deployment.killProcess`) signals it on that host
+    after the build server had nothing to kill: SIGTERM, so the same trap
+    removes the replica, then SIGKILL after 20 s. The log says the release
+    step was stopped; services that were already replaced stay on the new
+    release. A script without a rolling replace (a plain `up`) is not
+    interruptible and runs to completion, like a cancel that arrives too late.
+  - The `up` of the services that are not rolled, and the final `up`, are
+    never cut short: a cancel waits for the step that is running (up to the
+    20 s grace), then the script stops before the next one. The job ends only
+    after the script has cleaned up.
+  - `deployment.killProcess` on a compose that does not use a build server
+    sends `kill -9`, which cannot be caught: it can leave two containers until
+    the next deploy reconciles them.
 - **Interrupted deploys can leave two containers.** The next deploy finds more
   than one container for a selected service and reconciles first: it keeps the
   newest healthy one, removes the rest, and goes on.

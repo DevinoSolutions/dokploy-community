@@ -558,6 +558,14 @@ export interface RollingScript {
 export const ROLLING_RUN_FUNCTION = "dokploy_roll_run";
 
 /**
+ * True when a deploy script contains the rolling replace (not the plain `up` a
+ * compose falls back to when no service can be rolled). Only that script has a
+ * cancel trap, so only it is worth signalling on the serving host.
+ */
+export const commandRunsRollingReplace = (command: string) =>
+	command.includes(`${ROLLING_RUN_FUNCTION}() {`);
+
+/**
  * Shell: the rolling replace as functions, plus the call that replaces `up`.
  *
  * Everything runs in one shell with explicit `|| return 1`s: the call sits on
@@ -578,6 +586,12 @@ export const ROLLING_RUN_FUNCTION = "dokploy_roll_run";
  *
  * A TERM / INT / HUP (cancel, `pkill`) removes the replica that was not
  * promoted yet. A SIGKILL cannot be caught: the next deploy reconciles.
+ *
+ * The `up` of the services that are not rolled (and the final `up`) run in a
+ * session of their own (`setsid`), so a cancel that signals this script's
+ * process group does not kill them half way through a recreate: the trap runs
+ * once they return. A cancel therefore waits for such a step. A step that is
+ * still running when the cancel's grace ends keeps running on its own.
  */
 export const getRollingReplaceScript = ({
 	appName,
@@ -625,7 +639,7 @@ export const getRollingReplaceScript = ({
 	const othersBlock = `
 			if [ -n "$DR_OTHERS" ]; then
 				dokploy_roll_log "updating the services that are not rolled:$DR_OTHERS";
-				dokploy_roll_compose up -d --no-deps ${pullFlag}${buildFlag} $DR_OTHERS 2>&1 || return 1;
+				dokploy_roll_compose_shielded up -d --no-deps ${pullFlag}${buildFlag} $DR_OTHERS 2>&1 || return 1;
 			fi;`;
 
 	const definitions = `
@@ -637,6 +651,7 @@ export const getRollingReplaceScript = ({
 		dokploy_roll_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Rolling replace: $*"; };
 		dokploy_roll_sleep() { sleep "$1" & wait $!; };
 		dokploy_roll_compose() { env -i PATH="$PATH" HOME="$HOME" docker ${invocation} "$@"; };
+		dokploy_roll_compose_shielded() { if command -v setsid >/dev/null 2>&1; then ( exec setsid env -i PATH="$PATH" HOME="$HOME" docker ${invocation} "$@" ); else dokploy_roll_compose "$@"; fi; };
 		dokploy_roll_ids() { docker ps -aq --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
 		dokploy_roll_running_ids() { docker ps -q --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
 		dokploy_roll_remove() {
@@ -730,7 +745,7 @@ export const getRollingReplaceScript = ({
 			DR_OLD=$(dokploy_roll_running_ids "$1");
 			if [ -z "$DR_OLD" ]; then
 				dokploy_roll_log "$1: no running container, starting it with a plain up";
-				dokploy_roll_compose up -d --no-deps ${pullFlag}--no-build "$1" 2>&1 || return 1;
+				dokploy_roll_compose_shielded up -d --no-deps ${pullFlag}--no-build "$1" 2>&1 || return 1;
 				return 0;
 			fi;
 			if dokploy_roll_unchanged "$1"; then
@@ -757,7 +772,7 @@ export const getRollingReplaceScript = ({
 				dokploy_roll_fail "$1";
 				return 1;
 			fi;${drainBlock}
-			DOKPLOY_ROLL_PROMOTING="$DR_OLD"; DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTED=1;
+			DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTING="$DR_OLD"; DOKPLOY_ROLL_PROMOTED=1;
 			dokploy_roll_log "$1: stopping and removing the old container";
 			dokploy_roll_remove $DR_OLD || dokploy_roll_log "$1: the old container could not be removed, retrying";
 			DR_LEFT=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_NEW" || true);
@@ -785,7 +800,7 @@ export const getRollingReplaceScript = ({
 			done;${buildBlock}${pullBlock}${othersBlock}
 			for DR_S in $DR_ROLL; do dokploy_roll_service "$DR_S" || return 1; done;
 			dokploy_roll_log "reconciling the project (orphans, stopped services)";
-			dokploy_roll_compose up -d --no-recreate --no-build --remove-orphans $DR_ALL 2>&1 || return 1;
+			dokploy_roll_compose_shielded up -d --no-recreate --no-build --remove-orphans $DR_ALL 2>&1 || return 1;
 			return 0;
 		};
 		${ROLLING_RUN_FUNCTION}() {

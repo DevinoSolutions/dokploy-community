@@ -26,6 +26,14 @@ export interface RemoteBuildCancelTarget {
 	/** Per-deployment pid file on the build server. */
 	pidFile: string;
 	deploymentId: string;
+	/**
+	 * Release step only: after the command ends, wait up to this many seconds
+	 * for its process group to be gone before returning. A cancel kills the
+	 * session's first process at once, while a trap in the script still has
+	 * cleanup to do; returning earlier would free the deployment job (and let a
+	 * queued deploy of the same compose start) while that cleanup runs.
+	 */
+	drainSeconds?: number;
 }
 
 /**
@@ -53,6 +61,33 @@ export const getRemoteBuildCancelTarget = (
 	pidFile: getRemoteBuildPidFile(deploymentId),
 	deploymentId,
 });
+
+/**
+ * The release step of a build-server deploy (the script that pulls and starts
+ * the new release on the serving host) is cancelable the same way, with a pid
+ * file of its own on the serving host. Its key is the deployment id plus a
+ * suffix, so the build-server cancel (keyed by the bare id) never mistakes it
+ * for a build: the registry of running commands and the pid file's owner field
+ * both use this key.
+ */
+export const getReleaseCancelKey = (deploymentId: string) =>
+	`${deploymentId}.release`;
+
+/**
+ * `onRemoteHost` follows the path layout of the serving host: false when that
+ * is the Dokploy host itself (a compose without a server).
+ */
+export const getReleaseCancelTarget = (
+	deploymentId: string,
+	onRemoteHost: boolean,
+): RemoteBuildCancelTarget => {
+	const key = getReleaseCancelKey(deploymentId);
+	return {
+		pidFile: `${paths(onRemoteHost).LOGS_PATH}/.build-pids/${safeFileSegment(key)}.pid`,
+		deploymentId: key,
+		drainSeconds: RELEASE_DRAIN_SECONDS,
+	};
+};
 
 /**
  * Inner script, run by `setsid sh -c`. `$$` is the new session leader (and so
@@ -84,23 +119,40 @@ const SESSION_LAUNCHER = [
  */
 export const wrapCancelableRemoteBuild = (
 	command: string,
-	{ pidFile, deploymentId }: RemoteBuildCancelTarget,
-) =>
-	[
+	{ pidFile, deploymentId, drainSeconds }: RemoteBuildCancelTarget,
+) => {
+	const drain =
+		drainSeconds && drainSeconds > 0
+			? [
+					// Only after a signal-style exit (a cancel): a command that ended on
+					// its own is not waited for. The group id is the session leader's
+					// pid, first field of the pid file.
+					'if [ "$__rc" -ge 128 ]; then',
+					'read -r __pg _ < "$__f" 2>/dev/null || __pg=""',
+					'case "$__pg" in ""|*[!0-9]*|0|1) ;; *)',
+					"__i=0",
+					`while [ "$__i" -lt ${Math.floor(drainSeconds)} ] && kill -s 0 -- "-$__pg" 2>/dev/null; do sleep 1; __i=$((__i+1)); done;;`,
+					"esac",
+					"fi",
+				]
+			: [];
+	return [
 		`__f=${shSingleQuote(pidFile)}`,
 		`__id=${shSingleQuote(deploymentId)}`,
 		`__cmd=${shSingleQuote(command)}`,
 		'mkdir -p "$(dirname "$__f")" 2>/dev/null',
-		'if command -v setsid >/dev/null 2>&1; then',
+		"if command -v setsid >/dev/null 2>&1; then",
 		`( exec setsid sh -c ${shSingleQuote(SESSION_LAUNCHER)} sh "$__f" "$__id" "$__cmd" )`,
 		"else",
 		'echo "setsid is not installed on this server: this build cannot be cancelled from Dokploy." >&2',
 		'( exec "${SHELL:-sh}" -c "$__cmd" )',
 		"fi",
 		"__rc=$?",
+		...drain,
 		'rm -f "$__f"',
 		'exit "$__rc"',
 	].join("\n");
+};
 
 /** What the kill command reports, one word on stdout. */
 export type RemoteBuildKillResult =
@@ -118,6 +170,16 @@ export type RemoteBuildKillResult =
 	| "UNVERIFIED";
 
 export const KILL_GRACE_SECONDS = 8;
+
+/**
+ * Grace for a release step: after SIGTERM its rolling-replace trap still has to
+ * remove the replica that was not promoted, which takes longer than a build
+ * client needs to unwind. Must stay below the cancel's overall timeout.
+ */
+export const RELEASE_KILL_GRACE_SECONDS = 20;
+
+/** How long the release wrapper waits for the script's group after it ends. */
+export const RELEASE_DRAIN_SECONDS = RELEASE_KILL_GRACE_SECONDS + 5;
 
 /**
  * Runs on the build server: sends SIGTERM to the deployment's process group,
@@ -144,7 +206,7 @@ export const getKillRemoteBuildCommand = (
 		'[ -r "/proc/$pgid/stat" ] || { [ -d /proc/self ] && { rm -f "$f"; echo GONE; exit 0; }; echo UNVERIFIED; exit 0; }',
 		// A pid file left over from before a reboot names a pid that now belongs to
 		// something else; the boot id tells the two boots apart.
-		'curboot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)',
+		"curboot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)",
 		'[ "$boot" = "$curboot" ] || { rm -f "$f"; echo GONE; exit 0; }',
 		'cur=$(sed "s/^.*) //" "/proc/$pgid/stat" 2>/dev/null | cut -d" " -f20)',
 		'[ -n "$start" ] && [ "$cur" = "$start" ] || { rm -f "$f"; echo GONE; exit 0; }',

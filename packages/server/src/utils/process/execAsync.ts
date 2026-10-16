@@ -1,4 +1,4 @@
-import { exec, execFile, spawn } from "node:child_process";
+import { type ChildProcess, exec, execFile, spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";
@@ -82,6 +82,70 @@ export const execAsync = async (
 			});
 		}
 		throw error;
+	}
+};
+
+/**
+ * `execAsync` for a command that must be stoppable from another request: it
+ * runs on this host in its own session with a pid file (see
+ * `builders/remote-build-cancel.ts`), and `abortRemoteBuild(cancelable.
+ * deploymentId)` drops the wait for it. The counterpart of `execAsyncRemote`'s
+ * `cancelable` option for a serving host that is the Dokploy host itself.
+ *
+ * Aborting kills the wrapper shell only; the command itself is stopped by the
+ * kill script, by pid file, which is what lets a trap in it run.
+ */
+export const execAsyncCancelable = async (
+	command: string,
+	cancelable: RemoteBuildCancelTarget,
+	options: {
+		/**
+		 * Runs after the command is registered and before it starts. If it
+		 * throws, the command is not started.
+		 */
+		beforeExec?: () => void | Promise<void>;
+	} = {},
+): Promise<{ stdout: string; stderr: string }> => {
+	let aborted: string | undefined;
+	let child: ChildProcess | undefined;
+	let rejectAborted: ((error: ExecError) => void) | undefined;
+	const unregister = registerRemoteBuild(cancelable.deploymentId, (reason) => {
+		aborted = reason;
+		child?.kill("SIGKILL");
+		rejectAborted?.(
+			new ExecError(`Local build was cancelled: ${reason}`, { command }),
+		);
+	});
+	try {
+		await options.beforeExec?.();
+		if (aborted !== undefined) {
+			throw new ExecError(`Local build was cancelled: ${aborted}`, { command });
+		}
+		return await new Promise<{ stdout: string; stderr: string }>(
+			(resolve, reject) => {
+				rejectAborted = reject;
+				child = exec(
+					wrapCancelableRemoteBuild(command, cancelable),
+					(error, stdout, stderr) => {
+						if (!error) {
+							resolve({ stdout: stdout.toString(), stderr: stderr.toString() });
+							return;
+						}
+						reject(
+							new ExecError(`Command execution failed: ${error.message}`, {
+								command,
+								stdout: stdout.toString(),
+								stderr: stderr.toString(),
+								exitCode: error.code,
+								originalError: error,
+							}),
+						);
+					},
+				);
+			},
+		);
+	} finally {
+		unregister();
 	}
 };
 
