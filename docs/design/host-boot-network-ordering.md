@@ -384,8 +384,9 @@ connect --alias ...`. That is not free, which is why it is off:
   sandbox, 0 of 30 plain starts lost an alias), so we do not know how often a repair would be
   needed.
 
-So by default the script only reports. **T3 (6.4) has to reproduce the alias loss, and show
-that the repair restores aliases and address, before the switch is turned on.** With it on,
+So by default the script only reports. **T3 (6.4) provoked the loss and showed that the repair
+restores aliases and a static address (a dynamic address can change); the loss itself has
+not been reproduced naturally, so the switch stays off until Amin decides.** With it on,
 for each network that is missing a name:
 
 1. Re-read `State.Status` and `State.StartedAt` and compare them with what the script
@@ -395,9 +396,12 @@ for each network that is missing a name:
    nothing more, exit 3.
 3. `docker network connect --alias <each expected name> [--ip <stored static IP>] <net> <id>`,
    up to 3 tries, 20 s apart (`DOKPLOY_BOOT_RECOVER_REPAIR_PAUSE`). The `--ip` is carried over
-   only when the endpoint had a static address (`IPAMConfig`) before.
-4. If all 3 tries fail, a plain `docker network connect` (with `--ip` when known) so the
-   container is never left off the network, then `ALIAS REPAIR FAILED ... plain connect
+   only when the endpoint had a static address (`IPAMConfig`) before and it is a dotted IPv4.
+   (Docker 29 prints an unset address as `invalid IP`; the inspect template guards with
+   `IsValid`, checked on prod's Docker, and the shell ignores and logs anything that is not an
+   IPv4, so a bad `--ip` can never be built.)
+4. If all 3 tries fail, a last `docker network connect <net> <id>` with **no options at all**
+   (no `--ip`, no `--alias`) so the container is never left off the network, then `ALIAS REPAIR FAILED ... plain connect
    used: yes` at `err` and exit 3.
 5. Log the IP before and after. If it changed, `IP CHANGED <name> <net>: <old> -> <new>,
    check the Traefik route` at warning.
@@ -442,8 +446,8 @@ WantedBy=docker.service
 
 `/etc/default/dokploy-boot-recover` (ships as `dry-run`; flip to `enforce` after step 5 of
 the rollout). The `EXCLUDE` line is replaced with the helper's output at install time (5.7);
-the value shown is the safe floor. `ALIAS_REPAIR` stays `off` until T3 (6.4) has shown that
-the repair works.
+the value shown is the safe floor. `ALIAS_REPAIR` stays `off` until Amin decides to enable it (T3 and T3b in
+6.4 show what it does and does not guarantee).
 
 ```sh
 DOKPLOY_BOOT_RECOVER_MODE=dry-run
@@ -549,7 +553,7 @@ journal_failed_ids() {
 }
 
 ROW_FMT='{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}|{{with index .Config.Labels "com.docker.swarm.task.id"}}swarm{{end}}|{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}|{{with index .Config.Labels "com.docker.compose.service"}}{{.}}{{end}}|{{.State.Error}}'
-NET_FMT='{{range $k,$v := .NetworkSettings.Networks}}{{$k}}|{{join $v.Aliases ","}}|{{join $v.DNSNames ","}}|{{$v.IPAddress}}|{{with $v.IPAMConfig}}{{.IPv4Address}}{{end}}{{"\n"}}{{end}}'
+NET_FMT='{{range $k,$v := .NetworkSettings.Networks}}{{$k}}|{{join $v.Aliases ","}}|{{join $v.DNSNames ","}}|{{if $v.IPAddress.IsValid}}{{$v.IPAddress}}{{end}}|{{with $v.IPAMConfig}}{{if .IPv4Address.IsValid}}{{.IPv4Address}}{{end}}{{end}}{{"\n"}}{{end}}'
 
 QUIET=0 # classify logs what it leaves alone on the first pass only
 say() { [ "$QUIET" = 1 ] || log "$@" >&2; }
@@ -613,7 +617,13 @@ repair_net() { # id name net want static started missing
   fi
   log "ALIASES MISSING $name $net $missing, repairing (ip before: ${ip_before:-none})" warning
   for a in ${want//,/ }; do args="$args --alias $a"; done
-  [ -n "$static" ] && ipopt="--ip $static"
+  # The stored static address is only used if it is a dotted IPv4 (Docker 29 prints "invalid IP"
+  # for an unset netip.Addr); anything else is ignored and logged.
+  case "$static" in
+    '') ;;
+    [0-9]*.[0-9]*.[0-9]*.[0-9]*) ipopt="--ip $static" ;;
+    *) log "ignoring a static address that is not IPv4 on $name $net" notice ;;
+  esac
   if ! docker network disconnect "$net" "$id" >/dev/null 2>&1; then
     log "ALIAS REPAIR FAILED $name $net: disconnect failed, nothing changed" err
     return 1
@@ -624,9 +634,8 @@ repair_net() { # id name net want static started missing
     [ "$try" -lt 3 ] && sleep "$REPAIR_PAUSE"
   done
   if [ "$ok" = 0 ]; then
-    # Never leave the container off the network: a plain connect, without aliases.
-    # shellcheck disable=SC2086
-    docker network connect $ipopt "$net" "$id" >/dev/null 2>&1
+    # Never leave the container off the network: a last attempt with no options at all.
+    docker network connect "$net" "$id" >/dev/null 2>&1
   fi
   ip_after=$(net_lines "$id" | awk -F'|' -v n="$net" '$1 == n { print $4 }')
   missing=$(missing_names "$id" "$net" "$want")
@@ -807,9 +816,10 @@ printf "'\n"
 5. Set `DOKPLOY_BOOT_RECOVER_MODE=enforce` in `/etc/default/dokploy-boot-recover`.
    No reload needed, the file is read on each start.
 6. At the next reboot confirm the success criteria in 6.5.
-7. `DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR` stays `off`. Turn it on only after T3 has reproduced
-   an alias loss in the sandbox and shown the repair restores the aliases and the address, and
-   only with a note on who checks the Traefik route after the next real event.
+7. `DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR` stays `off`. Turn it on only on Amin's decision (T3b in 6.4
+   showed the repair works on real Docker for aliases and a static address, and that a dynamic
+   address can change), and only with a note on who checks the Traefik route after the next
+   real event.
 8. Whenever a Lead Gen stack is created, re-run `dokploy-boot-recover-exclusions` and update
    `/etc/default/dokploy-boot-recover` (5.7).
 
@@ -888,7 +898,10 @@ Done:
   Enforce on a daemon 3 hours old exited 4 and started nothing; a dry-run on the same
   daemon worked. An empty or unset `EXCLUDE` kept the Lead Gen globs; only
   `EXCLUDE_NONE=yes` disabled them (with the warning). A run where every start succeeds made
-  one pass and no 45 s pause. Also run: `bash -n` on both scripts.
+  one pass and no 45 s pause. Case 11: a stub that prints `invalid IP` for an unset static
+  address produced no `--ip` argument and an `ignoring a static address` log line; case 12:
+  when every connect fails the last attempt is a connect with no options at all. Also run:
+  `bash -n` on both scripts.
 
 - **T3, real Docker in an isolated sandbox (run 2026-10-16, 11:43Z to about 13:20Z).** A
   throwaway privileged `docker:29.9.0-dind` container on `devino-second` (same Docker version
@@ -931,23 +944,45 @@ Done:
     logged `SKIP` or ignored, and only containers with both a journal failure line and a
     `State.Error` were candidates.
 
-  *Not achieved.* (1) The alias-loss path: with no natural loss, the planned test of the
-  repair against a stripped endpoint (a `docker` wrapper that disconnects and plain-reconnects
-  the container right after its start) could not be completed. Fabricating a second failed
-  state by editing `config.v2.json` after `kill -9` of the inner daemon left the sandbox's
-  container store inconsistent (`failed to load container mount: RW layer ... does not
-  exist`), the inner `dockerd` stopped making progress during startup, and I stopped there
-  and tore the sandbox down. (2) Real-Docker coverage of `ALIAS_REPAIR=on`: **none**; it is
-  covered only by the stub tests in T2. (3) The cost of a reconnect under manager load: not
-  measured.
+  *Not achieved in the first sandbox.* The alias-loss path: with no natural loss, the planned
+  test of the repair could not be completed there. Fabricating a second failed state by
+  editing `config.v2.json` after `kill -9` of the inner daemon left the container store
+  inconsistent (`failed to load container mount: RW layer ... does not exist`), the inner
+  `dockerd` stopped making progress during startup, and I tore that sandbox down.
 
-  *Consequence for the design.* The check-and-report default (section 5.8) is confirmed
-  harmless and sufficient on healthy Docker: no alias loss occurred, so nothing needed
-  repairing. The gate for enabling repair is **not met**: it stays `off`, and enabling it still
-  needs a real-Docker test of the disconnect/connect path (aliases, IP, links, and the time it
-  takes under load), best done with a fresh sandbox that avoids `kill -9` (for example by
-  stopping the inner daemon cleanly and editing the stored state, or by using a second
-  attached `dockerd` on a copy of the data).
+- **T3b, repair path on real Docker (second sandbox, same day, about 25 minutes).** A fresh
+  `docker:29.9.0-dind` on `devino-second` (host swarm `inactive` before and after; container,
+  volume, image and temp files removed). No `kill -9` and no config editing: three containers
+  on an overlay (`10.50.0.0/24`) were started once, stopped, had their entrypoint file
+  removed and were started again, which gives a genuine `exited` container with a real
+  `State.Error` (a failed start of a container that had run before, the same shape as the
+  prod failure). The journal shim named their ids. A `docker` wrapper in the script's `PATH`
+  provoked the prod symptom: right after the script's plain `docker start` of two of them (one
+  with a static `--ip 10.50.0.50`, both compose-style with a service alias) it disconnected and
+  plain-reconnected the endpoint, which strips the aliases exactly as seen on prod.
+  - **Repair off:** `ALIASES MISSING demo-a ... a_svc` and `demo-b ... b_svc (repair is off,
+    nothing changed)`, `alias problems: yes`, exit 3. From the client container `a_svc` and
+    `b_svc` did **not** resolve (the prod symptom), `demo-c` did.
+  - **Repair on:** both containers repaired: `aliases restored` for each, `getent hosts a_svc`
+    and `b_svc` resolved again. The container with the static address got **the same address
+    back** (`10.50.0.25 -> 10.50.0.50`, the stripped endpoint had received a dynamic one); the
+    dynamic one **changed address** (`10.50.0.24 -> 10.50.0.26`) and the script logged `IP
+    CHANGED ... check the Traefik route`. Note that "before" is the address after the start,
+    not the address before the reboot.
+  - The `invalid IP` problem found by review405 was real on this Docker: an exited container's
+    `IPAddress` printed `invalid IP`. With the `IsValid` guard the fields are empty and the
+    repair command contained no bad `--ip`.
+  - Not covered here: a reconnect that fails or times out under manager load (stub tests only),
+    and a real Traefik route. A link or gateway-priority loss through the reconnect is by
+    construction, not measured.
+
+  *Consequence for the design.* The check-and-report default (section 5.8) is harmless and
+  sufficient on a healthy Docker: no alias loss occurred in 30 plain starts. The repair path
+  now works on real Docker for aliases and for a static address, and changes a dynamic
+  address, as documented. It still **stays `off`**: the loss itself is not reproduced (it was
+  only provoked), so we cannot say how often it would run, and the failure case under load is
+  untested. Turning it on is a decision for Amin with those two caveats and the Traefik check
+  in 6.5.
 - **T4, first real event.** See 6.5.
 
 ### 6.5 Success criteria at the next reboot or Docker restart
@@ -1057,7 +1092,7 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
 | Start storm re-overloads the manager. | Low. | Batches of 6 versus 53 at once, passes 45 s apart, `Nice=10`, 4 attempts max per container. |
 | Dependency order (an app starts before its DB). | Medium, harmless. | Once started, Docker's restart policy keeps restarting a container that exits. Databases on stack-only networks come back by themselves before this unit runs. |
 | A recovered container is up but unreachable by name (aliases lost). | Seen once on 2026-10-16. | The check in 5.8 reports it (`ALIASES MISSING`, exit 3), in the success criteria, and in T3. Cause unproven. By default nothing is repaired, so this stays a manual fix until repair is enabled. |
-| The opt-in repair (disconnect, connect) fails, drops the endpoint's links or gateway priority, or changes the container's IP so Traefik routes to a stale address. | Only when `ALIAS_REPAIR=on` (off by default). | Enabled only after T3. State re-check right before touching the network, 3 connect tries 20 s apart, a plain connect with the stored IP as last resort so it is never left off the network, IP before and after logged, `IP CHANGED` warning, a Traefik route check in the success criteria. |
+| The opt-in repair (disconnect, connect) fails, drops the endpoint's links or gateway priority, or changes the container's IP so Traefik routes to a stale address. | Only when `ALIAS_REPAIR=on` (off by default). | Enabled only on Amin's decision (T3b ran it on real Docker). State re-check right before touching the network, 3 connect tries 20 s apart, a last connect with no options as a last resort so it is never left off the network, IP before and after logged, `IP CHANGED` warning, a Traefik route check in the success criteria. |
 | Docker changes the journal wording `failed to start swarm container` on upgrade. Recovery silently stops. | Medium over time. | Dry-run after every Docker upgrade and compare with the journal; a restore that leaves restart-policy containers `exited` with no `EXCLUDED`, `SKIP` or `started` line for them is the signal. |
 | Unit fails at boot (swarm never ready). | Low. | Gives up after 300 s with exit 2, logs at `err`, blocks nothing. Nothing is `After=` it. |
 | A start fails with a legitimate non-network error (bad mount, missing image). | Possible. | Logged by name with the Docker error and retried at most 4 times. |
@@ -1072,7 +1107,7 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
 - **Lead Gen (decided):** excluded by default, see 5.7. Still open: who starts the excluded
   Lead Gen containers after a reboot, and whether any should be opted in later.
 - Whether to move from `dry-run` to `enforce` after step 4, or straight after step 3.
-- Whether to turn alias repair on, once T3 has shown it works (it is off by default).
+- Whether to turn alias repair on (it is off by default; T3b showed it works on real Docker when the loss is provoked, the natural loss was not reproduced).
 - Whether to open a task for the stale swarm advertise address (6.3).
 - Whether to report this upstream. The standing rule is not to post upstream, so the
   answer is no unless Amin says otherwise.
