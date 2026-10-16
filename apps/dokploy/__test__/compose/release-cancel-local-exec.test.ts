@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -167,6 +173,113 @@ describe("execAsyncCancelable", () => {
 			expect(error.message).toContain("cancelled by user");
 			// The command itself is left to the kill script.
 			spawnSync("sh", ["-c", getKillRemoteBuildCommand(target, 2)]);
+		},
+	);
+});
+
+/** A release target with the drain the real one has, in the temp directory. */
+const releaseTargetFor = (name: string) => ({
+	...targetFor(name),
+	drainSeconds: RELEASE_DRAIN_SECONDS,
+});
+
+describe("the release done marker, for real", () => {
+	it.skipIf(!hasSetsid)(
+		"clears a marker left by an earlier run before the script starts",
+		{ timeout: 30_000 },
+		async () => {
+			const target = releaseTargetFor("stale-start");
+			const seen = join(root, "stale-start.seen");
+			writeFileSync(`${target.pidFile}.done`, "");
+
+			await execAsyncCancelable(
+				`if [ -e "$DOKPLOY_RELEASE_DONE" ]; then echo present > ${seen}; else echo absent > ${seen}; fi`,
+				target,
+			);
+
+			expect(readFileSync(seen, "utf8").trim()).toBe("absent");
+		},
+	);
+
+	it.skipIf(!hasSetsid)(
+		"a stale marker does not cut the cancel short: the kill waits for the script's own cleanup",
+		{ timeout: 30_000 },
+		async () => {
+			const target = releaseTargetFor("stale-kill");
+			const cleaned = join(root, "stale-kill.cleaned");
+			const script = join(root, "stale-kill.sh");
+			// The cleanup takes a second and only then signals that it is done.
+			writeFileSync(
+				script,
+				`trap 'sleep 1; touch ${cleaned}; : > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM\nsleep 30 & wait $!\n`,
+			);
+			// What a SIGKILLed earlier release leaves behind.
+			writeFileSync(`${target.pidFile}.done`, "");
+
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
+			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
+
+			const kill = spawnSync(
+				"sh",
+				["-c", getKillRemoteBuildCommand(target, 15)],
+				{ encoding: "utf8" },
+			);
+			const error = await pending;
+
+			expect(kill.stdout.trim()).toBe("KILLED");
+			// Had the stale marker survived, the kill would have answered before this.
+			expect(existsSync(cleaned)).toBe(true);
+			expect(error).toMatchObject({ name: "ExecError", exitCode: 130 });
+		},
+	);
+
+	it.skipIf(!hasSetsid)(
+		"once the script is done, helpers that ignore TERM are killed too",
+		{ timeout: 30_000 },
+		async () => {
+			const target = releaseTargetFor("helpers");
+			const helperPid = join(root, "helpers.pid");
+			const script = join(root, "helpers.sh");
+			// A helper (like `docker events`) that outlives the script's cleanup and
+			// ignores TERM, as the group signal cannot remove it.
+			writeFileSync(
+				script,
+				[
+					`sh -c 'trap "" TERM; echo $$ > ${helperPid}; sleep 60' &`,
+					`trap ': > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM`,
+					"sleep 60 & wait $!",
+					"",
+				].join("\n"),
+			);
+
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
+			expect(await waitFor(() => existsSync(helperPid))).toBe(true);
+			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
+			const pid = Number(readFileSync(helperPid, "utf8").trim());
+			expect(Number.isInteger(pid) && pid > 1).toBe(true);
+
+			const kill = spawnSync(
+				"sh",
+				["-c", getKillRemoteBuildCommand(target, 15)],
+				{ encoding: "utf8" },
+			);
+			await pending;
+
+			expect(kill.stdout.trim()).toBe("KILLED");
+			// A killed process nobody reaped yet (no init in a container) is a zombie.
+			const gone = await waitFor(() => {
+				try {
+					const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+					return stat.charAt(stat.lastIndexOf(")") + 2) === "Z";
+				} catch {
+					return true;
+				}
+			}, 30);
+			expect(gone).toBe(true);
 		},
 	);
 });

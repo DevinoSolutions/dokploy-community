@@ -439,6 +439,15 @@ export const composeRouter = createTRPCRouter({
 				});
 				return;
 			}
+			// A rolling replace that is running on the serving host has a cancel
+			// launcher of its own: it is signalled by its pid file, so the shield
+			// around its `up` steps holds. The `pkill` below matches by command
+			// line and would interrupt a recreate half way.
+			const rolling = await cancelBuildServerDeploymentsForService({
+				type: "compose",
+				composeId: input.composeId,
+			});
+			if (rolling.cancelled > 0) return;
 			await killDockerBuild("compose", compose.serverId);
 		}),
 

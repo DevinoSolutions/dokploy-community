@@ -584,8 +584,9 @@ export const commandRunsRollingReplace = (command: string) =>
  * scale-up, never by Compose's own scale-down, which removes the
  * highest-numbered container (the new one).
  *
- * A TERM / INT / HUP (cancel, `pkill`) removes the replica that was not
- * promoted yet. A SIGKILL cannot be caught: the next deploy reconciles.
+ * A TERM / INT / HUP (the cancel launcher's group signal, see
+ * `remote-build-cancel.ts`; a `pkill` or a Ctrl-C by hand) removes the replica
+ * that was not promoted yet. A SIGKILL cannot be caught: the next deploy reconciles.
  *
  * The `up` of the services that are not rolled (and the final `up`) run in a
  * session of their own (`setsid`), so a cancel that signals this script's
