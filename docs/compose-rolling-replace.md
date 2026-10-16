@@ -132,10 +132,27 @@ deploy is never failed because of drift.
     cancel first looks at the build server and signals the serving host when
     there is nothing to kill there. The log says the release step was
     stopped; services that were already replaced stay on the new release.
-  - A compose without a build server is cancelled this way only while its
-    rolling script is running. In the steps before it (fetching the source,
-    applying patches) the cancel finds no release step, so nothing is
-    interrupted and the deploy goes on.
+  - A compose without a build server that has a rolling replace is
+    cancelled through its deployment row, whatever step it is in. While the
+    rolling script is running it is signalled as above. In the steps before it
+    (fetching the source, applying patches, the required-checks wait) there is
+    no release step to signal, so the cancel marks the deployment cancelled and
+    the deploy stops at the next step boundary: a step already in progress
+    (for example a clone) is let finish, then nothing more is fetched, pulled
+    or started and the previous release keeps serving. The deploy checks the
+    cancel before each of its steps, the last time right before the plain `up`.
+    A fresh-volumes deploy is checked right before its `down --volumes` and
+    not again after it: once the stack is down the `up` runs, and a cancel
+    that lands then is reported as arriving too late.
+  - The step that was let finish already replaced the compose file and `.env`
+    on disk, and Start runs `up -d` from them. So a cancel before the release
+    step puts the previous release's files back (the same restore a failed
+    deploy does, which also confirms the previous release is still up). A
+    first deploy has no previous release: the log says "No previous release to
+    restore, leaving the stack as-is", the new files stay and nothing is
+    running. A fresh-volumes deploy is not restored (its restore is not
+    transactional). If the restore itself fails, the deployment ends as an
+    error saying the files may still be the new ones.
   - A script without a rolling replace (a plain `up`) is not started through
     the launcher. With a build server it runs to completion, like a cancel
     that arrives too late. Without one it keeps the generic stop, described

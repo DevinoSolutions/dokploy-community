@@ -24,6 +24,10 @@ const mocks = vi.hoisted(() => ({
 	isDeploymentCancelled: vi.fn(),
 	statusAfterCancelledDeploy: vi.fn(),
 	runReleaseScript: vi.fn(),
+	assertDeploymentNotCancelled: vi.fn(),
+	getRestoreAfterFailedBuildCommand: vi.fn(),
+	cloneGitRepository: vi.fn(),
+	generateApplyPatchesCommand: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/services/compose-build-server", () => ({
@@ -54,6 +58,7 @@ vi.mock("@dokploy/server/utils/process/execAsync", async () => {
 vi.mock("@dokploy/server/utils/builders/compose", () => ({
 	getBuildComposeCommand: mocks.getBuildComposeCommand,
 	getBackupCurrentDeploymentCommand: vi.fn(() => "true;"),
+	getRestoreAfterFailedBuildCommand: mocks.getRestoreAfterFailedBuildCommand,
 	getRollbackMarkerProbeCommand: vi.fn(() => "true;"),
 	getCreateEnvFileCommand: vi.fn(() => ""),
 	getComposeBuildOverridePath: vi.fn(() => "/override.yml"),
@@ -62,8 +67,18 @@ vi.mock("@dokploy/server/utils/providers/raw", () => ({
 	getCreateComposeFileCommand: vi.fn().mockResolvedValue("true;"),
 }));
 vi.mock("@dokploy/server/services/patch", () => ({
-	generateApplyPatchesCommand: vi.fn().mockResolvedValue(""),
+	generateApplyPatchesCommand: mocks.generateApplyPatchesCommand,
 }));
+vi.mock("@dokploy/server/utils/providers/git", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/utils/providers/git")
+	>("@dokploy/server/utils/providers/git");
+	return {
+		...actual,
+		cloneGitRepository: mocks.cloneGitRepository,
+		getGitCommitInfo: vi.fn().mockResolvedValue(null),
+	};
+});
 vi.mock("@dokploy/server/services/deployment", async () => {
 	const actual = await vi.importActual<
 		typeof import("@dokploy/server/services/deployment")
@@ -83,6 +98,7 @@ vi.mock("@dokploy/server/services/deployment-cancel", async () => {
 		isDeploymentCancelled: mocks.isDeploymentCancelled,
 		statusAfterCancelledDeploy: mocks.statusAfterCancelledDeploy,
 		runReleaseScript: mocks.runReleaseScript,
+		assertDeploymentNotCancelled: mocks.assertDeploymentNotCancelled,
 	};
 });
 
@@ -156,6 +172,12 @@ beforeEach(async () => {
 		.mockResolvedValue({ stdout: "", stderr: "" });
 	mocks.getBuildComposeCommand.mockResolvedValue(ROLLING_SCRIPT);
 	mocks.runReleaseScript.mockResolvedValue(undefined);
+	mocks.assertDeploymentNotCancelled.mockReset().mockResolvedValue(undefined);
+	mocks.getRestoreAfterFailedBuildCommand.mockResolvedValue(
+		"RESTORE_PREVIOUS;",
+	);
+	mocks.cloneGitRepository.mockResolvedValue("true;");
+	mocks.generateApplyPatchesCommand.mockResolvedValue("");
 	mocks.prepareComposeBuildServerDeploy.mockResolvedValue({
 		images: [],
 		servingHostLabel: "the Dokploy host",
@@ -424,5 +446,363 @@ describe("a cancel that stops the rolling replace", () => {
 
 		expect(statuses().deployment).toContain("error");
 		expect(mocks.sendBuildErrorNotifications).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("a cancel before the release step of a rolling compose without a build server (T-2721)", () => {
+	const rollingSettings = {
+		enabled: true,
+		services: ["web"],
+		healthTimeoutSeconds: 60,
+		drainSeconds: 0,
+	};
+	const rollingNoBuildServer = (overrides: Partial<typeof COMPOSE> = {}) =>
+		useCompose({
+			buildServerId: null,
+			buildRegistryId: null as any,
+			rollingReplace: rollingSettings as any,
+			...overrides,
+		});
+
+	/** The cancel lands during a step: the check after it (the nth) throws. */
+	const cancelAtCheck = (nth: number) => {
+		let calls = 0;
+		mocks.assertDeploymentNotCancelled.mockImplementation(async () => {
+			calls++;
+			if (calls >= nth) {
+				throw new DeploymentCancelledError(
+					"Deployment cancelled: nothing more will be built, pushed or deployed.",
+				);
+			}
+		});
+	};
+
+	const runBuild = (overrides: Record<string, unknown> = {}, options = {}) =>
+		runComposeBuild(
+			{ ...COMPOSE, type: "compose", ...overrides } as any,
+			{ logPath: "/var/log/dep-1.log", deploymentId: "dep-1" },
+			options,
+		);
+
+	const ranCommands = () => [
+		...mocks.execAsync.mock.calls.map((call) => String(call[0])),
+		...mocks.execAsyncRemote.mock.calls.map((call) => String(call[1])),
+	];
+
+	const rollingGit = {
+		buildServerId: null,
+		buildRegistryId: null,
+		rollingReplace: rollingSettings,
+		sourceType: "git",
+	};
+
+	it("a cancel during the clone stops the deploy before the patches and the release step", async () => {
+		// Checks: before the backup (1), after the clone (2).
+		cancelAtCheck(2);
+
+		await expect(runBuild(rollingGit)).rejects.toMatchObject({
+			deploymentCancelled: true,
+		});
+
+		expect(mocks.cloneGitRepository).toHaveBeenCalledTimes(1);
+		// The clone replaced the compose file: the previous release's are put back.
+		expect(mocks.getRestoreAfterFailedBuildCommand).toHaveBeenCalledTimes(1);
+		expect(
+			mocks.getRestoreAfterFailedBuildCommand.mock.calls[0]?.[1],
+		).toMatchObject({
+			deploymentId: "dep-1",
+		});
+		expect(
+			ranCommands().filter((c) => c.includes("RESTORE_PREVIOUS;")),
+		).toHaveLength(1);
+		expect(mocks.generateApplyPatchesCommand).not.toHaveBeenCalled();
+		expect(mocks.getBuildComposeCommand).not.toHaveBeenCalled();
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+	});
+
+	it("a cancel during the patches stops the deploy before the release step", async () => {
+		cancelAtCheck(3);
+
+		await expect(runBuild(rollingGit)).rejects.toMatchObject({
+			deploymentCancelled: true,
+		});
+
+		expect(mocks.generateApplyPatchesCommand).toHaveBeenCalledTimes(1);
+		expect(mocks.getBuildComposeCommand).not.toHaveBeenCalled();
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+	});
+
+	it("a cancel while the required checks are awaited stops it before the release step too", async () => {
+		cancelAtCheck(4);
+
+		await expect(runBuild(rollingGit)).rejects.toMatchObject({
+			deploymentCancelled: true,
+		});
+
+		expect(mocks.waitForComposeRequiredChecks).toHaveBeenCalledTimes(1);
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+	});
+
+	it("a cancel while the compose file of a raw compose is written stops it", async () => {
+		cancelAtCheck(2);
+
+		await expect(
+			runBuild({
+				buildServerId: null,
+				buildRegistryId: null,
+				rollingReplace: rollingSettings,
+			}),
+		).rejects.toMatchObject({ deploymentCancelled: true });
+
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+	});
+
+	it("deployCompose ends a cancel during the clone as cancelled, not error, with no notification", async () => {
+		await rollingNoBuildServer();
+		cancelAtCheck(2);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(statuses().deployment).not.toContain("error");
+		expect(statuses().deployment).not.toContain("done");
+		// The previous release keeps serving.
+		expect(statuses().compose).toContain("done");
+		expect(statuses().compose).not.toContain("error");
+		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
+		expect(mocks.sendBuildSuccessNotifications).not.toHaveBeenCalled();
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+		expect(logged()).toContain("Nothing was pulled or started from this build");
+	});
+
+	it("rebuildCompose ends a cancel during the patches the same way", async () => {
+		await rollingNoBuildServer({ sourceType: "git" });
+		// Checks: start (1), after the compose file (2), after the patches (3).
+		cancelAtCheck(3);
+
+		const outcome = await rebuild().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(mocks.generateApplyPatchesCommand).toHaveBeenCalledTimes(1);
+		expect(statuses().deployment).not.toContain("error");
+		expect(statuses().deployment).not.toContain("done");
+		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+	});
+
+	it("a deploy nobody cancelled still reaches the release step", async () => {
+		await rollingNoBuildServer();
+
+		await deploy();
+
+		expect(mocks.assertDeploymentNotCancelled).toHaveBeenCalled();
+		expect(mocks.runReleaseScript).toHaveBeenCalledTimes(1);
+		expect(statuses().deployment).not.toContain("error");
+	});
+
+	it("a cancel after the release started is the release launcher's, with its own wording (unchanged)", async () => {
+		await rollingNoBuildServer();
+		mocks.runReleaseScript.mockRejectedValue(
+			new DeploymentCancelledError(undefined, { duringRelease: true }),
+		);
+		mocks.isDeploymentCancelled.mockResolvedValue(true);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(logged()).toContain("The release step was stopped");
+		expect(logged()).not.toContain("Nothing was pulled or started");
+	});
+
+	it("checks nothing for a build-server compose (its prepare step has its own checkpoints)", async () => {
+		await useCompose({ rollingReplace: rollingSettings as any });
+
+		await deploy();
+
+		expect(mocks.assertDeploymentNotCancelled).not.toHaveBeenCalled();
+		expect(mocks.prepareComposeBuildServerDeploy).toHaveBeenCalledTimes(1);
+	});
+
+	it("checks nothing for a compose without a rolling replace", async () => {
+		await useCompose({ buildServerId: null, buildRegistryId: null as any });
+
+		await deploy();
+
+		expect(mocks.assertDeploymentNotCancelled).not.toHaveBeenCalled();
+	});
+
+	it("checks nothing for a deployment that cannot be cancelled (a preview)", async () => {
+		await runBuild(rollingGit, { cancellable: false });
+
+		expect(mocks.assertDeploymentNotCancelled).not.toHaveBeenCalled();
+	});
+
+	it("a cancel before anything was written restores nothing", async () => {
+		cancelAtCheck(1);
+
+		await expect(runBuild(rollingGit)).rejects.toMatchObject({
+			deploymentCancelled: true,
+		});
+
+		expect(mocks.cloneGitRepository).not.toHaveBeenCalled();
+		expect(mocks.getRestoreAfterFailedBuildCommand).not.toHaveBeenCalled();
+	});
+
+	it("a cancel during the patches restores the previous release too", async () => {
+		cancelAtCheck(3);
+
+		await expect(runBuild(rollingGit)).rejects.toMatchObject({
+			deploymentCancelled: true,
+		});
+
+		expect(
+			ranCommands().filter((c) => c.includes("RESTORE_PREVIOUS;")),
+		).toHaveLength(1);
+	});
+
+	it("a restore that cannot run turns the cancel into an error that says so", async () => {
+		cancelAtCheck(2);
+		mocks.getRestoreAfterFailedBuildCommand.mockRejectedValue(
+			new Error("vault unreachable"),
+		);
+
+		await expect(runBuild(rollingGit)).rejects.toThrow(
+			/could not be restored \(vault unreachable\)/,
+		);
+	});
+
+	it("a cancel just before the plain up stops it: the up is not run and the deploy ends as cancelled", async () => {
+		await rollingNoBuildServer();
+		mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+		// Raw compose: start (1), after the write (2), required checks (3),
+		// before the down (4), after the deploy command is built (5).
+		cancelAtCheck(5);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(ranCommands().some((c) => c.includes("docker compose up -d"))).toBe(
+			false,
+		);
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+		expect(
+			ranCommands().filter((c) => c.includes("RESTORE_PREVIOUS;")),
+		).toHaveLength(1);
+		expect(statuses().deployment).not.toContain("error");
+		expect(statuses().deployment).not.toContain("done");
+		expect(statuses().compose).toContain("done");
+		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
+	});
+
+	it("rebuildCompose does not run the plain up after a cancel either", async () => {
+		await rollingNoBuildServer();
+		mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+		cancelAtCheck(5);
+
+		const outcome = await rebuild().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(ranCommands().some((c) => c.includes("docker compose up -d"))).toBe(
+			false,
+		);
+		expect(statuses().deployment).not.toContain("error");
+		expect(statuses().deployment).not.toContain("done");
+		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
+	});
+
+	describe("with fresh volumes (the stack is taken down first)", () => {
+		/** The cancel flag is set once the `down --volumes` step has run. */
+		const cancelAfterDown = () => {
+			mocks.assertDeploymentNotCancelled.mockImplementation(async () => {
+				if (ranCommands().some((c) => c.includes("down --volumes"))) {
+					throw new DeploymentCancelledError();
+				}
+			});
+		};
+		const upRan = () =>
+			ranCommands().some((c) => c.includes("docker compose up -d"));
+
+		it("deployCompose: a cancel after the down does not stop the up, and is not settled as 'the previous release keeps serving'", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			cancelAfterDown();
+
+			const outcome = await deployCompose({
+				composeId: "compose-1",
+				titleLog: "Manual deployment",
+				descriptionLog: "",
+				freshVolumes: true,
+			}).catch((error) => error);
+
+			expect(outcome).not.toMatchObject({ deploymentCancelled: true });
+			expect(ranCommands().some((c) => c.includes("down --volumes"))).toBe(
+				true,
+			);
+			expect(upRan()).toBe(true);
+			expect(mocks.getRestoreAfterFailedBuildCommand).not.toHaveBeenCalled();
+			expect(logged()).not.toContain("the previous release keeps serving");
+		});
+
+		it("rebuildCompose: the same", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			cancelAfterDown();
+
+			const outcome = await rebuildCompose({
+				composeId: "compose-1",
+				titleLog: "Rebuild deployment",
+				descriptionLog: "",
+				freshVolumes: true,
+			}).catch((error) => error);
+
+			expect(outcome).not.toMatchObject({ deploymentCancelled: true });
+			expect(upRan()).toBe(true);
+			expect(logged()).not.toContain("the previous release keeps serving");
+		});
+
+		it("a cancel before the down still stops the deploy", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			// Start (1), after the write (2), required checks (3), before the down (4).
+			cancelAtCheck(4);
+
+			const outcome = await deployCompose({
+				composeId: "compose-1",
+				titleLog: "Manual deployment",
+				descriptionLog: "",
+				freshVolumes: true,
+			}).catch((error) => error);
+
+			expect(outcome).toMatchObject({ deploymentCancelled: true });
+			expect(ranCommands().some((c) => c.includes("down --volumes"))).toBe(
+				false,
+			);
+			expect(upRan()).toBe(false);
+		});
+
+		it("without fresh volumes the check before the up still stops it", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			cancelAtCheck(5);
+
+			const outcome = await deploy().catch((error) => error);
+
+			expect(outcome).toMatchObject({ deploymentCancelled: true });
+			expect(upRan()).toBe(false);
+		});
+	});
+
+	it("the build-server path restores through its own prepare step, not this one", async () => {
+		await useCompose({ rollingReplace: rollingSettings as any });
+		mocks.prepareComposeBuildServerDeploy.mockRejectedValue(
+			new DeploymentCancelledError(),
+		);
+		mocks.isDeploymentCancelled.mockResolvedValue(true);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(mocks.assertDeploymentNotCancelled).not.toHaveBeenCalled();
+		expect(mocks.getRestoreAfterFailedBuildCommand).not.toHaveBeenCalled();
 	});
 });
