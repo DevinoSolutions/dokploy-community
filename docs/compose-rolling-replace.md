@@ -121,39 +121,47 @@ deploy is never failed because of drift.
 - **Several selected services:** services already replaced stay on the new
   release and the deployment reports an error. There is no revert-roll and no
   automatic restore once a service has been replaced.
-- **Cancel mid-rollout** (`compose.killBuild` sends SIGINT to the local deploy
-  process): the new replica that was not promoted yet is removed at once with
+- **Cancel mid-rollout** (`compose.killBuild` or `deployment.killProcess`):
+  the new replica that was not promoted yet is removed at once with
   `docker rm -f`, and the old container keeps serving. Limits:
-  - On a compose that deploys through a build server, the deploy script runs
-    on the serving host (the Dokploy host when the compose has no server), not
-    on the build server. When it contains a rolling replace it is started in
-    its own session with a pid file there, and a cancel
-    (`compose.killBuild` or `deployment.killProcess`) signals it on that host
-    after the build server had nothing to kill: SIGTERM, so the same trap
-    removes the replica, then SIGKILL after 20 s. The log says the release
-    step was stopped; services that were already replaced stay on the new
-    release. A script without a rolling replace (a plain `up`) is not
-    interruptible and runs to completion, like a cancel that arrives too late.
+  - The deploy script runs on the serving host (the Dokploy host when the
+    compose has no server), whether or not the compose uses a build server.
+    When it contains a rolling replace it is started in its own session with a
+    pid file there, and a cancel signals it on that host: SIGTERM, so the trap
+    removes the replica, then SIGKILL after 20 s. With a build server the
+    cancel first looks at the build server and signals the serving host when
+    there is nothing to kill there. The log says the release step was
+    stopped; services that were already replaced stay on the new release.
+  - A compose without a build server is cancelled this way only while its
+    rolling script is running. In the steps before it (fetching the source,
+    applying patches) the cancel finds no release step, so nothing is
+    interrupted and the deploy goes on.
+  - A script without a rolling replace (a plain `up`) is not started through
+    the launcher. With a build server it runs to completion, like a cancel
+    that arrives too late. Without one it keeps the generic stop, described
+    below.
   - The `up` of the services that are not rolled, and the final `up`, are
     never cut short: a cancel waits for the step that is running (up to the
     20 s grace), then the script stops before the next one. The job ends only
     after the script has cleaned up.
+  - Once the script has finished its cleanup, helpers still running in its
+    group (the `docker events` capture, the stall snapshot) are killed with
+    SIGKILL a second later, so a helper that ignores SIGTERM does not outlive
+    the cancel.
   - If the replica removal does not finish within 20 s of the cancel, the
     script is killed. The deployment log and the deployment's error message
     then say so: a replica it had not promoted may be left over (the next
     deploy reconciles it) and a `docker compose` step it had started may still
     be running on its own, because that step is not signalled.
-  - A compose that does **not** use a build server is not started through the
-    cancel launcher. `compose.killBuild` runs `pkill -2 -f "docker compose"`
-    on the serving host: SIGINT goes to every process whose command line
-    contains `docker compose`, which is the deploy script (its trap runs once
-    the `docker compose` step it is waiting on returns) and also the
-    `docker compose up` steps, including the ones the script runs in their own
-    session. Those are matched by command line, not by group, so they are
-    interrupted too (the shield only protects them from a group signal), so
-    a service that is mid-recreate may be interrupted. `deployment.killProcess` on such a compose sends
-    `kill -9`, which cannot be caught: it can leave two containers until the
-    next deploy reconciles them.
+  - A compose that does **not** roll keeps the generic stop. `compose.killBuild`
+    runs `pkill -2 -f "docker compose"` on the serving host, which sends
+    SIGINT to every process whose command line contains `docker compose`.
+    `deployment.killProcess` on such a compose sends `kill -9` to the recorded
+    pid. A rolling replace no longer uses either one, because they match by
+    command line or pid and ignore the session shield around its `up` steps:
+    a service that is mid-recreate could be interrupted, and `kill -9` cannot
+    be caught, so it could leave two containers until the next deploy
+    reconciles them.
 - **Interrupted deploys can leave two containers.** The next deploy finds more
   than one container for a selected service and reconciles first: it keeps the
   newest healthy one, removes the rest, and goes on.

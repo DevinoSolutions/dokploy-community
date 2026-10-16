@@ -315,7 +315,10 @@ export const deploymentRouter = createTRPCRouter({
 			const remote = await cancelBuildServerDeploymentById(
 				deployment.deploymentId,
 			);
-			if (remote?.status === "cancelled") {
+			// A compose without a build server whose rolling release could not be
+			// signalled (no pid file, no launcher, host unreachable) is cancelled
+			// but still running: it keeps the pid kill below it had before.
+			if (remote?.status === "cancelled" && !remote.genericStopNeeded) {
 				await audit(ctx, {
 					action: "cancel",
 					resourceType: "deployment",

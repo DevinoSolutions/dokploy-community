@@ -17,7 +17,10 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import {
 	abortRemoteBuild,
+	beginReleaseCancel,
+	discardReleaseCancel,
 	hasRunningRemoteBuild,
+	takeReleaseCancel,
 } from "@dokploy/server/utils/process/remote-build-registry";
 import { and, eq, ne } from "drizzle-orm";
 
@@ -52,15 +55,26 @@ export class DeploymentCancelledError extends Error {
 	 * have replaced some services.
 	 */
 	readonly duringRelease: boolean;
+	/**
+	 * True when the release step ended with the status of a SIGKILL: it did not
+	 * finish its cancel cleanup within the grace and was killed, so a step it
+	 * had started may still be running on its own.
+	 */
+	readonly releaseKilled: boolean;
 
 	constructor(
 		message = "Deployment cancelled.",
-		options: { settledStatus?: string; duringRelease?: boolean } = {},
+		options: {
+			settledStatus?: string;
+			duringRelease?: boolean;
+			releaseKilled?: boolean;
+		} = {},
 	) {
 		super(message);
 		this.name = "DeploymentCancelledError";
 		this.settledStatus = options.settledStatus;
 		this.duringRelease = options.duringRelease === true;
+		this.releaseKilled = options.releaseKilled === true;
 	}
 }
 
@@ -331,15 +345,44 @@ export const runReleaseScript = async ({
 		) {
 			throw new DeploymentCancelledError(
 				"Deployment cancelled: the release step was stopped.",
-				{ duringRelease: true },
+				{
+					duringRelease: true,
+					releaseKilled: await wasReleaseKilled(error, cancelable.deploymentId),
+				},
 			);
 		}
 		throw error;
+	} finally {
+		discardReleaseCancel(cancelable.deploymentId);
 	}
+};
+
+/**
+ * Whether the release step had to be SIGKILLed. The exit status says so only
+ * when the launching shell reports it (137); under a plain `sh` it dies of the
+ * TERM itself and reports 143 either way, so what the cancel side saw decides.
+ */
+const wasReleaseKilled = async (
+	error: unknown,
+	releaseKey: string,
+): Promise<boolean> => {
+	if (getExitCode(error) === SIGKILL_EXIT_CODE) return true;
+	// Waits at most as long as the kill script's own timeout, plus a moment.
+	const cancel = await takeReleaseCancel(releaseKey, KILL_TIMEOUT_MS + 5_000);
+	return cancel?.hardKilled === true;
 };
 
 /** Exit statuses of a shell whose command was ended by INT, KILL or TERM. */
 const SIGNAL_EXIT_CODES = new Set([130, 137, 143]);
+
+/** What a shell reports for a command that was ended by SIGKILL. */
+const SIGKILL_EXIT_CODE = 137;
+
+const getExitCode = (error: unknown): number | undefined => {
+	if (typeof error !== "object" || error === null) return undefined;
+	const { exitCode } = error as { exitCode?: unknown };
+	return typeof exitCode === "number" ? exitCode : undefined;
+};
 
 /**
  * True when a release command failed the way a cancel makes it fail: its
@@ -417,7 +460,11 @@ export interface CancellableDeployment {
 	logPath: string;
 	/** Host the deployment log is on (null: this Dokploy host). */
 	logServerId: string | null;
-	buildServerId: string;
+	/**
+	 * The build server the deployment builds on. Null for a compose that builds
+	 * on its serving host: there is no build to stop, only the release step.
+	 */
+	buildServerId: string | null;
 	/**
 	 * Compose only: the serving host, where the release step (the rolling
 	 * replace) runs once the images are built. A cancel signals it there too
@@ -432,6 +479,14 @@ export type CancelOutcome =
 			status: "cancelled";
 			result: RemoteBuildKillResult | "UNREACHABLE";
 			warning?: string;
+			/**
+			 * True for a deployment with no build server whose release step was
+			 * not actually stopped (no pid file, no launcher, no /proc, the host
+			 * unreachable, a process that survived SIGKILL): the row is cancelled,
+			 * but the caller still has to run the generic stop it had before the
+			 * release step became cancelable.
+			 */
+			genericStopNeeded?: boolean;
 	  };
 
 /**
@@ -445,6 +500,27 @@ const stopReleaseStep = async (
 ): Promise<{
 	result: RemoteBuildKillResult | "UNREACHABLE";
 	warning?: string;
+}> => {
+	// Announced before the signal: the deploy side sees its command end while
+	// the kill script is still finishing, and waits for this outcome.
+	const settle = beginReleaseCancel(getReleaseCancelKey(deploymentId));
+	let hardKilled = false;
+	try {
+		const stopped = await signalReleaseStep(releaseHost, deploymentId);
+		hardKilled = stopped.hardKilled === true;
+		return stopped;
+	} finally {
+		settle({ hardKilled });
+	}
+};
+
+const signalReleaseStep = async (
+	releaseHost: { serverId: string | null },
+	deploymentId: string,
+): Promise<{
+	result: RemoteBuildKillResult | "UNREACHABLE";
+	warning?: string;
+	hardKilled?: boolean;
 }> => {
 	const { serverId } = releaseHost;
 	const cancelKey = getReleaseCancelKey(deploymentId);
@@ -487,6 +563,7 @@ const stopReleaseStep = async (
 				// cleanup did not finish, and a shielded `docker compose up` it had
 				// started may still be running on its own.
 				result: "KILLED",
+				hardKilled: true,
 				warning: `The release step on ${where} did not finish its cleanup within ${RELEASE_KILL_GRACE_SECONDS}s of the cancel and was killed. A replica it had not promoted may be left over, and a docker compose step it had started may still be running on its own; the next deploy reconciles the replica.`,
 			};
 		}
@@ -513,38 +590,17 @@ const stopReleaseStep = async (
 };
 
 /**
- * Stops one deployment's build on its build server and marks the deployment
- * cancelled. Best effort on the server side: when the build server cannot be
- * reached, the deployment is still cancelled locally (its job ends and frees
- * its queue slot and group lock) and the log says the build may still be
- * running there.
+ * Signals the build of a deployment on its build server (see
+ * `remote-build-cancel.ts`). Never throws: a build server that cannot be
+ * reached comes back as `UNREACHABLE` with a warning.
  */
-export const cancelBuildServerDeployment = async (
-	target: CancellableDeployment,
-): Promise<CancelOutcome> => {
-	const { deploymentId, logPath, logServerId, buildServerId, releaseHost } =
-		target;
-
-	// Claim it first and atomically: only a deployment that is still running
-	// can be cancelled, and from here on every deploy step sees the flag.
-	const [claimed] = await db
-		.update(deployments)
-		.set({ status: "cancelled", finishedAt: new Date().toISOString() })
-		.where(
-			and(
-				eq(deployments.deploymentId, deploymentId),
-				eq(deployments.status, "running"),
-			),
-		)
-		.returning({ deploymentId: deployments.deploymentId });
-	if (!claimed) return { status: "not-running" };
-
-	await appendLogLine(
-		logServerId,
-		logPath,
-		"⛔ Deployment cancelled by user. Stopping the build on the build server...",
-	);
-
+const stopBuildOnBuildServer = async (
+	buildServerId: string,
+	deploymentId: string,
+): Promise<{
+	result: RemoteBuildKillResult | "UNREACHABLE";
+	warning?: string;
+}> => {
 	let result: RemoteBuildKillResult | "UNREACHABLE" = "UNREACHABLE";
 	let warning: string | undefined;
 	try {
@@ -587,6 +643,56 @@ export const cancelBuildServerDeployment = async (
 		const reason = error instanceof Error ? error.message : String(error);
 		warning = `Could not reach the build server to stop the build (${reason}). The deployment is cancelled here, but the build may keep running on the build server until it finishes.`;
 	}
+	return { result, warning };
+};
+
+/**
+ * Stops one deployment's build on its build server and marks the deployment
+ * cancelled. Best effort on the server side: when the build server cannot be
+ * reached, the deployment is still cancelled locally (its job ends and frees
+ * its queue slot and group lock) and the log says the build may still be
+ * running there.
+ *
+ * Without a `buildServerId` (a rolling compose that builds on its serving
+ * host) there is no build to stop: only the release step is signalled, on
+ * `releaseHost`.
+ */
+export const cancelBuildServerDeployment = async (
+	target: CancellableDeployment,
+): Promise<CancelOutcome> => {
+	const { deploymentId, logPath, logServerId, buildServerId, releaseHost } =
+		target;
+
+	// Claim it first and atomically: only a deployment that is still running
+	// can be cancelled, and from here on every deploy step sees the flag.
+	const [claimed] = await db
+		.update(deployments)
+		.set({ status: "cancelled", finishedAt: new Date().toISOString() })
+		.where(
+			and(
+				eq(deployments.deploymentId, deploymentId),
+				eq(deployments.status, "running"),
+			),
+		)
+		.returning({ deploymentId: deployments.deploymentId });
+	if (!claimed) return { status: "not-running" };
+
+	await appendLogLine(
+		logServerId,
+		logPath,
+		buildServerId
+			? "⛔ Deployment cancelled by user. Stopping the build on the build server..."
+			: "⛔ Deployment cancelled by user. Stopping the rolling replace on the serving host...",
+	);
+
+	let result: RemoteBuildKillResult | "UNREACHABLE" = "NONE";
+	let warning: string | undefined;
+	if (buildServerId) {
+		({ result, warning } = await stopBuildOnBuildServer(
+			buildServerId,
+			deploymentId,
+		));
+	}
 
 	// The images are built and this process is waiting on the release script
 	// (the rolling replace) on the serving host: the build server had nothing
@@ -628,14 +734,56 @@ export const cancelBuildServerDeployment = async (
 				? "✅ The release step was stopped on the serving host. A rolling replace removes the replica it had not promoted; services it had already updated stay on the new release; a step it had started is let finish."
 				: result === "KILLED"
 					? "✅ Build stopped on the build server."
-					: "ℹ️ No build was running on the build server (it had not started, or had just finished). Nothing more will be built or deployed.",
+					: buildServerId
+						? "ℹ️ No build was running on the build server (it had not started, or had just finished). Nothing more will be built or deployed."
+						: "ℹ️ No release step was running (it had not started, or had just finished). Nothing more will be deployed.",
 		);
 	}
 	return {
 		status: "cancelled",
 		result: releaseStopped ? "KILLED" : result,
 		warning,
+		genericStopNeeded: !buildServerId && !releaseStopped,
 	};
+};
+
+/**
+ * Cancels the deployments of a compose without a build server that are inside
+ * their rolling replace right now (this process is waiting on the cancelable
+ * release step). A deployment that is anywhere else (cloning, a plain `up`)
+ * is left alone and keeps the caller's generic stop.
+ */
+const cancelRollingReleases = async (
+	composeId: string,
+	owner: { serverId: string | null } | undefined,
+): Promise<{ cancelled: number; stopped: number; warnings: string[] }> => {
+	const warnings: string[] = [];
+	let cancelled = 0;
+	let stopped = 0;
+	if (!owner) return { cancelled, stopped, warnings };
+	const running = await db.query.deployments.findMany({
+		where: and(
+			eq(deployments.composeId, composeId),
+			eq(deployments.status, "running"),
+		),
+		columns: { deploymentId: true, logPath: true },
+	});
+	for (const row of running) {
+		if (!hasRunningRemoteBuild(getReleaseCancelKey(row.deploymentId))) continue;
+		const outcome = await cancelBuildServerDeployment({
+			deploymentId: row.deploymentId,
+			logPath: row.logPath,
+			logServerId: owner.serverId,
+			buildServerId: null,
+			releaseHost: { serverId: owner.serverId },
+		});
+		if (outcome.status === "cancelled") {
+			cancelled++;
+			if (!outcome.genericStopNeeded) stopped++;
+			if (outcome.warning) warnings.push(outcome.warning);
+		}
+	}
+	return { cancelled, stopped, warnings };
 };
 
 /**
@@ -643,6 +791,14 @@ export const cancelBuildServerDeployment = async (
  * build-server deployment of the service. `usesBuildServer` is true when the
  * service builds on a build server, in which case the caller must not run the
  * generic `pkill` on the serving host (it would hit unrelated deployments).
+ *
+ * A compose without a build server is cancelled here too while its rolling
+ * replace is running: the release script is signalled by its pid file, so the
+ * caller must not `pkill -f "docker compose"` either (`stopped` > 0), which
+ * ignores the shield around the `up` steps and can cut a recreate short. When
+ * no release step is running (`cancelled` 0), or it was cancelled but could
+ * not be signalled (`stopped` 0: no pid file, no launcher, no /proc, host
+ * unreachable), the caller keeps its generic stop.
  */
 export const cancelBuildServerDeploymentsForService = async (
 	service:
@@ -651,6 +807,12 @@ export const cancelBuildServerDeploymentsForService = async (
 ): Promise<{
 	usesBuildServer: boolean;
 	cancelled: number;
+	/**
+	 * How many of them were really stopped. Equal to `cancelled` for a build
+	 * server; for a compose without one, a cancel whose release step could not
+	 * be signalled counts as cancelled but not as stopped.
+	 */
+	stopped: number;
 	warnings: string[];
 }> => {
 	const warnings: string[] = [];
@@ -678,7 +840,12 @@ export const cancelBuildServerDeploymentsForService = async (
 				if (outcome.warning) warnings.push(outcome.warning);
 			}
 		}
-		return { usesBuildServer: onBuildServer.length > 0, cancelled, warnings };
+		return {
+			usesBuildServer: onBuildServer.length > 0,
+			cancelled,
+			stopped: cancelled,
+			warnings,
+		};
 	}
 
 	const owner = await db.query.compose.findFirst({
@@ -686,7 +853,8 @@ export const cancelBuildServerDeploymentsForService = async (
 		columns: { buildServerId: true, serverId: true },
 	});
 	if (!owner?.buildServerId) {
-		return { usesBuildServer: false, cancelled, warnings };
+		const rolling = await cancelRollingReleases(service.composeId, owner);
+		return { usesBuildServer: false, ...rolling };
 	}
 	const running = await db.query.deployments.findMany({
 		where: and(
@@ -709,13 +877,14 @@ export const cancelBuildServerDeploymentsForService = async (
 			if (outcome.warning) warnings.push(outcome.warning);
 		}
 	}
-	return { usesBuildServer: true, cancelled, warnings };
+	return { usesBuildServer: true, cancelled, stopped: cancelled, warnings };
 };
 
 /**
- * `deployment.killProcess` for a deployment that builds on a build server.
- * Returns `null` when the deployment does not (so the caller keeps its
- * existing behaviour), otherwise the outcome.
+ * `deployment.killProcess` for a deployment that builds on a build server, or
+ * a compose deployment that is inside its rolling replace. Returns `null` when
+ * it is neither (so the caller keeps its existing behaviour), otherwise the
+ * outcome.
  */
 export const cancelBuildServerDeploymentById = async (
 	deploymentId: string,
@@ -751,6 +920,17 @@ export const cancelBuildServerDeploymentById = async (
 				logPath: row.logPath,
 				logServerId: owner.serverId,
 				buildServerId: owner.buildServerId,
+				releaseHost: { serverId: owner.serverId },
+			});
+		}
+		// Without a build server only a rolling replace that is running has
+		// something to signal; any other compose deploy keeps its generic stop.
+		if (owner && hasRunningRemoteBuild(getReleaseCancelKey(row.deploymentId))) {
+			return cancelBuildServerDeployment({
+				deploymentId: row.deploymentId,
+				logPath: row.logPath,
+				logServerId: owner.serverId,
+				buildServerId: null,
 				releaseHost: { serverId: owner.serverId },
 			});
 		}

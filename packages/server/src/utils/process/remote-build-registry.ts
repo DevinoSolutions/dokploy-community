@@ -71,3 +71,89 @@ export const abortRemoteBuild = (deploymentId: string, reason: string) => {
 	}
 	return count;
 };
+
+/**
+ * What the cancel side saw while it stopped a deployment's release step. The
+ * deploy side cannot tell from the shell's exit status whether the step had to
+ * be SIGKILLed: under a plain `sh` (no `$SHELL`, as in the Dokploy container)
+ * the launcher dies of the TERM itself and reports 143 either way. So the
+ * cancel announces itself before it signals, and the deploy side, once its
+ * command has ended, waits for the outcome. Same `globalThis` slot as above.
+ */
+export interface ReleaseCancelOutcome {
+	/** The step did not finish its cancel cleanup in time and was SIGKILLed. */
+	hardKilled: boolean;
+}
+
+interface ReleaseCancelEntry {
+	outcome: Promise<ReleaseCancelOutcome>;
+	settle: (outcome: ReleaseCancelOutcome) => void;
+}
+
+const CANCEL_SLOT = Symbol.for("dokploy.releaseCancelOutcomes");
+
+const cancels = (): Map<string, ReleaseCancelEntry> => {
+	const holder = globalThis as unknown as Record<
+		symbol,
+		Map<string, ReleaseCancelEntry> | undefined
+	>;
+	let map = holder[CANCEL_SLOT];
+	if (!map) {
+		map = new Map();
+		holder[CANCEL_SLOT] = map;
+	}
+	return map;
+};
+
+/** An outcome nobody collected is dropped after this long. */
+const RELEASE_CANCEL_TTL_MS = 120_000;
+
+/**
+ * Called by the cancel before it signals the release step of `key`. Returns
+ * the function that records the outcome; call it exactly once, on every path.
+ */
+export const beginReleaseCancel = (
+	key: string,
+): ((outcome: ReleaseCancelOutcome) => void) => {
+	let settle: (outcome: ReleaseCancelOutcome) => void = () => {};
+	const outcome = new Promise<ReleaseCancelOutcome>((resolve) => {
+		settle = resolve;
+	});
+	const entry: ReleaseCancelEntry = { outcome, settle };
+	cancels().set(key, entry);
+	const timer = setTimeout(() => {
+		if (cancels().get(key) === entry) cancels().delete(key);
+	}, RELEASE_CANCEL_TTL_MS);
+	timer.unref?.();
+	return settle;
+};
+
+/**
+ * Called by the deploy side once its release command has ended: the outcome of
+ * the cancel that is stopping it, waiting at most `timeoutMs` for it, or
+ * undefined when no cancel announced itself. Always removes the entry.
+ */
+export const takeReleaseCancel = async (
+	key: string,
+	timeoutMs: number,
+): Promise<ReleaseCancelOutcome | undefined> => {
+	const entry = cancels().get(key);
+	if (!entry) return undefined;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			entry.outcome,
+			new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), timeoutMs);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+		if (cancels().get(key) === entry) cancels().delete(key);
+	}
+};
+
+/** Drops an outcome nobody needs (the release command ended on its own). */
+export const discardReleaseCancel = (key: string) => {
+	cancels().delete(key);
+};

@@ -230,8 +230,11 @@ export const getKillRemoteBuildCommand = (
 		'kill -s TERM -- "-$pgid" 2>/dev/null',
 		"i=0",
 		`while [ "$i" -lt ${grace} ]; do`,
-		// The script finished its cancel cleanup; only helpers can be left.
-		'[ ! -e "$f.done" ] || { rm -f "$f" "$f.done"; echo KILLED; exit 0; }',
+		// The script finished its cancel cleanup; only helpers can be left. A
+		// second later (its own exit) SIGKILL takes those too: a helper that
+		// ignores TERM (`docker events`, the stall snapshot) would survive the
+		// group signal otherwise.
+		'[ ! -e "$f.done" ] || { sleep 1; kill -s KILL -- "-$pgid" 2>/dev/null; rm -f "$f" "$f.done"; echo KILLED; exit 0; }',
 		'kill -s 0 -- "-$pgid" 2>/dev/null || { rm -f "$f"; echo KILLED; exit 0; }',
 		"sleep 1; i=$((i+1))",
 		"done",

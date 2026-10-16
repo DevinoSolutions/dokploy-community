@@ -790,7 +790,8 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 	});
 
 	describe("cancel / kill mid-rollout", () => {
-		// compose.killBuild sends SIGINT (pkill -2); other paths send TERM or HUP.
+		// The launcher's kill script sends TERM; a hand-made Ctrl-C sends INT, a
+		// closed terminal HUP.
 		it.each(["TERM", "INT", "HUP"])(
 			"%s removes the replica that was not promoted and leaves the old container serving",
 			{
@@ -856,9 +857,10 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		);
 	});
 
-	// The path a build-server compose takes: the script is launched in its own
-	// session with a pid file on the serving host, and the cancel runs the kill
-	// script there. SIGTERM reaches the whole group, so the trap can run.
+	// The path every rolling compose takes, with or without a build server: the
+	// script is launched in its own session with a pid file on the serving host,
+	// and the cancel runs the kill script there. SIGTERM reaches the whole group,
+	// so the trap can run.
 	describe.skipIf(!hasSetsid)("cancel through the release launcher", () => {
 		it("the kill script reaches the rolling script, its trap removes the unpromoted replica", {
 			timeout: 90_000,
@@ -1166,7 +1168,9 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				);
 
 				expect(kill.stdout.trim()).toBe("KILLED");
-				expect(await exited).toBe(137);
+				// 137 when $SHELL execs the command; 143 under a plain sh (no $SHELL, as
+				// in the Dokploy container), which dies of the TERM itself.
+				expect([137, 143]).toContain(await exited);
 				expect(existsSync(pidFile)).toBe(false);
 			});
 

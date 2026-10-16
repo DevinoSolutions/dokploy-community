@@ -22,7 +22,11 @@ import {
 	getPhaseLogLine,
 	resolveDeployGuardrails,
 } from "@dokploy/server/utils/builders/compose-guardrails";
-import { commandRunsRollingReplace } from "@dokploy/server/utils/builders/compose-rolling";
+import {
+	commandRunsRollingReplace,
+	resolveComposeRolling,
+} from "@dokploy/server/utils/builders/compose-rolling";
+import { RELEASE_KILL_GRACE_SECONDS } from "@dokploy/server/utils/builders/remote-build-cancel";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	cloneCompose,
@@ -230,19 +234,28 @@ export const createComposePhaseLogger = (
 };
 
 /**
- * Whether a cancel can stop the deploy script of a build-server compose on its
- * serving host. Only the rolling replace has a trap that makes that safe (it
- * removes the replica it had not promoted); the single `up` of any other
- * deploy keeps running to the end, like a cancel that arrives too late.
+ * Whether a cancel can stop the deploy script of a compose on its serving host.
+ * Only the rolling replace has a trap that makes that safe (it removes the
+ * replica it had not promoted), with or without a build server; the single
+ * `up` of any other deploy keeps running to the end when it is cancelled
+ * through a build server, and is interrupted by the generic stop when there is
+ * none.
  */
-const isReleaseCancelable = (
-	entity: Pick<Compose, "buildServerId">,
-	command: string,
-	cancellable = true,
+const isReleaseCancelable = (command: string, cancellable = true) =>
+	cancellable && commandRunsRollingReplace(command);
+
+/**
+ * Whether a cancel of this compose goes through its deployment row (see
+ * `deployment-cancel.ts`) instead of the generic stop: it builds on a build
+ * server, or it has a rolling replace, whose release step is cancelable. Only
+ * decides whether the end of a deploy has to honour a cancel flag; a compose
+ * that was never cancelled that way is unaffected.
+ */
+const usesDeploymentCancel = (
+	entity: Pick<Compose, "buildServerId" | "rollingReplace">,
 ) =>
-	Boolean(entity.buildServerId) &&
-	cancellable &&
-	commandRunsRollingReplace(command);
+	Boolean(entity.buildServerId) ||
+	resolveComposeRolling(entity.rollingReplace) !== null;
 
 /**
  * Shared clone → patches → (optional fresh-volumes down) → build pipeline used
@@ -360,7 +373,7 @@ export const runComposeBuild = async (
 	});
 	if (
 		deployment.deploymentId &&
-		isReleaseCancelable(entity, command, cancellable)
+		isReleaseCancelable(command, cancellable)
 	) {
 		await runReleaseScript({
 			serverId,
@@ -557,8 +570,9 @@ export const updateCompose = async (
 };
 
 /**
- * A build-server deploy that was cancelled (see `deployment-cancel.ts`) ends
- * here instead of in the generic failure path: the deployment already says
+ * A deploy that was cancelled through its deployment row (a build-server
+ * compose, or a rolling replace; see `deployment-cancel.ts`) ends here
+ * instead of in the generic failure path: the deployment already says
  * `cancelled` and must not become `error`, no build-error notification goes
  * out for something the user asked for, and the service returns to the state
  * of the release that is still serving.
@@ -573,17 +587,19 @@ export const updateCompose = async (
  * restore of the previous release failed: that is thrown as a plain error.
  */
 const settleCancelledComposeDeploy = async (
-	entity: Pick<Compose, "composeId" | "buildServerId" | "serverId">,
+	entity: Pick<Compose, "composeId" | "serverId">,
 	deployment: { deploymentId: string; logPath: string },
 	error: unknown,
 ) => {
-	if (!entity.buildServerId) return null;
 	if (!isDeploymentCancelledError(error)) return null;
 
 	try {
-		const note = (error as DeploymentCancelledError).duringRelease
-			? "Deployment cancelled ⛔ The release step was stopped. A rolling replace removes the replica it had not promoted yet; services it had already updated stay on the new release, and a step it had started is let finish before it stops."
-			: "Deployment cancelled ⛔ Nothing was pulled or started from this build; the previous release keeps serving.";
+		const cancelled = error as DeploymentCancelledError;
+		const note = !cancelled.duringRelease
+			? "Deployment cancelled ⛔ Nothing was pulled or started from this build; the previous release keeps serving."
+			: cancelled.releaseKilled
+				? `Deployment cancelled ⛔ The release step did not finish its cancel cleanup within ${RELEASE_KILL_GRACE_SECONDS}s and was killed. A replica it had not promoted may be left over (the next deploy reconciles it), services it had already updated stay on the new release, and a docker compose step it had started may still be running on its own.`
+				: "Deployment cancelled ⛔ The release step was stopped. A rolling replace removes the replica it had not promoted yet; services it had already updated stay on the new release, and a step it had started is let finish before it stops.";
 		const command = `echo ${quote([`\n${note}`])} >> ${quote([deployment.logPath])};`;
 		if (entity.serverId) {
 			await execAsyncRemote(entity.serverId, command);
@@ -639,7 +655,7 @@ export const deployCompose = async ({
 		// A cancel that landed during the pull/up cannot be honoured (the release
 		// is already running); it stays recorded as cancelled, not "done".
 		let finished = true;
-		if (compose.buildServerId) {
+		if (usesDeploymentCancel(compose)) {
 			finished = await markDeploymentDoneUnlessCancelled(
 				deployment.deploymentId,
 			);
@@ -692,7 +708,7 @@ export const deployCompose = async ({
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
 		if (
-			compose.buildServerId &&
+			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
 			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
@@ -864,7 +880,7 @@ export const rebuildCompose = async ({
 			remoteBuild,
 		});
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (isReleaseCancelable(compose, command)) {
+		if (isReleaseCancelable(command)) {
 			await runReleaseScript({
 				serverId: compose.serverId,
 				command: commandWithLog,
@@ -881,7 +897,7 @@ export const rebuildCompose = async ({
 
 		// See deployCompose: a cancel during the pull/up stays cancelled.
 		let finished = true;
-		if (compose.buildServerId) {
+		if (usesDeploymentCancel(compose)) {
 			finished = await markDeploymentDoneUnlessCancelled(
 				deployment.deploymentId,
 			);
@@ -922,7 +938,7 @@ export const rebuildCompose = async ({
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
 		if (
-			compose.buildServerId &&
+			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
 			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;

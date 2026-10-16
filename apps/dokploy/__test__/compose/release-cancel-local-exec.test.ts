@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -119,16 +125,20 @@ describe("execAsyncCancelable", () => {
 		async () => {
 			const target = targetFor("trap");
 			const trapped = join(root, "trap.ran");
+			const ready = join(root, "trap.ready");
 			const script = join(root, "trap.sh");
+			// The pid file exists before the script runs; the ready file says the
+			// trap is installed.
 			writeFileSync(
 				script,
-				`trap 'touch ${trapped}; exit 130' TERM\nsleep 30 & wait $!\n`,
+				`trap 'touch ${trapped}; exit 130' TERM\ntouch ${ready}\nsleep 30 & wait $!\n`,
 			);
 
 			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
 				(e) => e,
 			);
-			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
+			expect(await waitFor(() => existsSync(ready))).toBe(true);
+			expect(existsSync(target.pidFile)).toBe(true);
 
 			const kill = spawnSync(
 				"sh",
@@ -171,6 +181,126 @@ describe("execAsyncCancelable", () => {
 	);
 });
 
+/** A release target with the drain the real one has, in the temp directory. */
+const releaseTargetFor = (name: string) => ({
+	...targetFor(name),
+	drainSeconds: RELEASE_DRAIN_SECONDS,
+});
+
+describe("the release done marker, for real", () => {
+	it.skipIf(!hasSetsid)(
+		"clears a marker left by an earlier run before the script starts",
+		{ timeout: 30_000 },
+		async () => {
+			const target = releaseTargetFor("stale-start");
+			const seen = join(root, "stale-start.seen");
+			writeFileSync(`${target.pidFile}.done`, "");
+
+			await execAsyncCancelable(
+				`if [ -e "$DOKPLOY_RELEASE_DONE" ]; then echo present > ${seen}; else echo absent > ${seen}; fi`,
+				target,
+			);
+
+			expect(readFileSync(seen, "utf8").trim()).toBe("absent");
+		},
+	);
+
+	it.skipIf(!hasSetsid)(
+		"a stale marker does not cut the cancel short: the kill waits for the script's own cleanup",
+		{ timeout: 30_000 },
+		async () => {
+			const target = releaseTargetFor("stale-kill");
+			const cleaned = join(root, "stale-kill.cleaned");
+			const ready = join(root, "stale-kill.ready");
+			const script = join(root, "stale-kill.sh");
+			// The cleanup takes a second and only then signals that it is done. The
+			// ready file says the trap is installed: a TERM before that would end the
+			// script without a cleanup (the pid file exists before it runs).
+			writeFileSync(
+				script,
+				`trap 'sleep 1; touch ${cleaned}; : > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM\ntouch ${ready}\nsleep 30 & wait $!\n`,
+			);
+			// What a SIGKILLed earlier release leaves behind.
+			writeFileSync(`${target.pidFile}.done`, "");
+
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
+			expect(await waitFor(() => existsSync(ready))).toBe(true);
+			expect(existsSync(target.pidFile)).toBe(true);
+
+			const kill = spawnSync(
+				"sh",
+				["-c", getKillRemoteBuildCommand(target, 15)],
+				{ encoding: "utf8" },
+			);
+			const error = await pending;
+
+			expect(kill.stdout.trim()).toBe("KILLED");
+			// Had the stale marker survived, the kill would have answered before this.
+			expect(existsSync(cleaned)).toBe(true);
+			expect(error).toMatchObject({ name: "ExecError" });
+			// 130 when $SHELL execs the command, 143 when it is a plain sh that
+			// dies of the TERM itself.
+			expect([130, 143]).toContain(error.exitCode);
+		},
+	);
+
+	it.skipIf(!hasSetsid)(
+		"once the script is done, helpers that ignore TERM are killed too",
+		{ timeout: 30_000 },
+		async () => {
+			const target = releaseTargetFor("helpers");
+			// Not the target's pid file (helpers.pid): the helper would overwrite it.
+			const helperPid = join(root, "helpers.helper");
+			const ready = join(root, "helpers.ready");
+			const script = join(root, "helpers.sh");
+			// A helper (like `docker events`) that outlives the script's cleanup and
+			// ignores TERM, as the group signal cannot remove it. The trap comes first
+			// and the ready file last: a TERM before the trap would end the script
+			// without the done marker, and the kill would wait out its whole grace.
+			writeFileSync(
+				script,
+				[
+					`trap ': > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM`,
+					`sh -c 'trap "" TERM; echo $$ > ${helperPid}; sleep 60' &`,
+					`while [ ! -s ${helperPid} ]; do sleep 0.1; done`,
+					`touch ${ready}`,
+					"sleep 60 & wait $!",
+					"",
+				].join("\n"),
+			);
+
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
+			expect(await waitFor(() => existsSync(ready))).toBe(true);
+			expect(existsSync(target.pidFile)).toBe(true);
+			const pid = Number(readFileSync(helperPid, "utf8").trim());
+			expect(Number.isInteger(pid) && pid > 1).toBe(true);
+
+			const kill = spawnSync(
+				"sh",
+				["-c", getKillRemoteBuildCommand(target, 15)],
+				{ encoding: "utf8" },
+			);
+			await pending;
+
+			expect(kill.stdout.trim()).toBe("KILLED");
+			// A killed process nobody reaped yet (no init in a container) is a zombie.
+			const gone = await waitFor(() => {
+				try {
+					const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+					return stat.charAt(stat.lastIndexOf(")") + 2) === "Z";
+				} catch {
+					return true;
+				}
+			}, 30);
+			expect(gone).toBe(true);
+		},
+	);
+});
+
 describe("the release wrapper", () => {
 	it("waits for the script's group after a signal-style exit, and only for the release step", () => {
 		const release = wrapCancelableRemoteBuild(
@@ -184,7 +314,9 @@ describe("the release wrapper", () => {
 
 		expect(release).toContain('[ "$__rc" -ge 128 ]');
 		expect(release).toContain(`-lt ${RELEASE_DRAIN_SECONDS}`);
-		expect(release.indexOf("-ge 128")).toBeLessThan(release.lastIndexOf(`rm -f "$__f"`));
+		expect(release.indexOf("-ge 128")).toBeLessThan(
+			release.lastIndexOf(`rm -f "$__f"`),
+		);
 		expect(build).not.toContain("-ge 128");
 	});
 

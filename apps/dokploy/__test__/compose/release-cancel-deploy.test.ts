@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * Which deploy script of a build-server compose is run as a cancelable release
- * step, and how the deployment ends when a cancel stops it. Only the rolling
- * replace is: it has a trap that removes the replica it had not promoted. The
- * single `up` of any other deploy is sent exactly as before.
+ * Which deploy script of a compose is run as a cancelable release step, and
+ * how the deployment ends when a cancel stops it. Only the rolling replace is,
+ * with or without a build server: it has a trap that removes the replica it had
+ * not promoted. The single `up` of any other deploy is sent exactly as before.
  */
 
 const ROLLING_SCRIPT = "dokploy_roll_run() {\n  true;\n};\ndokploy_roll_run";
@@ -105,6 +105,7 @@ const COMPOSE = {
 	serverId: null as string | null,
 	buildServerId: "build-1" as string | null,
 	buildRegistryId: "reg-1",
+	rollingReplace: null as unknown,
 	domains: [],
 	environment: {
 		name: "prod",
@@ -231,12 +232,49 @@ describe("the deploy script of a build-server compose", () => {
 		).toBe(true);
 	});
 
-	it("a compose that builds on its serving host is not touched", async () => {
+	it("a rolling replace on a compose that builds on its serving host is a cancelable release step too", async () => {
+		await useCompose({
+			buildServerId: null,
+			buildRegistryId: null as any,
+			serverId: "serving-1",
+		});
+
+		await deploy();
+
+		expect(mocks.runReleaseScript).toHaveBeenCalledTimes(1);
+		const [arg] = mocks.runReleaseScript.mock.calls[0] ?? [];
+		expect(arg).toMatchObject({ serverId: "serving-1", deploymentId: "dep-1" });
+		expect(arg.command).toBe(
+			`(set -e;${ROLLING_SCRIPT}) >> /var/log/dep-1.log 2>&1`,
+		);
+		expect(
+			mocks.execAsyncRemote.mock.calls.some((call) =>
+				String(call[1]).includes("dokploy_roll_run"),
+			),
+		).toBe(false);
+	});
+
+	it("rebuildCompose does the same without a build server", async () => {
 		await useCompose({ buildServerId: null, buildRegistryId: null as any });
+
+		await rebuild();
+
+		expect(mocks.runReleaseScript).toHaveBeenCalledTimes(1);
+		expect(mocks.runReleaseScript.mock.calls[0]?.[0].serverId).toBeNull();
+	});
+
+	it("a plain up on a compose that builds on its serving host is sent exactly as before", async () => {
+		await useCompose({ buildServerId: null, buildRegistryId: null as any });
+		mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
 
 		await deploy();
 
 		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+		expect(
+			mocks.execAsync.mock.calls.some((call) =>
+				String(call[0]).includes("docker compose up -d"),
+			),
+		).toBe(true);
 	});
 
 	it("a deployment that cannot be cancelled (a preview) runs it as before", async () => {
@@ -252,6 +290,35 @@ describe("the deploy script of a build-server compose", () => {
 				String(call[0]).includes("dokploy_roll_run"),
 			),
 		).toBe(true);
+	});
+});
+
+describe("the end of a deploy honours a cancel only where a cancel can happen", () => {
+	const rollingSettings = {
+		enabled: true,
+		services: ["web"],
+		healthTimeoutSeconds: 60,
+		drainSeconds: 0,
+	};
+
+	it("a compose with a rolling replace and no build server does not overwrite a cancel with done", async () => {
+		await useCompose({
+			buildServerId: null,
+			buildRegistryId: null as any,
+			rollingReplace: rollingSettings as any,
+		});
+
+		await deploy();
+
+		expect(statuses().deployment).not.toContain("done");
+	});
+
+	it("a compose that never rolls keeps the plain done update", async () => {
+		await useCompose({ buildServerId: null, buildRegistryId: null as any });
+
+		await deploy();
+
+		expect(statuses().deployment).toContain("done");
 	});
 });
 
@@ -299,6 +366,40 @@ describe("a cancel that stops the rolling replace", () => {
 			"services it had already updated stay on the new release",
 		);
 		expect(log).not.toContain("Nothing was pulled or started");
+	});
+
+	it("a compose without a build server ends the same way", async () => {
+		await useCompose({ buildServerId: null, buildRegistryId: null as any });
+		stopped();
+		mocks.isDeploymentCancelled.mockResolvedValue(true);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(statuses().deployment).not.toContain("error");
+		expect(statuses().deployment).not.toContain("done");
+		expect(statuses().compose).toContain("done");
+		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
+		expect(logged()).toContain("The release step was stopped");
+	});
+
+	it("does not say a step is let finish when the release step had to be killed", async () => {
+		mocks.runReleaseScript.mockRejectedValue(
+			new DeploymentCancelledError(undefined, {
+				duringRelease: true,
+				releaseKilled: true,
+			}),
+		);
+		mocks.isDeploymentCancelled.mockResolvedValue(true);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		const log = logged();
+		expect(log).toContain("did not finish its cancel cleanup within 20s");
+		expect(log).toContain("was killed");
+		expect(log).toContain("may still be running on its own");
+		expect(log).not.toContain("is let finish");
 	});
 
 	it("a cancel during the build keeps its own wording", async () => {
