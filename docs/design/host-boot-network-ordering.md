@@ -380,8 +380,9 @@ connect --alias ...`. That is not free, which is why it is off:
   gateway priority and driver options;
 - the container can come back with a different IP, and Traefik may keep routing to the old
   address until it notices;
-- the cause of the one alias loss we saw is unproven and has not been reproduced, so we do
-  not know how often a repair would be needed.
+- the cause of the one alias loss we saw is unproven and has not been reproduced (in the T3
+  sandbox, 0 of 30 plain starts lost an alias), so we do not know how often a repair would be
+  needed.
 
 So by default the script only reports. **T3 (6.4) has to reproduce the alias loss, and show
 that the repair restores aliases and address, before the switch is turned on.** With it on,
@@ -889,24 +890,64 @@ Done:
   `EXCLUDE_NONE=yes` disabled them (with the warning). A run where every start succeeds made
   one pass and no 45 s pause. Also run: `bash -n` on both scripts.
 
-Not done (needs a host, and the brief said not to apply anything anywhere):
+- **T3, real Docker in an isolated sandbox (run 2026-10-16, 11:43Z to about 13:20Z).** A
+  throwaway privileged `docker:29.9.0-dind` container on `devino-second` (same Docker version
+  as prod) with its own `dockerd` and swarm. The host daemon was not touched: its swarm state
+  was `inactive` before and after, no network or container of the host was changed, and the
+  container, its volume and the image were removed afterwards. Setup: `swarm init`, attachable
+  overlay `dokploy-network`, a compose-style `restart: always` container with the aliases
+  `demo-root_db-1` and `root_db`, 59 `unless-stopped` standalone containers with one alias
+  each, 111 swarm services, one client container. The sandbox host was itself busy (load
+  average 40 to 70).
 
-- **T3, real Docker.** On `devino-second`, inside a throwaway privileged docker-in-docker
-  container with its own `dockerd` and swarm (so the host daemon is never touched):
-  `swarm init`, an attachable overlay, about 30 `--restart unless-stopped` containers on
-  it, with service-name aliases, plus one client container that resolves them. Restart the
-  inner daemon under load (many dummy services, low `--cpus`) until the 20 s attach timeout
-  reproduces. If it will not reproduce, stop the inner daemon, edit the containers'
-  `config.v2.json` to the failed shape (`ExitCode 255`, a `State.Error` text) and write
-  matching `failed to start swarm container container=<id>` lines for the script's journal
-  stub, start the inner daemon and run the script in `enforce`. **Assert**, for every
-  recovered container and every network: `State=running`, `Aliases` equal to the stored
-  aliases, `DNSNames` contain every alias, and `getent hosts <alias>` from the client
-  container resolves to that container's IP. Include a container whose aliases the start
-  loses (if it can be provoked) and check the reconnect path. **This is the gate for turning
-  `ALIAS_REPAIR` on**: it must show the loss reproduces (or at least that the repair path
-  works on a deliberately stripped endpoint), that the repair restores aliases and address,
-  and what the reconnect costs under the same manager load. Remove the sandbox afterwards.
+  *Failure reproduced once.* Restarting the inner `dockerd` with the container capped at
+  `--cpus 0.5`, right after the services had been created, produced the prod signature:
+  30 lines `failed to start swarm container ... attaching to network failed, make sure your
+  network options are correct and check manager logs: context deadline exceeded` (first one 70 s
+  after `Loading containers: done`, spread over the roughly 10 minutes until the daemon finished starting), and 31
+  containers `Exited (255)`, including the compose-style one, with that text in `State.Error`.
+  So the mechanism in section 3 is real on Docker 29.9.0 and does not need a host reboot. It
+  is load dependent: three more inner restarts that completed (0.5 and 0.2 CPUs, 45 and 175
+  services) produced **0** failures, and a fourth (245 services, overlay deliberately
+  over-subscribed, 0.5 CPUs) never finished starting within 20 minutes, so I could not make
+  the failure repeatable.
+
+  *Script against the reproduced state (real Docker, the daemon's real log as the journal;
+  only `journalctl`/`systemctl` are shimmed because the sandbox has no systemd):*
+  - Dry-run: `pass 1: 30 candidate(s)`, one `DRY-RUN would start ...; would verify DNS names:
+    dokploy-network|demo-root_db-1,root_db` line for the compose container, nothing started.
+  - Enforce, alias repair off, while the sandbox manager could not allocate addresses (I had
+    over-subscribed the /24 overlay, a sandbox mistake that made every attach fail again):
+    every start failed with the same Docker error, 4 passes, exit 3. The script did what it
+    should when the manager stays unhealthy: report and exit non-zero, no tight loop.
+  - Enforce, alias repair off, after freeing addresses: `pass 1: 30 candidate(s)`, 30
+    started, exit 0. **Aliases were identical before and after for all 30** (`Aliases` and
+    `DNSNames` compared per container), and from the client container `getent hosts root_db`
+    and `getent hosts svc-27` returned the right addresses. **A plain `docker start` did not
+    lose a DNS alias in any of the 30**, including the compose container. The alias loss seen
+    on prod on 2026-10-16 was therefore **not reproduced**.
+  - Selection controls (a second pass over fabricated state, see below): containers that were
+    stopped or killed by the sandbox itself, and containers whose `State.Error` was empty, were
+    logged `SKIP` or ignored, and only containers with both a journal failure line and a
+    `State.Error` were candidates.
+
+  *Not achieved.* (1) The alias-loss path: with no natural loss, the planned test of the
+  repair against a stripped endpoint (a `docker` wrapper that disconnects and plain-reconnects
+  the container right after its start) could not be completed. Fabricating a second failed
+  state by editing `config.v2.json` after `kill -9` of the inner daemon left the sandbox's
+  container store inconsistent (`failed to load container mount: RW layer ... does not
+  exist`), the inner `dockerd` stopped making progress during startup, and I stopped there
+  and tore the sandbox down. (2) Real-Docker coverage of `ALIAS_REPAIR=on`: **none**; it is
+  covered only by the stub tests in T2. (3) The cost of a reconnect under manager load: not
+  measured.
+
+  *Consequence for the design.* The check-and-report default (section 5.8) is confirmed
+  harmless and sufficient on healthy Docker: no alias loss occurred, so nothing needed
+  repairing. The gate for enabling repair is **not met**: it stays `off`, and enabling it still
+  needs a real-Docker test of the disconnect/connect path (aliases, IP, links, and the time it
+  takes under load), best done with a fresh sandbox that avoids `kill -9` (for example by
+  stopping the inner daemon cleanly and editing the stored state, or by using a second
+  attached `dockerd` on a copy of the data).
 - **T4, first real event.** See 6.5.
 
 ### 6.5 Success criteria at the next reboot or Docker restart
