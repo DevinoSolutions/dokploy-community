@@ -81,10 +81,16 @@ describe("getComposeRollingReport", () => {
 		expect(report.stackWarnings).toEqual([]);
 	});
 
-	it("checks the timeout it is given against the healthchecks (45s needed)", async () => {
-		const report = await getComposeRollingReport("compose-1", {
-			healthTimeoutSeconds: 20,
+	it("a healthcheck that cannot settle in the longest wait is reported", async () => {
+		domain.addDomainToCompose.mockResolvedValue({
+			services: {
+				web: {
+					image: "x",
+					healthcheck: { test: ["CMD", "true"], interval: "5m", retries: 3 },
+				},
+			},
 		});
+		const report = await getComposeRollingReport("compose-1");
 		if (!report.available) throw new Error("expected a report");
 		expect(
 			report.services
@@ -164,13 +170,13 @@ describe("assertComposeRollingSettings (save time)", () => {
 		).rejects.toThrow(/api: .*host port is published/);
 	});
 
-	it("refuses a timeout that is not longer than the healthcheck settles", async () => {
+	it("accepts a timeout shorter than the healthcheck settles: the wait is raised at deploy time", async () => {
 		await expect(
 			assertComposeRollingSettings(
 				"compose-1",
 				settings({ healthTimeoutSeconds: 30 }),
 			),
-		).rejects.toThrow(/longer than start_period/);
+		).resolves.toBeUndefined();
 	});
 
 	it("refuses a service that is not in the compose", async () => {

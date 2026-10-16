@@ -68,10 +68,7 @@ const loadRenderedSpec = async (composeId: string, type: "fetch" | "cache") => {
  */
 export const getComposeRollingReport = async (
 	composeId: string,
-	{
-		type = "cache",
-		healthTimeoutSeconds,
-	}: { type?: "fetch" | "cache"; healthTimeoutSeconds?: number } = {},
+	{ type = "cache" }: { type?: "fetch" | "cache" } = {},
 ): Promise<ComposeRollingReport> => {
 	const loaded = await loadRenderedSpec(composeId, type);
 	const { compose, spec } = loaded;
@@ -90,7 +87,6 @@ export const getComposeRollingReport = async (
 			service: name,
 			composeType: compose.composeType,
 			hasCustomCommand: Boolean(compose.command),
-			healthTimeoutSeconds,
 		});
 		return { name, eligible: blockers.length === 0, blockers };
 	});
@@ -139,7 +135,6 @@ export const assertComposeRollingSettings = async (
 			service,
 			composeType,
 			hasCustomCommand: Boolean(command),
-			healthTimeoutSeconds: settings.healthTimeoutSeconds,
 		});
 		if (blockers.length > 0) {
 			problems.push(

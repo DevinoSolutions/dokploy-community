@@ -53,10 +53,6 @@ import {
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import {
-	ROLLING_HEALTH_TIMEOUT_MAX_SECONDS,
-	ROLLING_HEALTH_TIMEOUT_MIN_SECONDS,
-} from "@dokploy/server/db/validations/compose-rolling";
-import {
 	assertComposeRollingSettings,
 	getComposeRollingReport,
 } from "@dokploy/server/services/compose-rolling";
@@ -451,23 +447,13 @@ export const composeRouter = createTRPCRouter({
 			return await loadServices(input.composeId, input.type);
 		}),
 	rollingEligibility: protectedProcedure
-		.input(
-			apiFetchServices.extend({
-				healthTimeoutSeconds: z
-					.number()
-					.int()
-					.min(ROLLING_HEALTH_TIMEOUT_MIN_SECONDS)
-					.max(ROLLING_HEALTH_TIMEOUT_MAX_SECONDS)
-					.optional(),
-			}),
-		)
+		.input(apiFetchServices)
 		.query(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["read"],
 			});
 			return await getComposeRollingReport(input.composeId, {
 				type: input.type,
-				healthTimeoutSeconds: input.healthTimeoutSeconds,
 			});
 		}),
 	loadMountsByService: protectedProcedure
