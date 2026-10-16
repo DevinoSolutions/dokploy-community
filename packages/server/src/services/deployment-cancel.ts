@@ -459,6 +459,14 @@ export type CancelOutcome =
 			status: "cancelled";
 			result: RemoteBuildKillResult | "UNREACHABLE";
 			warning?: string;
+			/**
+			 * True for a deployment with no build server whose release step was
+			 * not actually stopped (no pid file, no launcher, no /proc, the host
+			 * unreachable, a process that survived SIGKILL): the row is cancelled,
+			 * but the caller still has to run the generic stop it had before the
+			 * release step became cancelable.
+			 */
+			genericStopNeeded?: boolean;
 	  };
 
 /**
@@ -693,6 +701,7 @@ export const cancelBuildServerDeployment = async (
 		status: "cancelled",
 		result: releaseStopped ? "KILLED" : result,
 		warning,
+		genericStopNeeded: !buildServerId && !releaseStopped,
 	};
 };
 
@@ -705,10 +714,11 @@ export const cancelBuildServerDeployment = async (
 const cancelRollingReleases = async (
 	composeId: string,
 	owner: { serverId: string | null } | undefined,
-): Promise<{ cancelled: number; warnings: string[] }> => {
+): Promise<{ cancelled: number; stopped: number; warnings: string[] }> => {
 	const warnings: string[] = [];
 	let cancelled = 0;
-	if (!owner) return { cancelled, warnings };
+	let stopped = 0;
+	if (!owner) return { cancelled, stopped, warnings };
 	const running = await db.query.deployments.findMany({
 		where: and(
 			eq(deployments.composeId, composeId),
@@ -727,10 +737,11 @@ const cancelRollingReleases = async (
 		});
 		if (outcome.status === "cancelled") {
 			cancelled++;
+			if (!outcome.genericStopNeeded) stopped++;
 			if (outcome.warning) warnings.push(outcome.warning);
 		}
 	}
-	return { cancelled, warnings };
+	return { cancelled, stopped, warnings };
 };
 
 /**
@@ -740,11 +751,12 @@ const cancelRollingReleases = async (
  * generic `pkill` on the serving host (it would hit unrelated deployments).
  *
  * A compose without a build server is cancelled here too while its rolling
- * replace is running (`cancelled` > 0): the release script is signalled by its
- * pid file, so the caller must not `pkill -f "docker compose"` either, which
- * ignores the shield around the `up` steps and can cut a recreate short. With
- * `cancelled` 0 there is no such release step and the caller keeps its generic
- * stop.
+ * replace is running: the release script is signalled by its pid file, so the
+ * caller must not `pkill -f "docker compose"` either (`stopped` > 0), which
+ * ignores the shield around the `up` steps and can cut a recreate short. When
+ * no release step is running (`cancelled` 0), or it was cancelled but could
+ * not be signalled (`stopped` 0: no pid file, no launcher, no /proc, host
+ * unreachable), the caller keeps its generic stop.
  */
 export const cancelBuildServerDeploymentsForService = async (
 	service:
@@ -753,6 +765,12 @@ export const cancelBuildServerDeploymentsForService = async (
 ): Promise<{
 	usesBuildServer: boolean;
 	cancelled: number;
+	/**
+	 * How many of them were really stopped. Equal to `cancelled` for a build
+	 * server; for a compose without one, a cancel whose release step could not
+	 * be signalled counts as cancelled but not as stopped.
+	 */
+	stopped: number;
 	warnings: string[];
 }> => {
 	const warnings: string[] = [];
@@ -780,7 +798,12 @@ export const cancelBuildServerDeploymentsForService = async (
 				if (outcome.warning) warnings.push(outcome.warning);
 			}
 		}
-		return { usesBuildServer: onBuildServer.length > 0, cancelled, warnings };
+		return {
+			usesBuildServer: onBuildServer.length > 0,
+			cancelled,
+			stopped: cancelled,
+			warnings,
+		};
 	}
 
 	const owner = await db.query.compose.findFirst({
@@ -812,7 +835,7 @@ export const cancelBuildServerDeploymentsForService = async (
 			if (outcome.warning) warnings.push(outcome.warning);
 		}
 	}
-	return { usesBuildServer: true, cancelled, warnings };
+	return { usesBuildServer: true, cancelled, stopped: cancelled, warnings };
 };
 
 /**

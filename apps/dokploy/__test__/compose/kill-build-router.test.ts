@@ -78,6 +78,7 @@ beforeEach(() => {
 	mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
 		usesBuildServer: false,
 		cancelled: 0,
+		stopped: 0,
 		warnings: [],
 	});
 	mocks.cancelBuildServerDeploymentById.mockResolvedValue(null);
@@ -129,12 +130,32 @@ describe("compose.killBuild", () => {
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
 			usesBuildServer: false,
 			cancelled: 1,
+			stopped: 1,
 			warnings: [],
 		});
 
 		await composeCaller.killBuild({ composeId: "c1" });
 
 		expect(mocks.killDockerBuild).not.toHaveBeenCalled();
+	});
+
+	it("without a build server, a cancel that stopped nothing (no pid file, host unreachable) still falls back to the generic stop", async () => {
+		mocks.findComposeById.mockResolvedValue({
+			composeId: "c1",
+			name: "stack",
+			serverId: "serving-1",
+			buildServerId: null,
+		});
+		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			usesBuildServer: false,
+			cancelled: 1,
+			stopped: 0,
+			warnings: ["The release step ... pid file was not found"],
+		});
+
+		await composeCaller.killBuild({ composeId: "c1" });
+
+		expect(mocks.killDockerBuild).toHaveBeenCalledWith("compose", "serving-1");
 	});
 });
 
@@ -229,6 +250,20 @@ describe("deployment.killProcess", () => {
 			expect.anything(),
 			expect.objectContaining({ action: "cancel", resourceId: "dep-1" }),
 		);
+	});
+
+	it("a compose without a build server whose release step could not be signalled keeps the pid kill", async () => {
+		mocks.findDeploymentById.mockResolvedValue(deployment({ pid: "4242" }));
+		mocks.cancelBuildServerDeploymentById.mockResolvedValue({
+			status: "cancelled",
+			result: "NONE",
+			warning: "pid file was not found",
+			genericStopNeeded: true,
+		});
+
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+
+		expect(mocks.execAsync).toHaveBeenCalledWith("kill -9 4242");
 	});
 
 	it("keeps the old pid kill for a deployment that does not build on a build server", async () => {

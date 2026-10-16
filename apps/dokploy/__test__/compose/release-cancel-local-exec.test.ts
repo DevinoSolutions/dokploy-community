@@ -248,7 +248,8 @@ describe("the release done marker, for real", () => {
 		{ timeout: 30_000 },
 		async () => {
 			const target = releaseTargetFor("helpers");
-			const helperPid = join(root, "helpers.pid");
+			// Not the target's pid file (helpers.pid): the helper would overwrite it.
+			const helperPid = join(root, "helpers.helper");
 			const ready = join(root, "helpers.ready");
 			const script = join(root, "helpers.sh");
 			// A helper (like `docker events`) that outlives the script's cleanup and

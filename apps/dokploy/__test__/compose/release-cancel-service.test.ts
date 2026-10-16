@@ -165,6 +165,7 @@ describe("cancelBuildServerDeployment with a release host", () => {
 			status: "cancelled",
 			result: "KILLED",
 			warning: undefined,
+			genericStopNeeded: false,
 		});
 		const [kill] = killsOn("serving-1");
 		expect(kill).toBeDefined();
@@ -424,6 +425,7 @@ describe("a compose that builds on its serving host (no build server)", () => {
 			status: "cancelled",
 			result: "KILLED",
 			warning: undefined,
+			genericStopNeeded: false,
 		});
 		const kills = mocks.execAsyncRemote.mock.calls
 			.filter((call) => isKill(call[1]))
@@ -472,6 +474,40 @@ describe("a compose that builds on its serving host (no build server)", () => {
 		expect(order).toEqual(["kill", "abort"]);
 	});
 
+	it("reports the generic stop as needed when the release step could not be signalled", async () => {
+		startWaitingOnRelease();
+		answers("NONE", "NONE");
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect(outcome).toMatchObject({
+			status: "cancelled",
+			genericStopNeeded: true,
+		});
+		expect((outcome as any).warning).toContain("pid file was not found");
+	});
+
+	it.each(["UNVERIFIED", "FAILED"])(
+		"reports the generic stop as needed on %s",
+		async (answer) => {
+			startWaitingOnRelease();
+			answers("NONE", answer);
+
+			const outcome = await cancelBuildServerDeployment(target);
+
+			expect(outcome).toMatchObject({ genericStopNeeded: true });
+		},
+	);
+
+	it("a release step that was stopped (even by SIGKILL) needs no generic stop", async () => {
+		startWaitingOnRelease();
+		answers("NONE", "KILLED_HARD");
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect(outcome).toMatchObject({ genericStopNeeded: false });
+	});
+
 	it("says so when no release step was running", async () => {
 		const outcome = await cancelBuildServerDeployment(target);
 
@@ -514,6 +550,25 @@ describe("a compose that builds on its serving host (no build server)", () => {
 			expect(killsOn("serving-1")).toHaveLength(1);
 		});
 
+		it("counts a release step that could not be signalled as cancelled but not stopped", async () => {
+			startWaitingOnRelease();
+			answers("NONE", "NONE");
+			mocks.deploymentsFindMany.mockResolvedValue([
+				{ deploymentId: "dep-1", logPath: "/l/dep-1.log" },
+			]);
+
+			const outcome = await cancelBuildServerDeploymentsForService({
+				type: "compose",
+				composeId: "c1",
+			});
+
+			expect(outcome).toMatchObject({
+				usesBuildServer: false,
+				cancelled: 1,
+				stopped: 0,
+			});
+		});
+
 		it("leaves a deployment that is not in a rolling replace to the caller (cancelled 0, nothing claimed)", async () => {
 			// Running, but this process is not waiting on a cancelable release step.
 			mocks.deploymentsFindMany.mockResolvedValue([
@@ -528,6 +583,7 @@ describe("a compose that builds on its serving host (no build server)", () => {
 			expect(outcome).toEqual({
 				usesBuildServer: false,
 				cancelled: 0,
+				stopped: 0,
 				warnings: [],
 			});
 			expect(mocks.updateSets).toHaveLength(0);
