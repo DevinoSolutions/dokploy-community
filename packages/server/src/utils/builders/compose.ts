@@ -325,7 +325,8 @@ const getRestoreCommands = (
 
 /**
  * Restore script for a deploy that failed *before* the deploy script ran (the
- * build on the build server). The running containers were never touched, but
+ * build on the build server; for a rolling compose without one, a cancel
+ * during the fetch or the patches). The running containers were never touched, but
  * the clone already replaced the compose file and `.env`, so put the previous
  * release's files back and confirm it is still serving. Same markers as a
  * failed `docker compose up`, so `didRollbackSucceed` treats it identically.
@@ -341,9 +342,15 @@ export const getRestoreAfterFailedBuildCommand = async (
 		compose.composeType === "docker-compose" && !options.freshVolumes;
 	const effectiveProjectPath = compose.mounts.length > 0 ? projectPath : "";
 	const restore = getRestoreCommands(compose, {
-		command: createCommand(compose, effectiveProjectPath || undefined, {
-			overridePath: getComposeBuildOverridePath(compose),
-		}),
+		// A compose without a build server (cancelled before its release step)
+		// has no override file to merge, and its own command builds.
+		command: createCommand(
+			compose,
+			effectiveProjectPath || undefined,
+			compose.buildServerId
+				? { overridePath: getComposeBuildOverridePath(compose) }
+				: undefined,
+		),
 		deploymentId: options.deploymentId,
 		isTransactional,
 		projectPath: effectiveProjectPath,

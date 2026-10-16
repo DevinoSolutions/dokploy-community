@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
 	statusAfterCancelledDeploy: vi.fn(),
 	runReleaseScript: vi.fn(),
 	assertDeploymentNotCancelled: vi.fn(),
+	getRestoreAfterFailedBuildCommand: vi.fn(),
 	cloneGitRepository: vi.fn(),
 	generateApplyPatchesCommand: vi.fn(),
 }));
@@ -57,6 +58,7 @@ vi.mock("@dokploy/server/utils/process/execAsync", async () => {
 vi.mock("@dokploy/server/utils/builders/compose", () => ({
 	getBuildComposeCommand: mocks.getBuildComposeCommand,
 	getBackupCurrentDeploymentCommand: vi.fn(() => "true;"),
+	getRestoreAfterFailedBuildCommand: mocks.getRestoreAfterFailedBuildCommand,
 	getRollbackMarkerProbeCommand: vi.fn(() => "true;"),
 	getCreateEnvFileCommand: vi.fn(() => ""),
 	getComposeBuildOverridePath: vi.fn(() => "/override.yml"),
@@ -171,6 +173,9 @@ beforeEach(async () => {
 	mocks.getBuildComposeCommand.mockResolvedValue(ROLLING_SCRIPT);
 	mocks.runReleaseScript.mockResolvedValue(undefined);
 	mocks.assertDeploymentNotCancelled.mockReset().mockResolvedValue(undefined);
+	mocks.getRestoreAfterFailedBuildCommand.mockResolvedValue(
+		"RESTORE_PREVIOUS;",
+	);
 	mocks.cloneGitRepository.mockResolvedValue("true;");
 	mocks.generateApplyPatchesCommand.mockResolvedValue("");
 	mocks.prepareComposeBuildServerDeploy.mockResolvedValue({
@@ -479,6 +484,11 @@ describe("a cancel before the release step of a rolling compose without a build 
 			options,
 		);
 
+	const ranCommands = () => [
+		...mocks.execAsync.mock.calls.map((call) => String(call[0])),
+		...mocks.execAsyncRemote.mock.calls.map((call) => String(call[1])),
+	];
+
 	const rollingGit = {
 		buildServerId: null,
 		buildRegistryId: null,
@@ -495,6 +505,16 @@ describe("a cancel before the release step of a rolling compose without a build 
 		});
 
 		expect(mocks.cloneGitRepository).toHaveBeenCalledTimes(1);
+		// The clone replaced the compose file: the previous release's are put back.
+		expect(mocks.getRestoreAfterFailedBuildCommand).toHaveBeenCalledTimes(1);
+		expect(
+			mocks.getRestoreAfterFailedBuildCommand.mock.calls[0]?.[1],
+		).toMatchObject({
+			deploymentId: "dep-1",
+		});
+		expect(
+			ranCommands().filter((c) => c.includes("RESTORE_PREVIOUS;")),
+		).toHaveLength(1);
 		expect(mocks.generateApplyPatchesCommand).not.toHaveBeenCalled();
 		expect(mocks.getBuildComposeCommand).not.toHaveBeenCalled();
 		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
@@ -615,5 +635,92 @@ describe("a cancel before the release step of a rolling compose without a build 
 		await runBuild(rollingGit, { cancellable: false });
 
 		expect(mocks.assertDeploymentNotCancelled).not.toHaveBeenCalled();
+	});
+
+	it("a cancel before anything was written restores nothing", async () => {
+		cancelAtCheck(1);
+
+		await expect(runBuild(rollingGit)).rejects.toMatchObject({
+			deploymentCancelled: true,
+		});
+
+		expect(mocks.cloneGitRepository).not.toHaveBeenCalled();
+		expect(mocks.getRestoreAfterFailedBuildCommand).not.toHaveBeenCalled();
+	});
+
+	it("a cancel during the patches restores the previous release too", async () => {
+		cancelAtCheck(3);
+
+		await expect(runBuild(rollingGit)).rejects.toMatchObject({
+			deploymentCancelled: true,
+		});
+
+		expect(
+			ranCommands().filter((c) => c.includes("RESTORE_PREVIOUS;")),
+		).toHaveLength(1);
+	});
+
+	it("a restore that cannot run turns the cancel into an error that says so", async () => {
+		cancelAtCheck(2);
+		mocks.getRestoreAfterFailedBuildCommand.mockRejectedValue(
+			new Error("vault unreachable"),
+		);
+
+		await expect(runBuild(rollingGit)).rejects.toThrow(
+			/could not be restored \(vault unreachable\)/,
+		);
+	});
+
+	it("a cancel just before the plain up stops it: the up is not run and the deploy ends as cancelled", async () => {
+		await rollingNoBuildServer();
+		mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+		// Raw compose: start (1), after the write (2), required checks (3),
+		// before the down (4), after the deploy command is built (5).
+		cancelAtCheck(5);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(ranCommands().some((c) => c.includes("docker compose up -d"))).toBe(
+			false,
+		);
+		expect(mocks.runReleaseScript).not.toHaveBeenCalled();
+		expect(
+			ranCommands().filter((c) => c.includes("RESTORE_PREVIOUS;")),
+		).toHaveLength(1);
+		expect(statuses().deployment).not.toContain("error");
+		expect(statuses().deployment).not.toContain("done");
+		expect(statuses().compose).toContain("done");
+		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
+	});
+
+	it("rebuildCompose does not run the plain up after a cancel either", async () => {
+		await rollingNoBuildServer();
+		mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+		cancelAtCheck(5);
+
+		const outcome = await rebuild().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(ranCommands().some((c) => c.includes("docker compose up -d"))).toBe(
+			false,
+		);
+		expect(statuses().deployment).not.toContain("error");
+		expect(statuses().deployment).not.toContain("done");
+		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
+	});
+
+	it("the build-server path restores through its own prepare step, not this one", async () => {
+		await useCompose({ rollingReplace: rollingSettings as any });
+		mocks.prepareComposeBuildServerDeploy.mockRejectedValue(
+			new DeploymentCancelledError(),
+		);
+		mocks.isDeploymentCancelled.mockResolvedValue(true);
+
+		const outcome = await deploy().catch((error) => error);
+
+		expect(outcome).toMatchObject({ deploymentCancelled: true });
+		expect(mocks.assertDeploymentNotCancelled).not.toHaveBeenCalled();
+		expect(mocks.getRestoreAfterFailedBuildCommand).not.toHaveBeenCalled();
 	});
 });

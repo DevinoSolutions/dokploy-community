@@ -139,8 +139,18 @@ deploy is never failed because of drift.
     no release step to signal, so the cancel marks the deployment cancelled and
     the deploy stops at the next step boundary: a step already in progress
     (for example a clone) is let finish, then nothing more is fetched, pulled
-    or started and the previous release keeps serving. The new compose files
-    that step wrote stay on disk until the next deploy.
+    or started and the previous release keeps serving. The deploy checks the
+    cancel before each of its steps, the last time right before the plain `up`
+    (and the `down --volumes` of a fresh-volumes deploy).
+  - The step that was let finish already replaced the compose file and `.env`
+    on disk, and Start runs `up -d` from them. So a cancel before the release
+    step puts the previous release's files back (the same restore a failed
+    deploy does, which also confirms the previous release is still up). A
+    first deploy has no previous release: the log says "No previous release to
+    restore, leaving the stack as-is", the new files stay and nothing is
+    running. A fresh-volumes deploy is not restored (its restore is not
+    transactional). If the restore itself fails, the deployment ends as an
+    error saying the files may still be the new ones.
   - A script without a rolling replace (a plain `up`) is not started through
     the launcher. With a build server it runs to completion, like a cancel
     that arrives too late. Without one it keeps the generic stop, described

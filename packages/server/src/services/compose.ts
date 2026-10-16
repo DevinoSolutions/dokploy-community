@@ -16,6 +16,7 @@ import {
 	getBackupCurrentDeploymentCommand,
 	getBuildComposeCommand,
 	getComposeBuildOverridePath,
+	getRestoreAfterFailedBuildCommand,
 	getRollbackMarkerProbeCommand,
 } from "@dokploy/server/utils/builders/compose";
 import {
@@ -269,17 +270,62 @@ const usesDeploymentCancel = (
  * a deployment that cannot be cancelled (a preview).
  */
 const createCancelCheckpoint = (
-	entity: Pick<Compose, "buildServerId" | "rollingReplace">,
-	deploymentId: string | undefined,
-	cancellable = true,
+	entity: Awaited<ReturnType<typeof findComposeById>>,
+	deployment: { deploymentId?: string; logPath: string },
+	{
+		cancellable = true,
+		freshVolumes = false,
+	}: { cancellable?: boolean; freshVolumes?: boolean } = {},
 ) => {
+	const { deploymentId, logPath } = deployment;
 	const enabled =
 		cancellable &&
 		Boolean(deploymentId) &&
 		!entity.buildServerId &&
 		resolveComposeRolling(entity.rollingReplace) !== null;
-	return async () => {
-		if (enabled) await assertDeploymentNotCancelled(deploymentId);
+	// The fetch / patches / raw write already replaced the compose file and
+	// `.env` on disk, and a later Start runs `up -d` from them: a cancel here
+	// puts the previous release's files back, like a failed build-server build
+	// (see `prepareComposeBuildServerDeploy`). A first deploy has no previous
+	// release; the restore script says so and leaves the files.
+	const restorePreviousRelease = async () => {
+		try {
+			const restore = await getRestoreAfterFailedBuildCommand(entity, {
+				deploymentId,
+				freshVolumes,
+			});
+			if (!restore) return;
+			const commandWithLog = `(${restore}) >> ${logPath} 2>&1`;
+			if (entity.serverId) {
+				await execAsyncRemote(entity.serverId, commandWithLog);
+			} else {
+				await execAsync(commandWithLog);
+			}
+		} catch (restoreError) {
+			console.error(
+				"Could not restore the previous compose release after a cancel",
+				restoreError,
+			);
+			const reason =
+				restoreError instanceof Error
+					? restoreError.message
+					: String(restoreError);
+			throw new Error(
+				`Deployment cancelled, but the previous release could not be restored (${reason}). Its compose files may still be the new ones; check them or redeploy.`,
+			);
+		}
+	};
+	// `restore: false` for the check before anything was written.
+	return async ({ restore = true } = {}) => {
+		if (!enabled) return;
+		try {
+			await assertDeploymentNotCancelled(deploymentId);
+		} catch (error) {
+			if (restore && isDeploymentCancelledError(error)) {
+				await restorePreviousRelease();
+			}
+			throw error;
+		}
 	};
 };
 
@@ -313,11 +359,10 @@ export const runComposeBuild = async (
 	const { freshVolumes = false, applyPatches = true, cancellable } = options;
 	const serverId = entity.serverId;
 	const phases = createComposePhaseLogger(entity, deployment.logPath);
-	const checkpoint = createCancelCheckpoint(
-		entity,
-		deployment.deploymentId,
+	const checkpoint = createCancelCheckpoint(entity, deployment, {
 		cancellable,
-	);
+		freshVolumes,
+	});
 
 	const runStep = async (rawCommand: string) => {
 		const commandWithLog = `(${rawCommand}) >> ${deployment.logPath} 2>&1`;
@@ -328,7 +373,7 @@ export const runComposeBuild = async (
 		}
 	};
 
-	await checkpoint();
+	await checkpoint({ restore: false });
 
 	// Must run before the clone / raw-file rewrite below overwrites the code
 	// directory, otherwise there is nothing left to roll back to.
@@ -396,6 +441,9 @@ export const runComposeBuild = async (
 		? await phases.run("Build images on the build server", prepareBuildServer)
 		: await prepareBuildServer();
 
+	// Last check before the steps that cannot be interrupted: the stack is
+	// taken down (fresh volumes) or the plain `up` starts.
+	await checkpoint();
 	if (freshVolumes && entity.composeType === "docker-compose") {
 		const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
 		await runStep(downCommand);
@@ -407,10 +455,8 @@ export const runComposeBuild = async (
 		freshVolumes,
 		remoteBuild,
 	});
-	if (
-		deployment.deploymentId &&
-		isReleaseCancelable(command, cancellable)
-	) {
+	await checkpoint();
+	if (deployment.deploymentId && isReleaseCancelable(command, cancellable)) {
 		await runReleaseScript({
 			serverId,
 			command: `(${command}) >> ${deployment.logPath} 2>&1`,
@@ -819,10 +865,12 @@ export const rebuildCompose = async ({
 	});
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
-	const checkpoint = createCancelCheckpoint(compose, deployment.deploymentId);
+	const checkpoint = createCancelCheckpoint(compose, deployment, {
+		freshVolumes,
+	});
 
 	try {
-		await checkpoint();
+		await checkpoint({ restore: false });
 
 		// Snapshot before the raw-file rewrite / patch application below.
 		await backupCurrentDeployment(compose, deployment.logPath);
@@ -905,6 +953,9 @@ export const rebuildCompose = async ({
 			? await phases.run("Build images on the build server", prepareBuildServer)
 			: await prepareBuildServer();
 
+		// Last check before the steps that cannot be interrupted (see
+		// runComposeBuild).
+		await checkpoint();
 		if (freshVolumes && compose.composeType === "docker-compose") {
 			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
 			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;
@@ -921,6 +972,7 @@ export const rebuildCompose = async ({
 			freshVolumes,
 			remoteBuild,
 		});
+		await checkpoint();
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (isReleaseCancelable(command)) {
 			await runReleaseScript({

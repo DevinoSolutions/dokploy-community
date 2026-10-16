@@ -224,6 +224,19 @@ describe("compose rollback on a unit with a build server", () => {
 		expect(restore).toContain("never builds images (build server devino-third)");
 	});
 
+	it("restores a compose without a build server (a cancel before its release step) with its own up, and no override file", async () => {
+		const restore = await getRestoreAfterFailedBuildCommand(noBuildServer, {
+			deploymentId: "dep1",
+		});
+		const ups = upInvocations(restore);
+		expect(ups).toHaveLength(1);
+		expect(ups[0]).not.toContain("--no-build");
+		expect(ups[0]).not.toContain("--build");
+		expect(restore).not.toContain("docker-compose.dokploy-build.yml");
+		expect(restore).not.toContain("OVERRIDE_RESTORED");
+		expect(restore).toContain("No previous release to restore");
+	});
+
 	it("also pins the restore when the compose pulls images on deploy", async () => {
 		const script = await getBuildComposeCommand(
 			{ ...base, pullImagesOnDeploy: true } as typeof base,
