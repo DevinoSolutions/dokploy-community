@@ -2,6 +2,24 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.30
+
+**Opt-in rolling replace for Compose services** ([#399](https://github.com/DevinoSolutions/dokploy-community/pull/399), issue [#374](https://github.com/DevinoSolutions/dokploy-community/issues/374) item 4). Off by default. A plain `docker compose up -d` stops the old container before the new one exists, which leaves a window with no backend. With rolling replace enabled for a service, the new image is built or pulled first, a second replica is started next to the old container, and the old container is stopped and removed only after the new replica reports healthy and a drain delay has passed. A replica that never becomes healthy is removed and the old container keeps serving.
+- Enable it per service on the Compose Advanced tab, in the Rolling replace card. The card lists each service with its eligibility and the reasons it is refused.
+- Health timeout 10-900 s (default 120) and drain delay 0-120 s (default 5). The health wait is raised automatically to cover the service's healthcheck (`start_period + retries x (interval + timeout)`, capped at 900 s), so a healthcheck that only sets `test` is no longer refused; only one that cannot settle within 900 s is ([#400](https://github.com/DevinoSolutions/dokploy-community/pull/400)).
+- Refused on save and again at every deploy for services with `container_name`, a published host port, host or shared network modes, `scale` or `deploy.replicas` other than 1, static addresses, no usable healthcheck, or datastore images such as databases and queues. Only `docker-compose` type composes qualify; stacks, custom commands, fresh-volume deploys and previews never roll.
+- Adds the nullable `compose.rollingReplace` column (migration 0217). With it unset or disabled, deploy scripts are byte-identical to the previous release.
+- Design and decisions: `docs/design/compose-zero-downtime.md` ([#396](https://github.com/DevinoSolutions/dokploy-community/pull/396), [#398](https://github.com/DevinoSolutions/dokploy-community/pull/398)). Usage: `docs/compose-rolling-replace.md`.
+
+**Security: Traefik file access is confined to the Traefik directory** ([#397](https://github.com/DevinoSolutions/dokploy-community/pull/397), port of upstream Dokploy [#5070](https://github.com/Dokploy/dokploy/pull/5070), with credit to its authors). A member with the `traefikFiles` write permission could previously read or overwrite any file on the host by passing an absolute path or `../` segments to the Traefik file endpoints. Paths are now resolved against the Traefik configuration directory and anything outside it is rejected with a bad request. Remote servers are resolved with POSIX semantics.
+
+**Stack environments no longer go through the shell command line** ([#394](https://github.com/DevinoSolutions/dokploy-community/pull/394)). Compose stacks (`docker stack deploy`) embedded their environment in the deploy script, up to three times, so a large environment could fail with "Argument list too long" and the values were visible in `ps`. The environment is now staged once in a 0600 file next to the compose file and sourced by the docker command, then removed after the deploy, including on failure and cancel.
+
+Tests:
+- Guardrail shell-timing tests no longer flake ([#395](https://github.com/DevinoSolutions/dokploy-community/pull/395)).
+
+> One database migration in this release (0217, guarded). The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
+
 ### New in v0.30.8-community.29
 
 **Embedded deploy content no longer goes through the shell command line** ([#392](https://github.com/DevinoSolutions/dokploy-community/pull/392)). File mounts, patches, raw Compose sources and the Compose `.env` were embedded in the deploy shell command, so a large one could fail with "Argument list too long" on build-server and serving-host deploys. They are now written to a staging file over SFTP or the local filesystem and copied into place, as Compose files already were in community.28.
