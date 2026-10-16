@@ -397,9 +397,12 @@ for each network that is missing a name:
 3. `docker network connect --alias <each expected name> [--ip <stored static IP>] <net> <id>`,
    up to 3 tries, 20 s apart (`DOKPLOY_BOOT_RECOVER_REPAIR_PAUSE`). The `--ip` is carried over
    only when the endpoint had a static address (`IPAMConfig`) before and it is a dotted IPv4.
-   (Docker 29 prints an unset address as `invalid IP`; the inspect template guards with
-   `IsValid`, checked on prod's Docker, and the shell ignores and logs anything that is not an
-   IPv4, so a bad `--ip` can never be built.)
+   (The inspect template prints the raw address fields, because their type differs by Docker
+   version: plain strings on Docker 28, where an unset address is empty and `.IsValid` would
+   be a template error, and `netip.Addr` on Docker 29, where an unset address prints `invalid
+   IP`. The shell accepts the current IP only if it is a dotted IPv4 and treats anything else
+   as empty, and `--ip` is built only from a dotted IPv4 that is logged and ignored otherwise,
+   so a bad `--ip` can never be built on either version.)
 4. If all 3 tries fail, a last `docker network connect <net> <id>` with **no options at all**
    (no `--ip`, no `--alias`) so the container is never left off the network, then `ALIAS REPAIR FAILED ... plain connect
    used: yes` at `err` and exit 3.
@@ -553,7 +556,7 @@ journal_failed_ids() {
 }
 
 ROW_FMT='{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}|{{with index .Config.Labels "com.docker.swarm.task.id"}}swarm{{end}}|{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}|{{with index .Config.Labels "com.docker.compose.service"}}{{.}}{{end}}|{{.State.Error}}'
-NET_FMT='{{range $k,$v := .NetworkSettings.Networks}}{{$k}}|{{join $v.Aliases ","}}|{{join $v.DNSNames ","}}|{{if $v.IPAddress.IsValid}}{{$v.IPAddress}}{{end}}|{{with $v.IPAMConfig}}{{if .IPv4Address.IsValid}}{{.IPv4Address}}{{end}}{{end}}{{"\n"}}{{end}}'
+NET_FMT='{{range $k,$v := .NetworkSettings.Networks}}{{$k}}|{{join $v.Aliases ","}}|{{join $v.DNSNames ","}}|{{$v.IPAddress}}|{{with $v.IPAMConfig}}{{.IPv4Address}}{{end}}{{"\n"}}{{end}}'
 
 QUIET=0 # classify logs what it leaves alone on the first pass only
 say() { [ "$QUIET" = 1 ] || log "$@" >&2; }
@@ -577,9 +580,25 @@ classify() {
   done < <(journal_failed_ids)
 }
 
-# "net|aliases|dnsnames|ip|staticip" lines, bridge/host/none dropped.
+# "net|aliases|dnsnames|ip|staticip" lines, bridge/host/none dropped. The address fields are raw
+# Docker output, which differs by version (Docker 28: plain strings, empty when unset; Docker 29:
+# netip.Addr, which prints "invalid IP" when unset), so the current IP is accepted only if it is
+# a dotted IPv4 and is empty otherwise. A static address is checked where it is used (repair_net).
+# If docker inspect itself fails, say so on stderr instead of silently verifying nothing.
 net_lines() {
-  docker inspect --format "$NET_FMT" "$1" 2>/dev/null | grep -vE '^(bridge|host|none)\|' | sed '/^$/d'
+  local out
+  out=$(docker inspect --format "$NET_FMT" "$1" 2>/dev/null) || {
+    log "cannot read the network data of ${1:0:12} (docker inspect failed)" warning >&2
+    return 1
+  }
+  printf '%s\n' "$out" | grep -vE '^(bridge|host|none)\|' | sed '/^$/d' |
+    awk -F'|' -v OFS='|' '$4 !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { $4 = "" } 1'
+}
+
+# Names of the user-defined networks the container is attached to, one per line.
+user_networks() {
+  docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' "$1" 2>/dev/null |
+    grep -vE '^(bridge|host|none)?$'
 }
 
 # Expected names per network before the start: the stored aliases plus, for a compose
@@ -644,7 +663,7 @@ repair_net() { # id name net want static started missing
     return 1
   fi
   log "aliases restored $name $net: $want (ip ${ip_before:-none} -> ${ip_after:-none})" notice
-  [ "$ip_before" = "$ip_after" ] || log "IP CHANGED $name $net: $ip_before -> $ip_after, check the Traefik route" warning
+  [ -z "$ip_before" ] || [ "$ip_before" = "$ip_after" ] || log "IP CHANGED $name $net: $ip_before -> $ip_after, check the Traefik route" warning
   return 0
 }
 
@@ -671,6 +690,12 @@ trap 'rm -rf "$RESDIR"' EXIT
 start_one() { # id name service
   local id=$1 name=$2 out exp started
   exp=$(mktemp)
+  # The container is on a user network but nothing could be read about it: say so, do not skip
+  # the check silently.
+  if [ -z "$(net_lines "$id")" ] && [ -n "$(user_networks "$id")" ]; then
+    log "no network data could be read for $name, its DNS names will not be verified" warning
+    : > "$RESDIR/alias-problem"
+  fi
   expected_names "$id" "$3" > "$exp"
   if out=$(timeout "$START_TIMEOUT" docker start "$id" 2>&1); then
     log "started $name"
@@ -900,7 +925,13 @@ Done:
   `EXCLUDE_NONE=yes` disabled them (with the warning). A run where every start succeeds made
   one pass and no 45 s pause. Case 11: a stub that prints `invalid IP` for an unset static
   address produced no `--ip` argument and an `ignoring a static address` log line; case 12:
-  when every connect fails the last attempt is a connect with no options at all. Also run:
+  when every connect fails the last attempt is a connect with no options at all. Cases 13
+  and 14: Docker 28 style raw strings (unset = empty) and Docker 29 `invalid IP` in both the
+  current and the static address give the same repair, with `ip none -> ...` in the log and
+  no `invalid` in any connect or log line. Case 15: when `docker inspect` of the network
+  data fails, the script logs `cannot read the network data` and `no network data could be
+  read ... will not be verified`, makes no network call and exits 3, instead of silently
+  verifying nothing. Also run:
   `bash -n` on both scripts.
 
 - **T3, real Docker in an isolated sandbox (run 2026-10-16, 11:43Z to about 13:20Z).** A
@@ -970,8 +1001,11 @@ Done:
     CHANGED ... check the Traefik route`. Note that "before" is the address after the start,
     not the address before the reboot.
   - The `invalid IP` problem found by review405 was real on this Docker: an exited container's
-    `IPAddress` printed `invalid IP`. With the `IsValid` guard the fields are empty and the
-    repair command contained no bad `--ip`.
+    `IPAddress` printed `invalid IP`. That run used the earlier `IsValid` form of the template;
+    it was replaced afterwards by raw fields plus a shell check, so that it also works on
+    Docker 28 (`.IsValid` is a template error there). The raw template was then checked
+    read-only on prod's Docker 29 (unset addresses print `invalid IP` and are treated as
+    empty); Docker 28 is covered by the stub tests only.
   - Not covered here: a reconnect that fails or times out under manager load (stub tests only),
     and a real Traefik route. A link or gateway-priority loss through the reconnect is by
     construction, not measured.
