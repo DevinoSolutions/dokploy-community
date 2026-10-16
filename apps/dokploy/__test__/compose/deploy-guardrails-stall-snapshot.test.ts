@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -209,27 +209,40 @@ const writeScript = (script: string) => {
 // small wrapper that sends its stdout to that file, so the poll can see when the
 // watcher has really printed a block. The wrapper then echoes the file on the real
 // stdout and passes the exit status on. (Not an EXIT trap: scripts set their own.)
+// A timed-out waitForSnapshots exits with this status and a message on stderr; sh()
+// throws that message so the test fails with it instead of a later, vaguer assertion.
+const WAIT_TIMEOUT_STATUS = 97;
 const sh = (script: string, env: Record<string, string> = {}) => {
+	let result: SpawnSyncReturns<string>;
 	if (!script.includes("$STALL_TEST_OUT")) {
-		return spawnSync("sh", [writeScript(script)], {
+		result = spawnSync("sh", [writeScript(script)], {
 			encoding: "utf8",
 			env: { ...process.env, ...env },
 			timeout: 120_000,
 		});
+	} else {
+		const inner = writeScript(script);
+		const outer = writeScript(
+			`sh ${inner} >"$STALL_TEST_OUT"; rc=$?; cat "$STALL_TEST_OUT"; exit $rc`,
+		);
+		result = spawnSync("sh", [outer], {
+			encoding: "utf8",
+			env: {
+				...process.env,
+				STALL_TEST_OUT: toShellPath(join(scriptDir, `out-${scriptCount}`)),
+				...env,
+			},
+			timeout: 120_000,
+		});
 	}
-	const inner = writeScript(script);
-	const outer = writeScript(
-		`sh ${inner} >"$STALL_TEST_OUT"; rc=$?; cat "$STALL_TEST_OUT"; exit $rc`,
-	);
-	return spawnSync("sh", [outer], {
-		encoding: "utf8",
-		env: {
-			...process.env,
-			STALL_TEST_OUT: toShellPath(join(scriptDir, `out-${scriptCount}`)),
-			...env,
-		},
-		timeout: 120_000,
-	});
+	if (result.status === WAIT_TIMEOUT_STATUS) {
+		throw new Error(
+			`${result.stderr.trim()}
+stdout so far:
+${result.stdout}`,
+		);
+	}
+	return result;
 };
 
 const hasSh = (() => {
@@ -317,8 +330,9 @@ esac`,
 	// Waits (up to 40 s) until snapshot block `n` has been printed, instead of a fixed
 	// sleep that races a loaded runner (the watcher writes the block file and cats it a
 	// moment later). Polls the script's captured stdout, see sh().
+	// On timeout it writes a message to stderr and exits WAIT_TIMEOUT_STATUS, which sh() throws.
 	const waitForSnapshots = (n: number) =>
-		`i=0; while [ "$i" -lt 160 ] && ! grep -q -- "End of stall snapshot ${n}/" "$STALL_TEST_OUT" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;`;
+		`i=0; while [ "$i" -lt 160 ] && ! grep -q -- "End of stall snapshot ${n}/" "$STALL_TEST_OUT" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done; if ! grep -q -- "End of stall snapshot ${n}/" "$STALL_TEST_OUT" 2>/dev/null; then echo "waitForSnapshots: timed out after 40s waiting for snapshot ${n} (saw $(grep -c -- 'End of stall snapshot' "$STALL_TEST_OUT" 2>/dev/null))" >&2; type dokploy_stall_cleanup >/dev/null 2>&1 && dokploy_stall_cleanup; exit ${WAIT_TIMEOUT_STATUS}; fi;`;
 
 	// Waits (up to 60 s) until docker has been asked for the state `n` times. The
 	// watcher runs one state command at a time and prints its block before it starts
