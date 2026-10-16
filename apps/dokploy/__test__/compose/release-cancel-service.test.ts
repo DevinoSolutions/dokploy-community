@@ -406,6 +406,167 @@ describe("the compose entry points pass the serving host", () => {
 	});
 });
 
+describe("a compose that builds on its serving host (no build server)", () => {
+	const target = {
+		deploymentId: "dep-1",
+		logPath: "/etc/dokploy/logs/app/app-1.log",
+		logServerId: "serving-1" as string | null,
+		buildServerId: null,
+		releaseHost: { serverId: "serving-1" as string | null },
+	};
+
+	it("signals only the release step, on the serving host, and never contacts a build server", async () => {
+		startWaitingOnRelease();
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect(outcome).toEqual({
+			status: "cancelled",
+			result: "KILLED",
+			warning: undefined,
+		});
+		const kills = mocks.execAsyncRemote.mock.calls
+			.filter((call) => isKill(call[1]))
+			.map((call) => [call[0], String(call[1])]);
+		expect(kills).toHaveLength(1);
+		expect(kills[0]?.[0]).toBe("serving-1");
+		expect(kills[0]?.[1]).toContain("id='dep-1.release'");
+		expect(kills[0]?.[1]).toContain(`-lt ${RELEASE_KILL_GRACE_SECONDS}`);
+		const log = decodedLogLines();
+		expect(log).toContain("Stopping the rolling replace on the serving host");
+		expect(log).toContain("release step was stopped");
+		expect(log).not.toContain("build server");
+	});
+
+	it("signals the Dokploy host itself when the compose has no server", async () => {
+		startWaitingOnRelease();
+
+		const outcome = await cancelBuildServerDeployment({
+			...target,
+			logServerId: null,
+			releaseHost: { serverId: null },
+		});
+
+		expect(outcome).toMatchObject({ status: "cancelled", result: "KILLED" });
+		const local = mocks.execAsync.mock.calls
+			.map((call) => String(call[0]))
+			.filter(isKill);
+		expect(local).toHaveLength(1);
+		expect(local[0]).toContain(".build-pids/dep-1_release.pid");
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+	});
+
+	it("drops the wait for the release command after the kill answered", async () => {
+		const order: string[] = [];
+		mocks.execAsyncRemote.mockImplementation(async (_s: string, c: string) => {
+			if (isKill(c)) order.push("kill");
+			return { stdout: isKill(c) ? "KILLED
+" : "", stderr: "" };
+		});
+		const drop = registerRemoteBuild(getReleaseCancelKey("dep-1"), () => {
+			order.push("abort");
+		});
+
+		await cancelBuildServerDeployment(target);
+		drop();
+
+		expect(order).toEqual(["kill", "abort"]);
+	});
+
+	it("says so when no release step was running", async () => {
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect(outcome).toMatchObject({ status: "cancelled", result: "NONE" });
+		expect(decodedLogLines()).toContain("No release step was running");
+		expect(
+			mocks.execAsyncRemote.mock.calls.filter((call) => isKill(call[1])),
+		).toHaveLength(0);
+	});
+
+	it("warns when the release step had to be killed", async () => {
+		startWaitingOnRelease();
+		answers("NONE", "KILLED_HARD");
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect((outcome as any).warning).toContain("was killed");
+	});
+
+	describe("the entry points", () => {
+		beforeEach(() => {
+			mocks.composeFindFirst.mockResolvedValue({
+				buildServerId: null,
+				serverId: "serving-1",
+			});
+		});
+
+		it("compose.killBuild's cancel stops a rolling replace that is running", async () => {
+			startWaitingOnRelease();
+			mocks.deploymentsFindMany.mockResolvedValue([
+				{ deploymentId: "dep-1", logPath: "/l/dep-1.log" },
+			]);
+
+			const outcome = await cancelBuildServerDeploymentsForService({
+				type: "compose",
+				composeId: "c1",
+			});
+
+			expect(outcome).toMatchObject({ usesBuildServer: false, cancelled: 1 });
+			expect(killsOn("serving-1")).toHaveLength(1);
+		});
+
+		it("leaves a deployment that is not in a rolling replace to the caller (cancelled 0, nothing claimed)", async () => {
+			// Running, but this process is not waiting on a cancelable release step.
+			mocks.deploymentsFindMany.mockResolvedValue([
+				{ deploymentId: "dep-1", logPath: "/l/dep-1.log" },
+			]);
+
+			const outcome = await cancelBuildServerDeploymentsForService({
+				type: "compose",
+				composeId: "c1",
+			});
+
+			expect(outcome).toEqual({
+				usesBuildServer: false,
+				cancelled: 0,
+				warnings: [],
+			});
+			expect(mocks.updateSets).toHaveLength(0);
+			expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+			expect(mocks.execAsync).not.toHaveBeenCalled();
+		});
+
+		it("deployment.killProcess' cancel stops a rolling replace that is running", async () => {
+			startWaitingOnRelease();
+			mocks.deploymentsFindFirst.mockResolvedValue({
+				deploymentId: "dep-1",
+				logPath: "/l/dep-1.log",
+				composeId: "c1",
+				applicationId: null,
+				buildServerId: null,
+			});
+
+			const outcome = await cancelBuildServerDeploymentById("dep-1");
+
+			expect(outcome).toMatchObject({ status: "cancelled", result: "KILLED" });
+			expect(killsOn("serving-1")).toHaveLength(1);
+		});
+
+		it("deployment.killProcess keeps its pid kill for a compose deploy that is not in a rolling replace", async () => {
+			mocks.deploymentsFindFirst.mockResolvedValue({
+				deploymentId: "dep-1",
+				logPath: "/l/dep-1.log",
+				composeId: "c1",
+				applicationId: null,
+				buildServerId: null,
+			});
+
+			await expect(cancelBuildServerDeploymentById("dep-1")).resolves.toBeNull();
+			expect(mocks.updateSets).toHaveLength(0);
+		});
+	});
+});
+
 describe("runReleaseScript", () => {
 	const notCancelled = () =>
 		mocks.deploymentsFindFirst.mockResolvedValue({ status: "running" });
@@ -507,6 +668,32 @@ describe("runReleaseScript", () => {
 				deploymentCancelled: true,
 				duringRelease: true,
 			});
+		},
+	);
+
+	it.each([
+		[130, false],
+		[143, false],
+		[137, true],
+	])(
+		"exit %i after a cancel: releaseKilled is %s",
+		async (exitCode, releaseKilled) => {
+			notCancelled();
+			mocks.execAsyncRemote.mockImplementation(async () => {
+				cancelled();
+				throw new ExecError(`Remote command failed with exit code ${exitCode}`, {
+					command: "x",
+					exitCode,
+				});
+			});
+
+			const error = await runReleaseScript({
+				serverId: "serving-1",
+				command: "echo release",
+				deploymentId: "dep-1",
+			}).catch((e) => e);
+
+			expect(error).toMatchObject({ duringRelease: true, releaseKilled });
 		},
 	);
 

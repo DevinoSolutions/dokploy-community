@@ -102,7 +102,7 @@ describe("compose.killBuild", () => {
 		expect(mocks.killDockerBuild).not.toHaveBeenCalled();
 	});
 
-	it("without a build server is exactly the old behaviour", async () => {
+	it("without a build server and no rolling replace running is exactly the old behaviour", async () => {
 		mocks.findComposeById.mockResolvedValue({
 			composeId: "c1",
 			name: "stack",
@@ -112,8 +112,29 @@ describe("compose.killBuild", () => {
 
 		await composeCaller.killBuild({ composeId: "c1" });
 
+		expect(mocks.cancelBuildServerDeploymentsForService).toHaveBeenCalledWith({
+			type: "compose",
+			composeId: "c1",
+		});
 		expect(mocks.killDockerBuild).toHaveBeenCalledWith("compose", "serving-1");
-		expect(mocks.cancelBuildServerDeploymentsForService).not.toHaveBeenCalled();
+	});
+
+	it("without a build server, a running rolling replace is cancelled by its launcher and never pkilled", async () => {
+		mocks.findComposeById.mockResolvedValue({
+			composeId: "c1",
+			name: "stack",
+			serverId: "serving-1",
+			buildServerId: null,
+		});
+		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			usesBuildServer: false,
+			cancelled: 1,
+			warnings: [],
+		});
+
+		await composeCaller.killBuild({ composeId: "c1" });
+
+		expect(mocks.killDockerBuild).not.toHaveBeenCalled();
 	});
 });
 
