@@ -23,8 +23,7 @@ const app = (applicationId: string, extra: Partial<DeploymentJob> = {}) =>
 		...extra,
 	}) as DeploymentJob;
 
-const prio = (id: string) =>
-	app(id, { priority: true, priorityBy: "user-1" });
+const prio = (id: string) => app(id, { priority: true, priorityBy: "user-1" });
 
 const comp = (composeId: string, extra: Partial<DeploymentJob> = {}) =>
 	({

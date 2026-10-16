@@ -641,12 +641,12 @@ export class InMemoryQueue {
 			for (let index = 0; index < partition.waiting.length; index++) {
 				const job = partition.waiting[index] as InternalJob;
 				if (
-					index > first &&
+					index >= first &&
 					job.data.priority === true &&
 					isFree(job) &&
 					!seen.has(job.group)
 				) {
-					return { index, jumped: true };
+					return { index, jumped: index > first };
 				}
 				seen.add(job.group);
 			}
