@@ -22,6 +22,7 @@ export * from "./services/cloudflare-runtime";
 export * from "./services/cluster";
 export * from "./services/compose";
 export * from "./services/compose-build-server";
+export * from "./services/compose-rolling";
 export * from "./services/deployment";
 export * from "./services/deployment-cancel";
 export * from "./services/deployment-queue-journal";

@@ -143,6 +143,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "compose-readLogs": "dokploy:read",
   "compose-redeploy": "dokploy:deploy",
   "compose-refreshToken": "dokploy:services:write",
+  "compose-rollingEligibility": "dokploy:read",
   "compose-saveEnvironment": "dokploy:services:write",
   "compose-search": "dokploy:read",
   "compose-start": "dokploy:deploy",
