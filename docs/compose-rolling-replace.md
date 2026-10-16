@@ -134,6 +134,10 @@ deploy is never failed because of drift.
     step was stopped; services that were already replaced stay on the new
     release. A script without a rolling replace (a plain `up`) is not
     interruptible and runs to completion, like a cancel that arrives too late.
+  - The `up` of the services that are not rolled, and the final `up`, are
+    never cut short: a cancel waits for the step that is running (up to the
+    20 s grace), then the script stops before the next one. The job ends only
+    after the script has cleaned up.
   - `deployment.killProcess` on a compose that does not use a build server
     sends `kill -9`, which cannot be caught: it can leave two containers until
     the next deploy reconciles them.

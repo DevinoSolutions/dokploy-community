@@ -887,10 +887,14 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			);
 			// The shape runStep gives the deploy script: a subshell, output to the log.
 			const command = `(sh ${script}) >> ${toShellPath(logFile)} 2>&1`;
-			const child = spawn("sh", ["-c", wrapCancelableRemoteBuild(command, target)], {
-				env: envFor(world),
-				stdio: "ignore",
-			});
+			const child = spawn(
+				"sh",
+				["-c", wrapCancelableRemoteBuild(command, target)],
+				{
+					env: envFor(world),
+					stdio: "ignore",
+				},
+			);
 			const exited = new Promise<void>((resolve) => child.on("close", resolve));
 
 			// Wait (bounded) until the second replica exists and the pid file is there.
@@ -899,7 +903,8 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				if (
 					existsSync(pidFile) &&
 					existsSync(callsLog) &&
-					readFileSync(callsLog, "utf8").includes("--scale web=2 web")
+					readFileSync(callsLog, "utf8").includes("--scale web=2 web") &&
+					containersOf(world, "web").length === 2
 				) {
 					break;
 				}
@@ -909,10 +914,14 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			expect(runningOf(world, "web")).toContain(OLD);
 			expect(containersOf(world, "web").length).toBe(2);
 
-			const kill = spawnSync("sh", ["-c", getKillRemoteBuildCommand(target, 20)], {
-				encoding: "utf8",
-				timeout: 60_000,
-			});
+			const kill = spawnSync(
+				"sh",
+				["-c", getKillRemoteBuildCommand(target, 20)],
+				{
+					encoding: "utf8",
+					timeout: 60_000,
+				},
+			);
 			expect(kill.stdout.trim()).toBe("KILLED");
 			await exited;
 
@@ -927,6 +936,111 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			expect(existsSync(pidFile)).toBe(false);
 		});
 	});
+
+	describe.skipIf(!hasSetsid)(
+		"a cancel and the steps around the rollout",
+		() => {
+			const startWrapped = (
+				world: World,
+				scriptBody: string,
+				drainSeconds?: number,
+			) => {
+				const pidFile = join(world.dir, "release.pid");
+				const target = {
+					pidFile: toShellPath(pidFile),
+					deploymentId: getReleaseCancelKey("dep-x"),
+					drainSeconds,
+				};
+				const script = writeScript(world, scriptBody);
+				const child = spawn(
+					"sh",
+					[
+						writeScript(
+							world,
+							wrapCancelableRemoteBuild(`sh ${script}`, target),
+						),
+					],
+					{ env: envFor(world), stdio: "ignore" },
+				);
+				const exited = new Promise<void>((resolve) =>
+					child.on("close", resolve),
+				);
+				const termGroup = () => {
+					const pgid = readFileSync(pidFile, "utf8").split(" ")[0];
+					spawnSync("sh", [writeScript(world, `kill -s TERM -- -${pgid}`)]);
+				};
+				return { pidFile, exited, termGroup };
+			};
+			const waitFor = async (check: () => boolean) => {
+				for (let i = 0; i < 160 && !check(); i++) {
+					await new Promise((resolve) => setTimeout(resolve, 250));
+				}
+				return check();
+			};
+
+			it("the release wrapper returns only after the trap has finished", {
+				timeout: 90_000,
+			}, async () => {
+				const world = createWorld(changedWeb());
+				const done = join(world.dir, "trap.done");
+				const started = join(world.dir, "started");
+				const { pidFile, exited, termGroup } = startWrapped(
+					world,
+					`trap 'sleep 2; touch ${toShellPath(done)}; exit 130' TERM\ntouch ${toShellPath(started)}\nsleep 30 & wait $!\n`,
+					10,
+				);
+				expect(
+					await waitFor(() => existsSync(pidFile) && existsSync(started)),
+				).toBe(true);
+
+				termGroup();
+				await exited;
+
+				// Had the wrapper returned when the first process died, this would not
+				// exist yet: the trap sleeps 2 s first.
+				expect(existsSync(done)).toBe(true);
+				expect(existsSync(pidFile)).toBe(false);
+			});
+
+			it("a cancel during the up of the services that are not rolled lets it finish, then stops", {
+				timeout: 90_000,
+			}, async () => {
+				const world = createWorld(changedWeb());
+				const state = toShellPath(world.state);
+				// Only what this flow needs: the services, and a slow `up` for api.
+				writeFileSync(
+					join(world.bin, "docker"),
+					`#!/bin/sh\necho "$*" >> ${state}/calls.log\ncase "$*" in\n*"config --services"*) printf 'web\napi\n';;\n*"up -d --no-deps"*api*) sleep 3; touch ${state}/up.done;;\nesac\nexit 0\n`,
+					{ mode: 0o755 },
+				);
+				const callsLog = join(world.state, "calls.log");
+				const { pidFile, exited, termGroup } = startWrapped(
+					world,
+					scriptFor({ healthTimeoutSeconds: 60 }),
+					10,
+				);
+				expect(
+					await waitFor(
+						() =>
+							existsSync(pidFile) &&
+							existsSync(callsLog) &&
+							readFileSync(callsLog, "utf8").includes("up -d --no-deps"),
+					),
+				).toBe(true);
+
+				termGroup();
+				await exited;
+
+				// The recreate of the service that is not rolled was not cut short...
+				expect(existsSync(join(world.state, "up.done"))).toBe(true);
+				// ...and nothing after it ran: the trap took over once it returned.
+				const log = readFileSync(callsLog, "utf8");
+				expect(log).not.toMatch(/^ps /m);
+				expect(log).not.toContain("no-build web");
+				expect(log).not.toContain("--remove-orphans");
+			});
+		},
+	);
 
 	describe("hostile names", () => {
 		it("a service name or app name with shell syntax is data, not code", {

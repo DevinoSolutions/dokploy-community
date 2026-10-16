@@ -106,7 +106,10 @@ const COMPOSE = {
 	buildServerId: "build-1" as string | null,
 	buildRegistryId: "reg-1",
 	domains: [],
-	environment: { name: "prod", project: { name: "P", organizationId: "org-1" } },
+	environment: {
+		name: "prod",
+		project: { name: "P", organizationId: "org-1" },
+	},
 };
 
 const useCompose = async (overrides: Partial<typeof COMPOSE> = {}) => {
@@ -147,7 +150,9 @@ const logged = () =>
 beforeEach(async () => {
 	vi.clearAllMocks();
 	mocks.execAsync.mockReset().mockResolvedValue({ stdout: "", stderr: "" });
-	mocks.execAsyncRemote.mockReset().mockResolvedValue({ stdout: "", stderr: "" });
+	mocks.execAsyncRemote
+		.mockReset()
+		.mockResolvedValue({ stdout: "", stderr: "" });
 	mocks.getBuildComposeCommand.mockResolvedValue(ROLLING_SCRIPT);
 	mocks.runReleaseScript.mockResolvedValue(undefined);
 	mocks.prepareComposeBuildServerDeploy.mockResolvedValue({
@@ -185,7 +190,9 @@ describe("the deploy script of a build-server compose", () => {
 		const [arg] = mocks.runReleaseScript.mock.calls[0] ?? [];
 		expect(arg.serverId).toBe("serving-1");
 		expect(arg.deploymentId).toBe("dep-1");
-		expect(arg.command).toBe(`(set -e;${ROLLING_SCRIPT}) >> /var/log/dep-1.log 2>&1`);
+		expect(arg.command).toBe(
+			`(set -e;${ROLLING_SCRIPT}) >> /var/log/dep-1.log 2>&1`,
+		);
 		// It is not also sent as an ordinary command.
 		expect(
 			mocks.execAsyncRemote.mock.calls.some((call) =>
@@ -288,7 +295,9 @@ describe("a cancel that stops the rolling replace", () => {
 
 		const log = logged();
 		expect(log).toContain("The release step was stopped");
-		expect(log).toContain("services it had already replaced stay on the new release");
+		expect(log).toContain(
+			"services it had already replaced stay on the new release",
+		);
 		expect(log).not.toContain("Nothing was pulled or started");
 	});
 
@@ -306,7 +315,9 @@ describe("a cancel that stops the rolling replace", () => {
 	});
 
 	it("a rolling replace that failed on its own is still an error with a notification", async () => {
-		mocks.runReleaseScript.mockRejectedValue(new Error("Rolling replace failed"));
+		mocks.runReleaseScript.mockRejectedValue(
+			new Error("Rolling replace failed"),
+		);
 
 		await expect(deploy()).rejects.toThrow("Rolling replace failed");
 

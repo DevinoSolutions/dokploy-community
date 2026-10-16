@@ -1,9 +1,4 @@
-import {
-	type ChildProcess,
-	exec,
-	execFile,
-	spawn,
-} from "node:child_process";
+import { type ChildProcess, exec, execFile, spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";

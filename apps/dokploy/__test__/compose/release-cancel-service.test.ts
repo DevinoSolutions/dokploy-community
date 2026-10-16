@@ -65,6 +65,7 @@ import {
 	getRemoteBuildCancelTarget,
 	RELEASE_KILL_GRACE_SECONDS,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
+import { ExecError } from "@dokploy/server/utils/process/ExecError";
 import { registerRemoteBuild } from "@dokploy/server/utils/process/remote-build-registry";
 
 const isKill = (command: unknown) => String(command).includes("kill -s TERM");
@@ -78,9 +79,10 @@ const decodedLogLines = () =>
 	[...mocks.execAsyncRemote.mock.calls.map((call) => String(call[1]))]
 		.filter((command) => command.includes("base64 -d"))
 		.map((command) =>
-			Buffer.from(command.match(/echo "([^"]+)"/)?.[1] ?? "", "base64").toString(
-				"utf8",
-			),
+			Buffer.from(
+				command.match(/echo "([^"]+)"/)?.[1] ?? "",
+				"base64",
+			).toString("utf8"),
 		)
 		.join("\n");
 
@@ -89,7 +91,10 @@ const answers = (build: string, release: string) => {
 	mocks.execAsyncRemote.mockImplementation(
 		async (serverId: string, command: string) => {
 			if (!isKill(command)) return { stdout: "", stderr: "" };
-			return { stdout: `${serverId === "build-1" ? build : release}\n`, stderr: "" };
+			return {
+				stdout: `${serverId === "build-1" ? build : release}\n`,
+				stderr: "",
+			};
 		},
 	);
 	mocks.execAsync.mockImplementation(async (command: string) =>
@@ -116,7 +121,9 @@ describe("release cancel target", () => {
 		expect(release.pidFile).not.toBe(build.pidFile);
 		expect(release.deploymentId).toBe(getReleaseCancelKey("dep-1"));
 		expect(release.deploymentId).not.toBe(build.deploymentId);
-		expect(release.pidFile).toBe("/etc/dokploy/logs/.build-pids/dep-1_release.pid");
+		expect(release.pidFile).toBe(
+			"/etc/dokploy/logs/.build-pids/dep-1_release.pid",
+		);
 	});
 
 	it("uses the layout of the host it runs on", () => {
@@ -195,7 +202,8 @@ describe("cancelBuildServerDeployment with a release host", () => {
 			async (serverId: string, command: string) => {
 				if (isKill(command)) order.push(`kill:${serverId}`);
 				return {
-					stdout: isKill(command) && serverId === "serving-1" ? "KILLED\n" : "NONE\n",
+					stdout:
+						isKill(command) && serverId === "serving-1" ? "KILLED\n" : "NONE\n",
 					stderr: "",
 				};
 			},
@@ -227,7 +235,10 @@ describe("cancelBuildServerDeployment with a release host", () => {
 			},
 		);
 		// Registered under the release key: the build's own retry must not see it.
-		const unregister = registerRemoteBuild(getReleaseCancelKey("dep-1"), () => {});
+		const unregister = registerRemoteBuild(
+			getReleaseCancelKey("dep-1"),
+			() => {},
+		);
 
 		const outcome = await cancelBuildServerDeployment(target);
 		unregister();
@@ -239,7 +250,10 @@ describe("cancelBuildServerDeployment with a release host", () => {
 
 	it("does not call it stopped when the release command is running but left no pid file", async () => {
 		answers("NONE", "NONE");
-		const unregister = registerRemoteBuild(getReleaseCancelKey("dep-1"), () => {});
+		const unregister = registerRemoteBuild(
+			getReleaseCancelKey("dep-1"),
+			() => {},
+		);
 
 		const outcome = await cancelBuildServerDeployment(target);
 		unregister();
@@ -251,7 +265,30 @@ describe("cancelBuildServerDeployment with a release host", () => {
 		expect(decodedLogLines()).toContain("pid file was not found");
 	}, 15000);
 
+	it("still cancels, without a warning, when nothing is waiting on a release step and the host is unreachable", async () => {
+		mocks.execAsyncRemote.mockImplementation(
+			async (serverId: string, command: string) => {
+				if (serverId === "serving-1" && isKill(command)) {
+					throw new Error("connect ETIMEDOUT");
+				}
+				return { stdout: isKill(command) ? "NONE\n" : "", stderr: "" };
+			},
+		);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		const outcome = await cancelBuildServerDeployment(target);
+		warn.mockRestore();
+
+		expect(outcome.status).toBe("cancelled");
+		expect((outcome as any).warning).toBeUndefined();
+		expect(mocks.updateSets.some((set) => set.errorMessage)).toBe(false);
+	});
+
 	it("still cancels, with a warning, when the serving host is unreachable", async () => {
+		const unregister = registerRemoteBuild(
+			getReleaseCancelKey("dep-1"),
+			() => {},
+		);
 		mocks.execAsyncRemote.mockImplementation(
 			async (serverId: string, command: string) => {
 				if (serverId === "serving-1" && isKill(command)) {
@@ -262,6 +299,7 @@ describe("cancelBuildServerDeployment with a release host", () => {
 		);
 
 		const outcome = await cancelBuildServerDeployment(target);
+		unregister();
 
 		expect(outcome.status).toBe("cancelled");
 		const warning = (outcome as any).warning as string;
@@ -366,7 +404,8 @@ describe("runReleaseScript", () => {
 			deploymentId: "dep-1",
 		});
 
-		const [command, target, options] = mocks.execAsyncCancelable.mock.calls[0] ?? [];
+		const [command, target, options] =
+			mocks.execAsyncCancelable.mock.calls[0] ?? [];
 		expect(command).toBe("echo release");
 		expect(target).toEqual(getReleaseCancelTarget("dep-1", false));
 		expect(typeof options.beforeExec).toBe("function");
@@ -405,11 +444,41 @@ describe("runReleaseScript", () => {
 		).rejects.toMatchObject({ deploymentCancelled: true });
 	});
 
-	it("a signalled script after a cancel is the cancellation, and says it was mid-release", async () => {
+	it.each([130, 137, 143])(
+		"a script that ended with exit %i after a cancel is the cancellation, mid-release",
+		async (exitCode) => {
+			notCancelled();
+			mocks.execAsyncRemote.mockImplementation(async () => {
+				cancelled();
+				throw new ExecError(
+					`Remote command failed with exit code ${exitCode}`,
+					{
+						command: "x",
+						exitCode,
+					},
+				);
+			});
+
+			const error = await runReleaseScript({
+				serverId: "serving-1",
+				command: "echo release",
+				deploymentId: "dep-1",
+			}).catch((e) => e);
+
+			expect(error).toMatchObject({
+				deploymentCancelled: true,
+				duringRelease: true,
+			});
+		},
+	);
+
+	it("a dropped connection after a cancel is the cancellation too", async () => {
 		notCancelled();
 		mocks.execAsyncRemote.mockImplementation(async () => {
 			cancelled();
-			throw new Error("Command failed with signal SIGTERM");
+			throw new ExecError("Remote build was cancelled: cancelled by user", {
+				command: "x",
+			});
 		});
 
 		const error = await runReleaseScript({
@@ -423,6 +492,27 @@ describe("runReleaseScript", () => {
 			deploymentCancelled: true,
 			duringRelease: true,
 		});
+	});
+
+	it("a script that failed on its own after a cancel whose signal did not land stays an error", async () => {
+		notCancelled();
+		const failure = new ExecError("Remote command failed with exit code 1", {
+			command: "x",
+			exitCode: 1,
+		});
+		mocks.execAsyncRemote.mockImplementation(async () => {
+			cancelled();
+			throw failure;
+		});
+
+		const error = await runReleaseScript({
+			serverId: "serving-1",
+			command: "echo release",
+			deploymentId: "dep-1",
+		}).catch((e) => e);
+
+		expect(error).toBe(failure);
+		expect(error).not.toMatchObject({ deploymentCancelled: true });
 	});
 
 	it("a failing script that nobody cancelled stays an ordinary failure", async () => {

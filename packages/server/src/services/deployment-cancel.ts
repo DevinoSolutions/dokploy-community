@@ -320,10 +320,15 @@ export const runReleaseScript = async ({
 			await execAsyncCancelable(command, cancelable, { beforeExec });
 		}
 	} catch (error) {
-		// A cancel signals the script (or drops its connection): that failure is
-		// the cancellation, and the release may be half done.
-		const settled = await toCancelledErrorIfCancelled(deploymentId, error);
-		if (settled !== error) {
+		if (isDeploymentCancelledError(error)) throw error;
+		// Only a failure that looks like the signal landing is the cancellation
+		// (and the release may be half done). Any other failure after a cancel
+		// is a real one: the signal did not land and the rollout failed or
+		// ended on its own, which must still be reported as an error.
+		if (
+			isCancelSignalFailure(error) &&
+			(await isDeploymentCancelled(deploymentId))
+		) {
 			throw new DeploymentCancelledError(
 				"Deployment cancelled: the release step was stopped.",
 				{ duringRelease: true },
@@ -331,6 +336,29 @@ export const runReleaseScript = async ({
 		}
 		throw error;
 	}
+};
+
+/** Exit statuses of a shell whose command was ended by INT, KILL or TERM. */
+const SIGNAL_EXIT_CODES = new Set([130, 137, 143]);
+
+/**
+ * True when a release command failed the way a cancel makes it fail: its
+ * connection was dropped by `abortRemoteBuild`, or it ended with the exit
+ * status of an INT / KILL / TERM (the rolling replace's own trap exits 130).
+ */
+const isCancelSignalFailure = (error: unknown): boolean => {
+	if (typeof error !== "object" || error === null) return false;
+	const { exitCode, message } = error as {
+		exitCode?: unknown;
+		message?: unknown;
+	};
+	if (typeof exitCode === "number" && SIGNAL_EXIT_CODES.has(exitCode)) {
+		return true;
+	}
+	return (
+		typeof message === "string" &&
+		/was cancelled: cancelled by user/.test(message)
+	);
 };
 
 /** Longest a cancel waits for the build server's kill script (SSH included). */
@@ -414,9 +442,16 @@ export type CancelOutcome =
 const stopReleaseStep = async (
 	releaseHost: { serverId: string | null },
 	deploymentId: string,
-): Promise<{ result: RemoteBuildKillResult | "UNREACHABLE"; warning?: string }> => {
+): Promise<{
+	result: RemoteBuildKillResult | "UNREACHABLE";
+	warning?: string;
+}> => {
 	const { serverId } = releaseHost;
 	const cancelKey = getReleaseCancelKey(deploymentId);
+	// Nothing of this deployment is waiting on a release step in this process:
+	// the signal is only a precaution (a deploy this process no longer tracks),
+	// so a host that does not answer is not worth a warning.
+	const expected = hasRunningRemoteBuild(cancelKey);
 	const command = getKillRemoteBuildCommand(
 		getReleaseCancelTarget(deploymentId, !!serverId),
 		RELEASE_KILL_GRACE_SECONDS,
@@ -464,6 +499,12 @@ const stopReleaseStep = async (
 		return { result };
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
+		if (!expected) {
+			console.warn(
+				`Cancelling deployment ${deploymentId}: could not reach ${where} to look for a release step (${reason})`,
+			);
+			return { result: "UNREACHABLE" };
+		}
 		return {
 			result: "UNREACHABLE",
 			warning: `Could not reach ${where} to stop the release step (${reason}). The deployment is cancelled here, but a rolling replace may keep running there until it finishes.`,
