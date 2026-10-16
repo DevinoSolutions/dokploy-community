@@ -194,6 +194,17 @@ describe("health timeout against the healthcheck", () => {
 		).toEqual(["health-timeout-too-short"]);
 	});
 
+	it("zero interval, timeout and retries mean Docker's defaults", () => {
+		expect(
+			getHealthcheckSettleSeconds({
+				test: ["CMD", "true"],
+				interval: "0s",
+				timeout: "0s",
+				retries: 0,
+			}),
+		).toBe(180);
+	});
+
 	it.each([
 		[30, 66],
 		[120, 120],

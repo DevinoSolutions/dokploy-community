@@ -268,6 +268,9 @@ describe("rolling replace: when it cannot apply", () => {
 		// 3 retries x (5s interval + 2s timeout) = 21s, plus 1s
 		expect(command).toContain("dokploy_roll_run");
 		expect(command).toContain("$(date +%s) + 22 ))");
+		expect(command).toContain(
+			"the health wait is raised from 10s to 22s to cover the healthchecks",
+		);
 	});
 });
 

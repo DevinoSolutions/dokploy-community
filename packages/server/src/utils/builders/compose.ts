@@ -423,6 +423,11 @@ const getRollingDeployPlan = async ({
 			`Rolling replace: "${service}" is recreated normally this time. ${describeRollingBlockers(blockers)}`,
 	);
 	if (plan.rolled.length === 0) return { ...off, notices };
+	if (plan.healthTimeoutSeconds !== settings.healthTimeoutSeconds) {
+		notices.push(
+			`Rolling replace: the health wait is raised from ${settings.healthTimeoutSeconds}s to ${plan.healthTimeoutSeconds}s to cover the healthchecks.`,
+		);
+	}
 
 	const definitions = spec.services;
 	const hasBuild = (service: string) =>

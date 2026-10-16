@@ -240,18 +240,23 @@ const HEALTHCHECK_DEFAULT_TIMEOUT_SECONDS = 30;
  * before Docker has even finished judging it.
  */
 export const getHealthcheckSettleSeconds = (healthcheck: SpecObject) => {
-	const interval =
-		parseComposeDurationSeconds(healthcheck.interval) ??
-		HEALTHCHECK_DEFAULT_INTERVAL_SECONDS;
+	// Docker reads a zero (or unset) interval, timeout or retries as its default.
+	const positive = (value: number | undefined, fallback: number) =>
+		value !== undefined && value > 0 ? value : fallback;
+	const interval = positive(
+		parseComposeDurationSeconds(healthcheck.interval),
+		HEALTHCHECK_DEFAULT_INTERVAL_SECONDS,
+	);
 	const startPeriod =
 		parseComposeDurationSeconds(healthcheck.start_period) ?? 0;
-	const retries =
-		typeof healthcheck.retries === "number" && healthcheck.retries >= 0
-			? healthcheck.retries
-			: HEALTHCHECK_DEFAULT_RETRIES;
-	const probeTimeout =
-		parseComposeDurationSeconds(healthcheck.timeout) ??
-		HEALTHCHECK_DEFAULT_TIMEOUT_SECONDS;
+	const retries = positive(
+		typeof healthcheck.retries === "number" ? healthcheck.retries : undefined,
+		HEALTHCHECK_DEFAULT_RETRIES,
+	);
+	const probeTimeout = positive(
+		parseComposeDurationSeconds(healthcheck.timeout),
+		HEALTHCHECK_DEFAULT_TIMEOUT_SECONDS,
+	);
 	return startPeriod + retries * (interval + probeTimeout);
 };
 
