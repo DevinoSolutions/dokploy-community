@@ -27,8 +27,8 @@ Proposed fix: one oneshot systemd unit, `dokploy-boot-recover.service`, ordered 
 `docker.service`. It starts exactly the containers Docker itself recorded as "wanted
 running, failed to attach in this daemon run". It is idempotent, rate-limited, logged, and
 ships in `dry-run` mode first. Lead Gen stacks are excluded by default (5.7), and it checks
-that a recovered container is still reachable by its service name and restores the DNS
-aliases when it is not (5.8).
+that a recovered container is still reachable by its service name and logs it when it is
+not (5.8). Repairing a lost alias is a separate switch, off by default.
 
 ---
 
@@ -67,9 +67,9 @@ Facts that narrow the cause:
   joins `dokploy-network` so Traefik can route to it.
 - State left behind is machine-readable. A failed container keeps `State.ExitCode=255`,
   `State.FinishedAt` = restore time and `State.Error` =
-  `failed to set up container networking: attaching to network failed ...`. Five such
-  containers were still down at 10:15Z; by 10:30Z two had been started by hand and three
-  remained (one ordinary stack and two Lead Gen stacks).
+  `failed to set up container networking: attaching to network failed ...`. Most of the 53
+  were started by hand before 10:30Z; at the last manual dry-run (6.4, about 11:40Z) three
+  were still down: one ordinary stack and two Lead Gen stacks.
 - **A plain start can lose the DNS aliases.** One recovered database container (a compose
   `root_db` service) was started with a plain compose start at about 10:29Z. It was `Up` and
   healthy, but its `dokploy-network` endpoint had no aliases (the service name `root_db`
@@ -189,11 +189,13 @@ One mechanism: `dokploy-boot-recover.service` running `/usr/local/sbin/dokploy-b
 ### 5.2 Which containers it starts
 
 The container ids come from **dockerd's own journal for the current daemon run**, not from a
-guess about state. Every line `failed to start swarm container ... container=<id>` that
-`journalctl -u docker --since @<dockerd start time>` returns names a container Docker tried to
-start after the swarm came up and failed. `<dockerd start time>` is read with
-`systemctl show docker -p ExecMainStartTimestamp --timestamp=unix --value`. Each of those ids
-is then inspected, and started only if all of these hold:
+guess about state. The run is selected by the systemd invocation id of `docker.service`
+(`systemctl show docker -p InvocationID --value`, then `journalctl
+_SYSTEMD_INVOCATION_ID=<id>`), not by a timestamp, so a wall-clock step or two daemon runs in
+the same second cannot be mixed up. Every line `failed to start swarm container ...
+container=<id>` in that invocation names a container Docker tried to start after the swarm
+came up and failed. Each of those ids is then inspected, and started only if all of these
+hold:
 
 | Condition | Why |
 |---|---|
@@ -213,7 +215,9 @@ What this avoids:
 - A stale `State.Error` (it survives a later manual stop, and stopping an already-exited
   container sets no manual-stop flag) could make an old failure look current. The journal
   limits candidates to this run, and **enforce refuses to run when dockerd is older than 15
-  minutes** (`DOKPLOY_BOOT_RECOVER_MAX_AGE`, 900 s, exit 4). A manual `systemctl restart`
+  minutes** (`DOKPLOY_BOOT_RECOVER_MAX_AGE`, 900 s, exit 4). The age is computed on the
+  monotonic clock (`ExecMainStartTimestampMonotonic` against `/proc/uptime`), so an NTP or DHCP
+  time step cannot make an old daemon look young. A manual `systemctl restart`
   of the unit hours after boot therefore cannot resurrect stopped containers. A dry-run has
   no such limit, so it can be used at any time.
 - If a container is listed in the journal but its `State.Error` text changed wording in a
@@ -228,9 +232,11 @@ What this avoids:
    (lead-gen) <name>`). In `dry-run` mode, log the rest, each with the DNS names it would
    verify (5.8), and exit 0.
 4. In `enforce` mode, for each candidate record its expected DNS names, `docker start` it
-   (batches of 6, each with a 90 s timeout), then verify the names and restore them (5.8).
+   (batches of 6, each with a 90 s timeout), then verify the names (5.8). A missing name is
+   logged; it is repaired only if alias repair is switched on.
 5. A `docker start` that fails is tried again in the next pass (passes are 45 s apart, a
-   container is started at most 4 times per run). There is no other re-queue: once a start
+   container is started at most 4 times per run). If every start in a pass succeeded the
+   script stops there: no further pause and no extra pass. There is no other re-queue: once a start
    succeeds, Docker's own restart policy takes over. (An earlier draft re-started anything
    that had exited again. That was wrong: it re-ran one-shot containers that exit 0, and
    Docker's restart manager only uses the 10 s of uptime to reset its backoff, it does not
@@ -238,13 +244,14 @@ What this avoids:
 6. Everything is logged once to the journal through stdout (`journalctl -t
    dokploy-boot-recover`; priorities are set with `<N>` prefixes, there is no second
    `logger` copy). Names only. The final line is `done: N running after recovery, M still
-   failing to start, alias restore failed: yes/no`. Exit 3 if any start or alias restore
-   failed, exit 4 for the age refusal, exit 2 if swarm never became ready.
+   failing to start, alias problems: yes/no`. Exit 3 if any start failed or any alias is
+   missing (or its repair failed), exit 4 for the age refusal, exit 2 if swarm never became
+   ready, the invocation id is unknown or the age cannot be read.
 
 Safety properties: a lock (`flock`) prevents two runs overlapping. It never creates, removes,
-stops or restarts anything that is running, never edits Docker or Dokploy state other than
-reconnecting a container's network to restore aliases, and never prints environment or
-argv. A `docker start` on a container that Dokploy removed meanwhile fails harmlessly.
+stops or restarts anything that is running, never edits Docker or Dokploy state (the only
+exception, and only when alias repair is switched on, is reconnecting a container's network
+to restore aliases, see 5.8), and never prints environment or argv. A `docker start` on a container that Dokploy removed meanwhile fails harmlessly.
 
 ### 5.4 Behaviour on a plain `systemctl restart docker`
 
@@ -260,9 +267,9 @@ containers, swarm init, `RestartSwarmContainers`), so the same attach race can h
   This is documented systemd behaviour for `BindsTo`/`Requires`; it has not been exercised
   on the host. Step 4 of the rollout checks it at the first real Docker restart or reboot,
   in `dry-run`.
-- The script reads the start time of the running `dockerd` and only looks at journal lines
-  from that point (`--since @<start>`), so after a restart it only considers failures from
-  the new daemon run. Leftovers from an earlier run are ignored.
+- The script reads the invocation id of the running `docker.service` and only looks at that
+  invocation's journal lines, so after a restart it only considers failures from the new
+  daemon run. Leftovers from an earlier run are ignored.
 - Nothing about the selection changes: containers stopped before the restart have no
   failure line in the new run, and containers Docker restores without trouble are
   `running`, so neither is a candidate.
@@ -294,7 +301,8 @@ and 4). Moving to `enforce` is a separate, explicit edit.
   the unit only starts after Docker has finished its own attempt.
 - **Retry.** A single attempt is not assumed to be enough. A `docker start` that fails
   again is retried in the next pass, passes are 45 s apart, a container is started at most
-  4 times per run, and starts run 6 at a time so we do not recreate the burst. This is a
+  4 times per run, and starts run 6 at a time so we do not recreate the burst. When every
+  start in a pass succeeds the script stops at once, without the 45 s pause. This is a
   fixed pause, not exponential, because each attempt already carries its own 20 s attach
   budget inside Docker and the number of candidates is small (at most tens). Exhausting the
   attempts exits non-zero and logs at `err`, so the failure is visible instead of silent.
@@ -309,9 +317,13 @@ Amin opts them in. The mechanism stays generic (one exclusion list, no per-stack
   (the `com.docker.compose.project` label, which Dokploy sets to the stack's `appName`), or
   if the glob equals a prefix of the container name followed by `-`. Excluded containers are
   not started in any mode and are logged as `EXCLUDED (lead-gen) <name>` on every run.
-- Built-in default when the variable is unset: `*lead-gen* *leadgen*`. A missing or broken
-  env file therefore still excludes the obvious names. Set to an empty string it excludes
-  nothing; that is the only way to opt everything in.
+- Built-in default when the variable is unset **or empty**: `*lead-gen* *leadgen*`. A
+  missing, broken or blanked setting therefore still excludes the obvious names, and the
+  protection cannot be switched off by accident. Excluding nothing needs a separate, explicit
+  `DOKPLOY_BOOT_RECOVER_EXCLUDE_NONE=yes`; the script then logs `exclusions are disabled` at
+  warning on every run. Tested on prod in the manual dry-run (6.4): with the variable set to
+  an empty string both Lead Gen containers were still excluded, with `_NONE=yes` they were
+  offered.
 - The globs alone are not enough, because some Lead Gen stacks have generated names (an
   application called `app-input-online-monitor-xxxxxx` belongs to the "Lead Gen System"
   project). The authoritative list comes from Dokploy's database.
@@ -327,9 +339,10 @@ and Wellfound Lead Gen, and Lead Gen System). A Lead Gen project whose name does
 that pattern is not found. The appNames themselves are not committed here; they are
 generated on the host at install time.
 
-How it is refreshed: on demand, not automatically. Re-run the helper and update the env file
-(a) when a Lead Gen stack or project is added or renamed, (b) before switching to `enforce`,
-and (c) after any change to the project list. A stack missing from the list is only
+How it is refreshed: on demand, not automatically. **Re-run the helper whenever a Lead Gen
+stack is created** (its generated `appName` may not match the globs) and update the env file;
+also when a stack or project is renamed or moved, before switching to `enforce`, and after
+any change to the project list. A stack missing from the list is only
 protected if its name matches the globs. This is the main weakness of the design (see 7),
 and the reason `dry-run` prints the `EXCLUDED` lines: during the dry-run phase, check them
 against the Lead Gen project list.
@@ -338,39 +351,69 @@ Opting a stack in: remove its entry from the line in `/etc/default/dokploy-boot-
 (for a stack that only a glob covers, remove the glob and list the stacks that must stay
 excluded by `appName`). No restart or reload; the file is read at each unit start.
 
-### 5.8 DNS alias restore (post-check after every start)
+### 5.8 DNS alias check (always on) and alias repair (opt-in, off by default)
 
 Why: see the Evidence section. A recovered container can be `Up` and healthy and still
 unreachable by its service name, which breaks its clients without any container being down.
 `State=running` is therefore not a success criterion on its own.
 
-What the script does, per started container, for every user network it is on (`bridge`,
-`host` and `none` are skipped):
+**The check (always on, changes nothing).** Per started container, for every user network it
+is on (`bridge`, `host` and `none` are skipped):
 
 1. **Before the start**: read the network's stored `Aliases`. For a compose container, also
    expect the `com.docker.compose.service` label as a name (this covers a container whose
    stored aliases were already empty).
 2. **Start** it.
 3. **After the start**: every expected name must be in the endpoint's `DNSNames`
-   (`docker inspect --format` on `NetworkSettings.Networks`, names only).
-4. **If any is missing**: `docker network disconnect <net> <id>`, then `docker network
-   connect --alias <each expected name> <net> <id>` (one retry after 2 s; if connect still
-   fails, a plain `docker network connect` so the container is never left off the network).
-   Re-check. Logged as `ALIASES MISSING ...` then `aliases restored ...`, or `ALIAS RESTORE
-   FAILED ...` (journal priority `err`, exit 3).
+   (`docker inspect --format` on `NetworkSettings.Networks`, names only). If one is not, the
+   script logs `ALIASES MISSING <name> <net> <missing names> (repair is off, nothing
+   changed)` at warning, finishes with `alias problems: yes` and exits 3.
+
+**The repair (opt-in: `DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR=on`, default `off`).** Docker has no
+way to add an alias to a network a container is already on (a second `network connect` is
+rejected as a duplicate endpoint), so a repair is `network disconnect` followed by `network
+connect --alias ...`. That is not free, which is why it is off:
+
+- the connect goes through the same swarm round trip, with the same 20 s budget, that failed
+  at boot, so it can fail the same way;
+- it drops everything the endpoint had besides what we pass back: links, the mac address,
+  gateway priority and driver options;
+- the container can come back with a different IP, and Traefik may keep routing to the old
+  address until it notices;
+- the cause of the one alias loss we saw is unproven and has not been reproduced, so we do
+  not know how often a repair would be needed.
+
+So by default the script only reports. **T3 (6.4) has to reproduce the alias loss, and show
+that the repair restores aliases and address, before the switch is turned on.** With it on,
+for each network that is missing a name:
+
+1. Re-read `State.Status` and `State.StartedAt` and compare them with what the script
+   recorded right after its own start. If the container is not running or was restarted
+   since, log `SKIP alias repair` and leave it alone (somebody else is managing it).
+2. `docker network disconnect <net> <id>`. If that fails, log `ALIAS REPAIR FAILED`, change
+   nothing more, exit 3.
+3. `docker network connect --alias <each expected name> [--ip <stored static IP>] <net> <id>`,
+   up to 3 tries, 20 s apart (`DOKPLOY_BOOT_RECOVER_REPAIR_PAUSE`). The `--ip` is carried over
+   only when the endpoint had a static address (`IPAMConfig`) before.
+4. If all 3 tries fail, a plain `docker network connect` (with `--ip` when known) so the
+   container is never left off the network, then `ALIAS REPAIR FAILED ... plain connect
+   used: yes` at `err` and exit 3.
+5. Log the IP before and after. If it changed, `IP CHANGED <name> <net>: <old> -> <new>,
+   check the Traefik route` at warning.
+6. Re-check `DNSNames`; log `aliases restored ...` at notice.
 
 Options compared:
 
 | Option | Verdict |
 |---|---|
-| **Reattach with the recorded aliases** (above). | **Chosen.** Uses only data Docker already holds for that container. Needs no knowledge of Dokploy or compose, touches no env, and works for non-compose containers (plain `docker run`, Dokploy applications) as well. It is the same repair that was done by hand. |
+| **Check and log, repair opt-in** (above). | **Chosen.** Uses only data Docker already holds for that container, needs no knowledge of Dokploy or compose and works for non-compose containers too. The risky part (disconnect/connect) does not run unless someone turns it on after T3. |
+| Always repair after a missing alias. | Rejected for now (it was the previous draft): a reconnect depends on the same manager round trip that just failed and can change the address, with no evidence yet that it is needed more than once. |
 | Recover through `docker compose -p <project> up -d --no-deps <service>`. | Rejected. The host script does not know where Dokploy keeps each stack's compose file or its env, and would have to read them (secrets). It recreates the container, which is more than a start, and it can change the running image or config if the stack was edited after the last deploy. It does not apply to Dokploy applications or to non-compose containers. |
 
-Limits, stated plainly: a container with a fixed IP (`IPAMConfig`) is not given its address
-back by `connect --alias`; none of the candidates seen so far has one. Reconnecting briefly
-drops the container's connection on that network (a second or so). The DNS check is on the
-endpoint metadata; whether the name actually resolves from another container is a manual
-check in the success criteria (6.5).
+Limits, stated plainly: the DNS check is on the endpoint metadata; whether the name actually
+resolves from another container is a manual check in the success criteria (6.5). The
+manual fix used on 2026-10-16 (`disconnect` then `connect --alias <service> --alias <container
+name>`) is exactly the repair above without the IP carry-over.
 
 ### 5.9 Files
 
@@ -398,10 +441,12 @@ WantedBy=docker.service
 
 `/etc/default/dokploy-boot-recover` (ships as `dry-run`; flip to `enforce` after step 5 of
 the rollout). The `EXCLUDE` line is replaced with the helper's output at install time (5.7);
-the value shown is the safe floor.
+the value shown is the safe floor. `ALIAS_REPAIR` stays `off` until T3 (6.4) has shown that
+the repair works.
 
 ```sh
 DOKPLOY_BOOT_RECOVER_MODE=dry-run
+DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR=off
 DOKPLOY_BOOT_RECOVER_EXCLUDE='*lead-gen* *leadgen*'
 ```
 
@@ -412,30 +457,41 @@ DOKPLOY_BOOT_RECOVER_EXCLUDE='*lead-gen* *leadgen*'
 # dokploy-boot-recover: after dockerd is up, start the restart-policy containers whose
 # swarm-network attach failed during dockerd's own startup (moby RestartSwarmContainers,
 # "failed to start swarm container ... attaching to network failed ... context deadline
-# exceeded"), because the daemon does not retry a failed START, and put back the DNS
-# aliases a recovered container may have lost. See docs/design/host-boot-network-ordering.md.
+# exceeded"), because the daemon does not retry a failed START, and check that a recovered
+# container kept its DNS aliases. See docs/design/host-boot-network-ordering.md.
 #
 # Selection: the container ids come from dockerd's own journal for the CURRENT daemon run
-# ("failed to start swarm container"). Of those, only containers that are still exited, have
-# a restart policy, are not swarm tasks, still carry a State.Error, and do not match the
-# exclusion list are started. A container stopped by a user has no journal line in this run.
+# (selected by systemd invocation id, "failed to start swarm container"). Of those, only
+# containers that are still exited, have a restart policy, are not swarm tasks, still carry a
+# State.Error, and do not match the exclusion list are started. A container stopped by a user
+# has no journal line in this run.
 #
 # Containers whose compose project or name matches DOKPLOY_BOOT_RECOVER_EXCLUDE (space
 # separated shell globs) are never started; they are logged as "EXCLUDED (lead-gen) <name>".
 # Opting a stack in means removing its entry from that list.
+#
+# Alias repair (disconnect + connect --alias) is OFF by default: with it off, a missing alias
+# is only logged. Turn it on with DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR=on (see the design doc).
 set -u
 
 MODE=${DOKPLOY_BOOT_RECOVER_MODE:-dry-run}                # dry-run | enforce
-READY_TIMEOUT=${DOKPLOY_BOOT_RECOVER_READY_TIMEOUT:-300} # s to wait for swarm leader
+ALIAS_REPAIR=${DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR:-off}    # off | on
+READY_TIMEOUT=${DOKPLOY_BOOT_RECOVER_READY_TIMEOUT:-300}  # s to wait for swarm leader
 SETTLE=${DOKPLOY_BOOT_RECOVER_SETTLE:-20}                 # s pause once swarm is ready
 MAX_PASSES=${DOKPLOY_BOOT_RECOVER_MAX_PASSES:-4}
 PASS_PAUSE=${DOKPLOY_BOOT_RECOVER_PASS_PAUSE:-45}
 BATCH=${DOKPLOY_BOOT_RECOVER_BATCH:-6}                    # parallel docker start
 START_TIMEOUT=${DOKPLOY_BOOT_RECOVER_START_TIMEOUT:-90}   # s per docker start
 MAX_AGE=${DOKPLOY_BOOT_RECOVER_MAX_AGE:-900}              # enforce refuses when dockerd is older (s)
-# Space separated globs matched on container name and compose project. Unset = the two name
-# globs below (so a missing env file still excludes Lead Gen); set but empty = exclude nothing.
-EXCLUDE=${DOKPLOY_BOOT_RECOVER_EXCLUDE-*lead-gen* *leadgen*}
+REPAIR_PAUSE=${DOKPLOY_BOOT_RECOVER_REPAIR_PAUSE:-20}     # s between connect retries
+# Space separated globs matched on container name and compose project. Empty or unset means the
+# two name globs below, so a missing or blanked setting still excludes Lead Gen. Excluding
+# nothing needs the explicit DOKPLOY_BOOT_RECOVER_EXCLUDE_NONE=yes.
+if [ "${DOKPLOY_BOOT_RECOVER_EXCLUDE_NONE:-no}" = yes ]; then
+  EXCLUDE=""
+else
+  EXCLUDE=${DOKPLOY_BOOT_RECOVER_EXCLUDE:-*lead-gen* *leadgen*}
+fi
 
 # One line per message. Under systemd stdout goes to the journal, so no logger call (it would
 # duplicate every line); the <N> prefix sets the journal priority.
@@ -454,13 +510,23 @@ swarm_ready() {
     timeout 30 docker node ls --format '{{.Status}} {{.ManagerStatus}}' 2>/dev/null | grep -qx 'Ready Leader'
 }
 
-# Epoch seconds at which the running dockerd was started ("@1792135383" -> 1792135383).
-daemon_start_epoch() {
-  local ts
-  ts=$(systemctl show docker -p ExecMainStartTimestamp --timestamp=unix --value 2>/dev/null)
-  ts=${ts#@}
-  case "$ts" in '' | *[!0-9]*) return 1 ;; esac
-  echo "$ts"
+# systemd invocation id of the running docker.service: it names exactly this daemon run in the
+# journal, so a wall-clock step cannot mix runs.
+daemon_invocation() {
+  local i
+  i=$(systemctl show docker -p InvocationID --value 2>/dev/null)
+  case "$i" in '' | *[!0-9a-f]*) return 1 ;; esac
+  echo "$i"
+}
+
+# Seconds since the running dockerd started, from the monotonic clock against /proc/uptime.
+daemon_age() {
+  local m up
+  m=$(systemctl show docker -p ExecMainStartTimestampMonotonic --value 2>/dev/null)
+  up=$(cut -d' ' -f1 "${DOKPLOY_BOOT_RECOVER_UPTIME_FILE:-/proc/uptime}" 2>/dev/null)
+  case "$m" in '' | *[!0-9]*) return 1 ;; esac
+  [ -n "$up" ] || return 1
+  awk -v m="$m" -v u="$up" 'BEGIN { a = u - m / 1000000; if (a < 0) a = 0; printf "%d\n", a }'
 }
 
 # True if the container (name, compose project) matches an entry of the exclusion list.
@@ -477,12 +543,12 @@ excluded() {
 
 # Container ids dockerd itself reported as failed to start in this daemon run.
 journal_failed_ids() {
-  journalctl -u docker --since "@$DSTART" -o cat --no-pager 2>/dev/null |
+  journalctl _SYSTEMD_INVOCATION_ID="$INVOCATION" -o cat --no-pager 2>/dev/null |
     grep -F 'failed to start swarm container' | grep -oE 'container=[0-9a-f]{12,64}' | cut -d= -f2 | sort -u
 }
 
 ROW_FMT='{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}|{{with index .Config.Labels "com.docker.swarm.task.id"}}swarm{{end}}|{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}|{{with index .Config.Labels "com.docker.compose.service"}}{{.}}{{end}}|{{.State.Error}}'
-NET_FMT='{{range $k,$v := .NetworkSettings.Networks}}{{$k}}|{{join $v.Aliases ","}}|{{join $v.DNSNames ","}}{{"\n"}}{{end}}'
+NET_FMT='{{range $k,$v := .NetworkSettings.Networks}}{{$k}}|{{join $v.Aliases ","}}|{{join $v.DNSNames ","}}|{{$v.IPAddress}}|{{with $v.IPAMConfig}}{{.IPv4Address}}{{end}}{{"\n"}}{{end}}'
 
 QUIET=0 # classify logs what it leaves alone on the first pass only
 say() { [ "$QUIET" = 1 ] || log "$@" >&2; }
@@ -506,54 +572,85 @@ classify() {
   done < <(journal_failed_ids)
 }
 
-# "net|alias,alias|dnsnames" lines (the dokploy overlay, user bridges), bridge/host/none dropped.
+# "net|aliases|dnsnames|ip|staticip" lines, bridge/host/none dropped.
 net_lines() {
   docker inspect --format "$NET_FMT" "$1" 2>/dev/null | grep -vE '^(bridge|host|none)\|' | sed '/^$/d'
 }
 
 # Expected names per network before the start: the stored aliases plus, for a compose
-# container, its service name. Prints "net|name,name".
+# container, its service name. Prints "net|name,name|staticip".
 expected_names() { # id service
-  local line net aliases rest
-  while IFS='|' read -r net aliases rest; do
+  local net aliases dns ip static
+  while IFS='|' read -r net aliases dns ip static; do
     [ -n "$net" ] || continue
     [ -n "$2" ] && case ",$aliases," in *",$2,"*) ;; *) aliases="${aliases:+$aliases,}$2" ;; esac
-    [ -n "$aliases" ] && echo "$net|$aliases"
+    [ -n "$aliases" ] && echo "$net|$aliases|$static"
   done < <(net_lines "$1")
 }
 
-# After a start: every expected name must be in the endpoint's DNSNames. If not, disconnect
-# and reconnect the network with the full alias list. Returns 1 if a name is still missing.
-verify_aliases() { # id name expected-file
-  local id=$1 name=$2 exp=$3 net want missing a dns rc=0 args
-  while IFS='|' read -r net want; do
-    dns=$(net_lines "$id" | awk -F'|' -v n="$net" '$1 == n { print $3 }')
-    missing=""
-    for a in ${want//,/ }; do
-      case ",$dns," in *",$a,"*) ;; *) missing="$missing $a" ;; esac
-    done
-    [ -n "$missing" ] || continue
-    log "ALIASES MISSING on $net for $name:$missing, reconnecting" warning
-    args=""
-    for a in ${want//,/ }; do args="$args --alias $a"; done
-    docker network disconnect "$net" "$id" >/dev/null 2>&1
+# Names from <want> that are not in the endpoint's DNSNames on <net>, space separated.
+missing_names() { # id net want
+  local dns a out=""
+  dns=$(net_lines "$1" | awk -F'|' -v n="$2" '$1 == n { print $3 }')
+  for a in ${3//,/ }; do
+    case ",$dns," in *",$a,"*) ;; *) out="${out:+$out }$a" ;; esac
+  done
+  echo "$out"
+}
+
+# Alias repair (opt-in). A reconnect on the swarm overlay uses the same manager round trip as
+# the attach that failed at boot, so it can fail; hence the retries, the plain-connect fallback
+# and the state check right before touching the network. Returns 1 if a name is still missing.
+repair_net() { # id name net want static started missing
+  local id=$1 name=$2 net=$3 want=$4 static=$5 started=$6 missing=$7
+  local a args="" ipopt="" ip_before ip_after state try ok=0
+  ip_before=$(net_lines "$id" | awk -F'|' -v n="$net" '$1 == n { print $4 }')
+  state=$(docker inspect --format '{{.State.Status}}|{{.State.StartedAt}}' "$id" 2>/dev/null)
+  if [ "$state" != "running|$started" ]; then
+    log "SKIP alias repair $name $net: state changed since our start ($state), someone else is managing it" notice
+    return 0
+  fi
+  log "ALIASES MISSING $name $net $missing, repairing (ip before: ${ip_before:-none})" warning
+  for a in ${want//,/ }; do args="$args --alias $a"; done
+  [ -n "$static" ] && ipopt="--ip $static"
+  if ! docker network disconnect "$net" "$id" >/dev/null 2>&1; then
+    log "ALIAS REPAIR FAILED $name $net: disconnect failed, nothing changed" err
+    return 1
+  fi
+  for try in 1 2 3; do
     # shellcheck disable=SC2086
-    if docker network connect $args "$net" "$id" >/dev/null 2>&1 ||
-      { sleep 2; docker network connect $args "$net" "$id" >/dev/null 2>&1; }; then
-      dns=$(net_lines "$id" | awk -F'|' -v n="$net" '$1 == n { print $3 }')
-      missing=""
-      for a in ${want//,/ }; do
-        case ",$dns," in *",$a,"*) ;; *) missing="$missing $a" ;; esac
-      done
-    fi
-    if [ -n "$missing" ]; then
-      # Never leave the container off the network: fall back to a plain connect.
-      docker network connect "$net" "$id" >/dev/null 2>&1
-      log "ALIAS RESTORE FAILED on $net for $name:$missing (plain reconnect attempted)" err
+    if docker network connect $args $ipopt "$net" "$id" >/dev/null 2>&1; then ok=1; break; fi
+    [ "$try" -lt 3 ] && sleep "$REPAIR_PAUSE"
+  done
+  if [ "$ok" = 0 ]; then
+    # Never leave the container off the network: a plain connect, without aliases.
+    # shellcheck disable=SC2086
+    docker network connect $ipopt "$net" "$id" >/dev/null 2>&1
+  fi
+  ip_after=$(net_lines "$id" | awk -F'|' -v n="$net" '$1 == n { print $4 }')
+  missing=$(missing_names "$id" "$net" "$want")
+  if [ -n "$missing" ]; then
+    log "ALIAS REPAIR FAILED $name $net: still missing $missing (ip ${ip_before:-none} -> ${ip_after:-none}, plain connect used: $([ "$ok" = 0 ] && echo yes || echo no))" err
+    return 1
+  fi
+  log "aliases restored $name $net: $want (ip ${ip_before:-none} -> ${ip_after:-none})" notice
+  [ "$ip_before" = "$ip_after" ] || log "IP CHANGED $name $net: $ip_before -> $ip_after, check the Traefik route" warning
+  return 0
+}
+
+# After a start: every expected name must be in the endpoint's DNSNames. Missing names are
+# logged; they are repaired only when DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR=on.
+verify_aliases() { # id name expected-file started-at
+  local id=$1 name=$2 exp=$3 started=$4 net want static missing rc=0
+  while IFS='|' read -r net want static; do
+    missing=$(missing_names "$id" "$net" "$want")
+    [ -n "$missing" ] || continue
+    if [ "$ALIAS_REPAIR" != on ]; then
+      log "ALIASES MISSING $name $net $missing (repair is off, nothing changed)" warning
       rc=1
-    else
-      log "aliases restored on $net for $name: $want" notice
+      continue
     fi
+    repair_net "$id" "$name" "$net" "$want" "$static" "$started" "$missing" || rc=1
   done < "$exp"
   return $rc
 }
@@ -562,17 +659,19 @@ RESDIR=$(mktemp -d)
 trap 'rm -rf "$RESDIR"' EXIT
 
 start_one() { # id name service
-  local id=$1 name=$2 out exp rc
+  local id=$1 name=$2 out exp started
   exp=$(mktemp)
   expected_names "$id" "$3" > "$exp"
   if out=$(timeout "$START_TIMEOUT" docker start "$id" 2>&1); then
     log "started $name"
-    verify_aliases "$id" "$name" "$exp" || : > "$RESDIR/alias-failed"
+    started=$(docker inspect --format '{{.State.StartedAt}}' "$id" 2>/dev/null)
+    verify_aliases "$id" "$name" "$exp" "$started" || : > "$RESDIR/alias-problem"
     rm -f "$exp"
     return 0
   fi
   rm -f "$exp"
   log "start failed $name: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" warning
+  : > "$RESDIR/start-failed"
   return 1
 }
 
@@ -581,10 +680,11 @@ until swarm_ready; do
   [ "$waited" -ge "$READY_TIMEOUT" ] && { log "swarm not ready after ${READY_TIMEOUT}s, giving up" err; exit 2; }
   sleep 5; waited=$((waited + 5))
 done
-DSTART=$(daemon_start_epoch) || { log "cannot determine dockerd start time, giving up" err; exit 2; }
+INVOCATION=$(daemon_invocation) || { log "cannot determine the docker invocation id, giving up" err; exit 2; }
 sleep "$SETTLE"
-AGE=$(( $(date +%s) - DSTART ))
-log "swarm ready, mode=$MODE, dockerd started $(date -u -d "@$DSTART" +%FT%TZ), age ${AGE}s"
+AGE=$(daemon_age) || { log "cannot determine dockerd age, giving up" err; exit 2; }
+log "swarm ready, mode=$MODE, alias repair=$ALIAS_REPAIR, docker invocation ${INVOCATION:0:8}, dockerd age ${AGE}s"
+[ -n "$EXCLUDE" ] || log "exclusions are disabled (DOKPLOY_BOOT_RECOVER_EXCLUDE_NONE=yes)" warning
 
 # A State.Error outlives a later manual stop, so late in a daemon's life this unit must not
 # act (a manual restart of the unit hours after boot could resurrect stopped containers).
@@ -594,7 +694,6 @@ if [ "$MODE" = enforce ] && [ "$AGE" -gt "$MAX_AGE" ]; then
 fi
 
 declare -A attempts=() # id -> start attempts this run
-failed=0
 pass=1
 while [ "$pass" -le "$MAX_PASSES" ]; do
   todo=$(classify | sort -u)
@@ -615,7 +714,7 @@ while [ "$pass" -le "$MAX_PASSES" ]; do
     # Dry run: no docker start. Print what a recovery would verify afterwards.
     while IFS='|' read -r id name project service; do
       [ -n "$id" ] || continue
-      log "DRY-RUN would start $name; would verify DNS names: $(expected_names "$id" "$service" | tr '\n' ' ')"
+      log "DRY-RUN would start $name; would verify DNS names: $(expected_names "$id" "$service" | cut -d'|' -f1,2 | tr '\n' ' ')"
     done <<< "$list"
     exit 0
   fi
@@ -629,6 +728,9 @@ while [ "$pass" -le "$MAX_PASSES" ]; do
     if [ "$running" -ge "$BATCH" ]; then wait; running=0; fi
   done <<< "$list"
   wait
+  # Another pass only if a start failed; no pause after the last useful pass.
+  [ -e "$RESDIR/start-failed" ] || break
+  rm -f "$RESDIR/start-failed"
   pass=$((pass + 1))
   [ "$pass" -le "$MAX_PASSES" ] && sleep "$PASS_PAUSE"
 done
@@ -638,11 +740,13 @@ recovered=0
 for id in "${!attempts[@]}"; do
   [ "$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null)" = running ] && recovered=$((recovered + 1))
 done
-if [ "$left" -gt 0 ] || [ -e "$RESDIR/alias-failed" ]; then
-  log "done: $recovered running after recovery, $left still failing to start, alias restore failed: $([ -e "$RESDIR/alias-failed" ] && echo yes || echo no)" err
+problems=no
+[ -e "$RESDIR/alias-problem" ] && problems=yes
+if [ "$left" -gt 0 ] || [ "$problems" = yes ]; then
+  log "done: $recovered running after recovery, $left still failing to start, alias problems: $problems" err
   exit 3
 fi
-log "done: $recovered running after recovery, 0 still failing to start, alias restore failed: no"
+log "done: $recovered running after recovery, 0 still failing to start, alias problems: no"
 exit 0
 ```
 
@@ -702,13 +806,20 @@ printf "'\n"
 5. Set `DOKPLOY_BOOT_RECOVER_MODE=enforce` in `/etc/default/dokploy-boot-recover`.
    No reload needed, the file is read on each start.
 6. At the next reboot confirm the success criteria in 6.5.
+7. `DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR` stays `off`. Turn it on only after T3 has reproduced
+   an alias loss in the sandbox and shown the repair restores the aliases and the address, and
+   only with a note on who checks the Traefik route after the next real event.
+8. Whenever a Lead Gen stack is created, re-run `dokploy-boot-recover-exclusions` and update
+   `/etc/default/dokploy-boot-recover` (5.7).
 
 ### 6.2 Rollback
 
 `systemctl disable --now dokploy-boot-recover.service`, then remove the four files and
 `systemctl daemon-reload`. Instant neutralisation without touching systemd: set the mode
 back to `dry-run`. Rolling back returns the host to today's behaviour (manual recovery).
-The unit changes no Docker or Dokploy configuration, so nothing else needs undoing.
+The unit changes no Docker or Dokploy configuration, so nothing else needs undoing. Turning
+`DOKPLOY_BOOT_RECOVER_ALIAS_REPAIR` back to `off` removes the only code path that writes to
+Docker. Keep the exclusion list current while the unit is installed (6.1, step 8).
 
 ### 6.3 Related finding, not part of this fix
 
@@ -726,24 +837,28 @@ Done:
 
 - **T1, manual dry-run on the live host (read-only).** This is a manual dry-run of the
   final script, not a Docker-restart dry-run. The script text was piped over `ssh` stdin
-  (`bash -c "$(cat)"`, nothing copied to the host) with the mode forced to `dry-run` and no
-  lock file. It ran at about 11:00Z on 2026-10-16 (dockerd 3.6 hours old, which a dry run is
-  allowed), with the exclusion list generated by the helper from the live database (stack
-  names replaced here, as this repository is public):
+  (`bash -c "$(cat)"`, nothing copied to the host) with the mode forced to `dry-run` and the
+  lock pointed at `/dev/null`. It ran at about 11:40Z on 2026-10-16 (dockerd 4.2 hours old,
+  which a dry run is allowed), with the exclusion list generated by the helper from the live
+  database (stack names replaced here, as this repository is public):
 
   ```
-  swarm ready, mode=dry-run, dockerd started 2026-10-16T07:23:03Z, age 12931s
+  swarm ready, mode=dry-run, alias repair=off, docker invocation <8 hex>, dockerd age 15299s
   EXCLUDED (lead-gen) <lead-gen stack 1>-app-1
   EXCLUDED (lead-gen) <lead-gen stack 2>-api-1
   pass 1: 1 candidate(s)
   DRY-RUN would start <ordinary stack>-<service>-1; would verify DNS names: dokploy-network|<ordinary stack>-<service>-1,<service>
   ```
 
-  Controls: with an empty exclusion list the run offered 3 containers (the two Lead Gen
-  ones plus the one above). With the two globs removed, so only the 17 `appName` entries
-  remained, the output was identical. Nothing was started, no network was changed, and
-  nothing was left on the host. `bash -s` is not usable for this, because `docker` inside
-  the script reads the same stdin and swallows the rest of it, hence `bash -c "$(cat)"`.
+  Controls: with `DOKPLOY_BOOT_RECOVER_EXCLUDE` set to an empty string the output was
+  identical (the floor globs still protect both Lead Gen containers). With
+  `DOKPLOY_BOOT_RECOVER_EXCLUDE_NONE=yes` it logged `exclusions are disabled` and offered 3
+  containers (the two Lead Gen ones plus the one above). On the previous revision of the
+  script, with the two globs removed so only the 17 `appName` entries remained, the output
+  was also identical. Nothing was started, no network was changed, and nothing was left on
+  the host (the only leftover, an empty `/run` lock file from an earlier run of mine, was
+  removed). `bash -s` is not usable for this, because `docker` inside the script reads the
+  same stdin and swallows the rest of it, hence `bash -c "$(cat)"`.
 - **T1b, two bugs found by dry-runs, now fixed and covered.** (1) On Docker 29.9.0 a
   `--format` template that starts with `{{.Id}}` prints a missing label as `<no value>`, and
   the label `com.docker.swarm.task` is present but empty on every task, so the earlier
@@ -754,18 +869,25 @@ Done:
   found that the first selector keyed on `FinishedAt` and that a re-queue would re-run
   one-shot containers; both are gone (5.2, 5.3).
 - **T2, script logic against a stub `docker`, `journalctl` and `systemctl` (local, no host
-  touched).** 15 fixture containers. Dry run listed 6 and started nothing. Enforce:
-  started those 6 (one needed 3 attempts because it failed twice, one exited again by itself
-  and was correctly **not** re-started by the script), restored the aliases of two containers
-  whose stub start loses them (one by its stored aliases, one by the compose service
-  fallback) with the exact `disconnect` and `connect --alias` calls, and left alone: a
-  container stopped before boot, one stopped after boot, an old failure that is not in this
-  run's journal, a swarm task, a `no`-policy container, a one-shot that exited 0, a container
-  whose `State.Error` is empty (logged `SKIP`), and two excluded containers (by name glob and
-  by generated `appName`). A third run found nothing to start. Enforce on a daemon 3 hours
-  old exited 4 and started nothing; a dry-run on the same daemon worked. When `connect`
-  fails, the script retries, falls back to a plain connect, logs `ALIAS RESTORE FAILED` and
-  exits 3. Also run: `bash -n` on both scripts.
+  touched).** 15 fixture containers. Dry run listed 6 and started nothing. Enforce with the
+  default `ALIAS_REPAIR=off`: started those 6 (one needed 3 attempts because it failed twice,
+  one exited again by itself and was correctly **not** re-started by the script), logged
+  `ALIASES MISSING ... (repair is off, nothing changed)` for the two containers whose stub
+  start loses the aliases (one by its stored aliases, one by the compose service fallback),
+  made **no** `network` call, and exited 3. With `ALIAS_REPAIR=on`: the exact `disconnect` and
+  `connect --alias` calls for those two, `--ip 10.0.0.50` carried over from the stored static
+  address, IP before and after logged, `IP CHANGED` for the one that got a new address; two
+  failing connects were retried; when every connect fails the script tried 3 times, fell back
+  to a plain connect, logged `ALIAS REPAIR FAILED` and exited 3; a container whose
+  `StartedAt` changed under the script got `SKIP alias repair` and no network call. Left alone
+  in every run: a container stopped before boot, one stopped after boot, an old failure that
+  is not in this run's journal, a swarm task, a `no`-policy container, a one-shot that exited
+  0, a container whose `State.Error` is empty (logged `SKIP`), and two excluded containers
+  (by name glob and by generated `appName`). A second enforce run found nothing to start.
+  Enforce on a daemon 3 hours old exited 4 and started nothing; a dry-run on the same
+  daemon worked. An empty or unset `EXCLUDE` kept the Lead Gen globs; only
+  `EXCLUDE_NONE=yes` disabled them (with the warning). A run where every start succeeds made
+  one pass and no 45 s pause. Also run: `bash -n` on both scripts.
 
 Not done (needs a host, and the brief said not to apply anything anywhere):
 
@@ -781,19 +903,27 @@ Not done (needs a host, and the brief said not to apply anything anywhere):
   recovered container and every network: `State=running`, `Aliases` equal to the stored
   aliases, `DNSNames` contain every alias, and `getent hosts <alias>` from the client
   container resolves to that container's IP. Include a container whose aliases the start
-  loses (if it can be provoked) and check the reconnect path. Remove the sandbox afterwards.
+  loses (if it can be provoked) and check the reconnect path. **This is the gate for turning
+  `ALIAS_REPAIR` on**: it must show the loss reproduces (or at least that the repair path
+  works on a deliberately stripped endpoint), that the repair restores aliases and address,
+  and what the reconnect costs under the same manager load. Remove the sandbox afterwards.
 - **T4, first real event.** See 6.5.
 
 ### 6.5 Success criteria at the next reboot or Docker restart
 
 - `journalctl -t dokploy-boot-recover -b` shows `done: N running after recovery, 0 still
-  failing to start, alias restore failed: no`.
+  failing to start, alias problems: no`.
 - N matches the number of non-excluded ids in `journalctl -u docker | grep 'failed to start
   swarm container'` (minus containers removed since).
 - For each recovered container, on every user network: `docker inspect --format '{{range
   $k,$v := .NetworkSettings.Networks}}{{$k}} {{$v.Aliases}} {{$v.DNSNames}}{{"\n"}}{{end}}'`
   shows the same aliases as the healthy containers of the same stack, and every alias is in
-  `DNSNames`. Zero `ALIASES MISSING` lines, or each followed by `aliases restored`.
+  `DNSNames`. Zero `ALIASES MISSING` lines. (With repair on: each followed by `aliases
+  restored`, and no `ALIAS REPAIR FAILED`.)
+- Traefik route (needed when repair is on, cheap otherwise): for every recovered web
+  container, and for every `IP CHANGED` line, request the public hostname through Traefik and
+  confirm it answers from that container (status code only), or confirm that Traefik's
+  router lists the container's current address.
 - In-network name resolution: from another container on the same network,
   `getent hosts <service name>` returns the recovered container's address (spot-check at
   least one database container and one web container).
@@ -870,12 +1000,12 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
 | Starts a container a user meant to keep stopped. | Very low. Candidates must have a failure line in this daemon run's journal. The remaining case is a user stopping an already-exited container in the minutes between the daemon's failure and this unit's first pass (that sets no manual-stop flag and leaves `State.Error`). | Runs about 20 s after Docker is ready. Enforce refuses once dockerd is older than 15 minutes. `dry-run` first. Every name touched is logged. |
 | Start storm re-overloads the manager. | Low. | Batches of 6 versus 53 at once, passes 45 s apart, `Nice=10`, 4 attempts max per container. |
 | Dependency order (an app starts before its DB). | Medium, harmless. | Once started, Docker's restart policy keeps restarting a container that exits. Databases on stack-only networks come back by themselves before this unit runs. |
-| A recovered container is up but unreachable by name (aliases lost). | Seen once on 2026-10-16. | The post-check in 5.8, in the success criteria, and in T3. Cause unproven. |
-| The reconnect in 5.8 briefly drops the container's traffic on that network, or fails and leaves it detached. | Low. | Retry, then a plain connect so it is never left off the network, and exit 3 with an `err` log line. Reconnect happens only when a name is actually missing. |
+| A recovered container is up but unreachable by name (aliases lost). | Seen once on 2026-10-16. | The check in 5.8 reports it (`ALIASES MISSING`, exit 3), in the success criteria, and in T3. Cause unproven. By default nothing is repaired, so this stays a manual fix until repair is enabled. |
+| The opt-in repair (disconnect, connect) fails, drops the endpoint's links or gateway priority, or changes the container's IP so Traefik routes to a stale address. | Only when `ALIAS_REPAIR=on` (off by default). | Enabled only after T3. State re-check right before touching the network, 3 connect tries 20 s apart, a plain connect with the stored IP as last resort so it is never left off the network, IP before and after logged, `IP CHANGED` warning, a Traefik route check in the success criteria. |
 | Docker changes the journal wording `failed to start swarm container` on upgrade. Recovery silently stops. | Medium over time. | Dry-run after every Docker upgrade and compare with the journal; a restore that leaves restart-policy containers `exited` with no `EXCLUDED`, `SKIP` or `started` line for them is the signal. |
 | Unit fails at boot (swarm never ready). | Low. | Gives up after 300 s with exit 2, logs at `err`, blocks nothing. Nothing is `After=` it. |
 | A start fails with a legitimate non-network error (bad mount, missing image). | Possible. | Logged by name with the Docker error and retried at most 4 times. |
-| A Lead Gen stack is missing from the exclusion list and gets started. | Low to medium. New or renamed Lead Gen projects, or a project not named "... Lead Gen", are only protected by the name globs. | Dry-run first and review the `EXCLUDED` lines. Re-run the helper after any change to Lead Gen stacks and before `enforce`. |
+| A Lead Gen stack is missing from the exclusion list and gets started. | Low to medium. New or renamed Lead Gen projects, or a project not named "... Lead Gen", are only protected by the name globs. | Dry-run first and review the `EXCLUDED` lines. Re-run the helper whenever a Lead Gen stack is created, after any change to Lead Gen stacks, and before `enforce`. An empty setting keeps the globs; disabling needs `EXCLUDE_NONE=yes`. |
 | Excluded Lead Gen containers stay down after a reboot. | Certain, by decision. | They are logged on every run so the owner can start them. Opting in is a one-line edit (5.7). |
 | Root cause remains: attaches still time out. | Certain. | This fix removes the outage, not the timeout. Long term options are in 4 (c) and 6.3. |
 
@@ -886,6 +1016,7 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
 - **Lead Gen (decided):** excluded by default, see 5.7. Still open: who starts the excluded
   Lead Gen containers after a reboot, and whether any should be opted in later.
 - Whether to move from `dry-run` to `enforce` after step 4, or straight after step 3.
+- Whether to turn alias repair on, once T3 has shown it works (it is off by default).
 - Whether to open a task for the stale swarm advertise address (6.3).
 - Whether to report this upstream. The standing rule is not to post upstream, so the
   answer is no unless Amin says otherwise.
@@ -912,7 +1043,8 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
 
 `journalctl -b -u docker` (counts and first/last timestamps by normalised message),
 `journalctl -b -u docker -u containerd`, `systemctl cat/show docker`,
-`systemctl show docker -p ExecMainStartTimestamp`, `docker info --format` (swarm fields),
+`systemctl show docker -p InvocationID` and `-p ExecMainStartTimestampMonotonic`,
+`journalctl _SYSTEMD_INVOCATION_ID=<id>`, `docker info --format` (swarm fields),
 `docker node ls --format`, `docker network ls/inspect --format` (driver, scope, attachable,
 created), `docker inspect --format` with State, HostConfig.RestartPolicy, network names and
 one label (never `Config.Env` or `Config.Cmd`), `ip route get`, `ip neigh`, `ss -tlnH`,
