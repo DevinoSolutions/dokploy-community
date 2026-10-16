@@ -213,7 +213,7 @@ const writeScript = (script: string) => {
 // throws that message so the test fails with it instead of a later, vaguer assertion.
 const WAIT_TIMEOUT_STATUS = 97;
 const sh = (script: string, env: Record<string, string> = {}) => {
-	let result: ReturnType<typeof spawnSync>;
+	let result: SpawnSyncReturns<string>;
 	if (!script.includes("$STALL_TEST_OUT")) {
 		result = spawnSync("sh", [writeScript(script)], {
 			encoding: "utf8",
@@ -236,9 +236,13 @@ const sh = (script: string, env: Record<string, string> = {}) => {
 		});
 	}
 	if (result.status === WAIT_TIMEOUT_STATUS) {
-		throw new Error(String(result.stderr).trim());
+		throw new Error(
+			`${result.stderr.trim()}
+stdout so far:
+${result.stdout}`,
+		);
 	}
-	return result as SpawnSyncReturns<string>;
+	return result;
 };
 
 const hasSh = (() => {
