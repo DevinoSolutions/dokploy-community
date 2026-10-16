@@ -247,11 +247,13 @@ const isReleaseCancelable = (command: string, cancellable = true) =>
 	cancellable && commandRunsRollingReplace(command);
 
 /**
- * Whether a cancel of this compose goes through its deployment row (see
- * `deployment-cancel.ts`) instead of the generic stop: it builds on a build
- * server, or it has a rolling replace, whose release step is cancelable. Only
- * decides whether the end of a deploy has to honour a cancel flag; a compose
- * that was never cancelled that way is unaffected.
+ * Whether a cancel of this compose, as it was loaded when the deploy started,
+ * goes through its deployment row (see `deployment-cancel.ts`) instead of the
+ * generic stop: it builds on a build server, or it has a rolling replace, whose
+ * release step is cancelable. Only decides whether the failure path reads the
+ * cancel flag to note an earlier cancel in the log; a compose that was never
+ * cancelled that way is unaffected, and the row itself is protected from the
+ * closing `done` whatever this says (see `markDeploymentDoneUnlessCancelled`).
  */
 const usesDeploymentCancel = (
 	entity: Pick<Compose, "buildServerId" | "rollingReplace">,
@@ -315,9 +317,20 @@ const createCancelCheckpoint = (
 			);
 		}
 	};
-	// `restore: false` for the check before anything was written.
-	return async ({ restore = true } = {}) => {
-		if (!enabled) return;
+	// `restore: false` for the check before anything was written. `anyCompose`
+	// is for the required-checks wait, which polls the flag whatever this
+	// deploy loaded at its start: a cancel claims the row from the compose as it
+	// is when the button is pressed (rolling may have been switched on since,
+	// and a build-server compose has its own checkpoints only from its build on),
+	// and a wait that kept holding the queue slot would end as a timeout error.
+	return async ({
+		restore = true,
+		anyCompose = false,
+	}: {
+		restore?: boolean;
+		anyCompose?: boolean;
+	} = {}) => {
+		if (!enabled && !(anyCompose && cancellable && deploymentId)) return;
 		try {
 			await assertDeploymentNotCancelled(deploymentId);
 		} catch (error) {
@@ -421,7 +434,11 @@ export const runComposeBuild = async (
 	// check never leaves the stack torn down. Reads nothing at all when the
 	// unit has no `requiredChecks`, which is every existing row.
 	// See packages/server/src/services/build-policy/README.md
-	await waitForComposeRequiredChecks({ compose: entity, serverId });
+	await waitForComposeRequiredChecks({
+		compose: entity,
+		serverId,
+		assertNotCancelled: () => checkpoint({ anyCompose: true }),
+	});
 	// <<< build-policy hook (compose)
 	await checkpoint();
 
@@ -740,14 +757,9 @@ export const deployCompose = async ({
 
 		// A cancel that landed during the pull/up cannot be honoured (the release
 		// is already running); it stays recorded as cancelled, not "done".
-		let finished = true;
-		if (usesDeploymentCancel(compose)) {
-			finished = await markDeploymentDoneUnlessCancelled(
-				deployment.deploymentId,
-			);
-		} else {
-			await updateDeploymentStatus(deployment.deploymentId, "done");
-		}
+		const finished = await markDeploymentDoneUnlessCancelled(
+			deployment.deploymentId,
+		);
 		await updateCompose(composeId, {
 			composeStatus: "done",
 		});
@@ -930,6 +942,7 @@ export const rebuildCompose = async ({
 		await waitForComposeRequiredChecks({
 			compose,
 			serverId: compose.serverId,
+			assertNotCancelled: () => checkpoint({ anyCompose: true }),
 		});
 		// <<< build-policy hook (compose rebuild)
 		await checkpoint();
@@ -995,14 +1008,9 @@ export const rebuildCompose = async ({
 		);
 
 		// See deployCompose: a cancel during the pull/up stays cancelled.
-		let finished = true;
-		if (usesDeploymentCancel(compose)) {
-			finished = await markDeploymentDoneUnlessCancelled(
-				deployment.deploymentId,
-			);
-		} else {
-			await updateDeploymentStatus(deployment.deploymentId, "done");
-		}
+		const finished = await markDeploymentDoneUnlessCancelled(
+			deployment.deploymentId,
+		);
 		await updateCompose(composeId, {
 			composeStatus: "done",
 		});

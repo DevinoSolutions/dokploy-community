@@ -63,6 +63,13 @@ export interface WaitForRequiredChecksInput {
 	listCheckRuns: () => Promise<CheckRunLike[]>;
 	sleep: (ms: number) => Promise<void> | void;
 	now: () => number;
+	/**
+	 * Called ahead of every poll, and once more before a timeout is reported. It
+	 * throws to end the wait, which is how a deploy that was cancelled while it
+	 * waited leaves at its next poll instead of holding its slot until the checks
+	 * conclude or time out. Absent for a caller whose deploy cannot be cancelled.
+	 */
+	assertNotCancelled?: () => Promise<void>;
 }
 
 export const waitForRequiredChecks = async ({
@@ -75,6 +82,7 @@ export const waitForRequiredChecks = async ({
 	listCheckRuns,
 	sleep,
 	now,
+	assertNotCancelled,
 }: WaitForRequiredChecksInput): Promise<void> => {
 	if (requiredChecks.length === 0) return;
 
@@ -82,6 +90,7 @@ export const waitForRequiredChecks = async ({
 	let lastWaitingOn: string[] = [...requiredChecks];
 
 	for (;;) {
+		await assertNotCancelled?.();
 		const runs = await listCheckRuns();
 		const result = evaluateRequiredChecks(requiredChecks, runs);
 
@@ -102,6 +111,9 @@ export const waitForRequiredChecks = async ({
 		await sleep(pollIntervalMs);
 		if (now() - startedAt >= timeoutMs) break;
 	}
+
+	// A cancel that landed during the last sleep is the outcome, not the timeout.
+	await assertNotCancelled?.();
 
 	throw new BuildPolicyError(
 		"REQUIRED_CHECKS_TIMEOUT",

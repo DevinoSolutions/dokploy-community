@@ -85,11 +85,18 @@ export const waitForUnitRequiredChecks = async ({
 	listCheckRunsOverride,
 	sleepOverride,
 	nowOverride,
+	assertNotCancelled,
 }: {
 	unit: RequiredChecksUnit;
 	sha: string | null | undefined;
 	timeoutMs: number;
 	pollIntervalMs?: number;
+	/**
+	 * Throws to end the wait when the deploy was cancelled (see
+	 * `waitForRequiredChecks`). What it throws is not a failed gate: it is
+	 * rethrown as is and leaves no audit row.
+	 */
+	assertNotCancelled?: () => Promise<void>;
 	/** Test seams; production passes none of these. */
 	listCheckRunsOverride?: () => Promise<CheckRunLike[]>;
 	sleepOverride?: (ms: number) => Promise<void> | void;
@@ -180,6 +187,7 @@ export const waitForUnitRequiredChecks = async ({
 			return [...runs, ...statusRuns];
 		});
 
+	let cancelledWhileWaiting = false;
 	try {
 		await waitForRequiredChecks({
 			requiredChecks,
@@ -191,8 +199,19 @@ export const waitForUnitRequiredChecks = async ({
 			listCheckRuns,
 			sleep: sleepOverride ?? sleep,
 			now: nowOverride ?? Date.now,
+			assertNotCancelled: assertNotCancelled
+				? async () => {
+						try {
+							await assertNotCancelled();
+						} catch (error) {
+							cancelledWhileWaiting = true;
+							throw error;
+						}
+					}
+				: undefined,
 		});
 	} catch (error) {
+		if (cancelledWhileWaiting) throw error;
 		const code =
 			error instanceof BuildPolicyError ? error.code : "REQUIRED_CHECKS_FAILED";
 		await recordBuildPolicyAudit({

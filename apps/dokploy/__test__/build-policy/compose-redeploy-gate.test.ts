@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
 	generateApplyPatchesCommand: vi.fn().mockResolvedValue(""),
 	createDeploymentCompose: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
+	markDeploymentDoneUnlessCancelled: vi.fn(),
 	updateCompose: vi.fn(),
 	composeFindFirst: vi.fn(),
 }));
@@ -75,6 +76,16 @@ vi.mock("@dokploy/server/services/deployment", async () => {
 	};
 });
 
+vi.mock("@dokploy/server/services/deployment-cancel", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/services/deployment-cancel")
+	>("@dokploy/server/services/deployment-cancel");
+	return {
+		...actual,
+		markDeploymentDoneUnlessCancelled: mocks.markDeploymentDoneUnlessCancelled,
+	};
+});
+
 import { rebuildCompose } from "@dokploy/server/services/compose";
 
 const COMPOSE = {
@@ -108,6 +119,7 @@ describe("finding H — a compose redeploy is check-gated too", () => {
 		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
 		mocks.getBuildComposeCommand.mockResolvedValue("docker compose up -d;");
 		mocks.generateApplyPatchesCommand.mockResolvedValue("");
+		mocks.markDeploymentDoneUnlessCancelled.mockResolvedValue(true);
 		mocks.createDeploymentCompose.mockResolvedValue({
 			deploymentId: "dep-1",
 			logPath: "/var/log/dep-1.log",
@@ -190,6 +202,8 @@ describe("finding H — a compose redeploy is check-gated too", () => {
 		await rebuild();
 
 		expect(mocks.getBuildComposeCommand).toHaveBeenCalledTimes(1);
-		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "done");
+		expect(mocks.markDeploymentDoneUnlessCancelled).toHaveBeenCalledWith(
+			"dep-1",
+		);
 	});
 });

@@ -69,9 +69,15 @@ export interface ComposeRequiredChecksUnit {
 export const waitForComposeRequiredChecks = async ({
 	compose,
 	serverId,
+	assertNotCancelled,
 }: {
 	compose: ComposeRequiredChecksUnit;
 	serverId: string | null;
+	/**
+	 * Polled at the cadence of the wait: throws when the deployment was
+	 * cancelled, so the wait ends at once and no error is reported for it.
+	 */
+	assertNotCancelled?: () => Promise<void>;
 }): Promise<void> => {
 	const requiredChecks = (compose.requiredChecks ?? []).filter(
 		(name): name is string =>
@@ -119,5 +125,6 @@ export const waitForComposeRequiredChecks = async ({
 		},
 		sha,
 		timeoutMs: requiredChecksTimeoutMs(settings),
+		assertNotCancelled,
 	});
 };

@@ -69,6 +69,21 @@ vi.mock("@dokploy/server/services/deployment", async () => {
 	};
 });
 
+// The closing `done` goes through the conditional update; record it with the
+// other status writes so `statuses()` sees one list.
+vi.mock("@dokploy/server/services/deployment-cancel", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/services/deployment-cancel")
+	>("@dokploy/server/services/deployment-cancel");
+	return {
+		...actual,
+		markDeploymentDoneUnlessCancelled: async (deploymentId: string) => {
+			mocks.updateDeploymentStatus(deploymentId, "done");
+			return true;
+		},
+	};
+});
+
 import {
 	deployCompose,
 	rebuildCompose,
@@ -121,7 +136,8 @@ const statuses = () => ({
 		.filter(Boolean),
 });
 
-const executed = () => mocks.execAsync.mock.calls.map((call) => String(call[0]));
+const executed = () =>
+	mocks.execAsync.mock.calls.map((call) => String(call[0]));
 
 const useCompose = async (row: ReturnType<typeof composeRow>) => {
 	const { db } = await import("@dokploy/server/db");
@@ -168,31 +184,36 @@ describe("a health check that times out", () => {
 	it.each([
 		["deployCompose", deploy],
 		["rebuildCompose", rebuild],
-	])("%s ends the deployment as error, never done, and notifies", async (name, run) => {
-		await useCompose(composeRow(HEALTH));
-		failTheDeployScript();
+	])(
+		"%s ends the deployment as error, never done, and notifies",
+		async (name, run) => {
+			await useCompose(composeRow(HEALTH));
+			failTheDeployScript();
 
-		await expect(run()).rejects.toThrow("Command execution failed");
+			await expect(run()).rejects.toThrow("Command execution failed");
 
-		expect(statuses().deployment).toContain("error");
-		expect(statuses().deployment).not.toContain("done");
-		// No rollback marker in the log: the service is flagged, not "restored".
-		expect(statuses().compose).toContain("error");
-		expect(statuses().compose).not.toContain("done");
-		if (name === "deployCompose") {
-			// The failure notification path of a normal deploy failure.
-			expect(mocks.sendBuildErrorNotifications).toHaveBeenCalledTimes(1);
-			expect(mocks.sendBuildSuccessNotifications).not.toHaveBeenCalled();
-		}
-		// The usual failure line, plus the phase line when timestamps are on.
-		const commands = executed();
-		expect(commands.some((command) => command.includes("Error occurred"))).toBe(
-			true,
-		);
-		expect(
-			commands.some((command) => command.includes("Deployment failed (total")),
-		).toBe(true);
-	});
+			expect(statuses().deployment).toContain("error");
+			expect(statuses().deployment).not.toContain("done");
+			// No rollback marker in the log: the service is flagged, not "restored".
+			expect(statuses().compose).toContain("error");
+			expect(statuses().compose).not.toContain("done");
+			if (name === "deployCompose") {
+				// The failure notification path of a normal deploy failure.
+				expect(mocks.sendBuildErrorNotifications).toHaveBeenCalledTimes(1);
+				expect(mocks.sendBuildSuccessNotifications).not.toHaveBeenCalled();
+			}
+			// The usual failure line, plus the phase line when timestamps are on.
+			const commands = executed();
+			expect(
+				commands.some((command) => command.includes("Error occurred")),
+			).toBe(true);
+			expect(
+				commands.some((command) =>
+					command.includes("Deployment failed (total"),
+				),
+			).toBe(true);
+		},
+	);
 
 	it("does not run a rollback of its own", async () => {
 		await useCompose(composeRow(HEALTH));
