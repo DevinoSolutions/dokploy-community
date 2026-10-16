@@ -205,12 +205,32 @@ const writeScript = (script: string) => {
 	return toShellPath(path);
 };
 
-const sh = (script: string, env: Record<string, string> = {}) =>
-	spawnSync("sh", [writeScript(script)], {
+// A script that polls "$STALL_TEST_OUT" (see waitForSnapshots) runs as a child of a
+// small wrapper that sends its stdout to that file, so the poll can see when the
+// watcher has really printed a block. The wrapper then echoes the file on the real
+// stdout and passes the exit status on. (Not an EXIT trap: scripts set their own.)
+const sh = (script: string, env: Record<string, string> = {}) => {
+	if (!script.includes("$STALL_TEST_OUT")) {
+		return spawnSync("sh", [writeScript(script)], {
+			encoding: "utf8",
+			env: { ...process.env, ...env },
+			timeout: 120_000,
+		});
+	}
+	const inner = writeScript(script);
+	const outer = writeScript(
+		`sh ${inner} >"$STALL_TEST_OUT"; rc=$?; cat "$STALL_TEST_OUT"; exit $rc`,
+	);
+	return spawnSync("sh", [outer], {
 		encoding: "utf8",
-		env: { ...process.env, ...env },
+		env: {
+			...process.env,
+			STALL_TEST_OUT: toShellPath(join(scriptDir, `out-${scriptCount}`)),
+			...env,
+		},
 		timeout: 120_000,
 	});
+};
 
 const hasSh = (() => {
 	try {
@@ -294,12 +314,11 @@ esac`,
 	// up) only apply to stored settings, so a script test can use 1 s steps.
 	const fast = { afterSeconds: 1, everySeconds: 1, maxSnapshots: 3 };
 
-	// Waits (up to 40 s) until snapshot block `n` is written, then 1 s for the watcher
-	// to print it, instead of a fixed sleep that races a loaded runner. Reads the
-	// watcher's own block file, so it needs neither psArgsFile nor integer compares.
+	// Waits (up to 40 s) until snapshot block `n` has been printed, instead of a fixed
+	// sleep that races a loaded runner (the watcher writes the block file and cats it a
+	// moment later). Polls the script's captured stdout, see sh().
 	const waitForSnapshots = (n: number) =>
-		`i=0; while [ "$i" -lt 160 ] && ! grep -q -- "End of stall snapshot ${n}/" "$DOKPLOY_STALL_DIR/block" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
-sleep 1;`;
+		`i=0; while [ "$i" -lt 160 ] && ! grep -q -- "End of stall snapshot ${n}/" "$STALL_TEST_OUT" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;`;
 
 	// Waits (up to 60 s) until docker has been asked for the state `n` times. The
 	// watcher runs one state command at a time and prints its block before it starts
