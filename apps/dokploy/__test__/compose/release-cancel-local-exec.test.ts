@@ -125,16 +125,20 @@ describe("execAsyncCancelable", () => {
 		async () => {
 			const target = targetFor("trap");
 			const trapped = join(root, "trap.ran");
+			const ready = join(root, "trap.ready");
 			const script = join(root, "trap.sh");
+			// The pid file exists before the script runs; the ready file says the
+			// trap is installed.
 			writeFileSync(
 				script,
-				`trap 'touch ${trapped}; exit 130' TERM\nsleep 30 & wait $!\n`,
+				`trap 'touch ${trapped}; exit 130' TERM\ntouch ${ready}\nsleep 30 & wait $!\n`,
 			);
 
 			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
 				(e) => e,
 			);
-			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
+			expect(await waitFor(() => existsSync(ready))).toBe(true);
+			expect(existsSync(target.pidFile)).toBe(true);
 
 			const kill = spawnSync(
 				"sh",
@@ -207,11 +211,14 @@ describe("the release done marker, for real", () => {
 		async () => {
 			const target = releaseTargetFor("stale-kill");
 			const cleaned = join(root, "stale-kill.cleaned");
+			const ready = join(root, "stale-kill.ready");
 			const script = join(root, "stale-kill.sh");
-			// The cleanup takes a second and only then signals that it is done.
+			// The cleanup takes a second and only then signals that it is done. The
+			// ready file says the trap is installed: a TERM before that would end the
+			// script without a cleanup (the pid file exists before it runs).
 			writeFileSync(
 				script,
-				`trap 'sleep 1; touch ${cleaned}; : > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM\nsleep 30 & wait $!\n`,
+				`trap 'sleep 1; touch ${cleaned}; : > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM\ntouch ${ready}\nsleep 30 & wait $!\n`,
 			);
 			// What a SIGKILLed earlier release leaves behind.
 			writeFileSync(`${target.pidFile}.done`, "");
@@ -219,7 +226,8 @@ describe("the release done marker, for real", () => {
 			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
 				(e) => e,
 			);
-			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
+			expect(await waitFor(() => existsSync(ready))).toBe(true);
+			expect(existsSync(target.pidFile)).toBe(true);
 
 			const kill = spawnSync(
 				"sh",
@@ -241,14 +249,19 @@ describe("the release done marker, for real", () => {
 		async () => {
 			const target = releaseTargetFor("helpers");
 			const helperPid = join(root, "helpers.pid");
+			const ready = join(root, "helpers.ready");
 			const script = join(root, "helpers.sh");
 			// A helper (like `docker events`) that outlives the script's cleanup and
-			// ignores TERM, as the group signal cannot remove it.
+			// ignores TERM, as the group signal cannot remove it. The trap comes first
+			// and the ready file last: a TERM before the trap would end the script
+			// without the done marker, and the kill would wait out its whole grace.
 			writeFileSync(
 				script,
 				[
-					`sh -c 'trap "" TERM; echo $$ > ${helperPid}; sleep 60' &`,
 					`trap ': > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM`,
+					`sh -c 'trap "" TERM; echo $$ > ${helperPid}; sleep 60' &`,
+					`while [ ! -s ${helperPid} ]; do sleep 0.1; done`,
+					`touch ${ready}`,
 					"sleep 60 & wait $!",
 					"",
 				].join("\n"),
@@ -257,8 +270,8 @@ describe("the release done marker, for real", () => {
 			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
 				(e) => e,
 			);
-			expect(await waitFor(() => existsSync(helperPid))).toBe(true);
-			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
+			expect(await waitFor(() => existsSync(ready))).toBe(true);
+			expect(existsSync(target.pidFile)).toBe(true);
 			const pid = Number(readFileSync(helperPid, "utf8").trim());
 			expect(Number.isInteger(pid) && pid > 1).toBe(true);
 
