@@ -558,6 +558,14 @@ export interface RollingScript {
 export const ROLLING_RUN_FUNCTION = "dokploy_roll_run";
 
 /**
+ * True when a deploy script contains the rolling replace (not the plain `up` a
+ * compose falls back to when no service can be rolled). Only that script has a
+ * cancel trap, so only it is worth signalling on the serving host.
+ */
+export const commandRunsRollingReplace = (command: string) =>
+	command.includes(`${ROLLING_RUN_FUNCTION}() {`);
+
+/**
  * Shell: the rolling replace as functions, plus the call that replaces `up`.
  *
  * Everything runs in one shell with explicit `|| return 1`s: the call sits on

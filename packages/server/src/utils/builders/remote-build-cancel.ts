@@ -55,6 +55,32 @@ export const getRemoteBuildCancelTarget = (
 });
 
 /**
+ * The release step of a build-server deploy (the script that pulls and starts
+ * the new release on the serving host) is cancelable the same way, with a pid
+ * file of its own on the serving host. Its key is the deployment id plus a
+ * suffix, so the build-server cancel (keyed by the bare id) never mistakes it
+ * for a build: the registry of running commands and the pid file's owner field
+ * both use this key.
+ */
+export const getReleaseCancelKey = (deploymentId: string) =>
+	`${deploymentId}.release`;
+
+/**
+ * `onRemoteHost` follows the path layout of the serving host: false when that
+ * is the Dokploy host itself (a compose without a server).
+ */
+export const getReleaseCancelTarget = (
+	deploymentId: string,
+	onRemoteHost: boolean,
+): RemoteBuildCancelTarget => {
+	const key = getReleaseCancelKey(deploymentId);
+	return {
+		pidFile: `${paths(onRemoteHost).LOGS_PATH}/.build-pids/${safeFileSegment(key)}.pid`,
+		deploymentId: key,
+	};
+};
+
+/**
  * Inner script, run by `setsid sh -c`. `$$` is the new session leader (and so
  * the group id); its field 22 in /proc/<pid>/stat is its start time, which is
  * what later proves that a pid is still the process that wrote the file and
@@ -118,6 +144,13 @@ export type RemoteBuildKillResult =
 	| "UNVERIFIED";
 
 export const KILL_GRACE_SECONDS = 8;
+
+/**
+ * Grace for a release step: after SIGTERM its rolling-replace trap still has to
+ * remove the replica that was not promoted, which takes longer than a build
+ * client needs to unwind. Must stay below the cancel's overall timeout.
+ */
+export const RELEASE_KILL_GRACE_SECONDS = 20;
 
 /**
  * Runs on the build server: sends SIGTERM to the deployment's process group,

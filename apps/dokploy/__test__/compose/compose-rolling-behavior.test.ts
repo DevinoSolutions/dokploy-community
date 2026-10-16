@@ -14,6 +14,11 @@ import {
 	getRollingReplaceScript,
 	type RollingScriptOptions,
 } from "@dokploy/server/utils/builders/compose-rolling";
+import {
+	getKillRemoteBuildCommand,
+	getReleaseCancelKey,
+	wrapCancelableRemoteBuild,
+} from "@dokploy/server/utils/builders/remote-build-cancel";
 import { afterAll, describe, expect, it } from "vitest";
 
 /**
@@ -46,6 +51,12 @@ const hasSh = (() => {
 		return false;
 	}
 })();
+
+// The cancel launcher needs setsid and /proc (see remote-build-cancel.ts).
+const hasSetsid =
+	process.platform !== "win32" &&
+	spawnSync("sh", ["-c", "command -v setsid && [ -d /proc/self ]"]).status ===
+		0;
 
 afterAll(() => {
 	rmSync(root, { recursive: true, force: true });
@@ -843,6 +854,78 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				expect(stdout).not.toContain("RC=");
 			},
 		);
+	});
+
+	// The path a build-server compose takes: the script is launched in its own
+	// session with a pid file on the serving host, and the cancel runs the kill
+	// script there. SIGTERM reaches the whole group, so the trap can run.
+	describe.skipIf(!hasSetsid)("cancel through the release launcher", () => {
+		it("the kill script reaches the rolling script, its trap removes the unpromoted replica", {
+			timeout: 90_000,
+		}, async () => {
+			const world = createWorld(
+				changedWeb({
+					config: {
+						web: {
+							hash: "H2",
+							newImage: "sha256:NEW-web",
+							newHealth: "never",
+						},
+						api: { hash: "A1" },
+					},
+				}),
+			);
+			const pidFile = join(world.dir, "release.pid");
+			const target = {
+				pidFile: toShellPath(pidFile),
+				deploymentId: getReleaseCancelKey("dep-1"),
+			};
+			const logFile = join(world.dir, "deploy.log");
+			const script = writeScript(
+				world,
+				scriptFor({ healthTimeoutSeconds: 60 }),
+			);
+			// The shape runStep gives the deploy script: a subshell, output to the log.
+			const command = `(sh ${script}) >> ${toShellPath(logFile)} 2>&1`;
+			const child = spawn("sh", ["-c", wrapCancelableRemoteBuild(command, target)], {
+				env: envFor(world),
+				stdio: "ignore",
+			});
+			const exited = new Promise<void>((resolve) => child.on("close", resolve));
+
+			// Wait (bounded) until the second replica exists and the pid file is there.
+			const callsLog = join(world.state, "calls.log");
+			for (let i = 0; i < 160; i++) {
+				if (
+					existsSync(pidFile) &&
+					existsSync(callsLog) &&
+					readFileSync(callsLog, "utf8").includes("--scale web=2 web")
+				) {
+					break;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			}
+			expect(existsSync(pidFile)).toBe(true);
+			expect(runningOf(world, "web")).toContain(OLD);
+			expect(containersOf(world, "web").length).toBe(2);
+
+			const kill = spawnSync("sh", ["-c", getKillRemoteBuildCommand(target, 20)], {
+				encoding: "utf8",
+				timeout: 60_000,
+			});
+			expect(kill.stdout.trim()).toBe("KILLED");
+			await exited;
+
+			// The old container keeps serving, the replica is gone, and the trap said so.
+			expect(containersOf(world, "web")).toEqual([OLD]);
+			expect(runningOf(world, "web")).toEqual([OLD]);
+			const log = readFileSync(logFile, "utf8");
+			expect(log).toContain("the deployment was interrupted");
+			expect(log).toContain("that was not promoted");
+			expect(log).not.toContain("RC=");
+			expect(readFileSync(callsLog, "utf8")).toMatch(/docker rm -f web-new/);
+			expect(existsSync(pidFile)).toBe(false);
+		});
 	});
 
 	describe("hostile names", () => {

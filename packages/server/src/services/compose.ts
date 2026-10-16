@@ -22,6 +22,7 @@ import {
 	getPhaseLogLine,
 	resolveDeployGuardrails,
 } from "@dokploy/server/utils/builders/compose-guardrails";
+import { commandRunsRollingReplace } from "@dokploy/server/utils/builders/compose-rolling";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	cloneCompose,
@@ -68,6 +69,7 @@ import {
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
 	markDeploymentDoneUnlessCancelled,
+	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
 import { generateApplyPatchesCommand } from "./patch";
@@ -228,6 +230,21 @@ export const createComposePhaseLogger = (
 };
 
 /**
+ * Whether a cancel can stop the deploy script of a build-server compose on its
+ * serving host. Only the rolling replace has a trap that makes that safe (it
+ * removes the replica it had not promoted); the single `up` of any other
+ * deploy keeps running to the end, like a cancel that arrives too late.
+ */
+const isReleaseCancelable = (
+	entity: Pick<Compose, "buildServerId">,
+	command: string,
+	cancellable = true,
+) =>
+	Boolean(entity.buildServerId) &&
+	cancellable &&
+	commandRunsRollingReplace(command);
+
+/**
  * Shared clone → patches → (optional fresh-volumes down) → build pipeline used
  * by both `deployCompose` and the compose-preview deploy path. Extracting it
  * keeps `deployCompose` behavior identical while letting a preview run the same
@@ -341,6 +358,17 @@ export const runComposeBuild = async (
 		freshVolumes,
 		remoteBuild,
 	});
+	if (
+		deployment.deploymentId &&
+		isReleaseCancelable(entity, command, cancellable)
+	) {
+		await runReleaseScript({
+			serverId,
+			command: `(${command}) >> ${deployment.logPath} 2>&1`,
+			deploymentId: deployment.deploymentId,
+		});
+		return;
+	}
 	await runStep(command);
 };
 
@@ -553,7 +581,10 @@ const settleCancelledComposeDeploy = async (
 	if (!isDeploymentCancelledError(error)) return null;
 
 	try {
-		const command = `echo "\nDeployment cancelled ⛔ Nothing was pulled or started from this build; the previous release keeps serving." >> ${quote([deployment.logPath])};`;
+		const note = (error as DeploymentCancelledError).duringRelease
+			? "Deployment cancelled ⛔ The release step was stopped. A rolling replace removes the replica it had not promoted yet; services it had already replaced stay on the new release and the others keep the previous one."
+			: "Deployment cancelled ⛔ Nothing was pulled or started from this build; the previous release keeps serving.";
+		const command = `echo ${quote([`\n${note}`])} >> ${quote([deployment.logPath])};`;
 		if (entity.serverId) {
 			await execAsyncRemote(entity.serverId, command);
 		} else {
@@ -833,7 +864,13 @@ export const rebuildCompose = async ({
 			remoteBuild,
 		});
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (compose.serverId) {
+		if (isReleaseCancelable(compose, command)) {
+			await runReleaseScript({
+				serverId: compose.serverId,
+				command: commandWithLog,
+				deploymentId: deployment.deploymentId,
+			});
+		} else if (compose.serverId) {
 			await execAsyncRemote(compose.serverId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
