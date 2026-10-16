@@ -114,6 +114,14 @@ export const deploymentRouter = createTRPCRouter({
 
 	queueList: withPermission("deployment", "read").query(async ({ ctx }) => {
 		const orgId = ctx.session.activeOrganizationId;
+		// Same scoping as allCentralized: a member only sees what they were given.
+		const accessedServices =
+			ctx.user.role !== "owner" && ctx.user.role !== "admin"
+				? (await findMemberByUserId(ctx.user.id, orgId)).accessedServices
+				: null;
+		if (accessedServices !== null && accessedServices.length === 0) {
+			return [];
+		}
 		let rows: QueueJobRow[];
 
 		if (IS_CLOUD) {
@@ -149,7 +157,8 @@ export const deploymentRouter = createTRPCRouter({
 
 		// The local queue is shared by every organization, and a job's payload
 		// names its service, so keep only the jobs whose service is in the
-		// caller's organization. A job whose service is gone is dropped too.
+		// caller's organization (and, for a member, on their access list). A job
+		// whose service is gone is dropped too.
 		const serviceIdsOf = (row: QueueJobRow) => {
 			const { composeId, applicationId } = (row.data ?? {}) as {
 				composeId?: string;
@@ -166,7 +175,11 @@ export const deploymentRouter = createTRPCRouter({
 			const serviceIds = serviceIdsOf(row);
 			return (
 				serviceIds.length > 0 &&
-				serviceIds.every((id) => serviceOrganizations.get(id) === orgId)
+				serviceIds.every(
+					(id) =>
+						serviceOrganizations.get(id) === orgId &&
+						(accessedServices === null || accessedServices.includes(id)),
+				)
 			);
 		});
 
