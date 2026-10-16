@@ -6,6 +6,7 @@ import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
 import { logSenderError } from "./log-error";
 import {
+	escapeHtml,
 	sendCustomNotification,
 	sendDiscordNotification,
 	sendEmailNotification,
@@ -158,7 +159,7 @@ export const sendDockerCleanupNotifications = async (
 			if (telegram) {
 				await sendTelegramNotification(
 					telegram,
-					`<b>✅ Docker Cleanup</b>\n\n<b>Message:</b> ${message}\n<b>Date:</b> ${format(date, "PP")}\n<b>Time:</b> ${format(date, "pp")}`,
+					`<b>✅ Docker Cleanup</b>\n\n<b>Message:</b> ${escapeHtml(message)}\n<b>Date:</b> ${format(date, "PP")}\n<b>Time:</b> ${format(date, "pp")}`,
 				);
 			}
 

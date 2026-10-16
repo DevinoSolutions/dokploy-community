@@ -286,6 +286,30 @@ const readJsonBody = async <T extends object>(response: Response) => {
 	}
 };
 
+export const escapeHtml = (s: string) =>
+	s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+export const formatTelegramErrorMessage = (errorMessage: string) => {
+	const escaped = escapeHtml(errorMessage);
+	const limit = 3000;
+	if (escaped.length <= limit) return escaped;
+	let end = limit;
+	const ampIdx = escaped.lastIndexOf("&", end);
+	if (ampIdx !== -1 && escaped.indexOf(";", ampIdx) > end) {
+		end = ampIdx;
+	}
+	if (
+		end > 0 &&
+		end < escaped.length &&
+		isHighSurrogate(escaped.charCodeAt(end - 1))
+	) {
+		end--;
+	}
+	return `${escaped.substring(0, end)}…`;
+};
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+
 export const sendTelegramNotification = async (
 	connection: typeof telegram.$inferInsert,
 	messageText: string,
@@ -312,6 +336,12 @@ export const sendTelegramNotification = async (
 					: {}),
 			}),
 		});
+		if (!response.ok) {
+			const body = await response.text();
+			throw new Error(
+				`Failed to send telegram notification: ${response.status} ${body}`,
+			);
+		}
 	} catch (err) {
 		logSenderError("telegram", err, TELEGRAM_API);
 		throw new Error(
