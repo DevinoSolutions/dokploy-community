@@ -32,6 +32,7 @@ import {
 import {
 	checkPermission,
 	checkServicePermissionAndAccess,
+	findDeployableServiceOrganizations,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import { findServerById } from "@dokploy/server/services/server";
@@ -145,6 +146,29 @@ export const deploymentRouter = createTRPCRouter({
 			jobRows.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
 			rows = jobRows;
 		}
+
+		// The local queue is shared by every organization, and a job's payload
+		// names its service, so keep only the jobs whose service is in the
+		// caller's organization. A job whose service is gone is dropped too.
+		const serviceIdsOf = (row: QueueJobRow) => {
+			const { composeId, applicationId } = (row.data ?? {}) as {
+				composeId?: string;
+				applicationId?: string;
+			};
+			return [composeId, applicationId].filter((id): id is string =>
+				Boolean(id),
+			);
+		};
+		const serviceOrganizations = await findDeployableServiceOrganizations(
+			rows.flatMap(serviceIdsOf),
+		);
+		rows = rows.filter((row) => {
+			const serviceIds = serviceIdsOf(row);
+			return (
+				serviceIds.length > 0 &&
+				serviceIds.every((id) => serviceOrganizations.get(id) === orgId)
+			);
+		});
 
 		return Promise.all(
 			rows.map(async (row) => ({

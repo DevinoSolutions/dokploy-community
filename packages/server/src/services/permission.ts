@@ -400,6 +400,50 @@ export const findServiceOrganizationId = async (
 };
 
 /**
+ * Batched form of `findServiceOrganizationId` for the two kinds of service
+ * a deploy can be queued for, so a list of jobs costs one query instead of one
+ * per row. Ids that match no application or compose are left out of the map,
+ * and callers must treat them like ids of another organization.
+ */
+export const findDeployableServiceOrganizations = async (
+	serviceIds: string[],
+): Promise<Map<string, string>> => {
+	const ids = [...new Set(serviceIds.filter(Boolean))];
+	const organizations = new Map<string, string>();
+	if (ids.length === 0) {
+		return organizations;
+	}
+	const idList = sql.join(
+		ids.map((id) => sql`${id}`),
+		sql`, `,
+	);
+	const rows = await db.execute(sql`
+		SELECT s."serviceId" AS "serviceId", p."organizationId" AS "organizationId"
+		FROM (
+			SELECT "applicationId" AS "serviceId", "environmentId" FROM "application"
+			WHERE "applicationId" IN (${idList})
+			UNION ALL
+			SELECT "composeId" AS "serviceId", "environmentId" FROM "compose"
+			WHERE "composeId" IN (${idList})
+		) s
+		INNER JOIN "environment" e ON e."environmentId" = s."environmentId"
+		INNER JOIN "project" p ON p."projectId" = e."projectId"
+	`);
+	const result = rows as unknown;
+	const list = (
+		Array.isArray(result)
+			? result
+			: ((result as { rows?: unknown[] } | null)?.rows ?? [])
+	) as { serviceId?: string; organizationId?: string }[];
+	for (const { serviceId, organizationId } of list) {
+		if (serviceId && organizationId) {
+			organizations.set(serviceId, organizationId);
+		}
+	}
+	return organizations;
+};
+
+/**
  * Fail-closed row-level organization scope for an arbitrary service id.
  *
  * `checkPermission` only proves the caller holds a permission *inside their
