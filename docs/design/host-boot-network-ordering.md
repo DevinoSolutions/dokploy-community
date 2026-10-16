@@ -826,10 +826,10 @@ Docker. Keep the exclusion list current while the unit is installed (6.1, step 8
 The swarm node's advertised address is a LAN address (`.180`) that no longer exists on the
 host: the current addresses are `.16` (wired) and `.93` (Wi-Fi), and neighbour lookup for
 `.180` fails. At boot the agent's first session dials the stale address (`no route to
-host`, 07:24:15) and falls back to the local manager. It is unlikely to be the main cause
-(it cost less than a second), but it is a latent hazard: a DHCP-assigned advertise address
-on a workstation host. Suggest a separate task to pin it to a stable address in a quiet
-window.
+host`, 07:24:15) and falls back to the local manager. It costs about 3 s per boot, so it
+does not cause the attach timeouts, but it is a latent hazard: a DHCP-assigned advertise
+address on a workstation host. Tracked separately as T-2642 (pin it to a stable address in a
+quiet window); not part of this fix.
 
 ### 6.4 Testing without rebooting prod
 
@@ -944,7 +944,9 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
   of Traefik on `0.0.0.0:443` fail with `EADDRINUSE`. So it stops `tailscaled`, waits for port
   443 to be free, runs `docker service update --force dokploy-traefik`, waits until Traefik
   is running and bound to 443, then starts `tailscaled` again (and deliberately does not
-  re-enable Tailscale Serve on 443, because of the 2026-09-22 outage).
+  re-enable Tailscale Serve on 443, because of the 2026-09-22 outage). Update from a later
+  read-only probe (2026-10-16): Tailscale was **not** on 443 that day (it binds only ports
+  8443-8445), so that premise did not apply.
 - *Who and when.* The host does not record who installed it (root-owned files, no package or
   git metadata). The unit file was created 2026-05-19 13:27Z (the `multi-user.target.wants`
   symlink is dated 2026-05-10), and the script was last changed 2026-09-22 03:25Z, which
@@ -958,6 +960,12 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
   service update that it retried, Traefik up at 18:07:22Z. So **Traefik itself was not
   serving until 07:27:41Z on 2026-10-16, independently of the 53 containers.** That is a
   second, smaller contribution to the outage window and is not addressed by this design.
+  Its cause, found by that probe, is a false failure in the script itself: `docker service
+  update --force dokploy-traefik 2>&1 | tee /dev/stderr | logger` fails under systemd
+  (`tee: /dev/stderr: No such device or address`), and with `pipefail` the first update counts
+  as failed although it had converged (07:26:35Z). The script then forces a second update at
+  07:26:40Z, which kills the healthy Traefik; its replacements fail with `:80 already
+  allocated` until 07:27:40Z. Tracked as T-2657, outside this fix.
 - *Overlap or conflict with `dokploy-boot-recover`?* No overlap: it acts on one swarm service
   (`dokploy-traefik`) and on `tailscaled`; this unit acts on standalone containers and never
   touches either. There is a shared resource, the swarm manager, which is busy during
@@ -967,10 +975,17 @@ Read-only inspection on 2026-10-16 (`systemctl cat/show`, `journalctl -u ... -b`
   Traefik and the manager is not loaded by two jobs at once. It is only ordering, not
   `Requires=`/`Wants=`: if `boot-traefik-fix` fails or is removed, recovery still runs, and
   its own `TimeoutStartSec=300` bounds the wait.
+- *Does recovery touch Traefik's transient tasks from that window?* No, on three separate
+  grounds, checked read-only on 2026-10-16 against the `dokploy-traefik.1.*` containers (the
+  running one and the four `Created` ones left from failed replacements): each carries the
+  `com.docker.swarm.task.id` label, which the selector excludes (5.2); each has restart policy
+  `no`, which the selector requires to be `always`, `unless-stopped` or `on-failure`; and
+  they are not `exited` (the replacements are `Created`, never started) and have no
+  `failed to start swarm container` journal line, which is where candidates come from. A
+  swarm task is never a target, whatever state it is in.
 - *Should it be folded in?* No. Different failure (port 443 ownership vs. network attach),
-  different object, and the working unit should not be made riskier. Two observations for its
-  owners, outside this fix: `tee: /dev/stderr: No such device or address` in its journal, and
-  a `service update paused` message on 07:27:02Z followed by success.
+  different object, and the working unit should not be made riskier. Its false failure and the
+  second forced update are described above (T-2657).
 
 **`devino-container-maintenance-recovery.service`** (not named in `After=`, but relevant):
 
