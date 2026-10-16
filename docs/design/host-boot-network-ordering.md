@@ -26,7 +26,9 @@ attaches timed out. Docker logs the error and never retries a failed start.
 Proposed fix: one oneshot systemd unit, `dokploy-boot-recover.service`, ordered after
 `docker.service`. It starts exactly the containers Docker itself recorded as "wanted
 running, failed to attach in this daemon run". It is idempotent, rate-limited, logged, and
-ships in `dry-run` mode first. Lead Gen stacks are excluded by default (5.7).
+ships in `dry-run` mode first. Lead Gen stacks are excluded by default (5.7), and it checks
+that a recovered container is still reachable by its service name and restores the DNS
+aliases when it is not (5.8).
 
 ---
 
@@ -68,6 +70,24 @@ Facts that narrow the cause:
   `failed to set up container networking: attaching to network failed ...`. Five such
   containers were still down at 10:15Z; by 10:30Z two had been started by hand and three
   remained (one ordinary stack and two Lead Gen stacks).
+- **A plain start can lose the DNS aliases.** One recovered database container (a compose
+  `root_db` service) was started with a plain compose start at about 10:29Z. It was `Up` and
+  healthy, but its `dokploy-network` endpoint had no aliases (the service name `root_db`
+  was not resolvable), so the application crash-looped on `getaddrinfo EAI_AGAIN root_db`
+  until someone ran `docker network disconnect` and `connect --alias <service> --alias
+  <container name>`. Read-only checks afterwards (aliases and DNSNames only):
+  the repaired container now lists `Aliases=[<service> <container name>]` and
+  `DNSNames=[<container name> <service> <short id>]`; the containers that are still down
+  keep their stored aliases (`Aliases=[<container name> <service>]`), so the aliases are
+  lost during the start, not before it. It is not universal: another recovered container
+  on the same overlay, started by hand at 10:28, kept both aliases. So it has to be checked
+  per container, not assumed. The daemon journal has one line at 10:29:29 for the repaired
+  container, `error detaching from network ... could not find network attachment for
+  container <id> to network dokploy-network`, which looks like a swarm attachment
+  bookkeeping mismatch. The cause is **not proven**: it was not reproduced, and the moby
+  code read (`allocateNetwork`, `connectToNetwork`, `buildEndpointDNSNames`) rebuilds
+  `DNSNames` from the endpoint's `Aliases` on every start, so any loss happens on the
+  swarm attach path (`findAndAttachNetwork`) or in the manager's answer, which we cannot see.
 - Same signature on the previous reboot: 40 failures between 18:05:17 and 18:05:49 on
   2026-10-14 (`dockerd` started 18:03:47).
 - Scale: 16 cores, 217 GiB RAM, 175 swarm services, 638 containers (431 running). Userspace
@@ -120,6 +140,10 @@ Upstream knows this class of bug: moby/moby
 network fail to restart after dockerd restart", same error text, reported on 17.03, still
 open, with reports up to 19.03. No upstream workaround is documented.
 
+Open question, not part of the root cause above: why a start can come back without the
+endpoint aliases (see Evidence). The fix does not depend on the answer; it verifies the
+result of every start (5.8).
+
 What was ruled out:
 
 - systemd ordering. `docker.service` is already `After=network-online.target containerd.service`
@@ -163,49 +187,63 @@ One mechanism: `dokploy-boot-recover.service` running `/usr/local/sbin/dokploy-b
 
 ### 5.2 Which containers it starts
 
-All of these must hold, evaluated from `docker inspect` data only:
+The container ids come from **dockerd's own journal for the current daemon run**, not from a
+guess about state. Every line `failed to start swarm container ... container=<id>` that
+`journalctl -u docker --since @<dockerd start time>` returns names a container Docker tried to
+start after the swarm came up and failed. `<dockerd start time>` is read with
+`systemctl show docker -p ExecMainStartTimestamp --timestamp=unix --value`. Each of those ids
+is then inspected, and started only if all of these hold:
 
 | Condition | Why |
 |---|---|
-| `State.Status = exited` | It is down. |
-| `HostConfig.RestartPolicy.Name` is `always`, `unless-stopped` or `on-failure` | Docker would have restarted it itself. `no` means the user never asked for that. |
-| No `com.docker.swarm.task` label | Swarm service tasks are owned by the swarm orchestrator, which replaces them. |
-| `State.Error` matches `attaching to network failed` or `failed to set up container networking` | Docker itself recorded that the start failed on networking. A container stopped by a user, by Dokploy, or that crashed has an empty `State.Error`. |
-| `State.FinishedAt` is at or after the start of the running `dockerd` (minus 10 s) | The failure belongs to this daemon run. Old failures from an earlier run are left alone. |
+| `State.Status = exited` | It is still down. If it is running again (Dokploy, a person or Docker started it) it is left alone. |
+| `HostConfig.RestartPolicy.Name` is `always`, `unless-stopped` or `on-failure` | Docker would have restarted it itself. |
+| No `com.docker.swarm.task.id` label | Swarm service tasks are owned by the swarm orchestrator. (`com.docker.swarm.task` is present but empty on every task on this host, so it cannot be used.) |
+| `State.Error` is not empty | A start failure is recorded there. If it is empty, the container has been started or stopped since the failure, so it is skipped and logged. |
+| Not on the exclusion list (5.7) | Lead Gen is excluded by default. |
 
-"Failed at boot" versus "stopped by the user": `HasBeenManuallyStopped` is not exposed by
-the Docker API, so the script does not rely on it. A clean user stop (`docker stop`,
-Dokploy stop, `compose stop`) never writes the networking error, so it can never match.
-A dry run of the selector on prod (read-only) returned exactly the 5 containers that are
-down with that error and none of the cleanly stopped ones.
+What this avoids:
 
-The only name-based rule is the exclusion list in 5.7. Everything else is decided by what
-Docker recorded about the container.
+- `FinishedAt` is not used. A failed start only sets `State.Error` (it does not touch
+  `FinishedAt`), and a graceful `docker restart` stamps `FinishedAt` at shutdown, so it is not
+  a reliable marker of "failed in this run". The journal is the ground truth.
+- One-shot containers that exited 0 and containers stopped by a user have no such line in
+  this run, so they are never candidates.
+- A stale `State.Error` (it survives a later manual stop, and stopping an already-exited
+  container sets no manual-stop flag) could make an old failure look current. The journal
+  limits candidates to this run, and **enforce refuses to run when dockerd is older than 15
+  minutes** (`DOKPLOY_BOOT_RECOVER_MAX_AGE`, 900 s, exit 4). A manual `systemctl restart`
+  of the unit hours after boot therefore cannot resurrect stopped containers. A dry-run has
+  no such limit, so it can be used at any time.
+- If a container is listed in the journal but its `State.Error` text changed wording in a
+  Docker upgrade, nothing breaks: the test is "not empty", not a phrase match.
 
 ### 5.3 What it does
 
-1. Wait (up to 300 s) for swarm `active`, `ControlAvailable`, and a node that is
-   `Ready Leader`. Then settle 20 s.
-2. Select candidates (5.2) and drop the excluded ones (5.7, each logged as `EXCLUDED
-   (lead-gen) <name>`). In `dry-run` mode, log the rest and exit 0.
-3. In `enforce` mode, `docker start` them in batches of 6 (the original failure was 53 at
-   once), each with a 90 s timeout.
-4. Up to 4 passes, 45 s apart. A pass also re-queues containers this run started that
-   exited again (Docker's restart policy only takes over after 10 s of uptime, so an app
-   that dies at second 3 because its database is still starting would otherwise be left
-   dead). A container is started at most 4 times per run.
-5. Log everything to the journal (`journalctl -t dokploy-boot-recover`), names only. The
-   final line is `done: N running after recovery, M still failing`. Exit 3 (the unit shows
-   as failed in `systemctl --failed`) if any attach failure is left.
-6. Warn about "unclassified" containers: `exit 255`, restart policy set, restored in this
-   daemon run, but no networking error. They are not touched. It is the early warning that
-   Docker's wording changed or that a different failure mode appeared.
+1. Wait (up to 300 s) for swarm `active`, `ControlAvailable` and a node that is `Ready
+   Leader` (`docker info` and `docker node ls` run under `timeout 30`). Settle 20 s.
+2. In `enforce` mode, refuse if dockerd is older than 15 minutes (5.2).
+3. Select candidates (5.2) and drop the excluded ones (5.7, each logged as `EXCLUDED
+   (lead-gen) <name>`). In `dry-run` mode, log the rest, each with the DNS names it would
+   verify (5.8), and exit 0.
+4. In `enforce` mode, for each candidate record its expected DNS names, `docker start` it
+   (batches of 6, each with a 90 s timeout), then verify the names and restore them (5.8).
+5. A `docker start` that fails is tried again in the next pass (passes are 45 s apart, a
+   container is started at most 4 times per run). There is no other re-queue: once a start
+   succeeds, Docker's own restart policy takes over. (An earlier draft re-started anything
+   that had exited again. That was wrong: it re-ran one-shot containers that exit 0, and
+   Docker's restart manager only uses the 10 s of uptime to reset its backoff, it does not
+   stop restarting before that.)
+6. Everything is logged once to the journal through stdout (`journalctl -t
+   dokploy-boot-recover`; priorities are set with `<N>` prefixes, there is no second
+   `logger` copy). Names only. The final line is `done: N running after recovery, M still
+   failing to start, alias restore failed: yes/no`. Exit 3 if any start or alias restore
+   failed, exit 4 for the age refusal, exit 2 if swarm never became ready.
 
-Safety properties: a lock (`flock`) prevents two runs overlapping. A second run finds
-nothing, because a started container no longer has `State.Error`. It never creates,
-removes, stops or restarts anything that is running, never edits Docker or Dokploy state,
-and never prints environment or argv. A `docker start` on a container that Dokploy removed
-meanwhile fails harmlessly with "No such container".
+Safety properties: a lock (`flock`) prevents two runs overlapping. It never creates, removes,
+stops or restarts anything that is running, never edits Docker or Dokploy state other than
+reconnecting a container's network to restore aliases, and never prints environment or
+argv. A `docker start` on a container that Dokploy removed meanwhile fails harmlessly.
 
 ### 5.4 Behaviour on a plain `systemctl restart docker`
 
@@ -221,45 +259,44 @@ containers, swarm init, `RestartSwarmContainers`), so the same attach race can h
   This is documented systemd behaviour for `BindsTo`/`Requires`; it has not been exercised
   on the host. Step 4 of the rollout checks it at the first real Docker restart or reboot,
   in `dry-run`.
-- The script reads the start time of the running `dockerd` (`ExecMainStartTimestamp`), so
-  after a restart it only considers failures that belong to the new daemon run. Leftovers
-  from an earlier run are ignored.
-- Nothing about the selection changes: a clean `docker stop` leaves no networking error, so
-  containers stopped before the restart are not started. Containers that Docker restores
-  without trouble are `running`, so they are never candidates.
-- Idempotent: running it twice, or once per restart, is safe; a started container no longer
-  carries the error.
-- It can also be run by hand at any time with `systemctl restart dokploy-boot-recover`
-  (use `dry-run` to look first). Restarting Docker on prod is still governed by the
-  existing rule that nothing restarts Dokploy while the deploy queue has jobs; this unit
-  neither changes nor bypasses that.
+- The script reads the start time of the running `dockerd` and only looks at journal lines
+  from that point (`--since @<start>`), so after a restart it only considers failures from
+  the new daemon run. Leftovers from an earlier run are ignored.
+- Nothing about the selection changes: containers stopped before the restart have no
+  failure line in the new run, and containers Docker restores without trouble are
+  `running`, so neither is a candidate.
+- Idempotent: running it twice, or once per restart, is safe; a started container is no
+  longer `exited`, and a container that was started and stopped again has an empty
+  `State.Error` or is skipped.
+- A manual `systemctl restart dokploy-boot-recover` is safe in `dry-run` at any time, and
+  refused in `enforce` once dockerd is older than 15 minutes (5.2). Restarting Docker on prod
+  is still governed by the existing rule that nothing restarts Dokploy while the deploy queue
+  has jobs; this unit neither changes nor bypasses that.
 
 ### 5.5 Dry run first
 
 The script's mode is `dry-run` unless `DOKPLOY_BOOT_RECOVER_MODE` is exactly `enforce`.
 A missing, empty or mistyped environment file therefore also gives a dry run. In
 `dry-run` the script waits for swarm, selects candidates, logs one `DRY-RUN would start
-<name>` line per container plus any `UNCLASSIFIED` warnings, and exits 0 without running
-any `docker start`. The files install in `dry-run`, and the first run after approval is
-a dry run (rollout steps 3 and 4). Moving to `enforce` is a separate, explicit edit.
+<name>; would verify DNS names: <network>|<name>,<name> ...` line per container (the post-check
+of 5.8 that would run after the start), plus `EXCLUDED` and `SKIP` lines, and exits 0
+without running any `docker start`, `network disconnect` or `network connect`. The
+files install in `dry-run`, and the first run after approval is a dry run (rollout steps 3
+and 4). Moving to `enforce` is a separate, explicit edit.
 
-### 5.6 Pause and retry with backoff: included
-
-Both are built in; neither is optional.
+### 5.6 Pause and retry: included
 
 - **Pause.** The unit waits for `Ready Leader`, then sleeps 20 s. On this host it would
   start after `docker.service` is active, which in the incident was 07:25:44, about 91 s
   after the manager became leader, and the burst of attaches (07:24:21 to 07:25:33) was
   already over. The 20 s settle is margin, not the mechanism; the real protection is that
   the unit only starts after Docker has finished its own attempt.
-- **Retry with backoff.** A single attempt is not assumed to be enough. A `docker start`
-  that fails again is retried in the next pass, passes are 45 s apart, a container is
-  started at most 4 times per run, and starts run 6 at a time so we do not recreate the
-  burst. This is a fixed pause, not exponential, because each attempt already carries its
-  own 20 s attach budget inside Docker and the number of candidates is small (at most
-  tens). It also covers the second failure mode, containers that start and die within
-  Docker's 10 s grace window before its own restart policy engages. Exhausting the attempts
-  exits non-zero and logs at `err`, so the failure is visible instead of silent.
+- **Retry.** A single attempt is not assumed to be enough. A `docker start` that fails
+  again is retried in the next pass, passes are 45 s apart, a container is started at most
+  4 times per run, and starts run 6 at a time so we do not recreate the burst. This is a
+  fixed pause, not exponential, because each attempt already carries its own 20 s attach
+  budget inside Docker and the number of candidates is small (at most tens). Exhausting the
+  attempts exits non-zero and logs at `err`, so the failure is visible instead of silent.
 
 ### 5.7 Lead Gen exclusion (default on)
 
@@ -278,7 +315,7 @@ Amin opts them in. The mechanism stays generic (one exclusion list, no per-stack
   application called `app-input-online-monitor-xxxxxx` belongs to the "Lead Gen System"
   project). The authoritative list comes from Dokploy's database.
 
-How the list is built: `dokploy-boot-recover-exclusions` (5.8) runs **one read-only joined
+How the list is built: `dokploy-boot-recover-exclusions` (5.9) runs **one read-only joined
 query** in the `dokploy-postgres` container: `compose` and `application` `appName` ->
 `environment` -> `project`, keeping projects whose name matches `%lead%gen%` or `%leadgen%`
 (case-insensitive). It selects only the `appName`, writes nothing, and prints the resulting
@@ -300,7 +337,41 @@ Opting a stack in: remove its entry from the line in `/etc/default/dokploy-boot-
 (for a stack that only a glob covers, remove the glob and list the stacks that must stay
 excluded by `appName`). No restart or reload; the file is read at each unit start.
 
-### 5.8 Files
+### 5.8 DNS alias restore (post-check after every start)
+
+Why: see the Evidence section. A recovered container can be `Up` and healthy and still
+unreachable by its service name, which breaks its clients without any container being down.
+`State=running` is therefore not a success criterion on its own.
+
+What the script does, per started container, for every user network it is on (`bridge`,
+`host` and `none` are skipped):
+
+1. **Before the start**: read the network's stored `Aliases`. For a compose container, also
+   expect the `com.docker.compose.service` label as a name (this covers a container whose
+   stored aliases were already empty).
+2. **Start** it.
+3. **After the start**: every expected name must be in the endpoint's `DNSNames`
+   (`docker inspect --format` on `NetworkSettings.Networks`, names only).
+4. **If any is missing**: `docker network disconnect <net> <id>`, then `docker network
+   connect --alias <each expected name> <net> <id>` (one retry after 2 s; if connect still
+   fails, a plain `docker network connect` so the container is never left off the network).
+   Re-check. Logged as `ALIASES MISSING ...` then `aliases restored ...`, or `ALIAS RESTORE
+   FAILED ...` (journal priority `err`, exit 3).
+
+Options compared:
+
+| Option | Verdict |
+|---|---|
+| **Reattach with the recorded aliases** (above). | **Chosen.** Uses only data Docker already holds for that container. Needs no knowledge of Dokploy or compose, touches no env, and works for non-compose containers (plain `docker run`, Dokploy applications) as well. It is the same repair that was done by hand. |
+| Recover through `docker compose -p <project> up -d --no-deps <service>`. | Rejected. The host script does not know where Dokploy keeps each stack's compose file or its env, and would have to read them (secrets). It recreates the container, which is more than a start, and it can change the running image or config if the stack was edited after the last deploy. It does not apply to Dokploy applications or to non-compose containers. |
+
+Limits, stated plainly: a container with a fixed IP (`IPAMConfig`) is not given its address
+back by `connect --alias`; none of the candidates seen so far has one. Reconnecting briefly
+drops the container's connection on that network (a second or so). The DNS check is on the
+endpoint metadata; whether the name actually resolves from another container is a manual
+check in the success criteria (6.5).
+
+### 5.9 Files
 
 `/etc/systemd/system/dokploy-boot-recover.service`
 
@@ -339,20 +410,20 @@ DOKPLOY_BOOT_RECOVER_EXCLUDE='*lead-gen* *leadgen*'
 #!/usr/bin/env bash
 # dokploy-boot-recover: after dockerd is up, start the restart-policy containers whose
 # swarm-network attach failed during dockerd's own startup (moby RestartSwarmContainers,
-# "attaching to network failed ... context deadline exceeded"), because the daemon does
-# not retry a failed START. See docs/design/host-boot-network-ordering.md.
+# "failed to start swarm container ... attaching to network failed ... context deadline
+# exceeded"), because the daemon does not retry a failed START, and put back the DNS
+# aliases a recovered container may have lost. See docs/design/host-boot-network-ordering.md.
 #
-# Selection is by what Docker recorded, never by name or stack:
-#   exited + restart policy != no + not a swarm task + State.Error is the attach failure
-#   + the failure happened in the current dockerd run.
-# A container a user stopped has an empty State.Error and is never selected.
+# Selection: the container ids come from dockerd's own journal for the CURRENT daemon run
+# ("failed to start swarm container"). Of those, only containers that are still exited, have
+# a restart policy, are not swarm tasks, still carry a State.Error, and do not match the
+# exclusion list are started. A container stopped by a user has no journal line in this run.
 #
 # Containers whose compose project or name matches DOKPLOY_BOOT_RECOVER_EXCLUDE (space
 # separated shell globs) are never started; they are logged as "EXCLUDED (lead-gen) <name>".
 # Opting a stack in means removing its entry from that list.
 set -u
 
-LOG_TAG=dokploy-boot-recover
 MODE=${DOKPLOY_BOOT_RECOVER_MODE:-dry-run}                # dry-run | enforce
 READY_TIMEOUT=${DOKPLOY_BOOT_RECOVER_READY_TIMEOUT:-300} # s to wait for swarm leader
 SETTLE=${DOKPLOY_BOOT_RECOVER_SETTLE:-20}                 # s pause once swarm is ready
@@ -360,15 +431,17 @@ MAX_PASSES=${DOKPLOY_BOOT_RECOVER_MAX_PASSES:-4}
 PASS_PAUSE=${DOKPLOY_BOOT_RECOVER_PASS_PAUSE:-45}
 BATCH=${DOKPLOY_BOOT_RECOVER_BATCH:-6}                    # parallel docker start
 START_TIMEOUT=${DOKPLOY_BOOT_RECOVER_START_TIMEOUT:-90}   # s per docker start
+MAX_AGE=${DOKPLOY_BOOT_RECOVER_MAX_AGE:-900}              # enforce refuses when dockerd is older (s)
 # Space separated globs matched on container name and compose project. Unset = the two name
 # globs below (so a missing env file still excludes Lead Gen); set but empty = exclude nothing.
 EXCLUDE=${DOKPLOY_BOOT_RECOVER_EXCLUDE-*lead-gen* *leadgen*}
-NO_JOURNAL=${DOKPLOY_BOOT_RECOVER_NO_JOURNAL:-0}          # 1 = stdout only (manual dry runs)
-MARKER='attaching to network failed|failed to set up container networking'
 
+# One line per message. Under systemd stdout goes to the journal, so no logger call (it would
+# duplicate every line); the <N> prefix sets the journal priority.
 log() {
-  [ "$NO_JOURNAL" = 1 ] || logger -t "$LOG_TAG" -p "${2:-user.info}" -- "$1"
-  echo "$1"
+  local p=6
+  case "${2:-info}" in err) p=3 ;; warning) p=4 ;; notice) p=5 ;; esac
+  if [ -n "${JOURNAL_STREAM:-}" ]; then echo "<$p>$1"; else echo "$1"; fi
 }
 
 LOCK=${DOKPLOY_BOOT_RECOVER_LOCK:-/run/dokploy-boot-recover.lock}
@@ -376,15 +449,17 @@ exec 9>"$LOCK"
 flock -n 9 || { log "another run holds the lock, exiting"; exit 0; }
 
 swarm_ready() {
-  [ "$(docker info --format '{{.Swarm.LocalNodeState}} {{.Swarm.ControlAvailable}}' 2>/dev/null)" = "active true" ] &&
-    docker node ls --format '{{.Status}} {{.ManagerStatus}}' 2>/dev/null | grep -qx 'Ready Leader'
+  [ "$(timeout 30 docker info --format '{{.Swarm.LocalNodeState}} {{.Swarm.ControlAvailable}}' 2>/dev/null)" = "active true" ] &&
+    timeout 30 docker node ls --format '{{.Status}} {{.ManagerStatus}}' 2>/dev/null | grep -qx 'Ready Leader'
 }
 
-# Epoch seconds at which the running dockerd was started.
+# Epoch seconds at which the running dockerd was started ("@1792135383" -> 1792135383).
 daemon_start_epoch() {
   local ts
-  ts=$(systemctl show docker -p ExecMainStartTimestamp --value 2>/dev/null)
-  [ -n "$ts" ] && date -d "$ts" +%s 2>/dev/null
+  ts=$(systemctl show docker -p ExecMainStartTimestamp --timestamp=unix --value 2>/dev/null)
+  ts=${ts#@}
+  case "$ts" in '' | *[!0-9]*) return 1 ;; esac
+  echo "$ts"
 }
 
 # True if the container (name, compose project) matches an entry of the exclusion list.
@@ -399,124 +474,174 @@ excluded() {
   return $rc
 }
 
-# Print "id|name|finishedAt|project" for every container the daemon wanted running but failed
-# to attach (any run, any stack). Docker renders a missing label as "<no value>" for some
-# template shapes (seen on 29.9.0 when .Id comes first), hence the normalisation in awk.
-candidates() {
-  docker ps -aq --no-trunc --filter status=exited 2>/dev/null | xargs -r docker inspect --format     '{{.Id}}|{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.FinishedAt}}|{{index .Config.Labels "com.docker.swarm.task"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.State.Error}}' 2>/dev/null |
-    awk -F'|' -v OFS='|' -v m="$MARKER" '{ if ($5 == "<no value>") $5 = ""; if ($6 == "<no value>") $6 = "" }
-      $3 != "no" && $3 != "" && $5 == "" && $7 ~ m { print $1, substr($2, 2), $4, $6 }'
+# Container ids dockerd itself reported as failed to start in this daemon run.
+journal_failed_ids() {
+  journalctl -u docker --since "@$DSTART" -o cat --no-pager 2>/dev/null |
+    grep -F 'failed to start swarm container' | grep -oE 'container=[0-9a-f]{12,64}' | cut -d= -f2 | sort -u
 }
 
-# Same, restricted to failures of the current dockerd run: "id|name|project".
-current_candidates_all() {
-  local id name fin project
-  while IFS='|' read -r id name fin project; do
+ROW_FMT='{{.Name}}|{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}|{{with index .Config.Labels "com.docker.swarm.task.id"}}swarm{{end}}|{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}|{{with index .Config.Labels "com.docker.compose.service"}}{{.}}{{end}}|{{.State.Error}}'
+NET_FMT='{{range $k,$v := .NetworkSettings.Networks}}{{$k}}|{{join $v.Aliases ","}}|{{join $v.DNSNames ","}}{{"\n"}}{{end}}'
+
+QUIET=0 # classify logs what it leaves alone on the first pass only
+say() { [ "$QUIET" = 1 ] || log "$@" >&2; }
+
+# Classify the journal ids. Prints "id|name|project|service" for every start candidate; what it
+# leaves alone is logged on stderr (stdout is data).
+classify() {
+  local id name status policy swarm project service error
+  while read -r id; do
     [ -n "$id" ] || continue
-    if [ "$(date -d "$fin" +%s 2>/dev/null || echo 0)" -ge $((DSTART - 10)) ]; then
-      echo "$id|$name|$project"
-    fi
-  done < <(candidates)
+    IFS='|' read -r name status policy swarm project service error \
+      < <(docker inspect --format "$ROW_FMT" "$id" 2>/dev/null) || continue
+    [ -n "$name" ] || continue # container was removed since
+    name=${name#/}
+    [ "$status" = exited ] || continue # running again (Dokploy, a person, or Docker itself)
+    if excluded "$name" "$project"; then say "EXCLUDED (lead-gen) $name" notice; continue; fi
+    [ -z "$swarm" ] || continue
+    case "$policy" in always | unless-stopped | on-failure) ;; *) continue ;; esac
+    if [ -z "$error" ]; then say "SKIP $name: State.Error is empty, it was started or stopped since" notice; continue; fi
+    echo "$id|$name|$project|$service"
+  done < <(journal_failed_ids)
 }
 
-# What we may start: "id|name".
-current_candidates() {
-  local id name project
-  while IFS='|' read -r id name project; do
-    excluded "$name" "$project" || echo "$id|$name"
-  done < <(current_candidates_all)
+# "net|alias,alias|dnsnames" lines (the dokploy overlay, user bridges), bridge/host/none dropped.
+net_lines() {
+  docker inspect --format "$NET_FMT" "$1" 2>/dev/null | grep -vE '^(bridge|host|none)\|' | sed '/^$/d'
 }
 
-log_excluded() {
-  local id name project
-  while IFS='|' read -r id name project; do
-    excluded "$name" "$project" && log "EXCLUDED (lead-gen) $name" user.notice
-  done < <(current_candidates_all)
+# Expected names per network before the start: the stored aliases plus, for a compose
+# container, its service name. Prints "net|name,name".
+expected_names() { # id service
+  local line net aliases rest
+  while IFS='|' read -r net aliases rest; do
+    [ -n "$net" ] || continue
+    [ -n "$2" ] && case ",$aliases," in *",$2,"*) ;; *) aliases="${aliases:+$aliases,}$2" ;; esac
+    [ -n "$aliases" ] && echo "$net|$aliases"
+  done < <(net_lines "$1")
 }
 
-# Containers that exited 255 at restore, with a restart policy, but not by the attach failure.
-log_unclassified() {
-  docker ps -aq --no-trunc --filter status=exited 2>/dev/null | xargs -r docker inspect --format     '{{.Name}}|{{.HostConfig.RestartPolicy.Name}}|{{.State.ExitCode}}|{{.State.FinishedAt}}|{{index .Config.Labels "com.docker.swarm.task"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{.State.Error}}' 2>/dev/null |
-    awk -F'|' -v OFS='|' -v m="$MARKER" '{ if ($5 == "<no value>") $5 = ""; if ($6 == "<no value>") $6 = "" }
-      $2 != "no" && $2 != "" && $3 == 255 && $5 == "" && $7 !~ m { print substr($1, 2), $4, $6 }' |
-    while IFS='|' read -r name fin project; do
-      if [ "$(date -d "$fin" +%s 2>/dev/null || echo 0)" -ge $((DSTART - 10)) ] && ! excluded "$name" "$project"; then
-        log "UNCLASSIFIED exit-255 restart-policy container (not touched): $name" user.warning
-      fi
+# After a start: every expected name must be in the endpoint's DNSNames. If not, disconnect
+# and reconnect the network with the full alias list. Returns 1 if a name is still missing.
+verify_aliases() { # id name expected-file
+  local id=$1 name=$2 exp=$3 net want missing a dns rc=0 args
+  while IFS='|' read -r net want; do
+    dns=$(net_lines "$id" | awk -F'|' -v n="$net" '$1 == n { print $3 }')
+    missing=""
+    for a in ${want//,/ }; do
+      case ",$dns," in *",$a,"*) ;; *) missing="$missing $a" ;; esac
     done
+    [ -n "$missing" ] || continue
+    log "ALIASES MISSING on $net for $name:$missing, reconnecting" warning
+    args=""
+    for a in ${want//,/ }; do args="$args --alias $a"; done
+    docker network disconnect "$net" "$id" >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    if docker network connect $args "$net" "$id" >/dev/null 2>&1 ||
+      { sleep 2; docker network connect $args "$net" "$id" >/dev/null 2>&1; }; then
+      dns=$(net_lines "$id" | awk -F'|' -v n="$net" '$1 == n { print $3 }')
+      missing=""
+      for a in ${want//,/ }; do
+        case ",$dns," in *",$a,"*) ;; *) missing="$missing $a" ;; esac
+      done
+    fi
+    if [ -n "$missing" ]; then
+      # Never leave the container off the network: fall back to a plain connect.
+      docker network connect "$net" "$id" >/dev/null 2>&1
+      log "ALIAS RESTORE FAILED on $net for $name:$missing (plain reconnect attempted)" err
+      rc=1
+    else
+      log "aliases restored on $net for $name: $want" notice
+    fi
+  done < "$exp"
+  return $rc
 }
 
-start_one() { # id name
-  local out
-  if out=$(timeout "$START_TIMEOUT" docker start "$1" 2>&1); then
-    log "started $2"
-  else
-    log "start failed $2: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" user.warning
-    return 1
+RESDIR=$(mktemp -d)
+trap 'rm -rf "$RESDIR"' EXIT
+
+start_one() { # id name service
+  local id=$1 name=$2 out exp rc
+  exp=$(mktemp)
+  expected_names "$id" "$3" > "$exp"
+  if out=$(timeout "$START_TIMEOUT" docker start "$id" 2>&1); then
+    log "started $name"
+    verify_aliases "$id" "$name" "$exp" || : > "$RESDIR/alias-failed"
+    rm -f "$exp"
+    return 0
   fi
+  rm -f "$exp"
+  log "start failed $name: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" warning
+  return 1
 }
 
 waited=0
 until swarm_ready; do
-  [ "$waited" -ge "$READY_TIMEOUT" ] && { log "swarm not ready after ${READY_TIMEOUT}s, giving up" user.err; exit 2; }
+  [ "$waited" -ge "$READY_TIMEOUT" ] && { log "swarm not ready after ${READY_TIMEOUT}s, giving up" err; exit 2; }
   sleep 5; waited=$((waited + 5))
 done
-DSTART=$(daemon_start_epoch)
-[ -n "$DSTART" ] || { log "cannot determine dockerd start time, giving up" user.err; exit 2; }
+DSTART=$(daemon_start_epoch) || { log "cannot determine dockerd start time, giving up" err; exit 2; }
 sleep "$SETTLE"
-log "swarm ready, mode=$MODE, dockerd started $(date -u -d "@$DSTART" +%FT%TZ)"
-log_excluded
+AGE=$(( $(date +%s) - DSTART ))
+log "swarm ready, mode=$MODE, dockerd started $(date -u -d "@$DSTART" +%FT%TZ), age ${AGE}s"
+
+# A State.Error outlives a later manual stop, so late in a daemon's life this unit must not
+# act (a manual restart of the unit hours after boot could resurrect stopped containers).
+if [ "$MODE" = enforce ] && [ "$AGE" -gt "$MAX_AGE" ]; then
+  log "refusing to enforce: dockerd is ${AGE}s old (> ${MAX_AGE}s). Run dry-run to look." err
+  exit 4
+fi
 
 declare -A attempts=() # id -> start attempts this run
-declare -A names=()
-recovered=0
+failed=0
 pass=1
 while [ "$pass" -le "$MAX_PASSES" ]; do
-  # Attach failures, plus anything this run already started that exited again before the
-  # daemon's restart policy could take over (it only engages after 10 s of uptime).
-  todo=$(
-    current_candidates
-    for id in "${!attempts[@]}"; do
-      case "$(docker inspect --format '{{.State.Status}}|{{.HostConfig.RestartPolicy.Name}}' "$id" 2>/dev/null)" in
-        'exited|always' | 'exited|unless-stopped' | 'exited|on-failure') echo "$id|${names[$id]}" ;;
-      esac
-    done
-  )
-  todo=$(printf '%s\n' "$todo" | sed '/^$/d' | sort -u)
-  count=$(printf '%s\n' "$todo" | sed '/^$/d' | wc -l)
+  todo=$(classify | sort -u)
+  QUIET=1
+  # Drop containers that already used all their attempts.
+  count=0
+  list=""
+  while IFS='|' read -r id name project service; do
+    [ -n "$id" ] || continue
+    [ "${attempts[$id]:-0}" -lt "$MAX_PASSES" ] || continue
+    list="$list$id|$name|$project|$service"$'\n'
+    count=$((count + 1))
+  done <<< "$todo"
   [ "$count" -gt 0 ] || { log "pass $pass: nothing to do"; break; }
   log "pass $pass: $count candidate(s)"
 
   if [ "$MODE" != "enforce" ]; then
-    printf '%s\n' "$todo" | while IFS='|' read -r id name; do log "DRY-RUN would start $name"; done
-    log_unclassified
+    # Dry run: no docker start. Print what a recovery would verify afterwards.
+    while IFS='|' read -r id name project service; do
+      [ -n "$id" ] || continue
+      log "DRY-RUN would start $name; would verify DNS names: $(expected_names "$id" "$service" | tr '\n' ' ')"
+    done <<< "$list"
     exit 0
   fi
 
   running=0
-  while IFS='|' read -r id name; do
+  while IFS='|' read -r id name project service; do
     [ -n "$id" ] || continue
-    if [ "${attempts[$id]:-0}" -ge "$MAX_PASSES" ]; then continue; fi
-    attempts[$id]=$(( ${attempts[$id]:-0} + 1 )); names[$id]=$name
-    start_one "$id" "$name" &
+    attempts[$id]=$(( ${attempts[$id]:-0} + 1 ))
+    start_one "$id" "$name" "$service" &
     running=$((running + 1))
     if [ "$running" -ge "$BATCH" ]; then wait; running=0; fi
-  done <<< "$todo"
+  done <<< "$list"
   wait
   pass=$((pass + 1))
   [ "$pass" -le "$MAX_PASSES" ] && sleep "$PASS_PAUSE"
 done
 
-remaining=$(current_candidates | wc -l)
+left=$(classify | wc -l)
+recovered=0
 for id in "${!attempts[@]}"; do
   [ "$(docker inspect --format '{{.State.Status}}' "$id" 2>/dev/null)" = running ] && recovered=$((recovered + 1))
 done
-log_unclassified
-if [ "$remaining" -gt 0 ]; then
-  log "done: $recovered running after recovery, $remaining still failing" user.err
+if [ "$left" -gt 0 ] || [ -e "$RESDIR/alias-failed" ]; then
+  log "done: $recovered running after recovery, $left still failing to start, alias restore failed: $([ -e "$RESDIR/alias-failed" ] && echo yes || echo no)" err
   exit 3
 fi
-log "done: $recovered running after recovery, 0 still failing"
+log "done: $recovered running after recovery, 0 still failing to start, alias restore failed: no"
 exit 0
 ```
 
@@ -565,9 +690,11 @@ printf "'\n"
    Docker or Dokploy is involved, and the deploy queue is not touched.
 3. Prove the selector on the live host, no side effects: `systemctl start
    dokploy-boot-recover.service` in `dry-run`. Expected: `DRY-RUN would start` lines for
-   exactly the non-Lead-Gen containers currently down with the networking error, plus one
-   `EXCLUDED (lead-gen) <name>` line per excluded container that is down. Nothing is started.
-   Compare with `docker ps -a --filter status=exited`.
+   exactly the non-Lead-Gen containers that dockerd reported as failed to start in this daemon
+   run and that are still down, with the DNS names it would verify, plus one `EXCLUDED
+   (lead-gen) <name>` line per excluded container that is down. Nothing is started. Compare
+   with `journalctl -u docker | grep 'failed to start swarm container'` and `docker ps -a
+   --filter status=exited`.
 4. Leave it in `dry-run` through the next reboot or Docker restart. After it, compare
    its `DRY-RUN` list with the ground truth from the Docker log
    (`journalctl -b -u docker | grep "failed to start swarm container"`, same containers).
@@ -598,64 +725,81 @@ Done:
 
 - **T1, manual dry-run on the live host (read-only).** This is a manual dry-run of the
   final script, not a Docker-restart dry-run. The script text was piped over `ssh` stdin
-  (`bash -c "$(cat)"`, nothing copied to the host) with the mode forced to `dry-run`, no
-  journal writes and no lock file. It ran at about 10:35Z on 2026-10-16, with the exclusion
-  list generated by the helper from the live database (stack names replaced here, as this
-  repository is public):
+  (`bash -c "$(cat)"`, nothing copied to the host) with the mode forced to `dry-run` and no
+  lock file. It ran at about 11:00Z on 2026-10-16 (dockerd 3.6 hours old, which a dry run is
+  allowed), with the exclusion list generated by the helper from the live database (stack
+  names replaced here, as this repository is public):
 
   ```
-  swarm ready, mode=dry-run, dockerd started 2026-10-16T07:23:03Z
+  swarm ready, mode=dry-run, dockerd started 2026-10-16T07:23:03Z, age 12931s
   EXCLUDED (lead-gen) <lead-gen stack 1>-app-1
   EXCLUDED (lead-gen) <lead-gen stack 2>-api-1
   pass 1: 1 candidate(s)
-  DRY-RUN would start <ordinary stack>-<service>-1
+  DRY-RUN would start <ordinary stack>-<service>-1; would verify DNS names: dokploy-network|<ordinary stack>-<service>-1,<service>
   ```
 
-  Controls: with an empty exclusion list the same run offered 3 containers (the two Lead
-  Gen ones plus the one above). With the two globs removed so only the 17 `appName` entries
-  remained, the output was identical to the above. Two containers that had been down at
-  10:15Z had been started by hand by then, so they were correctly not listed. Nothing was
-  started and nothing was left on the host. `bash -s` is not usable for this, because
-  `docker` and `xargs` inside the script read the same stdin and swallow the rest of the
-  script, hence `bash -c "$(cat)"`.
-- **T1b, a bug found by T1.** A first run of T1 said "nothing to do" while 3 candidates
-  existed. Cause: on Docker 29.9.0 a `--format` template that starts with `{{.Id}}` renders
-  a missing label as `<no value>` instead of an empty string, so the "no swarm-task label"
-  test failed for every container. The script now normalises `<no value>`. The stub emits
-  the same quirk, so T2 covers it.
-- **T2, script logic against a stub `docker` (local, no host touched).** 17 fixture
-  containers. Dry run listed 5 and started none. Enforce started those 5 (one needed a
-  third attempt because it failed twice, one needed a second start because it died
-  immediately). It left alone: a container stopped before boot, one stopped after boot,
-  an old failure from an earlier daemon run, a swarm task, a `no`-policy container, an
-  `exit 255` container without the networking error (logged as `UNCLASSIFIED`), and six
-  excluded containers (matched by compose project, by name prefix, by generated `appName`,
-  and by glob), each logged as `EXCLUDED (lead-gen)`. A third run found nothing to do. The
-  unset-versus-empty behaviour of the exclusion variable was checked as well. One
-  deliberate over-match: a project called `lead-generation-docs` is excluded by
-  `*lead-gen*`, which is the safe direction. Also run: `bash -n` on both scripts.
+  Controls: with an empty exclusion list the run offered 3 containers (the two Lead Gen
+  ones plus the one above). With the two globs removed, so only the 17 `appName` entries
+  remained, the output was identical. Nothing was started, no network was changed, and
+  nothing was left on the host. `bash -s` is not usable for this, because `docker` inside
+  the script reads the same stdin and swallows the rest of it, hence `bash -c "$(cat)"`.
+- **T1b, two bugs found by dry-runs, now fixed and covered.** (1) On Docker 29.9.0 a
+  `--format` template that starts with `{{.Id}}` prints a missing label as `<no value>`, and
+  the label `com.docker.swarm.task` is present but empty on every task, so the earlier
+  selector matched nothing. The script now uses `{{with index .Config.Labels
+  "com.docker.swarm.task.id"}}...{{end}}`. The test stub prints `<no value>` for any
+  template that does not use `with`, and a test confirms the old template shape finds 0
+  candidates where the current one finds all 7 expected (default exclusions). (2) A dry-run and the review of this PR also
+  found that the first selector keyed on `FinishedAt` and that a re-queue would re-run
+  one-shot containers; both are gone (5.2, 5.3).
+- **T2, script logic against a stub `docker`, `journalctl` and `systemctl` (local, no host
+  touched).** 15 fixture containers. Dry run listed 6 and started nothing. Enforce:
+  started those 6 (one needed 3 attempts because it failed twice, one exited again by itself
+  and was correctly **not** re-started by the script), restored the aliases of two containers
+  whose stub start loses them (one by its stored aliases, one by the compose service
+  fallback) with the exact `disconnect` and `connect --alias` calls, and left alone: a
+  container stopped before boot, one stopped after boot, an old failure that is not in this
+  run's journal, a swarm task, a `no`-policy container, a one-shot that exited 0, a container
+  whose `State.Error` is empty (logged `SKIP`), and two excluded containers (by name glob and
+  by generated `appName`). A third run found nothing to start. Enforce on a daemon 3 hours
+  old exited 4 and started nothing; a dry-run on the same daemon worked. When `connect`
+  fails, the script retries, falls back to a plain connect, logs `ALIAS RESTORE FAILED` and
+  exits 3. Also run: `bash -n` on both scripts.
 
 Not done (needs a host, and the brief said not to apply anything anywhere):
 
 - **T3, real Docker.** On `devino-second`, inside a throwaway privileged docker-in-docker
   container with its own `dockerd` and swarm (so the host daemon is never touched):
-  `swarm init`, an attachable overlay, about 30 `--restart unless-stopped` containers,
-  then restart the inner daemon under load (many dummy services, low `--cpus`) until the
-  20 s attach timeout reproduces. If it will not reproduce, stop the inner daemon, edit the
-  containers' `config.v2.json` to the failed shape (`ExitCode 255`, the `State.Error`
-  text, `HasBeenManuallyStopped: true` so Docker will not restart them itself), start the
-  inner daemon and run the script in `enforce`. Remove the sandbox afterwards.
+  `swarm init`, an attachable overlay, about 30 `--restart unless-stopped` containers on
+  it, with service-name aliases, plus one client container that resolves them. Restart the
+  inner daemon under load (many dummy services, low `--cpus`) until the 20 s attach timeout
+  reproduces. If it will not reproduce, stop the inner daemon, edit the containers'
+  `config.v2.json` to the failed shape (`ExitCode 255`, a `State.Error` text) and write
+  matching `failed to start swarm container container=<id>` lines for the script's journal
+  stub, start the inner daemon and run the script in `enforce`. **Assert**, for every
+  recovered container and every network: `State=running`, `Aliases` equal to the stored
+  aliases, `DNSNames` contain every alias, and `getent hosts <alias>` from the client
+  container resolves to that container's IP. Include a container whose aliases the start
+  loses (if it can be provoked) and check the reconnect path. Remove the sandbox afterwards.
 - **T4, first real event.** See 6.5.
 
 ### 6.5 Success criteria at the next reboot or Docker restart
 
-- `journalctl -t dokploy-boot-recover -b` shows `done: N running after recovery, 0 still failing`.
-- N matches the `failed to start swarm container` count in `journalctl -b -u docker`
-  (minus containers removed since).
-- `docker ps -a --filter status=exited` shows no restart-policy container with the
-  networking error.
+- `journalctl -t dokploy-boot-recover -b` shows `done: N running after recovery, 0 still
+  failing to start, alias restore failed: no`.
+- N matches the number of non-excluded ids in `journalctl -u docker | grep 'failed to start
+  swarm container'` (minus containers removed since).
+- For each recovered container, on every user network: `docker inspect --format '{{range
+  $k,$v := .NetworkSettings.Networks}}{{$k}} {{$v.Aliases}} {{$v.DNSNames}}{{"\n"}}{{end}}'`
+  shows the same aliases as the healthy containers of the same stack, and every alias is in
+  `DNSNames`. Zero `ALIASES MISSING` lines, or each followed by `aliases restored`.
+- In-network name resolution: from another container on the same network,
+  `getent hosts <service name>` returns the recovered container's address (spot-check at
+  least one database container and one web container).
+- No restart-policy container outside the exclusion list remains `exited` with a
+  `State.Error` set.
 - Time from `docker.service` active to the last container running is under 5 minutes.
-- Zero `UNCLASSIFIED` lines.
+- `EXCLUDED (lead-gen)` lines list exactly the Lead Gen containers that were down.
 
 ---
 
@@ -663,10 +807,12 @@ Not done (needs a host, and the brief said not to apply anything anywhere):
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Starts a container a user meant to keep stopped. | Very low. A clean stop never leaves the networking error. The remaining case is a user stopping a stack through Dokploy in the few minutes between the daemon's failure and this unit's first pass, since stopping an already-exited container does not clear its error. Dokploy is itself restarting then. | Runs about 20 s after Docker is ready. `dry-run` first. The pass logs every name it touches. |
+| Starts a container a user meant to keep stopped. | Very low. Candidates must have a failure line in this daemon run's journal. The remaining case is a user stopping an already-exited container in the minutes between the daemon's failure and this unit's first pass (that sets no manual-stop flag and leaves `State.Error`). | Runs about 20 s after Docker is ready. Enforce refuses once dockerd is older than 15 minutes. `dry-run` first. Every name touched is logged. |
 | Start storm re-overloads the manager. | Low. | Batches of 6 versus 53 at once, passes 45 s apart, `Nice=10`, 4 attempts max per container. |
-| Dependency order (an app starts before its DB). | Medium, harmless. | Re-queue of containers that died inside Docker's 10 s grace window. Databases on stack-only networks come back by themselves before this unit runs. |
-| Docker changes the error wording on upgrade. Recovery silently stops. | Medium over time. | The pattern is two phrases. The `UNCLASSIFIED` warning fires when containers exit 255 at restore without it. Check after every Docker upgrade. |
+| Dependency order (an app starts before its DB). | Medium, harmless. | Once started, Docker's restart policy keeps restarting a container that exits. Databases on stack-only networks come back by themselves before this unit runs. |
+| A recovered container is up but unreachable by name (aliases lost). | Seen once on 2026-10-16. | The post-check in 5.8, in the success criteria, and in T3. Cause unproven. |
+| The reconnect in 5.8 briefly drops the container's traffic on that network, or fails and leaves it detached. | Low. | Retry, then a plain connect so it is never left off the network, and exit 3 with an `err` log line. Reconnect happens only when a name is actually missing. |
+| Docker changes the journal wording `failed to start swarm container` on upgrade. Recovery silently stops. | Medium over time. | Dry-run after every Docker upgrade and compare with the journal; a restore that leaves restart-policy containers `exited` with no `EXCLUDED`, `SKIP` or `started` line for them is the signal. |
 | Unit fails at boot (swarm never ready). | Low. | Gives up after 300 s with exit 2, logs at `err`, blocks nothing. Nothing is `After=` it. |
 | A start fails with a legitimate non-network error (bad mount, missing image). | Possible. | Logged by name with the Docker error and retried at most 4 times. |
 | A Lead Gen stack is missing from the exclusion list and gets started. | Low to medium. New or renamed Lead Gen projects, or a project not named "... Lead Gen", are only protected by the name globs. | Dry-run first and review the `EXCLUDED` lines. Re-run the helper after any change to Lead Gen stacks and before `enforce`. |
