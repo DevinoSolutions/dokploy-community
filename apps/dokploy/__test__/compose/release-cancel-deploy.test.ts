@@ -105,6 +105,7 @@ const COMPOSE = {
 	serverId: null as string | null,
 	buildServerId: "build-1" as string | null,
 	buildRegistryId: "reg-1",
+	rollingReplace: null as unknown,
 	domains: [],
 	environment: {
 		name: "prod",
