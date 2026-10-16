@@ -377,7 +377,6 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		const world = createWorld(changedWeb());
 		const result = runRoll(world, {
 			services: ["web", "api"],
-			hasOtherServices: false,
 		});
 		const log = calls(world);
 		expect(result.rc).toBe(0);
@@ -466,7 +465,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		expect(elapsed).toBeLessThan(60_000);
 	});
 
-	it("a replica with no health status (disabled healthcheck) is refused at once", {
+	it("a replica with no health status (disabled healthcheck) is refused on the second poll", {
 		timeout: 90_000,
 	}, () => {
 		const world = createWorld(
@@ -481,6 +480,28 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		expect(result.rc).toBe(1);
 		expect(result.stdout).toContain("no health status");
 		expect(containersOf(world, "web")).toEqual([OLD]);
+	});
+
+	it("a replica reported without health status on the first poll only is not removed", {
+		timeout: 90_000,
+	}, () => {
+		const world = createWorld(
+			changedWeb({
+				config: {
+					web: {
+						hash: "H2",
+						newImage: "sha256:NEW-web",
+						newHealth: "noneonce",
+					},
+					api: { hash: "A1" },
+				},
+			}),
+		);
+		const result = runRoll(world);
+		expect(result.rc).toBe(0);
+		expect(result.stdout).not.toContain("no health status");
+		expect(containersOf(world, "web")).toHaveLength(1);
+		expect(containersOf(world, "web")).not.toContain(OLD);
 	});
 
 	it("a replica that becomes healthy after a few polls is accepted", {
@@ -537,7 +558,6 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		});
 		const result = runRoll(world, {
 			services: ["web", "api"],
-			hasOtherServices: false,
 		});
 		expect(result.rc).toBe(1);
 		// A service was replaced: the script must not offer a restore.
@@ -567,7 +587,12 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			changedWeb({
 				flags: ["rm.fail"],
 				containers: [
-					{ id: OLD_FIRST, service: "web", hash: "H1", image: "sha256:OLD-web" },
+					{
+						id: OLD_FIRST,
+						service: "web",
+						hash: "H1",
+						image: "sha256:OLD-web",
+					},
 					{ id: "aa-api", service: "api", hash: "A1", image: "sha256:NEW-api" },
 				],
 			}),
@@ -643,7 +668,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				join(world.state, "cfg", "imageid.registry_web_1"),
 				"sha256:OLD-web",
 			);
-			const result = runRoll(world, { hasOtherServices: false });
+			const result = runRoll(world);
 			expect(result.rc).toBe(0);
 			expect(result.stdout).toContain("found 2 containers");
 			expect(containersOf(world, "web")).toEqual(["web-old-2"]);
@@ -659,7 +684,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				join(world.state, "cfg", "imageid.registry_web_1"),
 				"sha256:OLD-web",
 			);
-			const result = runRoll(world, { hasOtherServices: false });
+			const result = runRoll(world);
 			expect(result.rc).toBe(0);
 			expect(containersOf(world, "web")).toEqual(["web-old-1"]);
 		});
@@ -670,7 +695,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			const world = createWorld(
 				twoWebs({}, {}, { hash: "H2", newImage: "sha256:NEW-web" }),
 			);
-			const result = runRoll(world, { hasOtherServices: false });
+			const result = runRoll(world);
 			const log = calls(world);
 			expect(result.rc).toBe(0);
 			// Exactly one container is left and it is the freshly started one.
@@ -697,7 +722,6 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				buildServices: ["web"],
 				pullServices: ["api"],
 				pullAlways: true,
-				hasOtherServices: false,
 			});
 			const log = calls(world);
 			expect(result.rc).toBe(0);
@@ -731,57 +755,70 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 	});
 
 	describe("cancel / kill mid-rollout", () => {
-		it("removes the replica that was not promoted and leaves the old container serving", {
-			timeout: 90_000,
-		}, async () => {
-			const world = createWorld(
-				changedWeb({
-					config: {
-						web: { hash: "H2", newImage: "sha256:NEW-web", newHealth: "never" },
-						api: { hash: "A1" },
-					},
-				}),
-			);
-			// A watcher in the same shell sends the TERM, once the second replica
-			// exists. Bounded: it gives up after 40 s instead of hanging the run.
-			const calls = toShellPath(join(world.state, "calls.log"));
-			const before = `(
+		// compose.killBuild sends SIGINT (pkill -2); other paths send TERM or HUP.
+		it.each(["TERM", "INT", "HUP"])(
+			"%s removes the replica that was not promoted and leaves the old container serving",
+			{
+				timeout: 90_000,
+			},
+			async (signal) => {
+				const world = createWorld(
+					changedWeb({
+						config: {
+							web: {
+								hash: "H2",
+								newImage: "sha256:NEW-web",
+								newHealth: "never",
+							},
+							api: { hash: "A1" },
+						},
+					}),
+				);
+				// A watcher in the same shell sends the TERM, once the second replica
+				// exists. Bounded: it gives up after 40 s instead of hanging the run.
+				const calls = toShellPath(join(world.state, "calls.log"));
+				const before = `(
   i=0
   while [ "$i" -lt 160 ] && ! grep -q -- '--scale web=2 web' ${calls} 2>/dev/null; do sleep 0.25; i=$((i + 1)); done
-  kill -TERM $$
+  kill -${signal} $$
 ) >/dev/null 2>&1 &`;
-			const child = spawn(
-				"sh",
-				[
-					writeScript(
-						world,
-						scriptFor({ healthTimeoutSeconds: 60 }, { before }),
-					),
-				],
-				{ env: envFor(world), stdio: ["ignore", "pipe", "pipe"] },
-			);
-			let stdout = "";
-			child.stdout.on("data", (chunk) => {
-				stdout += String(chunk);
-			});
-			const exit = await new Promise<number | null>((resolve) => {
-				const timer = setTimeout(() => {
-					child.kill();
-					resolve(null);
-				}, 80_000);
-				child.on("close", (code) => {
-					clearTimeout(timer);
-					resolve(code);
+				const child = spawn(
+					"sh",
+					[
+						writeScript(
+							world,
+							scriptFor({ healthTimeoutSeconds: 60 }, { before }),
+						),
+					],
+					{ env: envFor(world), stdio: ["ignore", "pipe", "pipe"] },
+				);
+				let stdout = "";
+				child.stdout.on("data", (chunk) => {
+					stdout += String(chunk);
 				});
-			});
-			expect(exit).toBe(130);
-			expect(stdout).toContain("the deployment was interrupted");
-			expect(stdout).toContain("that was not promoted");
-			expect(containersOf(world, "web")).toEqual([OLD]);
-			expect(runningOf(world, "web")).toEqual([OLD]);
-			// The shell ended in the trap: no restore, no RC line.
-			expect(stdout).not.toContain("RC=");
-		});
+				const exit = await new Promise<number | null>((resolve) => {
+					const timer = setTimeout(() => {
+						child.kill();
+						resolve(null);
+					}, 80_000);
+					child.on("close", (code) => {
+						clearTimeout(timer);
+						resolve(code);
+					});
+				});
+				expect(exit).toBe(130);
+				expect(stdout).toContain("the deployment was interrupted");
+				expect(stdout).toContain("that was not promoted");
+				expect(containersOf(world, "web")).toEqual([OLD]);
+				expect(runningOf(world, "web")).toEqual([OLD]);
+				// The replica serves nothing: removed at once, not stopped with a grace period.
+				const callLog = readFileSync(join(world.state, "calls.log"), "utf8");
+				expect(callLog).not.toMatch(/docker stop web-new/);
+				expect(callLog).toMatch(/docker rm -f web-new/);
+				// The shell ended in the trap: no restore, no RC line.
+				expect(stdout).not.toContain("RC=");
+			},
+		);
 	});
 
 	describe("hostile names", () => {
@@ -793,7 +830,6 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			const result = runRoll(world, {
 				appName: `my-app';touch ${marker};'`,
 				services: [`web;touch ${marker}`, "web"],
-				hasOtherServices: true,
 			});
 			// The hostile service does not exist, so it is not rolled; the other
 			// still is, and nothing in the names ran.

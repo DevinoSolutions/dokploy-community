@@ -28,7 +28,12 @@ import {
 	getComposeRollingReport,
 } from "@dokploy/server/services/compose-rolling";
 
-const healthcheck = { test: ["CMD", "true"], interval: "10s", retries: 3 };
+const healthcheck = {
+	test: ["CMD", "true"],
+	interval: "10s",
+	timeout: "5s",
+	retries: 3,
+};
 
 const composeRow = (overrides: Record<string, unknown> = {}) => ({
 	composeId: "compose-1",
@@ -76,7 +81,7 @@ describe("getComposeRollingReport", () => {
 		expect(report.stackWarnings).toEqual([]);
 	});
 
-	it("checks the timeout it is given against the healthchecks (30s needed)", async () => {
+	it("checks the timeout it is given against the healthchecks (45s needed)", async () => {
 		const report = await getComposeRollingReport("compose-1", {
 			healthTimeoutSeconds: 20,
 		});

@@ -30,7 +30,12 @@ const baseCompose = {
 	environment: { project: { env: "" }, env: "" },
 } as unknown as Compose;
 
-const healthcheck = { test: ["CMD", "true"], interval: "5s", retries: 3 };
+const healthcheck = {
+	test: ["CMD", "true"],
+	interval: "5s",
+	timeout: "2s",
+	retries: 3,
+};
 const SPEC = {
 	services: {
 		web: { build: ".", healthcheck },
@@ -260,7 +265,7 @@ describe("rolling replace: when it cannot apply", () => {
 
 	it("a short health timeout falls back too", async () => {
 		const command = await build(rolling(["web"], { healthTimeoutSeconds: 10 }));
-		// 5s interval x 3 retries = 15s > 10s
+		// 3 retries x (5s interval + 2s timeout) = 21s > 10s
 		expect(command).not.toContain("dokploy_roll_run");
 		expect(command).toContain("must be longer than start_period");
 	});
@@ -309,15 +314,16 @@ describe("rolling replace: the generated script", () => {
 		);
 	});
 
-	it("never emits an others step when every service is rolled", () => {
-		expect(script({ hasOtherServices: false }).definitions).not.toContain(
-			"services that are not rolled",
-		);
-		expect(script().definitions).toContain("services that are not rolled");
+	it("always emits the others step; it is skipped at run time when DR_OTHERS is empty", () => {
+		// `config --services` also sees included and extended services the raw spec
+		// does not list, so the step cannot be decided from the spec.
+		const { definitions } = script();
+		expect(definitions).toContain("services that are not rolled");
+		expect(definitions).toContain('if [ -n "$DR_OTHERS" ]; then');
 	});
 
 	it("every up names its services; none is bare", () => {
-		const { definitions } = script({ hasOtherServices: true });
+		const { definitions } = script();
 		for (const line of definitions
 			.split("\n")
 			.filter((l) => / up -d/.test(l))) {

@@ -120,6 +120,15 @@ export const STATEFUL_IMAGE_NAMES: ReadonlySet<string> = new Set([
 	"cockroach",
 	"libsql",
 	"sqld",
+	"redis-stack",
+	"redis-stack-server",
+	"mssql",
+	"meilisearch",
+	"qdrant",
+	"typesense",
+	"weaviate",
+	"surrealdb",
+	"nats",
 ]);
 
 const isObject = (value: unknown): value is SpecObject =>
@@ -222,12 +231,14 @@ export const parseComposeDurationSeconds = (value: unknown) => {
 
 const HEALTHCHECK_DEFAULT_INTERVAL_SECONDS = 30;
 const HEALTHCHECK_DEFAULT_RETRIES = 3;
+const HEALTHCHECK_DEFAULT_TIMEOUT_SECONDS = 30;
 
 /**
- * Least time a new replica can need to be reported healthy or unhealthy:
- * `start_period + interval * retries`. The health timeout has to exceed it,
- * otherwise a slow-but-fine replica would be removed before Docker has even
- * finished judging it.
+ * Time Docker can need to judge a new replica: `start_period + retries *
+ * (interval + timeout)`. A failing probe runs up to its `timeout` before the
+ * next one is scheduled, so the last of the `retries` failures lands that late.
+ * The health timeout has to exceed it, otherwise a replica would be removed
+ * before Docker has even finished judging it.
  */
 export const getHealthcheckSettleSeconds = (healthcheck: SpecObject) => {
 	const interval =
@@ -239,7 +250,10 @@ export const getHealthcheckSettleSeconds = (healthcheck: SpecObject) => {
 		typeof healthcheck.retries === "number" && healthcheck.retries >= 0
 			? healthcheck.retries
 			: HEALTHCHECK_DEFAULT_RETRIES;
-	return startPeriod + interval * retries;
+	const probeTimeout =
+		parseComposeDurationSeconds(healthcheck.timeout) ??
+		HEALTHCHECK_DEFAULT_TIMEOUT_SECONDS;
+	return startPeriod + retries * (interval + probeTimeout);
 };
 
 const isNoneTest = (test: unknown) =>
@@ -358,14 +372,16 @@ export const getRollingEligibility = ({
 		if (healthTimeoutSeconds <= settle) {
 			add(
 				"health-timeout-too-short",
-				`The health timeout (${healthTimeoutSeconds}s) must be longer than start_period + interval x retries of the healthcheck (${settle}s).`,
+				`The health timeout (${healthTimeoutSeconds}s) must be longer than start_period + retries x (interval + timeout) of the healthcheck (${settle}s).`,
 			);
 		}
 	}
 
 	if (typeof definition.image === "string") {
 		const base = getImageBaseName(definition.image);
-		if (STATEFUL_IMAGE_NAMES.has(base)) {
+		// mcr.microsoft.com/mssql/server has a generic base name.
+		const mssql = definition.image.toLowerCase().includes("/mssql/");
+		if (STATEFUL_IMAGE_NAMES.has(base) || mssql) {
 			add(
 				"stateful-image",
 				`The image "${base}" looks like a datastore. Stateful services keep the plain recreate.`,
@@ -487,12 +503,6 @@ export interface RollingScriptOptions {
 	/** Services of a build-server deploy are pulled earlier and never built here. */
 	remoteBuild: boolean;
 	pullAlways: boolean;
-	/**
-	 * False when every service of the compose is rolled: the `up -d --no-deps
-	 * <others>` step is then not emitted at all. Profiles can only shrink the set
-	 * further at run time, so `true` is always safe.
-	 */
-	hasOtherServices?: boolean;
 	healthTimeoutSeconds: number;
 	drainSeconds: number;
 	pollIntervalSeconds?: number;
@@ -538,7 +548,6 @@ export const getRollingReplaceScript = ({
 	pullServices = [],
 	remoteBuild,
 	pullAlways,
-	hasOtherServices = true,
 	healthTimeoutSeconds,
 	drainSeconds,
 	pollIntervalSeconds = ROLLING_POLL_INTERVAL_SECONDS,
@@ -571,13 +580,14 @@ export const getRollingReplaceScript = ({
 		dokploy_roll_sleep ${drain};`
 			: "";
 
-	const othersBlock = hasOtherServices
-		? `
+	// Always emitted: DR_OTHERS comes from `config --services`, which also sees
+	// included and extended services the raw spec lacks, and the step is skipped
+	// at run time when there are none.
+	const othersBlock = `
 			if [ -n "$DR_OTHERS" ]; then
 				dokploy_roll_log "updating the services that are not rolled:$DR_OTHERS";
 				dokploy_roll_compose up -d --no-deps ${pullFlag}${buildFlag} $DR_OTHERS 2>&1 || return 1;
-			fi;`
-		: "";
+			fi;`;
 
 	const definitions = `
 		DOKPLOY_ROLL_SELECTED=${quote([services.join(" ")])};
@@ -595,6 +605,10 @@ export const getRollingReplaceScript = ({
 			docker stop "$@" >/dev/null 2>&1 || true;
 			docker rm -f "$@" >/dev/null 2>&1;
 		};
+		dokploy_roll_discard() {
+			if [ $# -eq 0 ]; then return 0; fi;
+			docker rm -f "$@" >/dev/null 2>&1;
+		};
 		dokploy_roll_extras() {
 			for DR_X in $(dokploy_roll_ids "$DOKPLOY_ROLL_SVC"); do
 				case " $DOKPLOY_ROLL_BEFORE " in *" $DR_X "*) ;; *) echo "$DR_X";; esac;
@@ -606,7 +620,7 @@ export const getRollingReplaceScript = ({
 			dokploy_roll_log "the deployment was interrupted";
 			if [ "$DOKPLOY_ROLL_ACTIVE" = "1" ]; then
 				DR_EXTRA=$(dokploy_roll_extras);
-				if [ -n "$DR_EXTRA" ]; then dokploy_roll_log "removing the replica of $DOKPLOY_ROLL_SVC that was not promoted"; dokploy_roll_remove $DR_EXTRA || true; fi;
+				if [ -n "$DR_EXTRA" ]; then dokploy_roll_log "removing the replica of $DOKPLOY_ROLL_SVC that was not promoted"; dokploy_roll_discard $DR_EXTRA || true; fi;
 			fi;
 			if [ -n "$DOKPLOY_ROLL_PROMOTING" ]; then dokploy_roll_remove $DOKPLOY_ROLL_PROMOTING || true; fi;
 			return 0;
@@ -614,7 +628,7 @@ export const getRollingReplaceScript = ({
 		dokploy_roll_fail() {
 			DR_EXTRA=$(dokploy_roll_extras);
 			DOKPLOY_ROLL_ACTIVE=0;
-			if [ -n "$DR_EXTRA" ]; then dokploy_roll_remove $DR_EXTRA || true; fi;
+			if [ -n "$DR_EXTRA" ]; then dokploy_roll_discard $DR_EXTRA || true; fi;
 			echo "Error: ❌ Rolling replace of $1 failed: $DOKPLOY_ROLL_REASON. The new replica was removed and the previous container was left as it was.";
 		};
 		dokploy_roll_reconcile() {
@@ -647,14 +661,18 @@ export const getRollingReplaceScript = ({
 		};
 		dokploy_roll_wait_healthy() {
 			DR_DEADLINE=$(( $(date +%s) + ${timeout} ));
-			DR_LAST="";
+			DR_LAST=""; DR_NONE=0;
 			while :; do
 				DR_STATE=$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null) || DR_STATE="missing none";
 				if [ "$DR_STATE" != "$DR_LAST" ]; then dokploy_roll_log "$DOKPLOY_ROLL_SVC: the new replica is $DR_STATE"; DR_LAST="$DR_STATE"; fi;
+				if [ "$DR_STATE" != "running none" ]; then DR_NONE=0; fi;
 				case "$DR_STATE" in
 					"running healthy") return 0;;
 					"running unhealthy") DOKPLOY_ROLL_REASON="the new replica reported unhealthy"; return 1;;
-					"running none") DOKPLOY_ROLL_REASON="the new replica has no health status, the healthcheck is missing or disabled"; return 1;;
+					"running none")
+						# The engine may not have attached the health monitor on the first poll.
+						DR_NONE=$((DR_NONE + 1));
+						if [ "$DR_NONE" -ge 2 ]; then DOKPLOY_ROLL_REASON="the new replica has no health status, the healthcheck is missing or disabled"; return 1; fi;;
 					"exited "*|"dead "*|"removing "*|"missing "*) DOKPLOY_ROLL_REASON="the new replica stopped before it became healthy ($DR_STATE)"; return 1;;
 				esac;
 				if [ "$(date +%s)" -ge "$DR_DEADLINE" ]; then DOKPLOY_ROLL_REASON="the new replica was not healthy within ${timeout}s (last state: $DR_STATE)"; return 1; fi;

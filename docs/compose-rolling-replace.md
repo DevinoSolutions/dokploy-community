@@ -44,8 +44,9 @@ guardrails):
   "all". Databases and other stateful services never belong here.
 - **Health timeout** (10 to 900 s, default 120): how long the new replica has
   to report healthy. It must be longer than the service's `start_period +
-  interval x retries`; the card checks it against the healthcheck of each
-  selected service.
+  retries x (interval + timeout)` (a failing probe runs up to its `timeout`
+  before the next one starts; the Compose defaults are 30 s each); the card
+  checks it against the healthcheck of each selected service.
 - **Drain delay** (0 to 120 s, default 5): the wait between "new replica
   healthy" and "stop the old container". It does not make the old container
   unroutable (see "The stop window" below).
@@ -68,7 +69,7 @@ hold:
 | another service uses `network_mode` / `pid` / `ipc: service:<svc>` or `volumes_from: <svc>` on it | replacing it breaks the dependent |
 | no compose-level `healthcheck`, `healthcheck.disable: true` or `test: ["NONE"]` | no readiness signal. An image-level `HEALTHCHECK` is not visible to Dokploy, so put the healthcheck in the compose file |
 | the image looks like a datastore (postgres, mysql, mariadb, mongo, redis, valkey, rabbitmq, kafka, ...) | stateful services keep the plain recreate. This is only a guard; the explicit selection is the real control |
-| health timeout is not longer than `start_period + interval x retries` | the replica would be judged before Docker has finished judging it |
+| health timeout is not longer than `start_period + retries x (interval + timeout)` | the replica would be judged before Docker has finished judging it |
 
 Things Dokploy cannot see, so you decide before selecting a service:
 
@@ -84,6 +85,13 @@ Things Dokploy cannot see, so you decide before selecting a service:
   length of the overlap (Docker DNS ignores health outside swarm).
 - Exec, terminal and backup actions pick the first running container, which can
   be either replica for a few seconds.
+- **Anything only visible after Compose renders the file.** Eligibility is read
+  from the compose file as Dokploy sees it, without variable interpolation,
+  `extends`, `include`, profiles or `.env` values. A `ports`,
+  `container_name` or `scale` that only appears after those are applied is
+  not detected. It fails safe: a second replica that cannot bind its port or
+  take its name makes the `up` fail, the new replica is removed and the old
+  container keeps serving.
 
 ## When the compose changes after you selected a service (drift)
 
@@ -97,13 +105,27 @@ deploy is never failed because of drift.
 - **New replica not healthy in time:** it is removed, the old container keeps
   serving, the deployment is marked as an error and the usual failure
   notification is sent. When no service had been replaced yet, the regular
-  restore of the previous release applies as before.
+  restore of the previous release applies as before. That restore recreates
+  every service of the compose, so services that are not rolled and were
+  already updated by this deploy go back to the previous release with a normal
+  stop-first recreate (a short downtime for them).
+- **The old container cannot be removed** after the new replica is healthy: the
+  service fails, the new replica keeps serving, the old container is left
+  stopped, and no `docker compose up` runs for it (Compose would scale back to
+  one container and keep the lowest-numbered, i.e. old, one). The next deploy
+  reconciles it.
 - **Several selected services:** services already replaced stay on the new
   release and the deployment reports an error. There is no revert-roll and no
   automatic restore once a service has been replaced.
-- **Cancel / kill mid-rollout** (a `compose.killBuild` style interrupt): the new
-  replica that was not promoted yet is removed as well. A hard `kill -9` cannot
-  be caught.
+- **Cancel mid-rollout** (`compose.killBuild` sends SIGINT to the local deploy
+  process): the new replica that was not promoted yet is removed at once with
+  `docker rm -f`, and the old container keeps serving. Limits:
+  - On a compose that deploys through a build server, cancel only signals the
+    build-server commands. The rolling script runs on the serving host and is
+    not interrupted, so a rollout that already started runs to completion, like
+    the single `up` it replaces.
+  - `deployment.killProcess` sends `kill -9`, which cannot be caught: it can
+    leave two containers until the next deploy reconciles them.
 - **Interrupted deploys can leave two containers.** The next deploy finds more
   than one container for a selected service and reconciles first: it keeps the
   newest healthy one, removes the rest, and goes on.

@@ -281,7 +281,8 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 								<p className="text-xs text-muted-foreground">
 									{ROLLING_HEALTH_TIMEOUT_MIN_SECONDS} to{" "}
 									{ROLLING_HEALTH_TIMEOUT_MAX_SECONDS}. Must be longer than a
-									service's <code>start_period + interval x retries</code>.
+									service's{" "}
+									<code>start_period + retries x (interval + timeout)</code>.
 								</p>
 							</div>
 							<div className="grid gap-2">

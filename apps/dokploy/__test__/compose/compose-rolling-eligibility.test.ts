@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 const healthcheck = {
 	test: ["CMD", "curl", "-f", "http://localhost/health"],
 	interval: "10s",
+	timeout: "5s",
 	retries: 3,
 	start_period: "20s",
 };
@@ -91,6 +92,10 @@ describe("rolling eligibility: every refusal reason", () => {
 		["stateful-image", { image: "docker.io/library/redis:7-alpine" }],
 		["stateful-image", { image: "bitnami/postgresql@sha256:abc" }],
 		["stateful-image", { image: "ghcr.io/x/valkey:8" }],
+		["stateful-image", { image: "redis/redis-stack:latest" }],
+		["stateful-image", { image: "mcr.microsoft.com/mssql/server:2022" }],
+		["stateful-image", { image: "qdrant/qdrant:v1" }],
+		["stateful-image", { image: "nats:2" }],
 	];
 
 	it.each(cases)("%s: %j", (code, extra) => {
@@ -160,19 +165,19 @@ describe("rolling eligibility: every refusal reason", () => {
 });
 
 describe("health timeout against the healthcheck", () => {
-	// start_period 20s + interval 10s x retries 3 = 50s
-	it("settle time is start_period + interval x retries", () => {
-		expect(getHealthcheckSettleSeconds(healthcheck)).toBe(50);
+	// start_period 20s + retries 3 x (interval 10s + timeout 5s) = 65s
+	it("settle time is start_period + retries x (interval + timeout)", () => {
+		expect(getHealthcheckSettleSeconds(healthcheck)).toBe(65);
 	});
 
-	it("uses the Compose defaults (30s interval, 3 retries, no start period)", () => {
-		expect(getHealthcheckSettleSeconds({ test: ["CMD", "true"] })).toBe(90);
+	it("uses the Compose defaults (30s interval, 30s timeout, 3 retries, no start period)", () => {
+		expect(getHealthcheckSettleSeconds({ test: ["CMD", "true"] })).toBe(180);
 	});
 
 	it.each([
-		[50, true],
-		[49, true],
-		[51, false],
+		[65, true],
+		[64, true],
+		[66, false],
 		[120, false],
 	])("timeout %ds is refused: %s", (timeout, refused) => {
 		expect(

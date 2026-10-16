@@ -7,7 +7,7 @@
 #   cfg/images.<svc>                 image refs of the service (`config --images`)
 #   cfg/imageid.<ref, / and : as _>  id of an image (`image inspect`)
 #   cfg/newimage.<svc>               image id of a replica created by `up`
-#   cfg/newhealth.<svc>              healthy | unhealthy | never | none | delay:<n>
+#   cfg/newhealth.<svc>              healthy | unhealthy | never | none | noneonce | delay:<n>
 #   cfg/up.fail.<svc>                `up` naming the service fails
 #   cfg/stop.noop, cfg/rm.fail       stop does nothing / rm fails
 #   calls.log                        one line per invocation
@@ -35,7 +35,8 @@ health_now() {
   left=$(cget "$1" polls_left)
   if [ -n "$left" ] && [ "$left" -gt 0 ]; then
     cset "$1" polls_left $((left - 1))
-    echo starting
+    # noneonce: the engine has not attached the health monitor on the first poll.
+    if [ -f "$D/containers/$1/pre_health" ]; then cat "$D/containers/$1/pre_health"; echo; else echo starting; fi
     return
   fi
   cget "$1" final_health
@@ -57,6 +58,7 @@ create() {
     unhealthy) cset "$id" final_health unhealthy; cset "$id" polls_left 0;;
     never) cset "$id" final_health starting; cset "$id" polls_left 0;;
     none) cset "$id" final_health none; cset "$id" polls_left 0;;
+    noneonce) cset "$id" final_health healthy; cset "$id" polls_left 1; cset "$id" pre_health none;;
   esac
   echo "$id"
 }

@@ -53,6 +53,10 @@ import {
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import {
+	ROLLING_HEALTH_TIMEOUT_MAX_SECONDS,
+	ROLLING_HEALTH_TIMEOUT_MIN_SECONDS,
+} from "@dokploy/server/db/validations/compose-rolling";
+import {
 	assertComposeRollingSettings,
 	getComposeRollingReport,
 } from "@dokploy/server/services/compose-rolling";
@@ -449,7 +453,12 @@ export const composeRouter = createTRPCRouter({
 	rollingEligibility: protectedProcedure
 		.input(
 			apiFetchServices.extend({
-				healthTimeoutSeconds: z.number().int().min(1).max(3600).optional(),
+				healthTimeoutSeconds: z
+					.number()
+					.int()
+					.min(ROLLING_HEALTH_TIMEOUT_MIN_SECONDS)
+					.max(ROLLING_HEALTH_TIMEOUT_MAX_SECONDS)
+					.optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
