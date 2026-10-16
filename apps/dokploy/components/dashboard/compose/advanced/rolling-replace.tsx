@@ -68,18 +68,9 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 	const drainSeconds = toNumber(drain, ROLLING_DRAIN_DEFAULT_SECONDS);
 	const isStack = data?.composeType === "stack";
 
-	// The timing is checked against each service's healthcheck, so it goes along.
-	const validTimeout =
-		Number.isInteger(timeoutSeconds) &&
-		timeoutSeconds >= ROLLING_HEALTH_TIMEOUT_MIN_SECONDS &&
-		timeoutSeconds <= ROLLING_HEALTH_TIMEOUT_MAX_SECONDS;
 	const { data: report, refetch: refetchReport } =
 		api.compose.rollingEligibility.useQuery(
-			{
-				composeId,
-				type: "cache",
-				healthTimeoutSeconds: validTimeout ? timeoutSeconds : undefined,
-			},
+			{ composeId, type: "cache" },
 			{ enabled: !!composeId, retry: false },
 		);
 
@@ -280,9 +271,10 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 								/>
 								<p className="text-xs text-muted-foreground">
 									{ROLLING_HEALTH_TIMEOUT_MIN_SECONDS} to{" "}
-									{ROLLING_HEALTH_TIMEOUT_MAX_SECONDS}. Must be longer than a
-									service's{" "}
-									<code>start_period + retries x (interval + timeout)</code>.
+									{ROLLING_HEALTH_TIMEOUT_MAX_SECONDS}. Raised automatically
+									when a service's{" "}
+									<code>start_period + retries x (interval + timeout)</code>{" "}
+									needs longer.
 								</p>
 							</div>
 							<div className="grid gap-2">

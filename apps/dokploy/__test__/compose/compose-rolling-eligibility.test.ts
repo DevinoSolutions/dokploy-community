@@ -1,4 +1,5 @@
 import {
+	getEffectiveHealthTimeoutSeconds,
 	getHealthcheckSettleSeconds,
 	getImageBaseName,
 	getRollingEligibility,
@@ -174,21 +175,67 @@ describe("health timeout against the healthcheck", () => {
 		expect(getHealthcheckSettleSeconds({ test: ["CMD", "true"] })).toBe(180);
 	});
 
-	it.each([
-		[65, true],
-		[64, true],
-		[66, false],
-		[120, false],
-	])("timeout %ds is refused: %s", (timeout, refused) => {
+	it("a healthcheck that settles within the longest wait is eligible", () => {
+		// Docker's defaults (180s) used to be refused against the 120s default.
 		expect(
-			codes(specOf({ web: web() }), { healthTimeoutSeconds: timeout }).includes(
-				"health-timeout-too-short",
-			),
-		).toBe(refused);
+			codes(specOf({ web: web({ healthcheck: { test: ["CMD", "true"] } }) })),
+		).toEqual([]);
 	});
 
-	it("is not checked when no timeout is given", () => {
-		expect(codes(specOf({ web: web() }))).toEqual([]);
+	it("a healthcheck that cannot settle within the longest wait is refused", () => {
+		expect(
+			codes(
+				specOf({
+					web: web({
+						healthcheck: { test: ["CMD", "true"], interval: "5m", retries: 3 },
+					}),
+				}),
+			),
+		).toEqual(["health-timeout-too-short"]);
+	});
+
+	it("zero interval, timeout and retries mean Docker's defaults", () => {
+		expect(
+			getHealthcheckSettleSeconds({
+				test: ["CMD", "true"],
+				interval: "0s",
+				timeout: "0s",
+				retries: 0,
+			}),
+		).toBe(180);
+	});
+
+	it.each([
+		[30, 66],
+		[120, 120],
+		[10, 66],
+		[900, 900],
+	])(
+		"the wait %ds is raised to cover the healthcheck: %ds",
+		(configured, expected) => {
+			// 65s to settle + 1s
+			expect(
+				getEffectiveHealthTimeoutSeconds(
+					specOf({ web: web() }),
+					["web"],
+					configured,
+				),
+			).toBe(expected);
+		},
+	);
+
+	it("the wait is never above the schema maximum", () => {
+		expect(
+			getEffectiveHealthTimeoutSeconds(
+				specOf({
+					web: web({
+						healthcheck: { test: ["CMD", "true"], interval: "1m", retries: 10 },
+					}),
+				}),
+				["web"],
+				120,
+			),
+		).toBe(900);
 	});
 
 	it.each([
@@ -251,7 +298,7 @@ describe("plan: drift is a fallback, never a failure", () => {
 		expect(plan.rolled).toEqual([]);
 	});
 
-	it("a health timeout shorter than the healthcheck falls back", () => {
+	it("a health timeout shorter than the healthcheck is raised, not refused", () => {
 		const plan = planRollingServices({
 			settings: { ...settings, services: ["web"], healthTimeoutSeconds: 30 },
 			spec: specOf({ web: web() }),
@@ -259,10 +306,8 @@ describe("plan: drift is a fallback, never a failure", () => {
 			hasCustomCommand: false,
 			freshVolumes: false,
 		});
-		expect(plan.rolled).toEqual([]);
-		expect(plan.fallbacks[0]?.blockers[0]?.code).toBe(
-			"health-timeout-too-short",
-		);
+		expect(plan.rolled).toEqual(["web"]);
+		expect(plan.healthTimeoutSeconds).toBe(66);
 	});
 });
 
