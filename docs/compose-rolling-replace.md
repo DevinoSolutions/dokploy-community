@@ -43,10 +43,11 @@ guardrails):
   whether it is eligible and why not. Pick services explicitly: there is no
   "all". Databases and other stateful services never belong here.
 - **Health timeout** (10 to 900 s, default 120): how long the new replica has
-  to report healthy. It must be longer than the service's `start_period +
-  retries x (interval + timeout)` (a failing probe runs up to its `timeout`
-  before the next one starts; the Compose defaults are 30 s each); the card
-  checks it against the healthcheck of each selected service.
+  to report healthy. If a selected service's healthcheck needs longer than
+  that (`start_period + retries x (interval + timeout)`, a failing probe runs
+  up to its `timeout` before the next one starts; the Compose defaults are 30 s
+  each, so 180 s with only a `test`), the wait is raised to cover it at deploy
+  time, up to the 900 s maximum.
 - **Drain delay** (0 to 120 s, default 5): the wait between "new replica
   healthy" and "stop the old container". It does not make the old container
   unroutable (see "The stop window" below).
@@ -69,7 +70,7 @@ hold:
 | another service uses `network_mode` / `pid` / `ipc: service:<svc>` or `volumes_from: <svc>` on it | replacing it breaks the dependent |
 | no compose-level `healthcheck`, `healthcheck.disable: true` or `test: ["NONE"]` | no readiness signal. An image-level `HEALTHCHECK` is not visible to Dokploy, so put the healthcheck in the compose file |
 | the image looks like a datastore (postgres, mysql, mariadb, mongo, redis, valkey, rabbitmq, kafka, ...) | stateful services keep the plain recreate. This is only a guard; the explicit selection is the real control |
-| health timeout is not longer than `start_period + retries x (interval + timeout)` | the replica would be judged before Docker has finished judging it |
+| the healthcheck cannot settle within 900 s (`start_period + retries x (interval + timeout)`) | the replica would be judged before Docker has finished judging it |
 
 Things Dokploy cannot see, so you decide before selecting a service:
 

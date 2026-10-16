@@ -263,11 +263,11 @@ describe("rolling replace: when it cannot apply", () => {
 		expect(command).toContain("the compose file could not be read");
 	});
 
-	it("a short health timeout falls back too", async () => {
+	it("a short health timeout is raised to cover the healthcheck", async () => {
 		const command = await build(rolling(["web"], { healthTimeoutSeconds: 10 }));
-		// 3 retries x (5s interval + 2s timeout) = 21s > 10s
-		expect(command).not.toContain("dokploy_roll_run");
-		expect(command).toContain("must be longer than start_period");
+		// 3 retries x (5s interval + 2s timeout) = 21s, plus 1s
+		expect(command).toContain("dokploy_roll_run");
+		expect(command).toContain("$(date +%s) + 22 ))");
 	});
 });
 

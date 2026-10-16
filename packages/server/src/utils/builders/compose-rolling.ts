@@ -2,6 +2,7 @@ import { quote } from "shell-quote";
 import {
 	type ComposeRollingReplace,
 	composeRollingReplaceSchema,
+	ROLLING_HEALTH_TIMEOUT_MAX_SECONDS,
 } from "../../db/validations/compose-rolling";
 
 export type { ComposeRollingReplace };
@@ -81,8 +82,6 @@ export interface RollingEligibilityInput {
 	hasCustomCommand?: boolean;
 	/** A fresh-volumes deploy is destructive by design. */
 	freshVolumes?: boolean;
-	/** When given, validated against the service's healthcheck timing. */
-	healthTimeoutSeconds?: number;
 }
 
 /**
@@ -270,7 +269,6 @@ export const getRollingEligibility = ({
 	composeType,
 	hasCustomCommand = false,
 	freshVolumes = false,
-	healthTimeoutSeconds,
 }: RollingEligibilityInput): RollingBlocker[] => {
 	const blockers: RollingBlocker[] = [];
 	const add = (code: RollingBlockerCode, message: string) =>
@@ -367,12 +365,14 @@ export const getRollingEligibility = ({
 			"no-healthcheck",
 			"The healthcheck has no test in the compose file (an image-level HEALTHCHECK is not visible here).",
 		);
-	} else if (healthTimeoutSeconds !== undefined) {
+	} else {
+		// The wait is raised to cover the healthcheck; only one that cannot fit
+		// even in the longest wait is refused.
 		const settle = getHealthcheckSettleSeconds(healthcheck);
-		if (healthTimeoutSeconds <= settle) {
+		if (settle >= ROLLING_HEALTH_TIMEOUT_MAX_SECONDS) {
 			add(
 				"health-timeout-too-short",
-				`The health timeout (${healthTimeoutSeconds}s) must be longer than start_period + retries x (interval + timeout) of the healthcheck (${settle}s).`,
+				`The healthcheck can take ${settle}s to settle (start_period + retries x (interval + timeout)), which does not fit in the longest health timeout (${ROLLING_HEALTH_TIMEOUT_MAX_SECONDS}s). Shorten its interval, timeout or retries.`,
 			);
 		}
 	}
@@ -438,6 +438,30 @@ export const getStackPreflightWarnings = (
 	return warnings;
 };
 
+/**
+ * The wait for a new replica: the configured timeout, raised when a selected
+ * service's healthcheck needs longer (`start_period + retries x (interval +
+ * timeout)` plus one second), never above the schema maximum. Waiting less
+ * would remove a replica Docker has not finished judging.
+ */
+export const getEffectiveHealthTimeoutSeconds = (
+	spec: RollingSpec,
+	services: string[],
+	configured: number,
+) => {
+	let needed = configured;
+	for (const service of services) {
+		const healthcheck = spec.services?.[service]?.healthcheck;
+		if (isObject(healthcheck)) {
+			needed = Math.max(
+				needed,
+				Math.ceil(getHealthcheckSettleSeconds(healthcheck)) + 1,
+			);
+		}
+	}
+	return Math.min(needed, ROLLING_HEALTH_TIMEOUT_MAX_SECONDS);
+};
+
 export interface RollingPlanInput {
 	settings: ComposeRollingReplace;
 	spec: RollingSpec;
@@ -449,6 +473,8 @@ export interface RollingPlanInput {
 export interface RollingServicePlan {
 	/** Eligible at deploy time: rolled. */
 	rolled: string[];
+	/** The wait for the new replica, raised to cover the rolled services' healthchecks. */
+	healthTimeoutSeconds: number;
 	/** Selected but no longer eligible: a normal recreate, with a warning. */
 	fallbacks: Array<{ service: string; blockers: RollingBlocker[] }>;
 }
@@ -466,7 +492,11 @@ export const planRollingServices = ({
 	hasCustomCommand,
 	freshVolumes,
 }: RollingPlanInput): RollingServicePlan => {
-	const plan: RollingServicePlan = { rolled: [], fallbacks: [] };
+	const plan: RollingServicePlan = {
+		rolled: [],
+		fallbacks: [],
+		healthTimeoutSeconds: settings.healthTimeoutSeconds,
+	};
 	for (const service of settings.services) {
 		const blockers = getRollingEligibility({
 			spec,
@@ -474,11 +504,15 @@ export const planRollingServices = ({
 			composeType,
 			hasCustomCommand,
 			freshVolumes,
-			healthTimeoutSeconds: settings.healthTimeoutSeconds,
 		});
 		if (blockers.length === 0) plan.rolled.push(service);
 		else plan.fallbacks.push({ service, blockers });
 	}
+	plan.healthTimeoutSeconds = getEffectiveHealthTimeoutSeconds(
+		spec,
+		plan.rolled,
+		settings.healthTimeoutSeconds,
+	);
 	return plan;
 };
 

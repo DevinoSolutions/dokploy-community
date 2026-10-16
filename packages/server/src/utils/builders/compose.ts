@@ -439,7 +439,7 @@ const getRollingDeployPlan = async ({
 				: plan.rolled.filter((service) => !hasBuild(service)),
 		remoteBuild,
 		pullAlways: Boolean(compose.pullImagesOnDeploy),
-		healthTimeoutSeconds: settings.healthTimeoutSeconds,
+		healthTimeoutSeconds: plan.healthTimeoutSeconds,
 		drainSeconds: settings.drainSeconds,
 	});
 	return { script, rolled: plan.rolled, notices };
