@@ -215,6 +215,24 @@ describe("waitForComposeRequiredChecks — the gate itself", () => {
 		expect(mocks.findPendingBreakGlass).not.toHaveBeenCalled();
 	});
 
+	it("forwards the cancel hook to the wait, and passes none when it is given none", async () => {
+		const assertNotCancelled = vi.fn().mockResolvedValue(undefined);
+		await waitForComposeRequiredChecks({
+			compose: COMPOSE,
+			serverId: null,
+			assertNotCancelled,
+		});
+		expect(mocks.waitForUnitRequiredChecks.mock.calls[0]?.[0]).toMatchObject({
+			assertNotCancelled,
+		});
+
+		mocks.waitForUnitRequiredChecks.mockClear();
+		await run();
+		expect(
+			mocks.waitForUnitRequiredChecks.mock.calls[0]?.[0].assertNotCancelled,
+		).toBeUndefined();
+	});
+
 	it("still gates an excluded compose unit, because exclusion is about the build host", async () => {
 		mocks.isUnitExcluded.mockResolvedValue(true);
 		await run();

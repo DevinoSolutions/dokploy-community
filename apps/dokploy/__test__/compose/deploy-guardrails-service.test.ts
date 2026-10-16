@@ -69,6 +69,21 @@ vi.mock("@dokploy/server/services/deployment", async () => {
 	};
 });
 
+// The closing `done` goes through the conditional update; record it with the
+// other status writes so `statuses()` sees one list.
+vi.mock("@dokploy/server/services/deployment-cancel", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/services/deployment-cancel")
+	>("@dokploy/server/services/deployment-cancel");
+	return {
+		...actual,
+		markDeploymentDoneUnlessCancelled: async (deploymentId: string) => {
+			mocks.updateDeploymentStatus(deploymentId, "done");
+			return true;
+		},
+	};
+});
+
 import {
 	deployCompose,
 	rebuildCompose,

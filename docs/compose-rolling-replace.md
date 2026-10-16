@@ -144,6 +144,22 @@ deploy is never failed because of drift.
     A fresh-volumes deploy is checked right before its `down --volumes` and
     not again after it: once the stack is down the `up` runs, and a cancel
     that lands then is reported as arriving too late.
+  - The required-checks wait polls the cancel flag at the same cadence as it
+    polls GitHub. A cancel during it ends the wait at the next poll instead of
+    holding the queue slot until the checks conclude or time out, restores the
+    previous release's files like the cancel above, and reports no error and no
+    failed-gate audit entry. The flag is only ever set for a compose that a
+    cancel claims through its deployment row: one with a rolling replace, or one
+    that builds on a build server. A plain compose (no rolling replace, no build
+    server) keeps the generic stop and is not claimed by a UI cancel, so for it
+    the poll finds nothing, unless rolling was switched on after the deploy
+    started.
+  - A deploy loads the compose when it starts, and a cancel reads it again when
+    it is pressed, so rolling can have been switched on in between. The closing
+    `done` of a compose deploy therefore never overwrites a deployment that was
+    cancelled meanwhile, whichever of the two saw the rolling setting: the row
+    stays cancelled and the log says the cancel arrived too late. A failure
+    after a cancel still ends as an error.
   - The step that was let finish already replaced the compose file and `.env`
     on disk, and Start runs `up -d` from them. So a cancel before the release
     step puts the previous release's files back (the same restore a failed

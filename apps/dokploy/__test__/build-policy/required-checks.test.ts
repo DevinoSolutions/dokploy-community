@@ -208,4 +208,91 @@ describe("waitForRequiredChecks", () => {
 			}),
 		).rejects.toBeInstanceOf(BuildPolicyError);
 	});
+	describe("a cancel while the checks are awaited (T-2838)", () => {
+		const cancelled = () =>
+			Object.assign(new Error("Deployment cancelled"), {
+				deploymentCancelled: true,
+			});
+
+		it("stops at the next poll with the cancel, not a timeout, and reads no more checks", async () => {
+			const listCheckRuns = vi.fn().mockResolvedValue([run("build", "queued")]);
+			let clock = 0;
+			const sleep = vi.fn().mockImplementation(async () => {
+				clock += 5_000;
+			});
+			let polls = 0;
+			const assertNotCancelled = vi.fn().mockImplementation(async () => {
+				polls++;
+				if (polls >= 3) throw cancelled();
+			});
+
+			await expect(
+				waitForRequiredChecks({
+					...base,
+					listCheckRuns,
+					sleep,
+					now: () => clock,
+					assertNotCancelled,
+				}),
+			).rejects.toMatchObject({ deploymentCancelled: true });
+
+			// Checked once per poll, ahead of the read: the third poll never reads.
+			expect(listCheckRuns).toHaveBeenCalledTimes(2);
+			expect(sleep).toHaveBeenCalledTimes(2);
+		});
+
+		it("a cancel that lands during the last sleep wins over the timeout", async () => {
+			const listCheckRuns = vi.fn().mockResolvedValue([run("build", "queued")]);
+			let clock = 0;
+			const sleep = vi.fn().mockImplementation(async () => {
+				clock += 60_000;
+			});
+			let polls = 0;
+			const assertNotCancelled = vi.fn().mockImplementation(async () => {
+				polls++;
+				if (polls >= 2) throw cancelled();
+			});
+
+			await expect(
+				waitForRequiredChecks({
+					...base,
+					listCheckRuns,
+					sleep,
+					now: () => clock,
+					assertNotCancelled,
+				}),
+			).rejects.toMatchObject({ deploymentCancelled: true });
+		});
+
+		it("a failed check still fails when nothing was cancelled", async () => {
+			const listCheckRuns = vi
+				.fn()
+				.mockResolvedValue([run("build", "completed", "failure")]);
+			const assertNotCancelled = vi.fn().mockResolvedValue(undefined);
+
+			await expect(
+				waitForRequiredChecks({
+					...base,
+					listCheckRuns,
+					sleep: vi.fn(),
+					now: () => 0,
+					assertNotCancelled,
+				}),
+			).rejects.toMatchObject({ code: "REQUIRED_CHECKS_FAILED" });
+		});
+
+		it("is not required: without the hook the wait behaves as before", async () => {
+			const listCheckRuns = vi
+				.fn()
+				.mockResolvedValue([run("build", "completed", "success")]);
+			await expect(
+				waitForRequiredChecks({
+					...base,
+					listCheckRuns,
+					sleep: vi.fn(),
+					now: () => 0,
+				}),
+			).resolves.toBeUndefined();
+		});
+	});
 });
