@@ -289,7 +289,7 @@ describe("rolling replace: the generated script", () => {
 	it("one service: scale up, record ids, health wait, drain, old ids removed, then reconcile", () => {
 		const { definitions } = script();
 		const order = [
-			'dokploy_roll_reconcile "$1";',
+			'dokploy_roll_reconcile "$1" || return 1;',
 			'dokploy_roll_unchanged "$1"',
 			'DOKPLOY_ROLL_BEFORE=$(dokploy_roll_ids "$1"',
 			'--scale "$1=2" "$1"',

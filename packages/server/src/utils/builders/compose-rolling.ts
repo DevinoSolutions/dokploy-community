@@ -642,7 +642,13 @@ export const getRollingReplaceScript = ({
 			if [ -z "$DR_KEEP" ]; then return 0; fi;
 			DR_DROP="";
 			for DR_C in $DR_ALL_IDS; do if [ "$DR_C" != "$DR_KEEP" ]; then DR_DROP="$DR_DROP $DR_C"; fi; done;
-			dokploy_roll_remove $DR_DROP || dokploy_roll_log "$1: some leftover containers could not be removed";
+			dokploy_roll_remove $DR_DROP || true;
+			DR_STILL=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_KEEP" || true);
+			if [ -n "$DR_STILL" ]; then docker rm -f $DR_STILL >/dev/null 2>&1 || true; DR_STILL=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_KEEP" || true); fi;
+			if [ -n "$DR_STILL" ]; then
+				echo "Error: ❌ Rolling replace of $1: a leftover container could not be removed ($DR_STILL). The container $DR_KEEP is serving. No compose up is run for this service: Compose would scale to one container and could keep the stuck one instead.";
+				return 1;
+			fi;
 			return 0;
 		};
 		dokploy_roll_unchanged() {
@@ -681,7 +687,7 @@ export const getRollingReplaceScript = ({
 		};
 		dokploy_roll_service() {
 			DOKPLOY_ROLL_SVC="$1"; DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_REASON=""; DOKPLOY_ROLL_BEFORE="";
-			dokploy_roll_reconcile "$1";
+			dokploy_roll_reconcile "$1" || return 1;
 			DR_OLD=$(dokploy_roll_running_ids "$1");
 			if [ -z "$DR_OLD" ]; then
 				dokploy_roll_log "$1: no running container, starting it with a plain up";

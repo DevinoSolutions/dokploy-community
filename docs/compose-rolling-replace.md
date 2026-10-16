@@ -113,7 +113,10 @@ deploy is never failed because of drift.
   service fails, the new replica keeps serving, the old container is left
   stopped, and no `docker compose up` runs for it (Compose would scale back to
   one container and keep the lowest-numbered, i.e. old, one). The next deploy
-  reconciles it.
+  reconciles it. If the leftover still cannot be removed then, the deploy fails
+  again for that service before any `docker compose up` runs, so a stuck old
+  container can never swap the service back to the old release; remove it by
+  hand (`docker rm -f <id>`).
 - **Several selected services:** services already replaced stay on the new
   release and the deployment reports an error. There is no revert-roll and no
   automatic restore once a service has been replaced.

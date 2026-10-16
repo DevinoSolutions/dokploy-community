@@ -674,6 +674,30 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			expect(containersOf(world, "web")).toEqual(["web-old-2"]);
 		});
 
+		it("a leftover that cannot be removed fails the deploy on every run and no compose up ever runs", {
+			timeout: 90_000,
+		}, () => {
+			// The older container is stopped but stuck (rm fails); the newer one serves.
+			// Compose would remove the newer one and start the stuck one again.
+			const world = createWorld({
+				...twoWebs(
+					{ running: false },
+					{ health: "healthy" },
+					{ hash: "H1", newImage: "sha256:OLD-web" },
+				),
+				flags: ["rm.fail"],
+			});
+			for (const attempt of [1, 2]) {
+				const result = runRoll(world);
+				expect(result.rc, `run ${attempt}`).not.toBe(0);
+				expect(result.stdout).toContain(
+					"leftover container could not be removed",
+				);
+				expect(runningOf(world, "web")).toEqual(["web-old-2"]);
+			}
+			expect(calls(world).filter((line) => / up /.test(line))).toEqual([]);
+		});
+
 		it("keeps the older one when the newer is not healthy", {
 			timeout: 90_000,
 		}, () => {
