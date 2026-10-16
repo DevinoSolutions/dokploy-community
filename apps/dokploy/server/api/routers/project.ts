@@ -1314,6 +1314,8 @@ export const projectRouter = createTRPCRouter({
 									// Not copied: the health check URL points at the original
 									// service, and a copy starts with every guardrail off.
 									deployGuardrails: _deployGuardrails,
+									// Not copied either: a copy opts into rolling replace itself.
+									rollingReplace: _rollingReplace,
 									...compose
 								} = await findComposeById(id);
 

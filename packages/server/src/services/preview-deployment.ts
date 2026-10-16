@@ -808,6 +808,9 @@ const executeComposePreview = async ({
 			// The deploy guardrails are configured for the production service (its
 			// health check URL would probe the wrong deployment for a preview).
 			deployGuardrails: null,
+			// Rolling replace never applies to a preview: its deploy path stays the
+			// plain recreate, whatever the production service opted into.
+			rollingReplace: null,
 			isolatedDeployment: false,
 			isolatedDeploymentsVolume: false,
 			env: resolvePreviewTemplateVariables(

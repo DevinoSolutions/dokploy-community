@@ -3,6 +3,10 @@ import {
 	deployGuardrailsSchema,
 } from "@dokploy/server/db/validations/compose-guardrails";
 import {
+	type ComposeRollingReplace,
+	composeRollingReplaceSchema,
+} from "@dokploy/server/db/validations/compose-rolling";
+import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
 } from "@dokploy/server/utils/preview-wildcard";
@@ -198,6 +202,13 @@ export const compose = pgTable("compose", {
 	 * existing row. See utils/builders/compose-guardrails.ts.
 	 */
 	deployGuardrails: jsonb("deployGuardrails").$type<DeployGuardrails>(),
+	/**
+	 * Fork column: opt-in rolling replace of selected services (scale up, wait
+	 * healthy, remove the old container). `null` = off, which is every existing
+	 * row. Separate from `deployGuardrails` on purpose: this one acts on the
+	 * deploy, the guardrails only observe. See utils/builders/compose-rolling.ts.
+	 */
+	rollingReplace: jsonb("rollingReplace").$type<ComposeRollingReplace>(),
 });
 
 export const composeRelations = relations(compose, ({ one, many }) => ({
@@ -299,6 +310,7 @@ const createSchema = createInsertSchema(compose, {
 		)
 		.optional(),
 	deployGuardrails: deployGuardrailsSchema.nullable().optional(),
+	rollingReplace: composeRollingReplaceSchema.nullable().optional(),
 });
 
 export const apiCreateCompose = createSchema.pick({

@@ -3,7 +3,7 @@ import { paths } from "@dokploy/server/constants";
 import type { InferResultType } from "@dokploy/server/types/with";
 import boxen from "boxen";
 import { quote } from "shell-quote";
-import { writeDomainsToCompose } from "../docker/domain";
+import { addDomainToCompose, writeDomainsToCompose } from "../docker/domain";
 import {
 	getInstallStagedFileCommand,
 	getStagedFilePath,
@@ -21,14 +21,23 @@ import {
 	DOCKER_EVENTS_FLUSH_COMMAND,
 	getDockerEventsStartScript,
 	getHealthCheckScript,
-	HEALTH_CHECK_STACK_SKIPPED_MESSAGE,
 	getPhaseEndCommand,
 	getPhaseHelpersScript,
 	getPhaseStartCommand,
 	getStallSnapshotStartScript,
+	HEALTH_CHECK_STACK_SKIPPED_MESSAGE,
 	resolveDeployGuardrails,
 	STALL_SNAPSHOT_CLEANUP_COMMAND,
 } from "./compose-guardrails";
+import {
+	describeRollingBlockers,
+	getRollingNoticeCommand,
+	getRollingReplaceScript,
+	getRollingRestoreGuard,
+	planRollingServices,
+	type RollingSpec,
+	resolveComposeRolling,
+} from "./compose-rolling";
 
 export type ComposeNested = InferResultType<
 	"compose",
@@ -346,6 +355,96 @@ export const getRestoreAfterFailedBuildCommand = async (
 	return `cd ${quote([projectPath])} 2>/dev/null || true;${restore}`;
 };
 
+interface RollingDeployPlan {
+	script: ReturnType<typeof getRollingReplaceScript> | null;
+	rolled: string[];
+	/** Lines for the deploy log: why a selected service is not rolled. */
+	notices: string[];
+}
+
+/**
+ * Decides, for this deploy, which selected services are rolled. Never throws
+ * and never fails a deploy: a setting that no longer fits the compose (drift)
+ * degrades to the normal recreate for that service, with a notice in the log.
+ */
+const getRollingDeployPlan = async ({
+	compose,
+	freshVolumes,
+	remoteBuild,
+	invocation,
+}: {
+	compose: ComposeNested;
+	freshVolumes: boolean;
+	remoteBuild: boolean;
+	invocation: string;
+}): Promise<RollingDeployPlan> => {
+	const off: RollingDeployPlan = { script: null, rolled: [], notices: [] };
+	const settings = resolveComposeRolling(compose.rollingReplace);
+	if (!settings) return off;
+	const skipped = (reason: string): RollingDeployPlan => ({
+		...off,
+		notices: [
+			`Rolling replace is off for this deploy: ${reason} Deploying normally.`,
+		],
+	});
+
+	if (compose.composeType !== "docker-compose") {
+		return skipped("it only applies to Docker Compose services, not stacks.");
+	}
+	if (compose.command) {
+		return skipped("the compose has a custom command.");
+	}
+	if (freshVolumes) {
+		return skipped("this deploy recreates the volumes.");
+	}
+
+	let spec: RollingSpec | null = null;
+	try {
+		spec = (await addDomainToCompose(
+			compose,
+			compose.domains,
+		)) as unknown as RollingSpec | null;
+	} catch {
+		spec = null;
+	}
+	if (!spec?.services) {
+		return skipped("the compose file could not be read.");
+	}
+
+	const plan = planRollingServices({
+		settings,
+		spec,
+		composeType: compose.composeType,
+		hasCustomCommand: false,
+		freshVolumes,
+	});
+	const notices = plan.fallbacks.map(
+		({ service, blockers }) =>
+			`Rolling replace: "${service}" is recreated normally this time. ${describeRollingBlockers(blockers)}`,
+	);
+	if (plan.rolled.length === 0) return { ...off, notices };
+
+	const definitions = spec.services;
+	const hasBuild = (service: string) =>
+		Boolean((definitions[service] as { build?: unknown } | null)?.build);
+	const script = getRollingReplaceScript({
+		appName: compose.appName,
+		invocation,
+		services: plan.rolled,
+		// A build server pulled the images before this script runs.
+		buildServices: remoteBuild ? [] : plan.rolled.filter(hasBuild),
+		pullServices:
+			remoteBuild || !compose.pullImagesOnDeploy
+				? []
+				: plan.rolled.filter((service) => !hasBuild(service)),
+		remoteBuild,
+		pullAlways: Boolean(compose.pullImagesOnDeploy),
+		healthTimeoutSeconds: settings.healthTimeoutSeconds,
+		drainSeconds: settings.drainSeconds,
+	});
+	return { script, rolled: plan.rolled, notices };
+};
+
 export const getBuildComposeCommand = async (
 	rawCompose: ComposeNested,
 	options: BuildComposeCommandOptions = {},
@@ -367,17 +466,18 @@ export const getBuildComposeCommand = async (
 			"This compose builds on a build server, but no remote build result was provided; refusing to build on the serving host.",
 		);
 	}
+	const remoteOptions: CreateCommandRemoteOptions | undefined = remoteBuild
+		? {
+				overridePath:
+					remoteBuild.images.length > 0
+						? getComposeBuildOverridePath(compose)
+						: undefined,
+			}
+		: undefined;
 	const command = createCommand(
 		compose,
 		mounts.length > 0 ? projectPath : undefined,
-		remoteBuild
-			? {
-					overridePath:
-						remoteBuild.images.length > 0
-							? getComposeBuildOverridePath(compose)
-							: undefined,
-				}
-			: undefined,
+		remoteOptions,
 	);
 
 	// The stack env, the env file and the compose are staged on the host before
@@ -408,13 +508,30 @@ export const getBuildComposeCommand = async (
 		await removeStagedFiles(compose.serverId, staged);
 		throw error;
 	}
+	// Opt-in rolling replace (null = off, which is every existing row). It takes
+	// the place of the single `up` below for the selected services; when it
+	// cannot apply, the deploy is the plain one and the log says why.
+	const rolling = await getRollingDeployPlan({
+		compose,
+		freshVolumes,
+		remoteBuild: Boolean(remoteBuild),
+		invocation: getComposeUpPrefix(
+			compose,
+			mounts.length > 0 ? projectPath : undefined,
+			remoteOptions,
+		),
+	});
+	const rollingLogLine = rolling.script
+		? `\nRolling replace: ${rolling.rolled.join(", ")} 🔁`
+		: "";
+
 	const logContent = `
 App Name: ${appName}
 Build Compose 🐳
 Detected: ${mounts.length} mounts 📂
 Command: docker ${command}
 Source Type: docker ${sourceType} ✅
-Compose Type: ${composeType} ✅`;
+Compose Type: ${composeType} ✅${rollingLogLine}`;
 
 	const logBox = boxen(logContent, {
 		padding: {
@@ -493,9 +610,14 @@ Compose Type: ${composeType} ✅`;
 		if [ "$PULL_OK" = "1" ]; then { ${pulls}; } 2>&1 || PULL_OK=0; fi${pullPhaseEnd}`;
 	}
 	const cleanEnvPrefix = getCleanEnvPrefix(stackEnvFile);
-	const upLine = remotePullBlock
-		? `if [ "$PULL_OK" = "1" ]; then ${cleanEnvPrefix} docker ${command.split(" ").join(" ")} 2>&1; else false; fi`
+	// The rolling replace is one shell function that takes the place of the
+	// docker line; without it this is the single docker line it always was.
+	const upCommand = rolling.script
+		? rolling.script.call
 		: `${cleanEnvPrefix} docker ${command.split(" ").join(" ")} 2>&1`;
+	const upLine = remotePullBlock
+		? `if [ "$PULL_OK" = "1" ]; then ${upCommand}; else false; fi`
+		: upCommand;
 	// The staged stack env is removed once `up` is done with it: before the
 	// script stops on the failure branch, right after `up` on the success one.
 	const stackEnvCleanup = stackEnvFile ? `rm -f ${quote([stackEnvFile])};` : "";
@@ -503,14 +625,30 @@ Compose Type: ${composeType} ✅`;
 	// Guardrails around the docker line: the phase helpers go first, the docker
 	// events capture and the stall snapshots start right before `up`, and all
 	// are closed right after it returns (on the failure branch as well, before the restore runs).
-	const upPhaseName = remotePullBlock
-		? "Start containers (compose up)"
-		: composeType === "stack"
-			? "Deploy stack (docker stack deploy)"
-			: "Build and start containers (compose up)";
+	const upPhaseName = rolling.script
+		? "Rolling replace (compose up)"
+		: remotePullBlock
+			? "Start containers (compose up)"
+			: composeType === "stack"
+				? "Deploy stack (docker stack deploy)"
+				: "Build and start containers (compose up)";
 	const helpersBlock = phaseTimestamps
 		? `${getPhaseHelpersScript()}\n\t\t`
 		: "";
+	// Notices (why a service is not rolled) and the rolling functions: empty
+	// strings unless the compose opted in.
+	const rollingBlock = [
+		...rolling.notices.map(getRollingNoticeCommand),
+		rolling.script?.definitions ?? "",
+	]
+		.filter(Boolean)
+		.map((part) => `${part}\n\t\t`)
+		.join("");
+	// A failed rolling deploy restores the previous release only while nothing
+	// has been promoted yet (see getRollingRestoreGuard).
+	const failureRestore = rolling.script
+		? getRollingRestoreGuard(restoreCommands)
+		: restoreCommands;
 	const preUp = [
 		phaseTimestamps ? getPhaseStartCommand(upPhaseName) : "",
 		guardrails?.dockerEvents
@@ -572,7 +710,7 @@ Compose Type: ${composeType} ✅`;
 			fi`
 				: ""
 		}
-		${helpersBlock}${upSection} || { ${upFailureGuardrails}echo "Error: ❌ Docker command failed"; ${restoreCommands} ${stackEnvCleanup ? `${stackEnvCleanup} ` : ""}exit 1; }
+		${rollingBlock}${helpersBlock}${upSection} || { ${upFailureGuardrails}echo "Error: ❌ Docker command failed"; ${failureRestore} ${stackEnvCleanup ? `${stackEnvCleanup} ` : ""}exit 1; }
 		${upSuccessBlock}${compose.isolatedDeployment ? `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1` : ""}
 		${healthCheckSection}${persistLastGood}
 
@@ -666,6 +804,22 @@ export interface CreateCommandRemoteOptions {
 	overridePath?: string;
 }
 
+/**
+ * `compose -p <app> ... -f <file> [-f <build override>]`: the invocation
+ * prefix of the deploy's own `up`. The rolling replace runs its other
+ * subcommands (config, build, pull, up per service) with the very same prefix.
+ */
+export const getComposeUpPrefix = (
+	compose: ComposeNested,
+	projectPath?: string,
+	remote?: CreateCommandRemoteOptions,
+) => {
+	const overrideFlag = remote?.overridePath
+		? ` -f ${quote([remote.overridePath])}`
+		: "";
+	return `${getComposeBaseArgs(compose, projectPath)}${overrideFlag}`;
+};
+
 export const createCommand = (
 	compose: ComposeNested,
 	projectPath?: string,
@@ -699,10 +853,7 @@ export const createCommand = (
 		// serving host must never build: `--no-build` turns a missing image into a
 		// pull (or an error) instead of a local build.
 		const buildFlag = remote ? " --no-build" : " --build";
-		const overrideFlag = remote?.overridePath
-			? ` -f ${quote([remote.overridePath])}`
-			: "";
-		command = `${getComposeBaseArgs(compose, projectPath)}${overrideFlag} up -d${pullFlag}${buildFlag} --remove-orphans`;
+		command = `${getComposeUpPrefix(compose, projectPath, remote)} up -d${pullFlag}${buildFlag} --remove-orphans`;
 	} else if (composeType === "stack") {
 		// `stack deploy` ignores `build:`; the override swaps in the pushed images.
 		const overrideFlag = remote?.overridePath

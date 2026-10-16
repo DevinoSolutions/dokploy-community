@@ -52,6 +52,14 @@ import {
 	updateDeploymentStatus,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import {
+	ROLLING_HEALTH_TIMEOUT_MAX_SECONDS,
+	ROLLING_HEALTH_TIMEOUT_MIN_SECONDS,
+} from "@dokploy/server/db/validations/compose-rolling";
+import {
+	assertComposeRollingSettings,
+	getComposeRollingReport,
+} from "@dokploy/server/services/compose-rolling";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
@@ -288,6 +296,17 @@ export const composeRouter = createTRPCRouter({
 			}
 			// <<< build-policy hook
 
+			// Rolling replace: every selected service must be able to roll on the
+			// compose as it is now (deploys re-check, a save is where the user
+			// hears about it).
+			if (input.rollingReplace) {
+				await assertComposeRollingSettings(
+					input.composeId,
+					input.rollingReplace,
+					{ composeType: input.composeType, command: input.command },
+				);
+			}
+
 			const updated = await updateCompose(input.composeId, input);
 			await audit(ctx, {
 				action: "update",
@@ -430,6 +449,26 @@ export const composeRouter = createTRPCRouter({
 				service: ["read"],
 			});
 			return await loadServices(input.composeId, input.type);
+		}),
+	rollingEligibility: protectedProcedure
+		.input(
+			apiFetchServices.extend({
+				healthTimeoutSeconds: z
+					.number()
+					.int()
+					.min(ROLLING_HEALTH_TIMEOUT_MIN_SECONDS)
+					.max(ROLLING_HEALTH_TIMEOUT_MAX_SECONDS)
+					.optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["read"],
+			});
+			return await getComposeRollingReport(input.composeId, {
+				type: input.type,
+				healthTimeoutSeconds: input.healthTimeoutSeconds,
+			});
 		}),
 	loadMountsByService: protectedProcedure
 		.input(
