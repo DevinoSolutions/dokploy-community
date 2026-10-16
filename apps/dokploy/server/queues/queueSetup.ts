@@ -242,6 +242,11 @@ export const cleanAllDeploymentQueue = async () => {
 	return true;
 };
 
+/**
+ * The generic stop for a build that has no cancel launcher of its own: it
+ * matches by command line on the whole host. A build-server deployment and a
+ * running rolling replace never come here (see `deployment-cancel.ts`).
+ */
 export const killDockerBuild = async (
 	type: "application" | "compose",
 	serverId: string | null,
