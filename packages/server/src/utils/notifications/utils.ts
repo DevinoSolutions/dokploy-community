@@ -336,12 +336,6 @@ export const sendTelegramNotification = async (
 					: {}),
 			}),
 		});
-		if (!response.ok) {
-			const body = await response.text();
-			throw new Error(
-				`Failed to send telegram notification: ${response.status} ${body}`,
-			);
-		}
 	} catch (err) {
 		logSenderError("telegram", err, TELEGRAM_API);
 		throw new Error(

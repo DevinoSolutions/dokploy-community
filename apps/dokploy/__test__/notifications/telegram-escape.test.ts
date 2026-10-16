@@ -41,13 +41,25 @@ describe("formatTelegramErrorMessage", () => {
 
 	it("does not cut an escaped entity in half", () => {
 		// "&amp;" starts at index 2999, so the cut at 3000 falls inside it.
-		const result = formatTelegramErrorMessage(`${"x".repeat(2999)}&${"y".repeat(100)}`);
+		const result = formatTelegramErrorMessage(
+			`${"x".repeat(2999)}&${"y".repeat(100)}`,
+		);
 		expect(result).toBe(`${"x".repeat(2999)}…`);
 		expect(result).not.toMatch(/&[a-z]*…$/);
 	});
 
 	it("does not split a surrogate pair", () => {
-		const result = formatTelegramErrorMessage(`${"x".repeat(2999)}😀${"y".repeat(100)}`);
+		const result = formatTelegramErrorMessage(
+			`${"x".repeat(2999)}😀${"y".repeat(100)}`,
+		);
 		expect(result).toBe(`${"x".repeat(2999)}…`);
+	});
+
+	it("keeps an entity that ends exactly at the limit", () => {
+		// "&amp;" occupies indexes 2995-2999, so it is complete at the cut.
+		const message = `${"x".repeat(2995)}&${"y".repeat(100)}`;
+		expect(formatTelegramErrorMessage(message)).toBe(
+			`${"x".repeat(2995)}&amp;…`,
+		);
 	});
 });
