@@ -5,6 +5,7 @@ import { notifications } from "../../db/schema";
 import ServerThresholdEmail from "../../emails/emails/server-threshold";
 import { logSenderError } from "./log-error";
 import {
+	escapeHtml,
 	sendCustomNotification,
 	sendDiscordNotification,
 	sendEmailNotification,
@@ -204,11 +205,11 @@ export const sendServerThresholdNotifications = async (
 					telegram,
 					`
 				<b>⚠️ Server ${payload.Type} Alert</b>
-                <b>Server Name:</b> ${payload.ServerName}
+                <b>Server Name:</b> ${escapeHtml(payload.ServerName)}
 				<b>Type:</b> ${payload.Type}
 				<b>Current Value:</b> ${payload.Value.toFixed(2)}%
 				<b>Threshold:</b> ${payload.Threshold.toFixed(2)}%
-				<b>Message:</b> ${payload.Message}
+				<b>Message:</b> ${escapeHtml(payload.Message)}
 				<b>Time:</b> ${date.toLocaleString()}
 			`,
 				);
