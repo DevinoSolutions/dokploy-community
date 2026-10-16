@@ -8,6 +8,7 @@ import { format } from "date-fns";
 import { and, eq } from "drizzle-orm";
 import { logSenderError } from "./log-error";
 import {
+	escapeHtml,
 	sendCustomNotification,
 	sendDiscordNotification,
 	sendEmailNotification,
@@ -248,7 +249,7 @@ export const sendBuildSuccessNotifications = async ({
 
 				await sendTelegramNotification(
 					telegram,
-					`<b>✅ Build Success</b>\n\n<b>Project:</b> ${projectName}\n<b>Application:</b> ${applicationName}\n<b>Environment:</b> ${environmentName}\n<b>Type:</b> ${applicationType}\n<b>Date:</b> ${format(
+					`<b>✅ Build Success</b>\n\n<b>Project:</b> ${escapeHtml(projectName)}\n<b>Application:</b> ${escapeHtml(applicationName)}\n<b>Environment:</b> ${escapeHtml(environmentName)}\n<b>Type:</b> ${escapeHtml(applicationType)}\n<b>Date:</b> ${format(
 						date,
 						"PP",
 					)}\n<b>Time:</b> ${format(date, "pp")}`,
