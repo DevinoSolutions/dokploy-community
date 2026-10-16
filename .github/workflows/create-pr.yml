@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   create-pr:
+    if: github.repository == 'Dokploy/dokploy'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
