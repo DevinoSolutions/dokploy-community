@@ -318,6 +318,32 @@ describe("cancelBuildServerDeployment with a release host", () => {
 		expect(mocks.updateSets.some((set) => set.errorMessage)).toBe(true);
 	});
 
+	it("asks the release kill to report a hard kill, and warns when SIGKILL was needed", async () => {
+		answers("NONE", "KILLED_HARD");
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect(killsOn("serving-1")[0]).toContain("echo KILLED_HARD");
+		// The build's own kill never reports it.
+		expect(killsOn("build-1")[0]).not.toContain("KILLED_HARD");
+		expect(outcome).toMatchObject({ status: "cancelled", result: "KILLED" });
+		const warning = (outcome as any).warning as string;
+		expect(warning).toContain("was killed");
+		expect(warning).toContain("may still be running on its own");
+		expect(decodedLogLines()).toContain("was killed");
+		expect(mocks.updateSets.some((set) => set.errorMessage === warning)).toBe(
+			true,
+		);
+	});
+
+	it("a release step that stopped on SIGTERM has no warning", async () => {
+		answers("NONE", "KILLED");
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect((outcome as any).warning).toBeUndefined();
+	});
+
 	it("warns when the release process survived SIGKILL", async () => {
 		answers("NONE", "FAILED");
 

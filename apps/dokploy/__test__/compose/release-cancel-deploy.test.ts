@@ -296,7 +296,7 @@ describe("a cancel that stops the rolling replace", () => {
 		const log = logged();
 		expect(log).toContain("The release step was stopped");
 		expect(log).toContain(
-			"services it had already replaced stay on the new release",
+			"services it had already updated stay on the new release",
 		);
 		expect(log).not.toContain("Nothing was pulled or started");
 	});

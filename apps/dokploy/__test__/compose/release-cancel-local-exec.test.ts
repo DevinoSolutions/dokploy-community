@@ -10,6 +10,7 @@ import {
 	getKillRemoteBuildCommand,
 	getReleaseCancelTarget,
 	getRemoteBuildCancelTarget,
+	parseKillResult,
 	RELEASE_DRAIN_SECONDS,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
@@ -183,8 +184,40 @@ describe("the release wrapper", () => {
 
 		expect(release).toContain('[ "$__rc" -ge 128 ]');
 		expect(release).toContain(`-lt ${RELEASE_DRAIN_SECONDS}`);
-		expect(release.indexOf("-ge 128")).toBeLessThan(release.indexOf("rm -f"));
+		expect(release.indexOf("-ge 128")).toBeLessThan(release.lastIndexOf(`rm -f "$__f"`));
 		expect(build).not.toContain("-ge 128");
+	});
+
+	it("exports the done marker to the release script and clears it, only for the release step", () => {
+		const release = wrapCancelableRemoteBuild(
+			"true",
+			getReleaseCancelTarget("dep-1", true),
+		);
+		const build = wrapCancelableRemoteBuild(
+			"true",
+			getRemoteBuildCancelTarget("dep-1"),
+		);
+
+		expect(release).toContain('DOKPLOY_RELEASE_DONE="$__f.done"');
+		expect(release).toContain("export DOKPLOY_RELEASE_DONE");
+		expect(release).toContain('[ ! -e "$__f.done" ]');
+		expect(release.indexOf('rm -f "$__f.done"')).toBeLessThan(
+			release.indexOf("setsid"),
+		);
+		expect(build).not.toContain("DOKPLOY_RELEASE_DONE");
+		expect(build).not.toContain(".done");
+	});
+
+	it("the kill script only reports a hard kill when asked, and stops waiting at the done marker", () => {
+		const target = getReleaseCancelTarget("dep-1", true);
+
+		expect(getKillRemoteBuildCommand(target, 5)).toContain("echo KILLED");
+		expect(getKillRemoteBuildCommand(target, 5)).not.toContain("KILLED_HARD");
+		expect(
+			getKillRemoteBuildCommand(target, 5, { reportHardKill: true }),
+		).toContain("echo KILLED_HARD");
+		expect(getKillRemoteBuildCommand(target, 5)).toContain('"$f.done"');
+		expect(parseKillResult("KILLED_HARD\n")).toBe("KILLED_HARD");
 	});
 });
 

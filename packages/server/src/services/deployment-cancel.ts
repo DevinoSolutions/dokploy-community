@@ -451,6 +451,7 @@ const stopReleaseStep = async (
 	const command = getKillRemoteBuildCommand(
 		getReleaseCancelTarget(deploymentId, !!serverId),
 		RELEASE_KILL_GRACE_SECONDS,
+		{ reportHardKill: true },
 	);
 	const where = serverId ? "the serving host" : "the Dokploy host";
 	const Where = serverId ? "The serving host" : "The Dokploy host";
@@ -478,6 +479,15 @@ const stopReleaseStep = async (
 			return {
 				result,
 				warning: `The release step of this deployment is running on ${where} but its pid file was not found (not written yet, or the launcher is missing there), so it could not be signalled. The local connection to it is being dropped; the rolling replace may still be running there.`,
+			};
+		}
+		if (result === "KILLED_HARD") {
+			return {
+				// Stopped, but only by SIGKILL after the grace: the script's cancel
+				// cleanup did not finish, and a shielded `docker compose up` it had
+				// started may still be running on its own.
+				result: "KILLED",
+				warning: `The release step on ${where} did not finish its cleanup within ${RELEASE_KILL_GRACE_SECONDS}s of the cancel and was killed. A replica it had not promoted may be left over, and a docker compose step it had started may still be running on its own; the next deploy reconciles the replica.`,
 			};
 		}
 		if (result === "FAILED") {
@@ -615,7 +625,7 @@ export const cancelBuildServerDeployment = async (
 			logServerId,
 			logPath,
 			releaseStopped
-				? "✅ The release step was stopped on the serving host. A rolling replace removes the replica it had not promoted; services it had already replaced stay on the new release."
+				? "✅ The release step was stopped on the serving host. A rolling replace removes the replica it had not promoted; services it had already updated stay on the new release; a step it had started is let finish."
 				: result === "KILLED"
 					? "✅ Build stopped on the build server."
 					: "ℹ️ No build was running on the build server (it had not started, or had just finished). Nothing more will be built or deployed.",

@@ -582,7 +582,7 @@ const settleCancelledComposeDeploy = async (
 
 	try {
 		const note = (error as DeploymentCancelledError).duringRelease
-			? "Deployment cancelled ⛔ The release step was stopped. A rolling replace removes the replica it had not promoted yet; services it had already replaced stay on the new release and the others keep the previous one."
+			? "Deployment cancelled ⛔ The release step was stopped. A rolling replace removes the replica it had not promoted yet; services it had already updated stay on the new release, and a step it had started is let finish before it stops."
 			: "Deployment cancelled ⛔ Nothing was pulled or started from this build; the previous release keeps serving.";
 		const command = `echo ${quote([`\n${note}`])} >> ${quote([deployment.logPath])};`;
 		if (entity.serverId) {

@@ -679,6 +679,9 @@ export const getRollingReplaceScript = ({
 			if [ -n "$DOKPLOY_ROLL_PROMOTING" ]; then dokploy_roll_remove $DOKPLOY_ROLL_PROMOTING || true; fi;
 			return 0;
 		};
+		dokploy_roll_signal_done() {
+			if [ -n "$DOKPLOY_RELEASE_DONE" ]; then : > "$DOKPLOY_RELEASE_DONE" 2>/dev/null || true; fi;
+		};
 		dokploy_roll_fail() {
 			DR_EXTRA=$(dokploy_roll_extras);
 			DOKPLOY_ROLL_ACTIVE=0;
@@ -804,7 +807,7 @@ export const getRollingReplaceScript = ({
 			return 0;
 		};
 		${ROLLING_RUN_FUNCTION}() {
-			trap 'dokploy_roll_abort; exit 130' INT TERM HUP;
+			trap 'dokploy_roll_abort; dokploy_roll_signal_done; exit 130' INT TERM HUP;
 			dokploy_roll_body; DR_RC=$?;
 			trap - INT TERM HUP;
 			return $DR_RC;

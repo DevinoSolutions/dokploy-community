@@ -1169,6 +1169,108 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				expect(await exited).toBe(137);
 				expect(existsSync(pidFile)).toBe(false);
 			});
+
+			it("the kill script reports a hard kill when asked, and not when TERM was enough", {
+				timeout: 90_000,
+			}, async () => {
+				const world = createWorld(changedWeb());
+				const started = join(world.dir, "started2");
+				const stubborn = launch(
+					world,
+					`trap '' TERM\ntouch ${toShellPath(started)}\nsleep 60\n`,
+					10,
+				);
+				expect(
+					await waitUntil(
+						() => existsSync(stubborn.pidFile) && existsSync(started),
+					),
+				).toBe(true);
+				const hard = spawnSync(
+					"sh",
+					[
+						writeScript(
+							world,
+							getKillRemoteBuildCommand(stubborn.target, 2, {
+								reportHardKill: true,
+							}),
+						),
+					],
+					{ encoding: "utf8", timeout: 60_000 },
+				);
+				expect(hard.stdout.trim()).toBe("KILLED_HARD");
+				await stubborn.exited;
+
+				const polite = launch(world, "sleep 60\n", 10);
+				expect(await waitUntil(() => existsSync(polite.pidFile))).toBe(true);
+				const soft = spawnSync(
+					"sh",
+					[
+						writeScript(
+							world,
+							getKillRemoteBuildCommand(polite.target, 5, {
+								reportHardKill: true,
+							}),
+						),
+					],
+					{ encoding: "utf8", timeout: 60_000 },
+				);
+				expect(soft.stdout.trim()).toBe("KILLED");
+				await polite.exited;
+			});
+
+			it("helpers left in the group do not hold the wrapper or the kill script once the cleanup is done", {
+				timeout: 90_000,
+			}, async () => {
+				const world = createWorld(
+					changedWeb({
+						config: {
+							web: {
+								hash: "H2",
+								newImage: "sha256:NEW-web",
+								newHealth: "never",
+							},
+							api: { hash: "A1" },
+						},
+					}),
+				);
+				// A helper that outlives the cancel, like the docker events capture.
+				const before = "( trap '' TERM; sleep 40 ) >/dev/null 2>&1 &";
+				const { pidFile, target, exited } = launch(
+					world,
+					scriptFor({ healthTimeoutSeconds: 60 }, { before }),
+					25,
+				);
+				expect(
+					await waitUntil(
+						() =>
+							existsSync(pidFile) && callsOf(world).includes("State.Health"),
+					),
+				).toBe(true);
+				const pgid = readFileSync(pidFile, "utf8").split(" ")[0];
+
+				const startedAt = Date.now();
+				const kill = spawnSync(
+					"sh",
+					[
+						writeScript(
+							world,
+							getKillRemoteBuildCommand(target, 20, { reportHardKill: true }),
+						),
+					],
+					{ encoding: "utf8", timeout: 60_000 },
+				);
+				await exited;
+				const elapsed = Date.now() - startedAt;
+
+				// Not the 20 s grace, not the 25 s drain: the marker ended both.
+				expect(kill.stdout.trim()).toBe("KILLED");
+				expect(elapsed).toBeLessThan(15_000);
+				expect(containersOf(world, "web")).toEqual([OLD]);
+				expect(existsSync(`${pidFile}.done`)).toBe(false);
+				spawnSync("sh", [
+					writeScript(world, `kill -s KILL -- -${pgid} 2>/dev/null; true`),
+				]);
+			});
 		},
 	);
 
