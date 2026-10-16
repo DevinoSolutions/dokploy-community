@@ -239,7 +239,10 @@ describe("the release done marker, for real", () => {
 			expect(kill.stdout.trim()).toBe("KILLED");
 			// Had the stale marker survived, the kill would have answered before this.
 			expect(existsSync(cleaned)).toBe(true);
-			expect(error).toMatchObject({ name: "ExecError", exitCode: 130 });
+			expect(error).toMatchObject({ name: "ExecError" });
+			// 130 when $SHELL execs the command, 143 when it is a plain sh that
+			// dies of the TERM itself.
+			expect([130, 143]).toContain(error.exitCode);
 		},
 	);
 
@@ -311,7 +314,9 @@ describe("the release wrapper", () => {
 
 		expect(release).toContain('[ "$__rc" -ge 128 ]');
 		expect(release).toContain(`-lt ${RELEASE_DRAIN_SECONDS}`);
-		expect(release.indexOf("-ge 128")).toBeLessThan(release.lastIndexOf(`rm -f "$__f"`));
+		expect(release.indexOf("-ge 128")).toBeLessThan(
+			release.lastIndexOf(`rm -f "$__f"`),
+		);
 		expect(build).not.toContain("-ge 128");
 	});
 
