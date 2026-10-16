@@ -395,8 +395,9 @@ describe("hostile ids", () => {
 });
 
 describe("cancelBuildServerDeploymentsForService", () => {
-	it("compose without a build server: not handled here (the caller keeps its behaviour)", async () => {
+	it("compose without a build server and no rolling replace running: nothing cancelled (the caller keeps its behaviour)", async () => {
 		mocks.composeFindFirst.mockResolvedValue({ buildServerId: null, serverId: null });
+		mocks.deploymentsFindMany.mockResolvedValue([]);
 
 		const result = await cancelBuildServerDeploymentsForService({
 			type: "compose",
@@ -405,7 +406,6 @@ describe("cancelBuildServerDeploymentsForService", () => {
 
 		expect(result).toEqual({ usesBuildServer: false, cancelled: 0, warnings: [] });
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
-		expect(mocks.deploymentsFindMany).not.toHaveBeenCalled();
 	});
 
 	it("compose with a build server: cancels each running deployment there, logs on the serving host", async () => {

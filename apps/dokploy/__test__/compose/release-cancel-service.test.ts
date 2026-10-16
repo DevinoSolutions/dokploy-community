@@ -460,8 +460,7 @@ describe("a compose that builds on its serving host (no build server)", () => {
 		const order: string[] = [];
 		mocks.execAsyncRemote.mockImplementation(async (_s: string, c: string) => {
 			if (isKill(c)) order.push("kill");
-			return { stdout: isKill(c) ? "KILLED
-" : "", stderr: "" };
+			return { stdout: isKill(c) ? "KILLED\n" : "", stderr: "" };
 		});
 		const drop = registerRemoteBuild(getReleaseCancelKey("dep-1"), () => {
 			order.push("abort");
@@ -561,7 +560,9 @@ describe("a compose that builds on its serving host (no build server)", () => {
 				buildServerId: null,
 			});
 
-			await expect(cancelBuildServerDeploymentById("dep-1")).resolves.toBeNull();
+			await expect(
+				cancelBuildServerDeploymentById("dep-1"),
+			).resolves.toBeNull();
 			expect(mocks.updateSets).toHaveLength(0);
 		});
 	});
@@ -681,10 +682,13 @@ describe("runReleaseScript", () => {
 			notCancelled();
 			mocks.execAsyncRemote.mockImplementation(async () => {
 				cancelled();
-				throw new ExecError(`Remote command failed with exit code ${exitCode}`, {
-					command: "x",
-					exitCode,
-				});
+				throw new ExecError(
+					`Remote command failed with exit code ${exitCode}`,
+					{
+						command: "x",
+						exitCode,
+					},
+				);
 			});
 
 			const error = await runReleaseScript({
