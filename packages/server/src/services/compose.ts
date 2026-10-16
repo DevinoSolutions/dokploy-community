@@ -442,9 +442,13 @@ export const runComposeBuild = async (
 		: await prepareBuildServer();
 
 	// Last check before the steps that cannot be interrupted: the stack is
-	// taken down (fresh volumes) or the plain `up` starts.
+	// taken down (fresh volumes) or the plain `up` starts. Once the stack was
+	// taken down there is no check before the `up`: nothing restores a
+	// fresh-volumes deploy, so a cancel is better reported as too late than
+	// as "the previous release keeps serving" with the stack down.
+	const tearsDown = freshVolumes && entity.composeType === "docker-compose";
 	await checkpoint();
-	if (freshVolumes && entity.composeType === "docker-compose") {
+	if (tearsDown) {
 		const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
 		await runStep(downCommand);
 	}
@@ -455,7 +459,7 @@ export const runComposeBuild = async (
 		freshVolumes,
 		remoteBuild,
 	});
-	await checkpoint();
+	if (!tearsDown) await checkpoint();
 	if (deployment.deploymentId && isReleaseCancelable(command, cancellable)) {
 		await runReleaseScript({
 			serverId,
@@ -953,10 +957,11 @@ export const rebuildCompose = async ({
 			? await phases.run("Build images on the build server", prepareBuildServer)
 			: await prepareBuildServer();
 
-		// Last check before the steps that cannot be interrupted (see
-		// runComposeBuild).
+		// Last check before the steps that cannot be interrupted, and none
+		// after the stack was taken down (see runComposeBuild).
+		const tearsDown = freshVolumes && compose.composeType === "docker-compose";
 		await checkpoint();
-		if (freshVolumes && compose.composeType === "docker-compose") {
+		if (tearsDown) {
 			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
 			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;
 			if (compose.serverId) {
@@ -972,7 +977,7 @@ export const rebuildCompose = async ({
 			freshVolumes,
 			remoteBuild,
 		});
-		await checkpoint();
+		if (!tearsDown) await checkpoint();
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
 		if (isReleaseCancelable(command)) {
 			await runReleaseScript({

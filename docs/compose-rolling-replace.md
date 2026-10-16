@@ -140,8 +140,10 @@ deploy is never failed because of drift.
     the deploy stops at the next step boundary: a step already in progress
     (for example a clone) is let finish, then nothing more is fetched, pulled
     or started and the previous release keeps serving. The deploy checks the
-    cancel before each of its steps, the last time right before the plain `up`
-    (and the `down --volumes` of a fresh-volumes deploy).
+    cancel before each of its steps, the last time right before the plain `up`.
+    A fresh-volumes deploy is checked right before its `down --volumes` and
+    not again after it: once the stack is down the `up` runs, and a cancel
+    that lands then is reported as arriving too late.
   - The step that was let finish already replaced the compose file and `.env`
     on disk, and Start runs `up -d` from them. So a cancel before the release
     step puts the previous release's files back (the same restore a failed

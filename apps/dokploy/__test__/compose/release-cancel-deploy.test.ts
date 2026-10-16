@@ -710,6 +710,88 @@ describe("a cancel before the release step of a rolling compose without a build 
 		expect(mocks.sendBuildErrorNotifications).not.toHaveBeenCalled();
 	});
 
+	describe("with fresh volumes (the stack is taken down first)", () => {
+		/** The cancel flag is set once the `down --volumes` step has run. */
+		const cancelAfterDown = () => {
+			mocks.assertDeploymentNotCancelled.mockImplementation(async () => {
+				if (ranCommands().some((c) => c.includes("down --volumes"))) {
+					throw new DeploymentCancelledError();
+				}
+			});
+		};
+		const upRan = () =>
+			ranCommands().some((c) => c.includes("docker compose up -d"));
+
+		it("deployCompose: a cancel after the down does not stop the up, and is not settled as 'the previous release keeps serving'", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			cancelAfterDown();
+
+			const outcome = await deployCompose({
+				composeId: "compose-1",
+				titleLog: "Manual deployment",
+				descriptionLog: "",
+				freshVolumes: true,
+			}).catch((error) => error);
+
+			expect(outcome).not.toMatchObject({ deploymentCancelled: true });
+			expect(ranCommands().some((c) => c.includes("down --volumes"))).toBe(
+				true,
+			);
+			expect(upRan()).toBe(true);
+			expect(mocks.getRestoreAfterFailedBuildCommand).not.toHaveBeenCalled();
+			expect(logged()).not.toContain("the previous release keeps serving");
+		});
+
+		it("rebuildCompose: the same", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			cancelAfterDown();
+
+			const outcome = await rebuildCompose({
+				composeId: "compose-1",
+				titleLog: "Rebuild deployment",
+				descriptionLog: "",
+				freshVolumes: true,
+			}).catch((error) => error);
+
+			expect(outcome).not.toMatchObject({ deploymentCancelled: true });
+			expect(upRan()).toBe(true);
+			expect(logged()).not.toContain("the previous release keeps serving");
+		});
+
+		it("a cancel before the down still stops the deploy", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			// Start (1), after the write (2), required checks (3), before the down (4).
+			cancelAtCheck(4);
+
+			const outcome = await deployCompose({
+				composeId: "compose-1",
+				titleLog: "Manual deployment",
+				descriptionLog: "",
+				freshVolumes: true,
+			}).catch((error) => error);
+
+			expect(outcome).toMatchObject({ deploymentCancelled: true });
+			expect(ranCommands().some((c) => c.includes("down --volumes"))).toBe(
+				false,
+			);
+			expect(upRan()).toBe(false);
+		});
+
+		it("without fresh volumes the check before the up still stops it", async () => {
+			await rollingNoBuildServer();
+			mocks.getBuildComposeCommand.mockResolvedValue(PLAIN_SCRIPT);
+			cancelAtCheck(5);
+
+			const outcome = await deploy().catch((error) => error);
+
+			expect(outcome).toMatchObject({ deploymentCancelled: true });
+			expect(upRan()).toBe(false);
+		});
+	});
+
 	it("the build-server path restores through its own prepare step, not this one", async () => {
 		await useCompose({ rollingReplace: rollingSettings as any });
 		mocks.prepareComposeBuildServerDeploy.mockRejectedValue(
