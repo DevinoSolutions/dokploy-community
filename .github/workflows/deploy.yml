@@ -7,6 +7,7 @@ on:
 
 jobs:
   build-and-push-cloud-image:
+    if: github.repository == 'Dokploy/dokploy'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -45,6 +46,7 @@ jobs:
             NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY }}
 
   build-and-push-schedule-image:
+    if: github.repository == 'Dokploy/dokploy'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -78,6 +80,7 @@ jobs:
           platforms: linux/amd64
 
   build-and-push-server-image:
+    if: github.repository == 'Dokploy/dokploy'
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
