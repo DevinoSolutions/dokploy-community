@@ -5,8 +5,8 @@ host was inspected read-only on 2026-10-16.
 
 ## Problem
 
-Builds on the shared build server fail with `429 Too Many Requests` from Docker
-Hub when BuildKit resolves a `FROM` line:
+Deploys fail with `429 Too Many Requests` from Docker Hub when BuildKit
+resolves a `FROM` line:
 
 ```
 #2 [internal] load metadata for docker.io/library/node:24-alpine
@@ -20,25 +20,52 @@ Two Marka production deploys died this way on 2026-10-16: `7aaa2fa9` (web
 `buildServerId = saZ6E_4nv0Ue2nUdm2GOi`, which is devino-third. The failure
 takes 5 to 8 seconds, before any layer is touched.
 
+### Scope
+
+- Reported by the user: sentry-selfhost counted 16 of the last 175 Dokploy deploy
+  logs with Docker Hub rate-limit errors, about 9.1%. Ten chats report affected
+  services: landing, shop, marka, portfolio, posthog, postify, sentry, uptimely,
+  upup and upAPI.
+- Cross-check from `deployment-allCentralized` (read-only) plus a grep of the deploy
+  logs for `429 Too Many Requests`, 2026-10-16: all of it falls in one burst between
+  12:48Z and 12:58Z.
+  - **16 compose deploys on devino-first**, the Dokploy host, not a build server
+    (composes build and pull there): Lead Gen Workers x4, upAPI `iii` x6, Uptimely
+    `uptimely-stack` x2, Marketing Studio `marketing-studio-stack` x2, Notifly
+    `notifly-dev`, BioFlow Stack, Demofy `demofy-stack`. That equals the user's
+    16 of 175.
+  - **12 application builds on devino-third**: Marka web, marka-ai, `iii` and
+    marka-docs (2 each, which includes the four above), upAPI web and landing (2 each).
+  - 28 failed deploys in roughly ten minutes, 7 projects beyond Marka.
+  - The failing images were `node` (`20-alpine`, `22-alpine`, `22-slim`,
+    `22-bookworm-slim`, `22.21.1-alpine`, `22.23.2-alpine3.23`, `24-alpine`),
+    `rust:1.90-slim`, `python:3.12-slim` and `debian:bookworm-slim`.
+  - Older logs with the same error exist for 2026-07-10 (Shorty, devino-first) and
+    one possible hit on 2026-08-31 (a plain "rate limit" match, not confirmed as
+    Docker Hub). Logs for 16 older failed deploys were not found on devino-first or devino-third, so the earlier
+    history is incomplete.
+- So the fix is not build-server only. devino-first, devino-third and devino-second
+  all egress through 74.12.17.251 and share one bucket.
+
 ## Findings
 
-| | devino-third (192.168.2.229) | Main Build Server = devino-second (192.168.2.217) |
-|---|---|---|
-| Dokploy serverId | `saZ6E_4nv0Ue2nUdm2GOi` | `z23s7X5TGtmf0VRFc3Q43` |
-| 429s in `journalctl -u docker` since 10:00Z | yes, 12:56:01 to 12:58:32Z (`node:22.23.2-alpine3.23` and `node:24-alpine`) | none |
-| Docker | 28.5.0, overlay2, `live-restore=false` | 29.6.1, overlay2, `live-restore=false` |
-| `/etc/docker/daemon.json` | does not exist (`/etc/docker` is empty) | `{"insecure-registries": ["192.168.2.217:5001", "127.0.0.1:5001"]}` |
-| `registry-mirrors` | none | none |
-| `~/.docker/config.json` auths | only `localhost:5000`; no `index.docker.io` | none |
-| buildx | `default*` driver `docker` (BuildKit 0.25.0) only | `default*` driver `docker` (0.31.1) and `devino-remote` driver `remote` (`tcp://192.168.2.217:1234`, container `buildkitd` 0.33.0) |
-| Running containers | 0 (pure build box) | registry-proxy, buildkitd, others |
-| Public IP | 74.12.17.251 | 74.12.17.251 |
+| | devino-first (Dokploy host) | devino-third (192.168.2.229) | Main Build Server = devino-second (192.168.2.217) |
+|---|---|---|---|
+| Dokploy serverId | local | `saZ6E_4nv0Ue2nUdm2GOi` | `z23s7X5TGtmf0VRFc3Q43` |
+| 429 on 2026-10-16 | yes, 16 compose deploys (deploy logs) | yes, 12 app builds; dockerd journal 12:56:01 to 12:58:32Z | none seen |
+| Docker | 29.9.0, `live-restore=false` | 28.5.0, overlay2, `live-restore=false` | 29.6.1, overlay2, `live-restore=false` |
+| `/etc/docker/daemon.json` | nvidia runtime, `default-address-pools`, `dns`, `node-generic-resources`, `min-api-version`, `features` | does not exist (`/etc/docker` is empty) | `{"insecure-registries": ["192.168.2.217:5001", "127.0.0.1:5001"]}` |
+| `registry-mirrors` | none | none | none |
+| `~/.docker/config.json` auths | only `localhost:5000` | only `localhost:5000`; no `index.docker.io` | none |
+| buildx | `default*` driver `docker` (BuildKit 0.34.0) only | `default*` driver `docker` (0.25.0) only | `default*` driver `docker` (0.31.1) and `devino-remote` driver `remote` (`tcp://192.168.2.217:1234`, container `buildkitd` 0.33.0) |
+| Running containers | 435 | 0 (pure build box) | registry-proxy, buildkitd, others |
+| Public IP | 74.12.17.251 | 74.12.17.251 | 74.12.17.251 |
 
-- Only devino-third showed the 429 in the window, but both servers sit behind
-  the same public IP, so they draw from one anonymous Docker Hub bucket. devino-second
-  just did not build a docker.io image in that window. Anything else NATed
-  behind that address (other devino hosts, the workstation) draws from the same bucket.
-- One `ratelimitpreview/test` HEAD from each server after 13:17Z returned the
+- All three hosts sit behind the same public IP, so they draw from one anonymous
+  Docker Hub bucket. devino-second just did not build a docker.io image in that
+  window. Anything else NATed behind that address (other devino hosts, the
+  workstation) draws from the same bucket.
+- One `ratelimitpreview/test` HEAD each from devino-third and devino-second after 13:17Z returned the
   same state: `ratelimit-limit: 100;w=3600`, `ratelimit-remaining: 94;w=3600`,
   `docker-ratelimit-source: 74.12.17.251`. The bucket has mostly recovered, which
   is why this looks intermittent: it empties during a burst of builds and refills.
@@ -90,7 +117,21 @@ daemon.json diff, devino-second (merge with the existing key):
  }
 ```
 
-Neither host sets `data-root` or `log-opts`, so there is nothing else to preserve.
+daemon.json diff, devino-first (add one key; keep every existing key, shown
+elided here, and make sure the preceding line gets its comma):
+
+```diff
+   "features": {
+     "containerd-snapshotter": false
+-  }
++  },
++  "registry-mirrors": ["https://mirror.gcr.io"]
+ }
+```
+
+None of the three hosts sets `data-root` or `log-opts`, so there is nothing else to
+preserve. On devino-first, edit a copy, run the validation below, and only then move it
+into place.
 
 ### (b) Local pull-through cache for docker.io
 
@@ -153,7 +194,7 @@ when both miss. It is the most robust end state and the most to maintain.
 +  "registry-mirrors": ["http://192.168.2.217:5002", "https://mirror.gcr.io"],
 ```
 
-(devino-third: the new file from (b) with that mirrors line; devino-second:
+(devino-third: the new file from (b) with that mirrors line; devino-first: the same two keys added to its existing file; devino-second:
 the merged file from (b) with that mirrors line.)
 
 ### (d) Dockerfile rewrites
@@ -165,10 +206,11 @@ fallback.
 
 ## Reload, not restart
 
-- `live-restore` is `false` on both hosts, so a full `systemctl restart docker`
+- `live-restore` is `false` on all three hosts, so a full `systemctl restart docker`
   would kill running containers and any in-flight build. devino-third runs 0
-  containers; devino-second does run some.
-- Not needed. Both units define `ExecReload=/bin/kill -s HUP $MAINPID`, and the
+  containers; devino-second does run some; devino-first runs 435, including
+  Dokploy itself, so a restart there must never be the plan.
+- Not needed. All three units define `ExecReload=/bin/kill -s HUP $MAINPID`, and the
   dockerd reference (via Context7, docs.docker.com/reference/cli/dockerd) lists
   `registry-mirrors` and `insecure-registries` among the options reconfigured on
   SIGHUP without a restart. So `systemctl reload docker` applies the change and
@@ -178,12 +220,20 @@ fallback.
   the mirror list after a reload. The check below settles it. If the first build
   still goes to `registry-1.docker.io`, a restart in an empty-queue window is the
   fallback. On devino-third that is safe once nothing is building, since it runs
-  0 containers.
+  0 containers. On devino-first it is not available at all: if the reload does
+  not take effect there, stop and decide separately.
+- Rollout order: devino-third first (it carries the app builds and tolerates a
+  restart if the open point goes wrong), verify, then devino-first, then
+  devino-second. The devino-first reload follows the standing rule for that host:
+  empty deploy queue, two empty checks, and a `pg_dump` first, even though a
+  SIGHUP reload does not restart Dokploy.
 
 ## BuildKit and buildx
 
-- Builds on devino-third use the `docker` driver (embedded BuildKit), which honors
-  the daemon's `registry-mirrors`. No `buildkitd.toml` is needed.
+- Builds on devino-third and devino-first use the `docker` driver (embedded
+  BuildKit), which honors the daemon's `registry-mirrors`. No `buildkitd.toml` is
+  needed. Plain `docker compose pull` of a docker.io image also goes through the
+  daemon's mirror list.
 - devino-second also has `devino-remote`, a `remote` driver builder
   (`buildkitd` container, TLS on `:1234`). A `docker-container` or `remote`
   builder does not read `daemon.json`; it needs
@@ -207,7 +257,7 @@ At the time of writing it held 2 active and 3 waiting jobs, none for Marka.
 2. `systemctl reload docker`, then `journalctl -u docker --since '-2min'` shows
    no config error.
 3. `docker info --format '{{json .RegistryConfig.Mirrors}}'` lists the new mirror
-   (it prints `null` today on both hosts).
+   (it prints `null` or `[]` today on all three hosts).
 4. Pull a small, otherwise unused docker.io image on the host and confirm its layers
    came through the mirror (for (b)/(c), `docker logs registry-dockerhub`
    shows the request; for (a) a pull of an image missing from the local store
@@ -246,6 +296,6 @@ Docker Hub credential, which Amin decides on. Nothing in (a) to (c) requires one
 
 ## Recommendation
 
-Do (a) on both hosts now: one key, `systemctl reload docker`, no restart, no new
+Do (a) on all three hosts now (devino-third, devino-first, devino-second): one key, `systemctl reload docker`, no restart, no new
 service. It removes the Docker Hub HEAD/GET from the common case, which is
 exactly what failed. Revisit (c) only if 429s recur with the mirror in place.
