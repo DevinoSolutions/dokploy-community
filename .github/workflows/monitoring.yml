@@ -9,6 +9,7 @@ env:
 
 jobs:
   docker-amd:
+    if: github.repository == 'Dokploy/dokploy'
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -45,6 +46,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
   docker-arm:
+    if: github.repository == 'Dokploy/dokploy'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
@@ -82,6 +84,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
 
   combine-manifests:
+    if: github.repository == 'Dokploy/dokploy'
     needs: [docker-amd, docker-arm]
     runs-on: ubuntu-latest
     timeout-minutes: 45
