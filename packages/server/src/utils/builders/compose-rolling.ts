@@ -161,6 +161,18 @@ const hasPublishedPort = (ports: unknown) => {
 	});
 };
 
+/** True when a port entry binds a host address (`127.0.0.1:80:80`, `host_ip`). */
+const bindsHostIp = (port: unknown) => {
+	if (isObject(port))
+		return typeof port.host_ip === "string" && port.host_ip !== "";
+	const value = String(port)
+		.replace(/\/[a-z]+$/i, "")
+		.trim();
+	if (/^\[[^\]]*\]:/.test(value)) return true;
+	const parts = value.split(":");
+	return parts.length === 3 && /^[\d.]+$/.test(parts[0] ?? "");
+};
+
 const hasStaticAddress = (service: SpecObject) => {
 	if (service.mac_address) return true;
 	const networks = service.networks;
@@ -390,6 +402,11 @@ export const getStackPreflightWarnings = (
 			isNoneTest(healthcheck.test)
 		) {
 			issues.push("no healthcheck: swarm cannot tell when a new task is ready");
+		}
+		if (Array.isArray(definition.ports) && definition.ports.some(bindsHostIp)) {
+			issues.push(
+				"a published port binds a host address: swarm ingress ignores it and listens on all interfaces",
+			);
 		}
 		const deploy = isObject(definition.deploy) ? definition.deploy : undefined;
 		const updateConfig = isObject(deploy?.update_config)

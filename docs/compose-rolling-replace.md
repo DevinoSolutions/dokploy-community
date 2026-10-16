@@ -160,10 +160,32 @@ services:
 
 Both parts matter: without a healthcheck the new task counts as ready as soon
 as it runs, and without `order: start-first` swarm stops the old task first. The
-Rolling replace card shows a warning for a stack service that has no healthcheck
-or no `start-first` update config. Moving an existing compose to stack type is
-not a no-op (`build:` is ignored, volumes are node-local, `container_name` and
-`restart:` do not apply); try it on a throwaway copy first.
+Rolling replace card shows a warning for a stack service that has no healthcheck,
+no `start-first` update config, or a published port that binds a host address.
+
+Moving an existing compose to stack type is not a no-op. Try it on a throwaway
+copy first. What a trial run (a real compose copied to a stack) showed:
+
+- **Volumes carry over.** Volume names are the same in both modes
+  (`<appName>_<volume>`), so the data is still there. Volumes are node-local.
+- **Things `docker stack deploy` rejects:** `depends_on` with conditions,
+  `cpus`, build secrets that use `environment:`, and a top-level `name:`.
+  `build:` and `restart:` are ignored, and so is `container_name`.
+- **External networks.** An external bridge network (local scope) has to be
+  recreated as an overlay network with `--attachable`.
+- **Host-IP port bindings are dropped.** Swarm ingress ignores the address in
+  `127.0.0.1:54005:5432` and listens on `0.0.0.0`. That is a security
+  regression unless a firewall covers the port, which is why the card warns
+  about it.
+- **`start-first` needs a healthcheck whose `start_period` covers boot time.**
+  In the trial, `start-first` without a healthcheck failed 53 of 117 requests
+  during the update, `start-first` with a healthcheck failed none of 212, and
+  `stop-first` failed 128 of 252.
+- **Keep stateful services `stop-first`** (postgres, redis, ...).
+  `start-first` briefly runs two tasks on one volume.
+- **No transactional rollback.** A stack deploy skips the restore of the
+  previous release and the pre-done health check that compose deploys have;
+  swarm's own `failure_action: rollback` is the only safety net.
 
 ## Known limits
 

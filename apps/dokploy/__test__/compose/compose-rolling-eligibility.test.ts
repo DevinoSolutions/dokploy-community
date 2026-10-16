@@ -291,4 +291,40 @@ describe("stack preflight warning", () => {
 			1,
 		);
 	});
+	it.each([
+		["short syntax with an ip", ["127.0.0.1:54005:5432"]],
+		["short syntax with an ip and no host port", ["127.0.0.1::5432"]],
+		["short syntax with an ipv6 address", ["[::1]:8080:80"]],
+		[
+			"long syntax with host_ip",
+			[{ target: 80, published: 8080, host_ip: "10.0.0.1" }],
+		],
+	])("flags a host address in a published port: %s", (_name, ports) => {
+		const warnings = getStackPreflightWarnings(
+			specOf({
+				web: {
+					image: "x",
+					healthcheck,
+					deploy: { update_config: { order: "start-first" } },
+					ports,
+				},
+			}),
+		);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.issues[0]).toMatch(/binds a host address/);
+	});
+
+	it("does not flag a published port without a host address", () => {
+		const warnings = getStackPreflightWarnings(
+			specOf({
+				web: {
+					image: "x",
+					healthcheck,
+					deploy: { update_config: { order: "start-first" } },
+					ports: ["8080:80", "80", { target: 80, published: 8080 }],
+				},
+			}),
+		);
+		expect(warnings).toEqual([]);
+	});
 });
