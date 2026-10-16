@@ -448,13 +448,10 @@ const stopReleaseStep = async (
 }> => {
 	const { serverId } = releaseHost;
 	const cancelKey = getReleaseCancelKey(deploymentId);
-	// Nothing of this deployment is waiting on a release step in this process:
-	// the signal is only a precaution (a deploy this process no longer tracks),
-	// so a host that does not answer is not worth a warning.
-	const expected = hasRunningRemoteBuild(cancelKey);
 	const command = getKillRemoteBuildCommand(
 		getReleaseCancelTarget(deploymentId, !!serverId),
 		RELEASE_KILL_GRACE_SECONDS,
+		{ reportHardKill: true },
 	);
 	const where = serverId ? "the serving host" : "the Dokploy host";
 	const Where = serverId ? "The serving host" : "The Dokploy host";
@@ -484,6 +481,15 @@ const stopReleaseStep = async (
 				warning: `The release step of this deployment is running on ${where} but its pid file was not found (not written yet, or the launcher is missing there), so it could not be signalled. The local connection to it is being dropped; the rolling replace may still be running there.`,
 			};
 		}
+		if (result === "KILLED_HARD") {
+			return {
+				// Stopped, but only by SIGKILL after the grace: the script's cancel
+				// cleanup did not finish, and a shielded `docker compose up` it had
+				// started may still be running on its own.
+				result: "KILLED",
+				warning: `The release step on ${where} did not finish its cleanup within ${RELEASE_KILL_GRACE_SECONDS}s of the cancel and was killed. A replica it had not promoted may be left over, and a docker compose step it had started may still be running on its own; the next deploy reconciles the replica.`,
+			};
+		}
 		if (result === "FAILED") {
 			return {
 				result,
@@ -499,12 +505,6 @@ const stopReleaseStep = async (
 		return { result };
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
-		if (!expected) {
-			console.warn(
-				`Cancelling deployment ${deploymentId}: could not reach ${where} to look for a release step (${reason})`,
-			);
-			return { result: "UNREACHABLE" };
-		}
 		return {
 			result: "UNREACHABLE",
 			warning: `Could not reach ${where} to stop the release step (${reason}). The deployment is cancelled here, but a rolling replace may keep running there until it finishes.`,
@@ -588,11 +588,16 @@ export const cancelBuildServerDeployment = async (
 		warning = `Could not reach the build server to stop the build (${reason}). The deployment is cancelled here, but the build may keep running on the build server until it finishes.`;
 	}
 
-	// The images are built and the serving host is running the release (the
-	// rolling replace): the build server had nothing to kill, signal the host
-	// that is running it. Skipped when a build was just killed.
+	// The images are built and this process is waiting on the release script
+	// (the rolling replace) on the serving host: the build server had nothing
+	// to kill, signal the host that is running it. Skipped when a build was
+	// just killed, and when no release step is running (no extra ssh call).
 	let releaseStopped = false;
-	if (releaseHost && result !== "KILLED") {
+	if (
+		releaseHost &&
+		result !== "KILLED" &&
+		hasRunningRemoteBuild(getReleaseCancelKey(deploymentId))
+	) {
 		const release = await stopReleaseStep(releaseHost, deploymentId);
 		releaseStopped = release.result === "KILLED";
 		if (release.warning) {
@@ -620,7 +625,7 @@ export const cancelBuildServerDeployment = async (
 			logServerId,
 			logPath,
 			releaseStopped
-				? "✅ The release step was stopped on the serving host. A rolling replace removes the replica it had not promoted; services it had already replaced stay on the new release."
+				? "✅ The release step was stopped on the serving host. A rolling replace removes the replica it had not promoted; services it had already updated stay on the new release; a step it had started is let finish."
 				: result === "KILLED"
 					? "✅ Build stopped on the build server."
 					: "ℹ️ No build was running on the build server (it had not started, or had just finished). Nothing more will be built or deployed.",

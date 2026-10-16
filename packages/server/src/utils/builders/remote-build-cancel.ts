@@ -121,6 +121,11 @@ export const wrapCancelableRemoteBuild = (
 	command: string,
 	{ pidFile, deploymentId, drainSeconds }: RemoteBuildCancelTarget,
 ) => {
+	// A release step tells the wrapper when its cancel cleanup is finished
+	// (`$DOKPLOY_RELEASE_DONE`, see the rolling script's trap): the wrapper then
+	// stops waiting even if background helpers of the script are still in the
+	// group. The marker is cleared before the command starts.
+	const isRelease = Boolean(drainSeconds && drainSeconds > 0);
 	const drain =
 		drainSeconds && drainSeconds > 0
 			? [
@@ -131,7 +136,10 @@ export const wrapCancelableRemoteBuild = (
 					'read -r __pg _ < "$__f" 2>/dev/null || __pg=""',
 					'case "$__pg" in ""|*[!0-9]*|0|1) ;; *)',
 					"__i=0",
-					`while [ "$__i" -lt ${Math.floor(drainSeconds)} ] && kill -s 0 -- "-$__pg" 2>/dev/null; do sleep 1; __i=$((__i+1)); done;;`,
+					`while [ "$__i" -lt ${Math.floor(drainSeconds)} ] && [ ! -e "$__f.done" ] && kill -s 0 -- "-$__pg" 2>/dev/null; do sleep 1; __i=$((__i+1)); done`,
+					// The marker stays while helpers are left, for the kill script
+					// that may still be polling for it; it removes it.
+					'kill -s 0 -- "-$__pg" 2>/dev/null || rm -f "$__f.done";;',
 					"esac",
 					"fi",
 				]
@@ -141,6 +149,12 @@ export const wrapCancelableRemoteBuild = (
 		`__id=${shSingleQuote(deploymentId)}`,
 		`__cmd=${shSingleQuote(command)}`,
 		'mkdir -p "$(dirname "$__f")" 2>/dev/null',
+		...(isRelease
+			? [
+					'rm -f "$__f.done"',
+					'DOKPLOY_RELEASE_DONE="$__f.done"; export DOKPLOY_RELEASE_DONE',
+				]
+			: []),
 		"if command -v setsid >/dev/null 2>&1; then",
 		`( exec setsid sh -c ${shSingleQuote(SESSION_LAUNCHER)} sh "$__f" "$__id" "$__cmd" )`,
 		"else",
@@ -166,6 +180,8 @@ export type RemoteBuildKillResult =
 	| "GONE"
 	/** The group survived SIGKILL. */
 	| "FAILED"
+	/** Release steps only: it needed SIGKILL, so its cancel cleanup never ran. */
+	| "KILLED_HARD"
 	/** No /proc, so the process cannot be told apart from a reused pid. */
 	| "UNVERIFIED";
 
@@ -193,6 +209,7 @@ export const RELEASE_DRAIN_SECONDS = RELEASE_KILL_GRACE_SECONDS + 5;
 export const getKillRemoteBuildCommand = (
 	{ pidFile, deploymentId }: RemoteBuildCancelTarget,
 	graceSeconds = KILL_GRACE_SECONDS,
+	{ reportHardKill = false }: { reportHardKill?: boolean } = {},
 ) => {
 	const grace = Math.max(1, Math.floor(graceSeconds));
 	return [
@@ -213,17 +230,20 @@ export const getKillRemoteBuildCommand = (
 		'kill -s TERM -- "-$pgid" 2>/dev/null',
 		"i=0",
 		`while [ "$i" -lt ${grace} ]; do`,
+		// The script finished its cancel cleanup; only helpers can be left.
+		'[ ! -e "$f.done" ] || { rm -f "$f" "$f.done"; echo KILLED; exit 0; }',
 		'kill -s 0 -- "-$pgid" 2>/dev/null || { rm -f "$f"; echo KILLED; exit 0; }',
 		"sleep 1; i=$((i+1))",
 		"done",
 		'kill -s KILL -- "-$pgid" 2>/dev/null',
 		"sleep 1",
 		'kill -s 0 -- "-$pgid" 2>/dev/null && { echo FAILED; exit 0; }',
-		'rm -f "$f"; echo KILLED',
+		`rm -f "$f" "$f.done"; echo ${reportHardKill ? "KILLED_HARD" : "KILLED"}`,
 	].join("\n");
 };
 
 const KILL_RESULTS: readonly RemoteBuildKillResult[] = [
+	"KILLED_HARD",
 	"KILLED",
 	"NONE",
 	"STALE",

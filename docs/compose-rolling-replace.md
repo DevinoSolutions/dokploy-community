@@ -138,9 +138,22 @@ deploy is never failed because of drift.
     never cut short: a cancel waits for the step that is running (up to the
     20 s grace), then the script stops before the next one. The job ends only
     after the script has cleaned up.
-  - `deployment.killProcess` on a compose that does not use a build server
-    sends `kill -9`, which cannot be caught: it can leave two containers until
-    the next deploy reconciles them.
+  - If the replica removal does not finish within 20 s of the cancel, the
+    script is killed. The deployment log and the deployment's error message
+    then say so: a replica it had not promoted may be left over (the next
+    deploy reconciles it) and a `docker compose` step it had started may still
+    be running on its own, because that step is not signalled.
+  - A compose that does **not** use a build server is not started through the
+    cancel launcher. `compose.killBuild` runs `pkill -2 -f "docker compose"`
+    on the serving host: SIGINT goes to every process whose command line
+    contains `docker compose`, which is the deploy script (its trap runs once
+    the `docker compose` step it is waiting on returns) and also the
+    `docker compose up` steps, including the ones the script runs in their own
+    session. Those are matched by command line, not by group, so they are
+    interrupted too (the shield only protects them from a group signal), so
+    a service that is mid-recreate may be interrupted. `deployment.killProcess` on such a compose sends
+    `kill -9`, which cannot be caught: it can leave two containers until the
+    next deploy reconciles them.
 - **Interrupted deploys can leave two containers.** The next deploy finds more
   than one container for a selected service and reconciles first: it keeps the
   newest healthy one, removes the rest, and goes on.

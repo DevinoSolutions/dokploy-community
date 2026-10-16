@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Cancelling a build-server compose while the release (the rolling replace) is
@@ -137,7 +137,19 @@ describe("release cancel target", () => {
 	});
 });
 
+/** A release step of dep-1 that this process is waiting on, like a live deploy. */
+let releaseWaiting: (() => void) | undefined;
+const startWaitingOnRelease = () => {
+	releaseWaiting = registerRemoteBuild(getReleaseCancelKey("dep-1"), () => {});
+};
+afterEach(() => {
+	releaseWaiting?.();
+	releaseWaiting = undefined;
+});
+
 describe("cancelBuildServerDeployment with a release host", () => {
+	beforeEach(startWaitingOnRelease);
+
 	const target = {
 		deploymentId: "dep-1",
 		logPath: "/etc/dokploy/logs/app/app-1.log",
@@ -265,23 +277,21 @@ describe("cancelBuildServerDeployment with a release host", () => {
 		expect(decodedLogLines()).toContain("pid file was not found");
 	}, 15000);
 
-	it("still cancels, without a warning, when nothing is waiting on a release step and the host is unreachable", async () => {
-		mocks.execAsyncRemote.mockImplementation(
-			async (serverId: string, command: string) => {
-				if (serverId === "serving-1" && isKill(command)) {
-					throw new Error("connect ETIMEDOUT");
-				}
-				return { stdout: isKill(command) ? "NONE\n" : "", stderr: "" };
-			},
-		);
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+	it("sends nothing to the serving host when no release step is running", async () => {
+		releaseWaiting?.();
+		releaseWaiting = undefined;
 
 		const outcome = await cancelBuildServerDeployment(target);
-		warn.mockRestore();
 
-		expect(outcome.status).toBe("cancelled");
+		expect(outcome).toMatchObject({ status: "cancelled", result: "NONE" });
 		expect((outcome as any).warning).toBeUndefined();
-		expect(mocks.updateSets.some((set) => set.errorMessage)).toBe(false);
+		expect(killsOn("serving-1")).toHaveLength(0);
+		expect(
+			mocks.execAsyncRemote.mock.calls
+				.filter((call) => call[0] === "serving-1")
+				.every((call) => String(call[1]).includes("base64 -d")),
+		).toBe(true);
+		expect(decodedLogLines()).toContain("No build was running");
 	});
 
 	it("still cancels, with a warning, when the serving host is unreachable", async () => {
@@ -308,6 +318,32 @@ describe("cancelBuildServerDeployment with a release host", () => {
 		expect(mocks.updateSets.some((set) => set.errorMessage)).toBe(true);
 	});
 
+	it("asks the release kill to report a hard kill, and warns when SIGKILL was needed", async () => {
+		answers("NONE", "KILLED_HARD");
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect(killsOn("serving-1")[0]).toContain("echo KILLED_HARD");
+		// The build's own kill never reports it.
+		expect(killsOn("build-1")[0]).not.toContain("KILLED_HARD");
+		expect(outcome).toMatchObject({ status: "cancelled", result: "KILLED" });
+		const warning = (outcome as any).warning as string;
+		expect(warning).toContain("was killed");
+		expect(warning).toContain("may still be running on its own");
+		expect(decodedLogLines()).toContain("was killed");
+		expect(mocks.updateSets.some((set) => set.errorMessage === warning)).toBe(
+			true,
+		);
+	});
+
+	it("a release step that stopped on SIGTERM has no warning", async () => {
+		answers("NONE", "KILLED");
+
+		const outcome = await cancelBuildServerDeployment(target);
+
+		expect((outcome as any).warning).toBeUndefined();
+	});
+
 	it("warns when the release process survived SIGKILL", async () => {
 		answers("NONE", "FAILED");
 
@@ -328,6 +364,8 @@ describe("cancelBuildServerDeployment with a release host", () => {
 });
 
 describe("the compose entry points pass the serving host", () => {
+	beforeEach(startWaitingOnRelease);
+
 	it("compose.killBuild's cancel signals the release step on the compose's server", async () => {
 		mocks.composeFindFirst.mockResolvedValue({
 			buildServerId: "build-1",
