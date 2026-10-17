@@ -97,6 +97,7 @@ import {
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
 	cleanQueuesByCompose,
+	keepOldestQueuesByCompose,
 	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
@@ -397,11 +398,35 @@ export const composeRouter = createTRPCRouter({
 			return composeResult;
 		}),
 	cleanQueues: protectedProcedure
-		.input(apiFindCompose)
+		.input(
+			apiFindCompose.extend({
+				mode: z
+					.enum(["all", "keepOldest"])
+					.default("all")
+					.describe(
+						'"all" (default) removes every waiting job of the compose stack, PR previews included. "keepOldest" keeps the earliest waiting job of each group of duplicates and removes the later ones; only plain deploy and redeploy jobs of the compose stack are considered (never PR previews), deploy and redeploy are separate, and jobs that differ in freshVolumes, pinnedImage or priority are not duplicates. Active jobs are never touched. keepOldest returns { kept, removed }, each a list of { jobId, enqueuedAt, type }.',
+					),
+			}),
+		)
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
+			if (input.mode === "keepOldest") {
+				const result = await keepOldestQueuesByCompose(input.composeId);
+				if (result.removed.length > 0) {
+					await audit(ctx, {
+						action: "cancel",
+						resourceType: "compose",
+						resourceId: input.composeId,
+						metadata: {
+							queue: "keepOldest",
+							removedJobIds: result.removed.map((job) => job.jobId),
+						},
+					});
+				}
+				return result;
+			}
 			await cleanQueuesByCompose(input.composeId);
 			return { success: true, message: "Queues cleaned successfully" };
 		}),

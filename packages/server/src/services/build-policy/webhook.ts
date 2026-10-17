@@ -65,7 +65,15 @@ export interface BuildPolicyGateUnit {
 }
 
 export type BuildPolicyGateResult =
-	| { deploy: true; coalesced: number }
+	| {
+			deploy: true;
+			coalesced: number;
+			/**
+			 * The push was folded into a job that was already waiting (it now carries
+			 * this push's title and pinned image). The caller must not enqueue it.
+			 */
+			merged?: true;
+	  }
 	| {
 			deploy: false;
 			reason: "skip_deploy_marker" | "watch_paths";
@@ -108,8 +116,10 @@ export const buildPolicyDeployGate = async ({
 	changedFiles?: string[] | null;
 	commitMessage?: string | null;
 	/**
-	 * Drops this unit's still-waiting plain deploys (never its previews) and
-	 * reports how many, and ideally their titles.
+	 * Folds the incoming push into this unit's oldest still-waiting plain deploy
+	 * and drops the other waiting ones (never its previews or redeploys). Reports
+	 * how many builds it replaced or dropped, ideally their titles, and whether
+	 * the push was merged.
 	 */
 	removeWaiting: CoalesceQueuedDeployInput["removeWaiting"];
 }): Promise<BuildPolicyGateResult> => {
@@ -181,7 +191,7 @@ export const buildPolicyDeployGate = async ({
 		}
 	}
 
-	const { removed } = await coalesceQueuedDeploy({
+	const { removed, merged } = await coalesceQueuedDeploy({
 		unitType,
 		unitId: unit.unitId,
 		unitName: unit.unitName,
@@ -190,7 +200,9 @@ export const buildPolicyDeployGate = async ({
 		recordAudit: recordBuildPolicyAudit,
 	});
 
-	return { deploy: true, coalesced: removed };
+	return merged
+		? { deploy: true, coalesced: removed, merged: true }
+		: { deploy: true, coalesced: removed };
 };
 
 /** Does this request body carry an `image` at all? Cheap, no database. */

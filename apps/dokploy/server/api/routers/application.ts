@@ -94,6 +94,7 @@ import {
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
 	cleanQueuesByApplication,
+	keepOldestQueuesByApplication,
 	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
@@ -1078,11 +1079,35 @@ export const applicationRouter = createTRPCRouter({
 		}),
 
 	cleanQueues: protectedProcedure
-		.input(apiFindOneApplication)
+		.input(
+			apiFindOneApplication.extend({
+				mode: z
+					.enum(["all", "keepOldest"])
+					.default("all")
+					.describe(
+						'"all" (default) removes every waiting job of the application, PR previews included. "keepOldest" keeps the earliest waiting job of each group of duplicates and removes the later ones; only plain deploy and redeploy jobs of the application are considered (never PR previews), deploy and redeploy are separate, and jobs that differ in freshVolumes, pinnedImage or priority are not duplicates. Active jobs are never touched. keepOldest returns { kept, removed }, each a list of { jobId, enqueuedAt, type }.',
+					),
+			}),
+		)
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["cancel"],
 			});
+			if (input.mode === "keepOldest") {
+				const result = await keepOldestQueuesByApplication(input.applicationId);
+				if (result.removed.length > 0) {
+					await audit(ctx, {
+						action: "cancel",
+						resourceType: "application",
+						resourceId: input.applicationId,
+						metadata: {
+							queue: "keepOldest",
+							removedJobIds: result.removed.map((job) => job.jobId),
+						},
+					});
+				}
+				return result;
+			}
 			await cleanQueuesByApplication(input.applicationId);
 		}),
 	clearDeployments: protectedProcedure

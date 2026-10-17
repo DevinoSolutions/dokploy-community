@@ -263,6 +263,15 @@ export default async function handler(
 			res.status(400).json({ message: hookImage.message });
 			return;
 		}
+		const jobData: DeploymentJob = {
+			composeId: composeResult.composeId as string,
+			titleLog: deploymentTitle,
+			type: "deploy",
+			applicationType: "compose",
+			descriptionLog: `Hash: ${deploymentHash}`,
+			server: !!composeResult.serverId,
+			serverId: composeResult.serverId ?? undefined,
+		};
 		const gate = await buildPolicyDeployGate({
 			unitType: "compose",
 			unit: {
@@ -274,7 +283,7 @@ export default async function handler(
 			},
 			commitMessage: deploymentTitle,
 			removeWaiting: () =>
-				coalesceQueuedComposeDeploys(composeResult.composeId),
+				coalesceQueuedComposeDeploys(composeResult.composeId, jobData),
 		});
 		if (!gate.deploy) {
 			res.status(301).json({ message: gate.message });
@@ -283,17 +292,9 @@ export default async function handler(
 		// <<< build-policy hook
 
 		try {
-			const jobData: DeploymentJob = {
-				composeId: composeResult.composeId as string,
-				titleLog: deploymentTitle,
-				type: "deploy",
-				applicationType: "compose",
-				descriptionLog: `Hash: ${deploymentHash}`,
-				server: !!composeResult.serverId,
-				serverId: composeResult.serverId ?? undefined,
-			};
-
-			if (IS_CLOUD && composeResult.serverId) {
+			if (gate.merged) {
+				// A waiting deploy took this push over; nothing to enqueue.
+			} else if (IS_CLOUD && composeResult.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});

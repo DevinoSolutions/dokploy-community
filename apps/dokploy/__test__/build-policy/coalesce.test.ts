@@ -219,3 +219,54 @@ describe("coalescing a queue that also holds a preview", () => {
 		]);
 	});
 });
+
+describe("coalesceQueuedDeploy when the push is folded into a waiting deploy", () => {
+	const base = {
+		unitType: "application" as const,
+		unitId: "app-1",
+		organizationId: "org-1",
+		unitName: "sendly-web",
+	};
+
+	it("tells the caller not to enqueue and audits the merge with the replaced titles", async () => {
+		const recordAudit = vi.fn().mockResolvedValue(undefined);
+		const result = await coalesceQueuedDeploy({
+			...base,
+			removeWaiting: vi
+				.fn()
+				.mockResolvedValue({ removed: 2, titles: ["p1", "p2"], merged: true }),
+			recordAudit,
+		});
+
+		expect(result).toEqual({ removed: 2, merged: true });
+		expect(recordAudit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				action: "deploy_coalesced",
+				metadata: expect.objectContaining({
+					removed: 2,
+					merged: true,
+					droppedTitles: ["p1", "p2"],
+				}),
+			}),
+		);
+	});
+
+	it("does not mark the result merged when nothing was folded in", async () => {
+		const result = await coalesceQueuedDeploy({
+			...base,
+			removeWaiting: vi.fn().mockResolvedValue({ removed: 1, titles: ["p1"] }),
+			recordAudit: vi.fn().mockResolvedValue(undefined),
+		});
+		expect(result).toEqual({ removed: 1 });
+	});
+
+	it("still reports the merge when the audit write fails", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const result = await coalesceQueuedDeploy({
+			...base,
+			removeWaiting: vi.fn().mockResolvedValue({ removed: 1, merged: true }),
+			recordAudit: vi.fn().mockRejectedValue(new Error("db down")),
+		});
+		expect(result).toEqual({ removed: 1, merged: true });
+	});
+});

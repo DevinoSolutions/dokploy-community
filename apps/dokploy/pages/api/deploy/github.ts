@@ -322,9 +322,11 @@ export default async function handler(
 					changedFiles: normalizedCommits,
 					commitMessage: deploymentTitle,
 					removeWaiting: () =>
-						coalesceQueuedApplicationDeploys(app.applicationId),
+						coalesceQueuedApplicationDeploys(app.applicationId, jobData),
 				});
 				if (!gate.deploy) continue;
+				// A waiting deploy took this push over; nothing to enqueue.
+				if (gate.merged) continue;
 				// <<< build-policy hook
 
 				if (IS_CLOUD && app.serverId) {
@@ -388,9 +390,11 @@ export default async function handler(
 					changedFiles: normalizedCommits,
 					commitMessage: deploymentTitle,
 					removeWaiting: () =>
-						coalesceQueuedComposeDeploys(composeApp.composeId),
+						coalesceQueuedComposeDeploys(composeApp.composeId, jobData),
 				});
 				if (!composeGate.deploy) continue;
+				// A waiting deploy took this push over; nothing to enqueue.
+				if (composeGate.merged) continue;
 				// <<< build-policy hook
 
 				if (IS_CLOUD && composeApp.serverId) {

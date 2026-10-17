@@ -45,7 +45,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 - **One builder for the whole organization** — with enforcement on, every GitHub-sourced application builds on the organization build server, pushes `<repository>:<sha>` to the organization registry, and updates the swarm service **by digest**, so CI can wait for that image instead of building a second copy of it
 - **Escape hatches that leave a record** — per-application and per-compose exclusions, plus a one-shot "build locally once" grant written to an audit trail with actor, reason and timestamp
-- **Required checks, coalescing and rollback by digest** — a deploy can wait for named commit checks, rapid pushes collapse into a single deploy, and a rollback re-deploys exactly the image that was running
+- **Required checks, coalescing and rollback by digest** — a deploy can wait for named commit checks, rapid pushes collapse into one waiting deploy that keeps its place in the queue and builds the newest commit, and a rollback re-deploys exactly the image that was running
 - **Off by default** — with no policy configured for an organization, every code path is stock upstream behaviour
 
 ### Preview deployments for Compose, GitLab and Gitea
