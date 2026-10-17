@@ -146,8 +146,10 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		restore: async () => {
 			try {
 				const result = await durable.restore(queue);
-				// Still behind the gate: nothing starts until the pass is done.
-				await dedupeRestoredUnits(queue);
+				// Before the gate opens, so the worker starts on the deduped queue.
+				// If the gate's timer already fired this is still safe: the pass is
+				// synchronous per unit and only ever removes waiting jobs.
+				if (result.restored > 0) await dedupeRestoredUnits(queue);
 				return result;
 			} finally {
 				gate.open();
@@ -261,33 +263,51 @@ const keepOldestForUnit = (
 /**
  * A push that lands before the boot replay finishes is enqueued normally, and
  * then the restored copy of the same deploy goes in front of it, leaving two
- * equivalent waiting jobs until the next push. Run once after the replay: for
- * every unit whose organization coalesces pushes (the same condition as the
- * enqueue-time gate), keep the oldest of each group of duplicates, which is the
- * restored one. Units of an organization that does not coalesce are left alone,
- * and so are running jobs. Best-effort: it never throws.
+ * equivalent waiting jobs until the next push. Run once after a replay that
+ * restored something: for every unit with two or more waiting jobs whose
+ * organization coalesces pushes (the same condition as the enqueue-time gate),
+ * keep the oldest of each group of duplicates, which is the restored one. This
+ * is keep-oldest, so it keeps the older job's payload, unlike push coalescing.
+ * Units of an organization that does not coalesce are left alone, and so are
+ * running jobs. Best-effort per unit: a failing lookup skips only that unit.
  */
 const dedupeRestoredUnits = async (
 	queue: Pick<DeploymentQueue, "getJobs" | "keepOldestWaiting">,
 ) => {
+	const units = new Map<
+		string,
+		{ unitType: "application" | "compose"; unitId: string; waiting: number }
+	>();
 	try {
-		const units = new Map<string, ["application" | "compose", string]>();
 		for (const { data } of await queue.getJobs(["waiting"])) {
-			if (data.applicationType === "application") {
-				units.set(`application:${data.applicationId}`, [
-					"application",
-					data.applicationId,
-				]);
-			} else if (data.applicationType === "compose") {
-				units.set(`compose:${data.composeId}`, ["compose", data.composeId]);
-			}
-		}
-		for (const [unitType, unitId] of units.values()) {
-			if (!(await isCoalescingEnforcedForUnit(unitType, unitId))) continue;
-			keepOldestForUnit(queue, unitType, unitId);
+			const unit =
+				data.applicationType === "application"
+					? { unitType: "application" as const, unitId: data.applicationId }
+					: data.applicationType === "compose"
+						? { unitType: "compose" as const, unitId: data.composeId }
+						: null;
+			if (!unit) continue;
+			const key = `${unit.unitType}:${unit.unitId}`;
+			const seen = units.get(key);
+			if (seen) seen.waiting++;
+			else units.set(key, { ...unit, waiting: 1 });
 		}
 	} catch (error) {
 		console.error("Deployment queue: post-restore dedupe failed", error);
+		return;
+	}
+	for (const { unitType, unitId, waiting } of units.values()) {
+		// A lone job has nothing to be a duplicate of; skip the lookup.
+		if (waiting < 2) continue;
+		try {
+			if (!(await isCoalescingEnforcedForUnit(unitType, unitId))) continue;
+			keepOldestForUnit(queue, unitType, unitId);
+		} catch (error) {
+			console.error(
+				`Deployment queue: post-restore dedupe failed for ${unitType} ${unitId}`,
+				error,
+			);
+		}
 	}
 };
 

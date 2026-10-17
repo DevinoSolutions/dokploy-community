@@ -602,12 +602,23 @@ so a plain fold of p2 into p1 reads `removed: 0, merged: true, droppedTitles:
 ### After a restart
 
 A push that arrives before the boot replay finishes enqueues normally, and then
-the job restored from the journal goes in front of it. Once the replay is done,
-and while the worker is still held back, the queue runs one keep-oldest pass
-per application or compose unit that is waiting (the restored job survives, the
-later duplicate is dropped and its journal row deleted). It only runs for units
-whose organization enforces remote builds, the same condition as the gate above,
-and it never touches a running job or a preview.
+the job restored from the journal goes in front of it. After a replay that
+restored something, the queue runs one **keep-oldest** pass over every
+application or compose unit with two or more waiting jobs, before the worker
+gate opens. (If the gate's 30 second timer already fired, the pass still runs
+and is harmless: it is synchronous and only removes waiting jobs.)
+
+It is not enqueue-time coalescing. It dedupes any waiting pair of the unit,
+including two restored jobs (an interrupted job and one queued behind it), and
+it keeps the **older** job with its own payload and title; the newest payload
+does not win. The duplicate rules are the clean-queues `keepOldest` ones: same
+type, `freshVolumes`, pinned image and `priority` / `priorityBy`, so a
+pinned-image job with a different digest is not a duplicate. The dropped jobs'
+journal rows are deleted and the pass writes no audit row, only a console line.
+
+It only runs for units whose organization enforces remote builds, the same
+condition as the gate above (one shared check), and it never touches a running
+job or a preview. A failing lookup skips only that unit and never blocks startup.
 
 ---
 

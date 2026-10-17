@@ -108,6 +108,23 @@ const findOrganizationId = async (
 	return environment?.project?.organizationId ?? null;
 };
 
+/**
+ * The organization that owns `environmentId`, when it enforces remote builds;
+ * null otherwise. The one place that decides "does the policy apply here", so
+ * the enqueue gate and the callers that act on the queue outside a push cannot
+ * drift apart. Cheap cached check first: on an instance where nobody enforces,
+ * this reads nothing else.
+ */
+const findEnforcingOrganizationId = async (
+	environmentId: string,
+): Promise<string | null> => {
+	if (!(await isBuildPolicyEnforcedAnywhere())) return null;
+	const organizationId = await findOrganizationId(environmentId);
+	if (!organizationId) return null;
+	const settings = await findBuildPolicySettings(organizationId);
+	return settings?.enforceRemoteBuilds ? organizationId : null;
+};
+
 export const buildPolicyDeployGate = async ({
 	unitType,
 	unit,
@@ -128,15 +145,9 @@ export const buildPolicyDeployGate = async ({
 	 */
 	removeWaiting: CoalesceQueuedDeployInput["removeWaiting"];
 }): Promise<BuildPolicyGateResult> => {
-	// Cheap cached check first: on an instance where nobody enforces, this is
-	// the only thing the gate does.
-	if (!(await isBuildPolicyEnforcedAnywhere())) return PASS;
-
-	const organizationId = await findOrganizationId(unit.environmentId);
+	// On an instance where nobody enforces, this is the only thing the gate does.
+	const organizationId = await findEnforcingOrganizationId(unit.environmentId);
 	if (!organizationId) return PASS;
-
-	const settings = await findBuildPolicySettings(organizationId);
-	if (!settings?.enforceRemoteBuilds) return PASS;
 
 	const marker = matchedSkipDeployMarker(commitMessage);
 	if (marker) {
@@ -338,11 +349,7 @@ export const rejectComposeDeployHookImage = async (
 	body: unknown,
 ): Promise<{ ok: true } | { ok: false; message: string }> => {
 	if (!deployHookBodyHasImage(body)) return { ok: true };
-	if (!(await isBuildPolicyEnforcedAnywhere())) return { ok: true };
-	const organizationId = await findOrganizationId(environmentId);
-	if (!organizationId) return { ok: true };
-	const settings = await findBuildPolicySettings(organizationId);
-	if (!settings?.enforceRemoteBuilds) return { ok: true };
+	if (!(await findEnforcingOrganizationId(environmentId))) return { ok: true };
 	return {
 		ok: false,
 		message:
@@ -362,6 +369,7 @@ export const isCoalescingEnforcedForUnit = async (
 	unitType: BuildPolicyUnitType,
 	unitId: string,
 ): Promise<boolean> => {
+	// Before the unit lookup, so an instance where nobody enforces reads nothing.
 	if (!(await isBuildPolicyEnforcedAnywhere())) return false;
 	const unit =
 		unitType === "application"
@@ -374,8 +382,5 @@ export const isCoalescingEnforcedForUnit = async (
 					columns: { environmentId: true },
 				});
 	if (!unit) return false;
-	const organizationId = await findOrganizationId(unit.environmentId);
-	if (!organizationId) return false;
-	const settings = await findBuildPolicySettings(organizationId);
-	return settings?.enforceRemoteBuilds === true;
+	return (await findEnforcingOrganizationId(unit.environmentId)) !== null;
 };

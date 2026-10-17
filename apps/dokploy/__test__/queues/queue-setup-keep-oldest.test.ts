@@ -8,11 +8,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 // What the boot replay puts in the queue and which units coalesce, per test.
-const boot = vi.hoisted(() => ({
-	replay: async (_queue: unknown): Promise<unknown> => undefined,
-	enforced: new Set<string>(),
-	failPolicy: false,
-}));
+const boot = vi.hoisted(() => {
+	const nothingRestored = { restored: 0, interrupted: 0, dropped: 0 };
+	return {
+		nothingRestored,
+		replay: async (_queue: unknown): Promise<typeof nothingRestored> =>
+			nothingRestored,
+		enforced: new Set<string>(),
+		/** Units whose policy lookup throws. */
+		failFor: new Set<string>(),
+		/** Units the post-restore pass looked up, in order. */
+		lookups: [] as string[],
+		/** Runs when the worker gate opens. */
+		onOpen: () => {},
+	};
+});
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
@@ -31,7 +41,7 @@ vi.mock("../../server/queues/deployments-queue", () => ({
 	processDeploymentJob: () => new Promise(() => {}),
 }));
 vi.mock("../../server/queues/lifecycle", () => ({
-	gateWorkerUntilRestored: () => ({ open: () => {} }),
+	gateWorkerUntilRestored: () => ({ open: () => boot.onOpen() }),
 	registerShutdownHandler: () => {},
 }));
 vi.mock("../../server/queues/queue-journal", () => ({
@@ -43,8 +53,10 @@ vi.mock("../../server/queues/queue-journal", () => ({
 }));
 vi.mock("@dokploy/server/services/build-policy/webhook", () => ({
 	isCoalescingEnforcedForUnit: async (unitType: string, unitId: string) => {
-		if (boot.failPolicy) throw new Error("policy lookup failed");
-		return boot.enforced.has(`${unitType}:${unitId}`);
+		const key = `${unitType}:${unitId}`;
+		boot.lookups.push(key);
+		if (boot.failFor.has(key)) throw new Error("policy lookup failed");
+		return boot.enforced.has(key);
 	},
 }));
 
@@ -266,8 +278,8 @@ describe("boot restore dedupes the units that coalesce", () => {
 	/** The journal replay: these jobs land at the front, as addRestored does. */
 	const replayOf =
 		(...jobs: Array<{ id: string; data: DeploymentJob }>) =>
-		async (queue: unknown) =>
-			(
+		async (queue: unknown) => {
+			const restored = (
 				queue as {
 					addRestored: (
 						jobs: Array<{
@@ -284,13 +296,14 @@ describe("boot restore dedupes the units that coalesce", () => {
 					timestamp: 1_700_000_000_000 + index,
 				})),
 			);
+			return { restored, interrupted: 0, dropped: 0 };
+		};
 
 	const restoreWith = async (
 		enforced: string[],
 		replay: ReturnType<typeof replayOf>,
 	) => {
 		boot.enforced = new Set(enforced);
-		boot.failPolicy = false;
 		boot.replay = replay;
 		return myQueue.restore();
 	};
@@ -301,9 +314,11 @@ describe("boot restore dedupes the units that coalesce", () => {
 	});
 
 	afterEach(() => {
-		boot.replay = async () => undefined;
+		boot.replay = async () => boot.nothingRestored;
 		boot.enforced = new Set();
-		boot.failPolicy = false;
+		boot.failFor = new Set();
+		boot.lookups = [];
+		boot.onOpen = () => {};
 		vi.restoreAllMocks();
 	});
 
@@ -384,18 +399,101 @@ describe("boot restore dedupes the units that coalesce", () => {
 		expect(await titles()).toEqual(["restored", "push before replay"]);
 	});
 
-	it("still opens the way when the policy lookup fails", async () => {
+	it("a failing policy lookup skips only that unit", async () => {
 		await reset();
 		await myQueue.add("deployments", appJob("R5", "active"));
+		await myQueue.add("deployments", appJob("R6", "active"));
 		await flush();
 		await myQueue.add("deployments", appJob("R5", "push before replay"));
-		boot.enforced = new Set(["application:R5"]);
-		boot.failPolicy = true;
-		boot.replay = replayOf({ id: "j-r5", data: appJob("R5", "restored") });
+		await myQueue.add("deployments", appJob("R6", "push before replay"));
+		boot.failFor = new Set(["application:R5"]);
 
-		const result = await myQueue.restore();
+		const result = await restoreWith(
+			["application:R5", "application:R6"],
+			replayOf(
+				{ id: "j-r5", data: appJob("R5", "restored r5") },
+				{ id: "j-r6", data: appJob("R6", "restored r6") },
+			),
+		);
 
-		expect(result).toBe(1);
+		expect(result.restored).toBe(2);
+		expect(boot.lookups).toEqual(["application:R5", "application:R6"]);
+		// R5 keeps its pair, R6 was still deduped after R5's lookup threw.
+		expect(await titles()).toEqual([
+			"restored r5",
+			"restored r6",
+			"push before replay",
+		]);
+	});
+
+	it("dedupes before the worker gate opens", async () => {
+		await reset();
+		await myQueue.add("deployments", appJob("R7", "active"));
+		await flush();
+		await myQueue.add("deployments", appJob("R7", "push before replay"));
+		let atOpen: Promise<unknown[]> | undefined;
+		const opened = vi.fn(() => {
+			// getJobs snapshots the queue synchronously, so this is the state the
+			// worker would start from.
+			atOpen = myQueue
+				.getJobs(["waiting"])
+				.then((jobs) => jobs.map((job) => (job.data as any).titleLog));
+		});
+		boot.onOpen = opened;
+
+		await restoreWith(
+			["application:R7"],
+			replayOf({ id: "j-r7", data: appJob("R7", "restored") }),
+		);
+
+		expect(opened).toHaveBeenCalledTimes(1);
+		expect(await atOpen).toEqual(["restored"]);
+	});
+
+	it("opens the gate even when the pass itself fails", async () => {
+		await reset();
+		await myQueue.add("deployments", appJob("R8", "active"));
+		await flush();
+		await myQueue.add("deployments", appJob("R8", "push before replay"));
+		const opened = vi.fn();
+		boot.onOpen = opened;
+		boot.failFor = new Set(["application:R8"]);
+
+		await restoreWith(
+			["application:R8"],
+			replayOf({ id: "j-r8", data: appJob("R8", "restored") }),
+		);
+
+		expect(opened).toHaveBeenCalledTimes(1);
 		expect(await titles()).toEqual(["restored", "push before replay"]);
+	});
+
+	it("does no lookup when the replay restored nothing", async () => {
+		await reset();
+		await myQueue.add("deployments", appJob("R9", "active"));
+		await flush();
+		await myQueue.add("deployments", appJob("R9", "d1"));
+		await myQueue.add("deployments", appJob("R9", "d2"));
+
+		await restoreWith(["application:R9"], async () => boot.nothingRestored);
+
+		expect(boot.lookups).toEqual([]);
+		expect(await titles()).toEqual(["d1", "d2"]);
+	});
+
+	it("does no lookup for units with a single waiting job", async () => {
+		await reset();
+		// One slot per partition: only R10 runs, everything else waits.
+		await myQueue.add("deployments", appJob("R10", "active"));
+		await flush();
+		await myQueue.add("deployments", appJob("R11", "lone push before replay"));
+
+		await restoreWith(
+			["application:R10", "application:R11"],
+			replayOf({ id: "j-r10", data: appJob("R10", "restored") }),
+		);
+
+		expect(boot.lookups).toEqual([]);
+		expect(await titles()).toEqual(["restored", "lone push before replay"]);
 	});
 });
