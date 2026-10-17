@@ -563,6 +563,11 @@ So `coalesceQueuedApplicationDeploys` additionally requires
 `applicationType === "application"` (and the compose sibling `"compose"`), and
 both report the titles of what they dropped so the audit row names it.
 
+The removal has **keep-oldest** semantics (T-3137): per job type (`deploy`,
+`redeploy`) the earliest-enqueued waiting job survives and only the later ones
+are dropped. The gate still enqueues the incoming push afterwards, so a burst
+leaves the oldest waiting job plus the newest one, not a single job.
+
 ---
 
 ## Rollback

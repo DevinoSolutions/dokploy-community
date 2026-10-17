@@ -4,9 +4,10 @@ import type { BuildPolicyUnitType } from "./policy";
 /**
  * Queue coalescing (spec 5.2.5).
  *
- * Before enqueueing a deploy for a unit, drop the deploys for that same unit
- * that are still *waiting*. Running builds are left alone. N pushes therefore
- * produce one build of the newest commit.
+ * Before enqueueing a deploy for a unit, drop the later deploys for that same
+ * unit that are still *waiting*, per job type, keeping the oldest of each type
+ * in its place (keep-oldest, T-3137). Running builds are left alone. A burst of
+ * pushes therefore leaves the oldest waiting deploy plus the one being enqueued.
  *
  * The caller's `removeWaiting` must drop only the unit's own plain deploys — a
  * queued PR preview for the same application is a different job that nobody

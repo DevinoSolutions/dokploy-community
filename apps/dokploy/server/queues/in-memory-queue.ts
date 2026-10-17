@@ -56,6 +56,23 @@ export interface InMemoryJob {
 	remove: () => Promise<void>;
 }
 
+/** A waiting job as reported by `keepOldestWaiting`. */
+export interface KeptWaitingJob {
+	jobId: string;
+	/** ISO-8601 time the job was enqueued. */
+	enqueuedAt: string;
+	type: "deploy" | "redeploy";
+}
+
+/** What `keepOldestWaiting` kept and dropped. */
+export interface KeepOldestOutcome {
+	/** The surviving job of each job type, oldest first. */
+	kept: KeptWaitingJob[];
+	removed: KeptWaitingJob[];
+	/** Payloads of the removed jobs, in the same order (for audit titles). */
+	removedData: DeploymentJob[];
+}
+
 /**
  * What a processor may report about a job that ended early. A cancelled or
  * failed priority job gives its lane's cooldown back (see `jumpedLast`).
@@ -504,6 +521,54 @@ export class InMemoryQueue {
 		}
 		this.settle(dropped);
 		return dropped.length;
+	}
+
+	/**
+	 * Per job type (`deploy`, `redeploy`), keep the earliest-enqueued waiting job
+	 * that matches `predicate` and remove the later ones. The two types are
+	 * independent: neither is dropped in favour of the other. The kept job is not
+	 * touched, so it keeps its place in the queue. Active jobs are never looked
+	 * at. "Earliest" is the enqueue time, ties broken by queue position (a
+	 * restored job sits at the front with its original time).
+	 */
+	keepOldestWaiting(
+		predicate: (data: DeploymentJob) => boolean,
+	): KeepOldestOutcome {
+		const matches: Array<{ job: InternalJob; partition: Partition }> = [];
+		for (const partition of this.partitions.values()) {
+			for (const job of partition.waiting) {
+				if (predicate(job.data)) matches.push({ job, partition });
+			}
+		}
+		const oldest = new Map<string, InternalJob>();
+		for (const { job } of matches) {
+			const current = oldest.get(job.data.type);
+			if (!current || job.timestamp < current.timestamp) {
+				oldest.set(job.data.type, job);
+			}
+		}
+		const dropped = new Set<InternalJob>();
+		for (const { job, partition } of matches) {
+			if (oldest.get(job.data.type) === job) continue;
+			dropped.add(job);
+			partition.waiting = partition.waiting.filter((other) => other !== job);
+		}
+		const summarize = (job: InternalJob): KeptWaitingJob => ({
+			jobId: job.id,
+			enqueuedAt: new Date(job.timestamp).toISOString(),
+			type: job.data.type,
+		});
+		this.settle([...dropped]);
+		const removedJobs = matches
+			.filter(({ job }) => dropped.has(job))
+			.map(({ job }) => job);
+		return {
+			kept: [...oldest.values()]
+				.sort((a, b) => a.timestamp - b.timestamp)
+				.map(summarize),
+			removed: removedJobs.map(summarize),
+			removedData: removedJobs.map((job) => job.data),
+		};
 	}
 
 	/** Drop every waiting job across all partitions. */

@@ -94,6 +94,7 @@ import {
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
 	cleanQueuesByApplication,
+	keepOldestQueuesByApplication,
 	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
@@ -1078,11 +1079,23 @@ export const applicationRouter = createTRPCRouter({
 		}),
 
 	cleanQueues: protectedProcedure
-		.input(apiFindOneApplication)
+		.input(
+			apiFindOneApplication.extend({
+				/**
+				 * "all" (default) drops every waiting job of the service. "keepOldest"
+				 * keeps the earliest waiting job of each type (deploy, redeploy) and
+				 * drops the later ones.
+				 */
+				mode: z.enum(["all", "keepOldest"]).default("all"),
+			}),
+		)
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["cancel"],
 			});
+			if (input.mode === "keepOldest") {
+				return await keepOldestQueuesByApplication(input.applicationId);
+			}
 			await cleanQueuesByApplication(input.applicationId);
 		}),
 	clearDeployments: protectedProcedure

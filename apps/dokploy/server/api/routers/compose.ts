@@ -97,6 +97,7 @@ import {
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import {
 	cleanQueuesByCompose,
+	keepOldestQueuesByCompose,
 	killDockerBuild,
 	myQueue,
 } from "@/server/queues/queueSetup";
@@ -397,11 +398,23 @@ export const composeRouter = createTRPCRouter({
 			return composeResult;
 		}),
 	cleanQueues: protectedProcedure
-		.input(apiFindCompose)
+		.input(
+			apiFindCompose.extend({
+				/**
+				 * "all" (default) drops every waiting job of the stack. "keepOldest"
+				 * keeps the earliest waiting job of each type (deploy, redeploy) and
+				 * drops the later ones.
+				 */
+				mode: z.enum(["all", "keepOldest"]).default("all"),
+			}),
+		)
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
+			if (input.mode === "keepOldest") {
+				return await keepOldestQueuesByCompose(input.composeId);
+			}
 			await cleanQueuesByCompose(input.composeId);
 			return { success: true, message: "Queues cleaned successfully" };
 		}),

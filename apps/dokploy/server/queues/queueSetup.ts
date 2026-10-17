@@ -14,6 +14,8 @@ import { processDeploymentJob } from "./deployments-queue";
 import {
 	type InMemoryJob,
 	InMemoryQueue,
+	type KeepOldestOutcome,
+	type KeptWaitingJob,
 	type PriorityOutcome,
 } from "./in-memory-queue";
 import { gateWorkerUntilRestored, registerShutdownHandler } from "./lifecycle";
@@ -37,6 +39,16 @@ import type { DeploymentJob } from "./queue-types";
  * dropping it. Remote-server jobs (`serverId`) share the same queue and journal.
  */
 
+/**
+ * Public result of a keep-oldest pass. `kept` holds the surviving job of each
+ * job type (an array, because `deploy` and `redeploy` are kept independently);
+ * it is empty when nothing of the service was waiting.
+ */
+export interface KeepOldestResult {
+	kept: KeptWaitingJob[];
+	removed: KeptWaitingJob[];
+}
+
 interface DeploymentQueue {
 	add: (
 		name: string,
@@ -50,6 +62,9 @@ interface DeploymentQueue {
 	on: (...args: unknown[]) => void;
 	run: () => Promise<void>;
 	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
+	keepOldestWaiting: (
+		predicate: (data: DeploymentJob) => boolean,
+	) => KeepOldestOutcome;
 	clearWaiting: () => number;
 	/** Re-enqueue the jobs the previous process left unfinished. Never throws. */
 	restore: () => Promise<RestoreResult>;
@@ -65,6 +80,7 @@ const createNoopQueue = (): DeploymentQueue => ({
 	on: () => {},
 	run: () => Promise.resolve(),
 	removeWaiting: () => 0,
+	keepOldestWaiting: () => ({ kept: [], removed: [], removedData: [] }),
 	clearWaiting: () => 0,
 	restore: () => Promise.resolve({ restored: 0, interrupted: 0, dropped: 0 }),
 	shutdown: () => Promise.resolve(),
@@ -116,6 +132,7 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		on: () => {},
 		run: () => queue.run(),
 		removeWaiting: (predicate) => queue.removeWaiting(predicate),
+		keepOldestWaiting: (predicate) => queue.keepOldestWaiting(predicate),
 		clearWaiting: () => queue.clearWaiting(),
 		restore: async () => {
 			try {
@@ -206,6 +223,34 @@ export const cleanQueuesByCompose = async (composeId: string) => {
 };
 
 /**
+ * "keepOldest" mode of the clean-queues actions: per job type, keep the
+ * earliest-enqueued waiting job of the service and drop the later ones. Active
+ * jobs and other services are untouched, and the kept job keeps its place.
+ * Only the unit's own plain deploys count, like coalescing: a queued PR preview
+ * is not a duplicate of the service's deploy.
+ */
+const keepOldestForUnit = (
+	unitType: "application" | "compose",
+	unitId: string,
+): KeepOldestResult => {
+	const { kept, removed } = myQueue.keepOldestWaiting((data) =>
+		isCoalescableDeployJob(unitType, unitId, data),
+	);
+	if (removed.length > 0) {
+		console.log(
+			`Removed ${removed.length} newer waiting job(s) for ${unitType} ${unitId}, kept ${kept.length}`,
+		);
+	}
+	return { kept, removed };
+};
+
+export const keepOldestQueuesByApplication = async (applicationId: string) =>
+	keepOldestForUnit("application", applicationId);
+
+export const keepOldestQueuesByCompose = async (composeId: string) =>
+	keepOldestForUnit("compose", composeId);
+
+/**
  * build-policy hook: coalescing siblings of the two helpers above.
  *
  * The originals back explicit "clean queues" actions, where dropping every
@@ -215,18 +260,21 @@ export const cleanQueuesByCompose = async (composeId: string) => {
  * nobody asked to cancel.
  *
  * Both return the titles of what they dropped, so the audit entry names it.
+ *
+ * Removal has keep-oldest semantics (T-3137): per job type the earliest waiting
+ * job survives and the later ones are dropped. The gate still enqueues the
+ * incoming push after this runs.
  */
 const coalesceWaiting = (
 	matches: (data: any) => boolean,
 ): { removed: number; titles: string[] } => {
+	const { removed, removedData } = myQueue.keepOldestWaiting(matches);
 	const titles: string[] = [];
-	const removed = myQueue.removeWaiting((data) => {
-		if (!matches(data)) return false;
+	for (const data of removedData) {
 		const title = (data as any)?.titleLog;
 		if (typeof title === "string") titles.push(title);
-		return true;
-	});
-	return { removed, titles };
+	}
+	return { removed: removed.length, titles };
 };
 
 export const coalesceQueuedApplicationDeploys = async (applicationId: string) =>
