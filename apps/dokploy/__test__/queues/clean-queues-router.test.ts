@@ -169,6 +169,28 @@ describe("keepOldest audit", () => {
 		expect(mocks.audit).not.toHaveBeenCalled();
 	});
 
+	it("still answers with what was removed when the audit write fails", async () => {
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.audit
+			.mockRejectedValueOnce(new Error("audit db down"))
+			.mockRejectedValueOnce(new Error("audit db down"));
+
+		const fromApplication = await applicationCaller.cleanQueues({
+			applicationId: "a1",
+			mode: "keepOldest",
+		});
+		const fromCompose = await composeCaller.cleanQueues({
+			composeId: "c1",
+			mode: "keepOldest",
+		});
+
+		expect(fromApplication).toEqual(result);
+		expect(fromCompose).toEqual(result);
+		expect(mocks.audit).toHaveBeenCalledTimes(2);
+		expect(logged).toHaveBeenCalledTimes(2);
+		logged.mockRestore();
+	});
+
 	it("does not add an audit row to the default mode", async () => {
 		await applicationCaller.cleanQueues({ applicationId: "a1" });
 		await composeCaller.cleanQueues({ composeId: "c1" });

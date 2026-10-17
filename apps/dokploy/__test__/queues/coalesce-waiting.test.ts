@@ -271,4 +271,66 @@ describe("coalesceWaiting", () => {
 		await pushThroughGate(queue, push("A", "p2"));
 		expect(await titles(queue)).toEqual(["p2"]);
 	});
+
+	describe("when the matching job waits in another partition", () => {
+		const onServer = (
+			applicationId: string,
+			titleLog: string,
+			serverId: string,
+			extra: Record<string, unknown> = {},
+		) => push(applicationId, titleLog, { serverId, ...extra });
+
+		/** Each server is its own lane with its own never-ending running job. */
+		const twoServers = async (journal?: QueueJournal) => {
+			const queue = new InMemoryQueue({ resolveConcurrency: () => 1, journal });
+			queue.process(() => new Promise(() => {}));
+			await queue.add(onServer("X", "running-1", "srv-1"));
+			await queue.add(onServer("Y", "running-2", "srv-2"));
+			await new Promise((r) => setTimeout(r, 0));
+			return queue;
+		};
+
+		it("is dropped, not merged into, and the push then enqueues in its own partition", async () => {
+			const { journal, calls } = recordingJournal();
+			const queue = await twoServers(journal);
+			// The service used to build on srv-1 and now deploys to srv-2.
+			await queue.add(onServer("A", "stale", "srv-1"));
+			const stale = (await waiting(queue))[0];
+			calls.settled.length = 0;
+
+			const incoming = onServer("A", "moved", "srv-2");
+			const result = queue.coalesceWaiting(incoming, isApp("A"));
+
+			expect(result.merged).toBeNull();
+			expect(result.removed.map((job) => job.jobId)).toEqual([stale?.id]);
+			expect(result.titles).toEqual(["stale"]);
+			expect(calls.settled).toEqual([[stale?.journalId]]);
+			expect(calls.updated).toEqual([]);
+			expect(await titles(queue)).toEqual([]);
+
+			// What the webhook does when nothing absorbed the push.
+			await queue.add(incoming);
+			const jobs = await waiting(queue);
+			expect(jobs.map((job) => job.data)).toEqual([incoming]);
+		});
+
+		it("still merges into the oldest match of its own partition and drops the other one", async () => {
+			const queue = await twoServers();
+			await queue.add(onServer("A", "stale", "srv-1"));
+			await queue.add(onServer("A", "home", "srv-2"));
+			const home = (await waiting(queue)).find(
+				(job) => (job.data as { titleLog: string }).titleLog === "home",
+			);
+
+			const result = queue.coalesceWaiting(
+				onServer("A", "push", "srv-2"),
+				isApp("A"),
+			);
+
+			expect(result.merged?.jobId).toBe(home?.id);
+			expect(result.removed).toHaveLength(1);
+			expect(result.titles).toEqual(["home", "stale"]);
+			expect(await titles(queue)).toEqual(["push"]);
+		});
+	});
 });

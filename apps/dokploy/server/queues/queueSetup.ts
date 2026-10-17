@@ -5,6 +5,7 @@ import {
 	updatePreviewDeployment,
 } from "@dokploy/server";
 import { isCoalescableDeployJob } from "@dokploy/server/services/build-policy/coalesce";
+import { isCoalescingEnforcedForUnit } from "@dokploy/server/services/build-policy/webhook";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -144,7 +145,12 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		clearWaiting: () => queue.clearWaiting(),
 		restore: async () => {
 			try {
-				return await durable.restore(queue);
+				const result = await durable.restore(queue);
+				// Before the gate opens, so the worker starts on the deduped queue.
+				// If the gate's timer already fired this is still safe: the pass is
+				// synchronous per unit and only ever removes waiting jobs.
+				if (result.restored > 0) await dedupeRestoredUnits(queue);
+				return result;
 			} finally {
 				gate.open();
 			}
@@ -239,10 +245,11 @@ export const cleanQueuesByCompose = async (composeId: string) => {
  * queued PR preview is not a duplicate of the service's deploy.
  */
 const keepOldestForUnit = (
+	queue: Pick<DeploymentQueue, "keepOldestWaiting">,
 	unitType: "application" | "compose",
 	unitId: string,
 ): KeepOldestResult => {
-	const { kept, removed } = myQueue.keepOldestWaiting((data) =>
+	const { kept, removed } = queue.keepOldestWaiting((data) =>
 		isCoalescableDeployJob(unitType, unitId, data),
 	);
 	if (removed.length > 0) {
@@ -253,11 +260,62 @@ const keepOldestForUnit = (
 	return { kept, removed };
 };
 
+/**
+ * A push that lands before the boot replay finishes is enqueued normally, and
+ * then the restored copy of the same deploy goes in front of it, leaving two
+ * equivalent waiting jobs until the next push. Run once after a replay that
+ * restored something: for every unit with two or more waiting jobs whose
+ * organization coalesces pushes (the same condition as the enqueue-time gate),
+ * keep the oldest of each group of duplicates, which is the restored one. This
+ * is keep-oldest, so it keeps the older job's payload, unlike push coalescing.
+ * Units of an organization that does not coalesce are left alone, and so are
+ * running jobs. Best-effort per unit: a failing lookup skips only that unit.
+ */
+const dedupeRestoredUnits = async (
+	queue: Pick<DeploymentQueue, "getJobs" | "keepOldestWaiting">,
+) => {
+	const units = new Map<
+		string,
+		{ unitType: "application" | "compose"; unitId: string; waiting: number }
+	>();
+	try {
+		for (const { data } of await queue.getJobs(["waiting"])) {
+			const unit =
+				data.applicationType === "application"
+					? { unitType: "application" as const, unitId: data.applicationId }
+					: data.applicationType === "compose"
+						? { unitType: "compose" as const, unitId: data.composeId }
+						: null;
+			if (!unit) continue;
+			const key = `${unit.unitType}:${unit.unitId}`;
+			const seen = units.get(key);
+			if (seen) seen.waiting++;
+			else units.set(key, { ...unit, waiting: 1 });
+		}
+	} catch (error) {
+		console.error("Deployment queue: post-restore dedupe failed", error);
+		return;
+	}
+	for (const { unitType, unitId, waiting } of units.values()) {
+		// A lone job has nothing to be a duplicate of; skip the lookup.
+		if (waiting < 2) continue;
+		try {
+			if (!(await isCoalescingEnforcedForUnit(unitType, unitId))) continue;
+			keepOldestForUnit(queue, unitType, unitId);
+		} catch (error) {
+			console.error(
+				`Deployment queue: post-restore dedupe failed for ${unitType} ${unitId}`,
+				error,
+			);
+		}
+	}
+};
+
 export const keepOldestQueuesByApplication = async (applicationId: string) =>
-	keepOldestForUnit("application", applicationId);
+	keepOldestForUnit(myQueue, "application", applicationId);
 
 export const keepOldestQueuesByCompose = async (composeId: string) =>
-	keepOldestForUnit("compose", composeId);
+	keepOldestForUnit(myQueue, "compose", composeId);
 
 /**
  * build-policy hook: coalescing siblings of the two helpers above.
@@ -271,8 +329,10 @@ export const keepOldestQueuesByCompose = async (composeId: string) =>
  * Both fold the incoming push into the oldest waiting deploy of the unit
  * (same flags), drop the other waiting duplicates, and report whether the push
  * was absorbed. When `merged` is true the caller must NOT enqueue the incoming
- * job: the waiting job now carries its title and pinned image. They also return
- * the titles of what was replaced or dropped, so the audit entry names it.
+ * job: the waiting job now carries its title and pinned image. `removed` counts
+ * only the jobs taken out of the queue; the job that was merged into stays
+ * queued and is not in it. `titles` names what was replaced or dropped, so the
+ * audit entry can show it.
  */
 const coalesceWaiting = (
 	incoming: DeploymentJob,
@@ -283,7 +343,7 @@ const coalesceWaiting = (
 		matches,
 	);
 	return {
-		removed: removed.length + (merged ? 1 : 0),
+		removed: removed.length,
 		titles,
 		merged: merged !== null,
 	};
