@@ -37,7 +37,7 @@ Devino runs its own products on Dokploy Community, built and deployed through th
 | Product | What it is | Status |
 | --- | --- | --- |
 | [Uptimely](https://getuptimely.com) | Uptime monitoring, on-call, status pages | [![Uptimely status](https://app.getuptimely.com/status/uptimely-status/badge)](https://app.getuptimely.com/status/uptimely-status) |
-| [Snapvisor](https://snapvisor.io) | Visual regression testing for pull requests | [![SnapVisor status](https://app.getuptimely.com/status/snapvisor-io/badge)](https://app.getuptimely.com/status/snapvisor-io) |
+| [Snapvisor](https://snapvisor.io) | Visual regression testing for pull requests | [![Snapvisor status](https://app.getuptimely.com/status/snapvisor-io/badge)](https://app.getuptimely.com/status/snapvisor-io) |
 | [DoDomain](https://dodomain.io) | Custom domains for SaaS | [![DoDomain status](https://app.getuptimely.com/status/dodomain-status/badge)](https://app.getuptimely.com/status/dodomain-status) |
 | [Notifly](https://notifly.io) | Notification infrastructure API | [![Notifly status](https://app.getuptimely.com/status/notifly-status/badge)](https://app.getuptimely.com/status/notifly-status) |
 | [GetItDone](https://nowgetitdone.com) | AI daily planner and to-do list | [![GetItDone status](https://app.getuptimely.com/status/getitdone-status/badge)](https://app.getuptimely.com/status/getitdone-status) |
