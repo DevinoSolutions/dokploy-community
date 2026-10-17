@@ -30,6 +30,31 @@ docker service update --image dokploy/dokploy:v0.30.8 --with-registry-auth dokpl
 
 The image is public — no registry login required.
 
+## Running in production
+
+Devino runs its own products on Dokploy Community, built and deployed through the fork and monitored by [Uptimely](https://getuptimely.com). Each badge below is live and links to that product's public status page.
+
+| Product | What it is | Status |
+| --- | --- | --- |
+| [Uptimely](https://getuptimely.com) | Uptime monitoring, on-call, status pages | [![Uptimely status](https://app.getuptimely.com/status/uptimely-status/badge)](https://app.getuptimely.com/status/uptimely-status) |
+| [Snapvisor](https://snapvisor.io) | Visual regression testing for pull requests | [![SnapVisor status](https://app.getuptimely.com/status/snapvisor-io/badge)](https://app.getuptimely.com/status/snapvisor-io) |
+| [DoDomain](https://dodomain.io) | Custom domains for SaaS | [![DoDomain status](https://app.getuptimely.com/status/dodomain-status/badge)](https://app.getuptimely.com/status/dodomain-status) |
+| [Notifly](https://notifly.io) | Notification infrastructure API | [![Notifly status](https://app.getuptimely.com/status/notifly-status/badge)](https://app.getuptimely.com/status/notifly-status) |
+| [GetItDone](https://nowgetitdone.com) | AI daily planner and to-do list | [![GetItDone status](https://app.getuptimely.com/status/getitdone-status/badge)](https://app.getuptimely.com/status/getitdone-status) |
+| [SuperBooks](https://superbooks.io) | AI bookkeeping and accounting software | [![SuperBooks status](https://app.getuptimely.com/status/superbooks-status/badge)](https://app.getuptimely.com/status/superbooks-status) |
+| [VoiceLabs](https://voicelabs.now) | AI text to speech, voice cloning | [![VoiceLabs status](https://app.getuptimely.com/status/voicelabs-status/badge)](https://app.getuptimely.com/status/voicelabs-status) |
+| [Shorty](https://aishorty.com) | AI video and article summarizer | [![Shorty status](https://app.getuptimely.com/status/shorty/badge)](https://app.getuptimely.com/status/shorty) |
+| [Demofy](https://demofy.io) | Automated product demo videos | [![Demofy status](https://app.getuptimely.com/status/demofy-status/badge)](https://app.getuptimely.com/status/demofy-status) |
+| [Syncara](https://syncara.ca) | Personal health record app | [![Syncara status](https://app.getuptimely.com/status/syncara-status/badge)](https://app.getuptimely.com/status/syncara-status) |
+| [Caramel](https://grabcaramel.com) | Free open-source coupon extension | [![Caramel status](https://app.getuptimely.com/status/caramel-status/badge)](https://app.getuptimely.com/status/caramel-status) |
+| [Marka](https://joinmarka.com) | 0% fee buy and sell marketplace | [![Marka status](https://app.getuptimely.com/status/marka-status/badge)](https://app.getuptimely.com/status/marka-status) |
+| [SafeMeet](https://safemeet.now) | Anonymous moderated 1:1 chat | [![SafeMeet status](https://app.getuptimely.com/status/safemeet-status/badge)](https://app.getuptimely.com/status/safemeet-status) |
+| [Caly](https://trycaly.com) | Free scheduling app | [![Caly status](https://app.getuptimely.com/status/caly-status/badge)](https://app.getuptimely.com/status/caly-status) |
+| [BioFlow](https://getbioflow.com) | AI link in bio builder | [![BioFlow status](https://app.getuptimely.com/status/bioflow-status/badge)](https://app.getuptimely.com/status/bioflow-status) |
+| [uNotes](https://unotes.net) | Free university notes, past exams | [![uNotes status](https://app.getuptimely.com/status/unotes-status/badge)](https://app.getuptimely.com/status/unotes-status) |
+
+The fork's own integrations guide shows how to wire Uptimely monitors, the deploy heartbeat and the incident channel into your apps: [Integrations guide](https://dokploy-community.devino.ca/integrations/).
+
 ## Key features
 
 Only what upstream Dokploy does not ship. The **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and the **[full release notes](https://github.com/DevinoSolutions/dokploy-community/releases/latest)** have the complete, per-PR credited list.
