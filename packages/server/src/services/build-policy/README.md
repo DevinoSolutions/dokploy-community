@@ -588,6 +588,27 @@ waiting **manual redeploy** (a different type), so a push does not cancel a
 redeploy someone asked for. A waiting job with a different `freshVolumes` or
 priority request is not a duplicate and stays; the push then enqueues next to it.
 
+A matching waiting job in a **different partition** (the unit moved to another
+server) is never merged into: it is dropped, and the push enqueues in its own
+partition as usual.
+
+The `deploy_coalesced` audit row counts what left the queue. `removed` is the
+number of waiting jobs dropped, **not** counting the job a push was merged
+into, which stays queued; `merged: true` says a push was folded into one.
+`droppedTitles` names every build that will not run, the replaced one included,
+so a plain fold of p2 into p1 reads `removed: 0, merged: true, droppedTitles:
+["p1"]`. The gate's `coalesced` field is the same `removed` count.
+
+### After a restart
+
+A push that arrives before the boot replay finishes enqueues normally, and then
+the job restored from the journal goes in front of it. Once the replay is done,
+and while the worker is still held back, the queue runs one keep-oldest pass
+per application or compose unit that is waiting (the restored job survives, the
+later duplicate is dropped and its journal row deleted). It only runs for units
+whose organization enforces remote builds, the same condition as the gate above,
+and it never touches a running job or a preview.
+
 ---
 
 ## Rollback

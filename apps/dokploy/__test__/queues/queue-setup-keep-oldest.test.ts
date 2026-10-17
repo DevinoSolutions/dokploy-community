@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * The queueSetup helpers over a real InMemoryQueue: the explicit clean-queues
@@ -6,6 +6,13 @@ import { describe, expect, it, vi } from "vitest";
  * oldest waiting deploy. Everything around the queue (DB, journal, worker gate)
  * is mocked; the first job of a service never finishes, so it stays active.
  */
+
+// What the boot replay puts in the queue and which units coalesce, per test.
+const boot = vi.hoisted(() => ({
+	replay: async (_queue: unknown): Promise<unknown> => undefined,
+	enforced: new Set<string>(),
+	failPolicy: false,
+}));
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
@@ -28,8 +35,17 @@ vi.mock("../../server/queues/lifecycle", () => ({
 	registerShutdownHandler: () => {},
 }));
 vi.mock("../../server/queues/queue-journal", () => ({
-	createQueueJournal: () => ({ journal: undefined, restore: vi.fn() }),
+	createQueueJournal: () => ({
+		journal: undefined,
+		restore: (queue: unknown) => boot.replay(queue),
+	}),
 	dbJournalStore: {},
+}));
+vi.mock("@dokploy/server/services/build-policy/webhook", () => ({
+	isCoalescingEnforcedForUnit: async (unitType: string, unitId: string) => {
+		if (boot.failPolicy) throw new Error("policy lookup failed");
+		return boot.enforced.has(`${unitType}:${unitId}`);
+	},
 }));
 
 import type { DeploymentJob } from "../../server/queues/queue-types";
@@ -198,13 +214,14 @@ describe("push-hook coalescing folds the push into the oldest waiting deploy", (
 		const second = await push("second push");
 		const third = await push("third push");
 
+		// `removed` counts jobs taken out of the queue, not the one merged into.
 		expect(second).toEqual({
-			removed: 1,
+			removed: 0,
 			titles: ["first push"],
 			merged: true,
 		});
 		expect(third).toEqual({
-			removed: 1,
+			removed: 0,
 			titles: ["second push"],
 			merged: true,
 		});
@@ -242,5 +259,143 @@ describe("push-hook coalescing folds the push into the oldest waiting deploy", (
 
 		expect(result.merged).toBe(false);
 		expect(await titles()).toEqual(["preview"]);
+	});
+});
+
+describe("boot restore dedupes the units that coalesce", () => {
+	/** The journal replay: these jobs land at the front, as addRestored does. */
+	const replayOf =
+		(...jobs: Array<{ id: string; data: DeploymentJob }>) =>
+		async (queue: unknown) =>
+			(
+				queue as {
+					addRestored: (
+						jobs: Array<{
+							journalId: string;
+							data: DeploymentJob;
+							timestamp: number;
+						}>,
+					) => number;
+				}
+			).addRestored(
+				jobs.map((job, index) => ({
+					journalId: job.id,
+					data: job.data,
+					timestamp: 1_700_000_000_000 + index,
+				})),
+			);
+
+	const restoreWith = async (
+		enforced: string[],
+		replay: ReturnType<typeof replayOf>,
+	) => {
+		boot.enforced = new Set(enforced);
+		boot.failPolicy = false;
+		boot.replay = replay;
+		return myQueue.restore();
+	};
+
+	beforeEach(() => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		boot.replay = async () => undefined;
+		boot.enforced = new Set();
+		boot.failPolicy = false;
+		vi.restoreAllMocks();
+	});
+
+	it("keeps the restored job when a push enqueued ahead of the replay finished", async () => {
+		await reset();
+		await myQueue.add("deployments", appJob("R1", "active"));
+		await flush();
+		// The push that beat the replay, and an unrelated service.
+		await myQueue.add("deployments", appJob("R1", "push before replay"));
+		await myQueue.add("deployments", appJob("R2", "other"));
+
+		await restoreWith(
+			["application:R1"],
+			replayOf({ id: "j-restored", data: appJob("R1", "restored") }),
+		);
+
+		expect(await titles()).toEqual(["restored", "other"]);
+		const active = await myQueue.getJobs(["active"]);
+		expect(
+			active
+				.filter((job) => (job.data as any).applicationId === "R1")
+				.map((job) => (job.data as any).titleLog),
+		).toEqual(["active"]);
+	});
+
+	it("does the same for a compose stack", async () => {
+		await reset();
+		await myQueue.add("deployments", composeJob("RC", "c-active"));
+		await flush();
+		await myQueue.add("deployments", composeJob("RC", "push before replay"));
+
+		await restoreWith(
+			["compose:RC"],
+			replayOf({ id: "j-c", data: composeJob("RC", "restored") }),
+		);
+
+		expect(await titles()).toEqual(["restored"]);
+	});
+
+	it("leaves jobs that are not duplicates: other type, flags, previews", async () => {
+		await reset();
+		await myQueue.add("deployments", appJob("R3", "active"));
+		await flush();
+		await myQueue.add("deployments", appJob("R3", "redeploy", "redeploy"));
+		await myQueue.add("deployments", {
+			...appJob("R3", "fresh"),
+			freshVolumes: true,
+		} as DeploymentJob);
+		await myQueue.add(
+			"deployments",
+			appJob("R3", "preview", "deploy", "application-preview"),
+		);
+
+		await restoreWith(
+			["application:R3"],
+			replayOf({ id: "j-r3", data: appJob("R3", "restored") }),
+		);
+
+		expect(await titles()).toEqual([
+			"restored",
+			"redeploy",
+			"fresh",
+			"preview",
+		]);
+	});
+
+	it("touches nothing for a unit whose organization does not coalesce", async () => {
+		await reset();
+		await myQueue.add("deployments", appJob("R4", "active"));
+		await flush();
+		await myQueue.add("deployments", appJob("R4", "push before replay"));
+
+		await restoreWith(
+			[],
+			replayOf({ id: "j-r4", data: appJob("R4", "restored") }),
+		);
+
+		expect(await titles()).toEqual(["restored", "push before replay"]);
+	});
+
+	it("still opens the way when the policy lookup fails", async () => {
+		await reset();
+		await myQueue.add("deployments", appJob("R5", "active"));
+		await flush();
+		await myQueue.add("deployments", appJob("R5", "push before replay"));
+		boot.enforced = new Set(["application:R5"]);
+		boot.failPolicy = true;
+		boot.replay = replayOf({ id: "j-r5", data: appJob("R5", "restored") });
+
+		const result = await myQueue.restore();
+
+		expect(result).toBe(1);
+		expect(await titles()).toEqual(["restored", "push before replay"]);
 	});
 });

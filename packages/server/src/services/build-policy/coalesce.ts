@@ -58,8 +58,12 @@ export interface CoalesceAuditEntry {
 }
 
 export interface CoalesceRemoval {
-	/** Waiting builds that will not run: replaced by the merge or dropped. */
+	/**
+	 * Waiting jobs taken out of the queue. The job a push was merged into stays
+	 * queued, so it is not counted here; `merged` reports it.
+	 */
 	removed: number;
+	/** Titles of the builds that will not run: dropped, or replaced by the merge. */
 	titles?: string[];
 	/** The incoming push was folded into a waiting job; do not enqueue it. */
 	merged?: boolean;
@@ -72,8 +76,8 @@ export interface CoalesceQueuedDeployInput {
 	organizationId: string;
 	/**
 	 * Folds the incoming push into this unit's oldest still-waiting plain deploy
-	 * and drops the other waiting duplicates. Either a count or a
-	 * `{removed, titles, merged}` record.
+	 * and drops the other waiting duplicates. Either a count of the jobs dropped
+	 * or a `{removed, titles, merged}` record.
 	 */
 	removeWaiting: () =>
 		| Promise<number | CoalesceRemoval>
@@ -121,11 +125,12 @@ export const coalesceQueuedDeploy = async ({
 			applicationId: unitType === "application" ? unitId : null,
 			composeId: unitType === "compose" ? unitId : null,
 			metadata: {
+				// Jobs dropped from the queue; a merge is reported by `merged`.
 				removed: result.removed,
 				...(result.merged ? { merged: true } : {}),
 				unitType,
 				unitName,
-				// So a dropped deploy is traceable to the push it came from.
+				// So a dropped or replaced deploy is traceable to the push it came from.
 				...(result.titles?.length ? { droppedTitles: result.titles } : {}),
 			},
 		});

@@ -1,5 +1,9 @@
 import { db } from "@dokploy/server/db";
-import { environments } from "@dokploy/server/db/schema";
+import {
+	applications,
+	compose as composeTable,
+	environments,
+} from "@dokploy/server/db/schema";
 import { getRegistryTag } from "@dokploy/server/utils/cluster/upload";
 import { shouldDeploy } from "@dokploy/server/utils/watch-paths/should-deploy";
 import { eq } from "drizzle-orm";
@@ -67,6 +71,7 @@ export interface BuildPolicyGateUnit {
 export type BuildPolicyGateResult =
 	| {
 			deploy: true;
+			/** Waiting jobs dropped from the queue (not counting a merge target). */
 			coalesced: number;
 			/**
 			 * The push was folded into a job that was already waiting (it now carries
@@ -118,8 +123,8 @@ export const buildPolicyDeployGate = async ({
 	/**
 	 * Folds the incoming push into this unit's oldest still-waiting plain deploy
 	 * and drops the other waiting ones (never its previews or redeploys). Reports
-	 * how many builds it replaced or dropped, ideally their titles, and whether
-	 * the push was merged.
+	 * how many jobs it dropped, ideally the titles of what it dropped or
+	 * replaced, and whether the push was merged.
 	 */
 	removeWaiting: CoalesceQueuedDeployInput["removeWaiting"];
 }): Promise<BuildPolicyGateResult> => {
@@ -346,3 +351,31 @@ export const rejectComposeDeployHookImage = async (
 };
 
 export const findUnitOrganizationId = findOrganizationId;
+
+/**
+ * Would a push for this unit coalesce right now? The same condition the gate
+ * applies before touching the queue: its organization enforces remote builds.
+ * For callers that act on the queue outside a push (the post-restore dedupe)
+ * and must not drop duplicates the policy never asked to drop.
+ */
+export const isCoalescingEnforcedForUnit = async (
+	unitType: BuildPolicyUnitType,
+	unitId: string,
+): Promise<boolean> => {
+	if (!(await isBuildPolicyEnforcedAnywhere())) return false;
+	const unit =
+		unitType === "application"
+			? await db.query.applications.findFirst({
+					where: eq(applications.applicationId, unitId),
+					columns: { environmentId: true },
+				})
+			: await db.query.compose.findFirst({
+					where: eq(composeTable.composeId, unitId),
+					columns: { environmentId: true },
+				});
+	if (!unit) return false;
+	const organizationId = await findOrganizationId(unit.environmentId);
+	if (!organizationId) return false;
+	const settings = await findBuildPolicySettings(organizationId);
+	return settings?.enforceRemoteBuilds === true;
+};

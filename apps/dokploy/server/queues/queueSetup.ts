@@ -5,6 +5,7 @@ import {
 	updatePreviewDeployment,
 } from "@dokploy/server";
 import { isCoalescableDeployJob } from "@dokploy/server/services/build-policy/coalesce";
+import { isCoalescingEnforcedForUnit } from "@dokploy/server/services/build-policy/webhook";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -144,7 +145,10 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		clearWaiting: () => queue.clearWaiting(),
 		restore: async () => {
 			try {
-				return await durable.restore(queue);
+				const result = await durable.restore(queue);
+				// Still behind the gate: nothing starts until the pass is done.
+				await dedupeRestoredUnits(queue);
+				return result;
 			} finally {
 				gate.open();
 			}
@@ -239,10 +243,11 @@ export const cleanQueuesByCompose = async (composeId: string) => {
  * queued PR preview is not a duplicate of the service's deploy.
  */
 const keepOldestForUnit = (
+	queue: Pick<DeploymentQueue, "keepOldestWaiting">,
 	unitType: "application" | "compose",
 	unitId: string,
 ): KeepOldestResult => {
-	const { kept, removed } = myQueue.keepOldestWaiting((data) =>
+	const { kept, removed } = queue.keepOldestWaiting((data) =>
 		isCoalescableDeployJob(unitType, unitId, data),
 	);
 	if (removed.length > 0) {
@@ -253,11 +258,44 @@ const keepOldestForUnit = (
 	return { kept, removed };
 };
 
+/**
+ * A push that lands before the boot replay finishes is enqueued normally, and
+ * then the restored copy of the same deploy goes in front of it, leaving two
+ * equivalent waiting jobs until the next push. Run once after the replay: for
+ * every unit whose organization coalesces pushes (the same condition as the
+ * enqueue-time gate), keep the oldest of each group of duplicates, which is the
+ * restored one. Units of an organization that does not coalesce are left alone,
+ * and so are running jobs. Best-effort: it never throws.
+ */
+const dedupeRestoredUnits = async (
+	queue: Pick<DeploymentQueue, "getJobs" | "keepOldestWaiting">,
+) => {
+	try {
+		const units = new Map<string, ["application" | "compose", string]>();
+		for (const { data } of await queue.getJobs(["waiting"])) {
+			if (data.applicationType === "application") {
+				units.set(`application:${data.applicationId}`, [
+					"application",
+					data.applicationId,
+				]);
+			} else if (data.applicationType === "compose") {
+				units.set(`compose:${data.composeId}`, ["compose", data.composeId]);
+			}
+		}
+		for (const [unitType, unitId] of units.values()) {
+			if (!(await isCoalescingEnforcedForUnit(unitType, unitId))) continue;
+			keepOldestForUnit(queue, unitType, unitId);
+		}
+	} catch (error) {
+		console.error("Deployment queue: post-restore dedupe failed", error);
+	}
+};
+
 export const keepOldestQueuesByApplication = async (applicationId: string) =>
-	keepOldestForUnit("application", applicationId);
+	keepOldestForUnit(myQueue, "application", applicationId);
 
 export const keepOldestQueuesByCompose = async (composeId: string) =>
-	keepOldestForUnit("compose", composeId);
+	keepOldestForUnit(myQueue, "compose", composeId);
 
 /**
  * build-policy hook: coalescing siblings of the two helpers above.
@@ -271,8 +309,10 @@ export const keepOldestQueuesByCompose = async (composeId: string) =>
  * Both fold the incoming push into the oldest waiting deploy of the unit
  * (same flags), drop the other waiting duplicates, and report whether the push
  * was absorbed. When `merged` is true the caller must NOT enqueue the incoming
- * job: the waiting job now carries its title and pinned image. They also return
- * the titles of what was replaced or dropped, so the audit entry names it.
+ * job: the waiting job now carries its title and pinned image. `removed` counts
+ * only the jobs taken out of the queue; the job that was merged into stays
+ * queued and is not in it. `titles` names what was replaced or dropped, so the
+ * audit entry can show it.
  */
 const coalesceWaiting = (
 	incoming: DeploymentJob,
@@ -283,7 +323,7 @@ const coalesceWaiting = (
 		matches,
 	);
 	return {
-		removed: removed.length + (merged ? 1 : 0),
+		removed: removed.length,
 		titles,
 		merged: merged !== null,
 	};

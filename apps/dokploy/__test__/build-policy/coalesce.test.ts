@@ -234,21 +234,41 @@ describe("coalesceQueuedDeploy when the push is folded into a waiting deploy", (
 			...base,
 			removeWaiting: vi
 				.fn()
-				.mockResolvedValue({ removed: 2, titles: ["p1", "p2"], merged: true }),
+				.mockResolvedValue({ removed: 1, titles: ["p1", "p2"], merged: true }),
 			recordAudit,
 		});
 
-		expect(result).toEqual({ removed: 2, merged: true });
+		expect(result).toEqual({ removed: 1, merged: true });
 		expect(recordAudit).toHaveBeenCalledWith(
 			expect.objectContaining({
 				action: "deploy_coalesced",
 				metadata: expect.objectContaining({
-					removed: 2,
+					removed: 1,
 					merged: true,
 					droppedTitles: ["p1", "p2"],
 				}),
 			}),
 		);
+	});
+
+	it("audits a plain fold that dropped no other job as removed 0, merged", async () => {
+		const recordAudit = vi.fn().mockResolvedValue(undefined);
+		const result = await coalesceQueuedDeploy({
+			...base,
+			removeWaiting: vi
+				.fn()
+				.mockResolvedValue({ removed: 0, titles: ["p1"], merged: true }),
+			recordAudit,
+		});
+
+		expect(result).toEqual({ removed: 0, merged: true });
+		expect(recordAudit).toHaveBeenCalledTimes(1);
+		const metadata = recordAudit.mock.calls[0]?.[0].metadata;
+		expect(metadata).toMatchObject({
+			removed: 0,
+			merged: true,
+			droppedTitles: ["p1"],
+		});
 	});
 
 	it("does not mark the result merged when nothing was folded in", async () => {

@@ -415,15 +415,21 @@ export const composeRouter = createTRPCRouter({
 			if (input.mode === "keepOldest") {
 				const result = await keepOldestQueuesByCompose(input.composeId);
 				if (result.removed.length > 0) {
-					await audit(ctx, {
-						action: "cancel",
-						resourceType: "compose",
-						resourceId: input.composeId,
-						metadata: {
-							queue: "keepOldest",
-							removedJobIds: result.removed.map((job) => job.jobId),
-						},
-					});
+					// The jobs are already gone, so a failing audit must not turn the
+					// answer into an error and hide what was removed.
+					try {
+						await audit(ctx, {
+							action: "cancel",
+							resourceType: "compose",
+							resourceId: input.composeId,
+							metadata: {
+								queue: "keepOldest",
+								removedJobIds: result.removed.map((job) => job.jobId),
+							},
+						});
+					} catch (error) {
+						console.error("keepOldest audit failed:", error);
+					}
 				}
 				return result;
 			}
