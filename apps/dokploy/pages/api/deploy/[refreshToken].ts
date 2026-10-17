@@ -331,6 +331,17 @@ export default async function handler(
 			res.status(400).json({ message: hookImage.message });
 			return;
 		}
+		const jobData: DeploymentJob = {
+			applicationId: application.applicationId as string,
+			titleLog: deploymentTitle,
+			...(deploymentHash && { descriptionLog: `Hash: ${deploymentHash}` }),
+			type: "deploy",
+			applicationType: "application",
+			server: !!application.serverId,
+			serverId: application.serverId ?? undefined,
+			// build-policy hook: deploy this image by digest, do not build.
+			...(hookImage.pinnedImage && { pinnedImage: hookImage.pinnedImage }),
+		};
 		const gate = await buildPolicyDeployGate({
 			unitType: "application",
 			unit: {
@@ -350,7 +361,7 @@ export default async function handler(
 			},
 			commitMessage: deploymentTitle,
 			removeWaiting: () =>
-				coalesceQueuedApplicationDeploys(application.applicationId),
+				coalesceQueuedApplicationDeploys(application.applicationId, jobData),
 		});
 		if (!gate.deploy) {
 			res.status(301).json({ message: gate.message });
@@ -359,19 +370,10 @@ export default async function handler(
 		// <<< build-policy hook
 
 		try {
-			const jobData: DeploymentJob = {
-				applicationId: application.applicationId as string,
-				titleLog: deploymentTitle,
-				...(deploymentHash && { descriptionLog: `Hash: ${deploymentHash}` }),
-				type: "deploy",
-				applicationType: "application",
-				server: !!application.serverId,
-				serverId: application.serverId ?? undefined,
-				// build-policy hook: deploy this image by digest, do not build.
-				...(hookImage.pinnedImage && { pinnedImage: hookImage.pinnedImage }),
-			};
-
-			if (IS_CLOUD && application.serverId) {
+			if (gate.merged) {
+				// A waiting deploy took this push over (title and pinned image
+				// included); nothing to enqueue.
+			} else if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {
 					console.error("Background deployment failed:", error);
 				});

@@ -171,3 +171,96 @@ describe("Refresh token webhook auto-deploy", () => {
 		expect(res.status).toHaveBeenCalledWith(200);
 	});
 });
+
+describe("Refresh token webhook, push folded into a waiting deploy", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.queueAdd.mockResolvedValue({ id: "job-id" });
+		mocks.resolveDeployHookImage.mockResolvedValue({ ok: true });
+		mocks.rejectComposeDeployHookImage.mockResolvedValue({ ok: true });
+	});
+
+	it("does not enqueue the application push when the gate merged it", async () => {
+		mocks.buildPolicyDeployGate.mockResolvedValue({
+			deploy: true,
+			coalesced: 1,
+			merged: true,
+		});
+		mocks.applicationsFindFirst.mockResolvedValue({
+			applicationId: "application-id",
+			appName: "app-name",
+			name: "app",
+			environment: { project: { organizationId: "org-id" } },
+			autoDeploy: true,
+			sourceType: "gitlab",
+			gitlabBranch: "main",
+			watchPaths: null,
+			serverId: "server-id",
+		});
+		const res = createResponse();
+
+		await applicationHandler(createGitlabPushRequest(), res);
+
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+		expect(res.status).toHaveBeenCalledWith(200);
+	});
+
+	it("hands the gate the push payload to fold in, pinned image included", async () => {
+		const pinnedImage = { ref: "r/app", tag: "t", digest: "sha256:new" };
+		mocks.resolveDeployHookImage.mockResolvedValue({ ok: true, pinnedImage });
+		mocks.buildPolicyDeployGate.mockResolvedValue({
+			deploy: true,
+			coalesced: 0,
+		});
+		mocks.applicationsFindFirst.mockResolvedValue({
+			applicationId: "application-id",
+			appName: "app-name",
+			name: "app",
+			environment: { project: { organizationId: "org-id" } },
+			autoDeploy: true,
+			sourceType: "gitlab",
+			gitlabBranch: "main",
+			watchPaths: null,
+			serverId: "server-id",
+		});
+		const queueSetup = await import("@/server/queues/queueSetup");
+		const res = createResponse();
+
+		await applicationHandler(createGitlabPushRequest(), res);
+		const gateArgs = mocks.buildPolicyDeployGate.mock.calls[0]?.[0];
+		await gateArgs.removeWaiting();
+
+		expect(queueSetup.coalesceQueuedApplicationDeploys).toHaveBeenCalledWith(
+			"application-id",
+			expect.objectContaining({ type: "deploy", pinnedImage }),
+		);
+		// Not merged: the push is enqueued as before.
+		expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not enqueue the compose push when the gate merged it", async () => {
+		mocks.buildPolicyDeployGate.mockResolvedValue({
+			deploy: true,
+			coalesced: 1,
+			merged: true,
+		});
+		mocks.composeFindFirst.mockResolvedValue({
+			composeId: "compose-id",
+			appName: "compose-name",
+			name: "stack",
+			environmentId: "env-id",
+			environment: { project: { organizationId: "org-id" } },
+			autoDeploy: true,
+			sourceType: "gitlab",
+			gitlabBranch: "main",
+			watchPaths: null,
+			serverId: "server-id",
+		});
+		const res = createResponse();
+
+		await composeHandler(createGitlabPushRequest(), res);
+
+		expect(mocks.queueAdd).not.toHaveBeenCalled();
+		expect(res.status).toHaveBeenCalledWith(200);
+	});
+});

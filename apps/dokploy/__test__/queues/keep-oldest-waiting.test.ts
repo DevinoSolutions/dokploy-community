@@ -74,7 +74,6 @@ describe("InMemoryQueue.keepOldestWaiting", () => {
 			[ids.aDeploy1, "deploy"],
 			[ids.aRedeploy, "redeploy"],
 		]);
-		expect(result.removedData).toHaveLength(2);
 		for (const job of [...result.kept, ...result.removed]) {
 			expect(new Date(job.enqueuedAt).toISOString()).toBe(job.enqueuedAt);
 		}

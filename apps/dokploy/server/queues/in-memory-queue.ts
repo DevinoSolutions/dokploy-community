@@ -66,12 +66,51 @@ export interface KeptWaitingJob {
 
 /** What `keepOldestWaiting` kept and dropped. */
 export interface KeepOldestOutcome {
-	/** The surviving job of each job type, oldest first. */
+	/** The surviving job of each duplicate group, in queue order. */
 	kept: KeptWaitingJob[];
 	removed: KeptWaitingJob[];
-	/** Payloads of the removed jobs, in the same order (for audit titles). */
-	removedData: DeploymentJob[];
 }
+
+/** What `coalesceWaiting` did with an incoming push. */
+export interface CoalesceWaitingOutcome {
+	/**
+	 * The waiting job the incoming payload was folded into (it keeps its place),
+	 * or null when no waiting job matched and the caller must enqueue normally.
+	 */
+	merged: KeptWaitingJob | null;
+	/** Later duplicates that were dropped. */
+	removed: KeptWaitingJob[];
+	/** Titles replaced or dropped, so an audit row can name them. */
+	titles: string[];
+}
+
+type PinnedImage = { ref: string; tag: string | null; digest: string };
+
+/**
+ * Two waiting jobs are interchangeable (the later one is a duplicate) when they
+ * are the same type and carry the same flags that change what the build does:
+ * fresh volumes, a pinned image and the priority request. A job that differs in
+ * any of them is not a duplicate and is never dropped in favour of the other.
+ */
+const sameJobProfile = (
+	a: DeploymentJob,
+	b: DeploymentJob,
+	options: { pinnedImage: boolean },
+): boolean => {
+	const fresh = (data: DeploymentJob) =>
+		(data as { freshVolumes?: boolean }).freshVolumes === true;
+	const pinned = (data: DeploymentJob) => {
+		const image = (data as { pinnedImage?: PinnedImage }).pinnedImage;
+		return image ? `${image.ref}|${image.tag ?? ""}|${image.digest}` : "";
+	};
+	return (
+		a.type === b.type &&
+		fresh(a) === fresh(b) &&
+		(a.priority === true) === (b.priority === true) &&
+		(a.priorityBy ?? "") === (b.priorityBy ?? "") &&
+		(!options.pinnedImage || pinned(a) === pinned(b))
+	);
+};
 
 /**
  * What a processor may report about a job that ended early. A cancelled or
@@ -195,7 +234,11 @@ export interface InMemoryQueueOptions {
 	 * picked up without restarting the queue. Must return a value >= 1.
 	 */
 	resolveConcurrency: (partition: string) => Promise<number> | number;
-	/** Monotonic clock; injectable for tests. Defaults to Date.now. */
+	/**
+	 * Clock for the enqueue time reported on jobs; injectable for tests. Defaults
+	 * to Date.now, which is not monotonic. Queue order never depends on it: it is
+	 * the insertion order of the waiting list.
+	 */
 	now?: () => number;
 	/** Durable record of the queue; see `QueueJournal`. */
 	journal?: QueueJournal;
@@ -523,51 +566,114 @@ export class InMemoryQueue {
 		return dropped.length;
 	}
 
+	private summarize(job: InternalJob): KeptWaitingJob {
+		return {
+			jobId: job.id,
+			enqueuedAt: new Date(job.timestamp).toISOString(),
+			type: job.data.type,
+		};
+	}
+
 	/**
-	 * Per job type (`deploy`, `redeploy`), keep the earliest-enqueued waiting job
-	 * that matches `predicate` and remove the later ones. The two types are
-	 * independent: neither is dropped in favour of the other. The kept job is not
-	 * touched, so it keeps its place in the queue. Active jobs are never looked
-	 * at. "Earliest" is the enqueue time, ties broken by queue position (a
-	 * restored job sits at the front with its original time).
+	 * Among the waiting jobs that match `predicate`, keep the oldest of each group
+	 * of duplicates and remove the later ones. Duplicates are the same type
+	 * (`deploy` and `redeploy` never displace each other) with the same
+	 * freshVolumes, pinnedImage and priority flags; a job that differs in any of
+	 * them is kept. "Oldest" is queue position within the partition (insertion
+	 * order), never the clock, so it holds when two jobs share a millisecond or
+	 * the clock steps back. Partitions are independent lanes: each keeps its own
+	 * oldest. The kept job is not touched, so it keeps its place; active jobs are
+	 * never looked at.
 	 */
 	keepOldestWaiting(
 		predicate: (data: DeploymentJob) => boolean,
 	): KeepOldestOutcome {
-		const matches: Array<{ job: InternalJob; partition: Partition }> = [];
+		const keptJobs: InternalJob[] = [];
+		const dropped: InternalJob[] = [];
 		for (const partition of this.partitions.values()) {
+			const survivors: InternalJob[] = [];
+			const gone = new Set<InternalJob>();
 			for (const job of partition.waiting) {
-				if (predicate(job.data)) matches.push({ job, partition });
+				if (!predicate(job.data)) continue;
+				const twin = survivors.find((kept) =>
+					sameJobProfile(kept.data, job.data, { pinnedImage: true }),
+				);
+				if (twin) gone.add(job);
+				else survivors.push(job);
 			}
-		}
-		const oldest = new Map<string, InternalJob>();
-		for (const { job } of matches) {
-			const current = oldest.get(job.data.type);
-			if (!current || job.timestamp < current.timestamp) {
-				oldest.set(job.data.type, job);
+			if (gone.size > 0) {
+				partition.waiting = partition.waiting.filter((job) => !gone.has(job));
+				dropped.push(...gone);
 			}
+			keptJobs.push(...survivors);
 		}
-		const dropped = new Set<InternalJob>();
-		for (const { job, partition } of matches) {
-			if (oldest.get(job.data.type) === job) continue;
-			dropped.add(job);
-			partition.waiting = partition.waiting.filter((other) => other !== job);
-		}
-		const summarize = (job: InternalJob): KeptWaitingJob => ({
-			jobId: job.id,
-			enqueuedAt: new Date(job.timestamp).toISOString(),
-			type: job.data.type,
-		});
-		this.settle([...dropped]);
-		const removedJobs = matches
-			.filter(({ job }) => dropped.has(job))
-			.map(({ job }) => job);
+		this.settle(dropped);
 		return {
-			kept: [...oldest.values()]
-				.sort((a, b) => a.timestamp - b.timestamp)
-				.map(summarize),
-			removed: removedJobs.map(summarize),
-			removedData: removedJobs.map((job) => job.data),
+			kept: keptJobs.map((job) => this.summarize(job)),
+			removed: dropped.map((job) => this.summarize(job)),
+		};
+	}
+
+	/**
+	 * Push-hook coalescing: fold `incoming` into the oldest waiting job it is a
+	 * duplicate of and drop the other duplicates, so a burst of pushes leaves one
+	 * waiting job, at the earliest position, carrying the newest payload. A
+	 * duplicate is a matching job (`predicate`) of the same type with the same
+	 * freshVolumes and priority flags; a pinned image is deliberately NOT part of
+	 * the match, because the newest digest must win. The kept job's payload is
+	 * replaced by `incoming` (title, description, pinned image, server) and the
+	 * journal row is updated to match. It keeps its place and enqueue time.
+	 *
+	 * Returns `merged: null` when nothing in the incoming job's partition matched;
+	 * the caller then enqueues the incoming job as usual. Duplicates found in
+	 * another partition (the service moved servers) are dropped either way.
+	 */
+	coalesceWaiting(
+		incoming: DeploymentJob,
+		predicate: (data: DeploymentJob) => boolean,
+	): CoalesceWaitingOutcome {
+		const home = getPartition(incoming);
+		let target: InternalJob | null = null;
+		const dropped: InternalJob[] = [];
+		// The incoming job's own partition first, so its oldest match is the target.
+		const ordered = [...this.partitions.entries()].sort(
+			([a], [b]) => Number(b === home) - Number(a === home),
+		);
+		for (const [key, partition] of ordered) {
+			const gone = new Set<InternalJob>();
+			for (const job of partition.waiting) {
+				if (!predicate(job.data)) continue;
+				if (!sameJobProfile(job.data, incoming, { pinnedImage: false })) {
+					continue;
+				}
+				if (!target && key === home) target = job;
+				else gone.add(job);
+			}
+			if (gone.size > 0) {
+				partition.waiting = partition.waiting.filter((job) => !gone.has(job));
+				dropped.push(...gone);
+			}
+		}
+		const titleOf = (job: InternalJob) => {
+			const title = (job.data as { titleLog?: unknown }).titleLog;
+			return typeof title === "string" ? [title] : [];
+		};
+		const titles = dropped.flatMap(titleOf);
+		this.settle(dropped);
+		if (target) {
+			titles.unshift(...titleOf(target));
+			target.data = incoming;
+			const journal = this.journal;
+			if (journal?.updated) {
+				const { journalId } = target;
+				const update = journal.updated.bind(journal);
+				this.notify(() => update(journalId, incoming));
+			}
+		}
+		return {
+			merged: target ? this.summarize(target) : null,
+			removed: dropped.map((job) => this.summarize(job)),
+			titles,
 		};
 	}
 

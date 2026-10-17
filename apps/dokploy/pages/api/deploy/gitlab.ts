@@ -225,12 +225,14 @@ export default async function handler(
 					changedFiles: modifiedFiles,
 					commitMessage,
 					removeWaiting: () =>
-						coalesceQueuedApplicationDeploys(app.applicationId),
+						coalesceQueuedApplicationDeploys(app.applicationId, jobData),
 				});
 				if (!gate.deploy) continue;
 				// <<< build-policy hook
 
 				deployedCount++;
+				// A waiting deploy took this push over; nothing to enqueue.
+				if (gate.merged) continue;
 				if (IS_CLOUD && app.serverId) {
 					deploy(jobData).catch((error) => {
 						console.error("Background deployment failed:", error);
@@ -286,12 +288,14 @@ export default async function handler(
 					changedFiles: modifiedFiles,
 					commitMessage,
 					removeWaiting: () =>
-						coalesceQueuedComposeDeploys(composeApp.composeId),
+						coalesceQueuedComposeDeploys(composeApp.composeId, jobData),
 				});
 				if (!composeGate.deploy) continue;
 				// <<< build-policy hook
 
 				deployedCount++;
+				// A waiting deploy took this push over; nothing to enqueue.
+				if (composeGate.merged) continue;
 				if (IS_CLOUD && composeApp.serverId) {
 					deploy(jobData).catch((error) => {
 						console.error("Background deployment failed:", error);

@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 /**
  * The queueSetup helpers over a real InMemoryQueue: the explicit clean-queues
- * "keepOldest" mode and the push-hook coalescing, which now shares its
- * keep-oldest removal. Everything around the queue (DB, journal, worker gate)
+ * "keepOldest" mode and the push-hook coalescing, which folds a push into the
+ * oldest waiting deploy. Everything around the queue (DB, journal, worker gate)
  * is mocked; the first job of a service never finishes, so it stays active.
  */
 
@@ -180,47 +180,67 @@ describe("default mode (cleanQueuesBy*) is unchanged", () => {
 	});
 });
 
-describe("push-hook coalescing uses keep-oldest removal", () => {
-	it("keeps the oldest waiting deploy, drops the later ones and names them", async () => {
+describe("push-hook coalescing folds the push into the oldest waiting deploy", () => {
+	it("a burst leaves one waiting deploy, at the first position, with the newest title", async () => {
 		await reset();
 		await myQueue.add("deployments", appJob("A3", "active"));
 		await flush();
-		await myQueue.add("deployments", appJob("A3", "first push"));
-		await myQueue.add("deployments", appJob("A3", "second push"));
-		await myQueue.add("deployments", appJob("A3", "third push"));
+		// What a webhook does: coalesce, then enqueue only if nothing absorbed it.
+		const push = async (title: string) => {
+			const job = appJob("A3", title);
+			const result = await coalesceQueuedApplicationDeploys("A3", job);
+			if (!result.merged) await myQueue.add("deployments", job);
+			return result;
+		};
+		await push("first push");
 		await myQueue.add("deployments", appJob("A3", "redo", "redeploy"));
+		await myQueue.add("deployments", appJob("Z3", "other service"));
+		const second = await push("second push");
+		const third = await push("third push");
 
-		const result = await coalesceQueuedApplicationDeploys("A3");
-
-		expect(result.removed).toBe(2);
-		expect(result.titles).toEqual(["second push", "third push"]);
-		expect(await titles()).toEqual(["first push", "redo"]);
+		expect(second).toEqual({
+			removed: 1,
+			titles: ["first push"],
+			merged: true,
+		});
+		expect(third).toEqual({
+			removed: 1,
+			titles: ["second push"],
+			merged: true,
+		});
+		expect(await titles()).toEqual(["third push", "redo", "other service"]);
 	});
 
-	it("never touches a PR preview, an active job or another stack", async () => {
+	it("reports no merge when nothing of the stack waits, so the caller enqueues", async () => {
 		await reset();
 		await myQueue.add("deployments", composeJob("C3", "active"));
 		await flush();
-		await myQueue.add("deployments", composeJob("C3", "w1"));
-		await myQueue.add("deployments", composeJob("C3", "w2"));
 		await myQueue.add("deployments", composeJob("C4", "other"));
 
-		const result = await coalesceQueuedComposeDeploys("C3");
+		const result = await coalesceQueuedComposeDeploys(
+			"C3",
+			composeJob("C3", "push"),
+		);
 
-		expect(result).toEqual({ removed: 1, titles: ["w2"] });
-		expect(await titles()).toEqual(["w1", "other"]);
+		expect(result).toEqual({ removed: 0, titles: [], merged: false });
+		expect(await titles()).toEqual(["other"]);
 	});
 
-	it("reports nothing removed when at most one deploy waits", async () => {
+	it("never touches a PR preview or an active job", async () => {
 		await reset();
 		await myQueue.add("deployments", appJob("A5", "active"));
 		await flush();
-		await myQueue.add("deployments", appJob("A5", "only"));
+		await myQueue.add(
+			"deployments",
+			appJob("A5", "preview", "deploy", "application-preview"),
+		);
 
-		expect(await coalesceQueuedApplicationDeploys("A5")).toEqual({
-			removed: 0,
-			titles: [],
-		});
-		expect(await titles()).toEqual(["only"]);
+		const result = await coalesceQueuedApplicationDeploys(
+			"A5",
+			appJob("A5", "push"),
+		);
+
+		expect(result.merged).toBe(false);
+		expect(await titles()).toEqual(["preview"]);
 	});
 });

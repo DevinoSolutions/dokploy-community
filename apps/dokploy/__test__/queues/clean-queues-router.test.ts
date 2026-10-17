@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 	cleanQueuesByCompose: vi.fn(async () => 3),
 	keepOldestQueuesByApplication: vi.fn(),
 	keepOldestQueuesByCompose: vi.fn(),
+	audit: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({
@@ -22,7 +23,7 @@ vi.mock("@dokploy/server", () => ({ IS_CLOUD: false }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
 
-vi.mock("@/server/api/utils/audit", () => ({ audit: vi.fn() }));
+vi.mock("@/server/api/utils/audit", () => ({ audit: mocks.audit }));
 
 vi.mock("@/server/queues/queueSetup", () => ({
 	cleanQueuesByApplication: mocks.cleanQueuesByApplication,
@@ -115,6 +116,66 @@ describe("application.cleanQueues", () => {
 	});
 });
 
+describe("keepOldest audit", () => {
+	it("records the removed job ids for an application", async () => {
+		await applicationCaller.cleanQueues({
+			applicationId: "a1",
+			mode: "keepOldest",
+		});
+
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+		expect(mocks.audit).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({
+				action: "cancel",
+				resourceType: "application",
+				resourceId: "a1",
+				metadata: { queue: "keepOldest", removedJobIds: ["j2"] },
+			}),
+		);
+	});
+
+	it("records the removed job ids for a compose stack", async () => {
+		await composeCaller.cleanQueues({ composeId: "c1", mode: "keepOldest" });
+
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+		expect(mocks.audit).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({
+				action: "cancel",
+				resourceType: "compose",
+				resourceId: "c1",
+				metadata: { queue: "keepOldest", removedJobIds: ["j2"] },
+			}),
+		);
+	});
+
+	it("writes nothing when keepOldest removed nothing", async () => {
+		mocks.keepOldestQueuesByApplication.mockResolvedValue({
+			kept: result.kept,
+			removed: [],
+		});
+		mocks.keepOldestQueuesByCompose.mockResolvedValue({
+			kept: result.kept,
+			removed: [],
+		});
+
+		await applicationCaller.cleanQueues({
+			applicationId: "a1",
+			mode: "keepOldest",
+		});
+		await composeCaller.cleanQueues({ composeId: "c1", mode: "keepOldest" });
+
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("does not add an audit row to the default mode", async () => {
+		await applicationCaller.cleanQueues({ applicationId: "a1" });
+		await composeCaller.cleanQueues({ composeId: "c1" });
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+});
+
 describe("compose.cleanQueues", () => {
 	it("without a mode drops everything and answers as before", async () => {
 		const out = await composeCaller.cleanQueues({ composeId: "c1" });
@@ -166,6 +227,11 @@ describe("MCP tools", () => {
 			expect(schema.properties.mode?.enum).toEqual(["all", "keepOldest"]);
 			expect(schema.properties.mode?.default).toBe("all");
 			expect(schema.required ?? []).not.toContain("mode");
+			// The description tells an MCP client what keepOldest leaves alone.
+			const description = (schema.properties.mode as { description?: string })
+				.description;
+			expect(description).toContain("never PR previews");
+			expect(description).toContain("PR previews included");
 		}
 	});
 });

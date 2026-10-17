@@ -89,8 +89,9 @@ review finding B: the section above was excellent and this one did not exist.
 2. **Every GitHub-sourced unit's build moves to the org build server**, and its
    deploy pulls by digest. A unit that must keep building where it is needs an
    exclusion, added before the switch is flipped.
-3. **Queued deploys start coalescing.** A burst of pushes produces one build.
-   Previews are never coalesced.
+3. **Queued deploys start coalescing.** A burst of pushes produces one build,
+   at the earliest slot, of the newest commit (or pinned digest). Previews and
+   waiting manual redeploys are never coalesced.
 4. **`[skip deploy]` starts being honoured** on the routes listed in
    `skip-deploy.ts`.
 5. **A deploy-hook `{image, …}` body stops being ignored**: validated on an
@@ -309,7 +310,9 @@ pipeline, it needs its own call: missing one is round-3 review finding H.
 - one import of `buildPolicyDeployGate`, one of the two coalescing helpers.
 - in the push→applications loop and the push→composes loop, a
   `buildPolicyDeployGate({...}); if (!gate.deploy) continue;` block **after**
-  upstream's own `shouldDeploy` check, so upstream's lines are untouched.
+  upstream's own `shouldDeploy` check, so upstream's lines are untouched, then
+  `if (gate.merged) continue;` because the push was folded into a job that was
+  already waiting (see **Coalescing**).
 
 Tag pushes and pull-request previews are deliberately not gated here: a preview
 is created by opening a PR, and coalescing or watch-path filtering it would
@@ -563,10 +566,27 @@ So `coalesceQueuedApplicationDeploys` additionally requires
 `applicationType === "application"` (and the compose sibling `"compose"`), and
 both report the titles of what they dropped so the audit row names it.
 
-The removal has **keep-oldest** semantics (T-3137): per job type (`deploy`,
-`redeploy`) the earliest-enqueued waiting job survives and only the later ones
-are dropped. The gate still enqueues the incoming push afterwards, so a burst
-leaves the oldest waiting job plus the newest one, not a single job.
+### Merge into the oldest waiting deploy (T-3137)
+
+Coalescing does not drop the waiting deploy and enqueue the push behind it, that
+would move the build to the back of the line. Instead the queue
+(`InMemoryQueue.coalesceWaiting`) finds the **oldest waiting plain deploy of the
+unit by queue position** whose type, `freshVolumes` and `priority` /
+`priorityBy` equal the incoming job's, and **rewrites that job's payload in
+place** with the incoming one (title, description, pinned image, server). It
+keeps its place and enqueue time, and the `deployment_queue_job` row is updated
+(`journal.updated`) so a restart replays the newest payload. The other waiting
+duplicates are dropped and their rows deleted. The gate then returns
+`merged: true` and the route must **not** enqueue the push. When nothing
+matches, the push enqueues as usual.
+
+Result: p1, p2, p3 leave one waiting job, at p1's position, carrying p3. A
+pinned-image burst deploys the newest digest, not the first one.
+
+What it never touches: the running job, PR previews, another unit's jobs, and a
+waiting **manual redeploy** (a different type), so a push does not cancel a
+redeploy someone asked for. A waiting job with a different `freshVolumes` or
+priority request is not a duplicate and stays; the push then enqueues next to it.
 
 ---
 

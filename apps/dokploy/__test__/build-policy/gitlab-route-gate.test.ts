@@ -252,6 +252,11 @@ describe("GitLab push webhook — build-policy gate (finding G)", () => {
 		await mocks.buildPolicyDeployGate.mock.calls[0]?.[0].removeWaiting();
 		expect(mocks.coalesceQueuedApplicationDeploys).toHaveBeenCalledWith(
 			"app-id-1",
+			expect.objectContaining({
+				applicationId: "app-id-1",
+				applicationType: "application",
+				type: "deploy",
+			}),
 		);
 
 		vi.clearAllMocks();
@@ -265,7 +270,25 @@ describe("GitLab push webhook — build-policy gate (finding G)", () => {
 		await mocks.buildPolicyDeployGate.mock.calls[0]?.[0].removeWaiting();
 		expect(mocks.coalesceQueuedComposeDeploys).toHaveBeenCalledWith(
 			"compose-id-1",
+			expect.objectContaining({
+				composeId: "compose-id-1",
+				applicationType: "compose",
+				type: "deploy",
+			}),
 		);
+	});
+
+	it("does not enqueue a push the gate folded into a waiting deploy", async () => {
+		mocks.buildPolicyDeployGate.mockResolvedValue({
+			deploy: true,
+			coalesced: 1,
+			merged: true,
+		});
+		rows([APP], [COMPOSE]);
+		await handler(makeReq(pushPayload()), makeRes());
+
+		expect(mocks.buildPolicyDeployGate).toHaveBeenCalledTimes(2);
+		expect(myQueue.add).not.toHaveBeenCalled();
 	});
 
 	it("still honours the unit's own explicit watchPaths before reaching the gate", async () => {
