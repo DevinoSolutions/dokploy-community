@@ -35,6 +35,7 @@ vi.mock("@dokploy/server", () => ({
 
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
 
+vi.mock("@/server/api/utils/cancel-audit", () => ({ auditCancel: vi.fn() }));
 vi.mock("@/server/api/utils/audit", () => ({ audit: mocks.audit }));
 
 vi.mock("@/server/queues/queueSetup", () => ({

@@ -129,6 +129,7 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 // The native binding is not needed to exercise the router.
 vi.mock("bcrypt", () => ({ default: {}, hash: vi.fn(), compare: vi.fn() }));
 
+vi.mock("@/server/api/utils/cancel-audit", () => ({ auditCancel: vi.fn() }));
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));

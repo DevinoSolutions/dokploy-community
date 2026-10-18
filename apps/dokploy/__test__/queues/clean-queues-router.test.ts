@@ -12,17 +12,27 @@ const mocks = vi.hoisted(() => ({
 	cleanQueuesByCompose: vi.fn(async () => 3),
 	keepOldestQueuesByApplication: vi.fn(),
 	keepOldestQueuesByCompose: vi.fn(),
+	findApplicationById: vi.fn(),
+	findComposeById: vi.fn(),
 	audit: vi.fn(),
+	auditCancel: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkServicePermissionAndAccess: mocks.checkServicePermissionAndAccess,
 }));
 
-vi.mock("@dokploy/server", () => ({ IS_CLOUD: false }));
+vi.mock("@dokploy/server", () => ({
+	IS_CLOUD: false,
+	findApplicationById: mocks.findApplicationById,
+	findComposeById: mocks.findComposeById,
+}));
 
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
 
+vi.mock("@/server/api/utils/cancel-audit", () => ({
+	auditCancel: mocks.auditCancel,
+}));
 vi.mock("@/server/api/utils/audit", () => ({ audit: mocks.audit }));
 
 vi.mock("@/server/queues/queueSetup", () => ({
@@ -64,6 +74,16 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.keepOldestQueuesByApplication.mockResolvedValue(result);
 	mocks.keepOldestQueuesByCompose.mockResolvedValue(result);
+	mocks.cleanQueuesByApplication.mockResolvedValue(3);
+	mocks.cleanQueuesByCompose.mockResolvedValue(3);
+	mocks.findApplicationById.mockResolvedValue({
+		applicationId: "a1",
+		appName: "app-abc123",
+	});
+	mocks.findComposeById.mockResolvedValue({
+		composeId: "c1",
+		name: "stack",
+	});
 });
 
 describe("application.cleanQueues", () => {
@@ -130,6 +150,7 @@ describe("keepOldest audit", () => {
 				action: "cancel",
 				resourceType: "application",
 				resourceId: "a1",
+				resourceName: "app-abc123",
 				metadata: { queue: "keepOldest", removedJobIds: ["j2"] },
 			}),
 		);
@@ -145,6 +166,7 @@ describe("keepOldest audit", () => {
 				action: "cancel",
 				resourceType: "compose",
 				resourceId: "c1",
+				resourceName: "stack",
 				metadata: { queue: "keepOldest", removedJobIds: ["j2"] },
 			}),
 		);
@@ -191,10 +213,81 @@ describe("keepOldest audit", () => {
 		logged.mockRestore();
 	});
 
-	it("does not add an audit row to the default mode", async () => {
+	it("records the caller on the entry", async () => {
+		await applicationCaller.cleanQueues({
+			applicationId: "a1",
+			mode: "keepOldest",
+		});
+
+		expect(mocks.audit.mock.calls[0]?.[0]).toMatchObject({
+			user: { id: "user-1", email: "user@example.com" },
+			session: { activeOrganizationId: "org-1" },
+		});
+	});
+});
+
+describe("cleanQueues audit in the default mode", () => {
+	it("records who dropped every waiting job of an application", async () => {
+		await applicationCaller.cleanQueues({ applicationId: "a1" });
+
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+		expect(mocks.audit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				user: expect.objectContaining({ id: "user-1" }),
+			}),
+			{
+				action: "cancel",
+				resourceType: "application",
+				resourceId: "a1",
+				resourceName: "app-abc123",
+				metadata: { queue: "all", removed: 3 },
+			},
+		);
+	});
+
+	it("records who dropped every waiting job of a compose stack", async () => {
+		await composeCaller.cleanQueues({ composeId: "c1", mode: "all" });
+
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+		expect(mocks.audit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				user: expect.objectContaining({ id: "user-1" }),
+			}),
+			{
+				action: "cancel",
+				resourceType: "compose",
+				resourceId: "c1",
+				resourceName: "stack",
+				metadata: { queue: "all", removed: 3 },
+			},
+		);
+	});
+
+	it("writes nothing when the queue had no waiting job", async () => {
+		mocks.cleanQueuesByApplication.mockResolvedValue(0);
+		mocks.cleanQueuesByCompose.mockResolvedValue(0);
+
 		await applicationCaller.cleanQueues({ applicationId: "a1" });
 		await composeCaller.cleanQueues({ composeId: "c1" });
+
 		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("still answers when the audit write fails", async () => {
+		const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.audit.mockRejectedValue(new Error("audit db down"));
+
+		await expect(
+			applicationCaller.cleanQueues({ applicationId: "a1" }),
+		).resolves.toBeUndefined();
+		await expect(
+			composeCaller.cleanQueues({ composeId: "c1" }),
+		).resolves.toEqual({
+			success: true,
+			message: "Queues cleaned successfully",
+		});
+		expect(logged).toHaveBeenCalledTimes(2);
+		logged.mockRestore();
 	});
 });
 
@@ -228,6 +321,88 @@ describe("compose.cleanQueues", () => {
 			expect(call.slice(1)).toEqual(["c1", { deployment: ["create"] }]);
 		}
 		expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("cleanQueues in the fork cancel trail", () => {
+	const caller = expect.objectContaining({
+		user: expect.objectContaining({ id: "user-1" }),
+		session: expect.objectContaining({ activeOrganizationId: "org-1" }),
+	});
+
+	it("records the caller for a whole-queue drop on an application", async () => {
+		await applicationCaller.cleanQueues({ applicationId: "a1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(1);
+		expect(mocks.auditCancel).toHaveBeenCalledWith(caller, {
+			action: "clean_queue",
+			targetType: "application",
+			targetId: "a1",
+			targetName: "app-abc123",
+			applicationId: "a1",
+			metadata: { queue: "all", removed: 3 },
+		});
+	});
+
+	it("records the caller for keepOldest on an application", async () => {
+		await applicationCaller.cleanQueues({
+			applicationId: "a1",
+			mode: "keepOldest",
+		});
+
+		expect(mocks.auditCancel).toHaveBeenCalledWith(
+			caller,
+			expect.objectContaining({
+				action: "keep_oldest_queue",
+				targetType: "application",
+				targetId: "a1",
+				metadata: { queue: "keepOldest", removedJobIds: ["j2"] },
+			}),
+		);
+	});
+
+	it("records the caller for both modes on a compose stack", async () => {
+		await composeCaller.cleanQueues({ composeId: "c1" });
+		await composeCaller.cleanQueues({ composeId: "c1", mode: "keepOldest" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(2);
+		expect(mocks.auditCancel.mock.calls[0]).toEqual([
+			caller,
+			expect.objectContaining({
+				action: "clean_queue",
+				targetType: "compose",
+				targetId: "c1",
+				composeId: "c1",
+			}),
+		]);
+		expect(mocks.auditCancel.mock.calls[1]).toEqual([
+			caller,
+			expect.objectContaining({
+				action: "keep_oldest_queue",
+				targetType: "compose",
+				composeId: "c1",
+			}),
+		]);
+	});
+
+	it("writes nothing when no job was removed", async () => {
+		mocks.cleanQueuesByApplication.mockResolvedValue(0);
+		mocks.keepOldestQueuesByCompose.mockResolvedValue({
+			kept: result.kept,
+			removed: [],
+		});
+
+		await applicationCaller.cleanQueues({ applicationId: "a1" });
+		await composeCaller.cleanQueues({ composeId: "c1", mode: "keepOldest" });
+
+		expect(mocks.auditCancel).not.toHaveBeenCalled();
+	});
+
+	it("still keeps the enterprise audit entry next to it", async () => {
+		await applicationCaller.cleanQueues({ applicationId: "a1" });
+
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(1);
 	});
 });
 

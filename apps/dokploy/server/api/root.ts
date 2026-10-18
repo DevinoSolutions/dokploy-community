@@ -13,6 +13,7 @@ import { cloudflareAccessRouter } from "./routers/cloudflare-access";
 import { clusterRouter } from "./routers/cluster";
 import { composeRouter } from "./routers/compose";
 import { deploymentRouter } from "./routers/deployment";
+import { deploymentCancelAuditRouter } from "./routers/deployment-cancel-audit";
 import { destinationRouter } from "./routers/destination";
 import { dnsProviderRouter } from "./routers/dns-provider";
 import { dockerRouter } from "./routers/docker";
@@ -85,6 +86,7 @@ export const appRouter = createTRPCRouter({
 	cluster: clusterRouter,
 	compose: composeRouter,
 	deployment: deploymentRouter,
+	deploymentCancelAudit: deploymentCancelAuditRouter,
 	destination: destinationRouter,
 	dnsProvider: dnsProviderRouter,
 	docker: dockerRouter,

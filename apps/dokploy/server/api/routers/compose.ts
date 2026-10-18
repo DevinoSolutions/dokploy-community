@@ -110,6 +110,7 @@ import {
 import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
+import { auditCancel } from "../utils/cancel-audit";
 import {
 	assertCanPrioritize,
 	recordPriorityUse,
@@ -412,28 +413,47 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["create"],
 			});
+			const compose = await findComposeById(input.composeId);
+			// The jobs are already gone once the queue helper returns, so a failing
+			// audit must not turn the answer into an error and hide what was removed.
+			const auditRemoved = async (
+				action: "clean_queue" | "keep_oldest_queue",
+				metadata: Record<string, unknown>,
+			) => {
+				await auditCancel(ctx, {
+					action,
+					targetType: "compose",
+					targetId: compose.composeId,
+					targetName: compose.appName,
+					composeId: compose.composeId,
+					metadata,
+				});
+				try {
+					await audit(ctx, {
+						action: "cancel",
+						resourceType: "compose",
+						resourceId: compose.composeId,
+						resourceName: compose.name,
+						metadata,
+					});
+				} catch (error) {
+					console.error("cleanQueues audit failed:", error);
+				}
+			};
 			if (input.mode === "keepOldest") {
 				const result = await keepOldestQueuesByCompose(input.composeId);
 				if (result.removed.length > 0) {
-					// The jobs are already gone, so a failing audit must not turn the
-					// answer into an error and hide what was removed.
-					try {
-						await audit(ctx, {
-							action: "cancel",
-							resourceType: "compose",
-							resourceId: input.composeId,
-							metadata: {
-								queue: "keepOldest",
-								removedJobIds: result.removed.map((job) => job.jobId),
-							},
-						});
-					} catch (error) {
-						console.error("keepOldest audit failed:", error);
-					}
+					await auditRemoved("keep_oldest_queue", {
+						queue: "keepOldest",
+						removedJobIds: result.removed.map((job) => job.jobId),
+					});
 				}
 				return result;
 			}
-			await cleanQueuesByCompose(input.composeId);
+			const removed = await cleanQueuesByCompose(input.composeId);
+			if (removed > 0) {
+				await auditRemoved("clean_queue", { queue: "all", removed });
+			}
 			return { success: true, message: "Queues cleaned successfully" };
 		}),
 	clearDeployments: protectedProcedure
@@ -444,6 +464,13 @@ export const composeRouter = createTRPCRouter({
 			});
 			const compose = await findComposeById(input.composeId);
 			await clearOldDeployments(compose.composeId, "compose");
+			await auditCancel(ctx, {
+				action: "clear_deployments",
+				targetType: "compose",
+				targetId: compose.composeId,
+				targetName: compose.appName,
+				composeId: compose.composeId,
+			});
 			await audit(ctx, {
 				action: "update",
 				resourceType: "compose",
@@ -459,6 +486,21 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const compose = await findComposeById(input.composeId);
+			const auditKill = async () => {
+				await auditCancel(ctx, {
+					action: "kill_build",
+					targetType: "compose",
+					targetId: compose.composeId,
+					targetName: compose.appName,
+					composeId: compose.composeId,
+				});
+				await audit(ctx, {
+					action: "cancel",
+					resourceType: "compose",
+					resourceId: compose.composeId,
+					resourceName: compose.name,
+				});
+			};
 			// A compose that builds on a build server is cancelled there, by
 			// deployment (see deployment-cancel.ts). The `pkill "docker compose"`
 			// below only ever runs on the serving host, where it would hit every
@@ -468,6 +510,7 @@ export const composeRouter = createTRPCRouter({
 					type: "compose",
 					composeId: input.composeId,
 				});
+				await auditKill();
 				return;
 			}
 			// A rolling replace that is running on the serving host has a cancel
@@ -480,8 +523,10 @@ export const composeRouter = createTRPCRouter({
 				type: "compose",
 				composeId: input.composeId,
 			});
-			if (rolling.stopped > 0) return;
-			await killDockerBuild("compose", compose.serverId);
+			if (rolling.stopped === 0) {
+				await killDockerBuild("compose", compose.serverId);
+			}
+			await auditKill();
 		}),
 
 	loadServices: protectedProcedure
@@ -1469,8 +1514,15 @@ export const composeRouter = createTRPCRouter({
 						applicationType: "compose",
 					});
 
+					await auditCancel(ctx, {
+						action: "cancel_deployment",
+						targetType: "compose",
+						targetId: compose.composeId,
+						targetName: compose.appName,
+						composeId: compose.composeId,
+					});
 					await audit(ctx, {
-						action: "stop",
+						action: "cancel",
 						resourceType: "compose",
 						resourceId: input.composeId,
 						resourceName: compose.name,

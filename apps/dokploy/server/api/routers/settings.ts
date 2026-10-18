@@ -61,6 +61,7 @@ import { scheduledJobs, scheduleJob } from "node-schedule";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { auditCancel } from "@/server/api/utils/cancel-audit";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiAssignDomain,
@@ -142,13 +143,21 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return true;
 		}
-		const result = cleanAllDeploymentQueue();
+		const removed = await cleanAllDeploymentQueue();
+		await auditCancel(ctx, {
+			action: "clear_all_queues",
+			targetType: "queue",
+			targetName: "all",
+			// Not scoped to one service or organization: every waiting job of the
+			// instance goes.
+			metadata: { removed, scope: "instance-wide" },
+		});
 		await audit(ctx, {
-			action: "update",
+			action: "cancel",
 			resourceType: "settings",
 			resourceName: "clean-deployment-queue",
 		});
-		return result;
+		return true;
 	}),
 	reloadTraefik: adminProcedure
 		.input(apiServerSchema)

@@ -64,6 +64,7 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { auditCancel } from "@/server/api/utils/cancel-audit";
 import {
 	assertCanPrioritize,
 	recordPriorityUse,
@@ -1093,28 +1094,47 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["cancel"],
 			});
+			const application = await findApplicationById(input.applicationId);
+			// The jobs are already gone once the queue helper returns, so a failing
+			// audit must not turn the answer into an error and hide what was removed.
+			const auditRemoved = async (
+				action: "clean_queue" | "keep_oldest_queue",
+				metadata: Record<string, unknown>,
+			) => {
+				await auditCancel(ctx, {
+					action,
+					targetType: "application",
+					targetId: application.applicationId,
+					targetName: application.appName,
+					applicationId: application.applicationId,
+					metadata,
+				});
+				try {
+					await audit(ctx, {
+						action: "cancel",
+						resourceType: "application",
+						resourceId: application.applicationId,
+						resourceName: application.appName,
+						metadata,
+					});
+				} catch (error) {
+					console.error("cleanQueues audit failed:", error);
+				}
+			};
 			if (input.mode === "keepOldest") {
 				const result = await keepOldestQueuesByApplication(input.applicationId);
 				if (result.removed.length > 0) {
-					// The jobs are already gone, so a failing audit must not turn the
-					// answer into an error and hide what was removed.
-					try {
-						await audit(ctx, {
-							action: "cancel",
-							resourceType: "application",
-							resourceId: input.applicationId,
-							metadata: {
-								queue: "keepOldest",
-								removedJobIds: result.removed.map((job) => job.jobId),
-							},
-						});
-					} catch (error) {
-						console.error("keepOldest audit failed:", error);
-					}
+					await auditRemoved("keep_oldest_queue", {
+						queue: "keepOldest",
+						removedJobIds: result.removed.map((job) => job.jobId),
+					});
 				}
 				return result;
 			}
-			await cleanQueuesByApplication(input.applicationId);
+			const removed = await cleanQueuesByApplication(input.applicationId);
+			if (removed > 0) {
+				await auditRemoved("clean_queue", { queue: "all", removed });
+			}
 		}),
 	clearDeployments: protectedProcedure
 		.input(apiFindOneApplication)
@@ -1124,6 +1144,13 @@ export const applicationRouter = createTRPCRouter({
 			});
 			const application = await findApplicationById(input.applicationId);
 			await clearOldDeployments(application.applicationId, "application");
+			await auditCancel(ctx, {
+				action: "clear_deployments",
+				targetType: "application",
+				targetId: application.applicationId,
+				targetName: application.appName,
+				applicationId: application.applicationId,
+			});
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "application",
@@ -1149,8 +1176,15 @@ export const applicationRouter = createTRPCRouter({
 			if (!remote.usesBuildServer && !application.buildServerId) {
 				await killDockerBuild("application", application.serverId);
 			}
+			await auditCancel(ctx, {
+				action: "kill_build",
+				targetType: "application",
+				targetId: application.applicationId,
+				targetName: application.appName,
+				applicationId: application.applicationId,
+			});
 			await audit(ctx, {
-				action: "stop",
+				action: "cancel",
 				resourceType: "application",
 				resourceId: application.applicationId,
 				resourceName: application.appName,
@@ -1328,8 +1362,15 @@ export const applicationRouter = createTRPCRouter({
 						applicationId: input.applicationId,
 						applicationType: "application",
 					});
+					await auditCancel(ctx, {
+						action: "cancel_deployment",
+						targetType: "application",
+						targetId: application.applicationId,
+						targetName: application.appName,
+						applicationId: application.applicationId,
+					});
 					await audit(ctx, {
-						action: "stop",
+						action: "cancel",
 						resourceType: "application",
 						resourceId: application.applicationId,
 						resourceName: application.appName,

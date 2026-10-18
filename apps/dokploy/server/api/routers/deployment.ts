@@ -41,6 +41,7 @@ import { desc, eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { auditCancel } from "@/server/api/utils/cancel-audit";
 import {
 	assertCanPrioritize,
 	recordPriorityUse,
@@ -67,6 +68,51 @@ const deploymentHostServerId = (
 	deployment.application?.serverId ||
 	deployment.compose?.serverId ||
 	null;
+
+/**
+ * What an audit entry names about a deployment: the service it belongs to (the
+ * log table shows resourceName, not the id) and the deployment's title.
+ */
+const deploymentAuditTarget = (deployment: {
+	title?: string | null;
+	applicationId?: string | null;
+	composeId?: string | null;
+	application?: { appName: string } | null;
+	compose?: { appName: string } | null;
+}) => ({
+	resourceName:
+		deployment.application?.appName ??
+		deployment.compose?.appName ??
+		deployment.title ??
+		undefined,
+	metadata: {
+		title: deployment.title,
+		applicationId: deployment.applicationId,
+		composeId: deployment.composeId,
+	},
+});
+
+/** The same target, as the fork's cancel trail records it. */
+const deploymentCancelAuditTarget = (deployment: {
+	deploymentId: string;
+	title?: string | null;
+	applicationId?: string | null;
+	composeId?: string | null;
+	application?: { appName: string } | null;
+	compose?: { appName: string } | null;
+}) => ({
+	targetType: "deployment" as const,
+	targetId: deployment.deploymentId,
+	targetName:
+		deployment.application?.appName ??
+		deployment.compose?.appName ??
+		deployment.title ??
+		undefined,
+	applicationId: deployment.applicationId,
+	composeId: deployment.composeId,
+	deploymentId: deployment.deploymentId,
+	metadata: { title: deployment.title },
+});
 
 export const deploymentRouter = createTRPCRouter({
 	all: protectedProcedure
@@ -309,6 +355,18 @@ export const deploymentRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
 			await assertDeploymentAccess(ctx, deployment, "cancel");
+			const auditKill = async () => {
+				await auditCancel(ctx, {
+					action: "kill_process",
+					...deploymentCancelAuditTarget(deployment),
+				});
+				await audit(ctx, {
+					action: "cancel",
+					resourceType: "deployment",
+					resourceId: deployment.deploymentId,
+					...deploymentAuditTarget(deployment),
+				});
+			};
 
 			// A build that runs on a build server has no local pid: it is stopped
 			// there, by deployment (see deployment-cancel.ts).
@@ -319,11 +377,7 @@ export const deploymentRouter = createTRPCRouter({
 			// signalled (no pid file, no launcher, host unreachable) is cancelled
 			// but still running: it keeps the pid kill below it had before.
 			if (remote?.status === "cancelled" && !remote.genericStopNeeded) {
-				await audit(ctx, {
-					action: "cancel",
-					resourceType: "deployment",
-					resourceId: deployment.deploymentId,
-				});
+				await auditKill();
 				return;
 			}
 
@@ -485,21 +539,13 @@ export const deploymentRouter = createTRPCRouter({
 						message: "The run is still starting, try again in a moment",
 					});
 				}
-				await audit(ctx, {
-					action: "cancel",
-					resourceType: "deployment",
-					resourceId: deployment.deploymentId,
-				});
+				await auditKill();
 				return;
 			}
 
 			await killOnHost();
 			await updateDeploymentStatus(deployment.deploymentId, "error");
-			await audit(ctx, {
-				action: "cancel",
-				resourceType: "deployment",
-				resourceId: deployment.deploymentId,
-			});
+			await auditKill();
 		}),
 
 	removeDeployment: protectedProcedure
@@ -512,10 +558,15 @@ export const deploymentRouter = createTRPCRouter({
 			const deployment = await findDeploymentById(input.deploymentId);
 			await assertDeploymentAccess(ctx, deployment, "cancel");
 			const result = await removeDeployment(input.deploymentId);
+			await auditCancel(ctx, {
+				action: "remove_deployment",
+				...deploymentCancelAuditTarget(deployment),
+			});
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "deployment",
 				resourceId: deployment.deploymentId,
+				...deploymentAuditTarget(deployment),
 			});
 			return result;
 		}),
