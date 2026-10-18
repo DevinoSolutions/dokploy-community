@@ -601,6 +601,7 @@ describe("a compose that builds on its serving host (no build server)", () => {
 				cancelled: 0,
 				stopped: 0,
 				warnings: [],
+				deploymentIds: [],
 			});
 			expect(mocks.updateSets).toHaveLength(0);
 			expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
@@ -662,6 +663,7 @@ describe("a compose that builds on its serving host (no build server)", () => {
 					cancelled: 1,
 					stopped: 0,
 					warnings: [],
+					deploymentIds: ["dep-1"],
 				});
 				expect(mocks.updateSets[0]).toMatchObject({ status: "cancelled" });
 				expect(killsOn("serving-1")).toHaveLength(0);

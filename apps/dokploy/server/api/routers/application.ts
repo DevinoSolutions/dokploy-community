@@ -1176,13 +1176,20 @@ export const applicationRouter = createTRPCRouter({
 			if (!remote.usesBuildServer && !application.buildServerId) {
 				await killDockerBuild("application", application.serverId);
 			}
-			await auditCancel(ctx, {
-				action: "kill_build",
-				targetType: "application",
-				targetId: application.applicationId,
-				targetName: application.appName,
-				applicationId: application.applicationId,
-			});
+			// One entry per deployment it stopped, so each cancelled deployment can
+			// show who stopped it; the one service-level entry when none was.
+			for (const deploymentId of remote.deploymentIds.length
+				? remote.deploymentIds
+				: [undefined]) {
+				await auditCancel(ctx, {
+					action: "kill_build",
+					targetType: "application",
+					targetId: application.applicationId,
+					targetName: application.appName,
+					applicationId: application.applicationId,
+					deploymentId,
+				});
+			}
 			await audit(ctx, {
 				action: "cancel",
 				resourceType: "application",

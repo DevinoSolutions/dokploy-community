@@ -1,6 +1,10 @@
-import { listDeploymentCancelAudit } from "@dokploy/server";
+import {
+	findDeploymentCancelledByService,
+	listDeploymentCancelAudit,
+} from "@dokploy/server";
+import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { z } from "zod";
-import { adminProcedure, createTRPCRouter } from "../trpc";
+import { adminProcedure, createTRPCRouter, protectedProcedure } from "../trpc";
 
 /**
  * Fork router: the trail of who cancelled, killed or dropped a deployment or
@@ -23,4 +27,31 @@ export const deploymentCancelAuditRouter = createTRPCRouter({
 				offset: input.offset,
 			}),
 		),
+
+	// Who cancelled the deployments listed on a service page. Open to whoever
+	// can read that service's deployments (`deployment.all`): the same service
+	// permission, member allow-list and organization checks.
+	byApplication: protectedProcedure
+		.input(z.object({ applicationId: z.string().min(1) }))
+		.query(async ({ ctx, input }) => {
+			await checkServicePermissionAndAccess(ctx, input.applicationId, {
+				deployment: ["read"],
+			});
+			return findDeploymentCancelledByService({
+				organizationId: ctx.session.activeOrganizationId,
+				applicationId: input.applicationId,
+			});
+		}),
+
+	byCompose: protectedProcedure
+		.input(z.object({ composeId: z.string().min(1) }))
+		.query(async ({ ctx, input }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				deployment: ["read"],
+			});
+			return findDeploymentCancelledByService({
+				organizationId: ctx.session.activeOrganizationId,
+				composeId: input.composeId,
+			});
+		}),
 });

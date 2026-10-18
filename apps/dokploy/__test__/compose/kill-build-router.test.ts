@@ -82,6 +82,7 @@ const deploymentCaller = deploymentRouter.createCaller(
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+		deploymentIds: [],
 		usesBuildServer: false,
 		cancelled: 0,
 		stopped: 0,
@@ -134,6 +135,7 @@ describe("compose.killBuild", () => {
 			buildServerId: null,
 		});
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: [],
 			usesBuildServer: false,
 			cancelled: 1,
 			stopped: 1,
@@ -153,6 +155,7 @@ describe("compose.killBuild", () => {
 			buildServerId: null,
 		});
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: [],
 			usesBuildServer: false,
 			cancelled: 1,
 			stopped: 0,
@@ -190,6 +193,7 @@ describe("application.killBuild", () => {
 			application({ buildServerId: "build-1" }),
 		);
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: [],
 			usesBuildServer: true,
 			cancelled: 1,
 			warnings: [],
@@ -217,6 +221,7 @@ describe("application.killBuild", () => {
 	it("a policy-forced remote build (no buildServerId on the app) is still cancelled remotely", async () => {
 		mocks.findApplicationById.mockResolvedValue(application());
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: [],
 			usesBuildServer: true,
 			cancelled: 1,
 			warnings: [],
@@ -414,6 +419,7 @@ describe("who cancelled", () => {
 		expect(mocks.killDockerBuild).toHaveBeenCalledTimes(1);
 
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: [],
 			usesBuildServer: false,
 			cancelled: 1,
 			stopped: 1,
@@ -565,6 +571,7 @@ describe("who cancelled, in the fork cancel trail", () => {
 		// launcher stopped it
 		mocks.findComposeById.mockResolvedValue(stack);
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: [],
 			usesBuildServer: false,
 			cancelled: 1,
 			stopped: 1,
@@ -573,6 +580,7 @@ describe("who cancelled, in the fork cancel trail", () => {
 		await composeCaller.killBuild({ composeId: "c1" });
 		// pkill fallback
 		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: [],
 			usesBuildServer: false,
 			cancelled: 0,
 			stopped: 0,
@@ -603,6 +611,67 @@ describe("who cancelled, in the fork cancel trail", () => {
 			targetId: "a1",
 			targetName: "app-abc123",
 			applicationId: "a1",
+		});
+	});
+
+	it("killBuild records each deployment it stopped, so the deployment can show who did", async () => {
+		mocks.findApplicationById.mockResolvedValue({
+			applicationId: "a1",
+			appName: "app-abc123",
+			serverId: "serving-1",
+			buildServerId: "build-1",
+		});
+		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: ["dep-1", "dep-2"],
+			usesBuildServer: true,
+			cancelled: 2,
+			stopped: 2,
+			warnings: [],
+		});
+
+		await applicationCaller.killBuild({ applicationId: "a1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(2);
+		for (const [i, deploymentId] of ["dep-1", "dep-2"].entries()) {
+			expect(mocks.auditCancel.mock.calls[i]).toEqual([
+				caller,
+				{
+					action: "kill_build",
+					targetType: "application",
+					targetId: "a1",
+					targetName: "app-abc123",
+					applicationId: "a1",
+					deploymentId,
+				},
+			]);
+		}
+
+		vi.clearAllMocks();
+		mocks.findComposeById.mockResolvedValue({
+			composeId: "c1",
+			appName: "stack-xyz789",
+			name: "stack",
+			serverId: "serving-1",
+			buildServerId: null,
+		});
+		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			deploymentIds: ["dep-3"],
+			usesBuildServer: false,
+			cancelled: 1,
+			stopped: 1,
+			warnings: [],
+		});
+
+		await composeCaller.killBuild({ composeId: "c1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(1);
+		expect(mocks.auditCancel).toHaveBeenCalledWith(caller, {
+			action: "kill_build",
+			targetType: "compose",
+			targetId: "c1",
+			targetName: "stack-xyz789",
+			composeId: "c1",
+			deploymentId: "dep-3",
 		});
 	});
 

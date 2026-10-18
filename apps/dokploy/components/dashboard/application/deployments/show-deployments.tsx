@@ -34,6 +34,7 @@ import { SnapvisorDeploymentBadge } from "../../settings/integrations/snapvisor/
 import { SnapvisorServiceLink } from "../../settings/integrations/snapvisor/snapvisor-service-link";
 import { ShowRollbackSettings } from "../rollbacks/show-rollback-settings";
 import { CancelQueues } from "./cancel-queues";
+import { describeCancelledBy } from "./cancelled-by";
 import { ClearDeployments } from "./clear-deployments";
 import { KillBuild } from "./kill-build";
 import { RefreshToken } from "./refresh-token";
@@ -88,6 +89,40 @@ export const ShowDeployments = ({
 		);
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+
+	// Who cancelled a deployment: only asked for once one is listed as
+	// cancelled, and re-read while it is, as the entry is written just after
+	// the status changes.
+	const hasCancelled = Boolean(
+		deployments?.some((deployment) => deployment.status === "cancelled"),
+	);
+	const cancelledByRefetch = hasCancelled ? 5000 : false;
+	const { data: cancelledByApplication } =
+		api.deploymentCancelAudit.byApplication.useQuery(
+			{ applicationId: id },
+			{
+				enabled: !!id && type === "application" && hasCancelled,
+				refetchInterval: cancelledByRefetch,
+			},
+		);
+	const { data: cancelledByCompose } =
+		api.deploymentCancelAudit.byCompose.useQuery(
+			{ composeId: id },
+			{
+				enabled: !!id && type === "compose" && hasCancelled,
+				refetchInterval: cancelledByRefetch,
+			},
+		);
+	const cancelledByDeployment = useMemo(
+		() =>
+			new Map(
+				(cancelledByApplication ?? cancelledByCompose ?? []).map((entry) => [
+					entry.deploymentId,
+					entry,
+				]),
+			),
+		[cancelledByApplication, cancelledByCompose],
+	);
 
 	// The service page already loads these; the query is shared, not repeated.
 	const { data: application } = api.application.one.useQuery(
@@ -373,6 +408,10 @@ export const ShowDeployments = ({
 								deployment.status === "done" ||
 								deployment.status === "error" ||
 								deployment.status === "cancelled";
+							const cancelledBy =
+								deployment.status === "cancelled"
+									? cancelledByDeployment.get(deployment.deploymentId)
+									: undefined;
 
 							return (
 								<div
@@ -455,6 +494,17 @@ export const ShowDeployments = ({
 														</button>
 													);
 												})()}
+											{cancelledBy && (
+												<span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+													{describeCancelledBy(cancelledBy)}
+													<DateTooltip
+														date={new Date(cancelledBy.createdAt).toISOString()}
+														className="text-xs"
+													>
+														·
+													</DateTooltip>
+												</span>
+											)}
 											{deployment.status === "error" &&
 												deployment.errorMessage?.trim() && (
 													<span

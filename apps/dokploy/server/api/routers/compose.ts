@@ -486,14 +486,21 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["cancel"],
 			});
 			const compose = await findComposeById(input.composeId);
-			const auditKill = async () => {
-				await auditCancel(ctx, {
-					action: "kill_build",
-					targetType: "compose",
-					targetId: compose.composeId,
-					targetName: compose.appName,
-					composeId: compose.composeId,
-				});
+			const auditKill = async (deploymentIds: readonly string[]) => {
+				// One entry per deployment it stopped, so each cancelled deployment
+				// can show who stopped it; the one service-level entry when none was.
+				for (const deploymentId of deploymentIds.length
+					? deploymentIds
+					: [undefined]) {
+					await auditCancel(ctx, {
+						action: "kill_build",
+						targetType: "compose",
+						targetId: compose.composeId,
+						targetName: compose.appName,
+						composeId: compose.composeId,
+						deploymentId,
+					});
+				}
 				await audit(ctx, {
 					action: "cancel",
 					resourceType: "compose",
@@ -506,11 +513,11 @@ export const composeRouter = createTRPCRouter({
 			// below only ever runs on the serving host, where it would hit every
 			// other compose operation running there.
 			if (compose.buildServerId) {
-				await cancelBuildServerDeploymentsForService({
+				const remote = await cancelBuildServerDeploymentsForService({
 					type: "compose",
 					composeId: input.composeId,
 				});
-				await auditKill();
+				await auditKill(remote.deploymentIds);
 				return;
 			}
 			// A rolling replace that is running on the serving host has a cancel
@@ -526,7 +533,7 @@ export const composeRouter = createTRPCRouter({
 			if (rolling.stopped === 0) {
 				await killDockerBuild("compose", compose.serverId);
 			}
-			await auditKill();
+			await auditKill(rolling.deploymentIds);
 		}),
 
 	loadServices: protectedProcedure
