@@ -8,8 +8,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
 	isBuildPolicyEnforcedAnywhere: vi.fn(),
 	findBuildPolicySettings: vi.fn(),
-	recordBuildPolicyAudit: vi.fn(async () => undefined),
-	recordDeploymentCancelAudit: vi.fn(async () => undefined),
+	recordBuildPolicyAudit: vi.fn(async (_entry: unknown) => undefined),
+	recordDeploymentCancelAudit: vi.fn(async (_input: unknown) => undefined),
 	environmentsFindFirst: vi.fn(),
 }));
 

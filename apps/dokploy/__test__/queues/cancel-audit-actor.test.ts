@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const mocks = vi.hoisted(() => ({
-	recordDeploymentCancelAudit: vi.fn(async () => undefined),
+	recordDeploymentCancelAudit: vi.fn(async (_input: unknown) => undefined),
 	listDeploymentCancelAudit: vi.fn(),
 }));
 
