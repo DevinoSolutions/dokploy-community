@@ -34,6 +34,7 @@ import { SnapvisorDeploymentBadge } from "../../settings/integrations/snapvisor/
 import { SnapvisorServiceLink } from "../../settings/integrations/snapvisor/snapvisor-service-link";
 import { ShowRollbackSettings } from "../rollbacks/show-rollback-settings";
 import { CancelQueues } from "./cancel-queues";
+import { describeCancelledBy, isAwaitingCancelledBy } from "./cancelled-by";
 import { ClearDeployments } from "./clear-deployments";
 import { KillBuild } from "./kill-build";
 import { RefreshToken } from "./refresh-token";
@@ -56,7 +57,7 @@ interface Props {
 // A deployment's description is "Commit: <40-character SHA>" for git builds.
 const COMMIT_DESCRIPTION_RE = /^(Commit:\s*)?([0-9a-f]{40})$/i;
 
-export const formatDuration =(seconds: number) => {
+export const formatDuration = (seconds: number) => {
 	if (seconds < 60) return `${seconds}s`;
 	const minutes = Math.floor(seconds / 60);
 	const remainingSeconds = seconds % 60;
@@ -88,6 +89,49 @@ export const ShowDeployments = ({
 		);
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+
+	// Who cancelled a deployment: only asked for once one is listed as
+	// cancelled, and re-read only while a recent cancellation has no entry yet,
+	// as the entry is written just after the status changes.
+	const hasCancelled = Boolean(
+		deployments?.some((deployment) => deployment.status === "cancelled"),
+	);
+	const cancelledByRefetch = (
+		entries: { deploymentId: string }[] | undefined,
+	): number | false =>
+		isAwaitingCancelledBy(
+			deployments,
+			new Set(entries?.map((entry) => entry.deploymentId)),
+			Date.now(),
+		)
+			? 5000
+			: false;
+	const { data: cancelledByApplication } =
+		api.deploymentCancelAudit.byApplication.useQuery(
+			{ applicationId: id },
+			{
+				enabled: !!id && type === "application" && hasCancelled,
+				refetchInterval: (query) => cancelledByRefetch(query.state.data),
+			},
+		);
+	const { data: cancelledByCompose } =
+		api.deploymentCancelAudit.byCompose.useQuery(
+			{ composeId: id },
+			{
+				enabled: !!id && type === "compose" && hasCancelled,
+				refetchInterval: (query) => cancelledByRefetch(query.state.data),
+			},
+		);
+	const cancelledByDeployment = useMemo(
+		() =>
+			new Map(
+				(cancelledByApplication ?? cancelledByCompose ?? []).map((entry) => [
+					entry.deploymentId,
+					entry,
+				]),
+			),
+		[cancelledByApplication, cancelledByCompose],
+	);
 
 	// The service page already loads these; the query is shared, not repeated.
 	const { data: application } = api.application.one.useQuery(
@@ -279,8 +323,7 @@ export const ShowDeployments = ({
 					<div className="flex flex-col gap-2 text-sm">
 						<span>
 							To redeploy automatically, add this webhook URL to your Git
-							provider or container registry. Payloads up to 25 MB are
-							accepted.
+							provider or container registry. Payloads up to 25 MB are accepted.
 						</span>
 						<div className="flex flex-row items-center gap-2 flex-wrap">
 							<span>Webhook URL: </span>
@@ -373,6 +416,10 @@ export const ShowDeployments = ({
 								deployment.status === "done" ||
 								deployment.status === "error" ||
 								deployment.status === "cancelled";
+							const cancelledBy =
+								deployment.status === "cancelled"
+									? cancelledByDeployment.get(deployment.deploymentId)
+									: undefined;
 
 							return (
 								<div
@@ -430,7 +477,9 @@ export const ShowDeployments = ({
 											{deployment.description?.trim() &&
 												(() => {
 													const description = deployment.description.trim();
-													const commit = description.match(COMMIT_DESCRIPTION_RE);
+													const commit = description.match(
+														COMMIT_DESCRIPTION_RE,
+													);
 													const sha = commit?.[2];
 													if (!sha) {
 														return (
@@ -455,6 +504,17 @@ export const ShowDeployments = ({
 														</button>
 													);
 												})()}
+											{cancelledBy && (
+												<span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+													{describeCancelledBy(cancelledBy)}
+													<DateTooltip
+														date={new Date(cancelledBy.createdAt).toISOString()}
+														className="text-xs"
+													>
+														·
+													</DateTooltip>
+												</span>
+											)}
 											{deployment.status === "error" &&
 												deployment.errorMessage?.trim() && (
 													<span
@@ -637,9 +697,7 @@ export const ShowDeployments = ({
 					onClose={() => setActiveLog(null)}
 					logPath={activeLog?.logPath || ""}
 					errorMessage={activeLog?.errorMessage || ""}
-					unavailableMessage={
-						needsLogHost ? logHost?.unavailable : undefined
-					}
+					unavailableMessage={needsLogHost ? logHost?.unavailable : undefined}
 				/>
 			</CardContent>
 		</Card>

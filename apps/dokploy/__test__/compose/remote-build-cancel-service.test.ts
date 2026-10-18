@@ -405,7 +405,13 @@ describe("cancelBuildServerDeploymentsForService", () => {
 			composeId: "c1",
 		});
 
-		expect(result).toEqual({ usesBuildServer: false, cancelled: 0, stopped: 0, warnings: [] });
+		expect(result).toEqual({
+			usesBuildServer: false,
+			cancelled: 0,
+			stopped: 0,
+			warnings: [],
+			deploymentIds: [],
+		});
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 	});
 
@@ -423,7 +429,13 @@ describe("cancelBuildServerDeploymentsForService", () => {
 			composeId: "c1",
 		});
 
-		expect(result).toEqual({ usesBuildServer: true, cancelled: 1, stopped: 1, warnings: [] });
+		expect(result).toEqual({
+			usesBuildServer: true,
+			cancelled: 1,
+			stopped: 1,
+			warnings: [],
+			deploymentIds: ["dep-1"],
+		});
 		expect(commandsOn("build-1")).toHaveLength(1);
 		expect(commandsOn("serving-1").some((c) => c.includes("/l/1.log"))).toBe(true);
 	});
@@ -438,7 +450,13 @@ describe("cancelBuildServerDeploymentsForService", () => {
 			applicationId: "a1",
 		});
 
-		expect(result).toEqual({ usesBuildServer: false, cancelled: 0, stopped: 0, warnings: [] });
+		expect(result).toEqual({
+			usesBuildServer: false,
+			cancelled: 0,
+			stopped: 0,
+			warnings: [],
+			deploymentIds: [],
+		});
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 		expect(mocks.updateSets).toHaveLength(0);
 	});
@@ -453,7 +471,13 @@ describe("cancelBuildServerDeploymentsForService", () => {
 			applicationId: "a1",
 		});
 
-		expect(result).toEqual({ usesBuildServer: true, cancelled: 1, stopped: 1, warnings: [] });
+		expect(result).toEqual({
+			usesBuildServer: true,
+			cancelled: 1,
+			stopped: 1,
+			warnings: [],
+			deploymentIds: ["dep-1"],
+		});
 		expect(mocks.execAsyncRemote.mock.calls.every((c) => c[0] === "build-1")).toBe(
 			true,
 		);

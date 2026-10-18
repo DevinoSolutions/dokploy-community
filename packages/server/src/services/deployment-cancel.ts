@@ -773,11 +773,17 @@ const hasRollingReplace = (owner: { rollingReplace?: unknown }) =>
 const cancelRollingReleases = async (
 	composeId: string,
 	owner: { serverId: string | null; rollingReplace?: unknown } | undefined,
-): Promise<{ cancelled: number; stopped: number; warnings: string[] }> => {
+): Promise<{
+	cancelled: number;
+	stopped: number;
+	warnings: string[];
+	deploymentIds: string[];
+}> => {
 	const warnings: string[] = [];
+	const deploymentIds: string[] = [];
 	let cancelled = 0;
 	let stopped = 0;
-	if (!owner) return { cancelled, stopped, warnings };
+	if (!owner) return { cancelled, stopped, warnings, deploymentIds };
 	const rolling = hasRollingReplace(owner);
 	const running = await db.query.deployments.findMany({
 		where: and(
@@ -802,6 +808,7 @@ const cancelRollingReleases = async (
 		});
 		if (outcome.status === "cancelled") {
 			cancelled++;
+			deploymentIds.push(row.deploymentId);
 			// Only a release step that was really signalled counts as stopped: the
 			// caller keeps its generic stop otherwise (a rolling compose can still
 			// run a plain `up`, which only that stop interrupts).
@@ -809,7 +816,7 @@ const cancelRollingReleases = async (
 			if (outcome.warning) warnings.push(outcome.warning);
 		}
 	}
-	return { cancelled, stopped, warnings };
+	return { cancelled, stopped, warnings, deploymentIds };
 };
 
 /**
@@ -840,8 +847,11 @@ export const cancelBuildServerDeploymentsForService = async (
 	 */
 	stopped: number;
 	warnings: string[];
+	/** The deployments that were cancelled, for the cancel trail. */
+	deploymentIds: string[];
 }> => {
 	const warnings: string[] = [];
+	const deploymentIds: string[] = [];
 	let cancelled = 0;
 
 	if (service.type === "application") {
@@ -863,6 +873,7 @@ export const cancelBuildServerDeploymentsForService = async (
 			});
 			if (outcome.status === "cancelled") {
 				cancelled++;
+				deploymentIds.push(row.deploymentId);
 				if (outcome.warning) warnings.push(outcome.warning);
 			}
 		}
@@ -871,6 +882,7 @@ export const cancelBuildServerDeploymentsForService = async (
 			cancelled,
 			stopped: cancelled,
 			warnings,
+			deploymentIds,
 		};
 	}
 
@@ -900,10 +912,17 @@ export const cancelBuildServerDeploymentsForService = async (
 		});
 		if (outcome.status === "cancelled") {
 			cancelled++;
+			deploymentIds.push(row.deploymentId);
 			if (outcome.warning) warnings.push(outcome.warning);
 		}
 	}
-	return { usesBuildServer: true, cancelled, stopped: cancelled, warnings };
+	return {
+		usesBuildServer: true,
+		cancelled,
+		stopped: cancelled,
+		warnings,
+		deploymentIds,
+	};
 };
 
 /**

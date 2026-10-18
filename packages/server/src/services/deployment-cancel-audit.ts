@@ -1,11 +1,12 @@
 import { db } from "@dokploy/server/db";
 import {
+	apikey,
 	type DeploymentCancelAuditAction,
 	type DeploymentCancelAuditActorType,
 	type DeploymentCancelAuditTargetType,
 	deploymentCancelAudit,
 } from "@dokploy/server/db/schema";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 
 /**
  * Fork-owned trail of who cancelled, killed or dropped a deployment or queued
@@ -89,4 +90,89 @@ export const listDeploymentCancelAudit = async ({
 		db.$count(deploymentCancelAudit, where),
 	]);
 	return { logs, total };
+};
+
+/** The actions that leave a deployment row `cancelled`. */
+const DEPLOYMENT_CANCEL_ACTIONS: DeploymentCancelAuditAction[] = [
+	"cancel_deployment",
+	"kill_build",
+	"kill_process",
+];
+
+/** How many deployments a service shows, and so how many entries come back. */
+const BY_SERVICE_DEPLOYMENT_LIMIT = 50;
+/** Rows read to find the latest entry of that many deployments. */
+const BY_SERVICE_ROW_LIMIT = 500;
+
+export interface DeploymentCancelledBy {
+	deploymentId: string;
+	action: DeploymentCancelAuditAction;
+	actorType: DeploymentCancelAuditActorType;
+	actorEmail: string | null;
+	/** The API key's name, or null when it has none or has been deleted. */
+	apiKeyName: string | null;
+	/** The first characters of the API key id, to tell unnamed keys apart. */
+	apiKeyShortId: string | null;
+	createdAt: Date;
+}
+
+/**
+ * Who cancelled the deployments of ONE service: the latest entry per
+ * deployment, newest first. Display fields only (no metadata). The caller
+ * authorizes the service; the organization filter is a second guard so an
+ * entry of another organization can never come back through a shared id.
+ */
+export const findDeploymentCancelledByService = async ({
+	organizationId,
+	applicationId,
+	composeId,
+}: {
+	organizationId: string;
+} & (
+	| { applicationId: string; composeId?: undefined }
+	| { composeId: string; applicationId?: undefined }
+)): Promise<DeploymentCancelledBy[]> => {
+	const rows = await db
+		.select({
+			deploymentId: deploymentCancelAudit.deploymentId,
+			action: deploymentCancelAudit.action,
+			actorType: deploymentCancelAudit.actorType,
+			actorEmail: deploymentCancelAudit.actorEmail,
+			apiKeyId: deploymentCancelAudit.apiKeyId,
+			apiKeyName: apikey.name,
+			createdAt: deploymentCancelAudit.createdAt,
+		})
+		.from(deploymentCancelAudit)
+		.leftJoin(apikey, eq(apikey.id, deploymentCancelAudit.apiKeyId))
+		.where(
+			and(
+				eq(deploymentCancelAudit.organizationId, organizationId),
+				applicationId
+					? eq(deploymentCancelAudit.applicationId, applicationId)
+					: eq(deploymentCancelAudit.composeId, composeId as string),
+				isNotNull(deploymentCancelAudit.deploymentId),
+				inArray(deploymentCancelAudit.action, DEPLOYMENT_CANCEL_ACTIONS),
+			),
+		)
+		.orderBy(
+			desc(deploymentCancelAudit.createdAt),
+			desc(deploymentCancelAudit.deploymentCancelAuditId),
+		)
+		.limit(BY_SERVICE_ROW_LIMIT);
+
+	const latest = new Map<string, DeploymentCancelledBy>();
+	for (const row of rows) {
+		if (!row.deploymentId || latest.has(row.deploymentId)) continue;
+		latest.set(row.deploymentId, {
+			deploymentId: row.deploymentId,
+			action: row.action,
+			actorType: row.actorType,
+			actorEmail: row.actorEmail,
+			apiKeyName: row.apiKeyName?.trim() || null,
+			apiKeyShortId: row.apiKeyId ? row.apiKeyId.slice(0, 6) : null,
+			createdAt: row.createdAt,
+		});
+		if (latest.size >= BY_SERVICE_DEPLOYMENT_LIMIT) break;
+	}
+	return [...latest.values()];
 };
