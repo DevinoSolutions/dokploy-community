@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { describeCancelledBy } from "@/components/dashboard/application/deployments/cancelled-by";
+import {
+	CANCELLED_BY_WAIT_MS,
+	describeCancelledBy,
+	isAwaitingCancelledBy,
+} from "@/components/dashboard/application/deployments/cancelled-by";
 
 const base = { actorEmail: null, apiKeyName: null, apiKeyShortId: null };
 
@@ -51,6 +55,82 @@ describe("describeCancelledBy", () => {
 	it("names the system", () => {
 		expect(describeCancelledBy({ ...base, actorType: "system" })).toBe(
 			"Cancelled by system",
+		);
+	});
+});
+
+describe("isAwaitingCancelledBy", () => {
+	const now = Date.parse("2026-10-18T12:00:00Z");
+	const ago = (ms: number) => new Date(now - ms).toISOString();
+	const cancelled = (deploymentId: string, finishedAt: string | null) => ({
+		deploymentId,
+		status: "cancelled",
+		createdAt: ago(60 * 60 * 1000),
+		finishedAt,
+	});
+	const none = new Set<string>();
+
+	it("waits for a recent cancellation without an entry", () => {
+		expect(
+			isAwaitingCancelledBy([cancelled("d1", ago(10_000))], none, now),
+		).toBe(true);
+	});
+
+	it("stops once the entry is there", () => {
+		expect(
+			isAwaitingCancelledBy(
+				[cancelled("d1", ago(10_000))],
+				new Set(["d1"]),
+				now,
+			),
+		).toBe(false);
+	});
+
+	it("gives up on an old cancellation that never got an entry", () => {
+		expect(
+			isAwaitingCancelledBy(
+				[cancelled("d1", ago(CANCELLED_BY_WAIT_MS + 1000))],
+				none,
+				now,
+			),
+		).toBe(false);
+	});
+
+	it("falls back to createdAt when there is no finish time", () => {
+		const recent = { ...cancelled("d1", null), createdAt: ago(5000) };
+		expect(isAwaitingCancelledBy([recent], none, now)).toBe(true);
+		expect(isAwaitingCancelledBy([cancelled("d2", null)], none, now)).toBe(
+			false,
+		);
+	});
+
+	it("ignores deployments that are not cancelled", () => {
+		expect(
+			isAwaitingCancelledBy(
+				[{ ...cancelled("d1", ago(1000)), status: "running" }],
+				none,
+				now,
+			),
+		).toBe(false);
+		expect(isAwaitingCancelledBy(undefined, none, now)).toBe(false);
+	});
+
+	it("keeps waiting while any recent cancellation lacks an entry", () => {
+		expect(
+			isAwaitingCancelledBy(
+				[
+					cancelled("old", ago(CANCELLED_BY_WAIT_MS * 5)),
+					cancelled("d2", ago(1000)),
+				],
+				new Set(["old"]),
+				now,
+			),
+		).toBe(true);
+	});
+
+	it("does not wait on an unparseable time", () => {
+		expect(isAwaitingCancelledBy([cancelled("d1", "garbage")], none, now)).toBe(
+			false,
 		);
 	});
 });

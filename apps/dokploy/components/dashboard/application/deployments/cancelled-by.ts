@@ -20,3 +20,35 @@ export const describeCancelledBy = (entry: CancelledByEntry): string => {
 	}
 	return `Cancelled by ${user ?? "a user"}`;
 };
+
+/** How long after a deployment is cancelled its trail entry is still awaited. */
+export const CANCELLED_BY_WAIT_MS = 2 * 60 * 1000;
+
+interface ListedDeployment {
+	deploymentId: string;
+	status: string | null;
+	createdAt: string;
+	finishedAt: string | null;
+}
+
+/**
+ * Whether to keep re-reading the cancel trail: a deployment was cancelled in
+ * the last two minutes and has no entry yet (the entry is written just after
+ * the status changes). Older cancelled rows without an entry, such as ones
+ * cancelled before the trail existed, never get one, so they stop the polling.
+ */
+export const isAwaitingCancelledBy = (
+	deployments: ListedDeployment[] | undefined,
+	trailDeploymentIds: ReadonlySet<string>,
+	now: number,
+): boolean =>
+	Boolean(
+		deployments?.some((deployment) => {
+			if (deployment.status !== "cancelled") return false;
+			if (trailDeploymentIds.has(deployment.deploymentId)) return false;
+			const cancelledAt = Date.parse(
+				deployment.finishedAt ?? deployment.createdAt,
+			);
+			return now - cancelledAt <= CANCELLED_BY_WAIT_MS;
+		}),
+	);

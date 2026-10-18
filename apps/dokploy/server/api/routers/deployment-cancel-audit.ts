@@ -1,10 +1,34 @@
 import {
+	type DeploymentCancelledBy,
 	findDeploymentCancelledByService,
 	listDeploymentCancelAudit,
 } from "@dokploy/server";
-import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import {
+	checkServicePermissionAndAccess,
+	hasPermission,
+	type PermissionCtx,
+} from "@dokploy/server/services/permission";
 import { z } from "zod";
 import { adminProcedure, createTRPCRouter, protectedProcedure } from "../trpc";
+
+/**
+ * Who is behind a cancellation is member information: the same gate as the
+ * member list (`member:read`, held by owners and admins). Anyone else who can
+ * read the service's deployments only learns whether a user or an API key did
+ * it, never the email or the key's name.
+ */
+const withActorVisibility = async (
+	ctx: PermissionCtx,
+	entries: DeploymentCancelledBy[],
+): Promise<DeploymentCancelledBy[]> => {
+	if (await hasPermission(ctx, { member: ["read"] })) return entries;
+	return entries.map((entry) => ({
+		...entry,
+		actorEmail: null,
+		apiKeyName: null,
+		apiKeyShortId: null,
+	}));
+};
 
 /**
  * Fork router: the trail of who cancelled, killed or dropped a deployment or
@@ -30,17 +54,21 @@ export const deploymentCancelAuditRouter = createTRPCRouter({
 
 	// Who cancelled the deployments listed on a service page. Open to whoever
 	// can read that service's deployments (`deployment.all`): the same service
-	// permission, member allow-list and organization checks.
+	// permission, member allow-list and organization checks. The actor's email
+	// and API key name come back only with `member:read`.
 	byApplication: protectedProcedure
 		.input(z.object({ applicationId: z.string().min(1) }))
 		.query(async ({ ctx, input }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["read"],
 			});
-			return findDeploymentCancelledByService({
-				organizationId: ctx.session.activeOrganizationId,
-				applicationId: input.applicationId,
-			});
+			return withActorVisibility(
+				ctx,
+				await findDeploymentCancelledByService({
+					organizationId: ctx.session.activeOrganizationId,
+					applicationId: input.applicationId,
+				}),
+			);
 		}),
 
 	byCompose: protectedProcedure
@@ -49,9 +77,12 @@ export const deploymentCancelAuditRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["read"],
 			});
-			return findDeploymentCancelledByService({
-				organizationId: ctx.session.activeOrganizationId,
-				composeId: input.composeId,
-			});
+			return withActorVisibility(
+				ctx,
+				await findDeploymentCancelledByService({
+					organizationId: ctx.session.activeOrganizationId,
+					composeId: input.composeId,
+				}),
+			);
 		}),
 });

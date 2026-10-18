@@ -9,6 +9,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	memberRole: "member" as string,
+	licensed: false,
+	customRolePermission: "{}",
 	accessedServices: [] as string[],
 	serviceOrgs: {
 		"app-own": "org-1",
@@ -42,20 +44,26 @@ vi.mock("@dokploy/server/db", () => {
 				{},
 				{
 					get: (_target, table) =>
-						table === "member"
+						table === "organizationRole"
 							? {
-									findFirst: vi.fn(async () => ({
-										id: "member-1",
-										userId: "user-1",
-										organizationId: "org-1",
-										role: mocks.memberRole,
-										accessedServices: mocks.accessedServices,
-										accessedProjects: [],
-										accessedEnvironments: [],
-										user: { id: "user-1" },
-									})),
+									findMany: vi.fn(async () => [
+										{ permission: mocks.customRolePermission },
+									]),
 								}
-							: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },
+							: table === "member"
+								? {
+										findFirst: vi.fn(async () => ({
+											id: "member-1",
+											userId: "user-1",
+											organizationId: "org-1",
+											role: mocks.memberRole,
+											accessedServices: mocks.accessedServices,
+											accessedProjects: [],
+											accessedEnvironments: [],
+											user: { id: "user-1" },
+										})),
+									}
+								: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },
 				},
 			),
 			// Service -> organization resolver used by assertServiceInOrganization.
@@ -70,6 +78,11 @@ vi.mock("@dokploy/server/db", () => {
 		dbUrl: "postgres://mock:mock@localhost:5432/mock",
 	};
 });
+
+// Custom roles only resolve with an enterprise license.
+vi.mock("@dokploy/server/services/proprietary/license-key", () => ({
+	hasValidLicense: vi.fn(async () => mocks.licensed),
+}));
 
 // The native binding is not needed to exercise the router.
 vi.mock("bcrypt", () => ({ default: {}, hash: vi.fn(), compare: vi.fn() }));
@@ -100,6 +113,8 @@ const entry = (deploymentId: string, extra: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
 	mocks.memberRole = "member";
+	mocks.licensed = false;
+	mocks.customRolePermission = "{}";
 	mocks.accessedServices = [];
 	mocks.rows = [];
 	mocks.where = null;
@@ -118,7 +133,7 @@ describe("deploymentCancelAudit.byApplication", () => {
 				deploymentId: "dep-1",
 				action: "kill_process",
 				actorType: "user",
-				actorEmail: "alice@example.com",
+				actorEmail: null,
 				apiKeyName: null,
 				apiKeyShortId: null,
 				createdAt: new Date("2026-10-18T10:00:00Z"),
@@ -274,6 +289,102 @@ describe("deploymentCancelAudit.byCompose", () => {
 		mocks.memberRole = "owner";
 		await expect(
 			caller().byCompose({ composeId: "comp-foreign" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.where).toBeNull();
+	});
+});
+
+describe("who cancelled is member information", () => {
+	const apiKeyEntry = entry("dep-2", {
+		actorType: "api_key",
+		actorEmail: "bob@example.com",
+		apiKeyId: "abcdef123456",
+		apiKeyName: "ci-bot",
+	});
+
+	it("hides the email and the key name from a member without member:read", async () => {
+		mocks.accessedServices = ["app-own", "comp-own"];
+		mocks.rows = [entry("dep-1"), apiKeyEntry];
+
+		for (const result of [
+			await caller().byApplication({ applicationId: "app-own" }),
+			await caller().byCompose({ composeId: "comp-own" }),
+		]) {
+			expect(result).toMatchObject([
+				{
+					deploymentId: "dep-1",
+					actorType: "user",
+					actorEmail: null,
+					apiKeyName: null,
+					apiKeyShortId: null,
+				},
+				{
+					deploymentId: "dep-2",
+					actorType: "api_key",
+					actorEmail: null,
+					apiKeyName: null,
+					apiKeyShortId: null,
+				},
+			]);
+		}
+	});
+
+	it.each(["owner", "admin"])("shows them to the %s", async (role) => {
+		mocks.memberRole = role;
+		mocks.rows = [entry("dep-1"), apiKeyEntry];
+
+		const result = await caller().byApplication({ applicationId: "app-own" });
+		expect(result).toMatchObject([
+			{ actorEmail: "alice@example.com" },
+			{
+				actorEmail: "bob@example.com",
+				apiKeyName: "ci-bot",
+				apiKeyShortId: "abcdef",
+			},
+		]);
+	});
+
+	it("shows them to a custom role with member:read", async () => {
+		mocks.licensed = true;
+		mocks.memberRole = "auditor";
+		mocks.customRolePermission = JSON.stringify({
+			deployment: ["read"],
+			member: ["read"],
+		});
+		mocks.accessedServices = ["comp-own"];
+		mocks.rows = [entry("dep-1")];
+
+		await expect(
+			caller().byCompose({ composeId: "comp-own" }),
+		).resolves.toMatchObject([{ actorEmail: "alice@example.com" }]);
+	});
+
+	it("hides them from a custom role with deployment:read but not member:read", async () => {
+		mocks.licensed = true;
+		mocks.memberRole = "deployer";
+		mocks.customRolePermission = JSON.stringify({ deployment: ["read"] });
+		mocks.accessedServices = ["app-own"];
+		mocks.rows = [entry("dep-1")];
+
+		await expect(
+			caller().byApplication({ applicationId: "app-own" }),
+		).resolves.toMatchObject([{ actorEmail: null }]);
+	});
+
+	it("refuses a custom role without deployment:read", async () => {
+		mocks.licensed = true;
+		mocks.memberRole = "viewer";
+		mocks.customRolePermission = JSON.stringify({ member: ["read"] });
+		mocks.accessedServices = ["app-own", "comp-own"];
+		mocks.rows = [entry("dep-1")];
+
+		// checkPermission rejects with UNAUTHORIZED, as for every other denied
+		// permission in this codebase
+		await expect(
+			caller().byApplication({ applicationId: "app-own" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		await expect(
+			caller().byCompose({ composeId: "comp-own" }),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 		expect(mocks.where).toBeNull();
 	});
