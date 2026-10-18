@@ -411,7 +411,7 @@ export const composeRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
-				deployment: ["create"],
+				deployment: ["cancel"],
 			});
 			const compose = await findComposeById(input.composeId);
 			// The jobs are already gone once the queue helper returns, so a failing

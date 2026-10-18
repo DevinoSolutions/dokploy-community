@@ -318,7 +318,7 @@ describe("compose.cleanQueues", () => {
 		await composeCaller.cleanQueues({ composeId: "c1" });
 		await composeCaller.cleanQueues({ composeId: "c1", mode: "keepOldest" });
 		for (const call of mocks.checkServicePermissionAndAccess.mock.calls) {
-			expect(call.slice(1)).toEqual(["c1", { deployment: ["create"] }]);
+			expect(call.slice(1)).toEqual(["c1", { deployment: ["cancel"] }]);
 		}
 		expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledTimes(2);
 	});
