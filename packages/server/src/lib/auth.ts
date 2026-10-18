@@ -966,7 +966,9 @@ export const buildMemberSession = async (
 export type ApiKeyVerification =
 	| {
 			status: "valid";
-			member: Awaited<ReturnType<typeof buildMemberSession>>;
+			member: Awaited<ReturnType<typeof buildMemberSession>> & {
+				session: { apiKeyId: string };
+			};
 	  }
 	| { status: "invalid" }
 	| { status: "rate_limited"; retryAfterSeconds: number };
@@ -1032,9 +1034,11 @@ export const verifyApiKeyDetailed = async (
 			return { status: "invalid" };
 		}
 
+		const member = await buildMemberSession(apiKeyRecord.user, organizationId);
 		return {
 			status: "valid",
-			member: await buildMemberSession(apiKeyRecord.user, organizationId),
+			// The key id rides on the session so a cancel can be traced to the key.
+			member: { ...member, session: { ...member.session, apiKeyId: key.id } },
 		};
 	} catch (error) {
 		console.error("Error verifying API key", error);

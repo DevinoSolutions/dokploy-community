@@ -7,6 +7,7 @@ import {
 import { getRegistryTag } from "@dokploy/server/utils/cluster/upload";
 import { shouldDeploy } from "@dokploy/server/utils/watch-paths/should-deploy";
 import { eq } from "drizzle-orm";
+import { recordDeploymentCancelAudit } from "../deployment-cancel-audit";
 import { findRegistryByIdWithCredentials } from "../registry";
 import { recordBuildPolicyAudit } from "./audit";
 import {
@@ -213,7 +214,22 @@ export const buildPolicyDeployGate = async ({
 		unitName: unit.unitName,
 		organizationId,
 		removeWaiting,
-		recordAudit: recordBuildPolicyAudit,
+		recordAudit: async (entry) => {
+			await recordBuildPolicyAudit(entry);
+			// The same drop, in the trail that needs no license. No caller is
+			// behind it: the push itself is the cause, so the actor is the system.
+			await recordDeploymentCancelAudit({
+				organizationId: entry.organizationId,
+				action: "coalesce_drop",
+				actor: { type: "system" },
+				targetType: unitType,
+				targetId: unit.unitId,
+				targetName: unit.unitName,
+				applicationId: entry.applicationId,
+				composeId: entry.composeId,
+				metadata: entry.metadata,
+			});
+		},
 	});
 
 	return merged

@@ -64,6 +64,7 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { auditCancel } from "@/server/api/utils/cancel-audit";
 import {
 	assertCanPrioritize,
 	recordPriorityUse,
@@ -1096,7 +1097,18 @@ export const applicationRouter = createTRPCRouter({
 			const application = await findApplicationById(input.applicationId);
 			// The jobs are already gone once the queue helper returns, so a failing
 			// audit must not turn the answer into an error and hide what was removed.
-			const auditRemoved = async (metadata: Record<string, unknown>) => {
+			const auditRemoved = async (
+				action: "clean_queue" | "keep_oldest_queue",
+				metadata: Record<string, unknown>,
+			) => {
+				await auditCancel(ctx, {
+					action,
+					targetType: "application",
+					targetId: application.applicationId,
+					targetName: application.appName,
+					applicationId: application.applicationId,
+					metadata,
+				});
 				try {
 					await audit(ctx, {
 						action: "cancel",
@@ -1112,7 +1124,7 @@ export const applicationRouter = createTRPCRouter({
 			if (input.mode === "keepOldest") {
 				const result = await keepOldestQueuesByApplication(input.applicationId);
 				if (result.removed.length > 0) {
-					await auditRemoved({
+					await auditRemoved("keep_oldest_queue", {
 						queue: "keepOldest",
 						removedJobIds: result.removed.map((job) => job.jobId),
 					});
@@ -1121,7 +1133,7 @@ export const applicationRouter = createTRPCRouter({
 			}
 			const removed = await cleanQueuesByApplication(input.applicationId);
 			if (removed > 0) {
-				await auditRemoved({ queue: "all", removed });
+				await auditRemoved("clean_queue", { queue: "all", removed });
 			}
 		}),
 	clearDeployments: protectedProcedure
@@ -1132,6 +1144,13 @@ export const applicationRouter = createTRPCRouter({
 			});
 			const application = await findApplicationById(input.applicationId);
 			await clearOldDeployments(application.applicationId, "application");
+			await auditCancel(ctx, {
+				action: "clear_deployments",
+				targetType: "application",
+				targetId: application.applicationId,
+				targetName: application.appName,
+				applicationId: application.applicationId,
+			});
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "application",
@@ -1157,6 +1176,13 @@ export const applicationRouter = createTRPCRouter({
 			if (!remote.usesBuildServer && !application.buildServerId) {
 				await killDockerBuild("application", application.serverId);
 			}
+			await auditCancel(ctx, {
+				action: "kill_build",
+				targetType: "application",
+				targetId: application.applicationId,
+				targetName: application.appName,
+				applicationId: application.applicationId,
+			});
 			await audit(ctx, {
 				action: "cancel",
 				resourceType: "application",
@@ -1335,6 +1361,13 @@ export const applicationRouter = createTRPCRouter({
 					await cancelDeployment({
 						applicationId: input.applicationId,
 						applicationType: "application",
+					});
+					await auditCancel(ctx, {
+						action: "cancel_deployment",
+						targetType: "application",
+						targetId: application.applicationId,
+						targetName: application.appName,
+						applicationId: application.applicationId,
 					});
 					await audit(ctx, {
 						action: "cancel",

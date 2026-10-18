@@ -41,6 +41,7 @@ import { desc, eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { auditCancel } from "@/server/api/utils/cancel-audit";
 import {
 	assertCanPrioritize,
 	recordPriorityUse,
@@ -89,6 +90,28 @@ const deploymentAuditTarget = (deployment: {
 		applicationId: deployment.applicationId,
 		composeId: deployment.composeId,
 	},
+});
+
+/** The same target, as the fork's cancel trail records it. */
+const deploymentCancelAuditTarget = (deployment: {
+	deploymentId: string;
+	title?: string | null;
+	applicationId?: string | null;
+	composeId?: string | null;
+	application?: { appName: string } | null;
+	compose?: { appName: string } | null;
+}) => ({
+	targetType: "deployment" as const,
+	targetId: deployment.deploymentId,
+	targetName:
+		deployment.application?.appName ??
+		deployment.compose?.appName ??
+		deployment.title ??
+		undefined,
+	applicationId: deployment.applicationId,
+	composeId: deployment.composeId,
+	deploymentId: deployment.deploymentId,
+	metadata: { title: deployment.title },
 });
 
 export const deploymentRouter = createTRPCRouter({
@@ -332,13 +355,18 @@ export const deploymentRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
 			await assertDeploymentAccess(ctx, deployment, "cancel");
-			const auditCancel = () =>
-				audit(ctx, {
+			const auditKill = async () => {
+				await auditCancel(ctx, {
+					action: "kill_process",
+					...deploymentCancelAuditTarget(deployment),
+				});
+				await audit(ctx, {
 					action: "cancel",
 					resourceType: "deployment",
 					resourceId: deployment.deploymentId,
 					...deploymentAuditTarget(deployment),
 				});
+			};
 
 			// A build that runs on a build server has no local pid: it is stopped
 			// there, by deployment (see deployment-cancel.ts).
@@ -349,7 +377,7 @@ export const deploymentRouter = createTRPCRouter({
 			// signalled (no pid file, no launcher, host unreachable) is cancelled
 			// but still running: it keeps the pid kill below it had before.
 			if (remote?.status === "cancelled" && !remote.genericStopNeeded) {
-				await auditCancel();
+				await auditKill();
 				return;
 			}
 
@@ -511,13 +539,13 @@ export const deploymentRouter = createTRPCRouter({
 						message: "The run is still starting, try again in a moment",
 					});
 				}
-				await auditCancel();
+				await auditKill();
 				return;
 			}
 
 			await killOnHost();
 			await updateDeploymentStatus(deployment.deploymentId, "error");
-			await auditCancel();
+			await auditKill();
 		}),
 
 	removeDeployment: protectedProcedure
@@ -530,6 +558,10 @@ export const deploymentRouter = createTRPCRouter({
 			const deployment = await findDeploymentById(input.deploymentId);
 			await assertDeploymentAccess(ctx, deployment, "cancel");
 			const result = await removeDeployment(input.deploymentId);
+			await auditCancel(ctx, {
+				action: "remove_deployment",
+				...deploymentCancelAuditTarget(deployment),
+			});
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "deployment",

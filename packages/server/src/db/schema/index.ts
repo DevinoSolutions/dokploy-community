@@ -12,6 +12,7 @@ export * from "./cloudflare-access";
 export * from "./compose";
 export * from "./deploy-hook";
 export * from "./deployment";
+export * from "./deployment-cancel-audit";
 export * from "./deployment-queue-job";
 export * from "./destination";
 export * from "./dns-provider";

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
 	revertScheduleRunCancel: vi.fn(),
 	removeDeployment: vi.fn(),
 	audit: vi.fn(),
+	auditCancel: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({
@@ -47,6 +48,9 @@ vi.mock("@dokploy/server/lib/auth", () => ({
 	validateRequest: vi.fn(),
 }));
 
+vi.mock("@/server/api/utils/cancel-audit", () => ({
+	auditCancel: mocks.auditCancel,
+}));
 vi.mock("@/server/api/utils/audit", () => ({ audit: mocks.audit }));
 
 vi.mock("@/server/queues/queueSetup", () => ({
@@ -317,16 +321,7 @@ describe("deployment.killProcess", () => {
 		);
 	});
 
-	it.each([
-		"1; rm -rf /",
-		"42 43",
-		"$(id)",
-		"-9",
-		"4242\n",
-		"0",
-		"1",
-		"007",
-	])(
+	it.each(["1; rm -rf /", "42 43", "$(id)", "-9", "4242\n", "0", "1", "007"])(
 		"refuses the non-numeric pid %j without running anything",
 		async (pid) => {
 			mocks.findDeploymentById.mockResolvedValue(
@@ -535,6 +530,175 @@ describe("who cancelled", () => {
 			resourceId: "dep-1",
 			resourceName: "stack-xyz789",
 			metadata: { title: "Deploy", applicationId: null, composeId: "c1" },
+		});
+	});
+});
+
+describe("who cancelled, in the fork cancel trail", () => {
+	const caller = expect.objectContaining({
+		user: expect.objectContaining({ id: "user-1", email: "user@example.com" }),
+		session: expect.objectContaining({ activeOrganizationId: "org-1" }),
+	});
+
+	it("compose.killBuild records the stack on every exit", async () => {
+		const stack = {
+			composeId: "c1",
+			name: "stack",
+			appName: "stack-xyz789",
+			serverId: "serving-1",
+			buildServerId: null,
+		};
+		const expected = {
+			action: "kill_build",
+			targetType: "compose",
+			targetId: "c1",
+			targetName: "stack-xyz789",
+			composeId: "c1",
+		};
+
+		// on a build server
+		mocks.findComposeById.mockResolvedValue({
+			...stack,
+			buildServerId: "build-1",
+		});
+		await composeCaller.killBuild({ composeId: "c1" });
+		// launcher stopped it
+		mocks.findComposeById.mockResolvedValue(stack);
+		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			usesBuildServer: false,
+			cancelled: 1,
+			stopped: 1,
+			warnings: [],
+		});
+		await composeCaller.killBuild({ composeId: "c1" });
+		// pkill fallback
+		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			usesBuildServer: false,
+			cancelled: 0,
+			stopped: 0,
+			warnings: [],
+		});
+		await composeCaller.killBuild({ composeId: "c1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(3);
+		for (const call of mocks.auditCancel.mock.calls) {
+			expect(call).toEqual([caller, expected]);
+		}
+	});
+
+	it("application.killBuild records the application", async () => {
+		mocks.findApplicationById.mockResolvedValue({
+			applicationId: "a1",
+			appName: "app-abc123",
+			serverId: "serving-1",
+			buildServerId: null,
+		});
+
+		await applicationCaller.killBuild({ applicationId: "a1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(1);
+		expect(mocks.auditCancel).toHaveBeenCalledWith(caller, {
+			action: "kill_build",
+			targetType: "application",
+			targetId: "a1",
+			targetName: "app-abc123",
+			applicationId: "a1",
+		});
+	});
+
+	it("deployment.killProcess records the deployment and its service on every path", async () => {
+		const running = (extra = {}) => ({
+			deploymentId: "dep-1",
+			title: "Rebuild",
+			applicationId: "a1",
+			composeId: null,
+			application: { appName: "app-abc123", serverId: "srv-1" },
+			pid: "4242",
+			status: "running",
+			schedule: null,
+			...extra,
+		});
+		const expected = {
+			action: "kill_process",
+			targetType: "deployment",
+			targetId: "dep-1",
+			targetName: "app-abc123",
+			applicationId: "a1",
+			composeId: null,
+			deploymentId: "dep-1",
+			metadata: { title: "Rebuild" },
+		};
+
+		// a pid kill
+		mocks.findDeploymentById.mockResolvedValue(running());
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+		// a build-server cancel
+		mocks.cancelBuildServerDeploymentById.mockResolvedValue({
+			status: "cancelled",
+			result: "KILLED",
+		});
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+		// a schedule run, named by its title
+		mocks.cancelBuildServerDeploymentById.mockResolvedValue(null);
+		mocks.findDeploymentById.mockResolvedValue(
+			running({
+				title: "nightly cleanup",
+				application: undefined,
+				schedule: { scheduleType: "server", serverId: "srv-1" },
+			}),
+		);
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(3);
+		expect(mocks.auditCancel.mock.calls[0]).toEqual([caller, expected]);
+		expect(mocks.auditCancel.mock.calls[1]).toEqual([caller, expected]);
+		expect(mocks.auditCancel.mock.calls[2]).toEqual([
+			caller,
+			{
+				...expected,
+				targetName: "nightly cleanup",
+				metadata: { title: "nightly cleanup" },
+			},
+		]);
+	});
+
+	it("deployment.killProcess records nothing when it refuses", async () => {
+		mocks.findDeploymentById.mockResolvedValue({
+			deploymentId: "dep-1",
+			applicationId: "a1",
+			composeId: null,
+			pid: "4242",
+			status: "done",
+			schedule: null,
+		});
+
+		await expect(
+			deploymentCaller.killProcess({ deploymentId: "dep-1" }),
+		).rejects.toMatchObject({ message: "Deployment is not running" });
+		expect(mocks.auditCancel).not.toHaveBeenCalled();
+	});
+
+	it("deployment.removeDeployment records the deployment", async () => {
+		mocks.findDeploymentById.mockResolvedValue({
+			deploymentId: "dep-1",
+			title: "Deploy",
+			applicationId: null,
+			composeId: "c1",
+			compose: { appName: "stack-xyz789", serverId: null },
+		});
+		mocks.removeDeployment.mockResolvedValue(true);
+
+		await deploymentCaller.removeDeployment({ deploymentId: "dep-1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledWith(caller, {
+			action: "remove_deployment",
+			targetType: "deployment",
+			targetId: "dep-1",
+			targetName: "stack-xyz789",
+			applicationId: null,
+			composeId: "c1",
+			deploymentId: "dep-1",
+			metadata: { title: "Deploy" },
 		});
 	});
 });

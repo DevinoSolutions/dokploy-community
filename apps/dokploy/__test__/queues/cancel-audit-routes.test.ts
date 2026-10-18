@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 	getAuditLogs: vi.fn(),
 	hasValidLicense: vi.fn(),
 	audit: vi.fn(),
+	auditCancel: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({
@@ -22,6 +23,9 @@ vi.mock("@dokploy/server", () => ({ IS_CLOUD: false }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
 
+vi.mock("@/server/api/utils/cancel-audit", () => ({
+	auditCancel: mocks.auditCancel,
+}));
 vi.mock("@/server/api/utils/audit", () => ({ audit: mocks.audit }));
 
 vi.mock("@/server/queues/queueSetup", () => ({
@@ -81,6 +85,21 @@ describe("settings.cleanAllDeploymentQueue", () => {
 				resourceType: "settings",
 				resourceName: "clean-deployment-queue",
 			},
+		);
+	});
+});
+
+describe("settings.cleanAllDeploymentQueue in the fork cancel trail", () => {
+	it("records the caller as a wipe of every queue", async () => {
+		await settingsCaller.cleanAllDeploymentQueue();
+
+		expect(mocks.auditCancel).toHaveBeenCalledTimes(1);
+		expect(mocks.auditCancel).toHaveBeenCalledWith(
+			expect.objectContaining({
+				user: expect.objectContaining({ id: "user-1" }),
+				session: expect.objectContaining({ activeOrganizationId: "org-1" }),
+			}),
+			{ action: "clear_all_queues", targetType: "queue", targetName: "all" },
 		);
 	});
 });

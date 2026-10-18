@@ -61,6 +61,7 @@ import { scheduledJobs, scheduleJob } from "node-schedule";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { auditCancel } from "@/server/api/utils/cancel-audit";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiAssignDomain,
@@ -143,6 +144,11 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}
 		const result = cleanAllDeploymentQueue();
+		await auditCancel(ctx, {
+			action: "clear_all_queues",
+			targetType: "queue",
+			targetName: "all",
+		});
 		await audit(ctx, {
 			action: "cancel",
 			resourceType: "settings",

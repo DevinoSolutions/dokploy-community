@@ -49,7 +49,11 @@ interface CreateContextOptions {
 		  })
 		| null;
 	session:
-		| (Session & { activeOrganizationId: string; impersonatedBy?: string })
+		| (Session & {
+				activeOrganizationId: string;
+				impersonatedBy?: string;
+				apiKeyId?: string;
+		  })
 		| null;
 	req: CreateNextContextOptions["req"];
 	res: CreateNextContextOptions["res"];

@@ -25,6 +25,7 @@ export * from "./services/compose-build-server";
 export * from "./services/compose-rolling";
 export * from "./services/deployment";
 export * from "./services/deployment-cancel";
+export * from "./services/deployment-cancel-audit";
 export * from "./services/deployment-queue-journal";
 export * from "./services/destination";
 export * from "./services/dns-provider";
