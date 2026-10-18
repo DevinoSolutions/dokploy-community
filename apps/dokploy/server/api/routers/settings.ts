@@ -143,18 +143,21 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return true;
 		}
-		const result = cleanAllDeploymentQueue();
+		const removed = await cleanAllDeploymentQueue();
 		await auditCancel(ctx, {
 			action: "clear_all_queues",
 			targetType: "queue",
 			targetName: "all",
+			// Not scoped to one service or organization: every waiting job of the
+			// instance goes.
+			metadata: { removed, scope: "instance-wide" },
 		});
 		await audit(ctx, {
 			action: "cancel",
 			resourceType: "settings",
 			resourceName: "clean-deployment-queue",
 		});
-		return result;
+		return true;
 	}),
 	reloadTraefik: adminProcedure
 		.input(apiServerSchema)

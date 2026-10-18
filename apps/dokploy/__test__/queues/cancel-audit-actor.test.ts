@@ -78,6 +78,40 @@ describe("auditCancel actor", () => {
 	});
 });
 
+describe("auditCancel while impersonating", () => {
+	it("adds the impersonating admin to the metadata", async () => {
+		await auditCancel(
+			{
+				user,
+				session: { activeOrganizationId: "org-1", impersonatedBy: "admin-1" },
+			},
+			{
+				action: "clean_queue",
+				targetType: "application",
+				metadata: { removed: 2 },
+			},
+		);
+
+		expect(mocks.recordDeploymentCancelAudit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				metadata: { removed: 2, impersonatedBy: "admin-1" },
+			}),
+		);
+	});
+
+	it("leaves the metadata alone when nobody is impersonating", async () => {
+		await auditCancel(
+			{ user, session: { activeOrganizationId: "org-1" } },
+			{ action: "clean_queue", targetType: "application" },
+		);
+
+		const input = mocks.recordDeploymentCancelAudit.mock.calls[0]?.[0] as {
+			metadata?: unknown;
+		};
+		expect(input.metadata).toBeUndefined();
+	});
+});
+
 describe("deploymentCancelAudit.all", () => {
 	const callerFor = (role: string) =>
 		deploymentCancelAuditRouter.createCaller({

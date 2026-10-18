@@ -79,7 +79,10 @@ export const listDeploymentCancelAudit = async ({
 	const [logs, total] = await Promise.all([
 		db.query.deploymentCancelAudit.findMany({
 			where,
-			orderBy: [desc(deploymentCancelAudit.createdAt)],
+			orderBy: [
+				desc(deploymentCancelAudit.createdAt),
+				desc(deploymentCancelAudit.deploymentCancelAuditId),
+			],
 			limit,
 			offset,
 		}),

@@ -64,7 +64,7 @@ const auditLogCaller = auditLogRouter.createCaller(
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	mocks.cleanAllDeploymentQueue.mockResolvedValue(true);
+	mocks.cleanAllDeploymentQueue.mockResolvedValue(4);
 	mocks.getAuditLogs.mockResolvedValue({ logs: [], total: 0 });
 	mocks.hasValidLicense.mockResolvedValue(true);
 });
@@ -99,7 +99,12 @@ describe("settings.cleanAllDeploymentQueue in the fork cancel trail", () => {
 				user: expect.objectContaining({ id: "user-1" }),
 				session: expect.objectContaining({ activeOrganizationId: "org-1" }),
 			}),
-			{ action: "clear_all_queues", targetType: "queue", targetName: "all" },
+			{
+				action: "clear_all_queues",
+				targetType: "queue",
+				targetName: "all",
+				metadata: { removed: 4, scope: "instance-wide" },
+			},
 		);
 	});
 });

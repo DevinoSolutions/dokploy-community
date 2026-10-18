@@ -6,7 +6,11 @@ import { recordDeploymentCancelAudit } from "@dokploy/server/services/deployment
 
 interface CancelAuditCtx {
 	user: { id: string; email: string };
-	session: { activeOrganizationId: string; apiKeyId?: string };
+	session: {
+		activeOrganizationId: string;
+		apiKeyId?: string;
+		impersonatedBy?: string | null;
+	};
 }
 
 interface CancelAuditEvent {
@@ -37,4 +41,13 @@ export const auditCancel = (ctx: CancelAuditCtx, event: CancelAuditEvent) =>
 			apiKeyId: ctx.session.apiKeyId,
 		},
 		...event,
+		// An admin acting as someone else: the entry names the user, this the admin.
+		...(ctx.session.impersonatedBy
+			? {
+					metadata: {
+						...event.metadata,
+						impersonatedBy: ctx.session.impersonatedBy,
+					},
+				}
+			: {}),
 	});

@@ -215,20 +215,30 @@ export const buildPolicyDeployGate = async ({
 		organizationId,
 		removeWaiting,
 		recordAudit: async (entry) => {
-			await recordBuildPolicyAudit(entry);
 			// The same drop, in the trail that needs no license. No caller is
 			// behind it: the push itself is the cause, so the actor is the system.
-			await recordDeploymentCancelAudit({
-				organizationId: entry.organizationId,
-				action: "coalesce_drop",
-				actor: { type: "system" },
-				targetType: unitType,
-				targetId: unit.unitId,
-				targetName: unit.unitName,
-				applicationId: entry.applicationId,
-				composeId: entry.composeId,
-				metadata: entry.metadata,
-			});
+			// Written first and on its own, so a failing build-policy write cannot
+			// skip it. Commit messages (`droppedTitles`) stay out of this row.
+			const { droppedTitles: _titles, ...metadata } = entry.metadata;
+			try {
+				await recordDeploymentCancelAudit({
+					organizationId: entry.organizationId,
+					action: "coalesce_drop",
+					actor: { type: "system" },
+					targetType: unitType,
+					targetId: unit.unitId,
+					targetName: unit.unitName,
+					applicationId: entry.applicationId,
+					composeId: entry.composeId,
+					metadata,
+				});
+			} catch (error) {
+				console.error(
+					"[build-policy] failed to record the cancel trail",
+					error,
+				);
+			}
+			await recordBuildPolicyAudit(entry);
 		},
 	});
 

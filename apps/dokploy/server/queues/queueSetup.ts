@@ -365,10 +365,8 @@ export const coalesceQueuedComposeDeploys = async (
 		isCoalescableDeployJob("compose", composeId, data),
 	);
 
-export const cleanAllDeploymentQueue = async () => {
-	myQueue.clearWaiting();
-	return true;
-};
+/** Drops every waiting job of the instance; returns how many were removed. */
+export const cleanAllDeploymentQueue = async () => myQueue.clearWaiting();
 
 /**
  * The generic stop for a build that has no cancel launcher of its own: it
