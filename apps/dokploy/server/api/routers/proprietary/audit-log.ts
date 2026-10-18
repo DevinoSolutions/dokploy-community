@@ -40,6 +40,8 @@ export const auditLogRouter = createTRPCRouter({
 						"service",
 						"environment",
 						"deployment",
+						"application",
+						"compose",
 						"user",
 						"customRole",
 						"domain",

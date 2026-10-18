@@ -84,6 +84,8 @@ const RESOURCE_LABELS: Record<string, string> = {
 	service: "Service",
 	environment: "Environment",
 	deployment: "Deployment",
+	application: "Application",
+	compose: "Compose",
 	user: "User",
 	customRole: "Custom Role",
 	domain: "Domain",

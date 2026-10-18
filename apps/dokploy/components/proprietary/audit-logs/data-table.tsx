@@ -61,6 +61,8 @@ const RESOURCE_OPTIONS = [
 	{ value: "service", label: "Applications / Services" },
 	{ value: "environment", label: "Environments" },
 	{ value: "deployment", label: "Deployments" },
+	{ value: "application", label: "Applications" },
+	{ value: "compose", label: "Compose stacks" },
 	{ value: "user", label: "Users" },
 	{ value: "customRole", label: "Custom Roles" },
 	{ value: "domain", label: "Domains" },
@@ -92,6 +94,8 @@ type AuditResourceType =
 	| "service"
 	| "environment"
 	| "deployment"
+	| "application"
+	| "compose"
 	| "user"
 	| "customRole"
 	| "domain"

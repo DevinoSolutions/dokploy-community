@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
 	updateDeploymentStatus: vi.fn(),
 	claimScheduleRunCancel: vi.fn(),
 	revertScheduleRunCancel: vi.fn(),
+	removeDeployment: vi.fn(),
 	audit: vi.fn(),
 }));
 
@@ -38,6 +39,7 @@ vi.mock("@dokploy/server", () => ({
 	updateDeploymentStatus: mocks.updateDeploymentStatus,
 	claimScheduleRunCancel: mocks.claimScheduleRunCancel,
 	revertScheduleRunCancel: mocks.revertScheduleRunCancel,
+	removeDeployment: mocks.removeDeployment,
 	isMissingProcessError: () => false,
 }));
 
@@ -376,5 +378,163 @@ describe("deployment.killProcess", () => {
 			deploymentCaller.killProcess({ deploymentId: "dep-1" }),
 		).rejects.toMatchObject({ message: "Deployment is not running" });
 		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+});
+
+describe("who cancelled", () => {
+	// The caller is the first argument of audit(), which reads the actor and the
+	// organization from it.
+	const actor = expect.objectContaining({
+		user: expect.objectContaining({ id: "user-1", email: "user@example.com" }),
+		session: expect.objectContaining({ activeOrganizationId: "org-1" }),
+	});
+
+	const compose = (extra = {}) => ({
+		composeId: "c1",
+		name: "stack",
+		serverId: "serving-1",
+		buildServerId: null,
+		...extra,
+	});
+
+	it("compose.killBuild on a build server records the caller and the stack", async () => {
+		mocks.findComposeById.mockResolvedValue(
+			compose({ buildServerId: "build-1" }),
+		);
+
+		await composeCaller.killBuild({ composeId: "c1" });
+
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+		expect(mocks.audit).toHaveBeenCalledWith(actor, {
+			action: "cancel",
+			resourceType: "compose",
+			resourceId: "c1",
+			resourceName: "stack",
+		});
+	});
+
+	it("compose.killBuild on the serving host records the caller, whether the launcher or the pkill stopped it", async () => {
+		mocks.findComposeById.mockResolvedValue(compose());
+		await composeCaller.killBuild({ composeId: "c1" });
+		expect(mocks.killDockerBuild).toHaveBeenCalledTimes(1);
+
+		mocks.cancelBuildServerDeploymentsForService.mockResolvedValue({
+			usesBuildServer: false,
+			cancelled: 1,
+			stopped: 1,
+			warnings: [],
+		});
+		await composeCaller.killBuild({ composeId: "c1" });
+		expect(mocks.killDockerBuild).toHaveBeenCalledTimes(1);
+
+		expect(mocks.audit).toHaveBeenCalledTimes(2);
+		for (const call of mocks.audit.mock.calls) {
+			expect(call[0]).toEqual(actor);
+			expect(call[1]).toMatchObject({
+				action: "cancel",
+				resourceType: "compose",
+				resourceId: "c1",
+				resourceName: "stack",
+			});
+		}
+	});
+
+	it("application.killBuild records the caller and the application as a cancel", async () => {
+		mocks.findApplicationById.mockResolvedValue({
+			applicationId: "a1",
+			appName: "app-abc123",
+			serverId: "serving-1",
+			buildServerId: null,
+		});
+
+		await applicationCaller.killBuild({ applicationId: "a1" });
+
+		expect(mocks.audit).toHaveBeenCalledTimes(1);
+		expect(mocks.audit).toHaveBeenCalledWith(actor, {
+			action: "cancel",
+			resourceType: "application",
+			resourceId: "a1",
+			resourceName: "app-abc123",
+		});
+	});
+
+	it("deployment.killProcess names the service and the deployment on every path", async () => {
+		const running = (extra = {}) => ({
+			deploymentId: "dep-1",
+			title: "Rebuild",
+			applicationId: "a1",
+			composeId: null,
+			application: { appName: "app-abc123", serverId: "srv-1" },
+			pid: "4242",
+			status: "running",
+			schedule: null,
+			...extra,
+		});
+		const expected = {
+			action: "cancel",
+			resourceType: "deployment",
+			resourceId: "dep-1",
+			resourceName: "app-abc123",
+			metadata: { title: "Rebuild", applicationId: "a1", composeId: null },
+		};
+
+		// a pid kill
+		mocks.findDeploymentById.mockResolvedValue(running());
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+
+		// a build-server cancel
+		mocks.cancelBuildServerDeploymentById.mockResolvedValue({
+			status: "cancelled",
+			result: "KILLED",
+		});
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+
+		// a schedule run: the entry carries the run's title, there is no service
+		mocks.cancelBuildServerDeploymentById.mockResolvedValue(null);
+		mocks.findDeploymentById.mockResolvedValue(
+			running({
+				title: "nightly cleanup",
+				application: undefined,
+				schedule: { scheduleType: "server", serverId: "srv-1" },
+			}),
+		);
+		await deploymentCaller.killProcess({ deploymentId: "dep-1" });
+
+		expect(mocks.audit).toHaveBeenCalledTimes(3);
+		expect(mocks.audit.mock.calls[0]).toEqual([actor, expected]);
+		expect(mocks.audit.mock.calls[1]).toEqual([actor, expected]);
+		expect(mocks.audit.mock.calls[2]).toEqual([
+			actor,
+			{
+				...expected,
+				resourceName: "nightly cleanup",
+				metadata: {
+					title: "nightly cleanup",
+					applicationId: "a1",
+					composeId: null,
+				},
+			},
+		]);
+	});
+
+	it("deployment.removeDeployment records the caller and the service", async () => {
+		mocks.findDeploymentById.mockResolvedValue({
+			deploymentId: "dep-1",
+			title: "Deploy",
+			applicationId: null,
+			composeId: "c1",
+			compose: { appName: "stack-xyz789", serverId: null },
+		});
+		mocks.removeDeployment.mockResolvedValue(true);
+
+		await deploymentCaller.removeDeployment({ deploymentId: "dep-1" });
+
+		expect(mocks.audit).toHaveBeenCalledWith(actor, {
+			action: "delete",
+			resourceType: "deployment",
+			resourceId: "dep-1",
+			resourceName: "stack-xyz789",
+			metadata: { title: "Deploy", applicationId: null, composeId: "c1" },
+		});
 	});
 });

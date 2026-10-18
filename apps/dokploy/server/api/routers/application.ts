@@ -1093,28 +1093,36 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["cancel"],
 			});
+			const application = await findApplicationById(input.applicationId);
+			// The jobs are already gone once the queue helper returns, so a failing
+			// audit must not turn the answer into an error and hide what was removed.
+			const auditRemoved = async (metadata: Record<string, unknown>) => {
+				try {
+					await audit(ctx, {
+						action: "cancel",
+						resourceType: "application",
+						resourceId: application.applicationId,
+						resourceName: application.appName,
+						metadata,
+					});
+				} catch (error) {
+					console.error("cleanQueues audit failed:", error);
+				}
+			};
 			if (input.mode === "keepOldest") {
 				const result = await keepOldestQueuesByApplication(input.applicationId);
 				if (result.removed.length > 0) {
-					// The jobs are already gone, so a failing audit must not turn the
-					// answer into an error and hide what was removed.
-					try {
-						await audit(ctx, {
-							action: "cancel",
-							resourceType: "application",
-							resourceId: input.applicationId,
-							metadata: {
-								queue: "keepOldest",
-								removedJobIds: result.removed.map((job) => job.jobId),
-							},
-						});
-					} catch (error) {
-						console.error("keepOldest audit failed:", error);
-					}
+					await auditRemoved({
+						queue: "keepOldest",
+						removedJobIds: result.removed.map((job) => job.jobId),
+					});
 				}
 				return result;
 			}
-			await cleanQueuesByApplication(input.applicationId);
+			const removed = await cleanQueuesByApplication(input.applicationId);
+			if (removed > 0) {
+				await auditRemoved({ queue: "all", removed });
+			}
 		}),
 	clearDeployments: protectedProcedure
 		.input(apiFindOneApplication)
@@ -1150,7 +1158,7 @@ export const applicationRouter = createTRPCRouter({
 				await killDockerBuild("application", application.serverId);
 			}
 			await audit(ctx, {
-				action: "stop",
+				action: "cancel",
 				resourceType: "application",
 				resourceId: application.applicationId,
 				resourceName: application.appName,
@@ -1329,7 +1337,7 @@ export const applicationRouter = createTRPCRouter({
 						applicationType: "application",
 					});
 					await audit(ctx, {
-						action: "stop",
+						action: "cancel",
 						resourceType: "application",
 						resourceId: application.applicationId,
 						resourceName: application.appName,

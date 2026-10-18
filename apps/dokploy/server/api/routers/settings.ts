@@ -144,7 +144,7 @@ export const settingsRouter = createTRPCRouter({
 		}
 		const result = cleanAllDeploymentQueue();
 		await audit(ctx, {
-			action: "update",
+			action: "cancel",
 			resourceType: "settings",
 			resourceName: "clean-deployment-queue",
 		});

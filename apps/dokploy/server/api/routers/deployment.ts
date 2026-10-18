@@ -68,6 +68,29 @@ const deploymentHostServerId = (
 	deployment.compose?.serverId ||
 	null;
 
+/**
+ * What an audit entry names about a deployment: the service it belongs to (the
+ * log table shows resourceName, not the id) and the deployment's title.
+ */
+const deploymentAuditTarget = (deployment: {
+	title?: string | null;
+	applicationId?: string | null;
+	composeId?: string | null;
+	application?: { appName: string } | null;
+	compose?: { appName: string } | null;
+}) => ({
+	resourceName:
+		deployment.application?.appName ??
+		deployment.compose?.appName ??
+		deployment.title ??
+		undefined,
+	metadata: {
+		title: deployment.title,
+		applicationId: deployment.applicationId,
+		composeId: deployment.composeId,
+	},
+});
+
 export const deploymentRouter = createTRPCRouter({
 	all: protectedProcedure
 		.input(apiFindAllByApplication)
@@ -309,6 +332,13 @@ export const deploymentRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const deployment = await findDeploymentById(input.deploymentId);
 			await assertDeploymentAccess(ctx, deployment, "cancel");
+			const auditCancel = () =>
+				audit(ctx, {
+					action: "cancel",
+					resourceType: "deployment",
+					resourceId: deployment.deploymentId,
+					...deploymentAuditTarget(deployment),
+				});
 
 			// A build that runs on a build server has no local pid: it is stopped
 			// there, by deployment (see deployment-cancel.ts).
@@ -319,11 +349,7 @@ export const deploymentRouter = createTRPCRouter({
 			// signalled (no pid file, no launcher, host unreachable) is cancelled
 			// but still running: it keeps the pid kill below it had before.
 			if (remote?.status === "cancelled" && !remote.genericStopNeeded) {
-				await audit(ctx, {
-					action: "cancel",
-					resourceType: "deployment",
-					resourceId: deployment.deploymentId,
-				});
+				await auditCancel();
 				return;
 			}
 
@@ -485,21 +511,13 @@ export const deploymentRouter = createTRPCRouter({
 						message: "The run is still starting, try again in a moment",
 					});
 				}
-				await audit(ctx, {
-					action: "cancel",
-					resourceType: "deployment",
-					resourceId: deployment.deploymentId,
-				});
+				await auditCancel();
 				return;
 			}
 
 			await killOnHost();
 			await updateDeploymentStatus(deployment.deploymentId, "error");
-			await audit(ctx, {
-				action: "cancel",
-				resourceType: "deployment",
-				resourceId: deployment.deploymentId,
-			});
+			await auditCancel();
 		}),
 
 	removeDeployment: protectedProcedure
@@ -516,6 +534,7 @@ export const deploymentRouter = createTRPCRouter({
 				action: "delete",
 				resourceType: "deployment",
 				resourceId: deployment.deploymentId,
+				...deploymentAuditTarget(deployment),
 			});
 			return result;
 		}),
