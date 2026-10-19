@@ -1,11 +1,12 @@
 import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { and, eq } from "drizzle-orm";
 
+import { quote } from "shell-quote";
 import semver from "semver";
 import { db } from "../db";
 import { compose } from "../db/schema";
@@ -186,6 +187,97 @@ interface TreeDataItem {
 	children?: TreeDataItem[];
 }
 
+/** Deepest directory level `readDirectory` lists; deeper entries are left out. */
+export const MAX_READ_DIRECTORY_DEPTH = 16;
+
+const READ_DIRECTORY_SENTINEL = "--";
+
+/**
+ * Lists `root` on a remote host as NUL-delimited paths relative to it: the
+ * directories, a sentinel, the symlinks, a sentinel, then everything else.
+ * `find` never follows symlinks (`-P`), so a link to a directory is reported
+ * as a link and is not descended, and names are only ever data: there is no
+ * `eval` and no JSON built in shell. Only `-P`, `-mindepth`, `-maxdepth`,
+ * `-type` and `-print0` are used, which busybox find has too.
+ */
+export const buildRemoteReadDirectoryCommand = (root: string) => {
+	const find = `find -P . -mindepth 1 -maxdepth ${MAX_READ_DIRECTORY_DEPTH}`;
+	const sentinel = `printf '%s\\000' ${READ_DIRECTORY_SENTINEL}`;
+	return [
+		`root=${quote([root])}`,
+		'[ -d "$root" ] || exit 0',
+		'cd -- "$root" || exit 0',
+		`${find} -type d -print0`,
+		sentinel,
+		`${find} -type l -print0`,
+		sentinel,
+		`${find} ! -type d ! -type l -print0`,
+		// An unreadable subdirectory makes find exit 1; list what was readable.
+		"exit 0",
+	].join("\n");
+};
+
+const compareNames = (a: TreeDataItem, b: TreeDataItem) =>
+	a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+
+/** Builds the tree from the output of `buildRemoteReadDirectoryCommand`. */
+export const parseRemoteReadDirectory = (
+	root: string,
+	stdout: string,
+): TreeDataItem[] => {
+	const records = stdout.split("\0");
+	// The output ends with a NUL, which leaves one empty trailing record.
+	if (records[records.length - 1] === "") records.pop();
+
+	const directories: string[] = [];
+	const others: { rel: string; type: "file" }[] = [];
+	let section = 0;
+	for (const record of records) {
+		if (record === READ_DIRECTORY_SENTINEL) {
+			section++;
+			continue;
+		}
+		if (!record.startsWith("./")) continue;
+		const rel = record.slice(2);
+		if (!rel) continue;
+		if (section === 0) directories.push(rel);
+		// Symlinks and everything that is not a directory are plain files.
+		else others.push({ rel, type: "file" });
+	}
+
+	const result: TreeDataItem[] = [];
+	const childrenOf = new Map<string, TreeDataItem[]>([["", result]]);
+	const parentOf = (rel: string) => {
+		const slash = rel.lastIndexOf("/");
+		return slash === -1 ? "" : rel.slice(0, slash);
+	};
+	const nameOf = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1);
+
+	// Shallowest first, so a directory exists before its children are added.
+	directories.sort((a, b) => a.split("/").length - b.split("/").length);
+	for (const rel of directories) {
+		const siblings = childrenOf.get(parentOf(rel));
+		if (!siblings) continue;
+		const children: TreeDataItem[] = [];
+		siblings.push({
+			id: posix.join(root, rel),
+			name: nameOf(rel),
+			type: "directory",
+			children,
+		});
+		childrenOf.set(rel, children);
+	}
+	for (const { rel } of others) {
+		childrenOf.get(parentOf(rel))?.push({
+			id: posix.join(root, rel),
+			name: nameOf(rel),
+			type: "file",
+		});
+	}
+	for (const siblings of childrenOf.values()) siblings.sort(compareNames);
+	return result;
+};
+
 export const readDirectory = async (
 	dirPath: string,
 	serverId?: string,
@@ -193,73 +285,32 @@ export const readDirectory = async (
 	if (serverId) {
 		const { stdout } = await execAsyncRemote(
 			serverId,
-			`
-process_items() {
-    local parent_dir="$1"
-    local __resultvar=$2
-
-    local items_json=""
-    local first=true
-    for item in "$parent_dir"/*; do
-        [ -e "$item" ] || continue
-        process_item "$item" item_json
-        if [ "$first" = true ]; then
-            first=false
-            items_json="$item_json"
-        else
-            items_json="$items_json,$item_json"
-        fi
-    done
-
-    eval $__resultvar="'[$items_json]'"
-}
-
-process_item() {
-    local item_path="$1"
-    local __resultvar=$2
-
-    local item_name=$(basename "$item_path")
-    local escaped_name=$(echo "$item_name" | sed 's/"/\\"/g')
-    local escaped_path=$(echo "$item_path" | sed 's/"/\\"/g')
-
-    if [ -d "$item_path" ]; then
-        # Is directory
-        process_items "$item_path" children_json
-        local json='{"id":"'"$escaped_path"'","name":"'"$escaped_name"'","type":"directory","children":'"$children_json"'}'
-    else
-        # Is file
-        local json='{"id":"'"$escaped_path"'","name":"'"$escaped_name"'","type":"file"}'
-    fi
-
-    eval $__resultvar="'$json'"
-}
-
-root_dir=${dirPath}
-
-process_items "$root_dir" json_output
-
-echo "$json_output"
-			`,
+			buildRemoteReadDirectoryCommand(dirPath),
 		);
-		const result = JSON.parse(stdout);
-		return result;
+		return parseRemoteReadDirectory(dirPath, stdout);
 	}
 
-	const stack = [dirPath];
+	const stack: { path: string; depth: number }[] = [
+		{ path: dirPath, depth: 1 },
+	];
 	const result: TreeDataItem[] = [];
 	const parentMap: Record<string, TreeDataItem[]> = {};
 
 	while (stack.length > 0) {
-		const currentPath = stack.pop();
-		if (!currentPath) continue;
+		const current = stack.pop();
+		if (!current) continue;
+		const currentPath = current.path;
 
 		const items = readdirSync(currentPath, { withFileTypes: true });
 		const currentDirectoryResult: TreeDataItem[] = [];
 
 		for (const item of items) {
 			const fullPath = join(currentPath, item.name);
+			// A Dirent is typed without following links: a symlink is a file here.
 			if (item.isDirectory()) {
-				stack.push(fullPath);
+				if (current.depth < MAX_READ_DIRECTORY_DEPTH) {
+					stack.push({ path: fullPath, depth: current.depth + 1 });
+				}
 				const directoryItem: TreeDataItem = {
 					id: fullPath,
 					name: item.name,
