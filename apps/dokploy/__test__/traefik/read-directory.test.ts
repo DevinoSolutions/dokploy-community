@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+	chmodSync,
 	mkdirSync,
 	mkdtempSync,
 	rmSync,
@@ -172,6 +173,39 @@ describe("readDirectory (remote)", () => {
 			expect(rootLine).not.toBe(`root=${root}`);
 			expect(command.match(/rm -rf/g)).toHaveLength(1);
 			expect(command).toContain('cd -- "$root"');
+		});
+
+		it("cannot exit non-zero because a find pass failed", () => {
+			const lines = buildRemoteReadDirectoryCommand("/base").split("\n");
+			expect(lines[lines.length - 1]).toBe("exit 0");
+		});
+
+		it.skipIf(
+			!hasSh || process.platform === "win32" || process.getuid?.() === 0,
+		)("lists what is readable when a subdirectory is not", async () => {
+			const base = mkdtempSync(join(tmpdir(), "readdir-denied-"));
+			const locked = join(base, "locked");
+			try {
+				mkdirSync(locked);
+				writeFileSync(join(base, "a.yml"), "x");
+				writeFileSync(join(locked, "b.yml"), "x");
+				chmodSync(locked, 0o000);
+				mocks.execAsyncRemote.mockImplementation(runLocally);
+
+				const tree = await readDirectory(base, "server-1");
+
+				expect(tree).toContainEqual({
+					id: join(base, "a.yml"),
+					name: "a.yml",
+					type: "file",
+				});
+				expect(tree.find((item) => item.name === "locked")?.children).toEqual(
+					[],
+				);
+			} finally {
+				chmodSync(locked, 0o700);
+				rmSync(base, { recursive: true, force: true });
+			}
 		});
 
 		it.skipIf(!hasSh)(

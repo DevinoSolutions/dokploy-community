@@ -212,6 +212,8 @@ export const buildRemoteReadDirectoryCommand = (root: string) => {
 		`${find} -type l -print0`,
 		sentinel,
 		`${find} ! -type d ! -type l -print0`,
+		// An unreadable subdirectory makes find exit 1; list what was readable.
+		"exit 0",
 	].join("\n");
 };
 
