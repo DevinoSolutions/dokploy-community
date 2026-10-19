@@ -540,7 +540,7 @@ make sure the regenerated migration does not `DROP` them.
 
 | Table | Schema file | Feature | Landed in |
 |---|---|---|---|
-| `oauth_client`, `oauth_refresh_token`, `oauth_provider_access_token`, `oauth_provider_consent`, `oauth_resource`, `oauth_client_resource`, `oauth_client_assertion` | `packages/server/src/db/schema/mcp-oauth.ts` | remote MCP server OAuth (`@better-auth/oauth-provider` storage; the 1.6 `oauth_application`, `oauth_access_token` and `oauth_consent` from `0198` were dropped in `0220`) | `0210` |
+| `oauth_client`, `oauth_refresh_token`, `oauth_provider_access_token`, `oauth_provider_consent`, `oauth_resource`, `oauth_client_resource`, `oauth_client_assertion` | `packages/server/src/db/schema/mcp-oauth.ts` | remote MCP server OAuth (`@better-auth/oauth-provider`; the 1.6 tables were dropped in `0220`) | `0210` |
 
 ### Migrator ordering gotcha (drizzle `postgres-js` migrator)
 

@@ -130,12 +130,18 @@ a rotation.
 Rolling back to better-auth 1.6 is no longer possible. Migration 0220 drops
 the 1.6 tables (`oauth_consent`, `oauth_access_token` and
 `oauth_application`), which held every grant in plaintext, so there is nothing
-left for 1.6 to find. After 0220 has run, do not redeploy an older release.
-Releases before community.13 (better-auth 1.6) cannot run at all without the
-1.6 tables. Releases community.13 through the one before 0220 still read and
-delete 1.6 rows in the daily token purge and when a client is revoked, so on
-those the purge fails and revoking a client in Settings errors until 0220's
-release is back.
+left for 1.6 to find. The only way back to the 1.6 data is restoring the
+pg_dump taken before the deploy that ran 0220. After 0220 has run, do not
+redeploy an older release. Releases before community.13 (better-auth 1.6) still
+boot, but their 1.6 MCP/OAuth endpoints no longer work. On community.13 through
+the one before 0220, the daily token purge and `revokeMcpAuthorization` delete
+the 1.7 rows first and then error on the missing 1.6 table; a revoke that shows
+an error has still removed the grant.
+
+On a database whose 0202 catch-up is still pending (an upstream switch-over),
+`applyForkSchemaCatchups` runs after `migrate()` and re-creates the three
+tables empty and unused. That is harmless; do not edit 0202's SQL, since that
+changes its hash.
 
 Until 0220 shipped, the 1.6 tables were kept as the rollback copy: the upgrade
 never changed a live 1.6 row, 1.7 only deleted expired 1.6 token rows (the
