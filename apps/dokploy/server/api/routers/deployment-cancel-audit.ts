@@ -15,7 +15,7 @@ import { adminProcedure, createTRPCRouter, protectedProcedure } from "../trpc";
  * Who is behind a cancellation is member information: the same gate as the
  * member list (`member:read`, held by owners and admins). Anyone else who can
  * read the service's deployments only learns whether a user or an API key did
- * it, never the email or the key's name.
+ * it, never the email, the key's name or the OAuth client.
  */
 const withActorVisibility = async (
 	ctx: PermissionCtx,
@@ -27,6 +27,8 @@ const withActorVisibility = async (
 		actorEmail: null,
 		apiKeyName: null,
 		apiKeyShortId: null,
+		oauthClientName: null,
+		oauthClientShortId: null,
 	}));
 };
 
@@ -55,7 +57,7 @@ export const deploymentCancelAuditRouter = createTRPCRouter({
 	// Who cancelled the deployments listed on a service page. Open to whoever
 	// can read that service's deployments (`deployment.all`): the same service
 	// permission, member allow-list and organization checks. The actor's email
-	// and API key name come back only with `member:read`.
+	// and API key or OAuth client name come back only with `member:read`.
 	byApplication: protectedProcedure
 		.input(z.object({ applicationId: z.string().min(1) }))
 		.query(async ({ ctx, input }) => {

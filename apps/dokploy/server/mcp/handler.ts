@@ -26,7 +26,10 @@ export interface McpAuth {
 	userId: string;
 	clientId: string;
 	scopes: Set<string>;
-	session: Awaited<ReturnType<typeof buildMemberSession>>["session"];
+	session: Awaited<ReturnType<typeof buildMemberSession>>["session"] & {
+		/** OAuth bearer grants only: the client the token was issued to. */
+		oauthClientId?: string;
+	};
 	user: Awaited<ReturnType<typeof buildMemberSession>>["user"];
 	/**
 	 * API-key grants only: admitted on a check another request made (recent
@@ -56,7 +59,8 @@ export const authenticateMcpBearer = async (
 		userId: token.userId,
 		clientId: token.clientId,
 		scopes: new Set(token.scopes),
-		session,
+		// The OAuth client rides on the session so the cancel trail can name it.
+		session: { ...session, oauthClientId: token.clientId },
 		user,
 	};
 };

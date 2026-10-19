@@ -1,14 +1,18 @@
 interface CancelledByEntry {
-	actorType: "user" | "api_key" | "system";
+	actorType: "user" | "api_key" | "oauth_client" | "system";
 	actorEmail: string | null;
 	apiKeyName: string | null;
 	apiKeyShortId: string | null;
+	oauthClientName?: string | null;
+	oauthClientShortId?: string | null;
 }
 
 /**
  * The line a cancelled deployment shows under its status: who stopped it.
  * An API key is named by its name, or by the start of its id when it has none
- * (or has been deleted), next to the user it belongs to.
+ * (or has been deleted), next to the user it belongs to. An MCP client that
+ * authenticated with an OAuth token is named the same way, by its name or by
+ * the start of its client id.
  */
 export const describeCancelledBy = (entry: CancelledByEntry): string => {
 	if (entry.actorType === "system") return "Cancelled by system";
@@ -17,6 +21,13 @@ export const describeCancelledBy = (entry: CancelledByEntry): string => {
 		const key = entry.apiKeyName?.trim() || entry.apiKeyShortId;
 		const label = key ? `API key ${key}` : "an API key";
 		return user ? `Cancelled by ${label} (${user})` : `Cancelled by ${label}`;
+	}
+	if (entry.actorType === "oauth_client") {
+		const client = entry.oauthClientName?.trim() || entry.oauthClientShortId;
+		if (!client) return `Cancelled by ${user ?? "a user"}`;
+		return user
+			? `Cancelled by ${user} via MCP client ${client}`
+			: `Cancelled by MCP client ${client}`;
 	}
 	return `Cancelled by ${user ?? "a user"}`;
 };

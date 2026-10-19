@@ -5,6 +5,7 @@ import {
 	type DeploymentCancelAuditActorType,
 	type DeploymentCancelAuditTargetType,
 	deploymentCancelAudit,
+	oauthClient,
 } from "@dokploy/server/db/schema";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 
@@ -19,6 +20,8 @@ export interface DeploymentCancelAuditActor {
 	userId?: string | null;
 	email?: string | null;
 	apiKeyId?: string | null;
+	/** The OAuth client of an MCP bearer token (its public id, never the token). */
+	oauthClientId?: string | null;
 }
 
 export interface RecordDeploymentCancelAuditInput {
@@ -49,6 +52,7 @@ export const recordDeploymentCancelAudit = async (
 			actorId: input.actor.userId ?? null,
 			actorEmail: input.actor.email ?? null,
 			apiKeyId: input.actor.apiKeyId ?? null,
+			oauthClientId: input.actor.oauthClientId ?? null,
 			targetType: input.targetType,
 			targetId: input.targetId ?? null,
 			targetName: input.targetName ?? null,
@@ -113,6 +117,10 @@ export interface DeploymentCancelledBy {
 	apiKeyName: string | null;
 	/** The first characters of the API key id, to tell unnamed keys apart. */
 	apiKeyShortId: string | null;
+	/** The OAuth client's name, or null when it has none or has been deleted. */
+	oauthClientName: string | null;
+	/** The first characters of the OAuth client id, to tell unnamed clients apart. */
+	oauthClientShortId: string | null;
 	createdAt: Date;
 }
 
@@ -140,10 +148,16 @@ export const findDeploymentCancelledByService = async ({
 			actorEmail: deploymentCancelAudit.actorEmail,
 			apiKeyId: deploymentCancelAudit.apiKeyId,
 			apiKeyName: apikey.name,
+			oauthClientId: deploymentCancelAudit.oauthClientId,
+			oauthClientName: oauthClient.name,
 			createdAt: deploymentCancelAudit.createdAt,
 		})
 		.from(deploymentCancelAudit)
 		.leftJoin(apikey, eq(apikey.id, deploymentCancelAudit.apiKeyId))
+		.leftJoin(
+			oauthClient,
+			eq(oauthClient.clientId, deploymentCancelAudit.oauthClientId),
+		)
 		.where(
 			and(
 				eq(deploymentCancelAudit.organizationId, organizationId),
@@ -170,6 +184,10 @@ export const findDeploymentCancelledByService = async ({
 			actorEmail: row.actorEmail,
 			apiKeyName: row.apiKeyName?.trim() || null,
 			apiKeyShortId: row.apiKeyId ? row.apiKeyId.slice(0, 6) : null,
+			oauthClientName: row.oauthClientName?.trim() || null,
+			oauthClientShortId: row.oauthClientId
+				? row.oauthClientId.slice(0, 6)
+				: null,
 			createdAt: row.createdAt,
 		});
 		if (latest.size >= BY_SERVICE_DEPLOYMENT_LIMIT) break;

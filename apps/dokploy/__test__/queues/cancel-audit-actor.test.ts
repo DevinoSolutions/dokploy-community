@@ -48,6 +48,7 @@ describe("auditCancel actor", () => {
 				userId: "user-1",
 				email: "user@example.com",
 				apiKeyId: undefined,
+				oauthClientId: undefined,
 			},
 			action: "kill_build",
 			targetType: "application",
@@ -71,8 +72,55 @@ describe("auditCancel actor", () => {
 					userId: "user-1",
 					email: "user@example.com",
 					apiKeyId: "key-1",
+					oauthClientId: undefined,
 				},
 				composeId: "c1",
+			}),
+		);
+	});
+
+	it("records a request made with an OAuth MCP token as the token's user plus the client id", async () => {
+		await auditCancel(
+			{
+				user,
+				session: { activeOrganizationId: "org-1", oauthClientId: "client-1" },
+			},
+			{
+				action: "cancel_deployment",
+				targetType: "application",
+				targetId: "a1",
+			},
+		);
+
+		expect(mocks.recordDeploymentCancelAudit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				actor: {
+					type: "oauth_client",
+					userId: "user-1",
+					email: "user@example.com",
+					apiKeyId: undefined,
+					oauthClientId: "client-1",
+				},
+			}),
+		);
+	});
+
+	it("keeps an API key as the actor if a request somehow carries both", async () => {
+		await auditCancel(
+			{
+				user,
+				session: {
+					activeOrganizationId: "org-1",
+					apiKeyId: "key-1",
+					oauthClientId: "client-1",
+				},
+			},
+			{ action: "cancel_deployment", targetType: "application" },
+		);
+
+		expect(mocks.recordDeploymentCancelAudit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				actor: expect.objectContaining({ type: "api_key" }),
 			}),
 		);
 	});

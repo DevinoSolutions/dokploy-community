@@ -107,6 +107,8 @@ const entry = (deploymentId: string, extra: Record<string, unknown> = {}) => ({
 	actorEmail: "alice@example.com",
 	apiKeyId: null,
 	apiKeyName: null,
+	oauthClientId: null,
+	oauthClientName: null,
 	createdAt: new Date("2026-10-18T10:00:00Z"),
 	...extra,
 });
@@ -136,6 +138,8 @@ describe("deploymentCancelAudit.byApplication", () => {
 				actorEmail: null,
 				apiKeyName: null,
 				apiKeyShortId: null,
+				oauthClientName: null,
+				oauthClientShortId: null,
 				createdAt: new Date("2026-10-18T10:00:00Z"),
 			},
 		]);
@@ -261,7 +265,37 @@ describe("deploymentCancelAudit.byApplication", () => {
 			"apiKeyShortId",
 			"createdAt",
 			"deploymentId",
+			"oauthClientName",
+			"oauthClientShortId",
 		]);
+	});
+
+	it("names an OAuth client by its name, or by the start of its client id", async () => {
+		mocks.memberRole = "owner";
+		mocks.rows = [
+			entry("dep-1", {
+				actorType: "oauth_client",
+				oauthClientId: "client-abc123",
+				oauthClientName: " Claude Code ",
+			}),
+			entry("dep-2", {
+				actorType: "oauth_client",
+				oauthClientId: "zyxwvu987654",
+				oauthClientName: null,
+			}),
+		];
+
+		const result = await caller().byApplication({ applicationId: "app-own" });
+		expect(result[0]).toMatchObject({
+			actorType: "oauth_client",
+			oauthClientName: "Claude Code",
+			oauthClientShortId: "client",
+			apiKeyName: null,
+		});
+		expect(result[1]).toMatchObject({
+			oauthClientName: null,
+			oauthClientShortId: "zyxwvu",
+		});
 	});
 });
 
@@ -300,6 +334,49 @@ describe("who cancelled is member information", () => {
 		actorEmail: "bob@example.com",
 		apiKeyId: "abcdef123456",
 		apiKeyName: "ci-bot",
+	});
+
+	const oauthEntry = entry("dep-3", {
+		actorType: "oauth_client",
+		actorEmail: "carol@example.com",
+		oauthClientId: "abcdef123456",
+		oauthClientName: "Claude Code",
+	});
+
+	it("hides the OAuth client from a member without member:read", async () => {
+		mocks.accessedServices = ["app-own", "comp-own"];
+		mocks.rows = [oauthEntry];
+
+		for (const result of [
+			await caller().byApplication({ applicationId: "app-own" }),
+			await caller().byCompose({ composeId: "comp-own" }),
+		]) {
+			expect(result).toMatchObject([
+				{
+					deploymentId: "dep-3",
+					actorType: "oauth_client",
+					actorEmail: null,
+					oauthClientName: null,
+					oauthClientShortId: null,
+				},
+			]);
+		}
+	});
+
+	it("shows the OAuth client to an admin", async () => {
+		mocks.memberRole = "admin";
+		mocks.rows = [oauthEntry];
+
+		await expect(
+			caller().byApplication({ applicationId: "app-own" }),
+		).resolves.toMatchObject([
+			{
+				actorType: "oauth_client",
+				actorEmail: "carol@example.com",
+				oauthClientName: "Claude Code",
+				oauthClientShortId: "abcdef",
+			},
+		]);
 	});
 
 	it("hides the email and the key name from a member without member:read", async () => {
