@@ -142,19 +142,39 @@ const realpathAllowingMissing = async (target: string): Promise<string> => {
 /**
  * The same on a remote host, in one SSH round trip: `realpath -m` resolves the
  * symlinks in every existing component without requiring the file to exist.
- * It prints the base, then the target, one per line. A path with a newline in
- * it breaks that framing and is rejected rather than guessed at.
+ * It prints the base, then the target, one per line. The output is parsed
+ * strictly: exactly two non-empty absolute lines and at most one trailing
+ * newline. A path with a newline in it breaks that framing and is rejected
+ * rather than guessed at. Every failure rejects the request; there is no
+ * fallback that skips the check.
  */
 const remoteRealpaths = async (
 	serverId: string,
 	base: string,
 	target: string,
 ): Promise<[string, string]> => {
-	const { stdout } = await execAsyncRemote(
-		serverId,
-		`realpath -m -- ${quote([base, target])}`,
+	let stdout: string;
+	try {
+		({ stdout } = await execAsyncRemote(
+			serverId,
+			`realpath -m -- ${quote([base, target])}`,
+		));
+	} catch (error) {
+		// The command ran and failed, typically a host without GNU realpath (busybox).
+		// Connection problems keep their own error.
+		const { name, exitCode } = error as { name?: string; exitCode?: unknown };
+		if (name === "ExecError" && typeof exitCode === "number") {
+			throw new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message:
+					"Could not resolve the Traefik file path on this server (GNU realpath -m is required)",
+			});
+		}
+		throw error;
+	}
+	const lines = (stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout).split(
+		"\n",
 	);
-	const lines = stdout.split(/\r?\n/).filter((line) => line !== "");
 	const [realBase, realTarget] = lines;
 	if (
 		lines.length !== 2 ||

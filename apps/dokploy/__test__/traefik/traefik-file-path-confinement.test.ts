@@ -81,12 +81,13 @@ const read = (filePath: string, serverId?: string) =>
 
 const rejected = { code: "BAD_REQUEST" };
 
-// The words a real shell makes of a command line (the test paths hold no newline).
+// The words a real shell makes of a command line, NUL separated so a word can
+// hold a newline.
 const shellWords = (command: string): string[] => {
-	const printed = spawnSync("sh", ["-c", `printf '%s\n' ${command}`], {
+	const printed = spawnSync("sh", ["-c", `printf '%s\\0' ${command}`], {
 		encoding: "utf8",
 	});
-	return printed.stdout.split("\n").slice(0, -1);
+	return printed.stdout.split("\0").slice(0, -1);
 };
 
 describe("traefik file endpoints are confined to the Traefik config directory", () => {
@@ -494,6 +495,11 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 			["only one path", `${remoteTraefikPath}\n`],
 			["three lines", `${remoteTraefikPath}\n${target}\n/extra\n`],
 			["a relative result", `${remoteTraefikPath}\ndynamic/app.yml\n`],
+			[
+				"an empty line between the paths",
+				`${remoteTraefikPath}\n\n${target}\n`,
+			],
+			["a second trailing newline", `${remoteTraefikPath}\n${target}\n\n`],
 		])("fails closed when the host prints %s", async (_label, stdout) => {
 			mocks.execAsyncRemote.mockResolvedValue({ stdout, stderr: "" });
 
@@ -502,6 +508,68 @@ describe("traefik file endpoints are confined to the Traefik config directory", 
 			);
 			await expect(read("dynamic/app.yml", server)).rejects.toMatchObject(
 				rejected,
+			);
+			expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
+			expect(mocks.readConfigInPath).not.toHaveBeenCalled();
+		});
+
+		it("rejects a target whose name ends in a newline instead of stripping it", async () => {
+			// realpath prints "<base>\n<target>\n\n", which is not two lines.
+			await expect(write("dynamic/app.yml\n", server)).rejects.toMatchObject(
+				rejected,
+			);
+			await expect(read("dynamic/app.yml\n", server)).rejects.toMatchObject(
+				rejected,
+			);
+			expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
+			expect(mocks.readConfigInPath).not.toHaveBeenCalled();
+		});
+
+		it("accepts output without a trailing newline", async () => {
+			mocks.execAsyncRemote.mockResolvedValue({
+				stdout: `${remoteTraefikPath}\n${target}`,
+				stderr: "",
+			});
+			await write("dynamic/app.yml", server);
+
+			expect(mocks.writeTraefikConfigInPath).toHaveBeenCalledWith(
+				target,
+				"http: {}",
+				server,
+			);
+		});
+
+		it("explains a host without GNU realpath and still fails closed", async () => {
+			const execError = Object.assign(
+				new Error("realpath: invalid option -- m"),
+				{
+					name: "ExecError",
+					exitCode: 1,
+				},
+			);
+			mocks.execAsyncRemote.mockRejectedValue(execError);
+
+			for (const run of [
+				() => write("dynamic/app.yml", server),
+				() => read("dynamic/app.yml", server),
+			]) {
+				await expect(run()).rejects.toMatchObject({
+					code: "PRECONDITION_FAILED",
+					message: expect.stringContaining("GNU realpath -m is required"),
+				});
+			}
+			expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
+			expect(mocks.readConfigInPath).not.toHaveBeenCalled();
+		});
+
+		it("lets a connection failure through and still never reads or writes", async () => {
+			mocks.execAsyncRemote.mockRejectedValue(new Error("connect ETIMEDOUT"));
+
+			await expect(write("dynamic/app.yml", server)).rejects.toThrow(
+				"connect ETIMEDOUT",
+			);
+			await expect(read("dynamic/app.yml", server)).rejects.toThrow(
+				"connect ETIMEDOUT",
 			);
 			expect(mocks.writeTraefikConfigInPath).not.toHaveBeenCalled();
 			expect(mocks.readConfigInPath).not.toHaveBeenCalled();
