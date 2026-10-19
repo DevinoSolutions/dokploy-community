@@ -286,7 +286,7 @@ describe("token hygiene", () => {
 		dbDelete.mockClear();
 	});
 
-	it("purgeExpiredMcpTokens deletes dead tokens, assertions, expired 1.6 rows and abandoned registrations", async () => {
+	it("purgeExpiredMcpTokens deletes dead tokens, assertions and abandoned registrations", async () => {
 		dbUpdate.mockClear();
 		await purgeExpiredMcpTokens();
 		const tables = dbDelete.mock.calls.map(([table]) => table);
@@ -294,26 +294,19 @@ describe("token hygiene", () => {
 			schema.oauthRefreshToken,
 			schema.oauthAccessToken,
 			schema.oauthClientAssertion,
-			schema.legacyOauthAccessToken,
 			schema.oauthClient,
 		]);
-		// Live 1.6 rows are the rollback copy: neither the consent nor the
-		// client table of 1.6 is purged.
-		expect(tables).not.toContain(schema.legacyOauthConsent);
-		expect(tables).not.toContain(schema.legacyOauthApplication);
 		// Replay responses past their window are cleared, rows kept.
 		expect(dbUpdate).toHaveBeenCalledTimes(1);
 		expect(dbUpdate).toHaveBeenCalledWith(schema.oauthRefreshToken);
 	});
 
-	it("revokeMcpAuthorization deletes the 1.7 tokens and consents and the matching 1.6 rows", async () => {
+	it("revokeMcpAuthorization deletes the 1.7 tokens and consents", async () => {
 		await revokeMcpAuthorization("user-1", "client-1");
 		expect(dbDelete.mock.calls.map(([table]) => table)).toEqual([
 			schema.oauthAccessToken,
 			schema.oauthRefreshToken,
 			schema.oauthConsent,
-			schema.legacyOauthAccessToken,
-			schema.legacyOauthConsent,
 		]);
 	});
 
