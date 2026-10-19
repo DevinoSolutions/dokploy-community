@@ -244,6 +244,37 @@ describe("deploymentCancelAudit.byApplication", () => {
 		expect(result[2]).toMatchObject({ actorType: "system", actorEmail: null });
 	});
 
+	it("cleans an untrusted OAuth client name", async () => {
+		mocks.memberRole = "owner";
+		const nameOf = async (name: string) => {
+			mocks.rows = [
+				entry("dep-x", {
+					actorType: "oauth_client",
+					oauthClientId: "abcdef123456",
+					oauthClientName: name,
+				}),
+			];
+			const [result] = await caller().byApplication({
+				applicationId: "app-own",
+			});
+			return result?.oauthClientName;
+		};
+
+		// Bidi overrides and zero-width characters are dropped
+		expect(await nameOf("\u202Egnp.exe\u202C Claude\u200B Code")).toBe(
+			"gnp.exe Claude Code",
+		);
+		// Whitespace and newlines collapse
+		expect(await nameOf("  Claude \n\t  Code  ")).toBe("Claude Code");
+		// A huge name is capped at 64 characters ending in an ellipsis
+		const long = await nameOf("A".repeat(5000));
+		expect(long).toBe(`${"A".repeat(63)}\u2026`);
+		expect(Array.from(long ?? "")).toHaveLength(64);
+		// Nothing printable left: null, so the short id is used
+		expect(await nameOf("\u0000\u0007\u202E\u2066\u200F")).toBeNull();
+		expect(await nameOf("   ")).toBeNull();
+	});
+
 	it("returns display fields only", async () => {
 		mocks.memberRole = "owner";
 		mocks.rows = [

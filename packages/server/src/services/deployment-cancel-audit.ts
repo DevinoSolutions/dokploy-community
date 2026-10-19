@@ -103,6 +103,32 @@ const DEPLOYMENT_CANCEL_ACTIONS: DeploymentCancelAuditAction[] = [
 	"kill_process",
 ];
 
+/** Longest OAuth client name shown; the rest is cut and ends in an ellipsis. */
+const OAUTH_CLIENT_NAME_MAX = 64;
+
+/**
+ * An OAuth client registers itself without authentication, so its name is
+ * untrusted text that ends up in a label: drop control and bidi/format
+ * characters, collapse whitespace, cap the length. Null when nothing is left,
+ * so the short client id is shown instead.
+ */
+export const sanitizeOAuthClientName = (
+	name: string | null | undefined,
+): string | null => {
+	const clean = (name ?? "")
+		.replace(/[\p{Cc}\p{Cf}]/gu, " ")
+		.replace(/\s+/gu, " ")
+		.trim();
+	if (!clean) return null;
+	const chars = Array.from(clean);
+	return chars.length > OAUTH_CLIENT_NAME_MAX
+		? `${chars
+				.slice(0, OAUTH_CLIENT_NAME_MAX - 1)
+				.join("")
+				.trimEnd()}\u2026`
+		: clean;
+};
+
 /** How many deployments a service shows, and so how many entries come back. */
 const BY_SERVICE_DEPLOYMENT_LIMIT = 50;
 /** Rows read to find the latest entry of that many deployments. */
@@ -184,7 +210,7 @@ export const findDeploymentCancelledByService = async ({
 			actorEmail: row.actorEmail,
 			apiKeyName: row.apiKeyName?.trim() || null,
 			apiKeyShortId: row.apiKeyId ? row.apiKeyId.slice(0, 6) : null,
-			oauthClientName: row.oauthClientName?.trim() || null,
+			oauthClientName: sanitizeOAuthClientName(row.oauthClientName),
 			oauthClientShortId: row.oauthClientId
 				? row.oauthClientId.slice(0, 6)
 				: null,
