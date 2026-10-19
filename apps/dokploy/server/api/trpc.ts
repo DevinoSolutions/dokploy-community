@@ -53,6 +53,7 @@ interface CreateContextOptions {
 				activeOrganizationId: string;
 				impersonatedBy?: string;
 				apiKeyId?: string;
+				oauthClientId?: string;
 		  })
 		| null;
 	req: CreateNextContextOptions["req"];

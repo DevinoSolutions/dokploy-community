@@ -1534,6 +1534,13 @@
       "when": 1792301533362,
       "tag": "0218_deployment_cancel_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1792378342003,
+      "tag": "0219_deployment_cancel_audit_oauth_client",
+      "breakpoints": true
     }
   ]
 }

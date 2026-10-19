@@ -121,6 +121,7 @@ describe("authenticateMcpBearer", () => {
 		expect(auth?.session).toEqual({
 			userId: "user-1",
 			activeOrganizationId: "org-1",
+			oauthClientId: "client-1",
 		});
 		expect(auth?.user.id).toBe("user-1");
 	});

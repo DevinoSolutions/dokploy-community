@@ -5,6 +5,7 @@ import {
 	type DeploymentCancelAuditActorType,
 	type DeploymentCancelAuditTargetType,
 	deploymentCancelAudit,
+	oauthClient,
 } from "@dokploy/server/db/schema";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 
@@ -19,6 +20,8 @@ export interface DeploymentCancelAuditActor {
 	userId?: string | null;
 	email?: string | null;
 	apiKeyId?: string | null;
+	/** The OAuth client of an MCP bearer token (its public id, never the token). */
+	oauthClientId?: string | null;
 }
 
 export interface RecordDeploymentCancelAuditInput {
@@ -49,6 +52,7 @@ export const recordDeploymentCancelAudit = async (
 			actorId: input.actor.userId ?? null,
 			actorEmail: input.actor.email ?? null,
 			apiKeyId: input.actor.apiKeyId ?? null,
+			oauthClientId: input.actor.oauthClientId ?? null,
 			targetType: input.targetType,
 			targetId: input.targetId ?? null,
 			targetName: input.targetName ?? null,
@@ -99,6 +103,32 @@ const DEPLOYMENT_CANCEL_ACTIONS: DeploymentCancelAuditAction[] = [
 	"kill_process",
 ];
 
+/** Longest OAuth client name shown; the rest is cut and ends in an ellipsis. */
+const OAUTH_CLIENT_NAME_MAX = 64;
+
+/**
+ * An OAuth client registers itself without authentication, so its name is
+ * untrusted text that ends up in a label: drop control and bidi/format
+ * characters, collapse whitespace, cap the length. Null when nothing is left,
+ * so the short client id is shown instead.
+ */
+export const sanitizeOAuthClientName = (
+	name: string | null | undefined,
+): string | null => {
+	const clean = (name ?? "")
+		.replace(/[\p{Cc}\p{Cf}]/gu, " ")
+		.replace(/\s+/gu, " ")
+		.trim();
+	if (!clean) return null;
+	const chars = Array.from(clean);
+	return chars.length > OAUTH_CLIENT_NAME_MAX
+		? `${chars
+				.slice(0, OAUTH_CLIENT_NAME_MAX - 1)
+				.join("")
+				.trimEnd()}\u2026`
+		: clean;
+};
+
 /** How many deployments a service shows, and so how many entries come back. */
 const BY_SERVICE_DEPLOYMENT_LIMIT = 50;
 /** Rows read to find the latest entry of that many deployments. */
@@ -113,6 +143,10 @@ export interface DeploymentCancelledBy {
 	apiKeyName: string | null;
 	/** The first characters of the API key id, to tell unnamed keys apart. */
 	apiKeyShortId: string | null;
+	/** The OAuth client's name, or null when it has none or has been deleted. */
+	oauthClientName: string | null;
+	/** The first characters of the OAuth client id, to tell unnamed clients apart. */
+	oauthClientShortId: string | null;
 	createdAt: Date;
 }
 
@@ -140,10 +174,16 @@ export const findDeploymentCancelledByService = async ({
 			actorEmail: deploymentCancelAudit.actorEmail,
 			apiKeyId: deploymentCancelAudit.apiKeyId,
 			apiKeyName: apikey.name,
+			oauthClientId: deploymentCancelAudit.oauthClientId,
+			oauthClientName: oauthClient.name,
 			createdAt: deploymentCancelAudit.createdAt,
 		})
 		.from(deploymentCancelAudit)
 		.leftJoin(apikey, eq(apikey.id, deploymentCancelAudit.apiKeyId))
+		.leftJoin(
+			oauthClient,
+			eq(oauthClient.clientId, deploymentCancelAudit.oauthClientId),
+		)
 		.where(
 			and(
 				eq(deploymentCancelAudit.organizationId, organizationId),
@@ -170,6 +210,10 @@ export const findDeploymentCancelledByService = async ({
 			actorEmail: row.actorEmail,
 			apiKeyName: row.apiKeyName?.trim() || null,
 			apiKeyShortId: row.apiKeyId ? row.apiKeyId.slice(0, 6) : null,
+			oauthClientName: sanitizeOAuthClientName(row.oauthClientName),
+			oauthClientShortId: row.oauthClientId
+				? row.oauthClientId.slice(0, 6)
+				: null,
 			createdAt: row.createdAt,
 		});
 		if (latest.size >= BY_SERVICE_DEPLOYMENT_LIMIT) break;

@@ -46,6 +46,53 @@ describe("describeCancelledBy", () => {
 		).toBe("Cancelled by API key abcdef (alice@example.com)");
 	});
 
+	it("names an MCP client and the user it acts for", () => {
+		expect(
+			describeCancelledBy({
+				...base,
+				actorType: "oauth_client",
+				actorEmail: "alice@example.com",
+				oauthClientName: "Claude Code",
+				oauthClientShortId: "abcdef",
+			}),
+		).toBe("Cancelled by alice@example.com via MCP client Claude Code");
+	});
+
+	it("names an unnamed MCP client by the start of its client id", () => {
+		expect(
+			describeCancelledBy({
+				...base,
+				actorType: "oauth_client",
+				actorEmail: "alice@example.com",
+				oauthClientName: null,
+				oauthClientShortId: "abcdef",
+			}),
+		).toBe("Cancelled by alice@example.com via MCP client abcdef");
+	});
+
+	it("names an MCP client when the user is hidden", () => {
+		expect(
+			describeCancelledBy({
+				...base,
+				actorType: "oauth_client",
+				oauthClientName: "Claude Code",
+			}),
+		).toBe("Cancelled by MCP client Claude Code");
+	});
+
+	it("falls back to the plain user when the client is hidden or unknown", () => {
+		expect(
+			describeCancelledBy({
+				...base,
+				actorType: "oauth_client",
+				actorEmail: "alice@example.com",
+			}),
+		).toBe("Cancelled by alice@example.com");
+		expect(describeCancelledBy({ ...base, actorType: "oauth_client" })).toBe(
+			"Cancelled by a user",
+		);
+	});
+
 	it("still reads well with no key and no user", () => {
 		expect(describeCancelledBy({ ...base, actorType: "api_key" })).toBe(
 			"Cancelled by an API key",

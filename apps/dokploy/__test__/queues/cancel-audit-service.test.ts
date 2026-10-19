@@ -56,6 +56,7 @@ describe("recordDeploymentCancelAudit", () => {
 			actorId: "user-1",
 			actorEmail: "user@example.com",
 			apiKeyId: "key-1",
+			oauthClientId: null,
 			targetType: "deployment",
 			targetId: "dep-1",
 			targetName: "app-abc123",
@@ -64,6 +65,30 @@ describe("recordDeploymentCancelAudit", () => {
 			deploymentId: "dep-1",
 			metadata: JSON.stringify({ title: "Rebuild" }),
 		});
+	});
+
+	it("stores the OAuth client id of an MCP token call, and no key id", async () => {
+		await recordDeploymentCancelAudit({
+			organizationId: "org-1",
+			action: "cancel_deployment",
+			actor: {
+				type: "oauth_client",
+				userId: "user-1",
+				email: "user@example.com",
+				oauthClientId: "client-1",
+			},
+			targetType: "application",
+			targetId: "a1",
+		});
+
+		expect(mocks.values).toHaveBeenCalledWith(
+			expect.objectContaining({
+				actorType: "oauth_client",
+				actorId: "user-1",
+				apiKeyId: null,
+				oauthClientId: "client-1",
+			}),
+		);
 	});
 
 	it("writes a system actor with no user", async () => {

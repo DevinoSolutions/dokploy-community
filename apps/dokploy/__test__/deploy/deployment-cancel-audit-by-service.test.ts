@@ -107,6 +107,8 @@ const entry = (deploymentId: string, extra: Record<string, unknown> = {}) => ({
 	actorEmail: "alice@example.com",
 	apiKeyId: null,
 	apiKeyName: null,
+	oauthClientId: null,
+	oauthClientName: null,
 	createdAt: new Date("2026-10-18T10:00:00Z"),
 	...extra,
 });
@@ -136,6 +138,8 @@ describe("deploymentCancelAudit.byApplication", () => {
 				actorEmail: null,
 				apiKeyName: null,
 				apiKeyShortId: null,
+				oauthClientName: null,
+				oauthClientShortId: null,
 				createdAt: new Date("2026-10-18T10:00:00Z"),
 			},
 		]);
@@ -240,6 +244,37 @@ describe("deploymentCancelAudit.byApplication", () => {
 		expect(result[2]).toMatchObject({ actorType: "system", actorEmail: null });
 	});
 
+	it("cleans an untrusted OAuth client name", async () => {
+		mocks.memberRole = "owner";
+		const nameOf = async (name: string) => {
+			mocks.rows = [
+				entry("dep-x", {
+					actorType: "oauth_client",
+					oauthClientId: "abcdef123456",
+					oauthClientName: name,
+				}),
+			];
+			const [result] = await caller().byApplication({
+				applicationId: "app-own",
+			});
+			return result?.oauthClientName;
+		};
+
+		// Bidi overrides and zero-width characters are dropped
+		expect(await nameOf("\u202Egnp.exe\u202C Claude\u200B Code")).toBe(
+			"gnp.exe Claude Code",
+		);
+		// Whitespace and newlines collapse
+		expect(await nameOf("  Claude \n\t  Code  ")).toBe("Claude Code");
+		// A huge name is capped at 64 characters ending in an ellipsis
+		const long = await nameOf("A".repeat(5000));
+		expect(long).toBe(`${"A".repeat(63)}\u2026`);
+		expect(Array.from(long ?? "")).toHaveLength(64);
+		// Nothing printable left: null, so the short id is used
+		expect(await nameOf("\u0000\u0007\u202E\u2066\u200F")).toBeNull();
+		expect(await nameOf("   ")).toBeNull();
+	});
+
 	it("returns display fields only", async () => {
 		mocks.memberRole = "owner";
 		mocks.rows = [
@@ -261,7 +296,37 @@ describe("deploymentCancelAudit.byApplication", () => {
 			"apiKeyShortId",
 			"createdAt",
 			"deploymentId",
+			"oauthClientName",
+			"oauthClientShortId",
 		]);
+	});
+
+	it("names an OAuth client by its name, or by the start of its client id", async () => {
+		mocks.memberRole = "owner";
+		mocks.rows = [
+			entry("dep-1", {
+				actorType: "oauth_client",
+				oauthClientId: "client-abc123",
+				oauthClientName: " Claude Code ",
+			}),
+			entry("dep-2", {
+				actorType: "oauth_client",
+				oauthClientId: "zyxwvu987654",
+				oauthClientName: null,
+			}),
+		];
+
+		const result = await caller().byApplication({ applicationId: "app-own" });
+		expect(result[0]).toMatchObject({
+			actorType: "oauth_client",
+			oauthClientName: "Claude Code",
+			oauthClientShortId: "client",
+			apiKeyName: null,
+		});
+		expect(result[1]).toMatchObject({
+			oauthClientName: null,
+			oauthClientShortId: "zyxwvu",
+		});
 	});
 });
 
@@ -300,6 +365,49 @@ describe("who cancelled is member information", () => {
 		actorEmail: "bob@example.com",
 		apiKeyId: "abcdef123456",
 		apiKeyName: "ci-bot",
+	});
+
+	const oauthEntry = entry("dep-3", {
+		actorType: "oauth_client",
+		actorEmail: "carol@example.com",
+		oauthClientId: "abcdef123456",
+		oauthClientName: "Claude Code",
+	});
+
+	it("hides the OAuth client from a member without member:read", async () => {
+		mocks.accessedServices = ["app-own", "comp-own"];
+		mocks.rows = [oauthEntry];
+
+		for (const result of [
+			await caller().byApplication({ applicationId: "app-own" }),
+			await caller().byCompose({ composeId: "comp-own" }),
+		]) {
+			expect(result).toMatchObject([
+				{
+					deploymentId: "dep-3",
+					actorType: "oauth_client",
+					actorEmail: null,
+					oauthClientName: null,
+					oauthClientShortId: null,
+				},
+			]);
+		}
+	});
+
+	it("shows the OAuth client to an admin", async () => {
+		mocks.memberRole = "admin";
+		mocks.rows = [oauthEntry];
+
+		await expect(
+			caller().byApplication({ applicationId: "app-own" }),
+		).resolves.toMatchObject([
+			{
+				actorType: "oauth_client",
+				actorEmail: "carol@example.com",
+				oauthClientName: "Claude Code",
+				oauthClientShortId: "abcdef",
+			},
+		]);
 	});
 
 	it("hides the email and the key name from a member without member:read", async () => {

@@ -24,7 +24,11 @@ export type DeploymentCancelAuditAction =
 	| "coalesce_drop";
 
 /** `system` is an internal path with no caller (coalescing on a push). */
-export type DeploymentCancelAuditActorType = "user" | "api_key" | "system";
+export type DeploymentCancelAuditActorType =
+	| "user"
+	| "api_key"
+	| "oauth_client"
+	| "system";
 
 export type DeploymentCancelAuditTargetType =
 	| "application"
@@ -51,6 +55,11 @@ export const deploymentCancelAudit = pgTable(
 		actorEmail: text("actorEmail"),
 		/** Set when the request authenticated with an API key (also over MCP). */
 		apiKeyId: text("apiKeyId"),
+		/**
+		 * Set when the request authenticated with an OAuth access token (an MCP
+		 * client). The client's public id only, never the token.
+		 */
+		oauthClientId: text("oauthClientId"),
 		targetType: text("targetType")
 			.$type<DeploymentCancelAuditTargetType>()
 			.notNull(),
