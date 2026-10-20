@@ -13,7 +13,7 @@ export const ENV_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Single quotes: the only quoting that leaves `$`, backticks and newlines alone. */
 export const singleQuote = (value: string) =>
-	`'${value.replaceAll("'", "'\''")}'`;
+	`'${value.replaceAll("'", "'\\''")}'`;
 
 /**
  * Names that must not be sourced into the environment of a build tool. Setting
@@ -53,6 +53,10 @@ const ENV_FILE_RESERVED_NAMES = new Set([
 	"SHELL",
 	"SHELLOPTS",
 	"SHLVL",
+	"SSH_ASKPASS",
+	"SSH_AUTH_SOCK",
+	"SSL_CERT_DIR",
+	"SSL_CERT_FILE",
 	"TERM",
 	"TMPDIR",
 	"TZ",
@@ -70,8 +74,6 @@ const ENV_FILE_RESERVED_PREFIXES = [
 	"DOCKER_",
 	"LC_",
 	"LD_",
-	"SSH_",
-	"SSL_",
 ];
 
 const ENV_FILE_RESERVED_PROXY_NAME = /^(?:http|https|ftp|all|no)_proxy$/i;

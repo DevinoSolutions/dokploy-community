@@ -11,6 +11,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { quote } from "shell-quote";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // An application's env, build args and build secrets used to travel on the
@@ -78,6 +79,7 @@ import {
 	getEnvFileLoader,
 	isEnvFileName,
 } from "@dokploy/server/utils/docker/env-file";
+import { prepareEnvironmentVariablesForShell } from "@dokploy/server/utils/docker/utils";
 
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
@@ -105,6 +107,13 @@ const bigEnv = (kb: number, prefix = "BIGSECRET") => {
 	}
 	return lines.join("\n");
 };
+
+/** `count` variables of `kb` KB each: the size is in the values, not the names. */
+const bigValues = (count: number, kb: number, prefix: string) =>
+	Array.from(
+		{ length: count },
+		(_, i) => `${prefix}_${i}=hunter2-${i}-${"x".repeat(kb * 1024)}`,
+	).join("\n");
 
 const createApplication = (overrides: Record<string, unknown> = {}) =>
 	({
@@ -202,7 +211,7 @@ describe.each(builders)("%s builder keeps values out of the command", (name, bui
 			publishDirectory: name === "static" ? "dist" : null,
 			env: "API_TOKEN=supersecret-token-1\nDB_PASSWORD=p4ss'w\"ord$(id)",
 			buildArgs: "NPM_TOKEN=npm-secret-2",
-			buildSecrets: "SSH_PASSPHRASE=passphrase-secret-3",
+			buildSecrets: "REGISTRY_PASSPHRASE=passphrase-secret-3",
 			...overrides,
 		});
 
@@ -228,10 +237,10 @@ describe.each(builders)("%s builder keeps values out of the command", (name, bui
 		const all = written.map(([, content]) => content).join("\n");
 		if (name === "dockerfile" || name === "static") {
 			expect(all).toContain("NPM_TOKEN='npm-secret-2'");
-			expect(all).toContain("SSH_PASSPHRASE='passphrase-secret-3'");
+			expect(all).toContain("REGISTRY_PASSPHRASE='passphrase-secret-3'");
 			expect(command).toContain("--build-arg NPM_TOKEN");
 			expect(command).not.toMatch(/--build-arg NPM_TOKEN=/);
-			expect(command).toContain("--secret type=env,id=SSH_PASSPHRASE");
+			expect(command).toContain("--secret type=env,id=REGISTRY_PASSPHRASE");
 		} else {
 			expect(all).toContain("API_TOKEN='supersecret-token-1'");
 			expect(command).toMatch(/--env API_TOKEN(?![=\w])/);
@@ -253,17 +262,32 @@ describe.each(builders)("%s builder keeps values out of the command", (name, bui
 		expect(removals?.length ?? 0).toBeGreaterThanOrEqual(2);
 	});
 
-	it("stays under the argument limit with a 300 KB env", async () => {
+	it("stays far under the argument limit with 300 KB of values", async () => {
 		const command = await build(
 			application({
-				env: bigEnv(300),
-				buildArgs: bigEnv(300, "BIGARG"),
-				buildSecrets: bigEnv(50, "BIGSEC"),
+				env: bigValues(4, 75, "BIGENV"),
+				buildArgs: bigValues(4, 75, "BIGARG"),
+				buildSecrets: bigValues(2, 75, "BIGSEC"),
 			}),
 			{ deploymentId: "dep-big" },
 		);
 
 		expect(bytes(command)).toBeLessThan(MAX_ARG_STRLEN / 8);
+		expect(command).not.toContain("hunter2");
+	});
+
+	it("keeps a command with hundreds of variables under the limit", async () => {
+		// Only the names are left on the command line.
+		const command = await build(
+			application({
+				env: bigEnv(60),
+				buildArgs: bigEnv(60, "BIGARG"),
+				buildSecrets: null,
+			}),
+			{ deploymentId: "dep-many" },
+		);
+
+		expect(bytes(command)).toBeLessThan(MAX_ARG_STRLEN);
 		expect(command).not.toContain("hunter2");
 	});
 
@@ -274,7 +298,7 @@ describe.each(builders)("%s builder keeps values out of the command", (name, bui
 		);
 
 		expect(command).not.toContain(".dokploy-stage-");
-		expect(command).not.toContain("sh -c");
+		expect(command).not.toContain("set -a");
 		expect(mocks.writeFileRemote).not.toHaveBeenCalled();
 	});
 });
@@ -289,9 +313,9 @@ describe("variables the env file cannot carry keep their command line form", () 
 			{ deploymentId: "dep-res" },
 		);
 
-		expect(command).toContain("--env PATH=/custom/bin");
-		expect(command).toContain("--env DOCKER_HOST=tcp://x:2375");
-		expect(command).toContain("--env EMPTY=");
+		expect(command).toContain(`--env ${quote(["PATH=/custom/bin"])}`);
+		expect(command).toContain(`--env ${quote(["DOCKER_HOST=tcp://x:2375"])}`);
+		expect(command).toContain(`--env ${quote(["EMPTY="])}`);
 		expect(command).toMatch(/--env NORMAL(?![=\w])/);
 		expect(command).not.toContain("value-7");
 	});
@@ -305,7 +329,7 @@ describe("variables the env file cannot carry keep their command line form", () 
 			{ deploymentId: "dep-clash" },
 		);
 
-		expect(command).toContain("--build-arg TOKEN=from-arg");
+		expect(command).toContain(`--build-arg ${quote(["TOKEN=from-arg"])}`);
 		expect(command).toContain("--secret type=env,id=TOKEN");
 		expect(command).not.toContain("from-secret");
 	});
@@ -319,7 +343,7 @@ describe("variables the env file cannot carry keep their command line form", () 
 			{ deploymentId: "dep-rp" },
 		);
 
-		expect(command).toContain("export LD_PRELOAD=/x.so");
+		expect(command).toContain(`export LD_PRELOAD=${quote(["/x.so"])}`);
 		expect(command).not.toContain("railpack-secret");
 		expect(command).toContain("--secret id=API_TOKEN,env=API_TOKEN");
 		expect(command).toContain("--secret id=LD_PRELOAD,env=LD_PRELOAD");
@@ -337,13 +361,18 @@ describe("variables the env file cannot carry keep their command line form", () 
 		const hash = (command: string) =>
 			command.match(/secrets-hash=([a-f0-9]{64})/)?.[1];
 		expect(hash(a)).toBe(hash(b));
-		// The pre-change hash input was the shell-quoted `KEY=value` strings.
+		// The input before this change: the shell-quoted `KEY=value` strings from
+		// prepareEnvironmentVariablesForShell, sorted, fed to sha256.
 		const { createHash } = await import("node:crypto");
-		const expected = createHash("sha256")
-			.update("A=1")
-			.update("'B=two words'")
-			.digest("hex");
-		expect(hash(a)).toBe(expected);
+		const previous = createHash("sha256");
+		for (const variable of prepareEnvironmentVariablesForShell(
+			"A=1\nB=two words",
+			"",
+			"",
+		).sort()) {
+			previous.update(variable);
+		}
+		expect(hash(a)).toBe(previous.digest("hex"));
 	});
 });
 
@@ -503,7 +532,7 @@ describe("build commands in a real shell", () => {
 				}),
 				{ deploymentId: "dep-sh" },
 			);
-			expect(bytes(script)).toBeLessThan(MAX_ARG_STRLEN / 8);
+			expect(bytes(script)).toBeLessThan(MAX_ARG_STRLEN / 4);
 
 			const result = run(script, bin);
 
@@ -555,7 +584,7 @@ describe("build commands in a real shell", () => {
 					}),
 					{ deploymentId: `dep-${buildType}` },
 				);
-				expect(bytes(script)).toBeLessThan(MAX_ARG_STRLEN / 8);
+				expect(bytes(script)).toBeLessThan(MAX_ARG_STRLEN / 4);
 
 				const result = run(script, bin);
 

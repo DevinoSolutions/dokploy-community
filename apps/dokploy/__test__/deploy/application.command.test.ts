@@ -240,6 +240,7 @@ describe("deployApplication - Command Generation Tests", () => {
 				buildPath: "/astro",
 			}),
 			null,
+			{ deploymentId: "deployment-id" },
 		);
 
 		expect(execProcess.execAsync).toHaveBeenCalledWith(
@@ -270,6 +271,7 @@ describe("deployApplication - Command Generation Tests", () => {
 				buildType: "railpack",
 			}),
 			null,
+			{ deploymentId: "deployment-id" },
 		);
 
 		expect(execProcess.execAsync).toHaveBeenCalledWith(
