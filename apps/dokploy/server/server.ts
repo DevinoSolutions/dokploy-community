@@ -6,6 +6,7 @@ import {
 	IS_CLOUD,
 	initCancelDeployments,
 	initCronJobs,
+	initDeploymentCancelAuditPruneCronJob,
 	initDoDomainSyncCronJobs,
 	initEnterpriseBackupCronJobs,
 	initializeNetwork,
@@ -143,6 +144,7 @@ void app
 				await sendDokployRestartNotifications();
 			}
 			await initEnterpriseBackupCronJobs();
+			initDeploymentCancelAuditPruneCronJob();
 
 			if (!isMcpDisabled()) {
 				initMcpTokenPurgeCronJob();
