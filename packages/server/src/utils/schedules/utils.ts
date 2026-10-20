@@ -240,17 +240,19 @@ export const runCommand = async (scheduleId: string) => {
 				await assertNotCancelled(deployment.deploymentId);
 				logFailureAfterwards = true;
 				// Only the pid line comes back over ssh; the output goes to the log.
+				// The command travels as the ssh channel's stdin into `docker exec -i`:
+				// it is on no command line, on the host or over ssh.
 				await execAsyncRemote(
 					serverId,
 					`
 					set -e
 					set -o pipefail
 					echo "Running scheduled command" >> ${quote([deployment.logPath])};
-					docker exec -e ${quote([`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`])} ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_RUN_WRAPPER])} ${quote([shellType])} ${quote([command])} 2>&1 | ${remoteRunOutputToLog(quote([deployment.logPath]))} || exit 1
+					docker exec -i -e ${quote([`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`])} ${quote([containerId])} ${quote([shellType])} -c ${quote([SCHEDULE_RUN_WRAPPER])} ${quote([shellType])} 2>&1 | ${remoteRunOutputToLog(quote([deployment.logPath]))} || exit 1
 					echo "✅ Command executed successfully" >> ${quote([deployment.logPath])};
 					`,
 					capturePid(deployment.deploymentId),
-					{ streamOnly: true },
+					{ streamOnly: true, stdin: command },
 				);
 			} else {
 				const writeStream = createWriteStream(deployment.logPath, {
@@ -271,10 +273,11 @@ export const runCommand = async (scheduleId: string) => {
 					writeStream.write(
 						`docker exec ${containerId} ${shellType} -c ${command}\n`,
 					);
-					await spawnAsync(
+					const run = spawnAsync(
 						"docker",
 						[
 							"exec",
+							"-i",
 							"-e",
 							`${SCHEDULE_RUN_ENV}=${deployment.deploymentId}`,
 							containerId,
@@ -282,7 +285,6 @@ export const runCommand = async (scheduleId: string) => {
 							"-c",
 							SCHEDULE_RUN_WRAPPER,
 							shellType,
-							command,
 						],
 						(data) => {
 							const output = capture(data);
@@ -291,6 +293,12 @@ export const runCommand = async (scheduleId: string) => {
 							}
 						},
 					);
+					// The command goes in through stdin, never through the arguments. A
+					// run that exits without reading it must not crash on EPIPE; its
+					// exit status is what counts.
+					run.child?.stdin?.on("error", () => {});
+					run.child?.stdin?.end(command);
+					await run;
 
 					writeStream.write("✅ Command executed successfully\n");
 					writeStream.end();

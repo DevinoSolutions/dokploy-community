@@ -16,10 +16,22 @@ const SCHEDULE_PID_MARKER = "__DOKPLOY_SCHEDULE_PID__";
 // command has not started (yet), or it is over.
 export const SCHEDULE_NONE_MARKER = "__DOKPLOY_SCHEDULE_NONE__";
 
-// Run as `<shell> -c <wrapper> <shell> <command>`: $0 is the shell, $1 the user
-// command, which is never interpolated into the script. It prints the pid that
-// the command will have (exec keeps it), then replaces itself with the command.
-export const SCHEDULE_RUN_WRAPPER = `printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$"; exec "$0" -c "$1"`;
+// Run as `<shell> -c <wrapper> <shell>` with the user command on stdin (`docker
+// exec -i`): $0 is the shell. The command is never part of a command line, so
+// it is not capped at 128 KB (MAX_ARG_STRLEN) and does not show in `ps` on the
+// host. The wrapper prints the pid that the command will have (exec keeps it),
+// reads the command and runs it from a 0600 file that it unlinks as soon as it
+// is open, so nothing is left behind in the container either. A container whose
+// temp directory cannot be written falls back to `-c` with the command as one
+// argument, which is how every run used to work.
+export const SCHEDULE_RUN_WRAPPER = [
+	`printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$"`,
+	"s=$(cat) || exit 1",
+	'f="${TMPDIR:-/tmp}/.dokploy-schedule-$$"',
+	`if ( set -C; umask 077; printf '%s\\n' "$s" > "$f" ) 2>/dev/null && exec 3< "$f" && [ -r /dev/fd/3 ]; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
+	'rm -f "$f"',
+	'exec "$0" -c "$s"',
+].join("; ");
 
 // Run as `<shell> -c <script> <shell> <deploymentId>`. Processes are frozen
 // before they are killed so a looping command cannot fork a replacement while
