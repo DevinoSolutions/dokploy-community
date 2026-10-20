@@ -608,9 +608,7 @@ describe("build commands in a real shell", () => {
 			}
 			expect(buildEnv.get("LD_PRELOAD")).toBe("/x.so");
 			const buildArgs = argsOf(out, "docker-buildx");
-			expect(buildArgs).toContain("--secret
-id=T_QUOTES,env=T_QUOTES
-");
+			expect(buildArgs).toContain("--secret\nid=T_QUOTES,env=T_QUOTES\n");
 			expect(buildArgs).not.toContain("pwned");
 		},
 	);
