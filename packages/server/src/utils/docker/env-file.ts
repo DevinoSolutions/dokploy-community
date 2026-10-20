@@ -18,7 +18,8 @@ export const singleQuote = (value: string) =>
 /**
  * Names that must not be sourced into the environment of a build tool. Setting
  * them changes how the tool itself runs rather than what it builds (`PATH`,
- * `HOME`, `DOCKER_HOST`, `LD_PRELOAD`, proxies, `GIT_*`, `PACK_*`, Go runtime
+ * `HOME`, `DOCKER_HOST`, `LD_PRELOAD`, proxies, git's and pack's own settings such as `GIT_SSH_COMMAND` and
+ * `PACK_HOME`, Go runtime
  * and libc tunables, ...), or is read-only in some `sh` (`UID`, `PPID`), which
  * would fail the build. A build argument with one of
  * these names keeps being passed on the command line, as it always was.
@@ -33,6 +34,17 @@ const ENV_FILE_RESERVED_NAMES = new Set([
 	"ENV",
 	"EUID",
 	"GID",
+	"GIT_ASKPASS",
+	"GIT_CONFIG",
+	"GIT_CONFIG_COUNT",
+	"GIT_CONFIG_GLOBAL",
+	"GIT_CONFIG_SYSTEM",
+	"GIT_DIR",
+	"GIT_EXEC_PATH",
+	"GIT_SSH",
+	"GIT_SSH_COMMAND",
+	"GIT_TEMPLATE_DIR",
+	"GIT_WORK_TREE",
 	"GLIBC_TUNABLES",
 	"GLOBIGNORE",
 	"GODEBUG",
@@ -53,6 +65,8 @@ const ENV_FILE_RESERVED_NAMES = new Set([
 	"OLDPWD",
 	"OPTARG",
 	"OPTIND",
+	"PACK_HOME",
+	"PACK_VOLUME_KEY",
 	"PATH",
 	"PPID",
 	"PS1",
@@ -84,10 +98,10 @@ const ENV_FILE_RESERVED_PREFIXES = [
 	"BUILDKIT_",
 	"BUILDX_",
 	"DOCKER_",
-	"GIT_",
+	"GIT_CONFIG_KEY_",
+	"GIT_CONFIG_VALUE_",
 	"LC_",
 	"LD_",
-	"PACK_",
 	"XDG_",
 ];
 
@@ -117,6 +131,13 @@ export const buildEnvFileContent = (entries: Iterable<[string, string]>) => {
  * The command is resolved before the file is sourced, so a file that sets
  * `PATH` cannot redirect it. `|| exit 1` keeps a missing or unreadable file
  * fatal on every `sh`, so the tool never runs without its variables.
+ *
+ * `consume` removes the file right after it is sourced, for a command that
+ * runs the loader once: the secrets are then on disk only for the instant it
+ * takes to read them, not for the whole build.
  */
-export const getEnvFileLoader = (stagedPath: string) =>
-	`sh -c '__dokploy_bin=$(command -v "$2") || exit 1; set -a; . "$1" || exit 1; set +a; shift 2; exec "$__dokploy_bin" "$@"' sh ${quote([stagedPath])}`;
+export const getEnvFileLoader = (
+	stagedPath: string,
+	{ consume = false }: { consume?: boolean } = {},
+) =>
+	`sh -c '__dokploy_bin=$(command -v "$2") || exit 1; set -a; . "$1" || exit 1; set +a;${consume ? ' rm -f "$1";' : ""} shift 2; exec "$__dokploy_bin" "$@"' sh ${quote([stagedPath])}`;

@@ -1,7 +1,13 @@
 import * as adminService from "@dokploy/server/services/admin";
 import * as applicationService from "@dokploy/server/services/application";
-import { deployApplication } from "@dokploy/server/services/application";
+import {
+	deployApplication,
+	deployPreviewApplication,
+	rebuildApplication,
+	rebuildPreviewApplication,
+} from "@dokploy/server/services/application";
 import * as deploymentService from "@dokploy/server/services/deployment";
+import * as previewDeploymentService from "@dokploy/server/services/preview-deployment";
 import * as builders from "@dokploy/server/utils/builders";
 import * as notifications from "@dokploy/server/utils/notifications/build-success";
 import * as staging from "@dokploy/server/utils/docker/staging";
@@ -71,7 +77,24 @@ vi.mock("@dokploy/server/services/admin", () => ({
 	getDokployUrl: vi.fn(),
 }));
 
+vi.mock("@dokploy/server/services/preview-deployment", () => ({
+	findPreviewDeploymentById: vi.fn(),
+	updatePreviewDeployment: vi.fn(),
+}));
+
+vi.mock("@dokploy/server/services/preview-comment", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/services/preview-comment")
+	>("@dokploy/server/services/preview-comment");
+	return { ...actual, upsertPreviewComment: vi.fn() };
+});
+
+vi.mock("@dokploy/server/utils/providers/github", () => ({
+	cloneGithubRepository: vi.fn().mockResolvedValue("git clone;"),
+}));
+
 vi.mock("@dokploy/server/services/deployment", () => ({
+	createDeploymentPreview: vi.fn(),
 	createDeployment: vi.fn(),
 	updateDeploymentStatus: vi.fn(),
 	updateDeployment: vi.fn(),
@@ -380,4 +403,154 @@ describe("deployApplication - Command Generation Tests", () => {
 			"/etc/dokploy/applications/a/.dokploy-stage-x",
 		]);
 	});
+});
+
+describe("staged build file cleanup on every deploy path", () => {
+	const stagedPath = "/apps/test-app/.dokploy-stage-build-env-one";
+	const previewDeployment = {
+		previewDeploymentId: "preview-id",
+		appName: "test-app-preview",
+		branch: "feature",
+		pullRequestId: "7",
+		pullRequestNumber: "7",
+		domain: { host: "pr-7.example.com" },
+	};
+
+	// The build command stages a file, then the deploy fails before the script runs.
+	const stageThenFail = () => {
+		vi.mocked(builders.getBuildCommand).mockImplementation(
+			async (_application, _serverId, options) => {
+				options?.onStaged?.([stagedPath]);
+				throw new Error("build failed");
+			},
+		);
+	};
+
+	const useApplication = (overrides = {}) => {
+		const app = createMockApplication({ sourceType: "github", ...overrides });
+		vi.mocked(db.query.applications.findFirst).mockResolvedValue(app as any);
+		vi.mocked(applicationService.findApplicationById).mockResolvedValue(
+			app as any,
+		);
+	};
+
+	const runners = {
+		rebuildApplication: () =>
+			rebuildApplication({
+				applicationId: "test-app-id",
+				titleLog: "Rebuild",
+				descriptionLog: "",
+			}),
+		deployPreviewApplication: () =>
+			deployPreviewApplication({
+				applicationId: "test-app-id",
+				titleLog: "Preview",
+				descriptionLog: "",
+				previewDeploymentId: "preview-id",
+			}),
+		rebuildPreviewApplication: () =>
+			rebuildPreviewApplication({
+				applicationId: "test-app-id",
+				titleLog: "Rebuild preview",
+				descriptionLog: "",
+				previewDeploymentId: "preview-id",
+			}),
+	};
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		useApplication();
+		vi.mocked(adminService.getDokployUrl).mockResolvedValue(
+			"http://localhost:3000",
+		);
+		for (const create of [
+			deploymentService.createDeployment,
+			deploymentService.createDeploymentPreview,
+		]) {
+			vi.mocked(create).mockResolvedValue(createMockDeployment() as any);
+		}
+		vi.mocked(execProcess.execAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "",
+		} as any);
+		vi.mocked(execProcess.execAsyncRemote).mockResolvedValue({
+			stdout: "",
+			stderr: "",
+		} as any);
+		vi.mocked(deploymentService.updateDeploymentStatus).mockResolvedValue(
+			undefined as any,
+		);
+		vi.mocked(deploymentService.updateDeployment).mockResolvedValue({} as any);
+		vi.mocked(applicationService.updateApplicationStatus).mockResolvedValue(
+			{} as any,
+		);
+		vi.mocked(
+			previewDeploymentService.findPreviewDeploymentById,
+		).mockResolvedValue(previewDeployment as any);
+		vi.mocked(
+			previewDeploymentService.updatePreviewDeployment,
+		).mockResolvedValue({} as any);
+		vi.mocked(gitProvider.getGitCommitInfo).mockResolvedValue(null as any);
+		vi.mocked(staging.removeStagedFiles).mockResolvedValue(undefined);
+	});
+
+	it.each(Object.entries(runners))(
+		"%s removes the staged files on the local host",
+		async (_name, run) => {
+			stageThenFail();
+
+			await run().catch(() => undefined);
+
+			expect(staging.removeStagedFiles).toHaveBeenCalledWith(null, [
+				stagedPath,
+			]);
+		},
+	);
+
+	it.each(Object.entries(runners))(
+		"%s removes them on the build server the files were staged on",
+		async (_name, run) => {
+			useApplication({ buildServerId: "build-1" });
+			stageThenFail();
+
+			await run().catch(() => undefined);
+
+			expect(builders.getBuildCommand).toHaveBeenCalledWith(
+				expect.anything(),
+				"build-1",
+				expect.anything(),
+			);
+			expect(staging.removeStagedFiles).toHaveBeenCalledWith("build-1", [
+				stagedPath,
+			]);
+		},
+	);
+
+	it.each([
+		["deployApplication", () =>
+			deployApplication({
+				applicationId: "test-app-id",
+				titleLog: "Deploy",
+				descriptionLog: "",
+			})],
+		...Object.entries(runners),
+	])(
+		"%s marks the deployment failed without waiting for the removal",
+		async (_name, run) => {
+			useApplication({ buildServerId: "build-1" });
+			stageThenFail();
+			// An unreachable build server: the removal never settles.
+			vi.mocked(staging.removeStagedFiles).mockReturnValue(
+				new Promise(() => {}),
+			);
+
+			await run().catch(() => undefined);
+
+			expect(staging.removeStagedFiles).toHaveBeenCalled();
+			expect(deploymentService.updateDeploymentStatus).toHaveBeenCalledWith(
+				"deployment-id",
+				"error",
+			);
+		},
+	);
 });

@@ -433,7 +433,7 @@ export const deployApplication = async ({
 			});
 		}
 	} catch (error) {
-		await removeStagedFiles(serverId, stagedBuildFiles);
+		void removeStagedFiles(serverId, stagedBuildFiles);
 		const cancelled = await settleCancelledApplicationDeploy(
 			applicationId,
 			deployment,
@@ -661,7 +661,7 @@ export const rebuildApplication = async ({
 			});
 		}
 	} catch (error) {
-		await removeStagedFiles(serverId, stagedBuildFiles);
+		void removeStagedFiles(serverId, stagedBuildFiles);
 		const cancelled = await settleCancelledApplicationDeploy(
 			applicationId,
 			deployment,
@@ -1015,7 +1015,7 @@ export const deployPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
-		await removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
+		void removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
 		let command = "";
 		if (!(error instanceof ExecError)) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1258,7 +1258,7 @@ export const rebuildPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
-		await removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
+		void removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
 		let command = "";
 
 		// Only log details for non-ExecError errors
