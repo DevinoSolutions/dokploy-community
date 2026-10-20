@@ -756,7 +756,7 @@ describe.skipIf(process.platform !== "linux")(
 			const run = runWrapper("sh", 'echo "$0"\nexit 0');
 
 			expect(run.stdout.split("\n")[1]).toBe("/dev/fd/3");
-			expect(SCHEDULE_RUN_WRAPPER).toContain("printf 'exec 3<&-\n%s\n'");
+			expect(SCHEDULE_RUN_WRAPPER).toContain(String.raw`printf 'exec 3<&-\n%s\n'`);
 		});
 
 		describe("temp file name", () => {
