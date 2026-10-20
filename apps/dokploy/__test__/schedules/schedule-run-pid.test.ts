@@ -6,6 +6,7 @@ import {
 	readFileSync,
 	rmSync,
 	symlinkSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -739,6 +740,117 @@ describe.skipIf(process.platform !== "linux")(
 
 			expect(run.status).toBe(0);
 			expect(run.stderr).not.toContain(FALLBACK_LINE);
+		});
+
+		it.each([
+			["bash", ["-C"]],
+			["bash", ["-o", "noclobber"]],
+		])(
+			"%s %j: stages through the file even when the shell inherited noclobber",
+			(shell, flags) => {
+				if (spawnSync(shell, ["-c", "true"]).error) return;
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-wrapper-"));
+				try {
+					const run = spawnSync(
+						shell,
+						[...flags, "-c", SCHEDULE_RUN_WRAPPER, shell],
+						{
+							input: 'echo "ran from $0"\nexit 6',
+							encoding: "utf8",
+							env: { ...process.env, TMPDIR: tmp },
+						},
+					);
+
+					expect(run.status).toBe(6);
+					expect(run.stdout).toContain("ran from /dev/fd/3\n");
+					expect(run.stderr).not.toContain(FALLBACK_LINE);
+					expect(readdirSync(tmp)).toEqual([]);
+				} finally {
+					rmSync(tmp, { recursive: true, force: true });
+				}
+			},
+		);
+
+		it("stages through the pid named file when mktemp fails", () => {
+			const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+			const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
+			try {
+				// A mktemp that fails, so the pid named file is used.
+				writeFileSync(join(bin, "mktemp"), "#!/bin/sh\nexit 1\n", {
+					mode: 0o755,
+				});
+				const run = runWrapper("sh", "exit 2", {
+					TMPDIR: tmp,
+					PATH: `${bin}:${process.env.PATH}`,
+				});
+
+				expect(run.status).toBe(2);
+				expect(run.stderr).not.toContain(FALLBACK_LINE);
+				expect(readdirSync(tmp)).toEqual([]);
+			} finally {
+				rmSync(bin, { recursive: true, force: true });
+				rmSync(tmp, { recursive: true, force: true });
+			}
+		});
+
+		describe("sweep of leftover run files", () => {
+			const setup = () => {
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-sweep-"));
+				const old = new Date(Date.now() - 2 * 60 * 60_000);
+				const oldRun = join(tmp, ".dokploy-schedule-AbCdEf");
+				const oldOther = join(tmp, "unrelated-old-file");
+				const freshRun = join(tmp, ".dokploy-schedule-fresh1");
+				for (const file of [oldRun, oldOther, freshRun]) {
+					writeFileSync(file, "echo left");
+				}
+				utimesSync(oldRun, old, old);
+				utimesSync(oldOther, old, old);
+				return { tmp, oldRun, oldOther, freshRun };
+			};
+
+			it.each(["sh", "bash"])(
+				"%s: removes run files older than an hour and nothing else, silently",
+				(shell) => {
+					if (spawnSync(shell, ["-c", "true"]).error) return;
+					const { tmp, oldRun, oldOther, freshRun } = setup();
+					try {
+						const run = runWrapper(shell, "exit 0", { TMPDIR: tmp });
+
+						expect(run.status).toBe(0);
+						expect(run.stderr).toBe("");
+						expect(existsSync(oldRun)).toBe(false);
+						expect(existsSync(oldOther)).toBe(true);
+						expect(existsSync(freshRun)).toBe(true);
+					} finally {
+						rmSync(tmp, { recursive: true, force: true });
+					}
+				},
+			);
+
+			it("runs the command normally when there is no find", () => {
+				const { tmp, oldRun } = setup();
+				const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+				try {
+					// A PATH with the tools the wrapper needs, and no find.
+					for (const tool of ["cat", "mktemp", "rm"]) {
+						const found = spawnSync("sh", ["-c", `command -v ${tool}`], {
+							encoding: "utf8",
+						}).stdout.trim();
+						if (found) symlinkSync(found, join(bin, tool));
+					}
+					const sh = spawnSync("sh", ["-c", "command -v sh"], {
+						encoding: "utf8",
+					}).stdout.trim();
+					const run = runWrapper(sh, "exit 4", { TMPDIR: tmp, PATH: bin });
+
+					expect(run.status).toBe(4);
+					expect(run.stderr).toBe("");
+					expect(existsSync(oldRun)).toBe(true);
+				} finally {
+					rmSync(tmp, { recursive: true, force: true });
+					rmSync(bin, { recursive: true, force: true });
+				}
+			});
 		});
 
 		it("closes fd 3 first, so the command does not inherit the script", () => {
