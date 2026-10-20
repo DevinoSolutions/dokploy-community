@@ -4,6 +4,7 @@ import { deployApplication } from "@dokploy/server/services/application";
 import * as deploymentService from "@dokploy/server/services/deployment";
 import * as builders from "@dokploy/server/utils/builders";
 import * as notifications from "@dokploy/server/utils/notifications/build-success";
+import * as staging from "@dokploy/server/utils/docker/staging";
 import * as execProcess from "@dokploy/server/utils/process/execAsync";
 import * as gitProvider from "@dokploy/server/utils/providers/git";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -88,8 +89,19 @@ vi.mock("@dokploy/server/utils/providers/git", async () => {
 
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	execAsync: vi.fn(),
+	execAsyncRemote: vi.fn(),
 	ExecError: class ExecError extends Error {},
 }));
+
+vi.mock("@dokploy/server/utils/docker/staging", async () => {
+	const actual = await vi.importActual<
+		typeof import("@dokploy/server/utils/docker/staging")
+	>("@dokploy/server/utils/docker/staging");
+	return {
+		...actual,
+		removeStagedFiles: vi.fn().mockResolvedValue(undefined),
+	};
+});
 
 vi.mock("@dokploy/server/utils/builders", async () => {
 	const actual = await vi.importActual<
@@ -240,6 +252,7 @@ describe("deployApplication - Command Generation Tests", () => {
 				buildPath: "/astro",
 			}),
 			null,
+			{ deploymentId: "deployment-id", onStaged: expect.any(Function) },
 		);
 
 		expect(execProcess.execAsync).toHaveBeenCalledWith(
@@ -270,6 +283,7 @@ describe("deployApplication - Command Generation Tests", () => {
 				buildType: "railpack",
 			}),
 			null,
+			{ deploymentId: "deployment-id", onStaged: expect.any(Function) },
 		);
 
 		expect(execProcess.execAsync).toHaveBeenCalledWith(
@@ -310,5 +324,60 @@ describe("deployApplication - Command Generation Tests", () => {
 		const fullCommand = execCalls[0]?.[0];
 
 		expect(fullCommand).toContain(">> /tmp/test-deployment.log 2>&1");
+	});
+
+	it("removes the staged build files when the script fails before the build", async () => {
+		vi.mocked(builders.getBuildCommand).mockImplementation(
+			async (_application, _serverId, options) => {
+				options?.onStaged?.(["/apps/test-app/.dokploy-stage-build-env-one"]);
+				return "nixpacks build";
+			},
+		);
+		// The clone, patch or build step fails under `set -e`.
+		vi.mocked(execProcess.execAsync).mockRejectedValueOnce(
+			new Error("clone failed"),
+		);
+
+		await deployApplication({
+			applicationId: "test-app-id",
+			titleLog: "Test",
+			descriptionLog: "",
+		}).catch(() => undefined);
+
+		expect(staging.removeStagedFiles).toHaveBeenCalledWith(null, [
+			"/apps/test-app/.dokploy-stage-build-env-one",
+		]);
+	});
+
+	it("removes them on the build server the files were staged on", async () => {
+		const app = createMockApplication({ buildServerId: "build-1" });
+		vi.mocked(db.query.applications.findFirst).mockResolvedValue(app as any);
+		vi.mocked(applicationService.findApplicationById).mockResolvedValue(
+			app as any,
+		);
+		vi.mocked(builders.getBuildCommand).mockImplementation(
+			async (_application, _serverId, options) => {
+				options?.onStaged?.(["/etc/dokploy/applications/a/.dokploy-stage-x"]);
+				return "nixpacks build";
+			},
+		);
+		vi.mocked(execProcess.execAsyncRemote).mockRejectedValue(
+			new Error("ssh dropped"),
+		);
+
+		await deployApplication({
+			applicationId: "test-app-id",
+			titleLog: "Test",
+			descriptionLog: "",
+		}).catch(() => undefined);
+
+		expect(builders.getBuildCommand).toHaveBeenCalledWith(
+			expect.anything(),
+			"build-1",
+			expect.anything(),
+		);
+		expect(staging.removeStagedFiles).toHaveBeenCalledWith("build-1", [
+			"/etc/dokploy/applications/a/.dokploy-stage-x",
+		]);
 	});
 });

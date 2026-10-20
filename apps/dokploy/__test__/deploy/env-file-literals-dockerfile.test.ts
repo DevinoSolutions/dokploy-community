@@ -1,7 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { createEnvFileCommand } from "@dokploy/server/utils/builders/utils";
+import {
+	createEnvFileCommand,
+	getAppEnvFileContent,
+} from "@dokploy/server/utils/builders/utils";
+import {
+	getStagedFilePath,
+	stageFiles,
+} from "@dokploy/server/utils/docker/staging";
 import { parse } from "dotenv";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -26,15 +33,29 @@ const cases: Record<string, string> = {
 // in the generated command as relative POSIX paths and writes mangled-name
 // files into the repo. The command targets a POSIX host, so only run it there.
 describe.skipIf(process.platform === "win32")("createEnvFileCommand", () => {
-	it("writes special environment values that a generic dotenv parser reads back literally", () => {
+	it("writes special environment values that a generic dotenv parser reads back literally", async () => {
 		mkdirSync(codePath, { recursive: true });
 
 		const serviceEnv = Object.entries(cases)
 			.map(([key, value]) => `${key}=${value}`)
 			.join("\n");
 
-		const command = createEnvFileCommand(dockerFilePath, serviceEnv, "", "");
+		// The content is staged out of band and copied into place by the script.
+		const staged = getStagedFilePath({
+			directory: projectPath,
+			kind: "app-env",
+			deploymentId: "literals",
+		});
+		await stageFiles({
+			directory: projectPath,
+			files: [
+				{ path: staged, content: getAppEnvFileContent(serviceEnv, "", "") },
+			],
+		});
+		const command = createEnvFileCommand(dockerFilePath, staged);
+		expect(command).not.toContain("pa$word");
 		execFileSync("bash", ["-c", command]);
+		expect(existsSync(staged)).toBe(false);
 
 		const written = readFileSync(join(codePath, ".env"), "utf8");
 		const parsed = parse(written);

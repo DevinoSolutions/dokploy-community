@@ -1,6 +1,15 @@
 import type { ApplicationNested } from "@dokploy/server/utils/builders";
 import { getRailpackCommand } from "@dokploy/server/utils/builders/railpack";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The builder stages the env on the host that runs the build; these tests only
+// read the generated command.
+vi.mock("@dokploy/server/utils/docker/staging", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("@dokploy/server/utils/docker/staging")
+	>()),
+	stageFiles: vi.fn(),
+}));
 
 const createApplication = (
 	overrides: Partial<ApplicationNested> = {},
@@ -32,15 +41,15 @@ const getSecretsHash = (command: string) => {
 };
 
 describe("getRailpackCommand", () => {
-	it("includes secrets-hash without clean cache", () => {
-		const command = getRailpackCommand(createApplication());
+	it("includes secrets-hash without clean cache", async () => {
+		const command = await getRailpackCommand(createApplication());
 
 		expect(command).toContain("--build-arg secrets-hash=");
 		expect(command).not.toContain("cache-key=");
 	});
 
-	it("includes cache-key only when clean cache is enabled", () => {
-		const command = getRailpackCommand(
+	it("includes cache-key only when clean cache is enabled", async () => {
+		const command = await getRailpackCommand(
 			createApplication({
 				cleanCache: true,
 			}),
@@ -50,8 +59,8 @@ describe("getRailpackCommand", () => {
 		expect(command).toContain("--build-arg cache-key=");
 	});
 
-	it("installs Railpack through sudo for non-root users", () => {
-		const command = getRailpackCommand(createApplication());
+	it("installs Railpack through sudo for non-root users", async () => {
+		const command = await getRailpackCommand(createApplication());
 
 		expect(command).toContain(
 			'$SUDO_CMD bash -c "$(curl -fsSL https://railpack.com/install.sh)"',
@@ -59,13 +68,13 @@ describe("getRailpackCommand", () => {
 		expect(command).toContain("sudo -n true 2>/dev/null");
 	});
 
-	it("changes secrets-hash when an environment value changes", () => {
-		const firstCommand = getRailpackCommand(
+	it("changes secrets-hash when an environment value changes", async () => {
+		const firstCommand = await getRailpackCommand(
 			createApplication({
 				env: "TEST_VAR=one",
 			}),
 		);
-		const secondCommand = getRailpackCommand(
+		const secondCommand = await getRailpackCommand(
 			createApplication({
 				env: "TEST_VAR=two",
 			}),
@@ -76,8 +85,8 @@ describe("getRailpackCommand", () => {
 		);
 	});
 
-	it("changes secrets-hash when referenced project or environment values change", () => {
-		const firstCommand = getRailpackCommand(
+	it("changes secrets-hash when referenced project or environment values change", async () => {
+		const firstCommand = await getRailpackCommand(
 			createApplication({
 				env: [
 					"PROJECT_VALUE=${{project.SHARED_VALUE}}",
@@ -91,7 +100,7 @@ describe("getRailpackCommand", () => {
 				},
 			} as Partial<ApplicationNested>),
 		);
-		const secondCommand = getRailpackCommand(
+		const secondCommand = await getRailpackCommand(
 			createApplication({
 				env: [
 					"PROJECT_VALUE=${{project.SHARED_VALUE}}",
