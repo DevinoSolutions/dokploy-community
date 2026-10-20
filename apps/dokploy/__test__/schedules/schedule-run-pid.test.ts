@@ -838,10 +838,10 @@ describe.skipIf(process.platform !== "linux")(
 						}).stdout.trim();
 						if (found) symlinkSync(found, join(bin, tool));
 					}
-					const run = runWrapper("sh", "exit 4", {
-						TMPDIR: tmp,
-						PATH: bin,
-					});
+					const sh = spawnSync("sh", ["-c", "command -v sh"], {
+						encoding: "utf8",
+					}).stdout.trim();
+					const run = runWrapper(sh, "exit 4", { TMPDIR: tmp, PATH: bin });
 
 					expect(run.status).toBe(4);
 					expect(run.stderr).toBe("");
