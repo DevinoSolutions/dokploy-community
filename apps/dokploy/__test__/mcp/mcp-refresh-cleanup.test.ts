@@ -29,7 +29,7 @@ const evaluate = (where: SQL) => {
 	const predicates = body.split(" and ").map((part) => {
 		const match = PREDICATE.exec(part);
 		if (!match) throw new Error(`unsupported predicate: ${part}`);
-		const [, table, column, op, index] = match;
+		const [, table = "", column = "", op, index] = match;
 		return { table, column, op, value: params[Number(index) - 1] };
 	});
 	const table = predicates[0]?.table ?? "";
@@ -179,7 +179,10 @@ describe("deleteSupersededMcpAccessTokens", () => {
 });
 
 describe("cleanupAfterMcpTokenGrant", () => {
-	const refreshBody = { grant_type: "refresh_token", refresh_token: "refresh-1" };
+	const refreshBody = {
+		grant_type: "refresh_token",
+		refresh_token: "refresh-1",
+	};
 
 	it("removes the superseded token after a successful refresh", async () => {
 		await cleanupAfterMcpTokenGrant(refreshBody, {
