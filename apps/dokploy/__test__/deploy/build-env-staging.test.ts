@@ -730,10 +730,7 @@ describe("build commands in a real shell", () => {
 			// `docker cp` fails; every other docker call succeeds.
 			writeFileSync(
 				`${bin}/docker`,
-				'#!/bin/sh
-case "$1" in cp) exit 1;; esac
-exit 0
-',
+				'#!/bin/sh\ncase "$1" in cp) exit 1;; esac\nexit 0\n',
 			);
 			chmodSync(`${bin}/docker`, 0o755);
 			const script = await getNixpacksCommand(
