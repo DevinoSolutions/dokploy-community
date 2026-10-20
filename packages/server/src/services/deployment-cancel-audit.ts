@@ -7,7 +7,8 @@ import {
 	deploymentCancelAudit,
 	oauthClient,
 } from "@dokploy/server/db/schema";
-import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, lt } from "drizzle-orm";
+import { scheduleJob } from "node-schedule";
 
 /**
  * Fork-owned trail of who cancelled, killed or dropped a deployment or queued
@@ -219,4 +220,46 @@ export const findDeploymentCancelledByService = async ({
 		if (latest.size >= BY_SERVICE_DEPLOYMENT_LIMIT) break;
 	}
 	return [...latest.values()];
+};
+
+/** Entries older than this are pruned by the daily job. */
+export const DEPLOYMENT_CANCEL_AUDIT_RETENTION_DAYS = 180;
+
+/** Deletes entries older than the retention window; returns how many went. */
+export const pruneDeploymentCancelAudit = async (
+	now: Date = new Date(),
+): Promise<number> => {
+	const cutoff = new Date(
+		now.getTime() - DEPLOYMENT_CANCEL_AUDIT_RETENTION_DAYS * 86_400_000,
+	);
+	const removed = await db
+		.delete(deploymentCancelAudit)
+		.where(lt(deploymentCancelAudit.createdAt, cutoff))
+		.returning({ id: deploymentCancelAudit.deploymentCancelAuditId });
+	return removed.length;
+};
+
+/** Daily prune; registered from server.ts. */
+export const initDeploymentCancelAuditPruneCronJob = () => {
+	scheduleJob("deployment-cancel-audit-prune", "41 4 * * *", async () => {
+		try {
+			await pruneDeploymentCancelAudit();
+		} catch (error) {
+			console.error("[deployment-cancel-audit] prune failed", error);
+		}
+	});
+};
+
+/**
+ * Clears the email of a deleted user from their entries. The user id stays
+ * (a plain id with no foreign key), so the trail still tells actions apart.
+ */
+export const scrubDeploymentCancelAuditActorEmail = async (
+	userId: string,
+	executor: Pick<typeof db, "update"> = db,
+): Promise<void> => {
+	await executor
+		.update(deploymentCancelAudit)
+		.set({ actorEmail: null })
+		.where(eq(deploymentCancelAudit.actorId, userId));
 };

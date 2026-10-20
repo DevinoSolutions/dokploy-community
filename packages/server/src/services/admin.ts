@@ -8,6 +8,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
+import { scrubDeploymentCancelAuditActorEmail } from "./deployment-cancel-audit";
 import { removeOrganizationNotifications } from "./notification-channels";
 import { getWebServerSettings } from "./web-server-settings";
 
@@ -108,6 +109,8 @@ export const removeUserById = async (userId: string) => {
 		for (const { id } of owned) {
 			await removeOrganizationNotifications(id, tx);
 		}
+		// The trail keeps the user id but not the email of a deleted user.
+		await scrubDeploymentCancelAuditActorEmail(userId, tx);
 		await tx
 			.delete(user)
 			.where(eq(user.id, userId))
