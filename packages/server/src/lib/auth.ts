@@ -39,6 +39,7 @@ import {
 	normalizeMcpRegisterBody,
 	resolveMcpOrigin,
 } from "../services/mcp-oauth";
+import { cleanupAfterMcpTokenGrant } from "../services/mcp-refresh-cleanup";
 import { removeOrganizationNotifications } from "../services/notification-channels";
 import { createAuditLog } from "../services/proprietary/audit-log";
 import { resolveOrganizationDefaultRole } from "../services/proprietary/license-key";
@@ -371,6 +372,16 @@ const createBetterAuth = () =>
 							return { context: { body: { ...body, resource } } };
 						}
 					}
+				}
+			}),
+			after: createAuthMiddleware(async (ctx) => {
+				// A refresh leaves the access token it replaced valid until it
+				// expires; delete it (see mcp-refresh-cleanup).
+				if (ctx.path === "/oauth2/token") {
+					await cleanupAfterMcpTokenGrant(
+						readFormOrJsonBody(ctx.body),
+						ctx.context.returned,
+					);
 				}
 			}),
 		},
