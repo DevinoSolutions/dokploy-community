@@ -854,6 +854,7 @@ export const deployPreviewApplication = async ({
 		previewDomain,
 	});
 	const stagedBuildFiles: string[] = [];
+	let stagedBuildServerId: string | null | undefined;
 	try {
 		await writePreviewComment("running");
 
@@ -964,7 +965,11 @@ export const deployPreviewApplication = async ({
 		if (!isDockerPreview) {
 			command += await getBuildCommand(application, buildServerId, {
 				deploymentId: deployment.deploymentId,
-				onStaged: (paths) => stagedBuildFiles.push(...paths),
+				// `buildServerId` is only in scope here: remember the host the files are on.
+				onStaged: (paths) => {
+					stagedBuildServerId = buildServerId;
+					stagedBuildFiles.push(...paths);
+				},
 			});
 		}
 
@@ -1010,7 +1015,7 @@ export const deployPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
-		await removeStagedFiles(buildServerId, stagedBuildFiles);
+		await removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
 		let command = "";
 		if (!(error instanceof ExecError)) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1093,6 +1098,7 @@ export const rebuildPreviewApplication = async ({
 	});
 
 	const stagedBuildFiles: string[] = [];
+	let stagedBuildServerId: string | null | undefined;
 	try {
 		await writePreviewComment("running");
 
@@ -1207,7 +1213,11 @@ export const rebuildPreviewApplication = async ({
 		if (!isDockerPreview) {
 			command += await getBuildCommand(application, buildServerId, {
 				deploymentId: deployment.deploymentId,
-				onStaged: (paths) => stagedBuildFiles.push(...paths),
+				// `buildServerId` is only in scope here: remember the host the files are on.
+				onStaged: (paths) => {
+					stagedBuildServerId = buildServerId;
+					stagedBuildFiles.push(...paths);
+				},
 			});
 		}
 		// >>> build-policy hook 2/4 (preview rebuild)
@@ -1248,7 +1258,7 @@ export const rebuildPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
-		await removeStagedFiles(buildServerId, stagedBuildFiles);
+		await removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
 		let command = "";
 
 		// Only log details for non-ExecError errors
