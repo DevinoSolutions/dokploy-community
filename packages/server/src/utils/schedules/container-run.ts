@@ -28,7 +28,7 @@ export const SCHEDULE_RUN_WRAPPER = [
 	`printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$"`,
 	"s=$(cat) || exit 1",
 	'f="${TMPDIR:-/tmp}/.dokploy-schedule-$$"',
-	`if ( set -C; umask 077; printf '%s\\n' "$s" > "$f" ) 2>/dev/null && exec 3< "$f"; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
+	`if ( set -C; umask 077; printf '%s\\n' "$s" > "$f" ) 2>/dev/null && exec 3< "$f" && [ -r /dev/fd/3 ]; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
 	'rm -f "$f"',
 	'exec "$0" -c "$s"',
 ].join("; ");
