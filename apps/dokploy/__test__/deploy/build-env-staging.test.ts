@@ -89,7 +89,8 @@ const TRICKY: Record<string, string> = {
 	T_DOLLAR: "$HOME ${PATH} $(echo pwned) `echo pwned` $$ $1",
 	T_BACKSLASH: "back\\slash \\n literal \\\\ end\\",
 	T_EQUALS: "a=b=c",
-	T_SPACES: "  padded value  ",
+	// dotenv trims unquoted values before they reach the builders, so only inner spaces survive.
+	T_SPACES: "padded   value",
 	T_UNICODE: "héllo ✅ 日本語",
 };
 const trickyText = Object.entries(TRICKY)
