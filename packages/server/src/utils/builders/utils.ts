@@ -93,6 +93,9 @@ export interface BuildEnvFile {
 }
 
 /**
+ * Consumes the file by default: a caller that reads it twice must pass
+ * `singleUse: false`.
+ *
  * `singleUse`: the builder runs the loader once, so the loader deletes the file
  * as soon as it has read it. Railpack runs it twice (prepare, then build) and
  * leaves the file to `cleanup`.

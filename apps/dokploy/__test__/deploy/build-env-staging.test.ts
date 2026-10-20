@@ -246,6 +246,36 @@ describe("env file names", () => {
 			"GIT_CONFIG_VALUE_12",
 			"PACK_HOME",
 			"PACK_VOLUME_KEY",
+			// Behaviour the git run itself reads (and logs).
+			...["GIT_CURL_VERBOSE",
+			"GIT_CONFIG_PARAMETERS",
+			"GIT_CONFIG_NOSYSTEM",
+			"GIT_PROXY_COMMAND",
+			"GIT_INDEX_FILE",
+			"GIT_OBJECT_DIRECTORY",
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_COMMON_DIR",
+			"GIT_CEILING_DIRECTORIES",
+			"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+			"GIT_EXTERNAL_DIFF",
+			"GIT_PAGER",
+			"GIT_EDITOR",
+			"GIT_SEQUENCE_EDITOR",
+			"GIT_TERMINAL_PROMPT",
+			"GIT_SSH_VARIANT",
+			"GIT_ALLOW_PROTOCOL",
+			"GIT_PROTOCOL_FROM_USER",
+			"GIT_NAMESPACE",
+			"GIT_REPLACE_REF_BASE",
+			"GIT_NO_REPLACE_OBJECTS",
+			"GIT_QUARANTINE_PATH",
+			"GIT_OPTIONAL_LOCKS",
+			"GIT_REDACT_COOKIES"],
+			// One name per reserved prefix.
+			"GIT_TRACE",
+			"GIT_TRACE_CURL",
+			"GIT_SSL_NO_VERIFY",
+			"GIT_HTTP_PROXY_AUTHMETHOD",
 		]) {
 			expect(isEnvFileName(name), name).toBe(false);
 		}
@@ -851,7 +881,7 @@ describe("build commands in a real shell", () => {
 						{ deploymentId: "dep-rp-twice" },
 					)
 				).replace(/^\$SUDO_CMD bash -c .*$/m, "true");
-				expect(script).not.toContain('rm -f "$1"');
+				expect(script).not.toContain('rm -f -- "$1"');
 
 				const result = run(script, bin);
 

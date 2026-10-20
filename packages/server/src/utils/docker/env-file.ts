@@ -18,11 +18,11 @@ export const singleQuote = (value: string) =>
 /**
  * Names that must not be sourced into the environment of a build tool. Setting
  * them changes how the tool itself runs rather than what it builds (`PATH`,
- * `HOME`, `DOCKER_HOST`, `LD_PRELOAD`, proxies, git's and pack's own settings such as `GIT_SSH_COMMAND` and
- * `PACK_HOME`, Go runtime
- * and libc tunables, ...), or is read-only in some `sh` (`UID`, `PPID`), which
- * would fail the build. A build argument with one of
- * these names keeps being passed on the command line, as it always was.
+ * `HOME`, `DOCKER_HOST`, `LD_PRELOAD`, proxies, git's and pack's own settings such
+ * as `GIT_SSH_COMMAND` and `PACK_HOME`, Go runtime and libc tunables, ...), or is
+ * read-only in some `sh` (`UID`, `PPID`), which would fail the build. A build
+ * argument with one of these names keeps being passed on the command line, as it
+ * always was.
  */
 const ENV_FILE_RESERVED_NAMES = new Set([
 	"BASHOPTS",
@@ -34,16 +34,40 @@ const ENV_FILE_RESERVED_NAMES = new Set([
 	"ENV",
 	"EUID",
 	"GID",
+	"GIT_ALLOW_PROTOCOL",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
 	"GIT_ASKPASS",
+	"GIT_CEILING_DIRECTORIES",
+	"GIT_COMMON_DIR",
 	"GIT_CONFIG",
 	"GIT_CONFIG_COUNT",
 	"GIT_CONFIG_GLOBAL",
+	"GIT_CONFIG_NOSYSTEM",
+	"GIT_CONFIG_PARAMETERS",
 	"GIT_CONFIG_SYSTEM",
+	"GIT_CURL_VERBOSE",
 	"GIT_DIR",
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+	"GIT_EDITOR",
 	"GIT_EXEC_PATH",
+	"GIT_EXTERNAL_DIFF",
+	"GIT_INDEX_FILE",
+	"GIT_NAMESPACE",
+	"GIT_NO_REPLACE_OBJECTS",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_OPTIONAL_LOCKS",
+	"GIT_PAGER",
+	"GIT_PROTOCOL_FROM_USER",
+	"GIT_PROXY_COMMAND",
+	"GIT_QUARANTINE_PATH",
+	"GIT_REDACT_COOKIES",
+	"GIT_REPLACE_REF_BASE",
+	"GIT_SEQUENCE_EDITOR",
 	"GIT_SSH",
 	"GIT_SSH_COMMAND",
+	"GIT_SSH_VARIANT",
 	"GIT_TEMPLATE_DIR",
+	"GIT_TERMINAL_PROMPT",
 	"GIT_WORK_TREE",
 	"GLIBC_TUNABLES",
 	"GLOBIGNORE",
@@ -100,6 +124,9 @@ const ENV_FILE_RESERVED_PREFIXES = [
 	"DOCKER_",
 	"GIT_CONFIG_KEY_",
 	"GIT_CONFIG_VALUE_",
+	"GIT_HTTP_",
+	"GIT_SSL_",
+	"GIT_TRACE",
 	"LC_",
 	"LD_",
 	"XDG_",
@@ -140,4 +167,4 @@ export const getEnvFileLoader = (
 	stagedPath: string,
 	{ consume = false }: { consume?: boolean } = {},
 ) =>
-	`sh -c '__dokploy_bin=$(command -v "$2") || exit 1; set -a; . "$1" || exit 1; set +a;${consume ? ' rm -f "$1";' : ""} shift 2; exec "$__dokploy_bin" "$@"' sh ${quote([stagedPath])}`;
+	`sh -c '__dokploy_bin=$(command -v "$2") || exit 1; set -a; . "$1" || exit 1; set +a;${consume ? ' rm -f -- "$1";' : ""} shift 2; exec "$__dokploy_bin" "$@"' sh ${quote([stagedPath])}`;
