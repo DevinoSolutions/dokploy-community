@@ -810,7 +810,7 @@ describe.skipIf(process.platform !== "linux")(
 					const run = spawnSync(sh, ["-c", SCHEDULE_RUN_WRAPPER, sh], {
 						input: 'echo "ran $0"\nexit 6',
 						encoding: "utf8",
-						env: { PATH: bin, TMPDIR: tmp },
+						env: { ...process.env, PATH: bin, TMPDIR: tmp },
 					});
 
 					expect(run.status).toBe(6);
