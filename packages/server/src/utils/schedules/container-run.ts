@@ -10,6 +10,9 @@ import { getComposeContainer, getServiceContainer } from "../docker/utils";
  */
 export const SCHEDULE_RUN_ENV = "DOKPLOY_SCHEDULE_RUN";
 
+// Temp files of the wrapper older than this are leftovers of a killed run.
+const SCHEDULE_TEMP_MAX_AGE_MINUTES = 60;
+
 const SCHEDULE_PID_MARKER = "__DOKPLOY_SCHEDULE_PID__";
 
 // Printed by the kill script when no process carries the tag of the run: the
@@ -26,13 +29,20 @@ export const SCHEDULE_NONE_MARKER = "__DOKPLOY_SCHEDULE_NONE__";
 // argument, which is how every run used to work.
 export const SCHEDULE_RUN_WRAPPER = [
 	`printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$"`,
+	// A 0600 file holding a whole command outlives a run that was killed with
+	// SIGKILL (it cannot be trapped) between mktemp and the rm below. Sweep what
+	// is older than any run can take to open its file. Silent, and skipped when
+	// there is no find.
+	`{ find "\${TMPDIR:-/tmp}" -maxdepth 1 -type f -name '.dokploy-schedule-*' -mmin +${SCHEDULE_TEMP_MAX_AGE_MINUTES} -exec rm -f {} + >/dev/null 2>&1; } 2>/dev/null`,
 	"s=$(cat) || exit 1",
 	// mktemp makes the name unpredictable (and the file 0600). Without it the
 	// name is guessable, so that file is only written when it does not exist yet.
 	'if f=$(mktemp "${TMPDIR:-/tmp}/.dokploy-schedule-XXXXXX" 2>/dev/null); then c=; else f="${TMPDIR:-/tmp}/.dokploy-schedule-$$"; c=1; fi',
 	// The first line of the file closes fd 3 (the unlinked file), so the command
-	// and its children do not inherit it.
-	`if ( [ -n "$c" ] && set -C; umask 077; printf 'exec 3<&-\\n%s\\n' "$s" > "$f" ) 2>/dev/null && exec 3< "$f" && [ -r /dev/fd/3 ]; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
+	// and its children do not inherit it. The mktemp file already exists, so it
+	// is written with `>|` (a shell that inherited noclobber would refuse `>`);
+	// the pid named one must not exist, so there `set -C` makes `>` exclusive.
+	`if ( umask 077; if [ -n "$c" ]; then set -C; printf 'exec 3<&-\\n%s\\n' "$s" > "$f"; else printf 'exec 3<&-\\n%s\\n' "$s" >| "$f"; fi ) 2>/dev/null && exec 3< "$f" && [ -r /dev/fd/3 ]; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
 	'rm -f "$f"',
 	"exec 3<&-",
 	// The whole command is then in the process list of the container: say so in

@@ -6,6 +6,7 @@ import {
 	readFileSync,
 	rmSync,
 	statSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -191,6 +192,27 @@ describe("updateSchedule script handling", () => {
 			"echo new",
 		);
 		expect(readdirSync(dir)).toEqual(["script.sh"]);
+	});
+
+	it("sweeps stale staged scripts of earlier saves, and leaves a fresh one alone", async () => {
+		const appName = "schedule-run-fast-bus-GhI789";
+		mocks.base = mocks.fsRoot;
+		const dir = path.join(root, "schedules", appName);
+		mkdirSync(dir, { recursive: true });
+		const stale = path.join(dir, ".dokploy-stage-schedule-script-sch-1-old");
+		const fresh = path.join(dir, ".dokploy-stage-schedule-script-sch-1-new");
+		writeFileSync(stale, "echo stale");
+		writeFileSync(fresh, "echo fresh");
+		const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000);
+		utimesSync(stale, twoHoursAgo, twoHoursAgo);
+		mocks.returning.mockResolvedValue([row(appName)]);
+
+		await updateSchedule({ scheduleId: "sch-1" } as never);
+
+		expect(readdirSync(dir).sort()).toEqual([
+			".dokploy-stage-schedule-script-sch-1-new",
+			"script.sh",
+		]);
 	});
 
 	it("stages the script of a server schedule through SFTP and moves it into place", async () => {
