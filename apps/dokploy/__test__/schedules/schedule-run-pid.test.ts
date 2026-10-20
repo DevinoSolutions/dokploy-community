@@ -5,6 +5,8 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -443,6 +445,25 @@ describe("runCommand pid capture on the Dokploy host", () => {
 		expect(stdin.received()).toBe(`export TOKEN=${secret}`);
 	});
 
+	it("does not write the command into the run log", async () => {
+		const secret = "s3cr3t-token-value";
+		mocks.findScheduleById.mockResolvedValue({
+			...schedule(null),
+			command: `export TOKEN=${secret}`,
+		});
+		const stdin = hostStdin();
+		mocks.spawnAsync.mockImplementation(() =>
+			Object.assign(Promise.resolve({}), { child: { stdin: stdin.stream } }),
+		);
+
+		await runCommand("sch-1");
+
+		const log = loggedOutput();
+		expect(log).toContain("docker exec cont-1 bash");
+		expect(log).not.toContain(secret);
+		expect(log).not.toContain("-c export");
+	});
+
 	it("passes the run tag to docker exec, records the pid and keeps the marker out of the log", async () => {
 		mocks.findScheduleById.mockResolvedValue(schedule(null));
 		const stdin = hostStdin();
@@ -688,6 +709,120 @@ describe.skipIf(process.platform !== "linux")(
 
 			expect(run.status).toBe(3);
 			expect(run.stdout).toContain("fallback ok\n");
+		});
+
+		const FALLBACK_LINE =
+			"dokploy: could not stage the schedule command in a file, running it as a -c argument";
+
+		it("falls back to -c and says so on stderr, without the command, when /dev/fd is not readable", () => {
+			const secret = "s3cr3t-token-value";
+			// Same wrapper, with a descriptor path that cannot be read.
+			const wrapper = SCHEDULE_RUN_WRAPPER.replace(
+				"[ -r /dev/fd/3 ]",
+				"[ -r /dev/fd/no-such-fd ]",
+			);
+			expect(wrapper).not.toBe(SCHEDULE_RUN_WRAPPER);
+
+			const run = spawnSync("sh", ["-c", wrapper, "sh"], {
+				input: `echo "ran ${secret}"\nexit 4`,
+				encoding: "utf8",
+			});
+
+			expect(run.status).toBe(4);
+			expect(run.stdout).toContain(`ran ${secret}\n`);
+			expect(run.stderr).toContain(FALLBACK_LINE);
+			expect(run.stderr).not.toContain(secret);
+		});
+
+		it("prints no fallback line when the command runs from the file", () => {
+			const run = runWrapper("sh", "exit 0");
+
+			expect(run.status).toBe(0);
+			expect(run.stderr).not.toContain(FALLBACK_LINE);
+		});
+
+		it("closes fd 3 first, so the command does not inherit the script", () => {
+			const run = runWrapper(
+				"sh",
+				'if [ -e /proc/$$/fd/3 ]; then echo "fd3 open"; else echo "fd3 closed"; fi',
+			);
+
+			expect(run.status).toBe(0);
+			expect(run.stdout).toContain("fd3 closed\n");
+			expect(run.stdout).not.toContain("fd3 open");
+		});
+
+		it("makes the first line of the run file close fd 3", () => {
+			const run = runWrapper("sh", 'echo "$0"\nexit 0');
+
+			expect(run.stdout.split("\n")[1]).toBe("/dev/fd/3");
+			expect(SCHEDULE_RUN_WRAPPER).toContain(String.raw`printf 'exec 3<&-\n%s\n'`);
+		});
+
+		describe("temp file name", () => {
+			const realMktemp = spawnSync("sh", ["-c", "command -v mktemp"], {
+				encoding: "utf8",
+			}).stdout?.trim() ?? "";
+
+			it.skipIf(!realMktemp)(
+				"uses mktemp for an unpredictable name",
+				() => {
+					const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+					const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
+					try {
+						const calls = join(bin, "calls");
+						writeFileSync(
+							join(bin, "mktemp"),
+							`#!/bin/sh\necho "$@" >> '${calls}'\nexec '${realMktemp}' "$@"\n`,
+							{ mode: 0o755 },
+						);
+						const run = runWrapper("sh", "exit 5", {
+							TMPDIR: tmp,
+							PATH: `${bin}:${process.env.PATH}`,
+						});
+
+						expect(run.status).toBe(5);
+						expect(readFileSync(calls, "utf8")).toContain(
+							`${tmp}/.dokploy-schedule-XXXXXX`,
+						);
+						expect(readdirSync(tmp)).toEqual([]);
+					} finally {
+						rmSync(bin, { recursive: true, force: true });
+						rmSync(tmp, { recursive: true, force: true });
+					}
+				},
+			);
+
+			it("still runs from the file, under the pid based name, when there is no mktemp", () => {
+				const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
+				try {
+					// A PATH with the tools the wrapper needs, and no mktemp.
+					for (const tool of ["cat", "rm"]) {
+						const found = spawnSync("sh", ["-c", `command -v ${tool}`], {
+							encoding: "utf8",
+						}).stdout.trim();
+						symlinkSync(found, join(bin, tool));
+					}
+					const sh = spawnSync("sh", ["-c", "command -v sh"], {
+						encoding: "utf8",
+					}).stdout.trim();
+					const run = spawnSync(sh, ["-c", SCHEDULE_RUN_WRAPPER, sh], {
+						input: 'echo "ran $0"\nexit 6',
+						encoding: "utf8",
+						env: { ...process.env, PATH: bin, TMPDIR: tmp },
+					});
+
+					expect(run.status).toBe(6);
+					expect(run.stdout).toContain("ran /dev/fd/3\n");
+					expect(run.stderr).not.toContain("could not stage");
+					expect(readdirSync(tmp)).toEqual([]);
+
+				} finally {
+					rmSync(bin, { recursive: true, force: true });
+					rmSync(tmp, { recursive: true, force: true });
+				}
+			});
 		});
 
 		it("the kill script leaves a run with another tag alone", async () => {

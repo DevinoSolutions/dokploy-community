@@ -27,9 +27,17 @@ export const SCHEDULE_NONE_MARKER = "__DOKPLOY_SCHEDULE_NONE__";
 export const SCHEDULE_RUN_WRAPPER = [
 	`printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$"`,
 	"s=$(cat) || exit 1",
-	'f="${TMPDIR:-/tmp}/.dokploy-schedule-$$"',
-	`if ( set -C; umask 077; printf '%s\\n' "$s" > "$f" ) 2>/dev/null && exec 3< "$f" && [ -r /dev/fd/3 ]; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
+	// mktemp makes the name unpredictable (and the file 0600). Without it the
+	// name is guessable, so that file is only written when it does not exist yet.
+	'if f=$(mktemp "${TMPDIR:-/tmp}/.dokploy-schedule-XXXXXX" 2>/dev/null); then c=; else f="${TMPDIR:-/tmp}/.dokploy-schedule-$$"; c=1; fi',
+	// The first line of the file closes fd 3 (the unlinked file), so the command
+	// and its children do not inherit it.
+	`if ( [ -n "$c" ] && set -C; umask 077; printf 'exec 3<&-\\n%s\\n' "$s" > "$f" ) 2>/dev/null && exec 3< "$f" && [ -r /dev/fd/3 ]; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
 	'rm -f "$f"',
+	"exec 3<&-",
+	// The whole command is then in the process list of the container: say so in
+	// the run log (never with the command in it).
+	`echo "dokploy: could not stage the schedule command in a file, running it as a -c argument" >&2`,
 	'exec "$0" -c "$s"',
 ].join("; ");
 

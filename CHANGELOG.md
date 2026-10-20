@@ -2,6 +2,10 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+**Schedule run script follow-ups** (T-4688, after [#431](https://github.com/DevinoSolutions/dokploy-community/pull/431)). Application and compose schedules now run their command from an unlinked file descriptor, so `$0` and `BASH_SOURCE` are `/dev/fd/3` and shell errors read `/dev/fd/3: line N` instead of naming a script path. The first line of that file closes fd 3, so line numbers in errors are one higher than the line in the schedule's command. When the container cannot stage the file (for example a read-only root filesystem without a tmpfs), the run log now says so on one line; the command then runs as a `-c` argument and is visible in the container's process list.
+
 ### New in v0.30.8-community.30
 
 **Opt-in rolling replace for Compose services** ([#399](https://github.com/DevinoSolutions/dokploy-community/pull/399), issue [#374](https://github.com/DevinoSolutions/dokploy-community/issues/374) item 4). Off by default. A plain `docker compose up -d` stops the old container before the new one exists, which leaves a window with no backend. With rolling replace enabled for a service, the new image is built or pulled first, a second replica is started next to the old container, and the old container is stopped and removed only after the new replica reports healthy and a drain delay has passed. A replica that never becomes healthy is removed and the old container keeps serving.
