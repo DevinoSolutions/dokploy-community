@@ -18,6 +18,7 @@ import {
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { getRemoteDocker } from "../servers/remote-docker";
+import { removeStagedFiles, type StageOptions } from "../docker/staging";
 import { withResolvedVaultRefs } from "../vault";
 import { getDockerCommand } from "./docker-file";
 import { getHerokuCommand } from "./heroku";
@@ -56,40 +57,58 @@ export type ApplicationNested = InferResultType<
 export const getBuildCommand = async (
 	rawApplication: ApplicationNested,
 	serverId: string | null | undefined,
+	options: StageOptions = {},
 ) => {
 	const application = await withResolvedVaultRefs(rawApplication);
 	let command = "";
 
-	if (application.sourceType !== "docker") {
-		const { buildType } = application;
-		switch (buildType) {
-			case "nixpacks":
-				command = getNixpacksCommand(application);
-				break;
-			case "heroku_buildpacks":
-				command = getHerokuCommand(application);
-				break;
-			case "paketo_buildpacks":
-				command = getPaketoCommand(application);
-				break;
-			case "static":
-				command = getStaticCommand(application);
-				break;
-			case "dockerfile":
-				command = getDockerCommand(application);
-				break;
-			case "railpack":
-				command = getRailpackCommand(application);
-				break;
-		}
-	}
+	// Env files staged for the build are written on the host that runs it. If a
+	// later step fails before the script runs, they are not left behind.
+	const staged: string[] = [];
+	const stageOptions = {
+		...options,
+		serverId,
+		onStaged: (paths: string[]) => {
+			staged.push(...paths);
+			options.onStaged?.(paths);
+		},
+	};
 
-	if (
-		application.registry ||
-		application.buildRegistry ||
-		application.rollbackRegistry
-	) {
-		command += await uploadImageRemoteCommand(application, serverId);
+	try {
+		if (application.sourceType !== "docker") {
+			const { buildType } = application;
+			switch (buildType) {
+				case "nixpacks":
+					command = await getNixpacksCommand(application, stageOptions);
+					break;
+				case "heroku_buildpacks":
+					command = await getHerokuCommand(application, stageOptions);
+					break;
+				case "paketo_buildpacks":
+					command = await getPaketoCommand(application, stageOptions);
+					break;
+				case "static":
+					command = await getStaticCommand(application, stageOptions);
+					break;
+				case "dockerfile":
+					command = await getDockerCommand(application, stageOptions);
+					break;
+				case "railpack":
+					command = await getRailpackCommand(application, stageOptions);
+					break;
+			}
+		}
+
+		if (
+			application.registry ||
+			application.buildRegistry ||
+			application.rollbackRegistry
+		) {
+			command += await uploadImageRemoteCommand(application, serverId);
+		}
+	} catch (error) {
+		await removeStagedFiles(serverId, staged);
+		throw error;
 	}
 
 	return command;

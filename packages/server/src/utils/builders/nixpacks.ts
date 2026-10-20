@@ -2,17 +2,26 @@ import path from "node:path";
 import { getStaticCommand } from "@dokploy/server/utils/builders/static";
 import { nanoid } from "nanoid";
 import { quote } from "shell-quote";
-import { prepareEnvironmentVariablesForShell } from "../docker/utils";
+import { prepareEnvironmentVariables } from "../docker/utils";
 import { getBuildAppDirectory } from "../filesystem/directory";
 import type { ApplicationNested } from ".";
-import { getCommitInfoEnvArgs, getGitCommitInfoCommands } from "./utils";
+import {
+	type BuildStageOptions,
+	getCommitInfoEnvArgs,
+	getEnvFlagArgs,
+	getGitCommitInfoCommands,
+	stageBuildVariables,
+} from "./utils";
 
-export const getNixpacksCommand = (application: ApplicationNested) => {
+export const getNixpacksCommand = async (
+	application: ApplicationNested,
+	stageOptions: BuildStageOptions = {},
+) => {
 	const { env, appName, publishDirectory, cleanCache } = application;
 
 	const buildAppDirectory = getBuildAppDirectory(application);
 	const buildContainerId = `${appName}-${nanoid(10)}`;
-	const envVariables = prepareEnvironmentVariablesForShell(
+	const envVariables = prepareEnvironmentVariables(
 		env,
 		application.environment.project.env,
 		application.environment.env,
@@ -24,9 +33,10 @@ export const getNixpacksCommand = (application: ApplicationNested) => {
 		args.push("--no-cache");
 	}
 
-	for (const env of envVariables) {
-		args.push("--env", env);
-	}
+	// The values go to nixpacks through its environment (a staged 0600 file), not
+	// through its command line: `--env KEY` takes the value from there.
+	const staged = await stageBuildVariables(appName, envVariables, stageOptions);
+	args.push(...getEnvFlagArgs("--env", staged));
 
 	if (publishDirectory) {
 		/* No need for any start command, since we'll use nginx later on */
@@ -36,10 +46,12 @@ export const getNixpacksCommand = (application: ApplicationNested) => {
 	let bashCommand = `
 		${getGitCommitInfoCommands()}
 		echo "Starting nixpacks build..." ;
-		${command} ${getCommitInfoEnvArgs()} || {
+		${staged.envFile.loader}${command} ${getCommitInfoEnvArgs()} || {
+			${staged.envFile.cleanup}
 			echo "❌ Nixpacks build failed" ;
 			exit 1;
 		}
+		${staged.envFile.cleanup}
 		echo "✅ Nixpacks build completed." ;
 		`;
 
@@ -62,7 +74,7 @@ export const getNixpacksCommand = (application: ApplicationNested) => {
 		exit 1;
 	}
 	docker rm ${buildContainerId}
-	${getStaticCommand(application)}
+	${await getStaticCommand(application, stageOptions)}
 				`;
 	}
 

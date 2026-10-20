@@ -321,7 +321,9 @@ export const deployApplication = async ({
 		});
 		// <<< build-policy hook 2a/4
 
-		command += await getBuildCommand(application, serverId);
+		command += await getBuildCommand(application, serverId, {
+			deploymentId: deployment.deploymentId,
+		});
 
 		// >>> build-policy hook 2/4: tag `<repository>:<sha>`, push to the
 		// organization registry and echo the digest. Empty when not enforcing.
@@ -551,7 +553,9 @@ export const rebuildApplication = async ({
 		});
 		// <<< build-policy hook 2a/4 (rebuild)
 		// Check case for docker only
-		command += await getBuildCommand(application, serverId);
+		command += await getBuildCommand(application, serverId, {
+			deploymentId: deployment.deploymentId,
+		});
 		// >>> build-policy hook 2/4 (rebuild)
 		command += await getBuildPolicyPushCommand(buildPolicy, {
 			appName: application.appName,
@@ -950,7 +954,9 @@ export const deployPreviewApplication = async ({
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {
-			command += await getBuildCommand(application, buildServerId);
+			command += await getBuildCommand(application, buildServerId, {
+				deploymentId: deployment.deploymentId,
+			});
 		}
 
 		// >>> build-policy hook 2/4 (preview): tag and push the preview image by
@@ -1188,7 +1194,9 @@ export const rebuildPreviewApplication = async ({
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {
-			command += await getBuildCommand(application, buildServerId);
+			command += await getBuildCommand(application, buildServerId, {
+				deploymentId: deployment.deploymentId,
+			});
 		}
 		// >>> build-policy hook 2/4 (preview rebuild)
 		command += await getBuildPolicyPushCommand(buildPolicy, {

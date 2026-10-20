@@ -1,4 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The builders stage env files on the host that runs the build; these tests
+// only read the generated command.
+vi.mock("@dokploy/server/utils/docker/staging", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("@dokploy/server/utils/docker/staging")
+	>()),
+	stageFiles: vi.fn(),
+}));
 
 import { getDockerCommand } from "@dokploy/server/utils/builders/docker-file";
 import { getHerokuCommand } from "@dokploy/server/utils/builders/heroku";
@@ -66,8 +75,8 @@ describe("Git Commit Info Helpers", () => {
 });
 
 describe("Dockerfile builder - commit info injection", () => {
-	it("should include git commit info extraction commands", () => {
-		const command = getDockerCommand(createMockApplication());
+	it("should include git commit info extraction commands", async () => {
+		const command = await getDockerCommand(createMockApplication());
 		expect(command).toContain(
 			"DOKPLOY_COMMIT_SHORT=$(git rev-parse --short HEAD",
 		);
@@ -77,8 +86,8 @@ describe("Dockerfile builder - commit info injection", () => {
 		);
 	});
 
-	it("should pass commit info as --build-arg to docker build", () => {
-		const command = getDockerCommand(createMockApplication());
+	it("should pass commit info as --build-arg to docker build", async () => {
+		const command = await getDockerCommand(createMockApplication());
 		expect(command).toContain(
 			'--build-arg DOKPLOY_COMMIT_HASH="$DOKPLOY_COMMIT_HASH"',
 		);
@@ -90,8 +99,8 @@ describe("Dockerfile builder - commit info injection", () => {
 		);
 	});
 
-	it("should include commit info alongside user-defined build args", () => {
-		const command = getDockerCommand(
+	it("should include commit info alongside user-defined build args", async () => {
+		const command = await getDockerCommand(
 			createMockApplication({ buildArgs: "MY_VAR=hello" }),
 		);
 		expect(command).toContain("--build-arg MY_VAR");
@@ -102,8 +111,8 @@ describe("Dockerfile builder - commit info injection", () => {
 });
 
 describe("Nixpacks builder - commit info injection", () => {
-	it("should include git commit info extraction commands", () => {
-		const command = getNixpacksCommand(
+	it("should include git commit info extraction commands", async () => {
+		const command = await getNixpacksCommand(
 			createMockApplication({ buildType: "nixpacks" }),
 		);
 		expect(command).toContain(
@@ -115,8 +124,8 @@ describe("Nixpacks builder - commit info injection", () => {
 		);
 	});
 
-	it("should pass commit info as --env to nixpacks build", () => {
-		const command = getNixpacksCommand(
+	it("should pass commit info as --env to nixpacks build", async () => {
+		const command = await getNixpacksCommand(
 			createMockApplication({ buildType: "nixpacks" }),
 		);
 		expect(command).toContain(
@@ -132,8 +141,8 @@ describe("Nixpacks builder - commit info injection", () => {
 });
 
 describe("Heroku builder - commit info injection", () => {
-	it("should include git commit info extraction commands", () => {
-		const command = getHerokuCommand(
+	it("should include git commit info extraction commands", async () => {
+		const command = await getHerokuCommand(
 			createMockApplication({ buildType: "heroku_buildpacks" }),
 		);
 		expect(command).toContain(
@@ -145,8 +154,8 @@ describe("Heroku builder - commit info injection", () => {
 		);
 	});
 
-	it("should pass commit info as --env to pack build", () => {
-		const command = getHerokuCommand(
+	it("should pass commit info as --env to pack build", async () => {
+		const command = await getHerokuCommand(
 			createMockApplication({ buildType: "heroku_buildpacks" }),
 		);
 		expect(command).toContain(
@@ -162,8 +171,8 @@ describe("Heroku builder - commit info injection", () => {
 });
 
 describe("Paketo builder - commit info injection", () => {
-	it("should include git commit info extraction commands", () => {
-		const command = getPaketoCommand(
+	it("should include git commit info extraction commands", async () => {
+		const command = await getPaketoCommand(
 			createMockApplication({ buildType: "paketo_buildpacks" }),
 		);
 		expect(command).toContain(
@@ -175,8 +184,8 @@ describe("Paketo builder - commit info injection", () => {
 		);
 	});
 
-	it("should pass commit info as --env to pack build", () => {
-		const command = getPaketoCommand(
+	it("should pass commit info as --env to pack build", async () => {
+		const command = await getPaketoCommand(
 			createMockApplication({ buildType: "paketo_buildpacks" }),
 		);
 		expect(command).toContain(
@@ -192,8 +201,8 @@ describe("Paketo builder - commit info injection", () => {
 });
 
 describe("Railpack builder - commit info injection", () => {
-	it("should include git commit info extraction commands", () => {
-		const command = getRailpackCommand(
+	it("should include git commit info extraction commands", async () => {
+		const command = await getRailpackCommand(
 			createMockApplication({ buildType: "railpack" }),
 		);
 		expect(command).toContain(
@@ -205,8 +214,8 @@ describe("Railpack builder - commit info injection", () => {
 		);
 	});
 
-	it("should pass commit info as --build-arg to docker buildx", () => {
-		const command = getRailpackCommand(
+	it("should pass commit info as --build-arg to docker buildx", async () => {
+		const command = await getRailpackCommand(
 			createMockApplication({ buildType: "railpack" }),
 		);
 		expect(command).toContain(

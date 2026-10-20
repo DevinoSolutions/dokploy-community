@@ -4,6 +4,7 @@ import type { InferResultType } from "@dokploy/server/types/with";
 import boxen from "boxen";
 import { quote } from "shell-quote";
 import { addDomainToCompose, writeDomainsToCompose } from "../docker/domain";
+import { ENV_VARIABLE_NAME, singleQuote } from "../docker/env-file";
 import {
 	getInstallStagedFileCommand,
 	getStagedFilePath,
@@ -943,11 +944,6 @@ ${getInstallStagedFileCommand({
 })}
 	`;
 };
-
-const ENV_VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/** Single quotes: the only quoting that leaves `$`, backticks and newlines alone. */
-const singleQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /**
  * Content of the file that carries a stack's environment: one `KEY='value'`
