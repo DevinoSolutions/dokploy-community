@@ -216,6 +216,71 @@ describe("env file names", () => {
 		}
 	});
 
+	it("stages ordinary GIT_ and PACK_ build arguments", () => {
+		for (const name of [
+			"GIT_TOKEN",
+			"GIT_PASSWORD",
+			"GIT_COMMIT_SHA",
+			"GIT_CONFIG_FOO",
+			"PACK_FOO",
+			"PACK_TOKEN",
+		]) {
+			expect(isEnvFileName(name), name).toBe(true);
+		}
+	});
+
+	it("keeps the variables git and pack read for themselves reserved", () => {
+		for (const name of [
+			"GIT_SSH",
+			"GIT_SSH_COMMAND",
+			"GIT_ASKPASS",
+			"GIT_DIR",
+			"GIT_WORK_TREE",
+			"GIT_EXEC_PATH",
+			"GIT_TEMPLATE_DIR",
+			"GIT_CONFIG",
+			"GIT_CONFIG_GLOBAL",
+			"GIT_CONFIG_SYSTEM",
+			"GIT_CONFIG_COUNT",
+			"GIT_CONFIG_KEY_0",
+			"GIT_CONFIG_VALUE_12",
+			"PACK_HOME",
+			"PACK_VOLUME_KEY",
+			// Behaviour the git run itself reads (and logs).
+			...["GIT_CURL_VERBOSE",
+			"GIT_CONFIG_PARAMETERS",
+			"GIT_CONFIG_NOSYSTEM",
+			"GIT_PROXY_COMMAND",
+			"GIT_INDEX_FILE",
+			"GIT_OBJECT_DIRECTORY",
+			"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			"GIT_COMMON_DIR",
+			"GIT_CEILING_DIRECTORIES",
+			"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+			"GIT_EXTERNAL_DIFF",
+			"GIT_PAGER",
+			"GIT_EDITOR",
+			"GIT_SEQUENCE_EDITOR",
+			"GIT_TERMINAL_PROMPT",
+			"GIT_SSH_VARIANT",
+			"GIT_ALLOW_PROTOCOL",
+			"GIT_PROTOCOL_FROM_USER",
+			"GIT_NAMESPACE",
+			"GIT_REPLACE_REF_BASE",
+			"GIT_NO_REPLACE_OBJECTS",
+			"GIT_QUARANTINE_PATH",
+			"GIT_OPTIONAL_LOCKS",
+			"GIT_REDACT_COOKIES"],
+			// One name per reserved prefix.
+			"GIT_TRACE",
+			"GIT_TRACE_CURL",
+			"GIT_SSL_NO_VERIFY",
+			"GIT_HTTP_PROXY_AUTHMETHOD",
+		]) {
+			expect(isEnvFileName(name), name).toBe(false);
+		}
+	});
+
 	it("single-quotes every value, whatever it holds", () => {
 		expect(buildEnvFileContent([["A", "it's"]])).toBe("A='it'\\''s'\n");
 		expect(buildEnvFileContent([["A", "$(x) `y`\nz"]])).toBe("A='$(x) `y`\nz'\n");
@@ -517,7 +582,7 @@ describe("build commands in a real shell", () => {
 			const name = tool === "docker" ? "docker-$1" : tool;
 			writeFileSync(
 				`${bin}/${tool}`,
-				`#!/bin/sh\ncase "$1 $2" in "buildx rm"|"buildx create") exit 0;; esac\nenv -0 > ${out}/${name}.env.bin\nprintf '%s\\n' "$@" > ${out}/${name}.args.txt\nexit ${exitCode}\n`,
+				`#!/bin/sh\ncase "$1 $2" in "buildx rm"|"buildx create") exit 0;; esac\nenv -0 > ${out}/${name}.env.bin\nls -A ${tmp}/applications/build-app | grep '^.dokploy-stage-build-env' > ${out}/${name}.staged.txt\nprintf '%s\\n' "$@" > ${out}/${name}.args.txt\nexit ${exitCode}\n`,
 			);
 			chmodSync(`${bin}/${tool}`, 0o755);
 		}
@@ -538,6 +603,9 @@ describe("build commands in a real shell", () => {
 		parseEnv0(readFileSync(`${out}/${tool}.env.bin`, "utf8"));
 	const argsOf = (out: string, tool: string) =>
 		readFileSync(`${out}/${tool}.args.txt`, "utf8");
+	/** Staged build env files still on disk when the tool started. */
+	const stagedAtStart = (out: string, tool: string) =>
+		readFileSync(`${out}/${tool}.staged.txt`, "utf8").trim();
 
 	itWithSh(
 		"docker build gets build args and secrets in its environment, none in argv",
@@ -751,6 +819,104 @@ describe("build commands in a real shell", () => {
 			expect(stagedIn(stagedDir())).toEqual([]);
 		},
 	);
+
+	describe("a single-use loader consumes the staged file", () => {
+		const secrets = {
+			env: "API_TOKEN=abc123",
+			buildArgs: "NPM_TOKEN=abc",
+		};
+		// [name, buildType, builder, fake tool, a variable that tool must receive]
+		const singleUse: Array<[string, string, Builder, string, string]> = [
+			["dockerfile", "dockerfile", getDockerCommand, "docker-build", "NPM_TOKEN"],
+			["nixpacks", "nixpacks", getNixpacksCommand, "nixpacks", "API_TOKEN"],
+			["heroku", "heroku_buildpacks", getHerokuCommand, "pack", "API_TOKEN"],
+			["paketo", "paketo_buildpacks", getPaketoCommand, "pack", "API_TOKEN"],
+		];
+
+		for (const [name, buildType, build, tool, variable] of singleUse) {
+			itWithSh(`${name} deletes the file as soon as it is sourced`, async () => {
+				const { bin, out } = installFakeTools(0);
+				const script = await build(
+					createApplication({ buildType, ...secrets }),
+					{ deploymentId: `dep-${name}-once` },
+				);
+				expect(stagedIn(stagedDir()).length).toBeGreaterThan(0);
+
+				const result = run(script, bin);
+
+				expect(result.status).toBe(0);
+				// Sourced (the tool has the variable) and already gone while it runs.
+				expect(received(out, tool).has(variable)).toBe(true);
+				expect(stagedAtStart(out, tool)).toBe("");
+				expect(stagedIn(stagedDir())).toEqual([]);
+			});
+
+			itWithSh(
+				`${name} still fails without running the tool when the file is gone`,
+				async () => {
+					const { bin, out } = installFakeTools(0);
+					const script = await build(
+						createApplication({ buildType, ...secrets }),
+						{ deploymentId: `dep-${name}-gone` },
+					);
+					for (const file of stagedIn(stagedDir())) {
+						rmSync(`${stagedDir()}/${file}`);
+					}
+
+					const result = run(script, bin);
+
+					expect(result.status).toBe(1);
+					expect(existsSync(`${out}/${tool}.env.bin`)).toBe(false);
+				},
+			);
+		}
+
+		itWithSh(
+			"railpack keeps the file for its second read, the script's cleanup removes it",
+			async () => {
+				const { bin, out } = installFakeTools(0);
+				const script = (
+					await getRailpackCommand(
+						createApplication({ buildType: "railpack", ...secrets }),
+						{ deploymentId: "dep-rp-twice" },
+					)
+				).replace(/^\$SUDO_CMD bash -c .*$/m, "true");
+				expect(script).not.toContain('rm -f -- "$1"');
+
+				const result = run(script, bin);
+
+				expect(result.status).toBe(0);
+				// Still there for prepare, and for the build that reads it again.
+				expect(stagedAtStart(out, "railpack")).not.toBe("");
+				expect(stagedAtStart(out, "docker-buildx")).not.toBe("");
+				expect(received(out, "docker-buildx").get("API_TOKEN")).toBe("abc123");
+				expect(stagedIn(stagedDir())).toEqual([]);
+			},
+		);
+
+		itWithSh("the loader removes the file only when asked to consume it", () => {
+			const { bin } = installFakeTools(0);
+			const cases: Array<[string, { consume?: boolean } | undefined, boolean]> =
+				[
+					["default", undefined, true],
+					["consume", { consume: true }, false],
+					["keep", { consume: false }, true],
+				];
+			for (const [label, options, existsAfter] of cases) {
+				const file = `${tmp}/envfile-${label}`;
+				writeFileSync(file, buildEnvFileContent([["API_TOKEN", "abc123"]]));
+
+				const result = run(
+					`${getEnvFileLoader(file, options)} sh -c 'test "$API_TOKEN" = abc123'`,
+					bin,
+				);
+
+				expect(result.status, label).toBe(0);
+				expect(existsSync(file), label).toBe(existsAfter);
+			}
+		});
+	});
+
 
 	itWithSh("loads and removes a staged file whose path has a space", () => {
 		const { bin, out } = installFakeTools(0);

@@ -42,11 +42,14 @@ export const getRailpackCommand = async (
 
 	// The values reach `railpack prepare` and the buildx secrets through their
 	// environment (a staged 0600 file), not through the command line or the
-	// script: `--env KEY` takes the value from there.
+	// script: `--env KEY` takes the value from there. The loader runs twice
+	// (prepare, then build), so the file cannot be consumed by the first run:
+	// it stays until the script's cleanup.
 	const staged = await stageBuildVariables(
 		application.appName,
 		rawEnvVariables,
 		stageOptions,
+		{ singleUse: false },
 	);
 
 	// Prepare command

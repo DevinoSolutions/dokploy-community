@@ -92,11 +92,22 @@ export interface BuildEnvFile {
 	cleanup: string;
 }
 
-export const getBuildEnvFile = (path?: string): BuildEnvFile =>
+/**
+ * Consumes the file by default: a caller that reads it twice must pass
+ * `singleUse: false`.
+ *
+ * `singleUse`: the builder runs the loader once, so the loader deletes the file
+ * as soon as it has read it. Railpack runs it twice (prepare, then build) and
+ * leaves the file to `cleanup`.
+ */
+export const getBuildEnvFile = (
+	path?: string,
+	{ singleUse = true }: { singleUse?: boolean } = {},
+): BuildEnvFile =>
 	path
 		? {
 				path,
-				loader: `${getEnvFileLoader(path)} `,
+				loader: `${getEnvFileLoader(path, { consume: singleUse })} `,
 				cleanup: `rm -f ${quote([path])};`,
 			}
 		: { loader: "", cleanup: "" };
@@ -111,6 +122,7 @@ export const stageBuildVariables = async (
 	appName: string,
 	variables: string[],
 	options: BuildStageOptions = {},
+	envFileOptions?: { singleUse?: boolean },
 ) => {
 	const passByName: string[] = [];
 	const inline: string[] = [];
@@ -132,7 +144,7 @@ export const stageBuildVariables = async (
 			: [],
 		options,
 	);
-	return { passByName, inline, envFile: getBuildEnvFile(path) };
+	return { passByName, inline, envFile: getBuildEnvFile(path, envFileOptions) };
 };
 
 /** `--env`, one flag per variable: stageable ones by name, the rest as `KEY=value`. */
