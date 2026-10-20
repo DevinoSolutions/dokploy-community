@@ -271,7 +271,7 @@ export const runCommand = async (scheduleId: string) => {
 					}
 					await assertNotCancelled(deployment.deploymentId);
 					writeStream.write(
-						`docker exec ${containerId} ${shellType} -c ${command}\n`,
+						`docker exec ${containerId} ${shellType}\n`,
 					);
 					const run = spawnAsync(
 						"docker",

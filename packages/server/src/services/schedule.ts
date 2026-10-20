@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { chmod, rename } from "node:fs/promises";
 import path from "node:path";
 import { TRPCError } from "@trpc/server";
@@ -264,14 +265,15 @@ ${schedule?.script || ""}`;
 	const staged = getStagedFilePath({
 		directory: fullPath,
 		kind: "schedule-script",
-		deploymentId: schedule.scheduleId,
-	});
-	await stageFiles({
-		serverId,
-		directory: fullPath,
-		files: [{ path: staged, content: scriptWithPid }],
+		// Per call: two saves of one schedule at once must not share a file.
+		deploymentId: `${schedule.scheduleId}-${randomUUID()}`,
 	});
 	try {
+		await stageFiles({
+			serverId,
+			directory: fullPath,
+			files: [{ path: staged, content: scriptWithPid }],
+		});
 		if (serverId) {
 			const qStaged = quote([staged]);
 			await execAsyncRemote(

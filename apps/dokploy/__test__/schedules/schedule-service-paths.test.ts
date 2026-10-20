@@ -230,6 +230,36 @@ describe("updateSchedule script handling", () => {
 		expect(last).toContain(stagedPath as string);
 	});
 
+	it("stages every save under its own name, so concurrent saves do not race", async () => {
+		mocks.writeFileRemote.mockResolvedValue(undefined);
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.returning.mockResolvedValue([
+			row("schedule-run-fast-bus-AbC123", {
+				scheduleType: "server",
+				serverId: "server-1",
+			}),
+		]);
+
+		await Promise.all([
+			updateSchedule({ scheduleId: "sch-1" } as never),
+			updateSchedule({ scheduleId: "sch-1" } as never),
+		]);
+
+		const staged = mocks.writeFileRemote.mock.calls.map((c) => c[1] as string);
+		expect(staged).toHaveLength(2);
+		expect(new Set(staged).size).toBe(2);
+		for (const name of staged) {
+			expect(name).toMatch(
+				/\.dokploy-stage-schedule-script-sch-1-[0-9a-f-]{36}$/,
+			);
+		}
+		// Each save moves its own file into place.
+		const moves = mocks.execAsyncRemote.mock.calls.map((c) => c[1] as string);
+		for (const name of staged) {
+			expect(moves.some((m) => m.includes(name))).toBe(true);
+		}
+	});
+
 	it("removes the staged file when it cannot be moved into place", async () => {
 		mocks.writeFileRemote.mockResolvedValue(undefined);
 		mocks.execAsyncRemote.mockImplementation(async (_id, command: string) => {
@@ -251,7 +281,7 @@ describe("updateSchedule script handling", () => {
 			(call) => call[1] as string,
 		);
 		expect(commands.at(-1)).toMatch(
-			/^rm -f \S+\.dokploy-stage-schedule-script-sch-1$/,
+			/^rm -f \S+\.dokploy-stage-schedule-script-sch-1-[0-9a-f-]{36}$/,
 		);
 	});
 
