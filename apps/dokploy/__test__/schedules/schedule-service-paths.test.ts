@@ -1,10 +1,12 @@
-import { execFileSync } from "node:child_process";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,8 +21,13 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	root: "",
+	// Where the schedule directories are: the same folder, spelled for the shell
+	// (root) or for fs (fsRoot, which Windows resolves).
+	base: "",
+	fsRoot: "",
 	execAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
+	writeFileRemote: vi.fn(),
 	findFirst: vi.fn(),
 	deleteWhere: vi.fn(),
 	returning: vi.fn(),
@@ -35,7 +42,7 @@ vi.mock("node:path", async (importOriginal) => {
 
 vi.mock("@dokploy/server/constants", () => ({
 	IS_CLOUD: false,
-	paths: () => ({ SCHEDULES_PATH: `${mocks.root}/schedules` }),
+	paths: () => ({ SCHEDULES_PATH: `${mocks.base}/schedules` }),
 }));
 
 vi.mock("@dokploy/server/db", () => ({
@@ -56,13 +63,10 @@ vi.mock("@dokploy/server/services/server", () => ({
 	findServerById: vi.fn(),
 }));
 
-vi.mock("@dokploy/server/utils/docker/utils", () => ({
-	encodeBase64: (content: string) => Buffer.from(content).toString("base64"),
-}));
-
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	execAsync: mocks.execAsync,
 	execAsyncRemote: mocks.execAsyncRemote,
+	writeFileRemote: mocks.writeFileRemote,
 }));
 
 import {
@@ -79,6 +83,8 @@ const toPosix = (value: string) =>
 
 const root = mkdtempSync(path.join(tmpdir(), "dokploy-schedule-svc-"));
 mocks.root = toPosix(root);
+mocks.fsRoot = root;
+mocks.base = mocks.root;
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
 const row = (appName: string, extra: Record<string, unknown> = {}) => ({
@@ -94,6 +100,7 @@ const row = (appName: string, extra: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.base = mocks.root;
 	mocks.deleteWhere.mockResolvedValue({ rowCount: 1 });
 });
 
@@ -143,27 +150,92 @@ describe("updateSchedule script handling", () => {
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 	});
 
-	it("writes the script into its directory", async () => {
+	it("writes the script into its directory without putting it in a command", async () => {
 		const appName = "schedule-run-fast-bus-AbC123";
-		mocks.returning.mockResolvedValue([row(appName)]);
+		mocks.base = mocks.fsRoot;
+		mocks.returning.mockResolvedValue([
+			row(appName, { script: "export TOKEN=s3cr3t-token-value" }),
+		]);
 
 		await updateSchedule({ scheduleId: "sch-1" } as never);
 
-		expect(mocks.execAsync).toHaveBeenCalledTimes(1);
-		execFileSync("bash", ["-c", mocks.execAsync.mock.calls[0]?.[0] as string], {
-			cwd: root,
-			stdio: "ignore",
-		});
-
-		const scriptFile = path.join(root, "schedules", appName, "script.sh");
+		// Nothing is run through a shell: the script never reaches a command line.
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		const dir = path.join(root, "schedules", appName);
+		const scriptFile = path.join(dir, "script.sh");
 		expect(existsSync(scriptFile)).toBe(true);
-		expect(readFileSync(scriptFile, "utf8")).toContain("echo hello");
+		const content = readFileSync(scriptFile, "utf8");
+		expect(content).toContain("export TOKEN=s3cr3t-token-value");
+		expect(content).toContain("Schedule ID: sch-1");
 		if (process.platform !== "win32") {
-			expect(statSync(scriptFile).mode & 0o111).not.toBe(0);
+			// Owner only, runnable, and the staged file was moved over the script.
+			expect(statSync(scriptFile).mode & 0o777).toBe(0o700);
 		}
-	}, 30_000);
+		expect(readdirSync(dir)).toEqual(["script.sh"]);
+	});
 
-	it("sends the script to the remote server for server schedules", async () => {
+	it("replaces an existing script in one step", async () => {
+		const appName = "schedule-run-fast-bus-DeF456";
+		mocks.base = mocks.fsRoot;
+		const dir = path.join(root, "schedules", appName);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(path.join(dir, "script.sh"), "echo old");
+		mocks.returning.mockResolvedValue([
+			row(appName, { script: "echo new" }),
+		]);
+
+		await updateSchedule({ scheduleId: "sch-1" } as never);
+
+		expect(readFileSync(path.join(dir, "script.sh"), "utf8")).toContain(
+			"echo new",
+		);
+		expect(readdirSync(dir)).toEqual(["script.sh"]);
+	});
+
+	it("stages the script of a server schedule through SFTP and moves it into place", async () => {
+		const secret = "s3cr3t-token-value";
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.writeFileRemote.mockResolvedValue(undefined);
+		mocks.returning.mockResolvedValue([
+			row("schedule-run-fast-bus-AbC123", {
+				scheduleType: "server",
+				serverId: "server-1",
+				script: `export TOKEN=${secret}`,
+			}),
+		]);
+
+		await updateSchedule({ scheduleId: "sch-1" } as never);
+
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		// The content goes through SFTP, to a staged file next to the script.
+		expect(mocks.writeFileRemote).toHaveBeenCalledTimes(1);
+		const [serverId, stagedPath, content] =
+			mocks.writeFileRemote.mock.calls[0] ?? [];
+		expect(serverId).toBe("server-1");
+		expect(stagedPath).toContain(
+			"/schedules/schedule-run-fast-bus-AbC123/.dokploy-stage-schedule-script-sch-1",
+		);
+		expect(content).toContain(secret);
+		// No command that is sent carries it, and the staged file ends up as the script.
+		const commands = mocks.execAsyncRemote.mock.calls.map(
+			(call) => call[1] as string,
+		);
+		expect(commands.length).toBeGreaterThan(0);
+		for (const command of commands) expect(command).not.toContain(secret);
+		expect(mocks.execAsyncRemote.mock.calls.every((c) => c[0] === "server-1"))
+			.toBe(true);
+		const last = commands.at(-1) as string;
+		expect(last).toMatch(/^chmod 700 \S+ && mv -f \S+ \S+\/script\.sh$/);
+		expect(last).toContain(stagedPath as string);
+	});
+
+	it("removes the staged file when it cannot be moved into place", async () => {
+		mocks.writeFileRemote.mockResolvedValue(undefined);
+		mocks.execAsyncRemote.mockImplementation(async (_id, command: string) => {
+			if (command.startsWith("chmod")) throw new Error("mv failed");
+			return { stdout: "", stderr: "" };
+		});
 		mocks.returning.mockResolvedValue([
 			row("schedule-run-fast-bus-AbC123", {
 				scheduleType: "server",
@@ -171,10 +243,30 @@ describe("updateSchedule script handling", () => {
 			}),
 		]);
 
+		await expect(
+			updateSchedule({ scheduleId: "sch-1" } as never),
+		).rejects.toThrow("mv failed");
+
+		const commands = mocks.execAsyncRemote.mock.calls.map(
+			(call) => call[1] as string,
+		);
+		expect(commands.at(-1)).toMatch(
+			/^rm -f \S+\.dokploy-stage-schedule-script-sch-1$/,
+		);
+	});
+
+	it("does nothing for a server schedule without a server", async () => {
+		mocks.returning.mockResolvedValue([
+			row("schedule-run-fast-bus-AbC123", {
+				scheduleType: "server",
+				serverId: null,
+			}),
+		]);
+
 		await updateSchedule({ scheduleId: "sch-1" } as never);
 
 		expect(mocks.execAsync).not.toHaveBeenCalled();
-		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
-		expect(mocks.execAsyncRemote.mock.calls[0]?.[0]).toBe("server-1");
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		expect(mocks.writeFileRemote).not.toHaveBeenCalled();
 	});
 });

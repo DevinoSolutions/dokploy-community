@@ -1,3 +1,4 @@
+import { chmod, rename } from "node:fs/promises";
 import path from "node:path";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
@@ -11,7 +12,11 @@ import type {
 } from "../db/schema/schedule";
 import { type Schedule, schedules } from "../db/schema/schedule";
 import { isPlainAppName } from "../db/schema/utils";
-import { encodeBase64 } from "../utils/docker/utils";
+import {
+	getStagedFilePath,
+	removeStagedFiles,
+	stageFiles,
+} from "../utils/docker/staging";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
 import { findMemberByUserId } from "./permission";
 import { findServerById } from "./server";
@@ -239,26 +244,46 @@ const handleScript = async (schedule: Schedule) => {
 			message: "Invalid schedule app name",
 		});
 	}
+	// A server schedule without a server has nowhere to write its script.
+	const serverId =
+		schedule.scheduleType === "server" ? schedule.serverId : null;
+	if (schedule.scheduleType === "server" && !serverId) return;
+
 	const { SCHEDULES_PATH } = paths(!!schedule?.serverId);
 	const fullPath = path.join(SCHEDULES_PATH, schedule.appName);
-	const scriptPath = quote([`${fullPath}/script.sh`]);
+	const scriptPath = path.join(fullPath, "script.sh");
 
 	// Add PID and Schedule ID echo by default to all scripts
 	const scriptWithPid = `echo "PID: $$ | Schedule ID: ${schedule.scheduleId}"
 ${schedule?.script || ""}`;
 
-	const encodedContent = encodeBase64(scriptWithPid);
-	const script = `
-	 	 mkdir -p ${quote([fullPath])}
-	 	 rm -f ${scriptPath}
-		 touch ${scriptPath}
-		 chmod +x ${scriptPath}
-		 echo "${encodedContent}" | base64 -d > ${scriptPath}
-	`;
-
-	if (schedule?.scheduleType === "dokploy-server") {
-		await execAsync(script);
-	} else if (schedule?.scheduleType === "server") {
-		await execAsyncRemote(schedule?.serverId || "", script);
+	// The script can hold secrets and be large, so it never goes through a
+	// command line (it would show in the host's process list, and one shell
+	// argument is capped at 128 KB). It is staged as a 0600 file through SFTP /
+	// fs, then moved over the script in one step, so a run never sees half of it.
+	const staged = getStagedFilePath({
+		directory: fullPath,
+		kind: "schedule-script",
+		deploymentId: schedule.scheduleId,
+	});
+	await stageFiles({
+		serverId,
+		directory: fullPath,
+		files: [{ path: staged, content: scriptWithPid }],
+	});
+	try {
+		if (serverId) {
+			const qStaged = quote([staged]);
+			await execAsyncRemote(
+				serverId,
+				`chmod 700 ${qStaged} && mv -f ${qStaged} ${quote([scriptPath])}`,
+			);
+		} else {
+			await chmod(staged, 0o700);
+			await rename(staged, scriptPath);
+		}
+	} catch (error) {
+		await removeStagedFiles(serverId, [staged]);
+		throw error;
 	}
 };
