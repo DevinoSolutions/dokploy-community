@@ -55,11 +55,14 @@ const applySet = (values: Record<string, unknown>, row: Row) => {
 	}
 	const { sql, params } = dialect.sqlToQuery(values.expiresAt as SQL);
 	const until = params[0];
-	if (!CLAMP.test(sql) || !(until instanceof Date)) {
+	// The driver only accepts a string here (see "never hands a Date").
+	if (!CLAMP.test(sql) || typeof until !== "string") {
 		throw new Error(`unsupported set: ${sql}`);
 	}
+	const untilMs = new Date(until).getTime();
+	if (Number.isNaN(untilMs)) throw new Error(`unparsable timestamp: ${until}`);
 	const current = row.expires_at as Date;
-	row.expires_at = current.getTime() < until.getTime() ? current : until;
+	if (untilMs < current.getTime()) row.expires_at = new Date(untilMs);
 };
 
 const toColumns = (row: Row) => ({
@@ -209,6 +212,30 @@ describe("retireSupersededMcpAccessTokens with a grace window", () => {
 		).resolves.toBe(2);
 		expect(expiryOf("A1")).toBe(NOW.toISOString());
 		expect(expiryOf("A1b")).toBe(inSeconds(60));
+	});
+
+	// Regression (as c850aeb67 for consumeRotatedRefreshToken): a Date
+	// interpolated into the raw `sql` template skips drizzle's column mapping,
+	// so postgres-js throws ERR_INVALID_ARG_TYPE and nothing is ever clamped.
+	it("never hands a Date to the driver", async () => {
+		const set = vi.fn((_values: Record<string, unknown>) => ({
+			where: () => ({ returning: async () => [{ id: "A1" }] }),
+		}));
+		dbUpdate.mockReturnValueOnce({ set } as never);
+		await retireSupersededMcpAccessTokens("refresh-1", "access-2", 300);
+		expect(set).toHaveBeenCalledTimes(1);
+		const values = set.mock.calls[0]?.[0] ?? {};
+		const seen = new Set<object>();
+		const containsDate = (value: unknown): boolean => {
+			if (value instanceof Date) return true;
+			if (!value || typeof value !== "object" || seen.has(value)) return false;
+			seen.add(value);
+			return Object.values(value).some(containsDate);
+		};
+		expect(containsDate(values)).toBe(false);
+		const { params } = dialect.sqlToQuery(values.expiresAt as SQL);
+		expect(params.some((param) => param instanceof Date)).toBe(false);
+		expect(params).toEqual([inSeconds(300)]);
 	});
 
 	it("uses DOKPLOY_MCP_REFRESH_GRACE_SECONDS (300 by default)", async () => {

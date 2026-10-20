@@ -20,7 +20,9 @@ import { getMcpRefreshGraceSeconds, hashOAuthToken } from "./mcp-oauth";
  * the new one (deleting it would 401 them all, and each 401 refreshes again
  * and retires the token the others just switched to). A replay inside the
  * provider's reuse window can also hand back a token that a later refresh has
- * already retired; the clamp keeps it usable for the window. LEAST() only ever shortens the expiry; `findMcpAccessToken` refuses the row
+ * already retired; the clamp keeps it usable for the window.
+ *
+ * LEAST() only ever shortens the expiry; `findMcpAccessToken` refuses the row
  * once it has passed and the daily purge removes it. `revoked` is not used:
  * any value there makes the token dead at once. With
  * DOKPLOY_MCP_REFRESH_GRACE_SECONDS=0 the row is deleted outright.
@@ -70,7 +72,11 @@ export const retireSupersededMcpAccessTokens = async (
 		return deleted.length;
 	}
 
-	const until = new Date(Date.now() + graceSeconds * 1000);
+	// A value interpolated into a raw `sql` template bypasses the column's
+	// driver mapping, so a Date reaches postgres-js as-is and its parameter
+	// encoder throws (`The "string" argument must be of type string ... Received
+	// an instance of Date`). Serialise the way drizzle's timestamp column does.
+	const until = new Date(Date.now() + graceSeconds * 1000).toISOString();
 	const clamped = await db
 		.update(oauthAccessToken)
 		.set({
