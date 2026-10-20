@@ -43,11 +43,29 @@ export const getNixpacksCommand = async (
 		args.push("--no-error-without-start");
 	}
 	const command = `nixpacks ${args.join(" ")}`;
+
+	// The static stage stages its own docker env file. It is created up front, so
+	// the failure branches below have to remove it as well.
+	const extraStaged: string[] = [];
+	const staticCommand = publishDirectory
+		? await getStaticCommand(application, {
+				...stageOptions,
+				onStaged: (paths) => {
+					extraStaged.push(...paths);
+					stageOptions.onStaged?.(paths);
+				},
+			})
+		: "";
+	const removeExtra = extraStaged.length
+		? `rm -f ${quote(extraStaged)};`
+		: "";
+
 	let bashCommand = `
 		${getGitCommitInfoCommands()}
 		echo "Starting nixpacks build..." ;
 		${staged.envFile.loader}${command} ${getCommitInfoEnvArgs()} || {
 			${staged.envFile.cleanup}
+			${removeExtra}
 			echo "❌ Nixpacks build failed" ;
 			exit 1;
 		}
@@ -70,11 +88,12 @@ export const getNixpacksCommand = async (
 	mkdir -p ${quote([localPath])}
 	docker cp ${quote([`${buildContainerId}:/app/${publishDirectory}${isDirectory ? "/." : ""}`])} ${quote([localPath])} || {
 		docker rm ${buildContainerId}
+		${removeExtra}
 		echo ${quote([`❌ Copying ${publishDirectory} to ${localPath} failed`])} ;
 		exit 1;
 	}
 	docker rm ${buildContainerId}
-	${await getStaticCommand(application, stageOptions)}
+	${staticCommand}
 				`;
 	}
 

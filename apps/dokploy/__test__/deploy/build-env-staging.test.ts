@@ -72,6 +72,7 @@ import { getRailpackCommand } from "@dokploy/server/utils/builders/railpack";
 import { getStaticCommand } from "@dokploy/server/utils/builders/static";
 import {
 	getAppEnvFileContent,
+	getBuildEnvFile,
 	stageBuildFiles,
 } from "@dokploy/server/utils/builders/utils";
 import {
@@ -79,6 +80,7 @@ import {
 	getEnvFileLoader,
 	isEnvFileName,
 } from "@dokploy/server/utils/docker/env-file";
+import { removeStagedFiles } from "@dokploy/server/utils/docker/staging";
 import { prepareEnvironmentVariablesForShell } from "@dokploy/server/utils/docker/utils";
 
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
@@ -194,8 +196,23 @@ describe("env file names", () => {
 			"SSH_AUTH_SOCK",
 			"LC_ALL",
 			"BASH_ENV",
+			"GOGC",
+			"GOMEMLIMIT",
+			"GODEBUG",
+			"GIT_SSH_COMMAND",
+			"PACK_VOLUME_KEY",
+			"XDG_DATA_HOME",
+			"REGISTRY_AUTH_FILE",
+			"MALLOC_ARENA_MAX",
 		]) {
 			expect(isEnvFileName(name), name).toBe(false);
+		}
+	});
+
+	it("keeps names that only look like reserved ones", () => {
+		// No bare "GO" or "GIT" prefix: these are ordinary build variables.
+		for (const name of ["GOOGLE_API_KEY", "GO_ENV", "GITHUB_TOKEN", "PACKAGE"]) {
+			expect(isEnvFileName(name), name).toBe(true);
 		}
 	});
 
@@ -655,6 +672,102 @@ describe("build commands in a real shell", () => {
 		expect(result.status).toBe(1);
 		expect(result.stdout).toContain("Nixpacks build failed");
 		expect(stagedIn(stagedDir())).toEqual([]);
+	});
+
+	itWithSh(
+		"a script that stops before the build leaves nothing once the caller cleans up",
+		async () => {
+			const { bin, out } = installFakeTools(0);
+			const staged: string[] = [];
+			const script = await getNixpacksCommand(
+				createApplication({ buildType: "nixpacks", env: "API_TOKEN=abc123" }),
+				{ deploymentId: "dep-early", onStaged: (paths) => staged.push(...paths) },
+			);
+			expect(staged).toHaveLength(1);
+
+			// The clone fails under `set -e` before the build step is reached.
+			const result = run(`set -e; false; ${script}`, bin);
+
+			expect(result.status).not.toBe(0);
+			expect(existsSync(`${out}/nixpacks.env.bin`)).toBe(false);
+			// Only the caller knows the script never got that far.
+			expect(stagedIn(stagedDir())).toHaveLength(1);
+			await removeStagedFiles(null, staged);
+			expect(stagedIn(stagedDir())).toEqual([]);
+		},
+	);
+
+	itWithSh(
+		"nixpacks with a publish directory leaves no docker env file when it fails",
+		async () => {
+			const { bin } = installFakeTools(1);
+			const staged: string[] = [];
+			const script = await getNixpacksCommand(
+				createApplication({
+					buildType: "nixpacks",
+					publishDirectory: "dist",
+					env: "API_TOKEN=abc123",
+					buildArgs: "NPM_TOKEN=abc",
+				}),
+				{ deploymentId: "dep-pub", onStaged: (paths) => staged.push(...paths) },
+			);
+			// The nixpacks file and the static stage's docker file.
+			expect(staged).toHaveLength(2);
+			expect(stagedIn(stagedDir())).toHaveLength(2);
+
+			const result = run(script, bin);
+
+			expect(result.status).toBe(1);
+			expect(result.stdout).toContain("Nixpacks build failed");
+			expect(stagedIn(stagedDir())).toEqual([]);
+		},
+	);
+
+	itWithSh(
+		"nixpacks with a publish directory leaves no docker env file when the copy fails",
+		async () => {
+			const { bin } = installFakeTools(0);
+			// `docker cp` fails; every other docker call succeeds.
+			writeFileSync(
+				`${bin}/docker`,
+				'#!/bin/sh
+case "$1" in cp) exit 1;; esac
+exit 0
+',
+			);
+			chmodSync(`${bin}/docker`, 0o755);
+			const script = await getNixpacksCommand(
+				createApplication({
+					buildType: "nixpacks",
+					publishDirectory: "dist",
+					env: "API_TOKEN=abc123",
+					buildArgs: "NPM_TOKEN=abc",
+				}),
+				{ deploymentId: "dep-cp" },
+			);
+			expect(stagedIn(stagedDir())).toHaveLength(2);
+
+			const result = run(script, bin);
+
+			expect(result.status).toBe(1);
+			expect(result.stdout).toContain("failed");
+			expect(stagedIn(stagedDir())).toEqual([]);
+		},
+	);
+
+	itWithSh("loads and removes a staged file whose path has a space", () => {
+		const { bin, out } = installFakeTools(0);
+		const directory = `${tmp}/dir with space`;
+		mkdirSync(directory, { recursive: true });
+		const file = `${directory}/.dokploy-stage-build-env-dep-space`;
+		writeFileSync(file, buildEnvFileContent([["API_TOKEN", "abc123"]]));
+		const envFile = getBuildEnvFile(file);
+
+		const result = run(`${envFile.loader}docker build; ${envFile.cleanup}`, bin);
+
+		expect(result.status).toBe(0);
+		expect(received(out, "docker-build").get("API_TOKEN")).toBe("abc123");
+		expect(existsSync(file)).toBe(false);
 	});
 
 	itWithSh("removes the staged env when the build context is missing", async () => {

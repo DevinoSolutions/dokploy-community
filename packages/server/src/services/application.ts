@@ -39,6 +39,7 @@ import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import { deployHook } from "../db/schema";
 import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
+import { removeStagedFiles } from "../utils/docker/staging";
 import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 // Fork module: enforced remote builds. See services/build-policy/README.md.
@@ -281,6 +282,7 @@ export const deployApplication = async ({
 		{ buildServerId: buildPolicy.buildServerId },
 	);
 
+	const stagedBuildFiles: string[] = [];
 	try {
 		let command = "set -e;";
 		if (application.sourceType === "github") {
@@ -323,6 +325,7 @@ export const deployApplication = async ({
 
 		command += await getBuildCommand(application, serverId, {
 			deploymentId: deployment.deploymentId,
+			onStaged: (paths) => stagedBuildFiles.push(...paths),
 		});
 
 		// >>> build-policy hook 2/4: tag `<repository>:<sha>`, push to the
@@ -430,6 +433,7 @@ export const deployApplication = async ({
 			});
 		}
 	} catch (error) {
+		await removeStagedFiles(serverId, stagedBuildFiles);
 		const cancelled = await settleCancelledApplicationDeploy(
 			applicationId,
 			deployment,
@@ -539,6 +543,7 @@ export const rebuildApplication = async ({
 		{ buildServerId: buildPolicy.buildServerId },
 	);
 
+	const stagedBuildFiles: string[] = [];
 	try {
 		let command = "set -e;";
 		// >>> build-policy hook 2a/4 (rebuild): the required-checks gate. A
@@ -555,6 +560,7 @@ export const rebuildApplication = async ({
 		// Check case for docker only
 		command += await getBuildCommand(application, serverId, {
 			deploymentId: deployment.deploymentId,
+			onStaged: (paths) => stagedBuildFiles.push(...paths),
 		});
 		// >>> build-policy hook 2/4 (rebuild)
 		command += await getBuildPolicyPushCommand(buildPolicy, {
@@ -655,6 +661,7 @@ export const rebuildApplication = async ({
 			});
 		}
 	} catch (error) {
+		await removeStagedFiles(serverId, stagedBuildFiles);
 		const cancelled = await settleCancelledApplicationDeploy(
 			applicationId,
 			deployment,
@@ -846,6 +853,7 @@ export const deployPreviewApplication = async ({
 		previewDeploymentId,
 		previewDomain,
 	});
+	const stagedBuildFiles: string[] = [];
 	try {
 		await writePreviewComment("running");
 
@@ -956,6 +964,7 @@ export const deployPreviewApplication = async ({
 		if (!isDockerPreview) {
 			command += await getBuildCommand(application, buildServerId, {
 				deploymentId: deployment.deploymentId,
+				onStaged: (paths) => stagedBuildFiles.push(...paths),
 			});
 		}
 
@@ -1001,6 +1010,7 @@ export const deployPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
+		await removeStagedFiles(buildServerId, stagedBuildFiles);
 		let command = "";
 		if (!(error instanceof ExecError)) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1082,6 +1092,7 @@ export const rebuildPreviewApplication = async ({
 		previewDomain,
 	});
 
+	const stagedBuildFiles: string[] = [];
 	try {
 		await writePreviewComment("running");
 
@@ -1196,6 +1207,7 @@ export const rebuildPreviewApplication = async ({
 		if (!isDockerPreview) {
 			command += await getBuildCommand(application, buildServerId, {
 				deploymentId: deployment.deploymentId,
+				onStaged: (paths) => stagedBuildFiles.push(...paths),
 			});
 		}
 		// >>> build-policy hook 2/4 (preview rebuild)
@@ -1236,6 +1248,7 @@ export const rebuildPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
+		await removeStagedFiles(buildServerId, stagedBuildFiles);
 		let command = "";
 
 		// Only log details for non-ExecError errors

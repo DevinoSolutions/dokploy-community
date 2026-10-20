@@ -18,27 +18,38 @@ export const singleQuote = (value: string) =>
 /**
  * Names that must not be sourced into the environment of a build tool. Setting
  * them changes how the tool itself runs rather than what it builds (`PATH`,
- * `HOME`, `DOCKER_HOST`, `LD_PRELOAD`, proxies, ...), or is read-only in some
- * `sh` (`UID`, `PPID`), which would fail the build. A build argument with one of
+ * `HOME`, `DOCKER_HOST`, `LD_PRELOAD`, proxies, `GIT_*`, `PACK_*`, Go runtime
+ * and libc tunables, ...), or is read-only in some `sh` (`UID`, `PPID`), which
+ * would fail the build. A build argument with one of
  * these names keeps being passed on the command line, as it always was.
  */
 const ENV_FILE_RESERVED_NAMES = new Set([
-	"_",
-	"BASH_ENV",
 	"BASHOPTS",
 	"BASHPID",
+	"BASH_ENV",
 	"CDPATH",
+	"CONTAINER_HOST",
 	"EGID",
 	"ENV",
 	"EUID",
 	"GID",
+	"GLIBC_TUNABLES",
 	"GLOBIGNORE",
+	"GODEBUG",
+	"GOGC",
+	"GOMAXPROCS",
+	"GOMEMLIMIT",
+	"GOTRACEBACK",
 	"GROUPS",
 	"HISTFILE",
 	"HOME",
+	"HOSTALIASES",
 	"IFS",
 	"LANG",
+	"LOCPATH",
 	"LOGNAME",
+	"MALLOC_ARENA_MAX",
+	"NLSPATH",
 	"OLDPWD",
 	"OPTARG",
 	"OPTIND",
@@ -49,6 +60,8 @@ const ENV_FILE_RESERVED_NAMES = new Set([
 	"PS4",
 	"PWD",
 	"RANDOM",
+	"REGISTRY_AUTH_FILE",
+	"RES_OPTIONS",
 	"SECONDS",
 	"SHELL",
 	"SHELLOPTS",
@@ -62,8 +75,7 @@ const ENV_FILE_RESERVED_NAMES = new Set([
 	"TZ",
 	"UID",
 	"USER",
-	"XDG_CONFIG_HOME",
-	"XDG_RUNTIME_DIR",
+	"_",
 ]);
 
 const ENV_FILE_RESERVED_PREFIXES = [
@@ -72,8 +84,11 @@ const ENV_FILE_RESERVED_PREFIXES = [
 	"BUILDKIT_",
 	"BUILDX_",
 	"DOCKER_",
+	"GIT_",
 	"LC_",
 	"LD_",
+	"PACK_",
+	"XDG_",
 ];
 
 const ENV_FILE_RESERVED_PROXY_NAME = /^(?:http|https|ftp|all|no)_proxy$/i;
