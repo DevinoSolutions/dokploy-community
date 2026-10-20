@@ -1,19 +1,20 @@
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { db } = await import("@dokploy/server/db");
 const { hashOAuthToken } = await import("@dokploy/server/services/mcp-oauth");
-const { cleanupAfterMcpTokenGrant, deleteSupersededMcpAccessTokens } =
+const { cleanupAfterMcpTokenGrant, retireSupersededMcpAccessTokens } =
 	await import("@dokploy/server/services/mcp-refresh-cleanup");
 
 type Row = Record<string, unknown>;
 
 /**
  * In-memory stand-in for the two token tables. The service's WHERE clauses
- * are rendered to SQL and evaluated against the rows, so the tests check what
- * the queries would match, not how they are written. Anything the evaluator
- * does not understand throws instead of matching nothing.
+ * and the expiry clamp are rendered to SQL and evaluated against the rows, so
+ * the tests check what the queries would do, not how they are written.
+ * Anything the evaluator does not understand throws instead of matching
+ * nothing.
  */
 const tables: Record<string, Row[]> = {
 	oauth_refresh_token: [],
@@ -43,6 +44,24 @@ const evaluate = (where: SQL) => {
 	return { table, matches };
 };
 
+const CLAMP =
+	/^LEAST\("oauth_provider_access_token"\."expires_at", \$1::timestamp\)$/;
+
+/** Applies `set({ expiresAt: LEAST(expires_at, $1::timestamp) })` to a row. */
+const applySet = (values: Record<string, unknown>, row: Row) => {
+	const keys = Object.keys(values);
+	if (keys.length !== 1 || keys[0] !== "expiresAt") {
+		throw new Error(`unsupported set: ${keys.join(", ")}`);
+	}
+	const { sql, params } = dialect.sqlToQuery(values.expiresAt as SQL);
+	const until = params[0];
+	if (!CLAMP.test(sql) || !(until instanceof Date)) {
+		throw new Error(`unsupported set: ${sql}`);
+	}
+	const current = row.expires_at as Date;
+	row.expires_at = current.getTime() < until.getTime() ? current : until;
+};
+
 const toColumns = (row: Row) => ({
 	id: row.id,
 	clientId: row.client_id,
@@ -53,6 +72,10 @@ const toColumns = (row: Row) => ({
 
 const findFirst = vi.mocked(db.query.oauthAccessToken.findFirst);
 const dbDelete = vi.mocked(db.delete);
+const dbUpdate = vi.mocked(db.update);
+
+const NOW = new Date("2026-10-20T12:00:00Z");
+const HOUR = 3_600_000;
 
 const refreshRow = (
 	id: string,
@@ -73,19 +96,38 @@ const accessRow = (
 	clientId: string,
 	refreshId: string,
 	userId = "user-1",
+	expiresAt = new Date(NOW.getTime() + 720 * HOUR),
 ) => ({
 	id,
 	token: hashOAuthToken(token),
 	client_id: clientId,
 	user_id: userId,
 	refresh_id: refreshId,
+	expires_at: expiresAt,
 });
 
 const accessIds = () =>
 	tables.oauth_provider_access_token?.map((row) => row.id).sort();
 
+const expiryOf = (id: string) =>
+	(
+		tables.oauth_provider_access_token?.find((row) => row.id === id)
+			?.expires_at as Date | undefined
+	)?.toISOString();
+
+const inHours = (hours: number) =>
+	new Date(NOW.getTime() + hours * HOUR).toISOString();
+const inSeconds = (seconds: number) =>
+	new Date(NOW.getTime() + seconds * 1000).toISOString();
+
+afterEach(() => {
+	vi.useRealTimers();
+});
+
 beforeEach(() => {
 	vi.clearAllMocks();
+	vi.useFakeTimers({ toFake: ["Date"] });
+	vi.setSystemTime(NOW);
 	// Client A refreshed R1 into R2: A1 came with R1, A2 with R2. Client B has
 	// its own grant, plus an older rotated row R3 with its access token B0.
 	tables.oauth_refresh_token = [
@@ -117,64 +159,129 @@ beforeEach(() => {
 			},
 		}),
 	})) as never);
+	dbUpdate.mockImplementation((() => ({
+		set: (values: Record<string, unknown>) => ({
+			where: (where: SQL) => ({
+				returning: async () => {
+					const { table, matches } = evaluate(where);
+					const updated = (tables[table] ?? []).filter(matches);
+					for (const row of updated) applySet(values, row);
+					return updated.map((row) => ({ id: row.id }));
+				},
+			}),
+		}),
+	})) as never);
 });
 
-describe("deleteSupersededMcpAccessTokens", () => {
+describe("retireSupersededMcpAccessTokens with a grace window", () => {
+	it("clamps the old token to the window and keeps every row", async () => {
+		await expect(
+			retireSupersededMcpAccessTokens("refresh-1", "access-2", 300),
+		).resolves.toBe(1);
+		expect(dbDelete).not.toHaveBeenCalled();
+		expect(accessIds()).toEqual(["A1", "A2", "B0", "B1"]);
+		expect(expiryOf("A1")).toBe(inSeconds(300));
+	});
+
+	it("leaves the new token and other clients' tokens as they were", async () => {
+		await retireSupersededMcpAccessTokens("refresh-1", "access-2", 300);
+		expect(expiryOf("A2")).toBe(inHours(720));
+		// B0 also hangs off a rotated refresh row, but belongs to another grant.
+		expect(expiryOf("B0")).toBe(inHours(720));
+		expect(expiryOf("B1")).toBe(inHours(720));
+	});
+
+	it("never lengthens an expiry that is already shorter", async () => {
+		tables.oauth_provider_access_token = [
+			accessRow("A1", "access-1", "client-a", "R1", "user-1", NOW),
+			accessRow(
+				"A1b",
+				"access-1b",
+				"client-a",
+				"R1",
+				"user-1",
+				new Date(NOW.getTime() + 60_000),
+			),
+			accessRow("A2", "access-2", "client-a", "R2"),
+		];
+		await expect(
+			retireSupersededMcpAccessTokens("refresh-1", "access-2", 300),
+		).resolves.toBe(2);
+		expect(expiryOf("A1")).toBe(NOW.toISOString());
+		expect(expiryOf("A1b")).toBe(inSeconds(60));
+	});
+
+	it("uses DOKPLOY_MCP_REFRESH_GRACE_SECONDS (300 by default)", async () => {
+		await retireSupersededMcpAccessTokens("refresh-1", "access-2");
+		expect(expiryOf("A1")).toBe(inSeconds(300));
+	});
+});
+
+describe("retireSupersededMcpAccessTokens with no grace window", () => {
 	it("deletes the access token of the rotated refresh row", async () => {
 		await expect(
-			deleteSupersededMcpAccessTokens("refresh-1", "access-2"),
+			retireSupersededMcpAccessTokens("refresh-1", "access-2", 0),
 		).resolves.toBe(1);
+		expect(dbUpdate).not.toHaveBeenCalled();
 		expect(accessIds()).toEqual(["A2", "B0", "B1"]);
 	});
 
 	it("keeps the newly issued token and other clients' tokens", async () => {
-		await deleteSupersededMcpAccessTokens("refresh-1", "access-2");
+		await retireSupersededMcpAccessTokens("refresh-1", "access-2", 0);
 		const remaining = tables.oauth_provider_access_token ?? [];
 		expect(remaining.find((row) => row.id === "A2")).toBeDefined();
-		// B0 also hangs off a rotated refresh row, but belongs to another grant.
 		expect(
 			remaining.filter((row) => row.client_id === "client-b").map((r) => r.id),
 		).toEqual(["B0", "B1"]);
 	});
+});
 
-	it("never deletes the issued token, even if it points at the consumed row", async () => {
-		tables.oauth_provider_access_token?.push(
-			accessRow("A3", "access-3", "client-a", "R1"),
-		);
-		await expect(
-			deleteSupersededMcpAccessTokens("refresh-1", "access-3"),
-		).resolves.toBe(0);
-		expect(accessIds()).toEqual(["A1", "A2", "A3", "B0", "B1"]);
-	});
+describe("retireSupersededMcpAccessTokens guards", () => {
+	it.each([0, 300])(
+		"never touches the issued token, even if it points at the consumed row (grace %s)",
+		async (grace) => {
+			tables.oauth_provider_access_token?.push(
+				accessRow("A3", "access-3", "client-a", "R1"),
+			);
+			await expect(
+				retireSupersededMcpAccessTokens("refresh-1", "access-3", grace),
+			).resolves.toBe(0);
+			expect(accessIds()).toEqual(["A1", "A2", "A3", "B0", "B1"]);
+			expect(expiryOf("A1")).toBe(inHours(720));
+		},
+	);
 
 	it("does nothing for a refresh token that was not rotated", async () => {
 		await expect(
-			deleteSupersededMcpAccessTokens("refresh-2", "access-2"),
+			retireSupersededMcpAccessTokens("refresh-2", "access-2", 300),
 		).resolves.toBe(0);
+		expect(dbUpdate).not.toHaveBeenCalled();
 		expect(dbDelete).not.toHaveBeenCalled();
 	});
 
 	it("does nothing when the issued token belongs to another client or user", async () => {
 		await expect(
-			deleteSupersededMcpAccessTokens("refresh-1", "access-b1"),
+			retireSupersededMcpAccessTokens("refresh-1", "access-b1", 300),
 		).resolves.toBe(0);
 		tables.oauth_provider_access_token?.push(
 			accessRow("U2", "access-u2", "client-a", "R2", "user-2"),
 		);
 		await expect(
-			deleteSupersededMcpAccessTokens("refresh-1", "access-u2"),
+			retireSupersededMcpAccessTokens("refresh-1", "access-u2", 0),
 		).resolves.toBe(0);
+		expect(dbUpdate).not.toHaveBeenCalled();
 		expect(dbDelete).not.toHaveBeenCalled();
 	});
 
 	it("does nothing for unknown tokens", async () => {
 		await expect(
-			deleteSupersededMcpAccessTokens("unknown", "access-2"),
+			retireSupersededMcpAccessTokens("unknown", "access-2", 300),
 		).resolves.toBe(0);
 		await expect(
-			deleteSupersededMcpAccessTokens("refresh-1", "unknown"),
+			retireSupersededMcpAccessTokens("refresh-1", "unknown", 300),
 		).resolves.toBe(0);
 		expect(accessIds()).toEqual(["A1", "A2", "B0", "B1"]);
+		expect(expiryOf("A1")).toBe(inHours(720));
 	});
 });
 
@@ -183,12 +290,16 @@ describe("cleanupAfterMcpTokenGrant", () => {
 		grant_type: "refresh_token",
 		refresh_token: "refresh-1",
 	};
+	const refreshed = { access_token: "access-2", refresh_token: "refresh-2" };
 
-	it("removes the superseded token after a successful refresh", async () => {
-		await cleanupAfterMcpTokenGrant(refreshBody, {
-			access_token: "access-2",
-			refresh_token: "refresh-2",
-		});
+	it("clamps the superseded token after a successful refresh", async () => {
+		await cleanupAfterMcpTokenGrant(refreshBody, refreshed, 300);
+		expect(accessIds()).toEqual(["A1", "A2", "B0", "B1"]);
+		expect(expiryOf("A1")).toBe(inSeconds(300));
+	});
+
+	it("deletes the superseded token when the grace window is 0", async () => {
+		await cleanupAfterMcpTokenGrant(refreshBody, refreshed, 0);
 		expect(accessIds()).toEqual(["A2", "B0", "B1"]);
 	});
 
@@ -203,6 +314,7 @@ describe("cleanupAfterMcpTokenGrant", () => {
 		await cleanupAfterMcpTokenGrant(refreshBody, undefined);
 		expect(findFirst).not.toHaveBeenCalled();
 		expect(accessIds()).toEqual(["A1", "A2", "B0", "B1"]);
+		expect(expiryOf("A1")).toBe(inHours(720));
 	});
 
 	it("logs a failure instead of throwing", async () => {
@@ -212,7 +324,7 @@ describe("cleanupAfterMcpTokenGrant", () => {
 			cleanupAfterMcpTokenGrant(refreshBody, { access_token: "access-2" }),
 		).resolves.toBeUndefined();
 		expect(error).toHaveBeenCalledWith(
-			"[mcp] failed to delete superseded access tokens",
+			"[mcp] failed to retire superseded access tokens",
 			expect.any(Error),
 		);
 		error.mockRestore();

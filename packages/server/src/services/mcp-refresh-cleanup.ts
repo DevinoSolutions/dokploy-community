@@ -1,26 +1,41 @@
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { db } from "../db";
 import { oauthAccessToken, oauthRefreshToken } from "../db/schema";
-import { hashOAuthToken } from "./mcp-oauth";
+import { getMcpRefreshGraceSeconds, hashOAuthToken } from "./mcp-oauth";
 
 /**
- * Deletes the access tokens a refresh made obsolete.
+ * Retires the access tokens a refresh made obsolete.
  *
  * The provider links every opaque access token to the refresh token issued
  * with it (`refresh_id`). A refresh_token grant rotates the presented refresh
  * row (sets `rotated_at` and `revoked`) and issues a new pair, but leaves the
  * access token minted with the rotated row alive until it expires
- * (DOKPLOY_MCP_ACCESS_TOKEN_HOURS). Under 1.6 the fork deleted the consumed
- * access token after each refresh; this restores that.
+ * (DOKPLOY_MCP_ACCESS_TOKEN_HOURS). Since #214 the fork clamped the consumed
+ * token to the rotation grace window after each refresh
+ * (`consumeRotatedRefreshToken`); the 1.7 port (498fa20b2) dropped that step,
+ * and this restores it.
  *
- * Only access tokens of the rotated refresh row go, and only when the token
- * just issued belongs to the same client and user and hangs off another
+ * The token is clamped, not deleted: many MCP sessions share one grant, and
+ * the siblings still holding the old token keep working until they pick up
+ * the new one (deleting it would 401 them all, and each 401 refreshes again
+ * and retires the token the others just switched to). A replay inside the
+ * provider's reuse window can also hand back a token that a later refresh has
+ * already retired; the clamp keeps it usable for the window. LEAST() only ever shortens the expiry; `findMcpAccessToken` refuses the row
+ * once it has passed and the daily purge removes it. `revoked` is not used:
+ * any value there makes the token dead at once. With
+ * DOKPLOY_MCP_REFRESH_GRACE_SECONDS=0 the row is deleted outright.
+ *
+ * Only access tokens of the rotated refresh row are touched, and only when the
+ * token just issued belongs to the same client and user and hangs off another
  * refresh row. The issued token itself is never matched. Returns the number
- * of rows deleted.
+ * of rows clamped or deleted.
  */
-export const deleteSupersededMcpAccessTokens = async (
+export const retireSupersededMcpAccessTokens = async (
 	consumedRefreshToken: string,
 	issuedAccessToken: string,
+	// Injected like the env helpers in mcp-oauth: the vitest config statically
+	// `define`s process.env, so tests cannot stub it.
+	graceSeconds: number = getMcpRefreshGraceSeconds(),
 ) => {
 	if (!consumedRefreshToken || !issuedAccessToken) return 0;
 	const consumed = await db.query.oauthRefreshToken.findFirst({
@@ -40,28 +55,41 @@ export const deleteSupersededMcpAccessTokens = async (
 	) {
 		return 0;
 	}
-	const deleted = await db
-		.delete(oauthAccessToken)
-		.where(
-			and(
-				eq(oauthAccessToken.refreshId, consumed.id),
-				eq(oauthAccessToken.clientId, consumed.clientId),
-				eq(oauthAccessToken.userId, consumed.userId),
-				ne(oauthAccessToken.id, issued.id),
-			),
-		)
+	const superseded = and(
+		eq(oauthAccessToken.refreshId, consumed.id),
+		eq(oauthAccessToken.clientId, consumed.clientId),
+		eq(oauthAccessToken.userId, consumed.userId),
+		ne(oauthAccessToken.id, issued.id),
+	);
+
+	if (graceSeconds <= 0) {
+		const deleted = await db
+			.delete(oauthAccessToken)
+			.where(superseded)
+			.returning({ id: oauthAccessToken.id });
+		return deleted.length;
+	}
+
+	const until = new Date(Date.now() + graceSeconds * 1000);
+	const clamped = await db
+		.update(oauthAccessToken)
+		.set({
+			expiresAt: sql`LEAST(${oauthAccessToken.expiresAt}, ${until}::timestamp)`,
+		})
+		.where(superseded)
 		.returning({ id: oauthAccessToken.id });
-	return deleted.length;
+	return clamped.length;
 };
 
 /**
  * `hooks.after` step for `/oauth2/token`: once a refresh_token grant has
- * answered with new tokens, removes the access tokens it superseded. Errors
+ * answered with new tokens, retires the access tokens it superseded. Errors
  * are logged and swallowed, so the token response is never affected.
  */
 export const cleanupAfterMcpTokenGrant = async (
 	body: Record<string, unknown>,
 	returned: unknown,
+	graceSeconds: number = getMcpRefreshGraceSeconds(),
 ) => {
 	if (body.grant_type !== "refresh_token") return;
 	if (typeof body.refresh_token !== "string") return;
@@ -71,8 +99,12 @@ export const cleanupAfterMcpTokenGrant = async (
 			: undefined;
 	if (typeof accessToken !== "string") return;
 	try {
-		await deleteSupersededMcpAccessTokens(body.refresh_token, accessToken);
+		await retireSupersededMcpAccessTokens(
+			body.refresh_token,
+			accessToken,
+			graceSeconds,
+		);
 	} catch (error) {
-		console.error("[mcp] failed to delete superseded access tokens", error);
+		console.error("[mcp] failed to retire superseded access tokens", error);
 	}
 };

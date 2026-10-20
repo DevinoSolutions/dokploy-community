@@ -376,7 +376,8 @@ const createBetterAuth = () =>
 			}),
 			after: createAuthMiddleware(async (ctx) => {
 				// A refresh leaves the access token it replaced valid until it
-				// expires; delete it (see mcp-refresh-cleanup).
+				// expires; clamp it to the rotation grace window (see
+				// mcp-refresh-cleanup).
 				if (ctx.path === "/oauth2/token") {
 					await cleanupAfterMcpTokenGrant(
 						readFormOrJsonBody(ctx.body),
