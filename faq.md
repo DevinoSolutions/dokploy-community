@@ -6,7 +6,7 @@ permalink: /faq/
 
 # Dokploy Community Edition FAQ
 
-Short answers to common questions about [Dokploy Community Edition](https://dokploy-community.devino.ca/), the self-hosted Dokploy fork. For feature setup guides see the [integrations page](https://dokploy-community.devino.ca/integrations/).
+Short answers to common questions about [Dokploy Community Edition](https://dokploy-community.devino.ca/), the self-hosted Dokploy fork. For feature setup guides see the [integrations page](https://dokploy-community.devino.ca/integrations/), the [MCP server guide](https://dokploy-community.devino.ca/mcp-server/), [enforced remote builds](https://dokploy-community.devino.ca/build-policy/), [deploy queue controls](https://dokploy-community.devino.ca/deploy-queue/) and [Compose rolling replace](https://dokploy-community.devino.ca/compose-rolling-replace/).
 
 ## What is Dokploy Community Edition?
 
@@ -71,7 +71,7 @@ claude mcp add --transport http --scope user dokploy https://<host>/api/mcp
 claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"
 ```
 
-[Remote MCP server in the README](https://github.com/DevinoSolutions/dokploy-community#remote-mcp-server-with-oauth-fork-original)
+[MCP server guide: sign-in flow, scopes and limits](https://dokploy-community.devino.ca/mcp-server/) and the [remote MCP server in the README](https://github.com/DevinoSolutions/dokploy-community#remote-mcp-server-with-oauth-fork-original)
 
 ## Why does my Dokploy GitHub webhook not trigger a deploy for large pushes?
 

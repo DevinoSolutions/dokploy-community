@@ -9,6 +9,10 @@ Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not
 ## Guides
 
 - **[Integrations guide](https://dokploy-community.devino.ca/integrations/)** — set up Uptimely, Snapvisor, DoDomain, Sendly and Notifly
+- **[MCP server with OAuth](https://dokploy-community.devino.ca/mcp-server/)** — connect Claude Code or any MCP client, scopes and revoking
+- **[Enforced remote builds](https://dokploy-community.devino.ca/build-policy/)** — build once on the build server, deploy by digest, required checks, rollback
+- **[Deploy queue controls](https://dokploy-community.devino.ca/deploy-queue/)** — priority lane, remove one waiting deploy, keep-oldest clean
+- **[Compose rolling replace](https://dokploy-community.devino.ca/compose-rolling-replace/)** — opt-in start-before-stop redeploys for Compose services
 - **[FAQ](https://dokploy-community.devino.ca/faq/)** — install, migrate from Dokploy, MCP server for Claude Code, large deploy webhooks, DoDomain, uptime monitoring, telemetry
 
 ## Switching from official Dokploy

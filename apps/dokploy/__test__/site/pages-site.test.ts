@@ -65,7 +65,24 @@ const COMMUNITY_TAG_RE = /v\d+\.\d+\.\d+-community\.\d+/g;
 
 const REPO_URL = "https://github.com/DevinoSolutions/dokploy-community";
 const LICENSE_URL = `${REPO_URL}/blob/canary/LICENSE.MD`;
-const MARKDOWN_PAGES = ["README.md", "faq.md", "integrations.md", "404.md"];
+/** Feature guide pages: the fork-only features upstream Dokploy does not ship. */
+const GUIDE_PAGES = [
+	{ file: "mcp-server.md", permalink: "/mcp-server/" },
+	{ file: "build-policy.md", permalink: "/build-policy/" },
+	{ file: "deploy-queue.md", permalink: "/deploy-queue/" },
+	{
+		file: "compose-rolling-replace.md",
+		permalink: "/compose-rolling-replace/",
+	},
+];
+const GUIDE_FILES = GUIDE_PAGES.map((page) => page.file);
+const MARKDOWN_PAGES = [
+	"README.md",
+	"faq.md",
+	"integrations.md",
+	"404.md",
+	...GUIDE_FILES,
+];
 
 /** Drops fenced code blocks (``` or ~~~, also when indented in a list). */
 const withoutCodeFences = (text: string) => {
@@ -187,6 +204,7 @@ describe("pages site: repository files", () => {
 				"assets",
 				"integrations.md",
 				"faq.md",
+				...GUIDE_FILES,
 				"llms.txt",
 				"robots.txt",
 				"install.sh",
@@ -489,7 +507,7 @@ describe("pages site: repository files", () => {
 	describe("Liquid", () => {
 		// GitHub Pages runs every page through Liquid, which silently drops
 		// `{{ ... }}` and `{% ... %}`. Escape them as `&#123;` in raw HTML.
-		it.each(["README.md", "faq.md", "integrations.md"])(
+		it.each(["README.md", "faq.md", "integrations.md", ...GUIDE_FILES])(
 			"%s has no Liquid delimiters",
 			(file) => {
 				const text = read(file);
@@ -688,7 +706,7 @@ describe("pages site: repository files", () => {
 
 		describe("descriptions and titles", () => {
 			const config = parseYaml(read("_config.yml")) as Record<string, unknown>;
-			const pages = ["faq.md", "integrations.md", "404.md"];
+			const pages = ["faq.md", "integrations.md", "404.md", ...GUIDE_FILES];
 
 			it.each(pages)("%s has a 70 to 160 character description", (file) => {
 				const description = String(frontMatterOf(file).description);
@@ -735,6 +753,7 @@ describe("pages site: repository files", () => {
 				"/",
 				"/faq/",
 				"/integrations/",
+				...GUIDE_PAGES.map((page) => page.permalink),
 				"/llms.txt",
 				"/robots.txt",
 				"/install.sh",
@@ -752,25 +771,26 @@ describe("pages site: repository files", () => {
 				return targets.filter((target) => !/^(https?:|mailto:|#)/.test(target));
 			};
 
-			it.each(["README.md", "faq.md", "integrations.md", "404.md"])(
-				"%s has no relative link that would 404 on the site",
-				(file) => {
-					for (const link of relativeLinks(file)) {
-						const target = (link.split("#")[0] as string).split(
-							"?",
-						)[0] as string;
-						if (sitePages.has(target)) continue;
-						const relative = target.replace(/^\.?\//, "");
-						const topLevel = relative.split("/")[0] as string;
-						expect(
-							fs.existsSync(path.join(REPO_ROOT, relative)) &&
-								!exclude.includes(topLevel) &&
-								!exclude.includes(relative),
-							`${file}: ${link} is not a page or file the site serves`,
-						).toBe(true);
-					}
-				},
-			);
+			it.each([
+				"README.md",
+				"faq.md",
+				"integrations.md",
+				"404.md",
+				...GUIDE_FILES,
+			])("%s has no relative link that would 404 on the site", (file) => {
+				for (const link of relativeLinks(file)) {
+					const target = (link.split("#")[0] as string).split("?")[0] as string;
+					if (sitePages.has(target)) continue;
+					const relative = target.replace(/^\.?\//, "");
+					const topLevel = relative.split("/")[0] as string;
+					expect(
+						fs.existsSync(path.join(REPO_ROOT, relative)) &&
+							!exclude.includes(topLevel) &&
+							!exclude.includes(relative),
+						`${file}: ${link} is not a page or file the site serves`,
+					).toBe(true);
+				}
+			});
 
 			it("README links the license through its real file name", () => {
 				expect(read("README.md")).toContain(`[Apache 2.0](${LICENSE_URL})`);
@@ -790,6 +810,132 @@ describe("pages site: repository files", () => {
 					);
 				}
 			});
+		});
+	});
+
+	describe("feature guide pages", () => {
+		const readme = read("README.md");
+		const faq = read("faq.md");
+		const llms = read("llms.txt");
+		const exclude = ((parseYaml(read("_config.yml")) as Record<string, unknown>)
+			.exclude ?? []) as string[];
+
+		it.each(GUIDE_PAGES)(
+			"$file has a title, a description and the $permalink permalink",
+			({ file, permalink }) => {
+				const { frontMatter } = parseMarkdown(file);
+				expect(String(frontMatter.title).length).toBeGreaterThan(10);
+				expect(String(frontMatter.description).length).toBeGreaterThanOrEqual(
+					70,
+				);
+				expect(frontMatter.permalink).toBe(permalink);
+			},
+		);
+
+		it.each(GUIDE_PAGES)(
+			"$file is served and listed in the sitemap",
+			({ file, permalink }) => {
+				expect(exclude).not.toContain(file);
+				expect(frontMatterOf(file).sitemap).not.toBe(false);
+				expect(permalink).toMatch(/^\/[a-z0-9-]+\/$/);
+			},
+		);
+
+		it("uses distinct permalinks and titles", () => {
+			const all = GUIDE_FILES.map((file) => frontMatterOf(file));
+			expect(new Set(all.map((fm) => fm.permalink)).size).toBe(all.length);
+			expect(new Set(all.map((fm) => fm.title)).size).toBe(all.length);
+		});
+
+		it.each(GUIDE_PAGES)(
+			"README links the $file page with an absolute https URL",
+			({ permalink }) => {
+				expect(readme).toContain(`](${SITE}${permalink})`);
+			},
+		);
+
+		it.each(GUIDE_PAGES)(
+			"faq.md and llms.txt link the $file page",
+			({ permalink }) => {
+				expect(faq).toContain(`](${SITE}${permalink})`);
+				expect(llms).toContain(`](${SITE}${permalink})`);
+			},
+		);
+
+		it.each(GUIDE_PAGES)(
+			"$file links the home page and the FAQ",
+			({ file }) => {
+				const { body } = parseMarkdown(file);
+				expect(body).toContain(`](${SITE}/)`);
+				expect(body).toContain(`](${SITE}/faq/)`);
+			},
+		);
+
+		it.each(GUIDE_PAGES)(
+			"$file has exactly one H1 and links another guide",
+			({ file, permalink }) => {
+				const { body } = parseMarkdown(file);
+				const h1s = withoutCodeFences(body)
+					.split("\n")
+					.filter((line) => line.startsWith("# "));
+				expect(h1s).toHaveLength(1);
+				const others = GUIDE_PAGES.filter(
+					(page) => page.permalink !== permalink,
+				);
+				expect(
+					others.some((page) => body.includes(`](${SITE}${page.permalink})`)),
+				).toBe(true);
+			},
+		);
+
+		it("the MCP guide names every scope the server offers", () => {
+			const scopes = read("apps/dokploy/server/mcp/scopes.ts");
+			const { body } = parseMarkdown("mcp-server.md");
+			const ids = [...scopes.matchAll(/id: "(dokploy:[a-z:]+)"/g)].map(
+				(match) => match[1] as string,
+			);
+			expect(ids.length).toBeGreaterThanOrEqual(8);
+			for (const id of ids) expect(body, id).toContain(`\`${id}\``);
+		});
+
+		it("the MCP guide states the real endpoint and the token defaults", () => {
+			const { body } = parseMarkdown("mcp-server.md");
+			expect(body).toContain("/api/mcp");
+			const oauth = read("packages/server/src/services/mcp-oauth.ts");
+			expect(oauth).toContain("DEFAULT_ACCESS_TOKEN_HOURS = 24 * 30");
+			expect(oauth).toContain("DEFAULT_REFRESH_TOKEN_DAYS = 365");
+			expect(body).toContain("30 days");
+			expect(body).toContain("365 days");
+		});
+
+		it("the build policy guide matches the settings defaults", () => {
+			const { body } = parseMarkdown("build-policy.md");
+			const schema = read("packages/server/src/db/schema/build-policy.ts");
+			expect(schema).toContain(".default(5)");
+			expect(schema).toContain(".min(1).max(720)");
+			expect(body).toContain("1 to 720, default 5");
+		});
+
+		it("the deploy queue guide names procedures the routers define", () => {
+			const { body } = parseMarkdown("deploy-queue.md");
+			const deployment = read("apps/dokploy/server/api/routers/deployment.ts");
+			for (const name of ["prioritizeQueued", "removeQueued", "queueList"]) {
+				expect(deployment, name).toContain(`${name}:`);
+				expect(body, name).toContain(name);
+			}
+			expect(read("apps/dokploy/server/api/routers/application.ts")).toContain(
+				"keepOldest",
+			);
+			expect(body).toContain("keepOldest");
+		});
+
+		it("the rolling replace guide matches the card defaults and the doc", () => {
+			const { body } = parseMarkdown("compose-rolling-replace.md");
+			const doc = read("docs/compose-rolling-replace.md");
+			expect(doc).toContain("(10 to 900 s, default 120)");
+			expect(doc).toContain("(0 to 120 s, default 5)");
+			expect(body).toContain("10 to 900 seconds, default 120");
+			expect(body).toContain("0 to 120 seconds, default 5");
 		});
 	});
 
@@ -822,7 +968,12 @@ describe.skipIf(!process.env.SITE_LIVE_TESTS)(
 			};
 		};
 
-		const PAGES = ["/", "/faq/", "/integrations/"];
+		const PAGES = [
+			"/",
+			"/faq/",
+			"/integrations/",
+			...GUIDE_PAGES.map((page) => page.permalink),
+		];
 
 		/** The same-site hrefs of a page, resolved against the page URL. */
 		const sameSiteLinks = (html: string, pathname: string) =>
@@ -973,16 +1124,19 @@ describe.skipIf(!process.env.SITE_LIVE_TESTS)(
 			expect(text).toContain("Dokploy Community Edition");
 		});
 
-		it("/sitemap.xml lists exactly the home, FAQ and integrations pages", async () => {
+		it("/sitemap.xml lists exactly the home, FAQ, integrations and guide pages", async () => {
 			const { text } = await get("/sitemap.xml");
 			const locations = [...text.matchAll(/<loc>([^<]+)<\/loc>/g)]
 				.map((match) => match[1])
 				.sort();
-			expect(locations).toEqual([
-				`${SITE}/`,
-				`${SITE}/faq/`,
-				`${SITE}/integrations/`,
-			]);
+			expect(locations).toEqual(
+				[
+					`${SITE}/`,
+					`${SITE}/faq/`,
+					`${SITE}/integrations/`,
+					...GUIDE_PAGES.map((page) => `${SITE}${page.permalink}`),
+				].sort(),
+			);
 		});
 
 		it("/ has SoftwareApplication JSON-LD with the package version (post-deploy)", async () => {
