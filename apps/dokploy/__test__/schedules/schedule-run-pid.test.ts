@@ -1,7 +1,17 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -193,11 +203,14 @@ describe("runCommand pid capture on a remote server", () => {
 		expect(command).toContain("set -o pipefail");
 		expect(command).not.toContain("tee");
 		expect(command).toContain("Command executed successfully");
-		expect(options).toEqual({ streamOnly: true });
+		// The user command is the stdin of the ssh channel, not part of the script.
+		expect(options).toEqual({ streamOnly: true, stdin: `echo "it's $HOME"` });
+		expect(command).not.toContain("it's");
 		// What docker receives once the shell has unquoted the command: the user
-		// command is a positional argument of the wrapper, never part of it.
+		// command is on its stdin (-i), never an argument.
 		expect(dockerArgs(command)).toEqual([
 			"exec",
+			"-i",
 			"-e",
 			"DOKPLOY_SCHEDULE_RUN=dep-1",
 			"cont-1",
@@ -205,8 +218,29 @@ describe("runCommand pid capture on a remote server", () => {
 			"-c",
 			SCHEDULE_RUN_WRAPPER,
 			"bash",
-			`echo "it's $HOME"`,
 		]);
+	});
+
+	it("keeps a secret and a script larger than one shell argument out of the command", async () => {
+		const secret = "s3cr3t-token-value";
+		const big = `export TOKEN=${secret}\n${"echo padding\n".repeat(30_000)}`;
+		mocks.findScheduleById.mockResolvedValue({
+			...schedule("srv-1"),
+			command: big,
+		});
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+
+		await runCommand("sch-1");
+
+		const [, command, , options] = mocks.execAsyncRemote.mock.calls[0] as [
+			string,
+			string,
+			unknown,
+			{ stdin?: string },
+		];
+		expect(command).not.toContain(secret);
+		expect(command.length).toBeLessThan(2_000);
+		expect(options.stdin).toBe(big);
 	});
 
 	describe("output of the generated remote command", () => {
@@ -376,14 +410,74 @@ describe("runCommand pid capture on a remote server", () => {
 	});
 });
 
+// Stands in for the stdin of the `docker exec` child.
+const hostStdin = () => {
+	let text = "";
+	let finished = false;
+	const stream = new Writable({
+		write(chunk, _encoding, done) {
+			text += chunk.toString();
+			done();
+		},
+		final(done) {
+			finished = true;
+			done();
+		},
+	});
+	return { stream, received: () => text, ended: () => finished };
+};
+
 describe("runCommand pid capture on the Dokploy host", () => {
+	it("keeps the command out of the arguments of docker exec on the host", async () => {
+		const secret = "s3cr3t-token-value";
+		mocks.findScheduleById.mockResolvedValue({
+			...schedule(null),
+			command: `export TOKEN=${secret}`,
+		});
+		const stdin = hostStdin();
+		mocks.spawnAsync.mockImplementation(() =>
+			Object.assign(Promise.resolve({}), { child: { stdin: stdin.stream } }),
+		);
+
+		await runCommand("sch-1");
+
+		const args = mocks.spawnAsync.mock.calls[0]?.[1] as string[];
+		expect(args.join(" ")).not.toContain(secret);
+		expect(stdin.received()).toBe(`export TOKEN=${secret}`);
+	});
+
+	it("does not write the command into the run log", async () => {
+		const secret = "s3cr3t-token-value";
+		mocks.findScheduleById.mockResolvedValue({
+			...schedule(null),
+			command: `export TOKEN=${secret}`,
+		});
+		const stdin = hostStdin();
+		mocks.spawnAsync.mockImplementation(() =>
+			Object.assign(Promise.resolve({}), { child: { stdin: stdin.stream } }),
+		);
+
+		await runCommand("sch-1");
+
+		const log = loggedOutput();
+		expect(log).toContain("docker exec cont-1 bash");
+		expect(log).not.toContain(secret);
+		expect(log).not.toContain("-c export");
+	});
+
 	it("passes the run tag to docker exec, records the pid and keeps the marker out of the log", async () => {
 		mocks.findScheduleById.mockResolvedValue(schedule(null));
-		mocks.spawnAsync.mockImplementation(async (_cmd, _args, onData) => {
-			onData(`${MARKER}=31\nhello\n`);
-			onData("PID: 99\n");
-			onData(`${MARKER}=8\n`);
-		});
+		const stdin = hostStdin();
+		mocks.spawnAsync.mockImplementation((_cmd, _args, onData) =>
+			Object.assign(
+				(async () => {
+					onData(`${MARKER}=31\nhello\n`);
+					onData("PID: 99\n");
+					onData(`${MARKER}=8\n`);
+				})(),
+				{ child: { stdin: stdin.stream } },
+			),
+		);
 
 		await expect(runCommand("sch-1")).resolves.toMatchObject({
 			status: "done",
@@ -393,6 +487,7 @@ describe("runCommand pid capture on the Dokploy host", () => {
 			"docker",
 			[
 				"exec",
+				"-i",
 				"-e",
 				"DOKPLOY_SCHEDULE_RUN=dep-1",
 				"cont-1",
@@ -400,10 +495,12 @@ describe("runCommand pid capture on the Dokploy host", () => {
 				"-c",
 				SCHEDULE_RUN_WRAPPER,
 				"bash",
-				`echo "it's $HOME"`,
 			],
 			expect.any(Function),
 		);
+		// The command is written to the stdin of docker exec, which is then closed.
+		expect(stdin.received()).toBe(`echo "it's $HOME"`);
+		expect(stdin.ended()).toBe(true);
 		expect(mocks.updateDeployment).toHaveBeenCalledTimes(1);
 		expect(mocks.updateDeployment).toHaveBeenCalledWith("dep-1", { pid: "31" });
 
@@ -493,15 +590,11 @@ describe.skipIf(process.platform !== "linux")(
 			"%s: prints the pid of the command and the kill script stops it and its children, and only them",
 			async (shell) => {
 				if (spawnSync(shell, ["-c", "true"]).error) return;
-				const run = spawn(
-					shell,
-					[
-						"-c",
-						SCHEDULE_RUN_WRAPPER,
-						shell,
-						'sleep 300 & echo "CHILD=$!"; sleep 301 & echo "CHILD=$!"; echo "PID: 99"; wait',
-					],
-					{ env: { ...process.env, DOKPLOY_SCHEDULE_RUN: RUN_ID } },
+				const run = spawn(shell, ["-c", SCHEDULE_RUN_WRAPPER, shell], {
+					env: { ...process.env, DOKPLOY_SCHEDULE_RUN: RUN_ID },
+				});
+				run.stdin.end(
+					'sleep 300 & echo "CHILD=$!"; sleep 301 & echo "CHILD=$!"; echo "PID: 99"; wait',
 				);
 				const unrelated = spawn("sleep", ["300"]);
 				spawned.push(run.pid as number, unrelated.pid as number);
@@ -542,10 +635,313 @@ describe.skipIf(process.platform !== "linux")(
 			},
 		);
 
+		// Runs the wrapper like `docker exec -i` does: the command is the stdin.
+		const runWrapper = (
+			shell: string,
+			command: string,
+			env: Record<string, string> = {},
+		) =>
+			spawnSync(shell, ["-c", SCHEDULE_RUN_WRAPPER, shell], {
+				input: command,
+				encoding: "utf8",
+				env: { ...process.env, ...env },
+				maxBuffer: 64 * 1024 * 1024,
+			});
+
+		it.each(["sh", "bash"])(
+			"%s: runs a command read from stdin, as the same process, and leaves no file behind",
+			(shell) => {
+				if (spawnSync(shell, ["-c", "true"]).error) return;
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-wrapper-"));
+				try {
+					const run = runWrapper(
+						shell,
+						'echo "ran $$"\necho "stdin:[$(cat)]"\nls -A "$TMPDIR" | wc -l\nexit 7',
+						{ TMPDIR: tmp },
+					);
+
+					expect(run.status).toBe(7);
+					const [marker, ran, stdin, files] = run.stdout.split("\n");
+					const pid = marker?.split("=")[1];
+					expect(marker).toBe(`${MARKER}=${pid}`);
+					// exec keeps the pid, so the marker names the process the kill script finds.
+					expect(ran).toBe(`ran ${pid}`);
+					// The command's own stdin is at its end: the script went through it.
+					expect(stdin).toBe("stdin:[]");
+					// The file is unlinked once open, so even the running command sees none.
+					expect(files?.trim()).toBe("0");
+					expect(readdirSync(tmp)).toEqual([]);
+				} finally {
+					rmSync(tmp, { recursive: true, force: true });
+				}
+			},
+		);
+
+		it("runs a command larger than one shell argument and keeps it off the command line", () => {
+			const big = `echo start\n${"echo padding\n".repeat(30_000)}echo end\n`;
+			// Linux caps a single argument at 128 KB: this one could not be passed.
+			expect(big.length).toBeGreaterThan(128 * 1024);
+			expect(SCHEDULE_RUN_WRAPPER.length).toBeLessThan(2_000);
+
+			const run = runWrapper("sh", big);
+
+			expect(run.status).toBe(0);
+			const lines = run.stdout.split("\n");
+			expect(lines[1]).toBe("start");
+			expect(lines.at(-2)).toBe("end");
+			expect(lines.filter((l) => l === "padding")).toHaveLength(30_000);
+		});
+
+		it("does not show the command in the process list of the shell that runs it", () => {
+			const secret = "s3cr3t-token-value";
+			const run = runWrapper(
+				"sh",
+				`: ${secret}\ntr '\\0' ' ' < /proc/$$/cmdline\n`,
+			);
+
+			expect(run.status).toBe(0);
+			expect(run.stdout).not.toContain(secret);
+		});
+
+		it("falls back to passing the command as one argument when the temp directory cannot be written", () => {
+			const run = runWrapper("sh", 'echo "fallback ok"\nexit 3', {
+				TMPDIR: "/nonexistent-dokploy-dir",
+			});
+
+			expect(run.status).toBe(3);
+			expect(run.stdout).toContain("fallback ok\n");
+		});
+
+		const FALLBACK_LINE =
+			"dokploy: could not stage the schedule command in a file, running it as a -c argument";
+
+		it("falls back to -c and says so on stderr, without the command, when /dev/fd is not readable", () => {
+			const secret = "s3cr3t-token-value";
+			// Same wrapper, with a descriptor path that cannot be read.
+			const wrapper = SCHEDULE_RUN_WRAPPER.replace(
+				"[ -r /dev/fd/3 ]",
+				"[ -r /dev/fd/no-such-fd ]",
+			);
+			expect(wrapper).not.toBe(SCHEDULE_RUN_WRAPPER);
+
+			const run = spawnSync("sh", ["-c", wrapper, "sh"], {
+				input: `echo "ran ${secret}"\nexit 4`,
+				encoding: "utf8",
+			});
+
+			expect(run.status).toBe(4);
+			expect(run.stdout).toContain(`ran ${secret}\n`);
+			expect(run.stderr).toContain(FALLBACK_LINE);
+			expect(run.stderr).not.toContain(secret);
+		});
+
+		it("prints no fallback line when the command runs from the file", () => {
+			const run = runWrapper("sh", "exit 0");
+
+			expect(run.status).toBe(0);
+			expect(run.stderr).not.toContain(FALLBACK_LINE);
+		});
+
+		it.each([
+			["bash", ["-C"]],
+			["bash", ["-o", "noclobber"]],
+		])(
+			"%s %j: stages through the file even when the shell inherited noclobber",
+			(shell, flags) => {
+				if (spawnSync(shell, ["-c", "true"]).error) return;
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-wrapper-"));
+				try {
+					const run = spawnSync(
+						shell,
+						[...flags, "-c", SCHEDULE_RUN_WRAPPER, shell],
+						{
+							input: 'echo "ran from $0"\nexit 6',
+							encoding: "utf8",
+							env: { ...process.env, TMPDIR: tmp },
+						},
+					);
+
+					expect(run.status).toBe(6);
+					expect(run.stdout).toContain("ran from /dev/fd/3\n");
+					expect(run.stderr).not.toContain(FALLBACK_LINE);
+					expect(readdirSync(tmp)).toEqual([]);
+				} finally {
+					rmSync(tmp, { recursive: true, force: true });
+				}
+			},
+		);
+
+		it("stages through the pid named file when mktemp fails", () => {
+			const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+			const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
+			try {
+				// A mktemp that fails, so the pid named file is used.
+				writeFileSync(join(bin, "mktemp"), "#!/bin/sh\nexit 1\n", {
+					mode: 0o755,
+				});
+				const run = runWrapper("sh", "exit 2", {
+					TMPDIR: tmp,
+					PATH: `${bin}:${process.env.PATH}`,
+				});
+
+				expect(run.status).toBe(2);
+				expect(run.stderr).not.toContain(FALLBACK_LINE);
+				expect(readdirSync(tmp)).toEqual([]);
+			} finally {
+				rmSync(bin, { recursive: true, force: true });
+				rmSync(tmp, { recursive: true, force: true });
+			}
+		});
+
+		describe("sweep of leftover run files", () => {
+			const setup = () => {
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-sweep-"));
+				const old = new Date(Date.now() - 2 * 60 * 60_000);
+				const oldRun = join(tmp, ".dokploy-schedule-AbCdEf");
+				const oldOther = join(tmp, "unrelated-old-file");
+				const freshRun = join(tmp, ".dokploy-schedule-fresh1");
+				for (const file of [oldRun, oldOther, freshRun]) {
+					writeFileSync(file, "echo left");
+				}
+				utimesSync(oldRun, old, old);
+				utimesSync(oldOther, old, old);
+				return { tmp, oldRun, oldOther, freshRun };
+			};
+
+			it.each(["sh", "bash"])(
+				"%s: removes run files older than an hour and nothing else, silently",
+				(shell) => {
+					if (spawnSync(shell, ["-c", "true"]).error) return;
+					const { tmp, oldRun, oldOther, freshRun } = setup();
+					try {
+						const run = runWrapper(shell, "exit 0", { TMPDIR: tmp });
+
+						expect(run.status).toBe(0);
+						expect(run.stderr).toBe("");
+						expect(existsSync(oldRun)).toBe(false);
+						expect(existsSync(oldOther)).toBe(true);
+						expect(existsSync(freshRun)).toBe(true);
+					} finally {
+						rmSync(tmp, { recursive: true, force: true });
+					}
+				},
+			);
+
+			it("runs the command normally when there is no find", () => {
+				const { tmp, oldRun } = setup();
+				const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+				try {
+					// A PATH with the tools the wrapper needs, and no find.
+					for (const tool of ["cat", "mktemp", "rm"]) {
+						const found = spawnSync("sh", ["-c", `command -v ${tool}`], {
+							encoding: "utf8",
+						}).stdout.trim();
+						if (found) symlinkSync(found, join(bin, tool));
+					}
+					const sh = spawnSync("sh", ["-c", "command -v sh"], {
+						encoding: "utf8",
+					}).stdout.trim();
+					const run = runWrapper(sh, "exit 4", { TMPDIR: tmp, PATH: bin });
+
+					expect(run.status).toBe(4);
+					expect(run.stderr).toBe("");
+					expect(existsSync(oldRun)).toBe(true);
+				} finally {
+					rmSync(tmp, { recursive: true, force: true });
+					rmSync(bin, { recursive: true, force: true });
+				}
+			});
+		});
+
+		it("closes fd 3 first, so the command does not inherit the script", () => {
+			const run = runWrapper(
+				"sh",
+				'if [ -e /proc/$$/fd/3 ]; then echo "fd3 open"; else echo "fd3 closed"; fi',
+			);
+
+			expect(run.status).toBe(0);
+			expect(run.stdout).toContain("fd3 closed\n");
+			expect(run.stdout).not.toContain("fd3 open");
+		});
+
+		it("makes the first line of the run file close fd 3", () => {
+			const run = runWrapper("sh", 'echo "$0"\nexit 0');
+
+			expect(run.stdout.split("\n")[1]).toBe("/dev/fd/3");
+			expect(SCHEDULE_RUN_WRAPPER).toContain(String.raw`printf 'exec 3<&-\n%s\n'`);
+		});
+
+		describe("temp file name", () => {
+			const realMktemp = spawnSync("sh", ["-c", "command -v mktemp"], {
+				encoding: "utf8",
+			}).stdout?.trim() ?? "";
+
+			it.skipIf(!realMktemp)(
+				"uses mktemp for an unpredictable name",
+				() => {
+					const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+					const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
+					try {
+						const calls = join(bin, "calls");
+						writeFileSync(
+							join(bin, "mktemp"),
+							`#!/bin/sh\necho "$@" >> '${calls}'\nexec '${realMktemp}' "$@"\n`,
+							{ mode: 0o755 },
+						);
+						const run = runWrapper("sh", "exit 5", {
+							TMPDIR: tmp,
+							PATH: `${bin}:${process.env.PATH}`,
+						});
+
+						expect(run.status).toBe(5);
+						expect(readFileSync(calls, "utf8")).toContain(
+							`${tmp}/.dokploy-schedule-XXXXXX`,
+						);
+						expect(readdirSync(tmp)).toEqual([]);
+					} finally {
+						rmSync(bin, { recursive: true, force: true });
+						rmSync(tmp, { recursive: true, force: true });
+					}
+				},
+			);
+
+			it("still runs from the file, under the pid based name, when there is no mktemp", () => {
+				const bin = mkdtempSync(join(tmpdir(), "schedule-bin-"));
+				const tmp = mkdtempSync(join(tmpdir(), "schedule-tmp-"));
+				try {
+					// A PATH with the tools the wrapper needs, and no mktemp.
+					for (const tool of ["cat", "rm"]) {
+						const found = spawnSync("sh", ["-c", `command -v ${tool}`], {
+							encoding: "utf8",
+						}).stdout.trim();
+						symlinkSync(found, join(bin, tool));
+					}
+					const sh = spawnSync("sh", ["-c", "command -v sh"], {
+						encoding: "utf8",
+					}).stdout.trim();
+					const run = spawnSync(sh, ["-c", SCHEDULE_RUN_WRAPPER, sh], {
+						input: 'echo "ran $0"\nexit 6',
+						encoding: "utf8",
+						env: { ...process.env, PATH: bin, TMPDIR: tmp },
+					});
+
+					expect(run.status).toBe(6);
+					expect(run.stdout).toContain("ran /dev/fd/3\n");
+					expect(run.stderr).not.toContain("could not stage");
+					expect(readdirSync(tmp)).toEqual([]);
+
+				} finally {
+					rmSync(bin, { recursive: true, force: true });
+					rmSync(tmp, { recursive: true, force: true });
+				}
+			});
+		});
+
 		it("the kill script leaves a run with another tag alone", async () => {
-			const run = spawn("sh", ["-c", SCHEDULE_RUN_WRAPPER, "sh", "sleep 300"], {
+			const run = spawn("sh", ["-c", SCHEDULE_RUN_WRAPPER, "sh"], {
 				env: { ...process.env, DOKPLOY_SCHEDULE_RUN: `${RUN_ID}x` },
 			});
+			run.stdin.end("sleep 300");
 			spawned.push(run.pid as number);
 			await until(() => alive(run.pid as number));
 

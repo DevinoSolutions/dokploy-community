@@ -10,16 +10,46 @@ import { getComposeContainer, getServiceContainer } from "../docker/utils";
  */
 export const SCHEDULE_RUN_ENV = "DOKPLOY_SCHEDULE_RUN";
 
+// Temp files of the wrapper older than this are leftovers of a killed run.
+const SCHEDULE_TEMP_MAX_AGE_MINUTES = 60;
+
 const SCHEDULE_PID_MARKER = "__DOKPLOY_SCHEDULE_PID__";
 
 // Printed by the kill script when no process carries the tag of the run: the
 // command has not started (yet), or it is over.
 export const SCHEDULE_NONE_MARKER = "__DOKPLOY_SCHEDULE_NONE__";
 
-// Run as `<shell> -c <wrapper> <shell> <command>`: $0 is the shell, $1 the user
-// command, which is never interpolated into the script. It prints the pid that
-// the command will have (exec keeps it), then replaces itself with the command.
-export const SCHEDULE_RUN_WRAPPER = `printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$"; exec "$0" -c "$1"`;
+// Run as `<shell> -c <wrapper> <shell>` with the user command on stdin (`docker
+// exec -i`): $0 is the shell. The command is never part of a command line, so
+// it is not capped at 128 KB (MAX_ARG_STRLEN) and does not show in `ps` on the
+// host. The wrapper prints the pid that the command will have (exec keeps it),
+// reads the command and runs it from a 0600 file that it unlinks as soon as it
+// is open, so nothing is left behind in the container either. A container whose
+// temp directory cannot be written falls back to `-c` with the command as one
+// argument, which is how every run used to work.
+export const SCHEDULE_RUN_WRAPPER = [
+	`printf '${SCHEDULE_PID_MARKER}=%s\\n' "$$"`,
+	// A 0600 file holding a whole command outlives a run that was killed with
+	// SIGKILL (it cannot be trapped) between mktemp and the rm below. Sweep what
+	// is older than any run can take to open its file. Silent, and skipped when
+	// there is no find.
+	`{ find "\${TMPDIR:-/tmp}" -maxdepth 1 -type f -name '.dokploy-schedule-*' -mmin +${SCHEDULE_TEMP_MAX_AGE_MINUTES} -exec rm -f {} + >/dev/null 2>&1; } 2>/dev/null`,
+	"s=$(cat) || exit 1",
+	// mktemp makes the name unpredictable (and the file 0600). Without it the
+	// name is guessable, so that file is only written when it does not exist yet.
+	'if f=$(mktemp "${TMPDIR:-/tmp}/.dokploy-schedule-XXXXXX" 2>/dev/null); then c=; else f="${TMPDIR:-/tmp}/.dokploy-schedule-$$"; c=1; fi',
+	// The first line of the file closes fd 3 (the unlinked file), so the command
+	// and its children do not inherit it. The mktemp file already exists, so it
+	// is written with `>|` (a shell that inherited noclobber would refuse `>`);
+	// the pid named one must not exist, so there `set -C` makes `>` exclusive.
+	`if ( umask 077; if [ -n "$c" ]; then set -C; printf 'exec 3<&-\\n%s\\n' "$s" > "$f"; else printf 'exec 3<&-\\n%s\\n' "$s" >| "$f"; fi ) 2>/dev/null && exec 3< "$f" && [ -r /dev/fd/3 ]; then rm -f "$f"; exec "$0" /dev/fd/3; fi`,
+	'rm -f "$f"',
+	"exec 3<&-",
+	// The whole command is then in the process list of the container: say so in
+	// the run log (never with the command in it).
+	`echo "dokploy: could not stage the schedule command in a file, running it as a -c argument" >&2`,
+	'exec "$0" -c "$s"',
+].join("; ");
 
 // Run as `<shell> -c <script> <shell> <deploymentId>`. Processes are frozen
 // before they are killed so a looping command cannot fork a replacement while

@@ -718,6 +718,8 @@ sleep 60`,
 		// be reaped, so a loaded runner only makes the test slower, not wrong. Cleanup
 		// runs after, so it cannot be what reaped it; a command that ignores SIGTERM
 		// and never gets SIGKILL stays alive and the test reports STILL-ALIVE.
+		// The watcher prints its block only after the reap, so wait for the block
+		// before cleanup, which would otherwise make the watcher drop it unprinted.
 		const result = sh(
 			`${script}
 i=0; while [ "$i" -lt 100 ] && [ ! -s ${toShellPath(psPidFile)} ]; do sleep 0.2; i=$((i + 1)); done;
@@ -726,6 +728,7 @@ T1=$(date +%s);
 i=0; while [ "$i" -lt 160 ] && kill -0 "$PSPID" 2>/dev/null; do sleep 0.25; i=$((i + 1)); done;
 if kill -0 "$PSPID" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi
 echo "REAP-TOOK $(( $(date +%s) - T1 ))"
+${waitForSnapshots(1)}
 T0=$(date +%s);
 dokploy_stall_cleanup;
 echo "CLEANUP-TOOK $(( $(date +%s) - T0 ))"`,

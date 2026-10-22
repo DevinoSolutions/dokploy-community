@@ -1,8 +1,10 @@
 "use client";
 
 import type { inferRouterOutputs } from "@trpc/server";
-import { ArrowRight, ListTodo, Loader2, XCircle } from "lucide-react";
+import { ArrowRight, ListTodo, Loader2, Trash2, XCircle } from "lucide-react";
 import Link from "next/link";
+import { toast } from "sonner";
+import { DialogAction } from "@/components/shared/dialog-action";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -72,7 +74,14 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 		{ refetchInterval: 3000 },
 	);
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const canRemoveWaiting =
+		!isCloud && (permissions?.deployment.cancel ?? false);
 	const utils = api.useUtils();
+	const { mutateAsync: removeQueued, isPending: isRemoving } =
+		api.deployment.removeQueued.useMutation({
+			onSettled: () => void utils.deployment.queueList.invalidate(),
+		});
 	const {
 		mutateAsync: cancelApplicationDeployment,
 		isPending: isCancellingApp,
@@ -156,6 +165,37 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 														<span className="text-muted-foreground text-xs">
 															—
 														</span>
+													)}
+													{canRemoveWaiting && row.state === "waiting" && (
+														<DialogAction
+															title="Remove this deploy from the queue?"
+															description="The deploy has not started. It is dropped from the queue and will not run. A deploy that is already running is not affected."
+															disabled={isRemoving}
+															onClick={async () => {
+																await removeQueued({
+																	jobId: String(row.id),
+																	serviceId: String(
+																		d.composeId ?? d.applicationId ?? "",
+																	),
+																})
+																	.then(() => {
+																		toast.success("Removed from the queue");
+																	})
+																	.catch((err) => {
+																		toast.error(err.message);
+																	});
+															}}
+														>
+															<Button
+																variant="ghost"
+																size="sm"
+																className="text-destructive hover:text-destructive"
+																disabled={isRemoving}
+															>
+																<Trash2 className="size-4 mr-1" />
+																Remove
+															</Button>
+														</DialogAction>
 													)}
 													{isCloud &&
 														row.state === "active" &&

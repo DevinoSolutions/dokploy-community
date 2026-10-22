@@ -39,6 +39,7 @@ import { eq } from "drizzle-orm";
 import type { z } from "zod";
 import { deployHook } from "../db/schema";
 import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
+import { removeStagedFiles } from "../utils/docker/staging";
 import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 // Fork module: enforced remote builds. See services/build-policy/README.md.
@@ -281,6 +282,7 @@ export const deployApplication = async ({
 		{ buildServerId: buildPolicy.buildServerId },
 	);
 
+	const stagedBuildFiles: string[] = [];
 	try {
 		let command = "set -e;";
 		if (application.sourceType === "github") {
@@ -321,7 +323,10 @@ export const deployApplication = async ({
 		});
 		// <<< build-policy hook 2a/4
 
-		command += await getBuildCommand(application, serverId);
+		command += await getBuildCommand(application, serverId, {
+			deploymentId: deployment.deploymentId,
+			onStaged: (paths) => stagedBuildFiles.push(...paths),
+		});
 
 		// >>> build-policy hook 2/4: tag `<repository>:<sha>`, push to the
 		// organization registry and echo the digest. Empty when not enforcing.
@@ -428,6 +433,7 @@ export const deployApplication = async ({
 			});
 		}
 	} catch (error) {
+		void removeStagedFiles(serverId, stagedBuildFiles);
 		const cancelled = await settleCancelledApplicationDeploy(
 			applicationId,
 			deployment,
@@ -537,6 +543,7 @@ export const rebuildApplication = async ({
 		{ buildServerId: buildPolicy.buildServerId },
 	);
 
+	const stagedBuildFiles: string[] = [];
 	try {
 		let command = "set -e;";
 		// >>> build-policy hook 2a/4 (rebuild): the required-checks gate. A
@@ -551,7 +558,10 @@ export const rebuildApplication = async ({
 		});
 		// <<< build-policy hook 2a/4 (rebuild)
 		// Check case for docker only
-		command += await getBuildCommand(application, serverId);
+		command += await getBuildCommand(application, serverId, {
+			deploymentId: deployment.deploymentId,
+			onStaged: (paths) => stagedBuildFiles.push(...paths),
+		});
 		// >>> build-policy hook 2/4 (rebuild)
 		command += await getBuildPolicyPushCommand(buildPolicy, {
 			appName: application.appName,
@@ -651,6 +661,7 @@ export const rebuildApplication = async ({
 			});
 		}
 	} catch (error) {
+		void removeStagedFiles(serverId, stagedBuildFiles);
 		const cancelled = await settleCancelledApplicationDeploy(
 			applicationId,
 			deployment,
@@ -842,6 +853,8 @@ export const deployPreviewApplication = async ({
 		previewDeploymentId,
 		previewDomain,
 	});
+	const stagedBuildFiles: string[] = [];
+	let stagedBuildServerId: string | null | undefined;
 	try {
 		await writePreviewComment("running");
 
@@ -950,7 +963,14 @@ export const deployPreviewApplication = async ({
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {
-			command += await getBuildCommand(application, buildServerId);
+			command += await getBuildCommand(application, buildServerId, {
+				deploymentId: deployment.deploymentId,
+				// `buildServerId` is only in scope here: remember the host the files are on.
+				onStaged: (paths) => {
+					stagedBuildServerId = buildServerId;
+					stagedBuildFiles.push(...paths);
+				},
+			});
 		}
 
 		// >>> build-policy hook 2/4 (preview): tag and push the preview image by
@@ -995,6 +1015,7 @@ export const deployPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
+		void removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
 		let command = "";
 		if (!(error instanceof ExecError)) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -1076,6 +1097,8 @@ export const rebuildPreviewApplication = async ({
 		previewDomain,
 	});
 
+	const stagedBuildFiles: string[] = [];
+	let stagedBuildServerId: string | null | undefined;
 	try {
 		await writePreviewComment("running");
 
@@ -1188,7 +1211,14 @@ export const rebuildPreviewApplication = async ({
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {
-			command += await getBuildCommand(application, buildServerId);
+			command += await getBuildCommand(application, buildServerId, {
+				deploymentId: deployment.deploymentId,
+				// `buildServerId` is only in scope here: remember the host the files are on.
+				onStaged: (paths) => {
+					stagedBuildServerId = buildServerId;
+					stagedBuildFiles.push(...paths);
+				},
+			});
 		}
 		// >>> build-policy hook 2/4 (preview rebuild)
 		command += await getBuildPolicyPushCommand(buildPolicy, {
@@ -1228,6 +1258,7 @@ export const rebuildPreviewApplication = async ({
 			previewStatus: "done",
 		});
 	} catch (error) {
+		void removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
 		let command = "";
 
 		// Only log details for non-ExecError errors

@@ -4,9 +4,9 @@
 
 ## Install and upgrade
 
-- [README: install, switch from Dokploy, features](https://github.com/DevinoSolutions/dokploy-community#readme): Fresh install with `curl -sSL https://dokploy-community.devino.ca/install.sh | sh`, one-command switch from official Dokploy with `docker service update --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.30 --with-registry-auth dokploy`, and the full feature list.
+- [README: install, switch from Dokploy, features](https://github.com/DevinoSolutions/dokploy-community#readme): Fresh install with `curl -sSL https://dokploy-community.devino.ca/install.sh | sh`, one-command switch from official Dokploy with `docker service update --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.31 --with-registry-auth dokploy`, and the full feature list.
 - [Site home](https://dokploy-community.devino.ca/): The same README as a web page, including the key features that upstream Dokploy does not have.
-- [Docker image tags](https://github.com/DevinoSolutions/dokploy-community#docker-image): ghcr.io/devinosolutions/dokploy-community with versioned tags (for example v0.30.8-community.30), `latest` for the latest release and `canary` for the latest build. Recent release images are multi-arch (linux/amd64 and linux/arm64).
+- [Docker image tags](https://github.com/DevinoSolutions/dokploy-community#docker-image): ghcr.io/devinosolutions/dokploy-community with versioned tags (for example v0.30.8-community.31), `latest` for the latest release and `canary` for the latest build. Recent release images are multi-arch (linux/amd64 and linux/arm64).
 - [Versioning](https://github.com/DevinoSolutions/dokploy-community#versioning): Tags follow the scheme v<upstream-version>-community.<release>.
 
 ## Features
@@ -15,6 +15,10 @@
 - [Uptimely monitoring](https://dokploy-community.devino.ca/integrations/#uptimely-uptime-ssl-and-domain-monitoring): One Website monitor per HTTPS domain from a service's Monitoring tab, checked every 5 minutes, with a 30-day timeline, an optional deploy heartbeat pinged after each successful deploy, and an Uptimely notification channel that declares an incident when a deploy fails and resolves it on the next success.
 - [Snapvisor visual testing](https://dokploy-community.devino.ca/integrations/#snapvisor-visual-testing-on-preview-deployments): Visual-diff review status on preview deployments, looked up by commit SHA.
 - [DoDomain domain connect](https://dokploy-community.devino.ca/integrations/#dodomain-custom-domain-connect-and-dns-verification): Domain owners connect DNS through a hosted flow and Dokploy shows the verification state.
+- [MCP server guide](https://dokploy-community.devino.ca/mcp-server/): Sign-in flow, the eight scopes (delete and administration off by default), token lifetimes, API-key alternative, revoking a client and limits for the built-in remote MCP server.
+- [Enforced remote builds](https://dokploy-community.devino.ca/build-policy/): The organization build policy: build on the build server, push to the registry, deploy by digest, exclusions, break-glass local builds, required GitHub checks, coalescing and rollback by digest. Off by default.
+- [Deploy queue controls](https://dokploy-community.devino.ca/deploy-queue/): Deploy with priority ahead of waiting jobs, remove one waiting deploy, and clean only duplicate queued deploys.
+- [Compose rolling replace](https://dokploy-community.devino.ca/compose-rolling-replace/): Opt-in start-before-stop redeploys for selected Compose services, with eligibility rules, cancel behavior and limits.
 - [Built-in MCP server](https://github.com/DevinoSolutions/dokploy-community#remote-mcp-server-with-oauth-fork-original): Dokploy serves its own remote MCP server at `https://<your-dokploy>/api/mcp` with OAuth sign-in, so Claude Code and other MCP clients need no local process and no API key: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then authenticate in the browser. An API key in the `x-api-key` header also works.
 
 ## FAQ

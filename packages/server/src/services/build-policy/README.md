@@ -90,8 +90,11 @@ review finding B: the section above was excellent and this one did not exist.
    deploy pulls by digest. A unit that must keep building where it is needs an
    exclusion, added before the switch is flipped.
 3. **Queued deploys start coalescing.** A burst of pushes produces one build,
-   at the earliest slot, of the newest commit (or pinned digest). Previews and
-   waiting manual redeploys are never coalesced.
+   at the earliest slot, of the newest commit (or pinned digest). Manual compose
+   and application deploys and redeploys coalesce the same way, each with its
+   own kind, and a drop they cause is audited under the user who clicked. Previews
+   are never coalesced, and a redeploy is never merged with a waiting deploy (or
+   the reverse).
 4. **`[skip deploy]` starts being honoured** on the routes listed in
    `skip-deploy.ts`.
 5. **A deploy-hook `{image, …}` body stops being ignored**: validated on an
@@ -355,6 +358,21 @@ busiest route for some units did not have it.
   always posting one would otherwise coalesce the queue and 400 on every single
   push, for ever.
 
+### `apps/dokploy/server/api/routers/compose.ts`
+
+- `deploy` and `redeploy` call `coalesceManualComposeDeploy(compose, jobData)`
+  (`apps/dokploy/server/api/utils/manual-compose-coalesce.ts`) just before
+  `myQueue.add`. It runs the same `buildPolicyDeployGate` as the webhooks, with
+  no commit message and no changed files, so only the coalescing step applies;
+  `[skip deploy]` and watch paths are never consulted for a manual request.
+  `merged` means a waiting job took the request over and nothing is enqueued.
+
+**Merge note:** the call must stay before `myQueue.add`, and priority requests
+skip it (a priority request is meant to jump the queue, and a merge would hand
+it the waiting job's place). The Cloud direct path (`deploy(jobData)` for a
+compose with a server) never queues and is not wired. The manual
+**application** path (`application.ts` `deploy` / `redeploy`) is not wired yet.
+
 ### `apps/dokploy/server/queues/queueSetup.ts`
 
 - `cleanQueuesByApplication` and `cleanQueuesByCompose` now return the number of
@@ -582,10 +600,16 @@ matches, the push enqueues as usual.
 
 Result: p1, p2, p3 leave one waiting job, at p1's position, carrying p3. A
 pinned-image burst deploys the newest digest, not the first one.
+Newest wins for a manual request too: a manual application deploy that folds
+into a waiting webhook job carrying a pinned image replaces that job's data, so
+the pinned image is dropped and the deploy builds from source.
 
 What it never touches: the running job, PR previews, another unit's jobs, and a
 waiting **manual redeploy** (a different type), so a push does not cancel a
-redeploy someone asked for. A waiting job with a different `freshVolumes` or
+redeploy someone asked for. A manual compose redeploy does fold into an older
+waiting redeploy of the same compose, as a manual compose deploy does into an
+older waiting deploy; a manual application redeploy and deploy fold into the
+application's older waiting redeploy and deploy the same way. A waiting job with a different `freshVolumes` or
 priority request is not a duplicate and stays; the push then enqueues next to it.
 
 A matching waiting job in a **different partition** (the unit moved to another

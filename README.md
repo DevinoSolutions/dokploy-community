@@ -2,13 +2,17 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.30**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.31**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
 ## Guides
 
 - **[Integrations guide](https://dokploy-community.devino.ca/integrations/)** — set up Uptimely, Snapvisor, DoDomain, Sendly and Notifly
+- **[MCP server with OAuth](https://dokploy-community.devino.ca/mcp-server/)** — connect Claude Code or any MCP client, scopes and revoking
+- **[Enforced remote builds](https://dokploy-community.devino.ca/build-policy/)** — build once on the build server, deploy by digest, required checks, rollback
+- **[Deploy queue controls](https://dokploy-community.devino.ca/deploy-queue/)** — priority lane, remove one waiting deploy, keep-oldest clean
+- **[Compose rolling replace](https://dokploy-community.devino.ca/compose-rolling-replace/)** — opt-in start-before-stop redeploys for Compose services
 - **[FAQ](https://dokploy-community.devino.ca/faq/)** — install, migrate from Dokploy, MCP server for Claude Code, large deploy webhooks, DoDomain, uptime monitoring, telemetry
 
 ## Switching from official Dokploy
@@ -17,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.30 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.31 \
   --with-registry-auth \
   dokploy
 ```
@@ -61,7 +65,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 ### Remote MCP server with OAuth (fork original)
 
-- Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP). Claude Code, Cursor or any MCP client connects over HTTPS with **no local process and no API key**
+- Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP). Claude Code or another MCP client whose OAuth redirect is https or a loopback http URL connects over HTTPS with **no local process and no API key**
 - **OAuth 2.1** with PKCE and dynamic client registration: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then `/mcp → Authenticate` opens the browser and you sign in once
 - **API-key alternative for automation fleets** — `POST /api/mcp` also accepts a Dokploy API key in the `x-api-key` header (`claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"`), so unattended agent sessions never depend on one shared OAuth grant
 - **Per-grant scopes** — a consent page with toggles for read, deploy, edit/delete services, edit/delete projects, backups and admin (delete and admin are off by default); role permissions still apply underneath. Revoke any client from Settings → Profile
@@ -69,7 +73,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 ### Build once, deploy by digest (fork original)
 
 - **One builder for the whole organization** — with enforcement on, every GitHub-sourced application builds on the organization build server, pushes `<repository>:<sha>` to the organization registry, and updates the swarm service **by digest**, so CI can wait for that image instead of building a second copy of it
-- **Escape hatches that leave a record** — per-application and per-compose exclusions, plus a one-shot "build locally once" grant written to an audit trail with actor, reason and timestamp
+- **Escape hatches that leave a record** — per-application exclusions (Compose builds are never moved to the build server, so they have nothing to exclude), plus a one-shot "build locally once" grant written to an audit trail with actor, reason and timestamp
 - **Required checks, coalescing and rollback by digest** — a deploy can wait for named commit checks, rapid pushes collapse into one waiting deploy that keeps its place in the queue and builds the newest commit, and a rollback re-deploys exactly the image that was running
 - **Off by default** — with no policy configured for an organization, every code path is stock upstream behaviour
 
@@ -116,12 +120,12 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.30
+## What's new in v0.30.8-community.31
 
-- Opt-in rolling replace for Compose services: the new replica starts and must report healthy before the old container is stopped. Off by default; the health wait is raised automatically to fit the service's healthcheck ([#399](https://github.com/DevinoSolutions/dokploy-community/pull/399), [#400](https://github.com/DevinoSolutions/dokploy-community/pull/400)).
-- Security: Traefik file read and write are confined to the Traefik configuration directory, a port of upstream Dokploy #5070 ([#397](https://github.com/DevinoSolutions/dokploy-community/pull/397)).
-- Stack environments are staged in a 0600 file instead of the deploy command line ([#394](https://github.com/DevinoSolutions/dokploy-community/pull/394)).
-- One database migration (0217). Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Node 24.22.1 in the images, lockfile and devcontainer, taking the October 2026 Node.js security release; contributed by decryptedchaos ([#436](https://github.com/DevinoSolutions/dokploy-community/pull/436)).
+- Manual Compose Deploy and Redeploy now coalesce duplicate waiting jobs, and one waiting job can be removed from the local deploy queue, with an audit entry ([#437](https://github.com/DevinoSolutions/dokploy-community/pull/437), [#438](https://github.com/DevinoSolutions/dokploy-community/pull/438)).
+- A cancel trail records who cancelled a deployment or dropped a queued job, shown as "Cancelled by" on the deployments list; MCP refresh grants no longer leave the superseded access token live; schedule scripts and build environments stay off the process command line.
+- Two database migrations (0218, 0219), both guarded. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -136,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.30
+export DOKPLOY_VERSION=v0.30.8-community.31
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -149,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.30      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.31      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -192,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.30` is the 30th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.31` is the 31st fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 

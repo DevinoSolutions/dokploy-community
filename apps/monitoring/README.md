@@ -6,7 +6,7 @@ You can use it for monitoring any external service.
 
 ## Requirements
 
-- Go 1.21
+- Go 1.24
 
 ## Configuration
 

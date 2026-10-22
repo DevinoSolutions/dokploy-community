@@ -31,6 +31,8 @@ vi.mock("@dokploy/server", () => ({
 	},
 	findApplicationById: mocks.findApplicationById,
 	findComposeById: mocks.findComposeById,
+	// The manual compose deploy asks the build-policy gate to coalesce first.
+	buildPolicyDeployGate: async () => ({ deploy: true, coalesced: 0 }),
 }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));

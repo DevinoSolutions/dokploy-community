@@ -6,7 +6,7 @@ permalink: /faq/
 
 # Dokploy Community Edition FAQ
 
-Short answers to common questions about [Dokploy Community Edition](https://dokploy-community.devino.ca/), the self-hosted Dokploy fork. For feature setup guides see the [integrations page](https://dokploy-community.devino.ca/integrations/).
+Short answers to common questions about [Dokploy Community Edition](https://dokploy-community.devino.ca/), the self-hosted Dokploy fork. For feature setup guides see the [integrations page](https://dokploy-community.devino.ca/integrations/), the [MCP server guide](https://dokploy-community.devino.ca/mcp-server/), [enforced remote builds](https://dokploy-community.devino.ca/build-policy/), [deploy queue controls](https://dokploy-community.devino.ca/deploy-queue/) and [Compose rolling replace](https://dokploy-community.devino.ca/compose-rolling-replace/).
 
 ## What is Dokploy Community Edition?
 
@@ -28,7 +28,7 @@ On a clean Linux server with root access, the same requirements as Dokploy, run 
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 
 # a specific version
-export DOKPLOY_VERSION=v0.30.8-community.30
+export DOKPLOY_VERSION=v0.30.8-community.31
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 
 # update an existing installation
@@ -41,7 +41,7 @@ Run one docker service update command against the dokploy service on your existi
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.30 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.31 \
   --with-registry-auth \
   dokploy
 ```
@@ -71,7 +71,7 @@ claude mcp add --transport http --scope user dokploy https://<host>/api/mcp
 claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"
 ```
 
-[Remote MCP server in the README](https://github.com/DevinoSolutions/dokploy-community#remote-mcp-server-with-oauth-fork-original)
+[MCP server guide: sign-in flow, scopes and limits](https://dokploy-community.devino.ca/mcp-server/) and the [remote MCP server in the README](https://github.com/DevinoSolutions/dokploy-community#remote-mcp-server-with-oauth-fork-original)
 
 ## Why does my Dokploy GitHub webhook not trigger a deploy for large pushes?
 
@@ -117,7 +117,7 @@ Yes. The container log viewer has a Send a command box that sends what you type 
 
 ## How does Dokploy Community Edition stay in sync with upstream Dokploy?
 
-The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.30.8-community.30.
+The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.30.8-community.31.
 
 [Versioning table](https://github.com/DevinoSolutions/dokploy-community#versioning)
 
@@ -249,7 +249,7 @@ It reports unhandled backend errors, meaning crashes and internal server errors,
       "name": "How does Dokploy Community Edition stay in sync with upstream Dokploy?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.30.8-community.30."
+        "text": "The fork merges upstream release tags, never the moving upstream canary branch, so it always tracks a tested and published state. It diverges only for features that upstream lacks, and when upstream ships an equivalent the fork drops its own version and takes the upstream one. Releases are versioned as the upstream version plus a community release number, for example v0.30.8-community.31."
       }
     },
     {
