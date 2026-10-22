@@ -841,6 +841,52 @@ describe("a failing step the log would not show", () => {
 		);
 	});
 
+	it("scrubs key assignments written with a colon, in lower case, or quoted", async () => {
+		failConfigWith({
+			stderr: [
+				"bad value API_KEY: colon-secret-1",
+				"bad value api_key=lower-secret-2",
+				'bad value STRIPE_SECRET_KEY="two words-secret-3" trailing',
+				"bad value KEY='single secret-4'",
+				"required variable SENDLY_API_KEY is missing a value",
+			].join("\n"),
+			exitCode: 1,
+		});
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		for (const secret of [
+			"colon-secret-1",
+			"lower-secret-2",
+			"secret-3",
+			"secret-4",
+		]) {
+			expect(logged).not.toContain(secret);
+		}
+		// A quoted value leaves no tail behind it.
+		expect(logged).not.toContain("words");
+		expect(logged).not.toContain("single");
+		expect(logged).toContain("API_KEY=[REDACTED]");
+		expect(logged).toContain("api_key=[REDACTED]");
+		expect(logged).toContain("STRIPE_SECRET_KEY=[REDACTED] trailing");
+		expect(logged).toContain("KEY=[REDACTED]");
+		// A key name without an assignment stays readable.
+		expect(logged).toContain(
+			"required variable SENDLY_API_KEY is missing a value",
+		);
+	});
+
+	it("says the output was withheld, not absent, when every stderr line was dropped", async () => {
+		failConfigWith({ stderr: 'near "A=1"\n', exitCode: 1 });
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain(
+			"docker compose config failed on builder (exit code 1); error output withheld",
+		);
+		expect(logged).not.toContain("without any error output");
+	});
+
 	it("rebuilds an image that vanished instead of failing the push", async () => {
 		mocks.execAsyncRemote.mockImplementation(
 			async (_serverId: string, command: string) => ({

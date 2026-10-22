@@ -132,6 +132,13 @@ export const assertComposeBuildSettings = async (
 
 const CONFIG_STDERR_MAX_LINES = 10;
 const CONFIG_STDERR_MAX_LINE_LENGTH = 300;
+// `NAME=value` or `NAME: value` where NAME is `KEY`, `*_KEY`, `*APIKEY` or
+// `KEY*` (case-insensitive), with the value quoted or running to the line end.
+// A name right after a dot is a compose path (`services.web.environment.NAME:
+// required variable ...`), which gives the reason and holds no value, so it is
+// left alone.
+const KEY_ASSIGNMENT =
+	/\b(?<!\.)((?:[A-Za-z0-9_]*(?:_|API))?KEY[A-Za-z0-9_]*)\s*[=:]\s*("[^"]*"|'[^']*'|.*)/gi;
 
 /**
  * What the deployment log says when `docker compose config` fails on the build
@@ -139,8 +146,7 @@ const CONFIG_STDERR_MAX_LINE_LENGTH = 300;
  * offending line (`... near "<line>"`) and validation errors repeat resolved
  * values. So the lines naming a quoted source line are dropped, the rest is cut
  * to the first few lines, run through the shared redaction and an
- * `*API_KEY=value` scrub. With nothing left to show, only the exit code is
- * logged.
+ * `*KEY=value` scrub. With nothing left to show, only the exit code is logged.
  */
 export const describeConfigFailure = (serverName: string, error: ExecError) => {
 	const lines = (error.stderr ?? "")
@@ -150,16 +156,17 @@ export const describeConfigFailure = (serverName: string, error: ExecError) => {
 		.slice(0, CONFIG_STDERR_MAX_LINES)
 		.map((line) =>
 			redactSecrets(line)
-				.replace(
-					/\b([A-Za-z0-9_]*API_?KEY[A-Za-z0-9_]*)\s*=\s*\S+/gi,
-					"$1=[REDACTED]",
-				)
+				.replace(KEY_ASSIGNMENT, "$1=[REDACTED]")
 				.slice(0, CONFIG_STDERR_MAX_LINE_LENGTH),
 		);
 	const head = `docker compose config failed on ${serverName}`;
 	if (lines.length === 0) {
-		return error.exitCode === undefined
-			? `${head}: the build server could not run docker compose config`
+		if (error.exitCode === undefined) {
+			return `${head}: the build server could not run docker compose config`;
+		}
+		// Say which it was: nothing printed, or something that was held back.
+		return error.stderr?.trim()
+			? `${head} (exit code ${error.exitCode}); error output withheld`
 			: `${head} (exit code ${error.exitCode}) without any error output`;
 	}
 	return `${head}:\n${lines.join("\n")}`;
