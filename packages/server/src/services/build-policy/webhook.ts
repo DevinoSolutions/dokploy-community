@@ -236,8 +236,9 @@ export const buildPolicyDeployGate = async ({
 			// The same drop, in the trail that needs no license. A webhook has no
 			// caller: the push itself is the cause, so the actor is the system. A
 			// manual deploy names whoever clicked, since the click can replace
-			// another user's waiting job. Written first and on its own, so a failing build-policy write cannot
-			// skip it. Commit messages (`droppedTitles`) stay out of this row.
+			// another user's waiting job. Written first and on its own, so a
+			// failing build-policy write cannot skip it. Commit messages
+			// (`droppedTitles`) stay out of this row.
 			const { droppedTitles: _titles, ...metadata } = entry.metadata;
 			try {
 				await recordDeploymentCancelAudit({

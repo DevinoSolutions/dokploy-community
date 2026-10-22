@@ -2,6 +2,13 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+**Manual deploy coalescing follow-ups** (T-6233, after [#437](https://github.com/DevinoSolutions/dokploy-community/pull/437)). Three changes. The first two apply only with remote builds enforced; with the policy off, the only change is that manual Deploy and Redeploy clicks on the same service are handled one after the other (the third item).
+- The Deploy and Redeploy buttons and API calls for an Application now coalesce waiting deploys like the Compose ones do: a request is folded into the application's oldest waiting job of the same kind and the other waiting duplicates are dropped and audited. PR previews are never touched, a redeploy is never merged with a deploy, priority requests skip it, and Cloud is unchanged. The newest request wins, as for a webhook push: when a manual deploy folds into a waiting webhook job that carries a pinned image, the job takes the manual request's data, so the pinned image is dropped and that deploy builds from source.
+- A drop caused by a manual click is now recorded in the cancel audit trail under the user (or API key, or OAuth client) who clicked, since the click can replace another user's waiting job. Drops caused by a webhook push are still recorded as the system.
+- Two quick manual clicks on the same service are now handled one after the other, so a second click can no longer slip in while the first is still writing its audit rows and leave an extra duplicate in the queue. A click waits at most 60 seconds for the one ahead of it. A webhook push racing a click is not covered and can still leave one duplicate, which the next coalescing pass folds.
+
 ### New in v0.30.8-community.31
 
 **Node 24.22.1 in the images, lockfile and devcontainer** ([#436](https://github.com/DevinoSolutions/dokploy-community/pull/436), contributed by decryptedchaos, thank you). Takes the Node.js 24.x security release of 2026-10-21, which fixes eight CVEs including TLS certificate hostname validation bypasses, a DNS resolve truncation, and an out-of-bounds write in the Brotli decoder. All four Dockerfiles, the devcontainer Dockerfile (now on the bookworm base, since there is no bullseye image for this Node release), `.nvmrc`, the CI workflow Node versions and `engines.node` move from 24.4.0 to 24.22.1. `@types/node` stays at `^24.4.0` (resolved 24.10.13) because no 24.22.1 types package is published, and the pnpm lockfile specifiers were corrected to match, which fixes the `pnpm install --frozen-lockfile` failure (`ERR_PNPM_OUTDATED_LOCKFILE`).
@@ -45,11 +52,6 @@ Docs, CI and tests:
 **Schedule run script follow-ups** (T-4688, after [#431](https://github.com/DevinoSolutions/dokploy-community/pull/431), [#433](https://github.com/DevinoSolutions/dokploy-community/pull/433), [#435](https://github.com/DevinoSolutions/dokploy-community/pull/435)). Application and compose schedules now run their command from an unlinked file descriptor, so `$0` and `BASH_SOURCE` are `/dev/fd/3` and shell errors read `/dev/fd/3: line N` instead of naming a script path. The first line of that file closes fd 3, so line numbers in errors are one higher than the line in the schedule's command. When the container cannot stage the file (for example a read-only root filesystem without a tmpfs), the run log now says so on one line; the command then runs as a `-c` argument and is visible in the container's process list.
 
 > Two database migrations in this release, both guarded and idempotent. 0218 creates the `deployment_cancel_audit` table with `CREATE TABLE IF NOT EXISTS`, the foreign key inside a `duplicate_object` handler and the three indexes with `IF NOT EXISTS`. 0219 adds the nullable `deployment_cancel_audit.oauthClientId` column with `ADD COLUMN IF NOT EXISTS`. The image is multi-arch (`linux/amd64` and `linux/arm64`), built by CI from the release commit.
-
-**Manual deploy coalescing follow-ups** (T-6233, after [#437](https://github.com/DevinoSolutions/dokploy-community/pull/437)). Three changes, all only with remote builds enforced:
-- The Deploy and Redeploy buttons and API calls for an Application now coalesce waiting deploys like the Compose ones do: a request is folded into the application's oldest waiting job of the same kind and the other waiting duplicates are dropped and audited. PR previews are never touched, a redeploy is never merged with a deploy, priority requests skip it, and Cloud is unchanged.
-- A drop caused by a manual click is now recorded in the cancel audit trail under the user (or API key, or OAuth client) who clicked, since the click can replace another user's waiting job. Drops caused by a webhook push are still recorded as the system.
-- Two quick clicks on the same service are now handled one after the other, so a second click can no longer slip in while the first is still writing its audit rows and leave an extra duplicate in the queue.
 
 ### New in v0.30.8-community.30
 

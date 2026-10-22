@@ -600,12 +600,16 @@ matches, the push enqueues as usual.
 
 Result: p1, p2, p3 leave one waiting job, at p1's position, carrying p3. A
 pinned-image burst deploys the newest digest, not the first one.
+Newest wins for a manual request too: a manual application deploy that folds
+into a waiting webhook job carrying a pinned image replaces that job's data, so
+the pinned image is dropped and the deploy builds from source.
 
 What it never touches: the running job, PR previews, another unit's jobs, and a
 waiting **manual redeploy** (a different type), so a push does not cancel a
 redeploy someone asked for. A manual compose redeploy does fold into an older
 waiting redeploy of the same compose, as a manual compose deploy does into an
-older waiting deploy. A waiting job with a different `freshVolumes` or
+older waiting deploy; a manual application redeploy and deploy fold into the
+application's older waiting redeploy and deploy the same way. A waiting job with a different `freshVolumes` or
 priority request is not a duplicate and stays; the push then enqueues next to it.
 
 A matching waiting job in a **different partition** (the unit moved to another

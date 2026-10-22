@@ -3,17 +3,14 @@ import type {
 	DeploymentCancelAuditTargetType,
 } from "@dokploy/server/db/schema";
 import { recordDeploymentCancelAudit } from "@dokploy/server/services/deployment-cancel-audit";
-import { cancelAuditCaller } from "./cancel-audit-actor";
+import {
+	type CancelAuditActorCtx,
+	cancelAuditCaller,
+} from "./cancel-audit-actor";
 
-interface CancelAuditCtx {
-	user: { id: string; email: string };
-	session: {
-		activeOrganizationId: string;
-		apiKeyId?: string;
-		oauthClientId?: string;
-		impersonatedBy?: string | null;
-	};
-}
+type CancelAuditCtx = CancelAuditActorCtx & {
+	session: { activeOrganizationId: string };
+};
 
 interface CancelAuditEvent {
 	action: DeploymentCancelAuditAction;

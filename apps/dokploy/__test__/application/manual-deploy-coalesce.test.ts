@@ -386,6 +386,44 @@ describe("audit actor and double clicks", () => {
 		}
 	});
 
+	it("names the OAuth client behind an MCP call", async () => {
+		await occupySlot();
+		const mcp = applicationRouter.createCaller({
+			...ctx,
+			session: { ...ctx.session, oauthClientId: "client-1" },
+		} as Parameters<typeof applicationRouter.createCaller>[0]);
+
+		await mcp.deploy({ applicationId: "a1", title: "a" });
+
+		expect(mocks.gateCalls[0]?.caller).toEqual({
+			actor: {
+				type: "oauth_client",
+				userId: "user-1",
+				email: "ops@example.com",
+				apiKeyId: undefined,
+				oauthClientId: "client-1",
+			},
+			impersonatedBy: undefined,
+		});
+	});
+
+	it("does not let a failing request hold up the next click on the same application", async () => {
+		await occupySlot();
+		const spy = vi
+			.spyOn(myQueue, "add")
+			.mockRejectedValueOnce(new Error("queue down"));
+
+		const [first, second] = await Promise.allSettled([
+			caller.deploy({ applicationId: "a1", title: "bad" }),
+			caller.deploy({ applicationId: "a1", title: "good" }),
+		]);
+
+		spy.mockRestore();
+		expect(first.status).toBe("rejected");
+		expect(second.status).toBe("fulfilled");
+		expect(await waitingTitles()).toEqual(["good"]);
+	});
+
 	it("leaves one waiting job when a second click lands while the first is auditing its drop", async () => {
 		await occupySlot();
 		await myQueue.add("deployments", {
