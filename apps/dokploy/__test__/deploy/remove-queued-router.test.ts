@@ -254,7 +254,9 @@ describe("deployment.removeQueued", () => {
 	});
 
 	it("truncates a long job title in the audit metadata", async () => {
-		mocks.jobs[0].data.titleLog = "x".repeat(500);
+		const [job] = mocks.jobs;
+		if (!job) throw new Error("expected a waiting job fixture");
+		job.data.titleLog = "x".repeat(500);
 
 		await caller.removeQueued({ jobId: "job-5", serviceId: "a1" });
 
