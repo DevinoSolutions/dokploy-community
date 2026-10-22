@@ -286,6 +286,7 @@ const Mariadb = (
 															<div> */}
 															<ContainerFreeMonitoring
 																appName={data?.appName || ""}
+																serviceId={data?.mariadbId}
 															/>
 															{/* </div> */}
 															{/* )} */}

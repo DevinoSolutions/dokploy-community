@@ -16,7 +16,11 @@ import {
 import { hasPermission } from "@dokploy/server/services/permission";
 import { quote } from "shell-quote";
 import { WebSocketServer } from "ws";
-import { canAccessDockerOverWss } from "./authorize";
+import {
+	canAccessDockerOverWss,
+	findServiceAppName,
+	isServiceContainerName,
+} from "./authorize";
 import { onGuardedConnection, toCloseReason } from "./guard";
 
 // serverIds are nanoid-generated (alphanumeric + `_` and `-`). Reject anything
@@ -126,6 +130,20 @@ export const setupDockerStatsMonitoringSocketServer = (
 			return;
 		}
 
+		// Service access only covers that service's containers, so pin the
+		// request to them instead of trusting appName.
+		const serviceAppName = serviceId
+			? await findServiceAppName(serviceId)
+			: null;
+		if (
+			serviceId &&
+			(!serviceAppName ||
+				!isServiceContainerName(appName, appType, serviceAppName))
+		) {
+			ws.close(4003, "Not authorized");
+			return;
+		}
+
 		// Resolve the optional remote serverId. We do this up-front so authz and
 		// path-traversal checks run before any SSH or filesystem work.
 		let resolvedServerId: string | null = null;
@@ -187,7 +205,7 @@ export const setupDockerStatsMonitoringSocketServer = (
 				// Special case: when monitoring "dokploy" (the host system rather than a
 				// container). If serverId is provided and not "local", fetch the host stats
 				// from that remote server over SSH; otherwise read local host stats.
-				if (appName === "dokploy") {
+				if (appName === "dokploy" && !serviceId) {
 					if (resolvedServerId) {
 						const recordedAppName = getMonitoringAppName(resolvedServerId);
 						const { container, disk } =
@@ -215,10 +233,18 @@ export const setupDockerStatsMonitoringSocketServer = (
 						label: [`com.docker.swarm.service.name=${appName}`],
 					}),
 					...(appType === "stack" && {
-						label: [`com.docker.swarm.task.name=${appName}`],
+						label: [
+							`com.docker.swarm.task.name=${appName}`,
+							...(serviceAppName
+								? [`com.docker.stack.namespace=${serviceAppName}`]
+								: []),
+						],
 					}),
 					...(appType === "docker-compose" && {
 						name: [appName],
+						...(serviceAppName && {
+							label: [`com.docker.compose.project=${serviceAppName}`],
+						}),
 					}),
 				};
 
