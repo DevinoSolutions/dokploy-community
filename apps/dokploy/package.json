@@ -186,9 +186,9 @@
 		"tailwindcss": "^4.3.1",
 		"tsx": "^4.22.4",
 		"typescript": "^7.0.2",
-		"vite": "7.3.5",
+		"vite": "7.3.7",
 		"vite-tsconfig-paths": "4.3.2",
-		"vitest": "^4.1.11"
+		"vitest": "^4.1.12"
 	},
 	"ct3aMetadata": {
 		"initVersion": "7.25.2"
