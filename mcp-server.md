@@ -1,6 +1,6 @@
 ---
 title: "Dokploy MCP Server with OAuth"
-description: "Connect Claude Code, Cursor or any MCP client to Dokploy Community Edition at /api/mcp with browser OAuth sign-in, per-grant scopes or an API key."
+description: "Connect Claude Code or another MCP client to Dokploy Community Edition at /api/mcp with browser OAuth sign-in, per-grant scopes or an API key."
 permalink: /mcp-server/
 ---
 
@@ -59,7 +59,7 @@ Open Settings, Profile, find the MCP Server card and revoke the client. Its toke
 
 ## Use an API key instead
 
-A client that cannot do the browser sign-in, or an unattended agent, can send a Dokploy API key in the `x-api-key` header. The key acts as the member who created it and is subject to the per-key rate limit.
+A client that cannot do the browser sign-in, or an unattended agent, can send a Dokploy API key in the `x-api-key` header. The key acts as the member who created it and is subject to the per-key rate limit. **An API-key connection is not scoped:** it gets all eight scopes, including Administration and both delete scopes, and only the member's own role limits what it can do. Use a key from a member with a restricted role, or prefer OAuth when you want to grant less.
 
 ```bash
 claude mcp add --transport http --scope user dokploy https://<your-dokploy-host>/api/mcp --header "x-api-key: <key>"
@@ -67,14 +67,14 @@ claude mcp add --transport http --scope user dokploy https://<your-dokploy-host>
 
 ## Which clients work
 
-Any MCP client that supports the Streamable HTTP transport and either OAuth with dynamic client registration or a custom header. Claude Code and Cursor are the clients named in the project documentation. Clients that only run local stdio servers need a bridge.
+Any MCP client that supports the Streamable HTTP transport and either OAuth with dynamic client registration or a custom header. Claude Code is the client this guide was written and verified against. Dynamic client registration only accepts redirect URIs that are `https` or `http` on a loopback address (`localhost`, `127.0.0.1` or `[::1]`), so any other client must use such a redirect URI. Clients that only run local stdio servers need a bridge.
 
 ## Limits
 
 - The server needs a public address. Set a domain under Settings, Server, or set `BETTER_AUTH_URL`. Without one the Profile card says the server is unconfigured.
 - `DOKPLOY_MCP_DISABLED=true` removes the endpoint entirely.
-- A tool call is only as powerful as the scopes and the user's own role. Grant the least you need, and keep Administration off for routine agents.
-- Some tools return a service's own configuration, including environment values, under the read scope. Treat a read grant as access to that data.
+- An OAuth tool call is only as powerful as the scopes you granted and the user's own role. Grant the least you need, and keep Administration off for routine agents. This does not apply to API keys, which always get every scope.
+- Some tools return a service's own configuration, including environment values and database passwords, under the read scope. Treat a read grant as access to that data.
 
 ## Related guides
 

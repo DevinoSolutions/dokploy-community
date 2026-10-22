@@ -19,7 +19,10 @@ The queue table shows what is running and what is waiting. The same data is avai
 Use this for a maintenance deploy that must start now instead of behind everything that arrived earlier. It is opt-in per deploy and nothing is stored on the service.
 
 ```bash
-curl -sS -X POST "https://<your-dokploy-host>/api/application.deploy"   -H "x-api-key: $DOKPLOY_API_KEY"   -H "Content-Type: application/json"   -d '{"applicationId":"<applicationId>","priority":true,"title":"Maintenance"}'
+curl -sS -X POST "https://<your-dokploy-host>/api/application.deploy" \
+  -H "x-api-key: $DOKPLOY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"applicationId":"<applicationId>","priority":true,"title":"Maintenance"}'
 ```
 
 `application.redeploy`, `compose.deploy` and `compose.redeploy` take the same `priority` field, and the MCP tools `application-deploy`, `application-redeploy`, `compose-deploy` and `compose-redeploy` accept it too. A deploy that is already waiting can be bumped with `deployment.prioritizeQueued` (MCP `deployment-prioritizeQueued`) using its queue job id.
@@ -53,6 +56,7 @@ Who can use it: the `deployment:priority` permission, which owners and admins ha
 ## Repeated manual Compose deploys coalesce
 
 When [remote builds are enforced](https://dokploy-community.devino.ca/build-policy/), clicking Deploy or Redeploy on a Compose service several times, or calling the API repeatedly, no longer piles up identical waiting jobs. A request is folded into the oldest waiting job of the same kind, which keeps its place in the queue and takes the new title and description. A redeploy is never merged with a deploy, previews are never touched, and priority requests skip it. With the policy off, nothing changes.
+
 ## Limits
 
 - Priority changes the order of **waiting** jobs only. With a builds concurrency of 1 a priority deploy still waits for the running job to finish.

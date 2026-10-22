@@ -908,6 +908,34 @@ describe("pages site: repository files", () => {
 			expect(body).toContain("365 days");
 		});
 
+		it("the MCP guide says API keys get every scope and names the redirect rule", () => {
+			const { body } = parseMarkdown("mcp-server.md");
+			expect(read("apps/dokploy/server/mcp/handler.ts")).toContain(
+				"scopes: new Set<string>(DOKPLOY_MCP_SCOPE_IDS)",
+			);
+			expect(body).toContain("An API-key connection is not scoped");
+			expect(read("packages/server/src/services/mcp-oauth.ts")).toContain(
+				"export const isAllowedRedirectUri",
+			);
+			expect(body).toContain("loopback");
+			expect(body).not.toContain("Cursor");
+			expect(read("README.md")).not.toContain("Claude Code, Cursor");
+		});
+
+		it("the build policy guide states the required-checks and admin-only rules", () => {
+			const { body } = parseMarkdown("build-policy.md");
+			const router = read("apps/dokploy/server/api/routers/build-policy.ts");
+			expect(router).toMatch(/rollbackToDigest: adminProcedure/);
+			expect(router).toMatch(/allowLocalBuildOnce: adminProcedure/);
+			expect(body).toContain(
+				"only take effect while Enforce Remote Builds is on",
+			);
+			expect(body).toContain("GitHub App provider");
+			expect(body).toContain("`dokploy:admin`");
+			expect(body).toContain("[deploy skip]");
+			expect(body).toContain("[no deploy]");
+		});
+
 		it("the build policy guide matches the settings defaults", () => {
 			const { body } = parseMarkdown("build-policy.md");
 			const schema = read("packages/server/src/db/schema/build-policy.ts");
