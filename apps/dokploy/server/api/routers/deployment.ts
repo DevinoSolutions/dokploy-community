@@ -296,6 +296,103 @@ export const deploymentRouter = createTRPCRouter({
 			return { success: true, jobId: job.id, priority };
 		}),
 
+	// Take ONE deploy out of the local queue while it is still waiting. Needs the
+	// same permission as application/compose.cleanQueues and cancelDeployment
+	// (deployment:cancel on the job's service). A running job is never touched;
+	// stopping a build is killBuild / cancelDeployment. A waiting job has no
+	// deployment row yet (it is created when the job starts), so none is changed.
+	removeQueued: protectedProcedure
+		.input(z.object({ jobId: z.string().min(1) }))
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Cloud deploys do not wait in a local queue",
+				});
+			}
+			// A missing job, one that already started and one the caller may not
+			// touch answer alike, so the shared queue cannot be probed.
+			const notWaiting = new TRPCError({
+				code: "NOT_FOUND",
+				message:
+					"No waiting deploy with that id. It may have started, finished or been cancelled.",
+			});
+			const waiting = await myQueue.getJobs(["waiting"]);
+			const job = waiting.find(
+				(candidate) => String(candidate.id) === input.jobId,
+			);
+			if (!job) throw notWaiting;
+			const data = job.data as {
+				composeId?: string;
+				applicationId?: string;
+				applicationType?: string;
+				type?: string;
+				titleLog?: string;
+			};
+			const serviceId = data.composeId ?? data.applicationId;
+			if (!serviceId) throw notWaiting;
+			try {
+				await checkServicePermissionAndAccess(ctx, serviceId, {
+					deployment: ["cancel"],
+				});
+			} catch {
+				throw notWaiting;
+			}
+
+			const isCompose = Boolean(data.composeId);
+			let serviceName: string;
+			try {
+				serviceName = isCompose
+					? (await findComposeById(serviceId)).appName
+					: (await findApplicationById(serviceId)).appName;
+			} catch {
+				throw notWaiting;
+			}
+
+			// False when the job started or finished since the lookup above.
+			let removed: boolean;
+			try {
+				removed = myQueue.removeWaitingJob(job.id);
+			} catch {
+				removed = false;
+			}
+			if (!removed) throw notWaiting;
+
+			const resourceType = isCompose ? "compose" : "application";
+			const metadata = {
+				jobId: job.id,
+				resourceType,
+				serviceId,
+				serviceName,
+				jobType: data.type,
+				applicationType: data.applicationType,
+				title: data.titleLog,
+			};
+			// The job is already gone, so a failing audit must not turn the answer
+			// into an error and hide what was removed.
+			await auditCancel(ctx, {
+				action: "remove_queued_job",
+				targetType: resourceType,
+				targetId: serviceId,
+				targetName: serviceName,
+				applicationId: isCompose ? undefined : serviceId,
+				composeId: isCompose ? serviceId : undefined,
+				metadata,
+			});
+			try {
+				await audit(ctx, {
+					action: "cancel",
+					resourceType,
+					resourceId: serviceId,
+					resourceName: serviceName,
+					metadata,
+				});
+			} catch (error) {
+				console.error("removeQueued audit failed:", error);
+			}
+			return { success: true, jobId: job.id, serviceId, resourceType };
+		}),
+
 	allByType: protectedProcedure
 		.input(apiFindAllByType)
 		.query(async ({ input, ctx }) => {

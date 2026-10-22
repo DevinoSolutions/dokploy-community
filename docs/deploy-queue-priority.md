@@ -162,6 +162,36 @@ that is not waiting any more (it started, finished, was cancelled, or is not one
 you can deploy) answers `404`. Queue ids are only valid for the current process;
 they change after a restart.
 
+## Remove one waiting deploy
+
+To drop a single deploy that has not started, without clearing the whole queue,
+use `deployment.removeQueued` with the id from the queue list (state `waiting`):
+
+```bash
+curl -sS -X POST "https://<dokploy-host>/api/deployment.removeQueued" \
+  -H "x-api-key: $DOKPLOY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"jobId":"job-123"}'
+```
+
+MCP: `deployment-removeQueued` with `{ "jobId": "job-123" }`. In the UI, the
+queue table has a Remove button on each waiting row, behind a confirmation.
+
+- It needs `deployment:cancel` on the job's service, the same as
+  `application.cleanQueues` and `compose.cleanQueues`. Owners and admins have it.
+- It only removes a **waiting** job. A running job is never touched; stopping a
+  build is `killBuild` / `cancelDeployment`.
+- A job that is missing, not yours, already started or already finished all
+  answer the same `404`, so the shared queue cannot be probed.
+- A waiting job has no deployment row yet (it is created when the job starts),
+  so there is no "queued" row left behind. The queue journal row is closed, so a
+  restart does not bring the job back.
+- Self-hosted only. Cloud has no local queue and answers `400`.
+- Audited in the cancel trail as `remove_queued_job` (job id, service id and
+  name, resource type, job type and title) and, for licensed organizations, as a
+  `cancel` audit entry. `settings.cleanAllDeploymentQueue` remains the
+  instance-wide admin option.
+
 ## Audit and replay
 
 Every use writes an audit entry with the action `prioritize` (Deployed with

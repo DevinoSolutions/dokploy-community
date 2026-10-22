@@ -63,6 +63,8 @@ interface DeploymentQueue {
 	close: () => Promise<void>;
 	on: (...args: unknown[]) => void;
 	run: () => Promise<void>;
+	/** Remove one job while it is still waiting; false when it is not. */
+	removeWaitingJob: (id: string) => boolean;
 	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
 	keepOldestWaiting: (
 		predicate: (data: DeploymentJob) => boolean,
@@ -85,6 +87,7 @@ const createNoopQueue = (): DeploymentQueue => ({
 	close: () => Promise.resolve(),
 	on: () => {},
 	run: () => Promise.resolve(),
+	removeWaitingJob: () => false,
 	removeWaiting: () => 0,
 	keepOldestWaiting: () => ({ kept: [], removed: [] }),
 	coalesceWaiting: () => ({ merged: null, removed: [], titles: [] }),
@@ -138,6 +141,7 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		close: () => queue.close(),
 		on: () => {},
 		run: () => queue.run(),
+		removeWaitingJob: (id) => queue.removeWaitingJob(id),
 		removeWaiting: (predicate) => queue.removeWaiting(predicate),
 		keepOldestWaiting: (predicate) => queue.keepOldestWaiting(predicate),
 		coalesceWaiting: (incoming, predicate) =>

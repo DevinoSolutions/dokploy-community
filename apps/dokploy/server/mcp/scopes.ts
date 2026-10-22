@@ -117,6 +117,8 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
 	"deployment.killProcess": "dokploy:deploy",
 	// Moves a waiting deploy ahead of the queue; gated by deployment:priority.
 	"deployment.prioritizeQueued": "dokploy:deploy",
+	// Drops one waiting deploy; gated by deployment:cancel like cleanQueues.
+	"deployment.removeQueued": "dokploy:deploy",
 	"application.clearDeployments": "dokploy:deploy",
 	"application.cleanQueues": "dokploy:deploy",
 	"application.dropDeployment": "dokploy:deploy",

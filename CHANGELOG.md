@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**Remove one waiting deploy from the queue** (T-6138). The deployments queue table has a Remove button on each waiting row, behind a confirmation, and the API has `deployment.removeQueued` (MCP `deployment-removeQueued`). It drops that one job instead of every waiting job on the instance. It needs `deployment:cancel` on the job's service, like Cancel Queues, never touches a running job, and answers the same 404 for a missing, foreign, started or finished job. A waiting job has no deployment row yet, so none is left showing as queued. Each removal is recorded in the cancel audit trail as `remove_queued_job`. Self-hosted only. See `docs/deploy-queue-priority.md`.
+
 **Schedule run script follow-ups** (T-4688, after [#431](https://github.com/DevinoSolutions/dokploy-community/pull/431)). Application and compose schedules now run their command from an unlinked file descriptor, so `$0` and `BASH_SOURCE` are `/dev/fd/3` and shell errors read `/dev/fd/3: line N` instead of naming a script path. The first line of that file closes fd 3, so line numbers in errors are one higher than the line in the schedule's command. When the container cannot stage the file (for example a read-only root filesystem without a tmpfs), the run log now says so on one line; the command then runs as a `-c` argument and is visible in the container's process list.
 
 ### New in v0.30.8-community.30
