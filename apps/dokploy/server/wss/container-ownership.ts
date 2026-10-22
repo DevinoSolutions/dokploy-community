@@ -56,6 +56,8 @@ export const containerBelongsToService = async (
 		const command = quote([
 			"docker",
 			"inspect",
+			"--type",
+			"container",
 			"--format",
 			"{{json .Config.Labels}}",
 			containerId,

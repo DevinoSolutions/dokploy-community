@@ -19,6 +19,7 @@ import { WebSocketServer } from "ws";
 import { canAccessDockerOverWss, isServiceContainerName } from "./authorize";
 import { findServiceAppName } from "./container-ownership";
 import { onGuardedConnection, toCloseReason } from "./guard";
+import { isValidMonitoringAppName } from "./utils";
 
 // serverIds are nanoid-generated (alphanumeric + `_` and `-`). Reject anything
 // else at the WS boundary so user input cannot reach filesystem paths or SSH
@@ -112,6 +113,13 @@ export const setupDockerStatsMonitoringSocketServer = (
 
 		if (!appName) {
 			ws.close(4000, "appName no provided");
+			return;
+		}
+
+		// appName names a directory under MONITORING_PATH and reaches the stats
+		// files raw, so it is checked on every request, scoped or not.
+		if (!isValidMonitoringAppName(appName)) {
+			ws.close(4000, "Invalid appName");
 			return;
 		}
 

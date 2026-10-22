@@ -173,4 +173,28 @@ describe("docker stats websocket scoped to a service", () => {
 		expect(filters.name).toEqual(["custom-name"]);
 		ws.close();
 	});
+
+	it.each(["..", ".", "../../etc", "a/b", "a%00b"])(
+		"rejects the unsafe appName %j before anything is recorded",
+		async (appName) => {
+			mockValidateRequest.mockResolvedValue(AUTH);
+			mockFindServiceAppName.mockResolvedValue("compose-abc");
+			const { closed } = await connectTo(
+				`appName=${encodeURIComponent(appName)}&appType=docker-compose&serviceId=svc-1`,
+			);
+
+			expect((await closed).code).toBe(4000);
+			await wait(POLL_INTERVAL + 200);
+			expect(mockListContainers).not.toHaveBeenCalled();
+			expect(mockRecordAdvancedStats).not.toHaveBeenCalled();
+		},
+	);
+
+	it("rejects an unsafe appName without a service too", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		const { closed } = await connectTo("appName=..&appType=application");
+
+		expect((await closed).code).toBe(4000);
+		expect(mockCanAccessDockerOverWss).not.toHaveBeenCalled();
+	});
 });
