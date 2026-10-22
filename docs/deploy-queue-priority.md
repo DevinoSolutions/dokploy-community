@@ -171,10 +171,14 @@ use `deployment.removeQueued` with the id from the queue list (state `waiting`):
 curl -sS -X POST "https://<dokploy-host>/api/deployment.removeQueued" \
   -H "x-api-key: $DOKPLOY_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"jobId":"job-123"}'
+  -d '{"jobId":"job-123","serviceId":"<application or compose id>"}'
 ```
 
-MCP: `deployment-removeQueued` with `{ "jobId": "job-123" }`. In the UI, the
+MCP: `deployment-removeQueued` with
+`{ "jobId": "job-123", "serviceId": "<application or compose id>" }`. `serviceId`
+must be the service the `queueList` row names (`composeId` if present, otherwise
+`applicationId`); a mismatch answers with the same 404 as a missing job, which
+guards against job ids being reused after a restart. In the UI, the
 queue table has a Remove button on each waiting row, behind a confirmation.
 
 - It needs `deployment:cancel` on the job's service, the same as
