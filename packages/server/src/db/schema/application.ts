@@ -626,6 +626,9 @@ export const apiFindMonitoringStats = z.object({
 	appName: z
 		.string()
 		.min(1)
+		// The regex is kept next to the refine so the generated OpenAPI schema
+		// still advertises the pattern.
+		.regex(MONITORING_APP_NAME_PATTERN, { message: "Invalid appName" })
 		.refine(isValidMonitoringAppName, { message: "Invalid appName" }),
 });
 

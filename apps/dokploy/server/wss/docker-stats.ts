@@ -19,6 +19,7 @@ import { WebSocketServer } from "ws";
 import {
 	canAccessDockerOverWss,
 	hasComposeProjectPrefix,
+	isHostStatsBucketName,
 	isServiceContainerName,
 } from "./authorize";
 import {
@@ -160,14 +161,20 @@ export const setupDockerStatsMonitoringSocketServer = (
 		}
 
 		// Compose container names are free-form and stats are recorded under the
-		// name, so a name that is another service's appName (or extends it) would
-		// write into that service's stats history.
+		// name, so a name that is a host bucket, or another service's appName (or
+		// extends it), would write into that bucket's stats history.
 		if (
 			serviceId &&
 			serviceAppName &&
 			appType === "docker-compose" &&
-			!hasComposeProjectPrefix(appName, serviceAppName) &&
-			(await isOtherServiceAppName(appName, serviceId))
+			(isHostStatsBucketName(appName, serviceAppName) ||
+				(await isOtherServiceAppName(
+					appName,
+					serviceId,
+					hasComposeProjectPrefix(appName, serviceAppName)
+						? serviceAppName
+						: undefined,
+				)))
 		) {
 			ws.close(4003, "Not authorized");
 			return;
