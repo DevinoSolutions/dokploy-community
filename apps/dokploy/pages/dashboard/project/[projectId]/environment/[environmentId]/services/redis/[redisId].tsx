@@ -284,6 +284,7 @@ const Redis = (
 															<div> */}
 															<ContainerFreeMonitoring
 																appName={data?.appName || ""}
+																serviceId={data?.redisId}
 															/>
 															{/* </div> */}
 															{/* )} */}
