@@ -207,6 +207,7 @@ describe("docker stats websocket scoped to a service", () => {
 		expect(mockIsOtherServiceAppName).toHaveBeenCalledWith(
 			"app-victim-xyz789",
 			"svc-1",
+			undefined,
 		);
 		await wait(POLL_INTERVAL + 200);
 		expect(mockListContainers).not.toHaveBeenCalled();
@@ -214,21 +215,38 @@ describe("docker stats websocket scoped to a service", () => {
 	});
 
 	it.each(["compose-abc-web-1", "compose-abc_web_1"])(
-		"accepts the compose project container name %s without a lookup",
+		"accepts the compose project container name %s, ignoring only the project's own prefix in the lookup",
 		async (appName) => {
 			mockValidateRequest.mockResolvedValue(AUTH);
 			mockFindServiceAppName.mockResolvedValue("compose-abc");
-			mockIsOtherServiceAppName.mockResolvedValue(true);
 			const { ws } = await connectTo(
 				`appName=${appName}&appType=docker-compose&serviceId=svc-1`,
 			);
 			await wait(POLL_INTERVAL + 200);
 
-			expect(mockIsOtherServiceAppName).not.toHaveBeenCalled();
+			expect(mockIsOtherServiceAppName).toHaveBeenCalledWith(
+				appName,
+				"svc-1",
+				"compose-abc",
+			);
 			expect(mockListContainers).toHaveBeenCalled();
 			ws.close();
 		},
 	);
+
+	it("refuses a project-form name that extends another service's appName", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		mockFindServiceAppName.mockResolvedValue("compose-abc");
+		mockIsOtherServiceAppName.mockResolvedValue(true);
+		const { closed } = await connectTo(
+			"appName=compose-abc-web-1&appType=docker-compose&serviceId=svc-1",
+		);
+
+		expect((await closed).code).toBe(4003);
+		await wait(POLL_INTERVAL + 200);
+		expect(mockListContainers).not.toHaveBeenCalled();
+		expect(mockRecordAdvancedStats).not.toHaveBeenCalled();
+	});
 
 	it("does not treat a lookalike of the project name as the project prefix", async () => {
 		mockValidateRequest.mockResolvedValue(AUTH);
@@ -239,7 +257,39 @@ describe("docker stats websocket scoped to a service", () => {
 		);
 
 		expect((await closed).code).toBe(4003);
-		expect(mockIsOtherServiceAppName).toHaveBeenCalled();
+		expect(mockIsOtherServiceAppName).toHaveBeenCalledWith(
+			"compose-abcdef",
+			"svc-1",
+			undefined,
+		);
+	});
+
+	it.each(["dokploy", "dokploy-Xk3j2h1g0f9e8", "dokploy-"])(
+		"never lets a scoped compose socket record into the host bucket %s",
+		async (appName) => {
+			mockValidateRequest.mockResolvedValue(AUTH);
+			mockFindServiceAppName.mockResolvedValue("compose-abc");
+			const { closed } = await connectTo(
+				`appName=${appName}&appType=docker-compose&serviceId=svc-1`,
+			);
+
+			expect((await closed).code).toBe(4003);
+			await wait(POLL_INTERVAL + 200);
+			expect(mockListContainers).not.toHaveBeenCalled();
+			expect(mockRecordAdvancedStats).not.toHaveBeenCalled();
+		},
+	);
+
+	it("still serves a compose project whose own appName starts with dokploy-", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		mockFindServiceAppName.mockResolvedValue("dokploy-test-abc123");
+		const { ws } = await connectTo(
+			"appName=dokploy-test-abc123-web-1&appType=docker-compose&serviceId=svc-1",
+		);
+		await wait(POLL_INTERVAL + 200);
+
+		expect(mockListContainers).toHaveBeenCalled();
+		ws.close();
 	});
 
 	it.each(["..", ".", "../../etc", "a/b", "a%00b"])(

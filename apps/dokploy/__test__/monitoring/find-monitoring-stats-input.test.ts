@@ -1,5 +1,9 @@
-import { apiFindMonitoringStats } from "@dokploy/server/db/schema/application";
+import {
+	apiFindMonitoringStats,
+	MONITORING_APP_NAME_PATTERN,
+} from "@dokploy/server/db/schema/application";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 describe("apiFindMonitoringStats", () => {
 	it.each([
@@ -18,4 +22,16 @@ describe("apiFindMonitoringStats", () => {
 			expect(apiFindMonitoringStats.safeParse({ appName }).success).toBe(false);
 		},
 	);
+});
+
+describe("apiFindMonitoringStats JSON schema", () => {
+	it("still advertises the appName pattern", () => {
+		const schema = z.toJSONSchema(apiFindMonitoringStats, {
+			io: "input",
+			unrepresentable: "any",
+		});
+		expect(schema.properties?.appName).toMatchObject({
+			pattern: MONITORING_APP_NAME_PATTERN.source,
+		});
+	});
 });
