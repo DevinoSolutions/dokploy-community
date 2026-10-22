@@ -16,6 +16,7 @@ import {
 	getBuiltImageTag,
 	getCloneCompleteCommand,
 	getComposeBuildCommand,
+	getComposeBuildServiceCommand,
 	getComposeBuildSettingsError,
 	getComposeConfigJsonCommand,
 	getReusableCloneProbeCommand,
@@ -38,7 +39,9 @@ import {
 	encodeBase64,
 	getCreateFilesCommand,
 } from "@dokploy/server/utils/docker/utils";
+import { ExecError } from "@dokploy/server/utils/process/ExecError";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
+import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
 import { cloneGitRepository } from "@dokploy/server/utils/providers/git";
 import { cloneGiteaRepository } from "@dokploy/server/utils/providers/gitea";
@@ -125,6 +128,54 @@ export const assertComposeBuildSettings = async (
 			message: "The build server and registry must belong to your organization",
 		});
 	}
+};
+
+const CONFIG_STDERR_MAX_LINES = 10;
+const CONFIG_STDERR_MAX_LINE_LENGTH = 300;
+// `NAME=value`, `NAME: value` or JSON-style `"NAME":"value"` where NAME is `KEY`,
+// `*_KEY`, `*APIKEY` or `KEY*` (case-insensitive), with the value quoted or
+// running to the line end. Dot-prefixed names (`services.web.environment.NAME`)
+// are redacted like any other.
+const KEY_ASSIGNMENT =
+	/\b((?:[A-Za-z0-9_]*(?:_|API))?KEY[A-Za-z0-9_]*)(["']?)\s*[=:]\s*("[^"]*"|'[^']*'|.*)/gi;
+
+// Compose's own "required variable NAME is missing a value" message follows a
+// `NAME:` and carries no value, so it stays readable.
+const scrubKeyAssignments = (line: string) =>
+	line.replace(KEY_ASSIGNMENT, (match, name, quote, value) =>
+		/^required variable/i.test(value) ? match : `${name}${quote}=[REDACTED]`,
+	);
+
+/**
+ * What the deployment log says when `docker compose config` fails on the build
+ * server. Its stderr can quote the environment: dotenv parse errors repeat the
+ * offending line (`... near "<line>"`) and validation errors repeat resolved
+ * values. So the lines naming a quoted source line are dropped, the rest is cut
+ * to the first few lines, run through the shared redaction and an
+ * `*KEY=value` scrub. With nothing left to show, only the exit code is logged.
+ */
+export const describeConfigFailure = (serverName: string, error: ExecError) => {
+	const lines = (error.stderr ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line && !line.includes('near "'))
+		.slice(0, CONFIG_STDERR_MAX_LINES)
+		.map((line) =>
+			scrubKeyAssignments(
+				redactSecrets(line.slice(0, CONFIG_STDERR_MAX_LINE_LENGTH)),
+			),
+		);
+	const head = `docker compose config failed on ${serverName}`;
+	if (lines.length === 0) {
+		if (error.exitCode === undefined) {
+			return `${head}: the build server could not run docker compose config`;
+		}
+		// Say which it was: nothing printed, or something that was held back.
+		return error.stderr?.trim()
+			? `${head} (exit code ${error.exitCode}); error output withheld`
+			: `${head} (exit code ${error.exitCode}) without any error output`;
+	}
+	return `${head}:\n${lines.join("\n")}`;
 };
 
 const MAX_LOG_CHUNK = 24 * 1024;
@@ -429,7 +480,22 @@ const buildImagesOnBuildServer = async (
 			projectPath,
 			stackEnvFile,
 		);
-		const { stdout } = await execOnBuildServer(configCommand);
+		let stdout: string;
+		try {
+			({ stdout } = await execOnBuildServer(configCommand));
+		} catch (error) {
+			// Nothing else writes this failure down: the command is not streamed
+			// (stdout is the resolved environment) and an ExecError is not logged by
+			// the caller, so a compose that does not resolve (a `${VAR:?}` with no
+			// value, a YAML error) used to fail with an empty log. Only a bounded,
+			// scrubbed stderr is logged (the reason, not the resolved configuration),
+			// never stdout or error.message, which carries the stdout tail when
+			// stderr is empty. Plain errors (an SSH failure) are logged by the caller.
+			if (error instanceof ExecError) {
+				log.line(describeConfigFailure(buildServer.name, error));
+			}
+			throw error;
+		}
 		const builtServices = parseBuiltServices(stdout, entity.appName);
 
 		if (builtServices.length === 0) {
@@ -474,6 +540,14 @@ const buildImagesOnBuildServer = async (
 				images: [...byLocalImage.values()],
 				registryLabel: registry.registryUrl || registry.registryName,
 				configDir,
+				rebuildService: (service) =>
+					getComposeBuildServiceCommand(
+						buildEntity,
+						codePath,
+						service,
+						projectPath,
+						stackEnvFile,
+					),
 			}),
 		);
 		// The serving host pulls the images it was just told about, and its stack

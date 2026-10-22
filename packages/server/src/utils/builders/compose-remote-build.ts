@@ -195,6 +195,21 @@ export const getComposeBuildCommand = (
 	`set -e; cd ${quote([codePath])}; echo "🔨 Building images with docker compose build"; ${getCleanEnvPrefix(stackEnvFile)} docker ${getComposeBaseArgs(compose, projectPath)} build 2>&1;`;
 
 /**
+ * Runs on the build server: `docker compose ... build <service>` for one
+ * service. Used to rebuild an image that vanished between the build and the
+ * push; the layer cache makes it quick. A single `&&` chain, so it reports its
+ * own exit status even where `set -e` is suspended (inside `||`).
+ */
+export const getComposeBuildServiceCommand = (
+	compose: ComposeNested,
+	codePath: string,
+	service: string,
+	projectPath?: string,
+	stackEnvFile?: string,
+) =>
+	`cd ${quote([codePath])} && ${getCleanEnvPrefix(stackEnvFile)} docker ${getComposeBaseArgs(compose, projectPath)} build ${quote([service])} 2>&1`;
+
+/**
  * Runs on the build server after a successful build (and the registry login,
  * which runs as its own command): tags the image compose produced for each
  * built service, pushes the per-deployment tag and
@@ -205,11 +220,20 @@ export const getTagAndPushCommand = ({
 	images,
 	registryLabel,
 	configDir,
+	rebuildService,
 }: {
 	images: ComposePushedImage[];
 	registryLabel: string;
 	/** The registry's own docker config (see loginDockerRegistry), if any. */
 	configDir?: string;
+	/**
+	 * Shell that rebuilds one service (see `getComposeBuildServiceCommand`). A
+	 * build takes many minutes and its first images sit on a shared host the
+	 * whole time, so another job's prune can remove one before the push. With
+	 * this set, a missing image is rebuilt from the layer cache instead of
+	 * failing the deploy.
+	 */
+	rebuildService?: (service: string) => string;
 }) => {
 	const lines: string[] = [
 		"set -e;",
@@ -222,9 +246,27 @@ export const getTagAndPushCommand = ({
 		const local = quote([image.localImage]);
 		const ref = quote([image.ref]);
 		const latest = quote([image.latestRef]);
+		const missing = quote([
+			`❌ The build did not produce image ${image.localImage} for service ${image.service}`,
+		]);
 		lines.push(
 			`echo ${quote([`📦 ${image.service}: ${image.localImage} -> ${image.ref}`])};`,
-			`docker image inspect ${local} >/dev/null 2>&1 || { echo ${quote([`❌ The build did not produce image ${image.localImage} for service ${image.service}`])}; exit 1; }`,
+		);
+		if (rebuildService) {
+			lines.push(
+				`docker image inspect ${local} >/dev/null 2>&1 || {`,
+				`echo ${quote([`⚠️ Image ${image.localImage} is no longer on the build server (removed after the build); rebuilding service ${image.service} from the layer cache`])};`,
+				'date -u +"%Y-%m-%dT%H:%M:%SZ";',
+				`( ${rebuildService(image.service)} ) || { echo ${quote([`❌ Rebuilding service ${image.service} failed`])}; exit 1; };`,
+				`docker image inspect ${local} >/dev/null 2>&1 || { echo ${missing}; exit 1; };`,
+				"}",
+			);
+		} else {
+			lines.push(
+				`docker image inspect ${local} >/dev/null 2>&1 || { echo ${missing}; exit 1; }`,
+			);
+		}
+		lines.push(
 			`docker tag ${local} ${ref} || { echo "❌ Error tagging image"; exit 1; }`,
 			`docker tag ${local} ${latest} || { echo "❌ Error tagging image"; exit 1; }`,
 			`${getDockerPushRetryCall(image.ref, configDir)} || { echo "❌ Error pushing image"; exit 1; }`,

@@ -59,6 +59,7 @@ import {
 	createDeploymentLogWriter,
 	prepareComposeBuildServerDeploy,
 } from "@dokploy/server/services/compose-build-server";
+import { ExecError } from "@dokploy/server/utils/process/ExecError";
 
 const compose = {
 	appName: "my-app",
@@ -685,5 +686,259 @@ describe("createDeploymentLogWriter", () => {
 		writer.line("hello");
 		await expect(writer.close()).resolves.toBeUndefined();
 		error.mockRestore();
+	});
+});
+
+describe("a failing step the log would not show", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.findServerById.mockResolvedValue(buildServer);
+		mocks.findRegistryByIdWithCredentials.mockResolvedValue(registry);
+		mocks.loginDockerRegistry.mockResolvedValue(undefined);
+		mocks.cloneGitRepository.mockResolvedValue("echo clone;");
+		mocks.generateApplyPatchesCommand.mockResolvedValue("");
+		mocks.writeFileRemote.mockResolvedValue(undefined);
+	});
+
+	const loggedOn = (serverId: string) =>
+		mocks.execAsyncRemote.mock.calls
+			.filter((call) => call[0] === serverId)
+			.map((call) =>
+				Buffer.from(
+					(call[1] as string).match(/echo "([A-Za-z0-9+/=]+)"/)?.[1] ?? "",
+					"base64",
+				).toString("utf8"),
+			)
+			.join("");
+
+	it("writes the compose config error to the deployment log", async () => {
+		const stderr =
+			"error while interpolating services.web.environment.SENDLY_API_KEY: required variable SENDLY_API_KEY is missing a value: put its API key in .env\n";
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => {
+				if (command.includes("config --format json")) {
+					throw new ExecError(
+						`Remote command failed with exit code 1: ${stderr}`,
+						{
+							command,
+							stdout: "",
+							stderr,
+							exitCode: 1,
+							serverId: "build-1",
+						},
+					);
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+
+		await expect(
+			prepareComposeBuildServerDeploy({
+				entity: { ...compose, serverId: "serve-1" },
+				deployment: { logPath: "/var/log/dep.log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			}),
+		).rejects.toBeInstanceOf(ExecError);
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain("docker compose config failed");
+		expect(logged).toContain("required variable SENDLY_API_KEY is missing");
+	});
+
+	it("never writes the resolved configuration (stdout) to the log", async () => {
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => {
+				if (command.includes("config --format json")) {
+					throw new ExecError("Remote command failed with exit code 1", {
+						command,
+						stdout: '{"environment":{"DB_PASSWORD":"hunter2-hunter2"}}',
+						stderr: "yaml: line 3: mapping values are not allowed here",
+						exitCode: 1,
+						serverId: "build-1",
+					});
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+
+		await expect(
+			prepareComposeBuildServerDeploy({
+				entity: { ...compose, serverId: "serve-1" },
+				deployment: { logPath: "/var/log/dep.log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			}),
+		).rejects.toBeInstanceOf(ExecError);
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain("mapping values are not allowed here");
+		expect(logged).not.toContain("hunter2");
+	});
+
+	const failConfigWith = (details: {
+		stdout?: string;
+		stderr?: string;
+		exitCode?: number;
+	}) =>
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => {
+				if (command.includes("config --format json")) {
+					throw new ExecError("Remote command failed", {
+						command,
+						serverId: "build-1",
+						...details,
+					});
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+	const deployFailing = () =>
+		expect(
+			prepareComposeBuildServerDeploy({
+				entity: { ...compose, serverId: "serve-1" },
+				deployment: { logPath: "/var/log/dep.log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			}),
+		).rejects.toBeInstanceOf(ExecError);
+
+	it("drops lines that quote an .env line, scrubs API keys and keeps ten lines", async () => {
+		const stderr = [
+			'failed to read /code/.env: line 3: unexpected character "-" in variable name near "SENDLY_API_KEY=sk-live-abc123"',
+			"validating /code/docker-compose.yml: services.web.ports invalid SENDLY_API_KEY=sk-live-abc123 here",
+			...Array.from({ length: 14 }, (_, i) => `detail line ${i + 1}`),
+		].join("\n");
+		failConfigWith({ stderr, exitCode: 1 });
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		expect(logged).not.toContain("sk-live-abc123");
+		expect(logged).not.toContain('near "');
+		expect(logged).toContain("SENDLY_API_KEY=[REDACTED]");
+		expect(logged).toContain("detail line 9");
+		expect(logged).not.toContain("detail line 10");
+	});
+
+	it("logs the exit code, never the stdout tail, when stderr is empty", async () => {
+		failConfigWith({
+			stdout: '{"environment":{"DB_PASSWORD":"hunter2-hunter2"}}',
+			stderr: "",
+			exitCode: 1,
+		});
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain(
+			"docker compose config failed on builder (exit code 1) without any error output",
+		);
+		expect(logged).not.toContain("hunter2");
+	});
+
+	it("says the build server could not run it when there is no exit code", async () => {
+		failConfigWith({ stderr: '   \nnear "A=1"\n' });
+		await deployFailing();
+
+		expect(loggedOn("serve-1")).toContain(
+			"the build server could not run docker compose config",
+		);
+	});
+
+	it("scrubs key assignments written with a colon, in lower case, or quoted", async () => {
+		failConfigWith({
+			stderr: [
+				"bad value API_KEY: colon-secret-1",
+				"bad value api_key=lower-secret-2",
+				'bad value STRIPE_SECRET_KEY="two words-secret-3" trailing',
+				"bad value KEY='single secret-4'",
+				"required variable SENDLY_API_KEY is missing a value",
+			].join("\n"),
+			exitCode: 1,
+		});
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		for (const secret of [
+			"colon-secret-1",
+			"lower-secret-2",
+			"secret-3",
+			"secret-4",
+		]) {
+			expect(logged).not.toContain(secret);
+		}
+		// A quoted value leaves no tail behind it.
+		expect(logged).not.toContain("words");
+		expect(logged).not.toContain("single");
+		expect(logged).toContain("API_KEY=[REDACTED]");
+		expect(logged).toContain("api_key=[REDACTED]");
+		expect(logged).toContain("STRIPE_SECRET_KEY=[REDACTED] trailing");
+		expect(logged).toContain("KEY=[REDACTED]");
+		// A key name without an assignment stays readable.
+		expect(logged).toContain(
+			"required variable SENDLY_API_KEY is missing a value",
+		);
+	});
+
+	it("scrubs dot-prefixed and JSON-style key names, and the cut line before scrubbing", async () => {
+		failConfigWith({
+			stderr: [
+				"x.API_KEY=secret1",
+				"environment.API_KEY=secret2",
+				'invalid interpolation format for services.web.environment.API_KEY: "sk-abc$x"',
+				'{"API_KEY":"secret5","other":1}',
+				"{'API_KEY': 'secret6'}",
+				`${"p".repeat(295)} API_KEY=secret7-secret7`,
+				"services.web.environment.SENDLY_API_KEY: required variable SENDLY_API_KEY is missing a value",
+			].join("\n"),
+			exitCode: 1,
+		});
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		for (const secret of [
+			"secret1",
+			"secret2",
+			"sk-abc",
+			"secret5",
+			"secret6",
+			"secret7",
+		]) {
+			expect(logged).not.toContain(secret);
+		}
+		expect(logged).toContain("x.API_KEY=[REDACTED]");
+		expect(logged).toContain("services.web.environment.API_KEY=[REDACTED]");
+		expect(logged).toContain('"API_KEY"=[REDACTED]');
+		expect(logged).toContain(
+			"services.web.environment.SENDLY_API_KEY: required variable SENDLY_API_KEY is missing a value",
+		);
+	});
+
+	it("says the output was withheld, not absent, when every stderr line was dropped", async () => {
+		failConfigWith({ stderr: 'near "A=1"\n', exitCode: 1 });
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain(
+			"docker compose config failed on builder (exit code 1); error output withheld",
+		);
+		expect(logged).not.toContain("without any error output");
+	});
+
+	it("rebuilds an image that vanished instead of failing the push", async () => {
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => ({
+				stdout: command.includes("config --format json")
+					? configJson({ web: { build: { context: "." } } })
+					: "",
+				stderr: "",
+			}),
+		);
+		await prepareComposeBuildServerDeploy({
+			entity: compose,
+			deployment: { logPath: "/tmp/log", deploymentId: "dep1" },
+			runStep: vi.fn().mockResolvedValue(undefined),
+		});
+		const push = mocks.execAsyncRemote.mock.calls
+			.map((call) => call[1] as string)
+			.find((command) => command.includes("docker push"))!;
+		expect(push).toContain("rebuilding service web from the layer cache");
+		expect(push).toMatch(/docker compose -p my-app .* build web 2>&1/);
 	});
 });
