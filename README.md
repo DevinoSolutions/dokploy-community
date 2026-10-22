@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.31**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.32**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.31 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.32 \
   --with-registry-auth \
   dokploy
 ```
@@ -120,12 +120,12 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.31
+## What's new in v0.30.8-community.32
 
-- Node 24.22.1 in the images, lockfile and devcontainer, taking the October 2026 Node.js security release; contributed by decryptedchaos ([#436](https://github.com/DevinoSolutions/dokploy-community/pull/436)).
-- Manual Compose Deploy and Redeploy now coalesce duplicate waiting jobs, and one waiting job can be removed from the local deploy queue, with an audit entry ([#437](https://github.com/DevinoSolutions/dokploy-community/pull/437), [#438](https://github.com/DevinoSolutions/dokploy-community/pull/438)).
-- A cancel trail records who cancelled a deployment or dropped a queued job, shown as "Cancelled by" on the deployments list; MCP refresh grants no longer leave the superseded access token live; schedule scripts and build environments stay off the process command line.
-- Two database migrations (0218, 0219), both guarded. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Four new site guides on dokploy-community.devino.ca for the MCP server with OAuth, enforced remote builds, deploy queue controls and Compose rolling replace ([#444](https://github.com/DevinoSolutions/dokploy-community/pull/444)).
+- Manual Application Deploy and Redeploy now coalesce waiting duplicates like the Compose ones, a manual drop is audited under the person who clicked, and two quick clicks on one service are handled one after the other ([#443](https://github.com/DevinoSolutions/dokploy-community/pull/443)).
+- Build-server composes write a failed `docker compose config` to the deployment log, and an image that vanished before the push is rebuilt once ([#439](https://github.com/DevinoSolutions/dokploy-community/pull/439)); the Dependabot alerts are cleared ([#442](https://github.com/DevinoSolutions/dokploy-community/pull/442)).
+- No database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -140,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.31
+export DOKPLOY_VERSION=v0.30.8-community.32
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -153,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.31      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.32      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -196,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.31` is the 31st fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.32` is the 32nd fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
