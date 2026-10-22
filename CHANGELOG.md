@@ -4,7 +4,7 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
-**Dependabot sweep 2026-10-22** (T-6311). Clears the open alerts: vite to 7.3.7 (override and the apps/dokploy dev dependency), vitest to 4.1.12 so `@vitest/mocker` is 4.1.12, `follow-redirects` to 1.16.1, `hono` to 4.13.13 through a `^4.13.11` override, and `github.com/klauspost/compress` to v1.18.7 in the monitoring agent. Dev tooling and transitive dependencies only.
+**Dependabot sweep 2026-10-22** (T-6311). Clears the open alerts: vite to 7.3.7 (override and the apps/dokploy dev dependency), vitest to 4.1.12 so `@vitest/mocker` is 4.1.12, `follow-redirects` to 1.16.1, `hono` to 4.13.13 through a `^4.13.11` override, and `github.com/klauspost/compress` to v1.18.7 in the monitoring agent. `hono`, `follow-redirects` and the compress library are runtime dependencies; vite and vitest are build and test tooling. Because compress 1.18.7 requires Go 1.24, the monitoring agent image now builds with `golang:1.24-alpine3.21` and runs on `alpine:3.21` (was Go 1.21 on Alpine 3.19).
 
 **Remove one waiting deploy from the queue** (T-6138). The deployments queue table has a Remove button on each waiting row, behind a confirmation, and the API has `deployment.removeQueued` (MCP `deployment-removeQueued`). It drops that one job instead of every waiting job on the instance. It needs `deployment:cancel` on the job's service, like Cancel Queues, never touches a running job, and answers the same 404 for a missing, foreign, started or finished job. A waiting job has no deployment row yet, so none is left showing as queued. Each removal is recorded in the cancel audit trail as `remove_queued_job`. Self-hosted only. See `docs/deploy-queue-priority.md`.
 
