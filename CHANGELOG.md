@@ -27,6 +27,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 **Cloud schedules register without a timezone** (T-6566, ports upstream [#5748](https://github.com/Dokploy/dokploy/pull/5748), fixes upstream #5139) — on Cloud, the jobs service rejected the `null` timezone the UI saves, so schedules never ran; it now accepts it, and jobs-service calls throw on a non-2xx answer instead of failing silently.
 
+**Docker disk usage follows server access** (T-6568, follow-up to [#451](https://github.com/DevinoSolutions/dokploy-community/pull/451)) — with `docker.read` instead of admin, a member could read `docker system df` for any server in their organization. A member now needs that server in their granted servers, like the rest of the server-scoped views; owners and admins still see every server and the local host is unchanged.
+
 ### New in v0.30.8-community.31
 
 **Node 24.22.1 in the images, lockfile and devcontainer** ([#436](https://github.com/DevinoSolutions/dokploy-community/pull/436), contributed by decryptedchaos, thank you). Takes the Node.js 24.x security release of 2026-10-21, which fixes eight CVEs including TLS certificate hostname validation bypasses, a DNS resolve truncation, and an out-of-bounds write in the Brotli decoder. All four Dockerfiles, the devcontainer Dockerfile (now on the bookworm base, since there is no bullseye image for this Node release), `.nvmrc`, the CI workflow Node versions and `engines.node` move from 24.4.0 to 24.22.1. `@types/node` stays at `^24.4.0` (resolved 24.10.13) because no 24.22.1 types package is published, and the pnpm lockfile specifiers were corrected to match, which fixes the `pnpm install --frozen-lockfile` failure (`ERR_PNPM_OUTDATED_LOCKFILE`).
