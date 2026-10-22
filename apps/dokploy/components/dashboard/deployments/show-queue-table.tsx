@@ -172,7 +172,12 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 															description="The deploy has not started. It is dropped from the queue and will not run. A deploy that is already running is not affected."
 															disabled={isRemoving}
 															onClick={async () => {
-																await removeQueued({ jobId: String(row.id) })
+																await removeQueued({
+																	jobId: String(row.id),
+																	serviceId: String(
+																		d.composeId ?? d.applicationId ?? "",
+																	),
+																})
 																	.then(() => {
 																		toast.success("Removed from the queue");
 																	})

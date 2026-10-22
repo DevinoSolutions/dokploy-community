@@ -56,6 +56,9 @@ const ctx = {
 	user: { id: "user-1", email: "ops@example.com", role: "admin" },
 };
 
+// The service each fixture job belongs to, as the queue table sends it.
+const svc = (jobId: string) => (jobId === "job-6" ? "c1" : "a1");
+
 const { deploymentRouter } = await import("@/server/api/routers/deployment");
 const caller = deploymentRouter.createCaller(
 	ctx as Parameters<typeof deploymentRouter.createCaller>[0],
@@ -111,7 +114,10 @@ beforeEach(() => {
 
 describe("deployment.removeQueued", () => {
 	it("removes a waiting application deploy and audits it in both trails", async () => {
-		const result = await caller.removeQueued({ jobId: "job-5" });
+		const result = await caller.removeQueued({
+			jobId: "job-5",
+			serviceId: svc("job-5"),
+		});
 
 		expect(mocks.getJobs).toHaveBeenCalledWith(["waiting"]);
 		expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledWith(
@@ -154,7 +160,7 @@ describe("deployment.removeQueued", () => {
 	});
 
 	it("removes a waiting compose deploy", async () => {
-		await caller.removeQueued({ jobId: "job-6" });
+		await caller.removeQueued({ jobId: "job-6", serviceId: svc("job-6") });
 
 		expect(mocks.removeWaitingJob).toHaveBeenCalledWith("job-6");
 		expect(mocks.auditCancel).toHaveBeenCalledWith(
@@ -180,7 +186,7 @@ describe("deployment.removeQueued", () => {
 
 	it("refuses a running job: it is never removed or audited", async () => {
 		await expect(
-			caller.removeQueued({ jobId: "job-run" }),
+			caller.removeQueued({ jobId: "job-run", serviceId: svc("job-run") }),
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
 
 		expect(mocks.removeWaitingJob).not.toHaveBeenCalled();
@@ -190,7 +196,9 @@ describe("deployment.removeQueued", () => {
 
 	it("answers a missing job, a foreign or forbidden job, a deleted service and a payload without a service identically", async () => {
 		const attempt = (jobId: string) =>
-			caller.removeQueued({ jobId }).catch((error) => error);
+			caller
+				.removeQueued({ jobId, serviceId: svc(jobId) })
+				.catch((error) => error);
 
 		const missing = await attempt("job-404");
 		mocks.checkServicePermissionAndAccess.mockRejectedValueOnce(
@@ -214,12 +222,12 @@ describe("deployment.removeQueued", () => {
 
 	it("gives the same answer when the job started between the lookup and the removal", async () => {
 		const missing = await caller
-			.removeQueued({ jobId: "job-404" })
+			.removeQueued({ jobId: "job-404", serviceId: svc("job-404") })
 			.catch((error) => error);
 		mocks.removeWaitingJob.mockReturnValue(false);
 
 		const raced = await caller
-			.removeQueued({ jobId: "job-5" })
+			.removeQueued({ jobId: "job-5", serviceId: svc("job-5") })
 			.catch((error) => error);
 
 		expect(raced).toMatchObject({ code: "NOT_FOUND" });
@@ -228,14 +236,44 @@ describe("deployment.removeQueued", () => {
 		expect(mocks.audit).not.toHaveBeenCalled();
 	});
 
+	it("answers a job whose service is not the one the caller named like a missing job", async () => {
+		const missing = await caller
+			.removeQueued({ jobId: "job-404", serviceId: "a1" })
+			.catch((error) => error);
+
+		// job-5 belongs to a1: after a restart the id may name a different job.
+		const stale = await caller
+			.removeQueued({ jobId: "job-5", serviceId: "c1" })
+			.catch((error) => error);
+
+		expect(stale).toMatchObject({ code: "NOT_FOUND" });
+		expect(stale.message).toBe(missing.message);
+		expect(mocks.removeWaitingJob).not.toHaveBeenCalled();
+		expect(mocks.auditCancel).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("truncates a long job title in the audit metadata", async () => {
+		mocks.jobs[0].data.titleLog = "x".repeat(500);
+
+		await caller.removeQueued({ jobId: "job-5", serviceId: "a1" });
+
+		expect(mocks.auditCancel).toHaveBeenCalledWith(
+			ctx,
+			expect.objectContaining({
+				metadata: expect.objectContaining({ title: "x".repeat(200) }),
+			}),
+		);
+	});
+
 	it("maps a removal that throws to the same answer, without auditing", async () => {
 		mocks.removeWaitingJob.mockImplementation(() => {
 			throw new Error("Missing lock for job job-5");
 		});
 
-		await expect(caller.removeQueued({ jobId: "job-5" })).rejects.toMatchObject(
-			{ code: "NOT_FOUND" },
-		);
+		await expect(
+			caller.removeQueued({ jobId: "job-5", serviceId: svc("job-5") }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
 		expect(mocks.auditCancel).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
 	});
@@ -243,16 +281,16 @@ describe("deployment.removeQueued", () => {
 	it("is refused on Cloud before the queue is looked at", async () => {
 		mocks.cloud.value = true;
 
-		await expect(caller.removeQueued({ jobId: "job-5" })).rejects.toMatchObject(
-			{ code: "BAD_REQUEST" },
-		);
+		await expect(
+			caller.removeQueued({ jobId: "job-5", serviceId: svc("job-5") }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
 		expect(mocks.getJobs).not.toHaveBeenCalled();
 		expect(mocks.removeWaitingJob).not.toHaveBeenCalled();
 		expect(mocks.auditCancel).not.toHaveBeenCalled();
 	});
 
 	it("changes no deployment row: a waiting job has none until it starts", async () => {
-		await caller.removeQueued({ jobId: "job-5" });
+		await caller.removeQueued({ jobId: "job-5", serviceId: svc("job-5") });
 
 		expect(mocks.updateDeploymentStatus).not.toHaveBeenCalled();
 	});
@@ -261,13 +299,15 @@ describe("deployment.removeQueued", () => {
 		mocks.audit.mockRejectedValue(new Error("audit down"));
 
 		await expect(
-			caller.removeQueued({ jobId: "job-5" }),
+			caller.removeQueued({ jobId: "job-5", serviceId: svc("job-5") }),
 		).resolves.toMatchObject({ success: true, jobId: "job-5" });
 		expect(mocks.auditCancel).toHaveBeenCalledTimes(1);
 	});
 
 	it("rejects an empty job id", async () => {
-		await expect(caller.removeQueued({ jobId: "" })).rejects.toMatchObject({
+		await expect(
+			caller.removeQueued({ jobId: "", serviceId: svc("") }),
+		).rejects.toMatchObject({
 			code: "BAD_REQUEST",
 		});
 	});

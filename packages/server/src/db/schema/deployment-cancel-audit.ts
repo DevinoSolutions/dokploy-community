@@ -13,8 +13,8 @@ import { organization } from "./account";
  */
 
 export type DeploymentCancelAuditAction =
-		| "remove_queued_job"
-| "cancel_deployment"
+	| "remove_queued_job"
+	| "cancel_deployment"
 	| "kill_build"
 	| "kill_process"
 	| "remove_deployment"

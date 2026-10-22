@@ -60,6 +60,8 @@ describe("resolveToolScope", () => {
 		// Does not match the deploy pattern, so without the override it would be
 		// "edit services".
 		expect(m("deployment", "prioritizeQueued")).toBe("dokploy:deploy");
+		// remove* would otherwise fall under "delete services".
+		expect(m("deployment", "removeQueued")).toBe("dokploy:deploy");
 		expect(m("application", "clearDeployments")).toBe("dokploy:deploy");
 		expect(m("application", "cleanQueues")).toBe("dokploy:deploy");
 		expect(m("compose", "deployTemplate")).toBe("dokploy:services:write");

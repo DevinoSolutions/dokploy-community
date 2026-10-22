@@ -302,7 +302,14 @@ export const deploymentRouter = createTRPCRouter({
 	// stopping a build is killBuild / cancelDeployment. A waiting job has no
 	// deployment row yet (it is created when the job starts), so none is changed.
 	removeQueued: protectedProcedure
-		.input(z.object({ jobId: z.string().min(1) }))
+		.input(
+			z.object({
+				jobId: z.string().min(1),
+				// The service the row showed. Job ids restart after a process restart,
+				// so a table left open could name a different job by the same id.
+				serviceId: z.string().min(1),
+			}),
+		)
 		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				throw new TRPCError({
@@ -331,6 +338,7 @@ export const deploymentRouter = createTRPCRouter({
 			};
 			const serviceId = data.composeId ?? data.applicationId;
 			if (!serviceId) throw notWaiting;
+			if (serviceId !== input.serviceId) throw notWaiting;
 			try {
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					deployment: ["cancel"],
@@ -366,7 +374,7 @@ export const deploymentRouter = createTRPCRouter({
 				serviceName,
 				jobType: data.type,
 				applicationType: data.applicationType,
-				title: data.titleLog,
+				title: data.titleLog?.slice(0, 200),
 			};
 			// The job is already gone, so a failing audit must not turn the answer
 			// into an error and hide what was removed.
