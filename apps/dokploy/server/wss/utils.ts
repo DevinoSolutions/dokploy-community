@@ -3,17 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execAsync, IS_CLOUD, paths } from "@dokploy/server";
-import { MONITORING_APP_NAME_PATTERN } from "@dokploy/server/db/schema/application";
 
-/**
- * Validates the `appName` of a stats request, which names a directory under
- * MONITORING_PATH. Same shape `application.readAppMonitoring` accepts, minus
- * `.` and `..`, which the pattern allows but which would leave the bucket.
- */
-export const isValidMonitoringAppName = (appName: string): boolean =>
-	MONITORING_APP_NAME_PATTERN.test(appName) &&
-	appName !== "." &&
-	appName !== "..";
+// The `appName` of a stats request names a directory under MONITORING_PATH, so
+// it is validated with the same check `application.readAppMonitoring` uses.
+export { isValidMonitoringAppName } from "@dokploy/server/db/schema/application";
 
 /**
  * Validates that the container ID matches Docker's expected format.
