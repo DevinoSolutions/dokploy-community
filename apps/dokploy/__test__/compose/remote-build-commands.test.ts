@@ -1,8 +1,20 @@
+import { spawnSync } from "node:child_process";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	buildComposeOverrideYaml,
 	getBuiltImageRepoName,
 	getBuiltImageTag,
 	getComposeBuildCommand,
+	getComposeBuildServiceCommand,
 	getComposeBuildSettingsError,
 	getComposeConfigJsonCommand,
 	getTagAndPushCommand,
@@ -11,8 +23,8 @@ import {
 	sanitizeImageRepoName,
 } from "@dokploy/server/utils/builders/compose-remote-build";
 import { quote } from "shell-quote";
-import { parse } from "yaml";
 import { describe, expect, it, vi } from "vitest";
+import { parse } from "yaml";
 
 vi.mock("@dokploy/server/utils/docker/domain", () => ({
 	writeDomainsToCompose: vi.fn().mockResolvedValue(""),
@@ -297,5 +309,111 @@ describe("getTagAndPushCommand", () => {
 		expect(command).toContain("docker image prune -f");
 		expect(command).not.toMatch(/volume/i);
 		expect(command).not.toMatch(/system prune/);
+	});
+});
+
+describe("getTagAndPushCommand when an image vanished after the build", () => {
+	const images = [
+		{
+			service: "web",
+			localImage: "my-app-web",
+			ref: "reg.example.com/acme/my-app-web:dpl-1",
+			latestRef: "reg.example.com/acme/my-app-web:latest",
+		},
+	];
+	const rebuildService = (service: string) =>
+		getComposeBuildServiceCommand(compose, "/code", service);
+
+	it("rebuilds only the missing service, then re-checks before tagging", () => {
+		const command = getTagAndPushCommand({
+			images,
+			registryLabel: "reg.example.com",
+			rebuildService,
+		});
+		const rebuild = command.indexOf("build web 2>&1");
+		expect(rebuild).toBeGreaterThan(-1);
+		expect(command.indexOf("docker image inspect my-app-web")).toBeLessThan(
+			rebuild,
+		);
+		expect(
+			command.lastIndexOf("docker image inspect my-app-web"),
+		).toBeGreaterThan(rebuild);
+		expect(rebuild).toBeLessThan(command.indexOf("docker tag my-app-web"));
+		expect(command).toContain("did not produce image");
+	});
+
+	it("keeps the old fail-fast script when no rebuild is given", () => {
+		const command = getTagAndPushCommand({
+			images,
+			registryLabel: "reg.example.com",
+		});
+		expect(command).not.toContain("rebuilding service");
+		expect(command).toContain("did not produce image");
+	});
+
+	const bash = spawnSync("bash", ["-c", "true"]).status === 0;
+
+	// Runs the real script against a fake `docker`: inspect fails until the
+	// compose build has run, so the script has to rebuild to get through.
+	const runScript = (rebuildable: boolean, buildSucceeds = true) => {
+		const dir = mkdtempSync(join(tmpdir(), "dokploy-push-"));
+		const bin = join(dir, "bin");
+		mkdirSync(bin);
+		const state = join(dir, "state");
+		mkdirSync(state);
+		writeFileSync(
+			join(bin, "docker"),
+			[
+				"#!/bin/sh",
+				`echo "$@" >> '${state}/calls'`,
+				'case "$1 $2" in',
+				`  "image inspect") [ -f '${state}/built' ] ;;`,
+				`  "compose -p") ${buildSucceeds ? `touch '${state}/built'` : "exit 1"} ;;`,
+				"  *) exit 0 ;;",
+				"esac",
+				"",
+			].join("\n"),
+			{ mode: 0o755 },
+		);
+		const script = getTagAndPushCommand({
+			images,
+			registryLabel: "reg.example.com",
+			rebuildService: rebuildable
+				? (service) => getComposeBuildServiceCommand(compose, dir, service)
+				: undefined,
+		});
+		const result = spawnSync("bash", ["-c", script], {
+			env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+			encoding: "utf8",
+		});
+		const calls = existsSync(join(state, "calls"))
+			? readFileSync(join(state, "calls"), "utf8")
+			: "";
+		rmSync(dir, { recursive: true, force: true });
+		return { ...result, calls };
+	};
+
+	it.skipIf(!bash)("runs: rebuilds, then tags and pushes", () => {
+		const { status, stdout, calls } = runScript(true);
+		expect(stdout).toContain("rebuilding service web from the layer cache");
+		expect(stdout).toContain("web pushed");
+		expect(status).toBe(0);
+		expect(calls).toMatch(/compose -p my-app .* build web/);
+		expect(calls).toContain(
+			"tag my-app-web reg.example.com/acme/my-app-web:dpl-1",
+		);
+	});
+
+	it.skipIf(!bash)("runs: still fails when the rebuild fails", () => {
+		const { status, stdout, calls } = runScript(true, false);
+		expect(status).not.toBe(0);
+		expect(stdout).toContain("Rebuilding service web failed");
+		expect(calls).not.toContain("push");
+	});
+
+	it.skipIf(!bash)("runs: without a rebuild the old error stands", () => {
+		const { status, stdout } = runScript(false);
+		expect(status).not.toBe(0);
+		expect(stdout).toContain("The build did not produce image my-app-web");
 	});
 });

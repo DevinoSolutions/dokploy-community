@@ -16,6 +16,7 @@ import {
 	getBuiltImageTag,
 	getCloneCompleteCommand,
 	getComposeBuildCommand,
+	getComposeBuildServiceCommand,
 	getComposeBuildSettingsError,
 	getComposeConfigJsonCommand,
 	getReusableCloneProbeCommand,
@@ -38,6 +39,10 @@ import {
 	encodeBase64,
 	getCreateFilesCommand,
 } from "@dokploy/server/utils/docker/utils";
+import {
+	ExecError,
+	truncateOutputTail,
+} from "@dokploy/server/utils/process/ExecError";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
 import { cloneGitRepository } from "@dokploy/server/utils/providers/git";
@@ -429,7 +434,23 @@ const buildImagesOnBuildServer = async (
 			projectPath,
 			stackEnvFile,
 		);
-		const { stdout } = await execOnBuildServer(configCommand);
+		let stdout: string;
+		try {
+			({ stdout } = await execOnBuildServer(configCommand));
+		} catch (error) {
+			// Nothing else writes this failure down: the command is not streamed
+			// (stdout is the resolved environment) and an ExecError is not logged by
+			// the caller, so a compose that does not resolve (a `${VAR:?}` with no
+			// value, a YAML error) used to fail with an empty log. Only stderr is
+			// logged, which carries the reason and not the resolved configuration.
+			if (error instanceof ExecError && error.stderr?.trim()) {
+				log.line(
+					`docker compose config failed on ${buildServer.name}:
+${truncateOutputTail(error.stderr)}`,
+				);
+			}
+			throw error;
+		}
 		const builtServices = parseBuiltServices(stdout, entity.appName);
 
 		if (builtServices.length === 0) {
@@ -474,6 +495,14 @@ const buildImagesOnBuildServer = async (
 				images: [...byLocalImage.values()],
 				registryLabel: registry.registryUrl || registry.registryName,
 				configDir,
+				rebuildService: (service) =>
+					getComposeBuildServiceCommand(
+						buildEntity,
+						codePath,
+						service,
+						projectPath,
+						stackEnvFile,
+					),
 			}),
 		);
 		// The serving host pulls the images it was just told about, and its stack

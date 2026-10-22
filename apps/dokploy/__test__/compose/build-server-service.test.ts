@@ -59,6 +59,7 @@ import {
 	createDeploymentLogWriter,
 	prepareComposeBuildServerDeploy,
 } from "@dokploy/server/services/compose-build-server";
+import { ExecError } from "@dokploy/server/utils/process/ExecError";
 
 const compose = {
 	appName: "my-app",
@@ -685,5 +686,112 @@ describe("createDeploymentLogWriter", () => {
 		writer.line("hello");
 		await expect(writer.close()).resolves.toBeUndefined();
 		error.mockRestore();
+	});
+});
+
+describe("a failing step the log would not show", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.findServerById.mockResolvedValue(buildServer);
+		mocks.findRegistryByIdWithCredentials.mockResolvedValue(registry);
+		mocks.loginDockerRegistry.mockResolvedValue(undefined);
+		mocks.cloneGitRepository.mockResolvedValue("echo clone;");
+		mocks.generateApplyPatchesCommand.mockResolvedValue("");
+		mocks.writeFileRemote.mockResolvedValue(undefined);
+	});
+
+	const loggedOn = (serverId: string) =>
+		mocks.execAsyncRemote.mock.calls
+			.filter((call) => call[0] === serverId)
+			.map((call) =>
+				Buffer.from(
+					(call[1] as string).match(/echo "([A-Za-z0-9+/=]+)"/)?.[1] ?? "",
+					"base64",
+				).toString("utf8"),
+			)
+			.join("");
+
+	it("writes the compose config error to the deployment log", async () => {
+		const stderr =
+			"error while interpolating services.web.environment.SENDLY_API_KEY: required variable SENDLY_API_KEY is missing a value: put its API key in .env\n";
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => {
+				if (command.includes("config --format json")) {
+					throw new ExecError(
+						`Remote command failed with exit code 1: ${stderr}`,
+						{
+							command,
+							stdout: "",
+							stderr,
+							exitCode: 1,
+							serverId: "build-1",
+						},
+					);
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+
+		await expect(
+			prepareComposeBuildServerDeploy({
+				entity: { ...compose, serverId: "serve-1" },
+				deployment: { logPath: "/var/log/dep.log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			}),
+		).rejects.toBeInstanceOf(ExecError);
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain("docker compose config failed");
+		expect(logged).toContain("required variable SENDLY_API_KEY is missing");
+	});
+
+	it("never writes the resolved configuration (stdout) to the log", async () => {
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => {
+				if (command.includes("config --format json")) {
+					throw new ExecError("Remote command failed with exit code 1", {
+						command,
+						stdout: '{"environment":{"DB_PASSWORD":"hunter2-hunter2"}}',
+						stderr: "yaml: line 3: mapping values are not allowed here",
+						exitCode: 1,
+						serverId: "build-1",
+					});
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+
+		await expect(
+			prepareComposeBuildServerDeploy({
+				entity: { ...compose, serverId: "serve-1" },
+				deployment: { logPath: "/var/log/dep.log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			}),
+		).rejects.toBeInstanceOf(ExecError);
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain("mapping values are not allowed here");
+		expect(logged).not.toContain("hunter2");
+	});
+
+	it("rebuilds an image that vanished instead of failing the push", async () => {
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => ({
+				stdout: command.includes("config --format json")
+					? configJson({ web: { build: { context: "." } } })
+					: "",
+				stderr: "",
+			}),
+		);
+		await prepareComposeBuildServerDeploy({
+			entity: compose,
+			deployment: { logPath: "/tmp/log", deploymentId: "dep1" },
+			runStep: vi.fn().mockResolvedValue(undefined),
+		});
+		const push = mocks.execAsyncRemote.mock.calls
+			.map((call) => call[1] as string)
+			.find((command) => command.includes("docker push"))!;
+		expect(push).toContain("rebuilding service web from the layer cache");
+		expect(push).toMatch(/docker compose -p my-app .* build web 2>&1/);
 	});
 });
