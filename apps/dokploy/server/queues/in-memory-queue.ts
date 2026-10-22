@@ -552,6 +552,23 @@ export class InMemoryQueue {
 		return Promise.resolve();
 	}
 
+	/**
+	 * Remove one job by id, only while it is still waiting; true when it was.
+	 * Unlike `remove`, the answer says whether anything left the queue, so a
+	 * caller whose job started or finished a moment ago finds out. The check and
+	 * the removal are one synchronous step, so a job cannot start in between.
+	 */
+	removeWaitingJob(id: string): boolean {
+		for (const partition of this.partitions.values()) {
+			const removed = partition.waiting.filter((job) => job.id === id);
+			if (removed.length === 0) continue;
+			partition.waiting = partition.waiting.filter((job) => job.id !== id);
+			this.settle(removed);
+			return true;
+		}
+		return false;
+	}
+
 	/** Remove waiting jobs matching a predicate. Active jobs are not affected. */
 	removeWaiting(predicate: (data: DeploymentJob) => boolean): number {
 		const dropped: InternalJob[] = [];

@@ -169,6 +169,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "deployment-queueList": "dokploy:read",
   "deployment-readLogs": "dokploy:read",
   "deployment-removeDeployment": "dokploy:deploy",
+  "deployment-removeQueued": "dokploy:deploy",
   "deploymentCancelAudit-all": "dokploy:read",
   "deploymentCancelAudit-byApplication": "dokploy:read",
   "deploymentCancelAudit-byCompose": "dokploy:read",
