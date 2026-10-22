@@ -9,6 +9,10 @@ Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not
 ## Guides
 
 - **[Integrations guide](https://dokploy-community.devino.ca/integrations/)** — set up Uptimely, Snapvisor, DoDomain, Sendly and Notifly
+- **[MCP server with OAuth](https://dokploy-community.devino.ca/mcp-server/)** — connect Claude Code or any MCP client, scopes and revoking
+- **[Enforced remote builds](https://dokploy-community.devino.ca/build-policy/)** — build once on the build server, deploy by digest, required checks, rollback
+- **[Deploy queue controls](https://dokploy-community.devino.ca/deploy-queue/)** — priority lane, remove one waiting deploy, keep-oldest clean
+- **[Compose rolling replace](https://dokploy-community.devino.ca/compose-rolling-replace/)** — opt-in start-before-stop redeploys for Compose services
 - **[FAQ](https://dokploy-community.devino.ca/faq/)** — install, migrate from Dokploy, MCP server for Claude Code, large deploy webhooks, DoDomain, uptime monitoring, telemetry
 
 ## Switching from official Dokploy
@@ -61,7 +65,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 ### Remote MCP server with OAuth (fork original)
 
-- Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP). Claude Code, Cursor or any MCP client connects over HTTPS with **no local process and no API key**
+- Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP). Claude Code or another MCP client whose OAuth redirect is https or a loopback http URL connects over HTTPS with **no local process and no API key**
 - **OAuth 2.1** with PKCE and dynamic client registration: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then `/mcp → Authenticate` opens the browser and you sign in once
 - **API-key alternative for automation fleets** — `POST /api/mcp` also accepts a Dokploy API key in the `x-api-key` header (`claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"`), so unattended agent sessions never depend on one shared OAuth grant
 - **Per-grant scopes** — a consent page with toggles for read, deploy, edit/delete services, edit/delete projects, backups and admin (delete and admin are off by default); role permissions still apply underneath. Revoke any client from Settings → Profile
@@ -69,7 +73,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 ### Build once, deploy by digest (fork original)
 
 - **One builder for the whole organization** — with enforcement on, every GitHub-sourced application builds on the organization build server, pushes `<repository>:<sha>` to the organization registry, and updates the swarm service **by digest**, so CI can wait for that image instead of building a second copy of it
-- **Escape hatches that leave a record** — per-application and per-compose exclusions, plus a one-shot "build locally once" grant written to an audit trail with actor, reason and timestamp
+- **Escape hatches that leave a record** — per-application exclusions (Compose builds are never moved to the build server, so they have nothing to exclude), plus a one-shot "build locally once" grant written to an audit trail with actor, reason and timestamp
 - **Required checks, coalescing and rollback by digest** — a deploy can wait for named commit checks, rapid pushes collapse into one waiting deploy that keeps its place in the queue and builds the newest commit, and a rollback re-deploys exactly the image that was running
 - **Off by default** — with no policy configured for an organization, every code path is stock upstream behaviour
 
