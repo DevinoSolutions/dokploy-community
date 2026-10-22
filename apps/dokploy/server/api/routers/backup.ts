@@ -268,7 +268,7 @@ export const backupRouter = createTRPCRouter({
 
 				const value = await removeBackupById(input.backupId);
 				if (IS_CLOUD && value) {
-					removeJob({
+					await removeJob({
 						backupId: input.backupId,
 						cronSchedule: value.schedule,
 						type: "backup",
