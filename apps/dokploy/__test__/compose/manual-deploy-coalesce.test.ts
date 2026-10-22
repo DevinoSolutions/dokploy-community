@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => ({
 	checkServicePermissionAndAccess: vi.fn(),
 	audit: vi.fn(),
 	gateCalls: [] as Array<Record<string, any>>,
+	// How long the gate's audit write takes, to widen the gap between the
+	// coalesce and the enqueue.
+	auditDelayMs: { value: 0 },
 }));
 
 vi.mock("@dokploy/server", async () => {
@@ -44,7 +47,11 @@ vi.mock("@dokploy/server", async () => {
 				unitName: input.unit.unitName,
 				organizationId: "org-1",
 				removeWaiting: input.removeWaiting,
-				recordAudit: async () => {},
+				recordAudit: async () => {
+					if (mocks.auditDelayMs.value) {
+						await new Promise((r) => setTimeout(r, mocks.auditDelayMs.value));
+					}
+				},
 			});
 			return merged
 				? { deploy: true, coalesced: removed, merged: true }
@@ -145,6 +152,7 @@ beforeEach(() => {
 	mocks.gateCalls.length = 0;
 	mocks.cloud.value = false;
 	mocks.enforced.value = true;
+	mocks.auditDelayMs.value = 0;
 	mocks.checkPermission.mockResolvedValue(undefined);
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
 	myQueue.clearWaiting();
@@ -391,5 +399,97 @@ describe("audit", () => {
 				resourceId: "c1",
 			}),
 		);
+	});
+});
+
+describe("audit actor", () => {
+	it("hands the gate the user behind the click, so a drop is not recorded as the system", async () => {
+		await occupySlot();
+
+		await caller.deploy({ composeId: "c1", title: "a" });
+		await caller.redeploy({ composeId: "c1", title: "r" });
+
+		expect(mocks.gateCalls).toHaveLength(2);
+		for (const call of mocks.gateCalls) {
+			expect(call.caller).toMatchObject({
+				actor: {
+					type: "user",
+					userId: "user-1",
+					email: "ops@example.com",
+				},
+			});
+		}
+	});
+
+	it("names the API key or the admin impersonating, like the other cancel trail rows", async () => {
+		await occupySlot();
+		const keyed = composeRouter.createCaller({
+			...ctx,
+			session: {
+				...ctx.session,
+				apiKeyId: "key-1",
+				impersonatedBy: "admin-9",
+			},
+		} as Parameters<typeof composeRouter.createCaller>[0]);
+
+		await keyed.deploy({ composeId: "c1", title: "a" });
+
+		expect(mocks.gateCalls[0]?.caller).toEqual({
+			actor: {
+				type: "api_key",
+				userId: "user-1",
+				email: "ops@example.com",
+				apiKeyId: "key-1",
+				oauthClientId: undefined,
+			},
+			impersonatedBy: "admin-9",
+		});
+	});
+});
+
+describe("two clicks at once", () => {
+	// A waiting job on another server is dropped (removed > 0, merged false) and
+	// the audit write is awaited before the request queues itself. A second click
+	// in that gap used to find nothing waiting and queue too, leaving two.
+	it("leaves one waiting job when a second click lands while the first is auditing its drop", async () => {
+		useCompose({ serverId: serverId() });
+		await occupySlot();
+		await myQueue.add("deployments", {
+			...job("slot", "old-server-slot"),
+			serverId: `old-${serverId()}`,
+		});
+		await myQueue.add("deployments", {
+			...job("c1", "stale", { server: true }),
+			serverId: `old-${serverId()}`,
+		});
+		await flush();
+		mocks.auditDelayMs.value = 20;
+
+		await Promise.all([
+			caller.deploy({ composeId: "c1", title: "click-1" }),
+			caller.deploy({ composeId: "c1", title: "click-2" }),
+		]);
+
+		const mine = (await waiting()).filter(
+			(queued) => queued.composeId === "c1",
+		);
+		expect(mine.map((queued) => queued.titleLog)).toEqual(["click-2"]);
+	});
+
+	it("does not let a failing request hold up the next click on the same compose", async () => {
+		await occupySlot();
+		const spy = vi
+			.spyOn(myQueue, "add")
+			.mockRejectedValueOnce(new Error("queue down"));
+
+		const [first, second] = await Promise.allSettled([
+			caller.deploy({ composeId: "c1", title: "bad" }),
+			caller.deploy({ composeId: "c1", title: "good" }),
+		]);
+
+		spy.mockRestore();
+		expect(first.status).toBe("rejected");
+		expect(second.status).toBe("fulfilled");
+		expect(await waitingTitles()).toEqual(["good"]);
 	});
 });

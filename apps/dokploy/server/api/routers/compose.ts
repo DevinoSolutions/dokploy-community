@@ -116,6 +116,7 @@ import {
 	recordPriorityUse,
 } from "../utils/deploy-priority";
 import { coalesceManualComposeDeploy } from "../utils/manual-compose-coalesce";
+import { serializeManualDeploy } from "../utils/manual-deploy-lock";
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -693,26 +694,31 @@ export const composeRouter = createTRPCRouter({
 					}),
 				};
 			}
+			const addJob = () =>
+				myQueue.add(
+					"deployments",
+					{
+						...jobData,
+						...(input.priority
+							? { priority: true, priorityBy: ctx.user.id }
+							: {}),
+					},
+					{
+						removeOnComplete: true,
+						removeOnFail: true,
+					},
+				);
 			// A priority request wants to jump the queue, so it is never folded into
-			// a waiting job (which would keep that job's place).
-			const coalesced = input.priority
-				? { merged: false }
-				: await coalesceManualComposeDeploy(compose, jobData);
-			// A waiting deploy took this one over; nothing to enqueue.
-			const queued = coalesced.merged
-				? undefined
-				: await myQueue.add(
-						"deployments",
-						{
-							...jobData,
-							...(input.priority
-								? { priority: true, priorityBy: ctx.user.id }
-								: {}),
-						},
-						{
-							removeOnComplete: true,
-							removeOnFail: true,
-						},
+			// a waiting job (which would keep that job's place). Everything else
+			// coalesces and queues as one step per compose, so a second click cannot
+			// slip in between the two and leave a duplicate. A waiting deploy that
+			// took this one over means there is nothing to enqueue.
+			const queued = input.priority
+				? await addJob()
+				: await serializeManualDeploy(`compose:${input.composeId}`, async () =>
+						(await coalesceManualComposeDeploy(compose, jobData, ctx)).merged
+							? undefined
+							: addJob(),
 					);
 			await audit(ctx, {
 				action: "deploy",
@@ -781,26 +787,31 @@ export const composeRouter = createTRPCRouter({
 					}),
 				};
 			}
+			const addJob = () =>
+				myQueue.add(
+					"deployments",
+					{
+						...jobData,
+						...(input.priority
+							? { priority: true, priorityBy: ctx.user.id }
+							: {}),
+					},
+					{
+						removeOnComplete: true,
+						removeOnFail: true,
+					},
+				);
 			// A priority request wants to jump the queue, so it is never folded into
-			// a waiting job (which would keep that job's place).
-			const coalesced = input.priority
-				? { merged: false }
-				: await coalesceManualComposeDeploy(compose, jobData);
-			// A waiting deploy took this one over; nothing to enqueue.
-			const queued = coalesced.merged
-				? undefined
-				: await myQueue.add(
-						"deployments",
-						{
-							...jobData,
-							...(input.priority
-								? { priority: true, priorityBy: ctx.user.id }
-								: {}),
-						},
-						{
-							removeOnComplete: true,
-							removeOnFail: true,
-						},
+			// a waiting job (which would keep that job's place). Everything else
+			// coalesces and queues as one step per compose, so a second click cannot
+			// slip in between the two and leave a duplicate. A waiting deploy that
+			// took this one over means there is nothing to enqueue.
+			const queued = input.priority
+				? await addJob()
+				: await serializeManualDeploy(`compose:${input.composeId}`, async () =>
+						(await coalesceManualComposeDeploy(compose, jobData, ctx)).merged
+							? undefined
+							: addJob(),
 					);
 			await audit(ctx, {
 				action: "deploy",
