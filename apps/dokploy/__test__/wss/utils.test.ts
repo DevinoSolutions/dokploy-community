@@ -3,6 +3,7 @@ import {
 	buildDockerLogsArguments,
 	createDockerLogsDataHandler,
 	isValidContainerId,
+	isValidMonitoringAppName,
 	isValidSearch,
 	isValidSince,
 	isValidTail,
@@ -227,5 +228,34 @@ describe("terminateDockerLogsProcess", () => {
 
 		expect(terminateDockerLogsProcess(childProcess)).toBeUndefined();
 		expect(childProcess.kill).not.toHaveBeenCalled();
+	});
+});
+
+describe("isValidMonitoringAppName", () => {
+	it("accepts container, stack task and host bucket names", () => {
+		for (const name of [
+			"dokploy",
+			"dokploy-abc_123",
+			"app-web-x1y2z3",
+			"stack-abc_web.1.k3j2h1g0f9e8",
+		]) {
+			expect(isValidMonitoringAppName(name)).toBe(true);
+		}
+	});
+
+	it("rejects anything that could leave the monitoring directory", () => {
+		for (const name of [
+			"",
+			".",
+			"..",
+			"../other",
+			"a/b",
+			"a\\b",
+			"a b",
+			"x;rm",
+			"a\u0000b",
+		]) {
+			expect(isValidMonitoringAppName(name)).toBe(false);
+		}
 	});
 });

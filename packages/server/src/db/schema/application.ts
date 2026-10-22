@@ -614,11 +614,13 @@ export const apiSaveEnvironmentVariables = createSchema
 // so a crafted value cannot traverse out of MONITORING_PATH. Container app
 // names fed through this same endpoint are auto-generated and only contain
 // these characters as well.
+export const MONITORING_APP_NAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
+
 export const apiFindMonitoringStats = z.object({
 	appName: z
 		.string()
 		.min(1)
-		.regex(/^[A-Za-z0-9_.-]+$/, { message: "Invalid appName" }),
+		.regex(MONITORING_APP_NAME_PATTERN, { message: "Invalid appName" }),
 });
 
 export const apiUpdateApplication = createSchema
