@@ -4,6 +4,7 @@ import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";
 import {
 	type RemoteBuildCancelTarget,
+	shSingleQuote,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
 import { Client, type ClientCallback } from "ssh2";
@@ -38,9 +39,18 @@ export {
 
 const execAsyncBase = util.promisify(exec);
 
-// Node embeds the full command in error.message; it may carry secrets.
-const withoutCommand = (message: string, command: string) =>
-	message.split(command).join("[command omitted]");
+// Node embeds the full command in error.message; it may carry secrets. A
+// command wrapped by `shSingleQuote` (execAsyncCancelable) appears there with
+// each `'` escaped, so that form is stripped too.
+export const withoutCommand = (message: string, command: string) => {
+	if (!command) return message;
+	const escaped = shSingleQuote(command).slice(1, -1);
+	return message
+		.split(escaped)
+		.join("[command omitted]")
+		.split(command)
+		.join("[command omitted]");
+};
 
 export const execAsync = async (
 	command: string,
