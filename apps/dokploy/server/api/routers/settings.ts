@@ -88,6 +88,7 @@ import {
 	enterpriseProcedure,
 	protectedProcedure,
 	publicProcedure,
+	withPermission,
 } from "../trpc";
 
 /**
@@ -342,7 +343,7 @@ export const settingsRouter = createTRPCRouter({
 		});
 		return true;
 	}),
-	getDockerDiskUsage: adminProcedure
+	getDockerDiskUsage: withPermission("docker", "read")
 		.input(z.object({ serverId: z.string().optional() }).optional())
 		.query(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
