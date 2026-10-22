@@ -29,6 +29,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 **Docker disk usage follows server access** (T-6568, follow-up to [#451](https://github.com/DevinoSolutions/dokploy-community/pull/451)) — with `docker.read` instead of admin, a member could read `docker system df` for any server in their organization. A member now needs that server in their granted servers, like the rest of the server-scoped views; owners and admins still see every server and the local host is unchanged.
 
+**Select no longer clears form values on reset** (upstream [#5745](https://github.com/Dokploy/dokploy/pull/5745)). The shared Radix Select wrapper now ignores the empty-string value Radix emits when a form resets, so resetting a form no longer wipes the selected value. Ported with the original commits cherry-picked (T-6669).
+
 ### New in v0.30.8-community.31
 
 **Node 24.22.1 in the images, lockfile and devcontainer** ([#436](https://github.com/DevinoSolutions/dokploy-community/pull/436), contributed by decryptedchaos, thank you). Takes the Node.js 24.x security release of 2026-10-21, which fixes eight CVEs including TLS certificate hostname validation bypasses, a DNS resolve truncation, and an out-of-bounds write in the Brotli decoder. All four Dockerfiles, the devcontainer Dockerfile (now on the bookworm base, since there is no bullseye image for this Node release), `.nvmrc`, the CI workflow Node versions and `engines.node` move from 24.4.0 to 24.22.1. `@types/node` stays at `^24.4.0` (resolved 24.10.13) because no 24.22.1 types package is published, and the pnpm lockfile specifiers were corrected to match, which fixes the `pnpm install --frozen-lockfile` failure (`ERR_PNPM_OUTDATED_LOCKFILE`).
