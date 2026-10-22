@@ -16,11 +16,8 @@ import {
 import { hasPermission } from "@dokploy/server/services/permission";
 import { quote } from "shell-quote";
 import { WebSocketServer } from "ws";
-import {
-	canAccessDockerOverWss,
-	findServiceAppName,
-	isServiceContainerName,
-} from "./authorize";
+import { canAccessDockerOverWss, isServiceContainerName } from "./authorize";
+import { findServiceAppName } from "./container-ownership";
 import { onGuardedConnection, toCloseReason } from "./guard";
 
 // serverIds are nanoid-generated (alphanumeric + `_` and `-`). Reject anything

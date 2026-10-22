@@ -16,12 +16,13 @@ vi.mock("@dokploy/server", () => ({
 	docker: { listContainers: mockListContainers },
 	execAsync: vi.fn(),
 }));
-vi.mock("@dokploy/server/db", () => ({ db: {} }));
 const mockCanAccessDockerOverWss = vi.hoisted(() => vi.fn());
 const mockFindServiceAppName = vi.hoisted(() => vi.fn());
 vi.mock("@/server/wss/authorize", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@/server/wss/authorize")>()),
 	canAccessDockerOverWss: mockCanAccessDockerOverWss,
+}));
+vi.mock("@/server/wss/container-ownership", () => ({
 	findServiceAppName: mockFindServiceAppName,
 }));
 
