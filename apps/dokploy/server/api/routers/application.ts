@@ -69,6 +69,8 @@ import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "@/server/api/utils/deploy-priority";
+import { coalesceManualApplicationDeploy } from "@/server/api/utils/manual-application-coalesce";
+import { serializeManualDeploy } from "@/server/api/utils/manual-deploy-lock";
 import { getRailpackVersions } from "@/server/api/utils/railpack-versions";
 import {
 	apiCreateApplication,
@@ -554,19 +556,34 @@ export const applicationRouter = createTRPCRouter({
 					}),
 				};
 			}
-			const queued = await myQueue.add(
-				"deployments",
-				{
-					...jobData,
-					...(input.priority
-						? { priority: true, priorityBy: ctx.user.id }
-						: {}),
-				},
-				{
-					removeOnComplete: true,
-					removeOnFail: true,
-				},
-			);
+			const addJob = () =>
+				myQueue.add(
+					"deployments",
+					{
+						...jobData,
+						...(input.priority
+							? { priority: true, priorityBy: ctx.user.id }
+							: {}),
+					},
+					{
+						removeOnComplete: true,
+						removeOnFail: true,
+					},
+				);
+			// A priority request wants to jump the queue, so it is never folded into
+			// a waiting job. Everything else coalesces and queues as one step per
+			// application (see the compose router). A waiting deploy that took this
+			// one over means there is nothing to enqueue.
+			const queued = input.priority
+				? await addJob()
+				: await serializeManualDeploy(
+						`application:${input.applicationId}`,
+						async () =>
+							(await coalesceManualApplicationDeploy(application, jobData, ctx))
+								.merged
+								? undefined
+								: addJob(),
+					);
 			await audit(ctx, {
 				action: "rebuild",
 				resourceType: "application",
@@ -579,8 +596,8 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: application.applicationId,
 				resourceName: application.appName,
 				via: "redeploy",
-				jobId: queued.id,
-				outcome: queued.priority,
+				jobId: queued?.id,
+				outcome: queued?.priority,
 			});
 			return {
 				success: true,
@@ -1043,19 +1060,34 @@ export const applicationRouter = createTRPCRouter({
 					}),
 				};
 			}
-			const queued = await myQueue.add(
-				"deployments",
-				{
-					...jobData,
-					...(input.priority
-						? { priority: true, priorityBy: ctx.user.id }
-						: {}),
-				},
-				{
-					removeOnComplete: true,
-					removeOnFail: true,
-				},
-			);
+			const addJob = () =>
+				myQueue.add(
+					"deployments",
+					{
+						...jobData,
+						...(input.priority
+							? { priority: true, priorityBy: ctx.user.id }
+							: {}),
+					},
+					{
+						removeOnComplete: true,
+						removeOnFail: true,
+					},
+				);
+			// A priority request wants to jump the queue, so it is never folded into
+			// a waiting job. Everything else coalesces and queues as one step per
+			// application (see the compose router). A waiting deploy that took this
+			// one over means there is nothing to enqueue.
+			const queued = input.priority
+				? await addJob()
+				: await serializeManualDeploy(
+						`application:${input.applicationId}`,
+						async () =>
+							(await coalesceManualApplicationDeploy(application, jobData, ctx))
+								.merged
+								? undefined
+								: addJob(),
+					);
 			await audit(ctx, {
 				action: "deploy",
 				resourceType: "application",
@@ -1068,8 +1100,8 @@ export const applicationRouter = createTRPCRouter({
 				resourceId: application.applicationId,
 				resourceName: application.appName,
 				via: "deploy",
-				jobId: queued.id,
-				outcome: queued.priority,
+				jobId: queued?.id,
+				outcome: queued?.priority,
 			});
 			return {
 				success: true,

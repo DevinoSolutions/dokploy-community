@@ -91,7 +91,8 @@ review finding B: the section above was excellent and this one did not exist.
    exclusion, added before the switch is flipped.
 3. **Queued deploys start coalescing.** A burst of pushes produces one build,
    at the earliest slot, of the newest commit (or pinned digest). Manual compose
-   deploys and redeploys coalesce the same way, each with its own kind. Previews
+   and application deploys and redeploys coalesce the same way, each with its
+   own kind, and a drop they cause is audited under the user who clicked. Previews
    are never coalesced, and a redeploy is never merged with a waiting deploy (or
    the reverse).
 4. **`[skip deploy]` starts being honoured** on the routes listed in

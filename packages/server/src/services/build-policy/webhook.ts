@@ -7,7 +7,10 @@ import {
 import { getRegistryTag } from "@dokploy/server/utils/cluster/upload";
 import { shouldDeploy } from "@dokploy/server/utils/watch-paths/should-deploy";
 import { eq } from "drizzle-orm";
-import { recordDeploymentCancelAudit } from "../deployment-cancel-audit";
+import {
+	type DeploymentCancelAuditActor,
+	recordDeploymentCancelAudit,
+} from "../deployment-cancel-audit";
 import { findRegistryByIdWithCredentials } from "../registry";
 import { recordBuildPolicyAudit } from "./audit";
 import {
@@ -24,6 +27,18 @@ import {
 } from "./settings";
 import { matchedSkipDeployMarker } from "./skip-deploy";
 import { resolveWatchPaths } from "./watch-paths";
+
+/**
+ * Who asked for a deploy that goes through the gate, when somebody did: the
+ * user (or API key, or OAuth client) behind a manual deploy or redeploy. The
+ * coalesce_drop trail row names them, because their click can replace another
+ * user's waiting job. Webhooks have no caller, so their drops stay `system`.
+ */
+export interface DeployGateCaller {
+	actor: DeploymentCancelAuditActor;
+	/** An admin acting as `actor`; recorded in the row's metadata. */
+	impersonatedBy?: string | null;
+}
 
 export type PinnedImageJob = {
 	ref: string;
@@ -132,6 +147,7 @@ export const buildPolicyDeployGate = async ({
 	changedFiles,
 	commitMessage,
 	removeWaiting,
+	caller,
 }: {
 	unitType: BuildPolicyUnitType;
 	unit: BuildPolicyGateUnit;
@@ -145,6 +161,8 @@ export const buildPolicyDeployGate = async ({
 	 * replaced, and whether the push was merged.
 	 */
 	removeWaiting: CoalesceQueuedDeployInput["removeWaiting"];
+	/** The person behind a manual deploy; omitted for webhooks (the system). */
+	caller?: DeployGateCaller;
 }): Promise<BuildPolicyGateResult> => {
 	// On an instance where nobody enforces, this is the only thing the gate does.
 	const organizationId = await findEnforcingOrganizationId(unit.environmentId);
@@ -215,22 +233,25 @@ export const buildPolicyDeployGate = async ({
 		organizationId,
 		removeWaiting,
 		recordAudit: async (entry) => {
-			// The same drop, in the trail that needs no license. No caller is
-			// behind it: the push itself is the cause, so the actor is the system.
-			// Written first and on its own, so a failing build-policy write cannot
+			// The same drop, in the trail that needs no license. A webhook has no
+			// caller: the push itself is the cause, so the actor is the system. A
+			// manual deploy names whoever clicked, since the click can replace
+			// another user's waiting job. Written first and on its own, so a failing build-policy write cannot
 			// skip it. Commit messages (`droppedTitles`) stay out of this row.
 			const { droppedTitles: _titles, ...metadata } = entry.metadata;
 			try {
 				await recordDeploymentCancelAudit({
 					organizationId: entry.organizationId,
 					action: "coalesce_drop",
-					actor: { type: "system" },
+					actor: caller?.actor ?? { type: "system" },
 					targetType: unitType,
 					targetId: unit.unitId,
 					targetName: unit.unitName,
 					applicationId: entry.applicationId,
 					composeId: entry.composeId,
-					metadata,
+					metadata: caller?.impersonatedBy
+						? { ...metadata, impersonatedBy: caller.impersonatedBy }
+						: metadata,
 				});
 			} catch (error) {
 				console.error(
