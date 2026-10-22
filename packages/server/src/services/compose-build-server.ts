@@ -39,11 +39,9 @@ import {
 	encodeBase64,
 	getCreateFilesCommand,
 } from "@dokploy/server/utils/docker/utils";
-import {
-	ExecError,
-	truncateOutputTail,
-} from "@dokploy/server/utils/process/ExecError";
+import { ExecError } from "@dokploy/server/utils/process/ExecError";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
+import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
 import { cloneGitRepository } from "@dokploy/server/utils/providers/git";
 import { cloneGiteaRepository } from "@dokploy/server/utils/providers/gitea";
@@ -130,6 +128,41 @@ export const assertComposeBuildSettings = async (
 			message: "The build server and registry must belong to your organization",
 		});
 	}
+};
+
+const CONFIG_STDERR_MAX_LINES = 10;
+const CONFIG_STDERR_MAX_LINE_LENGTH = 300;
+
+/**
+ * What the deployment log says when `docker compose config` fails on the build
+ * server. Its stderr can quote the environment: dotenv parse errors repeat the
+ * offending line (`... near "<line>"`) and validation errors repeat resolved
+ * values. So the lines naming a quoted source line are dropped, the rest is cut
+ * to the first few lines, run through the shared redaction and an
+ * `*API_KEY=value` scrub. With nothing left to show, only the exit code is
+ * logged.
+ */
+export const describeConfigFailure = (serverName: string, error: ExecError) => {
+	const lines = (error.stderr ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line && !line.includes('near "'))
+		.slice(0, CONFIG_STDERR_MAX_LINES)
+		.map((line) =>
+			redactSecrets(line)
+				.replace(
+					/\b([A-Za-z0-9_]*API_?KEY[A-Za-z0-9_]*)\s*=\s*\S+/gi,
+					"$1=[REDACTED]",
+				)
+				.slice(0, CONFIG_STDERR_MAX_LINE_LENGTH),
+		);
+	const head = `docker compose config failed on ${serverName}`;
+	if (lines.length === 0) {
+		return error.exitCode === undefined
+			? `${head}: the build server could not run docker compose config`
+			: `${head} (exit code ${error.exitCode}) without any error output`;
+	}
+	return `${head}:\n${lines.join("\n")}`;
 };
 
 const MAX_LOG_CHUNK = 24 * 1024;
@@ -441,13 +474,12 @@ const buildImagesOnBuildServer = async (
 			// Nothing else writes this failure down: the command is not streamed
 			// (stdout is the resolved environment) and an ExecError is not logged by
 			// the caller, so a compose that does not resolve (a `${VAR:?}` with no
-			// value, a YAML error) used to fail with an empty log. Only stderr is
-			// logged, which carries the reason and not the resolved configuration.
-			if (error instanceof ExecError && error.stderr?.trim()) {
-				log.line(
-					`docker compose config failed on ${buildServer.name}:
-${truncateOutputTail(error.stderr)}`,
-				);
+			// value, a YAML error) used to fail with an empty log. Only a bounded,
+			// scrubbed stderr is logged (the reason, not the resolved configuration),
+			// never stdout or error.message, which carries the stdout tail when
+			// stderr is empty. Plain errors (an SSH failure) are logged by the caller.
+			if (error instanceof ExecError) {
+				log.line(describeConfigFailure(buildServer.name, error));
 			}
 			throw error;
 		}

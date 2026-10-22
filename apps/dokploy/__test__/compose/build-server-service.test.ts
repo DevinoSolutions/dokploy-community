@@ -774,6 +774,73 @@ describe("a failing step the log would not show", () => {
 		expect(logged).not.toContain("hunter2");
 	});
 
+	const failConfigWith = (details: {
+		stdout?: string;
+		stderr?: string;
+		exitCode?: number;
+	}) =>
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => {
+				if (command.includes("config --format json")) {
+					throw new ExecError("Remote command failed", {
+						command,
+						serverId: "build-1",
+						...details,
+					});
+				}
+				return { stdout: "", stderr: "" };
+			},
+		);
+	const deployFailing = () =>
+		expect(
+			prepareComposeBuildServerDeploy({
+				entity: { ...compose, serverId: "serve-1" },
+				deployment: { logPath: "/var/log/dep.log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			}),
+		).rejects.toBeInstanceOf(ExecError);
+
+	it("drops lines that quote an .env line, scrubs API keys and keeps ten lines", async () => {
+		const stderr = [
+			'failed to read /code/.env: line 3: unexpected character "-" in variable name near "SENDLY_API_KEY=sk-live-abc123"',
+			"validating /code/docker-compose.yml: services.web.ports invalid SENDLY_API_KEY=sk-live-abc123 here",
+			...Array.from({ length: 14 }, (_, i) => `detail line ${i + 1}`),
+		].join("\n");
+		failConfigWith({ stderr, exitCode: 1 });
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		expect(logged).not.toContain("sk-live-abc123");
+		expect(logged).not.toContain('near "');
+		expect(logged).toContain("SENDLY_API_KEY=[REDACTED]");
+		expect(logged).toContain("detail line 9");
+		expect(logged).not.toContain("detail line 10");
+	});
+
+	it("logs the exit code, never the stdout tail, when stderr is empty", async () => {
+		failConfigWith({
+			stdout: '{"environment":{"DB_PASSWORD":"hunter2-hunter2"}}',
+			stderr: "",
+			exitCode: 1,
+		});
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		expect(logged).toContain(
+			"docker compose config failed on builder (exit code 1) without any error output",
+		);
+		expect(logged).not.toContain("hunter2");
+	});
+
+	it("says the build server could not run it when there is no exit code", async () => {
+		failConfigWith({ stderr: '   \nnear "A=1"\n' });
+		await deployFailing();
+
+		expect(loggedOn("serve-1")).toContain(
+			"the build server could not run docker compose config",
+		);
+	});
+
 	it("rebuilds an image that vanished instead of failing the push", async () => {
 		mocks.execAsyncRemote.mockImplementation(
 			async (_serverId: string, command: string) => ({
