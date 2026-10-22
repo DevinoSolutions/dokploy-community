@@ -115,6 +115,7 @@ import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "../utils/deploy-priority";
+import { coalesceManualComposeDeploy } from "../utils/manual-compose-coalesce";
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -692,19 +693,27 @@ export const composeRouter = createTRPCRouter({
 					}),
 				};
 			}
-			const queued = await myQueue.add(
-				"deployments",
-				{
-					...jobData,
-					...(input.priority
-						? { priority: true, priorityBy: ctx.user.id }
-						: {}),
-				},
-				{
-					removeOnComplete: true,
-					removeOnFail: true,
-				},
-			);
+			// A priority request wants to jump the queue, so it is never folded into
+			// a waiting job (which would keep that job's place).
+			const coalesced = input.priority
+				? { merged: false }
+				: await coalesceManualComposeDeploy(compose, jobData);
+			// A waiting deploy took this one over; nothing to enqueue.
+			const queued = coalesced.merged
+				? undefined
+				: await myQueue.add(
+						"deployments",
+						{
+							...jobData,
+							...(input.priority
+								? { priority: true, priorityBy: ctx.user.id }
+								: {}),
+						},
+						{
+							removeOnComplete: true,
+							removeOnFail: true,
+						},
+					);
 			await audit(ctx, {
 				action: "deploy",
 				resourceType: "compose",
@@ -717,8 +726,8 @@ export const composeRouter = createTRPCRouter({
 						resourceId: input.composeId,
 						resourceName: compose.name,
 						via: "deploy",
-						jobId: queued.id,
-						outcome: queued.priority,
+						jobId: queued?.id,
+						outcome: queued?.priority,
 					})
 				: undefined;
 			return {
@@ -772,19 +781,27 @@ export const composeRouter = createTRPCRouter({
 					}),
 				};
 			}
-			const queued = await myQueue.add(
-				"deployments",
-				{
-					...jobData,
-					...(input.priority
-						? { priority: true, priorityBy: ctx.user.id }
-						: {}),
-				},
-				{
-					removeOnComplete: true,
-					removeOnFail: true,
-				},
-			);
+			// A priority request wants to jump the queue, so it is never folded into
+			// a waiting job (which would keep that job's place).
+			const coalesced = input.priority
+				? { merged: false }
+				: await coalesceManualComposeDeploy(compose, jobData);
+			// A waiting deploy took this one over; nothing to enqueue.
+			const queued = coalesced.merged
+				? undefined
+				: await myQueue.add(
+						"deployments",
+						{
+							...jobData,
+							...(input.priority
+								? { priority: true, priorityBy: ctx.user.id }
+								: {}),
+						},
+						{
+							removeOnComplete: true,
+							removeOnFail: true,
+						},
+					);
 			await audit(ctx, {
 				action: "deploy",
 				resourceType: "compose",
@@ -797,8 +814,8 @@ export const composeRouter = createTRPCRouter({
 						resourceId: input.composeId,
 						resourceName: compose.name,
 						via: "redeploy",
-						jobId: queued.id,
-						outcome: queued.priority,
+						jobId: queued?.id,
+						outcome: queued?.priority,
 					})
 				: undefined;
 			return {
