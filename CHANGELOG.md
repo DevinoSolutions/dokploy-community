@@ -22,6 +22,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 **WebSocket hardening follow-ups** (T-6531, after [#446](https://github.com/DevinoSolutions/dokploy-community/pull/446) and [#447](https://github.com/DevinoSolutions/dokploy-community/pull/447)) — the compose stats socket now matches the container by its exact name and refuses a container name that is, or starts with, another service's app name, so a compose owner can no longer write into another service's stats history by naming a container after it; the monitoring history query rejects `.` and `..` like the stats socket does; the container ownership check is now covered by a test that pins `docker inspect --type container`.
 
 **Stats socket follow-ups** (T-6547, after [#448](https://github.com/DevinoSolutions/dokploy-community/pull/448)) — a compose service's stats socket can no longer record into the host buckets (`dokploy`, `dokploy-<serverId>`) or under another service's preview deployment app name, and the check against other services' app names now also runs for names of the project's own `<project>-...` form, ignoring only the project's own prefix; the monitoring history query keeps advertising its appName pattern in the OpenAPI schema.
+**Host Monitoring needs Docker access** (upstream [#5742](https://github.com/Dokploy/dokploy/pull/5742)). The host Monitoring page, its menu entries and search item now require both monitoring and Docker read access, and users with Docker read access (not only admins) can load the Docker disk usage chart.
+
 
 ### New in v0.30.8-community.31
 
