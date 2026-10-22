@@ -22,7 +22,10 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 }));
 
 import { applications, libsql } from "@dokploy/server/db/schema";
-import { containerBelongsToService } from "@/server/wss/container-ownership";
+import {
+	containerBelongsToService,
+	isOtherServiceAppName,
+} from "@/server/wss/container-ownership";
 
 const labels = (l: Record<string, string>) => ({ stdout: JSON.stringify(l) });
 
@@ -68,11 +71,33 @@ describe("containerBelongsToService", () => {
 		expect(await containerBelongsToService("nope", "c1")).toBe(false);
 	});
 
+	it("inspects the container as a container, never as another docker object", async () => {
+		mockExec.mockResolvedValue(
+			labels({ "com.docker.swarm.service.name": "app-mine-abc123" }),
+		);
+		await containerBelongsToService("svc", "c1");
+		const command = mockExec.mock.calls[0]?.[0] as string;
+		expect(command).toContain("docker inspect --type container ");
+		expect(command.endsWith(" c1")).toBe(true);
+	});
+
 	it("inspects the container on the given server when there is one", async () => {
 		mockExec.mockResolvedValue(
 			labels({ "com.docker.compose.project": "app-mine-abc123" }),
 		);
 		expect(await containerBelongsToService("svc", "c1", "srv-1")).toBe(true);
 		expect(mockExec.mock.calls[0]?.[0]).toBe("srv-1");
+	});
+});
+
+describe("isOtherServiceAppName", () => {
+	it("is true when another service owns that name", async () => {
+		mockRows.set(applications, { appName: "app-victim-abc123" });
+		expect(await isOtherServiceAppName("app-victim-abc123", "svc")).toBe(true);
+	});
+
+	it("is false when no other service matches", async () => {
+		mockRows.clear();
+		expect(await isOtherServiceAppName("custom-name", "svc")).toBe(false);
 	});
 });
