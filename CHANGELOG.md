@@ -15,6 +15,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 - Four new site guides on https://dokploy-community.devino.ca for fork-only features: the MCP server with OAuth (`/mcp-server/`), enforced remote builds (`/build-policy/`), deploy queue controls (`/deploy-queue/`) and Compose rolling replace (`/compose-rolling-replace/`), linked from the README, the FAQ and `llms.txt`.
 
+**WebSocket container access bound to the service** (T-6464) — ports upstream #5733, #5716 and #5741: a member with access to one service can no longer open a terminal into, or read the stats of, another service's containers; ExecError no longer exposes the command; members with service access now see that service's container monitoring.
+
 ### New in v0.30.8-community.31
 
 **Node 24.22.1 in the images, lockfile and devcontainer** ([#436](https://github.com/DevinoSolutions/dokploy-community/pull/436), contributed by decryptedchaos, thank you). Takes the Node.js 24.x security release of 2026-10-21, which fixes eight CVEs including TLS certificate hostname validation bypasses, a DNS resolve truncation, and an out-of-bounds write in the Brotli decoder. All four Dockerfiles, the devcontainer Dockerfile (now on the bookworm base, since there is no bullseye image for this Node release), `.nvmrc`, the CI workflow Node versions and `engines.node` move from 24.4.0 to 24.22.1. `@types/node` stays at `^24.4.0` (resolved 24.10.13) because no 24.22.1 types package is published, and the pnpm lockfile specifiers were corrected to match, which fixes the `pnpm install --frozen-lockfile` failure (`ERR_PNPM_OUTDATED_LOCKFILE`).
