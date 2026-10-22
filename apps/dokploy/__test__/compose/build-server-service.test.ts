@@ -876,6 +876,40 @@ describe("a failing step the log would not show", () => {
 		);
 	});
 
+	it("scrubs dot-prefixed and JSON-style key names, and the cut line before scrubbing", async () => {
+		failConfigWith({
+			stderr: [
+				"x.API_KEY=secret1",
+				"environment.API_KEY=secret2",
+				'invalid interpolation format for services.web.environment.API_KEY: "sk-abc$x"',
+				'{"API_KEY":"secret5","other":1}',
+				"{'API_KEY': 'secret6'}",
+				`${"p".repeat(295)} API_KEY=secret7-secret7`,
+				"services.web.environment.SENDLY_API_KEY: required variable SENDLY_API_KEY is missing a value",
+			].join("\n"),
+			exitCode: 1,
+		});
+		await deployFailing();
+
+		const logged = loggedOn("serve-1");
+		for (const secret of [
+			"secret1",
+			"secret2",
+			"sk-abc",
+			"secret5",
+			"secret6",
+			"secret7",
+		]) {
+			expect(logged).not.toContain(secret);
+		}
+		expect(logged).toContain("x.API_KEY=[REDACTED]");
+		expect(logged).toContain("services.web.environment.API_KEY=[REDACTED]");
+		expect(logged).toContain('"API_KEY"=[REDACTED]');
+		expect(logged).toContain(
+			"services.web.environment.SENDLY_API_KEY: required variable SENDLY_API_KEY is missing a value",
+		);
+	});
+
 	it("says the output was withheld, not absent, when every stderr line was dropped", async () => {
 		failConfigWith({ stderr: 'near "A=1"\n', exitCode: 1 });
 		await deployFailing();

@@ -132,13 +132,19 @@ export const assertComposeBuildSettings = async (
 
 const CONFIG_STDERR_MAX_LINES = 10;
 const CONFIG_STDERR_MAX_LINE_LENGTH = 300;
-// `NAME=value` or `NAME: value` where NAME is `KEY`, `*_KEY`, `*APIKEY` or
-// `KEY*` (case-insensitive), with the value quoted or running to the line end.
-// A name right after a dot is a compose path (`services.web.environment.NAME:
-// required variable ...`), which gives the reason and holds no value, so it is
-// left alone.
+// `NAME=value`, `NAME: value` or JSON-style `"NAME":"value"` where NAME is `KEY`,
+// `*_KEY`, `*APIKEY` or `KEY*` (case-insensitive), with the value quoted or
+// running to the line end. Dot-prefixed names (`services.web.environment.NAME`)
+// are redacted like any other.
 const KEY_ASSIGNMENT =
-	/\b(?<!\.)((?:[A-Za-z0-9_]*(?:_|API))?KEY[A-Za-z0-9_]*)\s*[=:]\s*("[^"]*"|'[^']*'|.*)/gi;
+	/\b((?:[A-Za-z0-9_]*(?:_|API))?KEY[A-Za-z0-9_]*)(["']?)\s*[=:]\s*("[^"]*"|'[^']*'|.*)/gi;
+
+// Compose's own "required variable NAME is missing a value" message follows a
+// `NAME:` and carries no value, so it stays readable.
+const scrubKeyAssignments = (line: string) =>
+	line.replace(KEY_ASSIGNMENT, (match, name, quote, value) =>
+		/^required variable/i.test(value) ? match : `${name}${quote}=[REDACTED]`,
+	);
 
 /**
  * What the deployment log says when `docker compose config` fails on the build
@@ -155,9 +161,9 @@ export const describeConfigFailure = (serverName: string, error: ExecError) => {
 		.filter((line) => line && !line.includes('near "'))
 		.slice(0, CONFIG_STDERR_MAX_LINES)
 		.map((line) =>
-			redactSecrets(line)
-				.replace(KEY_ASSIGNMENT, "$1=[REDACTED]")
-				.slice(0, CONFIG_STDERR_MAX_LINE_LENGTH),
+			scrubKeyAssignments(
+				redactSecrets(line.slice(0, CONFIG_STDERR_MAX_LINE_LENGTH)),
+			),
 		);
 	const head = `docker compose config failed on ${serverName}`;
 	if (lines.length === 0) {
