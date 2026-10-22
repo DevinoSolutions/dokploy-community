@@ -13,7 +13,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
-import { eq } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { quote } from "shell-quote";
 
 const OWNERSHIP_LABELS = [
@@ -42,6 +42,26 @@ export const findServiceAppName = async (serviceId: string) => {
 			.limit(1);
 		if (row) return row.appName;
 	}
+};
+
+// Stats are recorded under the container name the client sends, and a compose
+// owner can name a container anything. A name that equals or extends another
+// service's appName would write into that service's stats history.
+export const isOtherServiceAppName = async (
+	name: string,
+	serviceId: string,
+): Promise<boolean> => {
+	for (const { table, id } of SERVICE_TABLES) {
+		const [row] = await db
+			.select({ appName: table.appName })
+			.from(table)
+			.where(
+				and(ne(id, serviceId), sql`starts_with(${name}, ${table.appName})`),
+			)
+			.limit(1);
+		if (row) return true;
+	}
+	return false;
 };
 
 // Service access alone must not allow `docker exec` into other tenants' containers.

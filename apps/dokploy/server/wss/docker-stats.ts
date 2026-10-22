@@ -16,8 +16,15 @@ import {
 import { hasPermission } from "@dokploy/server/services/permission";
 import { quote } from "shell-quote";
 import { WebSocketServer } from "ws";
-import { canAccessDockerOverWss, isServiceContainerName } from "./authorize";
-import { findServiceAppName } from "./container-ownership";
+import {
+	canAccessDockerOverWss,
+	hasComposeProjectPrefix,
+	isServiceContainerName,
+} from "./authorize";
+import {
+	findServiceAppName,
+	isOtherServiceAppName,
+} from "./container-ownership";
 import { onGuardedConnection, toCloseReason } from "./guard";
 import { isValidMonitoringAppName } from "./utils";
 
@@ -25,6 +32,9 @@ import { isValidMonitoringAppName } from "./utils";
 // else at the WS boundary so user input cannot reach filesystem paths or SSH
 // lookups in unexpected forms.
 const SERVER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+const escapeRegExp = (value: string) =>
+	value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 type AppType = "application" | "stack" | "docker-compose";
 
@@ -149,6 +159,20 @@ export const setupDockerStatsMonitoringSocketServer = (
 			return;
 		}
 
+		// Compose container names are free-form and stats are recorded under the
+		// name, so a name that is another service's appName (or extends it) would
+		// write into that service's stats history.
+		if (
+			serviceId &&
+			serviceAppName &&
+			appType === "docker-compose" &&
+			!hasComposeProjectPrefix(appName, serviceAppName) &&
+			(await isOtherServiceAppName(appName, serviceId))
+		) {
+			ws.close(4003, "Not authorized");
+			return;
+		}
+
 		// Resolve the optional remote serverId. We do this up-front so authz and
 		// path-traversal checks run before any SSH or filesystem work.
 		let resolvedServerId: string | null = null;
@@ -246,7 +270,9 @@ export const setupDockerStatsMonitoringSocketServer = (
 						],
 					}),
 					...(appType === "docker-compose" && {
-						name: [appName],
+						// Docker's name filter is a substring regex and container names
+						// carry a leading slash, so anchor it to this name only.
+						name: [`^/${escapeRegExp(appName)}$`],
 						...(serviceAppName && {
 							label: [`com.docker.compose.project=${serviceAppName}`],
 						}),

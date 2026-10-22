@@ -616,11 +616,17 @@ export const apiSaveEnvironmentVariables = createSchema
 // these characters as well.
 export const MONITORING_APP_NAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
 
+// The pattern allows `.` and `..`, which would leave the bucket directory.
+export const isValidMonitoringAppName = (appName: string): boolean =>
+	MONITORING_APP_NAME_PATTERN.test(appName) &&
+	appName !== "." &&
+	appName !== "..";
+
 export const apiFindMonitoringStats = z.object({
 	appName: z
 		.string()
 		.min(1)
-		.regex(MONITORING_APP_NAME_PATTERN, { message: "Invalid appName" }),
+		.refine(isValidMonitoringAppName, { message: "Invalid appName" }),
 });
 
 export const apiUpdateApplication = createSchema

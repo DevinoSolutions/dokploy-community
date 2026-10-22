@@ -18,12 +18,14 @@ vi.mock("@dokploy/server", () => ({
 }));
 const mockCanAccessDockerOverWss = vi.hoisted(() => vi.fn());
 const mockFindServiceAppName = vi.hoisted(() => vi.fn());
+const mockIsOtherServiceAppName = vi.hoisted(() => vi.fn());
 vi.mock("@/server/wss/authorize", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@/server/wss/authorize")>()),
 	canAccessDockerOverWss: mockCanAccessDockerOverWss,
 }));
 vi.mock("@/server/wss/container-ownership", () => ({
 	findServiceAppName: mockFindServiceAppName,
+	isOtherServiceAppName: mockIsOtherServiceAppName,
 }));
 
 import { setupDockerStatsMonitoringSocketServer } from "@/server/wss/docker-stats";
@@ -52,6 +54,7 @@ beforeEach(async () => {
 	mockGetHostSystemStats.mockResolvedValue({});
 	mockCanAccessDockerOverWss.mockResolvedValue(true);
 	mockListContainers.mockResolvedValue([]);
+	mockIsOtherServiceAppName.mockResolvedValue(false);
 	server = http.createServer();
 	setupDockerStatsMonitoringSocketServer(server);
 	await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -170,8 +173,73 @@ describe("docker stats websocket scoped to a service", () => {
 		expect(mockListContainers).toHaveBeenCalled();
 		const filters = JSON.parse(mockListContainers.mock.calls[0]?.[0].filters);
 		expect(filters.label).toEqual(["com.docker.compose.project=compose-abc"]);
-		expect(filters.name).toEqual(["custom-name"]);
+		expect(filters.name).toEqual(["^/custom-name$"]);
 		ws.close();
+	});
+
+	it("matches the compose container name exactly, escaping regex characters", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		mockFindServiceAppName.mockResolvedValue("compose-abc");
+		const { ws } = await connectTo(
+			"appName=compose-abc-web.1&appType=docker-compose&serviceId=svc-1",
+		);
+		await wait(POLL_INTERVAL + 200);
+
+		const filters = JSON.parse(mockListContainers.mock.calls[0]?.[0].filters);
+		expect(filters.name).toEqual(["^/compose-abc-web\\.1$"]);
+		const nameFilter = new RegExp(filters.name[0]);
+		expect(nameFilter.test("/compose-abc-web.1")).toBe(true);
+		expect(nameFilter.test("/compose-abc-webX1")).toBe(false);
+		expect(nameFilter.test("/other-compose-abc-web.1")).toBe(false);
+		expect(nameFilter.test("/compose-abc-web.1-x")).toBe(false);
+		ws.close();
+	});
+
+	it("rejects a compose container name that is another service's appName", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		mockFindServiceAppName.mockResolvedValue("compose-abc");
+		mockIsOtherServiceAppName.mockResolvedValue(true);
+		const { closed } = await connectTo(
+			"appName=app-victim-xyz789&appType=docker-compose&serviceId=svc-1",
+		);
+
+		expect((await closed).code).toBe(4003);
+		expect(mockIsOtherServiceAppName).toHaveBeenCalledWith(
+			"app-victim-xyz789",
+			"svc-1",
+		);
+		await wait(POLL_INTERVAL + 200);
+		expect(mockListContainers).not.toHaveBeenCalled();
+		expect(mockRecordAdvancedStats).not.toHaveBeenCalled();
+	});
+
+	it.each(["compose-abc-web-1", "compose-abc_web_1"])(
+		"accepts the compose project container name %s without a lookup",
+		async (appName) => {
+			mockValidateRequest.mockResolvedValue(AUTH);
+			mockFindServiceAppName.mockResolvedValue("compose-abc");
+			mockIsOtherServiceAppName.mockResolvedValue(true);
+			const { ws } = await connectTo(
+				`appName=${appName}&appType=docker-compose&serviceId=svc-1`,
+			);
+			await wait(POLL_INTERVAL + 200);
+
+			expect(mockIsOtherServiceAppName).not.toHaveBeenCalled();
+			expect(mockListContainers).toHaveBeenCalled();
+			ws.close();
+		},
+	);
+
+	it("does not treat a lookalike of the project name as the project prefix", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		mockFindServiceAppName.mockResolvedValue("compose-abc");
+		mockIsOtherServiceAppName.mockResolvedValue(true);
+		const { closed } = await connectTo(
+			"appName=compose-abcdef&appType=docker-compose&serviceId=svc-1",
+		);
+
+		expect((await closed).code).toBe(4003);
+		expect(mockIsOtherServiceAppName).toHaveBeenCalled();
 	});
 
 	it.each(["..", ".", "../../etc", "a/b", "a%00b"])(
