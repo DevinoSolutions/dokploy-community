@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build stage
-FROM golang:1.21-alpine3.19 AS builder
+FROM golang:1.24-alpine3.21 AS builder
 
 # Instalar dependencias necesarias
 RUN apk add --no-cache gcc musl-dev sqlite-dev
@@ -21,7 +21,7 @@ RUN go mod download
 RUN CGO_ENABLED=1 GOOS=linux go build -o main main.go
 
 # Etapa final
-FROM alpine:3.19
+FROM alpine:3.21
 
 # Instalar SQLite y otras dependencias necesarias
 RUN apk add --no-cache sqlite-libs docker-cli
