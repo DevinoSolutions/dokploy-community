@@ -3,16 +3,14 @@ import type {
 	DeploymentCancelAuditTargetType,
 } from "@dokploy/server/db/schema";
 import { recordDeploymentCancelAudit } from "@dokploy/server/services/deployment-cancel-audit";
+import {
+	type CancelAuditActorCtx,
+	cancelAuditCaller,
+} from "./cancel-audit-actor";
 
-interface CancelAuditCtx {
-	user: { id: string; email: string };
-	session: {
-		activeOrganizationId: string;
-		apiKeyId?: string;
-		oauthClientId?: string;
-		impersonatedBy?: string | null;
-	};
-}
+type CancelAuditCtx = CancelAuditActorCtx & {
+	session: { activeOrganizationId: string };
+};
 
 interface CancelAuditEvent {
 	action: DeploymentCancelAuditAction;
@@ -36,17 +34,7 @@ interface CancelAuditEvent {
 export const auditCancel = (ctx: CancelAuditCtx, event: CancelAuditEvent) =>
 	recordDeploymentCancelAudit({
 		organizationId: ctx.session.activeOrganizationId,
-		actor: {
-			type: ctx.session.apiKeyId
-				? "api_key"
-				: ctx.session.oauthClientId
-					? "oauth_client"
-					: "user",
-			userId: ctx.user.id,
-			email: ctx.user.email,
-			apiKeyId: ctx.session.apiKeyId,
-			oauthClientId: ctx.session.oauthClientId,
-		},
+		actor: cancelAuditCaller(ctx).actor,
 		...event,
 		// An admin acting as someone else: the entry names the user, this the admin.
 		...(ctx.session.impersonatedBy

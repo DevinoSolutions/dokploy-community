@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * A push that drops waiting deploys has no caller. The drop lands in the
- * fork's cancel trail as the system, next to the build-policy audit row.
+ * fork's cancel trail as the system, next to the build-policy audit row. A
+ * manual deploy has one, and the row names them.
  */
 
 const mocks = vi.hoisted(() => ({
@@ -99,6 +100,63 @@ describe("coalescing in the cancel trail", () => {
 			composeId: null,
 			metadata: expect.objectContaining({ removed: 2 }),
 		});
+	});
+
+	it("records the drop under the person behind a manual deploy", async () => {
+		await buildPolicyDeployGate({
+			unitType: "compose",
+			unit: { ...UNIT, unitId: "c-1", unitName: "stack" },
+			caller: {
+				actor: {
+					type: "user",
+					userId: "user-2",
+					email: "dev@example.com",
+				},
+			},
+			removeWaiting: vi.fn(async () => ({ removed: 1, merged: true })),
+		});
+
+		expect(mocks.recordDeploymentCancelAudit).toHaveBeenCalledTimes(1);
+		const row = mocks.recordDeploymentCancelAudit.mock.calls[0]?.[0] as {
+			actor: unknown;
+			metadata: Record<string, unknown>;
+		};
+		expect(row.actor).toEqual({
+			type: "user",
+			userId: "user-2",
+			email: "dev@example.com",
+		});
+		expect(row.metadata).not.toHaveProperty("impersonatedBy");
+	});
+
+	it("keeps an API key and the impersonating admin on the row", async () => {
+		await buildPolicyDeployGate({
+			unitType: "application",
+			unit: UNIT,
+			caller: {
+				actor: {
+					type: "api_key",
+					userId: "user-2",
+					email: "dev@example.com",
+					apiKeyId: "key-1",
+				},
+				impersonatedBy: "admin-9",
+			},
+			removeWaiting: vi.fn(async () => ({ removed: 2 })),
+		});
+
+		expect(mocks.recordDeploymentCancelAudit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				actor: expect.objectContaining({
+					type: "api_key",
+					apiKeyId: "key-1",
+				}),
+				metadata: expect.objectContaining({
+					removed: 2,
+					impersonatedBy: "admin-9",
+				}),
+			}),
+		);
 	});
 
 	it("keeps commit messages out of the cancel trail row", async () => {
