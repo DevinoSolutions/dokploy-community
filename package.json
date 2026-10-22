@@ -24,7 +24,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.7",
-		"@types/node": "^24.4.0",
+		"@types/node": "^24.22.1",
 		"dotenv": "16.4.5",
 		"esbuild": "0.25.0",
 		"lint-staged": "^15.5.2",
@@ -32,7 +32,7 @@
 	},
 	"packageManager": "pnpm@10.22.0",
 	"engines": {
-		"node": "^24.4.0",
+		"node": "^24.22.1",
 		"pnpm": ">=9.12.0"
 	},
 	"lint-staged": {

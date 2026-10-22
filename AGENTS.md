@@ -4,7 +4,7 @@ Instructions for coding agents working in this repository (a Dokploy fork: Next.
 
 ## Setup
 
-- Node 24.4.0 (`.nvmrc`) and pnpm 10.22.0 (`packageManager`).
+- Node 24.22.1 (`.nvmrc`) and pnpm 10.22.0 (`packageManager`).
 - `pnpm install --frozen-lockfile`
 - Branch from `canary`, open PRs against `canary`. One focused change per PR.
 
@@ -35,7 +35,7 @@ scripts/dev-instance.sh logs
 scripts/dev-instance.sh down    # stops everything and deletes all state
 ```
 
-- Needs Docker, bash, curl, Node 24.4.0 and pnpm (Linux, macOS or WSL). `up` is safe to repeat; each checkout or worktree gets its own ports and container.
+- Needs Docker, bash, curl, Node 24.22.1 and pnpm (Linux, macOS or WSL). `up` is safe to repeat; each checkout or worktree gets its own ports and container.
 - Open `<url>/register` and create a throwaway admin account. The database lives in tmpfs and is gone after `down`.
 - It does not run `pnpm dokploy:setup`, so there is no Docker Swarm, Traefik or `dokploy-network`. Pages, API routes, auth and migrations work; deploying applications does not. Always run `down` when you are finished.
 
