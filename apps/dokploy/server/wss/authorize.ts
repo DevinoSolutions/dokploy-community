@@ -75,6 +75,17 @@ export const isServiceContainerName = (
 	return appType === "docker-compose";
 };
 
+// Compose names its containers "<project>-<service>-<n>" ("_" in compose v1).
+// A name of this form cannot be another service's stats bucket, so it needs no
+// lookup against the other services' appNames.
+export const hasComposeProjectPrefix = (
+	containerName: string,
+	projectName: string,
+): boolean =>
+	containerName.length > projectName.length + 1 &&
+	containerName.startsWith(projectName) &&
+	"-_".includes(containerName.charAt(projectName.length));
+
 // Authorizes the host/server SSH terminal opened over a WebSocket. The local
 // host terminal is a root shell on the control-plane host, so it is restricted
 // to owner/admin. A remote server terminal needs server access plus
