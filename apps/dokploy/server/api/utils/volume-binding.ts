@@ -15,6 +15,8 @@ import {
  * is unknown. Run-time checks refuse it when another organization claims it.
  *
  * Must run after the service permission check and before anything is written.
+ * Returns the server the service runs on (null is the local host), which is
+ * the only host a command for this volume may be run on.
  */
 export const assertVolumeNameForService = async (
 	ctx: { user: { role?: string | null } },
@@ -38,4 +40,5 @@ export const assertVolumeNameForService = async (
 	assertVolumeBindingAllowed(facts, {
 		privileged: existingRow || isPrivilegedVolumeRole(ctx.user.role),
 	});
+	return facts.serverId;
 };

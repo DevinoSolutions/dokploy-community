@@ -27,6 +27,7 @@ vi.mock("@dokploy/server/services/volume-binding", () => ({
 		serviceType,
 		serviceId,
 		appName: "app",
+		serverId: null,
 		recordedOnOwnMount: false,
 		recordedOnOtherSameOrgMount: false,
 		declaredByComposeFile: false,

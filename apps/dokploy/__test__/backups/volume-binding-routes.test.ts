@@ -16,14 +16,29 @@ const mocks = vi.hoisted(() => ({
 	findVolumeBackupRows: vi.fn(),
 	findMountRows: vi.fn(),
 	restoreVolume: vi.fn(),
+	execAsyncRemote: vi.fn(),
+	execAsyncStream: vi.fn(),
+	findServerById: vi.fn(),
 }));
 
 const known = vi.hoisted(() => ({
 	services: {
-		"app-1": { type: "application", appName: "app-one-x" },
-		"compose-1": { type: "compose", appName: "stack-x" },
-		"pg-1": { type: "postgres", appName: "postgres-db-AbC123" },
-	} as Record<string, { type: string; appName: string }>,
+		"app-1": { type: "application", appName: "app-one-x", serverId: null },
+		"app-remote": {
+			type: "application",
+			appName: "app-remote-x",
+			serverId: "server-b",
+		},
+		"compose-1": { type: "compose", appName: "stack-x", serverId: null },
+		"pg-1": {
+			type: "postgres",
+			appName: "postgres-db-AbC123",
+			serverId: null,
+		},
+	} as Record<
+		string,
+		{ type: string; appName: string; serverId: string | null }
+	>,
 	ownMounts: new Set<string>(),
 	otherSameOrgMounts: new Set<string>(),
 	composeDeclared: new Set<string>(),
@@ -51,6 +66,7 @@ vi.mock("@dokploy/server/services/volume-binding", () => ({
 			serviceType,
 			serviceId,
 			appName: service.appName,
+			serverId: service.serverId,
 			recordedOnOwnMount: known.ownMounts.has(volumeName),
 			recordedOnOtherSameOrgMount: known.otherSameOrgMounts.has(volumeName),
 			declaredByComposeFile: known.composeDeclared.has(volumeName),
@@ -107,12 +123,12 @@ vi.mock("@dokploy/server/lib/auth", () => ({
 }));
 
 vi.mock("@dokploy/server/services/server", () => ({
-	findServerById: vi.fn(),
+	findServerById: mocks.findServerById,
 }));
 
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
-	execAsyncRemote: vi.fn(),
-	execAsyncStream: vi.fn(),
+	execAsyncRemote: mocks.execAsyncRemote,
+	execAsyncStream: mocks.execAsyncStream,
 }));
 
 vi.mock("@/server/api/utils/audit", () => ({
@@ -402,6 +418,75 @@ describe("restoring a volume", () => {
 				volumeName: "postgres-victim-Zz9999-data",
 			}),
 		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+	});
+
+	it("only runs on the server of the service, never on one the caller picks", async () => {
+		// local service, remote server named
+		await expect(
+			volumeBackupsAs("member").restoreVolumeBackupWithLogs({
+				...restoreInput,
+				serverId: "server-b",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+
+		// remote service, local host asked for (empty or missing serverId)
+		mocks.findVolumeBackupRows.mockResolvedValue([
+			{ volumeName: "app-remote-x_data" },
+		]);
+		const remoteInput = {
+			...restoreInput,
+			id: "app-remote",
+			volumeName: "app-remote-x_data",
+		};
+		for (const serverId of [undefined, "", "server-other"]) {
+			await expect(
+				volumeBackupsAs("member").restoreVolumeBackupWithLogs({
+					...remoteInput,
+					serverId,
+				}),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		}
+		expect(mocks.restoreVolume).not.toHaveBeenCalled();
+	});
+
+	it("runs the restore of a remote service on that server", async () => {
+		mocks.findVolumeBackupRows.mockResolvedValue([
+			{ volumeName: "app-remote-x_data" },
+		]);
+		mocks.findServerById.mockResolvedValue({ organizationId: "org-a" });
+		mocks.restoreVolume.mockResolvedValue("echo restore");
+		mocks.execAsyncRemote.mockResolvedValue(undefined);
+
+		const observable = await volumeBackupsAs(
+			"member",
+		).restoreVolumeBackupWithLogs({
+			...restoreInput,
+			id: "app-remote",
+			volumeName: "app-remote-x_data",
+			serverId: "server-b",
+		});
+		await new Promise<void>((resolve) => {
+			(
+				observable as unknown as {
+					subscribe: (observer: { complete: () => void }) => void;
+				}
+			).subscribe({ complete: resolve });
+		});
+
+		expect(mocks.restoreVolume).toHaveBeenCalledWith(
+			"app-remote",
+			"dest-a",
+			"app-remote-x_data",
+			"app-one-x_data-2024.tar",
+			"server-b",
+			"application",
+		);
+		expect(mocks.execAsyncRemote).toHaveBeenCalledWith(
+			"server-b",
+			"echo restore",
+			expect.any(Function),
+		);
+		expect(mocks.execAsyncStream).not.toHaveBeenCalled();
 	});
 
 	it("rejects a recorded name that another organization claims", async () => {

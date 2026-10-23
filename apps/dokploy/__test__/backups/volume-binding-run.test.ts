@@ -205,7 +205,11 @@ describe("runVolumeBackup binds the volume to the service on every run", () => {
 			}),
 		);
 		mocks.loadVolumeBindingFacts.mockResolvedValue(
-			facts({ volumeName: "orgb-data", claimedByOtherOrganization: true }),
+			facts({
+				volumeName: "orgb-data",
+				serverId: "server-1",
+				claimedByOtherOrganization: true,
+			}),
 		);
 
 		await runVolumeBackup("vb-1");
@@ -215,6 +219,77 @@ describe("runVolumeBackup binds the volume to the service on every run", () => {
 			expect.stringContaining("Volume backup refused"),
 		);
 		expect(mocks.backupVolume).not.toHaveBeenCalled();
+	});
+
+	describe("database volume backups run on the database's own server", () => {
+		const databaseRow = (serverId: string | null) =>
+			row({
+				applicationId: null,
+				application: null,
+				serviceType: "postgres",
+				postgresId: "pg-1",
+				volumeName: "postgres-db-AbC123-data",
+				postgres: {
+					appName: "postgres-db-AbC123",
+					serverId,
+					environment: {
+						project: { name: "project", organizationId: "org-a" },
+					},
+				},
+			});
+		const databaseFacts = (serverId: string | null) =>
+			facts({
+				volumeName: "postgres-db-AbC123-data",
+				serviceType: "postgres",
+				serviceId: "pg-1",
+				appName: "postgres-db-AbC123",
+				serverId,
+			});
+
+		it("evaluates the claims for, and executes on, the remote server of the database", async () => {
+			mocks.findVolumeBackupById.mockResolvedValue(databaseRow("server-db"));
+			mocks.loadVolumeBindingFacts.mockResolvedValue(
+				databaseFacts("server-db"),
+			);
+
+			await runVolumeBackup("vb-1");
+
+			expect(mocks.loadVolumeBindingFacts).toHaveBeenCalledWith({
+				serviceType: "postgres",
+				serviceId: "pg-1",
+				volumeName: "postgres-db-AbC123-data",
+			});
+			expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(1);
+			expect(mocks.execAsyncRemote.mock.calls[0]?.[0]).toBe("server-db");
+			expect(mocks.execAsync).not.toHaveBeenCalled();
+			expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith(
+				"dep-1",
+				"done",
+			);
+		});
+
+		it("still runs a database on the local host locally", async () => {
+			mocks.findVolumeBackupById.mockResolvedValue(databaseRow(null));
+			mocks.loadVolumeBindingFacts.mockResolvedValue(databaseFacts(null));
+
+			await runVolumeBackup("vb-1");
+
+			expect(mocks.execAsync).toHaveBeenCalledTimes(1);
+			expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		});
+
+		it("refuses when the claims were read for a different host than the one it runs on", async () => {
+			mocks.findVolumeBackupById.mockResolvedValue(databaseRow("server-db"));
+			mocks.loadVolumeBindingFacts.mockResolvedValue(databaseFacts(null));
+
+			await runVolumeBackup("vb-1");
+
+			expect(mocks.backupVolume).not.toHaveBeenCalled();
+			expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith(
+				"dep-1",
+				"error",
+			);
+		});
 	});
 
 	it("fails closed for a row that does not belong to exactly one service", async () => {

@@ -25,7 +25,7 @@ import {
 import { getRclonePathAndFlags, normalizeS3Path } from "../backups/utils";
 import { sendVolumeBackupNotifications } from "../notifications/volume-backup";
 import { backupVolume, getVolumeServiceAppName } from "./backup";
-import { evaluateVolumeBinding } from "./binding";
+import { evaluateVolumeBinding, resolveVolumeBackupHost } from "./binding";
 
 // Helper functions to extract project info from volume backup
 const getProjectName = (
@@ -105,6 +105,12 @@ const assertVolumeBackupBinding = async (
 		serviceId: owner[1],
 		volumeName: volumeBackup.volumeName,
 	});
+	// The claims were read for the service's host; the command must run there.
+	if (facts.serverId !== resolveVolumeBackupHost(volumeBackup)) {
+		throw new Error(
+			"Volume backup refused: the service's server changed while the backup was being checked.",
+		);
+	}
 	const verdict = evaluateVolumeBinding(facts, { privileged: true });
 	if (!verdict.ok) {
 		throw new Error(`Volume backup refused: ${verdict.message}`);
@@ -116,8 +122,7 @@ export const scheduleVolumeBackup = async (volumeBackupId: string) => {
 	// Throttle scheduled runs against the same global per-server limit as
 	// database/compose backups. Manual runs (runVolumeBackup called directly)
 	// stay immediate.
-	const serverKey =
-		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
+	const serverKey = resolveVolumeBackupHost(volumeBackup);
 	scheduleJob(volumeBackupId, volumeBackup.cronExpression, async () => {
 		await withBackupSlot(serverKey, volumeBackupId, () =>
 			runVolumeBackup(volumeBackupId),
@@ -175,8 +180,7 @@ const cleanupOldVolumeBackups = async (
 
 export const runVolumeBackup = async (volumeBackupId: string) => {
 	const volumeBackup = await findVolumeBackupById(volumeBackupId);
-	const serverId =
-		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
+	const serverId = resolveVolumeBackupHost(volumeBackup);
 	const projectName = getProjectName(volumeBackup);
 	const organizationId = getOrganizationId(volumeBackup);
 	await findDestinationByIdForOrganization(

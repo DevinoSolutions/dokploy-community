@@ -35,6 +35,33 @@ export const isDokployReservedVolumeName = (volumeName: string) =>
 	volumeName.startsWith("dokploy-") ||
 	volumeName.startsWith("dokploy_");
 
+type ServiceHost = { serverId?: string | null } | null | undefined;
+
+// The server a volume backup (and a restore into its service) really runs on:
+// the one the owning service is deployed to, null for the local Dokploy host.
+// Backup, restore and the binding check all use this single answer, so the
+// claims are always evaluated for the host that runs `docker run -v`.
+export const resolveVolumeBackupHost = (row: {
+	application?: ServiceHost;
+	compose?: ServiceHost;
+	postgres?: ServiceHost;
+	mysql?: ServiceHost;
+	mariadb?: ServiceHost;
+	mongo?: ServiceHost;
+	redis?: ServiceHost;
+	libsql?: ServiceHost;
+}): string | null =>
+	(
+		row.application ??
+		row.compose ??
+		row.postgres ??
+		row.mysql ??
+		row.mariadb ??
+		row.mongo ??
+		row.redis ??
+		row.libsql
+	)?.serverId || null;
+
 export type VolumeBindingFacts = {
 	volumeName: string;
 	serviceType: ServiceType;

@@ -374,12 +374,20 @@ export const volumeBackupsRouter = createTRPCRouter({
 					message: "This volume does not belong to the service.",
 				});
 			}
-			await assertVolumeNameForService(ctx, {
+			const serviceHost = await assertVolumeNameForService(ctx, {
 				serviceType: input.serviceType,
 				serviceId: input.id,
 				volumeName: input.volumeName,
 				existingRow: true,
 			});
+			// The claims on a volume name were checked for the service's own host,
+			// so the restore may only run there, never on a host the caller picks.
+			if ((input.serverId || null) !== serviceHost) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "The restore must run on the server of the service.",
+				});
+			}
 			const destination = await findDestinationById(input.destinationId);
 			if (destination.organizationId !== ctx.session.activeOrganizationId) {
 				throw new TRPCError({
@@ -387,8 +395,9 @@ export const volumeBackupsRouter = createTRPCRouter({
 					message: "You don't have access to this destination.",
 				});
 			}
-			if (input.serverId) {
-				const targetServer = await findServerById(input.serverId);
+			const serverId = serviceHost;
+			if (serverId) {
+				const targetServer = await findServerById(serverId);
 				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
@@ -411,7 +420,7 @@ export const volumeBackupsRouter = createTRPCRouter({
 							input.destinationId,
 							input.volumeName,
 							input.backupFileName,
-							input.serverId || "",
+							serverId || "",
 							input.serviceType,
 						);
 
@@ -420,9 +429,9 @@ export const volumeBackupsRouter = createTRPCRouter({
 						emit.next(""); // Empty line
 
 						// Execute the restore command with real-time output
-						if (input.serverId) {
-							emit.next(`🌐 Executing on remote server: ${input.serverId}`);
-							await execAsyncRemote(input.serverId, restoreCommand, (data) => {
+						if (serverId) {
+							emit.next(`🌐 Executing on remote server: ${serverId}`);
+							await execAsyncRemote(serverId, restoreCommand, (data) => {
 								emit.next(data);
 							});
 						} else {

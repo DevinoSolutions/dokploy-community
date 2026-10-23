@@ -25,6 +25,7 @@ const {
 	evaluateVolumeBinding,
 	isDokployReservedVolumeName,
 	isInServiceVolumeNamespace,
+	resolveVolumeBackupHost,
 } = await import("@dokploy/server/utils/volume-backups/binding");
 const { collectComposeDeclaredVolumeNames, loadVolumeBindingFacts } =
 	await import("@dokploy/server/services/volume-binding");
@@ -70,6 +71,30 @@ describe("the service volume namespace", () => {
 			expect(isDokployReservedVolumeName(name)).toBe(true);
 		}
 		expect(isDokployReservedVolumeName("dokployment")).toBe(false);
+	});
+});
+
+describe("resolveVolumeBackupHost", () => {
+	it("is the server of whichever service owns the row, null for the local host", () => {
+		expect(resolveVolumeBackupHost({ application: { serverId: "s1" } })).toBe(
+			"s1",
+		);
+		expect(resolveVolumeBackupHost({ compose: { serverId: "s2" } })).toBe("s2");
+		for (const key of [
+			"postgres",
+			"mysql",
+			"mariadb",
+			"mongo",
+			"redis",
+			"libsql",
+		] as const) {
+			expect(resolveVolumeBackupHost({ [key]: { serverId: "s3" } })).toBe("s3");
+			expect(resolveVolumeBackupHost({ [key]: { serverId: null } })).toBeNull();
+		}
+		expect(resolveVolumeBackupHost({ application: { serverId: null } })).toBe(
+			null,
+		);
+		expect(resolveVolumeBackupHost({})).toBeNull();
 	});
 });
 
@@ -342,6 +367,44 @@ describe("loadVolumeBindingFacts", () => {
 		]);
 		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
 			claimedByOtherOrganization: false,
+		});
+	});
+
+	it("counts a claim whose service or organization cannot be resolved on every server", async () => {
+		const input = {
+			serviceType: "application" as const,
+			serviceId: "app-1",
+			volumeName: "pgdata",
+		};
+		mocks.applications.findFirst.mockResolvedValue({
+			appName: "app-one-x",
+			serverId: "server-b",
+			...orgOf("org-a"),
+		});
+
+		// a mount whose service no longer resolves
+		mocks.mounts.findMany.mockResolvedValue([{ mountId: "orphan" }]);
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			serverId: "server-b",
+			claimedByOtherOrganization: true,
+		});
+
+		// a volume backup whose service has no organization
+		mocks.mounts.findMany.mockResolvedValue([]);
+		mocks.volumeBackups.findMany.mockResolvedValue([
+			{ redis: { appName: "z", serverId: "server-x", environment: null } },
+		]);
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			claimedByOtherOrganization: true,
+		});
+
+		// a namespace claim without organization
+		mocks.volumeBackups.findMany.mockResolvedValue([]);
+		mocks.postgres.findMany.mockResolvedValue([
+			{ appName: "pgdata", serverId: "server-x", environment: null },
+		]);
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			claimedByOtherOrganization: true,
 		});
 	});
 

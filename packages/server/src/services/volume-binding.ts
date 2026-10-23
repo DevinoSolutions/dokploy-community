@@ -218,10 +218,14 @@ const findOrganizationsClaimingNamespace = async (volumeName: string) => {
 			with: environment,
 		}),
 	]);
-	return results.flat().map((service) => ({
-		organizationId: organizationOf(service),
-		serverId: serverOf(service),
-	}));
+	return results.flat().map((service) => {
+		const organizationId = organizationOf(service);
+		return {
+			organizationId,
+			serverId: serverOf(service),
+			anyServer: !organizationId,
+		};
+	});
 };
 
 type RowWithServices = Partial<
@@ -241,11 +245,15 @@ const rowService = (row: RowWithServices) => {
 const rowOrganization = (row: RowWithServices) =>
 	organizationOf(rowService(row));
 
+// A row whose service or organization cannot be resolved cannot be placed on
+// a host, so it counts as a claim on every server.
 const rowClaim = (row: RowWithServices) => {
 	const service = rowService(row);
+	const organizationId = organizationOf(service);
 	return {
-		organizationId: organizationOf(service),
+		organizationId,
 		serverId: serverOf(service),
+		anyServer: !service || !organizationId,
 	};
 };
 
@@ -309,7 +317,8 @@ export const loadVolumeBindingFacts = async ({
 		...volumeBackupRows.map(rowClaim),
 	].some(
 		(claim) =>
-			claim.serverId === serverId && claim.organizationId !== organizationId,
+			(claim.anyServer || claim.serverId === serverId) &&
+			claim.organizationId !== organizationId,
 	);
 
 	return {
