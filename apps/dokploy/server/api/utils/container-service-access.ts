@@ -8,6 +8,7 @@ import {
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
+	hasPermission,
 	type PermissionCtx,
 } from "@dokploy/server/services/permission";
 import { getAccessibleServerIds } from "@dokploy/server/services/server";
@@ -387,12 +388,28 @@ export const assertAppNameReadable = async (
 	}
 };
 
+// What one list row may show a caller: a service they can read, or, for the
+// host's own containers (no service behind them), only an owner or admin.
+const rowVisible = (check: ContainerServiceCheck, admin: boolean) =>
+	check.outcome === "readable" || (check.outcome === "unowned" && admin);
+
 /**
  * Narrows a container list to the containers of services the caller can read.
- * Owners and admins see the list as it is. A member gets only the containers
- * whose labels name services they were granted on this server; a container that
- * backs no service is dropped, and so is everything when the labels cannot be
- * read.
+ *
+ * A member gets only the containers whose labels name services they were
+ * granted on this server; a container that backs no service is dropped, and so
+ * is everything when the labels cannot be read.
+ *
+ * Owners and admins see the list as it is (the Docker page lists everything on
+ * the host). With `strict` they are checked too: a container of another
+ * organization is dropped, and the host's own containers stay. The routes that
+ * list by an appName use `strict`, because the command behind them matches more
+ * than the appName (a prefix, a substring, an id prefix) and the appName is
+ * something the caller can rename their own service to.
+ *
+ * The batched `docker inspect` exits non-zero when one container has vanished
+ * but still prints the others; those are used and only the missing ones are
+ * dropped.
  */
 export const filterReadableContainers = async <
 	T extends { containerId: string },
@@ -400,8 +417,11 @@ export const filterReadableContainers = async <
 	ctx: PermissionCtx,
 	containers: T[],
 	serverId?: string,
+	options: { strict?: boolean } = {},
 ): Promise<T[]> => {
-	if (containers.length === 0 || (await isOwnerOrAdmin(ctx))) return containers;
+	if (containers.length === 0) return containers;
+	const admin = await isOwnerOrAdmin(ctx);
+	if (admin && !options.strict) return containers;
 
 	// the placeholder "No container id" is not something docker can inspect
 	const listed = containers.filter((container) =>
@@ -412,7 +432,7 @@ export const filterReadableContainers = async <
 	let stdout: string;
 	try {
 		({ stdout } = await runOn(
-			quote([
+			`${quote([
 				"docker",
 				"inspect",
 				"--type",
@@ -420,7 +440,7 @@ export const filterReadableContainers = async <
 				"--format",
 				"{{.Id}} {{json .Config.Labels}}",
 				...listed.map((container) => container.containerId),
-			]),
+			])} 2>/dev/null || true`,
 			serverId,
 		));
 	} catch {
@@ -456,7 +476,75 @@ export const filterReadableContainers = async <
 			outcome = checkDockerObjectServices(ctx, object, serverId);
 			outcomes.set(key, outcome);
 		}
-		if ((await outcome).outcome === "readable") kept.push(container);
+		if (rowVisible(await outcome, admin)) kept.push(container);
 	}
 	return kept;
+};
+
+/**
+ * The same narrowing for swarm task rows (`docker service ps`, `docker stack
+ * ps`), which carry a task id, not a container id. `serviceNameOf` gives the
+ * swarm service a row belongs to; each distinct service is resolved once with
+ * `docker service inspect` and checked like a container's labels. Everybody is
+ * checked, owners and admins included (see `strict` above), and a service that
+ * cannot be resolved drops its rows.
+ */
+export const filterReadableTasks = async <T>(
+	ctx: PermissionCtx,
+	rows: T[],
+	serviceNameOf: (row: T) => string,
+	serverId?: string,
+): Promise<T[]> => {
+	if (rows.length === 0) return rows;
+	const admin = await isOwnerOrAdmin(ctx);
+
+	const visible = new Map<string, Promise<boolean>>();
+	const kept: T[] = [];
+	for (const row of rows) {
+		const serviceName = serviceNameOf(row);
+		if (!serviceName) continue;
+		let allowed = visible.get(serviceName);
+		if (!allowed) {
+			allowed = (async () => {
+				const service = await readDockerObject(
+					serviceName,
+					serverId,
+					"service",
+				);
+				if (!service) return false;
+				return rowVisible(
+					await checkDockerObjectServices(ctx, service, serverId),
+					admin,
+				);
+			})();
+			visible.set(serviceName, allowed);
+		}
+		if (await allowed) kept.push(row);
+	}
+	return kept;
+};
+
+/**
+ * Whether the caller may see the environment variables of a container. The
+ * inspect output (`Config.Env`) and `/proc/<pid>/environ` carry them, so a
+ * member whose role lacks `envVars:read` (a custom role can drop it) gets them
+ * blanked or refused. Owners and admins always hold it.
+ */
+export const canReadContainerEnv = (ctx: PermissionCtx) =>
+	hasPermission(ctx, { envVars: ["read"] });
+
+/** `KEY=value` entries of `Config.Env` keep their names and lose their values. */
+export const redactContainerEnv = <T>(config: T): T => {
+	if (!config || typeof config !== "object") return config;
+	const inner = (config as { Config?: { Env?: unknown } }).Config;
+	if (!inner || !Array.isArray(inner.Env)) return config;
+	return {
+		...config,
+		Config: {
+			...inner,
+			Env: inner.Env.map((entry) =>
+				typeof entry === "string" ? `${entry.split("=")[0]}=` : entry,
+			),
+		},
+	};
 };

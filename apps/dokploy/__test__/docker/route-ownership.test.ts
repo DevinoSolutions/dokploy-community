@@ -35,6 +35,10 @@ const mocks = vi.hoisted(() => ({
 	ids: new Map<string, string>(),
 	idOf: (name: string) =>
 		Buffer.from(name).toString("hex").padEnd(64, "0").slice(0, 64),
+	// swarm service name -> its spec labels
+	swarmServices: new Map<string, Record<string, string>>(),
+	// the caller lacks envVars:read
+	denyEnv: false,
 	commands: [] as { serverId?: string; command: string }[],
 	services: {} as Record<string, ReturnType<typeof vi.fn>>,
 	checkServicePermissionAndAccess: undefined as unknown as ReturnType<
@@ -90,6 +94,14 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
 	return {
 		...original,
 		checkServicePermissionAndAccess: mocks.checkServicePermissionAndAccess,
+		hasPermission: vi.fn(
+			async (
+				...args: Parameters<typeof original.hasPermission>
+			): Promise<boolean> =>
+				mocks.denyEnv && "envVars" in args[1]
+					? false
+					: original.hasPermission(...args),
+		),
 	};
 });
 
@@ -100,11 +112,22 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 		>();
 	const run = async (command: string, serverId?: string) => {
 		mocks.commands.push({ serverId, command });
+		if (command.startsWith("docker service inspect")) {
+			const name = (command.trim().split(/\s+/).pop() ?? "").replace(/'/g, "");
+			const labels = mocks.swarmServices.get(name);
+			if (!labels) throw new Error("No such service");
+			const id = Buffer.from(name).toString("hex").padEnd(25, "z").slice(0, 25);
+			return { stdout: `${id} ${JSON.stringify(labels)} ${name}`, stderr: "" };
+		}
 		if (!command.startsWith("docker inspect"))
 			return { stdout: "", stderr: "" };
+		// the list filter tolerates a container that vanished: docker prints the
+		// others and exits non-zero, which the command swallows
+		const tolerant = command.endsWith("|| true");
 		// references follow the --format argument; the output has one line each
 		const references = command
 			.slice(command.indexOf("}}' ") + 4)
+			.replace(/ 2>\/dev\/null \|\| true$/, "")
 			.split(/\s+/)
 			.map((word) => word.replace(/'/g, ""))
 			.filter(Boolean);
@@ -115,7 +138,10 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 					key === reference ||
 					(mocks.ids.get(key) ?? mocks.idOf(key)).startsWith(reference),
 			);
-			if (!name) throw new Error("No such container");
+			if (!name) {
+				if (tolerant) continue;
+				throw new Error("No such container");
+			}
 			lines.push(
 				`${mocks.ids.get(name) ?? mocks.idOf(name)} ${JSON.stringify(mocks.containers.get(name))}`,
 			);
@@ -341,6 +367,8 @@ beforeEach(() => {
 	mocks.parents.clear();
 	mocks.containers.clear();
 	mocks.ids.clear();
+	mocks.swarmServices.clear();
+	mocks.denyEnv = false;
 	mocks.commands.length = 0;
 	mocks.checkServicePermissionAndAccess.mockClear();
 	mocks.getContainers.mockReset();
@@ -677,5 +705,224 @@ describe("routes that take an appName", () => {
 			);
 			expect(dockerCalls()).toBe(0);
 		});
+	});
+});
+
+// A service owner can rename their own service to anything (`a`, `.`), and the
+// commands behind the list routes match far more than the appName: a prefix
+// (`grep '^.*Name: a'`), a substring (`--filter name=a`) or a service id
+// prefix (`docker service ps a`). The appName passing the check must therefore
+// not be enough; every row is checked on its own.
+describe("a short or colliding appName", () => {
+	const mine = { serviceId: "app-a", serverId: null };
+
+	const setup = (appName: string) => {
+		mocks.serviceRows.set(applications, [
+			{ ...mine, appName },
+			{ serviceId: "app-b", serverId: null, appName: "app-b-abc123" },
+		]);
+		mocks.serviceOrganizations.set("app-a", "org-a");
+		mocks.serviceOrganizations.set("app-b", "org-b");
+		mocks.containers.set("c-a", { "com.docker.swarm.service.name": appName });
+		mocks.containers.set("c-b", {
+			"com.docker.swarm.service.name": "app-b-abc123",
+		});
+		mocks.containers.set("traefik", {});
+		mocks.swarmServices.set(appName, {});
+		mocks.swarmServices.set("app-b-abc123", {});
+		mocks.swarmServices.set("traefik", {});
+		grant("app-a");
+	};
+
+	const containerRows = () =>
+		["c-a", "c-b", "traefik"].map((name) => ({
+			containerId: mocks.idOf(name).slice(0, 12),
+			name,
+		}));
+	const names = (rows: { name: string }[] | undefined) =>
+		rows?.map((row) => row.name);
+
+	describe.each(["a", "."])("appName %j", (appName) => {
+		beforeEach(() => setup(appName));
+
+		it("getContainersByAppNameMatch drops containers of other organizations", async () => {
+			mocks.services.getContainersByAppNameMatch?.mockResolvedValue(
+				containerRows(),
+			);
+			// the member sees only their own service's container
+			expect(
+				names(
+					await callerAs("member").getContainersByAppNameMatch({ appName }),
+				),
+			).toEqual(["c-a"]);
+			// an owner also loses the other organization's container, and keeps the
+			// host's own
+			expect(
+				names(await callerAs("owner").getContainersByAppNameMatch({ appName })),
+			).toEqual(["c-a", "traefik"]);
+		});
+
+		it("getContainersByAppNameMatch (compose) drops containers of other organizations", async () => {
+			mocks.services.getContainersByAppNameMatch?.mockResolvedValue(
+				containerRows(),
+			);
+			expect(
+				names(
+					await callerAs("member").getContainersByAppNameMatch({
+						appName,
+						appType: "docker-compose",
+					}),
+				),
+			).toEqual(["c-a"]);
+		});
+
+		it("getContainersByAppLabel (standalone substring match) drops containers of other organizations", async () => {
+			mocks.services.getContainersByAppLabel?.mockResolvedValue(
+				containerRows(),
+			);
+			for (const role of ["member", "admin", "owner"] as const) {
+				const result = await callerAs(role).getContainersByAppLabel({
+					appName,
+					type: "standalone",
+				});
+				expect(names(result)).not.toContain("c-b");
+				expect(names(result)).toContain("c-a");
+			}
+		});
+
+		it("getServiceContainersByAppName (service id prefix) drops tasks of other organizations", async () => {
+			mocks.services.getServiceContainersByAppName?.mockResolvedValue([
+				{ name: `${appName}.1` },
+				{ name: "app-b-abc123.1" },
+				{ name: "app-b-abc123.2" },
+				{ name: "traefik.1" },
+			]);
+			expect(
+				names(
+					await callerAs("member").getServiceContainersByAppName({ appName }),
+				),
+			).toEqual([`${appName}.1`]);
+			expect(
+				names(
+					await callerAs("owner").getServiceContainersByAppName({ appName }),
+				),
+			).toEqual([`${appName}.1`, "traefik.1"]);
+		});
+
+		it("getStackContainersByAppName drops tasks of other organizations", async () => {
+			mocks.services.getStackContainersByAppName?.mockResolvedValue([
+				{ name: `${appName}.1` },
+				{ name: "app-b-abc123.1" },
+			]);
+			expect(
+				names(
+					await callerAs("member").getStackContainersByAppName({ appName }),
+				),
+			).toEqual([`${appName}.1`]);
+		});
+
+		it("getContainersByAppNameMatch (stack) drops tasks of other organizations", async () => {
+			mocks.services.getContainersByAppNameMatch?.mockResolvedValue([
+				{ containerId: "", name: `${appName}.1.task1` },
+				{ containerId: "", name: "app-b-abc123.1.task2" },
+			]);
+			expect(
+				names(
+					await callerAs("member").getContainersByAppNameMatch({
+						appName,
+						appType: "stack",
+					}),
+				),
+			).toEqual([`${appName}.1.task1`]);
+		});
+	});
+
+	it("drops every row when a task's service cannot be resolved", async () => {
+		setup("a");
+		mocks.services.getServiceContainersByAppName?.mockResolvedValue([
+			{ name: "ghost.1" },
+		]);
+		expect(
+			await callerAs("owner").getServiceContainersByAppName({ appName: "a" }),
+		).toEqual([]);
+	});
+});
+
+describe("docker.getContainers when a container vanishes during the listing", () => {
+	it("keeps the others and drops only the missing one", async () => {
+		mocks.containers.set("c-a", {
+			"com.docker.swarm.service.name": "app-a-abc123",
+		});
+		mocks.serviceRows.set(applications, [
+			{ serviceId: "app-a", serverId: null },
+		]);
+		mocks.serviceOrganizations.set("app-a", "org-a");
+		grant("app-a");
+		mocks.getContainers.mockResolvedValue([
+			{ containerId: "ffffffffffff", name: "vanished" },
+			{ containerId: mocks.idOf("c-a").slice(0, 12), name: "c-a" },
+		]);
+
+		const result = await callerAs("member").getContainers({});
+		expect(
+			result?.map((container: { name: string }) => container.name),
+		).toEqual(["c-a"]);
+	});
+});
+
+describe("secrets in the container's environment", () => {
+	const config = {
+		Id: "x",
+		Config: { Env: ["DB_PASSWORD=hunter2", "EMPTY=", "A=b=c"], Image: "img" },
+	};
+
+	beforeEach(() => {
+		ownApp();
+		grant("app-a");
+		mocks.services.getConfig?.mockResolvedValue(config);
+	});
+
+	it("getConfig blanks the values of Config.Env for a caller without envVars:read", async () => {
+		mocks.denyEnv = true;
+		const result = await callerAs("member").getConfig({ containerId: "c-a" });
+		expect(result.Config.Env).toEqual(["DB_PASSWORD=", "EMPTY=", "A="]);
+		expect(result.Config.Image).toBe("img");
+		expect(JSON.stringify(result)).not.toContain("hunter2");
+	});
+
+	it("getConfig returns the environment to a caller with envVars:read", async () => {
+		const result = await callerAs("member").getConfig({ containerId: "c-a" });
+		expect(result.Config.Env).toContain("DB_PASSWORD=hunter2");
+	});
+
+	it.each(["/proc/1/environ", "/proc", "/etc/../proc/self/environ", "/proc/"])(
+		"readContainerFile refuses %s for a caller without envVars:read",
+		async (path) => {
+			mocks.denyEnv = true;
+			await expect(
+				callerAs("member").readContainerFile({ containerId: "c-a", path }),
+			).rejects.toMatchObject({ code: "FORBIDDEN" });
+			expect(mocks.services.readContainerFile).not.toHaveBeenCalled();
+		},
+	);
+
+	it("readContainerFile still reads other paths, and /proc with envVars:read", async () => {
+		mocks.denyEnv = true;
+		await callerAs("member").readContainerFile({
+			containerId: "c-a",
+			path: "/etc/hostname",
+		});
+		await callerAs("member").readContainerFile({
+			containerId: "c-a",
+			path: "/processes/x",
+		});
+		expect(mocks.services.readContainerFile).toHaveBeenCalledTimes(2);
+
+		mocks.denyEnv = false;
+		await callerAs("member").readContainerFile({
+			containerId: "c-a",
+			path: "/proc/1/environ",
+		});
+		expect(mocks.services.readContainerFile).toHaveBeenCalledTimes(3);
 	});
 });

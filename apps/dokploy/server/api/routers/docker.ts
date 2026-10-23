@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import {
 	containerKill,
 	containerRemove,
@@ -25,7 +26,10 @@ import { audit } from "@/server/api/utils/audit";
 import {
 	assertAppNameReadable,
 	assertServerReachable,
+	canReadContainerEnv,
 	filterReadableContainers,
+	filterReadableTasks,
+	redactContainerEnv,
 	resolveContainerForRoute,
 } from "@/server/api/utils/container-service-access";
 import { uploadFileToContainerSchema } from "@/utils/schema";
@@ -41,6 +45,15 @@ const containerPathSchema = z
 		(path) => path.startsWith("/") && !path.includes("\0"),
 		"Path must be absolute.",
 	);
+
+// "<service>.<slot>" (a global service has the node id in place of the slot)
+const taskService = (row: { name: string }) =>
+	row.name.split(".").slice(0, -1).join(".");
+
+const isProcPath = (path: string) => {
+	const normalized = posix.normalize(path);
+	return normalized === "/proc" || normalized.startsWith("/proc/");
+};
 
 export const dockerRouter = createTRPCRouter({
 	getContainers: withPermission("docker", "read")
@@ -221,7 +234,11 @@ export const dockerRouter = createTRPCRouter({
 				input.containerId,
 				input.serverId,
 			);
-			return await getConfig(containerId, input.serverId);
+			const config = await getConfig(containerId, input.serverId);
+			// the inspect output carries Config.Env, secrets included
+			return (await canReadContainerEnv(ctx))
+				? config
+				: redactContainerEnv(config);
 		}),
 
 	getContainersByAppNameMatch: withPermission("service", "read")
@@ -234,11 +251,24 @@ export const dockerRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await assertAppNameReadable(ctx, input.appName, input.serverId);
-			return await getContainersByAppNameMatch(
+			// the commands behind these routes match more than the appName (a prefix,
+			// a substring, an id prefix), so the rows are checked one by one
+			const rows = await getContainersByAppNameMatch(
 				input.appName,
 				input.appType,
 				input.serverId,
 			);
+			return input.appType === "stack"
+				? await filterReadableTasks(
+						ctx,
+						rows,
+						// "<service>.<slot>.<task id>"
+						(row) => row.name.split(".").slice(0, -2).join("."),
+						input.serverId,
+					)
+				: await filterReadableContainers(ctx, rows, input.serverId, {
+						strict: true,
+					});
 		}),
 
 	getContainersByAppLabel: withPermission("docker", "read")
@@ -251,11 +281,16 @@ export const dockerRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await assertAppNameReadable(ctx, input.appName, input.serverId);
-			return await getContainersByAppLabel(
+			const rows = await getContainersByAppLabel(
 				input.appName,
 				input.type,
 				input.serverId,
 			);
+			return rows
+				? await filterReadableContainers(ctx, rows, input.serverId, {
+						strict: true,
+					})
+				: rows;
 		}),
 
 	getStackContainersByAppName: withPermission("docker", "read")
@@ -267,7 +302,12 @@ export const dockerRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await assertAppNameReadable(ctx, input.appName, input.serverId);
-			return await getStackContainersByAppName(input.appName, input.serverId);
+			return await filterReadableTasks(
+				ctx,
+				await getStackContainersByAppName(input.appName, input.serverId),
+				taskService,
+				input.serverId,
+			);
 		}),
 
 	getServiceContainersByAppName: withPermission("docker", "read")
@@ -279,7 +319,12 @@ export const dockerRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await assertAppNameReadable(ctx, input.appName, input.serverId);
-			return await getServiceContainersByAppName(input.appName, input.serverId);
+			return await filterReadableTasks(
+				ctx,
+				await getServiceContainersByAppName(input.appName, input.serverId),
+				taskService,
+				input.serverId,
+			);
 		}),
 
 	uploadFileToContainer: withPermission("docker", "read")
@@ -352,6 +397,14 @@ export const dockerRouter = createTRPCRouter({
 				input.containerId,
 				input.serverId,
 			);
+			// /proc/<pid>/environ is the process environment, secrets included
+			if (isProcPath(input.path) && !(await canReadContainerEnv(ctx))) {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message:
+						"Reading /proc needs permission to read environment variables.",
+				});
+			}
 			return await readContainerFile(containerId, input.path, input.serverId);
 		}),
 
