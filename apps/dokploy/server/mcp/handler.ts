@@ -9,6 +9,7 @@ import {
 	findMcpAccessToken,
 	resolveDefaultOrganizationId,
 } from "@dokploy/server/services/mcp-oauth";
+import { redactToolResult } from "@dokploy/server/services/service-secrets";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
 	CallToolRequestSchema,
@@ -21,6 +22,7 @@ import { eq } from "drizzle-orm";
 import packageInfo from "../../package.json";
 import { captureError } from "../sentry";
 import { type McpToolDefinition, toolsForScopes } from "./registry";
+import { CREDENTIAL_QUERIES } from "./scopes";
 
 export interface McpAuth {
 	userId: string;
@@ -361,6 +363,49 @@ export const applySecretReadPolicy = (
 	};
 };
 
+/**
+ * Admin-scope tools whose whole purpose is to hand back a credential, so their
+ * result is not blanked: every credential query in the scope table, plus the
+ * mutations that mint one (an API key, an instance or SCIM token, a generated
+ * SSH key pair). Each already requires `dokploy:admin`.
+ */
+export const CREDENTIAL_RESULT_PATHS: ReadonlySet<string> = new Set([
+	...CREDENTIAL_QUERIES,
+	"user.createApiKey",
+	"user.generateToken",
+	"scim.generateToken",
+	"scim.rotateToken",
+	"sshKey.generate",
+]);
+
+/**
+ * Read-scope tools whose result is variable NAMES by construction: the `env`
+ * array in an envKeys reply holds keys, and the generic walk would blank it.
+ */
+export const KEYS_ONLY_RESULT_PATHS: ReadonlySet<string> = new Set([
+	"application.envKeys",
+	"compose.envKeys",
+]);
+
+/**
+ * Whether a tool result is blanked before it is returned: always, except for
+ * a credential tool, an envKeys tool (names only), and a `.one` read whose (already admin-gated)
+ * `includeEnv` is true.
+ */
+export const shouldRedactResult = (path: string, forcedArgs: unknown) => {
+	if (CREDENTIAL_RESULT_PATHS.has(path)) return false;
+	if (KEYS_ONLY_RESULT_PATHS.has(path)) return false;
+	if (
+		SECRET_READ_PATHS.has(path) &&
+		typeof forcedArgs === "object" &&
+		forcedArgs !== null &&
+		(forcedArgs as { includeEnv?: unknown }).includeEnv === true
+	) {
+		return false;
+	}
+	return true;
+};
+
 /** Scope check, then execution through the injected tRPC caller. */
 export const executeMcpTool = async ({
 	tool,
@@ -379,10 +424,13 @@ export const executeMcpTool = async ({
 		);
 	}
 	try {
-		const result = await call(
-			tool.path,
-			applySecretReadPolicy(tool.path, args ?? {}, scopes),
-		);
+		const callArgs = applySecretReadPolicy(tool.path, args ?? {}, scopes);
+		const raw = await call(tool.path, callArgs);
+		// Second line of defence: whatever a route nests (a service row inside
+		// an environment, a project, a search hit) loses its secret fields.
+		const result = shouldRedactResult(tool.path, callArgs)
+			? redactToolResult(raw)
+			: raw;
 		const text =
 			result === undefined ? "null" : JSON.stringify(result, bigintReplacer);
 		// Reuse the serialized form so structuredContent is JSON-safe too: a

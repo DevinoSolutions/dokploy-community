@@ -199,3 +199,129 @@ export const shapeServiceRead = <T extends AnyRecord>(
 	includeEnv: boolean | undefined,
 ): T | (T & SecretsRedacted) =>
 	includeEnv === false ? redactServiceSecrets(row) : row;
+
+/**
+ * Keys whose value is blanked wherever they appear in an MCP tool result, at
+ * any depth. A superset of the columns `redactServiceSecrets` knows, so a
+ * route that nests a service row (environment.one, project.one, search, ...)
+ * is covered without a per-route list.
+ */
+export const MCP_SECRET_KEYS: ReadonlySet<string> = new Set([
+	"env",
+	"buildArgs",
+	"buildSecrets",
+	"previewEnv",
+	"previewBuildArgs",
+	"previewBuildSecrets",
+	"password",
+	"databasePassword",
+	"databaseRootPassword",
+	"refreshToken",
+	"accessToken",
+	"idToken",
+	"token",
+	"secret",
+	"clientSecret",
+	"privateKey",
+	"sshPrivateKey",
+	"encryptionKey",
+	"encryptionPassword",
+	"encryptionPassword2",
+	"secretAccessKey",
+	"awsSecretAccessKey",
+	"accessKey",
+	"secretKey",
+	"apiKey",
+	"apiToken",
+	"appPassword",
+	"botToken",
+	"appToken",
+	"scimToken",
+	"heartbeatKey",
+	"licenseKey",
+	"webhookSecret",
+	"githubClientSecret",
+	"githubPrivateKey",
+	"githubWebhookSecret",
+]);
+
+const isPlainObject = (value: unknown): value is AnyRecord => {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return false;
+	}
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+};
+
+const hasContent = (value: unknown): boolean =>
+	typeof value === "string"
+		? value !== ""
+		: Array.isArray(value)
+			? value.length > 0
+			: isPlainObject(value)
+				? Object.keys(value).length > 0
+				: false;
+
+interface Walked {
+	value: unknown;
+	changed: boolean;
+}
+
+/**
+ * Copy-on-write walk: a subtree with nothing to blank is returned as the same
+ * reference, so only the path down to a blanked field is copied. `path` holds
+ * the containers being walked, which stops a cycle without flagging a
+ * subtree that is merely shared.
+ */
+const walkSecrets = (node: unknown, path: Set<object>): Walked => {
+	if (Array.isArray(node)) {
+		if (path.has(node)) return { value: node, changed: false };
+		path.add(node);
+		let copy: unknown[] | null = null;
+		node.forEach((item, index) => {
+			const walked = walkSecrets(item, path);
+			if (!walked.changed) return;
+			copy ??= node.slice();
+			copy[index] = walked.value;
+		});
+		path.delete(node);
+		return { value: copy ?? node, changed: copy !== null };
+	}
+	if (!isPlainObject(node)) return { value: node, changed: false };
+	if (path.has(node)) return { value: node, changed: false };
+	path.add(node);
+	let copy: AnyRecord | null = null;
+	for (const [key, value] of Object.entries(node)) {
+		let next: unknown = value;
+		if (MCP_SECRET_KEYS.has(key)) {
+			if (hasContent(value)) next = BLANK;
+		} else if (key === "customGitUrl") {
+			next = stripUrlCredentials(value);
+		} else {
+			const walked = walkSecrets(value, path);
+			if (walked.changed) next = walked.value;
+		}
+		if (next !== value) {
+			copy ??= { ...node };
+			copy[key] = next;
+		}
+	}
+	path.delete(node);
+	return { value: copy ?? node, changed: copy !== null };
+};
+
+/**
+ * An MCP tool result with every {@link MCP_SECRET_KEYS} value blanked to `""`
+ * at any depth, and the userinfo stripped from `customGitUrl`. A top-level
+ * object that had something blanked also carries `secretsRedacted: true`
+ * (an array result cannot carry the marker). The input is not mutated, and
+ * an untouched subtree is shared rather than copied.
+ */
+export const redactToolResult = (result: unknown): unknown => {
+	const walked = walkSecrets(result, new Set());
+	if (!walked.changed) return result;
+	if (isPlainObject(walked.value)) {
+		(walked.value as AnyRecord).secretsRedacted = true;
+	}
+	return walked.value;
+};

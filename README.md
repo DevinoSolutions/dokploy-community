@@ -67,7 +67,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 - Dokploy hosts its own **MCP server** at `POST /api/mcp` (Streamable HTTP). Claude Code or another MCP client whose OAuth redirect is https or a loopback http URL connects over HTTPS with **no local process and no API key**
 - **OAuth 2.1** with PKCE and dynamic client registration: `claude mcp add --transport http --scope user dokploy https://<host>/api/mcp`, then `/mcp → Authenticate` opens the browser and you sign in once
-- **Secrets stay out of agent transcripts** — `application-one`, `compose-one` and the database `*-one` tools omit environment values, passwords and tokens through MCP unless the call passes `includeEnv: true` with the `dokploy:admin` scope; `application-envKeys` and `compose-envKeys` return variable names only
+- **Secrets stay out of agent transcripts** — `application-one`, `compose-one` and the database `*-one` tools omit environment values, passwords and tokens through MCP unless the call passes `includeEnv: true` with the `dokploy:admin` scope; `application-envKeys` and `compose-envKeys` return variable names only; every MCP tool result has secret fields blanked at any depth
 - **API-key alternative for automation fleets** — `POST /api/mcp` also accepts a Dokploy API key in the `x-api-key` header (`claude mcp add --transport http --scope user dokploy https://<host>/api/mcp --header "x-api-key: <key>"`), so unattended agent sessions never depend on one shared OAuth grant
 - **Per-grant scopes** — a consent page with toggles for read, deploy, edit/delete services, edit/delete projects, backups and admin (delete and admin are off by default); role permissions still apply underneath. Revoke any client from Settings → Profile
 

@@ -151,7 +151,7 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
  * `awsSecretAccessKey` away), the *Providers listings and gitProvider.getAll
  * (id/name/url only), sshKey.allForApps and user.get (explicit safe projections).
  */
-const CREDENTIAL_QUERIES = new Set([
+export const CREDENTIAL_QUERIES: ReadonlySet<string> = new Set([
 	// sshKeys row, unprojected → privateKey
 	"sshKey.one",
 	"sshKey.all",
