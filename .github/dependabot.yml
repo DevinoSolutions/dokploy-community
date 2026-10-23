@@ -1,0 +1,60 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - "/"
+      - "/apps/api"
+      - "/apps/dokploy"
+      - "/apps/schedules"
+      - "/packages/server"
+      - "/packages/server/src/emails"
+    target-branch: canary
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: canary
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directories:
+      - "/"
+      - "/.devcontainer"
+    target-branch: canary
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns:
+          - "*"
+
+  - package-ecosystem: gomod
+    directory: "/apps/monitoring"
+    target-branch: canary
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
