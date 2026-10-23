@@ -36,7 +36,7 @@ overrides:
   h3@<1.15.9: 1.15.9
   hono@<4.13.11: ^4.13.11
   immutable@<3.8.4: 3.8.4
-  ip-address@<10.7.1: 10.7.1
+  ip-address@<10.7.4: 10.7.4
   lodash@<4.18.1: 4.18.1
   minimatch@<3.1.4: 3.1.4
   minimatch@>=10.0.0 <10.2.3: 10.2.3
@@ -466,8 +466,8 @@ importers:
         specifier: ^1.0.7
         version: 1.0.7(tailwindcss@4.3.1)
       toml:
-        specifier: 4.2.0
-        version: 4.2.0
+        specifier: 5.0.1
+        version: 5.0.1
       tw-animate-css:
         specifier: ^1.4.0
         version: 1.4.0
@@ -816,8 +816,8 @@ importers:
         specifier: ~1.16.0
         version: 1.16.0
       toml:
-        specifier: 4.2.0
-        version: 4.2.0
+        specifier: 5.0.1
+        version: 5.0.1
       ws:
         specifier: 8.21.0
         version: 8.21.0
@@ -6721,8 +6721,8 @@ packages:
     resolution: {integrity: sha512-tAAg/72/VxOUW7RQSX1pIxJVucYKcjFjfvj60L57jrZpYCHC3XN0WCQ3sNYL4Gmvv+7GPvTAjc+KSdeNuE8oWQ==}
     engines: {node: '>=12.22.0'}
 
-  ip-address@10.7.1:
-    resolution: {integrity: sha512-4OUAqU9Z1i3vCnS05hzGiFnEMDpQ+62pAD/MVQOp83fYyNC8GleCqaS0QikQBmcWCrKFiUs/B8ztRRiYOAXuCA==}
+  ip-address@10.7.4:
+    resolution: {integrity: sha512-DWBMKyeM25D70nrIiTkgQth59/G+naKOTep6huF9j+GmeK3DMD60Zvxg5d5qQnz+38AHgou6ean2LECX+lrKDg==}
     engines: {node: '>= 12'}
 
   ip-regex@5.0.0:
@@ -8904,8 +8904,8 @@ packages:
     resolution: {integrity: sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA==}
     engines: {node: '>=0.6'}
 
-  toml@4.2.0:
-    resolution: {integrity: sha512-TvAJjbHZlYmI323+srtqHQFyJsoWy6mI09ppkuj9+iRsqsVKG9fvTcOP7FHF2UCb0QSYtjEavffrKzdd0XgClg==}
+  toml@5.0.1:
+    resolution: {integrity: sha512-EqYNA/YvUNndrA2B3O2ojzLQoTQrBxeZ9UIjQwk8t10oe6n7dwclBwd9IdZQTOKwe6vWX+AXtl6IntXRbepdxQ==}
     engines: {node: '>=20'}
 
   tr46@0.0.3:
@@ -15483,7 +15483,7 @@ snapshots:
   express-rate-limit@8.5.2(express@5.2.1):
     dependencies:
       express: 5.2.1
-      ip-address: 10.7.1
+      ip-address: 10.7.4
 
   express@5.2.1:
     dependencies:
@@ -16088,7 +16088,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  ip-address@10.7.1: {}
+  ip-address@10.7.4: {}
 
   ip-regex@5.0.0: {}
 
@@ -18204,7 +18204,7 @@ snapshots:
 
   socks@2.8.8:
     dependencies:
-      ip-address: 10.7.1
+      ip-address: 10.7.4
       smart-buffer: 4.2.0
     optional: true
 
@@ -18576,7 +18576,7 @@ snapshots:
 
   toidentifier@1.0.1: {}
 
-  toml@4.2.0: {}
+  toml@5.0.1: {}
 
   tr46@0.0.3: {}
 
