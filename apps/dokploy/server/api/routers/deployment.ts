@@ -14,6 +14,7 @@ import {
 	findApplicationById,
 	findComposeById,
 	findDeploymentById,
+	getAccessibleServerIds,
 	getScheduleRunLaunch,
 	IS_CLOUD,
 	isMissingProcessError,
@@ -135,8 +136,8 @@ export const deploymentRouter = createTRPCRouter({
 	allByServer: withPermission("deployment", "read")
 		.input(apiFindAllByServer)
 		.query(async ({ input, ctx }) => {
-			const targetServer = await findServerById(input.serverId);
-			if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
+			const accessibleServerIds = await getAccessibleServerIds(ctx.session);
+			if (!accessibleServerIds.has(input.serverId)) {
 				throw new TRPCError({
 					code: "UNAUTHORIZED",
 					message: "You don't have access to this server.",
@@ -411,8 +412,8 @@ export const deploymentRouter = createTRPCRouter({
 				});
 			} else if (target.kind === "server") {
 				await checkPermission(ctx, { deployment: ["read"] });
-				const targetServer = await findServerById(target.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
+				const accessibleServerIds = await getAccessibleServerIds(ctx.session);
+				if (!accessibleServerIds.has(target.serverId)) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message:

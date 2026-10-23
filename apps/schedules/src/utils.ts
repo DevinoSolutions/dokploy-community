@@ -15,6 +15,7 @@ import {
 	runPostgresBackup,
 	runVolumeBackup,
 	skipScheduledBackupIfStopped,
+	validateBackupServiceBinding,
 } from "@dokploy/server";
 import {
 	and,
@@ -34,6 +35,16 @@ export const runJobs = async (job: QueueJob) => {
 		if (job.type === "backup") {
 			const { backupId } = job;
 			const backup = await findBackupById(backupId);
+			// Fail closed on a row that targets more than one service or a
+			// service of another kind than its type.
+			const binding = validateBackupServiceBinding(backup);
+			if (binding.error) {
+				logger.error(
+					{ backupId, error: binding.error },
+					"Scheduled backup refused",
+				);
+				return;
+			}
 			const {
 				databaseType,
 				postgres,

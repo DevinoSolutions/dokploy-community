@@ -162,6 +162,9 @@ const createSchema = createInsertSchema(backups, {
 	serviceName: backupPathSchema.nullish(),
 	database: z.string(),
 	schedule: z.string(),
+	// Spelled out: the type drizzle-zod infers for this enum column is polluted
+	// with Number/String members, which cannot be passed on as a plain string.
+	backupType: z.enum(["database", "compose"]).optional(),
 	keepLatestCount: z.number().optional(),
 	databaseType: z.enum([
 		"postgres",
