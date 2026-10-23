@@ -27,6 +27,7 @@ import {
 	hasPermission,
 } from "@dokploy/server/services/permission";
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
+import { scrubCommandFields } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, getTableColumns, isNotNull, sql } from "drizzle-orm";
@@ -38,6 +39,7 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { assertContainerServiceReadable } from "@/server/api/utils/container-service-access";
 import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
@@ -745,9 +747,10 @@ export const serverRouter = createTRPCRouter({
 		.input(
 			z.object({
 				containerId: z.string().regex(/^[a-zA-Z0-9.\-_]+$/),
+				serverId: z.string().optional(),
 			}),
 		)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				throw new TRPCError({
 					code: "UNAUTHORIZED",
@@ -755,6 +758,22 @@ export const serverRouter = createTRPCRouter({
 				});
 			}
 
-			return await getContainerProcesses(input.containerId);
+			await assertServerInOrganization(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
+			// The argv of a container's processes carries its service's secrets, so
+			// the container must belong to a service the caller can read.
+			await assertContainerServiceReadable(
+				ctx,
+				input.containerId,
+				input.serverId,
+			);
+
+			const processes = await getContainerProcesses(
+				input.containerId,
+				input.serverId,
+			);
+			return scrubCommandFields(processes) as typeof processes;
 		}),
 });
