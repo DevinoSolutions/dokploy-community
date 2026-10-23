@@ -3,7 +3,7 @@ import {
 	createDeploymentBackup,
 	updateDeploymentStatus,
 } from "@dokploy/server/services/deployment";
-import { findDestinationById } from "@dokploy/server/services/destination";
+import { findDestinationByIdForOrganization } from "@dokploy/server/services/destination";
 import { findEnvironmentById } from "@dokploy/server/services/environment";
 import type { Postgres } from "@dokploy/server/services/postgres";
 import { findProjectById } from "@dokploy/server/services/project";
@@ -24,6 +24,10 @@ export const runPostgresBackup = async (
 	const { name, environmentId } = postgres;
 	const environment = await findEnvironmentById(environmentId);
 	const project = await findProjectById(environment.projectId);
+	const destination = await findDestinationByIdForOrganization(
+		backup.destinationId,
+		project.organizationId,
+	);
 
 	const deployment = await createDeploymentBackup({
 		backupId: backup.backupId,
@@ -31,7 +35,6 @@ export const runPostgresBackup = async (
 		description: "Initializing Backup",
 	});
 	const { prefix } = backup;
-	const destination = await findDestinationById(backup.destinationId);
 	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
 	const bucketDestination = `${normalizeS3Path(prefix)}${backupFileName}`;
 	try {

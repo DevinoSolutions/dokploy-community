@@ -7,6 +7,7 @@ import {
 	composeRollingReplaceSchema,
 } from "@dokploy/server/db/validations/compose-rolling";
 import { deployPriorityInput } from "@dokploy/server/db/validations/deploy-priority";
+import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
@@ -261,8 +262,20 @@ export const composeRelations = relations(compose, ({ one, many }) => ({
 	previewDeployments: many(previewDeployments),
 }));
 
+const branchField = z
+	.string()
+	.min(1)
+	.regex(VALID_BRANCH_REGEX, "Invalid branch name")
+	.nullable()
+	.optional();
+
 const createSchema = createInsertSchema(compose, {
 	name: z.string().min(1),
+	branch: branchField,
+	gitlabBranch: branchField,
+	bitbucketBranch: branchField,
+	giteaBranch: branchField,
+	customGitBranch: branchField,
 	appName: z
 		.string()
 		.min(1)
