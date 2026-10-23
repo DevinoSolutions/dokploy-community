@@ -87,6 +87,10 @@ const SortableHeader = ({
 export const ShowNetworks = ({ serverId }: Props) => {
 	const utils = api.useUtils();
 	const [verified, setVerified] = useState(false);
+	const { data: auth } = api.user.get.useQuery();
+	// The sync routes list the networks of the whole host, so they are
+	// owner/admin only.
+	const canSync = auth?.role === "owner" || auth?.role === "admin";
 	const [sorting, setSorting] = useState<SortingState>([
 		{ id: "createdAt", desc: true },
 	]);
@@ -107,7 +111,10 @@ export const ShowNetworks = ({ serverId }: Props) => {
 		data: syncStatus,
 		isFetching: isVerifying,
 		refetch: refetchVerify,
-	} = api.network.networksToSync.useQuery({ serverId }, { enabled: verified });
+	} = api.network.networksToSync.useQuery(
+		{ serverId },
+		{ enabled: verified && canSync },
+	);
 
 	const missingIds = useMemo(
 		() => new Set(syncStatus?.missing.map((m) => m.networkId) ?? []),
@@ -354,7 +361,7 @@ export const ShowNetworks = ({ serverId }: Props) => {
 						</CardDescription>
 						<CardAction className="self-center">
 							<div className="flex items-center gap-2">
-								{networks && networks.length > 0 && (
+								{canSync && networks && networks.length > 0 && (
 									<Button
 										variant="outline"
 										isLoading={isVerifying}
@@ -364,7 +371,7 @@ export const ShowNetworks = ({ serverId }: Props) => {
 										Verify
 									</Button>
 								)}
-								<SyncNetworks serverId={serverId} />
+								{canSync && <SyncNetworks serverId={serverId} />}
 								{networks && networks.length > 0 && (
 									<HandleNetwork serverId={serverId} />
 								)}

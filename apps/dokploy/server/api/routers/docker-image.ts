@@ -1,32 +1,30 @@
-import {
-	findServerById,
-	getImageConfig,
-	getImages,
-	removeImage,
-} from "@dokploy/server";
-import { TRPCError } from "@trpc/server";
+import { getImageConfig, getImages, removeImage } from "@dokploy/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
-import { createTRPCRouter, withPermission } from "../trpc";
+import { assertServerReachable } from "@/server/api/utils/container-service-access";
+import { adminProcedure, createTRPCRouter } from "../trpc";
 
+// An image is not owned by a service: the list, the inspect output (the
+// environment and history baked into the image) and `docker rmi` all act on
+// every image of the host, other tenants' and Dokploy's own included. docker:read
+// is a plain "may open the Docker page" grant that members can hold, so it is
+// not a boundary for that and there is no service to check a member against.
+// The whole router is owner/admin only instead (adminProcedure; owners and
+// admins always hold docker:read), and the Docker page hides its Images tab for
+// everybody else.
 export const dockerImageRouter = createTRPCRouter({
-	getImages: withPermission("docker", "read")
+	getImages: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			return await getImages(input.serverId);
 		}),
 
-	getImageConfig: withPermission("docker", "read")
+	getImageConfig: adminProcedure
 		.input(
 			z.object({
 				imageRef: z.string().min(1),
@@ -34,16 +32,11 @@ export const dockerImageRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			return await getImageConfig(input.imageRef, input.serverId);
 		}),
 
-	removeImage: withPermission("docker", "read")
+	removeImage: adminProcedure
 		.input(
 			z.object({
 				repository: z.string(),
@@ -54,12 +47,7 @@ export const dockerImageRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			await removeImage(
 				{
 					repository: input.repository,

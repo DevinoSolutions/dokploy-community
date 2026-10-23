@@ -11,7 +11,11 @@ import {
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { createTRPCRouter, withPermission } from "@/server/api/trpc";
+import {
+	adminProcedure,
+	createTRPCRouter,
+	withPermission,
+} from "@/server/api/trpc";
 import { db } from "@/server/db";
 import {
 	apiCreateNetwork,
@@ -20,12 +24,37 @@ import {
 	network as networkTable,
 } from "@/server/db/schema";
 import { audit } from "../utils/audit";
-import { assertServerInOrganization } from "../utils/server-org-scope";
+import {
+	assertServerReachable,
+	canReachServer,
+} from "../utils/container-service-access";
+
+// The row of the caller's organization, on a server the caller can reach (an
+// organization's networks live on its servers, and a member only gets the ones
+// they were granted). Every other answer is the same NOT_FOUND, so it says
+// nothing about which networks exist.
+const findOwnNetwork = async (
+	ctx: { user: { id: string }; session: { activeOrganizationId: string } },
+	networkId: string,
+) => {
+	const row = await findNetworkById(networkId);
+	if (
+		row.organizationId !== ctx.session.activeOrganizationId ||
+		!(await canReachServer(ctx, row.serverId ?? undefined))
+	) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Network not found",
+		});
+	}
+	return row;
+};
 
 export const networkRouter = createTRPCRouter({
 	all: withPermission("network", "read")
 		.input(z.object({ serverId: z.string().optional() }))
 		.query(async ({ ctx, input }) => {
+			await assertServerReachable(ctx, input.serverId);
 			const rows = await db.query.network.findMany({
 				where: and(
 					eq(networkTable.organizationId, ctx.session.activeOrganizationId),
@@ -41,22 +70,12 @@ export const networkRouter = createTRPCRouter({
 	one: withPermission("network", "read")
 		.input(apiFindOneNetwork)
 		.query(async ({ ctx, input }) => {
-			const row = await findNetworkById(input.networkId);
-			if (row.organizationId !== ctx.session.activeOrganizationId) {
-				throw new TRPCError({
-					code: "NOT_FOUND",
-					message: "Network not found",
-				});
-			}
-			return row;
+			return await findOwnNetwork(ctx, input.networkId);
 		}),
 	create: withPermission("network", "create")
 		.input(apiCreateNetwork)
 		.mutation(async ({ ctx, input }) => {
-			await assertServerInOrganization(
-				input.serverId ?? undefined,
-				ctx.session.activeOrganizationId,
-			);
+			await assertServerReachable(ctx, input.serverId ?? undefined);
 			const created = await createNetwork(
 				input,
 				ctx.session.activeOrganizationId,
@@ -69,20 +88,22 @@ export const networkRouter = createTRPCRouter({
 			});
 			return created;
 		}),
-	networksToSync: withPermission("network", "read")
+	// The sync and import routes list and adopt the networks that exist on the
+	// host, every tenant's included, and an imported row can then be recreated or
+	// removed through this router. A host network is not owned by an
+	// organization, so there is nothing to scope a member to: owner/admin only
+	// (they always hold the network statement).
+	networksToSync: adminProcedure
 		.input(z.object({ serverId: z.string().optional() }))
 		.query(async ({ ctx, input }) => {
-			await assertServerInOrganization(
-				input.serverId,
-				ctx.session.activeOrganizationId,
-			);
+			await assertServerReachable(ctx, input.serverId);
 			return findNetworksToSync(
 				ctx.session.activeOrganizationId,
 				input.serverId ?? null,
 			);
 		}),
 
-	import: withPermission("network", "create")
+	import: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
@@ -90,10 +111,7 @@ export const networkRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
-			await assertServerInOrganization(
-				input.serverId,
-				ctx.session.activeOrganizationId,
-			);
+			await assertServerReachable(ctx, input.serverId);
 			const result = await importDockerNetworks(
 				ctx.session.activeOrganizationId,
 				input.serverId ?? null,
@@ -113,26 +131,14 @@ export const networkRouter = createTRPCRouter({
 	inspect: withPermission("network", "read")
 		.input(apiFindOneNetwork)
 		.query(async ({ ctx, input }) => {
-			const network = await findNetworkById(input.networkId);
-			if (network.organizationId !== ctx.session.activeOrganizationId) {
-				throw new TRPCError({
-					code: "NOT_FOUND",
-					message: "Network not found",
-				});
-			}
+			await findOwnNetwork(ctx, input.networkId);
 			return inspectNetwork(input.networkId);
 		}),
 
 	recreate: withPermission("network", "delete")
 		.input(apiFindOneNetwork)
 		.mutation(async ({ ctx, input }) => {
-			const network = await findNetworkById(input.networkId);
-			if (network.organizationId !== ctx.session.activeOrganizationId) {
-				throw new TRPCError({
-					code: "NOT_FOUND",
-					message: "Network not found",
-				});
-			}
+			await findOwnNetwork(ctx, input.networkId);
 			const recreated = await recreateNetwork(input.networkId);
 			await audit(ctx, {
 				action: "reload",
@@ -146,13 +152,7 @@ export const networkRouter = createTRPCRouter({
 	resync: withPermission("network", "delete")
 		.input(apiFindOneNetwork)
 		.mutation(async ({ ctx, input }) => {
-			const network = await findNetworkById(input.networkId);
-			if (network.organizationId !== ctx.session.activeOrganizationId) {
-				throw new TRPCError({
-					code: "NOT_FOUND",
-					message: "Network not found",
-				});
-			}
+			await findOwnNetwork(ctx, input.networkId);
 			const resynced = await resyncNetwork(
 				input.networkId,
 				ctx.session.activeOrganizationId,
@@ -169,13 +169,7 @@ export const networkRouter = createTRPCRouter({
 	remove: withPermission("network", "delete")
 		.input(apiRemoveNetwork)
 		.mutation(async ({ ctx, input }) => {
-			const network = await findNetworkById(input.networkId);
-			if (network.organizationId !== ctx.session.activeOrganizationId) {
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "Not authorized to delete this network",
-				});
-			}
+			await findOwnNetwork(ctx, input.networkId);
 			const removed = await removeNetwork(input.networkId);
 			await audit(ctx, {
 				action: "delete",

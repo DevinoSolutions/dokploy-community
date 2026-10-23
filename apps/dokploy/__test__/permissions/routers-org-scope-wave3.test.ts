@@ -27,6 +27,24 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
 	};
 });
 
+// the network routes ask which servers the caller may reach (their organization,
+// and for a member the ones they were granted)
+vi.mock("@dokploy/server/services/server", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("@dokploy/server/services/server")>();
+	return {
+		...actual,
+		getAccessibleServerIds: vi.fn(
+			async (session: { activeOrganizationId: string }) =>
+				new Set(
+					serverRow.organizationId === session.activeOrganizationId
+						? [serverRow.serverId as string]
+						: [],
+				),
+		),
+	};
+});
+
 vi.mock("@dokploy/server/services/ai", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("@dokploy/server/services/ai")>();

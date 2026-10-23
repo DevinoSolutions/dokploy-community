@@ -28,12 +28,13 @@ import {
 	assertServerReachable,
 	canReadContainerEnv,
 	filterReadableContainers,
+	filterReadableEvents,
 	filterReadableTasks,
 	redactContainerEnv,
 	resolveContainerForRoute,
 } from "@/server/api/utils/container-service-access";
 import { uploadFileToContainerSchema } from "@/utils/schema";
-import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
+import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
 
 export const containerIdRegex = /^[a-zA-Z0-9.\-_]+$/;
 
@@ -70,8 +71,10 @@ export const dockerRouter = createTRPCRouter({
 				: containers;
 		}),
 
-	// Host-level diagnostics, so this requires docker.read AND server.read.
-	getServerHealth: protectedProcedure
+	// Host-level diagnostics of the whole server (every tenant's containers and
+	// their restarts), so this requires docker.read AND server.read and is
+	// owner/admin only: no service owns it to check a member against.
+	getServerHealth: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
@@ -480,6 +483,12 @@ export const dockerRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await assertServerReachable(ctx, input.serverId);
-			return await getDockerEvents(input.serverId, input.minutes);
+			const result = await getDockerEvents(input.serverId, input.minutes);
+			// the host's events name every tenant's containers: a member gets the
+			// events of the services they can read
+			return {
+				...result,
+				events: await filterReadableEvents(ctx, result.events, input.serverId),
+			};
 		}),
 });

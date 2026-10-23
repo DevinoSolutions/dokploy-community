@@ -280,7 +280,7 @@ export const assertContainerServiceReadable = async (
 	return container.id;
 };
 
-const isOwnerOrAdmin = async (ctx: PermissionCtx) => {
+export const isOwnerOrAdmin = async (ctx: PermissionCtx) => {
 	const member = await findMemberByUserId(
 		ctx.user.id,
 		ctx.session.activeOrganizationId,
@@ -520,6 +520,88 @@ export const filterReadableTasks = async <T>(
 			visible.set(serviceName, allowed);
 		}
 		if (await allowed) kept.push(row);
+	}
+	return kept;
+};
+
+/**
+ * Narrows rows that name a swarm service (`docker service ls`, `docker service
+ * ps`) the way the container lists are narrowed: a member gets only the rows of
+ * services they can read on this server. Owners and admins see the host's list
+ * as it is (the Docker page lists everything on the host), without one
+ * `docker service inspect` per row.
+ */
+export const filterReadableServiceRows = async <T>(
+	ctx: PermissionCtx,
+	rows: T[],
+	serviceNameOf: (row: T) => string,
+	serverId?: string,
+): Promise<T[]> => {
+	if (await isOwnerOrAdmin(ctx)) return rows;
+	return await filterReadableTasks(ctx, rows, serviceNameOf, serverId);
+};
+
+/** The same for `docker stats` rows, which carry the container id as `ID`. */
+export const filterReadableStats = async <T extends { ID: string }>(
+	ctx: PermissionCtx,
+	rows: T[],
+	serverId?: string,
+): Promise<T[]> => {
+	if (await isOwnerOrAdmin(ctx)) return rows;
+	const readable = new Set(
+		(
+			await filterReadableContainers(
+				ctx,
+				rows.map((row) => ({ containerId: row.ID })),
+				serverId,
+			)
+		).map((row) => row.containerId),
+	);
+	return rows.filter((row) => readable.has(row.ID));
+};
+
+type DockerEventLike = {
+	Type?: string;
+	Actor?: { Attributes?: Record<string, string> };
+};
+
+/**
+ * Narrows `docker events` to the events of containers and swarm services the
+ * caller can read. The event carries the container's labels (or the service
+ * name) in `Actor.Attributes`, which are mapped to Dokploy services like any
+ * other container's. Events that belong to no service (images, networks,
+ * volumes, nodes, the daemon, a container nobody labelled) are the host's own
+ * and only an owner or admin sees them, so everything else is dropped for a
+ * member.
+ */
+export const filterReadableEvents = async <T extends DockerEventLike>(
+	ctx: PermissionCtx,
+	events: T[],
+	serverId?: string,
+): Promise<T[]> => {
+	if (events.length === 0 || (await isOwnerOrAdmin(ctx))) return events;
+
+	const outcomes = new Map<string, Promise<ContainerServiceCheck>>();
+	const kept: T[] = [];
+	for (const event of events) {
+		const attributes = event.Actor?.Attributes ?? {};
+		let appNames: string[];
+		if (event.Type === "container") {
+			appNames = ownershipNames(labelValues(attributes));
+		} else if (event.Type === "service") {
+			appNames = ownershipNames([attributes.name, ...labelValues(attributes)]);
+		} else {
+			continue;
+		}
+		if (appNames.length === 0) continue;
+
+		const key = [...appNames].sort().join("|");
+		let outcome = outcomes.get(key);
+		if (!outcome) {
+			outcome = checkDockerObjectServices(ctx, { id: "", appNames }, serverId);
+			outcomes.set(key, outcome);
+		}
+		if (rowVisible(await outcome, false)) kept.push(event);
 	}
 	return kept;
 };
