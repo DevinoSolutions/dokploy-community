@@ -25,7 +25,6 @@ export const canAccessDockerOverWss = async (
 	serverId?: string | null,
 	serviceId?: string | null,
 ): Promise<boolean> => {
-	// return false;
 	if (!user || !session?.activeOrganizationId) return false;
 
 	const ctx = buildCtx(user, session.activeOrganizationId);
@@ -59,6 +58,43 @@ export const canAccessDockerOverWss = async (
 
 	return true;
 };
+
+// Whether a stats request for `appName` targets the service named
+// `serviceAppName`. Applications and databases run as one swarm service named
+// after the app; stack tasks are namespaced "<stack>_<service>". Compose
+// container names are free-form, so the stats socket also filters compose and
+// stack containers by their project/namespace label. `appType` comes from the
+// URL, so any other value is rejected.
+export const isServiceContainerName = (
+	appName: string,
+	appType: string,
+	serviceAppName: string,
+): boolean => {
+	if (appType === "application") return appName === serviceAppName;
+	if (appType === "stack") return appName.startsWith(`${serviceAppName}_`);
+	return appType === "docker-compose";
+};
+
+// Compose names its containers "<project>-<service>-<n>" ("_" in compose v1).
+export const hasComposeProjectPrefix = (
+	containerName: string,
+	projectName: string,
+): boolean =>
+	containerName.length > projectName.length + 1 &&
+	containerName.startsWith(projectName) &&
+	"-_".includes(containerName.charAt(projectName.length));
+
+// Stats of the control-plane host and of remote servers are recorded in the
+// buckets "dokploy" and "dokploy-<serverId>" (getMonitoringAppName). A service
+// may only record under such a name if it is its own container, i.e. of the
+// form "<own appName>-...", which is the case when the service's own appName
+// starts with "dokploy-".
+export const isHostStatsBucketName = (
+	name: string,
+	ownAppName: string,
+): boolean =>
+	(name === "dokploy" || name.startsWith("dokploy-")) &&
+	!hasComposeProjectPrefix(name, ownAppName);
 
 // Authorizes the host/server SSH terminal opened over a WebSocket. The local
 // host terminal is a root shell on the control-plane host, so it is restricted

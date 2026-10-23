@@ -54,6 +54,7 @@ import {
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { checkPermission } from "@dokploy/server/services/permission";
+import { getAccessibleServerIds } from "@dokploy/server/services/server";
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
 import { TRPCError } from "@trpc/server";
 import { eq, sql } from "drizzle-orm";
@@ -88,6 +89,7 @@ import {
 	enterpriseProcedure,
 	protectedProcedure,
 	publicProcedure,
+	withPermission,
 } from "../trpc";
 
 /**
@@ -342,7 +344,7 @@ export const settingsRouter = createTRPCRouter({
 		});
 		return true;
 	}),
-	getDockerDiskUsage: adminProcedure
+	getDockerDiskUsage: withPermission("docker", "read")
 		.input(z.object({ serverId: z.string().optional() }).optional())
 		.query(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
@@ -352,6 +354,16 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			if (input?.serverId) {
+				// Owners/admins get every org server; members only the ones granted to them.
+				const accessibleIds = await getAccessibleServerIds(ctx.session);
+				if (!accessibleIds.has(input.serverId)) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: "You are not authorized to access this server",
+					});
+				}
+			}
 			return getDockerDiskUsage(input?.serverId);
 		}),
 	saveSSHPrivateKey: adminProcedure

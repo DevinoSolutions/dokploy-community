@@ -614,11 +614,22 @@ export const apiSaveEnvironmentVariables = createSchema
 // so a crafted value cannot traverse out of MONITORING_PATH. Container app
 // names fed through this same endpoint are auto-generated and only contain
 // these characters as well.
+export const MONITORING_APP_NAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
+
+// The pattern allows `.` and `..`, which would leave the bucket directory.
+export const isValidMonitoringAppName = (appName: string): boolean =>
+	MONITORING_APP_NAME_PATTERN.test(appName) &&
+	appName !== "." &&
+	appName !== "..";
+
 export const apiFindMonitoringStats = z.object({
 	appName: z
 		.string()
 		.min(1)
-		.regex(/^[A-Za-z0-9_.-]+$/, { message: "Invalid appName" }),
+		// The regex is kept next to the refine so the generated OpenAPI schema
+		// still advertises the pattern.
+		.regex(MONITORING_APP_NAME_PATTERN, { message: "Invalid appName" })
+		.refine(isValidMonitoringAppName, { message: "Invalid appName" }),
 });
 
 export const apiUpdateApplication = createSchema

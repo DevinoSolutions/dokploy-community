@@ -57,6 +57,11 @@ interface Props {
 	 * Only meaningful when `appName === "dokploy"` (host-level monitoring).
 	 */
 	serverId?: string;
+	/**
+	 * The Dokploy service this monitor was opened from. Lets the socket authorize
+	 * a member by access to that service and pin the stats to its containers.
+	 */
+	serviceId?: string;
 }
 
 type MemorySize = number | string;
@@ -157,6 +162,7 @@ export const ContainerFreeMonitoring = ({
 	appName,
 	appType = "application",
 	serverId,
+	serviceId,
 }: Props) => {
 	// For host-level monitoring (`appName === "dokploy"`), redirect to the
 	// remote bucket `dokploy-<serverId>` when a remote server is selected;
@@ -218,6 +224,9 @@ export const ContainerFreeMonitoring = ({
 		if (serverId && serverId !== LOCAL_SERVER_ID) {
 			params.set("serverId", serverId);
 		}
+		if (serviceId) {
+			params.set("serviceId", serviceId);
+		}
 		const wsUrl = `${protocol}//${window.location.host}/listen-docker-stats-monitoring?${params.toString()}`;
 		const ws = new WebSocket(wsUrl);
 
@@ -252,7 +261,7 @@ export const ContainerFreeMonitoring = ({
 		};
 
 		return () => ws.close();
-	}, [appName, appType, serverId]);
+	}, [appName, appType, serverId, serviceId]);
 
 	const memoryValue = currentData.memory.value;
 	const swapValue = memoryValue.swap;

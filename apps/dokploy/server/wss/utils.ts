@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { execAsync, IS_CLOUD, paths } from "@dokploy/server";
 
+// The `appName` of a stats request names a directory under MONITORING_PATH, so
+// it is validated with the same check `application.readAppMonitoring` uses.
+export { isValidMonitoringAppName } from "@dokploy/server/db/schema/application";
+
 /**
  * Validates that the container ID matches Docker's expected format.
  * Docker container IDs are 64-character hex strings (or 12-char short form).

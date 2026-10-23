@@ -48,6 +48,7 @@
 		"overrides": {
 			"js-yaml@4": "4.3.2",
 			"sharp@<0.35.5": "^0.35.5",
+			"dompurify@<3.4.17": "^3.4.17",
 			"esbuild": "0.25.0",
 			"better-call": "1.4.0",
 			"@better-fetch/fetch": "1.3.2",
@@ -74,7 +75,7 @@
 			"h3@<1.15.9": "1.15.9",
 			"hono@<4.13.11": "^4.13.11",
 			"immutable@<3.8.4": "3.8.4",
-			"ip-address@<10.7.1": "10.7.1",
+			"ip-address@<10.7.4": "10.7.4",
 			"lodash@<4.18.1": "4.18.1",
 			"minimatch@<3.1.4": "3.1.4",
 			"minimatch@>=10.0.0 <10.2.3": "10.2.3",
@@ -93,6 +94,9 @@
 			"valibot@<1.4.2": "1.4.2",
 			"vite@7": "7.3.7",
 			"yaml@2": "2.8.3"
+		},
+		"auditConfig": {
+			"ignoreGhsas": ["GHSA-vfj7-8cjw-p6xm"]
 		},
 		"peerDependencyRules": {
 			"ignoreMissing": [

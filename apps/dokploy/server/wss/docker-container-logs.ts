@@ -5,6 +5,7 @@ import { spawn as spawnPty } from "node-pty";
 import { Client, type ClientChannel } from "ssh2";
 import { WebSocketServer } from "ws";
 import { canAccessDockerOverWss } from "./authorize";
+import { containerBelongsToService } from "./container-ownership";
 import { onGuardedConnection } from "./guard";
 import {
 	buildDockerLogsArguments,
@@ -142,15 +143,33 @@ export const setupDockerContainerLogsWebSocketServer = (
 			tail,
 		});
 		try {
-			if (serverId) {
-				const server = await findServerById(serverId);
-				if (isClosed) return;
+			const server = serverId ? await findServerById(serverId) : null;
+			if (isClosed) return;
 
-				if (server.organizationId !== session.activeOrganizationId) {
-					ws.close();
-					return;
-				}
+			// Organization and cloud gates come before any container lookup: the
+			// ownership check runs `docker inspect` on the target host.
+			if (server && server.organizationId !== session.activeOrganizationId) {
+				ws.close();
+				return;
+			}
+			if (!server && IS_CLOUD) {
+				send("This feature is not available in the cloud version.");
+				ws.close();
+				return;
+			}
 
+			// Service access only covers that service's own containers; without
+			// this, logs (and `docker attach` input) reach any container on the host.
+			if (
+				serviceId &&
+				!(await containerBelongsToService(serviceId, containerId, serverId))
+			) {
+				ws.close(4003, "Not authorized");
+				return;
+			}
+			if (isClosed) return;
+
+			if (server) {
 				if (!server.sshKeyId) {
 					ws.close(4000, "No SSH key available for this server");
 					return;
@@ -207,11 +226,6 @@ export const setupDockerContainerLogsWebSocketServer = (
 						privateKey: server.sshKey?.privateKey,
 					});
 			} else {
-				if (IS_CLOUD) {
-					send("This feature is not available in the cloud version.");
-					ws.close();
-					return;
-				}
 				const stdout = createDockerLogsDataHandler(search, send);
 				const stderr = createDockerLogsDataHandler(search, send);
 				const childProcess = spawn("docker", dockerLogsArguments, {

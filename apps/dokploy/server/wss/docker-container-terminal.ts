@@ -4,6 +4,7 @@ import { spawn } from "node-pty";
 import { Client } from "ssh2";
 import { WebSocketServer } from "ws";
 import { canAccessDockerOverWss } from "./authorize";
+import { containerBelongsToService } from "./container-ownership";
 import { onGuardedConnection } from "./guard";
 import {
 	isValidContainerId,
@@ -76,14 +77,29 @@ export const setupDockerContainerTerminalWebSocketServer = (
 			return;
 		}
 		try {
-			if (serverId) {
-				const server = await findServerById(serverId);
+			const server = serverId ? await findServerById(serverId) : null;
 
-				if (server.organizationId !== session.activeOrganizationId) {
-					ws.close();
-					return;
-				}
+			// Organization and cloud gates come before any container lookup: the
+			// ownership check runs `docker inspect` on the target host.
+			if (server && server.organizationId !== session.activeOrganizationId) {
+				ws.close();
+				return;
+			}
+			if (!server && IS_CLOUD) {
+				ws.send("This feature is not available in the cloud version.");
+				ws.close();
+				return;
+			}
 
+			if (
+				serviceId &&
+				!(await containerBelongsToService(serviceId, containerId, serverId))
+			) {
+				ws.close(4003, "Not authorized");
+				return;
+			}
+
+			if (server) {
 				if (!server.sshKeyId)
 					throw new Error("No SSH key available for this server");
 
@@ -169,11 +185,6 @@ export const setupDockerContainerTerminalWebSocketServer = (
 						privateKey: server.sshKey?.privateKey,
 					});
 			} else {
-				if (IS_CLOUD) {
-					ws.send("This feature is not available in the cloud version.");
-					ws.close();
-					return;
-				}
 				const ptyProcess = spawn(
 					"docker",
 					["exec", "-it", "-w", "/", containerId, shell],
