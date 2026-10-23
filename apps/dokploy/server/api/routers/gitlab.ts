@@ -1,4 +1,5 @@
 import {
+	assertCanUpdateGitProvider,
 	assertGitProviderAccess,
 	canViewGitProviderSecrets,
 	createGitlab,
@@ -151,11 +152,7 @@ export const gitlabRouter = createTRPCRouter({
 			// organization before it is rewritten (updateGitProvider re-assigns the
 			// organization), and its own gitProviderId is the one that is updated.
 			const gitlab = await findGitlabById(input.gitlabId);
-			if (
-				gitlab.gitProvider.organizationId !== ctx.session.activeOrganizationId
-			) {
-				throw new TRPCError({ code: "UNAUTHORIZED" });
-			}
+			await assertCanUpdateGitProvider(ctx.session, gitlab.gitProvider);
 			if (input.name) {
 				await updateGitProvider(gitlab.gitProviderId, {
 					name: input.name,

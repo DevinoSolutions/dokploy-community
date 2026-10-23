@@ -232,14 +232,24 @@ export const apiReadStatsLogs = z.object({
 		.optional(),
 });
 
-export const apiUpdateUser = createSchema.partial().extend({
-	email: z
-		.string()
-		.email("Please enter a valid email address")
-		.min(1, "Email is required")
-		.optional(),
-	password: z.string().optional(),
-	currentPassword: z.string().optional(),
-	firstName: z.string().optional(),
-	lastName: z.string().optional(),
-});
+// `user.update` writes the caller's own row, so it takes an explicit list of
+// the profile fields the account form sends and nothing else. Anything outside
+// it (id, emailVerified, banned, twoFactorEnabled, licence and billing columns)
+// is stripped by the schema instead of being spread onto the row (T-6895).
+export const apiUpdateUser = createSchema
+	.pick({
+		image: true,
+		allowImpersonation: true,
+	})
+	.partial()
+	.extend({
+		email: z
+			.string()
+			.email("Please enter a valid email address")
+			.min(1, "Email is required")
+			.optional(),
+		password: z.string().optional(),
+		currentPassword: z.string().optional(),
+		firstName: z.string().optional(),
+		lastName: z.string().optional(),
+	});

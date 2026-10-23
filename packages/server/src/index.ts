@@ -77,6 +77,7 @@ export * from "./services/schedule";
 export * from "./services/security";
 export * from "./services/server";
 export * from "./services/server-health";
+export * from "./services/service-reference-scope";
 export * from "./services/settings";
 export * from "./services/snapvisor";
 export * from "./services/snapvisor-checks";
