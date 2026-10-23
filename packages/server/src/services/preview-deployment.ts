@@ -43,6 +43,7 @@ import {
 	getPreviewCommentContext,
 	updatePreviewComment,
 } from "./preview-comment";
+import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 import { finalizePreviewBuildMetadata } from "./snapvisor";
 import { getWebServerSettings } from "./web-server-settings";
 
@@ -766,6 +767,16 @@ const executeComposePreview = async ({
 		createdAt: new Date().toISOString(),
 	});
 
+	// A row can still hold a registry or provider of another organization. Checked
+	// before the first PR comment so a stale foreign token never posts one, and
+	// the failure comment is skipped for the same reason.
+	let referenceRefusal: unknown = null;
+	try {
+		await assertDeployReferencesInOrganization(compose);
+	} catch (error) {
+		referenceRefusal = error;
+	}
+
 	const previewSuffix = buildComposePreviewSuffix(previewDeployment);
 	const previewDomains = previewDeployment.domains ?? [];
 	const firstHost = previewDomains[0]?.host;
@@ -774,6 +785,7 @@ const executeComposePreview = async ({
 		: "";
 
 	try {
+		if (referenceRefusal) throw referenceRefusal;
 		await postComposePreviewComment(
 			compose,
 			previewDeployment,
@@ -865,12 +877,14 @@ const executeComposePreview = async ({
 			console.error(logError);
 		}
 
-		await postComposePreviewComment(
-			compose,
-			previewDeployment,
-			"error",
-			previewUrl,
-		);
+		if (!referenceRefusal) {
+			await postComposePreviewComment(
+				compose,
+				previewDeployment,
+				"error",
+				previewUrl,
+			);
+		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",

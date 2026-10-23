@@ -5,6 +5,10 @@ import { db } from "@dokploy/server/db";
 import { network, patch } from "@dokploy/server/db/schema";
 import type { Compose } from "@dokploy/server/services/compose";
 import type { Domain } from "@dokploy/server/services/domain";
+import {
+	assertDeployReferencesInOrganization,
+	type DeployReferenceEntity,
+} from "@dokploy/server/services/service-reference-scope";
 import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
@@ -33,7 +37,16 @@ import type {
 	PropertiesNetworks,
 } from "./types";
 
-export const cloneCompose = async (compose: Compose) => {
+/**
+ * Clones (or writes) the compose source for a read outside a deploy: the services
+ * list, the source-type fetch, the rolling-replace preflight, the collision
+ * rewrite. A stored registry, git provider or SSH key of another organization
+ * is refused before anything is cloned, the same as at deploy (T-6902).
+ */
+export const cloneCompose = async (
+	compose: Compose & DeployReferenceEntity,
+) => {
+	await assertDeployReferencesInOrganization(compose, "source");
 	let command = "set -e;";
 	const entity = {
 		...compose,

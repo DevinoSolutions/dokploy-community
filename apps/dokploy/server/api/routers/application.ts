@@ -670,7 +670,12 @@ export const applicationRouter = createTRPCRouter({
 			// Being in the organization is not enough: the caller has to be able to use
 			// this provider (own, shared or assigned), as the provider picker implies.
 			await assertCanUseServiceGitProviders(
-				{ githubId: input.githubId },
+				{
+					githubId: input.githubId,
+					repository: input.repository,
+					owner: input.owner,
+					sourceType: "github",
+				},
 				() => findApplicationById(input.applicationId),
 				ctx.session,
 			);
@@ -709,7 +714,14 @@ export const applicationRouter = createTRPCRouter({
 			// Being in the organization is not enough: the caller has to be able to use
 			// this provider (own, shared or assigned), as the provider picker implies.
 			await assertCanUseServiceGitProviders(
-				{ gitlabId: input.gitlabId },
+				{
+					gitlabId: input.gitlabId,
+					gitlabRepository: input.gitlabRepository,
+					gitlabOwner: input.gitlabOwner,
+					gitlabProjectId: input.gitlabProjectId,
+					gitlabPathNamespace: input.gitlabPathNamespace,
+					sourceType: "gitlab",
+				},
 				() => findApplicationById(input.applicationId),
 				ctx.session,
 			);
@@ -750,7 +762,13 @@ export const applicationRouter = createTRPCRouter({
 			// Being in the organization is not enough: the caller has to be able to use
 			// this provider (own, shared or assigned), as the provider picker implies.
 			await assertCanUseServiceGitProviders(
-				{ bitbucketId: input.bitbucketId },
+				{
+					bitbucketId: input.bitbucketId,
+					bitbucketRepository: input.bitbucketRepository,
+					bitbucketOwner: input.bitbucketOwner,
+					bitbucketRepositorySlug: input.bitbucketRepositorySlug,
+					sourceType: "bitbucket",
+				},
 				() => findApplicationById(input.applicationId),
 				ctx.session,
 			);
@@ -790,7 +808,12 @@ export const applicationRouter = createTRPCRouter({
 			// Being in the organization is not enough: the caller has to be able to use
 			// this provider (own, shared or assigned), as the provider picker implies.
 			await assertCanUseServiceGitProviders(
-				{ giteaId: input.giteaId },
+				{
+					giteaId: input.giteaId,
+					giteaRepository: input.giteaRepository,
+					giteaOwner: input.giteaOwner,
+					sourceType: "gitea",
+				},
 				() => findApplicationById(input.applicationId),
 				ctx.session,
 			);

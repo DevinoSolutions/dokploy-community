@@ -26,6 +26,7 @@ vi.mock("@dokploy/server/db", () => {
 			returning: vi.fn().mockResolvedValue([{}] as any),
 			from: vi.fn(() => chain),
 			innerJoin: vi.fn(() => chain),
+			// biome-ignore lint/suspicious/noThenProperty: drizzle's query builder is itself a thenable, so the fake standing in for it must be one too
 			then: (resolve: (v: any) => void) => {
 				resolve([]);
 			},

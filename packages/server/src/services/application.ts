@@ -860,15 +860,22 @@ export const deployPreviewApplication = async ({
 	});
 	const stagedBuildFiles: string[] = [];
 	let stagedBuildServerId: string | null | undefined;
+	// A row can still hold a registry or provider of another organization. Checked
+	// before the first PR comment so a stale foreign token never posts one, and
+	// the failure comment is skipped for the same reason.
+	let referenceRefusal: unknown = null;
 	try {
+		await assertDeployReferencesInOrganization(application);
+	} catch (error) {
+		referenceRefusal = error;
+	}
+	try {
+		if (referenceRefusal) throw referenceRefusal;
 		await writePreviewComment("running");
 
 		// build-policy hook 1/4 (preview), continued: refusing here rather than
 		// above means the preview status, the log and the PR comment all say why.
 		if (!buildPolicy) throw buildPolicyError;
-
-		// A row can still hold a registry or provider of another organization.
-		await assertDeployReferencesInOrganization(application);
 
 		// A preview row only fits the source it was created for (see
 		// getPreviewSourceMismatchMessage); refuse before cloning or pulling.
@@ -1044,12 +1051,14 @@ export const deployPreviewApplication = async ({
 		}
 
 		// Never let a failing status comment hide the actual build error.
-		await writePreviewComment("error").catch((commentError) => {
-			console.error(
-				"Error reporting the preview deployment failure:",
-				commentError,
-			);
-		});
+		if (!referenceRefusal) {
+			await writePreviewComment("error").catch((commentError) => {
+				console.error(
+					"Error reporting the preview deployment failure:",
+					commentError,
+				);
+			});
+		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",
@@ -1107,14 +1116,21 @@ export const rebuildPreviewApplication = async ({
 
 	const stagedBuildFiles: string[] = [];
 	let stagedBuildServerId: string | null | undefined;
+	// A row can still hold a registry or provider of another organization. Checked
+	// before the first PR comment so a stale foreign token never posts one, and
+	// the failure comment is skipped for the same reason.
+	let referenceRefusal: unknown = null;
 	try {
+		await assertDeployReferencesInOrganization(application);
+	} catch (error) {
+		referenceRefusal = error;
+	}
+	try {
+		if (referenceRefusal) throw referenceRefusal;
 		await writePreviewComment("running");
 
 		// build-policy hook 1/4 (preview rebuild), continued.
 		if (!buildPolicy) throw buildPolicyError;
-
-		// A row can still hold a registry or provider of another organization.
-		await assertDeployReferencesInOrganization(application);
 
 		// A preview row only fits the source it was created for (see
 		// getPreviewSourceMismatchMessage); refuse before cloning or pulling.
@@ -1289,12 +1305,14 @@ export const rebuildPreviewApplication = async ({
 		}
 
 		// Never let a failing status comment hide the actual build error.
-		await writePreviewComment("error").catch((commentError) => {
-			console.error(
-				"Error reporting the preview deployment failure:",
-				commentError,
-			);
-		});
+		if (!referenceRefusal) {
+			await writePreviewComment("error").catch((commentError) => {
+				console.error(
+					"Error reporting the preview deployment failure:",
+					commentError,
+				);
+			});
+		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",

@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
 	}[],
 	member: { role: "member", accessedGitProviders: [] as string[] },
 	licensed: false,
-	current: {} as Record<string, string | null>,
+	current: {} as Record<string, unknown>,
 	providerLookup: vi.fn(),
 	updateApplication: vi.fn(),
 	updateCompose: vi.fn(),
@@ -133,6 +133,13 @@ const callerOf = async (router: "application" | "compose") => {
 };
 
 const FIELDS = ["githubId", "gitlabId", "bitbucketId", "giteaId"] as const;
+
+const REPO_FIELD = {
+	githubId: "repository",
+	gitlabId: "gitlabRepository",
+	bitbucketId: "bitbucketRepository",
+	giteaId: "giteaRepository",
+} as const;
 
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -403,7 +410,12 @@ describe.each(SAVE_ROUTES)(
 		});
 
 		it("saves other fields of a service whose provider somebody else connected", async () => {
-			mocks.current = { [field]: `${field}-private` };
+			// the form resends the stored repository; only the branch changed
+			mocks.current = {
+				[field]: `${field}-private`,
+				...input,
+				sourceType: field.replace("Id", ""),
+			};
 
 			await call(`${field}-private`);
 
@@ -413,12 +425,150 @@ describe.each(SAVE_ROUTES)(
 			);
 		});
 
+		it("refuses re-pointing the repository through a provider the caller cannot use", async () => {
+			mocks.current = {
+				[field]: `${field}-private`,
+				...input,
+				sourceType: field.replace("Id", ""),
+				[REPO_FIELD[field]]: "other-repo",
+			};
+
+			await expect(call(`${field}-private`)).rejects.toMatchObject({
+				code: "FORBIDDEN",
+			});
+			expect(mocks.updateApplication).not.toHaveBeenCalled();
+		});
+
+		it("lets an owner re-point the repository through any provider of the organization", async () => {
+			mocks.member = { role: "owner", accessedGitProviders: [] };
+			mocks.current = {
+				[field]: `${field}-private`,
+				...input,
+				sourceType: field.replace("Id", ""),
+				[REPO_FIELD[field]]: "other-repo",
+			};
+
+			await call(`${field}-private`);
+
+			expect(mocks.updateApplication).toHaveBeenCalledTimes(1);
+		});
+
 		it("lets an owner pick any provider of the organization", async () => {
 			mocks.member = { role: "owner", accessedGitProviders: [] };
 
 			await call(`${field}-private`);
 
 			expect(mocks.updateApplication).toHaveBeenCalledTimes(1);
+		});
+	},
+);
+
+// The id alone is not the whole reference: the repository columns say what the
+// provider's token is used to clone, so changing them needs access to the
+// provider stored on the service too (or the one the update sets).
+describe.each(UPDATES)(
+	"$router.update repository columns",
+	{ timeout: 60_000 },
+	(service) => {
+		describe.each(FIELDS)("%s as a member", (field) => {
+			const repo = REPO_FIELD[field];
+			const update = async (input: Record<string, unknown>) =>
+				(await callerOf(service.router)).update({
+					[service.idKey]: "svc-1",
+					...input,
+				});
+
+			it("refuses changing the repository of a service whose provider the caller cannot use", async () => {
+				mocks.current = { [field]: `${field}-private`, [repo]: "old" };
+
+				await expect(update({ [repo]: "new" })).rejects.toMatchObject({
+					code: "FORBIDDEN",
+				});
+				expect(service.written()).not.toHaveBeenCalled();
+			});
+
+			it("lets the unchanged repository through (the forms resend it)", async () => {
+				mocks.current = { [field]: `${field}-private`, [repo]: "same" };
+
+				await update({ [repo]: "same", branch: "next" });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
+
+			it("treats an empty string and null as the same stored value", async () => {
+				mocks.current = { [field]: `${field}-private`, [repo]: null };
+
+				await update({ [repo]: "" });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
+
+			it("lets a branch-only change through", async () => {
+				mocks.current = { [field]: `${field}-private`, [repo]: "old" };
+
+				await update({ branch: "next", buildPath: "/app" });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
+
+			it("allows the repository change when the stored provider is usable", async () => {
+				mocks.current = { [field]: `${field}-shared`, [repo]: "old" };
+
+				await update({ [repo]: "new" });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
+
+			it("checks the provider the same update sets, not the stored one", async () => {
+				mocks.current = { [field]: `${field}-shared`, [repo]: "old" };
+
+				await expect(
+					update({ [field]: `${field}-private`, [repo]: "new" }),
+				).rejects.toMatchObject({ code: "FORBIDDEN" });
+				await update({ [field]: `${field}-mine`, [repo]: "new" });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
+
+			it("allows a repository change when no provider is stored or set", async () => {
+				mocks.current = { [field]: null, [repo]: "old" };
+
+				await update({ [repo]: "new" });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
+
+			it.each(["owner", "admin"])("does not hold an %s back", async (role) => {
+				mocks.member = { role, accessedGitProviders: [] };
+				mocks.current = { [field]: `${field}-private`, [repo]: "old" };
+
+				await update({ [repo]: "new" });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
+
+			it("refuses a source-type switch that makes an unusable stored provider active", async () => {
+				mocks.current = {
+					[field]: `${field}-private`,
+					sourceType: "raw",
+					[repo]: "old",
+				};
+				const sourceType = field.replace("Id", "");
+
+				await expect(update({ sourceType })).rejects.toMatchObject({
+					code: "FORBIDDEN",
+				});
+				expect(service.written()).not.toHaveBeenCalled();
+			});
+
+			it("lets a source type that is already active be sent again", async () => {
+				const sourceType = field.replace("Id", "");
+				mocks.current = { [field]: `${field}-private`, sourceType };
+
+				await update({ sourceType });
+
+				expect(service.written()).toHaveBeenCalledTimes(1);
+			});
 		});
 	},
 );

@@ -196,26 +196,32 @@ const REGISTRY_REFERENCE_KEYS: (keyof ServiceReferenceInput)[] = [
 	"rollbackRegistryId",
 ];
 
+export type DeployReferenceEntity = {
+	sourceType?: string | null;
+	environment: { project: { organizationId: string } };
+} & ServiceReferenceInput;
+
 /**
  * Rows written before #461 can still hold a registry, git provider or SSH key
  * of another organization, and `project.duplicate` used to copy them. This is
- * the deploy-time half of the same rule: the deployment loads the credentials
- * of every id its source type and registries use, so each one is re-checked
- * against the organization of the service's project and the deployment fails
- * closed, with a message that lands in the deployment log. Nothing is rewritten:
- * the row keeps the stale id until somebody picks a provider of their own.
+ * the use-time half of the same rule: whatever loads the credentials of the ids
+ * a row points at re-checks them against the organization of the service's
+ * project and fails closed (FORBIDDEN, with a message that lands in the
+ * deployment log when it is a deploy). Nothing is rewritten: the row keeps the
+ * stale id until somebody picks one of their own.
  *
  * Only the git id the source type clones with is checked (a stale `githubId` on
- * a custom-git service is never read); every registry id is, because the
- * build, pull, push and rollback paths pick among them.
+ * a custom-git service is never read). With the default `deploy` scope every
+ * registry id is checked as well, because the build, pull, push and rollback
+ * paths pick among them; the `source` scope is for the routes that only clone
+ * or read the repository (services list, source fetch, template read, patch
+ * repo) and checks the source credential alone.
  */
 export const assertDeployReferencesInOrganization = async (
-	entity: {
-		sourceType?: string | null;
-		environment: { project: { organizationId: string } };
-	} & ServiceReferenceInput,
+	entity: DeployReferenceEntity,
+	scope: "deploy" | "source" = "deploy",
 ) => {
-	const keys = [...REGISTRY_REFERENCE_KEYS];
+	const keys = scope === "deploy" ? [...REGISTRY_REFERENCE_KEYS] : [];
 	const sourceKey = entity.sourceType
 		? SOURCE_REFERENCE_KEYS[entity.sourceType]
 		: undefined;
@@ -261,14 +267,38 @@ type GitProviderReferences = Pick<
 	"githubId" | "gitlabId" | "bitbucketId" | "giteaId"
 >;
 
-const GIT_PROVIDER_REFERENCES: {
+/**
+ * The columns that say which repository a git-provider source points at, plus
+ * the ids and the source type. Branch, build path, trigger type and the like
+ * are not here: they stay free for anybody who may edit the service.
+ */
+export type GitSourceInput = GitProviderReferences & {
+	sourceType?: string | null;
+	repository?: string | null;
+	owner?: string | null;
+	gitlabRepository?: string | null;
+	gitlabOwner?: string | null;
+	gitlabProjectId?: number | null;
+	gitlabPathNamespace?: string | null;
+	bitbucketRepository?: string | null;
+	bitbucketOwner?: string | null;
+	bitbucketRepositorySlug?: string | null;
+	giteaRepository?: string | null;
+	giteaOwner?: string | null;
+};
+
+const GIT_SOURCES: {
+	sourceType: string;
 	key: keyof GitProviderReferences;
 	label: string;
+	repositoryKeys: (keyof GitSourceInput)[];
 	gitProviderIdOf: Lookup;
 }[] = [
 	{
+		sourceType: "github",
 		key: "githubId",
 		label: "GitHub provider",
+		repositoryKeys: ["repository", "owner"],
 		gitProviderIdOf: async (id) =>
 			(
 				await db.query.github.findFirst({
@@ -278,8 +308,15 @@ const GIT_PROVIDER_REFERENCES: {
 			)?.gitProviderId,
 	},
 	{
+		sourceType: "gitlab",
 		key: "gitlabId",
 		label: "GitLab provider",
+		repositoryKeys: [
+			"gitlabRepository",
+			"gitlabOwner",
+			"gitlabProjectId",
+			"gitlabPathNamespace",
+		],
 		gitProviderIdOf: async (id) =>
 			(
 				await db.query.gitlab.findFirst({
@@ -289,8 +326,14 @@ const GIT_PROVIDER_REFERENCES: {
 			)?.gitProviderId,
 	},
 	{
+		sourceType: "bitbucket",
 		key: "bitbucketId",
 		label: "Bitbucket provider",
+		repositoryKeys: [
+			"bitbucketRepository",
+			"bitbucketOwner",
+			"bitbucketRepositorySlug",
+		],
 		gitProviderIdOf: async (id) =>
 			(
 				await db.query.bitbucket.findFirst({
@@ -300,8 +343,10 @@ const GIT_PROVIDER_REFERENCES: {
 			)?.gitProviderId,
 	},
 	{
+		sourceType: "gitea",
 		key: "giteaId",
 		label: "Gitea provider",
+		repositoryKeys: ["giteaRepository", "giteaOwner"],
 		gitProviderIdOf: async (id) =>
 			(
 				await db.query.gitea.findFirst({
@@ -312,6 +357,10 @@ const GIT_PROVIDER_REFERENCES: {
 	},
 ];
 
+// "", null and undefined all mean "no value" for a stored repository column
+const normalized = (value: unknown) =>
+	value === "" || value === undefined ? null : value;
+
 /**
  * Being in the organization (assertServiceReferencesInOrganization) is not the
  * same as being allowed to use the git provider: members only see the
@@ -320,46 +369,105 @@ const GIT_PROVIDER_REFERENCES: {
  * admins see all). The provider pickers list exactly that set, so this refuses
  * the ids a picker could not have offered.
  *
- * An id equal to the one already stored on the row is left alone, so a member
- * editing other fields of a service whose provider somebody else connected is
- * not locked out; only setting or changing to an inaccessible id is refused.
- * `loadCurrent` is only called when the input sets one of the ids.
+ * Three things need access to the provider that ends up on the service (the id
+ * in the input, or the one already stored when the input has none):
+ * - setting or changing the id;
+ * - changing a repository column of that source (repository, owner, project id
+ *   and path namespace, slug), compared against the stored row, so the repo is
+ *   not re-pointed through somebody else's token;
+ * - switching the source type to that source, which makes the stored provider
+ *   active.
+ * Everything else is free, so a member editing the branch, build path, trigger
+ * type or any other field of a service whose provider somebody else connected
+ * is not locked out, and the unchanged values the save forms resend pass.
+ *
+ * `loadCurrent` is only called when the input touches one of those fields.
  */
-export const assertCanUseServiceGitProviders = async (
-	input: GitProviderReferences,
-	loadCurrent: () => Promise<GitProviderReferences | null | undefined>,
+const findInaccessibleGitProvider = async (
+	input: GitSourceInput,
+	loadCurrent: () => Promise<GitSourceInput | null | undefined>,
 	session: { userId: string; activeOrganizationId: string },
 ) => {
-	const set = GIT_PROVIDER_REFERENCES.filter(
-		({ key }) => input[key] !== null && input[key] !== undefined,
-	);
-	if (set.length === 0) {
-		return;
+	const touched = (key: keyof GitSourceInput) =>
+		input[key] !== undefined && input[key] !== null;
+	const touchesSource = (source: (typeof GIT_SOURCES)[number]) =>
+		touched(source.key) ||
+		source.repositoryKeys.some((key) => input[key] !== undefined) ||
+		input.sourceType === source.sourceType;
+	if (!GIT_SOURCES.some(touchesSource)) {
+		return null;
 	}
 
 	const current = await loadCurrent();
-	const changed = set.filter(({ key }) => input[key] !== current?.[key]);
-	if (changed.length === 0) {
-		return;
+	const needed = GIT_SOURCES.flatMap((source) => {
+		if (!touchesSource(source)) {
+			return [];
+		}
+		const id =
+			input[source.key] !== undefined
+				? input[source.key]
+				: current?.[source.key];
+		if (id === null || id === undefined) {
+			return [];
+		}
+		const idChanged = touched(source.key) && id !== current?.[source.key];
+		const repositoryChanged = source.repositoryKeys.some(
+			(key) =>
+				input[key] !== undefined &&
+				normalized(input[key]) !== normalized(current?.[key]),
+		);
+		const activated =
+			input.sourceType === source.sourceType &&
+			current?.sourceType !== source.sourceType;
+		return idChanged || repositoryChanged || activated ? [{ source, id }] : [];
+	});
+	if (needed.length === 0) {
+		return null;
 	}
 
 	const [gitProviderIds, accessible] = await Promise.all([
-		Promise.all(
-			changed.map(({ key, gitProviderIdOf }) =>
-				gitProviderIdOf(input[key] as string),
-			),
-		),
+		Promise.all(needed.map(({ source, id }) => source.gitProviderIdOf(id))),
 		getAccessibleGitProviderIds(session),
 	]);
 
-	const refused = changed.find((_, index) => {
+	const refused = needed.find((_, index) => {
 		const gitProviderId = gitProviderIds[index];
 		return !gitProviderId || !accessible.has(gitProviderId);
 	});
-	if (refused) {
+	return refused?.source.label ?? null;
+};
+
+export const assertCanUseServiceGitProviders = async (
+	...args: Parameters<typeof findInaccessibleGitProvider>
+) => {
+	const label = await findInaccessibleGitProvider(...args);
+	if (label) {
 		throw new TRPCError({
 			code: "FORBIDDEN",
-			message: `You don't have access to this ${refused.label}`,
+			message: `You don't have access to this ${label}`,
+		});
+	}
+};
+
+/**
+ * `project.duplicate`, member side: the copy keeps the git provider ids of the
+ * source row, so a caller who could not have picked that provider is refused
+ * with the same kind of message as a foreign id. Owners and admins can use every
+ * provider of the organization and pass.
+ */
+export const assertCanCopyServiceGitProviders = async (
+	service: GitProviderReferences & { name: string },
+	session: { userId: string; activeOrganizationId: string },
+) => {
+	const label = await findInaccessibleGitProvider(
+		service,
+		async () => null,
+		session,
+	);
+	if (label) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Cannot duplicate "${service.name}": you don't have access to its ${label}. Ask its owner to share it, or choose one of your own in the service settings, then duplicate again.`,
 		});
 	}
 };

@@ -3,6 +3,7 @@ import {
 	addDomainToCompose,
 	assertCanUseServiceGitProviders,
 	assertComposeBuildSettings,
+	assertDeployReferencesInOrganization,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
 	assertServiceReferencesInOrganization,
@@ -635,6 +636,9 @@ export const composeRouter = createTRPCRouter({
 				}
 				return compose.sourceType;
 			} catch (err) {
+				if (err instanceof TRPCError && err.code === "FORBIDDEN") {
+					throw err;
+				}
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error fetching source type",
@@ -964,6 +968,9 @@ export const composeRouter = createTRPCRouter({
 					message: "You are not authorized to update this compose",
 				});
 			}
+
+			// A stored provider or SSH key of another organization must not be used to clone.
+			await assertDeployReferencesInOrganization(compose, "source");
 
 			const tempAppName = `${compose.appName}-temp-template-${nanoid()}`;
 

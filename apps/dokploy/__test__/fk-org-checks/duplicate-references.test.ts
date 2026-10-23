@@ -8,6 +8,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // row), so it has nothing to refuse.
 const mocks = vi.hoisted(() => ({
 	owners: new Map<string, string>(),
+	member: { role: "owner", accessedGitProviders: [] as string[] },
+	gitProviders: [] as {
+		gitProviderId: string;
+		userId: string;
+		sharedWithOrganization: boolean;
+	}[],
 	application: {} as Record<string, unknown>,
 	compose: {} as Record<string, unknown>,
 	createProject: vi.fn(),
@@ -18,6 +24,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("drizzle-orm", async (importOriginal) => ({
 	...(await importOriginal<typeof import("drizzle-orm")>()),
 	eq: (_column: unknown, value: unknown) => ({ value }),
+	and: (...conditions: unknown[]) => conditions,
 }));
 
 const lookup = (kind: "plain" | "provider") =>
@@ -28,7 +35,10 @@ const lookup = (kind: "plain" | "provider") =>
 		}
 		return kind === "plain"
 			? { organizationId }
-			: { gitProvider: { organizationId } };
+			: {
+					gitProviderId: `gp-${args.where.value}`,
+					gitProvider: { organizationId },
+				};
 	});
 
 vi.mock("@dokploy/server/db", async (importOriginal) => ({
@@ -41,8 +51,14 @@ vi.mock("@dokploy/server/db", async (importOriginal) => ({
 			gitlab: { findFirst: lookup("provider") },
 			gitea: { findFirst: lookup("provider") },
 			bitbucket: { findFirst: lookup("provider") },
+			gitProvider: { findMany: vi.fn(async () => mocks.gitProviders) },
+			member: { findFirst: vi.fn(async () => mocks.member) },
 		},
 	},
+}));
+
+vi.mock("@dokploy/server/services/proprietary/license-key", () => ({
+	hasValidLicense: vi.fn(async () => false),
 }));
 
 vi.mock("@dokploy/server", async () => {
@@ -54,6 +70,7 @@ vi.mock("@dokploy/server", async () => {
 		IS_CLOUD: false,
 		assertServiceCopyReferencesInOrganization:
 			real.assertServiceCopyReferencesInOrganization,
+		assertCanCopyServiceGitProviders: real.assertCanCopyServiceGitProviders,
 		findApplicationById: vi.fn(async () => mocks.application),
 		findComposeById: vi.fn(async () => mocks.compose),
 		createProject: mocks.createProject,
@@ -123,6 +140,32 @@ beforeEach(() => {
 	mocks.owners.clear();
 	mocks.owners.set("own", "org-b");
 	mocks.owners.set("foreign", "org-a");
+	mocks.member = { role: "owner", accessedGitProviders: [] };
+	mocks.gitProviders = [
+		{
+			gitProviderId: "gp-own",
+			userId: "user-1",
+			sharedWithOrganization: false,
+		},
+		{
+			gitProviderId: "gp-gh-mine",
+			userId: "user-1",
+			sharedWithOrganization: false,
+		},
+		{
+			gitProviderId: "gp-gh-shared",
+			userId: "user-2",
+			sharedWithOrganization: true,
+		},
+		{
+			gitProviderId: "gp-gh-private",
+			userId: "user-2",
+			sharedWithOrganization: false,
+		},
+	];
+	for (const id of ["gh-mine", "gh-shared", "gh-private"]) {
+		mocks.owners.set(id, "org-b");
+	}
 	mocks.application = {
 		applicationId: "svc-1",
 		name: "web",
@@ -188,6 +231,62 @@ describe.each(["application", "compose"] as const)(
 					customGitSSHKeyId: "own",
 				}),
 			);
+		});
+	},
+);
+
+describe.each(["application", "compose"] as const)(
+	"project.duplicate of a %s, git provider access",
+	{ timeout: 60_000 },
+	(type) => {
+		const row = () =>
+			type === "application" ? mocks.application : mocks.compose;
+		const created = () =>
+			type === "application" ? mocks.createApplication : mocks.createCompose;
+
+		it("refuses a member a service on a provider somebody else connected and did not share", async () => {
+			mocks.member = { role: "member", accessedGitProviders: [] };
+			row().githubId = "gh-private";
+
+			await expect(duplicate(type)).rejects.toMatchObject({
+				message: expect.stringContaining(
+					"you don't have access to its GitHub provider",
+				),
+			});
+			expect(mocks.createProject).not.toHaveBeenCalled();
+			expect(created()).not.toHaveBeenCalled();
+		});
+
+		it.each(["gh-mine", "gh-shared"])(
+			"copies a member's service on the usable provider %s",
+			async (id) => {
+				mocks.member = { role: "member", accessedGitProviders: [] };
+				row().githubId = id;
+
+				await duplicate(type);
+
+				expect(created()).toHaveBeenCalledTimes(1);
+			},
+		);
+
+		it.each(["owner", "admin"])(
+			"copies the service for an %s whatever the provider",
+			async (role) => {
+				mocks.member = { role, accessedGitProviders: [] };
+				row().githubId = "gh-private";
+
+				await duplicate(type);
+
+				expect(created()).toHaveBeenCalledTimes(1);
+			},
+		);
+
+		it("copies a member's service that has no git provider", async () => {
+			mocks.member = { role: "member", accessedGitProviders: [] };
+
+			await duplicate(type);
+
+			expect(created()).toHaveBeenCalledTimes(1);
 		});
 	},
 );

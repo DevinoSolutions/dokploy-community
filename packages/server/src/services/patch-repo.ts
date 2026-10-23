@@ -10,6 +10,7 @@ import { cloneGithubRepository } from "../utils/providers/github";
 import { cloneGitlabRepository } from "../utils/providers/gitlab";
 import { findApplicationById } from "./application";
 import { findComposeById } from "./compose";
+import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
 interface PatchRepoConfig {
 	type: "application" | "compose";
@@ -38,6 +39,9 @@ export const ensurePatchRepo = async ({
 		type === "application"
 			? await findApplicationById(id)
 			: await findComposeById(id);
+
+	// A stored provider or SSH key of another organization must not be used to clone.
+	await assertDeployReferencesInOrganization(application, "source");
 
 	const { PATCH_REPOS_PATH } = paths(!!serverId);
 	const repoPath = join(PATCH_REPOS_PATH, type, application.appName);
