@@ -180,9 +180,9 @@ export const assertComposeSpecVolumesBound = async (
 		const hint =
 			strict && compose.composeType !== "stack"
 				? `Dokploy does not write a .env for this compose ("Create env file" is off), so its variables cannot be resolved: turn on "Create env file", or write the volume names out in the compose file.`
-				: "Write the volume names out in the compose file.";
+				: "Write the volume names and paths out in the compose file.";
 		throw new Error(
-			`Compose volume check failed: ${unresolved[0]} cannot be resolved before the deploy, so the volumes it uses cannot be checked. ${hint} Keep the volumes in the one compose file (no include, no extends from another file, no volumes_from a container).`,
+			`Compose volume check failed: ${unresolved[0]} cannot be resolved before the deploy, so the volumes and host paths it uses cannot be checked. ${hint} Keep the volumes in the one compose file (no include, no extends from another file, no volumes_from a container).`,
 		);
 	}
 	const [refused] = await findRefusedComposeVolumes(compose, uses);
