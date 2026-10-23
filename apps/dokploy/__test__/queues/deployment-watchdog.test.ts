@@ -1424,3 +1424,132 @@ describe("the slot is released even when the bookkeeping fails", () => {
 		);
 	});
 });
+
+describe("a deploy that stalls after the image push", () => {
+	// job-4512: the log ended at "✅ Image Pushed", the rollout never started and
+	// the row stayed running for 66 minutes. The watchdog reads the log's
+	// modification time, not its content, so this stall is a plain idle stall.
+	const stalledAfterPush = () => {
+		running = [row({ title: "Deploy (Image Pushed)" })];
+		clock = START + 30 * MIN;
+		idleMs = 25 * MIN;
+	};
+
+	it("fires the idle trigger like a build-phase stall: stop, mark failed, notify, release", async () => {
+		stalledAfterPush();
+		deps.stop.mockResolvedValue({
+			method: "pid",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await sweepTwice(watchdog);
+		expect(logLines()[0]).toBe("Watchdog: no log output for 20 min");
+		expect(deps.stop).toHaveBeenCalledTimes(1);
+
+		// The rollout never started, so the job does not end by itself.
+		clock += 11 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.markFailed).toHaveBeenCalledTimes(1);
+		expect(deps.markFailed.mock.calls[0]?.[1]).toContain(
+			"Watchdog: no log output for 20 min",
+		);
+		expect(deps.notify).toHaveBeenCalledTimes(1);
+		expect(deps.recordAudit.mock.calls[0]?.[0]).toMatchObject({
+			action: "watchdog_fail",
+			metadata: expect.objectContaining({ reason: "idle", slotReleased: true }),
+		});
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: false,
+		});
+		expect(logLines()).toContain("Watchdog: marked failed");
+	});
+
+	it("handles it the same way as a stall in the build phase", async () => {
+		const outcomes: Array<Record<string, unknown>> = [];
+		for (const title of ["Deploy (building)", "Deploy (Image Pushed)"]) {
+			vi.clearAllMocks();
+			keptLocks = new Set();
+			running = [row({ title })];
+			jobs = [appJob()];
+			clock = START + 30 * MIN;
+			idleMs = 25 * MIN;
+			deps.readStatus.mockResolvedValue("running");
+			deps.readLogIdleMs.mockImplementation(async () => idleMs);
+			const watchdog = createDeploymentWatchdog(asDeps);
+			await sweepTwice(watchdog);
+			outcomes.push({
+				stops: deps.stop.mock.calls.length,
+				marked: deps.markFailed.mock.calls.length,
+				notified: deps.notify.mock.calls.length,
+				line: logLines()[0],
+			});
+		}
+
+		expect(outcomes[1]).toEqual(outcomes[0]);
+		expect(outcomes[1]).toMatchObject({
+			stops: 1,
+			line: "Watchdog: no log output for 20 min",
+		});
+	});
+
+	it("does not fire on the first silent sweep alone", async () => {
+		stalledAfterPush();
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.stop).not.toHaveBeenCalled();
+		expect(deps.markFailed).not.toHaveBeenCalled();
+	});
+});
+
+describe("a log host that cannot be reached", () => {
+	it("never fires the idle trigger, however long it stays unreachable", async () => {
+		idleMs = null;
+		clock = START + 80 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+		clock += MIN;
+		await watchdog.sweep();
+		clock += MIN;
+		await watchdog.sweep();
+
+		expect(deps.stop).not.toHaveBeenCalled();
+		expect(deps.markFailed).not.toHaveBeenCalled();
+		expect(deps.appendLog).not.toHaveBeenCalled();
+		expect(deps.releaseJob).not.toHaveBeenCalled();
+	});
+
+	it("still fires the wall limit, without reading the log", async () => {
+		idleMs = null;
+		clock = START + 91 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(logLines()[0]).toBe("Watchdog: exceeded 90 min");
+		expect(deps.stop).toHaveBeenCalledTimes(1);
+		expect(deps.readLogIdleMs).not.toHaveBeenCalled();
+	});
+
+	it("an unreachable sighting between two silent ones does not count as silence", async () => {
+		clock = START + 30 * MIN;
+		deps.readLogIdleMs
+			.mockResolvedValueOnce(25 * MIN)
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(25 * MIN);
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+		clock += MIN;
+		await watchdog.sweep();
+		clock += MIN;
+		await watchdog.sweep();
+
+		expect(deps.stop).not.toHaveBeenCalled();
+	});
+});
