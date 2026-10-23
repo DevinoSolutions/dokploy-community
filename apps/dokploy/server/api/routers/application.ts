@@ -76,6 +76,11 @@ import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "@/server/api/utils/deploy-priority";
+import { cancelRunningDeploymentLocally } from "@/server/api/utils/local-cancel";
+import {
+	readServiceWatchdogExclusion,
+	writeServiceWatchdogExclusion,
+} from "@/server/api/utils/watchdog-exclusion";
 import { coalesceManualApplicationDeploy } from "@/server/api/utils/manual-application-coalesce";
 import { serializeManualDeploy } from "@/server/api/utils/manual-deploy-lock";
 import { getRailpackVersions } from "@/server/api/utils/railpack-versions";
@@ -1318,6 +1323,43 @@ export const applicationRouter = createTRPCRouter({
 			});
 			return true;
 		}),
+	// "Exclude from the stuck-deployment watchdog": the service owner can opt out
+	// of the automatic failing of stuck deployments (see queues/deployment-watchdog.ts).
+	watchdogExclusion: protectedProcedure
+		.input(apiFindOneApplication)
+		.query(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.applicationId, {
+				service: ["read"],
+			});
+			return readServiceWatchdogExclusion({
+				type: "application",
+				id: input.applicationId,
+			});
+		}),
+
+	setWatchdogExclusion: protectedProcedure
+		.input(
+			apiFindOneApplication.extend({ excluded: z.boolean() }),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.applicationId, {
+				service: ["create"],
+			});
+			const application = await findApplicationById(input.applicationId);
+			const result = await writeServiceWatchdogExclusion(
+				{ type: "application", id: input.applicationId },
+				input.excluded,
+			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "application",
+				resourceId: input.applicationId,
+				resourceName: application.appName,
+				metadata: { watchdogExcluded: input.excluded },
+			});
+			return result;
+		}),
+
 	killBuild: protectedProcedure
 		.input(apiFindOneApplication)
 		.mutation(async ({ input, ctx }) => {
@@ -1562,9 +1604,20 @@ export const applicationRouter = createTRPCRouter({
 				}
 			}
 
+			// Self-hosted: stop the running deployment on its host and let the job
+			// free its queue slot (see cancel-active-deployment.ts).
+			if (!IS_CLOUD) {
+				return cancelRunningDeploymentLocally(ctx, {
+					type: "application",
+					applicationId: application.applicationId,
+					appName: application.appName,
+					name: application.name,
+				});
+			}
+
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Deployment cancellation only available in cloud version",
+				message: "This service has no server to cancel its deployment on",
 			});
 		}),
 

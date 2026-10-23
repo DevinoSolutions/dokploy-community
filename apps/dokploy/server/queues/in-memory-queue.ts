@@ -184,6 +184,12 @@ interface InternalJob {
 	/** Started ahead of waiting jobs through the priority lane. */
 	jumped: boolean;
 	wentAheadOf: number;
+	/**
+	 * The slot was freed by `releaseActive` while the processor was still
+	 * running. When it finally returns it must not touch the partition: the
+	 * group may have been started again by then.
+	 */
+	released: boolean;
 }
 
 interface Partition {
@@ -492,6 +498,7 @@ export class InMemoryQueue {
 			group: getGroup(data),
 			jumped: false,
 			wentAheadOf: 0,
+			released: false,
 		};
 	}
 
@@ -564,6 +571,32 @@ export class InMemoryQueue {
 			if (removed.length === 0) continue;
 			partition.waiting = partition.waiting.filter((job) => job.id !== id);
 			this.settle(removed);
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Free the slot of a running job whose processor will not return (it hangs in
+	 * a command nobody can interrupt). The job leaves the partition's active list
+	 * and its service's group lock, the journal row is settled and the next
+	 * waiting job may start; the processor itself is left alone, and when it ends
+	 * it changes nothing here. True when a running job had that id. The deployment
+	 * watchdog calls this after it has stopped the work, never instead of that.
+	 */
+	releaseActive(id: string): boolean {
+		for (const partition of this.partitions.values()) {
+			const job = partition.active.find((candidate) => candidate.id === id);
+			if (!job) continue;
+			job.released = true;
+			job.finishedOn = this.now();
+			job.failedReason = "Released by the deployment watchdog";
+			partition.active = partition.active.filter((j) => j.id !== job.id);
+			partition.activeGroups.delete(job.group);
+			if (job.jumped) partition.jumpedLast = false;
+			this.settle([job]);
+			this.wakeIdleWaiters();
+			void this.drainPartition(job.partition);
 			return true;
 		}
 		return false;
@@ -852,23 +885,29 @@ export class InMemoryQueue {
 			job.failedReason = error instanceof Error ? error.message : String(error);
 			console.error("In-memory deployment job failed", error);
 		} finally {
-			job.finishedOn = this.now();
-			const partition = this.partitions.get(job.partition);
-			if (partition) {
-				partition.active = partition.active.filter((j) => j.id !== job.id);
-				partition.activeGroups.delete(job.group);
-				// A priority job that did not complete frees the "one ahead"
-				// allowance for a retry; it is held for exactly as long as the slot.
-				if (job.jumped && outcome) partition.jumpedLast = false;
+			// Its slot was already freed (and may be in use again): nothing to undo.
+			if (!job.released) {
+				job.finishedOn = this.now();
+				const partition = this.partitions.get(job.partition);
+				if (partition) {
+					partition.active = partition.active.filter((j) => j.id !== job.id);
+					partition.activeGroups.delete(job.group);
+					// A priority job that did not complete frees the "one ahead"
+					// allowance for a retry; it is held for exactly as long as the slot.
+					if (job.jumped && outcome) partition.jumpedLast = false;
+				}
+				this.settle([job]);
+				this.wakeIdleWaiters();
+				// A slot (and possibly the group) freed up — try to schedule more.
+				void this.drainPartition(job.partition);
 			}
-			this.settle([job]);
-			if (this.activeCount() === 0) {
-				const waiters = this.idleWaiters;
-				this.idleWaiters = [];
-				for (const wake of waiters) wake();
-			}
-			// A slot (and possibly the group) freed up — try to schedule more.
-			void this.drainPartition(job.partition);
 		}
+	}
+
+	private wakeIdleWaiters() {
+		if (this.activeCount() !== 0) return;
+		const waiters = this.idleWaiters;
+		this.idleWaiters = [];
+		for (const wake of waiters) wake();
 	}
 }

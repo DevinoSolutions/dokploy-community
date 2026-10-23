@@ -102,6 +102,9 @@ const DEPLOYMENT_CANCEL_ACTIONS: DeploymentCancelAuditAction[] = [
 	"cancel_deployment",
 	"kill_build",
 	"kill_process",
+	// A watchdog stop ends `error`. A row whose finish did not complete stays
+	// `cancelled`, and then says who stopped it.
+	"watchdog_fail",
 ];
 
 /** Longest OAuth client name shown; the rest is cut and ends in an ellipsis. */

@@ -49,6 +49,7 @@ import { ComposePaidMonitoring } from "@/components/dashboard/monitoring/paid/co
 import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
+import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -590,6 +591,7 @@ const Service = (
 												<ShowComposeBuildServer composeId={composeId} />
 												<DeployGuardrailsCompose composeId={composeId} />
 												<RollingReplaceCompose composeId={composeId} />
+												<WatchdogExclusion id={composeId} type="compose" />
 											</div>
 										</TabsContent>
 									)}

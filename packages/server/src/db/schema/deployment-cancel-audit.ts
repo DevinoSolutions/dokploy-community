@@ -22,7 +22,8 @@ export type DeploymentCancelAuditAction =
 	| "clean_queue"
 	| "keep_oldest_queue"
 	| "clear_all_queues"
-	| "coalesce_drop";
+	| "coalesce_drop"
+	| "watchdog_fail";
 
 /** `system` is an internal path with no caller (coalescing on a push). */
 export type DeploymentCancelAuditActorType =

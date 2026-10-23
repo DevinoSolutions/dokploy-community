@@ -11,6 +11,8 @@ import {
 	cleanupSystem,
 	cleanupVolumes,
 	DEFAULT_UPDATE_DATA,
+	findApplicationById,
+	findComposeById,
 	findServerById,
 	getDockerDiskUsage,
 	getDokployImageTag,
@@ -53,6 +55,11 @@ import {
 import { db } from "@dokploy/server/db";
 import { checkPermission } from "@dokploy/server/services/permission";
 import { getAccessibleServerIds } from "@dokploy/server/services/server";
+import {
+	apiAddDeploymentWatchdogExclusion,
+	apiRemoveDeploymentWatchdogExclusion,
+	apiUpdateDeploymentWatchdog,
+} from "@dokploy/server/utils/deployments/watchdog-config";
 import {
 	cancelDockerCleanup,
 	scheduleDockerCleanup,
@@ -534,6 +541,102 @@ export const settingsRouter = createTRPCRouter({
 				action: "update",
 				resourceType: "settings",
 				resourceName: "builds-concurrency",
+			});
+			return true;
+		}),
+
+	// Stuck-deployment watchdog (see queues/deployment-watchdog.ts). Reading the
+	// settings is getWebServerSettings, which returns the same row.
+	updateDeploymentWatchdog: adminProcedure
+		.input(apiUpdateDeploymentWatchdog)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This feature is only available for self-hosted instances",
+				});
+			}
+
+			await updateWebServerSettings({
+				deploymentWatchdogEnabled: input.enabled,
+				deploymentWatchdogIdleMinutes: input.idleMinutes,
+				deploymentWatchdogMaxMinutes: input.maxMinutes,
+			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "deployment-watchdog",
+			});
+			return true;
+		}),
+
+	// A service on this list is never failed by the watchdog. The list is
+	// instance-wide, so a service of another organization cannot be named.
+	addDeploymentWatchdogExclusion: adminProcedure
+		.input(apiAddDeploymentWatchdogExclusion)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This feature is only available for self-hosted instances",
+				});
+			}
+
+			const service =
+				input.type === "compose"
+					? await findComposeById(input.id)
+					: await findApplicationById(input.id);
+			if (
+				service.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not allowed to exclude this service",
+				});
+			}
+
+			const current = await getWebServerSettings();
+			const others = (current?.deploymentWatchdogExclusions ?? []).filter(
+				(entry) => !(entry.type === input.type && entry.id === input.id),
+			);
+			await updateWebServerSettings({
+				deploymentWatchdogExclusions: [...others, input],
+			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "deployment-watchdog-exclusion",
+				metadata: { type: input.type, id: input.id, name: service.name },
+			});
+			return true;
+		}),
+
+	removeDeploymentWatchdogExclusion: adminProcedure
+		.input(apiRemoveDeploymentWatchdogExclusion)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This feature is only available for self-hosted instances",
+				});
+			}
+
+			const current = await getWebServerSettings();
+			const list = current?.deploymentWatchdogExclusions ?? [];
+			await updateWebServerSettings({
+				deploymentWatchdogExclusions: list.filter(
+					(entry) => !(entry.type === input.type && entry.id === input.id),
+				),
+			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "deployment-watchdog-exclusion",
+				metadata: { removed: true, type: input.type, id: input.id },
 			});
 			return true;
 		}),
