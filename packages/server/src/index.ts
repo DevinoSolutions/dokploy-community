@@ -199,6 +199,7 @@ export * from "./utils/uptimely/base-url";
 export * from "./utils/uptimely/client";
 export * from "./utils/uptimely/heartbeat";
 export * from "./utils/uptimely/preflight";
+export * from "./utils/uptimely/read-cache";
 export * from "./utils/vault";
 export * from "./utils/volume-backups/index";
 export * from "./utils/watch-paths/normalize-changed-files";

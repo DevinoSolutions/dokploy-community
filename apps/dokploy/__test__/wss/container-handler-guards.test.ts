@@ -5,17 +5,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 
 // The container terminal and the container logs viewer both reach a container
-// by a client-supplied id. Service access alone must not be enough: the
-// handlers must check the container belongs to the service, and only after the
-// organization and cloud gates, because that check runs `docker inspect` on the
-// target host.
+// by a client-supplied name or id. Service access alone must not be enough: the
+// handlers resolve the string to ONE full id with its ownership check, with or
+// without a serviceId, only after the organization and cloud gates (the check
+// runs `docker inspect` on the target host), and run exec, logs and attach on
+// that full id, never on the string.
 
 const state = vi.hoisted(() => ({ isCloud: false }));
 const mockFindServerById = vi.hoisted(() => vi.fn());
-const mockOwnership = vi.hoisted(() => vi.fn());
+const mockResolve = vi.hoisted(() => vi.fn());
+const FULL_ID = "a".repeat(64);
 const mockSpawn = vi.hoisted(() => vi.fn());
 const mockSpawnPty = vi.hoisted(() => vi.fn());
 const mockSshConnect = vi.hoisted(() => vi.fn());
+const mockSshExec = vi.hoisted(() => vi.fn());
 
 vi.mock("@dokploy/server", () => ({
 	get IS_CLOUD() {
@@ -33,8 +36,8 @@ vi.mock("@dokploy/server", () => ({
 vi.mock("@/server/wss/authorize", () => ({
 	canAccessDockerOverWss: vi.fn(async () => true),
 }));
-vi.mock("@/server/wss/container-ownership", () => ({
-	containerBelongsToService: mockOwnership,
+vi.mock("@/server/wss/resolve-container", () => ({
+	resolveDockerTarget: mockResolve,
 }));
 vi.mock("node-pty", () => ({ spawn: mockSpawnPty }));
 vi.mock("node:child_process", async (importOriginal) => ({
@@ -44,6 +47,7 @@ vi.mock("node:child_process", async (importOriginal) => ({
 vi.mock("ssh2", () => ({
 	Client: class extends EventEmitter {
 		connect = mockSshConnect;
+		exec = mockSshExec;
 		end = vi.fn();
 	},
 }));
@@ -78,16 +82,19 @@ const handlers = [
 		setup: setupDockerContainerTerminalWebSocketServer,
 		// What the handler starts once every gate has passed.
 		started: () => mockSpawnPty.mock.calls.length,
+		// Arguments of the docker command the local branch spawned.
+		localArgs: () => (mockSpawnPty.mock.calls[0]?.[1] ?? []) as string[],
 	},
 	{
 		name: "container logs",
 		path: "/docker-container-logs",
 		setup: setupDockerContainerLogsWebSocketServer,
 		started: () => mockSpawn.mock.calls.length,
+		localArgs: () => (mockSpawn.mock.calls[0]?.[1] ?? []) as string[],
 	},
 ] as const;
 
-describe.each(handlers)("$name", ({ path, setup, started }) => {
+describe.each(handlers)("$name", ({ path, setup, started, localArgs }) => {
 	let server: http.Server;
 	let port: number;
 	const sockets: WebSocket[] = [];
@@ -107,7 +114,7 @@ describe.each(handlers)("$name", ({ path, setup, started }) => {
 	beforeEach(async () => {
 		vi.clearAllMocks();
 		state.isCloud = false;
-		mockOwnership.mockResolvedValue(true);
+		mockResolve.mockResolvedValue(FULL_ID);
 		mockSpawnPty.mockImplementation(fakePty);
 		mockSpawn.mockImplementation(fakeChild);
 		server = http.createServer();
@@ -121,8 +128,8 @@ describe.each(handlers)("$name", ({ path, setup, started }) => {
 		await new Promise((r) => server.close(r));
 	});
 
-	it("closes 4003 and starts nothing for a container of another service", async () => {
-		mockOwnership.mockResolvedValue(false);
+	it("closes 4003 and starts nothing for a container that does not resolve", async () => {
+		mockResolve.mockResolvedValue(null);
 		const { ws, closed } = await open({
 			containerId: "other",
 			serviceId: "svc",
@@ -131,28 +138,55 @@ describe.each(handlers)("$name", ({ path, setup, started }) => {
 
 		expect(await closed).toBe(4003);
 		await wait(100);
-		expect(mockOwnership).toHaveBeenCalledWith("svc", "other", null);
+		expect(mockResolve).toHaveBeenCalledWith(
+			expect.objectContaining({
+				reference: "other",
+				serviceId: "svc",
+				serverId: null,
+			}),
+		);
 		expect(started()).toBe(0);
 		expect(mockSpawnPty).not.toHaveBeenCalled();
 	});
 
-	it("starts for a container of the service", async () => {
+	it("runs on the full id the check resolved, not on the string sent", async () => {
 		await open({ containerId: "mine", serviceId: "svc" });
 		await wait(150);
 
-		expect(mockOwnership).toHaveBeenCalledWith("svc", "mine", null);
+		expect(mockResolve).toHaveBeenCalledWith(
+			expect.objectContaining({ reference: "mine", serviceId: "svc" }),
+		);
 		expect(started()).toBe(1);
+		expect(localArgs()).toContain(FULL_ID);
+		expect(localArgs()).not.toContain("mine");
 	});
 
-	it("does not check ownership without a service", async () => {
+	it("resolves and refuses without a service too", async () => {
+		mockResolve.mockResolvedValue(null);
+		const { closed } = await open({ containerId: "dokploy-postgres" });
+
+		expect(await closed).toBe(4003);
+		await wait(100);
+		expect(mockResolve).toHaveBeenCalledWith(
+			expect.objectContaining({
+				reference: "dokploy-postgres",
+				serviceId: null,
+			}),
+		);
+		expect(started()).toBe(0);
+	});
+
+	it("runs on the full id without a service", async () => {
 		await open({ containerId: "any" });
 		await wait(150);
 
-		expect(mockOwnership).not.toHaveBeenCalled();
+		expect(mockResolve).toHaveBeenCalledTimes(1);
 		expect(started()).toBe(1);
+		expect(localArgs()).toContain(FULL_ID);
+		expect(localArgs()).not.toContain("any");
 	});
 
-	it("rejects another organization's server before any container lookup", async () => {
+	it("rejects another organization server before any container lookup", async () => {
 		mockFindServerById.mockResolvedValue({
 			serverId: "srv-1",
 			organizationId: "org-other",
@@ -167,21 +201,33 @@ describe.each(handlers)("$name", ({ path, setup, started }) => {
 		expect(await closed).toBe(1005);
 		await wait(100);
 		expect(mockFindServerById).toHaveBeenCalledWith("srv-1");
-		expect(mockOwnership).not.toHaveBeenCalled();
+		expect(mockResolve).not.toHaveBeenCalled();
 		expect(mockSshConnect).not.toHaveBeenCalled();
 	});
 
-	it("checks ownership against the server for an own-organization server", async () => {
+	it("resolves against the server and runs the full id over ssh for an own-organization server", async () => {
 		mockFindServerById.mockResolvedValue({
 			serverId: "srv-1",
 			organizationId: "org-1",
 			sshKeyId: "key",
 		});
+		mockSshConnect.mockImplementation(function (this: EventEmitter) {
+			queueMicrotask(() => this.emit("ready"));
+		});
 		await open({ containerId: "c1", serviceId: "svc", serverId: "srv-1" });
 		await wait(150);
 
-		expect(mockOwnership).toHaveBeenCalledWith("svc", "c1", "srv-1");
+		expect(mockResolve).toHaveBeenCalledWith(
+			expect.objectContaining({
+				reference: "c1",
+				serviceId: "svc",
+				serverId: "srv-1",
+			}),
+		);
 		expect(mockSshConnect).toHaveBeenCalled();
+		const command = mockSshExec.mock.calls[0]?.[0] as string;
+		expect(command).toContain(FULL_ID);
+		expect(command.split(" ")).not.toContain("c1");
 	});
 
 	it("does not look up containers locally on the cloud control plane", async () => {
@@ -190,7 +236,7 @@ describe.each(handlers)("$name", ({ path, setup, started }) => {
 
 		await closed;
 		await wait(100);
-		expect(mockOwnership).not.toHaveBeenCalled();
+		expect(mockResolve).not.toHaveBeenCalled();
 		expect(started()).toBe(0);
 	});
 });

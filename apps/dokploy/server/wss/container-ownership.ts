@@ -10,12 +10,7 @@ import {
 	previewDeployments,
 	redis,
 } from "@dokploy/server/db/schema";
-import {
-	execAsync,
-	execAsyncRemote,
-} from "@dokploy/server/utils/process/execAsync";
 import { and, eq, ne, sql } from "drizzle-orm";
-import { quote } from "shell-quote";
 
 export const OWNERSHIP_LABELS = [
 	"com.docker.swarm.service.name",
@@ -90,32 +85,4 @@ export const isOtherServiceAppName = async (
 		if (row) return true;
 	}
 	return false;
-};
-
-// Service access alone must not allow `docker exec` into other tenants' containers.
-export const containerBelongsToService = async (
-	serviceId: string,
-	containerId: string,
-	serverId?: string | null,
-): Promise<boolean> => {
-	try {
-		const appName = await findServiceAppName(serviceId);
-		if (!appName) return false;
-		const command = quote([
-			"docker",
-			"inspect",
-			"--type",
-			"container",
-			"--format",
-			"{{json .Config.Labels}}",
-			containerId,
-		]);
-		const { stdout } = serverId
-			? await execAsyncRemote(serverId, command)
-			: await execAsync(command);
-		const labels = JSON.parse(stdout.trim()) ?? {};
-		return OWNERSHIP_LABELS.some((label) => labels[label] === appName);
-	} catch {
-		return false;
-	}
 };
