@@ -288,7 +288,11 @@ describe("binds of those directories at deploy", () => {
 	it("refuses a relative path that climbs to a parent from the compose's directory", async () => {
 		await expect(
 			assertComposeVolumesBound(
-				composeRow(bind("../../../../../../../../../var/lib")),
+				composeRow(
+					bind(
+						"../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../var/lib",
+					),
+				),
 			),
 		).rejects.toThrow(parentMessage);
 	});
@@ -407,7 +411,8 @@ volumes:
 		});
 
 	describe("reading the volumes", () => {
-		const volumes = (command: string) => getCommandRunVolumes({ command, composeId: "compose-1" });
+		const volumes = (command: string) =>
+			getCommandRunVolumes({ command, composeId: "compose-1" });
 
 		it.each([
 			["compose -f d.yml run -v /a:/b web", ["/a:/b"]],
@@ -464,7 +469,7 @@ volumes:
 	it.each([
 		"--volume=/:/host",
 		"-v /var/lib/docker:/d:ro",
-		"-v ../../../../../../../../../../../..:/d",
+		"-v ../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../..:/d",
 	])("refuses a bind of a parent: %s", async (flags) => {
 		await expect(assertComposeVolumesBound(run(flags))).rejects.toThrow(
 			/command bind mount ".*" contains Docker's own volume storage/,
@@ -881,7 +886,10 @@ describe("--project-directory moves the base of relative binds", () => {
 		["/var/lib/docker", "."],
 		["/var/lib/docker", "./"],
 		["/etc", "../var/lib"],
-		["../../../../../../../../../../../..", "."],
+		[
+			"../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../../..",
+			".",
+		],
 	])(
 		"--project-directory %s with %s binds a parent",
 		async (directory, source) => {
