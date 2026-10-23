@@ -126,6 +126,16 @@ export const bitbucketRouter = createTRPCRouter({
 	update: withPermission("gitProviders", "create")
 		.input(apiUpdateBitbucket)
 		.mutation(async ({ input, ctx }) => {
+			// The provider row is addressed by id: it has to belong to the caller's
+			// organization before it is rewritten (updateGitProvider re-assigns the
+			// organization), and its own gitProviderId is the one that is updated.
+			const bitbucket = await findBitbucketById(input.bitbucketId);
+			if (
+				bitbucket.gitProvider.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
+			}
 			const result = await updateBitbucket(input.bitbucketId, {
 				...input,
 				organizationId: ctx.session.activeOrganizationId,

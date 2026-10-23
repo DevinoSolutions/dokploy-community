@@ -89,10 +89,13 @@ describe.each(SERVICES)("api update schema of $router", ({ idKey, schema }) => {
 		).parse({
 			[idKey]: "svc-1",
 			environmentId: "env-of-another-org",
+			// the service's identity on the host (swarm service, volume namespace)
+			appName: "someone-elses-app-AbC123",
 			name: "renamed",
 		});
 
 		expect(parsed).not.toHaveProperty("environmentId");
+		expect(parsed).not.toHaveProperty("appName");
 		expect(parsed).toMatchObject({ [idKey]: "svc-1", name: "renamed" });
 	});
 });
@@ -117,11 +120,13 @@ describe.each(SERVICES)("$router.update", { timeout: 60_000 }, (service) => {
 			[service.idKey]: "svc-1",
 			name: "renamed",
 			environmentId: "env-of-org-a",
+			appName: "someone-elses-app-AbC123",
 		});
 
 		expect(mocks.updated).toHaveBeenCalledTimes(1);
 		const written = mocks.updated.mock.calls[0]?.[1];
 		expect(written).toMatchObject({ name: "renamed" });
 		expect(written).not.toHaveProperty("environmentId");
+		expect(written).not.toHaveProperty("appName");
 	});
 });

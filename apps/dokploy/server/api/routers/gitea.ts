@@ -220,18 +220,29 @@ export const giteaRouter = createTRPCRouter({
 	update: withPermission("gitProviders", "create")
 		.input(apiUpdateGitea)
 		.mutation(async ({ input, ctx }) => {
+			// The provider row is addressed by id: it has to belong to the caller's
+			// organization before it is rewritten (updateGitProvider re-assigns the
+			// organization), and its own gitProviderId is the one that is updated.
+			const gitea = await findGiteaById(input.giteaId);
+			if (
+				gitea.gitProvider.organizationId !== ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
+			}
 			if (input.name) {
-				await updateGitProvider(input.gitProviderId, {
+				await updateGitProvider(gitea.gitProviderId, {
 					name: input.name,
 					organizationId: ctx.session.activeOrganizationId,
 				});
 
 				await updateGitea(input.giteaId, {
 					...input,
+					gitProviderId: gitea.gitProviderId,
 				});
 			} else {
 				await updateGitea(input.giteaId, {
 					...input,
+					gitProviderId: gitea.gitProviderId,
 				});
 			}
 

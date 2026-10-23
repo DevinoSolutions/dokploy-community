@@ -647,7 +647,12 @@ export const apiUpdateApplication = createSchema
 	// `snapvisorProjectName` only goes through
 	// `snapvisor.setApplicationProject`, which validates the slug and checks
 	// the organization.
-	.omit({ serverId: true, environmentId: true, snapvisorProjectName: true });
+	.omit({
+		serverId: true,
+		environmentId: true,
+		appName: true,
+		snapvisorProjectName: true,
+	});
 
 // Schema for transferring application to another server
 export const apiTransferApplication = z.object({
