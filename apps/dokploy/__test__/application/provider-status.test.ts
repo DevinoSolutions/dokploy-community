@@ -12,6 +12,7 @@ vi.mock("@dokploy/server/index", () => ({
 	IS_CLOUD: true,
 	hasValidLicense: vi.fn(async () => false),
 	assertServiceReferencesInOrganization: vi.fn(async () => undefined),
+	assertCanUseServiceGitProviders: vi.fn(async () => undefined),
 	updateApplication: mockUpdateApplication,
 	findApplicationById: vi.fn(async () => ({
 		applicationId: "app-1",

@@ -220,4 +220,41 @@ describe("user.update", { timeout: 60_000 }, () => {
 		expect(mocks.updateUser).not.toHaveBeenCalled();
 		expect(mocks.accountSet).not.toHaveBeenCalled();
 	});
+
+	it("changes the password on a password-only payload and writes no user row", async () => {
+		mocks.findAccount.mockResolvedValue({
+			password: bcrypt.hashSync("old-password", 4),
+		});
+		const caller = await callerOf();
+
+		await expect(
+			caller.update({
+				password: "new-password",
+				currentPassword: "old-password",
+			}),
+		).resolves.not.toThrow();
+
+		expect(mocks.accountSet).toHaveBeenCalledTimes(1);
+		// updateUser would end in an empty `set()` ("No values to set") with nothing
+		// but undefined profile fields
+		expect(mocks.updateUser).not.toHaveBeenCalled();
+	});
+
+	it("still writes the user row when a profile field comes with the password", async () => {
+		mocks.findAccount.mockResolvedValue({
+			password: bcrypt.hashSync("old-password", 4),
+		});
+		const caller = await callerOf();
+
+		await caller.update({
+			password: "new-password",
+			currentPassword: "old-password",
+			allowImpersonation: false,
+		});
+
+		expect(mocks.updateUser).toHaveBeenCalledWith(
+			"user-1",
+			expect.objectContaining({ allowImpersonation: false }),
+		);
+	});
 });

@@ -1,4 +1,5 @@
 import {
+	assertCanUseServiceGitProviders,
 	assertNetworkIdsAttachableToResource,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
@@ -666,6 +667,18 @@ export const applicationRouter = createTRPCRouter({
 				{ githubId: input.githubId },
 				ctx.session.activeOrganizationId,
 			);
+			// Being in the organization is not enough: the caller has to be able to use
+			// this provider (own, shared or assigned), as the provider picker implies.
+			await assertCanUseServiceGitProviders(
+				{
+					githubId: input.githubId,
+					repository: input.repository,
+					owner: input.owner,
+					sourceType: "github",
+				},
+				() => findApplicationById(input.applicationId),
+				ctx.session,
+			);
 			await updateApplication(input.applicationId, {
 				repository: input.repository,
 				branch: input.branch,
@@ -697,6 +710,20 @@ export const applicationRouter = createTRPCRouter({
 			await assertServiceReferencesInOrganization(
 				{ gitlabId: input.gitlabId },
 				ctx.session.activeOrganizationId,
+			);
+			// Being in the organization is not enough: the caller has to be able to use
+			// this provider (own, shared or assigned), as the provider picker implies.
+			await assertCanUseServiceGitProviders(
+				{
+					gitlabId: input.gitlabId,
+					gitlabRepository: input.gitlabRepository,
+					gitlabOwner: input.gitlabOwner,
+					gitlabProjectId: input.gitlabProjectId,
+					gitlabPathNamespace: input.gitlabPathNamespace,
+					sourceType: "gitlab",
+				},
+				() => findApplicationById(input.applicationId),
+				ctx.session,
 			);
 			await updateApplication(input.applicationId, {
 				gitlabRepository: input.gitlabRepository,
@@ -732,6 +759,19 @@ export const applicationRouter = createTRPCRouter({
 				{ bitbucketId: input.bitbucketId },
 				ctx.session.activeOrganizationId,
 			);
+			// Being in the organization is not enough: the caller has to be able to use
+			// this provider (own, shared or assigned), as the provider picker implies.
+			await assertCanUseServiceGitProviders(
+				{
+					bitbucketId: input.bitbucketId,
+					bitbucketRepository: input.bitbucketRepository,
+					bitbucketOwner: input.bitbucketOwner,
+					bitbucketRepositorySlug: input.bitbucketRepositorySlug,
+					sourceType: "bitbucket",
+				},
+				() => findApplicationById(input.applicationId),
+				ctx.session,
+			);
 			await updateApplication(input.applicationId, {
 				bitbucketRepository: input.bitbucketRepository,
 				bitbucketRepositorySlug: input.bitbucketRepositorySlug,
@@ -764,6 +804,18 @@ export const applicationRouter = createTRPCRouter({
 			await assertServiceReferencesInOrganization(
 				{ giteaId: input.giteaId },
 				ctx.session.activeOrganizationId,
+			);
+			// Being in the organization is not enough: the caller has to be able to use
+			// this provider (own, shared or assigned), as the provider picker implies.
+			await assertCanUseServiceGitProviders(
+				{
+					giteaId: input.giteaId,
+					giteaRepository: input.giteaRepository,
+					giteaOwner: input.giteaOwner,
+					sourceType: "gitea",
+				},
+				() => findApplicationById(input.applicationId),
+				ctx.session,
 			);
 			await updateApplication(input.applicationId, {
 				giteaRepository: input.giteaRepository,
@@ -918,6 +970,11 @@ export const applicationRouter = createTRPCRouter({
 			await assertServiceReferencesInOrganization(
 				input,
 				ctx.session.activeOrganizationId,
+			);
+			await assertCanUseServiceGitProviders(
+				input,
+				() => findApplicationById(input.applicationId),
+				ctx.session,
 			);
 
 			if (input.buildServerId) {

@@ -289,6 +289,21 @@ export const userRouter = createTRPCRouter({
 			// the profile allow-list of apiUpdateUser, picked by name here as well so a
 			// widened schema cannot start writing other columns.
 			const { email, image, firstName, lastName, allowImpersonation } = input;
+			// A password-only payload has no profile column to write: an empty `set()` throws
+			// "No values to set" after the password was already changed above.
+			if (
+				[email, image, firstName, lastName, allowImpersonation].every(
+					(value) => value === undefined,
+				)
+			) {
+				await audit(ctx, {
+					action: "update",
+					resourceType: "user",
+					resourceId: ctx.user.id,
+					resourceName: ctx.user.email,
+				});
+				return await findUserById(ctx.user.id);
+			}
 			try {
 				const result = await updateUser(ctx.user.id, {
 					email,
