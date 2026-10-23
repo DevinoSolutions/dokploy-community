@@ -92,7 +92,13 @@ export const apiUpdateProject = createSchema
 	// (`*.` stripping, prefix-pattern rejection, hostname validation). Leaving
 	// them writable through the generic project update would let an unvalidated
 	// string reach the column, so they are omitted here on purpose.
-	.omit({ wildcardDomain: true, useOrganizationWildcard: true });
+	// `organizationId` is omitted too: a project never changes organization, and
+	// accepting it would let an owner/admin hand a project to another one.
+	.omit({
+		wildcardDomain: true,
+		useOrganizationWildcard: true,
+		organizationId: true,
+	});
 // .omit({ serverId: true });
 
 export const apiUpdateProjectWildcardDomain = z.object({

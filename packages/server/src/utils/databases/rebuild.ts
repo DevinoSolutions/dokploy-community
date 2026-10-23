@@ -13,6 +13,7 @@ import { deployMongo } from "@dokploy/server/services/mongo";
 import { deployMySql } from "@dokploy/server/services/mysql";
 import { deployPostgres } from "@dokploy/server/services/postgres";
 import { deployRedis } from "@dokploy/server/services/redis";
+import { assertVolumeMountsBound } from "@dokploy/server/services/volume-binding";
 import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { removeService } from "../docker/utils";
@@ -35,6 +36,15 @@ export const rebuildDatabase = async (
 	if (!database) {
 		throw new Error("Database not found");
 	}
+
+	// `docker volume rm --force` on a name that is reserved or claimed by
+	// another organization would destroy that tenant's data. Refuse before
+	// anything is touched: not even the service is removed, so a refused rebuild
+	// leaves the running service and every volume as they were.
+	await assertVolumeMountsBound(database.mounts, {
+		serviceType: type,
+		serviceId: databaseId,
+	});
 
 	await removeService(database.appName, database.serverId);
 	await new Promise((resolve) => setTimeout(resolve, 6000));

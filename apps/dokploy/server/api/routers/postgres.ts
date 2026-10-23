@@ -30,6 +30,7 @@ import {
 import { db } from "@dokploy/server/db";
 import {
 	addNewService,
+	assertEnvironmentInOrganization,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
@@ -499,6 +500,12 @@ export const postgresRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.postgresId, {
 				service: ["create"],
 			});
+
+			// The target must be an environment of the caller's active organization.
+			await assertEnvironmentInOrganization(
+				input.targetEnvironmentId,
+				ctx.session.activeOrganizationId,
+			);
 
 			const updatedPostgres = await db
 				.update(postgresTable)

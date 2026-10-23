@@ -83,6 +83,12 @@ export type VolumeBindingFacts = {
 	// in that service's `appName` namespace or is recorded on its mounts or
 	// volume backups.
 	claimedByOtherOrganization: boolean;
+	// What makes claimedByOtherOrganization true, for the server log only
+	// (never for the user-facing refusal).
+	otherOrganizationClaims?: Array<{
+		source: "namespace" | "mount" | "volumeBackup";
+		id: string;
+	}>;
 };
 
 export type VolumeBindingVerdict =

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, randomInt } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -67,9 +67,9 @@ export const generatePassword = (quantity = 16): string => {
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 	let password = "";
 	for (let i = 0; i < quantity; i++) {
-		password += characters.charAt(
-			Math.floor(Math.random() * characters.length),
-		);
+		// Also the random suffix of every appName (buildAppName), which keeps a
+		// service's volume namespace unique, so it must not be predictable.
+		password += characters.charAt(randomInt(characters.length));
 	}
 	return password.toLowerCase();
 };

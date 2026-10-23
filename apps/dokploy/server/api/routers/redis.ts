@@ -28,6 +28,7 @@ import {
 import { db } from "@dokploy/server/db";
 import {
 	addNewService,
+	assertEnvironmentInOrganization,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
@@ -480,6 +481,12 @@ export const redisRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.redisId, {
 				service: ["create"],
 			});
+
+			// The target must be an environment of the caller's active organization.
+			await assertEnvironmentInOrganization(
+				input.targetEnvironmentId,
+				ctx.session.activeOrganizationId,
+			);
 
 			const updatedRedis = await db
 				.update(redisTable)

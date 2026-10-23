@@ -223,10 +223,16 @@ export const updateProjectById = async (
 	projectId: string,
 	projectData: Partial<Project>,
 ) => {
+	// A project never changes identity or organization through an update.
+	const {
+		projectId: _projectId,
+		organizationId: _organizationId,
+		...changes
+	} = projectData;
 	const result = await db
 		.update(projects)
 		.set({
-			...projectData,
+			...changes,
 		})
 		.where(eq(projects.projectId, projectId))
 		.returning()

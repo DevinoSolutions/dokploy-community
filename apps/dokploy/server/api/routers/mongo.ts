@@ -29,6 +29,7 @@ import {
 import { db } from "@dokploy/server/db";
 import {
 	addNewService,
+	assertEnvironmentInOrganization,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
@@ -493,6 +494,12 @@ export const mongoRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.mongoId, {
 				service: ["create"],
 			});
+
+			// The target must be an environment of the caller's active organization.
+			await assertEnvironmentInOrganization(
+				input.targetEnvironmentId,
+				ctx.session.activeOrganizationId,
+			);
 
 			const updatedMongo = await db
 				.update(mongoTable)

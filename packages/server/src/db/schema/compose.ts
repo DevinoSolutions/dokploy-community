@@ -386,7 +386,12 @@ export const apiUpdateCompose = createSchema
 	})
 	// `snapvisorProjectName` only goes through `snapvisor.setComposeProject`,
 	// which validates the slug and checks the organization.
-	.omit({ serverId: true, snapvisorProjectName: true });
+	.omit({
+		serverId: true,
+		environmentId: true,
+		appName: true,
+		snapvisorProjectName: true,
+	});
 
 export const apiSaveEnvironmentVariablesCompose = createSchema
 	.pick({

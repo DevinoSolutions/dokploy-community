@@ -319,10 +319,16 @@ export const updateEnvironmentById = async (
 	environmentId: string,
 	environmentData: Partial<Environment>,
 ) => {
+	// An environment never changes identity or project through an update.
+	const {
+		environmentId: _environmentId,
+		projectId: _projectId,
+		...changes
+	} = environmentData;
 	const result = await db
 		.update(environments)
 		.set({
-			...environmentData,
+			...changes,
 		})
 		.where(eq(environments.environmentId, environmentId))
 		.returning()
