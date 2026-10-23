@@ -6,8 +6,12 @@ import {
 } from "@dokploy/server/db/schema";
 import {
 	checkServiceAccess,
+	checkServicePermissionAndAccess,
+	findMemberByUserId,
+	hasPermission,
 	type PermissionCtx,
 } from "@dokploy/server/services/permission";
+import { getAccessibleServerIds } from "@dokploy/server/services/server";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -274,4 +278,273 @@ export const assertContainerServiceReadable = async (
 	const check = await checkDockerObjectServices(ctx, container, serverId);
 	if (check.outcome !== "readable") throw containerNotFound();
 	return container.id;
+};
+
+const isOwnerOrAdmin = async (ctx: PermissionCtx) => {
+	const member = await findMemberByUserId(
+		ctx.user.id,
+		ctx.session.activeOrganizationId,
+	);
+	return member.role === "owner" || member.role === "admin";
+};
+
+/**
+ * Whether the caller may reach `serverId`: it belongs to their organization and,
+ * for a member, is one of the servers they were granted. No `serverId` is the
+ * local Dokploy host, which every caller reaches.
+ */
+export const canReachServer = async (ctx: PermissionCtx, serverId?: string) => {
+	if (!serverId) return true;
+	const accessible = await getAccessibleServerIds({
+		userId: ctx.user.id,
+		activeOrganizationId: ctx.session.activeOrganizationId,
+	});
+	return accessible.has(serverId);
+};
+
+export const assertServerReachable = async (
+	ctx: PermissionCtx,
+	serverId?: string,
+) => {
+	if (!(await canReachServer(ctx, serverId)))
+		throw new TRPCError({ code: "UNAUTHORIZED" });
+};
+
+/**
+ * Resolves what a docker route was sent (a name or an id prefix) to the full id
+ * of the ONE container that passed the ownership check; run the command on that
+ * id and never on the string the client sent.
+ *
+ * The same rules as the container WebSockets (resolveDockerTarget):
+ * - the caller can reach `serverId` (their organization, and for a member a
+ *   server they were granted);
+ * - the labels name the services behind the container, every one of them on
+ *   that server and readable by the caller in their organization;
+ * - a container that backs no service (Dokploy itself, Traefik, its database,
+ *   an unlabelled one) is the host's own: owners and admins only.
+ *
+ * `access: "write"` is for routes that change the container or its files
+ * (restart, stop, kill, remove, upload, edit, delete). The docker statement has
+ * no write action, so those also need `deployment:create` on every service
+ * behind the container, the same gate that starts, stops and reloads the
+ * service itself. Owners and admins pass it like every enterprise statement.
+ *
+ * Every refusal is the same NOT_FOUND, so the answer says nothing about which
+ * containers exist.
+ */
+export const resolveContainerForRoute = async (
+	ctx: PermissionCtx,
+	containerId: string,
+	serverId: string | undefined,
+	access: "read" | "write" = "read",
+): Promise<string> => {
+	try {
+		if (!(await canReachServer(ctx, serverId))) throw containerNotFound();
+		const container = await readDockerObject(containerId, serverId);
+		if (!container) throw containerNotFound();
+
+		const check = await checkDockerObjectServices(ctx, container, serverId);
+		if (check.outcome === "refused") throw containerNotFound();
+		if (check.outcome === "unowned") {
+			if (!(await isOwnerOrAdmin(ctx))) throw containerNotFound();
+			return container.id;
+		}
+		if (access === "write") {
+			for (const serviceId of check.serviceIds) {
+				await checkServicePermissionAndAccess(ctx, serviceId, {
+					deployment: ["create"],
+				});
+			}
+		}
+		return container.id;
+	} catch {
+		throw containerNotFound();
+	}
+};
+
+/**
+ * The same check for a route that is sent an appName (the swarm service name or
+ * compose project) instead of a container: the appName must name a service the
+ * caller can read on `serverId`. An appName that names no service is the host's
+ * own (Dokploy, Traefik): owners and admins only.
+ */
+export const assertAppNameReadable = async (
+	ctx: PermissionCtx,
+	appName: string,
+	serverId?: string,
+) => {
+	try {
+		if (!(await canReachServer(ctx, serverId))) throw containerNotFound();
+		const check = await checkDockerObjectServices(
+			ctx,
+			{ id: "", appNames: [appName] },
+			serverId,
+		);
+		if (check.outcome === "readable") return;
+		if (check.outcome === "unowned" && (await isOwnerOrAdmin(ctx))) return;
+		throw containerNotFound();
+	} catch {
+		throw containerNotFound();
+	}
+};
+
+// What one list row may show a caller: a service they can read, or, for the
+// host's own containers (no service behind them), only an owner or admin.
+const rowVisible = (check: ContainerServiceCheck, admin: boolean) =>
+	check.outcome === "readable" || (check.outcome === "unowned" && admin);
+
+/**
+ * Narrows a container list to the containers of services the caller can read.
+ *
+ * A member gets only the containers whose labels name services they were
+ * granted on this server; a container that backs no service is dropped, and so
+ * is everything when the labels cannot be read.
+ *
+ * Owners and admins see the list as it is (the Docker page lists everything on
+ * the host). With `strict` they are checked too: a container of another
+ * organization is dropped, and the host's own containers stay. The routes that
+ * list by an appName use `strict`, because the command behind them matches more
+ * than the appName (a prefix, a substring, an id prefix) and the appName is
+ * something the caller can rename their own service to.
+ *
+ * The batched `docker inspect` exits non-zero when one container has vanished
+ * but still prints the others; those are used and only the missing ones are
+ * dropped.
+ */
+export const filterReadableContainers = async <
+	T extends { containerId: string },
+>(
+	ctx: PermissionCtx,
+	containers: T[],
+	serverId?: string,
+	options: { strict?: boolean } = {},
+): Promise<T[]> => {
+	if (containers.length === 0) return containers;
+	const admin = await isOwnerOrAdmin(ctx);
+	if (admin && !options.strict) return containers;
+
+	// the placeholder "No container id" is not something docker can inspect
+	const listed = containers.filter((container) =>
+		/^[a-f0-9]{12,64}$/.test(container.containerId),
+	);
+	if (listed.length === 0) return [];
+
+	let stdout: string;
+	try {
+		({ stdout } = await runOn(
+			`${quote([
+				"docker",
+				"inspect",
+				"--type",
+				"container",
+				"--format",
+				"{{.Id}} {{json .Config.Labels}}",
+				...listed.map((container) => container.containerId),
+			])} 2>/dev/null || true`,
+			serverId,
+		));
+	} catch {
+		return [];
+	}
+
+	const labelled: { id: string; appNames: string[] }[] = [];
+	for (const line of stdout.trim().split("\n")) {
+		const split = line.indexOf(" ");
+		const id = line.slice(0, split);
+		if (split < 0 || !FULL_ID.container.test(id)) continue;
+		try {
+			const labels = (JSON.parse(line.slice(split + 1)) ?? {}) as Record<
+				string,
+				unknown
+			>;
+			labelled.push({ id, appNames: ownershipNames(labelValues(labels)) });
+		} catch {
+			// unreadable labels: the container stays out of the list
+		}
+	}
+
+	const outcomes = new Map<string, Promise<ContainerServiceCheck>>();
+	const kept: T[] = [];
+	for (const container of listed) {
+		const object = labelled.find((entry) =>
+			entry.id.startsWith(container.containerId),
+		);
+		if (!object) continue;
+		const key = [...object.appNames].sort().join("|");
+		let outcome = outcomes.get(key);
+		if (!outcome) {
+			outcome = checkDockerObjectServices(ctx, object, serverId);
+			outcomes.set(key, outcome);
+		}
+		if (rowVisible(await outcome, admin)) kept.push(container);
+	}
+	return kept;
+};
+
+/**
+ * The same narrowing for swarm task rows (`docker service ps`, `docker stack
+ * ps`), which carry a task id, not a container id. `serviceNameOf` gives the
+ * swarm service a row belongs to; each distinct service is resolved once with
+ * `docker service inspect` and checked like a container's labels. Everybody is
+ * checked, owners and admins included (see `strict` above), and a service that
+ * cannot be resolved drops its rows.
+ */
+export const filterReadableTasks = async <T>(
+	ctx: PermissionCtx,
+	rows: T[],
+	serviceNameOf: (row: T) => string,
+	serverId?: string,
+): Promise<T[]> => {
+	if (rows.length === 0) return rows;
+	const admin = await isOwnerOrAdmin(ctx);
+
+	const visible = new Map<string, Promise<boolean>>();
+	const kept: T[] = [];
+	for (const row of rows) {
+		const serviceName = serviceNameOf(row);
+		if (!serviceName) continue;
+		let allowed = visible.get(serviceName);
+		if (!allowed) {
+			allowed = (async () => {
+				const service = await readDockerObject(
+					serviceName,
+					serverId,
+					"service",
+				);
+				if (!service) return false;
+				return rowVisible(
+					await checkDockerObjectServices(ctx, service, serverId),
+					admin,
+				);
+			})();
+			visible.set(serviceName, allowed);
+		}
+		if (await allowed) kept.push(row);
+	}
+	return kept;
+};
+
+/**
+ * Whether the caller may see the environment variables of a container. The
+ * inspect output (`Config.Env`) and `/proc/<pid>/environ` carry them, so a
+ * member whose role lacks `envVars:read` (a custom role can drop it) gets them
+ * blanked or refused. Owners and admins always hold it.
+ */
+export const canReadContainerEnv = (ctx: PermissionCtx) =>
+	hasPermission(ctx, { envVars: ["read"] });
+
+/** `KEY=value` entries of `Config.Env` keep their names and lose their values. */
+export const redactContainerEnv = <T>(config: T): T => {
+	if (!config || typeof config !== "object") return config;
+	const inner = (config as { Config?: { Env?: unknown } }).Config;
+	if (!inner || !Array.isArray(inner.Env)) return config;
+	return {
+		...config,
+		Config: {
+			...inner,
+			Env: inner.Env.map((entry) =>
+				typeof entry === "string" ? `${entry.split("=")[0]}=` : entry,
+			),
+		},
+	};
 };
