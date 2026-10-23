@@ -46,6 +46,7 @@ import {
 	isOfflineStatus,
 	nothingToMonitorMessage,
 	preflightWarning,
+	UPTIMELY_POLL_INTERVAL_MS,
 } from "./uptimely-panel-helpers";
 
 type UptimelyServiceType =
@@ -241,8 +242,13 @@ export const UptimelyServicePanel = ({ serviceType, serviceId }: Props) => {
 	const { data, isPending, error, refetch, isFetching } =
 		api.uptimely.serviceStatus.useQuery(input, {
 			enabled: isCloud === false && !!serviceId,
-			refetchInterval: 60_000,
-			refetchOnWindowFocus: false,
+			// Every poll is metered against the Uptimely project's monthly quota:
+			// only poll while this tab is visible, and slowly. Refresh is manual
+			// (button) or on returning to the tab.
+			refetchInterval: UPTIMELY_POLL_INTERVAL_MS,
+			refetchIntervalInBackground: false,
+			refetchOnWindowFocus: true,
+			staleTime: UPTIMELY_POLL_INTERVAL_MS,
 			retry: false,
 		});
 
@@ -507,6 +513,13 @@ export const UptimelyServicePanel = ({ serviceType, serviceId }: Props) => {
 
 	return (
 		<Shell>
+			{data.quota && (
+				<div className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+					Uptimely quota exhausted. Showing the last known status; Dokploy
+					will check again after{" "}
+					{new Date(data.quota.retryAfter).toLocaleTimeString()}.
+				</div>
+			)}
 			<div className="flex flex-row flex-wrap items-start justify-between gap-3">
 				<div className="flex flex-row items-center gap-3">
 					{header}

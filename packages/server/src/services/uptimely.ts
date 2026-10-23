@@ -23,6 +23,12 @@ import {
 	preflightUrls,
 	type UptimelyPreflightResult,
 } from "@dokploy/server/utils/uptimely/preflight";
+import {
+	getUptimelyBackoffUntil,
+	invalidateUptimelyCache,
+	isUptimelyQuotaError,
+	readUptimelyCached,
+} from "@dokploy/server/utils/uptimely/read-cache";
 import { TRPCError } from "@trpc/server";
 import { and, asc, eq, ne } from "drizzle-orm";
 import type { z } from "zod";
@@ -57,6 +63,21 @@ export const uptimelyClientFor = (
 		apiKey: integration.apiKey,
 		baseUrl: integration.baseUrl,
 	});
+
+/**
+ * Metered read through the shared TTL cache (see utils/uptimely/read-cache):
+ * one upstream call per tool + arguments per minute across every tab and user
+ * of the integration, and none while the integration is in quota backoff.
+ * Writes must call `uptimelyClientFor(...).callTool` directly.
+ */
+const readUptimelyTool = <T>(
+	integration: UptimelyIntegration,
+	tool: string,
+	args: Record<string, unknown>,
+): Promise<T> =>
+	readUptimelyCached(integration, `${tool}|${JSON.stringify(args)}`, () =>
+		uptimelyClientFor(integration).callTool<T>(tool, args),
+	);
 
 /** Masks a stored API key down to its last four characters. */
 export const maskUptimelyApiKey = maskApiKey;
@@ -154,6 +175,7 @@ export const updateUptimely = async (
 			message: "Uptimely integration not found",
 		});
 	}
+	invalidateUptimelyCache(updated);
 	return updated;
 };
 
@@ -163,6 +185,7 @@ export const removeUptimely = async (organizationId: string) => {
 		.where(eq(uptimelyIntegration.organizationId, organizationId))
 		.returning()
 		.then((rows) => rows[0]);
+	if (removed) invalidateUptimelyCache(removed);
 	return removed ?? null;
 };
 
@@ -205,9 +228,11 @@ export interface UptimelyStatusPage {
 export const listUptimelyStatusPages = async (
 	integration: UptimelyIntegration,
 ) => {
-	const result = await uptimelyClientFor(integration).callTool<{
+	const result = await readUptimelyTool<{
 		statusPages: UptimelyStatusPage[];
-	}>("uptimely_status_page_list", { projectId: integration.projectId });
+	}>(integration, "uptimely_status_page_list", {
+		projectId: integration.projectId,
+	});
 	return result.statusPages ?? [];
 };
 
@@ -448,16 +473,15 @@ const monitorNameKey = (name: string) =>
  * Any failing page fails the whole pass.
  */
 const listUptimelyMonitors = async (
-	client: UptimelyClient,
-	projectId: string,
+	integration: UptimelyIntegration,
 ): Promise<UptimelyListedMonitor[]> => {
 	const all: UptimelyListedMonitor[] = [];
 	for (let page = 0; page < LIST_MAX_PAGES; page++) {
-		const result = await client.callTool<{
+		const result = await readUptimelyTool<{
 			count?: number;
 			monitors?: UptimelyListedMonitor[];
-		}>("uptimely_monitor_list", {
-			projectId,
+		}>(integration, "uptimely_monitor_list", {
+			projectId: integration.projectId,
 			limit: LIST_PAGE_SIZE,
 			offset: all.length,
 		});
@@ -640,7 +664,7 @@ export const linkUptimelyService = async (params: {
 	let listed: UptimelyListedMonitor[] = [];
 	if (pending.some((s) => !explicit.has(s))) {
 		try {
-			listed = await listUptimelyMonitors(client, integration.projectId);
+			listed = await listUptimelyMonitors(integration);
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : "Unknown Uptimely error";
@@ -676,6 +700,8 @@ export const linkUptimelyService = async (params: {
 			});
 			monitorId = result.monitorId;
 			alreadyExisted = result.created === false;
+			// The cached monitor list no longer matches Uptimely.
+			invalidateUptimelyCache(integration);
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : "Unknown Uptimely error";
@@ -830,6 +856,7 @@ export const linkUptimelyHeartbeat = async (params: {
 			cause: error,
 		});
 	}
+	invalidateUptimelyCache(integration);
 	if (typeof created.monitorId !== "string" || !created.monitorId) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
@@ -1129,14 +1156,15 @@ export const getUptimelyServiceStatus = async (params: {
 	// The deploy heartbeat is reported on its own, not as an uptime monitor.
 	const links = allLinks.filter((l) => l.kind !== "heartbeat");
 	const heartbeatLink = allLinks.find((l) => l.kind === "heartbeat");
-	const client = uptimelyClientFor(integration);
 	const heartbeatDetail = heartbeatLink
-		? await client
-				.callTool<UptimelyMonitorDetail>("uptimely_monitor_get", {
+		? await readUptimelyTool<UptimelyMonitorDetail>(
+				integration,
+				"uptimely_monitor_get",
+				{
 					projectId: integration.projectId,
 					monitorId: heartbeatLink.monitorId,
-				})
-				.then(
+				},
+			).then(
 					(detail) => ({ detail, error: null }),
 					(error: unknown) => ({
 						detail: null,
@@ -1149,10 +1177,14 @@ export const getUptimelyServiceStatus = async (params: {
 		: null;
 	const results = await Promise.allSettled(
 		links.map((link) =>
-			client.callTool<UptimelyMonitorDetail>("uptimely_monitor_get", {
-				projectId: integration.projectId,
-				monitorId: link.monitorId,
-			}),
+			readUptimelyTool<UptimelyMonitorDetail>(
+				integration,
+				"uptimely_monitor_get",
+				{
+					projectId: integration.projectId,
+					monitorId: link.monitorId,
+				},
+			),
 		),
 	);
 
@@ -1215,10 +1247,27 @@ export const getUptimelyServiceStatus = async (params: {
 				}
 			: null;
 
+	// Calm quota state for the panel: set while Uptimely is being left alone.
+	const backoffUntil = getUptimelyBackoffUntil(integration);
+	const quotaHit =
+		backoffUntil !== null ||
+		results.some(
+			(r) => r.status === "rejected" && isUptimelyQuotaError(r.reason),
+		);
+	const quota = quotaHit
+		? {
+				exhausted: true as const,
+				retryAfter: new Date(
+					backoffUntil ?? Date.now() + 60_000,
+				).toISOString(),
+			}
+		: null;
+
 	return {
 		overall: worstUptimelyStatus(monitors.map((m) => m.status)),
 		monitors,
 		heartbeat,
+		quota,
 	};
 };
 
