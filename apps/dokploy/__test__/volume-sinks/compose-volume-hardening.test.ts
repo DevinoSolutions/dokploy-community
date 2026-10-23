@@ -877,13 +877,9 @@ services:
 		mocks.readFileSync.mockReturnValue(CLEAN_OVERRIDE);
 
 		for (const prefix of [
-			"--config /root/.docker",
-			"-H tcp://127.0.0.1:2375",
-			"--host=tcp://127.0.0.1:2375",
-			"--context other",
-			"-c other",
 			"--log-level debug",
-			"-D --tls",
+			"-l info",
+			"-D",
 		]) {
 			mocks.readFileSync.mockClear();
 			// a compose command that starts containers must still name a file
@@ -915,7 +911,7 @@ services:
 			assertComposeVolumesBound(
 				composeRow(yaml, {
 					composeType: "stack",
-					command: `--context other stack deploy ${APP}`,
+					command: `--log-level debug stack deploy ${APP}`,
 				}),
 			),
 		).rejects.toThrow(/without naming a compose file/);

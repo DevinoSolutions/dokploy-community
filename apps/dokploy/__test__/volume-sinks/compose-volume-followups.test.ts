@@ -567,8 +567,6 @@ volumes:
 			"cp victim-container:/data /tmp/data",
 			"exec victim-container sh",
 			"volume rm victim_data",
-			"--context x run -v /var/lib/docker/volumes:/x alpine",
-			"-H tcp://host:2375 run -v /:/x alpine",
 			// not even the word `docker compose`
 			"docker run -v /:/x alpine",
 			"docker-compose -f docker-compose.yml up -d",
@@ -586,7 +584,6 @@ volumes:
 			"run -v=/:/x alpine",
 			"cp victim-container:/data /tmp/data",
 			"exec victim-container sh",
-			"--context x run -v /:/x alpine",
 		])("refuses it chained after docker compose: %s", async (docker) => {
 			await expect(
 				assertComposeVolumesBound(custom(`${CHAINED} ${docker}`)),
@@ -632,7 +629,11 @@ volumes:
 				`compose -p ${APP} -f docker-compose.yml up -d && docker compose -p ${APP} -f docker-compose.yml ps`,
 				`compose -p ${APP} -f docker-compose.yml up -d && docker-compose -p ${APP} -f docker-compose.yml logs web`,
 				`stack deploy -c docker-compose.yml ${APP} --prune --with-registry-auth`,
-				`--context x compose -p ${APP} -f docker-compose.yml up -d`,
+				`--log-level debug compose -p ${APP} -f docker-compose.yml up -d`,
+				`-D -l info compose -p ${APP} -f docker-compose.yml up -d`,
+				`compose -p ${APP} -f docker-compose.yml run --rm web curl -sH "X-A: b" --host h -c x`,
+				`compose -p ${APP} -f docker-compose.yml exec web sh -c ls`,
+				`stack deploy -c docker-compose.yml ${APP}`,
 			]) {
 				await expect(
 					assertComposeVolumesBound(custom(command)),
@@ -641,6 +642,73 @@ volumes:
 			await expect(
 				assertComposeVolumesBound(custom("")),
 			).resolves.toBeUndefined();
+		});
+
+		describe("docker options that change the daemon, context or config", () => {
+			const base = `-p ${APP} -f docker-compose.yml up -d`;
+
+			it.each([
+				"-H ssh://x compose",
+				"-Hssh://x compose",
+				"-H=tcp://x compose",
+				"--host tcp://x compose",
+				"--host=tcp://x compose",
+				"--context x compose",
+				"--context=x compose",
+				"-c x compose",
+				"-cx compose",
+				"-Dc x compose",
+				"--config /tmp/x compose",
+				"--config=/tmp/x compose",
+				"--tls compose",
+				"--tlsverify compose",
+				"--tlscacert /x compose",
+				"--tlscert=/x compose",
+				"--tlskey /x compose",
+				"-D --tls compose",
+			])("refuses %s up", async (prefix) => {
+				await expect(
+					assertComposeVolumesBound(custom(`${prefix} ${base}`)),
+				).rejects.toThrow(/the docker option ".*" is not allowed in a custom command/);
+			});
+
+			it.each([
+				"-H x",
+				"--host=tcp://x",
+				"--context=x",
+				"-c x",
+				"--config /tmp/x",
+				"--tls",
+			])("refuses %s in a chained command", async (option) => {
+				await expect(
+					assertComposeVolumesBound(
+						custom(`compose ${base} && docker ${option} compose -p ${APP} ps`),
+					),
+				).rejects.toThrow(/is not allowed in a custom command/);
+				await expect(
+					assertComposeVolumesBound(
+						custom(`compose ${base} && docker-compose ${option} ps`),
+					),
+				).rejects.toThrow(/is not allowed in a custom command/);
+			});
+
+			it.each([
+				`compose -H tcp://x ${base}`,
+				`compose --host=tcp://x ${base}`,
+				`compose --context x ${base}`,
+				`compose -c x ${base}`,
+				`compose --config /tmp/x ${base}`,
+				`compose ${base} --context x`,
+				`compose -p ${APP} -f docker-compose.yml run --rm -H tcp://x web sh`,
+				`compose -p ${APP} -f docker-compose.yml exec --context=x web sh`,
+				`stack deploy -c docker-compose.yml -H tcp://x ${APP}`,
+				`stack deploy --context x -c docker-compose.yml ${APP}`,
+				`stack -H tcp://x deploy -c docker-compose.yml ${APP}`,
+			])("refuses it among the compose or stack options: %s", async (command) => {
+				await expect(
+					assertComposeVolumesBound(custom(command)),
+				).rejects.toThrow(/is not allowed in a custom command/);
+			});
 		});
 
 		it("still checks the -v of a docker compose run", async () => {

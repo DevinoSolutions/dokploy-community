@@ -235,6 +235,9 @@ type CommandSegment = {
 	// The `--mount` / `--volumes-from` options of a `docker compose run`, as
 	// written. They are not read like `-v`, so a run that has one is refused.
 	uncheckedMounts: string[];
+	// The first docker global option that points the command at another
+	// daemon, context or config (see findDaemonOption).
+	daemonOption?: string;
 };
 
 // `docker compose run` options that take a value (the next word, or the rest
@@ -298,6 +301,85 @@ const parseRunVolumes = (words: string[]) => {
 		}
 	}
 	return volumes;
+};
+
+const DAEMON_LONG_OPTION =
+	/^--(?:host|context|config|tls|tlsverify|tlscacert|tlscert|tlskey)(?:=|$)/;
+
+// The docker global options that change the daemon, the context or the
+// config the command runs against (`-H`/`--host`, `-c`/`--context`,
+// `--config`, `--tls*`). With one, `docker compose` talks to another
+// daemon and the volumes it mounts are not this host's, or this host's under
+// another config, so the check cannot say anything about them (T-7055). The
+// docker CLI takes them before the subcommand and the compose plugin also
+// takes them among its own options, so both are read. A short option is read
+// letter by letter up to the first one that takes a value (`f`, `p`, `l`:
+// the rest of the word is the value), so `-Dc ctx` and `-cctx` are seen.
+// `-c` is only one before the subcommand: after `stack deploy` it is the
+// compose file, and after a service name it is the service command's own.
+const findDaemonOption = (words: string[], { allowShortC = false } = {}) => {
+	for (const word of words) {
+		if (DAEMON_LONG_OPTION.test(word)) {
+			return word;
+		}
+		if (/^-[^-]/.test(word)) {
+			for (const letter of word.slice(1)) {
+				if (letter === "H" || (letter === "c" && !allowShortC)) {
+					return word;
+				}
+				if ("fpl".includes(letter)) {
+					break;
+				}
+			}
+		}
+	}
+	return undefined;
+};
+
+// The same for the words after a `compose run` / `exec` subcommand, up to
+// the service name: everything after it is the command that runs in the
+// container (`run web rails s --host 0.0.0.0`), which docker does not read.
+const RUN_AND_EXEC_LONG_OPTIONS_WITH_VALUE = new Set([
+	"cap-add",
+	"cap-drop",
+	"entrypoint",
+	"env",
+	"env-from-file",
+	"index",
+	"label",
+	"name",
+	"publish",
+	"pull",
+	"user",
+	"volume",
+	"workdir",
+]);
+
+const findDaemonOptionBeforeService = (words: string[]) => {
+	const before: string[] = [];
+	for (let i = 0; i < words.length; i++) {
+		const word = words[i] as string;
+		if (word.startsWith("--")) {
+			before.push(word);
+			const name = word.slice(2).split("=")[0] ?? "";
+			if (!word.includes("=") && RUN_AND_EXEC_LONG_OPTIONS_WITH_VALUE.has(name)) {
+				i += 1;
+			}
+		} else if (/^-[^-]/.test(word)) {
+			before.push(word);
+			for (let j = 1; j < word.length; j++) {
+				if (RUN_SHORT_OPTIONS_WITH_VALUE.has(word[j] as string)) {
+					if (j === word.length - 1) {
+						i += 1;
+					}
+					break;
+				}
+			}
+		} else {
+			break;
+		}
+	}
+	return findDaemonOption(before);
 };
 
 // The `--mount` and `--volumes-from` options in the words after `run`. They
@@ -427,6 +509,11 @@ const parseComposeCommand = (
 					}
 				}
 				const uncheckedMounts: string[] = [];
+				const daemonOption =
+					findDaemonOption(words.slice(0, i), { allowShortC: false }) ??
+					(subcommand === "run" || subcommand === "exec"
+						? findDaemonOptionBeforeService(words.slice(i + 1))
+						: findDaemonOption(words.slice(i + 1), { allowShortC: true }));
 				if (subcommand === "run") {
 					volumes.push(...parseRunVolumes(words.slice(i + 1)));
 					uncheckedMounts.push(...parseRunUncheckedMounts(words.slice(i + 1)));
@@ -440,11 +527,17 @@ const parseComposeCommand = (
 					volumes,
 					envFiles,
 					uncheckedMounts,
+					daemonOption,
 				};
 			}
 			if (command === "stack") {
 				const rest = words.slice(start + 1);
-				const subcommand = rest.find((word) => !word.startsWith("-"));
+				const subcommandIndex = rest.findIndex((word) => !word.startsWith("-"));
+				const subcommand = rest[subcommandIndex];
+				const cut = subcommandIndex < 0 ? rest.length : subcommandIndex;
+				const daemonOption =
+					findDaemonOption(words.slice(0, start + 1 + cut)) ??
+					findDaemonOption(rest.slice(cut), { allowShortC: true });
 				for (let i = 0; i < rest.length; i++) {
 					const word = rest[i] as string;
 					if (word === "-c" || word === "--compose-file") {
@@ -467,6 +560,7 @@ const parseComposeCommand = (
 					volumes,
 					envFiles,
 					uncheckedMounts: [],
+					daemonOption,
 				};
 			}
 			return {
@@ -477,6 +571,7 @@ const parseComposeCommand = (
 				volumes,
 				envFiles,
 				uncheckedMounts: [],
+				daemonOption: findDaemonOption(words.slice(0, start)),
 			};
 		});
 	return { segments, opaque };
@@ -554,9 +649,18 @@ export const assertCommandRunsComposeOnly = (
 	if (!compose.command) {
 		return;
 	}
-	const other = parseComposeCommand(compose.command).segments.find(
-		(segment) => segment.kind === "other",
-	);
+	const { segments } = parseComposeCommand(compose.command);
+	const daemon = segments.find((segment) => segment.daemonOption);
+	if (daemon) {
+		logger.warn(
+			{ composeId: compose.composeId, option: daemon.daemonOption },
+			"[VolumeBinding] A compose command was refused: a docker option that changes the daemon, context or config",
+		);
+		throw new Error(
+			`Compose command refused: the docker option "${daemon.daemonOption}" is not allowed in a custom command. -H/--host, -c/--context, --config and --tls* point docker at another daemon or config, where the volumes it mounts cannot be checked.`,
+		);
+	}
+	const other = segments.find((segment) => segment.kind === "other");
 	if (other) {
 		logger.warn(
 			{ composeId: compose.composeId, command: other.command },
