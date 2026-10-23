@@ -230,6 +230,11 @@ type CommandSegment = {
 	volumes: string[];
 	// The `--env-file` values: they replace the `.env` Dokploy writes.
 	envFiles: string[];
+	// The first word of an `other` segment (`run`, `exec`, `cp`, ...).
+	command?: string;
+	// The `--mount` / `--volumes-from` options of a `docker compose run`, as
+	// written. They are not read like `-v`, so a run that has one is refused.
+	uncheckedMounts: string[];
 };
 
 // `docker compose run` options that take a value (the next word, or the rest
@@ -294,6 +299,13 @@ const parseRunVolumes = (words: string[]) => {
 	}
 	return volumes;
 };
+
+// The `--mount` and `--volumes-from` options in the words after `run`. They
+// mount volumes and bind sources like `-v` does, but are not parsed: a run
+// that has one is refused rather than guessed at. Like `-v`, the whole rest
+// of the line is read, so one after the service name is refused too.
+const parseRunUncheckedMounts = (words: string[]) =>
+	words.filter((word) => /^--(?:mount|volumes-from)(?:=|$)/.test(word));
 
 // The value of a path option that the shell or Docker would expand into
 // something else: a variable, a substitution or a pattern. The path it ends
@@ -414,8 +426,10 @@ const parseComposeCommand = (
 						break;
 					}
 				}
+				const uncheckedMounts: string[] = [];
 				if (subcommand === "run") {
 					volumes.push(...parseRunVolumes(words.slice(i + 1)));
+					uncheckedMounts.push(...parseRunUncheckedMounts(words.slice(i + 1)));
 				}
 				assertLiteralPathOptions({ files, projectDirectories, envFiles });
 				return {
@@ -425,6 +439,7 @@ const parseComposeCommand = (
 					projectDirectories,
 					volumes,
 					envFiles,
+					uncheckedMounts,
 				};
 			}
 			if (command === "stack") {
@@ -451,9 +466,18 @@ const parseComposeCommand = (
 					projectDirectories,
 					volumes,
 					envFiles,
+					uncheckedMounts: [],
 				};
 			}
-			return { kind: "other", files, projectDirectories, volumes, envFiles };
+			return {
+				kind: "other",
+				command,
+				files,
+				projectDirectories,
+				volumes,
+				envFiles,
+				uncheckedMounts: [],
+			};
 		});
 	return { segments, opaque };
 };
@@ -518,11 +542,33 @@ export const getCommandOverrideFiles = (
 	return [...overrides];
 };
 
-// The volumes a custom command adds to `docker compose run` with `-v`. Only
-// a command that is `docker compose` is read (the first command runs as
-// `docker <command>`, the chained ones must start with `docker compose`);
-// anything else the command runs (`docker run -v ...`, `docker stack`, ...) is
-// not looked at, as before.
+// A custom command is `docker <command>` followed by chained
+// `docker compose ...` commands, and a deploy only needs `compose` and `stack`
+// (T-7055). Any other docker command (`docker run -v ...`, `create`, `cp`,
+// `exec`, `container run`, `service create --mount`, `volume`, ...) can mount,
+// read or write a volume or a container that is not the compose's own, and
+// its `-v` / `--mount` / `--volumes-from` are not parsed, so it is refused.
+export const assertCommandRunsComposeOnly = (
+	compose: Pick<ComposeNested, "command" | "composeId">,
+) => {
+	if (!compose.command) {
+		return;
+	}
+	const other = parseComposeCommand(compose.command).segments.find(
+		(segment) => segment.kind === "other",
+	);
+	if (other) {
+		logger.warn(
+			{ composeId: compose.composeId, command: other.command },
+			"[VolumeBinding] A compose command was refused: it runs a docker command other than compose or stack",
+		);
+		throw new Error(
+			`Compose command refused: it runs \`docker ${other.command ?? ""}\`, which can mount volumes or reach containers that are not this compose's own. A custom command can only run \`docker compose\` (chained: \`docker compose\` or \`docker-compose\`) or \`docker stack\`.`,
+		);
+	}
+};
+
+// The volumes a custom command adds to `docker compose run` with `-v`.
 //
 // A line with a glob or a shell operator next to a `run` is refused: the
 // shell may turn the glob into other words, so a `-v` could be hidden in or
@@ -544,6 +590,16 @@ export const getCommandRunVolumes = (
 		);
 		throw new Error(
 			"Compose command refused: it runs `docker compose run` next to a shell pattern (`*`, `?`, `[`) or operator that the shell may rewrite, so the volumes it mounts cannot be checked. Write the command without them.",
+		);
+	}
+	const unchecked = runs.flatMap((segment) => segment.uncheckedMounts)[0];
+	if (unchecked !== undefined) {
+		logger.warn(
+			{ composeId: compose.composeId },
+			"[VolumeBinding] A compose command was refused: docker compose run with --mount or --volumes-from",
+		);
+		throw new Error(
+			`Compose command refused: \`docker compose run\` uses "${unchecked}", and its mounts cannot be checked. Use -v with a volume of the compose's own instead.`,
 		);
 	}
 	return runs.flatMap((segment) => segment.volumes);
@@ -619,6 +675,7 @@ const loadOverrideFile = async (
 // before any docker command.
 export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	const compose = await withResolvedVaultRefs(rawCompose);
+	assertCommandRunsComposeOnly(compose);
 	const overrideFiles = getCommandOverrideFiles(compose);
 	const commandVolumes = getCommandRunVolumes(compose);
 	let spec: Awaited<ReturnType<typeof addDomainToCompose>>;
