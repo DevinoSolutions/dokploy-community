@@ -1,3 +1,5 @@
+import { posix } from "node:path";
+
 // The Docker volume names a compose file really mounts, worked out from the
 // YAML Dokploy deploys (T-6822). A compose file can name any volume on the
 // host: a top-level entry with `external: true` or an explicit `name:` is used
@@ -16,7 +18,9 @@
 //   returned when they differ);
 // - isolatedDeployment and randomize only rename keys (`<key>-<suffix>`), so
 //   the final YAML is what has to be resolved, not the one the user typed.
-// Bind mounts (host paths), tmpfs and anonymous volumes are not named volumes.
+// Bind mounts (host paths), tmpfs and anonymous volumes are not named volumes,
+// except that a bind of Docker's own volume directory is refused (see
+// reachesDockerVolumesDirectory).
 
 export type ComposeVariables = Record<string, string> | null;
 
@@ -31,6 +35,11 @@ type InterpolationOptions = {
 const VARIABLE =
 	/\$(?:\$|([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])((?:[^{}]|\{[^{}]*\})*))?\})/g;
 const ESCAPED_DOLLAR = "\u0000";
+
+// The value of a variable that is set at deploy time but that Dokploy cannot
+// know (PATH and HOME of the deploy shell). A value that contains it cannot be
+// resolved; `${HOME+x}` and `${HOME:-x}` still see the variable as set.
+export const UNKNOWN_VARIABLE_VALUE = "\u0001";
 
 // Compose's `${VAR}`, `$VAR`, `${VAR:-default}`, `${VAR-default}`,
 // `${VAR:+alt}`, `${VAR+alt}`, `${VAR:?err}` and `$$`. null means the value
@@ -88,7 +97,11 @@ export const interpolateComposeValue = (
 			}
 		},
 	);
-	if (unresolved || result.includes("$")) {
+	if (
+		unresolved ||
+		result.includes("$") ||
+		result.includes(UNKNOWN_VARIABLE_VALUE)
+	) {
 		return null;
 	}
 	return result.replaceAll(ESCAPED_DOLLAR, "$");
@@ -113,6 +126,8 @@ export type ComposeVolumeResolution = {
 	// Things the effective volume cannot be worked out for (an unresolved
 	// variable in a name or in a service's volume source).
 	unresolved: string[];
+	// Mounts of Docker's own volume storage directory, by path.
+	forbidden: string[];
 };
 
 type LooseSpec = {
@@ -125,36 +140,83 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 	!!value && typeof value === "object" && !Array.isArray(value);
 
 // Long-syntax types that are not named volumes.
-const NON_VOLUME_TYPES = new Set([
-	"bind",
-	"tmpfs",
-	"npipe",
-	"cluster",
-	"image",
-]);
+const NON_VOLUME_TYPES = new Set(["tmpfs", "npipe", "cluster", "image"]);
 
 const isFilePathSource = (source: string) =>
 	/^[./~]/.test(source) || /^[A-Za-z]:/.test(source);
 
-// The top-level keys the services mount by name, plus the sources whose
-// variables could not be resolved.
-const collectMountedKeys = (
-	services: Record<string, unknown>,
-	options: InterpolationOptions,
+// Docker keeps every local volume's data here. A bind mount of this directory
+// (or of a path under it) is a named volume by another name.
+const DOCKER_VOLUMES_DIRECTORY = "/var/lib/docker/volumes";
+
+// `baseDirs` are the directories a relative path may be resolved from; a
+// path is also resolved from `/`, so a `..` chain cannot hide it. `~` is the
+// home of an unknown user.
+export const reachesDockerVolumesDirectory = (
+	path: string,
+	baseDirs: string[] = [],
 ) => {
-	const keys = new Set<string>();
-	const unresolved: string[] = [];
-	// A source that cannot be resolved can name any declared volume, or a path.
-	let anyKey = false;
+	const normalized = path.replace(/\\/g, "/");
+	const homes = ["/root", "/home/user/a"];
+	const candidates = normalized.startsWith("~")
+		? ["/", ...homes].map((base) =>
+				posix.resolve(base, `.${normalized.slice(1)}`),
+			)
+		: ["/", ...baseDirs].map((base) => posix.resolve(base, normalized));
+	return candidates.some(
+		(candidate) =>
+			candidate === DOCKER_VOLUMES_DIRECTORY ||
+			candidate.startsWith(`${DOCKER_VOLUMES_DIRECTORY}/`),
+	);
+};
+
+// An empty value is not a boolean: Docker fails on it.
+const FALSE_VALUES = new Set(["false", "0", "f", "n", "no", "off"]);
+const TRUE_VALUES = new Set(["true", "1", "t", "y", "yes", "on"]);
+
+type ResolveOptions = {
+	appName: string;
+	// Where a relative bind source may be resolved from.
+	baseDirs?: string[];
+} & InterpolationOptions;
+
+type MountedKeys = {
+	keys: Set<string>;
+	unresolved: string[];
+	forbidden: string[];
+	anyKey: boolean;
+};
+
+// The top-level keys the services mount by name, plus what cannot be checked.
+const collectMounts = (
+	services: Record<string, unknown>,
+	options: ResolveOptions,
+	into: MountedKeys,
+) => {
+	const checkPath = (rawPath: string, what: string) => {
+		const path = interpolateComposeValue(rawPath, options);
+		if (path === null) {
+			return;
+		}
+		if (path && reachesDockerVolumesDirectory(path, options.baseDirs)) {
+			into.forbidden.push(`${what} "${rawPath}"`);
+		}
+	};
 	const addSource = (rawSource: string) => {
 		const source = interpolateComposeValue(rawSource, options);
 		if (source === null) {
-			anyKey = true;
+			// It can name any declared volume, or a path.
+			into.anyKey = true;
 			return;
 		}
-		if (source && !isFilePathSource(source)) {
-			keys.add(source);
+		if (!source) {
+			return;
 		}
+		if (isFilePathSource(source)) {
+			checkPath(source, "bind mount");
+			return;
+		}
+		into.keys.add(source);
 	};
 	for (const [serviceName, service] of Object.entries(services)) {
 		if (!isRecord(service)) {
@@ -165,12 +227,16 @@ const collectMountedKeys = (
 		if (Array.isArray(service.volumes_from)) {
 			for (const entry of service.volumes_from) {
 				if (typeof entry === "string" && entry.startsWith("container:")) {
-					unresolved.push(`service "${serviceName}" (volumes_from a container)`);
+					into.unresolved.push(
+						`service "${serviceName}" (volumes_from a container)`,
+					);
 				}
 			}
 		}
 		if (isRecord(service.extends) && service.extends.file) {
-			unresolved.push(`service "${serviceName}" (extends from another file)`);
+			into.unresolved.push(
+				`service "${serviceName}" (extends from another file)`,
+			);
 		}
 		const volumes = service.volumes;
 		if (!Array.isArray(volumes)) {
@@ -189,79 +255,152 @@ const collectMountedKeys = (
 					continue;
 				}
 				if (typeof entry.source === "string" && entry.source) {
-					addSource(entry.source);
+					if (type === "bind") {
+						checkPath(entry.source, "bind mount");
+					} else {
+						addSource(entry.source);
+					}
 				}
 			}
 		}
 	}
-	return { keys, unresolved, anyKey };
+};
+
+// The volume names a set of compose files (the file Dokploy deploys plus the
+// override files of a custom command) mounts. A key is checked with the
+// definition of every file that declares it, because the merge order of the
+// definitions is not worth reproducing.
+export const resolveComposeFilesMountedVolumes = (
+	specs: LooseSpec[],
+	options: ResolveOptions,
+): ComposeVolumeResolution => {
+	const uses: ComposeVolumeUse[] = [];
+	const unresolved: string[] = [];
+	const forbidden: string[] = [];
+	const mounted: MountedKeys = {
+		keys: new Set<string>(),
+		unresolved,
+		forbidden,
+		anyKey: false,
+	};
+	for (const spec of specs) {
+		if (spec?.include) {
+			unresolved.push("include (volumes from another file)");
+		}
+		if (spec && isRecord(spec.services)) {
+			collectMounts(spec.services, options, mounted);
+		}
+	}
+	const definitionSets = specs.map((spec) =>
+		spec && isRecord(spec.volumes) ? spec.volumes : {},
+	);
+	if (mounted.anyKey) {
+		for (const definitions of definitionSets) {
+			for (const key of Object.keys(definitions)) {
+				mounted.keys.add(key);
+			}
+		}
+	}
+	const prefixes = [
+		...new Set([options.appName, normalizeComposeProjectName(options.appName)]),
+	];
+
+	const seen = new Set<string>();
+	const addUse = (use: ComposeVolumeUse) => {
+		const id = `${use.key}\u0000${use.volumeName}`;
+		if (!seen.has(id)) {
+			seen.add(id);
+			uses.push(use);
+		}
+	};
+
+	for (const key of mounted.keys) {
+		// A key that is not declared makes compose fail on its own.
+		const declaring = definitionSets.filter((definitions) =>
+			Object.hasOwn(definitions, key),
+		);
+		for (const definitions of declaring) {
+			const definition = isRecord(definitions[key]) ? definitions[key] : {};
+
+			const device = isRecord(definition.driver_opts)
+				? definition.driver_opts.device
+				: undefined;
+			if (typeof device === "string" && device) {
+				const resolvedDevice = interpolateComposeValue(device, options);
+				if (resolvedDevice === null) {
+					unresolved.push(`volume "${key}"`);
+					continue;
+				}
+				if (
+					isFilePathSource(resolvedDevice) &&
+					reachesDockerVolumesDirectory(resolvedDevice, options.baseDirs)
+				) {
+					forbidden.push(`volume "${key}" (device "${device}")`);
+					continue;
+				}
+			}
+
+			// `external` may be a boolean, a string that Docker reads as one (also
+			// from a variable, in any case) or the older `{ name }` object.
+			let external = false;
+			let legacyName: unknown;
+			if (isRecord(definition.external)) {
+				external = true;
+				legacyName = definition.external.name;
+			} else if (typeof definition.external === "boolean") {
+				external = definition.external;
+			} else if (
+				typeof definition.external === "string" ||
+				typeof definition.external === "number"
+			) {
+				const text = interpolateComposeValue(
+					String(definition.external),
+					options,
+				);
+				if (text === null) {
+					unresolved.push(`volume "${key}"`);
+					continue;
+				}
+				const normalized = text.trim().toLowerCase();
+				if (TRUE_VALUES.has(normalized)) {
+					external = true;
+				} else if (!FALSE_VALUES.has(normalized)) {
+					unresolved.push(`volume "${key}"`);
+					continue;
+				}
+			}
+
+			let rawName: unknown = definition.name;
+			if (external && !rawName) {
+				rawName = legacyName;
+			}
+			if (rawName !== undefined && rawName !== null && rawName !== "") {
+				if (typeof rawName !== "string") {
+					unresolved.push(`volume "${key}"`);
+					continue;
+				}
+				const name = interpolateComposeValue(rawName, options);
+				if (name === null || !name) {
+					unresolved.push(`volume "${key}"`);
+					continue;
+				}
+				addUse({ key, volumeName: name, derived: false });
+				continue;
+			}
+			if (external) {
+				addUse({ key, volumeName: key, derived: false });
+				continue;
+			}
+			for (const prefix of prefixes) {
+				addUse({ key, volumeName: `${prefix}_${key}`, derived: true });
+			}
+		}
+	}
+	return { uses, unresolved, forbidden };
 };
 
 export const resolveComposeMountedVolumes = (
 	spec: LooseSpec,
-	{
-		appName,
-		env,
-		strict,
-	}: { appName: string } & InterpolationOptions,
-): ComposeVolumeResolution => {
-	const uses: ComposeVolumeUse[] = [];
-	const options = { env, strict };
-	if (!spec || !isRecord(spec.services)) {
-		return { uses, unresolved: [] };
-	}
-	const { keys, unresolved, anyKey } = collectMountedKeys(
-		spec.services,
-		options,
-	);
-	if (spec.include) {
-		unresolved.push("include (volumes from another file)");
-	}
-	const definitions = isRecord(spec.volumes) ? spec.volumes : {};
-	if (anyKey) {
-		for (const key of Object.keys(definitions)) {
-			keys.add(key);
-		}
-	}
-	const prefixes = [...new Set([appName, normalizeComposeProjectName(appName)])];
-
-	for (const key of keys) {
-		// A key that is not declared makes compose fail on its own.
-		if (!Object.hasOwn(definitions, key)) {
-			continue;
-		}
-		const definition = isRecord(definitions[key]) ? definitions[key] : {};
-		const { external } = definition;
-		const isExternal =
-			external === true ||
-			external === "true" ||
-			(external !== null && typeof external === "object");
-		const legacyName = isRecord(external) ? external.name : undefined;
-
-		let rawName: unknown = definition.name;
-		if (isExternal && !rawName) {
-			rawName = legacyName;
-		}
-		if (rawName !== undefined && rawName !== null && rawName !== "") {
-			if (typeof rawName !== "string") {
-				unresolved.push(`volume "${key}"`);
-				continue;
-			}
-			const name = interpolateComposeValue(rawName, options);
-			if (name === null || !name) {
-				unresolved.push(`volume "${key}"`);
-				continue;
-			}
-			uses.push({ key, volumeName: name, derived: false });
-			continue;
-		}
-		if (isExternal) {
-			uses.push({ key, volumeName: key, derived: false });
-			continue;
-		}
-		for (const prefix of prefixes) {
-			uses.push({ key, volumeName: `${prefix}_${key}`, derived: true });
-		}
-	}
-	return { uses, unresolved };
-};
+	options: ResolveOptions,
+): ComposeVolumeResolution =>
+	resolveComposeFilesMountedVolumes([spec], options);

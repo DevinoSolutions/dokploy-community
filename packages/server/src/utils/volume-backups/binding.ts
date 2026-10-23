@@ -82,6 +82,10 @@ export type VolumeBindingFacts = {
 	// name: a mount, a volume backup or its `appName` namespace. Only compose
 	// files are checked against it (see services/volume-binding.ts).
 	claimedByOtherSameOrgService?: boolean;
+	// Another compose that has deployed on the same server declares the name in
+	// its stored compose file (read only when the compose-file check asks).
+	declaredByOtherCompose?: boolean;
+	otherComposeDeclarations?: string[];
 	// The service is a compose whose own file declares this volume (an
 	// `external: true` volume or one with an explicit `name:`).
 	declaredByComposeFile: boolean;

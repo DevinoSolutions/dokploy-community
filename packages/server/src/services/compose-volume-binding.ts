@@ -1,16 +1,25 @@
+import { readFileSync } from "node:fs";
+import { posix } from "node:path";
+import { paths } from "@dokploy/server/constants";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
-import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import {
 	addDomainToCompose,
 	loadDockerCompose,
 	loadDockerComposeRemote,
 } from "@dokploy/server/utils/docker/domain";
-import { getEnvironmentVariablesObject } from "@dokploy/server/utils/docker/utils";
+import {
+	getEnvironmentVariablesObject,
+	parseEnvironmentKeyValuePair,
+	prepareEnvironmentVariables,
+} from "@dokploy/server/utils/docker/utils";
+import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
+import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import {
 	type ComposeVariables,
-	resolveComposeMountedVolumes,
+	resolveComposeFilesMountedVolumes,
+	UNKNOWN_VARIABLE_VALUE,
 } from "@dokploy/server/utils/volume-backups/compose-volumes";
-import { parse as parseShell } from "shell-quote";
+import { parse as parseShell, quote } from "shell-quote";
 import { parse } from "yaml";
 import { logger } from "../lib/logger";
 import { findRefusedComposeVolumes } from "./volume-binding";
@@ -25,15 +34,27 @@ type ComposeForVolumeCheck = Pick<
 	| "randomize"
 	| "suffix"
 	| "environment"
+	| "serverId"
+	| "sourceType"
+	| "composePath"
 >;
 
-type Spec = Parameters<typeof resolveComposeMountedVolumes>[0];
+type Spec = Parameters<typeof resolveComposeFilesMountedVolumes>[0][number];
 
 // The variables `docker compose` / `docker stack deploy` interpolate the
 // compose file with, as Dokploy writes them (see getCreateEnvFileCommand and
 // stageStackEnvFile). A compose that does not get an env file from Dokploy
 // reads whatever `.env` sits next to the file, which Dokploy cannot see, so no
 // variable is trusted then (`strict`).
+//
+// The two kinds differ on a variable that is set to an empty string:
+// - docker compose reads it from the `.env` as set-but-empty, which
+//   `${A-x}` and `${A+x}` tell apart from unset, so empty values are kept;
+// - a stack's staged env file leaves a variable without a value out
+//   (buildStackEnvFileContent), so for a stack it is unset.
+// The deploy shell's own variables are set but unknown: PATH and HOME for
+// docker compose (the process environment wins over the `.env`), and the
+// shell's PWD and the like for a stack.
 const getInterpolationVariables = (
 	compose: ComposeForVolumeCheck,
 ): { env: ComposeVariables; strict: boolean } => {
@@ -42,45 +63,93 @@ const getInterpolationVariables = (
 		return { env: {}, strict: true };
 	}
 	try {
-		const content = isStack
-			? (compose.env ?? "")
-			: `APP_NAME=${compose.appName}\nCOMPOSE_PROJECT_NAME=${compose.appName}\n${compose.env ?? ""}${
-					compose.randomize ? `\nCOMPOSE_PREFIX=${compose.suffix}` : ""
-				}`;
-		return {
-			env: getEnvironmentVariablesObject(
-				content,
-				compose.environment.project.env,
-				compose.environment.env,
-			),
-			strict: false,
-		};
+		const projectEnv = compose.environment.project.env;
+		const environmentEnv = compose.environment.env;
+		if (isStack) {
+			const env = getEnvironmentVariablesObject(
+				compose.env ?? "",
+				projectEnv,
+				environmentEnv,
+			);
+			for (const name of ["PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"]) {
+				if (!Object.hasOwn(env, name)) {
+					env[name] = UNKNOWN_VARIABLE_VALUE;
+				}
+			}
+			return { env, strict: false };
+		}
+		const content = `APP_NAME=${compose.appName}\nCOMPOSE_PROJECT_NAME=${compose.appName}\n${compose.env ?? ""}${
+			compose.randomize ? `\nCOMPOSE_PREFIX=${compose.suffix}` : ""
+		}`;
+		const env: Record<string, string> = {};
+		for (const pair of prepareEnvironmentVariables(
+			content,
+			projectEnv,
+			environmentEnv,
+		)) {
+			const [key, value] = parseEnvironmentKeyValuePair(pair);
+			env[key] = value;
+		}
+		env.PATH = UNKNOWN_VARIABLE_VALUE;
+		env.HOME = UNKNOWN_VARIABLE_VALUE;
+		return { env, strict: false };
 	} catch {
 		// Unresolved references: the variables are not known.
 		return { env: null, strict: true };
 	}
 };
 
-// Refuses (throws) when the compose spec mounts a named volume that is not
-// the compose's own (T-6822). `spec` is the YAML that is deployed: domains,
-// randomize and isolatedDeployment already applied.
+const getCodeDirectory = (compose: ComposeForVolumeCheck) => {
+	const { COMPOSE_PATH } = paths(!!compose.serverId);
+	// Hosts are Linux; a drive letter only appears on a Windows dev machine.
+	const root = COMPOSE_PATH.replace(/\\/g, "/").replace(/^[A-Za-z]:/, "");
+	return posix.join(root, compose.appName, "code");
+};
+
+// Refuses (throws) when the compose files mount a named volume that is not
+// the compose's own (T-6822). The first spec is the YAML that is deployed
+// (domains, randomize and isolatedDeployment already applied); the others are
+// the override files of a custom command.
 export const assertComposeSpecVolumesBound = async (
 	compose: ComposeForVolumeCheck,
-	spec: Spec,
+	specs: Spec | Spec[],
 ) => {
 	const { env, strict } = getInterpolationVariables(compose);
-	const { uses, unresolved } = resolveComposeMountedVolumes(spec, {
-		appName: compose.appName,
-		env,
-		strict,
-	});
+	const codeDirectory = getCodeDirectory(compose);
+	const composeFile =
+		compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath;
+	const { uses, unresolved, forbidden } = resolveComposeFilesMountedVolumes(
+		Array.isArray(specs) ? specs : [specs],
+		{
+			appName: compose.appName,
+			env,
+			strict,
+			baseDirs: [
+				codeDirectory,
+				posix.dirname(posix.resolve(codeDirectory, composeFile || ".")),
+			],
+		},
+	);
+	if (forbidden.length > 0) {
+		logger.warn(
+			{ composeId: compose.composeId, forbidden },
+			"[VolumeBinding] A compose file volume was refused: it mounts Docker's volume storage",
+		);
+		throw new Error(
+			`Compose volume refused: ${forbidden[0]} is Docker's own volume storage (/var/lib/docker/volumes), which holds every volume on the host.`,
+		);
+	}
 	if (unresolved.length > 0) {
 		logger.warn(
 			{ composeId: compose.composeId, unresolved },
 			"[VolumeBinding] A compose file volume was refused: it could not be resolved",
 		);
+		const hint =
+			strict && compose.composeType !== "stack"
+				? `Dokploy does not write a .env for this compose ("Create env file" is off), so its variables cannot be resolved: turn on "Create env file", or write the volume names out in the compose file.`
+				: "Write the volume names out in the compose file.";
 		throw new Error(
-			`Compose volume check failed: ${unresolved[0]} cannot be resolved before the deploy, so the volumes it uses cannot be checked. Write the volume names out in the compose file, and keep volumes in the one compose file (no include, no extends from another file, no volumes_from a container).`,
+			`Compose volume check failed: ${unresolved[0]} cannot be resolved before the deploy, so the volumes it uses cannot be checked. ${hint} Keep the volumes in the one compose file (no include, no extends from another file, no volumes_from a container).`,
 		);
 	}
 	const [refused] = await findRefusedComposeVolumes(compose, uses);
@@ -89,65 +158,176 @@ export const assertComposeSpecVolumesBound = async (
 	}
 };
 
-// The compose file arguments of a custom command. A custom command replaces
-// the generated one, so it could point docker at a file Dokploy did not
-// check.
-const getCommandFileArguments = (command: string) => {
-	const files: string[] = [];
-	const tokens = parseShell(command);
-	for (let index = 0; index < tokens.length; index++) {
-		const token = tokens[index];
-		if (typeof token !== "string") {
-			continue;
+// `docker compose` options that take a value, before the subcommand.
+const COMPOSE_OPTIONS_WITH_VALUE = new Set([
+	"-f",
+	"--file",
+	"-p",
+	"--project-name",
+	"--env-file",
+	"--project-directory",
+	"--profile",
+	"--parallel",
+	"--ansi",
+	"--progress",
+]);
+
+// The subcommands that create containers from the compose files.
+const FILE_READING_SUBCOMMANDS = new Set(["up", "run", "create"]);
+
+type CommandSegment = {
+	kind: "compose" | "stack" | "other";
+	subcommand?: string;
+	files: string[];
+};
+
+// A custom command replaces the generated one, but it is still `docker
+// <command>` chained with `docker compose ...` commands (sanitizeCommand).
+// A compose file argument is only one in the global options before the
+// subcommand (`rm -f` is not a file), and `-c` only for `docker stack`.
+const parseComposeCommand = (command: string): CommandSegment[] => {
+	const segments: string[][] = [[]];
+	for (const token of parseShell(command)) {
+		if (typeof token === "string") {
+			segments[segments.length - 1]?.push(token);
+		} else {
+			segments.push([]);
 		}
-		const inline = /^(?:--file=|--compose-file=|-f|-c)(.+)$/.exec(token);
-		if (inline?.[1]) {
-			files.push(inline[1]);
-		} else if (["-f", "--file", "-c", "--compose-file"].includes(token)) {
-			const next = tokens[index + 1];
-			if (typeof next === "string") {
-				files.push(next);
+	}
+	return segments
+		.filter((tokens) => tokens.length > 0)
+		.map((tokens, index): CommandSegment => {
+			let words = tokens;
+			if (index > 0) {
+				if (words[0] === "docker") {
+					words = words.slice(1);
+				} else if (words[0] === "docker-compose") {
+					words = ["compose", ...words.slice(1)];
+				}
+			}
+			const files: string[] = [];
+			if (words[0] === "compose") {
+				let subcommand: string | undefined;
+				for (let i = 1; i < words.length; ) {
+					const word = words[i] as string;
+					if (word.startsWith("--") && word.includes("=")) {
+						const [name, ...rest] = word.split("=");
+						if (name === "--file") {
+							files.push(rest.join("="));
+						}
+						i += 1;
+					} else if (COMPOSE_OPTIONS_WITH_VALUE.has(word)) {
+						const value = words[i + 1];
+						if ((word === "-f" || word === "--file") && value !== undefined) {
+							files.push(value);
+						}
+						i += 2;
+					} else if (/^-f.+/.test(word)) {
+						files.push(word.slice(2));
+						i += 1;
+					} else if (word.startsWith("-")) {
+						i += 1;
+					} else {
+						subcommand = word;
+						break;
+					}
+				}
+				return { kind: "compose", subcommand, files };
+			}
+			if (words[0] === "stack") {
+				const subcommand = words.slice(1).find((word) => !word.startsWith("-"));
+				for (let i = 1; i < words.length; i++) {
+					const word = words[i] as string;
+					if (word === "-c" || word === "--compose-file") {
+						const value = words[i + 1];
+						if (value !== undefined) {
+							files.push(value);
+						}
+					} else if (word.startsWith("--compose-file=")) {
+						files.push(word.slice("--compose-file=".length));
+					} else if (/^-c.+/.test(word)) {
+						files.push(word.slice(2));
+					}
+				}
+				return { kind: "stack", subcommand, files };
+			}
+			return { kind: "other", files };
+		});
+};
+
+// The compose files a custom command passes besides the deployed one. A
+// command that starts containers without naming a file would make Docker find
+// a compose file (or an override) in the project directory by itself.
+export const getCommandOverrideFiles = (
+	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
+) => {
+	if (!compose.command) {
+		return [];
+	}
+	const codeDirectory = getCodeDirectory(compose);
+	const deployed = posix.resolve(
+		codeDirectory,
+		compose.sourceType === "raw"
+			? "docker-compose.yml"
+			: compose.composePath || "docker-compose.yml",
+	);
+	const overrides = new Set<string>();
+	for (const segment of parseComposeCommand(compose.command)) {
+		const startsContainers =
+			(segment.kind === "compose" &&
+				segment.subcommand !== undefined &&
+				FILE_READING_SUBCOMMANDS.has(segment.subcommand)) ||
+			(segment.kind === "stack" && segment.subcommand === "deploy");
+		if (startsContainers && segment.files.length === 0) {
+			logger.warn(
+				{ composeId: compose.composeId },
+				"[VolumeBinding] A compose command was refused: it names no compose file",
+			);
+			throw new Error(
+				`Compose command refused: it starts containers without naming a compose file, so Docker would pick one from the project directory and its volumes would not be checked. Pass "-f ${compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath}" (or "-c" for a stack).`,
+			);
+		}
+		for (const file of startsContainers ? segment.files : []) {
+			const absolute = posix.resolve(codeDirectory, file);
+			if (absolute !== deployed) {
+				overrides.add(absolute);
 			}
 		}
 	}
-	return files;
+	return [...overrides];
 };
 
-const normalizeComposePath = (path: string) => path.replace(/^(\.\/)+/, "");
-
-const assertCommandUsesCheckedFile = (
-	compose: ComposeForVolumeCheck &
-		Pick<ComposeNested, "command" | "sourceType" | "composePath">,
-) => {
-	if (!compose.command) {
-		return;
-	}
-	const rendered = normalizeComposePath(
-		compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath,
-	);
-	const other = getCommandFileArguments(compose.command).find(
-		(file) => normalizeComposePath(file) !== rendered,
-	);
-	if (other !== undefined) {
-		logger.warn(
-			{ composeId: compose.composeId, file: other },
-			"[VolumeBinding] A compose command was refused: it uses another compose file",
-		);
+const loadOverrideFile = async (
+	compose: ComposeForVolumeCheck,
+	path: string,
+): Promise<Spec> => {
+	let text: string;
+	try {
+		if (compose.serverId) {
+			const { stdout } = await execAsyncRemote(
+				compose.serverId,
+				`cat ${quote([path])}`,
+			);
+			text = stdout;
+		} else {
+			text = readFileSync(path, "utf8");
+		}
+		return parse(text, { maxAliasCount: 10000, merge: true }) as Spec;
+	} catch {
 		throw new Error(
-			`Compose command refused: it uses the compose file "${other}", but only the compose file Dokploy deploys ("${rendered}") has its volumes checked. Use that file in the command.`,
+			`Compose command refused: the compose file "${path}" it uses could not be read, so its volumes cannot be checked.`,
 		);
 	}
 };
 
 // Deploy, redeploy and preview: checks the final compose file (the one
-// `writeDomainsToCompose` stages) before anything is built, torn down or
-// started. A file that cannot be rendered is left to the render step, which
-// reports it and stops the script before any docker command.
-export const assertComposeVolumesBound = async (
-	rawCompose: ComposeNested,
-) => {
+// `writeDomainsToCompose` stages), and the override files of a custom command,
+// before anything is built, torn down or started. A file that cannot be
+// rendered is left to the render step, which reports it and stops the script
+// before any docker command.
+export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	const compose = await withResolvedVaultRefs(rawCompose);
-	assertCommandUsesCheckedFile(compose);
+	const overrideFiles = getCommandOverrideFiles(compose);
 	let spec: Awaited<ReturnType<typeof addDomainToCompose>>;
 	try {
 		spec = await addDomainToCompose(compose, compose.domains);
@@ -157,7 +337,10 @@ export const assertComposeVolumesBound = async (
 	if (!spec) {
 		return;
 	}
-	await assertComposeSpecVolumesBound(compose, spec as Spec);
+	const overrides = await Promise.all(
+		overrideFiles.map((path) => loadOverrideFile(compose, path)),
+	);
+	await assertComposeSpecVolumesBound(compose, [spec as Spec, ...overrides]);
 };
 
 // Start (`docker compose up -d` from the files on disk): checks the compose
