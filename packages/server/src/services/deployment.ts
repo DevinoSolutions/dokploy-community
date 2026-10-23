@@ -25,6 +25,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { resolveVolumeBackupHost } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
@@ -613,8 +614,9 @@ export const createDeploymentVolumeBackup = async (
 		throw new Error("Invalid volume backup app name");
 	}
 
-	const serverId =
-		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
+	// The host the backup command runs on (databases included), so the log it
+	// appends to exists there. Same answer as runVolumeBackup.
+	const serverId = resolveVolumeBackupHost(volumeBackup);
 	await removeLastTenDeployments(deployment.volumeBackupId, "volumeBackup");
 	try {
 		const { VOLUME_BACKUPS_PATH } = paths(!!serverId);
