@@ -1,6 +1,6 @@
 {
 	"name": "dokploy",
-	"version": "v0.30.8-community.31",
+	"version": "v0.30.8-community.32",
 	"private": true,
 	"license": "Apache-2.0",
 	"type": "module",
@@ -139,7 +139,7 @@
 		"recharts": "^3.8.0",
 		"resend": "^6.0.2",
 		"semver": "7.7.3",
-		"shadcn": "^4.11.0",
+		"shadcn": "^4.22.1",
 		"shell-quote": "^1.9.0",
 		"slugify": "^1.6.6",
 		"sonner": "^1.7.4",
@@ -156,7 +156,7 @@
 		"ws": "8.21.0",
 		"xterm-addon-fit": "^0.8.0",
 		"yaml": "2.8.3",
-		"zod": "^4.5.4",
+		"zod": "^4.6.6",
 		"zod-form-data": "^3.0.1"
 	},
 	"devDependencies": {
