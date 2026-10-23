@@ -261,34 +261,14 @@ export const reachesDockerVolumesDirectory = (
 	baseDirs: string[] = [],
 ) => dockerVolumesDirectoryReach(path, baseDirs) !== null;
 
-// The first variable of a value that is not an escaped `$$`.
-const firstVariable = (raw: string) => {
+// Where the first variable of a value that is not an escaped `$$` starts.
+const firstVariableIndex = (raw: string) => {
 	for (const match of raw.matchAll(VARIABLE)) {
 		if (match[0] !== "$$") {
-			return match;
+			return match.index;
 		}
 	}
-	return null;
-};
-
-const firstVariableIndex = (raw: string) => firstVariable(raw)?.index ?? -1;
-
-// The text without its `${...}` groups (a default may hold a `..` that is
-// judged on its own).
-const withoutBracedVariables = (text: string) => {
-	let depth = 0;
-	let result = "";
-	for (let i = 0; i < text.length; i++) {
-		if (text[i] === "$" && text[i + 1] === "{") {
-			depth += 1;
-			i += 1;
-		} else if (text[i] === "}" && depth > 0) {
-			depth -= 1;
-		} else if (depth === 0) {
-			result += text[i];
-		}
-	}
-	return result;
+	return -1;
 };
 
 // A source with a `${VAR}` that cannot be resolved can still be known to be
@@ -320,38 +300,31 @@ export const unresolvedSourceReachesDockerVolumes = (
 	);
 };
 
-// A `..` written after a variable that cannot be resolved (`${PWD}/../..`,
-// `${HOME}/../..`): the variable can be any directory, so the path can end up
-// anywhere above it. A `..` inside a `${...}` (a default) is not counted
-// here; see unresolvedDefaultReach.
-export const unresolvedSourceClimbs = (rawSource: string) => {
-	const index = firstVariableIndex(rawSource);
-	return (
-		index >= 0 &&
-		/\.\.(?:\/|$)/.test(withoutBracedVariables(rawSource.slice(index)))
-	);
-};
+// A `..` segment anywhere in a source that depends on a variable that cannot
+// be resolved (`${HOME}/../..`, `${A}${U:-/../..}`, `${X:-${HOME}/..}`):
+// the variable can be any directory, and a default can hold the climb, so the
+// path can end up anywhere above where it starts. Inside or outside any
+// `${...}`, in any default.
+export const unresolvedSourceClimbs = (rawSource: string) =>
+	/\.\.(?:[/}$]|$)/.test(rawSource);
 
-// The default of the first variable (`${X:-default}`, `${X-default}`) put
-// where the variable is, judged with the normal rules of a path, because the
-// variable is unset when it takes the default. Defaults inside defaults are
-// followed. A default that is only a relative path (`${DATA_DIR:-../data}`)
-// is not a problem unless it climbs to a parent of Docker's volume storage.
-export const unresolvedDefaultReach = (
+const SOLE_DEFAULT = /^\$\{[A-Za-z_][A-Za-z0-9_]*:?-([^${}]*)\}$/;
+
+// The one source with a `..` that is not refused for it: exactly one variable
+// with a plain literal default (`${DATA_DIR:-../data}`), nothing before or
+// after, no `$` or braces in the default. The default is the path it falls
+// back to and is judged with the normal rules, so `${X:-../../..}` that
+// reaches `/` is still refused. undefined when the source is not that form.
+export const soleDefaultReach = (
 	rawSource: string,
 	baseDirs: string[] = [],
-): DockerVolumesReach => {
-	const match = firstVariable(rawSource);
-	if (!match || (match[3] !== ":-" && match[3] !== "-")) {
-		return null;
+): DockerVolumesReach | undefined => {
+	const fallback = SOLE_DEFAULT.exec(rawSource)?.[1];
+	if (fallback === undefined) {
+		return undefined;
 	}
-	const candidate =
-		rawSource.slice(0, match.index).replaceAll("$$", "$") + (match[4] ?? "");
-	if (candidate.includes("$")) {
-		return unresolvedDefaultReach(candidate, baseDirs);
-	}
-	return isFilePathSource(candidate)
-		? dockerVolumesDirectoryReach(candidate, baseDirs)
+	return isFilePathSource(fallback)
+		? dockerVolumesDirectoryReach(fallback, baseDirs)
 		: null;
 };
 
@@ -417,24 +390,25 @@ const collectMounts = (
 	};
 	// A path that depends on a variable Dokploy does not provide. What is
 	// written before the variable may already put it in Docker's volume
-	// storage, and a `..` after it can climb out of anywhere; both are
-	// refused. Returns whether it was.
+	// storage, and a `..` anywhere in it can climb out of anywhere; both are
+	// refused, except for a lone variable with a literal default, which is
+	// judged as that default. Returns whether it was refused.
 	const refuseUnresolvedPath = (rawPath: string, what: string) => {
 		if (unresolvedSourceReachesDockerVolumes(rawPath, options.baseDirs)) {
 			into.forbidden.push(`${what} "${rawPath}"`);
 			return true;
 		}
-		const defaultReach = unresolvedDefaultReach(rawPath, options.baseDirs);
-		if (defaultReach === "inside") {
+		const fallback = soleDefaultReach(rawPath, options.baseDirs);
+		if (fallback === "inside") {
 			into.forbidden.push(`${what} "${rawPath}"`);
 			return true;
 		}
-		if (defaultReach === "parent") {
+		if (fallback === "parent") {
 			into.forbiddenParents.push(`${what} "${rawPath}"`);
 			return true;
 		}
-		if (unresolvedSourceClimbs(rawPath)) {
-			into.unresolved.push(`${what} "${rawPath}" (a ".." after a variable)`);
+		if (fallback === undefined && unresolvedSourceClimbs(rawPath)) {
+			into.unresolved.push(`${what} "${rawPath}" (a ".." in a path that depends on a variable)`);
 			return true;
 		}
 		return false;

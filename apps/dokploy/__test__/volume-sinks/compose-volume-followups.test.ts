@@ -54,7 +54,7 @@ const {
 	dockerVolumesDirectoryReach,
 	reachesDockerVolumesDirectory,
 	resolveComposeMountedVolumes,
-	unresolvedDefaultReach,
+	soleDefaultReach,
 	unresolvedSourceClimbs,
 	unresolvedSourceReachesDockerVolumes,
 } = await import("@dokploy/server/utils/volume-backups/compose-volumes");
@@ -1138,8 +1138,8 @@ describe("a variable followed by .. that cannot be resolved", () => {
 		["${X}/..x", false],
 		["${X}/a..b", false],
 		["${X}/data", false],
-		["../${X}", false],
-		["$${X}/../x", false],
+		["../${X}", true],
+		["${X}/../x", true],
 		["${X}", false],
 	])("unresolvedSourceClimbs(%s) is %s", (raw, expected) => {
 		expect(unresolvedSourceClimbs(raw)).toBe(expected);
@@ -1376,11 +1376,7 @@ describe("a path option that is not literal", () => {
 	});
 });
 
-describe("a default that climbs", () => {
-	// Enough `..` to reach `/` from the compose directory wherever the tests run.
-	const CLIMB = Array(CODE_DIRECTORY.split("/").length + 1)
-		.fill("..")
-		.join("/");
+describe("a source with a variable and a ..", () => {
 	const off = { createEnvFile: false };
 	const entry = (value: string) => `
 services:
@@ -1388,12 +1384,61 @@ services:
     volumes:
       - "${value}"
 `;
+	// Enough `..` to reach `/` from the compose directory wherever the tests run.
+	const CLIMB = Array(CODE_DIRECTORY.split("/").length + 1)
+		.fill("..")
+		.join("/");
+	const climbs = /Compose volume check failed/;
+	const refused = /Compose volume (check failed|refused)/;
+	const parent = /contains Docker's own volume storage/;
 
-	it("allows a default that is a relative path", async () => {
+	it.each([
+		"${HOME}/${U:-..}/${U:-..}/${U:-..}/${U:-..}/${U:-..}:/h",
+		"${A}${U:-/../../../../..}:/h",
+		"${X:-${HOME}/../..}:/h",
+		"${X:-$HOME/../..}:/h",
+		"${X:-/srv}/../../..:/h",
+		"${HOME}/../..:/h",
+		"/srv/${X:-..}/..:/h",
+	])("refuses %s with the env file on", async (source) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry(source))),
+		).rejects.toThrow(refused);
+	});
+
+	it.each([
+		"${A}/${U:-..}/${U:-..}/${U:-..}/${U:-..}/${U:-..}:/h",
+		"${A}${U:-/../../../../..}:/h",
+		"${X:-${HOME}/../..}:/h",
+		"${X:-$HOME/../..}:/h",
+		"${X:-/srv}/../../..:/h",
+		"${X:-${Y:-..}}:/h",
+		"/srv/${X:-..}/..:/h",
+	])("refuses %s with the env file off", async (source) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry(source), off)),
+		).rejects.toThrow(climbs);
+	});
+
+	it("refuses the long-syntax bind of the same sources", async () => {
+		for (const source of [
+			"${A}/${U:-..}/${U:-..}/${U:-..}/${U:-..}/${U:-..}",
+			"${A}${U:-/../../../../..}",
+			"${X:-${HOME}/../..}",
+			"${X:-/srv}/../../..",
+		]) {
+			await expect(
+				assertComposeVolumesBound(composeRow(longBind(`"${source}"`), off)),
+			).rejects.toThrow(climbs);
+		}
+	});
+
+	it("allows a lone variable with a literal default that is not a parent", async () => {
 		for (const source of [
 			"${DATA_DIR:-../data}:/data",
 			"${DATA_DIR-../data}:/data",
-			"${DATA_DIR:-./data}:/data",
+			"${DATA_DIR:-./data}:/data:ro",
+			"${X:-/srv}:/h",
 			"${DATA_DIR:-/srv/data}:/data",
 			"${DATA_DIR:-data}:/data",
 			"${DATA_DIR:-../../data}:/data",
@@ -1407,21 +1452,37 @@ services:
 		}
 	});
 
-	it.each([
-		`\${X:-${CLIMB}}:/h`,
-		`\${X-${CLIMB}}:/h`,
-		"${X:-../../../../../../../../../..}:/h",
-		"${X:-/}:/h",
-		"${X:-/var/lib}:/h",
-		`\${X:-\${Y:-${CLIMB}}}:/h`,
-		`/srv/\${X:-${CLIMB}}:/h`,
-	])("refuses the default that climbs to a parent: %s", async (source) => {
+	it("allows a source with a variable and no ..", async () => {
+		for (const source of [
+			"${HOME}/data:/d",
+			"${DATA_DIR}:/data",
+			"${DATA_DIR}/x:/data",
+			"./${X}/data:/d",
+		]) {
+			await expect(
+				assertComposeVolumesBound(composeRow(entry(source), off)),
+			).resolves.toBeUndefined();
+		}
 		await expect(
-			assertComposeVolumesBound(composeRow(entry(source), off)),
-		).rejects.toThrow(/contains Docker's own volume storage/);
+			assertComposeVolumesBound(composeRow(entry("${HOME}/data:/d"))),
+		).resolves.toBeUndefined();
 	});
 
-	it("refuses a default inside the storage", async () => {
+	it("judges the lone default as a path, so one that reaches a parent is refused", async () => {
+		for (const source of [
+			`\${X:-${CLIMB}}:/h`,
+			`\${X-${CLIMB}}:/h`,
+			"${X:-/}:/h",
+			"${X:-/var/lib}:/h",
+			"${X:-/var/lib/docker}:/h",
+		]) {
+			await expect(
+				assertComposeVolumesBound(composeRow(entry(source), off)),
+			).rejects.toThrow(parent);
+		}
+	});
+
+	it("refuses a lone default inside the storage", async () => {
 		await expect(
 			assertComposeVolumesBound(
 				composeRow(entry("${X:-/var/lib/docker/volumes/v}:/h"), off),
@@ -1429,36 +1490,53 @@ services:
 		).rejects.toThrow(/is Docker's own volume storage/);
 	});
 
-	it("still refuses a .. written after the variable, outside its braces", async () => {
-		await expect(
-			assertComposeVolumesBound(
-				composeRow(entry("${DATA_DIR:-../data}/../..:/h"), off),
-			),
-		).rejects.toThrow(/Compose volume check failed/);
+	it("is not an exception when the default holds a variable or braces", async () => {
+		for (const source of [
+			"${X:-${Y:-../data}}:/h",
+			"${X:-$Y/../data}:/h",
+			"${X:-../data}${Y}:/h",
+			"${Y}${X:-../data}:/h",
+		]) {
+			await expect(
+				assertComposeVolumesBound(composeRow(entry(source), off)),
+			).rejects.toThrow(climbs);
+		}
 	});
 
-	it("counts the .. outside the braces only", () => {
-		expect(unresolvedSourceClimbs("${DATA_DIR:-../data}")).toBe(false);
-		expect(unresolvedSourceClimbs("${X:-${Y:-..}}")).toBe(false);
-		expect(unresolvedSourceClimbs("${X:-..}/..")).toBe(true);
-		expect(unresolvedSourceClimbs("${X}/..")).toBe(true);
+	it.each([
+		["${DATA_DIR:-../data}", true],
+		["${X:-${Y:-..}}", true],
+		["${X:-..}/..", true],
+		["${X}/..", true],
+		["${X}..", true],
+		["${X}${U:-/..}", true],
+		["${X}/..x", false],
+		["${X}/a..b", false],
+		["${X}/data", false],
+		["${X}", false],
+	])("unresolvedSourceClimbs(%s) is %s", (raw, expected) => {
+		expect(unresolvedSourceClimbs(raw)).toBe(expected);
 	});
 
-	it("judges a default as a path", () => {
+	it("judges only a lone literal default", () => {
 		const base = ["/etc/dokploy/compose/app/code"];
 
-		expect(unresolvedDefaultReach("${X:-../data}", base)).toBeNull();
-		expect(unresolvedDefaultReach("${X:-../../../../..}", base)).toBe("parent");
-		expect(unresolvedDefaultReach("${X:-../../../../../..}", base)).toBe(
-			"parent",
+		expect(soleDefaultReach("${X:-../data}", base)).toBeNull();
+		expect(soleDefaultReach("${X-../data}", base)).toBeNull();
+		expect(soleDefaultReach("${X:-../../../../..}", base)).toBe("parent");
+		expect(soleDefaultReach("${X:-../../../../../..}", base)).toBe("parent");
+		expect(soleDefaultReach("${X:-/}", base)).toBe("parent");
+		expect(soleDefaultReach("${X:-data}", base)).toBeNull();
+		expect(soleDefaultReach("${X:-}", base)).toBeNull();
+		expect(soleDefaultReach("${X:-/var/lib/docker/volumes/v}", base)).toBe(
+			"inside",
 		);
-		expect(unresolvedDefaultReach("${X:-data}", base)).toBeNull();
-		expect(unresolvedDefaultReach("${X}", base)).toBeNull();
-		expect(unresolvedDefaultReach("${X:?err}", base)).toBeNull();
-		expect(unresolvedDefaultReach("${X:+../../../../..}", base)).toBeNull();
-		expect(
-			unresolvedDefaultReach("${X:-/var/lib/docker/volumes/v}", base),
-		).toBe("inside");
-		expect(unresolvedDefaultReach("/srv/${X:-../../..}", base)).toBe("parent");
+		expect(soleDefaultReach("${X}", base)).toBeUndefined();
+		expect(soleDefaultReach("${X:?err}", base)).toBeUndefined();
+		expect(soleDefaultReach("${X:+../..}", base)).toBeUndefined();
+		expect(soleDefaultReach("/srv/${X:-..}", base)).toBeUndefined();
+		expect(soleDefaultReach("${X:-..}/a", base)).toBeUndefined();
+		expect(soleDefaultReach("${X:-${Y}}", base)).toBeUndefined();
+		expect(soleDefaultReach("${X:-$Y}", base)).toBeUndefined();
 	});
 });
