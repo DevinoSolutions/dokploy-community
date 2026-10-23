@@ -11,6 +11,7 @@ import {
 	loadWatchdogServiceContext,
 	markDeploymentFailedByWatchdog,
 	markServiceFailedIfStillRunning,
+	readDeploymentStatus,
 	readLogIdleMs,
 	resolveWatchdogLogHost,
 	resolveWatchdogService,
@@ -48,6 +49,8 @@ export const defaultStopDeps: StopDeps = {
 			await execAsync(command);
 		}
 	},
+	resolveKind: async (row) =>
+		(await resolveWatchdogService(row))?.composeId ? "compose" : "application",
 	killDockerBuild,
 };
 
@@ -55,7 +58,8 @@ export const createDefaultWatchdogDeps = (): WatchdogDeps => ({
 	now: () => Date.now(),
 	loadConfig: async () => resolveWatchdogConfig(await getWebServerSettings()),
 	activeJobs: () => myQueue.getJobs(["active"]),
-	releaseJob: (jobId) => myQueue.releaseActive(jobId),
+	releaseJob: (jobId, options) => myQueue.releaseActive(jobId, options),
+	readStatus: readDeploymentStatus,
 	listRunning: listRunningDeployDeployments,
 	latestDeploys: listLatestDeploysOf,
 	resolveService: resolveWatchdogService,

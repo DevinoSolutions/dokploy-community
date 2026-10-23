@@ -23,18 +23,19 @@ export const WatchdogExclusion = ({ id, type }: Props) => {
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 	const applicationQuery = api.application.watchdogExclusion.useQuery(
 		{ applicationId: id },
-		{ enabled: type === "application" && !!id && !isCloud },
+		{ enabled: type === "application" && !!id && isCloud === false },
 	);
 	const composeQuery = api.compose.watchdogExclusion.useQuery(
 		{ composeId: id },
-		{ enabled: type === "compose" && !!id && !isCloud },
+		{ enabled: type === "compose" && !!id && isCloud === false },
 	);
 	const { mutateAsync: setApplication, isPending: isSavingApplication } =
 		api.application.setWatchdogExclusion.useMutation();
 	const { mutateAsync: setCompose, isPending: isSavingCompose } =
 		api.compose.setWatchdogExclusion.useMutation();
 
-	if (isCloud) return null;
+	// Not known yet counts as Cloud: nothing flickers in, and no query is sent.
+	if (isCloud !== false) return null;
 
 	const query = type === "application" ? applicationQuery : composeQuery;
 	const isSaving = isSavingApplication || isSavingCompose;

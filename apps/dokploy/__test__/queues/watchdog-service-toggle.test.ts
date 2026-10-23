@@ -4,13 +4,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * The per-service switch "Exclude from the stuck-deployment watchdog" on
  * applications and composes: anyone who may update the service can flip it (no
  * admin role), it is off by default, and it edits the same instance-wide list
- * the admin card shows.
+ * the admin card shows. The edits go through the atomic helpers of the web
+ * server settings (one UPDATE), never a read-modify-write here.
  */
 
 const mocks = vi.hoisted(() => ({
 	checkServicePermissionAndAccess: vi.fn(),
 	getWebServerSettings: vi.fn(),
-	updateWebServerSettings: vi.fn(),
+	addWatchdogExclusion: vi.fn(),
+	removeWatchdogExclusion: vi.fn(),
 	findApplicationById: vi.fn(),
 	findComposeById: vi.fn(),
 	audit: vi.fn(),
@@ -22,7 +24,8 @@ vi.mock("@dokploy/server/services/permission", () => ({
 
 vi.mock("@dokploy/server/services/web-server-settings", () => ({
 	getWebServerSettings: mocks.getWebServerSettings,
-	updateWebServerSettings: mocks.updateWebServerSettings,
+	addWatchdogExclusion: mocks.addWatchdogExclusion,
+	removeWatchdogExclusion: mocks.removeWatchdogExclusion,
 }));
 
 vi.mock("@dokploy/server", () => ({
@@ -63,7 +66,8 @@ beforeEach(() => {
 		deploymentWatchdogEnabled: true,
 		deploymentWatchdogExclusions: [],
 	});
-	mocks.updateWebServerSettings.mockResolvedValue({});
+	mocks.addWatchdogExclusion.mockResolvedValue(undefined);
+	mocks.removeWatchdogExclusion.mockResolvedValue(undefined);
 	mocks.findApplicationById.mockResolvedValue({ appName: "app-abc123" });
 	mocks.findComposeById.mockResolvedValue({ appName: "stack-xyz789" });
 });
@@ -127,9 +131,10 @@ describe("flipping the switch", () => {
 			"a1",
 			{ service: ["create"] },
 		);
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [{ type: "application", id: "a1" }],
-		});
+		expect(mocks.addWatchdogExclusion).toHaveBeenCalledWith(
+			{ type: "application", id: "a1" },
+			{ keepExisting: true },
+		);
 		expect(mocks.audit).toHaveBeenCalledWith(expect.anything(), {
 			action: "update",
 			resourceType: "application",
@@ -145,9 +150,10 @@ describe("flipping the switch", () => {
 			excluded: true,
 		});
 
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [{ type: "compose", id: "c1" }],
-		});
+		expect(mocks.addWatchdogExclusion).toHaveBeenCalledWith(
+			{ type: "compose", id: "c1" },
+			{ keepExisting: true },
+		);
 		expect(mocks.audit).toHaveBeenCalledWith(
 			expect.anything(),
 			expect.objectContaining({
@@ -157,45 +163,40 @@ describe("flipping the switch", () => {
 		);
 	});
 
-	it("turning it off removes only that service and keeps the others", async () => {
-		mocks.getWebServerSettings.mockResolvedValue({
-			deploymentWatchdogExclusions: [
-				{ type: "application", id: "a1" },
-				{ type: "compose", id: "a1" },
-				{ type: "application", id: "a2", reason: "long migrations" },
-			],
-		});
-
+	it("turning it off removes only that service, in one atomic edit", async () => {
 		await applicationCaller.setWatchdogExclusion({
 			applicationId: "a1",
 			excluded: false,
 		});
 
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [
-				{ type: "compose", id: "a1" },
-				{ type: "application", id: "a2", reason: "long migrations" },
-			],
-		});
+		expect(mocks.removeWatchdogExclusion).toHaveBeenCalledTimes(1);
+		expect(mocks.removeWatchdogExclusion).toHaveBeenCalledWith(
+			"application",
+			"a1",
+		);
+		expect(mocks.addWatchdogExclusion).not.toHaveBeenCalled();
 	});
 
-	it("turning it on twice does not duplicate the entry or drop its reason", async () => {
-		mocks.getWebServerSettings.mockResolvedValue({
-			deploymentWatchdogExclusions: [
-				{ type: "application", id: "a1", reason: "set by an admin" },
-			],
+	it("turning it off for a compose names the compose, not an application of that id", async () => {
+		await composeCaller.setWatchdogExclusion({
+			composeId: "a1",
+			excluded: false,
 		});
 
+		expect(mocks.removeWatchdogExclusion).toHaveBeenCalledWith("compose", "a1");
+	});
+
+	it("turning it on keeps an entry an admin already made, with its reason", async () => {
 		await applicationCaller.setWatchdogExclusion({
 			applicationId: "a1",
 			excluded: true,
 		});
 
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [
-				{ type: "application", id: "a1", reason: "set by an admin" },
-			],
-		});
+		// keepExisting is what stops the helper replacing the admin's entry.
+		expect(mocks.addWatchdogExclusion).toHaveBeenCalledWith(
+			{ type: "application", id: "a1" },
+			{ keepExisting: true },
+		);
 	});
 
 	it("changes nothing when the permission check refuses", async () => {
@@ -207,7 +208,8 @@ describe("flipping the switch", () => {
 			composeCaller.setWatchdogExclusion({ composeId: "c1", excluded: true }),
 		).rejects.toThrow("UNAUTHORIZED");
 
-		expect(mocks.updateWebServerSettings).not.toHaveBeenCalled();
+		expect(mocks.addWatchdogExclusion).not.toHaveBeenCalled();
+		expect(mocks.removeWatchdogExclusion).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
 	});
 });

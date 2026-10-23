@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { runInJobContext } from "@dokploy/server/utils/process/job-context";
 import type { DeploymentJob } from "./queue-types";
 
 /**
@@ -190,6 +191,12 @@ interface InternalJob {
 	 * group may have been started again by then.
 	 */
 	released: boolean;
+	/**
+	 * The release kept the service's group lock: nothing could be stopped, so a
+	 * second deploy of the service must not start next to the first. The lock
+	 * is dropped when the processor really returns.
+	 */
+	groupLockKept: boolean;
 }
 
 interface Partition {
@@ -499,6 +506,7 @@ export class InMemoryQueue {
 			jumped: false,
 			wentAheadOf: 0,
 			released: false,
+			groupLockKept: false,
 		};
 	}
 
@@ -581,10 +589,19 @@ export class InMemoryQueue {
 	 * a command nobody can interrupt). The job leaves the partition's active list
 	 * and its service's group lock, the journal row is settled and the next
 	 * waiting job may start; the processor itself is left alone, and when it ends
-	 * it changes nothing here. True when a running job had that id. The deployment
-	 * watchdog calls this after it has stopped the work, never instead of that.
+	 * it changes nothing here (and every status write it makes is ignored, see
+	 * utils/process/job-context.ts). True when a running job had that id. The
+	 * deployment watchdog calls this after it has stopped the work.
+	 *
+	 * `keepGroupLock`: free the slot (capacity for the other services) but keep
+	 * the service's group lock until the processor really returns. For a job
+	 * whose process could not be stopped, so a second build of the same service
+	 * does not run next to it.
 	 */
-	releaseActive(id: string): boolean {
+	releaseActive(
+		id: string,
+		options: { keepGroupLock?: boolean } = {},
+	): boolean {
 		for (const partition of this.partitions.values()) {
 			const job = partition.active.find((candidate) => candidate.id === id);
 			if (!job) continue;
@@ -592,7 +609,8 @@ export class InMemoryQueue {
 			job.finishedOn = this.now();
 			job.failedReason = "Released by the deployment watchdog";
 			partition.active = partition.active.filter((j) => j.id !== job.id);
-			partition.activeGroups.delete(job.group);
+			if (options.keepGroupLock) job.groupLockKept = true;
+			else partition.activeGroups.delete(job.group);
 			if (job.jumped) partition.jumpedLast = false;
 			this.settle([job]);
 			this.wakeIdleWaiters();
@@ -878,15 +896,24 @@ export class InMemoryQueue {
 	private async runJob(job: InternalJob) {
 		let outcome: JobOutcome | undefined;
 		try {
-			const result = await this.processor?.(this.toPublic(job));
+			const result = await runInJobContext(
+				{ isReleased: () => job.released },
+				() => this.processor?.(this.toPublic(job)),
+			);
 			if (result === "cancelled" || result === "failed") outcome = result;
 		} catch (error) {
 			outcome = "failed";
 			job.failedReason = error instanceof Error ? error.message : String(error);
 			console.error("In-memory deployment job failed", error);
 		} finally {
-			// Its slot was already freed (and may be in use again): nothing to undo.
-			if (!job.released) {
+			if (job.released) {
+				// Its slot was already freed (and may be in use again). Only a kept
+				// group lock is still ours to drop, now that the process is over.
+				if (job.groupLockKept) {
+					this.partitions.get(job.partition)?.activeGroups.delete(job.group);
+					void this.drainPartition(job.partition);
+				}
+			} else {
 				job.finishedOn = this.now();
 				const partition = this.partitions.get(job.partition);
 				if (partition) {

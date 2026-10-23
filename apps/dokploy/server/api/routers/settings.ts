@@ -56,6 +56,10 @@ import { db } from "@dokploy/server/db";
 import { checkPermission } from "@dokploy/server/services/permission";
 import { getAccessibleServerIds } from "@dokploy/server/services/server";
 import {
+	addWatchdogExclusion,
+	removeWatchdogExclusion,
+} from "@dokploy/server/services/web-server-settings";
+import {
 	apiAddDeploymentWatchdogExclusion,
 	apiRemoveDeploymentWatchdogExclusion,
 	apiUpdateDeploymentWatchdog,
@@ -597,13 +601,8 @@ export const settingsRouter = createTRPCRouter({
 				});
 			}
 
-			const current = await getWebServerSettings();
-			const others = (current?.deploymentWatchdogExclusions ?? []).filter(
-				(entry) => !(entry.type === input.type && entry.id === input.id),
-			);
-			await updateWebServerSettings({
-				deploymentWatchdogExclusions: [...others, input],
-			});
+			// One atomic UPDATE: two edits at once cannot lose an entry.
+			await addWatchdogExclusion(input, { keepExisting: false });
 
 			await audit(ctx, {
 				action: "update",
@@ -624,13 +623,30 @@ export const settingsRouter = createTRPCRouter({
 				});
 			}
 
-			const current = await getWebServerSettings();
-			const list = current?.deploymentWatchdogExclusions ?? [];
-			await updateWebServerSettings({
-				deploymentWatchdogExclusions: list.filter(
-					(entry) => !(entry.type === input.type && entry.id === input.id),
-				),
-			});
+			// The list is instance-wide: an admin removes only entries for services
+			// of their own organization. An entry whose service is gone is stale and
+			// can be removed by anyone who may edit the list.
+			try {
+				const service =
+					input.type === "compose"
+						? await findComposeById(input.id)
+						: await findApplicationById(input.id);
+				if (
+					service.environment.project.organizationId !==
+					ctx.session.activeOrganizationId
+				) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You are not allowed to change this service",
+					});
+				}
+			} catch (error) {
+				if (!(error instanceof TRPCError) || error.code !== "NOT_FOUND") {
+					throw error;
+				}
+			}
+
+			await removeWatchdogExclusion(input.type, input.id);
 
 			await audit(ctx, {
 				action: "update",

@@ -119,10 +119,11 @@ const deps: Record<
 		notRunning: false,
 		claimedCancelled: true,
 	})),
+	readStatus: vi.fn(async () => "running" as string | null),
 	// Like the real one, it takes the row out of the running set.
 	markFailed: vi.fn(async (deploymentId: string) => {
 		running = running.filter((r) => r.deploymentId !== deploymentId);
-		return true;
+		return "flipped";
 	}),
 	failServiceIfRunning: vi.fn(async () => {}),
 	loadContext: vi.fn(async () => context),
@@ -130,6 +131,16 @@ const deps: Record<
 	recordAudit: vi.fn(async () => {}),
 };
 const asDeps = deps as unknown as WatchdogDeps;
+
+/**
+ * Silence is only acted on when it is seen on two consecutive sweeps: this runs
+ * both, a minute apart, like the interval does.
+ */
+const sweepTwice = async (watchdog: { sweep: () => Promise<void> }) => {
+	await watchdog.sweep();
+	clock += MIN;
+	await watchdog.sweep();
+};
 
 const logLines = () =>
 	deps.appendLog.mock.calls.map((call) => (call as unknown[])[2] as string);
@@ -149,9 +160,11 @@ beforeEach(() => {
 		notRunning: false,
 		claimedCancelled: true,
 	});
+	deps.readStatus.mockResolvedValue("running");
+	deps.readLogIdleMs.mockImplementation(async () => idleMs);
 	deps.markFailed.mockImplementation(async (deploymentId: string) => {
 		running = running.filter((r) => r.deploymentId !== deploymentId);
-		return true;
+		return "flipped";
 	});
 	deps.latestDeploys.mockResolvedValue([] as never[]);
 	deps.releaseJob.mockImplementation((id: string) => {
@@ -167,10 +180,21 @@ describe("when it fires", () => {
 		idleMs = 21 * MIN;
 		const watchdog = createDeploymentWatchdog(asDeps);
 
-		await watchdog.sweep();
+		await sweepTwice(watchdog);
 
 		expect(deps.stop).toHaveBeenCalledTimes(1);
 		expect(logLines()[0]).toBe("Watchdog: no log output for 20 min");
+	});
+
+	it("does not act on silence it has seen only once", async () => {
+		clock = START + 30 * MIN;
+		idleMs = 21 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.stop).not.toHaveBeenCalled();
+		expect(deps.appendLog).not.toHaveBeenCalled();
 	});
 
 	it("fails a deployment that ran longer than the wall limit, even with a fresh log", async () => {
@@ -209,14 +233,14 @@ describe("when it fires", () => {
 	});
 
 	it("honours changed limits", async () => {
-		config = { ...config, idleMinutes: 5, maxMinutes: 15 };
-		clock = START + 6 * MIN;
-		idleMs = 6 * MIN;
+		config = { ...config, idleMinutes: 15, maxMinutes: 40 };
+		clock = START + 20 * MIN;
+		idleMs = 16 * MIN;
 		const watchdog = createDeploymentWatchdog(asDeps);
 
-		await watchdog.sweep();
+		await sweepTwice(watchdog);
 
-		expect(logLines()[0]).toBe("Watchdog: no log output for 5 min");
+		expect(logLines()[0]).toBe("Watchdog: no log output for 15 min");
 	});
 
 	it("does nothing when disabled", async () => {
@@ -305,7 +329,7 @@ describe("what it records once the job has ended", () => {
 		clock = START + 30 * MIN;
 		idleMs = 25 * MIN;
 		const watchdog = createDeploymentWatchdog(asDeps);
-		await watchdog.sweep();
+		await sweepTwice(watchdog);
 		return watchdog;
 	};
 
@@ -324,6 +348,7 @@ describe("what it records once the job has ended", () => {
 		expect(deps.markFailed.mock.calls[0]).toEqual([
 			"dep-1",
 			expect.stringContaining("Watchdog: no log output for 20 min"),
+			{ claimedCancel: true },
 		]);
 		expect(logLines()).toEqual([
 			"Watchdog: no log output for 20 min",
@@ -356,7 +381,7 @@ describe("what it records once the job has ended", () => {
 
 	it("does not notify again when the deploy flow already failed the row", async () => {
 		const watchdog = await fireIdle();
-		deps.markFailed.mockResolvedValueOnce(false);
+		deps.markFailed.mockResolvedValueOnce("already-error");
 		jobs = [];
 		running = [];
 		clock += MIN;
@@ -440,7 +465,7 @@ describe("queue slot", () => {
 		clock = START + 30 * MIN;
 		idleMs = 25 * MIN;
 		const watchdog = createDeploymentWatchdog(asDeps);
-		await watchdog.sweep();
+		await sweepTwice(watchdog);
 
 		// The compose is still restoring its previous release.
 		clock += 5 * MIN;
@@ -461,23 +486,74 @@ describe("queue slot", () => {
 		clock = START + 30 * MIN;
 		idleMs = 25 * MIN;
 		const watchdog = createDeploymentWatchdog(asDeps);
-		await watchdog.sweep();
+		await sweepTwice(watchdog);
 		expect(logLines()).toContain("Watchdog: no process handle");
 
 		clock += 11 * MIN;
 		await watchdog.sweep();
 
-		expect(deps.releaseJob).toHaveBeenCalledWith("job-1");
+		// Nothing could be stopped: the slot is freed, the service stays locked.
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: true,
+		});
 		// The service goes to error unless the flow already settled it.
 		expect(deps.failServiceIfRunning).toHaveBeenCalledTimes(1);
 		expect(deps.markFailed).toHaveBeenCalledTimes(1);
-		expect(logLines()).toContain(
-			"Watchdog: the deployment did not end after it was stopped; its queue slot was released",
+		expect(logLines().join("\n")).toContain(
+			"this service stays locked (no new deploy of it starts) until the old process ends or Dokploy restarts",
 		);
 		expect(deps.recordAudit.mock.calls[0]?.[0]).toMatchObject({
-			metadata: expect.objectContaining({ slotReleased: true, stop: "none" }),
+			metadata: expect.objectContaining({
+				slotReleased: true,
+				groupLockKept: true,
+				stop: "none",
+			}),
 		});
 		expect(watchdog.pendingCount()).toBe(0);
+	});
+
+	it("frees the slot completely when the process was signalled but did not end", async () => {
+		deps.stop.mockResolvedValue({
+			method: "pid",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 30 * MIN;
+		idleMs = 25 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await sweepTwice(watchdog);
+
+		clock += 11 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: false,
+		});
+		expect(logLines().join("\n")).toContain("its queue slot was released");
+	});
+
+	it("settles the row and the service BEFORE it frees the slot", async () => {
+		deps.stop.mockResolvedValue({
+			method: "none",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 30 * MIN;
+		idleMs = 25 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await sweepTwice(watchdog);
+		clock += 11 * MIN;
+		await watchdog.sweep();
+
+		const order = (mock: AnyMock) => mock.mock.invocationCallOrder[0] ?? 0;
+		// Freeing the slot starts the next job at once: nothing may touch its
+		// service after that.
+		expect(order(deps.failServiceIfRunning)).toBeLessThan(
+			order(deps.releaseJob),
+		);
+		expect(order(deps.markFailed)).toBeLessThan(order(deps.releaseJob));
+		expect(order(deps.notify)).toBeLessThan(order(deps.releaseJob));
+		expect(order(deps.recordAudit)).toBeLessThan(order(deps.releaseJob));
 	});
 
 	it("a stopped deployment with no job in the queue is closed at once", async () => {
@@ -541,7 +617,7 @@ describe("which host", () => {
 		clock = START + 30 * MIN;
 		idleMs = 25 * MIN;
 		const watchdog = createDeploymentWatchdog(asDeps);
-		await watchdog.sweep();
+		await sweepTwice(watchdog);
 		jobs = [];
 		running = [];
 		clock += MIN;
@@ -619,7 +695,10 @@ describe("jobs that hang with no running deployment", () => {
 
 		await watchdog.sweep();
 
-		expect(deps.releaseJob).toHaveBeenCalledWith("job-1");
+		// Stuck after the work: nothing runs any more, so no lock is kept.
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: false,
+		});
 		expect(deps.recordAudit.mock.calls[0]?.[0]).toMatchObject({
 			action: "watchdog_fail",
 			actor: { type: "system" },
@@ -656,7 +735,11 @@ describe("jobs that hang with no running deployment", () => {
 
 		await watchdog.sweep();
 
-		expect(deps.releaseJob).toHaveBeenCalledWith("job-1");
+		// No deployment at all: whatever it runs was never stopped, so the
+		// service stays locked.
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: true,
+		});
 	});
 
 	it("leaves a young job that has no deployment yet", async () => {
@@ -738,5 +821,205 @@ describe("a sweep that is still running", () => {
 		const watchdog = createDeploymentWatchdog(asDeps);
 
 		await expect(watchdog.sweep()).resolves.toBeUndefined();
+	});
+});
+
+describe("checks before anything is stopped", () => {
+	it("a log that moved between the two sweeps starts the count again", async () => {
+		clock = START + 30 * MIN;
+		idleMs = 25 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+
+		idleMs = 1 * MIN;
+		clock += MIN;
+		await watchdog.sweep();
+		expect(deps.stop).not.toHaveBeenCalled();
+
+		// Silent again: the first sighting only.
+		idleMs = 25 * MIN;
+		clock += MIN;
+		await watchdog.sweep();
+		expect(deps.stop).not.toHaveBeenCalled();
+	});
+
+	it("reads the log again right before the stop, and a log that moved is left alone", async () => {
+		clock = START + 30 * MIN;
+		// Sweep 1 and the idle read of sweep 2 see silence; the re-read just
+		// before the stop sees output.
+		deps.readLogIdleMs
+			.mockResolvedValueOnce(25 * MIN)
+			.mockResolvedValueOnce(25 * MIN)
+			.mockResolvedValueOnce(2 * 1000);
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await sweepTwice(watchdog);
+
+		expect(deps.readLogIdleMs).toHaveBeenCalledTimes(3);
+		expect(deps.stop).not.toHaveBeenCalled();
+		// No false claim in the log either.
+		expect(deps.appendLog).not.toHaveBeenCalled();
+	});
+
+	it("reads the row status again, and a deployment that ended meanwhile is left alone", async () => {
+		clock = START + 100 * MIN;
+		deps.readStatus.mockResolvedValue("done");
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.readStatus).toHaveBeenCalledWith("dep-1");
+		expect(deps.stop).not.toHaveBeenCalled();
+		expect(deps.appendLog).not.toHaveBeenCalled();
+		expect(deps.markFailed).not.toHaveBeenCalled();
+	});
+
+	it("only writes the 'no log output' line after the re-check passed", async () => {
+		clock = START + 30 * MIN;
+		idleMs = 25 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await sweepTwice(watchdog);
+
+		const order = (mock: AnyMock) => mock.mock.invocationCallOrder[0] ?? 0;
+		expect(order(deps.readStatus)).toBeLessThan(order(deps.appendLog));
+		expect(order(deps.appendLog)).toBeLessThan(order(deps.stop));
+	});
+});
+
+describe("a leftover running row", () => {
+	it("is not bound to the healthy job of its service: nothing is stopped, marked or released", async () => {
+		// The job started an hour after this row was created.
+		running = [
+			row({ createdAt: new Date(START - 3 * 60 * MIN).toISOString() }),
+		];
+		jobs = [appJob("job-1", "app-1", START)];
+		// The job's own deploy is running, the leftover row is an older one.
+		deps.latestDeploys.mockResolvedValue([
+			{
+				status: "running",
+				createdAt: new Date(START + MIN).toISOString(),
+				finishedAt: null,
+			},
+		] as never[]);
+		clock = START + 200 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+		await watchdog.sweep();
+
+		expect(deps.stop).not.toHaveBeenCalled();
+		expect(deps.markFailed).not.toHaveBeenCalled();
+		expect(deps.failServiceIfRunning).not.toHaveBeenCalled();
+		expect(deps.releaseJob).not.toHaveBeenCalled();
+		expect(deps.recordAudit).not.toHaveBeenCalled();
+	});
+
+	it("does not make the healthy job look hung either", async () => {
+		running = [
+			row({ createdAt: new Date(START - 3 * 60 * MIN).toISOString() }),
+		];
+		jobs = [appJob("job-1", "app-1", START)];
+		deps.latestDeploys.mockResolvedValue([
+			{
+				status: "running",
+				createdAt: new Date(START + MIN).toISOString(),
+				finishedAt: null,
+			},
+		] as never[]);
+		clock = START + 30 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).not.toHaveBeenCalled();
+	});
+
+	it("a row created just after the job started is its deployment", async () => {
+		running = [row({ createdAt: new Date(START + 5 * 1000).toISOString() })];
+		jobs = [appJob("job-1", "app-1", START)];
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.stop).toHaveBeenCalledTimes(1);
+	});
+
+	it("is also skipped when the job is restarted between the sweep and the stop", async () => {
+		clock = START + 100 * MIN;
+		// The re-read of the queue before the stop shows a newer job of the service.
+		deps.activeJobs
+			.mockResolvedValueOnce(jobs)
+			.mockResolvedValueOnce([appJob("job-2", "app-1", START + 99 * MIN)]);
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.stop).not.toHaveBeenCalled();
+	});
+});
+
+describe("a row that ended some other way", () => {
+	it("is not claimed as a watchdog failure: no log line, no notification, no trail", async () => {
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		deps.appendLog.mockClear();
+		// A person cancelled it while the stop was on its way.
+		// The person's cancel already ended the row, so it is no longer running.
+		deps.markFailed.mockImplementationOnce(async (id: string) => {
+			running = running.filter((r) => r.deploymentId !== id);
+			return "unchanged";
+		});
+		jobs = [];
+		clock += MIN;
+		await watchdog.sweep();
+
+		expect(deps.appendLog).not.toHaveBeenCalled();
+		expect(deps.notify).not.toHaveBeenCalled();
+		expect(deps.recordAudit).not.toHaveBeenCalled();
+		expect(deps.failServiceIfRunning).not.toHaveBeenCalled();
+	});
+
+	it("still frees the slot of a job that is hung past the grace period", async () => {
+		deps.stop.mockResolvedValue({
+			method: "pid",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		deps.markFailed.mockImplementationOnce(async (id: string) => {
+			running = running.filter((r) => r.deploymentId !== id);
+			return "unchanged";
+		});
+		clock += 11 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: false,
+		});
+		expect(deps.notify).not.toHaveBeenCalled();
+	});
+
+	it("tells the row whether the watchdog itself claimed the cancel", async () => {
+		deps.stop.mockResolvedValue({
+			method: "pid",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		jobs = [];
+		clock += MIN;
+		await watchdog.sweep();
+
+		// A cancelled row is only taken over when the launcher cancelled it for us.
+		expect(deps.markFailed.mock.calls[0]?.[2]).toEqual({
+			claimedCancel: false,
+		});
 	});
 });

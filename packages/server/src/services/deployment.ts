@@ -25,6 +25,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import { resolveVolumeBackupHost } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
@@ -1087,6 +1088,10 @@ export const updateDeploymentStatus = async (
 	deploymentId: string,
 	deploymentStatus: Deployment["status"],
 ) => {
+	// A job the watchdog released must not write over the failure it recorded.
+	if (skipWriteOfReleasedJob(`the status of deployment ${deploymentId}`)) {
+		return [];
+	}
 	const application = await db
 		.update(deployments)
 		.set({

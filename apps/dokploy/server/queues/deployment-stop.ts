@@ -39,6 +39,13 @@ export interface StopDeps {
 	) => Promise<number>;
 	/** `kill -9 <pid>` on the host (null: the Dokploy host). */
 	killPid: (serverId: string | null, pid: string) => Promise<void>;
+	/**
+	 * The kind of service a deployment belongs to. A preview row names only its
+	 * preview, so its service is looked up.
+	 */
+	resolveKind: (
+		row: Pick<WatchdogDeployment, "previewDeploymentId">,
+	) => Promise<"application" | "compose">;
 	/** `killDockerBuild` of the queue module. */
 	killDockerBuild: (
 		kind: "application" | "compose",
@@ -54,12 +61,32 @@ const VALID_PID = /^(?:[2-9]|[1-9]\d+)$/;
 export const stopDeploymentWork = async (
 	row: Pick<
 		WatchdogDeployment,
-		"deploymentId" | "pid" | "serverId" | "composeId" | "applicationId"
+		| "deploymentId"
+		| "pid"
+		| "serverId"
+		| "buildServerId"
+		| "composeId"
+		| "applicationId"
+		| "previewDeploymentId"
 	>,
 	deps: StopDeps,
 ): Promise<StopResult> => {
 	let claimedCancelled = false;
 	let warning: string | undefined;
+
+	// A preview built on a build server runs there, under no pid file the cancel
+	// machinery knows (its row names no service), and the row's own server is
+	// the host that serves it, not the one that builds. Nothing can be signalled
+	// safely: only its queue slot is released, after the grace period.
+	if (row.previewDeploymentId && row.buildServerId) {
+		return {
+			method: "none",
+			notRunning: false,
+			claimedCancelled,
+			warning:
+				"A preview deployment built on a build server cannot be stopped individually, so it was not signalled; its queue slot is released if it does not end by itself.",
+		};
+	}
 
 	// A build on a build server, or a rolling replace, runs under a pid file and
 	// is stopped exactly (see deployment-cancel.ts).
@@ -105,7 +132,11 @@ export const stopDeploymentWork = async (
 	// No launcher and no pid: the only handle left is the command name, which
 	// matches every docker build (or compose) on the host. Only used when no
 	// other deploy of that kind runs there, so an unrelated build is never hit.
-	const kind = row.composeId ? "compose" : "application";
+	const kind = row.previewDeploymentId
+		? await deps.resolveKind(row)
+		: row.composeId
+			? "compose"
+			: "application";
 	const others = await deps.countOtherRunning(row);
 	if (others > 0) {
 		return {

@@ -13,7 +13,11 @@ import { z } from "zod";
 
 export const DEFAULT_WATCHDOG_ENABLED = true;
 export const DEFAULT_WATCHDOG_IDLE_MINUTES = 20;
-export const MIN_WATCHDOG_IDLE_MINUTES = 5;
+/**
+ * A rolling replace can be silent for up to 900 s while it waits for the new
+ * replica to be healthy, so a shorter idle limit would fail a healthy deploy.
+ */
+export const MIN_WATCHDOG_IDLE_MINUTES = 15;
 export const DEFAULT_WATCHDOG_MAX_MINUTES = 90;
 export const MIN_WATCHDOG_MAX_MINUTES = 15;
 /** Upper bounds only keep a typo (an extra zero) from disabling the check. */

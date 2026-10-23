@@ -42,6 +42,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
 import {
 	cloneGitRepository,
@@ -724,6 +725,8 @@ export const updateCompose = async (
 	composeData: Partial<Compose>,
 ) => {
 	const { appName, ...rest } = composeData;
+	// A job the watchdog released must not write over what happened since.
+	if (skipWriteOfReleasedJob(`compose ${composeId}`)) return undefined;
 	const composeResult = await db
 		.update(compose)
 		.set({

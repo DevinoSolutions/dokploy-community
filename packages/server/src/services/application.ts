@@ -18,6 +18,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
 import { buildRemoteDocker } from "@dokploy/server/utils/providers/docker";
 import {
@@ -201,6 +202,10 @@ export const updateApplicationStatus = async (
 	applicationId: string,
 	applicationStatus: Application["applicationStatus"],
 ) => {
+	// A job the watchdog released must not write over what happened since.
+	if (skipWriteOfReleasedJob(`the status of application ${applicationId}`)) {
+		return [];
+	}
 	const application = await db
 		.update(applications)
 		.set({

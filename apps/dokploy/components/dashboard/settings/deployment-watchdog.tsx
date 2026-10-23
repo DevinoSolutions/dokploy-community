@@ -188,7 +188,10 @@ export const DeploymentWatchdog = () => {
 							/>
 							<p className="text-xs text-muted-foreground">
 								No new log output. Default {DEFAULT_WATCHDOG_IDLE_MINUTES},
-								minimum {MIN_WATCHDOG_IDLE_MINUTES}.
+								minimum {MIN_WATCHDOG_IDLE_MINUTES}. It must cover the longest
+								silent step of your deploys: a rolling replace waiting for the
+								new replica to be healthy (up to 15 minutes), big image pulls
+								and pushes.
 							</p>
 						</div>
 						<div className="flex flex-col gap-1">

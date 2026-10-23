@@ -1,7 +1,8 @@
 import { IS_CLOUD } from "@dokploy/server/constants";
 import {
+	addWatchdogExclusion,
 	getWebServerSettings,
-	updateWebServerSettings,
+	removeWatchdogExclusion,
 } from "@dokploy/server/services/web-server-settings";
 import {
 	isWatchdogExcluded,
@@ -14,7 +15,9 @@ import { TRPCError } from "@trpc/server";
  * and writes the same instance-wide list as the admin card in Settings >
  * Deployments (a list on the web server settings, not a column: the
  * application table is at the 100-column limit of a relational query). The
- * caller has already checked the permission on the service.
+ * caller has already checked the permission on the service. Writes are one
+ * atomic UPDATE (see web-server-settings.ts), so two people flipping switches
+ * at once cannot lose an entry.
  */
 
 export type WatchdogServiceRef =
@@ -51,17 +54,13 @@ export const writeServiceWatchdogExclusion = async (
 	excluded: boolean,
 ) => {
 	assertSelfHosted();
-	const current = resolveWatchdogConfig(await getWebServerSettings());
-	const others = current.exclusions.filter(
-		(entry) => !(entry.type === service.type && entry.id === service.id),
-	);
-	const kept = current.exclusions.find(
-		(entry) => entry.type === service.type && entry.id === service.id,
-	);
-	await updateWebServerSettings({
-		deploymentWatchdogExclusions: excluded
-			? [...others, kept ?? { type: service.type, id: service.id }]
-			: others,
-	});
+	if (excluded) {
+		await addWatchdogExclusion(
+			{ type: service.type, id: service.id },
+			{ keepExisting: true },
+		);
+	} else {
+		await removeWatchdogExclusion(service.type, service.id);
+	}
 	return { excluded };
 };

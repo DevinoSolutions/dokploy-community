@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -9,6 +10,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
 	getWebServerSettings: vi.fn(),
 	updateWebServerSettings: vi.fn(),
+	addWatchdogExclusion: vi.fn(),
+	removeWatchdogExclusion: vi.fn(),
 	findApplicationById: vi.fn(),
 	findComposeById: vi.fn(),
 	audit: vi.fn(),
@@ -16,6 +19,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkPermission: vi.fn(async () => undefined),
+}));
+
+vi.mock("@dokploy/server/services/web-server-settings", () => ({
+	getWebServerSettings: mocks.getWebServerSettings,
+	updateWebServerSettings: mocks.updateWebServerSettings,
+	addWatchdogExclusion: mocks.addWatchdogExclusion,
+	removeWatchdogExclusion: mocks.removeWatchdogExclusion,
 }));
 
 vi.mock("@dokploy/server", () => ({
@@ -61,6 +71,8 @@ beforeEach(() => {
 		deploymentWatchdogExclusions: [],
 	});
 	mocks.updateWebServerSettings.mockResolvedValue({});
+	mocks.addWatchdogExclusion.mockResolvedValue(undefined);
+	mocks.removeWatchdogExclusion.mockResolvedValue(undefined);
 	mocks.findApplicationById.mockResolvedValue(serviceIn("org-1"));
 	mocks.findComposeById.mockResolvedValue(serviceIn("org-1"));
 });
@@ -86,7 +98,7 @@ describe("settings.updateDeploymentWatchdog", () => {
 	});
 
 	it.each([
-		{ enabled: true, idleMinutes: 4, maxMinutes: 90 },
+		{ enabled: true, idleMinutes: 14, maxMinutes: 90 },
 		{ enabled: true, idleMinutes: 20, maxMinutes: 14 },
 		{ enabled: true, idleMinutes: 60, maxMinutes: 30 },
 		{ enabled: true, idleMinutes: 20.5, maxMinutes: 90 },
@@ -119,11 +131,10 @@ describe("settings.addDeploymentWatchdogExclusion", () => {
 		});
 
 		expect(mocks.findApplicationById).toHaveBeenCalledWith("a1");
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [
-				{ type: "application", id: "a1", reason: "long migrations" },
-			],
-		});
+		expect(mocks.addWatchdogExclusion).toHaveBeenCalledWith(
+			{ type: "application", id: "a1", reason: "long migrations" },
+			{ keepExisting: false },
+		);
 		expect(mocks.audit).toHaveBeenCalledTimes(1);
 	});
 
@@ -131,31 +142,27 @@ describe("settings.addDeploymentWatchdogExclusion", () => {
 		await owner.addDeploymentWatchdogExclusion({ type: "compose", id: "c1" });
 
 		expect(mocks.findComposeById).toHaveBeenCalledWith("c1");
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [{ type: "compose", id: "c1" }],
-		});
+		expect(mocks.addWatchdogExclusion).toHaveBeenCalledWith(
+			{ type: "compose", id: "c1" },
+			{ keepExisting: false },
+		);
 	});
 
-	it("keeps the others and replaces an entry for the same service", async () => {
-		mocks.getWebServerSettings.mockResolvedValue({
-			deploymentWatchdogExclusions: [
-				{ type: "application", id: "a1", reason: "old" },
-				{ type: "compose", id: "c9" },
-			],
-		});
-
+	it("replaces the entry of the same service, in one atomic edit", async () => {
 		await owner.addDeploymentWatchdogExclusion({
 			type: "application",
 			id: "a1",
 			reason: "new",
 		});
 
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [
-				{ type: "compose", id: "c9" },
-				{ type: "application", id: "a1", reason: "new" },
-			],
-		});
+		// keepExisting false: the new reason wins. The helper does the whole edit
+		// in one UPDATE, so the route never reads the list itself.
+		expect(mocks.addWatchdogExclusion).toHaveBeenCalledWith(
+			{ type: "application", id: "a1", reason: "new" },
+			{ keepExisting: false },
+		);
+		expect(mocks.getWebServerSettings).not.toHaveBeenCalled();
+		expect(mocks.updateWebServerSettings).not.toHaveBeenCalled();
 	});
 
 	it("refuses a service of another organization", async () => {
@@ -165,7 +172,7 @@ describe("settings.addDeploymentWatchdogExclusion", () => {
 			owner.addDeploymentWatchdogExclusion({ type: "application", id: "a1" }),
 		).rejects.toThrow("not allowed to exclude");
 
-		expect(mocks.updateWebServerSettings).not.toHaveBeenCalled();
+		expect(mocks.addWatchdogExclusion).not.toHaveBeenCalled();
 	});
 
 	it("refuses a kind that is not an application or a compose", async () => {
@@ -179,26 +186,84 @@ describe("settings.addDeploymentWatchdogExclusion", () => {
 });
 
 describe("settings.removeDeploymentWatchdogExclusion", () => {
-	it("removes only the named service", async () => {
-		mocks.getWebServerSettings.mockResolvedValue({
-			deploymentWatchdogExclusions: [
-				{ type: "application", id: "a1" },
-				{ type: "compose", id: "a1" },
-				{ type: "application", id: "a2" },
-			],
-		});
-
+	it("removes only the named service, in one atomic edit", async () => {
 		await owner.removeDeploymentWatchdogExclusion({
 			type: "application",
 			id: "a1",
 		});
 
-		expect(mocks.updateWebServerSettings).toHaveBeenCalledWith({
-			deploymentWatchdogExclusions: [
-				{ type: "compose", id: "a1" },
-				{ type: "application", id: "a2" },
-			],
-		});
+		expect(mocks.findApplicationById).toHaveBeenCalledWith("a1");
+		expect(mocks.removeWatchdogExclusion).toHaveBeenCalledTimes(1);
+		expect(mocks.removeWatchdogExclusion).toHaveBeenCalledWith(
+			"application",
+			"a1",
+		);
+		expect(mocks.getWebServerSettings).not.toHaveBeenCalled();
+		expect(mocks.updateWebServerSettings).not.toHaveBeenCalled();
 		expect(mocks.audit).toHaveBeenCalledTimes(1);
+	});
+
+	it("removes a compose through the compose lookup", async () => {
+		await owner.removeDeploymentWatchdogExclusion({
+			type: "compose",
+			id: "c1",
+		});
+
+		expect(mocks.findComposeById).toHaveBeenCalledWith("c1");
+		expect(mocks.removeWatchdogExclusion).toHaveBeenCalledWith("compose", "c1");
+	});
+
+	it("refuses to remove the entry of a service of another organization", async () => {
+		mocks.findApplicationById.mockResolvedValue(serviceIn("org-2"));
+
+		await expect(
+			owner.removeDeploymentWatchdogExclusion({
+				type: "application",
+				id: "a1",
+			}),
+		).rejects.toThrow("not allowed to change");
+
+		expect(mocks.removeWatchdogExclusion).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it("still removes the stale entry of a service that no longer exists", async () => {
+		mocks.findApplicationById.mockRejectedValue(
+			new TRPCError({ code: "NOT_FOUND", message: "Application not found" }),
+		);
+
+		await owner.removeDeploymentWatchdogExclusion({
+			type: "application",
+			id: "gone",
+		});
+
+		expect(mocks.removeWatchdogExclusion).toHaveBeenCalledWith(
+			"application",
+			"gone",
+		);
+	});
+
+	it("does not hide any other failure of the lookup", async () => {
+		mocks.findApplicationById.mockRejectedValue(new Error("db down"));
+
+		await expect(
+			owner.removeDeploymentWatchdogExclusion({
+				type: "application",
+				id: "a1",
+			}),
+		).rejects.toThrow("db down");
+
+		expect(mocks.removeWatchdogExclusion).not.toHaveBeenCalled();
+	});
+
+	it("is for admins: a member is refused", async () => {
+		await expect(
+			callerFor("member").removeDeploymentWatchdogExclusion({
+				type: "application",
+				id: "a1",
+			}),
+		).rejects.toThrow();
+
+		expect(mocks.removeWatchdogExclusion).not.toHaveBeenCalled();
 	});
 });

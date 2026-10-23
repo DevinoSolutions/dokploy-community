@@ -15,6 +15,7 @@ const deps = {
 	cancelWithLauncher: vi.fn(),
 	countOtherRunning: vi.fn(),
 	killPid: vi.fn(),
+	resolveKind: vi.fn(),
 	killDockerBuild: vi.fn(),
 } satisfies StopDeps;
 
@@ -22,8 +23,10 @@ const target = (overrides = {}) => ({
 	deploymentId: "dep-1",
 	pid: null as string | null,
 	serverId: null as string | null,
+	buildServerId: null as string | null,
 	composeId: null as string | null,
 	applicationId: "app-1" as string | null,
+	previewDeploymentId: null as string | null,
 	...overrides,
 });
 
@@ -32,6 +35,7 @@ beforeEach(() => {
 	deps.cancelWithLauncher.mockResolvedValue(null);
 	deps.countOtherRunning.mockResolvedValue(0);
 	deps.killPid.mockResolvedValue(undefined);
+	deps.resolveKind.mockResolvedValue("application");
 	deps.killDockerBuild.mockResolvedValue(undefined);
 });
 
@@ -163,5 +167,50 @@ describe("a build with no handle", () => {
 		expect(deps.killDockerBuild).not.toHaveBeenCalled();
 		expect(result.method).toBe("none");
 		expect(result.warning).toContain("2 other deploys run on the same host");
+	});
+});
+
+describe("a preview deployment", () => {
+	const preview = (overrides = {}) =>
+		target({
+			applicationId: null,
+			previewDeploymentId: "prev-1",
+			serverId: "srv-app",
+			...overrides,
+		});
+
+	it("built on a build server is not signalled: its row names the serving host, not the builder", async () => {
+		const result = await stopDeploymentWork(
+			preview({ buildServerId: "srv-build" }),
+			deps,
+		);
+
+		expect(result.method).toBe("none");
+		expect(result.warning).toContain("build server");
+		expect(deps.cancelWithLauncher).not.toHaveBeenCalled();
+		expect(deps.killPid).not.toHaveBeenCalled();
+		expect(deps.killDockerBuild).not.toHaveBeenCalled();
+	});
+
+	it("of a compose gets the compose stop, not the application one", async () => {
+		deps.resolveKind.mockResolvedValue("compose");
+
+		await stopDeploymentWork(preview(), deps);
+
+		expect(deps.killDockerBuild).toHaveBeenCalledWith("compose", "srv-app");
+	});
+
+	it("of an application gets the application stop on its own server", async () => {
+		deps.resolveKind.mockResolvedValue("application");
+
+		await stopDeploymentWork(preview(), deps);
+
+		expect(deps.killDockerBuild).toHaveBeenCalledWith("application", "srv-app");
+	});
+
+	it("with a pid is stopped by the pid on its server", async () => {
+		await stopDeploymentWork(preview({ pid: "4321" }), deps);
+
+		expect(deps.killPid).toHaveBeenCalledWith("srv-app", "4321");
 	});
 });

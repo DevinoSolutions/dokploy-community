@@ -69,7 +69,7 @@ interface DeploymentQueue {
 	 * Free the slot of a running job that will not end (see
 	 * InMemoryQueue.releaseActive); false when no running job has that id.
 	 */
-	releaseActive: (id: string) => boolean;
+	releaseActive: (id: string, options?: { keepGroupLock?: boolean }) => boolean;
 	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
 	keepOldestWaiting: (
 		predicate: (data: DeploymentJob) => boolean,
@@ -148,7 +148,7 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		on: () => {},
 		run: () => queue.run(),
 		removeWaitingJob: (id) => queue.removeWaitingJob(id),
-		releaseActive: (id) => queue.releaseActive(id),
+		releaseActive: (id, options) => queue.releaseActive(id, options),
 		removeWaiting: (predicate) => queue.removeWaiting(predicate),
 		keepOldestWaiting: (predicate) => queue.keepOldestWaiting(predicate),
 		coalesceWaiting: (incoming, predicate) =>

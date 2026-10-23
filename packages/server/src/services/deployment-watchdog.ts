@@ -184,14 +184,27 @@ export const resolveWatchdogLogHost = (
 ) => resolveDeploymentLogHost(row);
 
 /**
+ * What `markDeploymentFailedByWatchdog` did:
+ * - flipped: it set the row to `error`.
+ * - already-error: the deploy flow had failed the row itself; only the reason
+ *   was added when it left none.
+ * - unchanged: the row ended some other way (done, or cancelled by a person):
+ *   nothing was written and the watchdog must not claim a failure.
+ */
+export type WatchdogMarkOutcome = "flipped" | "already-error" | "unchanged";
+
+/**
  * Ends the deployment as `error`, with the watchdog's message, unless it ended
- * on its own: only a row that is still `running` (or `cancelled`, by the stop
- * that the watchdog itself issued) is changed. True when this call did it.
+ * on its own. A `running` row is always changed. A `cancelled` row only when
+ * `claimedCancel` says the watchdog's own stop is what cancelled it (the
+ * launcher claims the row before it kills); a row a person cancelled stays
+ * cancelled.
  */
 export const markDeploymentFailedByWatchdog = async (
 	deploymentId: string,
 	message: string,
-): Promise<boolean> => {
+	options: { claimedCancel: boolean },
+): Promise<WatchdogMarkOutcome> => {
 	const changed = await db
 		.update(deployments)
 		.set({
@@ -202,24 +215,43 @@ export const markDeploymentFailedByWatchdog = async (
 		.where(
 			and(
 				eq(deployments.deploymentId, deploymentId),
-				inArray(deployments.status, ["running", "cancelled"]),
+				inArray(
+					deployments.status,
+					options.claimedCancel ? ["running", "cancelled"] : ["running"],
+				),
 			),
 		)
 		.returning({ deploymentId: deployments.deploymentId });
-	if (changed.length > 0) return true;
-	// The deploy flow got there first and already recorded the failure: only add
-	// the reason when it left none.
-	await db
-		.update(deployments)
-		.set({ errorMessage: message })
-		.where(
-			and(
-				eq(deployments.deploymentId, deploymentId),
-				eq(deployments.status, "error"),
-				isNull(deployments.errorMessage),
-			),
-		);
-	return false;
+	if (changed.length > 0) return "flipped";
+	const current = await db.query.deployments.findFirst({
+		where: eq(deployments.deploymentId, deploymentId),
+		columns: { status: true, errorMessage: true },
+	});
+	if (current?.status !== "error") return "unchanged";
+	if (!current.errorMessage) {
+		await db
+			.update(deployments)
+			.set({ errorMessage: message })
+			.where(
+				and(
+					eq(deployments.deploymentId, deploymentId),
+					eq(deployments.status, "error"),
+					isNull(deployments.errorMessage),
+				),
+			);
+	}
+	return "already-error";
+};
+
+/** The current status of a deployment row, or null when it is gone. */
+export const readDeploymentStatus = async (
+	deploymentId: string,
+): Promise<string | null> => {
+	const row = await db.query.deployments.findFirst({
+		where: eq(deployments.deploymentId, deploymentId),
+		columns: { status: true },
+	});
+	return row?.status ?? null;
 };
 
 /** The service, or preview, a deployment belongs to. */

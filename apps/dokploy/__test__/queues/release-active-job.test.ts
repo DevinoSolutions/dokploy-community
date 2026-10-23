@@ -173,3 +173,74 @@ describe("InMemoryQueue.releaseActive", () => {
 		hung.resolve();
 	});
 });
+
+describe("InMemoryQueue.releaseActive with keepGroupLock", () => {
+	it("frees the slot for other services but keeps the service locked", async () => {
+		const hung = deferred();
+		const started: string[] = [];
+		const queue = new InMemoryQueue({ resolveConcurrency: () => 1 });
+		queue.process(async (job) => {
+			const id = (job.data as { applicationId: string }).applicationId;
+			started.push(id);
+			if (started.length === 1) await hung.promise;
+		});
+		await queue.add(appJob("a"));
+		await queue.add(appJob("a"));
+		await queue.add(appJob("b"));
+		await flush();
+		expect(started).toEqual(["a"]);
+
+		const [active] = await queue.getJobs(["active"]);
+		expect(
+			queue.releaseActive(active?.id as string, { keepGroupLock: true }),
+		).toBe(true);
+		await flush();
+
+		// The slot went to the other service; the second deploy of "a" still waits
+		// behind the process nobody could stop.
+		expect(started).toEqual(["a", "b"]);
+		expect(await queue.getJobs(["waiting"])).toHaveLength(1);
+		hung.resolve();
+	});
+
+	it("starts the service again once the old process really ends", async () => {
+		const hung = deferred();
+		const started: string[] = [];
+		const queue = new InMemoryQueue({ resolveConcurrency: () => 4 });
+		queue.process(async (job) => {
+			started.push((job.data as { applicationId: string }).applicationId);
+			if (started.length === 1) await hung.promise;
+		});
+		await queue.add(appJob("a"));
+		await queue.add(appJob("a"));
+		await flush();
+		const [active] = await queue.getJobs(["active"]);
+		queue.releaseActive(active?.id as string, { keepGroupLock: true });
+		await flush();
+		expect(started).toEqual(["a"]);
+
+		hung.resolve();
+		await flush();
+
+		expect(started).toEqual(["a", "a"]);
+	});
+
+	it("without the option the service is free at once", async () => {
+		const hung = deferred();
+		const started: string[] = [];
+		const queue = new InMemoryQueue({ resolveConcurrency: () => 4 });
+		queue.process(async (job) => {
+			started.push((job.data as { applicationId: string }).applicationId);
+			if (started.length === 1) await hung.promise;
+		});
+		await queue.add(appJob("a"));
+		await queue.add(appJob("a"));
+		await flush();
+		const [active] = await queue.getJobs(["active"]);
+		queue.releaseActive(active?.id as string, { keepGroupLock: false });
+		await flush();
+
+		expect(started).toEqual(["a", "a"]);
+		hung.resolve();
+	});
+});

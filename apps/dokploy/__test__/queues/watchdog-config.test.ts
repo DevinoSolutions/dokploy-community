@@ -51,6 +51,8 @@ describe("defaults", () => {
 			deploymentWatchdogIdleMinutes: 1,
 			deploymentWatchdogMaxMinutes: 2,
 		});
+		// 15: a build step can be silent for several minutes, so less than that would kill healthy builds.
+		expect(MIN_WATCHDOG_IDLE_MINUTES).toBe(15);
 		expect(config.idleMinutes).toBe(MIN_WATCHDOG_IDLE_MINUTES);
 		expect(config.maxMinutes).toBe(MIN_WATCHDOG_MAX_MINUTES);
 	});
@@ -80,14 +82,15 @@ describe("settings validation", () => {
 		expect(
 			apiUpdateDeploymentWatchdog.safeParse({
 				enabled: false,
-				idleMinutes: 5,
+				idleMinutes: 15,
 				maxMinutes: 15,
 			}).success,
 		).toBe(true);
 	});
 
 	it.each([
-		["idle below 5", { ...valid, idleMinutes: 4 }],
+		["idle below 15", { ...valid, idleMinutes: 14 }],
+		["idle of the old minimum", { ...valid, idleMinutes: 5 }],
 		["wall below 15", { ...valid, maxMinutes: 14 }],
 		["idle not a whole number", { ...valid, idleMinutes: 20.5 }],
 		["idle as text", { ...valid, idleMinutes: "20" }],
@@ -126,7 +129,7 @@ describe("settings validation", () => {
 		expect(
 			apiUpdateWebServerSettings.safeParse({
 				deploymentWatchdogEnabled: false,
-				deploymentWatchdogIdleMinutes: 5,
+				deploymentWatchdogIdleMinutes: 15,
 			}).success,
 		).toBe(true);
 	});

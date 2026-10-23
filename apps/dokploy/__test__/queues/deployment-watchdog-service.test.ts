@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
 	resolveDeploymentLogHost: vi.fn(),
 	updateRows: [] as Array<{ set: unknown; returned: unknown[] }>,
+	wheres: [] as unknown[],
+	findFirst: vi.fn(),
 	returnQueue: [] as unknown[][],
 	sendBuildErrorNotifications: vi.fn(),
 	getDeploymentErrorMessage: vi.fn(),
@@ -50,8 +52,9 @@ vi.mock("@dokploy/server/db", () => ({
 	db: {
 		update: () => ({
 			set: (set: unknown) => ({
-				where: () => ({
+				where: (condition: unknown) => ({
 					returning: () => {
+						mocks.wheres.push(condition);
 						const returned = mocks.returnQueue.shift() ?? [];
 						mocks.updateRows.push({ set, returned });
 						return Promise.resolve(returned);
@@ -60,18 +63,25 @@ vi.mock("@dokploy/server/db", () => ({
 					// without .returning().
 					// biome-ignore lint/suspicious/noThenProperty: a thenable stands in for the query builder
 					then: (resolve: (value: unknown) => void) => {
+						mocks.wheres.push(condition);
 						mocks.updateRows.push({ set, returned: [] });
 						resolve([]);
 					},
 				}),
 			}),
 		}),
-		query: { deployments: { findMany: vi.fn(async () => []) } },
+		query: {
+			deployments: {
+				findMany: vi.fn(async () => []),
+				findFirst: (...args: unknown[]) => mocks.findFirst(...args),
+			},
+		},
 	},
 }));
 
 import {
 	markDeploymentFailedByWatchdog,
+	readDeploymentStatus,
 	readLogIdleMs,
 	sendWatchdogFailureNotification,
 } from "@dokploy/server/services/deployment-watchdog";
@@ -83,9 +93,25 @@ const base = {
 	previewDeploymentId: null as string | null,
 };
 
+/** Every bound value of a drizzle condition, to see which statuses it matches. */
+const boundValues = (node: unknown, found: unknown[] = []): unknown[] => {
+	if (Array.isArray(node)) {
+		for (const item of node) boundValues(item, found);
+	} else if (node && typeof node === "object") {
+		const record = node as { queryChunks?: unknown; value?: unknown };
+		if (record.queryChunks) boundValues(record.queryChunks, found);
+		else if ("value" in record && typeof record.value !== "object") {
+			found.push(record.value);
+		} else if (Array.isArray(record.value)) boundValues(record.value, found);
+	}
+	return found;
+};
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.updateRows.length = 0;
+	mocks.wheres.length = 0;
+	mocks.findFirst.mockReset();
 	mocks.returnQueue.length = 0;
 	mocks.resolveDeploymentLogHost.mockResolvedValue(null);
 });
@@ -192,12 +218,13 @@ describe("markDeploymentFailedByWatchdog", () => {
 	it("sets error with the reason and a finish time on a row that was running", async () => {
 		mocks.returnQueue.push([{ deploymentId: "dep-1" }]);
 
-		const changed = await markDeploymentFailedByWatchdog(
+		const outcome = await markDeploymentFailedByWatchdog(
 			"dep-1",
 			"Watchdog: exceeded 90 min",
+			{ claimedCancel: false },
 		);
 
-		expect(changed).toBe(true);
+		expect(outcome).toBe("flipped");
 		expect(mocks.updateRows).toHaveLength(1);
 		expect(mocks.updateRows[0]?.set).toMatchObject({
 			status: "error",
@@ -206,15 +233,89 @@ describe("markDeploymentFailedByWatchdog", () => {
 		});
 	});
 
+	it("only takes over a cancelled row when the watchdog's own stop cancelled it", async () => {
+		mocks.returnQueue.push(
+			[{ deploymentId: "dep-1" }],
+			[{ deploymentId: "dep-1" }],
+		);
+
+		await markDeploymentFailedByWatchdog("dep-1", "r", { claimedCancel: true });
+		await markDeploymentFailedByWatchdog("dep-1", "r", {
+			claimedCancel: false,
+		});
+
+		const claimed = boundValues(mocks.wheres[0]);
+		const notClaimed = boundValues(mocks.wheres[1]);
+		expect(claimed).toContain("cancelled");
+		expect(claimed).toContain("running");
+		// A row a person cancelled stays cancelled.
+		expect(notClaimed).toContain("running");
+		expect(notClaimed).not.toContain("cancelled");
+	});
+
 	it("only adds the reason to a row the deploy flow already failed", async () => {
 		mocks.returnQueue.push([]);
+		mocks.findFirst.mockResolvedValue({ status: "error", errorMessage: null });
 
-		const changed = await markDeploymentFailedByWatchdog("dep-1", "reason");
+		const outcome = await markDeploymentFailedByWatchdog("dep-1", "reason", {
+			claimedCancel: false,
+		});
 
-		expect(changed).toBe(false);
+		expect(outcome).toBe("already-error");
 		expect(mocks.updateRows).toHaveLength(2);
 		// The second statement does not touch status or the finish time.
 		expect(mocks.updateRows[1]?.set).toEqual({ errorMessage: "reason" });
+	});
+
+	it("keeps the reason the deploy flow already recorded", async () => {
+		mocks.returnQueue.push([]);
+		mocks.findFirst.mockResolvedValue({
+			status: "error",
+			errorMessage: "build failed",
+		});
+
+		const outcome = await markDeploymentFailedByWatchdog("dep-1", "reason", {
+			claimedCancel: false,
+		});
+
+		expect(outcome).toBe("already-error");
+		expect(mocks.updateRows).toHaveLength(1);
+	});
+
+	it.each(["done", "cancelled", "running"])(
+		"reports a row that is %s as unchanged and writes nothing more",
+		async (status) => {
+			mocks.returnQueue.push([]);
+			mocks.findFirst.mockResolvedValue({ status, errorMessage: null });
+
+			const outcome = await markDeploymentFailedByWatchdog("dep-1", "reason", {
+				claimedCancel: false,
+			});
+
+			expect(outcome).toBe("unchanged");
+			expect(mocks.updateRows).toHaveLength(1);
+		},
+	);
+
+	it("reports a row that is gone as unchanged", async () => {
+		mocks.returnQueue.push([]);
+		mocks.findFirst.mockResolvedValue(undefined);
+
+		expect(
+			await markDeploymentFailedByWatchdog("dep-1", "reason", {
+				claimedCancel: true,
+			}),
+		).toBe("unchanged");
+	});
+});
+
+describe("readDeploymentStatus", () => {
+	it("is the status of the row, or null when it is gone", async () => {
+		mocks.findFirst.mockResolvedValueOnce({ status: "running" });
+		mocks.findFirst.mockResolvedValueOnce(undefined);
+
+		expect(await readDeploymentStatus("dep-1")).toBe("running");
+		expect(await readDeploymentStatus("dep-2")).toBeNull();
 	});
 });
 
