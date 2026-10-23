@@ -76,6 +76,12 @@ export type VolumeBindingFacts = {
 	// The volume is recorded as a named mount of another service of the same
 	// organization.
 	recordedOnOtherSameOrgMount: boolean;
+	// The volume is recorded on a volume backup of this very service.
+	recordedOnOwnVolumeBackup?: boolean;
+	// Another service of the same organization on the same server claims the
+	// name: a mount, a volume backup or its `appName` namespace. Only compose
+	// files are checked against it (see services/volume-binding.ts).
+	claimedByOtherSameOrgService?: boolean;
 	// The service is a compose whose own file declares this volume (an
 	// `external: true` volume or one with an explicit `name:`).
 	declaredByComposeFile: boolean;

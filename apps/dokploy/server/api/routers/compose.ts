@@ -57,6 +57,7 @@ import {
 	assertComposeRollingSettings,
 	getComposeRollingReport,
 } from "@dokploy/server/services/compose-rolling";
+import { assertComposeFileVolumesBound } from "@dokploy/server/services/compose-volume-binding";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
@@ -318,6 +319,31 @@ export const composeRouter = createTRPCRouter({
 					input.rollingReplace,
 					{ composeType: input.composeType, command: input.command },
 				);
+			}
+
+			// A raw compose file that mounts a volume which is not the compose's own
+			// is refused at save (T-6822); a deploy checks the final file again,
+			// which also covers git sources, randomize and isolated deployments.
+			if (input.composeFile) {
+				const existing = await findComposeById(input.composeId);
+				const effective = { ...existing, ..._.omitBy(input, _.isUndefined) };
+				if (
+					effective.sourceType === "raw" &&
+					!effective.randomize &&
+					!effective.isolatedDeployment
+				) {
+					try {
+						await assertComposeFileVolumesBound(
+							effective,
+							input.composeFile,
+						);
+					} catch (error) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 			}
 
 			const updated = await updateCompose(input.composeId, input);

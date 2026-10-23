@@ -315,6 +315,8 @@ export const loadVolumeBindingFacts = async ({
 	const idKey = SERVICE_ID_KEYS[serviceType];
 	let recordedOnOwnMount = false;
 	let recordedOnOtherSameOrgMount = false;
+	let recordedOnOwnVolumeBackup = false;
+	let recordedOnOtherSameOrgVolumeBackup = false;
 	for (const row of mountRows) {
 		if (row[idKey] === serviceId) {
 			recordedOnOwnMount = true;
@@ -325,6 +327,23 @@ export const loadVolumeBindingFacts = async ({
 			recordedOnOtherSameOrgMount = true;
 		}
 	}
+
+	for (const row of volumeBackupRows) {
+		if (row[idKey] === serviceId) {
+			recordedOnOwnVolumeBackup = true;
+		} else if (
+			rowOrganization(row) === organizationId &&
+			serverOf(rowService(row)) === serverId
+		) {
+			recordedOnOtherSameOrgVolumeBackup = true;
+		}
+	}
+	const inOtherSameOrgNamespace = namespaceOrganizations.some(
+		(claim) =>
+			claim.organizationId === organizationId &&
+			claim.serverId === serverId &&
+			claim.id !== service.appName,
+	);
 
 	// A volume name only collides on one host, so a claim counts only when the
 	// claiming service runs on the same server (local host = null).
@@ -350,6 +369,11 @@ export const loadVolumeBindingFacts = async ({
 		serverId,
 		recordedOnOwnMount,
 		recordedOnOtherSameOrgMount,
+		recordedOnOwnVolumeBackup,
+		claimedByOtherSameOrgService:
+			recordedOnOtherSameOrgMount ||
+			recordedOnOtherSameOrgVolumeBackup ||
+			inOtherSameOrgNamespace,
 		declaredByComposeFile:
 			serviceType === "compose" &&
 			collectComposeDeclaredVolumeNames(
@@ -462,4 +486,109 @@ export const assertVolumeMountsBound = async (
 	if (refused) {
 		throw new Error(refused.message);
 	}
+};
+
+const composeVolumeRefusal = (volumeName: string, appName: string) =>
+	`Compose volume "${volumeName}" is refused: it is not one of this compose's volumes. Use the default volume name ("${appName}_<name>", which is what a plain volume gets) or a volume nothing else uses. A volume that another service or organization uses, or one Dokploy reserves, cannot be mounted from a compose file.`;
+
+// The same decision `evaluateVolumeBinding` makes for a stored mount, for a
+// volume a compose FILE mounts (T-6822). The file is the user's own text, so
+// it counts as nobody's record: a name outside the compose's own namespace is
+// accepted only when nothing else claims it. The compose's own mounts and
+// volume backup rows are its own records and count for it.
+// - a malformed name, a Dokploy-reserved name or one another organization's
+//   service on the same server claims is ALWAYS refused. Exception: a name in
+//   the compose's OWN namespace claimed only by volume backup rows (the stale
+//   or hand-written rows of the #460 MED-4 relaxation);
+// - the compose's own namespace (`<appName>_*`, `<appName>-*`, `<appName>`) and
+//   the compose's own default names are allowed;
+// - any other name is refused when another service of the SAME organization
+//   claims it (a mount, a volume backup or its appName namespace), unless the
+//   compose has its own mount or volume backup row for it. A volume nothing
+//   records stays allowed, so volumes made by hand keep working.
+export const findRefusedComposeVolumes = async (
+	compose: { composeId: string; appName: string },
+	uses: ReadonlyArray<{ volumeName: string; derived?: boolean }>,
+	{ serverIds }: { serverIds?: Array<string | null> } = {},
+): Promise<RefusedVolumeMount[]> => {
+	const service = {
+		serviceType: "compose" as const,
+		serviceId: compose.composeId,
+	};
+	const derivedNames = new Set<string>();
+	const volumeNames = new Set<string>();
+	for (const use of uses) {
+		volumeNames.add(use.volumeName);
+		if (use.derived) {
+			derivedNames.add(use.volumeName);
+		}
+	}
+	const refused: RefusedVolumeMount[] = [];
+	for (const volumeName of volumeNames) {
+		const message = composeVolumeRefusal(volumeName, compose.appName);
+		for (const onServerId of serverIds ?? [undefined]) {
+			let isRefused = false;
+			try {
+				const facts = await loadVolumeBindingFacts({
+					...service,
+					volumeName,
+					onServerId,
+				});
+				const claims = facts.otherOrganizationClaims ?? [];
+				const own =
+					derivedNames.has(volumeName) ||
+					isInServiceVolumeNamespace(volumeName, compose.appName) ||
+					isInServiceVolumeNamespace(volumeName, facts.appName);
+				const onlyVolumeBackupClaims =
+					claims.length > 0 &&
+					claims.every((claim) => claim.source === "volumeBackup");
+				const verdict = evaluateVolumeBinding(
+					{
+						...facts,
+						recordedOnOwnMount: true,
+						claimedByOtherOrganization:
+							facts.claimedByOtherOrganization &&
+							!(own && onlyVolumeBackupClaims),
+					},
+					{ privileged: true },
+				);
+				const claimedByOtherService =
+					!own &&
+					!facts.recordedOnOwnMount &&
+					!facts.recordedOnOwnVolumeBackup &&
+					facts.claimedByOtherSameOrgService === true;
+				if (!verdict.ok || claimedByOtherService) {
+					// Server side only: the user-facing text stays the one refusal
+					// message, so it cannot tell another service's rows apart.
+					logger.warn(
+						{
+							...service,
+							volumeName,
+							serverId: facts.serverId,
+							conflictingRows: claims,
+							claimedByOtherSameOrgService:
+								facts.claimedByOtherSameOrgService ?? false,
+						},
+						"[VolumeBinding] A compose file volume was refused",
+					);
+					isRefused = true;
+				}
+			} catch (error) {
+				if (!(error instanceof TRPCError) || error.code !== "NOT_FOUND") {
+					throw error;
+				}
+				// The compose or its organization cannot be resolved: fail closed.
+				logger.warn(
+					{ ...service, volumeName },
+					"[VolumeBinding] A compose file volume was refused: the compose could not be resolved",
+				);
+				isRefused = true;
+			}
+			if (isRefused) {
+				refused.push({ volumeName, message });
+				break;
+			}
+		}
+	}
+	return refused;
 };
