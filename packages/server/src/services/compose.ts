@@ -61,6 +61,10 @@ import { getDokployUrl } from "./admin";
 // See services/build-policy/README.md.
 import { waitForComposeRequiredChecks } from "./build-policy/compose-checks";
 import {
+	assertComposeFileOnDiskVolumesBound,
+	assertComposeVolumesBound,
+} from "./compose-volume-binding";
+import {
 	createDeploymentCompose,
 	getDeploymentErrorMessage,
 	updateDeployment,
@@ -271,6 +275,47 @@ const usesDeploymentCancel = (
  * `prepareComposeBuildServerDeploy`; the rest keeps the generic stop) and for
  * a deployment that cannot be cancelled (a preview).
  */
+/**
+ * Refuses a compose file that mounts a named volume which is not the compose's
+ * own (T-6822), before anything is built, torn down (`down --volumes` removes
+ * a non-external volume that carries a `name:`) or started. A raw compose is
+ * checked from the database before its file is written. A fetched one is
+ * checked on disk after the fetch and patches, and its previous release files
+ * are put back on a refusal, because a later Start runs `up -d` from them.
+ */
+const assertComposeVolumesBoundForDeploy = async (
+	entity: Awaited<ReturnType<typeof findComposeById>>,
+	deployment: { deploymentId?: string; logPath: string },
+	{ freshVolumes, restoreFiles }: { freshVolumes: boolean; restoreFiles: boolean },
+) => {
+	try {
+		await assertComposeVolumesBound(entity);
+	} catch (error) {
+		if (restoreFiles) {
+			try {
+				const restore = await getRestoreAfterFailedBuildCommand(entity, {
+					deploymentId: deployment.deploymentId,
+					freshVolumes,
+				});
+				if (restore) {
+					const commandWithLog = `(${restore}) >> ${deployment.logPath} 2>&1`;
+					if (entity.serverId) {
+						await execAsyncRemote(entity.serverId, commandWithLog);
+					} else {
+						await execAsync(commandWithLog);
+					}
+				}
+			} catch (restoreError) {
+				console.error(
+					"Could not restore the previous compose release after a refused compose volume",
+					restoreError,
+				);
+			}
+		}
+		throw error;
+	}
+};
+
 const createCancelCheckpoint = (
 	entity: Awaited<ReturnType<typeof findComposeById>>,
 	deployment: { deploymentId?: string; logPath: string },
@@ -388,6 +433,13 @@ export const runComposeBuild = async (
 
 	await checkpoint({ restore: false });
 
+	if (entity.sourceType === "raw") {
+		await assertComposeVolumesBoundForDeploy(entity, deployment, {
+			freshVolumes,
+			restoreFiles: false,
+		});
+	}
+
 	// Must run before the clone / raw-file rewrite below overwrites the code
 	// directory, otherwise there is nothing left to roll back to.
 	await backupCurrentDeployment(entity, deployment.logPath);
@@ -426,6 +478,13 @@ export const runComposeBuild = async (
 		);
 		await phases.run("Apply patches", () => runStep(command));
 		await checkpoint();
+	}
+
+	if (entity.sourceType !== "raw") {
+		await assertComposeVolumesBoundForDeploy(entity, deployment, {
+			freshVolumes,
+			restoreFiles: true,
+		});
 	}
 
 	// >>> build-policy hook (compose): required-checks gate, between the clone
@@ -888,6 +947,13 @@ export const rebuildCompose = async ({
 	try {
 		await checkpoint({ restore: false });
 
+		if (compose.sourceType === "raw") {
+			await assertComposeVolumesBoundForDeploy(compose, deployment, {
+				freshVolumes,
+				restoreFiles: false,
+			});
+		}
+
 		// Snapshot before the raw-file rewrite / patch application below.
 		await backupCurrentDeployment(compose, deployment.logPath);
 
@@ -927,6 +993,13 @@ export const rebuildCompose = async ({
 				}
 			});
 			await checkpoint();
+		}
+
+		if (compose.sourceType !== "raw") {
+			await assertComposeVolumesBoundForDeploy(compose, deployment, {
+				freshVolumes,
+				restoreFiles: true,
+			});
 		}
 
 		// >>> build-policy hook (compose rebuild): the same required-checks gate
@@ -1148,6 +1221,11 @@ export const startCompose = async (composeId: string) => {
 		await assertComposeDirectoryExists(compose.serverId, projectPath, "start");
 	}
 	try {
+		// Start runs `up -d` from the files a deploy left on disk: they get the
+		// same volume check as a deploy (T-6822).
+		if (compose.composeType === "docker-compose") {
+			await assertComposeFileOnDiskVolumesBound(compose);
+		}
 		const path =
 			compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath;
 		// A compose built on a build server starts from the pushed images: merge

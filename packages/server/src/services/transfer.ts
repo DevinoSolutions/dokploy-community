@@ -5,7 +5,10 @@ import path from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { findComposeById } from "@dokploy/server/services/compose";
 import { findMountsByApplicationId } from "@dokploy/server/services/mount";
-import { findRefusedVolumeMounts } from "@dokploy/server/services/volume-binding";
+import {
+	findRefusedComposeVolumes,
+	findRefusedVolumeMounts,
+} from "@dokploy/server/services/volume-binding";
 import {
 	loadDockerCompose,
 	loadDockerComposeRemote,
@@ -431,6 +434,21 @@ async function getMountConfigsForTransfer(
 	);
 	if (refused) {
 		throw new Error(`Transfer refused: ${refused.message}`);
+	}
+	// A compose also reaches the volumes its file names; a volume another
+	// service of the organization uses is refused as at deploy (T-6822).
+	if (opts.serviceType === "compose") {
+		const compose = await findComposeById(opts.serviceId);
+		const [refusedComposeVolume] = await findRefusedComposeVolumes(
+			compose,
+			mountConfigs
+				.filter((mount) => mount.mountType === "volume")
+				.map((mount) => ({ volumeName: mount.sourcePath })),
+			{ serverIds: [opts.sourceServerId, opts.targetServerId] },
+		);
+		if (refusedComposeVolume) {
+			throw new Error(`Transfer refused: ${refusedComposeVolume.message}`);
+		}
 	}
 	return mountConfigs;
 }
