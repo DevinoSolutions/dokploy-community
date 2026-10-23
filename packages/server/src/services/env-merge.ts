@@ -20,7 +20,7 @@ export class EnvMergeError extends Error {
 // The statement grammar of the `dotenv` parser that builds the deploy
 // environment (same quoting and multiline rules), so spans agree with it.
 const STATEMENT =
-	/(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
+	/(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
 
 interface Statement {
 	key: string;
@@ -131,4 +131,61 @@ export const mergeEnvText = (
 		);
 	}
 	return merged;
+};
+
+export interface EnvBlockLosses {
+	/** Stored variables the incoming block no longer defines. */
+	dropped: string[];
+	/** Variables both define, where the stored value is set and the incoming one is empty. */
+	blanked: string[];
+}
+
+/**
+ * What replacing a stored block with `incoming` would lose: names only, so
+ * the result is safe to put in an error message. A variable that goes from a
+ * value to `KEY=` is a loss too, which is the shape a blanked MCP read sends
+ * back.
+ */
+export const envBlockLosses = (
+	stored: string | null | undefined,
+	incoming: string | null | undefined,
+): EnvBlockLosses => {
+	const before = parse(normalize(stored));
+	const after = parse(normalize(incoming));
+	const dropped: string[] = [];
+	const blanked: string[] = [];
+	for (const [key, value] of Object.entries(before)) {
+		if (!Object.hasOwn(after, key)) dropped.push(key);
+		else if (value !== "" && after[key] === "") blanked.push(key);
+	}
+	return { dropped, blanked };
+};
+
+export interface MergeSummary {
+	/** Variables in the incoming block that were not stored before. */
+	added: number;
+	/** Variables in the incoming block that replaced a stored one. */
+	updated: number;
+	/** Requested names that existed and were removed. */
+	unset: number;
+	/** Requested names that were not stored, so nothing was removed. */
+	unsetMissing: string[];
+}
+
+/** Counts (and the caller's own unset names) for a merge: no values. */
+export const summarizeMerge = (
+	current: string | null | undefined,
+	incoming: string | null | undefined,
+	unset: readonly string[] = [],
+): MergeSummary => {
+	const before = parse(normalize(current));
+	const sent = Object.keys(parse(normalize(incoming)));
+	const added = sent.filter((key) => !Object.hasOwn(before, key)).length;
+	const missing = unset.filter((key) => !Object.hasOwn(before, key));
+	return {
+		added,
+		updated: sent.length - added,
+		unset: new Set(unset).size - new Set(missing).size,
+		unsetMissing: [...new Set(missing)],
+	};
 };

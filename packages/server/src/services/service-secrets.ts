@@ -395,6 +395,19 @@ export const redactToolResult = (result: unknown): unknown => {
 	return walked.value;
 };
 
+/**
+ * Variable-block columns that are nullable: `null` empties one just as `""`
+ * does (lower case, matched without regard to case).
+ */
+const NULLABLE_BLOCK_KEYS: ReadonlySet<string> = new Set([
+	"env",
+	"buildargs",
+	"buildsecrets",
+	"previewenv",
+	"previewbuildargs",
+	"previewbuildsecrets",
+]);
+
 /** How many object/array levels below the arguments are searched for an emptied secret. */
 export const EMPTIED_SECRET_MAX_DEPTH = 6;
 
@@ -418,7 +431,11 @@ export const findEmptiedSecretField = (args: unknown): string | null => {
 		}
 		if (!isPlainObject(node)) return null;
 		for (const [key, value] of Object.entries(node)) {
-			if (isSecretKey(key) && typeof value === "string" && value.trim() === "") {
+			if (
+				isSecretKey(key) &&
+				((typeof value === "string" && value.trim() === "") ||
+					(value === null && NULLABLE_BLOCK_KEYS.has(key.toLowerCase())))
+			) {
 				return key;
 			}
 		}

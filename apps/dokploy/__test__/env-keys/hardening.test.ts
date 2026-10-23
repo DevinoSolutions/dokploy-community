@@ -171,7 +171,9 @@ describe("write-back guard", () => {
 		name: string,
 		args: unknown,
 		scopes: Set<string>,
-		call = vi.fn(async () => ({ ok: true })),
+		call: (path: string, args: unknown) => Promise<unknown> = vi.fn(
+			async () => ({ ok: true }),
+		),
 	) => ({
 		call,
 		promise: executeMcpTool({ tool: tool(name), args, scopes, call }),
@@ -207,7 +209,10 @@ describe("write-back guard", () => {
 			const { call, promise } = run("application-update", args, WRITE);
 			const result = await promise;
 			expect(result.isError, JSON.stringify(args)).toBe(true);
-			expect(call).not.toHaveBeenCalled();
+			expect(call).not.toHaveBeenCalledWith(
+				"application.update",
+				expect.anything(),
+			);
 		}
 	});
 
@@ -310,6 +315,9 @@ describe("write-back guard", () => {
 			"application-update",
 			{ applicationId: "app-1", description: "", env: "A=1" },
 			WRITE,
+			vi.fn(async (path: string) =>
+				path === "application.one" ? { env: "A=1" } : { ok: true },
+			),
 		);
 		expect((await empty.promise).isError).toBeUndefined();
 		expect(empty.call).toHaveBeenCalledWith("application.update", {

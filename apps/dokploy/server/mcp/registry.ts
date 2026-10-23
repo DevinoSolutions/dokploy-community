@@ -154,6 +154,50 @@ export const isEnvSaveTool = (
 	tool.procedureName === "saveEnvironment" &&
 	ENV_SAVE_ROUTERS.has(tool.routerName);
 
+/** Routers whose update tool can also carry a variable block (a service row, or the shared project/environment env). */
+export const ENV_UPDATE_ROUTERS: ReadonlySet<string> = new Set([
+	...ENV_SAVE_ROUTERS,
+	"project",
+	"environment",
+]);
+
+/** Every column that holds a dotenv-style block. */
+export const ENV_LIKE_FIELDS = [
+	"env",
+	"buildArgs",
+	"buildSecrets",
+	"previewEnv",
+	"previewBuildArgs",
+	"previewBuildSecrets",
+] as const;
+
+export const isEnvUpdateTool = (
+	tool: Pick<McpToolDefinition, "type" | "routerName" | "procedureName">,
+) =>
+	tool.type === "mutation" &&
+	tool.procedureName === "update" &&
+	ENV_UPDATE_ROUTERS.has(tool.routerName);
+
+/** The variable-block fields a tool's input schema takes. */
+export const envFieldsOf = (
+	tool: Pick<McpToolDefinition, "inputSchema">,
+): Array<(typeof ENV_LIKE_FIELDS)[number]> => {
+	const properties = tool.inputSchema.properties;
+	if (typeof properties !== "object" || properties === null) return [];
+	return ENV_LIKE_FIELDS.filter((field) => field in properties);
+};
+
+const ENV_UPDATE_NOTE =
+	" Through MCP, a call whose env, buildArgs, buildSecrets or preview variable blocks would drop variables that exist now (or blank their values) is refused, and the error names them (names only when the grant includes dokploy:read); pass replaceAll: true to replace a block on purpose. Values read back blank over MCP.";
+
+const ENV_UPDATE_EXTRA_PROPERTIES = {
+	[REPLACE_ALL_ARG]: {
+		type: "boolean",
+		description:
+			"Replace the variable blocks you send even if existing variables are dropped or blanked.",
+	},
+};
+
 const ENV_SAVE_EXTRA_PROPERTIES = {
 	[REPLACE_ALL_ARG]: {
 		type: "boolean",
@@ -227,6 +271,16 @@ export const buildMcpToolRegistry = (
 				...ENV_SAVE_EXTRA_PROPERTIES,
 			};
 		}
+		if (
+			isEnvUpdateTool({ type, routerName, procedureName }) &&
+			inputSchema.properties &&
+			typeof inputSchema.properties === "object"
+		) {
+			inputSchema.properties = {
+				...(inputSchema.properties as Record<string, unknown>),
+				...ENV_UPDATE_EXTRA_PROPERTIES,
+			};
+		}
 		const scope = resolveToolScope({ routerName, procedureName, type });
 		const method = type === "query" ? "GET" : "POST";
 		const name = segments.join("-");
@@ -239,7 +293,11 @@ export const buildMcpToolRegistry = (
 			description:
 				(def.meta?.openapi?.description ??
 					def.meta?.openapi?.summary ??
-					`${method} /${path}`) + (SAVE_ENVIRONMENT_NOTE[procedureName] ?? ""),
+					`${method} /${path}`) +
+				(SAVE_ENVIRONMENT_NOTE[procedureName] ?? "") +
+				(isEnvUpdateTool({ type, routerName, procedureName })
+					? ENV_UPDATE_NOTE
+					: ""),
 			inputSchema,
 			scope,
 			annotations: {
