@@ -22,6 +22,7 @@ import {
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import { findRestorableVolumeNames } from "@dokploy/server/services/volume-backups";
 import { findServerById } from "@dokploy/server/services/server";
 import {
 	execAsyncRemote,
@@ -35,6 +36,39 @@ import { audit } from "@/server/api/utils/audit";
 import { assertVolumeBackupLimit } from "@/server/api/utils/plan-limits";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
+
+const VOLUME_BACKUP_SERVICE_KEYS = [
+	"applicationId",
+	"postgresId",
+	"mysqlId",
+	"mariadbId",
+	"mongoId",
+	"redisId",
+	"libsqlId",
+	"composeId",
+] as const;
+
+const getVolumeBackupServiceId = (
+	vb: Partial<
+		Record<(typeof VOLUME_BACKUP_SERVICE_KEYS)[number], string | null>
+	>,
+) => VOLUME_BACKUP_SERVICE_KEYS.map((key) => vb[key]).find(Boolean) || null;
+
+// A volume backup always belongs to a service. A row that points at none
+// cannot be tied to an organization, so by-id routes report it as missing
+// instead of skipping the service permission.
+const requireVolumeBackupServiceId = (
+	vb: Parameters<typeof getVolumeBackupServiceId>[0],
+) => {
+	const serviceId = getVolumeBackupServiceId(vb);
+	if (!serviceId) {
+		throw new TRPCError({
+			code: "NOT_FOUND",
+			message: "Volume backup not found",
+		});
+	}
+	return serviceId;
+};
 
 export const volumeBackupsRouter = createTRPCRouter({
 	list: protectedProcedure
@@ -98,16 +132,27 @@ export const volumeBackupsRouter = createTRPCRouter({
 				] as const
 			).find((type) => input[`${type}Id`]);
 			const serviceId = serviceType ? input[`${serviceType}Id`] : undefined;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					volumeBackup: ["create"],
+			if (!serviceId) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "A volume backup needs a service to back up.",
 				});
+			}
+			// Every service id on the row must be one the caller can reach, not
+			// just the first, or a second id would smuggle in a foreign service.
+			for (const key of VOLUME_BACKUP_SERVICE_KEYS) {
+				const id = input[key];
+				if (id) {
+					await checkServicePermissionAndAccess(ctx, id, {
+						volumeBackup: ["create"],
+					});
+				}
 			}
 			await findDestinationByIdForOrganization(
 				input.destinationId,
 				ctx.session.activeOrganizationId,
 			);
-			if (IS_CLOUD && serviceType && serviceId) {
+			if (IS_CLOUD && serviceType) {
 				const existingVolumeBackups = await db.query.volumeBackups.findMany({
 					where: eq(volumeBackups[`${serviceType}Id`], serviceId),
 				});
@@ -144,20 +189,11 @@ export const volumeBackupsRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			const vb = await findVolumeBackupById(input.volumeBackupId);
-			const serviceId =
-				vb.applicationId ||
-				vb.postgresId ||
-				vb.mysqlId ||
-				vb.mariadbId ||
-				vb.mongoId ||
-				vb.redisId ||
-				vb.libsqlId ||
-				vb.composeId;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					volumeBackup: ["read"],
-				});
-			}
+			await checkServicePermissionAndAccess(
+				ctx,
+				requireVolumeBackupServiceId(vb),
+				{ volumeBackup: ["read"] },
+			);
 			return vb;
 		}),
 	delete: protectedProcedure
@@ -168,20 +204,11 @@ export const volumeBackupsRouter = createTRPCRouter({
 		)
 		.mutation(async ({ input, ctx }) => {
 			const vb = await findVolumeBackupById(input.volumeBackupId);
-			const serviceId =
-				vb.applicationId ||
-				vb.postgresId ||
-				vb.mysqlId ||
-				vb.mariadbId ||
-				vb.mongoId ||
-				vb.redisId ||
-				vb.libsqlId ||
-				vb.composeId;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					volumeBackup: ["delete"],
-				});
-			}
+			await checkServicePermissionAndAccess(
+				ctx,
+				requireVolumeBackupServiceId(vb),
+				{ volumeBackup: ["delete"] },
+			);
 			const result = await removeVolumeBackup(input.volumeBackupId);
 			await audit(ctx, {
 				action: "delete",
@@ -194,19 +221,21 @@ export const volumeBackupsRouter = createTRPCRouter({
 		.input(updateVolumeBackupSchema)
 		.mutation(async ({ input, ctx }) => {
 			const existingVb = await findVolumeBackupById(input.volumeBackupId);
-			const serviceId =
-				existingVb.applicationId ||
-				existingVb.postgresId ||
-				existingVb.mysqlId ||
-				existingVb.mariadbId ||
-				existingVb.mongoId ||
-				existingVb.redisId ||
-				existingVb.libsqlId ||
-				existingVb.composeId;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					volumeBackup: ["update"],
-				});
+			await checkServicePermissionAndAccess(
+				ctx,
+				requireVolumeBackupServiceId(existingVb),
+				{ volumeBackup: ["update"] },
+			);
+			// The update input carries the service ids too. Re-pointing the row
+			// at another service would back that service's volume up to the
+			// caller's destination without any permission check on it.
+			for (const key of VOLUME_BACKUP_SERVICE_KEYS) {
+				if (input[key] !== undefined && input[key] !== existingVb[key]) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "The service of a volume backup cannot be changed.",
+					});
+				}
 			}
 			await findDestinationByIdForOrganization(
 				input.destinationId,
@@ -258,20 +287,11 @@ export const volumeBackupsRouter = createTRPCRouter({
 		.input(z.object({ volumeBackupId: z.string().min(1) }))
 		.mutation(async ({ input, ctx }) => {
 			const vb = await findVolumeBackupById(input.volumeBackupId);
-			const serviceId =
-				vb.applicationId ||
-				vb.postgresId ||
-				vb.mysqlId ||
-				vb.mariadbId ||
-				vb.mongoId ||
-				vb.redisId ||
-				vb.libsqlId ||
-				vb.composeId;
-			if (serviceId) {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
-					volumeBackup: ["create"],
-				});
-			}
+			await checkServicePermissionAndAccess(
+				ctx,
+				requireVolumeBackupServiceId(vb),
+				{ volumeBackup: ["create"] },
+			);
 			try {
 				const result = await runVolumeBackup(input.volumeBackupId);
 				await audit(ctx, {
@@ -308,6 +328,21 @@ export const volumeBackupsRouter = createTRPCRouter({
 			}),
 		)
 		.subscription(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.id, {
+				volumeBackup: ["restore"],
+			});
+			// The restore removes and recreates the named Docker volume, so it
+			// must be one of this service's own volumes, not any volume on the host.
+			const restorableVolumes = await findRestorableVolumeNames(
+				input.id,
+				input.serviceType,
+			);
+			if (!restorableVolumes.has(input.volumeName)) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This volume does not belong to the service.",
+				});
+			}
 			const destination = await findDestinationById(input.destinationId);
 			if (destination.organizationId !== ctx.session.activeOrganizationId) {
 				throw new TRPCError({

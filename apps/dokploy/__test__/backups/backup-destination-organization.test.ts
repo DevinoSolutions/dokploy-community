@@ -17,6 +17,7 @@ vi.mock("@dokploy/server/db", () => ({
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkPermission: vi.fn(async () => undefined),
 	checkServicePermissionAndAccess: vi.fn(async () => undefined),
+	findServiceOrganizationId: vi.fn(async () => "org-a"),
 }));
 
 vi.mock("@dokploy/server", () => ({
@@ -181,16 +182,35 @@ describe("backup endpoints scope destinations to the active organization", () =>
 		expect(mocks.restorePostgresBackup).toHaveBeenCalledTimes(1);
 	});
 
-	it("leaves service-less web-server schedules unscoped (maintainer decision)", async () => {
+	it("rejects a web-server schedule on a destination from another organization", async () => {
 		mocks.findDestinationRow.mockResolvedValue(foreignDestination);
 
-		await caller.create({
-			...createInput,
-			postgresId: undefined,
+		await expect(
+			caller.create({
+				...createInput,
+				postgresId: undefined,
+				databaseType: "web-server",
+				destinationId: "dest-b",
+			}),
+		).rejects.toMatchObject({
+			message: "You don't have access to this destination.",
+		});
+		expect(mocks.createBackup).not.toHaveBeenCalled();
+	});
+
+	it("rejects restoring a web-server backup from a destination of another organization", async () => {
+		mocks.findDestinationRow.mockResolvedValue(foreignDestination);
+
+		const stream = await caller.restoreBackupWithLogs({
+			...restoreInput,
+			databaseId: "",
 			databaseType: "web-server",
 			destinationId: "dest-b",
 		});
 
-		expect(mocks.createBackup).toHaveBeenCalledTimes(1);
+		await expect(drain(stream)).rejects.toMatchObject({
+			code: "UNAUTHORIZED",
+		});
+		expect(mocks.restoreWebServerBackup).not.toHaveBeenCalled();
 	});
 });

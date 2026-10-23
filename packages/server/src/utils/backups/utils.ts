@@ -9,7 +9,10 @@ export { GENERIC_RCLONE_PROVIDER };
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { BackupSchedule } from "@dokploy/server/services/backup";
+import {
+	type BackupSchedule,
+	validateBackupServiceBinding,
+} from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { scheduledJobs, scheduleJob } from "node-schedule";
 import { quote } from "shell-quote";
@@ -55,6 +58,16 @@ export const scheduleBackup = (backup: BackupSchedule) => {
 			// A stopped database is not a backup failure: skip quietly instead of
 			// erroring on every tick (see shouldSkipStoppedBackup).
 			if (await skipScheduledBackupIfStopped(backup)) {
+				return;
+			}
+			// Fail closed on a row that targets more than one service or a
+			// service of another kind than its type: nothing runs for it.
+			const binding = validateBackupServiceBinding(backup);
+			if (binding.error) {
+				logger.error(
+					{ backupId, error: binding.error },
+					"[Backup] Scheduled backup refused",
+				);
 				return;
 			}
 			if (backup.backupType === "database") {

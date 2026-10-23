@@ -7,12 +7,16 @@ import {
 	ENCRYPTION_KEY_BACKUP_FILE,
 	exportEncryptionKeys,
 } from "@dokploy/server/lib/encryption";
-import type { BackupSchedule } from "@dokploy/server/services/backup";
+import {
+	type BackupSchedule,
+	findInstanceBackupDestination,
+	validateBackupServiceBinding,
+} from "@dokploy/server/services/backup";
 import {
 	createDeploymentBackup,
 	updateDeploymentStatus,
 } from "@dokploy/server/services/deployment";
-import { findDestinationById } from "@dokploy/server/services/destination";
+import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import { sendDokployBackupNotifications } from "../notifications/dokploy-backup";
 import { execAsync } from "../process/execAsync";
@@ -46,7 +50,26 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 	const writeStream = createWriteStream(deployment.logPath, { flags: "a" });
 	let computedBackupSize: number | undefined;
 	try {
-		const destination = await findDestinationById(backup.destinationId);
+		// The zip contains the whole Dokploy base path and the database dump, so
+		// the destination has to be proven to belong to an organization the
+		// backup's creator administers before anything is zipped or uploaded. A
+		// refusal is recorded as a failed run (log, notification, status) instead
+		// of failing silently.
+		const binding = validateBackupServiceBinding(backup);
+		if (binding.error) {
+			throw new Error(`Backup refused: ${binding.error}`);
+		}
+		let destination: Awaited<ReturnType<typeof findInstanceBackupDestination>>;
+		try {
+			destination = await findInstanceBackupDestination(backup);
+		} catch (error) {
+			if (error instanceof TRPCError && error.code === "UNAUTHORIZED") {
+				throw new Error(
+					"Backup refused: its creator is unknown or is no longer an owner or admin of the destination's organization. Nothing was uploaded. Re-save the backup as an owner or admin of that organization, or delete it.",
+				);
+			}
+			throw error;
+		}
 		const timestamp = getBackupTimestamp();
 		const { BASE_PATH } = paths();
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-backup-"));
