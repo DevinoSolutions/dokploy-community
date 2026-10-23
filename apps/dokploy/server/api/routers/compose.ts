@@ -4,6 +4,7 @@ import {
 	assertComposeBuildSettings,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
+	assertServiceReferencesInOrganization,
 	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	cloneBitbucketRepository,
@@ -234,6 +235,13 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
+
+			// Registries, git providers and the SSH key give the build credentials: each
+			// one that is set has to be the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				input,
+				ctx.session.activeOrganizationId,
+			);
 
 			// Build server: the caller must be allowed to use the server (same check
 			// as applications), and the settings as a whole must be valid. Checked
