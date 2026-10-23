@@ -128,3 +128,9 @@ export const dayBarClass = (state: DayState) => {
 /** True when Uptimely's status name for a monitor means it is down. */
 export const isOfflineStatus = (status: { name: string } | null | undefined) =>
 	!!status && /offline|down|outage|fail|critical|error/i.test(status.name);
+
+/**
+ * Status poll cadence while the tab is visible (5 minutes). Every poll is
+ * metered against the Uptimely project's monthly quota.
+ */
+export const UPTIMELY_POLL_INTERVAL_MS = 5 * 60_000;

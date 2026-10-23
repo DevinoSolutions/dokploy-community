@@ -23,15 +23,22 @@ export class UptimelyError extends Error {
 	readonly code?: string | number;
 	/** Deep link to the Uptimely setting that fixes a denial, when provided. */
 	readonly settingsUrl?: string;
+	/** How long Uptimely asked callers to wait (Retry-After / reset header). */
+	readonly retryAfterMs?: number;
 
 	constructor(
 		message: string,
-		options: { code?: string | number; settingsUrl?: string } = {},
+		options: {
+			code?: string | number;
+			settingsUrl?: string;
+			retryAfterMs?: number;
+		} = {},
 	) {
 		super(message);
 		this.name = "UptimelyError";
 		this.code = options.code;
 		this.settingsUrl = options.settingsUrl;
+		this.retryAfterMs = options.retryAfterMs;
 	}
 }
 
@@ -129,6 +136,30 @@ const pickResponse = (
 		responses.find((r) => r.id === null || r.id === undefined) ??
 		null
 	);
+};
+
+/**
+ * Reads how long to wait from `Retry-After` (seconds or HTTP date) or an
+ * `X-RateLimit-Reset` style header (epoch seconds, or seconds from now).
+ */
+export const parseRetryAfterMs = (
+	headers: Pick<Headers, "get">,
+	now = Date.now(),
+): number | undefined => {
+	const retryAfter = headers.get("retry-after")?.trim();
+	if (retryAfter) {
+		const seconds = Number(retryAfter);
+		if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+		const date = Date.parse(retryAfter);
+		if (Number.isFinite(date)) return Math.max(0, date - now);
+	}
+	const reset = Number(
+		headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset"),
+	);
+	if (Number.isFinite(reset) && reset > 0) {
+		return reset > 1e9 ? Math.max(0, reset * 1000 - now) : reset * 1000;
+	}
+	return undefined;
 };
 
 const readDenial = (result: ToolCallResult) => {
@@ -312,9 +343,14 @@ export const unwrapCodeModeResult = <T>(raw: unknown): T => {
 					? failure.message
 					: "";
 		const parsed = parseSandboxError(message);
+		const retryAfterSeconds = Number(parsed.fields?.retryAfterSeconds);
 		throw new UptimelyError(parsed.message, {
 			code: parsed.code,
 			settingsUrl: parsed.settingsUrl,
+			retryAfterMs:
+				Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+					? retryAfterSeconds * 1000
+					: undefined,
 		});
 	}
 	const value = envelope.result;
@@ -410,6 +446,12 @@ export const createUptimelyClient = (
 			throw new UptimelyError(
 				"Uptimely rejected the API key. Check the project API key in Settings → Integrations.",
 				{ code: response.status },
+			);
+		}
+		if (response.status === 429) {
+			throw new UptimelyError(
+				"Uptimely rate limit or monthly quota reached (HTTP 429)",
+				{ code: 429, retryAfterMs: parseRetryAfterMs(response.headers) },
 			);
 		}
 		if (parsed?.error) {
