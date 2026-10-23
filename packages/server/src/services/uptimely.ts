@@ -442,8 +442,10 @@ const monitorNameKey = (name: string) =>
 
 /**
  * Lists the project's monitors: one pass of `uptimely_monitor_list` pages
- * (offset based, until `count` monitors are seen or a page is empty, at most
- * LIST_MAX_PAGES). Any failing page fails the whole pass.
+ * (offset based, at most LIST_MAX_PAGES). `count` may be the project total or
+ * just this page's size, so it is only trusted as a total when it exceeds the
+ * page length. Stops on an empty page, a short page, or all monitors seen.
+ * Any failing page fails the whole pass.
  */
 const listUptimelyMonitors = async (
 	client: UptimelyClient,
@@ -462,8 +464,15 @@ const listUptimelyMonitors = async (
 		const monitors = Array.isArray(result?.monitors) ? result.monitors : [];
 		all.push(...monitors);
 		const total = typeof result?.count === "number" ? result.count : null;
-		if (monitors.length === 0 || (total !== null && all.length >= total)) break;
-		if (total === null && monitors.length < LIST_PAGE_SIZE) break;
+		if (monitors.length === 0 || monitors.length < LIST_PAGE_SIZE) break;
+		if (total !== null && total > monitors.length && all.length >= total) {
+			break;
+		}
+		if (page === LIST_MAX_PAGES - 1) {
+			console.warn(
+				`Uptimely monitor list hit the ${LIST_MAX_PAGES}-page cap (${all.length} monitors); matches beyond it are not seen.`,
+			);
+		}
 	}
 	return all;
 };
@@ -583,6 +592,12 @@ export const linkUptimelyService = async (params: {
 	const taken = new Set<string>();
 	const explicit = new Map<UptimelyMonitorSpec, string>();
 	if (params.monitorId && pending.length > 0) {
+		if (existing.some((l) => l.monitorId === params.monitorId)) {
+			throw new TRPCError({
+				code: "CONFLICT",
+				message: "That monitor is already linked to this service.",
+			});
+		}
 		let monitor: { id?: unknown; monitorType?: unknown };
 		try {
 			monitor = await client.callTool<{ id?: unknown; monitorType?: unknown }>(

@@ -451,6 +451,34 @@ describe("linkUptimelyService", () => {
 			expect(listCalls).toHaveLength(10);
 		});
 
+		it("keeps paging when count is just the page size", async () => {
+			const filler = (from: number) =>
+				Array.from({ length: 100 }, (_, i) =>
+					site(`mon-f${from + i}`, `Devino/f (${from + i}.example.com)`),
+				);
+			listHandler = (call) =>
+				call.arguments.offset === 0
+					? { count: 100, monitors: filler(0) }
+					: { count: 2, monitors: [site("mon-p2", APP), site("mon-p2b", "x")] };
+			const result = await link();
+			expect(listCalls.map((c) => c.arguments.offset)).toEqual([0, 100]);
+			expect(result.adopted.map((l) => l.monitorId)).toEqual(["mon-p2"]);
+		});
+
+		it("stops on a short page when count is absent", async () => {
+			listHandler = () => ({ monitors: [site("mon-s", APP)] });
+			const result = await link();
+			expect(listCalls).toHaveLength(1);
+			expect(result.adopted.map((l) => l.monitorId)).toEqual(["mon-s"]);
+		});
+
+		it("handles an empty first page", async () => {
+			listHandler = () => ({ count: 0, monitors: [] });
+			const result = await link();
+			expect(listCalls).toHaveLength(1);
+			expect(result.created).toHaveLength(2);
+		});
+
 		it("counts a create answered with created:false as adopted", async () => {
 			toolHandler = (call) => ({
 				monitorId: `existing-${String(call.arguments.url)}`,
@@ -522,6 +550,29 @@ describe("linkUptimelyService", () => {
 					/does not exist in this integration/,
 				);
 				expect(toolCalls.map((c) => c.name)).toEqual(["uptimely_monitor_get"]);
+				expect(mocks.insertedLinks).toHaveLength(0);
+			});
+
+			it("refuses a monitor already linked to this service, before any call", async () => {
+				mocks.linksFindMany.mockResolvedValue([
+					{ kind: "website", target: "https://other.example.com", monitorId: "mon-dup" },
+				]);
+				await expect(link({ monitorId: "mon-dup" })).rejects.toThrow(
+					/already linked to this service/,
+				);
+				expect(toolCalls).toHaveLength(0);
+				expect(mocks.insertedLinks).toHaveLength(0);
+			});
+
+			it("refuses an ambiguous type when several specs of it are pending", async () => {
+				mocks.findDomainsByApplicationId.mockResolvedValue([
+					{ host: "app.example.com", https: true, path: "/" },
+					{ host: "www.example.com", https: true, path: "/" },
+				]);
+				toolHandler = () => ({ id: "mon-w", monitorType: "Website" });
+				await expect(link({ monitorId: "mon-w" })).rejects.toThrow(
+					/More than one monitor of that type/,
+				);
 				expect(mocks.insertedLinks).toHaveLength(0);
 			});
 
