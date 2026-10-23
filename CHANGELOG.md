@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**Next.js security update** (T-6745). Next.js 16.3.8 to 16.4.2 (patched for GHSA-2464-fhr4-w9xw, which also needs sharp 0.35.5 or newer, already enforced by an override) and dompurify to 3.4.17 or newer (GHSA-cg2g-xh64-v4q7, critical).
+
 **Manual deploy coalescing follow-ups** (T-6233, after [#437](https://github.com/DevinoSolutions/dokploy-community/pull/437)). Three changes. The first two apply only with remote builds enforced; with the policy off, the only change is that manual Deploy and Redeploy clicks on the same service are handled one after the other (the third item).
 - The Deploy and Redeploy buttons and API calls for an Application now coalesce waiting deploys like the Compose ones do: a request is folded into the application's oldest waiting job of the same kind and the other waiting duplicates are dropped and audited. PR previews are never touched, a redeploy is never merged with a deploy, priority requests skip it, and Cloud is unchanged. The newest request wins, as for a webhook push: when a manual deploy folds into a waiting webhook job that carries a pinned image, the job takes the manual request's data, so the pinned image is dropped and that deploy builds from source.
 - A drop caused by a manual click is now recorded in the cancel audit trail under the user (or API key, or OAuth client) who clicked, since the click can replace another user's waiting job. Drops caused by a webhook push are still recorded as the system.
