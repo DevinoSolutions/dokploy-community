@@ -57,6 +57,7 @@ import {
 	assertComposeRollingSettings,
 	getComposeRollingReport,
 } from "@dokploy/server/services/compose-rolling";
+import { assertComposeFileVolumesBound } from "@dokploy/server/services/compose-volume-binding";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
@@ -320,7 +321,33 @@ export const composeRouter = createTRPCRouter({
 				);
 			}
 
-			const updated = await updateCompose(input.composeId, input);
+			// A raw compose file that mounts a volume which is not the compose's own
+			// is refused at save (T-6822), with the randomize / isolated renames
+			// applied; a deploy checks the final file again, which also covers git
+			// sources.
+			if (input.composeFile) {
+				const existing = await findComposeById(input.composeId);
+				const effective = { ...existing, ..._.omitBy(input, _.isUndefined) };
+				if (effective.sourceType === "raw") {
+					try {
+						await assertComposeFileVolumesBound(
+							effective,
+							input.composeFile,
+						);
+					} catch (error) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
+			}
+
+			// The status is written by deploys only (the schema omits it too).
+			const { composeStatus: _composeStatus, ...update } = input as typeof input & {
+				composeStatus?: unknown;
+			};
+			const updated = await updateCompose(input.composeId, update);
 			await audit(ctx, {
 				action: "update",
 				resourceType: "compose",

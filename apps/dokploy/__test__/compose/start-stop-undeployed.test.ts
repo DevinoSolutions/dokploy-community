@@ -9,6 +9,12 @@ const mocks = vi.hoisted(() => ({
 	existsSync: vi.fn(),
 }));
 
+// The volume check of Start has its own tests (volume-sinks/compose-deploy-order).
+vi.mock("@dokploy/server/services/compose-volume-binding", () => ({
+	assertComposeFileOnDiskVolumesBound: vi.fn(async () => undefined),
+	assertComposeVolumesBound: vi.fn(async () => undefined),
+}));
+
 vi.mock("node:fs", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:fs")>()),
 	existsSync: mocks.existsSync,
