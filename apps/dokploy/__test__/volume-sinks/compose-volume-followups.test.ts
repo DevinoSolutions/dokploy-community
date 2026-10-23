@@ -54,6 +54,7 @@ const {
 	dockerVolumesDirectoryReach,
 	reachesDockerVolumesDirectory,
 	resolveComposeMountedVolumes,
+	unresolvedDefaultReach,
 	unresolvedSourceClimbs,
 	unresolvedSourceReachesDockerVolumes,
 } = await import("@dokploy/server/utils/volume-backups/compose-volumes");
@@ -1279,4 +1280,185 @@ describe("process links that collapse away", () => {
 			expect(dockerVolumesDirectoryReach(path)).toBeNull();
 		},
 	);
+});
+
+// Round 2 of the review of PR #470.
+describe("a path option that is not literal", () => {
+	const projectDirectory = (value: string) =>
+		composeRow(bind("."), {
+			command: `compose --project-directory ${value} -f ${DEPLOYED} up -d`,
+		});
+	const refused = /Compose command refused: the --project-directory/;
+
+	it.each([
+		"$HOME/../..",
+		"${HOME}/../..",
+		'"\`echo /\`"',
+		"/e*",
+		"$X",
+		"${X}",
+		"/va?",
+		"/[v]ar",
+		"/{var,etc}",
+		'"$(echo /)"',
+	])("refuses --project-directory %s", async (value) => {
+		await expect(
+			assertComposeVolumesBound(projectDirectory(value)),
+		).rejects.toThrow(refused);
+	});
+
+	it.each(["$X", "/e*", "$HOME/../..", '"\`echo /\`"'])(
+		"refuses --project-directory=%s",
+		async (value) => {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(bind("."), {
+						command: `compose --project-directory=${value} -f ${DEPLOYED} up -d`,
+					}),
+				),
+			).rejects.toThrow(refused);
+		},
+	);
+
+	it.each([
+		["-f $X", /compose file "\$X"/],
+		["-f *.yml", /compose file "\*\.yml"/],
+		["--file=$X", /compose file "\$X"/],
+		["--file ${X}/a.yml", /compose file/],
+		["-f/etc/*.yml", /compose file/],
+		["--env-file $X", /--env-file "\$X"/],
+		["--env-file=*.env", /--env-file "\*\.env"/],
+		["--env-file '[a].env'", /--env-file/],
+	])("refuses %s", async (option, message) => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(NOTHING, {
+					command: `compose ${option} -f ${DEPLOYED} up -d`,
+				}),
+			),
+		).rejects.toThrow(message);
+	});
+
+	it("refuses it in a chained command and for a stack", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(NOTHING, {
+					command: `compose -f ${DEPLOYED} up -d && docker compose --project-directory $X -f ${DEPLOYED} ps`,
+				}),
+			),
+		).rejects.toThrow(refused);
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(NOTHING, {
+					composeType: "stack",
+					command: "stack deploy -c /srv/*.yml app",
+				}),
+			),
+		).rejects.toThrow(/Compose command refused: the compose file/);
+	});
+
+	it("still allows literal paths, quoted or not", async () => {
+		for (const value of [
+			"/srv/app",
+			'"/srv/app"',
+			"'/srv/my app'",
+			"..",
+			"./sub",
+		]) {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(bind("./data"), {
+						command: `compose --project-directory ${value} -f ${DEPLOYED} up -d`,
+					}),
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+});
+
+describe("a default that climbs", () => {
+	// Enough `..` to reach `/` from the compose directory wherever the tests run.
+	const CLIMB = Array(CODE_DIRECTORY.split("/").length + 1)
+		.fill("..")
+		.join("/");
+	const off = { createEnvFile: false };
+	const entry = (value: string) => `
+services:
+  web:
+    volumes:
+      - "${value}"
+`;
+
+	it("allows a default that is a relative path", async () => {
+		for (const source of [
+			"${DATA_DIR:-../data}:/data",
+			"${DATA_DIR-../data}:/data",
+			"${DATA_DIR:-./data}:/data",
+			"${DATA_DIR:-/srv/data}:/data",
+			"${DATA_DIR:-data}:/data",
+			"${DATA_DIR:-../../data}:/data",
+		]) {
+			await expect(
+				assertComposeVolumesBound(composeRow(entry(source), off)),
+			).resolves.toBeUndefined();
+			await expect(
+				assertComposeVolumesBound(composeRow(entry(source))),
+			).resolves.toBeUndefined();
+		}
+	});
+
+	it.each([
+		`\${X:-${CLIMB}}:/h`,
+		`\${X-${CLIMB}}:/h`,
+		"${X:-../../../../../../../../../..}:/h",
+		"${X:-/}:/h",
+		"${X:-/var/lib}:/h",
+		`\${X:-\${Y:-${CLIMB}}}:/h`,
+		`/srv/\${X:-${CLIMB}}:/h`,
+	])("refuses the default that climbs to a parent: %s", async (source) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry(source), off)),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+	});
+
+	it("refuses a default inside the storage", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${X:-/var/lib/docker/volumes/v}:/h"), off),
+			),
+		).rejects.toThrow(/is Docker's own volume storage/);
+	});
+
+	it("still refuses a .. written after the variable, outside its braces", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${DATA_DIR:-../data}/../..:/h"), off),
+			),
+		).rejects.toThrow(/Compose volume check failed/);
+	});
+
+	it("counts the .. outside the braces only", () => {
+		expect(unresolvedSourceClimbs("${DATA_DIR:-../data}")).toBe(false);
+		expect(unresolvedSourceClimbs("${X:-${Y:-..}}")).toBe(false);
+		expect(unresolvedSourceClimbs("${X:-..}/..")).toBe(true);
+		expect(unresolvedSourceClimbs("${X}/..")).toBe(true);
+	});
+
+	it("judges a default as a path", () => {
+		const base = ["/etc/dokploy/compose/app/code"];
+
+		expect(unresolvedDefaultReach("${X:-../data}", base)).toBeNull();
+		expect(unresolvedDefaultReach("${X:-../../../../..}", base)).toBe("parent");
+		expect(unresolvedDefaultReach("${X:-../../../../../..}", base)).toBe(
+			"parent",
+		);
+		expect(unresolvedDefaultReach("${X:-data}", base)).toBeNull();
+		expect(unresolvedDefaultReach("${X}", base)).toBeNull();
+		expect(unresolvedDefaultReach("${X:?err}", base)).toBeNull();
+		expect(unresolvedDefaultReach("${X:+../../../../..}", base)).toBeNull();
+		expect(
+			unresolvedDefaultReach("${X:-/var/lib/docker/volumes/v}", base),
+		).toBe("inside");
+		expect(unresolvedDefaultReach("/srv/${X:-../../..}", base)).toBe("parent");
+	});
 });

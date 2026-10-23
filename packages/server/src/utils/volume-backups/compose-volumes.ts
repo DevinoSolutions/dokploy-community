@@ -262,13 +262,33 @@ export const reachesDockerVolumesDirectory = (
 ) => dockerVolumesDirectoryReach(path, baseDirs) !== null;
 
 // The first variable of a value that is not an escaped `$$`.
-const firstVariableIndex = (raw: string) => {
+const firstVariable = (raw: string) => {
 	for (const match of raw.matchAll(VARIABLE)) {
 		if (match[0] !== "$$") {
-			return match.index;
+			return match;
 		}
 	}
-	return -1;
+	return null;
+};
+
+const firstVariableIndex = (raw: string) => firstVariable(raw)?.index ?? -1;
+
+// The text without its `${...}` groups (a default may hold a `..` that is
+// judged on its own).
+const withoutBracedVariables = (text: string) => {
+	let depth = 0;
+	let result = "";
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] === "$" && text[i + 1] === "{") {
+			depth += 1;
+			i += 1;
+		} else if (text[i] === "}" && depth > 0) {
+			depth -= 1;
+		} else if (depth === 0) {
+			result += text[i];
+		}
+	}
+	return result;
 };
 
 // A source with a `${VAR}` that cannot be resolved can still be known to be
@@ -300,12 +320,39 @@ export const unresolvedSourceReachesDockerVolumes = (
 	);
 };
 
-// A `..` after a variable that cannot be resolved (`${PWD}/../..`,
+// A `..` written after a variable that cannot be resolved (`${PWD}/../..`,
 // `${HOME}/../..`): the variable can be any directory, so the path can end up
-// anywhere above it.
+// anywhere above it. A `..` inside a `${...}` (a default) is not counted
+// here; see unresolvedDefaultReach.
 export const unresolvedSourceClimbs = (rawSource: string) => {
 	const index = firstVariableIndex(rawSource);
-	return index >= 0 && /\.\.(?:\/|$)/.test(rawSource.slice(index));
+	return (
+		index >= 0 &&
+		/\.\.(?:\/|$)/.test(withoutBracedVariables(rawSource.slice(index)))
+	);
+};
+
+// The default of the first variable (`${X:-default}`, `${X-default}`) put
+// where the variable is, judged with the normal rules of a path, because the
+// variable is unset when it takes the default. Defaults inside defaults are
+// followed. A default that is only a relative path (`${DATA_DIR:-../data}`)
+// is not a problem unless it climbs to a parent of Docker's volume storage.
+export const unresolvedDefaultReach = (
+	rawSource: string,
+	baseDirs: string[] = [],
+): DockerVolumesReach => {
+	const match = firstVariable(rawSource);
+	if (!match || (match[3] !== ":-" && match[3] !== "-")) {
+		return null;
+	}
+	const candidate =
+		rawSource.slice(0, match.index).replaceAll("$$", "$") + (match[4] ?? "");
+	if (candidate.includes("$")) {
+		return unresolvedDefaultReach(candidate, baseDirs);
+	}
+	return isFilePathSource(candidate)
+		? dockerVolumesDirectoryReach(candidate, baseDirs)
+		: null;
 };
 
 // An empty value is not a boolean: Docker fails on it.
@@ -375,6 +422,15 @@ const collectMounts = (
 	const refuseUnresolvedPath = (rawPath: string, what: string) => {
 		if (unresolvedSourceReachesDockerVolumes(rawPath, options.baseDirs)) {
 			into.forbidden.push(`${what} "${rawPath}"`);
+			return true;
+		}
+		const defaultReach = unresolvedDefaultReach(rawPath, options.baseDirs);
+		if (defaultReach === "inside") {
+			into.forbidden.push(`${what} "${rawPath}"`);
+			return true;
+		}
+		if (defaultReach === "parent") {
+			into.forbiddenParents.push(`${what} "${rawPath}"`);
 			return true;
 		}
 		if (unresolvedSourceClimbs(rawPath)) {

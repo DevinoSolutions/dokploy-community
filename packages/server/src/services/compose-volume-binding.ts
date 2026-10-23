@@ -289,6 +289,30 @@ const parseRunVolumes = (words: string[]) => {
 	return volumes;
 };
 
+// The value of a path option that the shell or Docker would expand into
+// something else: a variable, a substitution or a pattern. The path it ends
+// up as cannot be known here, and the compose files, the project directory
+// and the env file decide what the check reads and resolves from.
+const NON_LITERAL = /[$`*?[\]{}]/;
+
+const assertLiteralPathOptions = (
+	segment: Pick<CommandSegment, "files" | "projectDirectories" | "envFiles">,
+) => {
+	const options: Array<[string, string[]]> = [
+		["compose file", segment.files],
+		["--project-directory", segment.projectDirectories],
+		["--env-file", segment.envFiles],
+	];
+	for (const [name, values] of options) {
+		const value = values.find((candidate) => NON_LITERAL.test(candidate));
+		if (value !== undefined) {
+			throw new Error(
+				`Compose command refused: the ${name} "${value}" uses a variable, a substitution or a pattern, so the files and volumes it leads to cannot be checked. Write the path out.`,
+			);
+		}
+	}
+};
+
 // pflag reads `-f=path` and `-fpath` as the path.
 const shortOptionValue = (word: string) => word.slice(2).replace(/^=/, "");
 
@@ -387,6 +411,7 @@ const parseComposeCommand = (
 				if (subcommand === "run") {
 					volumes.push(...parseRunVolumes(words.slice(i + 1)));
 				}
+				assertLiteralPathOptions({ files, projectDirectories, envFiles });
 				return {
 					kind: "compose",
 					subcommand,
@@ -412,6 +437,7 @@ const parseComposeCommand = (
 						files.push(shortOptionValue(word));
 					}
 				}
+				assertLiteralPathOptions({ files, projectDirectories, envFiles });
 				return {
 					kind: "stack",
 					subcommand,
