@@ -15,6 +15,7 @@ import {
 	runPostgresBackup,
 	runVolumeBackup,
 	skipScheduledBackupIfStopped,
+	validateBackupServiceBinding,
 } from "@dokploy/server";
 import {
 	and,
@@ -25,7 +26,6 @@ import {
 	server,
 	volumeBackups,
 } from "@dokploy/server/db";
-import { validateBackupServiceBinding } from "@dokploy/server/services/backup";
 import { logger } from "./logger.js";
 import { scheduleJob } from "./queue.js";
 import type { QueueJob } from "./schema.js";
