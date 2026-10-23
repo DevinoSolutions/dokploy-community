@@ -20,6 +20,7 @@ import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import {
 	type ComposeVariables,
 	resolveComposeFilesMountedVolumes,
+	resolveEnvironmentReferences,
 	UNKNOWN_VARIABLE_VALUE,
 } from "@dokploy/server/utils/volume-backups/compose-volumes";
 import { parse as parseShell, quote } from "shell-quote";
@@ -62,39 +63,45 @@ type Spec = Parameters<typeof resolveComposeFilesMountedVolumes>[0][number];
 // shell's PWD and the like for a stack.
 const getInterpolationVariables = (
 	compose: ComposeForVolumeCheck,
+	{ customEnvFile = false }: { customEnvFile?: boolean } = {},
 ): { env: ComposeVariables; strict: boolean } => {
 	const isStack = compose.composeType === "stack";
-	if (!isStack && !compose.createEnvFile) {
+	if ((!isStack && !compose.createEnvFile) || customEnvFile) {
 		return { env: {}, strict: true };
 	}
 	try {
 		const projectEnv = compose.environment.project.env;
 		const environmentEnv = compose.environment.env;
 		if (isStack) {
-			const env = getEnvironmentVariablesObject(
+			const written = getEnvironmentVariablesObject(
 				compose.env ?? "",
 				projectEnv,
 				environmentEnv,
 			);
-			for (const name of ["PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"]) {
-				if (!Object.hasOwn(env, name)) {
-					env[name] = UNKNOWN_VARIABLE_VALUE;
-				}
+			const shellNames = ["PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"].filter(
+				(name) => !Object.hasOwn(written, name),
+			);
+			// The values refer to each other, as Compose expands them.
+			const env = resolveEnvironmentReferences(written, shellNames);
+			for (const name of shellNames) {
+				env[name] = UNKNOWN_VARIABLE_VALUE;
 			}
 			return { env, strict: false };
 		}
 		const content = `APP_NAME=${compose.appName}\nCOMPOSE_PROJECT_NAME=${compose.appName}\n${compose.env ?? ""}${
 			compose.randomize ? `\nCOMPOSE_PREFIX=${compose.suffix}` : ""
 		}`;
-		const env: Record<string, string> = {};
+		const written: Record<string, string> = {};
 		for (const pair of prepareEnvironmentVariables(
 			content,
 			projectEnv,
 			environmentEnv,
 		)) {
 			const [key, value] = parseEnvironmentKeyValuePair(pair);
-			env[key] = value;
+			written[key] = value;
 		}
+		// The values refer to each other, as Compose expands them.
+		const env = resolveEnvironmentReferences(written, ["PATH", "HOME"]);
 		env.PATH = UNKNOWN_VARIABLE_VALUE;
 		env.HOME = UNKNOWN_VARIABLE_VALUE;
 		return { env, strict: false };
@@ -118,23 +125,34 @@ const getCodeDirectory = (compose: ComposeForVolumeCheck) => {
 export const assertComposeSpecVolumesBound = async (
 	compose: ComposeForVolumeCheck,
 	specs: Spec | Spec[],
+	{
+		commandVolumes = [],
+		commandBaseDirs = [],
+		customEnvFile = false,
+	}: {
+		commandVolumes?: string[];
+		commandBaseDirs?: string[];
+		customEnvFile?: boolean;
+	} = {},
 ) => {
-	const { env, strict } = getInterpolationVariables(compose);
+	const { env, strict } = getInterpolationVariables(compose, {
+		customEnvFile,
+	});
 	const codeDirectory = getCodeDirectory(compose);
 	const composeFile =
 		compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath;
-	const { uses, unresolved, forbidden } = resolveComposeFilesMountedVolumes(
-		Array.isArray(specs) ? specs : [specs],
-		{
+	const { uses, unresolved, forbidden, forbiddenParents } =
+		resolveComposeFilesMountedVolumes(Array.isArray(specs) ? specs : [specs], {
 			appName: compose.appName,
 			env,
 			strict,
 			baseDirs: [
 				codeDirectory,
 				posix.dirname(posix.resolve(codeDirectory, composeFile || ".")),
+				...commandBaseDirs,
 			],
-		},
-	);
+			commandVolumes,
+		});
 	if (forbidden.length > 0) {
 		logger.warn(
 			{ composeId: compose.composeId, forbidden },
@@ -142,6 +160,15 @@ export const assertComposeSpecVolumesBound = async (
 		);
 		throw new Error(
 			`Compose volume refused: ${forbidden[0]} is Docker's own volume storage (/var/lib/docker/volumes), which holds every volume on the host.`,
+		);
+	}
+	if (forbiddenParents.length > 0) {
+		logger.warn(
+			{ composeId: compose.composeId, forbiddenParents },
+			"[VolumeBinding] A compose file volume was refused: it mounts a directory that contains Docker's volume storage",
+		);
+		throw new Error(
+			`Compose volume refused: ${forbiddenParents[0]} contains Docker's own volume storage (/var/lib/docker/volumes), which holds every volume on the host. Mount a directory of the compose's own instead.`,
 		);
 	}
 	if (unresolved.length > 0) {
@@ -199,6 +226,97 @@ type CommandSegment = {
 	subcommand?: string;
 	files: string[];
 	projectDirectories: string[];
+	// The `-v` / `--volume` values of a `docker compose run`.
+	volumes: string[];
+	// The `--env-file` values: they replace the `.env` Dokploy writes.
+	envFiles: string[];
+};
+
+// `docker compose run` options that take a value (the next word, or the rest
+// of the word after a single-letter option). Without this list the value of
+// `-e` or `--name` could be taken for an option.
+const RUN_SHORT_OPTIONS_WITH_VALUE = new Set(["e", "l", "p", "u", "v", "w"]);
+const RUN_LONG_OPTIONS_WITH_VALUE = new Set([
+	"cap-add",
+	"cap-drop",
+	"entrypoint",
+	"env",
+	"env-from-file",
+	"label",
+	"name",
+	"publish",
+	"pull",
+	"user",
+	"volume",
+	"workdir",
+]);
+
+// The `-v` / `--volume` values in the words after `run`. pflag reads
+// `-v x`, `-vx`, `-v=x`, `--volume x`, `--volume=x`, and a short option can
+// follow other short flags (`-Tv x`). The whole rest of the line is read, not
+// only the words before the service name, because an unknown option that takes
+// a value would otherwise hide a later `-v`; a `-v` after the service name is
+// the service command's own, and is only ever checked more strictly.
+const parseRunVolumes = (words: string[]) => {
+	const volumes: string[] = [];
+	for (let i = 0; i < words.length; i++) {
+		const word = words[i] as string;
+		if (word.startsWith("--")) {
+			const [name = "", ...rest] = word.slice(2).split("=");
+			if (!RUN_LONG_OPTIONS_WITH_VALUE.has(name)) {
+				continue;
+			}
+			const value = rest.length > 0 ? rest.join("=") : words[i + 1];
+			if (rest.length === 0) {
+				i += 1;
+			}
+			if (name === "volume" && value !== undefined) {
+				volumes.push(value);
+			}
+		} else if (/^-[^-]/.test(word)) {
+			for (let j = 1; j < word.length; j++) {
+				const letter = word[j] as string;
+				if (!RUN_SHORT_OPTIONS_WITH_VALUE.has(letter)) {
+					continue;
+				}
+				const attached = word.slice(j + 1).replace(/^=/, "");
+				let value: string | undefined = attached;
+				if (!attached) {
+					value = words[i + 1];
+					i += 1;
+				}
+				if (letter === "v" && value !== undefined) {
+					volumes.push(value);
+				}
+				break;
+			}
+		}
+	}
+	return volumes;
+};
+
+// The value of a path option that the shell or Docker would expand into
+// something else: a variable, a substitution or a pattern. The path it ends
+// up as cannot be known here, and the compose files, the project directory
+// and the env file decide what the check reads and resolves from.
+const NON_LITERAL = /[$`*?[\]{}]/;
+
+const assertLiteralPathOptions = (
+	segment: Pick<CommandSegment, "files" | "projectDirectories" | "envFiles">,
+) => {
+	const options: Array<[string, string[]]> = [
+		["compose file", segment.files],
+		["--project-directory", segment.projectDirectories],
+		["--env-file", segment.envFiles],
+	];
+	for (const [name, values] of options) {
+		const value = values.find((candidate) => NON_LITERAL.test(candidate));
+		if (value !== undefined) {
+			throw new Error(
+				`Compose command refused: the ${name} "${value}" uses a variable, a substitution or a pattern, so the files and volumes it leads to cannot be checked. Write the path out.`,
+			);
+		}
+	}
 };
 
 // pflag reads `-f=path` and `-fpath` as the path.
@@ -209,16 +327,35 @@ const shortOptionValue = (word: string) => word.slice(2).replace(/^=/, "");
 // A compose file argument is only one in the global options before the
 // subcommand (`rm -f` is not a file), `-c` only for `docker stack`, and the
 // options of `docker` itself (`-H x`, `--context x`, ...) come first.
-const parseComposeCommand = (command: string): CommandSegment[] => {
-	const segments: string[][] = [[]];
-	for (const token of parseShell(command)) {
+//
+// `opaque` is true when the line has a word the shell would rewrite (a glob
+// such as `A=*`) or an operator other than `&&`: what follows cannot be
+// told from here. A glob is kept as its pattern so that the words around it
+// keep their place.
+const parseComposeCommand = (
+	command: string,
+): { segments: CommandSegment[]; opaque: boolean } => {
+	const words: string[][] = [[]];
+	let opaque = false;
+	// A shell variable stays in the word as written (`$SRC`) so that a `-v`
+	// value that uses one is seen as unknown, not as an empty string. For a
+	// compose file it makes no difference: either way that file is not the
+	// deployed one and cannot be read.
+	for (const token of parseShell(command, (name) => `$${name}`)) {
 		if (typeof token === "string") {
-			segments[segments.length - 1]?.push(token);
+			words[words.length - 1]?.push(token);
+			continue;
+		}
+		const { op, pattern } = token as { op?: string; pattern?: string };
+		if (op === "glob" && pattern !== undefined) {
+			words[words.length - 1]?.push(pattern);
+			opaque = true;
 		} else {
-			segments.push([]);
+			words.push([]);
+			opaque = opaque || op !== "&&";
 		}
 	}
-	return segments
+	const segments = words
 		.filter((tokens) => tokens.length > 0)
 		.map((tokens, index): CommandSegment => {
 			let words = tokens;
@@ -237,10 +374,13 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 			}
 			const files: string[] = [];
 			const projectDirectories: string[] = [];
+			const volumes: string[] = [];
+			const envFiles: string[] = [];
 			const command = words[start];
 			if (command === "compose") {
 				let subcommand: string | undefined;
-				for (let i = start + 1; i < words.length; ) {
+				let i = start + 1;
+				for (; i < words.length; ) {
 					const word = words[i] as string;
 					if (word.startsWith("--") && word.includes("=")) {
 						const [name, ...rest] = word.split("=");
@@ -248,6 +388,8 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 							files.push(rest.join("="));
 						} else if (name === "--project-directory") {
 							projectDirectories.push(rest.join("="));
+						} else if (name === "--env-file") {
+							envFiles.push(rest.join("="));
 						}
 						i += 1;
 					} else if (COMPOSE_OPTIONS_WITH_VALUE.has(word)) {
@@ -257,6 +399,8 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 								files.push(value);
 							} else if (word === "--project-directory") {
 								projectDirectories.push(value);
+							} else if (word === "--env-file") {
+								envFiles.push(value);
 							}
 						}
 						i += 2;
@@ -270,7 +414,18 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 						break;
 					}
 				}
-				return { kind: "compose", subcommand, files, projectDirectories };
+				if (subcommand === "run") {
+					volumes.push(...parseRunVolumes(words.slice(i + 1)));
+				}
+				assertLiteralPathOptions({ files, projectDirectories, envFiles });
+				return {
+					kind: "compose",
+					subcommand,
+					files,
+					projectDirectories,
+					volumes,
+					envFiles,
+				};
 			}
 			if (command === "stack") {
 				const rest = words.slice(start + 1);
@@ -288,10 +443,19 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 						files.push(shortOptionValue(word));
 					}
 				}
-				return { kind: "stack", subcommand, files, projectDirectories };
+				assertLiteralPathOptions({ files, projectDirectories, envFiles });
+				return {
+					kind: "stack",
+					subcommand,
+					files,
+					projectDirectories,
+					volumes,
+					envFiles,
+				};
 			}
-			return { kind: "other", files, projectDirectories };
+			return { kind: "other", files, projectDirectories, volumes, envFiles };
 		});
+	return { segments, opaque };
 };
 
 // The compose files a custom command passes besides the deployed one. A
@@ -311,7 +475,7 @@ export const getCommandOverrideFiles = (
 			: compose.composePath || "docker-compose.yml",
 	);
 	const overrides = new Set<string>();
-	for (const segment of parseComposeCommand(compose.command)) {
+	for (const segment of parseComposeCommand(compose.command).segments) {
 		const startsContainers =
 			(segment.kind === "compose" &&
 				segment.subcommand !== undefined &&
@@ -354,6 +518,77 @@ export const getCommandOverrideFiles = (
 	return [...overrides];
 };
 
+// The volumes a custom command adds to `docker compose run` with `-v`. Only
+// a command that is `docker compose` is read (the first command runs as
+// `docker <command>`, the chained ones must start with `docker compose`);
+// anything else the command runs (`docker run -v ...`, `docker stack`, ...) is
+// not looked at, as before.
+//
+// A line with a glob or a shell operator next to a `run` is refused: the
+// shell may turn the glob into other words, so a `-v` could be hidden in or
+// after it.
+export const getCommandRunVolumes = (
+	compose: Pick<ComposeNested, "command" | "composeId">,
+) => {
+	if (!compose.command) {
+		return [];
+	}
+	const { segments, opaque } = parseComposeCommand(compose.command);
+	const runs = segments.filter(
+		(segment) => segment.kind === "compose" && segment.subcommand === "run",
+	);
+	if (runs.length > 0 && opaque) {
+		logger.warn(
+			{ composeId: compose.composeId },
+			"[VolumeBinding] A compose command was refused: a glob or operator next to docker compose run",
+		);
+		throw new Error(
+			"Compose command refused: it runs `docker compose run` next to a shell pattern (`*`, `?`, `[`) or operator that the shell may rewrite, so the volumes it mounts cannot be checked. Write the command without them.",
+		);
+	}
+	return runs.flatMap((segment) => segment.volumes);
+};
+
+// The directories a command makes relative paths of the compose files
+// resolve from: `--project-directory`, and the directory of every file it
+// names (the project directory defaults to the first file's).
+export const getCommandBaseDirectories = (
+	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
+) => {
+	if (!compose.command) {
+		return [];
+	}
+	const codeDirectory = getCodeDirectory(compose);
+	const directories = new Set<string>();
+	for (const segment of parseComposeCommand(compose.command).segments) {
+		const projectDirectories = segment.projectDirectories.map((directory) =>
+			posix.resolve(codeDirectory, directory),
+		);
+		for (const directory of projectDirectories) {
+			directories.add(directory);
+		}
+		for (const file of segment.files) {
+			const candidates = posix.isAbsolute(file)
+				? [posix.normalize(file)]
+				: [codeDirectory, ...projectDirectories].map((base) =>
+						posix.resolve(base, file),
+					);
+			for (const candidate of candidates) {
+				directories.add(posix.dirname(candidate));
+			}
+		}
+	}
+	return [...directories];
+};
+
+// A command that names its own `--env-file` replaces the `.env` Dokploy
+// writes, so the variables of the compose are not the ones Docker uses.
+export const commandUsesEnvFile = (compose: Pick<ComposeNested, "command">) =>
+	!!compose.command &&
+	parseComposeCommand(compose.command).segments.some(
+		(segment) => segment.envFiles.length > 0,
+	);
+
 const loadOverrideFile = async (
 	compose: ComposeForVolumeCheck,
 	path: string,
@@ -385,6 +620,7 @@ const loadOverrideFile = async (
 export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	const compose = await withResolvedVaultRefs(rawCompose);
 	const overrideFiles = getCommandOverrideFiles(compose);
+	const commandVolumes = getCommandRunVolumes(compose);
 	let spec: Awaited<ReturnType<typeof addDomainToCompose>>;
 	try {
 		spec = await addDomainToCompose(compose, compose.domains);
@@ -397,7 +633,11 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	const overrides = await Promise.all(
 		overrideFiles.map((path) => loadOverrideFile(compose, path)),
 	);
-	await assertComposeSpecVolumesBound(compose, [spec as Spec, ...overrides]);
+	await assertComposeSpecVolumesBound(compose, [spec as Spec, ...overrides], {
+		commandVolumes,
+		commandBaseDirs: getCommandBaseDirectories(compose),
+		customEnvFile: commandUsesEnvFile(compose),
+	});
 };
 
 // Start (`docker compose up -d` from the files on disk): checks the compose
