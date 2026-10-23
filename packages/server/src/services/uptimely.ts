@@ -426,12 +426,126 @@ export const findUptimelyLinks = async (
 		orderBy: [asc(uptimelyMonitorLink.createdAt)],
 	});
 
+/** A monitor as `uptimely_monitor_list` reports it; only `id` is relied on. */
+type UptimelyListedMonitor = Record<string, unknown> & {
+	id?: unknown;
+	monitorId?: unknown;
+	name?: unknown;
+	monitorType?: unknown;
+};
+
+const DEFAULT_PORTS: Record<string, string> = { "https:": "443", "http:": "80" };
+
 /**
- * Creates the planned Uptimely monitors for a service and records a link row
+ * Canonical form of a monitored URL so a stored `https://App.Example.com:443/`
+ * and the planned `https://app.example.com` compare equal: lowercase host,
+ * default port dropped, trailing slashes dropped, query kept, fragment ignored.
+ * Returns null for anything that is not an http(s) URL.
+ */
+export const normalizeUptimelyUrl = (value: unknown): string | null => {
+	if (typeof value !== "string" || !value.trim()) return null;
+	let url: URL;
+	try {
+		url = new URL(value.trim());
+	} catch {
+		return null;
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+	const port =
+		url.port && url.port !== DEFAULT_PORTS[url.protocol] ? url.port : "";
+	const path = url.pathname.replace(/\/+$/, "");
+	return `${url.protocol}//${url.hostname.toLowerCase()}${port ? `:${port}` : ""}${path}${url.search}`;
+};
+
+const monitorIdOf = (monitor: UptimelyListedMonitor): string | null => {
+	const id = monitor.id ?? monitor.monitorId;
+	return typeof id === "string" && id ? id : null;
+};
+
+/** Reads a field off the listed monitor or the config object Uptimely nests it in. */
+const monitorField = (monitor: UptimelyListedMonitor, field: string) => {
+	if (monitor[field] != null) return monitor[field];
+	for (const nested of ["config", "args", "settings"]) {
+		const value = monitor[nested];
+		if (value && typeof value === "object") {
+			const found = (value as Record<string, unknown>)[field];
+			if (found != null) return found;
+		}
+	}
+	return undefined;
+};
+
+/** The comparable key of a planned monitor (`null` when it has none). */
+const specMatchKey = (spec: UptimelyMonitorSpec): string | null =>
+	spec.kind === "website"
+		? normalizeUptimelyUrl(spec.target)
+		: spec.target.toLowerCase();
+
+/** The same key, read from a listed monitor of the spec's type. */
+const monitorMatchKey = (
+	spec: UptimelyMonitorSpec,
+	monitor: UptimelyListedMonitor,
+): string | null => {
+	if (spec.kind === "website") {
+		return normalizeUptimelyUrl(
+			monitorField(monitor, "url") ?? monitorField(monitor, "target"),
+		);
+	}
+	const host = monitorField(monitor, "host") ?? monitorField(monitor, "target");
+	if (typeof host !== "string" || !host.trim()) return null;
+	const text = host.trim().toLowerCase();
+	if (spec.kind === "port") {
+		const port = monitorField(monitor, "port");
+		return port != null && !text.includes(":") ? `${text}:${port}` : text;
+	}
+	return text;
+};
+
+/**
+ * Finds the already-existing monitor a planned one would duplicate: same
+ * Uptimely monitor type and the same normalized URL/host(:port), else the
+ * exact name Dokploy gives its own monitors (covers an unlink followed by a
+ * re-link, and list payloads that omit the URL). A monitor already taken by
+ * another spec of this run is never matched twice.
+ */
+const findAdoptableMonitor = (
+	spec: UptimelyMonitorSpec,
+	monitors: UptimelyListedMonitor[],
+	taken: Set<string>,
+): string | null => {
+	const key = specMatchKey(spec);
+	let byName: string | null = null;
+	for (const monitor of monitors) {
+		const id = monitorIdOf(monitor);
+		if (!id || taken.has(id)) continue;
+		if (monitor.monitorType !== spec.monitorType) continue;
+		if (key && monitorMatchKey(spec, monitor) === key) return id;
+		if (!byName && monitor.name === spec.name) byName = id;
+	}
+	return byName;
+};
+
+/**
+ * Links the planned Uptimely monitors for a service and records a link row
  * per monitor. Monitors already linked for the same (kind, target) are
- * skipped, so re-running after adding a domain only creates the new ones.
- * Each link is stored as soon as its monitor exists, so a failure part-way
- * never orphans an already-created monitor.
+ * skipped, so re-running after adding a domain only handles the new ones.
+ *
+ * Before creating anything, the integration's project is listed once (one
+ * `uptimely_monitor_list` call per invocation, never per domain) and a planned
+ * monitor that already exists there, same type and same normalized URL, is
+ * adopted: only a link row is written. A monitor is created only when none
+ * matches. `monitorId` adopts that specific monitor (it must exist in the
+ * project and match exactly one pending planned monitor).
+ *
+ * If the list call fails, linking fails closed instead of creating blindly:
+ * creating without knowing what exists is what duplicates monitors and burns
+ * Uptimely quota, and a retry costs one list call rather than a create per
+ * domain.
+ *
+ * Each link is stored as soon as its monitor is known, so a failure part-way
+ * never orphans an already-created monitor. Unlinking only deletes link rows
+ * (Dokploy never deletes Uptimely monitors), so an adopted monitor is never
+ * removed from Uptimely by Dokploy.
  */
 export const linkUptimelyService = async (params: {
 	integration: UptimelyIntegration;
@@ -441,6 +555,8 @@ export const linkUptimelyService = async (params: {
 	/** Path every Website monitor checks; ignored when `target` is passed. */
 	checkPath?: string;
 	target?: UptimelyServiceTarget;
+	/** Adopt this existing monitor of the integration's project instead of creating one. */
+	monitorId?: string;
 }) => {
 	const { integration, serviceType, serviceId } = params;
 	const target =
@@ -473,7 +589,80 @@ export const linkUptimelyService = async (params: {
 
 	const client = uptimelyClientFor(integration);
 	const created: UptimelyMonitorLink[] = [];
+	const adopted: UptimelyMonitorLink[] = [];
+
+	const saveLink = (monitorId: string, spec: UptimelyMonitorSpec) =>
+		db
+			.insert(uptimelyMonitorLink)
+			.values({
+				uptimelyId: integration.uptimelyId,
+				serviceType,
+				serviceId,
+				monitorId,
+				kind: spec.kind,
+				target: spec.target,
+			})
+			.returning()
+			.then((rows) => rows[0]);
+
+	let listed: UptimelyListedMonitor[] = [];
+	if (pending.length > 0) {
+		try {
+			const result = await client.callTool<{
+				monitors?: UptimelyListedMonitor[];
+			}>("uptimely_monitor_list", {
+				projectId: integration.projectId,
+				limit: 100,
+			});
+			listed = Array.isArray(result?.monitors) ? result.monitors : [];
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Unknown Uptimely error";
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message: `Could not list the existing Uptimely monitors, so nothing was created (it could duplicate a monitor): ${message}`,
+				cause: error,
+			});
+		}
+	}
+
+	const taken = new Set<string>();
+	const explicit = new Map<UptimelyMonitorSpec, string>();
+	if (params.monitorId) {
+		const monitor = listed.find((m) => monitorIdOf(m) === params.monitorId);
+		if (!monitor) {
+			throw new TRPCError({
+				code: "NOT_FOUND",
+				message:
+					"That monitor does not exist in this integration's Uptimely project.",
+			});
+		}
+		const candidates = pending.filter(
+			(s) => s.monitorType === monitor.monitorType,
+		);
+		const only = candidates[0];
+		if (candidates.length !== 1 || !only) {
+			throw new TRPCError({
+				code: "BAD_REQUEST",
+				message:
+					candidates.length === 0
+						? `That monitor is a ${String(monitor.monitorType)} monitor, which this service has nothing pending for.`
+						: "More than one monitor of that type is pending for this service; link the others first so the monitor to adopt is unambiguous.",
+			});
+		}
+		explicit.set(only, params.monitorId);
+		taken.add(params.monitorId);
+	}
+
 	for (const spec of pending) {
+		const adoptId =
+			explicit.get(spec) ?? findAdoptableMonitor(spec, listed, taken);
+		if (adoptId) {
+			taken.add(adoptId);
+			const row = await saveLink(adoptId, spec);
+			if (row) adopted.push(row);
+			continue;
+		}
 		let monitorId: string;
 		try {
 			const result = await client.callTool<{ monitorId: string }>(
@@ -499,22 +688,11 @@ export const linkUptimelyService = async (params: {
 				cause: error,
 			});
 		}
-		const row = await db
-			.insert(uptimelyMonitorLink)
-			.values({
-				uptimelyId: integration.uptimelyId,
-				serviceType,
-				serviceId,
-				monitorId,
-				kind: spec.kind,
-				target: spec.target,
-			})
-			.returning()
-			.then((rows) => rows[0]);
+		const row = await saveLink(monitorId, spec);
 		if (row) created.push(row);
 	}
 
-	return { created, skipped: plan.length - pending.length };
+	return { created, adopted, skipped: plan.length - pending.length };
 };
 
 /**

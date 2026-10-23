@@ -204,6 +204,8 @@ export const uptimelyCheckPathSchema = z
 export const apiLinkUptimelyService = apiUptimelyService.extend({
 	includeSslAndDomain: z.boolean().default(false),
 	checkPath: uptimelyCheckPathSchema.optional(),
+	/** Adopt this existing monitor of the integration's project instead of creating one. */
+	monitorId: z.string().trim().min(1).max(128).optional(),
 });
 
 export const apiPreflightUptimelyService = apiUptimelyService.extend({

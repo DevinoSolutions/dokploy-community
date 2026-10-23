@@ -274,9 +274,13 @@ export const UptimelyServicePanel = ({ serviceType, serviceId }: Props) => {
 					: {}),
 			})
 			.then(async (result) => {
+				const parts = [
+					result.created > 0 ? `Created ${result.created}` : null,
+					result.adopted > 0 ? `Linked ${result.adopted} existing` : null,
+				].filter(Boolean);
 				toast.success(
-					result.created > 0
-						? `Created ${result.created} Uptimely monitor${result.created === 1 ? "" : "s"}`
+					parts.length > 0
+						? `${parts.join(", ")} Uptimely monitor${result.created + result.adopted === 1 ? "" : "s"}`
 						: "Every monitor already exists",
 				);
 				await utils.uptimely.serviceStatus.invalidate(input);

@@ -281,6 +281,7 @@ export const uptimelyRouter = createTRPCRouter({
 					serviceId: input.serviceId,
 					includeSslAndDomain: input.includeSslAndDomain,
 					target,
+					monitorId: input.monitorId,
 				});
 				await audit(ctx, {
 					action: "create",
@@ -290,10 +291,12 @@ export const uptimelyRouter = createTRPCRouter({
 					metadata: {
 						serviceType: input.serviceType,
 						monitorsCreated: result.created.length,
+						monitorsAdopted: result.adopted.length,
 					},
 				});
 				return {
 					created: result.created.length,
+					adopted: result.adopted.length,
 					skipped: result.skipped,
 				};
 			} catch (error) {
