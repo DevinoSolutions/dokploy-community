@@ -28,7 +28,8 @@ const mocks = vi.hoisted(() => ({
 	assertServerInOrganization: vi.fn(),
 }));
 
-vi.mock("@dokploy/server", () => {
+vi.mock("@dokploy/server", async () => {
+	const { TRPCError } = await import("@trpc/server");
 	const stubs: Record<string | symbol, unknown> = {};
 	const named: Record<string, unknown> = {
 		IS_CLOUD: false,
@@ -51,6 +52,16 @@ vi.mock("@dokploy/server", () => {
 		updateBitbucket: mocks.updateBitbucket,
 		updateGitProvider: mocks.updateGitProvider,
 		applyDockerCleanupSchedule: vi.fn(),
+		// the organization half of the real check; who may update a provider
+		// within the organization is covered in fk-org-checks (T-6895)
+		assertCanUpdateGitProvider: async (
+			_session: unknown,
+			provider: { organizationId: string },
+		) => {
+			if (provider.organizationId !== "org-b") {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
+			}
+		},
 	};
 	return new Proxy(stubs, {
 		get: (target, key) => {

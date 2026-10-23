@@ -171,3 +171,29 @@ export const canViewGitProviderSecrets = async (
 
 	return memberRecord?.role === "owner" || memberRecord?.role === "admin";
 };
+
+/**
+ * Authorizes rewriting a git provider (its name, credentials, endpoints).
+ *
+ * `gitProviders:create` is what lets a member add a provider of their own, so
+ * on its own it must not let them rewrite one that somebody else connected,
+ * which would swap the token or endpoint every deploy using it clones with.
+ * Only the user who created the provider or an org owner/admin may update it.
+ * A provider of another organization is refused first with the same
+ * UNAUTHORIZED the update routes already used.
+ */
+export const assertCanUpdateGitProvider = async (
+	session: { userId: string; activeOrganizationId: string },
+	provider: { userId: string; organizationId: string },
+) => {
+	if (provider.organizationId !== session.activeOrganizationId) {
+		throw new TRPCError({ code: "UNAUTHORIZED" });
+	}
+	if (!(await canViewGitProviderSecrets(session, provider))) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message:
+				"Only the creator of this git provider or an admin can update it",
+		});
+	}
+};

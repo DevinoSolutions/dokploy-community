@@ -285,8 +285,18 @@ export const userRouter = createTRPCRouter({
 					);
 			}
 
+			// The password lives on the account row and was handled above; the rest is
+			// the profile allow-list of apiUpdateUser, picked by name here as well so a
+			// widened schema cannot start writing other columns.
+			const { email, image, firstName, lastName, allowImpersonation } = input;
 			try {
-				const result = await updateUser(ctx.user.id, input);
+				const result = await updateUser(ctx.user.id, {
+					email,
+					image,
+					firstName,
+					lastName,
+					allowImpersonation,
+				});
 				await audit(ctx, {
 					action: "update",
 					resourceType: "user",

@@ -1,4 +1,5 @@
 import {
+	assertCanUpdateGitProvider,
 	assertGitProviderAccess,
 	canViewGitProviderSecrets,
 	createBitbucket,
@@ -130,12 +131,7 @@ export const bitbucketRouter = createTRPCRouter({
 			// organization before it is rewritten (updateGitProvider re-assigns the
 			// organization), and its own gitProviderId is the one that is updated.
 			const bitbucket = await findBitbucketById(input.bitbucketId);
-			if (
-				bitbucket.gitProvider.organizationId !==
-				ctx.session.activeOrganizationId
-			) {
-				throw new TRPCError({ code: "UNAUTHORIZED" });
-			}
+			await assertCanUpdateGitProvider(ctx.session, bitbucket.gitProvider);
 			const result = await updateBitbucket(input.bitbucketId, {
 				...input,
 				organizationId: ctx.session.activeOrganizationId,

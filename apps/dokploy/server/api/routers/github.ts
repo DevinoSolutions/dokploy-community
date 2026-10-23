@@ -1,4 +1,5 @@
 import {
+	assertCanUpdateGitProvider,
 	assertGitProviderAccess,
 	canViewGitProviderSecrets,
 	findGithubById,
@@ -121,11 +122,7 @@ export const githubRouter = createTRPCRouter({
 			// organization before it is rewritten (updateGitProvider re-assigns the
 			// organization), and its own gitProviderId is the one that is updated.
 			const github = await findGithubById(input.githubId);
-			if (
-				github.gitProvider.organizationId !== ctx.session.activeOrganizationId
-			) {
-				throw new TRPCError({ code: "UNAUTHORIZED" });
-			}
+			await assertCanUpdateGitProvider(ctx.session, github.gitProvider);
 			await updateGitProvider(github.gitProviderId, {
 				name: input.name,
 				organizationId: ctx.session.activeOrganizationId,

@@ -1,4 +1,5 @@
 import {
+	assertCanUpdateGitProvider,
 	assertGitProviderAccess,
 	canViewGitProviderSecrets,
 	createGitea,
@@ -224,11 +225,7 @@ export const giteaRouter = createTRPCRouter({
 			// organization before it is rewritten (updateGitProvider re-assigns the
 			// organization), and its own gitProviderId is the one that is updated.
 			const gitea = await findGiteaById(input.giteaId);
-			if (
-				gitea.gitProvider.organizationId !== ctx.session.activeOrganizationId
-			) {
-				throw new TRPCError({ code: "UNAUTHORIZED" });
-			}
+			await assertCanUpdateGitProvider(ctx.session, gitea.gitProvider);
 			if (input.name) {
 				await updateGitProvider(gitea.gitProviderId, {
 					name: input.name,

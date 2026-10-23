@@ -2,6 +2,7 @@ import {
 	assertNetworkIdsAttachableToResource,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
+	assertServiceReferencesInOrganization,
 	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	createApplication,
@@ -659,6 +660,12 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			// The provider supplies the credentials this application clones with: it has to be
+			// the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				{ githubId: input.githubId },
+				ctx.session.activeOrganizationId,
+			);
 			await updateApplication(input.applicationId, {
 				repository: input.repository,
 				branch: input.branch,
@@ -685,6 +692,12 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			// The provider supplies the credentials this application clones with: it has to be
+			// the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				{ gitlabId: input.gitlabId },
+				ctx.session.activeOrganizationId,
+			);
 			await updateApplication(input.applicationId, {
 				gitlabRepository: input.gitlabRepository,
 				gitlabOwner: input.gitlabOwner,
@@ -713,6 +726,12 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			// The provider supplies the credentials this application clones with: it has to be
+			// the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				{ bitbucketId: input.bitbucketId },
+				ctx.session.activeOrganizationId,
+			);
 			await updateApplication(input.applicationId, {
 				bitbucketRepository: input.bitbucketRepository,
 				bitbucketRepositorySlug: input.bitbucketRepositorySlug,
@@ -740,6 +759,12 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			// The provider supplies the credentials this application clones with: it has to be
+			// the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				{ giteaId: input.giteaId },
+				ctx.session.activeOrganizationId,
+			);
 			await updateApplication(input.applicationId, {
 				giteaRepository: input.giteaRepository,
 				giteaOwner: input.giteaOwner,
@@ -766,10 +791,14 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
-			await updateApplication(
-				input.applicationId,
-				resolveDockerProviderFields(input),
+			const fields = resolveDockerProviderFields(input);
+			// The registry supplies the credentials the image is pulled with: it has
+			// to be the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				{ registryId: fields.registryId },
+				ctx.session.activeOrganizationId,
 			);
+			await updateApplication(input.applicationId, fields);
 			const application = await findApplicationById(input.applicationId);
 			await audit(ctx, {
 				action: "update",
@@ -785,6 +814,12 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+			// The SSH key supplies the credentials this application clones with: it has to be
+			// the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				{ customGitSSHKeyId: input.customGitSSHKeyId },
+				ctx.session.activeOrganizationId,
+			);
 			await updateApplication(input.applicationId, {
 				customGitBranch: input.customGitBranch,
 				customGitBuildPath: input.customGitBuildPath,
@@ -877,6 +912,13 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],
 			});
+
+			// Registries, git providers and the SSH key give the build credentials: each
+			// one that is set has to be the caller's organization's (T-6895).
+			await assertServiceReferencesInOrganization(
+				input,
+				ctx.session.activeOrganizationId,
+			);
 
 			if (input.buildServerId) {
 				const accessibleIds = await getAccessibleServerIds(ctx.session);
