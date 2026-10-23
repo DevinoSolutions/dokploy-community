@@ -286,6 +286,23 @@ const blankEnvArray = (entries: unknown[]): unknown[] => {
 	return copy ?? entries;
 };
 
+/** Fields that hold a command line (`docker top` args, a service command). */
+const COMMAND_KEYS: ReadonlySet<string> = new Set(["command", "args"]);
+
+const scrubCommandValue = (value: unknown): unknown => {
+	if (typeof value === "string") return scrubCommandText(value);
+	if (!Array.isArray(value)) return value;
+	let copy: unknown[] | null = null;
+	value.forEach((entry, index) => {
+		if (typeof entry !== "string") return;
+		const scrubbed = scrubCommandText(entry);
+		if (scrubbed === entry) return;
+		copy ??= value.slice();
+		copy[index] = scrubbed;
+	});
+	return copy ?? value;
+};
+
 interface Walked {
 	value: unknown;
 	changed: boolean;
@@ -326,6 +343,8 @@ const walkSecrets = (node: unknown, path: Set<object>): Walked => {
 			}
 		} else if (key === "customGitUrl") {
 			next = stripUrlCredentials(value);
+		} else if (COMMAND_KEYS.has(key.toLowerCase())) {
+			next = scrubCommandValue(value);
 		} else {
 			const walked = walkSecrets(value, path);
 			if (walked.changed) next = walked.value;
@@ -355,35 +374,40 @@ export const redactToolResult = (result: unknown): unknown => {
 	return walked.value;
 };
 
+/** How many object/array levels below the arguments are searched for an emptied secret. */
+export const EMPTIED_SECRET_MAX_DEPTH = 6;
+
 /**
  * Whether an MCP mutation argument sets a secret field to an empty or
  * whitespace-only string, the shape a read-then-write round trip produces
- * once the read blanked the value. Looks at the top level and one object
- * level down (an input that nests a row); returns the offending field name.
+ * once the read blanked the value. Recurses through objects and arrays down
+ * to {@link EMPTIED_SECRET_MAX_DEPTH} levels, so a nested row such as
+ * `metadata.postgres.databasePassword` or `items[0].password` is caught;
+ * returns the offending field name.
  */
 export const findEmptiedSecretField = (args: unknown): string | null => {
-	if (!isPlainObject(args)) return null;
-	const emptied = (record: AnyRecord): string | null => {
-		for (const [key, value] of Object.entries(record)) {
-			if (
-				isSecretKey(key) &&
-				typeof value === "string" &&
-				value.trim() === ""
-			) {
+	const visit = (node: unknown, depth: number): string | null => {
+		if (depth > EMPTIED_SECRET_MAX_DEPTH) return null;
+		if (Array.isArray(node)) {
+			for (const item of node) {
+				const found = visit(item, depth + 1);
+				if (found) return found;
+			}
+			return null;
+		}
+		if (!isPlainObject(node)) return null;
+		for (const [key, value] of Object.entries(node)) {
+			if (isSecretKey(key) && typeof value === "string" && value.trim() === "") {
 				return key;
 			}
 		}
+		for (const value of Object.values(node)) {
+			const found = visit(value, depth + 1);
+			if (found) return found;
+		}
 		return null;
 	};
-	const top = emptied(args);
-	if (top) return top;
-	for (const value of Object.values(args)) {
-		if (isPlainObject(value)) {
-			const nested = emptied(value);
-			if (nested) return nested;
-		}
-	}
-	return null;
+	return visit(args, 0);
 };
 
 /**
@@ -396,10 +420,31 @@ export const scrubSecretsInText = (text: string): string =>
 	text
 		.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1***@")
 		.replace(
-			/(--(?:token|password|secret|api-key)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi,
+			/("[A-Za-z_]*(?:token|password|passwd|secret|api_?key)"\s*:\s*")[^"]*(")/gi,
+			"$1***$2",
+		)
+		.replace(
+			/(--(?:token|password|passwd|secret|api-key)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi,
 			"$1***",
 		)
 		.replace(
 			/\b((?:access_?|refresh_?|api_?|auth_?|bearer_?)?(?:token|password|passwd|secret|api_?key))(\s*=\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)/gi,
 			"$1$2***",
 		);
+
+/** `-p` followed by a port mapping (`8080:80`, `127.0.0.1:80:80/tcp`) or a path (`mkdir -p /a/b`) is not a password. */
+const looksLikePortMapping = (value: string) =>
+	/^(\d{1,3}(\.\d{1,3}){3}:)?\d+(:\d+)?(\/(tcp|udp|sctp))?$/i.test(value) ||
+	/^[/~.]/.test(value);
+
+/**
+ * {@link scrubSecretsInText} plus the `-p <password>` / `-p<password>` flag,
+ * for fields known to hold a command line (where `-p` is a flag and not
+ * prose). A value that looks like a port mapping is left alone.
+ */
+export const scrubCommandText = (text: string): string =>
+	scrubSecretsInText(text).replace(
+		/(^|\s)-p(\s*)(\S+)/g,
+		(match, lead: string, gap: string, value: string) =>
+			looksLikePortMapping(value) ? match : `${lead}-p${gap}***`,
+	);

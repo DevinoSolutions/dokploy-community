@@ -558,7 +558,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "server-buildServers": "dokploy:read",
   "server-count": "dokploy:read",
   "server-create": "dokploy:admin",
-  "server-getContainerProcesses": "dokploy:read",
+  "server-getContainerProcesses": "dokploy:admin",
   "server-getContainerResourceStats": "dokploy:read",
   "server-getDefaultCommand": "dokploy:read",
   "server-getMonitoringConfig": "dokploy:admin",

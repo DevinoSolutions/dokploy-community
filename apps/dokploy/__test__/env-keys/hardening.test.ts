@@ -1,5 +1,8 @@
 import {
+	EMPTIED_SECRET_MAX_DEPTH,
+	findEmptiedSecretField,
 	redactToolResult,
+	scrubCommandText,
 	scrubSecretsInText,
 } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
@@ -203,7 +206,7 @@ describe("write-back guard", () => {
 		}
 	});
 
-	it("is case-insensitive and also looks one object level down", () => {
+	it("is case-insensitive", () => {
 		const base = {
 			name: "application-update",
 			type: "mutation" as const,
@@ -215,9 +218,53 @@ describe("write-back guard", () => {
 		expect(
 			guardSecretWriteBack(base, { row: { env: "" } }, WRITE).error,
 		).toContain("`env`");
+	});
+
+	it("refuses backup.update with a nested emptied database password", async () => {
+		const call = vi.fn(async () => ({ ok: true }));
+		const result = await executeMcpTool({
+			tool: tool("backup-update"),
+			args: {
+				backupId: "b-1",
+				metadata: { postgres: { databaseUser: "u", databasePassword: "" } },
+			},
+			scopes: new Set(["dokploy:backups"]),
+			call,
+		});
+		expect(result.isError).toBe(true);
+		expect(result.content[0]?.text).toContain("`databasePassword`");
+		expect(call).not.toHaveBeenCalled();
+	});
+
+	it("refuses an emptied secret nested inside an array", () => {
+		const base = {
+			name: "x-update",
+			type: "mutation" as const,
+			procedureName: "update",
+		};
 		expect(
-			guardSecretWriteBack(base, { a: { b: { env: "" } } }, WRITE).error,
+			guardSecretWriteBack(
+				base,
+				{ items: [{ name: "a" }, { creds: { password: " " } }] },
+				WRITE,
+			).error,
+		).toContain("`password`");
+		expect(
+			guardSecretWriteBack(base, { items: [{ password: "kept" }] }, WRITE).error,
 		).toBeUndefined();
+	});
+
+	it("searches six levels down and no further", () => {
+		const nest = (levels: number) => {
+			let node: Record<string, unknown> = { env: "" };
+			for (let i = 0; i < levels; i += 1) node = { child: node };
+			return node;
+		};
+		expect(findEmptiedSecretField(nest(0))).toBe("env");
+		expect(findEmptiedSecretField(nest(EMPTIED_SECRET_MAX_DEPTH))).toBe("env");
+		expect(
+			findEmptiedSecretField(nest(EMPTIED_SECRET_MAX_DEPTH + 1)),
+		).toBeNull();
 	});
 
 	it("honours allowEmptySecrets for an admin and strips it before the call", async () => {
@@ -365,5 +412,73 @@ describe("database envKeys", () => {
 		await expect(
 			caller.postgres.envKeys({ postgresId: "pg-1" }),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
+});
+
+describe("container process lists", () => {
+	const top = {
+		Titles: ["PID", "COMMAND"],
+		Processes: [
+			{ pid: "1", command: "app --password hunter2 --token abc123 -p 8080:80" },
+			{
+				pid: "2",
+				args: "psql -pSECRETPW postgres://ci:pw99@db:5432/x mkdir -p /a/b",
+			},
+			{ pid: "3", command: 'node x.js {"token":"tok_json","name":"keep"}' },
+			{ pid: "4", args: ["run", "--secret=s3cr3t", "--port", "80"] },
+		],
+	};
+
+	it("needs dokploy:admin", async () => {
+		expect(tool("server-getContainerProcesses").scope).toBe("dokploy:admin");
+		const call = vi.fn(async () => top);
+		const result = await executeMcpTool({
+			tool: tool("server-getContainerProcesses"),
+			args: { containerId: "abc" },
+			scopes: READ,
+			call,
+		});
+		expect(result.isError).toBe(true);
+		expect(call).not.toHaveBeenCalled();
+	});
+
+	it("scrubs command and args strings in an admin result", async () => {
+		const result = await executeMcpTool({
+			tool: tool("server-getContainerProcesses"),
+			args: { containerId: "abc" },
+			scopes: ADMIN,
+			call: async () => top,
+		});
+		const text = result.content[0]?.text ?? "";
+		for (const secret of [
+			"hunter2",
+			"abc123",
+			"SECRETPW",
+			"pw99",
+			"tok_json",
+			"s3cr3t",
+		]) {
+			expect(text, secret).not.toContain(secret);
+		}
+		const body = result.structuredContent as {
+			Processes: Array<{ command?: string; args?: string | string[] }>;
+		};
+		expect(body.Processes[0]?.command).toContain("-p 8080:80");
+		expect(body.Processes[1]?.args).toContain("mkdir -p /a/b");
+		expect(body.Processes[1]?.args).toContain("postgres://***@db:5432/x");
+		expect(body.Processes[2]?.command).toContain('"name":"keep"');
+		expect(body.Processes[3]?.args).toEqual(["run", "--secret=***", "--port", "80"]);
+	});
+
+	it("scrubs the JSON colon form in an error or a command", () => {
+		expect(scrubSecretsInText('{"token": "abc", "name": "x"}')).toBe(
+			'{"token": "***", "name": "x"}',
+		);
+		expect(scrubSecretsInText('{"apiKey":"k","n":1}')).toBe(
+			'{"apiKey":"***","n":1}',
+		);
+		expect(scrubCommandText("login -p hunter2")).toBe("login -p ***");
+		expect(scrubCommandText("login -phunter2")).toBe("login -p***");
+		expect(scrubSecretsInText("login -p hunter2")).toBe("login -p hunter2");
 	});
 });

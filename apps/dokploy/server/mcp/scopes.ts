@@ -66,7 +66,7 @@ export const DOKPLOY_SCOPES: ScopeDefinition[] = [
 		id: "dokploy:admin",
 		label: "Administration",
 		description:
-			"Servers, cluster, Docker cleanup, SSH keys, registries, git providers, notifications, certificates, users, organization, roles and every other setting. Also required to read stored credentials and raw file reads, including the queries that return private keys, access keys, provider tokens, swarm join tokens, and raw container and image inspect output (its environment values are still blanked). Credential reads return the raw value.",
+			"Servers, cluster, Docker cleanup, SSH keys, registries, git providers, notifications, certificates, users, organization, roles and every other setting. Also required to read stored credentials and raw file reads, including the queries that return private keys, access keys, provider tokens, swarm join tokens, and raw container and image inspect output and container process lists (environment values and command-line secrets are still blanked). Credential reads return the raw value.",
 		defaultOn: false,
 	},
 ];
@@ -141,6 +141,9 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
 	// the service's secrets. Admin only; the result walk still blanks Env.
 	"docker.getConfig": "dokploy:admin",
 	"dockerImage.getImageConfig": "dokploy:admin",
+	// `docker top ... args` for any container id: the full argv of its processes,
+	// which carries tokens and passwords given as flags.
+	"server.getContainerProcesses": "dokploy:admin",
 };
 
 /**
