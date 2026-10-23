@@ -196,6 +196,11 @@ export const parseDotenvVariables = (
 		return null;
 	}
 	const source = text.replace(/^﻿/, "").replace(/\r\n/g, "\n");
+	// Go trims and splits on more white space than JavaScript does (U+0085
+	// is one), so a value with one of them would not be the text read here.
+	if (UNCERTAIN_DOTENV_CHARACTER.test(source)) {
+		return null;
+	}
 	const variables: Record<string, string> = {};
 	// What follows a closing quote must be nothing or a comment.
 	const isTail = (rest: string) => /^\s*(?:#.*)?$/.test(rest);
@@ -292,6 +297,28 @@ export const parseDotenvVariables = (
 };
 
 const MAX_DOTENV_VALUE_LINES = 200;
+
+// NUL and the other control characters (a tab and a line feed are fine), DEL,
+// the C1 controls (U+0085 NEL), and the Unicode white space that is not
+// ASCII: Compose and this parser may disagree on them.
+const codeUnit = (value: number) => String.raw`\u${value.toString(16).padStart(4, "0")}`;
+const UNCERTAIN_DOTENV_RANGES: Array<[number, number]> = [
+	[0x00, 0x08],
+	[0x0b, 0x0c],
+	[0x0e, 0x1f],
+	[0x7f, 0xa0],
+	[0x1680, 0x1680],
+	[0x2000, 0x200a],
+	[0x2028, 0x2029],
+	[0x202f, 0x202f],
+	[0x205f, 0x205f],
+	[0x3000, 0x3000],
+];
+const UNCERTAIN_DOTENV_CHARACTER = new RegExp(
+	`[${UNCERTAIN_DOTENV_RANGES.map(
+		([from, to]) => `${codeUnit(from)}-${codeUnit(to)}`,
+	).join("")}]`,
+);
 
 // A variable the source names whose value could not be resolved.
 const referencesUnresolvedVariable = (

@@ -161,11 +161,25 @@ const readDotenv = async (
 			if (!stats.isFile() || stats.size > MAX_DOTENV_BYTES) {
 				return null;
 			}
+			// A read can return less than there is: read to the end of the file,
+			// or to one byte over the limit.
 			const buffer = Buffer.alloc(MAX_DOTENV_BYTES + 1);
-			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-			return bytesRead > MAX_DOTENV_BYTES
+			let length = 0;
+			while (length < buffer.length) {
+				const { bytesRead } = await handle.read(
+					buffer,
+					length,
+					buffer.length - length,
+					length,
+				);
+				if (bytesRead === 0) {
+					break;
+				}
+				length += bytesRead;
+			}
+			return length > MAX_DOTENV_BYTES
 				? null
-				: buffer.toString("utf8", 0, bytesRead);
+				: buffer.toString("utf8", 0, length);
 		} finally {
 			await handle.close();
 		}
@@ -230,7 +244,7 @@ const getInterpolationWorlds = async (
 	}: {
 		customEnvFile: boolean;
 		hasCommand: boolean;
-		commandKinds: { compose: boolean; stack: boolean };
+		commandKinds: { compose: boolean; stack: boolean; count: number };
 		directories: string[];
 		composeDirectory: string;
 	},
@@ -259,6 +273,12 @@ const getInterpolationWorlds = async (
 					? written
 					: await getDotenvInterpolationVariables(compose, directory);
 			worlds.push(isStack ? overlay(file, written) : file);
+			// Every docker command of a custom command runs under the clean
+			// environment (see withCleanEnvironment), but the .env alone is also
+			// checked once there is more than one, should a later one not get it.
+			if (isStack && commandKinds.count > 1) {
+				worlds.push(file);
+			}
 		}
 	}
 	if (commandKinds.stack) {
@@ -316,14 +336,14 @@ export const assertComposeSpecVolumesBound = async (
 		commandBaseDirs = [],
 		customEnvFile = false,
 		hasCommand = false,
-		commandKinds = { compose: false, stack: false },
+		commandKinds = { compose: false, stack: false, count: 0 },
 	}: {
 		commandVolumes?: string[];
 		commandBaseDirs?: string[];
 		customEnvFile?: boolean;
 		hasCommand?: boolean;
 		// Which docker commands a custom command runs.
-		commandKinds?: { compose: boolean; stack: boolean };
+		commandKinds?: { compose: boolean; stack: boolean; count: number };
 	} = {},
 ) => {
 	const codeDirectory = getCodeDirectory(compose);
@@ -1099,6 +1119,7 @@ const getCommandKinds = (compose: Pick<ComposeNested, "command">) => {
 	return {
 		compose: segments.some((segment) => segment.kind === "compose"),
 		stack: segments.some((segment) => segment.kind === "stack"),
+		count: segments.length,
 	};
 };
 

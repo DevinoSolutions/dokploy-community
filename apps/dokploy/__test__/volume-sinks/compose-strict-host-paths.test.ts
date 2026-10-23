@@ -738,3 +738,88 @@ volumes:
 		expect((error as Error).message).not.toContain("sekret");
 	});
 });
+
+// Review of T-7160, round 2.
+describe("white space that Go knows and JavaScript does not", () => {
+	const volumes = service("    volumes:\n      - ${DIR}:/data");
+
+	it("does not read a .env with a NEL, and refuses the path", async () => {
+		for (const text of [
+			`DIR=\u0085${VICTIM}\n`,
+			"DIR=/var/lib/docker\u0085\n",
+			`DIR=${VICTIM}\u0085\n`,
+		]) {
+			dotenvFiles({ [`${CODE}/.env`]: text });
+			await expect(
+				assertComposeVolumesBound(composeRow(volumes)),
+			).rejects.toThrow(failed);
+		}
+	});
+
+	it("does not read a file with another control or space character", () => {
+		for (const character of [
+			"\u0000",
+			"\u000B",
+			"\u007F",
+			"\u0080",
+			"\u0085",
+			"\u009F",
+			"\u00A0",
+			"\u1680",
+			"\u2000",
+			"\u200A",
+			"\u2028",
+			"\u2029",
+			"\u202F",
+			"\u205F",
+			"\u3000",
+		]) {
+			expect(parseDotenvVariables(`A=x${character}y\n`)).toBeNull();
+			expect(parseDotenvVariables(`A=${character}y\n`)).toBeNull();
+			expect(parseDotenvVariables(`A=y${character}\n`)).toBeNull();
+		}
+		// Letters outside ASCII, a tab and a CRLF are read.
+		expect(parseDotenvVariables("A=café\tx\r\nB=日本\n")).toEqual({
+			A: "café\tx",
+			B: "日本",
+		});
+	});
+});
+
+describe("a read that returns less than the file", () => {
+	it("is read to the end", async () => {
+		const { dotenvHandle } = await import("./dotenv-fs-mock");
+		mocks.readDotenv.mockResolvedValue(
+			dotenvHandle(`DIR=${VICTIM}\n`, { chunk: 7 }),
+		);
+		await expect(
+			assertComposeVolumesBound(composeRow(service("    build: ${DIR}"))),
+		).rejects.toThrow(refusedByStorage);
+	});
+});
+
+describe("a stack with chained commands", () => {
+	const row = (command: string) =>
+		composeRow(service("    volumes:\n      - ${DIR}:/data"), {
+			composeType: "stack",
+			createEnvFile: false,
+			env: "DIR=/srv/tenant/data",
+			command,
+		});
+	const file = `-f ${CODE}/docker-compose.yml`;
+
+	it("also checks the .env alone when more than one command runs", async () => {
+		dotenvFiles({ [`${CODE}/.env`]: `DIR=${VICTIM}\n` });
+		await expect(
+			assertComposeVolumesBound(
+				row(
+					`compose -p x ${file} config && docker compose -p x ${file} up -d`,
+				),
+			),
+		).rejects.toThrow(refusedByStorage);
+		// One command: the staged variable wins over the .env.
+		await expect(
+			assertComposeVolumesBound(row(`compose -p x ${file} up -d`)),
+		).resolves.toBeUndefined();
+	});
+});
