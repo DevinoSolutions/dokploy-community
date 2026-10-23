@@ -9,26 +9,21 @@ import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { assertServerReachable } from "@/server/api/utils/container-service-access";
 import { getLocalServerIp } from "@/server/wss/terminal";
-import { createTRPCRouter, withPermission } from "../trpc";
+import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
 
 export const clusterRouter = createTRPCRouter({
-	getNodes: withPermission("docker", "read")
+	// The swarm nodes belong to the cluster, not to a service: owner/admin only,
+	// like swarm.getNodes.
+	getNodes: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const targetServer = await findServerById(input.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You don't have access to this server.",
-					});
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			const docker = await getRemoteDocker(input.serverId);
 			const workers: DockerNode[] = await docker.listNodes();
 			return workers;

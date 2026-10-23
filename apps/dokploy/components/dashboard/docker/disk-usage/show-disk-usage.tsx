@@ -129,8 +129,14 @@ export const ShowDiskUsage = ({ serverId }: Props) => {
 
 	const { data: diskUsage, isLoading: isLoadingDiskUsage } =
 		api.dockerDiskUsage.getDiskUsage.useQuery({ serverId });
+	const { data: auth } = api.user.get.useQuery();
+	// The build cache is the host's, shared by every build: owner/admin only.
+	const isAdmin = auth?.role === "owner" || auth?.role === "admin";
 	const { data: buildCache, isLoading: isLoadingBuildCache } =
-		api.dockerDiskUsage.getBuildCache.useQuery({ serverId });
+		api.dockerDiskUsage.getBuildCache.useQuery(
+			{ serverId },
+			{ enabled: isAdmin },
+		);
 	const { mutateAsync: pruneBuildCache, isPending: isPruning } =
 		api.dockerDiskUsage.pruneBuildCache.useMutation();
 
@@ -291,138 +297,140 @@ export const ShowDiskUsage = ({ serverId }: Props) => {
 					/>
 				))}
 			</div>
-			<Card className="h-full bg-sidebar p-2.5 rounded-xl">
-				<div className="rounded-xl bg-background shadow-md">
-					<CardHeader>
-						<div className="flex flex-wrap items-center justify-between gap-2">
-							<div>
-								<CardTitle className="text-xl flex flex-row gap-2">
-									<Gauge className="size-6 text-muted-foreground self-center" />
-									Build Cache
-								</CardTitle>
-								<CardDescription>
-									Cache layers kept by the Docker builder on the selected
-									server.
-								</CardDescription>
-							</div>
-							<DialogAction
-								title="Prune build cache"
-								description="This will remove all build cache entries that are not currently in use. This action cannot be undone."
-								onClick={handlePrune}
-								disabled={isPruning}
-							>
-								<Button variant="outline" size="sm" disabled={isPruning}>
-									<Trash2 className="size-4 mr-1" />
-									Prune build cache
-								</Button>
-							</DialogAction>
-						</div>
-					</CardHeader>
-					<CardContent className="space-y-4 py-8 border-t">
-						{isLoadingBuildCache ? (
-							<div className="flex flex-row gap-2 items-center justify-center text-sm text-muted-foreground min-h-[45vh]">
-								<span>Loading...</span>
-								<Loader2 className="animate-spin size-4" />
-							</div>
-						) : !buildCache?.length ? (
-							<div className="flex min-h-[45vh] w-full flex-col items-center justify-center gap-4 rounded-lg border border-dashed p-8">
-								<div className="rounded-full bg-muted p-4">
-									<Database className="size-10 text-muted-foreground" />
+			{isAdmin && (
+				<Card className="h-full bg-sidebar p-2.5 rounded-xl">
+					<div className="rounded-xl bg-background shadow-md">
+						<CardHeader>
+							<div className="flex flex-wrap items-center justify-between gap-2">
+								<div>
+									<CardTitle className="text-xl flex flex-row gap-2">
+										<Gauge className="size-6 text-muted-foreground self-center" />
+										Build Cache
+									</CardTitle>
+									<CardDescription>
+										Cache layers kept by the Docker builder on the selected
+										server.
+									</CardDescription>
 								</div>
-								<div className="space-y-1 text-center">
-									<p className="text-sm font-medium">No build cache found</p>
-									<p className="max-w-sm text-sm text-muted-foreground">
-										Layers cached by "docker build" on this server will appear
-										here.
-									</p>
-								</div>
+								<DialogAction
+									title="Prune build cache"
+									description="This will remove all build cache entries that are not currently in use. This action cannot be undone."
+									onClick={handlePrune}
+									disabled={isPruning}
+								>
+									<Button variant="outline" size="sm" disabled={isPruning}>
+										<Trash2 className="size-4 mr-1" />
+										Prune build cache
+									</Button>
+								</DialogAction>
 							</div>
-						) : (
-							<>
-								<div className="flex flex-wrap items-center gap-2">
-									<Input
-										placeholder="Search by id, type or description..."
-										value={globalFilter}
-										onChange={(e) => setGlobalFilter(e.target.value)}
-										className="max-w-xs"
-									/>
+						</CardHeader>
+						<CardContent className="space-y-4 py-8 border-t">
+							{isLoadingBuildCache ? (
+								<div className="flex flex-row gap-2 items-center justify-center text-sm text-muted-foreground min-h-[45vh]">
+									<span>Loading...</span>
+									<Loader2 className="animate-spin size-4" />
 								</div>
-								<div className="rounded-md border overflow-x-auto">
-									<Table>
-										<TableHeader>
-											{table.getHeaderGroups().map((headerGroup) => (
-												<TableRow key={headerGroup.id}>
-													{headerGroup.headers.map((header) => (
-														<TableHead key={header.id}>
-															{header.isPlaceholder
-																? null
-																: flexRender(
-																		header.column.columnDef.header,
-																		header.getContext(),
-																	)}
-														</TableHead>
-													))}
-												</TableRow>
-											))}
-										</TableHeader>
-										<TableBody>
-											{table.getRowModel().rows?.length ? (
-												table.getRowModel().rows.map((row) => (
-													<TableRow key={row.id}>
-														{row.getVisibleCells().map((cell) => (
-															<TableCell key={cell.id}>
-																{flexRender(
-																	cell.column.columnDef.cell,
-																	cell.getContext(),
-																)}
-															</TableCell>
+							) : !buildCache?.length ? (
+								<div className="flex min-h-[45vh] w-full flex-col items-center justify-center gap-4 rounded-lg border border-dashed p-8">
+									<div className="rounded-full bg-muted p-4">
+										<Database className="size-10 text-muted-foreground" />
+									</div>
+									<div className="space-y-1 text-center">
+										<p className="text-sm font-medium">No build cache found</p>
+										<p className="max-w-sm text-sm text-muted-foreground">
+											Layers cached by "docker build" on this server will appear
+											here.
+										</p>
+									</div>
+								</div>
+							) : (
+								<>
+									<div className="flex flex-wrap items-center gap-2">
+										<Input
+											placeholder="Search by id, type or description..."
+											value={globalFilter}
+											onChange={(e) => setGlobalFilter(e.target.value)}
+											className="max-w-xs"
+										/>
+									</div>
+									<div className="rounded-md border overflow-x-auto">
+										<Table>
+											<TableHeader>
+												{table.getHeaderGroups().map((headerGroup) => (
+													<TableRow key={headerGroup.id}>
+														{headerGroup.headers.map((header) => (
+															<TableHead key={header.id}>
+																{header.isPlaceholder
+																	? null
+																	: flexRender(
+																			header.column.columnDef.header,
+																			header.getContext(),
+																		)}
+															</TableHead>
 														))}
 													</TableRow>
-												))
-											) : (
-												<TableRow>
-													<TableCell
-														colSpan={columns.length}
-														className="h-24 text-center text-muted-foreground"
-													>
-														No build cache entries match your filters.
-													</TableCell>
-												</TableRow>
-											)}
-										</TableBody>
-									</Table>
-								</div>
-								{table.getPageCount() > 1 && (
-									<div className="flex items-center justify-end gap-4">
-										<span className="text-sm text-muted-foreground">
-											Page {table.getState().pagination.pageIndex + 1} of{" "}
-											{table.getPageCount()}
-										</span>
-										<div className="flex gap-2">
-											<Button
-												variant="outline"
-												size="sm"
-												onClick={() => table.previousPage()}
-												disabled={!table.getCanPreviousPage()}
-											>
-												Previous
-											</Button>
-											<Button
-												variant="outline"
-												size="sm"
-												onClick={() => table.nextPage()}
-												disabled={!table.getCanNextPage()}
-											>
-												Next
-											</Button>
-										</div>
+												))}
+											</TableHeader>
+											<TableBody>
+												{table.getRowModel().rows?.length ? (
+													table.getRowModel().rows.map((row) => (
+														<TableRow key={row.id}>
+															{row.getVisibleCells().map((cell) => (
+																<TableCell key={cell.id}>
+																	{flexRender(
+																		cell.column.columnDef.cell,
+																		cell.getContext(),
+																	)}
+																</TableCell>
+															))}
+														</TableRow>
+													))
+												) : (
+													<TableRow>
+														<TableCell
+															colSpan={columns.length}
+															className="h-24 text-center text-muted-foreground"
+														>
+															No build cache entries match your filters.
+														</TableCell>
+													</TableRow>
+												)}
+											</TableBody>
+										</Table>
 									</div>
-								)}
-							</>
-						)}
-					</CardContent>
-				</div>
-			</Card>
+									{table.getPageCount() > 1 && (
+										<div className="flex items-center justify-end gap-4">
+											<span className="text-sm text-muted-foreground">
+												Page {table.getState().pagination.pageIndex + 1} of{" "}
+												{table.getPageCount()}
+											</span>
+											<div className="flex gap-2">
+												<Button
+													variant="outline"
+													size="sm"
+													onClick={() => table.previousPage()}
+													disabled={!table.getCanPreviousPage()}
+												>
+													Previous
+												</Button>
+												<Button
+													variant="outline"
+													size="sm"
+													onClick={() => table.nextPage()}
+													disabled={!table.getCanNextPage()}
+												>
+													Next
+												</Button>
+											</div>
+										</div>
+									)}
+								</>
+							)}
+						</CardContent>
+					</div>
+				</Card>
+			)}
 		</div>
 	);
 };
