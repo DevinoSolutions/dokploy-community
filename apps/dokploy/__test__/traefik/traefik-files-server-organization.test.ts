@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 	readDirectory: vi.fn(),
 	readConfigInPath: vi.fn(),
 	writeTraefikConfigInPath: vi.fn(),
+	execAsyncRemote: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({
@@ -49,6 +51,12 @@ const caller = settingsRouter.createCaller({
 } as Parameters<typeof settingsRouter.createCaller>[0]);
 
 const filePath = path.join(traefikPath, "dynamic/app.yml");
+// The router passes the real path of the file, and the working directory may
+// itself sit behind a symlink.
+const realFilePath = path.join(
+	fs.realpathSync(process.cwd()),
+	".docker/traefik/dynamic/app.yml",
+);
 // Remote servers are Linux hosts: their Traefik directory is always posix.
 const remoteFilePath = "dynamic/app.yml";
 const remoteResolvedPath = "/etc/dokploy/traefik/dynamic/app.yml";
@@ -62,6 +70,13 @@ describe("traefik file endpoints scope remote servers to the active organization
 		}));
 		mocks.readDirectory.mockResolvedValue([]);
 		mocks.readConfigInPath.mockResolvedValue("http: {}");
+		// A remote host without symlinks: `realpath -m -- <base> <target>`.
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => ({
+				stdout: `${command.replace("realpath -m -- ", "").split(" ").join("\n")}\n`,
+				stderr: "",
+			}),
+		);
 	});
 
 	it("rejects listing a server from another organization", async () => {
@@ -91,7 +106,10 @@ describe("traefik file endpoints scope remote servers to the active organization
 
 	it("allows servers of the active organization", async () => {
 		await caller.readDirectories({ serverId: "server-a" });
-		await caller.readTraefikFile({ path: remoteFilePath, serverId: "server-a" });
+		await caller.readTraefikFile({
+			path: remoteFilePath,
+			serverId: "server-a",
+		});
 		await caller.updateTraefikFile({
 			path: remoteFilePath,
 			traefikConfig: "http: {}",
@@ -122,7 +140,7 @@ describe("traefik file endpoints scope remote servers to the active organization
 
 		expect(mocks.findServerById).not.toHaveBeenCalled();
 		expect(mocks.writeTraefikConfigInPath).toHaveBeenCalledWith(
-			path.resolve(filePath),
+			realFilePath,
 			"http: {}",
 			undefined,
 		);

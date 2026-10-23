@@ -170,7 +170,12 @@ export const apiTraefikConfig = z.object({
 });
 
 export const apiModifyTraefikConfig = z.object({
-	path: z.string().min(1),
+	path: z
+		.string()
+		.min(1)
+		.refine((path) => !path.includes("\0"), {
+			message: "Invalid path: null bytes are not allowed",
+		}),
 	traefikConfig: z.string().min(1),
 	serverId: z.string().optional(),
 });
