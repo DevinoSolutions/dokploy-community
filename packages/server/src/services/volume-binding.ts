@@ -16,7 +16,10 @@ import {
 	type ServiceType,
 	volumeBackups,
 } from "../db/schema";
-import type { VolumeBindingFacts } from "../utils/volume-backups/binding";
+import {
+	evaluateVolumeBinding,
+	type VolumeBindingFacts,
+} from "../utils/volume-backups/binding";
 
 const environmentOrganization = {
 	columns: {},
@@ -264,10 +267,14 @@ export const loadVolumeBindingFacts = async ({
 	serviceType,
 	serviceId,
 	volumeName,
+	onServerId,
 }: {
 	serviceType: ServiceType;
 	serviceId: string;
 	volumeName: string;
+	// Read the claims for another host than the service's own (null is the
+	// local host). A transfer writes the volume on its target server too.
+	onServerId?: string | null;
 }): Promise<VolumeBindingFacts> => {
 	const service = await loadService(serviceType, serviceId);
 	if (!service) {
@@ -294,7 +301,7 @@ export const loadVolumeBindingFacts = async ({
 			findOrganizationsClaimingNamespace(volumeName),
 		]);
 
-	const serverId = serverOf(service);
+	const serverId = onServerId === undefined ? serverOf(service) : onServerId;
 	const idKey = SERVICE_ID_KEYS[serviceType];
 	let recordedOnOwnMount = false;
 	let recordedOnOtherSameOrgMount = false;
@@ -336,4 +343,73 @@ export const loadVolumeBindingFacts = async ({
 			).has(volumeName),
 		claimedByOtherOrganization,
 	};
+};
+
+export type RefusedVolumeMount = { volumeName: string; message: string };
+
+// Sinks that act on the volume names already stored on a service's mounts
+// (deploy, database rebuild, transfer) have no user to ask, and a stored mount
+// can predate the binding rules (T-6822). The stored mount is the record of the
+// name, so it counts as the service's own mount, and the same fail-closed
+// claims as the run-time check of #459 decide:
+// - a name that fails the volume-name format, a Dokploy-reserved name
+//   (`dokploy`, `dokploy-*`, `dokploy_*`) or a name another organization's
+//   service on the same server claims is ALWAYS refused;
+// - anything else an owner/admin could have created is accepted, so an
+//   organization's own outside-named mounts keep working.
+// `serverIds` lists the hosts to read the claims for (default: the service's
+// own host; null is the local host).
+export const findRefusedVolumeMounts = async (
+	mounts: ReadonlyArray<{ type: string; volumeName?: string | null }>,
+	service: { serviceType: ServiceType; serviceId: string },
+	{ serverIds }: { serverIds?: Array<string | null> } = {},
+): Promise<RefusedVolumeMount[]> => {
+	const volumeNames = new Set<string>();
+	for (const mount of mounts) {
+		if (mount.type === "volume" && mount.volumeName) {
+			volumeNames.add(mount.volumeName);
+		}
+	}
+	const refused: RefusedVolumeMount[] = [];
+	for (const volumeName of volumeNames) {
+		for (const onServerId of serverIds ?? [undefined]) {
+			let verdict: ReturnType<typeof evaluateVolumeBinding>;
+			try {
+				const facts = await loadVolumeBindingFacts({
+					...service,
+					volumeName,
+					onServerId,
+				});
+				verdict = evaluateVolumeBinding(
+					{ ...facts, recordedOnOwnMount: true },
+					{ privileged: true },
+				);
+			} catch (error) {
+				if (!(error instanceof TRPCError) || error.code !== "NOT_FOUND") {
+					throw error;
+				}
+				// The service or its organization cannot be resolved: fail closed.
+				verdict = {
+					ok: false,
+					message: `Volume "${volumeName}" is refused: the service it belongs to could not be resolved.`,
+				};
+			}
+			if (!verdict.ok) {
+				refused.push({ volumeName, message: verdict.message });
+				break;
+			}
+		}
+	}
+	return refused;
+};
+
+// Refuses (throws) when any volume mount of the service fails the check above.
+export const assertVolumeMountsBound = async (
+	mounts: ReadonlyArray<{ type: string; volumeName?: string | null }>,
+	service: { serviceType: ServiceType; serviceId: string },
+) => {
+	const [refused] = await findRefusedVolumeMounts(mounts, service);
+	if (refused) {
+		throw new Error(refused.message);
+	}
 };

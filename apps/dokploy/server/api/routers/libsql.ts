@@ -22,6 +22,7 @@ import {
 } from "@dokploy/server";
 import {
 	addNewService,
+	assertEnvironmentInOrganization,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 } from "@dokploy/server/services/permission";
@@ -441,6 +442,12 @@ export const libsqlRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.libsqlId, {
 				service: ["create"],
 			});
+
+			// The target must be an environment of the caller's active organization.
+			await assertEnvironmentInOrganization(
+				input.targetEnvironmentId,
+				ctx.session.activeOrganizationId,
+			);
 
 			const updatedLibsql = await db
 				.update(libsqlTable)

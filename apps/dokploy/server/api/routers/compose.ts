@@ -59,6 +59,7 @@ import {
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
+	assertEnvironmentInOrganization,
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
@@ -1245,6 +1246,12 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
+
+			// The target must be an environment of the caller's active organization.
+			await assertEnvironmentInOrganization(
+				input.targetEnvironmentId,
+				ctx.session.activeOrganizationId,
+			);
 
 			const updatedCompose = await db
 				.update(composeTable)

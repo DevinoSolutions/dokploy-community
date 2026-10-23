@@ -27,13 +27,19 @@ const DEFAULT_SWARM_TAB = "overview";
 const Dashboard = () => {
 	const router = useRouter();
 	const { data: permissions } = api.user.getPermissions.useQuery();
+	const { data: auth } = api.user.get.useQuery();
+	// Volume names are host-global, so the volumes API is owner/admin only.
+	const canSeeVolumes = auth?.role === "owner" || auth?.role === "admin";
 	// Host-level diagnostics, so this needs server.read on top of docker.read.
 	const canSeeHealth = !!permissions?.docker.read && !!permissions?.server.read;
 
 	const queryTab =
 		typeof router.query.tab === "string" ? router.query.tab : DEFAULT_TAB;
 	const activeTab =
-		queryTab === "health" && !canSeeHealth ? DEFAULT_TAB : queryTab;
+		(queryTab === "health" && !canSeeHealth) ||
+		(queryTab === "volumes" && !canSeeVolumes)
+			? DEFAULT_TAB
+			: queryTab;
 
 	const activeSwarmTab =
 		typeof router.query.subtab === "string"
@@ -73,7 +79,9 @@ const Dashboard = () => {
 						<TabsTrigger value="containers">Containers</TabsTrigger>
 						<TabsTrigger value="swarm">Swarm</TabsTrigger>
 						<TabsTrigger value="images">Images</TabsTrigger>
-						<TabsTrigger value="volumes">Volumes</TabsTrigger>
+						{canSeeVolumes && (
+							<TabsTrigger value="volumes">Volumes</TabsTrigger>
+						)}
 						<TabsTrigger value="networks">Networks</TabsTrigger>
 						<TabsTrigger value="events">Events</TabsTrigger>
 						<TabsTrigger value="disk-usage">Disk Usage</TabsTrigger>
@@ -107,9 +115,11 @@ const Dashboard = () => {
 					<TabsContent value="images">
 						<ShowImages serverId={serverId} />
 					</TabsContent>
-					<TabsContent value="volumes">
-						<ShowVolumes serverId={serverId} />
-					</TabsContent>
+					{canSeeVolumes && (
+						<TabsContent value="volumes">
+							<ShowVolumes serverId={serverId} />
+						</TabsContent>
+					)}
 					<TabsContent value="networks">
 						<ShowNetworks serverId={serverId} />
 					</TabsContent>

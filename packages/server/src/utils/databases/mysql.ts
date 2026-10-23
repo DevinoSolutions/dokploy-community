@@ -1,6 +1,7 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
 import { resolveServiceNetworks } from "../../services/network";
+import { assertVolumeMountsBound } from "../../services/volume-binding";
 import {
 	calculateResources,
 	generateBindMounts,
@@ -71,6 +72,11 @@ export const buildMysql = async (rawMysql: MysqlNested) => {
 		mysql.environment.project.env,
 		mysql.environment.env,
 	);
+	// Deploy fails closed on a mount whose volume name belongs to somebody else.
+	await assertVolumeMountsBound(mounts, {
+		serviceType: "mysql",
+		serviceId: mysql.mysqlId,
+	});
 	const volumesMount = generateVolumeMounts(mounts);
 	const bindsMount = generateBindMounts(mounts);
 	const filesMount = generateFileMounts(appName, mysql);

@@ -5,6 +5,7 @@ import path from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { findComposeById } from "@dokploy/server/services/compose";
 import { findMountsByApplicationId } from "@dokploy/server/services/mount";
+import { findRefusedVolumeMounts } from "@dokploy/server/services/volume-binding";
 import {
 	loadDockerCompose,
 	loadDockerComposeRemote,
@@ -410,7 +411,31 @@ function extractComposeSpecMounts(
 	return mounts;
 }
 
+// A transfer reads a volume on the source host and writes it on the target
+// host, both by name. A name that is reserved, malformed or claimed by another
+// organization on either host would copy that tenant's data out of, or over, its
+// volume, so the whole transfer is refused instead of silently skipping the
+// mount (which would leave the move half done). Compose-declared volumes and a
+// service's own outside-named mounts stay allowed (see findRefusedVolumeMounts).
 async function getMountConfigsForTransfer(
+	opts: TransferOptions,
+): Promise<ResolvedMountTransferConfig[]> {
+	const mountConfigs = await collectMountConfigsForTransfer(opts);
+	const [refused] = await findRefusedVolumeMounts(
+		mountConfigs.map((mount) => ({
+			type: mount.mountType,
+			volumeName: mount.mountType === "volume" ? mount.sourcePath : null,
+		})),
+		{ serviceType: opts.serviceType, serviceId: opts.serviceId },
+		{ serverIds: [opts.sourceServerId, opts.targetServerId] },
+	);
+	if (refused) {
+		throw new Error(`Transfer refused: ${refused.message}`);
+	}
+	return mountConfigs;
+}
+
+async function collectMountConfigsForTransfer(
 	opts: TransferOptions,
 ): Promise<ResolvedMountTransferConfig[]> {
 	const dbMounts = await findMountsByApplicationId(

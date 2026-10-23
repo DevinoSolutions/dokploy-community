@@ -28,6 +28,7 @@ import { resolveServiceNetworks } from "./network";
 import type { Port } from "./port";
 import type { Project } from "./project";
 import { findRegistryByIdWithCredentials, type Registry } from "./registry";
+import { assertVolumeMountsBound } from "./volume-binding";
 
 export const createRollback = async (
 	input: z.infer<typeof createRollbackSchema>,
@@ -261,6 +262,11 @@ const rollbackApplication = async (
 		cpuReservation,
 	});
 
+	// A rollback deploys the snapshot's mounts, so it goes through the same check.
+	await assertVolumeMountsBound(mounts, {
+		serviceType: "application",
+		serviceId: resolvedContext.applicationId,
+	});
 	const volumesMount = generateVolumeMounts(mounts);
 
 	const resolvedNetworks = await resolveServiceNetworks(

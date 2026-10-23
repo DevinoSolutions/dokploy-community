@@ -9,6 +9,7 @@ import {
 	removeVolume,
 	writeVolumeFile,
 } from "@dokploy/server";
+import { isPrivilegedVolumeRole } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
@@ -25,8 +26,30 @@ const volumePathSchema = z
 		"Path must be absolute.",
 	);
 
+// A Docker volume name is global to the host: this router lists, reads,
+// writes, deletes and removes ANY volume of the server by name, including other
+// tenants' volumes and Dokploy's own. docker:read is a plain "may open the
+// Docker page" grant that members can hold, so it is not a boundary for that.
+// Scoping each call to the caller's own service namespaces would need a
+// per-call service lookup, hide every volume no service records (orphans,
+// shared infrastructure) and still leave the list itself host-wide, so the
+// whole router is owner/admin only instead. The Docker page hides its Volumes
+// tab for everybody else.
+export const volumeAdminProcedure = withPermission("docker", "read").use(
+	({ ctx, next }) => {
+		if (!isPrivilegedVolumeRole(ctx.user.role)) {
+			throw new TRPCError({
+				code: "FORBIDDEN",
+				message:
+					"Only an organization owner or admin can manage Docker volumes.",
+			});
+		}
+		return next();
+	},
+);
+
 export const dockerVolumeRouter = createTRPCRouter({
-	getVolumes: withPermission("docker", "read")
+	getVolumes: volumeAdminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
@@ -42,7 +65,7 @@ export const dockerVolumeRouter = createTRPCRouter({
 			return await getVolumes(input.serverId);
 		}),
 
-	getVolumesSize: withPermission("docker", "read")
+	getVolumesSize: volumeAdminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
@@ -58,7 +81,7 @@ export const dockerVolumeRouter = createTRPCRouter({
 			return await getVolumesSize(input.serverId);
 		}),
 
-	listVolumeFiles: withPermission("docker", "read")
+	listVolumeFiles: volumeAdminProcedure
 		.input(
 			z.object({
 				volumeName: z
@@ -83,7 +106,7 @@ export const dockerVolumeRouter = createTRPCRouter({
 			);
 		}),
 
-	readVolumeFile: withPermission("docker", "read")
+	readVolumeFile: volumeAdminProcedure
 		.input(
 			z.object({
 				volumeName: z
@@ -104,7 +127,7 @@ export const dockerVolumeRouter = createTRPCRouter({
 			return await readVolumeFile(input.volumeName, input.path, input.serverId);
 		}),
 
-	writeVolumeFile: withPermission("docker", "read")
+	writeVolumeFile: volumeAdminProcedure
 		.input(
 			z.object({
 				volumeName: z
@@ -137,7 +160,7 @@ export const dockerVolumeRouter = createTRPCRouter({
 			});
 		}),
 
-	deleteVolumeFile: withPermission("docker", "read")
+	deleteVolumeFile: volumeAdminProcedure
 		.input(
 			z.object({
 				volumeName: z
@@ -167,7 +190,7 @@ export const dockerVolumeRouter = createTRPCRouter({
 			});
 		}),
 
-	getVolumeConfig: withPermission("docker", "read")
+	getVolumeConfig: volumeAdminProcedure
 		.input(
 			z.object({
 				volumeName: z
@@ -187,7 +210,7 @@ export const dockerVolumeRouter = createTRPCRouter({
 			return await getVolumeConfig(input.volumeName, input.serverId);
 		}),
 
-	removeVolume: withPermission("docker", "read")
+	removeVolume: volumeAdminProcedure
 		.input(
 			z.object({
 				volumeName: z

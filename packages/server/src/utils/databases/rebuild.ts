@@ -7,12 +7,14 @@ import {
 	postgres,
 	redis,
 } from "@dokploy/server/db/schema";
+import { logger } from "@dokploy/server/lib/logger";
 import { deployLibsql } from "@dokploy/server/services/libsql";
 import { deployMariadb } from "@dokploy/server/services/mariadb";
 import { deployMongo } from "@dokploy/server/services/mongo";
 import { deployMySql } from "@dokploy/server/services/mysql";
 import { deployPostgres } from "@dokploy/server/services/postgres";
 import { deployRedis } from "@dokploy/server/services/redis";
+import { findRefusedVolumeMounts } from "@dokploy/server/services/volume-binding";
 import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { removeService } from "../docker/utils";
@@ -36,11 +38,31 @@ export const rebuildDatabase = async (
 		throw new Error("Database not found");
 	}
 
+	// `docker volume rm --force` on a name that is reserved or claimed by
+	// another organization would destroy that tenant's data, so those names are
+	// never removed. The deploy that follows refuses them as well.
+	const refusedVolumes = new Map(
+		(
+			await findRefusedVolumeMounts(database.mounts, {
+				serviceType: type,
+				serviceId: databaseId,
+			})
+		).map((refused) => [refused.volumeName, refused.message]),
+	);
+
 	await removeService(database.appName, database.serverId);
 	await new Promise((resolve) => setTimeout(resolve, 6000));
 
 	for (const mount of database.mounts) {
 		if (mount.type === "volume") {
+			const refusal = refusedVolumes.get(mount.volumeName ?? "");
+			if (refusal) {
+				logger.warn(
+					{ databaseId, type, volumeName: mount.volumeName },
+					`[Rebuild] Skipped removing a volume that is not this service's: ${refusal}`,
+				);
+				continue;
+			}
 			const command = `docker volume rm ${quote([mount?.volumeName ?? ""])} --force`;
 			if (database.serverId) {
 				await execAsyncRemote(database.serverId, command);
