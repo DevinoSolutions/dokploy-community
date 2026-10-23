@@ -42,7 +42,11 @@ vi.mock("@dokploy/server/utils/vault", () => ({
 
 vi.mock("node:fs/promises", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:fs/promises")>()),
-	readFile: mocks.readDotenv,
+	open: async (path: string) => {
+		const { dotenvHandle } = await import("./dotenv-fs-mock");
+		const result = await mocks.readDotenv(path);
+		return typeof result === "string" ? dotenvHandle(result) : result;
+	},
 }));
 
 vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
@@ -561,5 +565,176 @@ describe("a remote-looking context that climbs through defaults", () => {
 		await expect(
 			assertComposeVolumesBound(composeRow(build("github.com/${UP}${V}"))),
 		).rejects.toThrow(refusedByStorage);
+	});
+});
+
+// Review of T-7160: which environment each docker command of a deploy sees.
+describe("the environment each command of a deploy sees", () => {
+	const stackCommand = (words: string) => words;
+
+	it("reads the .env for a stack whose custom command runs docker compose", async () => {
+		dotenvFiles({ [`${CODE}/.env`]: `DIR=${VICTIM}\n` });
+		const row = (overrides = {}) =>
+			composeRow(service("    volumes:\n      - ${DIR}:/data"), {
+				composeType: "stack",
+				createEnvFile: false,
+				command: `compose -p ${APP} -f ${CODE}/docker-compose.yml up -d`,
+				...overrides,
+			});
+		await expect(assertComposeVolumesBound(row())).rejects.toThrow(
+			refusedByStorage,
+		);
+		// The staged stack variables are the process environment, which wins
+		// over the .env for a variable of both.
+		await expect(
+			assertComposeVolumesBound(row({ env: "DIR=./safe" })),
+		).resolves.toBeUndefined();
+	});
+
+	it("checks a stack deploy with the staged env and with nothing", async () => {
+		dotenvFiles({ [`${CODE}/.env`]: "DIR=/srv/ok\n" });
+		const command = stackCommand(
+			`stack deploy -c ${CODE}/docker-compose.yml ${APP}`,
+		);
+		for (const composeType of ["stack", "docker-compose"]) {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(
+						service(`    volumes:\n      - "\${DIR:-${VICTIM}}:/data"`),
+						{ composeType, createEnvFile: false, command, env: "DIR=./safe" },
+					),
+				),
+			).rejects.toThrow(refusedByStorage);
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(service("    volumes:\n      - ${DIR:-./ok}:/data"), {
+						composeType,
+						createEnvFile: false,
+						command,
+						env: "DIR=./safe",
+					}),
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+});
+
+describe("reading the .env", () => {
+	const hostile = (text: string) => ({ [`${CODE}/.env`]: text });
+	const bytesOver = "é".repeat(600_000);
+
+	it("parses a pathological file in well under a second", () => {
+		const started = performance.now();
+		for (const text of [
+			`V="${"\n".repeat(300_000)}`,
+			`V="${"a\n".repeat(150_000)}`,
+			`V=x${" ".repeat(300_000)}y`,
+			`V=x${" ".repeat(300_000)}`,
+			`${" ".repeat(300_000)}x`,
+			`V='${"\n".repeat(300_000)}`,
+			`${"A=1\n".repeat(50_000)}`.replace(/A=1\n/g, (_, i) => `K${i}=1\n`),
+		]) {
+			parseDotenvVariables(text);
+		}
+		expect(performance.now() - started).toBeLessThan(1000);
+	});
+
+	it("does not read a quoted value over many lines", () => {
+		expect(parseDotenvVariables(`V="${"\n".repeat(201)}"`)).toBeNull();
+		expect(parseDotenvVariables(`V="${"\n".repeat(20)}"`)).toEqual({
+			V: "\n".repeat(20),
+		});
+	});
+
+	it("starts a comment at a space and a hash only", () => {
+		expect(parseDotenvVariables("A=/a # c\nB=/b #c\nC=/c#d")).toEqual({
+			A: "/a",
+			B: "/b",
+			C: "/c#d",
+		});
+		expect(parseDotenvVariables("A=/a\t# c")).toEqual({
+			A: UNRESOLVED_VARIABLE_VALUE,
+		});
+	});
+
+	it("measures the size in bytes, not in characters", async () => {
+		// 600k characters, 1.2 MB: a victim path after it must not be dropped.
+		const text = `# ${bytesOver}\nDIR=${VICTIM}\n`;
+		expect(text.length).toBeLessThan(1024 * 1024);
+		dotenvFiles(hostile(text));
+		await expect(
+			assertComposeVolumesBound(composeRow(service("    build: ${DIR}"))),
+		).rejects.toThrow(failed);
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: text, stderr: "" });
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(service("    build: ${DIR}"), { serverId: "server-1" }),
+			),
+		).rejects.toThrow(failed);
+	});
+
+	it("does not read what is not a regular file, or is large", async () => {
+		const { dotenvHandle } = await import("./dotenv-fs-mock");
+		for (const handle of [
+			dotenvHandle("DIR=./ok\n", { kind: "fifo" }),
+			dotenvHandle("DIR=./ok\n", { size: 1024 * 1024 + 1 }),
+		]) {
+			mocks.readDotenv.mockResolvedValue(handle);
+			await expect(
+				assertComposeVolumesBound(composeRow(service("    build: ${DIR}"))),
+			).rejects.toThrow(failed);
+		}
+	});
+
+	it("reads a remote file only when it is a regular file, under a time limit", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: "DIR=./ok\n",
+			stderr: "",
+		});
+		await assertComposeVolumesBound(
+			composeRow(service("    build: ${DIR}"), { serverId: "server-1" }),
+		);
+		const command = mocks.execAsyncRemote.mock.calls[0]?.[1] as string;
+		expect(command).toContain(`[ -f ${REMOTE_CODE}/.env ]`);
+		expect(command).toContain("timeout 10 head -c");
+		// Present but not a regular file: the command exits non-zero.
+		expect(command).toMatch(/elif \[ -e [^\]]+\]; then exit 3; fi$/);
+	});
+});
+
+describe("a refusal does not show a value that came from a variable", () => {
+	it("shows the compose's text for a volume name", async () => {
+		const orgOf = (organizationId: string) => ({
+			environment: { project: { organizationId } },
+		});
+		mocks.query.compose.findFirst.mockResolvedValue({
+			appName: APP,
+			serverId: null,
+			composeFile: "",
+			...orgOf("org-a"),
+		});
+		mocks.query.mounts.findMany.mockResolvedValue([
+			{
+				mountId: "mount-b",
+				mariadbId: "m-b",
+				mariadb: { appName: "m-b", serverId: null, ...orgOf("org-b") },
+			},
+		]);
+		dotenvFiles({ [`${CODE}/.env`]: "NAME=sekret-volume\n" });
+		const compose = `
+services:
+  web:
+    volumes:
+      - data:/data
+volumes:
+  data:
+    name: \${NAME}
+`;
+		const error = await assertComposeVolumesBound(composeRow(compose)).catch(
+			(caught) => caught as Error,
+		);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain('Compose volume "${NAME}" is refused');
+		expect((error as Error).message).not.toContain("sekret");
 	});
 });

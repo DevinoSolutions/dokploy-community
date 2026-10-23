@@ -195,13 +195,21 @@ export const parseDotenvVariables = (
 	if (/\r(?!\n)/.test(text)) {
 		return null;
 	}
-	const lines = text.replace(/^﻿/, "").split(/\r?\n/);
+	const source = text.replace(/^﻿/, "").replace(/\r\n/g, "\n");
 	const variables: Record<string, string> = {};
 	// What follows a closing quote must be nothing or a comment.
 	const isTail = (rest: string) => /^\s*(?:#.*)?$/.test(rest);
-	for (let index = 0; index < lines.length; index++) {
-		const line = lines[index] as string;
+	let position = 0;
+	while (position <= source.length) {
+		let lineEnd = source.indexOf("\n", position);
+		if (lineEnd < 0) {
+			lineEnd = source.length;
+		}
+		const line = source.slice(position, lineEnd);
+		// Where the next line starts; a quoted value over several lines moves it.
+		let next = lineEnd + 1;
 		if (/^\s*(?:#.*)?$/.test(line)) {
+			position = next;
 			continue;
 		}
 		const assignment = /^\s*(?:export\s+)?([A-Za-z0-9_.-]+)\s*=\s*(.*)$/.exec(
@@ -215,32 +223,38 @@ export const parseDotenvVariables = (
 		let value: string;
 		const quote = rest[0];
 		if (quote === "'" || quote === '"') {
-			// Read up to the closing quote, over lines. A backslash in a double
+			// One pass up to the closing quote, over lines. A backslash in a double
 			// quoted value skips the next character.
-			let body = rest.slice(1);
+			const start = lineEnd - rest.length + 1;
 			let closing = -1;
-			for (;;) {
-				for (let i = 0; i < body.length; i++) {
-					if (quote === '"' && body[i] === "\\") {
+			if (quote === "'") {
+				closing = source.indexOf("'", start);
+			} else {
+				for (let i = start; i < source.length; i++) {
+					const character = source[i];
+					if (character === "\\") {
 						i += 1;
-					} else if (body[i] === quote) {
+					} else if (character === '"') {
 						closing = i;
 						break;
 					}
 				}
-				if (closing >= 0) {
-					break;
-				}
-				index += 1;
-				if (index >= lines.length) {
-					return null;
-				}
-				body = `${body}\n${lines[index]}`;
 			}
-			if (!isTail(body.slice(closing + 1))) {
+			if (closing < 0) {
 				return null;
 			}
-			const inner = body.slice(0, closing);
+			const inner = source.slice(start, closing);
+			// A value is a few lines (a key, a certificate); a quote that spans
+			// more is not read.
+			if (inner.split("\n").length > MAX_DOTENV_VALUE_LINES) {
+				return null;
+			}
+			const tailEnd = source.indexOf("\n", closing);
+			const tailStop = tailEnd < 0 ? source.length : tailEnd;
+			if (!isTail(source.slice(closing + 1, tailStop))) {
+				return null;
+			}
+			next = tailStop + 1;
 			if (quote === "'") {
 				value = inner.replaceAll("$", "$$$$");
 			} else if (/\\[^\\"nrt]/.test(inner)) {
@@ -254,25 +268,30 @@ export const parseDotenvVariables = (
 			}
 		} else if (quote === "`") {
 			return null;
-		} else if (rest.startsWith("#")) {
+		} else if (rest.startsWith("#") || rest.includes("\t#")) {
+			// A comment or not: Compose starts one at a space and a `#`, and what a
+			// tab does is not certain.
 			value = UNRESOLVED_VARIABLE_VALUE;
 		} else {
-			value = rest.replace(/\s+#.*$/, "").trimEnd();
+			const comment = rest.indexOf(" #");
+			value = (comment < 0 ? rest : rest.slice(0, comment)).trimEnd();
 		}
 		if (key === "COMPOSE_ENV_FILES") {
 			return null;
 		}
-		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-			// Cannot be named by a `$VAR` / `${VAR}`.
-			continue;
+		if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+			if (Object.hasOwn(variables, key)) {
+				return null;
+			}
+			variables[key] = value;
 		}
-		if (Object.hasOwn(variables, key)) {
-			return null;
-		}
-		variables[key] = value;
+		// Other names cannot be named by a `$VAR` / `${VAR}`.
+		position = next;
 	}
 	return variables;
 };
+
+const MAX_DOTENV_VALUE_LINES = 200;
 
 // A variable the source names whose value could not be resolved.
 const referencesUnresolvedVariable = (
@@ -299,6 +318,8 @@ export type ComposeVolumeUse = {
 	volumeName: string;
 	// The name is `<project>_<key>`: the compose's own default.
 	derived: boolean;
+	// What a refusal shows instead of the name, when it came from a variable.
+	display?: string;
 };
 
 export type ComposeVolumeResolution = {
@@ -1225,7 +1246,14 @@ export const resolveComposeFilesMountedVolumes = (
 					unresolved.push(`volume "${key}"`);
 					continue;
 				}
-				addUse({ key, volumeName: name, derived: false });
+				addUse({
+					key,
+					volumeName: name,
+					derived: false,
+					// A name that came out of a variable is not shown: its value may
+					// come from a file the reader of a refusal cannot see.
+					display: rawName.includes("$") ? rawName : undefined,
+				});
 				continue;
 			}
 			if (external) {

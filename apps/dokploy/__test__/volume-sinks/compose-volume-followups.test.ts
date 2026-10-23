@@ -47,7 +47,11 @@ vi.mock("node:fs", async (importOriginal) => ({
 // The `.env` of the project directory (T-7160). Not there unless a test says so.
 vi.mock("node:fs/promises", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:fs/promises")>()),
-	readFile: mocks.readDotenv,
+	open: async (path: string) => {
+		const { dotenvHandle } = await import("./dotenv-fs-mock");
+		const result = await mocks.readDotenv(path);
+		return typeof result === "string" ? dotenvHandle(result) : result;
+	},
 }));
 
 const fsError = (code: string) => Object.assign(new Error(code), { code });

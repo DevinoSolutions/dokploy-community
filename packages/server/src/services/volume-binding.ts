@@ -596,7 +596,11 @@ const composeVolumeRefusal = (volumeName: string, appName: string) =>
 // - a compose's own default names (`<appName>_<key>`) are not looked up.
 export const findRefusedComposeVolumes = async (
 	compose: { composeId: string; appName: string },
-	uses: ReadonlyArray<{ volumeName: string; derived?: boolean }>,
+	uses: ReadonlyArray<{
+		volumeName: string;
+		derived?: boolean;
+		display?: string;
+	}>,
 	{ serverIds }: { serverIds?: Array<string | null> } = {},
 ): Promise<RefusedVolumeMount[]> => {
 	const service = {
@@ -605,8 +609,12 @@ export const findRefusedComposeVolumes = async (
 	};
 	const derivedNames = new Set<string>();
 	const volumeNames = new Set<string>();
+	const displayNames = new Map<string, string>();
 	for (const use of uses) {
 		volumeNames.add(use.volumeName);
+		if (use.display !== undefined && !displayNames.has(use.volumeName)) {
+			displayNames.set(use.volumeName, use.display);
+		}
 		if (use.derived) {
 			derivedNames.add(use.volumeName);
 		}
@@ -616,7 +624,10 @@ export const findRefusedComposeVolumes = async (
 		if (derivedNames.has(volumeName)) {
 			continue;
 		}
-		const message = composeVolumeRefusal(volumeName, compose.appName);
+		const message = composeVolumeRefusal(
+			displayNames.get(volumeName) ?? volumeName,
+			compose.appName,
+		);
 		for (const onServerId of serverIds ?? [undefined]) {
 			let isRefused = false;
 			try {
