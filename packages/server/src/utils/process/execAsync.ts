@@ -4,6 +4,7 @@ import util from "node:util";
 import { findServerById } from "@dokploy/server/services/server";
 import {
 	type RemoteBuildCancelTarget,
+	shSingleQuote,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
 import { Client, type ClientCallback } from "ssh2";
@@ -37,6 +38,19 @@ export {
 } from "./ExecError";
 
 const execAsyncBase = util.promisify(exec);
+
+// Node embeds the full command in error.message; it may carry secrets. A
+// command wrapped by `shSingleQuote` (execAsyncCancelable) appears there with
+// each `'` escaped, so that form is stripped too.
+export const withoutCommand = (message: string, command: string) => {
+	if (!command) return message;
+	const escaped = shSingleQuote(command).slice(1, -1);
+	return message
+		.split(escaped)
+		.join("[command omitted]")
+		.split(command)
+		.join("[command omitted]");
+};
 
 export const execAsync = async (
 	command: string,
@@ -73,13 +87,16 @@ export const execAsync = async (
 			// @ts-expect-error
 			const stderr = error.stderr?.toString() || "";
 
-			throw new ExecError(`Command execution failed: ${error.message}`, {
-				command,
-				stdout,
-				stderr,
-				exitCode,
-				originalError: error,
-			});
+			throw new ExecError(
+				`Command execution failed: ${withoutCommand(error.message, command)}`,
+				{
+					command,
+					stdout,
+					stderr,
+					exitCode,
+					originalError: error,
+				},
+			);
 		}
 		throw error;
 	}
@@ -132,13 +149,16 @@ export const execAsyncCancelable = async (
 							return;
 						}
 						reject(
-							new ExecError(`Command execution failed: ${error.message}`, {
-								command,
-								stdout: stdout.toString(),
-								stderr: stderr.toString(),
-								exitCode: error.code,
-								originalError: error,
-							}),
+							new ExecError(
+								`Command execution failed: ${withoutCommand(error.message, command)}`,
+								{
+									command,
+									stdout: stdout.toString(),
+									stderr: stderr.toString(),
+									exitCode: error.code,
+									originalError: error,
+								},
+							),
 						);
 					},
 				);
@@ -251,13 +271,16 @@ export const execAsyncStream = (
 		const childProcess = exec(command, options, (error) => {
 			if (error) {
 				reject(
-					new ExecError(`Command execution failed: ${error.message}`, {
-						command,
-						stdout: stdoutComplete,
-						stderr: stderrComplete,
-						exitCode: error.code,
-						originalError: error,
-					}),
+					new ExecError(
+						`Command execution failed: ${withoutCommand(error.message, command)}`,
+						{
+							command,
+							stdout: stdoutComplete,
+							stderr: stderrComplete,
+							exitCode: error.code,
+							originalError: error,
+						},
+					),
 				);
 				return;
 			}

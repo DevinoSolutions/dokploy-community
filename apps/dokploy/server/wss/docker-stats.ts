@@ -16,13 +16,26 @@ import {
 import { hasPermission } from "@dokploy/server/services/permission";
 import { quote } from "shell-quote";
 import { WebSocketServer } from "ws";
-import { canAccessDockerOverWss } from "./authorize";
+import {
+	canAccessDockerOverWss,
+	hasComposeProjectPrefix,
+	isHostStatsBucketName,
+	isServiceContainerName,
+} from "./authorize";
+import {
+	findServiceAppName,
+	isOtherServiceAppName,
+} from "./container-ownership";
 import { onGuardedConnection, toCloseReason } from "./guard";
+import { isValidMonitoringAppName } from "./utils";
 
 // serverIds are nanoid-generated (alphanumeric + `_` and `-`). Reject anything
 // else at the WS boundary so user input cannot reach filesystem paths or SSH
 // lookups in unexpected forms.
 const SERVER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+const escapeRegExp = (value: string) =>
+	value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 type AppType = "application" | "stack" | "docker-compose";
 
@@ -114,6 +127,13 @@ export const setupDockerStatsMonitoringSocketServer = (
 			return;
 		}
 
+		// appName names a directory under MONITORING_PATH and reaches the stats
+		// files raw, so it is checked on every request, scoped or not.
+		if (!isValidMonitoringAppName(appName)) {
+			ws.close(4000, "Invalid appName");
+			return;
+		}
+
 		if (!user || !session) {
 			ws.close();
 			return;
@@ -121,6 +141,40 @@ export const setupDockerStatsMonitoringSocketServer = (
 
 		if (
 			!(await canAccessDockerOverWss(user, session, serverIdParam, serviceId))
+		) {
+			ws.close(4003, "Not authorized");
+			return;
+		}
+
+		// Service access only covers that service's containers, so pin the
+		// request to them instead of trusting appName.
+		const serviceAppName = serviceId
+			? await findServiceAppName(serviceId)
+			: null;
+		if (
+			serviceId &&
+			(!serviceAppName ||
+				!isServiceContainerName(appName, appType, serviceAppName))
+		) {
+			ws.close(4003, "Not authorized");
+			return;
+		}
+
+		// Compose container names are free-form and stats are recorded under the
+		// name, so a name that is a host bucket, or another service's appName (or
+		// extends it), would write into that bucket's stats history.
+		if (
+			serviceId &&
+			serviceAppName &&
+			appType === "docker-compose" &&
+			(isHostStatsBucketName(appName, serviceAppName) ||
+				(await isOtherServiceAppName(
+					appName,
+					serviceId,
+					hasComposeProjectPrefix(appName, serviceAppName)
+						? serviceAppName
+						: undefined,
+				)))
 		) {
 			ws.close(4003, "Not authorized");
 			return;
@@ -187,7 +241,7 @@ export const setupDockerStatsMonitoringSocketServer = (
 				// Special case: when monitoring "dokploy" (the host system rather than a
 				// container). If serverId is provided and not "local", fetch the host stats
 				// from that remote server over SSH; otherwise read local host stats.
-				if (appName === "dokploy") {
+				if (appName === "dokploy" && !serviceId) {
 					if (resolvedServerId) {
 						const recordedAppName = getMonitoringAppName(resolvedServerId);
 						const { container, disk } =
@@ -215,10 +269,20 @@ export const setupDockerStatsMonitoringSocketServer = (
 						label: [`com.docker.swarm.service.name=${appName}`],
 					}),
 					...(appType === "stack" && {
-						label: [`com.docker.swarm.task.name=${appName}`],
+						label: [
+							`com.docker.swarm.task.name=${appName}`,
+							...(serviceAppName
+								? [`com.docker.stack.namespace=${serviceAppName}`]
+								: []),
+						],
 					}),
 					...(appType === "docker-compose" && {
-						name: [appName],
+						// Docker's name filter is a substring regex and container names
+						// carry a leading slash, so anchor it to this name only.
+						name: [`^/${escapeRegExp(appName)}$`],
+						...(serviceAppName && {
+							label: [`com.docker.compose.project=${serviceAppName}`],
+						}),
 					}),
 				};
 
