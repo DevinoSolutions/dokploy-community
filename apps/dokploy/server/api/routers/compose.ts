@@ -69,6 +69,10 @@ import {
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
 import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
+import {
 	type CompleteTemplate,
 	fetchTemplateFiles,
 	fetchTemplateLogo,
@@ -91,6 +95,7 @@ import {
 	apiFetchServices,
 	apiFindCompose,
 	apiRandomizeCompose,
+	apiReadCompose,
 	apiRedeployCompose,
 	apiSaveEnvironmentVariablesCompose,
 	apiTransferCompose,
@@ -179,7 +184,7 @@ export const composeRouter = createTRPCRouter({
 		}),
 
 	one: protectedProcedure
-		.input(apiFindCompose)
+		.input(apiReadCompose)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.composeId, "read");
 
@@ -226,10 +231,28 @@ export const composeRouter = createTRPCRouter({
 			}
 
 			return {
-				...compose,
+				...shapeServiceRead(compose, input.includeEnv),
 				hasGitProviderAccess,
 				unauthorizedProvider,
 			};
+		}),
+
+	envKeys: protectedProcedure
+		.input(apiFindCompose)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.composeId, "read");
+			const compose = await findComposeById(input.composeId);
+			if (
+				compose.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to access this compose",
+				});
+			}
+			// Names only: the values never leave the server.
+			return { env: listEnvKeys(compose.env) };
 		}),
 
 	update: protectedProcedure
@@ -354,8 +377,8 @@ export const composeRouter = createTRPCRouter({
 
 			// The status is written by deploys only (the schema omits it too).
 			const { composeStatus: _composeStatus, ...update } = input as typeof input & {
-				composeStatus?: unknown;
-			};
+					composeStatus?: unknown;
+				};
 			const updated = await updateCompose(input.composeId, update);
 			await audit(ctx, {
 				action: "update",

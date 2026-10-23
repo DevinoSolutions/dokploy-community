@@ -209,3 +209,15 @@ export const UlimitSwarmSchema = z
 	.strict();
 
 export const UlimitsSwarmSchema = z.array(UlimitSwarmSchema);
+
+/**
+ * Optional flag on the `*.one` reads that return a service row. The dashboard
+ * leaves it unset (secrets included, as before); false blanks every secret
+ * value on the row. The MCP dispatcher decides it server-side.
+ */
+export const includeEnvInput = z
+	.boolean()
+	.optional()
+	.describe(
+		"Include secret values (env, build args and secrets, passwords, tokens). Defaults to true in the dashboard. Through MCP values are omitted unless this is true and the grant includes the dokploy:admin scope; use envKeys for variable names only.",
+	);

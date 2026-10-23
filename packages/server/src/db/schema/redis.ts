@@ -19,6 +19,7 @@ import {
 	EndpointSpecSwarmSchema,
 	type HealthCheckSwarm,
 	HealthCheckSwarmSchema,
+	includeEnvInput,
 	type LabelsSwarm,
 	LabelsSwarmSchema,
 	type NetworkSwarm,
@@ -156,6 +157,10 @@ export const apiCreateRedis = createSchema.pick({
 
 export const apiFindOneRedis = z.object({
 	redisId: z.string().min(1),
+});
+
+export const apiReadRedis = apiFindOneRedis.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiChangeRedisStatus = createSchema

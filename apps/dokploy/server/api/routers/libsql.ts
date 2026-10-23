@@ -26,6 +26,10 @@ import {
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 } from "@dokploy/server/services/permission";
+import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
@@ -37,6 +41,7 @@ import {
 	apiCreateLibsql,
 	apiDeployLibsql,
 	apiFindOneLibsql,
+	apiReadLibsql,
 	apiRebuildLibsql,
 	apiResetLibsql,
 	apiSaveEnvironmentVariablesLibsql,
@@ -106,7 +111,23 @@ export const libsqlRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	one: protectedProcedure
+	one: protectedProcedure.input(apiReadLibsql).query(async ({ input, ctx }) => {
+		await checkServiceAccess(ctx, input.libsqlId, "read");
+
+		const libsql = await findLibsqlById(input.libsqlId);
+		if (
+			libsql.environment.project.organizationId !==
+			ctx.session.activeOrganizationId
+		) {
+			throw new TRPCError({
+				code: "UNAUTHORIZED",
+				message: "You are not authorized to access this Libsql",
+			});
+		}
+		return shapeServiceRead(libsql, input.includeEnv);
+	}),
+
+	envKeys: protectedProcedure
 		.input(apiFindOneLibsql)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.libsqlId, "read");
@@ -121,7 +142,8 @@ export const libsqlRouter = createTRPCRouter({
 					message: "You are not authorized to access this Libsql",
 				});
 			}
-			return libsql;
+			// Names only: the values never leave the server.
+			return { env: listEnvKeys(libsql.env) };
 		}),
 
 	start: protectedProcedure
