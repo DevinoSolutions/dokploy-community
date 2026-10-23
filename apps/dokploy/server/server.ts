@@ -16,6 +16,7 @@ import {
 	initVolumeBackupsCronJobs,
 	isMcpDisabled,
 	isNotSwarmManagerError,
+	restoreInterruptedTraefik,
 	sendDokployRestartNotifications,
 	setBackgroundErrorReporter,
 	setupDirectories,
@@ -135,6 +136,9 @@ void app
 						captureError(e, { handler: "initializeNetwork" });
 					}
 				}
+				await restoreInterruptedTraefik().catch((error) => {
+					console.error("Failed to restore Traefik:", error);
+				});
 				await initCronJobs();
 				await initSchedules();
 				await initCancelDeployments();
