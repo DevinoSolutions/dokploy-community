@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import {
 	addDomainToCompose,
+	assertCanUseServiceGitProviders,
 	assertComposeBuildSettings,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
@@ -242,6 +243,13 @@ export const composeRouter = createTRPCRouter({
 			await assertServiceReferencesInOrganization(
 				input,
 				ctx.session.activeOrganizationId,
+			);
+			// Being in the organization is not enough: the caller has to be able to use
+			// the git provider (own, shared or assigned), as the provider picker implies.
+			await assertCanUseServiceGitProviders(
+				input,
+				() => findComposeById(input.composeId),
+				ctx.session,
 			);
 
 			// Build server: the caller must be allowed to use the server (same check

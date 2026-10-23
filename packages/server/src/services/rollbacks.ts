@@ -28,6 +28,7 @@ import { resolveServiceNetworks } from "./network";
 import type { Port } from "./port";
 import type { Project } from "./project";
 import { findRegistryByIdWithCredentials, type Registry } from "./registry";
+import { foreignReferenceMessage } from "./service-reference-scope";
 import { assertVolumeMountsBound } from "./volume-binding";
 
 export const createRollback = async (
@@ -224,6 +225,16 @@ const rollbackApplication = async (
 ) => {
 	if (!fullContext) {
 		throw new Error("Full context is required for rollback");
+	}
+
+	// The snapshot may predate the organization check on registries: refuse a
+	// rollback registry of another organization before logging in to it.
+	if (
+		fullContext.rollbackRegistry &&
+		fullContext.rollbackRegistry.organizationId !==
+			fullContext.environment.project.organizationId
+	) {
+		throw new Error(foreignReferenceMessage("rollback registry"));
 	}
 
 	const resolvedContext = await withResolvedVaultRefs(fullContext);

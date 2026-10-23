@@ -45,3 +45,19 @@ vi.mock("@dokploy/server/db", () => {
 		dbUrl: "postgres://mock:mock@localhost:5432/mock",
 	};
 });
+
+/**
+ * Deploys re-check that the registry, git provider and SSH key a service points
+ * at belong to its organization (T-6902). The mocked database above has no such
+ * rows, so every deploy test would be refused; the check itself is covered in
+ * fk-org-checks/deploy-references.test.ts, which imports the real function.
+ */
+vi.mock(
+	"@dokploy/server/services/service-reference-scope",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("@dokploy/server/services/service-reference-scope")
+		>()),
+		assertDeployReferencesInOrganization: vi.fn(async () => undefined),
+	}),
+);

@@ -84,6 +84,7 @@ import {
 	updatePreviewDeployment,
 } from "./preview-deployment";
 import { validUniqueServerAppName } from "./project";
+import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 import { finalizePreviewBuildMetadata } from "./snapvisor";
 export type Application = typeof applications.$inferSelect;
 
@@ -284,6 +285,8 @@ export const deployApplication = async ({
 
 	const stagedBuildFiles: string[] = [];
 	try {
+		// A row can still hold a registry or provider of another organization.
+		await assertDeployReferencesInOrganization(application);
 		let command = "set -e;";
 		if (application.sourceType === "github") {
 			command += await cloneGithubRepository(applicationEntity);
@@ -545,6 +548,8 @@ export const rebuildApplication = async ({
 
 	const stagedBuildFiles: string[] = [];
 	try {
+		// A row can still hold a registry or provider of another organization.
+		await assertDeployReferencesInOrganization(application);
 		let command = "set -e;";
 		// >>> build-policy hook 2a/4 (rebuild): the required-checks gate. A
 		// rebuild has no clone, so this only waits; the existing checkout is
@@ -862,6 +867,9 @@ export const deployPreviewApplication = async ({
 		// above means the preview status, the log and the PR comment all say why.
 		if (!buildPolicy) throw buildPolicyError;
 
+		// A row can still hold a registry or provider of another organization.
+		await assertDeployReferencesInOrganization(application);
+
 		// A preview row only fits the source it was created for (see
 		// getPreviewSourceMismatchMessage); refuse before cloning or pulling.
 		const sourceMismatch = getPreviewSourceMismatchMessage(
@@ -1104,6 +1112,9 @@ export const rebuildPreviewApplication = async ({
 
 		// build-policy hook 1/4 (preview rebuild), continued.
 		if (!buildPolicy) throw buildPolicyError;
+
+		// A row can still hold a registry or provider of another organization.
+		await assertDeployReferencesInOrganization(application);
 
 		// A preview row only fits the source it was created for (see
 		// getPreviewSourceMismatchMessage); refuse before cloning or pulling.

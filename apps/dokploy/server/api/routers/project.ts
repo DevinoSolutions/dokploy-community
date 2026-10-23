@@ -1,5 +1,6 @@
 import {
 	assembleProjectExport,
+	assertServiceCopyReferencesInOrganization,
 	createApplication,
 	createBackup,
 	createCompose,
@@ -1183,6 +1184,19 @@ export const projectRouter = createTRPCRouter({
 							selected.id,
 							ctx.session.activeOrganizationId,
 						);
+						// The copy keeps the registry, git provider and SSH key ids of the
+						// source row: one of another organization is refused, not copied.
+						if (selected.type === "application") {
+							await assertServiceCopyReferencesInOrganization(
+								await findApplicationById(selected.id),
+								ctx.session.activeOrganizationId,
+							);
+						} else if (selected.type === "compose") {
+							await assertServiceCopyReferencesInOrganization(
+								await findComposeById(selected.id),
+								ctx.session.activeOrganizationId,
+							);
+						}
 					}
 				}
 
