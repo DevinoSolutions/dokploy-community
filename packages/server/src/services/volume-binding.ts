@@ -26,7 +26,7 @@ const environmentOrganization = {
 } as const;
 
 const serviceWithOrganization = {
-	columns: { appName: true },
+	columns: { appName: true, serverId: true },
 	with: { environment: environmentOrganization },
 } as const;
 
@@ -42,8 +42,13 @@ const everyServiceWithOrganization = {
 } as const;
 
 type ServiceWithOrganization = {
+	serverId?: string | null;
 	environment?: { project?: { organizationId?: string | null } | null } | null;
 } | null;
+
+// null is the local Dokploy host.
+const serverOf = (service: ServiceWithOrganization | undefined) =>
+	service?.serverId ?? null;
 
 const organizationOf = (service: ServiceWithOrganization | undefined) =>
 	service?.environment?.project?.organizationId ?? null;
@@ -65,7 +70,7 @@ const serviceNotFound = () =>
 	new TRPCError({ code: "NOT_FOUND", message: "Service not found" });
 
 const loadService = async (serviceType: ServiceType, serviceId: string) => {
-	const columns = { appName: true } as const;
+	const columns = { appName: true, serverId: true } as const;
 	const with_ = { environment: environmentOrganization } as const;
 	switch (serviceType) {
 		case "application":
@@ -77,7 +82,7 @@ const loadService = async (serviceType: ServiceType, serviceId: string) => {
 		case "compose":
 			return db.query.compose.findFirst({
 				where: eq(compose.composeId, serviceId),
-				columns: { appName: true, composeFile: true },
+				columns: { appName: true, serverId: true, composeFile: true },
 				with: with_,
 			});
 		case "libsql":
@@ -170,7 +175,7 @@ const namespaceClaim = (appNameColumn: AnyPgColumn, name: string) =>
 
 const findOrganizationsClaimingNamespace = async (volumeName: string) => {
 	const environment = { environment: environmentOrganization } as const;
-	const columns = { appName: true } as const;
+	const columns = { appName: true, serverId: true } as const;
 	const results = await Promise.all([
 		db.query.applications.findMany({
 			where: namespaceClaim(applications.appName, volumeName),
@@ -213,21 +218,35 @@ const findOrganizationsClaimingNamespace = async (volumeName: string) => {
 			with: environment,
 		}),
 	]);
-	return results.flat().map((service) => organizationOf(service));
+	return results.flat().map((service) => ({
+		organizationId: organizationOf(service),
+		serverId: serverOf(service),
+	}));
 };
 
 type RowWithServices = Partial<
 	Record<ServiceType, ServiceWithOrganization | undefined>
 >;
 
-const rowOrganization = (row: RowWithServices) => {
+const rowService = (row: RowWithServices) => {
 	for (const serviceType of SERVICE_TYPES) {
 		const service = row[serviceType];
 		if (service) {
-			return organizationOf(service);
+			return service;
 		}
 	}
 	return null;
+};
+
+const rowOrganization = (row: RowWithServices) =>
+	organizationOf(rowService(row));
+
+const rowClaim = (row: RowWithServices) => {
+	const service = rowService(row);
+	return {
+		organizationId: organizationOf(service),
+		serverId: serverOf(service),
+	};
 };
 
 // Everything the binding decision needs, read in one place so that it can be
@@ -267,28 +286,38 @@ export const loadVolumeBindingFacts = async ({
 			findOrganizationsClaimingNamespace(volumeName),
 		]);
 
+	const serverId = serverOf(service);
 	const idKey = SERVICE_ID_KEYS[serviceType];
 	let recordedOnOwnMount = false;
 	let recordedOnOtherSameOrgMount = false;
 	for (const row of mountRows) {
 		if (row[idKey] === serviceId) {
 			recordedOnOwnMount = true;
-		} else if (rowOrganization(row) === organizationId) {
+		} else if (
+			rowOrganization(row) === organizationId &&
+			rowClaim(row).serverId === serverId
+		) {
 			recordedOnOtherSameOrgMount = true;
 		}
 	}
 
+	// A volume name only collides on one host, so a claim counts only when the
+	// claiming service runs on the same server (local host = null).
 	const claimedByOtherOrganization = [
 		...namespaceOrganizations,
-		...mountRows.map(rowOrganization),
-		...volumeBackupRows.map(rowOrganization),
-	].some((owner) => owner !== organizationId);
+		...mountRows.map(rowClaim),
+		...volumeBackupRows.map(rowClaim),
+	].some(
+		(claim) =>
+			claim.serverId === serverId && claim.organizationId !== organizationId,
+	);
 
 	return {
 		volumeName,
 		serviceType,
 		serviceId,
 		appName: service.appName,
+		serverId,
 		recordedOnOwnMount,
 		recordedOnOtherSameOrgMount,
 		declaredByComposeFile:

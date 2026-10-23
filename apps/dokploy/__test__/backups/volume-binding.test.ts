@@ -36,6 +36,7 @@ const facts = (overrides: Partial<Facts> = {}): Facts => ({
 	serviceType: "application",
 	serviceId: "app-1",
 	appName: "app-one-x",
+	serverId: null,
 	recordedOnOwnMount: false,
 	recordedOnOtherSameOrgMount: false,
 	declaredByComposeFile: false,
@@ -99,6 +100,53 @@ describe("evaluateVolumeBinding", () => {
 			false,
 		);
 		expect(evaluateVolumeBinding(claimed, { privileged: true }).ok).toBe(false);
+	});
+
+	it("lets another organization's claim beat a short legacy appName prefix", () => {
+		const verdict = evaluateVolumeBinding(
+			facts({
+				appName: "app",
+				volumeName: "app-xyz-data",
+				claimedByOtherOrganization: true,
+			}),
+			{ privileged: true },
+		);
+		expect(verdict.ok).toBe(false);
+	});
+
+	it("fails closed on a name that is not a volume name, even if it is a recorded mount", () => {
+		for (const volumeName of ["/etc", "../x", "a b", "-x", "", "a:b"]) {
+			for (const privileged of [true, false]) {
+				expect(
+					evaluateVolumeBinding(
+						facts({
+							appName: "",
+							volumeName,
+							recordedOnOwnMount: true,
+							recordedOnOtherSameOrgMount: true,
+						}),
+						{ privileged },
+					).ok,
+				).toBe(false);
+			}
+		}
+	});
+
+	it("answers every refusal with the same text, so names of other organizations cannot be probed", () => {
+		const message = (overrides: Partial<Facts>, privileged = false) => {
+			const verdict = evaluateVolumeBinding(facts(overrides), { privileged });
+			return verdict.ok ? null : verdict.message.replace(/"[^"]*"/, "");
+		};
+		const unclaimed = message({ volumeName: "nobody-uses-this" });
+		const claimed = message({
+			volumeName: "nobody-uses-this",
+			claimedByOtherOrganization: true,
+		});
+		const reserved = message({ volumeName: "dokploy-postgres" });
+		expect(unclaimed).toBeTruthy();
+		expect(claimed).toBe(unclaimed);
+		expect(reserved).toBe(unclaimed);
+		expect(message({ volumeName: "nobody-uses-this" }, true)).toBe(unclaimed);
 	});
 
 	it("rejects Dokploy's own volumes, for everyone", () => {
@@ -212,6 +260,7 @@ describe("loadVolumeBindingFacts", () => {
 		}
 		mocks.applications.findFirst.mockResolvedValue({
 			appName: "app-one-x",
+			serverId: null,
 			...orgOf("org-a"),
 		});
 	});
@@ -243,6 +292,80 @@ describe("loadVolumeBindingFacts", () => {
 				volumeName: "postgres-b-AbC123-data",
 			}),
 		).resolves.toMatchObject({ claimedByOtherOrganization: true });
+	});
+
+	it("only counts claims of services on the same server", async () => {
+		const input = {
+			serviceType: "application" as const,
+			serviceId: "app-1",
+			volumeName: "pgdata",
+		};
+		const foreignMount = (serverId: string | null) => [
+			{
+				postgresId: "pg-b",
+				postgres: { appName: "x", serverId, ...orgOf("org-b") },
+			},
+		];
+
+		// org A on the local host, org B on its own remote server: no collision
+		mocks.mounts.findMany.mockResolvedValue(foreignMount("server-b"));
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			claimedByOtherOrganization: false,
+		});
+
+		// same local host: collision
+		mocks.mounts.findMany.mockResolvedValue(foreignMount(null));
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			serverId: null,
+			claimedByOtherOrganization: true,
+		});
+
+		// both on the same remote server: collision
+		mocks.applications.findFirst.mockResolvedValue({
+			appName: "app-one-x",
+			serverId: "server-b",
+			...orgOf("org-a"),
+		});
+		mocks.mounts.findMany.mockResolvedValue(foreignMount("server-b"));
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			serverId: "server-b",
+			claimedByOtherOrganization: true,
+		});
+
+		// namespace claims and volume backups follow the same rule
+		mocks.mounts.findMany.mockResolvedValue([]);
+		mocks.postgres.findMany.mockResolvedValue([
+			{ appName: "pgdata", serverId: "server-c", ...orgOf("org-b") },
+		]);
+		mocks.volumeBackups.findMany.mockResolvedValue([
+			{ mysql: { appName: "y", serverId: "server-c", ...orgOf("org-b") } },
+		]);
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			claimedByOtherOrganization: false,
+		});
+	});
+
+	it("only offers a same-organization mount on the same server to owners and admins", async () => {
+		const sameOrgOn = (serverId: string | null) => [
+			{
+				applicationId: "app-2",
+				application: { appName: "app-two", serverId, ...orgOf("org-a") },
+			},
+		];
+		const input = {
+			serviceType: "application" as const,
+			serviceId: "app-1",
+			volumeName: "shared-data",
+		};
+
+		mocks.mounts.findMany.mockResolvedValue(sameOrgOn("server-z"));
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			recordedOnOtherSameOrgMount: false,
+		});
+		mocks.mounts.findMany.mockResolvedValue(sameOrgOn(null));
+		await expect(loadVolumeBindingFacts(input)).resolves.toMatchObject({
+			recordedOnOtherSameOrgMount: true,
+		});
 	});
 
 	it("flags a volume another organization records as a mount or a volume backup", async () => {

@@ -1,4 +1,5 @@
 import type { ServiceType } from "@dokploy/server/db/schema";
+import { VOLUME_NAME_REGEX } from "@dokploy/server/db/schema/utils";
 import { TRPCError } from "@trpc/server";
 
 // A Docker volume name is global to the host. Volume backups, restores and
@@ -39,6 +40,10 @@ export type VolumeBindingFacts = {
 	serviceType: ServiceType;
 	serviceId: string;
 	appName: string;
+	// Docker volume names are per host. Only claims of services on this same
+	// server count (null is the local Dokploy host); the loader already
+	// filtered the claim flags below by it.
+	serverId: string | null;
 	// The volume is recorded as a named mount of this very service.
 	recordedOnOwnMount: boolean;
 	// The volume is recorded as a named mount of another service of the same
@@ -47,8 +52,9 @@ export type VolumeBindingFacts = {
 	// The service is a compose whose own file declares this volume (an
 	// `external: true` volume or one with an explicit `name:`).
 	declaredByComposeFile: boolean;
-	// Another organization's service claims the name: it sits in that service's
-	// `appName` namespace or is recorded on its mounts or volume backups.
+	// Another organization's service on the same server claims the name: it sits
+	// in that service's `appName` namespace or is recorded on its mounts or
+	// volume backups.
 	claimedByOtherOrganization: boolean;
 };
 
@@ -68,22 +74,36 @@ export const isPrivilegedVolumeRole = (role: string | null | undefined) =>
 // mounted by one of its services, or declared by the service's own compose
 // file. A brand-new outside name is rejected for everybody, because nothing on
 // the host tells which organization an unrecorded volume belongs to.
+// One message for every refusal, so that the text cannot be used to tell
+// another organization's volume from a name nobody uses.
+const refusal = (
+	volumeName: string,
+	appName: string,
+): VolumeBindingVerdict => ({
+	ok: false,
+	message: `Volume "${volumeName}" is not one of this service's volumes. Name it "${appName}-<name>" or "${appName}_<name>". Using a volume outside that name needs an organization owner or admin, and only works for a volume another service of the organization already mounts or the service's compose file declares.`,
+});
+
 export const evaluateVolumeBinding = (
 	facts: VolumeBindingFacts,
 	{ privileged }: { privileged: boolean },
 ): VolumeBindingVerdict => {
 	const { volumeName, appName } = facts;
-	if (isInServiceVolumeNamespace(volumeName, appName)) {
-		return { ok: true };
+	// Rows written before the name was validated can hold a path such as
+	// `/etc`, which `docker run -v` turns into a host bind mount.
+	if (!VOLUME_NAME_REGEX.test(volumeName)) {
+		return refusal(volumeName, appName);
 	}
+	// Claims come first: a short legacy appName (`app`) would otherwise own
+	// another organization's `app-xxxx-data` by prefix.
 	if (
 		isDokployReservedVolumeName(volumeName) ||
 		facts.claimedByOtherOrganization
 	) {
-		return {
-			ok: false,
-			message: `Volume "${volumeName}" belongs to another service, another organization or Dokploy itself and cannot be used here.`,
-		};
+		return refusal(volumeName, appName);
+	}
+	if (isInServiceVolumeNamespace(volumeName, appName)) {
+		return { ok: true };
 	}
 	if (facts.recordedOnOwnMount) {
 		return { ok: true };
@@ -94,12 +114,7 @@ export const evaluateVolumeBinding = (
 	) {
 		return { ok: true };
 	}
-	return {
-		ok: false,
-		message: privileged
-			? `Volume "${volumeName}" is not one of this service's volumes. An outside volume is only accepted when another service of this organization already mounts it or the service's compose file declares it. Otherwise name it "${appName}-<name>" or "${appName}_<name>".`
-			: `Volume "${volumeName}" is not one of this service's volumes. Name it "${appName}-<name>" or "${appName}_<name>"; using a volume outside that name needs an organization owner or admin.`,
-	};
+	return refusal(volumeName, appName);
 };
 
 export const assertVolumeBindingAllowed = (

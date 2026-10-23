@@ -85,6 +85,7 @@ const facts = (overrides: Record<string, unknown> = {}) => ({
 	serviceType: "application",
 	serviceId: "app-1",
 	appName: "app-one-x",
+	serverId: null,
 	recordedOnOwnMount: false,
 	recordedOnOtherSameOrgMount: false,
 	declaredByComposeFile: false,
