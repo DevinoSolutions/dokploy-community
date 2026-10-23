@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
 			network: table(),
 		},
 		warn: vi.fn(),
+		readDotenv: vi.fn(),
 	};
 });
 
@@ -35,6 +36,14 @@ vi.mock("@dokploy/server/lib/logger", () => ({
 vi.mock("@dokploy/server/utils/vault", () => ({
 	withResolvedVaultRefs: async <T>(value: T) => value,
 }));
+
+// The `.env` of the project directory (T-7160). Not there unless a test says so.
+vi.mock("node:fs/promises", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:fs/promises")>()),
+	readFile: mocks.readDotenv,
+}));
+
+const fsError = (code: string) => Object.assign(new Error(code), { code });
 
 const { assertComposeVolumesBound } = await import(
 	"@dokploy/server/services/compose-volume-binding"
@@ -95,6 +104,7 @@ volumes:
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.readDotenv.mockRejectedValue(fsError("ENOENT"));
 	for (const table of Object.values(mocks.query)) {
 		table.findMany.mockResolvedValue([]);
 	}
@@ -453,7 +463,8 @@ volumes:
 			).rejects.toThrow(/Compose volume check failed/);
 		});
 
-		it("trusts no variable when the compose reads a .env Dokploy does not write", async () => {
+		it("trusts no variable when the compose reads a .env Dokploy cannot read", async () => {
+			mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 			await expect(
 				assertComposeVolumesBound(
 					composeRow(

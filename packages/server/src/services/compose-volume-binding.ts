@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
@@ -9,20 +10,22 @@ import {
 	loadDockerCompose,
 	loadDockerComposeRemote,
 } from "@dokploy/server/utils/docker/domain";
+import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import {
 	getEnvironmentVariablesObject,
 	parseEnvironmentKeyValuePair,
 	prepareEnvironmentVariables,
 } from "@dokploy/server/utils/docker/utils";
-import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import {
 	type ComposeVariables,
+	type ComposeVolumeResolution,
+	dockerVolumesDirectoryReach,
+	parseDotenvVariables,
 	resolveComposeFilesMountedVolumes,
 	resolveEnvironmentReferences,
 	UNKNOWN_VARIABLE_VALUE,
-	dockerVolumesDirectoryReach,
 } from "@dokploy/server/utils/volume-backups/compose-volumes";
 import { parse as parseShell, quote } from "shell-quote";
 import { parse } from "yaml";
@@ -51,8 +54,10 @@ type Spec = Parameters<typeof resolveComposeFilesMountedVolumes>[0][number];
 // The variables `docker compose` / `docker stack deploy` interpolate the
 // compose file with, as Dokploy writes them (see getCreateEnvFileCommand and
 // stageStackEnvFile). A compose that does not get an env file from Dokploy
-// reads whatever `.env` sits next to the file, which Dokploy cannot see, so no
-// variable is trusted then (`strict`).
+// reads whatever `.env` sits in its project directory, which the repository
+// can bring: that file is read from the host and parsed
+// (getDotenvInterpolationVariables), and no variable is trusted only when it
+// cannot be (`strict`).
 //
 // The two kinds differ on a variable that is set to an empty string:
 // - docker compose reads it from the `.env` as set-but-empty, which
@@ -62,14 +67,15 @@ type Spec = Parameters<typeof resolveComposeFilesMountedVolumes>[0][number];
 // The deploy shell's own variables are set but unknown: PATH and HOME for
 // docker compose (the process environment wins over the `.env`), and the
 // shell's PWD and the like for a stack.
+type InterpolationVariables = { env: ComposeVariables; strict: boolean };
+
+const STRICT_VARIABLES: InterpolationVariables = { env: {}, strict: true };
+
+// The variables of the env file Dokploy writes (or stages, for a stack).
 const getInterpolationVariables = (
 	compose: ComposeForVolumeCheck,
-	{ customEnvFile = false }: { customEnvFile?: boolean } = {},
-): { env: ComposeVariables; strict: boolean } => {
+): InterpolationVariables => {
 	const isStack = compose.composeType === "stack";
-	if ((!isStack && !compose.createEnvFile) || customEnvFile) {
-		return { env: {}, strict: true };
-	}
 	try {
 		const projectEnv = compose.environment.project.env;
 		const environmentEnv = compose.environment.env;
@@ -112,6 +118,127 @@ const getInterpolationVariables = (
 	}
 };
 
+// Compose reads `.env` from the project directory (the `--project-directory`
+// or the directory of the first compose file); with an `--env-file` it reads
+// only that file. The process environment is `env -i PATH HOME` (see
+// getCleanEnvPrefix), so the file is the whole of it. A file that is not there
+// is no variable at all; one that cannot be read, or that the check does not
+// understand, is not known (`strict`).
+const MAX_DOTENV_BYTES = 1024 * 1024;
+
+const getDotenvInterpolationVariables = async (
+	compose: ComposeForVolumeCheck,
+	directory: string,
+): Promise<InterpolationVariables> => {
+	const path = posix.join(directory, ".env");
+	let variables: Record<string, string> | null;
+	try {
+		let text: string;
+		if (compose.serverId) {
+			// `cat` of a file that is not there is an error, so look first.
+			const { stdout } = await execAsyncRemote(
+				compose.serverId,
+				`if [ -e ${quote([path])} ]; then head -c ${MAX_DOTENV_BYTES + 1} ${quote([path])}; fi`,
+			);
+			text = stdout;
+		} else {
+			try {
+				text = await readFile(path, "utf8");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw error;
+				}
+				text = "";
+			}
+		}
+		variables =
+			text.length > MAX_DOTENV_BYTES ? null : parseDotenvVariables(text);
+	} catch {
+		return STRICT_VARIABLES;
+	}
+	if (!variables) {
+		return STRICT_VARIABLES;
+	}
+	// The values refer to each other, as Compose expands them. PATH and HOME are
+	// the process's, which win over the file.
+	const env = resolveEnvironmentReferences(variables, ["PATH", "HOME"]);
+	env.PATH = UNKNOWN_VARIABLE_VALUE;
+	env.HOME = UNKNOWN_VARIABLE_VALUE;
+	return { env, strict: false };
+};
+
+// Every set of variables the deployed command can interpolate with: one when
+// Dokploy writes the env file and passes it (`--env-file`), and for a stack,
+// which never reads a `.env`. Otherwise Compose reads the `.env` of its project
+// directory, which depends on the command (`--project-directory`, the
+// directory of the first file), so the `.env` of each directory it can be is
+// read, and the compose is checked with each of them. An `--env-file` of a
+// custom command is not read: nothing is trusted then.
+const getInterpolationWorlds = async (
+	compose: ComposeForVolumeCheck,
+	{
+		customEnvFile,
+		hasCommand,
+		directories,
+		composeDirectory,
+	}: {
+		customEnvFile: boolean;
+		hasCommand: boolean;
+		directories: string[];
+		composeDirectory: string;
+	},
+): Promise<InterpolationVariables[]> => {
+	if (customEnvFile) {
+		return [STRICT_VARIABLES];
+	}
+	if (
+		compose.composeType === "stack" ||
+		(compose.createEnvFile && !hasCommand)
+	) {
+		return [getInterpolationVariables(compose)];
+	}
+	const worlds: InterpolationVariables[] = [];
+	for (const directory of new Set(directories)) {
+		// Dokploy writes its env file next to the compose file.
+		worlds.push(
+			compose.createEnvFile && directory === composeDirectory
+				? getInterpolationVariables(compose)
+				: await getDotenvInterpolationVariables(compose, directory),
+		);
+	}
+	return worlds;
+};
+
+const mergeResolutions = (
+	resolutions: ComposeVolumeResolution[],
+): ComposeVolumeResolution => {
+	const uses = new Map<string, ComposeVolumeResolution["uses"][number]>();
+	const merged: ComposeVolumeResolution = {
+		uses: [],
+		unresolved: [],
+		forbidden: [],
+		forbiddenParents: [],
+	};
+	for (const resolution of resolutions) {
+		for (const use of resolution.uses) {
+			uses.set(`${use.key}\u0000${use.volumeName}`, use);
+		}
+		for (const name of [
+			"unresolved",
+			"forbidden",
+			"forbiddenParents",
+		] as const) {
+			for (const entry of resolution[name]) {
+				if (!merged[name].includes(entry)) {
+					merged[name].push(entry);
+				}
+			}
+		}
+	}
+	merged.uses = [...uses.values()];
+	return merged;
+};
+
 const getCodeDirectory = (compose: ComposeForVolumeCheck) => {
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	// Hosts are Linux; a drive letter only appears on a Windows dev machine.
@@ -130,30 +257,42 @@ export const assertComposeSpecVolumesBound = async (
 		commandVolumes = [],
 		commandBaseDirs = [],
 		customEnvFile = false,
+		hasCommand = false,
 	}: {
 		commandVolumes?: string[];
 		commandBaseDirs?: string[];
 		customEnvFile?: boolean;
+		hasCommand?: boolean;
 	} = {},
 ) => {
-	const { env, strict } = getInterpolationVariables(compose, {
-		customEnvFile,
-	});
 	const codeDirectory = getCodeDirectory(compose);
 	const composeFile =
 		compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath;
-	const { uses, unresolved, forbidden, forbiddenParents } =
-		resolveComposeFilesMountedVolumes(Array.isArray(specs) ? specs : [specs], {
-			appName: compose.appName,
-			env,
-			strict,
-			baseDirs: [
-				codeDirectory,
-				posix.dirname(posix.resolve(codeDirectory, composeFile || ".")),
-				...commandBaseDirs,
-			],
-			commandVolumes,
-		});
+	const composeDirectory = posix.dirname(
+		posix.resolve(codeDirectory, composeFile || "."),
+	);
+	const baseDirs = [codeDirectory, composeDirectory, ...commandBaseDirs];
+	const worlds = await getInterpolationWorlds(compose, {
+		customEnvFile,
+		hasCommand,
+		directories: baseDirs,
+		composeDirectory,
+	});
+	const strict = worlds.some((world) => world.strict);
+	const { uses, unresolved, forbidden, forbiddenParents } = mergeResolutions(
+		worlds.map((world) =>
+			resolveComposeFilesMountedVolumes(
+				Array.isArray(specs) ? specs : [specs],
+				{
+					appName: compose.appName,
+					env: world.env,
+					strict: world.strict,
+					baseDirs,
+					commandVolumes,
+				},
+			),
+		),
+	);
 	if (forbidden.length > 0) {
 		logger.warn(
 			{ composeId: compose.composeId, forbidden },
@@ -177,10 +316,9 @@ export const assertComposeSpecVolumesBound = async (
 			{ composeId: compose.composeId, unresolved },
 			"[VolumeBinding] A compose file volume was refused: it could not be resolved",
 		);
-		const hint =
-			strict && compose.composeType !== "stack"
-				? `Dokploy does not write a .env for this compose ("Create env file" is off), so its variables cannot be resolved: turn on "Create env file", or write the volume names out in the compose file.`
-				: "Write the volume names and paths out in the compose file.";
+		const hint = strict
+			? `Dokploy could not read the env file Compose uses for this compose (the .env in its project directory could not be read or understood, or a custom command passes --env-file), so the variables in its volume names and host paths cannot be resolved: turn on "Create env file" (and drop --env-file from the command), or write the volume names and paths out in the compose file.`
+			: "Write the volume names and paths out in the compose file.";
 		throw new Error(
 			`Compose volume check failed: ${unresolved[0]} cannot be resolved before the deploy, so the volumes and host paths it uses cannot be checked. ${hint} Keep the volumes in the one compose file (no include, no extends from another file, no volumes_from a container).`,
 		);
@@ -947,6 +1085,7 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 		commandVolumes,
 		commandBaseDirs: getCommandBaseDirectories(compose),
 		customEnvFile: commandUsesEnvFile(compose),
+		hasCommand: !!compose.command,
 	});
 };
 

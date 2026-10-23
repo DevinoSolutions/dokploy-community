@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => {
 			network: table(),
 		},
 		warn: vi.fn(),
+		readDotenv: vi.fn(),
 	};
 });
 
@@ -36,6 +37,14 @@ vi.mock("@dokploy/server/lib/logger", () => ({
 vi.mock("@dokploy/server/utils/vault", () => ({
 	withResolvedVaultRefs: async <T>(value: T) => value,
 }));
+
+// The `.env` of the project directory (T-7160). Not there unless a test says so.
+vi.mock("node:fs/promises", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:fs/promises")>()),
+	readFile: mocks.readDotenv,
+}));
+
+const fsError = (code: string) => Object.assign(new Error(code), { code });
 
 const { assertComposeVolumesBound, assertComposeFileVolumesBound } =
 	await import("@dokploy/server/services/compose-volume-binding");
@@ -103,6 +112,7 @@ const composeRow = (composeFile: string, overrides = {}) =>
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.readDotenv.mockRejectedValue(fsError("ENOENT"));
 	for (const table of Object.values(mocks.query)) {
 		table.findMany.mockResolvedValue([]);
 	}
@@ -342,15 +352,14 @@ describe("build.dockerfile outside the context", () => {
 		}
 	});
 
-	it("judges the join with a lone default context as that default (strict)", () => {
-		// `${CTX:-..}/Dockerfile` is `../Dockerfile`, not a path that climbs from
-		// an unknown directory.
+	it("judges the join with a lone default context as that default", () => {
+		// `${CTX:-..}/Dockerfile` is `../Dockerfile` when CTX is not set, not a
+		// path that climbs from an unknown directory.
 		expect(
 			check(
 				service(
 					"    build:\n      context: ${CTX:-..}\n      dockerfile: Dockerfile",
 				),
-				STRICT,
 			),
 		).toEqual(clean);
 		expect(
@@ -358,7 +367,6 @@ describe("build.dockerfile outside the context", () => {
 				service(
 					"    build:\n      context: ${CTX:-./app}\n      dockerfile: docker/Dockerfile",
 				),
-				STRICT,
 			),
 		).toEqual(clean);
 		expect(
@@ -366,18 +374,22 @@ describe("build.dockerfile outside the context", () => {
 				service(
 					"    build:\n      context: ${CTX:-/}\n      dockerfile: Dockerfile",
 				),
-				STRICT,
 			).forbiddenParents.length,
 		).toBeGreaterThan(0);
-		// Any other variable next to a climb is still refused.
-		expect(
-			check(
-				service(
-					"    build:\n      context: ${CTX}\n      dockerfile: ../Dockerfile",
-				),
-				STRICT,
-			).unresolved,
-		).toHaveLength(1);
+	});
+
+	it("trusts no default when the env file cannot be read (strict)", () => {
+		// A .env nobody read may set CTX, and then the default is not used.
+		for (const context of ["${CTX:-..}", "${CTX:-./app}", "${CTX}"]) {
+			expect(
+				check(
+					service(
+						`    build:\n      context: ${context}\n      dockerfile: Dockerfile`,
+					),
+					STRICT,
+				).unresolved.length,
+			).toBeGreaterThan(0);
+		}
 	});
 });
 
@@ -861,7 +873,8 @@ describe("assertComposeVolumesBound", () => {
 		).resolves.toBeUndefined();
 	});
 
-	it("refuses a path it cannot resolve when Create env file is off", async () => {
+	it("refuses a path it cannot resolve when the .env cannot be read", async () => {
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		await expect(
 			deploy(service("    env_file: ${DIR}/../../.env"), {
 				createEnvFile: false,

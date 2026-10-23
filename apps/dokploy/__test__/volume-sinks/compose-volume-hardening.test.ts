@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
 		},
 		warn: vi.fn(),
 		readFileSync: vi.fn(),
+		readDotenv: vi.fn(),
 	};
 });
 
@@ -42,6 +43,14 @@ vi.mock("node:fs", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:fs")>()),
 	readFileSync: mocks.readFileSync,
 }));
+
+// The `.env` of the project directory (T-7160). Not there unless a test says so.
+vi.mock("node:fs/promises", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:fs/promises")>()),
+	readFile: mocks.readDotenv,
+}));
+
+const fsError = (code: string) => Object.assign(new Error(code), { code });
 
 const { paths } = await import("@dokploy/server/constants");
 const { assertComposeVolumesBound } = await import(
@@ -133,6 +142,7 @@ ${definition}
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.readDotenv.mockRejectedValue(fsError("ENOENT"));
 	for (const table of Object.values(mocks.query)) {
 		table.findMany.mockResolvedValue([]);
 	}
