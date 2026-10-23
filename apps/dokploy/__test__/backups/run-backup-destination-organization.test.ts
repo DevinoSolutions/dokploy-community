@@ -73,6 +73,17 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 const { runPostgresBackup } = await import(
 	"@dokploy/server/utils/backups/postgres"
 );
+const { runMySqlBackup } = await import("@dokploy/server/utils/backups/mysql");
+const { runMariadbBackup } = await import(
+	"@dokploy/server/utils/backups/mariadb"
+);
+const { runMongoBackup } = await import("@dokploy/server/utils/backups/mongo");
+const { runLibsqlBackup } = await import(
+	"@dokploy/server/utils/backups/libsql"
+);
+const { runComposeBackup } = await import(
+	"@dokploy/server/utils/backups/compose"
+);
 const { runVolumeBackup } = await import(
 	"@dokploy/server/utils/volume-backups/utils"
 );
@@ -176,3 +187,54 @@ describe("runVolumeBackup checks the destination organization before side effect
 		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "done");
 	});
 });
+
+describe.each([
+	["runMySqlBackup", runMySqlBackup, "mysql"],
+	["runMariadbBackup", runMariadbBackup, "mariadb"],
+	["runMongoBackup", runMongoBackup, "mongo"],
+	["runLibsqlBackup", runLibsqlBackup, "libsql"],
+	["runComposeBackup", runComposeBackup, "postgres"],
+] as const)(
+	"%s checks the destination organization before side effects",
+	(_name, run, databaseType) => {
+		const service = {
+			name: "svc",
+			appName: "svc-app",
+			environmentId: "env-1",
+			serverId: null,
+			databaseUser: "user",
+			databaseRootPassword: "root",
+			databasePassword: "pw",
+		};
+		const serviceBackup = { ...backup, databaseType };
+
+		it("aborts before creating a deployment when the destination belongs to another organization", async () => {
+			mocks.findDestinationRow.mockResolvedValue(foreignDestination);
+
+			await expect(
+				(run as (s: never, b: never) => Promise<unknown>)(
+					service as never,
+					serviceBackup as never,
+				),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+
+			expect(mocks.createDeploymentBackup).not.toHaveBeenCalled();
+			expect(mocks.execAsync).not.toHaveBeenCalled();
+		});
+
+		it("runs when the destination belongs to the project organization", async () => {
+			mocks.findDestinationRow.mockResolvedValue(ownDestination);
+
+			await (run as (s: never, b: never) => Promise<unknown>)(
+				service as never,
+				serviceBackup as never,
+			);
+
+			expect(mocks.execAsync).toHaveBeenCalledTimes(1);
+			expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith(
+				"dep-1",
+				"done",
+			);
+		});
+	},
+);

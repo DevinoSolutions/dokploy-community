@@ -7,12 +7,14 @@ import {
 	ENCRYPTION_KEY_BACKUP_FILE,
 	exportEncryptionKeys,
 } from "@dokploy/server/lib/encryption";
-import type { BackupSchedule } from "@dokploy/server/services/backup";
+import {
+	type BackupSchedule,
+	findInstanceBackupDestination,
+} from "@dokploy/server/services/backup";
 import {
 	createDeploymentBackup,
 	updateDeploymentStatus,
 } from "@dokploy/server/services/deployment";
-import { findDestinationById } from "@dokploy/server/services/destination";
 import { quote } from "shell-quote";
 import { sendDokployBackupNotifications } from "../notifications/dokploy-backup";
 import { execAsync } from "../process/execAsync";
@@ -38,6 +40,11 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 		return;
 	}
 
+	// The zip contains the whole Dokploy base path and the database dump, so
+	// the destination has to be proven to belong to an organization the
+	// backup's creator administers before any deployment, zip or upload.
+	const destination = await findInstanceBackupDestination(backup);
+
 	const deployment = await createDeploymentBackup({
 		backupId: backup.backupId,
 		title: "Web Server Backup",
@@ -46,7 +53,6 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 	const writeStream = createWriteStream(deployment.logPath, { flags: "a" });
 	let computedBackupSize: number | undefined;
 	try {
-		const destination = await findDestinationById(backup.destinationId);
 		const timestamp = getBackupTimestamp();
 		const { BASE_PATH } = paths();
 		const tempDir = await mkdtemp(join(tmpdir(), "dokploy-backup-"));

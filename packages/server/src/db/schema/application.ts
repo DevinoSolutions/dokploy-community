@@ -636,6 +636,13 @@ export const apiUpdateApplication = createSchema
 	.partial()
 	.extend({
 		applicationId: z.string().min(1),
+		// Same validator as the provider-save schemas and compose: the branch
+		// names reach git commands, so a plain update must not bypass it.
+		branch: branchField.nullable().optional(),
+		gitlabBranch: branchField.nullable().optional(),
+		bitbucketBranch: branchField.nullable().optional(),
+		giteaBranch: branchField.nullable().optional(),
+		customGitBranch: branchField.nullable().optional(),
 	})
 	// `snapvisorProjectName` only goes through
 	// `snapvisor.setApplicationProject`, which validates the slug and checks
