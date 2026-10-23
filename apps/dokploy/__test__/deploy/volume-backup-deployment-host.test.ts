@@ -1,3 +1,4 @@
+import { quote } from "shell-quote";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // The deployment row and its log are created on the host the backup command
@@ -99,7 +100,10 @@ describe("createDeploymentVolumeBackup puts the deployment on the host the backu
 			];
 			expect(host).toBe("db-server");
 			expect(command).toContain("mkdir -p");
-			expect(command).toContain(String(mocks.insertedValues[0]?.logPath));
+			// The command shell-quotes the log path (it escapes the colons in the time).
+			expect(command).toContain(
+				quote([String(mocks.insertedValues[0]?.logPath)]),
+			);
 		},
 	);
 
