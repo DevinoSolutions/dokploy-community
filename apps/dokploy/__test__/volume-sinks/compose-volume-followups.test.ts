@@ -716,36 +716,51 @@ volumes:
 
 		describe("compose and stack subcommands", () => {
 			const base = `-p ${APP} -f docker-compose.yml`;
+			const NOT_ALLOWED = (sub: string, kind = "compose") =>
+				new RegExp(
+					`Compose command refused: \`docker ${kind} ${sub}\` is not allowed in a custom command`,
+				);
+			const WRITES_A_FILE = /`docker compose config .*` writes a file/;
+			const WATCH = /`docker compose up .*` syncs host paths/;
 
 			it.each([
-				"cp web:/etc/passwd /tmp/passwd",
-				"export web",
-				"config -o /var/lib/docker/volumes/victim/_data/x",
-				"config --output /tmp/x",
-				"config --output=/tmp/x",
-				"config -qo /tmp/x",
-				"config -o/tmp/x",
-				"events",
-				"push",
-				"attach web",
-				"commit web img",
-				"stats",
-				"volumes",
-				"scale web=2",
-				"publish repo/x",
-				"alpha dry-run",
-				"bridge convert",
-			])("refuses docker compose %s", async (rest) => {
+				["cp web:/etc/passwd /tmp/passwd", NOT_ALLOWED("cp")],
+				["export web", NOT_ALLOWED("export")],
+				["events", NOT_ALLOWED("events")],
+				["push", NOT_ALLOWED("push")],
+				["attach web", NOT_ALLOWED("attach")],
+				["commit web img", NOT_ALLOWED("commit")],
+				["stats", NOT_ALLOWED("stats")],
+				["volumes", NOT_ALLOWED("volumes")],
+				["scale web=2", NOT_ALLOWED("scale")],
+				["publish repo/x", NOT_ALLOWED("publish")],
+				["alpha dry-run", NOT_ALLOWED("alpha")],
+				["bridge convert", NOT_ALLOWED("bridge")],
+				// every tenant's project names and file paths
+				["ls", NOT_ALLOWED("ls")],
+				["ls -a", NOT_ALLOWED("ls")],
+				// the host paths of develop.watch
+				["watch", NOT_ALLOWED("watch")],
+				["up -d --watch", WATCH],
+				["up --watch=true", WATCH],
+				["up -w", WATCH],
+				["up -dw", WATCH],
+				["up web -w", WATCH],
+				// a file at a path of the command's choosing
+				["config -o /var/lib/docker/volumes/victim/_data/x", WRITES_A_FILE],
+				["config --output /tmp/x", WRITES_A_FILE],
+				["config --output=/tmp/x", WRITES_A_FILE],
+				["config -qo /tmp/x", WRITES_A_FILE],
+				["config -o/tmp/x", WRITES_A_FILE],
+			])("refuses docker compose %s", async (rest, reason) => {
 				await expect(
 					assertComposeVolumesBound(custom(`compose ${base} ${rest}`)),
-				).rejects.toThrow(/Compose command refused: .*(not allowed|writes a file)/);
+				).rejects.toThrow(reason);
 				await expect(
 					assertComposeVolumesBound(
-						custom(
-							`compose ${base} up -d && docker compose ${base} ${rest}`,
-						),
+						custom(`compose ${base} up -d && docker compose ${base} ${rest}`),
 					),
-				).rejects.toThrow(/Compose command refused: .*(not allowed|writes a file)/);
+				).rejects.toThrow(reason);
 			});
 
 			it.each([
@@ -756,10 +771,10 @@ volumes:
 				"create",
 				"down",
 				"exec web ls",
+				"exec -w /app web ls",
 				"images",
 				"kill",
 				"logs -f web",
-				"ls",
 				"pause",
 				"port web 80",
 				"ps",
@@ -771,10 +786,10 @@ volumes:
 				"top",
 				"unpause",
 				"up -d --build",
+				"up -d --wait --wait-timeout 30",
 				"version",
 				"wait web",
-				"watch",
-				"run --rm web sh -c ls",
+				"run --rm -w /app web sh -c ls",
 			])("allows docker compose %s", async (rest) => {
 				await expect(
 					assertComposeVolumesBound(custom(`compose ${base} ${rest}`)),
@@ -782,22 +797,20 @@ volumes:
 			});
 
 			it.each([
-				"stack config -c docker-compose.yml",
-				"stack up -c docker-compose.yml app",
-				"stack remove app",
-				"stack inspect app",
-			])("refuses docker %s", async (command) => {
-				await expect(
-					assertComposeVolumesBound(custom(command)),
-				).rejects.toThrow(
-					/Compose command refused: `docker stack \w+` is not allowed/,
+				["stack config -c docker-compose.yml", "config"],
+				["stack up -c docker-compose.yml app", "up"],
+				["stack remove app", "remove"],
+				["stack inspect app", "inspect"],
+				["stack ls", "ls"],
+			])("refuses docker %s", async (command, sub) => {
+				await expect(assertComposeVolumesBound(custom(command))).rejects.toThrow(
+					NOT_ALLOWED(sub, "stack"),
 				);
 			});
 
 			it.each([
 				`stack deploy -c docker-compose.yml ${APP}`,
 				`stack rm ${APP}`,
-				`stack ls`,
 				`stack ps ${APP}`,
 				`stack services ${APP}`,
 			])("allows docker %s", async (command) => {
@@ -809,27 +822,90 @@ volumes:
 
 		describe("path options that lead into Docker's volume storage", () => {
 			const VICTIM = "/var/lib/docker/volumes/victim/_data";
+			const COMPOSE_FILE = "compose file";
 
 			it.each([
-				`compose -f ${VICTIM}/docker-compose.yml up -d`,
-				`compose -f=${VICTIM}/docker-compose.yml up -d`,
-				`compose -f${VICTIM}/docker-compose.yml up -d`,
-				`compose --file ${VICTIM}/docker-compose.yml up -d`,
-				`compose --file=${VICTIM}/docker-compose.yml up -d`,
-				`compose -f ../../../../../../../../../../var/lib/docker/volumes/victim/_data/c.yml up -d`,
-				`compose -f /var/lib/docker/volumes/../volumes/victim/c.yml up -d`,
-				`compose -p ${APP} --env-file ${VICTIM}/.env -f docker-compose.yml up -d`,
-				`compose -p ${APP} --env-file=${VICTIM}/.env -f docker-compose.yml up -d`,
-				`compose -p ${APP} --project-directory ${VICTIM} -f docker-compose.yml up -d`,
-				`compose -p ${APP} --project-directory=${VICTIM} -f docker-compose.yml up -d`,
-				`compose -p ${APP} -f docker-compose.yml run --env-from-file ${VICTIM}/.env web sh`,
-				`compose -p ${APP} -f docker-compose.yml run --env-from-file=${VICTIM}/.env web sh`,
-				`stack deploy -c ${VICTIM}/docker-compose.yml ${APP}`,
-				`stack deploy --compose-file=${VICTIM}/docker-compose.yml ${APP}`,
-				`compose -p ${APP} -f docker-compose.yml up -d && docker compose -f ${VICTIM}/c.yml up -d`,
-			])("refuses %s", async (command) => {
+				[`compose -f ${VICTIM}/docker-compose.yml up -d`, COMPOSE_FILE],
+				[`compose -f=${VICTIM}/docker-compose.yml up -d`, COMPOSE_FILE],
+				[`compose -f${VICTIM}/docker-compose.yml up -d`, COMPOSE_FILE],
+				[`compose --file ${VICTIM}/docker-compose.yml up -d`, COMPOSE_FILE],
+				[`compose --file=${VICTIM}/docker-compose.yml up -d`, COMPOSE_FILE],
+				[
+					"compose -f ../../../../../../../../../../var/lib/docker/volumes/victim/_data/c.yml up -d",
+					COMPOSE_FILE,
+				],
+				[
+					"compose -f /var/lib/docker/volumes/../volumes/victim/c.yml up -d",
+					COMPOSE_FILE,
+				],
+				// a doubled slash and a `~` do not hide it
+				["compose -f //var/lib/docker/volumes/victim/c.yml up -d", COMPOSE_FILE],
+				[
+					"compose -f /var//lib/docker//volumes/victim/c.yml up -d",
+					COMPOSE_FILE,
+				],
+				[
+					"compose -f /var/lib/./docker/volumes/victim/c.yml up -d",
+					COMPOSE_FILE,
+				],
+				[
+					"compose -f ~/../../var/lib/docker/volumes/victim/_data/c.yml up -d",
+					COMPOSE_FILE,
+				],
+				[
+					"compose -p x --env-file //var/lib/docker/volumes/victim/_data/.env -f docker-compose.yml up -d",
+					"--env-file",
+				],
+				[
+					"compose -p x --env-file ~/../../var/lib/docker/volumes/victim/_data/.env -f docker-compose.yml up -d",
+					"--env-file",
+				],
+				[
+					`compose -p ${APP} --env-file ${VICTIM}/.env -f docker-compose.yml up -d`,
+					"--env-file",
+				],
+				[
+					`compose -p ${APP} --env-file=${VICTIM}/.env -f docker-compose.yml up -d`,
+					"--env-file",
+				],
+				[
+					`compose -p ${APP} --project-directory ${VICTIM} -f docker-compose.yml up -d`,
+					"--project-directory",
+				],
+				[
+					`compose -p ${APP} --project-directory=${VICTIM} -f docker-compose.yml up -d`,
+					"--project-directory",
+				],
+				[
+					`compose -p ${APP} --project-directory //var/lib/docker/volumes/victim -f docker-compose.yml up -d`,
+					"--project-directory",
+				],
+				[
+					`compose -p ${APP} -f docker-compose.yml run --env-from-file ${VICTIM}/.env web sh`,
+					"--env-from-file",
+				],
+				[
+					`compose -p ${APP} -f docker-compose.yml run --env-from-file=${VICTIM}/.env web sh`,
+					"--env-from-file",
+				],
+				[
+					`compose -p ${APP} -f docker-compose.yml run --env-from-file //var/lib/docker/volumes/victim/.env web sh`,
+					"--env-from-file",
+				],
+				[`stack deploy -c ${VICTIM}/docker-compose.yml ${APP}`, COMPOSE_FILE],
+				[
+					`stack deploy --compose-file=${VICTIM}/docker-compose.yml ${APP}`,
+					COMPOSE_FILE,
+				],
+				[
+					`compose -p ${APP} -f docker-compose.yml up -d && docker compose -f ${VICTIM}/c.yml up -d`,
+					COMPOSE_FILE,
+				],
+			])("refuses %s", async (command, name) => {
 				await expect(assertComposeVolumesBound(custom(command))).rejects.toThrow(
-					/Compose command refused: the .* is Docker's own volume storage/,
+					new RegExp(
+						`Compose command refused: the ${name} ".*" is Docker's own volume storage`,
+					),
 				);
 			});
 
@@ -2127,6 +2203,8 @@ services:
 		const restore = await restoreOf(command);
 		expect(restore).toContain("Restoring previous working deployment");
 		expect(restore).not.toMatch(/docker run|docker -H|--context|\bcp web|\/var\/lib\/docker|--mount/);
+		// the log says the command was left out
+		expect(restore).toContain("custom command dropped for the restore: it failed the volume check");
 		// the default command brings the restored files up instead
 		expect(restore).toContain(`docker compose -p ${APP}`);
 	});
@@ -2137,5 +2215,6 @@ services:
 		);
 		expect(restore).toContain(`docker compose -p ${APP} -f docker-compose.yml up -d`);
 		expect(restore).not.toContain("--remove-orphans");
+		expect(restore).not.toContain("custom command dropped");
 	});
 });

@@ -235,6 +235,8 @@ type CommandSegment = {
 	envFromFiles: string[];
 	// The `-o` / `--output` option of a `docker compose config`, as written.
 	outputOption?: string;
+	// The `--watch` / `-w` option of a `docker compose up`, as written.
+	watchOption?: string;
 	// The first word of an `other` segment (`run`, `exec`, `cp`, ...).
 	command?: string;
 	// The `--mount` / `--volumes-from` options of a `docker compose run`, as
@@ -418,6 +420,11 @@ const parseRunEnvFromFiles = (words: string[]) => {
 // bundle (`-qo FILE`).
 const OUTPUT_OPTION = /^(?:--output(?:=|$)|-[A-Za-z]*o)/;
 
+// `docker compose up --watch` (`-w` on `up`; on `run` and `exec` it is --workdir) syncs
+// the `develop.watch[].path` host paths of the compose file into the containers,
+// and that path is not checked.
+const WATCH_OPTION = /^(?:--watch(?:=|$)|-[A-Za-z]*w)/;
+
 // The value of a path option that the shell or Docker would expand into
 // something else: a variable, a substitution or a pattern. The path it ends
 // up as cannot be known here, and the compose files, the project directory
@@ -545,6 +552,10 @@ const parseComposeCommand = (
 					subcommand === "config"
 						? words.slice(i + 1).find((word) => OUTPUT_OPTION.test(word))
 						: undefined;
+				const watchOption =
+					subcommand === "up"
+						? words.slice(i + 1).find((word) => WATCH_OPTION.test(word))
+						: undefined;
 				const daemonOption =
 					findDaemonOption(words.slice(0, i), { allowShortC: false }) ??
 					(subcommand === "run" || subcommand === "exec"
@@ -571,6 +582,7 @@ const parseComposeCommand = (
 					envFromFiles,
 					uncheckedMounts,
 					outputOption,
+					watchOption,
 					daemonOption,
 				};
 			}
@@ -705,7 +717,6 @@ const COMPOSE_SUBCOMMANDS = new Set([
 	"images",
 	"kill",
 	"logs",
-	"ls",
 	"pause",
 	"port",
 	"ps",
@@ -720,9 +731,8 @@ const COMPOSE_SUBCOMMANDS = new Set([
 	"up",
 	"version",
 	"wait",
-	"watch",
 ]);
-const STACK_SUBCOMMANDS = new Set(["deploy", "ls", "ps", "rm", "services"]);
+const STACK_SUBCOMMANDS = new Set(["deploy", "ps", "rm", "services"]);
 
 export const assertCommandRunsComposeOnly = (
 	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
@@ -763,6 +773,11 @@ export const assertCommandRunsComposeOnly = (
 				`Compose command refused: \`docker ${segment.kind} ${segment.subcommand}\` is not allowed in a custom command, because it can read or write host paths or reach containers that are not this compose's own. Allowed: ${[...allowed].join(", ")}.`,
 			);
 		}
+		if (segment.watchOption !== undefined) {
+			throw new Error(
+				`Compose command refused: \`docker compose up ${segment.watchOption}\` syncs host paths named in the compose file into the containers, which is not allowed in a custom command.`,
+			);
+		}
 		if (segment.outputOption !== undefined) {
 			throw new Error(
 				`Compose command refused: \`docker compose config ${segment.outputOption}\` writes a file to a path of the command's choosing, which is not allowed in a custom command.`,
@@ -778,10 +793,10 @@ export const assertCommandRunsComposeOnly = (
 			),
 		];
 		const options: Array<[string, string[]]> = [
-			["compose file", segment.files],
 			["--project-directory", segment.projectDirectories],
 			["--env-file", segment.envFiles],
 			["--env-from-file", segment.envFromFiles],
+			["compose file", segment.files],
 		];
 		for (const [name, values] of options) {
 			// A project directory that only contains the storage (`/`) is
