@@ -121,6 +121,35 @@ describe("deploying a database whose stored mounts name somebody else's volume",
 		expect(mocks.update).toHaveBeenCalledTimes(1);
 	});
 
+	it("deploys the service's own volume despite another organization's stale volume backup row", async () => {
+		mocks.query.volumeBackups.findMany.mockResolvedValue([
+			{
+				volumeBackupId: "vb-stale",
+				mariadbId: "m-b",
+				mariadb: { appName: "x", serverId: null, ...orgOf("org-b") },
+			},
+		]);
+
+		await buildPostgres(postgresRow([volumeMount("postgres-db-AbC123-data")]));
+
+		expect(mocks.update).toHaveBeenCalledTimes(1);
+	});
+
+	it("refuses a name another organization's mount shares on the same server", async () => {
+		mocks.query.mounts.findMany.mockResolvedValue([
+			{
+				mountId: "mount-b",
+				mariadbId: "m-b",
+				mariadb: { appName: "x", serverId: null, ...orgOf("org-b") },
+			},
+		]);
+
+		await expect(
+			buildPostgres(postgresRow([volumeMount("postgres-db-AbC123-data")])),
+		).rejects.toThrow(/is not one of this service's volumes/);
+		expect(mocks.update).not.toHaveBeenCalled();
+	});
+
 	it("refuses Dokploy's own volume with the binding message, before Docker is touched", async () => {
 		await expect(
 			buildPostgres(postgresRow([volumeMount("dokploy-postgres")])),

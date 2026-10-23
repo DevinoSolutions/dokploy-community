@@ -12,7 +12,6 @@ const mocks = vi.hoisted(() => ({
 	getVolumeConfig: vi.fn(),
 	removeVolume: vi.fn(),
 	findServerById: vi.fn(),
-	checkPermission: vi.fn(),
 	audit: vi.fn(),
 }));
 
@@ -26,10 +25,6 @@ vi.mock("@dokploy/server", () => ({
 	getVolumeConfig: mocks.getVolumeConfig,
 	removeVolume: mocks.removeVolume,
 	findServerById: mocks.findServerById,
-}));
-
-vi.mock("@dokploy/server/services/permission", () => ({
-	checkPermission: mocks.checkPermission,
 }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({
@@ -73,7 +68,6 @@ const calls = (caller: ReturnType<typeof callerAs>) => ({
 
 beforeEach(() => {
 	vi.clearAllMocks();
-	mocks.checkPermission.mockResolvedValue(undefined);
 	mocks.getVolumes.mockResolvedValue([]);
 	mocks.getVolumesSize.mockResolvedValue([]);
 	mocks.listVolumeFiles.mockResolvedValue([]);
@@ -86,7 +80,9 @@ describe("dockerVolume router", () => {
 		const member = calls(callerAs("member"));
 
 		for (const [name, call] of Object.entries(member)) {
-			await expect(call(), name).rejects.toMatchObject({ code: "FORBIDDEN" });
+			await expect(call(), name).rejects.toMatchObject({
+				code: "UNAUTHORIZED",
+			});
 		}
 		for (const mock of [
 			mocks.getVolumes,
@@ -107,7 +103,7 @@ describe("dockerVolume router", () => {
 		const custom = calls(callerAs("reviewers"));
 
 		await expect(custom.removeVolume()).rejects.toMatchObject({
-			code: "FORBIDDEN",
+			code: "UNAUTHORIZED",
 		});
 		expect(mocks.removeVolume).not.toHaveBeenCalled();
 	});
@@ -126,17 +122,6 @@ describe("dockerVolume router", () => {
 			expect(mocks.audit).toHaveBeenCalledTimes(3);
 		},
 	);
-
-	it("still needs docker:read on top of the role", async () => {
-		mocks.checkPermission.mockRejectedValue(
-			Object.assign(new Error("denied"), { code: "UNAUTHORIZED" }),
-		);
-
-		await expect(calls(callerAs("owner")).getVolumes()).rejects.toThrow(
-			"denied",
-		);
-		expect(mocks.getVolumes).not.toHaveBeenCalled();
-	});
 
 	it("keeps the server-organization check for an owner", async () => {
 		mocks.findServerById.mockResolvedValue({ organizationId: "org-b" });

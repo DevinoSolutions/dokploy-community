@@ -165,6 +165,23 @@ describe("scanServiceForTransfer", () => {
 		expect(mocks.scanVolume).not.toHaveBeenCalled();
 	});
 
+	it("transfers the service's own volume despite another organization's stale volume backup row", async () => {
+		mocks.query.volumeBackups.findMany.mockResolvedValue([
+			{
+				volumeBackupId: "vb-stale",
+				postgresId: "pg-b",
+				postgres: { appName: "x", serverId: null, ...orgOf("org-b") },
+			},
+		]);
+		mocks.findMountsByApplicationId.mockResolvedValue([
+			dbVolume("app-one-x-data"),
+		]);
+
+		await expect(scanServiceForTransfer(options())).resolves.toMatchObject({
+			volumes: [{ volumeName: "app-one-x-data" }],
+		});
+	});
+
 	it("also checks the claims on the target server", async () => {
 		// org B has a service on the target server that owns this name there
 		mocks.query.postgres.findMany.mockResolvedValue([

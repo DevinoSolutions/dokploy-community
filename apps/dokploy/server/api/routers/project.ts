@@ -40,6 +40,7 @@ import {
 	addNewEnvironment,
 	addNewProject,
 	assertProjectInOrganization,
+	assertServiceInOrganization,
 	checkPermission,
 	checkProjectAccess,
 	findMemberByUserId,
@@ -1172,6 +1173,18 @@ export const projectRouter = createTRPCRouter({
 		.mutation(async ({ ctx, input }) => {
 			try {
 				await checkProjectAccess(ctx, "create");
+
+				// Every service to clone must belong to the caller's organization,
+				// whichever project it is copied into: its row, mounts and domains
+				// are copied verbatim. Checked before anything is created.
+				if (input.includeServices) {
+					for (const selected of input.selectedServices ?? []) {
+						await assertServiceInOrganization(
+							selected.id,
+							ctx.session.activeOrganizationId,
+						);
+					}
+				}
 
 				const sourceEnvironment = input.duplicateInSameProject
 					? await findEnvironmentById(input.sourceEnvironmentId)

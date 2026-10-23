@@ -18,8 +18,13 @@ const mocks = vi.hoisted(() => {
 		redis: table(),
 		mounts: table(),
 		volumeBackups: table(),
+		warn: vi.fn(),
 	};
 });
+
+vi.mock("@dokploy/server/lib/logger", () => ({
+	logger: { warn: mocks.warn, error: vi.fn(), info: vi.fn() },
+}));
 
 vi.mock("@dokploy/server/db", () => ({
 	db: { query: mocks },
@@ -42,7 +47,9 @@ const volume = (volumeName: string | null) => ({
 beforeEach(() => {
 	vi.resetAllMocks();
 	for (const key of Object.keys(mocks) as Array<keyof typeof mocks>) {
-		mocks[key].findMany.mockResolvedValue([]);
+		if (key !== "warn") {
+			mocks[key].findMany.mockResolvedValue([]);
+		}
 	}
 	mocks.applications.findFirst.mockResolvedValue({
 		appName: "app-one-x",
@@ -169,6 +176,92 @@ describe("findRefusedVolumeMounts", () => {
 			serviceId: "gone",
 		});
 		expect(refused).toHaveLength(1);
+	});
+});
+
+describe("other organizations' rows on a shared host", () => {
+	const orgBVolumeBackup = {
+		volumeBackupId: "vb-stale",
+		postgresId: "pg-b",
+		postgres: { appName: "x", serverId: null, ...orgOf("org-b") },
+	};
+	const orgBMount = {
+		mountId: "mount-b",
+		postgresId: "pg-b",
+		postgres: { appName: "x", serverId: null, ...orgOf("org-b") },
+	};
+
+	it("lets a stale volume backup row of another organization not lock the service out of its own namespace", async () => {
+		mocks.volumeBackups.findMany.mockResolvedValue([orgBVolumeBackup]);
+
+		await expect(
+			findRefusedVolumeMounts(
+				[
+					volume("app-one-x"),
+					volume("app-one-x-data"),
+					volume("app-one-x_cache"),
+				],
+				service,
+			),
+		).resolves.toEqual([]);
+		expect(mocks.warn).not.toHaveBeenCalled();
+	});
+
+	it("still refuses an outside name that only another organization's volume backup row claims", async () => {
+		mocks.volumeBackups.findMany.mockResolvedValue([orgBVolumeBackup]);
+
+		await expect(
+			findRefusedVolumeMounts([volume("shared-assets")], service),
+		).resolves.toHaveLength(1);
+	});
+
+	it("still refuses a name in the service's namespace when another organization MOUNTS it", async () => {
+		mocks.mounts.findMany.mockResolvedValue([orgBMount]);
+
+		await expect(
+			findRefusedVolumeMounts([volume("app-one-x-data")], service),
+		).resolves.toHaveLength(1);
+	});
+
+	it("still refuses when a mount and a volume backup row both claim the name", async () => {
+		mocks.mounts.findMany.mockResolvedValue([orgBMount]);
+		mocks.volumeBackups.findMany.mockResolvedValue([orgBVolumeBackup]);
+
+		await expect(
+			findRefusedVolumeMounts([volume("app-one-x-data")], service),
+		).resolves.toHaveLength(1);
+	});
+
+	it("logs the service and the conflicting rows on the server, and keeps them out of the message", async () => {
+		mocks.mounts.findMany.mockResolvedValue([orgBMount]);
+		mocks.volumeBackups.findMany.mockResolvedValue([orgBVolumeBackup]);
+
+		const [refused] = await findRefusedVolumeMounts(
+			[volume("app-one-x-data")],
+			service,
+		);
+
+		expect(refused?.message).not.toMatch(/mount-b|vb-stale|org-b/);
+		expect(mocks.warn).toHaveBeenCalledTimes(1);
+		expect(mocks.warn.mock.calls[0]?.[0]).toMatchObject({
+			serviceType: "application",
+			serviceId: "app-1",
+			volumeName: "app-one-x-data",
+			conflictingRows: [
+				{ source: "mount", id: "mount-b" },
+				{ source: "volumeBackup", id: "vb-stale" },
+			],
+		});
+	});
+
+	it("logs a reserved name without any conflicting row", async () => {
+		await findRefusedVolumeMounts([volume("dokploy-postgres")], service);
+
+		expect(mocks.warn.mock.calls[0]?.[0]).toMatchObject({
+			serviceId: "app-1",
+			volumeName: "dokploy-postgres",
+			conflictingRows: [],
+		});
 	});
 });
 

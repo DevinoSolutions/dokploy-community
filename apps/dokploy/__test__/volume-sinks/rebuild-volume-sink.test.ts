@@ -106,9 +106,16 @@ beforeEach(() => {
 });
 
 const rebuild = async () => {
-	const done = rebuildDatabase("pg-1", "postgres");
+	// settle first so a refusal is not an unhandled rejection while timers run
+	const settled = rebuildDatabase("pg-1", "postgres").then(
+		() => null,
+		(error: Error) => error,
+	);
 	await vi.advanceTimersByTimeAsync(6000);
-	await done;
+	const error = await settled;
+	if (error) {
+		throw error;
+	}
 };
 
 describe("rebuildDatabase", () => {
@@ -133,42 +140,102 @@ describe("rebuildDatabase", () => {
 		]);
 	});
 
-	it("never removes Dokploy's own volumes, and says so in the log", async () => {
+	it("refuses a rebuild that includes Dokploy's own volume and touches nothing", async () => {
 		setMounts([
-			volumeMount("dokploy-postgres"),
 			volumeMount("postgres-db-AbC123-data"),
+			volumeMount("dokploy-postgres"),
 		]);
+
+		await expect(rebuild()).rejects.toThrow(
+			/is not one of this service's volumes/,
+		);
+
+		// not even the service is removed, and no volume of the list is
+		expect(mocks.removeService).not.toHaveBeenCalled();
+		expect(removedVolumes()).toEqual([]);
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+		expect(mocks.deployPostgres).not.toHaveBeenCalled();
+		expect(mocks.warn).toHaveBeenCalledTimes(1);
+		expect(mocks.warn.mock.calls[0]?.[0]).toMatchObject({
+			serviceId: "pg-1",
+			volumeName: "dokploy-postgres",
+		});
+	});
+
+	it("refuses, touching nothing, when another organization's service claims a volume", async () => {
+		mocks.query.mariadb.findMany.mockResolvedValue([
+			{ appName: "mariadb-b-Zz9999", serverId: null, ...orgOf("org-b") },
+		]);
+		setMounts([volumeMount("mariadb-b-Zz9999-data")]);
+
+		await expect(rebuild()).rejects.toThrow(
+			/is not one of this service's volumes/,
+		);
+
+		expect(mocks.removeService).not.toHaveBeenCalled();
+		expect(removedVolumes()).toEqual([]);
+	});
+
+	it("names the conflicting rows in the server log, not in the error", async () => {
+		mocks.query.mounts.findMany.mockResolvedValue([
+			{
+				mountId: "mount-of-org-b",
+				postgresId: "pg-b",
+				postgres: { appName: "x", serverId: null, ...orgOf("org-b") },
+			},
+		]);
+		setMounts([volumeMount("pgdata")]);
+
+		const error = await rebuild().catch((caught: Error) => caught);
+
+		expect((error as Error).message).not.toContain("mount-of-org-b");
+		expect(mocks.warn.mock.calls[0]?.[0]).toMatchObject({
+			serviceId: "pg-1",
+			conflictingRows: [{ source: "mount", id: "mount-of-org-b" }],
+		});
+	});
+
+	it("still rebuilds when the only conflict is another organization's stale volume backup row in the service's own namespace", async () => {
+		mocks.query.volumeBackups.findMany.mockResolvedValue([
+			{
+				volumeBackupId: "vb-stale",
+				postgresId: "pg-b",
+				postgres: { appName: "x", serverId: null, ...orgOf("org-b") },
+			},
+		]);
+		setMounts([volumeMount("postgres-db-AbC123-data")]);
 
 		await rebuild();
 
 		expect(removedVolumes()).toEqual([
 			"docker volume rm postgres-db-AbC123-data --force",
 		]);
-		expect(mocks.warn).toHaveBeenCalledTimes(1);
-		expect(mocks.warn.mock.calls[0]?.[1]).toContain("Skipped removing");
-		expect(mocks.warn.mock.calls[0]?.[0]).toMatchObject({
-			volumeName: "dokploy-postgres",
-		});
 	});
 
-	it("never removes a volume another organization's service claims", async () => {
-		mocks.query.mariadb.findMany.mockResolvedValue([
-			{ appName: "mariadb-b-Zz9999", serverId: null, ...orgOf("org-b") },
+	it("does not let a stale volume backup row of another organization excuse an outside name", async () => {
+		mocks.query.volumeBackups.findMany.mockResolvedValue([
+			{
+				volumeBackupId: "vb-stale",
+				postgresId: "pg-b",
+				postgres: { appName: "x", serverId: null, ...orgOf("org-b") },
+			},
 		]);
-		setMounts([volumeMount("mariadb-b-Zz9999-data")]);
+		setMounts([volumeMount("shared-assets")]);
 
-		await rebuild();
-
-		expect(removedVolumes()).toEqual([]);
-		expect(mocks.warn).toHaveBeenCalledTimes(1);
+		await expect(rebuild()).rejects.toThrow(
+			/is not one of this service's volumes/,
+		);
+		expect(mocks.removeService).not.toHaveBeenCalled();
 	});
 
 	it("never passes a host path to docker volume rm", async () => {
 		setMounts([volumeMount("/var/lib/docker")]);
 
-		await rebuild();
+		await expect(rebuild()).rejects.toThrow();
 
 		expect(removedVolumes()).toEqual([]);
+		expect(mocks.removeService).not.toHaveBeenCalled();
 	});
 
 	it("keeps removing on the service's remote server", async () => {
