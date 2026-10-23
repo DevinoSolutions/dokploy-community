@@ -53,6 +53,7 @@ const {
 const {
 	dockerVolumesDirectoryReach,
 	reachesDockerVolumesDirectory,
+	resolveEnvironmentReferences,
 	resolveComposeMountedVolumes,
 	soleDefaultReach,
 	unresolvedSourceClimbs,
@@ -1293,7 +1294,7 @@ describe("a path option that is not literal", () => {
 	it.each([
 		"$HOME/../..",
 		"${HOME}/../..",
-		'"\`echo /\`"',
+		'"`echo /`"',
 		"/e*",
 		"$X",
 		"${X}",
@@ -1307,7 +1308,7 @@ describe("a path option that is not literal", () => {
 		).rejects.toThrow(refused);
 	});
 
-	it.each(["$X", "/e*", "$HOME/../..", '"\`echo /\`"'])(
+	it.each(["$X", "/e*", "$HOME/../..", '"`echo /`"'])(
 		"refuses --project-directory=%s",
 		async (value) => {
 			await expect(
@@ -1570,17 +1571,16 @@ services:
 		).rejects.toThrow(failed);
 	});
 
-	it.each([
-		"${A}/.${U}./.${U}./.${U}.",
-		"${A}/.${U}.",
-		"${A}/.${U:-}.",
-	])("refuses %s when no variable is known (env file off)", async (source) => {
-		await expect(
-			assertComposeVolumesBound(
-				composeRow(entry(source), { createEnvFile: false }),
-			),
-		).rejects.toThrow(failed);
-	});
+	it.each(["${A}/.${U}./.${U}./.${U}.", "${A}/.${U}.", "${A}/.${U:-}."])(
+		"refuses %s when no variable is known (env file off)",
+		async (source) => {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(entry(source), { createEnvFile: false }),
+				),
+			).rejects.toThrow(failed);
+		},
+	);
 
 	it("refuses the same in the long syntax", async () => {
 		for (const [env, source] of [
@@ -1590,9 +1590,7 @@ services:
 			["E=", "${HOME}/.${E}./.${E}./.${E}./.${E}./.${E}."],
 		] as const) {
 			await expect(
-				assertComposeVolumesBound(
-					composeRow(longBind(`"${source}"`), { env }),
-				),
+				assertComposeVolumesBound(composeRow(longBind(`"${source}"`), { env })),
 			).rejects.toThrow(failed);
 		}
 	});
@@ -1629,5 +1627,166 @@ services:
 				composeRow(entry(source), { env, createEnvFile: false }),
 			),
 		).resolves.toBeUndefined();
+	});
+});
+
+// Round 5 of the review of PR #470: a known value that refers to variables.
+describe("values of the environment that refer to variables", () => {
+	const entry = (value: string) => `
+services:
+  web:
+    volumes:
+      - "${value}:/h"
+`;
+	const refused = /Compose volume (check failed|refused)/;
+	const failed = /Compose volume check failed/;
+
+	it.each([
+		["B=/\nV=${B}", "${V}"],
+		["B=/\nV=$B", "${V}"],
+		["D=docker\nV=/var/lib/${D}", "${V}"],
+		["V=/var/lib/${D}\nD=docker", "${V}"],
+		["V=${B:-/}", "${V}"],
+		["B=..\nV=${B}/${B}/${B}/${B}/${B}", "${HOME}/${V}"],
+		["B=..\nV=${HOME}/${B}/${B}/${B}/${B}/${B}", "${V}"],
+		["B=/\nV=${B}${B}\nW=${V}", "${W}"],
+		["B=/\nV=${B:-x}", "${V}"],
+		["B=..\nV=${B}/${B}", "${PATH}/${V}/${V}/${V}"],
+	])("refuses the short syntax: %j with %s", async (env, source) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry(source), { env })),
+		).rejects.toThrow(refused);
+	});
+
+	it.each([
+		["B=/\nV=${B}", "${V}"],
+		["B=/\nV=$B", "${V}"],
+		["D=docker\nV=/var/lib/${D}", "${V}"],
+		["V=/var/lib/${D}\nD=docker", "${V}"],
+		["V=${B:-/}", "${V}"],
+		["B=..\nV=${B}/${B}/${B}/${B}/${B}", "${HOME}/${V}"],
+	])("refuses the long syntax: %j with %s", async (env, source) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(longBind(`"${source}"`), { env })),
+		).rejects.toThrow(refused);
+	});
+
+	it("refuses it for a stack too", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${V}"), {
+					composeType: "stack",
+					env: "B=/\nV=${B}",
+				}),
+			),
+		).rejects.toThrow(refused);
+	});
+
+	it("follows the value to the path it is", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${V}"), {
+					env: "B=/\nV=${B}var/lib/docker/volumes",
+				}),
+			),
+		).rejects.toThrow(/is Docker's own volume storage/);
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${V}"), { env: "B=/var\nV=${B}/lib" }),
+			),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+	});
+
+	it("refuses a cycle, and a self reference, without hanging", async () => {
+		for (const [env, source] of [
+			["A=${B}\nB=${A}", "${A}"],
+			["A=${B}\nB=${A}", "${B}"],
+			["A=${A}", "${A}"],
+			["A=x${A}", "${A}"],
+			["A=${B}\nB=${C}\nC=${A}", "${C}"],
+			["V=${NOPE:?missing}", "${V}"],
+		] as const) {
+			await expect(
+				assertComposeVolumesBound(composeRow(entry(source), { env })),
+			).rejects.toThrow(failed);
+		}
+	});
+
+	it("refuses a variable that refers to one it cannot follow, in a default too", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${V:-../data}"), { env: "V=${LATER}\nLATER=/" }),
+			),
+		).rejects.toThrow(failed);
+	});
+
+	it("keeps $$ a literal $", async () => {
+		// V is the text $B, not the value of B.
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${V}"), { env: "B=/\nV=$$B" }),
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${V}"), { env: "B=/\nV=a$$b" }),
+			),
+		).resolves.toBeUndefined();
+		expect(
+			resolveEnvironmentReferences({ B: "/", V: "$$B", W: "a$$" }),
+		).toEqual({ B: "/", V: "$B", W: "a$" });
+	});
+
+	it("still allows a value that resolves to a harmless path", async () => {
+		for (const [env, source] of [
+			["B=/srv\nV=${B}/data", "${V}"],
+			["B=/srv\nV=$B/data", "${V}"],
+			["V=${ABSENT}/x", "${V}"],
+			["V=${ABSENT:-/srv}", "${V}"],
+			["B=./data\nV=${B}", "${V}"],
+			["V=${HOME}/x", "${V}"],
+			["V=${HOME}/.cache", "${V}"],
+			["B=beta\nV=${HOME}/${B}", "${V}"],
+		] as const) {
+			await expect(
+				assertComposeVolumesBound(composeRow(entry(source), { env })),
+			).resolves.toBeUndefined();
+		}
+		await expect(
+			assertComposeVolumesBound(composeRow(entry("${DATA_DIR}"))),
+		).resolves.toBeUndefined();
+	});
+
+	it("resolves the map in file order", () => {
+		const resolve = resolveEnvironmentReferences;
+		const UNKNOWN = "\u0001";
+		const UNRESOLVED = "\u0002";
+
+		expect(resolve({ B: "/srv", V: "${B}/data" })).toEqual({
+			B: "/srv",
+			V: "/srv/data",
+		});
+		expect(resolve({ V: "${B}/data", B: "/srv" })).toEqual({
+			V: UNRESOLVED,
+			B: "/srv",
+		});
+		expect(resolve({ A: "${B}", B: "${A}" })).toEqual({
+			A: UNRESOLVED,
+			B: UNRESOLVED,
+		});
+		expect(resolve({ A: "${A}" })).toEqual({ A: UNRESOLVED });
+		expect(resolve({ B: "x", V: "${B:-y}${C:-z}${B:+q}" })).toEqual({
+			B: "x",
+			V: "xzq",
+		});
+		expect(resolve({ B: "", V: "${B:-y}${B-z}${B:+q}${B+r}" })).toEqual({
+			B: "",
+			V: "yr",
+		});
+		expect(resolve({ V: "${HOME}/x" }, ["HOME"])).toEqual({
+			V: `${UNKNOWN}/x`,
+		});
+		expect(resolve({ V: "${C:?e}" })).toEqual({ V: UNRESOLVED });
+		expect(resolve({ V: "plain" })).toEqual({ V: "plain" });
 	});
 });

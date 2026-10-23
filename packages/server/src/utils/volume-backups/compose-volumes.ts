@@ -101,12 +101,94 @@ export const interpolateComposeValue = (
 	if (
 		unresolved ||
 		result.includes("$") ||
-		result.includes(UNKNOWN_VARIABLE_VALUE)
+		result.includes(UNKNOWN_VARIABLE_VALUE) ||
+		result.includes(UNRESOLVED_VARIABLE_VALUE)
 	) {
 		return null;
 	}
 	return result.replaceAll(ESCAPED_DOLLAR, "$");
 };
+
+// The value of a variable whose own value refers to a variable that cannot be
+// followed (see resolveEnvironmentReferences). Unlike an unknown one, its use
+// in a bind source is refused.
+export const UNRESOLVED_VARIABLE_VALUE = "\u0002";
+
+// Compose expands `$VAR`, `${VAR}` and the default forms inside the values of
+// the `.env` it reads, and Dokploy writes the Environment tab as that file.
+// This does the same to the map, in file order, so that a value is what
+// Docker will use. A reference is followed only to a variable defined EARLIER
+// (and to an absent one, which is unset); a reference to a later line, to the
+// variable itself (a cycle), or an error form (`${X:?}`) cannot be told from
+// here, and makes the whole value UNRESOLVED. The deploy shell's own variables
+// (`unknownNames`) are set but unknown: they leave UNKNOWN_VARIABLE_VALUE in
+// the text, so the rest of the value is kept. `$$` is a literal `$`.
+export const resolveEnvironmentReferences = (
+	env: Record<string, string>,
+	unknownNames: string[] = [],
+): Record<string, string> => {
+	const resolved: Record<string, string> = {};
+	const expand = (text: string): string =>
+		text.replace(
+			VARIABLE,
+			(match, bare?: string, braced?: string, operator?: string, arg = "") => {
+				if (match === "$$") {
+					return "$";
+				}
+				const key = (bare ?? braced) as string;
+				if (unknownNames.includes(key)) {
+					return UNKNOWN_VARIABLE_VALUE;
+				}
+				if (Object.hasOwn(resolved, key)) {
+					const current = resolved[key] as string;
+					switch (operator) {
+						case ":-":
+							return current ? current : expand(arg);
+						case ":+":
+							return current ? expand(arg) : "";
+						case "+":
+							return expand(arg);
+						default:
+							return current;
+					}
+				}
+				if (Object.hasOwn(env, key)) {
+					// Defined on a later line, or this very variable.
+					return UNRESOLVED_VARIABLE_VALUE;
+				}
+				switch (operator) {
+					case ":-":
+					case "-":
+						return expand(arg);
+					case ":?":
+					case "?":
+						return UNRESOLVED_VARIABLE_VALUE;
+					default:
+						return "";
+				}
+			},
+		);
+	for (const [key, value] of Object.entries(env)) {
+		const text = expand(value);
+		resolved[key] = text.includes(UNRESOLVED_VARIABLE_VALUE)
+			? UNRESOLVED_VARIABLE_VALUE
+			: text;
+	}
+	return resolved;
+};
+
+// A variable the source names whose value could not be resolved.
+const referencesUnresolvedVariable = (
+	text: string,
+	{ env, strict }: InterpolationOptions,
+) =>
+	!!env &&
+	!strict &&
+	[...text.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)].some(
+		(match) =>
+			Object.hasOwn(env, match[1] as string) &&
+			(env[match[1] as string] as string).includes(UNRESOLVED_VARIABLE_VALUE),
+	);
 
 // What `docker compose -p <name>` makes of a project name (compose-go
 // `NormalizeProjectName`).
@@ -327,7 +409,13 @@ const substituteVariables = (
 			const key = (bare ?? braced) as string;
 			const current =
 				env && !strict && Object.hasOwn(env, key) ? env[key] : undefined;
-			const value = current === UNKNOWN_VARIABLE_VALUE ? undefined : current;
+			// A value can hold the marks of the deploy shell's variables or of
+			// something unresolved: they count as empty, and a value that is
+			// only marks counts as unset.
+			const stripped = current
+				?.replaceAll(UNKNOWN_VARIABLE_VALUE, "")
+				.replaceAll(UNRESOLVED_VARIABLE_VALUE, "");
+			const value = stripped === "" && current !== "" ? undefined : stripped;
 			const more = () => substituteVariables(arg, { env, strict });
 			switch (operator) {
 				case ":-":
@@ -431,6 +519,12 @@ const collectMounts = (
 	const refuseUnresolvedPath = (rawPath: string, what: string) => {
 		if (unresolvedSourceReachesDockerVolumes(rawPath, options.baseDirs)) {
 			into.forbidden.push(`${what} "${rawPath}"`);
+			return true;
+		}
+		if (referencesUnresolvedVariable(rawPath, options)) {
+			into.unresolved.push(
+				`${what} "${rawPath}" (a variable whose value refers to a variable that cannot be followed)`,
+			);
 			return true;
 		}
 		const fallback = soleDefaultReach(rawPath, options.baseDirs);

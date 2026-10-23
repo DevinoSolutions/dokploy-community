@@ -20,6 +20,7 @@ import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import {
 	type ComposeVariables,
 	resolveComposeFilesMountedVolumes,
+	resolveEnvironmentReferences,
 	UNKNOWN_VARIABLE_VALUE,
 } from "@dokploy/server/utils/volume-backups/compose-volumes";
 import { parse as parseShell, quote } from "shell-quote";
@@ -72,30 +73,35 @@ const getInterpolationVariables = (
 		const projectEnv = compose.environment.project.env;
 		const environmentEnv = compose.environment.env;
 		if (isStack) {
-			const env = getEnvironmentVariablesObject(
+			const written = getEnvironmentVariablesObject(
 				compose.env ?? "",
 				projectEnv,
 				environmentEnv,
 			);
-			for (const name of ["PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"]) {
-				if (!Object.hasOwn(env, name)) {
-					env[name] = UNKNOWN_VARIABLE_VALUE;
-				}
+			const shellNames = ["PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"].filter(
+				(name) => !Object.hasOwn(written, name),
+			);
+			// The values refer to each other, as Compose expands them.
+			const env = resolveEnvironmentReferences(written, shellNames);
+			for (const name of shellNames) {
+				env[name] = UNKNOWN_VARIABLE_VALUE;
 			}
 			return { env, strict: false };
 		}
 		const content = `APP_NAME=${compose.appName}\nCOMPOSE_PROJECT_NAME=${compose.appName}\n${compose.env ?? ""}${
 			compose.randomize ? `\nCOMPOSE_PREFIX=${compose.suffix}` : ""
 		}`;
-		const env: Record<string, string> = {};
+		const written: Record<string, string> = {};
 		for (const pair of prepareEnvironmentVariables(
 			content,
 			projectEnv,
 			environmentEnv,
 		)) {
 			const [key, value] = parseEnvironmentKeyValuePair(pair);
-			env[key] = value;
+			written[key] = value;
 		}
+		// The values refer to each other, as Compose expands them.
+		const env = resolveEnvironmentReferences(written, ["PATH", "HOME"]);
 		env.PATH = UNKNOWN_VARIABLE_VALUE;
 		env.HOME = UNKNOWN_VARIABLE_VALUE;
 		return { env, strict: false };
