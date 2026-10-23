@@ -117,13 +117,23 @@ export const githubRouter = createTRPCRouter({
 	update: withPermission("gitProviders", "create")
 		.input(apiUpdateGithub)
 		.mutation(async ({ input, ctx }) => {
-			await updateGitProvider(input.gitProviderId, {
+			// The provider row is addressed by id: it has to belong to the caller's
+			// organization before it is rewritten (updateGitProvider re-assigns the
+			// organization), and its own gitProviderId is the one that is updated.
+			const github = await findGithubById(input.githubId);
+			if (
+				github.gitProvider.organizationId !== ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
+			}
+			await updateGitProvider(github.gitProviderId, {
 				name: input.name,
 				organizationId: ctx.session.activeOrganizationId,
 			});
 
 			await updateGithub(input.githubId, {
 				...input,
+				gitProviderId: github.gitProviderId,
 			});
 
 			await audit(ctx, {

@@ -4,6 +4,7 @@ import {
 	deleteServer,
 	findServerById,
 	findServersByUserId,
+	findSSHKeyById,
 	findUserById,
 	getAccessibleServerIds,
 	getAllContainerStats,
@@ -600,6 +601,17 @@ export const serverRouter = createTRPCRouter({
 						code: "NOT_FOUND",
 						message: "Server is inactive",
 					});
+				}
+				// The server would connect with this key: it has to be the
+				// caller's organization's.
+				if (input.sshKeyId) {
+					const sshKey = await findSSHKeyById(input.sshKeyId);
+					if (sshKey.organizationId !== ctx.session.activeOrganizationId) {
+						throw new TRPCError({
+							code: "UNAUTHORIZED",
+							message: "You are not authorized to use this SSH key",
+						});
+					}
 				}
 				const currentServer = await updateServerById(input.serverId, {
 					...input,

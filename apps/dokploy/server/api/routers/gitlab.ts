@@ -147,18 +147,29 @@ export const gitlabRouter = createTRPCRouter({
 	update: withPermission("gitProviders", "create")
 		.input(apiUpdateGitlab)
 		.mutation(async ({ input, ctx }) => {
+			// The provider row is addressed by id: it has to belong to the caller's
+			// organization before it is rewritten (updateGitProvider re-assigns the
+			// organization), and its own gitProviderId is the one that is updated.
+			const gitlab = await findGitlabById(input.gitlabId);
+			if (
+				gitlab.gitProvider.organizationId !== ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({ code: "UNAUTHORIZED" });
+			}
 			if (input.name) {
-				await updateGitProvider(input.gitProviderId, {
+				await updateGitProvider(gitlab.gitProviderId, {
 					name: input.name,
 					organizationId: ctx.session.activeOrganizationId,
 				});
 
 				await updateGitlab(input.gitlabId, {
 					...input,
+					gitProviderId: gitlab.gitProviderId,
 				});
 			} else {
 				await updateGitlab(input.gitlabId, {
 					...input,
+					gitProviderId: gitlab.gitProviderId,
 				});
 			}
 

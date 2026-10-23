@@ -16,7 +16,12 @@ import {
 	type ServiceType,
 	volumeBackups,
 } from "../db/schema";
-import type { VolumeBindingFacts } from "../utils/volume-backups/binding";
+import { logger } from "../lib/logger";
+import {
+	evaluateVolumeBinding,
+	isInServiceVolumeNamespace,
+	type VolumeBindingFacts,
+} from "../utils/volume-backups/binding";
 
 const environmentOrganization = {
 	columns: {},
@@ -221,6 +226,8 @@ const findOrganizationsClaimingNamespace = async (volumeName: string) => {
 	return results.flat().map((service) => {
 		const organizationId = organizationOf(service);
 		return {
+			source: "namespace" as const,
+			id: service.appName,
 			organizationId,
 			serverId: serverOf(service),
 			anyServer: !organizationId,
@@ -247,10 +254,16 @@ const rowOrganization = (row: RowWithServices) =>
 
 // A row whose service or organization cannot be resolved cannot be placed on
 // a host, so it counts as a claim on every server.
-const rowClaim = (row: RowWithServices) => {
+const rowClaim = (
+	row: RowWithServices,
+	source: "mount" | "volumeBackup",
+	id: string,
+) => {
 	const service = rowService(row);
 	const organizationId = organizationOf(service);
 	return {
+		source,
+		id,
 		organizationId,
 		serverId: serverOf(service),
 		anyServer: !service || !organizationId,
@@ -264,10 +277,14 @@ export const loadVolumeBindingFacts = async ({
 	serviceType,
 	serviceId,
 	volumeName,
+	onServerId,
 }: {
 	serviceType: ServiceType;
 	serviceId: string;
 	volumeName: string;
+	// Read the claims for another host than the service's own (null is the
+	// local host). A transfer writes the volume on its target server too.
+	onServerId?: string | null;
 }): Promise<VolumeBindingFacts> => {
 	const service = await loadService(serviceType, serviceId);
 	if (!service) {
@@ -294,7 +311,7 @@ export const loadVolumeBindingFacts = async ({
 			findOrganizationsClaimingNamespace(volumeName),
 		]);
 
-	const serverId = serverOf(service);
+	const serverId = onServerId === undefined ? serverOf(service) : onServerId;
 	const idKey = SERVICE_ID_KEYS[serviceType];
 	let recordedOnOwnMount = false;
 	let recordedOnOtherSameOrgMount = false;
@@ -303,7 +320,7 @@ export const loadVolumeBindingFacts = async ({
 			recordedOnOwnMount = true;
 		} else if (
 			rowOrganization(row) === organizationId &&
-			rowClaim(row).serverId === serverId
+			serverOf(rowService(row)) === serverId
 		) {
 			recordedOnOtherSameOrgMount = true;
 		}
@@ -311,15 +328,19 @@ export const loadVolumeBindingFacts = async ({
 
 	// A volume name only collides on one host, so a claim counts only when the
 	// claiming service runs on the same server (local host = null).
-	const claimedByOtherOrganization = [
+	const otherOrganizationClaims = [
 		...namespaceOrganizations,
-		...mountRows.map(rowClaim),
-		...volumeBackupRows.map(rowClaim),
-	].some(
-		(claim) =>
-			(claim.anyServer || claim.serverId === serverId) &&
-			claim.organizationId !== organizationId,
-	);
+		...mountRows.map((row) => rowClaim(row, "mount", row.mountId)),
+		...volumeBackupRows.map((row) =>
+			rowClaim(row, "volumeBackup", row.volumeBackupId),
+		),
+	]
+		.filter(
+			(claim) =>
+				(claim.anyServer || claim.serverId === serverId) &&
+				claim.organizationId !== organizationId,
+		)
+		.map(({ source, id }) => ({ source, id }));
 
 	return {
 		volumeName,
@@ -334,6 +355,111 @@ export const loadVolumeBindingFacts = async ({
 			collectComposeDeclaredVolumeNames(
 				(service as { composeFile?: string | null }).composeFile,
 			).has(volumeName),
-		claimedByOtherOrganization,
+		claimedByOtherOrganization: otherOrganizationClaims.length > 0,
+		otherOrganizationClaims,
 	};
+};
+
+export type RefusedVolumeMount = { volumeName: string; message: string };
+
+// Sinks that act on the volume names already stored on a service's mounts
+// (deploy, database rebuild, transfer) have no user to ask, and a stored mount
+// can predate the binding rules (T-6822). The stored mount is the record of the
+// name, so it counts as the service's own mount, and the same fail-closed
+// claims as the run-time check of #459 decide:
+// - a name that fails the volume-name format, a Dokploy-reserved name
+//   (`dokploy`, `dokploy-*`, `dokploy_*`) or a name another organization's
+//   service on the same server claims is ALWAYS refused, with one exception:
+//   a name in the service's OWN namespace (`<appName>`, `<appName>-*`,
+//   `<appName>_*`) that is claimed only by another organization's volume
+//   backup rows is allowed. appName is unique on the host, so such a row is a
+//   stale or hand-written record and must not lock a service out of its own
+//   volumes. Another organization's mount or appName namespace still refuses;
+// - anything else an owner/admin could have created is accepted, so an
+//   organization's own outside-named mounts keep working.
+// `serverIds` lists the hosts to read the claims for (default: the service's
+// own host; null is the local host).
+export const findRefusedVolumeMounts = async (
+	mounts: ReadonlyArray<{ type: string; volumeName?: string | null }>,
+	service: { serviceType: ServiceType; serviceId: string },
+	{ serverIds }: { serverIds?: Array<string | null> } = {},
+): Promise<RefusedVolumeMount[]> => {
+	const volumeNames = new Set<string>();
+	for (const mount of mounts) {
+		if (mount.type === "volume" && mount.volumeName) {
+			volumeNames.add(mount.volumeName);
+		}
+	}
+	const refused: RefusedVolumeMount[] = [];
+	for (const volumeName of volumeNames) {
+		for (const onServerId of serverIds ?? [undefined]) {
+			let verdict: ReturnType<typeof evaluateVolumeBinding>;
+			try {
+				const facts = await loadVolumeBindingFacts({
+					...service,
+					volumeName,
+					onServerId,
+				});
+				const claims = facts.otherOrganizationClaims ?? [];
+				const onlyVolumeBackupClaims =
+					claims.length > 0 &&
+					claims.every((claim) => claim.source === "volumeBackup");
+				verdict = evaluateVolumeBinding(
+					{
+						...facts,
+						recordedOnOwnMount: true,
+						claimedByOtherOrganization:
+							facts.claimedByOtherOrganization &&
+							!(
+								onlyVolumeBackupClaims &&
+								isInServiceVolumeNamespace(volumeName, facts.appName)
+							),
+					},
+					{ privileged: true },
+				);
+				if (!verdict.ok) {
+					// Server side only: the user-facing text stays the one refusal
+					// message, so it cannot tell another organization's rows apart.
+					logger.warn(
+						{
+							...service,
+							volumeName,
+							serverId: facts.serverId,
+							conflictingRows: claims,
+						},
+						"[VolumeBinding] A stored volume mount was refused",
+					);
+				}
+			} catch (error) {
+				if (!(error instanceof TRPCError) || error.code !== "NOT_FOUND") {
+					throw error;
+				}
+				// The service or its organization cannot be resolved: fail closed.
+				logger.warn(
+					{ ...service, volumeName },
+					"[VolumeBinding] A stored volume mount was refused: the service could not be resolved",
+				);
+				verdict = {
+					ok: false,
+					message: `Volume "${volumeName}" is refused: the service it belongs to could not be resolved.`,
+				};
+			}
+			if (!verdict.ok) {
+				refused.push({ volumeName, message: verdict.message });
+				break;
+			}
+		}
+	}
+	return refused;
+};
+
+// Refuses (throws) when any volume mount of the service fails the check above.
+export const assertVolumeMountsBound = async (
+	mounts: ReadonlyArray<{ type: string; volumeName?: string | null }>,
+	service: { serviceType: ServiceType; serviceId: string },
+) => {
+	const [refused] = await findRefusedVolumeMounts(mounts, service);
+	if (refused) {
+		throw new Error(refused.message);
+	}
 };

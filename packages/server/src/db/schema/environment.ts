@@ -66,7 +66,8 @@ export const apiUpdateEnvironment = z.object({
 	environmentId: z.string().min(1),
 	name: z.string().min(1).optional(),
 	description: z.string().optional(),
-	projectId: z.string().optional(),
+	// No `projectId`: an environment never changes project through update, which
+	// would move it (and its services) into a project of another organization.
 	env: z.string().optional(),
 });
 

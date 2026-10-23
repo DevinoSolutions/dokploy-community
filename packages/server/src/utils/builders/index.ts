@@ -2,6 +2,7 @@ import { db } from "@dokploy/server/db";
 import { applications, domains } from "@dokploy/server/db/schema";
 import { resolveServiceNetworks } from "@dokploy/server/services/network";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
+import { assertVolumeMountsBound } from "@dokploy/server/services/volume-binding";
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
 import { eq } from "drizzle-orm";
@@ -164,6 +165,11 @@ export const mechanizeDockerContainer = async (
 		cpuReservation,
 	});
 
+	// Deploy fails closed on a mount whose volume name belongs to somebody else.
+	await assertVolumeMountsBound(mounts, {
+		serviceType: "application",
+		serviceId: application.applicationId,
+	});
 	const volumesMount = generateVolumeMounts(mounts);
 
 	const resolvedNetworks = await resolveServiceNetworks(application);

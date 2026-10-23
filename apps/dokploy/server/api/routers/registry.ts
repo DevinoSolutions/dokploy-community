@@ -68,6 +68,11 @@ export const registryRouter = createTRPCRouter({
 					message: "You are not allowed to update this registry",
 				});
 			}
+			// `docker login` runs over SSH on this server with the new credentials.
+			await assertServerInOrganization(
+				rest.serverId && rest.serverId !== "none" ? rest.serverId : undefined,
+				ctx.session.activeOrganizationId,
+			);
 			const application = await updateRegistry(registryId, {
 				...rest,
 			});
