@@ -764,14 +764,15 @@ export const serverRouter = createTRPCRouter({
 			);
 			// The argv of a container's processes carries its service's secrets, so
 			// the container must belong to a service the caller can read.
-			await assertContainerServiceReadable(
+			// `docker top` runs on the id that was checked, not on the string sent.
+			const containerId = await assertContainerServiceReadable(
 				ctx,
 				input.containerId,
 				input.serverId,
 			);
 
 			const processes = await getContainerProcesses(
-				input.containerId,
+				containerId,
 				input.serverId,
 			);
 			return scrubCommandFields(processes) as typeof processes;

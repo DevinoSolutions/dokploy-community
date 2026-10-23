@@ -1,4 +1,9 @@
-import { applications, compose, postgres } from "@dokploy/server/db/schema";
+import {
+	applications,
+	compose,
+	postgres,
+	previewDeployments,
+} from "@dokploy/server/db/schema";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,12 +17,21 @@ const mocks = vi.hoisted(() => ({
 	// table -> rows the service lookup finds for the container's labels
 	serviceRows: new Map<
 		unknown,
-		{ serviceId: string; serverId: string | null }[]
+		(
+			| { serviceId: string; serverId: string | null }
+			| { applicationId: string | null; composeId: string | null }
+		)[]
 	>(),
 	// service id -> organization it lives in
 	serviceOrganizations: new Map<string, string>(),
-	// container id -> its labels
+	// parent rows the preview lookup reads the server from
+	parents: new Map<unknown, { serverId: string | null }[]>(),
+	// container name -> its labels
 	containers: new Map<string, Record<string, string>>(),
+	// container name -> the full id docker resolves it to (default: derived)
+	ids: new Map<string, string>(),
+	idOf: (name: string) =>
+		Buffer.from(name).toString("hex").padEnd(64, "0").slice(0, 64),
 	commands: [] as { serverId?: string; command: string }[],
 }));
 
@@ -28,9 +42,13 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 		...original,
 		db: {
 			query: { member: { findFirst: vi.fn(async () => mocks.member) } },
-			select: () => ({
+			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
-					where: async () => mocks.serviceRows.get(table) ?? [],
+					// service lookup, preview lookup, or the preview parent's server
+					where: async () =>
+						("serviceId" in fields || "applicationId" in fields
+							? mocks.serviceRows.get(table)
+							: mocks.parents.get(table)) ?? [],
 				}),
 			}),
 			// findServiceOrganizationId passes the service id as the first param
@@ -54,7 +72,8 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 			const id = command.trim().split(/\s+/).pop() ?? "";
 			const labels = mocks.containers.get(id);
 			if (!labels) throw new Error("No such container");
-			return { stdout: JSON.stringify(labels), stderr: "" };
+			const fullId = mocks.ids.get(id) ?? mocks.idOf(id);
+			return { stdout: `${fullId} ${JSON.stringify(labels)}`, stderr: "" };
 		}
 		return {
 			stdout: [
@@ -103,6 +122,8 @@ beforeEach(() => {
 	mocks.serviceRows.clear();
 	mocks.serviceOrganizations.clear();
 	mocks.containers.clear();
+	mocks.ids.clear();
+	mocks.parents.clear();
 	mocks.commands.length = 0;
 });
 
@@ -179,7 +200,7 @@ describe("server.getContainerProcesses", () => {
 		expect(dockerTopRuns()).toHaveLength(0);
 	});
 
-	it("refuses a container that names a second service the caller cannot read", async () => {
+	it("refuses a container with a forged extra label naming a service the caller cannot read", async () => {
 		mocks.member = { role: "member", accessedServices: ["app-a"] };
 		mocks.containers.set("c-mixed", {
 			"com.docker.swarm.service.name": "app-a-abc123",
@@ -245,7 +266,7 @@ describe("server.getContainerProcesses", () => {
 		expect(dockerTopRuns()).toEqual([
 			{
 				serverId: undefined,
-				command: expect.stringContaining("docker top c-a"),
+				command: expect.stringContaining(`docker top ${mocks.idOf("c-a")}`),
 			},
 		]);
 	});
@@ -269,7 +290,7 @@ describe("server.getContainerProcesses", () => {
 		expect(dockerTopRuns()).toEqual([
 			{
 				serverId: "server-a",
-				command: expect.stringContaining("docker top c-a"),
+				command: expect.stringContaining(`docker top ${mocks.idOf("c-a")}`),
 			},
 		]);
 	});
@@ -288,5 +309,145 @@ describe("server.getContainerProcesses", () => {
 
 		expect(processes).toHaveLength(1);
 		expect(dockerTopRuns()).toHaveLength(1);
+	});
+	it("runs docker top on the id inspect returned, not on the string sent", async () => {
+		mocks.member = { role: "owner", accessedServices: [] };
+		const fullId = "a".repeat(64);
+		// a name the caller picked to look like the prefix of another container
+		mocks.containers.set("aaaa", {
+			"com.docker.swarm.service.name": "app-a-abc123",
+		});
+		mocks.ids.set("aaaa", fullId);
+		mocks.serviceRows.set(applications, [
+			{ serviceId: "app-a", serverId: null },
+		]);
+		mocks.serviceOrganizations.set("app-a", "org-a");
+
+		await caller.server.getContainerProcesses({ containerId: "aaaa" });
+
+		const runs = dockerTopRuns();
+		expect(runs).toHaveLength(1);
+		expect(runs[0]?.command).toBe(
+			`docker top ${fullId} -eo pid,pcpu,pmem,rss,args`,
+		);
+	});
+
+	it("refuses an inspect answer without a full 64 hex id", async () => {
+		mocks.member = { role: "owner", accessedServices: [] };
+		mocks.containers.set("c-a", {
+			"com.docker.swarm.service.name": "app-a-abc123",
+		});
+		mocks.ids.set("c-a", "abc123");
+		mocks.serviceRows.set(applications, [
+			{ serviceId: "app-a", serverId: null },
+		]);
+		mocks.serviceOrganizations.set("app-a", "org-a");
+
+		await expect(
+			caller.server.getContainerProcesses({ containerId: "c-a" }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(dockerTopRuns()).toHaveLength(0);
+	});
+
+	it("resolves a preview container of an application to its parent", async () => {
+		mocks.containers.set("c-prev", {
+			"com.docker.swarm.service.name": "preview-app-p-xyz",
+		});
+		mocks.serviceRows.set(previewDeployments, [
+			{ applicationId: "app-p", composeId: null },
+		]);
+		mocks.parents.set(applications, [{ serverId: null }]);
+		mocks.serviceOrganizations.set("app-p", "org-a");
+
+		mocks.member = { role: "member", accessedServices: [] };
+		await expect(
+			caller.server.getContainerProcesses({ containerId: "c-prev" }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(dockerTopRuns()).toHaveLength(0);
+
+		mocks.member = { role: "member", accessedServices: ["app-p"] };
+		await caller.server.getContainerProcesses({ containerId: "c-prev" });
+		expect(dockerTopRuns()).toHaveLength(1);
+	});
+
+	it("resolves a preview container of a compose to its parent and server", async () => {
+		mocks.member = { role: "member", accessedServices: ["cmp-p"] };
+		mocks.containers.set("c-prev", {
+			"com.docker.compose.project": "preview-cmp-p-xyz",
+		});
+		mocks.serviceRows.set(previewDeployments, [
+			{ applicationId: null, composeId: "cmp-p" },
+		]);
+		mocks.parents.set(compose, [{ serverId: "server-a" }]);
+		mocks.serviceOrganizations.set("cmp-p", "org-a");
+
+		// the parent runs on server-a, so the local host is the wrong place
+		await expect(
+			caller.server.getContainerProcesses({ containerId: "c-prev" }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(dockerTopRuns()).toHaveLength(0);
+
+		await caller.server.getContainerProcesses({
+			containerId: "c-prev",
+			serverId: "server-a",
+		});
+		expect(dockerTopRuns()).toEqual([
+			{
+				serverId: "server-a",
+				command: expect.stringContaining(`docker top ${mocks.idOf("c-prev")}`),
+			},
+		]);
+	});
+
+	it("refuses a preview of an organization B service", async () => {
+		mocks.member = { role: "owner", accessedServices: [] };
+		mocks.containers.set("c-prev", {
+			"com.docker.swarm.service.name": "preview-app-b-xyz",
+		});
+		mocks.serviceRows.set(previewDeployments, [
+			{ applicationId: "app-b", composeId: null },
+		]);
+		mocks.parents.set(applications, [{ serverId: null }]);
+		mocks.serviceOrganizations.set("app-b", "org-b");
+
+		await expect(
+			caller.server.getContainerProcesses({ containerId: "c-prev" }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(dockerTopRuns()).toHaveLength(0);
+	});
+
+	it("refuses a remote container requested without a serverId", async () => {
+		mocks.member = { role: "owner", accessedServices: [] };
+		mocks.containers.set("c-remote", {
+			"com.docker.swarm.service.name": "app-r-abc123",
+		});
+		mocks.serviceRows.set(applications, [
+			{ serviceId: "app-r", serverId: "server-a" },
+		]);
+		mocks.serviceOrganizations.set("app-r", "org-a");
+
+		await expect(
+			caller.server.getContainerProcesses({ containerId: "c-remote" }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(dockerTopRuns()).toHaveLength(0);
+	});
+
+	it("refuses a local container requested with a serverId", async () => {
+		mocks.member = { role: "owner", accessedServices: [] };
+		mocks.containers.set("c-local", {
+			"com.docker.swarm.service.name": "app-l-abc123",
+		});
+		mocks.serviceRows.set(applications, [
+			{ serviceId: "app-l", serverId: null },
+		]);
+		mocks.serviceOrganizations.set("app-l", "org-a");
+
+		await expect(
+			caller.server.getContainerProcesses({
+				containerId: "c-local",
+				serverId: "server-a",
+			}),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(dockerTopRuns()).toHaveLength(0);
 	});
 });

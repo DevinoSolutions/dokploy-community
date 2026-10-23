@@ -26,30 +26,43 @@ import {
 const containerNotFound = () =>
 	new TRPCError({ code: "NOT_FOUND", message: "Container not found" });
 
-const readOwnerAppNames = async (
+// Docker resolves a name before an ID prefix, and a compose user may name a
+// container like the prefix of another one. The id comes back with the labels so
+// the caller can run its command on the container that was checked, not on
+// whatever the string resolves to later.
+const FULL_CONTAINER_ID = /^[a-f0-9]{64}$/;
+
+const readContainer = async (
 	containerId: string,
 	serverId?: string,
-): Promise<string[]> => {
+): Promise<{ id: string; appNames: string[] } | null> => {
 	const command = quote([
 		"docker",
 		"inspect",
 		"--type",
 		"container",
 		"--format",
-		"{{json .Config.Labels}}",
+		"{{.Id}} {{json .Config.Labels}}",
 		containerId,
 	]);
 	try {
 		const { stdout } = serverId
 			? await execAsyncRemote(serverId, command)
 			: await execAsync(command);
-		const labels = (JSON.parse(stdout.trim()) ?? {}) as Record<string, unknown>;
+		const output = stdout.trim();
+		const split = output.indexOf(" ");
+		const id = output.slice(0, split);
+		if (split < 0 || !FULL_CONTAINER_ID.test(id)) return null;
+		const labels = (JSON.parse(output.slice(split + 1)) ?? {}) as Record<
+			string,
+			unknown
+		>;
 		const names = OWNERSHIP_LABELS.map((label) => labels[label]).filter(
 			(value): value is string => typeof value === "string" && value !== "",
 		);
-		return [...new Set(names)];
+		return { id, appNames: [...new Set(names)] };
 	} catch {
-		return [];
+		return null;
 	}
 };
 
@@ -110,16 +123,19 @@ const findServicesByAppName = async (appNames: string[]) => {
  * Owners and admins are not exempt from the "belongs to a service" rule: a
  * container that backs no service (Dokploy itself, Traefik, its database) is
  * refused for every role.
+ *
+ * Returns the full id of the container that was checked. Run the command on
+ * that id and never on the string the client sent.
  */
 export const assertContainerServiceReadable = async (
 	ctx: PermissionCtx,
 	containerId: string,
 	serverId?: string,
-) => {
-	const appNames = await readOwnerAppNames(containerId, serverId);
-	if (appNames.length === 0) throw containerNotFound();
+): Promise<string> => {
+	const container = await readContainer(containerId, serverId);
+	if (!container || container.appNames.length === 0) throw containerNotFound();
 
-	const services = await findServicesByAppName(appNames);
+	const services = await findServicesByAppName(container.appNames);
 	if (services.length === 0) throw containerNotFound();
 
 	for (const service of services) {
@@ -130,4 +146,5 @@ export const assertContainerServiceReadable = async (
 			throw containerNotFound();
 		}
 	}
+	return container.id;
 };
