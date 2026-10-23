@@ -515,8 +515,8 @@ export const UptimelyServicePanel = ({ serviceType, serviceId }: Props) => {
 		<Shell>
 			{data.quota && (
 				<div className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-					Uptimely quota exhausted. Showing the last known status; Dokploy
-					will check again after{" "}
+					Uptimely quota exhausted. Status shown here may be out of date;
+					Dokploy will check again after{" "}
 					{new Date(data.quota.retryAfter).toLocaleTimeString()}.
 				</div>
 			)}

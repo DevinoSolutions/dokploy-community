@@ -15,6 +15,24 @@ import { UptimelyError } from "./client";
 
 export const UPTIMELY_READ_CACHE_TTL_MS = 60_000;
 export const UPTIMELY_DEFAULT_BACKOFF_MS = 15 * 60_000;
+/** A monthly reset must not lock the integration out: probe once per cap. */
+export const UPTIMELY_MAX_BACKOFF_MS = 30 * 60_000;
+const UPTIMELY_MIN_BACKOFF_MS = 1_000;
+
+/**
+ * Backoff length for a server-supplied wait: missing or invalid values use the
+ * default, 0 means "retry now" (the minimum), anything else is clamped to the
+ * cap. Never returns a value that cannot be turned into a Date.
+ */
+export const clampUptimelyBackoffMs = (value: unknown): number => {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+		return UPTIMELY_DEFAULT_BACKOFF_MS;
+	}
+	return Math.min(
+		Math.max(value, UPTIMELY_MIN_BACKOFF_MS),
+		UPTIMELY_MAX_BACKOFF_MS,
+	);
+};
 /** Expired entries are kept this long so they can be served during backoff. */
 const STALE_RETENTION_MS = 60 * 60_000;
 const MAX_ENTRIES = 500;
@@ -22,7 +40,10 @@ const MAX_ENTRIES = 500;
 export class UptimelyQuotaError extends UptimelyError {
 	readonly retryAt: number;
 
-	constructor(retryAt: number, options: { cause?: unknown } = {}) {
+	constructor(retryAtInput: number, options: { cause?: unknown } = {}) {
+		const retryAt = Number.isFinite(retryAtInput)
+			? Math.min(retryAtInput, Date.now() + UPTIMELY_MAX_BACKOFF_MS)
+			: Date.now() + UPTIMELY_DEFAULT_BACKOFF_MS;
 		super(
 			`Uptimely quota exhausted, retrying after ${new Date(retryAt).toISOString()}`,
 			{
@@ -52,6 +73,9 @@ type Entry = { value: unknown; expiresAt: number };
 const entries = new Map<string, Entry>();
 const inflight = new Map<string, Promise<unknown>>();
 const backoffUntil = new Map<string, number>();
+/** Bumped on invalidation so reads already in flight do not write back. */
+const generations = new Map<string, number>();
+const generationOf = (prefix: string) => generations.get(prefix) ?? 0;
 
 const integrationPrefix = (s: IntegrationScope) =>
 	`${JSON.stringify([s.organizationId, s.uptimelyId])}|`;
@@ -94,12 +118,14 @@ export const invalidateUptimelyCache = (scope: IntegrationScope) => {
 		}
 	}
 	backoffUntil.delete(prefix);
+	generations.set(prefix, generationOf(prefix) + 1);
 };
 
 export const resetUptimelyCacheForTests = () => {
 	entries.clear();
 	inflight.clear();
 	backoffUntil.clear();
+	generations.clear();
 };
 
 /**
@@ -128,30 +154,34 @@ export const readUptimelyCached = async <T>(
 	const pending = inflight.get(key);
 	if (pending) return pending as Promise<T>;
 
-	const run = (async () => {
+	const prefix = integrationPrefix(scope);
+	const generation = generationOf(prefix);
+	let run: Promise<T> | undefined;
+	run = (async () => {
 		try {
 			const value = await fetcher();
-			const at = Date.now();
-			entries.set(key, {
-				value,
-				expiresAt: at + (options.ttlMs ?? UPTIMELY_READ_CACHE_TTL_MS),
-			});
-			prune(at);
+			if (generationOf(prefix) === generation) {
+				const at = Date.now();
+				entries.set(key, {
+					value,
+					expiresAt: at + (options.ttlMs ?? UPTIMELY_READ_CACHE_TTL_MS),
+				});
+				prune(at);
+			}
 			return value;
 		} catch (error) {
 			if (!isUptimelyQuotaError(error)) throw error;
-			const waitMs =
-				error instanceof UptimelyError &&
-				typeof error.retryAfterMs === "number" &&
-				error.retryAfterMs > 0
-					? error.retryAfterMs
-					: UPTIMELY_DEFAULT_BACKOFF_MS;
+			const waitMs = clampUptimelyBackoffMs(
+				error instanceof UptimelyError ? error.retryAfterMs : undefined,
+			);
 			const retryAt = Date.now() + waitMs;
-			backoffUntil.set(integrationPrefix(scope), retryAt);
+			if (generationOf(prefix) === generation) {
+				backoffUntil.set(prefix, retryAt);
+			}
 			if (entry) return entry.value as T;
 			throw new UptimelyQuotaError(retryAt, { cause: error });
 		} finally {
-			inflight.delete(key);
+			if (inflight.get(key) === run) inflight.delete(key);
 		}
 	})();
 	inflight.set(key, run);

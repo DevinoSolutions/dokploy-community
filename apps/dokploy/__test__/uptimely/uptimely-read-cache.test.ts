@@ -5,7 +5,9 @@ import {
 	isUptimelyQuotaError,
 	readUptimelyCached,
 	resetUptimelyCacheForTests,
+	clampUptimelyBackoffMs,
 	UPTIMELY_DEFAULT_BACKOFF_MS,
+	UPTIMELY_MAX_BACKOFF_MS,
 	UPTIMELY_READ_CACHE_TTL_MS,
 	UptimelyQuotaError,
 } from "@dokploy/server/utils/uptimely/read-cache";
@@ -150,6 +152,80 @@ describe("readUptimelyCached", () => {
 		await readUptimelyCached(scope, "list", fetcher);
 		await readUptimelyCached(other, "list", fetcher);
 		expect(fetcher).toHaveBeenCalledTimes(3);
+	});
+});
+
+describe("backoff clamp, races and sharing", () => {
+	it("clamps a huge Retry-After without throwing", async () => {
+		const huge = vi.fn(async () => {
+			throw new UptimelyError("limited", {
+				code: 429,
+				retryAfterMs: 99999999999999 * 1000,
+			});
+		});
+		const error = await readUptimelyCached(scope, "list", huge).catch((e) => e);
+		expect(error).toBeInstanceOf(UptimelyQuotaError);
+		expect(error.retryAt).toBe(Date.now() + UPTIMELY_MAX_BACKOFF_MS);
+		expect(() => new Date(error.retryAt).toISOString()).not.toThrow();
+		expect(getUptimelyBackoffUntil(scope)).toBe(
+			Date.now() + UPTIMELY_MAX_BACKOFF_MS,
+		);
+	});
+
+	it("uses the default for invalid waits and the minimum for 0", () => {
+		expect(clampUptimelyBackoffMs(Number.NaN)).toBe(UPTIMELY_DEFAULT_BACKOFF_MS);
+		expect(clampUptimelyBackoffMs(Number.POSITIVE_INFINITY)).toBe(
+			UPTIMELY_DEFAULT_BACKOFF_MS,
+		);
+		expect(clampUptimelyBackoffMs(-5)).toBe(UPTIMELY_DEFAULT_BACKOFF_MS);
+		expect(clampUptimelyBackoffMs(undefined)).toBe(UPTIMELY_DEFAULT_BACKOFF_MS);
+		expect(clampUptimelyBackoffMs(0)).toBe(1_000);
+		expect(clampUptimelyBackoffMs(120_000)).toBe(120_000);
+	});
+
+	it("Retry-After: 0 retries almost immediately, not after 15 minutes", async () => {
+		const limited = vi.fn(async () => {
+			throw new UptimelyError("limited", { code: 429, retryAfterMs: 0 });
+		});
+		await readUptimelyCached(scope, "list", limited).catch(() => {});
+		vi.advanceTimersByTime(1_001);
+		expect(await readUptimelyCached(scope, "list", async () => "ok")).toBe("ok");
+	});
+
+	it("does not write back a fetch that was invalidated while in flight", async () => {
+		let release: (v: string) => void = () => {};
+		const slow = vi.fn(() => new Promise<string>((r) => (release = r)));
+		const pending = readUptimelyCached(scope, "list", slow);
+		invalidateUptimelyCache(scope);
+		release("stale");
+		expect(await pending).toBe("stale");
+		const fresh = vi.fn(async () => "fresh");
+		expect(await readUptimelyCached(scope, "list", fresh)).toBe("fresh");
+	});
+
+	it("does not set a backoff from a 429 that was invalidated while in flight", async () => {
+		let fail: (e: unknown) => void = () => {};
+		const slow = vi.fn(() => new Promise<string>((_, rej) => (fail = rej)));
+		const pending = readUptimelyCached(scope, "list", slow).catch((e) => e);
+		invalidateUptimelyCache(scope);
+		fail(new UptimelyError("old key", { code: 429 }));
+		await pending;
+		expect(getUptimelyBackoffUntil(scope)).toBeNull();
+	});
+
+	it("shares a rejection with every waiter and clears inflight", async () => {
+		let fail: (e: unknown) => void = () => {};
+		const fetcher = vi
+			.fn<() => Promise<string>>()
+			.mockImplementationOnce(() => new Promise((_, rej) => (fail = rej)))
+			.mockResolvedValueOnce("ok");
+		const a = readUptimelyCached(scope, "list", fetcher);
+		const b = readUptimelyCached(scope, "list", fetcher);
+		fail(new UptimelyError("boom"));
+		await expect(a).rejects.toThrow("boom");
+		await expect(b).rejects.toThrow("boom");
+		expect(fetcher).toHaveBeenCalledTimes(1);
+		expect(await readUptimelyCached(scope, "list", fetcher)).toBe("ok");
 	});
 });
 

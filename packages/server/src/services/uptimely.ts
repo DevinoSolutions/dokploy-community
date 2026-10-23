@@ -1329,6 +1329,8 @@ export const runUptimelyProbe = async (params: {
 	});
 	// When every probe was refused for the same reason (typically the AI write
 	// gate), surface that as the error instead of a list of identical failures.
+	// A probe changes monitor state, so drop the cached reads.
+	if (probes.some((p) => !p.error)) invalidateUptimelyCache(integration);
 	if (probes.every((p) => p.error)) {
 		const first = results.find((r) => r.status === "rejected") as
 			| PromiseRejectedResult
