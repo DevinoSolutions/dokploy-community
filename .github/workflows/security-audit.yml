@@ -1,15 +1,31 @@
+# Mirrors check 1 of the org's DevinoSolutions/.github security-audit.yml
+# (pnpm audit at high). That reusable workflow lives in a private repo and
+# cannot be called from this public one. Check 2 (stale override floors) is
+# not included.
 name: Security audit
 
 on:
   pull_request:
     branches: [canary]
+    paths:
+      - pnpm-lock.yaml
+      - "**/package.json"
+      - pnpm-workspace.yaml
+      - .github/workflows/security-audit.yml
   workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 1"
 
 permissions:
   contents: read
 
 jobs:
   audit:
-    uses: DevinoSolutions/.github/.github/workflows/security-audit.yml@main
-    with:
-      package-manager: pnpm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.22.1
+      - run: pnpm audit --audit-level=high

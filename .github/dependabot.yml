@@ -45,3 +45,16 @@ updates:
       docker:
         patterns:
           - "*"
+
+  - package-ecosystem: gomod
+    directory: "/apps/monitoring"
+    target-branch: canary
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        update-types:
+          - minor
+          - patch
+        patterns:
+          - "*"
