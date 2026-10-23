@@ -11,6 +11,30 @@ vi.mock("@dokploy/server/db", () => ({
 	db: { query: { destinations: { findFirst: mocks.findDestinationRow } } },
 }));
 
+// The volume-name binding has its own tests (volume-binding*.test.ts); here
+// every volume sits in the service's own namespace.
+vi.mock("@dokploy/server/services/volume-binding", () => ({
+	loadVolumeBindingFacts: async ({
+		serviceType,
+		serviceId,
+		volumeName,
+	}: {
+		serviceType: string;
+		serviceId: string;
+		volumeName: string;
+	}) => ({
+		volumeName,
+		serviceType,
+		serviceId,
+		appName: "app",
+		serverId: null,
+		recordedOnOwnMount: false,
+		recordedOnOtherSameOrgMount: false,
+		declaredByComposeFile: false,
+		claimedByOtherOrganization: false,
+	}),
+}));
+
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkPermission: vi.fn(async () => undefined),
 	checkServicePermissionAndAccess: vi.fn(async () => undefined),

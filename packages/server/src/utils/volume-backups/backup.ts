@@ -10,6 +10,7 @@ import {
 	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "../backups/utils";
+import { resolveVolumeBackupHost } from "./binding";
 
 interface RestartSafeBackupCommandOptions {
 	stopCommand: string;
@@ -72,8 +73,7 @@ export const backupVolume = async (
 ) => {
 	const { serviceType, volumeName, turnOff, prefix } = volumeBackup;
 	const destination = await findDestinationById(volumeBackup.destinationId);
-	const serverId =
-		volumeBackup.application?.serverId || volumeBackup.compose?.serverId;
+	const serverId = resolveVolumeBackupHost(volumeBackup);
 	const { VOLUME_BACKUPS_PATH, VOLUME_BACKUP_LOCK_PATH } = paths(!!serverId);
 	const backupFileName = `${volumeName}-${getBackupTimestamp()}.tar`;
 	const effectivePrefix = prefix
