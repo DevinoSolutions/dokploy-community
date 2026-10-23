@@ -17,13 +17,13 @@ import {
 import { and, eq, ne, sql } from "drizzle-orm";
 import { quote } from "shell-quote";
 
-const OWNERSHIP_LABELS = [
+export const OWNERSHIP_LABELS = [
 	"com.docker.swarm.service.name",
 	"com.docker.compose.project",
 	"com.docker.stack.namespace",
 ];
 
-const SERVICE_TABLES = [
+export const SERVICE_TABLES = [
 	{ table: applications, id: applications.applicationId },
 	{ table: compose, id: compose.composeId },
 	{ table: postgres, id: postgres.postgresId },
