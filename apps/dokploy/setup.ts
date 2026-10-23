@@ -1,9 +1,4 @@
-import { exec } from "node:child_process";
 import { exit } from "node:process";
-import { promisify } from "node:util";
-
-const execAsync = promisify(exec);
-
 import { setupDirectories } from "@dokploy/server/setup/config-paths";
 import { initializePostgres } from "@dokploy/server/setup/postgres-setup";
 import {
@@ -14,9 +9,9 @@ import {
 	createDefaultMiddlewares,
 	createDefaultServerTraefikConfig,
 	createDefaultTraefikConfig,
+	ensureTraefikImage,
 	initializeStandaloneTraefik,
 	initializeTraefikService,
-	TRAEFIK_VERSION,
 } from "@dokploy/server/setup/traefik-setup";
 
 const useTraefikSwarmMode = process.env.TRAEFIK_SWARM_MODE === "true";
@@ -29,8 +24,9 @@ const useTraefikSwarmMode = process.env.TRAEFIK_SWARM_MODE === "true";
 		await initializeNetwork();
 		createDefaultTraefikConfig();
 		createDefaultServerTraefikConfig();
-		await execAsync(`docker pull traefik:v${TRAEFIK_VERSION}`);
 		if (useTraefikSwarmMode) {
+			// The standalone path pulls the image itself.
+			await ensureTraefikImage();
 			await initializeTraefikService({});
 		} else {
 			await initializeStandaloneTraefik();
