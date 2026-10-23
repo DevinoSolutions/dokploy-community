@@ -1,17 +1,17 @@
-import { CLEANUP_CRON_JOB } from "@dokploy/server/constants";
 import { member } from "@dokploy/server/db/schema";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import { getAllServers } from "@dokploy/server/services/server";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { eq } from "drizzle-orm";
-import { scheduleJob } from "node-schedule";
 import { quote } from "shell-quote";
 import { db } from "../../db/index";
 import { startLogCleanup } from "../access-log/handler";
-import { cleanupAll } from "../docker/utils";
+import {
+	scheduleDockerCleanup,
+	WEB_SERVER_CLEANUP_JOB,
+} from "../docker/cleanup-job";
 import { sendDockerCleanupNotifications } from "../notifications/docker-cleanup";
-import { backgroundJob } from "../process/background";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 import { redactRcloneCredentials } from "./redact";
 import {
@@ -38,19 +38,12 @@ export const initCronJobs = async () => {
 
 	if (webServerSettings?.enableDockerCleanup) {
 		try {
-			scheduleJob(
-				"docker-cleanup",
-				CLEANUP_CRON_JOB,
-				backgroundJob("[Backup] Docker cleanup", async () => {
-					console.log(
-						`Docker Cleanup ${new Date().toLocaleString()}]  Running docker cleanup`,
-					);
-
-					await cleanupAll();
-
-					await sendDockerCleanupNotifications(admin.user.id);
-				}),
-			);
+			scheduleDockerCleanup({
+				jobName: WEB_SERVER_CLEANUP_JOB,
+				hostLabel: "the Dokploy server",
+				cron: webServerSettings.dockerCleanupCron,
+				afterCleanup: () => sendDockerCleanupNotifications(admin.user.id),
+			});
 		} catch (error) {
 			console.error("[Backup] Docker Cleanup Error", error);
 		}
@@ -62,26 +55,17 @@ export const initCronJobs = async () => {
 		const { serverId, enableDockerCleanup, name } = server;
 		if (enableDockerCleanup) {
 			try {
-				scheduleJob(
+				scheduleDockerCleanup({
+					jobName: serverId,
 					serverId,
-					CLEANUP_CRON_JOB,
-					backgroundJob(
-						"[Backup] Server docker cleanup",
-						async () => {
-							console.log(
-								`SERVER-BACKUP[${new Date().toLocaleString()}] Running Cleanup ${name}`,
-							);
-
-							await cleanupAll(serverId);
-
-							await sendDockerCleanupNotifications(
-								admin.user.id,
-								`Docker cleanup for Server ${name} (${serverId})`,
-							);
-						},
-						{ serverId },
-					),
-				);
+					hostLabel: `server ${name} (${serverId})`,
+					cron: server.dockerCleanupCron,
+					afterCleanup: () =>
+						sendDockerCleanupNotifications(
+							admin.user.id,
+							`Docker cleanup for Server ${name} (${serverId})`,
+						),
+				});
 			} catch (error) {
 				console.error(`[Backup] ${error}`);
 			}

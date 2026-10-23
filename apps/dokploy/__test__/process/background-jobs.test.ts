@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 	scheduleJob: vi.fn(),
 	removeJob: vi.fn(),
 	schedule: vi.fn(),
+	findServerById: vi.fn(),
 }));
 
 vi.mock("node-schedule", () => ({
@@ -29,9 +30,25 @@ vi.mock("@dokploy/server", async () => {
 		CLEANUP_CRON_JOB: "0 0 * * *",
 		IS_CLOUD: false,
 		cleanupAll: mocks.cleanupAll,
+		findServerById: mocks.findServerById,
 		sendDockerCleanupNotifications: mocks.sendDockerCleanupNotifications,
 	};
 });
+
+// The cleanup job itself (utils/docker/cleanup-job) runs for real; only what it
+// reaches out to is replaced: the docker prune, and the deployment lookups of
+// the idle guard (nothing is deploying).
+vi.mock("@dokploy/server/utils/docker/utils", () => ({
+	cleanupAll: mocks.cleanupAll,
+}));
+
+vi.mock("@dokploy/server/db", () => ({
+	db: { query: { deployments: { findMany: async () => [] } } },
+}));
+
+vi.mock("@dokploy/server/services/deployment-queue-journal", () => ({
+	listQueueJobs: async () => [],
+}));
 
 vi.mock("@/server/utils/backup", () => ({
 	schedule: mocks.schedule,
@@ -64,6 +81,10 @@ beforeEach(() => {
 	process.on("unhandledRejection", onUnhandled);
 	errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.clearAllMocks();
+	mocks.findServerById.mockResolvedValue({
+		name: "prod",
+		dockerCleanupCron: "0 4 * * *",
+	});
 });
 
 afterEach(() => {
@@ -435,7 +456,7 @@ describe("docker cleanup schedule for a remote server", () => {
 		expect(unhandled).toEqual([]);
 		expect(mocks.sendDockerCleanupNotifications).not.toHaveBeenCalled();
 		expect(errorSpy).toHaveBeenCalledWith(
-			"Docker cleanup failed",
+			"Docker cleanup (server prod (srv-1)) failed",
 			{ serverId: "srv-1" },
 			expect.stringContaining("Timed out while waiting for handshake"),
 		);

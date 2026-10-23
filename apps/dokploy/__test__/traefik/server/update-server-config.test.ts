@@ -25,6 +25,7 @@ const baseSettings: WebServerSettings = {
 	letsEncryptEmail: null,
 	sshPrivateKey: null,
 	enableDockerCleanup: true,
+	dockerCleanupCron: "0 4 * * *",
 	buildsConcurrency: 1,
 	logCleanupCron: null,
 	metricsConfig: {

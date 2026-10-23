@@ -1,7 +1,5 @@
 import path from "node:path";
 import {
-	backgroundJob,
-	CLEANUP_CRON_JOB,
 	checkGPUStatus,
 	checkPortInUse,
 	checkPostgresHealth,
@@ -55,10 +53,14 @@ import {
 import { db } from "@dokploy/server/db";
 import { checkPermission } from "@dokploy/server/services/permission";
 import { getAccessibleServerIds } from "@dokploy/server/services/server";
+import {
+	cancelDockerCleanup,
+	scheduleDockerCleanup,
+	WEB_SERVER_CLEANUP_JOB,
+} from "@dokploy/server/utils/docker/cleanup-job";
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
 import { TRPCError } from "@trpc/server";
 import { eq, sql } from "drizzle-orm";
-import { scheduledJobs, scheduleJob } from "node-schedule";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
@@ -80,7 +82,7 @@ import {
 	server,
 } from "@/server/db/schema";
 import { cleanAllDeploymentQueue } from "@/server/queues/queueSetup";
-import { removeJob, schedule } from "@/server/utils/backup";
+import { applyDockerCleanupSchedule } from "@/server/utils/docker-cleanup";
 import packageInfo from "../../../package.json";
 import { appRouter } from "../root";
 import {
@@ -442,77 +444,45 @@ export const settingsRouter = createTRPCRouter({
 
 				await updateServerById(input.serverId, {
 					enableDockerCleanup: input.enableDockerCleanup,
+					...(input.dockerCleanupCron && {
+						dockerCleanupCron: input.dockerCleanupCron,
+					}),
 				});
 
 				const server = await findServerById(input.serverId);
 
-				if (server.enableDockerCleanup) {
-					if (server.serverStatus === "inactive") {
-						throw new TRPCError({
-							code: "NOT_FOUND",
-							message: "Server is inactive",
-						});
-					}
-					if (IS_CLOUD) {
-						await schedule({
-							cronSchedule: CLEANUP_CRON_JOB,
-							serverId: input.serverId,
-							type: "server",
-						});
-					} else {
-						scheduleJob(
-							server.serverId,
-							CLEANUP_CRON_JOB,
-							backgroundJob(
-								"Docker cleanup",
-								async () => {
-									console.log(
-										`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
-									);
-
-									await cleanupAll(server.serverId);
-
-									await sendDockerCleanupNotifications(server.organizationId);
-								},
-								{ serverId: server.serverId },
-							),
-						);
-					}
-				} else {
-					if (IS_CLOUD) {
-						await removeJob({
-							cronSchedule: CLEANUP_CRON_JOB,
-							serverId: input.serverId,
-							type: "server",
-						});
-					} else {
-						const currentJob = scheduledJobs[server.serverId];
-						currentJob?.cancel();
-					}
+				if (server.enableDockerCleanup && server.serverStatus === "inactive") {
+					throw new TRPCError({
+						code: "NOT_FOUND",
+						message: "Server is inactive",
+					});
 				}
+				// Replaces the server's job (or cancels it), so a changed schedule
+				// takes effect now and not at the next restart.
+				await applyDockerCleanupSchedule(
+					server.serverId,
+					server.organizationId,
+					server.enableDockerCleanup,
+					server.dockerCleanupCron,
+				);
 			} else if (!IS_CLOUD) {
 				const settingsUpdated = await updateWebServerSettings({
 					enableDockerCleanup: input.enableDockerCleanup,
+					...(input.dockerCleanupCron && {
+						dockerCleanupCron: input.dockerCleanupCron,
+					}),
 				});
 
 				if (settingsUpdated?.enableDockerCleanup) {
 					const organizationId = ctx.session.activeOrganizationId;
-					scheduleJob(
-						"docker-cleanup",
-						CLEANUP_CRON_JOB,
-						backgroundJob("Docker cleanup", async () => {
-							console.log(
-								`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
-							);
-
-							await cleanupAll();
-
-							await sendDockerCleanupNotifications(organizationId);
-						}),
-					);
+					scheduleDockerCleanup({
+						jobName: WEB_SERVER_CLEANUP_JOB,
+						hostLabel: "the Dokploy server",
+						cron: settingsUpdated.dockerCleanupCron,
+						afterCleanup: () => sendDockerCleanupNotifications(organizationId),
+					});
 				} else {
-					const currentJob = scheduledJobs["docker-cleanup"];
-					currentJob?.cancel();
+					cancelDockerCleanup(WEB_SERVER_CLEANUP_JOB);
 				}
 			}
 

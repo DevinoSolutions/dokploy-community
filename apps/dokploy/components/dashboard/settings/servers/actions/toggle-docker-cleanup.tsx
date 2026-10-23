@@ -9,6 +9,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
+import { DockerCleanupScheduleSelect } from "../docker-cleanup-schedule-select";
 
 interface Props {
 	serverId?: string;
@@ -33,16 +34,22 @@ export const ToggleDockerCleanup = ({ serverId }: Props) => {
 	const enabled = serverId
 		? server?.enableDockerCleanup
 		: data?.enableDockerCleanup;
+	const cron = serverId ? server?.dockerCleanupCron : data?.dockerCleanupCron;
 
 	const { mutateAsync } = api.settings.updateDockerCleanup.useMutation();
 
-	const handleToggle = async (checked: boolean) => {
+	const save = async (
+		enableDockerCleanup: boolean,
+		dockerCleanupCron?: string,
+	) => {
 		try {
 			await mutateAsync({
-				enableDockerCleanup: checked,
+				enableDockerCleanup,
+				...(dockerCleanupCron && { dockerCleanupCron }),
 				...(serverId && { serverId }),
 			} as {
 				enableDockerCleanup: boolean;
+				dockerCleanupCron?: string;
 				serverId?: string;
 			});
 			if (serverId) {
@@ -55,6 +62,8 @@ export const ToggleDockerCleanup = ({ serverId }: Props) => {
 			toast.error("Docker Cleanup Error");
 		}
 	};
+
+	const handleToggle = (checked: boolean) => save(checked);
 
 	return (
 		<div className="flex items-center gap-4">
@@ -75,6 +84,10 @@ export const ToggleDockerCleanup = ({ serverId }: Props) => {
 							runners, cron jobs, one-off tasks).
 						</p>
 						<p className="mt-1">
+							It runs at the hour you pick (UTC) and waits while deployments are
+							running or queued on the server, retrying for up to 3 hours.
+						</p>
+						<p className="mt-1">
 							For custom cleanup strategies, use{" "}
 							<a
 								href="https://docs.dokploy.com/docs/core/schedule-jobs#example-1-automatic-docker-cleanup"
@@ -89,6 +102,12 @@ export const ToggleDockerCleanup = ({ serverId }: Props) => {
 					</TooltipContent>
 				</Tooltip>
 			</TooltipProvider>
+			{enabled && cron && (
+				<DockerCleanupScheduleSelect
+					value={cron}
+					onChange={(next) => save(true, next)}
+				/>
+			)}
 		</div>
 	);
 };
