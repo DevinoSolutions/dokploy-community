@@ -1089,7 +1089,12 @@ export const updateDeploymentStatus = async (
 	deploymentStatus: Deployment["status"],
 ) => {
 	// A job the watchdog released must not write over the failure it recorded.
-	if (skipWriteOfReleasedJob(`the status of deployment ${deploymentId}`)) {
+	if (
+		skipWriteOfReleasedJob(
+			`the status of deployment ${deploymentId}`,
+			deploymentId,
+		)
+	) {
 		return [];
 	}
 	const application = await db

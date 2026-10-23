@@ -89,6 +89,33 @@ const clampMinutes = (
 		? Math.min(max, Math.max(min, Math.floor(value)))
 		: fallback;
 
+// Only the kind and the id decide whether a service is excluded: a reason that
+// is too long (a direct SQL edit) must not cost the service its exclusion.
+const storedExclusionSchema = z.object({
+	type: z.enum(["application", "compose"]),
+	id: z.string().min(1),
+	reason: z.unknown().optional(),
+});
+
+/**
+ * Each entry on its own: one bad element is dropped and the valid ones are
+ * kept. Parsing the list as a whole would drop every exclusion for one typo,
+ * and the watchdog would then fail services that were excluded on purpose.
+ */
+export const parseExclusions = (value: unknown): WatchdogExclusion[] => {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item): WatchdogExclusion[] => {
+		const parsed = storedExclusionSchema.safeParse(item);
+		if (!parsed.success) return [];
+		const { type, id, reason } = parsed.data;
+		return [
+			typeof reason === "string" && reason.length > 0
+				? { type, id, reason: reason.slice(0, 300) }
+				: { type, id },
+		];
+	});
+};
+
 /**
  * The effective configuration from the stored row. A value outside its bounds
  * (an old row, a direct SQL edit) is clamped instead of rejected: the watchdog
@@ -109,10 +136,7 @@ export const resolveWatchdogConfig = (
 		MIN_WATCHDOG_MAX_MINUTES,
 		MAX_WATCHDOG_MAX_MINUTES,
 	);
-	const exclusions = z
-		.array(watchdogExclusionSchema)
-		.catch([])
-		.parse(settings?.deploymentWatchdogExclusions ?? []);
+	const exclusions = parseExclusions(settings?.deploymentWatchdogExclusions);
 	return {
 		enabled: settings?.deploymentWatchdogEnabled ?? DEFAULT_WATCHDOG_ENABLED,
 		idleMinutes,

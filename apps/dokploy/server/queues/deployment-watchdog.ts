@@ -13,7 +13,7 @@ import {
 	type WatchdogTrigger,
 	watchdogTriggerLine,
 } from "@dokploy/server/utils/deployments/watchdog-config";
-import type { StopResult } from "./deployment-stop";
+import type { StopOptions, StopResult } from "./deployment-stop";
 import type { InMemoryJob } from "./in-memory-queue";
 
 /**
@@ -47,6 +47,18 @@ import type { InMemoryJob } from "./in-memory-queue";
  * the stop (it sends one); the watchdog sends it only when it is the one that
  * changes the row, so one failure is one notification.
  *
+ * A `running` row that no active job of its service runs (an orphan: the
+ * process restarted, or the job was released) is only closed as failed. Its
+ * process is not known to be ours, so nothing is signalled except through the
+ * pid-file launcher, which checks the pid and its start time; the recorded pid
+ * and the host-wide command-name stop are never used for it.
+ *
+ * A group lock kept after a release (nothing could be signalled) is dropped
+ * after a hard bound, max(2 x wall limit, 3 h), with a loud log line and an
+ * audit entry, so a process that never returns cannot block a service until
+ * the next restart. A stop that found no handle only because other deploys run
+ * on the host is tried again on later sweeps, before the slot is released.
+ *
  * Besides running deploys, a job can sit `active` with no running deployment:
  * the flow finished (or never created a row) and then hung. Those slots are
  * released too, once the job has been silent for the grace period.
@@ -58,6 +70,8 @@ export const WATCHDOG_INTERVAL_MS = MINUTE_MS;
 export const STOP_RELEASE_GRACE_MS = 10 * MINUTE_MS;
 /** A job still active this long after its deployment ended is hung. */
 export const WEDGED_AFTER_FINISH_MS = 5 * MINUTE_MS;
+/** A kept service lock is dropped after at least this long (and 2 x the wall limit). */
+export const GROUP_LOCK_MIN_BOUND_MINUTES = 180;
 
 type DeployRow = WatchdogServiceRef;
 
@@ -71,6 +85,12 @@ export interface WatchdogDeps {
 	 * `keepGroupLock` keeps the service locked until its process returns.
 	 */
 	releaseJob: (jobId: string, options?: { keepGroupLock?: boolean }) => boolean;
+	/** True while a released job still holds its service lock. */
+	hasKeptGroupLock: (jobId: string) => boolean;
+	/** Drop that lock; false when it was not held any more. */
+	dropKeptGroupLock: (jobId: string) => boolean;
+	/** Refuse every later status write for this deployment (its job is released). */
+	markDeploymentReleased: (deploymentId: string) => void;
 	/** The status of a deployment row right now; null when it is gone. */
 	readStatus: (deploymentId: string) => Promise<string | null>;
 	listRunning: () => Promise<WatchdogDeployment[]>;
@@ -100,7 +120,7 @@ export interface WatchdogDeps {
 		logPath: string,
 		line: string,
 	) => Promise<void>;
-	stop: (row: WatchdogDeployment) => Promise<StopResult>;
+	stop: (row: WatchdogDeployment, options?: StopOptions) => Promise<StopResult>;
 	markFailed: (
 		deploymentId: string,
 		message: string,
@@ -117,6 +137,15 @@ export interface WatchdogDeps {
 	recordAudit: (input: RecordDeploymentCancelAuditInput) => Promise<void>;
 	releaseGraceMs?: number;
 	wedgedAfterMs?: number;
+}
+
+/** A released job that still holds its service lock. */
+interface KeptLock {
+	row: WatchdogDeployment | null;
+	service: DeployRow;
+	host: string | null;
+	since: number;
+	boundMs: number;
 }
 
 /** A stop that was issued and is waiting for its job to end. */
@@ -181,6 +210,8 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 	const releaseGraceMs = deps.releaseGraceMs ?? STOP_RELEASE_GRACE_MS;
 	const wedgedAfterMs = deps.wedgedAfterMs ?? WEDGED_AFTER_FINISH_MS;
 	const pending = new Map<string, PendingStop>();
+	/** Service locks kept after a release: job id -> what holds it, since when. */
+	const keptLocks = new Map<string, KeptLock>();
 	/** Deployments seen silent on the last sweep: id -> when first seen. */
 	const suspects = new Map<string, number>();
 	let sweeping = false;
@@ -267,6 +298,22 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 		});
 	};
 
+	const safeStop = async (
+		row: WatchdogDeployment,
+		options: StopOptions,
+	): Promise<StopResult> => {
+		try {
+			return await deps.stop(row, options);
+		} catch (error) {
+			return {
+				method: "none",
+				notRunning: false,
+				claimedCancelled: false,
+				warning: `Could not stop the work: ${errorText(error)}`,
+			};
+		}
+	};
+
 	const stopAndTrack = async (
 		row: WatchdogDeployment,
 		trigger: WatchdogTrigger,
@@ -293,17 +340,9 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 
 		const host = await hostOf(row);
 		await deps.appendLog(host, row.logPath, watchdogTriggerLine(confirmed));
-		let stop: StopResult;
-		try {
-			stop = await deps.stop(row);
-		} catch (error) {
-			stop = {
-				method: "none",
-				notRunning: false,
-				claimedCancelled: false,
-				warning: `Could not stop the work: ${errorText(error)}`,
-			};
-		}
+		// No job runs it: the process is not known to be ours, so only the
+		// launcher (which verifies pid and start time) may be used.
+		const stop = await safeStop(row, job ? {} : { launcherOnly: true });
 		if (stop.warning) {
 			await deps.appendLog(host, row.logPath, `Watchdog: ${stop.warning}`);
 		}
@@ -324,21 +363,141 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 		pending.set(row.deploymentId, stopped);
 	};
 
+	/**
+	 * Free the slot of a job (always the last step) and, when the service lock is
+	 * kept, remember it so the hard bound can drop it later.
+	 */
+	const releaseSlot = (
+		job: InMemoryJob,
+		keepGroupLock: boolean,
+		holder: {
+			row: WatchdogDeployment | null;
+			service: DeployRow;
+			host: string | null;
+		},
+		config: WatchdogConfig,
+	) => {
+		const released = deps.releaseJob(job.id, { keepGroupLock });
+		if (!released || !keepGroupLock) return;
+		keptLocks.set(job.id, {
+			...holder,
+			since: deps.now(),
+			boundMs:
+				Math.max(2 * config.maxMinutes, GROUP_LOCK_MIN_BOUND_MINUTES) *
+				MINUTE_MS,
+		});
+	};
+
+	/**
+	 * A stop that found no handle only because other deploys ran on the host is
+	 * tried again: they may have ended, and the generic stop is safe again.
+	 */
+	const retryStop = async (stopped: PendingStop) => {
+		const { row } = stopped;
+		if ((await deps.readStatus(row.deploymentId)) !== "running") return;
+		const next = await safeStop(row, {});
+		if (next.method === "none" && !next.notRunning) {
+			// Still nothing to signal; stop asking when it is no longer a matter of
+			// waiting for the others.
+			stopped.stop = { ...stopped.stop, retryable: next.retryable === true };
+			return;
+		}
+		stopped.stop = {
+			...next,
+			claimedCancelled: stopped.stop.claimedCancelled || next.claimedCancelled,
+		};
+		// A fresh grace period for the job to end after this stop.
+		stopped.stoppedAt = deps.now();
+		await deps.appendLog(
+			stopped.host,
+			row.logPath,
+			"Watchdog: the other deploys on the host had ended, so the build was stopped now",
+		);
+	};
+
 	/** Follow up on a stop issued by an earlier sweep. */
-	const settle = async (stopped: PendingStop, jobs: InMemoryJob[]) => {
+	const settle = async (
+		stopped: PendingStop,
+		jobs: InMemoryJob[],
+		config: WatchdogConfig,
+	) => {
 		const job = jobs.find((candidate) => candidate.id === stopped.jobId);
+		if (
+			job &&
+			stopped.stop.method === "none" &&
+			stopped.stop.retryable &&
+			!stopped.stop.notRunning
+		) {
+			await retryStop(stopped);
+		}
 		if (job && deps.now() - stopped.stoppedAt < releaseGraceMs) return;
 		pending.delete(stopped.row.deploymentId);
 		// Nothing could be signalled: the process may still be running, so the
 		// service stays locked and only the slot (fleet capacity) is freed.
 		const keepGroupLock = stopped.stop.method === "none";
-		// The row, the log and the service first, the slot last: freeing the slot
-		// starts the next job at once, and its service must not be touched after.
-		await finish(stopped, {
-			slotReleased: Boolean(job),
-			lockKept: Boolean(job) && keepGroupLock,
-		});
-		if (job) deps.releaseJob(job.id, { keepGroupLock });
+		// From here on the late writes of this job are refused by deployment id.
+		if (job) deps.markDeploymentReleased(stopped.row.deploymentId);
+		try {
+			// The row, the log and the service first, the slot last: freeing the
+			// slot starts the next job at once, and its service must not be touched
+			// after.
+			await finish(stopped, {
+				slotReleased: Boolean(job),
+				lockKept: Boolean(job) && keepGroupLock,
+			});
+		} finally {
+			// Whatever went wrong above, the slot must not stay held.
+			if (job) {
+				releaseSlot(
+					job,
+					keepGroupLock,
+					{ row: stopped.row, service: stopped.row, host: stopped.host },
+					config,
+				);
+			}
+		}
+	};
+
+	/** Drop service locks that were kept for too long. */
+	const dropExpiredLocks = async () => {
+		for (const [jobId, kept] of [...keptLocks]) {
+			if (!deps.hasKeptGroupLock(jobId)) {
+				// The old process returned by itself: the lock went with it.
+				keptLocks.delete(jobId);
+				continue;
+			}
+			const heldMs = deps.now() - kept.since;
+			if (heldMs < kept.boundMs) continue;
+			keptLocks.delete(jobId);
+			if (!deps.dropKeptGroupLock(jobId)) continue;
+			const heldMinutes = Math.floor(heldMs / MINUTE_MS);
+			console.error(
+				`Deployment watchdog: the old process of job ${jobId} has not returned ${heldMinutes} min after its slot was released; its service lock was dropped, new deploys of the service can start (the old process may still be running)`,
+			);
+			try {
+				if (kept.row) {
+					await deps.appendLog(
+						kept.host,
+						kept.row.logPath,
+						`Watchdog: the old process had not ended ${heldMinutes} min after its queue slot was released, so the lock on this service was dropped; new deploys of it can start now (the old process may still be running)`,
+					);
+				}
+				const context = await deps.loadContext(kept.service);
+				if (context) {
+					await audit(kept.row, context, {
+						reason: "group-lock-dropped",
+						jobId,
+						groupLockDropped: true,
+						heldMinutes,
+					});
+				}
+			} catch (error) {
+				console.error(
+					`Deployment watchdog: could not record the dropped lock of job ${jobId}`,
+					errorText(error),
+				);
+			}
+		}
 	};
 
 	/** An active job with no running deployment that has been hung since. */
@@ -376,18 +535,32 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 			console.warn(
 				`Deployment watchdog: releasing the queue slot of job ${job.id}, hung with no running deployment`,
 			);
-			await deps.failServiceIfRunning(service).catch(() => {});
-			const context = await deps.loadContext(service);
-			if (context) {
-				await audit(null, context, {
-					reason: "hung-job",
-					jobId: job.id,
-					activeMinutes: Math.floor((deps.now() - startedAt) / MINUTE_MS),
-					slotReleased: true,
-					groupLockKept: keepGroupLock,
-				});
+			try {
+				await deps.failServiceIfRunning(service).catch(() => {});
+				const context = await deps.loadContext(service);
+				if (context) {
+					await audit(null, context, {
+						reason: "hung-job",
+						jobId: job.id,
+						activeMinutes: Math.floor((deps.now() - startedAt) / MINUTE_MS),
+						slotReleased: true,
+						groupLockKept: keepGroupLock,
+					});
+				}
+			} catch (error) {
+				console.error(
+					`Deployment watchdog: could not record the release of job ${job.id}`,
+					errorText(error),
+				);
+			} finally {
+				// The slot is freed whatever the bookkeeping above did.
+				releaseSlot(
+					job,
+					keepGroupLock,
+					{ row: null, service, host: null },
+					config,
+				);
 			}
-			deps.releaseJob(job.id, { keepGroupLock });
 		}
 	};
 
@@ -397,7 +570,7 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 
 		for (const stopped of [...pending.values()]) {
 			try {
-				await settle(stopped, jobs);
+				await settle(stopped, jobs, config);
 			} catch (error) {
 				console.error(
 					`Deployment watchdog: could not finish ${stopped.row.deploymentId}`,
@@ -405,6 +578,7 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 				);
 			}
 		}
+		await dropExpiredLocks();
 		if (!config.enabled) return;
 
 		const running = await deps.listRunning();

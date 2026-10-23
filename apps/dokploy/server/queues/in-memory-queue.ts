@@ -259,6 +259,8 @@ export interface InMemoryQueueOptions {
 
 export class InMemoryQueue {
 	private partitions = new Map<string, Partition>();
+	/** Released jobs whose service lock is still held, by job id. */
+	private keptLocks = new Map<string, InternalJob>();
 	private processor: Processor | null = null;
 	private running = false;
 	private paused = false;
@@ -609,8 +611,12 @@ export class InMemoryQueue {
 			job.finishedOn = this.now();
 			job.failedReason = "Released by the deployment watchdog";
 			partition.active = partition.active.filter((j) => j.id !== job.id);
-			if (options.keepGroupLock) job.groupLockKept = true;
-			else partition.activeGroups.delete(job.group);
+			if (options.keepGroupLock) {
+				job.groupLockKept = true;
+				this.keptLocks.set(job.id, job);
+			} else {
+				partition.activeGroups.delete(job.group);
+			}
 			if (job.jumped) partition.jumpedLast = false;
 			this.settle([job]);
 			this.wakeIdleWaiters();
@@ -618,6 +624,27 @@ export class InMemoryQueue {
 			return true;
 		}
 		return false;
+	}
+
+	/** True while a released job still holds its service's group lock. */
+	hasKeptGroupLock(id: string): boolean {
+		return this.keptLocks.get(id)?.groupLockKept === true;
+	}
+
+	/**
+	 * Drop the group lock a released job kept, because its processor has not
+	 * returned for too long: the service can deploy again. The processor's late
+	 * return then changes nothing (the lock is no longer its to drop, and a newer
+	 * job of the service may hold it). False when no lock was kept.
+	 */
+	dropKeptGroupLock(id: string): boolean {
+		const job = this.keptLocks.get(id);
+		if (!job?.groupLockKept) return false;
+		job.groupLockKept = false;
+		this.keptLocks.delete(id);
+		this.partitions.get(job.partition)?.activeGroups.delete(job.group);
+		void this.drainPartition(job.partition);
+		return true;
 	}
 
 	/** Remove waiting jobs matching a predicate. Active jobs are not affected. */
@@ -910,6 +937,8 @@ export class InMemoryQueue {
 				// Its slot was already freed (and may be in use again). Only a kept
 				// group lock is still ours to drop, now that the process is over.
 				if (job.groupLockKept) {
+					job.groupLockKept = false;
+					this.keptLocks.delete(job.id);
 					this.partitions.get(job.partition)?.activeGroups.delete(job.group);
 					void this.drainPartition(job.partition);
 				}

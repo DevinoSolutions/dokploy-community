@@ -45,11 +45,56 @@ export const isReleasedJobContext = (): boolean =>
 	store().getStore()?.isReleased() === true;
 
 /**
- * Logs and returns true when a write should be skipped because the job that
- * makes it was released by the watchdog.
+ * The deployments whose job was released by force. The context above is lost
+ * when code runs outside the job's async chain (a detached callback, a timer),
+ * so a deployment write is also refused by the id of the deployment: the
+ * watchdog already settled that row, and nothing may change it again.
  */
-export const skipWriteOfReleasedJob = (what: string): boolean => {
-	if (!isReleasedJobContext()) return false;
+const RELEASED_SLOT = Symbol.for("dokploy.releasedDeployments");
+const MAX_RELEASED_DEPLOYMENTS = 500;
+
+const releasedDeployments = (): Set<string> => {
+	const registry = globalThis as unknown as Record<
+		symbol,
+		Set<string> | undefined
+	>;
+	let slot = registry[RELEASED_SLOT];
+	if (!slot) {
+		slot = new Set<string>();
+		registry[RELEASED_SLOT] = slot;
+	}
+	return slot;
+};
+
+export const markDeploymentReleased = (deploymentId: string): void => {
+	const released = releasedDeployments();
+	released.add(deploymentId);
+	// Bounded: the oldest ids go first (a Set keeps insertion order).
+	while (released.size > MAX_RELEASED_DEPLOYMENTS) {
+		const oldest = released.values().next().value;
+		if (oldest === undefined) break;
+		released.delete(oldest);
+	}
+};
+
+export const isDeploymentReleased = (deploymentId: string): boolean =>
+	releasedDeployments().has(deploymentId);
+
+/**
+ * Logs and returns true when a write should be skipped because the job that
+ * makes it was released by the watchdog: it runs in a released job's context,
+ * or it is for a deployment the watchdog released.
+ */
+export const skipWriteOfReleasedJob = (
+	what: string,
+	deploymentId?: string,
+): boolean => {
+	if (
+		!isReleasedJobContext() &&
+		!(deploymentId && isDeploymentReleased(deploymentId))
+	) {
+		return false;
+	}
 	console.warn(
 		`Ignored ${what}: the deployment job was released by the watchdog`,
 	);

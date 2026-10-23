@@ -23,6 +23,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { markDeploymentReleased } from "@dokploy/server/utils/process/job-context";
 import type { CancelActiveDeps } from "../utils/cancel-active-deployment";
 import { type StopDeps, stopDeploymentWork } from "./deployment-stop";
 import {
@@ -59,6 +60,9 @@ export const createDefaultWatchdogDeps = (): WatchdogDeps => ({
 	loadConfig: async () => resolveWatchdogConfig(await getWebServerSettings()),
 	activeJobs: () => myQueue.getJobs(["active"]),
 	releaseJob: (jobId, options) => myQueue.releaseActive(jobId, options),
+	hasKeptGroupLock: (jobId) => myQueue.hasKeptGroupLock(jobId),
+	dropKeptGroupLock: (jobId) => myQueue.dropKeptGroupLock(jobId),
+	markDeploymentReleased,
 	readStatus: readDeploymentStatus,
 	listRunning: listRunningDeployDeployments,
 	latestDeploys: listLatestDeploysOf,
@@ -66,7 +70,7 @@ export const createDefaultWatchdogDeps = (): WatchdogDeps => ({
 	readLogIdleMs: (row) => readLogIdleMs(row),
 	logHost: resolveWatchdogLogHost,
 	appendLog: appendLogLine,
-	stop: (row) => stopDeploymentWork(row, defaultStopDeps),
+	stop: (row, options) => stopDeploymentWork(row, defaultStopDeps, options),
 	markFailed: markDeploymentFailedByWatchdog,
 	failServiceIfRunning: markServiceFailedIfStillRunning,
 	loadContext: loadWatchdogServiceContext,

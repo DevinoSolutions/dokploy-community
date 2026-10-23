@@ -244,3 +244,92 @@ describe("InMemoryQueue.releaseActive with keepGroupLock", () => {
 		hung.resolve();
 	});
 });
+
+describe("InMemoryQueue.dropKeptGroupLock", () => {
+	const setup = async () => {
+		const hung = deferred();
+		const started: string[] = [];
+		const queue = new InMemoryQueue({ resolveConcurrency: () => 4 });
+		queue.process(async (job) => {
+			started.push((job.data as { applicationId: string }).applicationId);
+			if (started.length === 1) await hung.promise;
+		});
+		await queue.add(appJob("a"));
+		await queue.add(appJob("a"));
+		await flush();
+		const [active] = await queue.getJobs(["active"]);
+		const id = active?.id as string;
+		queue.releaseActive(id, { keepGroupLock: true });
+		await flush();
+		return { queue, hung, started, id };
+	};
+
+	it("reports the lock while it is kept, and not for a job that did not keep it", async () => {
+		const { queue, hung, id } = await setup();
+
+		expect(queue.hasKeptGroupLock(id)).toBe(true);
+		expect(queue.hasKeptGroupLock("job-999")).toBe(false);
+		hung.resolve();
+	});
+
+	it("lets the service deploy again when dropped", async () => {
+		const { queue, started, id, hung } = await setup();
+		expect(started).toEqual(["a"]);
+
+		expect(queue.dropKeptGroupLock(id)).toBe(true);
+		await flush();
+
+		expect(started).toEqual(["a", "a"]);
+		expect(queue.hasKeptGroupLock(id)).toBe(false);
+		hung.resolve();
+	});
+
+	it("the old processor's late return does not free the lock of the newer job", async () => {
+		const first = deferred();
+		const second = deferred();
+		const started: string[] = [];
+		const queue = new InMemoryQueue({ resolveConcurrency: () => 4 });
+		queue.process(async (job) => {
+			started.push((job.data as { applicationId: string }).applicationId);
+			await (started.length === 1 ? first.promise : second.promise);
+		});
+		await queue.add(appJob("a"));
+		await queue.add(appJob("a"));
+		await flush();
+		const [active] = await queue.getJobs(["active"]);
+		queue.releaseActive(active?.id as string, { keepGroupLock: true });
+		queue.dropKeptGroupLock(active?.id as string);
+		await flush();
+		// The second deploy of the service runs now; a third waits behind it.
+		expect(started).toEqual(["a", "a"]);
+		await queue.add(appJob("a"));
+		await flush();
+		expect(started).toEqual(["a", "a"]);
+
+		first.resolve();
+		await flush();
+
+		// The first processor's late return took nobody's lock.
+		expect(started).toEqual(["a", "a"]);
+		expect(await queue.getJobs(["waiting"])).toHaveLength(1);
+		second.resolve();
+	});
+
+	it("is false when nothing is kept, and when the processor already returned", async () => {
+		const { queue, hung, id } = await setup();
+		hung.resolve();
+		await flush();
+
+		expect(queue.hasKeptGroupLock(id)).toBe(false);
+		expect(queue.dropKeptGroupLock(id)).toBe(false);
+		expect(queue.dropKeptGroupLock("job-999")).toBe(false);
+	});
+
+	it("cannot be dropped twice", async () => {
+		const { queue, id, hung } = await setup();
+
+		expect(queue.dropKeptGroupLock(id)).toBe(true);
+		expect(queue.dropKeptGroupLock(id)).toBe(false);
+		hung.resolve();
+	});
+});

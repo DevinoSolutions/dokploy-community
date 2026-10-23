@@ -28,6 +28,22 @@ export interface StopResult {
 	claimedCancelled: boolean;
 	/** A note for the log: what could not be stopped, and why. */
 	warning?: string;
+	/**
+	 * Nothing was signalled only because other deploys run on the host (the
+	 * generic stop would hit them): trying again later, once they ended, can work.
+	 */
+	retryable?: boolean;
+}
+
+export interface StopOptions {
+	/**
+	 * Use only the handles that are checked against the deployment itself (the
+	 * pid-file launcher, which verifies the pid and its start time). Never a
+	 * recorded pid (it may have been reused by another process) and never the
+	 * host-wide command-name stop. For a deployment that no queue job runs: its
+	 * process, if any, is not known to be ours.
+	 */
+	launcherOnly?: boolean;
 }
 
 export interface StopDeps {
@@ -70,6 +86,7 @@ export const stopDeploymentWork = async (
 		| "previewDeploymentId"
 	>,
 	deps: StopDeps,
+	options: StopOptions = {},
 ): Promise<StopResult> => {
 	let claimedCancelled = false;
 	let warning: string | undefined;
@@ -113,6 +130,17 @@ export const stopDeploymentWork = async (
 		}
 	}
 
+	if (options.launcherOnly) {
+		return {
+			method: "none",
+			notRunning: false,
+			claimedCancelled,
+			warning:
+				warning ??
+				"No queue job runs this deployment, so no process was signalled; only its record was closed.",
+		};
+	}
+
 	if (row.pid && VALID_PID.test(row.pid)) {
 		try {
 			await deps.killPid(row.serverId, row.pid);
@@ -144,6 +172,7 @@ export const stopDeploymentWork = async (
 			notRunning: false,
 			claimedCancelled,
 			warning: `The ${kind} build has no process handle and ${others} other deploy${others === 1 ? " runs" : "s run"} on the same host, so it was not signalled; it may keep running there until it ends.`,
+			retryable: true,
 		};
 	}
 	await deps.killDockerBuild(kind, row.serverId);

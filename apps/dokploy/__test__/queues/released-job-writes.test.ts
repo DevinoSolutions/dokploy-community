@@ -179,3 +179,41 @@ describe("late success of a released job", () => {
 		expect(mocks.update).toHaveBeenCalledTimes(2);
 	});
 });
+
+describe("a deployment whose job was released", () => {
+	it("refuses its writes by id, even outside the job's context", async () => {
+		const { markDeploymentReleased, isDeploymentReleased } = await import(
+			"@dokploy/server/utils/process/job-context"
+		);
+		markDeploymentReleased("dep-late");
+
+		expect(isDeploymentReleased("dep-late")).toBe(true);
+		expect(isDeploymentReleased("dep-other")).toBe(false);
+		expect(await markDeploymentDoneUnlessCancelled("dep-late")).toBe(false);
+		expect(mocks.update).not.toHaveBeenCalled();
+		// Another deployment of the same service is not affected.
+		expect(await markDeploymentDoneUnlessCancelled("dep-other")).toBe(true);
+	});
+
+	it("skipWriteOfReleasedJob checks the id only when one is given", async () => {
+		const { markDeploymentReleased } = await import(
+			"@dokploy/server/utils/process/job-context"
+		);
+		markDeploymentReleased("dep-x");
+
+		expect(skipWriteOfReleasedJob("the status of the service")).toBe(false);
+		expect(
+			skipWriteOfReleasedJob("the status of deployment dep-x", "dep-x"),
+		).toBe(true);
+	});
+
+	it("remembers a bounded number of deployments, oldest first out", async () => {
+		const { markDeploymentReleased, isDeploymentReleased } = await import(
+			"@dokploy/server/utils/process/job-context"
+		);
+		for (let i = 0; i < 600; i++) markDeploymentReleased(`bulk-${i}`);
+
+		expect(isDeploymentReleased("bulk-0")).toBe(false);
+		expect(isDeploymentReleased("bulk-599")).toBe(true);
+	});
+});

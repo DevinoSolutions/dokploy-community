@@ -214,3 +214,92 @@ describe("a preview deployment", () => {
 		expect(deps.killPid).toHaveBeenCalledWith("srv-app", "4321");
 	});
 });
+
+describe("launcherOnly (a deployment no queue job runs)", () => {
+	it("tries the launcher, and signals nothing else when it has no handle", async () => {
+		const result = await stopDeploymentWork(
+			target({ pid: "4242", serverId: "srv-1" }),
+			deps,
+			{ launcherOnly: true },
+		);
+
+		expect(deps.cancelWithLauncher).toHaveBeenCalledWith("dep-1");
+		// The recorded pid may belong to another process by now.
+		expect(deps.killPid).not.toHaveBeenCalled();
+		// And pkill matches every docker build on the host.
+		expect(deps.killDockerBuild).not.toHaveBeenCalled();
+		expect(deps.countOtherRunning).not.toHaveBeenCalled();
+		expect(result.method).toBe("none");
+		expect(result.warning).toContain("only its record was closed");
+		expect(result.retryable).toBeUndefined();
+	});
+
+	it("still lets the launcher stop a build it can verify", async () => {
+		deps.cancelWithLauncher.mockResolvedValue({
+			status: "cancelled",
+			result: "KILLED",
+		});
+
+		const result = await stopDeploymentWork(target(), deps, {
+			launcherOnly: true,
+		});
+
+		expect(result).toMatchObject({
+			method: "launcher",
+			claimedCancelled: true,
+		});
+		expect(deps.killDockerBuild).not.toHaveBeenCalled();
+	});
+
+	it("does not fall back to pkill when the launcher found no process", async () => {
+		deps.cancelWithLauncher.mockResolvedValue({
+			status: "cancelled",
+			result: "GONE",
+			genericStopNeeded: true,
+		});
+
+		const result = await stopDeploymentWork(
+			target({ composeId: "comp-1", applicationId: null }),
+			deps,
+			{ launcherOnly: true },
+		);
+
+		expect(deps.killDockerBuild).not.toHaveBeenCalled();
+		expect(deps.killPid).not.toHaveBeenCalled();
+		expect(result.method).toBe("none");
+		expect(result.claimedCancelled).toBe(true);
+	});
+
+	it("reports a deployment that already ended", async () => {
+		deps.cancelWithLauncher.mockResolvedValue({ status: "not-running" });
+
+		const result = await stopDeploymentWork(target(), deps, {
+			launcherOnly: true,
+		});
+
+		expect(result.notRunning).toBe(true);
+	});
+});
+
+describe("retryable", () => {
+	it("is set when only other deploys on the host kept it from being signalled", async () => {
+		deps.countOtherRunning.mockResolvedValue(1);
+
+		const result = await stopDeploymentWork(target(), deps);
+
+		expect(result.method).toBe("none");
+		expect(result.retryable).toBe(true);
+	});
+
+	it("is not set for a failed signal or a preview built elsewhere", async () => {
+		deps.killPid.mockRejectedValue(new Error("no such process"));
+		const failed = await stopDeploymentWork(target({ pid: "4242" }), deps);
+		const preview = await stopDeploymentWork(
+			target({ previewDeploymentId: "pv-1", buildServerId: "srv-build" }),
+			deps,
+		);
+
+		expect(failed.retryable).toBeUndefined();
+		expect(preview.retryable).toBeUndefined();
+	});
+});

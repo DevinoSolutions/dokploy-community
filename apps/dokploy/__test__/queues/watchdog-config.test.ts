@@ -226,3 +226,51 @@ describe("log lines", () => {
 		expect(WATCHDOG_FAILED_LINE).toBe("Watchdog: marked failed");
 	});
 });
+
+describe("exclusions that are partly invalid", () => {
+	it("keeps the valid entries when one element is bad", () => {
+		const config = resolveWatchdogConfig({
+			deploymentWatchdogExclusions: [
+				{ type: "application", id: "a1" },
+				{ type: "postgres", id: "p1" },
+				{ type: "compose" },
+				"nonsense",
+				null,
+				{ type: "compose", id: "c1", reason: "long migrations" },
+			],
+		});
+
+		expect(config.exclusions).toEqual([
+			{ type: "application", id: "a1" },
+			{ type: "compose", id: "c1", reason: "long migrations" },
+		]);
+		expect(isWatchdogExcluded(config.exclusions, { applicationId: "a1" })).toBe(
+			true,
+		);
+		expect(isWatchdogExcluded(config.exclusions, { composeId: "c1" })).toBe(
+			true,
+		);
+	});
+
+	it("does not drop an exclusion because its reason is too long or not text", () => {
+		const config = resolveWatchdogConfig({
+			deploymentWatchdogExclusions: [
+				{ type: "application", id: "a1", reason: "x".repeat(500) },
+				{ type: "application", id: "a2", reason: 42 },
+			],
+		});
+
+		expect(config.exclusions).toHaveLength(2);
+		expect(config.exclusions[0]?.reason).toHaveLength(300);
+		expect(config.exclusions[1]).toEqual({ type: "application", id: "a2" });
+	});
+
+	it("is an empty list when the stored value is not a list at all", () => {
+		for (const stored of [null, undefined, "x", 3, {}]) {
+			expect(
+				resolveWatchdogConfig({ deploymentWatchdogExclusions: stored })
+					.exclusions,
+			).toEqual([]);
+		}
+	});
+});

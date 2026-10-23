@@ -143,7 +143,12 @@ export const markDeploymentDoneUnlessCancelled = async (
 	deploymentId: string,
 ): Promise<boolean> => {
 	// A job the watchdog released must not report a success late.
-	if (skipWriteOfReleasedJob(`the status of deployment ${deploymentId}`)) {
+	if (
+		skipWriteOfReleasedJob(
+			`the status of deployment ${deploymentId}`,
+			deploymentId,
+		)
+	) {
 		return false;
 	}
 	const updated = await db

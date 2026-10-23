@@ -88,6 +88,8 @@ let config = {
 };
 let running: Row[] = [];
 let jobs: InMemoryJob[] = [];
+/** Released jobs that still hold their service lock (what the queue keeps). */
+let keptLocks = new Set<string>();
 let idleMs: number | null = 0;
 let logHost: string | null | undefined = null;
 
@@ -100,11 +102,15 @@ const deps: Record<
 	now: vi.fn(() => clock),
 	loadConfig: vi.fn(async () => config),
 	activeJobs: vi.fn(async () => jobs),
-	releaseJob: vi.fn((id: string) => {
+	releaseJob: vi.fn((id: string, options?: { keepGroupLock?: boolean }) => {
 		const had = jobs.some((job) => job.id === id);
 		jobs = jobs.filter((job) => job.id !== id);
+		if (had && options?.keepGroupLock) keptLocks.add(id);
 		return had;
 	}),
+	hasKeptGroupLock: vi.fn((id: string) => keptLocks.has(id)),
+	dropKeptGroupLock: vi.fn((id: string) => keptLocks.delete(id)),
+	markDeploymentReleased: vi.fn(),
 	listRunning: vi.fn(async () => running),
 	latestDeploys: vi.fn(async () => [] as never[]),
 	resolveService: vi.fn(async (r: Row) => ({
@@ -150,6 +156,7 @@ beforeEach(() => {
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "warn").mockImplementation(() => {});
 	clock = START;
+	keptLocks = new Set();
 	config = { enabled: true, idleMinutes: 20, maxMinutes: 90, exclusions: [] };
 	running = [row()];
 	jobs = [appJob()];
@@ -167,11 +174,18 @@ beforeEach(() => {
 		return "flipped";
 	});
 	deps.latestDeploys.mockResolvedValue([] as never[]);
-	deps.releaseJob.mockImplementation((id: string) => {
-		const had = jobs.some((job) => job.id === id);
-		jobs = jobs.filter((job) => job.id !== id);
-		return had;
-	});
+	deps.releaseJob.mockImplementation(
+		(id: string, options?: { keepGroupLock?: boolean }) => {
+			const had = jobs.some((job) => job.id === id);
+			jobs = jobs.filter((job) => job.id !== id);
+			if (had && options?.keepGroupLock) keptLocks.add(id);
+			return had;
+		},
+	);
+	deps.hasKeptGroupLock.mockImplementation((id: string) => keptLocks.has(id));
+	deps.dropKeptGroupLock.mockImplementation((id: string) =>
+		keptLocks.delete(id),
+	);
 });
 
 describe("when it fires", () => {
@@ -608,6 +622,7 @@ describe("which host", () => {
 				serverId: "srv-serving",
 				buildServerId: "srv-build",
 			}),
+			{},
 		);
 	});
 
@@ -1021,5 +1036,391 @@ describe("a row that ended some other way", () => {
 		expect(deps.markFailed.mock.calls[0]?.[2]).toEqual({
 			claimedCancel: false,
 		});
+	});
+});
+
+describe("a running row that no job runs (orphan)", () => {
+	it("is only marked failed: the stop may use the launcher and nothing else", async () => {
+		jobs = [];
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.stop).toHaveBeenCalledTimes(1);
+		expect(deps.stop.mock.calls[0]?.[1]).toEqual({ launcherOnly: true });
+		expect(deps.markFailed).toHaveBeenCalledTimes(1);
+		// No job, so no slot to release and no lock to keep.
+		expect(deps.releaseJob).not.toHaveBeenCalled();
+		expect(watchdog.pendingCount()).toBe(0);
+	});
+
+	it("is closed with the same outcome rules as any other row", async () => {
+		jobs = [];
+		deps.markFailed.mockImplementationOnce(async (id: string) => {
+			running = running.filter((r) => r.deploymentId !== id);
+			return "unchanged";
+		});
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(logLines()).not.toContain("Watchdog: marked failed");
+		expect(deps.notify).not.toHaveBeenCalled();
+		expect(deps.recordAudit).not.toHaveBeenCalled();
+	});
+
+	it("tells the log that no process was signalled", async () => {
+		jobs = [];
+		deps.stop.mockResolvedValue({
+			method: "none",
+			notRunning: false,
+			claimedCancelled: false,
+			warning: "no process was signalled",
+		});
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(logLines().join("\n")).toContain("no process was signalled");
+		expect(deps.markFailed).toHaveBeenCalledTimes(1);
+	});
+
+	it("a row with a job of its own service still gets the full stop", async () => {
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.stop.mock.calls[0]?.[1]).toEqual({});
+	});
+});
+
+describe("a stop that found no handle because the host was busy", () => {
+	const busy = {
+		method: "none" as const,
+		notRunning: false,
+		claimedCancelled: false,
+		warning: "2 other deploys run on the same host",
+		retryable: true,
+	};
+
+	it("is tried again on the next sweep, and the slot is not released when it works", async () => {
+		deps.stop.mockResolvedValueOnce(busy);
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		expect(deps.stop).toHaveBeenCalledTimes(1);
+
+		// The others have ended: the generic stop is safe now.
+		deps.stop.mockResolvedValueOnce({
+			method: "generic",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock += MIN;
+		await watchdog.sweep();
+
+		expect(deps.stop).toHaveBeenCalledTimes(2);
+		expect(logLines().join("\n")).toContain(
+			"had ended, so the build was stopped",
+		);
+		expect(deps.releaseJob).not.toHaveBeenCalled();
+		expect(watchdog.pendingCount()).toBe(1);
+	});
+
+	it("gets a fresh grace period after the later stop", async () => {
+		deps.stop.mockResolvedValueOnce(busy);
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		clock += 9 * MIN;
+		deps.stop.mockResolvedValueOnce({
+			method: "generic",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		await watchdog.sweep();
+
+		// 11 min after the first stop, but only 2 after the one that worked.
+		clock += 2 * MIN;
+		await watchdog.sweep();
+		expect(deps.releaseJob).not.toHaveBeenCalled();
+
+		clock += 9 * MIN;
+		await watchdog.sweep();
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: false,
+		});
+	});
+
+	it("keeps asking each sweep while the host is busy, then releases with the lock kept", async () => {
+		deps.stop.mockResolvedValue(busy);
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		clock += MIN;
+		await watchdog.sweep();
+		clock += MIN;
+		await watchdog.sweep();
+		expect(deps.stop).toHaveBeenCalledTimes(3);
+		expect(deps.releaseJob).not.toHaveBeenCalled();
+
+		clock += 10 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: true,
+		});
+	});
+
+	it("does not ask again when the row is no longer running", async () => {
+		deps.stop.mockResolvedValueOnce(busy);
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		deps.readStatus.mockResolvedValue("done");
+
+		clock += MIN;
+		await watchdog.sweep();
+
+		expect(deps.stop).toHaveBeenCalledTimes(1);
+	});
+
+	it("stops asking once the reason is no longer a busy host", async () => {
+		deps.stop.mockResolvedValueOnce(busy);
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		deps.stop.mockResolvedValueOnce({
+			method: "none",
+			notRunning: false,
+			claimedCancelled: false,
+			warning: "could not signal",
+		});
+		clock += MIN;
+		await watchdog.sweep();
+		clock += MIN;
+		await watchdog.sweep();
+
+		expect(deps.stop).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("a kept service lock", () => {
+	const keepLock = async (
+		watchdog: ReturnType<typeof createDeploymentWatchdog>,
+	) => {
+		deps.stop.mockResolvedValue({
+			method: "none",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 100 * MIN;
+		await watchdog.sweep();
+		clock += 11 * MIN;
+		await watchdog.sweep();
+		expect(keptLocks.has("job-1")).toBe(true);
+		return clock;
+	};
+
+	it("is dropped after max(2 x wall limit, 3 h), with a loud log line and an audit entry", async () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const watchdog = createDeploymentWatchdog(asDeps);
+		const releasedAt = await keepLock(watchdog);
+		deps.recordAudit.mockClear();
+
+		clock = releasedAt + 179 * MIN;
+		await watchdog.sweep();
+		expect(deps.dropKeptGroupLock).not.toHaveBeenCalled();
+
+		clock = releasedAt + 181 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.dropKeptGroupLock).toHaveBeenCalledWith("job-1");
+		expect(keptLocks.has("job-1")).toBe(false);
+		expect(error).toHaveBeenCalledWith(
+			expect.stringContaining("service lock was dropped"),
+		);
+		expect(logLines().join("\n")).toContain(
+			"the lock on this service was dropped",
+		);
+		expect(deps.recordAudit.mock.calls[0]?.[0]).toMatchObject({
+			action: "watchdog_fail",
+			actor: { type: "system" },
+			metadata: expect.objectContaining({
+				reason: "group-lock-dropped",
+				groupLockDropped: true,
+				jobId: "job-1",
+			}),
+		});
+	});
+
+	it("is dropped only once", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const watchdog = createDeploymentWatchdog(asDeps);
+		const releasedAt = await keepLock(watchdog);
+
+		clock = releasedAt + 200 * MIN;
+		await watchdog.sweep();
+		clock += 10 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.dropKeptGroupLock).toHaveBeenCalledTimes(1);
+	});
+
+	it("follows twice the wall limit when that is longer than 3 h", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		config = { ...config, maxMinutes: 200 };
+		const watchdog = createDeploymentWatchdog(asDeps);
+		deps.stop.mockResolvedValue({
+			method: "none",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 250 * MIN;
+		await watchdog.sweep();
+		clock += 11 * MIN;
+		await watchdog.sweep();
+		const releasedAt = clock;
+
+		clock = releasedAt + 399 * MIN;
+		await watchdog.sweep();
+		expect(deps.dropKeptGroupLock).not.toHaveBeenCalled();
+
+		clock = releasedAt + 401 * MIN;
+		await watchdog.sweep();
+		expect(deps.dropKeptGroupLock).toHaveBeenCalledTimes(1);
+	});
+
+	it("is left alone once the old process returned and took the lock with it", async () => {
+		const watchdog = createDeploymentWatchdog(asDeps);
+		const releasedAt = await keepLock(watchdog);
+		deps.recordAudit.mockClear();
+		keptLocks.delete("job-1");
+
+		clock = releasedAt + 400 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.dropKeptGroupLock).not.toHaveBeenCalled();
+		expect(deps.recordAudit).not.toHaveBeenCalled();
+	});
+
+	it("is also dropped for a hung job that never had a deployment", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		running = [];
+		clock = START + 91 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		expect(keptLocks.has("job-1")).toBe(true);
+
+		clock += 181 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.dropKeptGroupLock).toHaveBeenCalledWith("job-1");
+	});
+
+	it("is still dropped when the watchdog was switched off meanwhile", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const watchdog = createDeploymentWatchdog(asDeps);
+		const releasedAt = await keepLock(watchdog);
+		config = { ...config, enabled: false };
+
+		clock = releasedAt + 181 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.dropKeptGroupLock).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("the slot is released even when the bookkeeping fails", () => {
+	it("releases it when marking the row failed throws", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		deps.stop.mockResolvedValue({
+			method: "pid",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		deps.markFailed.mockRejectedValueOnce(new Error("db down"));
+
+		clock += 11 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: false,
+		});
+		expect(watchdog.pendingCount()).toBe(0);
+	});
+
+	it("keeps the lock of a job nothing could stop, even when marking fails", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		deps.stop.mockResolvedValue({
+			method: "none",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		deps.markFailed.mockRejectedValueOnce(new Error("db down"));
+
+		clock += 11 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: true,
+		});
+	});
+
+	it("releases a hung job when the audit trail cannot be written", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		running = [];
+		deps.loadContext.mockRejectedValueOnce(new Error("db down"));
+		clock = START + 91 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).toHaveBeenCalledWith("job-1", {
+			keepGroupLock: true,
+		});
+	});
+
+	it("one failing hung job does not stop the others from being released", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		running = [];
+		jobs = [appJob("job-1", "app-1", START), appJob("job-2", "app-2", START)];
+		deps.failServiceIfRunning.mockRejectedValueOnce(new Error("db down"));
+		deps.loadContext.mockRejectedValueOnce(new Error("db down"));
+		clock = START + 91 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+
+		expect(deps.releaseJob).toHaveBeenCalledTimes(2);
+	});
+
+	it("refuses the late writes of the deployment before it frees the slot", async () => {
+		deps.stop.mockResolvedValue({
+			method: "pid",
+			notRunning: false,
+			claimedCancelled: false,
+		});
+		clock = START + 100 * MIN;
+		const watchdog = createDeploymentWatchdog(asDeps);
+		await watchdog.sweep();
+		clock += 11 * MIN;
+		await watchdog.sweep();
+
+		expect(deps.markDeploymentReleased).toHaveBeenCalledWith("dep-1");
+		const order = (mock: AnyMock) => mock.mock.invocationCallOrder[0] ?? 0;
+		expect(order(deps.markDeploymentReleased)).toBeLessThan(
+			order(deps.releaseJob),
+		);
 	});
 });
