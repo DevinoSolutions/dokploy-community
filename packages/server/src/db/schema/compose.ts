@@ -38,7 +38,12 @@ import { previewDeployments } from "./preview-deployments";
 import { registry } from "./registry";
 import { schedules } from "./schedule";
 import { server } from "./server";
-import { applicationStatus, certificateType, triggerType } from "./shared";
+import {
+	applicationStatus,
+	certificateType,
+	includeEnvInput,
+	triggerType,
+} from "./shared";
 import { sshKeys } from "./ssh-key";
 import {
 	APP_NAME_MESSAGE,
@@ -349,6 +354,10 @@ export const apiCreateComposeByTemplate = createSchema
 
 export const apiFindCompose = z.object({
 	composeId: z.string().min(1),
+});
+
+export const apiReadCompose = apiFindCompose.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiDeployCompose = z.object({

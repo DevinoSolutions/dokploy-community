@@ -18,7 +18,7 @@ export const DOKPLOY_SCOPES: ScopeDefinition[] = [
 		id: "dokploy:read",
 		label: "Read",
 		description:
-			"List and inspect projects, services, deployments, logs and settings, including a service's own configuration (environment, database passwords). Stored credentials, raw file reads and user records require Administration.",
+			"List and inspect projects, services, deployments, logs and settings, including a service's own configuration. Secret values (environment, build args, database passwords, tokens) are omitted unless Administration is also granted and the call asks for them; envKeys lists variable names only. Stored credentials, raw file reads and user records require Administration.",
 		defaultOn: true,
 	},
 	{
@@ -66,7 +66,7 @@ export const DOKPLOY_SCOPES: ScopeDefinition[] = [
 		id: "dokploy:admin",
 		label: "Administration",
 		description:
-			"Servers, cluster, Docker cleanup, SSH keys, registries, git providers, notifications, certificates, users, organization, roles and every other setting. Also required to read stored credentials and raw file reads, including the queries that return private keys, access keys and provider tokens.",
+			"Servers, cluster, Docker cleanup, SSH keys, registries, git providers, notifications, certificates, users, organization, roles and every other setting. Also required to read stored credentials and raw file reads, including the queries that return private keys, access keys, provider tokens, swarm join tokens, and raw container and image inspect output and container process lists (environment values and command-line secrets are still blanked). Credential reads return the raw value.",
 		defaultOn: false,
 	},
 ];
@@ -137,6 +137,13 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
 	"settings.getUpdateData": "dokploy:read",
 	// Personal bookmark on a template; must not require administration.
 	"user.toggleTemplateBookmark": "dokploy:services:write",
+	// Raw `docker inspect` output: a container's Env, labels and command carry
+	// the service's secrets. Admin only; the result walk still blanks Env.
+	"docker.getConfig": "dokploy:admin",
+	"dockerImage.getImageConfig": "dokploy:admin",
+	// `docker top ... args` for any container id: the full argv of its processes,
+	// which carries tokens and passwords given as flags.
+	"server.getContainerProcesses": "dokploy:admin",
 };
 
 /**
@@ -151,7 +158,7 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
  * `awsSecretAccessKey` away), the *Providers listings and gitProvider.getAll
  * (id/name/url only), sshKey.allForApps and user.get (explicit safe projections).
  */
-const CREDENTIAL_QUERIES = new Set([
+export const CREDENTIAL_QUERIES: ReadonlySet<string> = new Set([
 	// sshKeys row, unprojected → privateKey
 	"sshKey.one",
 	"sshKey.all",
@@ -163,6 +170,10 @@ const CREDENTIAL_QUERIES = new Set([
 	"gitlab.one",
 	"gitea.one",
 	"bitbucket.one",
+	// `docker swarm join --token <token>` in the returned command: whoever holds
+	// it can join a node to the swarm
+	"cluster.addWorker",
+	"cluster.addManager",
 	// raw Traefik container env → ACME DNS-01 credentials
 	"settings.readTraefikEnv",
 	// webServerSettings row → sshPrivateKey and metricsConfig.server.token

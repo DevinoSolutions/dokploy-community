@@ -35,6 +35,10 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
+import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -46,6 +50,7 @@ import {
 	apiCreatePostgres,
 	apiDeployPostgres,
 	apiFindOnePostgres,
+	apiReadPostgres,
 	apiRebuildPostgres,
 	apiResetPostgres,
 	apiSaveEnvironmentVariablesPostgres,
@@ -138,6 +143,24 @@ export const postgresRouter = createTRPCRouter({
 			}
 		}),
 	one: protectedProcedure
+		.input(apiReadPostgres)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.postgresId, "read");
+
+			const postgres = await findPostgresById(input.postgresId);
+			if (
+				postgres.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to access this Postgres",
+				});
+			}
+			return shapeServiceRead(postgres, input.includeEnv);
+		}),
+
+	envKeys: protectedProcedure
 		.input(apiFindOnePostgres)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.postgresId, "read");
@@ -152,7 +175,8 @@ export const postgresRouter = createTRPCRouter({
 					message: "You are not authorized to access this Postgres",
 				});
 			}
-			return postgres;
+			// Names only: the values never leave the server.
+			return { env: listEnvKeys(postgres.env) };
 		}),
 
 	start: protectedProcedure

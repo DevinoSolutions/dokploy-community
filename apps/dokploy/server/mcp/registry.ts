@@ -118,6 +118,15 @@ const toObjectJsonSchema = (
 	} as McpToolDefinition["inputSchema"];
 };
 
+/**
+ * `saveEnvironment` REPLACES the whole variable set, and a read over MCP
+ * returns the values blanked, so the tool says how to do it safely.
+ */
+const SAVE_ENVIRONMENT_NOTE: Record<string, string> = {
+	saveEnvironment:
+		" Replaces the entire env: send every variable you want to keep. Values read back blank over MCP (use the envKeys tool for the names), and an empty env is refused unless allowEmptySecrets is true with the dokploy:admin scope.",
+};
+
 export interface BuildRegistryOptions {
 	/** Router names whose procedures are never exposed (the `mcp` router itself). */
 	excludeRouters?: string[];
@@ -162,9 +171,9 @@ export const buildMcpToolRegistry = (
 			procedureName,
 			type,
 			description:
-				def.meta?.openapi?.description ??
-				def.meta?.openapi?.summary ??
-				`${method} /${path}`,
+				(def.meta?.openapi?.description ??
+					def.meta?.openapi?.summary ??
+					`${method} /${path}`) + (SAVE_ENVIRONMENT_NOTE[procedureName] ?? ""),
 			inputSchema,
 			scope,
 			annotations: {

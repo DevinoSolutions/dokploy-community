@@ -20,6 +20,7 @@ import {
 	EndpointSpecSwarmSchema,
 	type HealthCheckSwarm,
 	HealthCheckSwarmSchema,
+	includeEnvInput,
 	type LabelsSwarm,
 	LabelsSwarmSchema,
 	type NetworkSwarm,
@@ -168,6 +169,10 @@ export const apiCreateMongo = createSchema.pick({
 
 export const apiFindOneMongo = z.object({
 	mongoId: z.string().min(1),
+});
+
+export const apiReadMongo = apiFindOneMongo.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiChangeMongoStatus = createSchema
