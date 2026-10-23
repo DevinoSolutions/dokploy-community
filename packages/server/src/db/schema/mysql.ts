@@ -20,6 +20,7 @@ import {
 	EndpointSpecSwarmSchema,
 	type HealthCheckSwarm,
 	HealthCheckSwarmSchema,
+	includeEnvInput,
 	type LabelsSwarm,
 	LabelsSwarmSchema,
 	type NetworkSwarm,
@@ -175,6 +176,10 @@ export const apiCreateMySql = createSchema.pick({
 
 export const apiFindOneMySql = z.object({
 	mysqlId: z.string().min(1),
+});
+
+export const apiReadMySql = apiFindOneMySql.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiChangeMySqlStatus = createSchema

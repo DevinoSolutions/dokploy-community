@@ -20,6 +20,7 @@ import {
 	EndpointSpecSwarmSchema,
 	type HealthCheckSwarm,
 	HealthCheckSwarmSchema,
+	includeEnvInput,
 	type LabelsSwarm,
 	LabelsSwarmSchema,
 	type NetworkSwarm,
@@ -169,6 +170,10 @@ export const apiCreatePostgres = createSchema.pick({
 
 export const apiFindOnePostgres = z.object({
 	postgresId: z.string().min(1),
+});
+
+export const apiReadPostgres = apiFindOnePostgres.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiChangePostgresStatus = createSchema

@@ -361,8 +361,10 @@ describe("executeMcpTool", () => {
 			scopes: new Set(["dokploy:read"]),
 			call,
 		});
+		// application.one is a secret-bearing read: the dispatcher forces includeEnv.
 		expect(call).toHaveBeenCalledWith("application.one", {
 			applicationId: "app-1",
+			includeEnv: false,
 		});
 		expect(result.isError).toBeUndefined();
 		expect((result.content[0] as { text: string }).text).toBe(

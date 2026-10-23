@@ -41,6 +41,7 @@ import {
 	EndpointSpecSwarmSchema,
 	type HealthCheckSwarm,
 	HealthCheckSwarmSchema,
+	includeEnvInput,
 	type LabelsSwarm,
 	LabelsSwarmSchema,
 	type NetworkSwarm,
@@ -444,6 +445,10 @@ export const apiCreateApplication = createSchema.pick({
 
 export const apiFindOneApplication = z.object({
 	applicationId: z.string().min(1),
+});
+
+export const apiReadApplication = apiFindOneApplication.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiDeployApplication = createSchema

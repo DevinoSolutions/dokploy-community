@@ -9,6 +9,12 @@ import {
 	findMcpAccessToken,
 	resolveDefaultOrganizationId,
 } from "@dokploy/server/services/mcp-oauth";
+import {
+	findEmptiedSecretField,
+	redactToolResult,
+	scrubCommandFields,
+	scrubSecretsInText,
+} from "@dokploy/server/services/service-secrets";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
 	CallToolRequestSchema,
@@ -21,6 +27,7 @@ import { eq } from "drizzle-orm";
 import packageInfo from "../../package.json";
 import { captureError } from "../sentry";
 import { type McpToolDefinition, toolsForScopes } from "./registry";
+import { CREDENTIAL_QUERIES } from "./scopes";
 
 export interface McpAuth {
 	userId: string;
@@ -310,14 +317,149 @@ export type ToolCallResult = {
 	isError?: true;
 };
 
+/** Error text goes through the scrub: a message can quote a URL or a flag with a token in it. */
 const errorResult = (text: string): ToolCallResult => ({
-	content: [{ type: "text", text }],
+	content: [{ type: "text", text: scrubSecretsInText(text) }],
 	isError: true,
 });
 
 /** Procedures can return bigint columns, which plain JSON.stringify throws on. */
 const bigintReplacer = (_key: string, value: unknown) =>
 	typeof value === "bigint" ? value.toString() : value;
+
+/**
+ * `*.one` reads that return a service row with secret values (env, build
+ * args and secrets, database passwords, tokens). They take `includeEnv`; the
+ * dispatcher, not the caller, decides it (T-6991).
+ */
+export const SECRET_READ_PATHS: ReadonlySet<string> = new Set([
+	"application.one",
+	"compose.one",
+	"postgres.one",
+	"mysql.one",
+	"mariadb.one",
+	"mongo.one",
+	"redis.one",
+	"libsql.one",
+]);
+
+/** The one scope whose grant already covers reading stored credentials. */
+export const SECRET_READ_SCOPE = "dokploy:admin";
+
+/**
+ * Forces `includeEnv` on the secret-bearing reads. Values are omitted unless
+ * the call passes `includeEnv: true` AND the grant includes
+ * `dokploy:admin` (the scope that gates every other credential read); any
+ * other value, or a missing one, becomes false. The tool schema only
+ * documents this: the override here is what enforces it.
+ */
+export const applySecretReadPolicy = (
+	path: string,
+	args: unknown,
+	scopes: Set<string>,
+): unknown => {
+	if (!SECRET_READ_PATHS.has(path)) return args;
+	const input =
+		typeof args === "object" && args !== null && !Array.isArray(args)
+			? (args as Record<string, unknown>)
+			: {};
+	return {
+		...input,
+		includeEnv: input.includeEnv === true && scopes.has(SECRET_READ_SCOPE),
+	};
+};
+
+/**
+ * Admin-scope tools whose whole purpose is to hand back a credential, so their
+ * result is not blanked: every credential query in the scope table, plus the
+ * mutations that mint one (an API key, an instance or SCIM token, a generated
+ * SSH key pair). Each already requires `dokploy:admin`.
+ */
+export const CREDENTIAL_RESULT_PATHS: ReadonlySet<string> = new Set([
+	...CREDENTIAL_QUERIES,
+	"user.createApiKey",
+	"user.generateToken",
+	"scim.generateToken",
+	"scim.rotateToken",
+	"sshKey.generate",
+]);
+
+/**
+ * Read-scope tools whose result is variable NAMES by construction: the `env`
+ * array in an envKeys reply holds keys, and the generic walk would blank it.
+ */
+export const KEYS_ONLY_RESULT_PATHS: ReadonlySet<string> = new Set([
+	"application.envKeys",
+	"compose.envKeys",
+	"postgres.envKeys",
+	"mysql.envKeys",
+	"mariadb.envKeys",
+	"mongo.envKeys",
+	"redis.envKeys",
+	"libsql.envKeys",
+]);
+
+/** Argument that lets an admin write an empty value into a secret field. */
+export const ALLOW_EMPTY_SECRETS_ARG = "allowEmptySecrets";
+
+/**
+ * A read over MCP blanks secret values, so a read-modify-write loop sends the
+ * blank straight back. For a mutation, refuses any secret-named field set to an
+ * empty or whitespace-only string (top level and one object level down), unless
+ * the call passes `allowEmptySecrets: true` AND the grant has `dokploy:admin`.
+ * The flag is stripped before the procedure sees the arguments. A `create*`
+ * mutation has no stored value to erase, so it is not checked.
+ */
+export const guardSecretWriteBack = (
+	tool: Pick<McpToolDefinition, "name" | "type" | "procedureName">,
+	args: unknown,
+	scopes: Set<string>,
+): { args: unknown; error?: string } => {
+	if (tool.type !== "mutation") return { args };
+	if (typeof args !== "object" || args === null || Array.isArray(args)) {
+		return { args };
+	}
+	const { [ALLOW_EMPTY_SECRETS_ARG]: flag, ...rest } = args as Record<
+		string,
+		unknown
+	>;
+	if (flag === true && scopes.has(SECRET_READ_SCOPE)) return { args: rest };
+	if (/^create/i.test(tool.procedureName)) return { args: rest };
+	const field = findEmptiedSecretField(rest);
+	if (!field) return { args: rest };
+	return {
+		args: rest,
+		error: `BAD_REQUEST: ${tool.name} sets \`${field}\` to an empty value. Secret values are redacted when read over MCP (they read back as ""), so writing that back would erase the stored secret. Leave the field out to keep it unchanged, use the envKeys tool to see which variables exist, and send the full set you want to keep (saveEnvironment replaces the whole env). To clear a value on purpose, repeat the call with ${ALLOW_EMPTY_SECRETS_ARG}: true, which needs the ${SECRET_READ_SCOPE} scope.`,
+	};
+};
+
+/**
+ * Tools whose result carries real argv in `command`/`args`, so the command
+ * line is scrubbed of flag and URL credentials. Only these: a service's own
+ * `command`/`args` is configuration that must read back unchanged.
+ */
+export const COMMAND_LINE_RESULT_PATHS: ReadonlySet<string> = new Set([
+	"server.getContainerProcesses",
+]);
+
+/**
+ * Whether a tool result is blanked before it is returned: always, except for
+ * a credential tool, an envKeys tool (names only), and a `.one` read whose (already admin-gated)
+ * `includeEnv` is true.
+ */
+export const shouldRedactResult = (path: string, forcedArgs: unknown) => {
+	if (CREDENTIAL_RESULT_PATHS.has(path)) return false;
+	if (KEYS_ONLY_RESULT_PATHS.has(path)) return false;
+	if (
+		SECRET_READ_PATHS.has(path) &&
+		typeof forcedArgs === "object" &&
+		forcedArgs !== null &&
+		(forcedArgs as { includeEnv?: unknown }).includeEnv === true
+	) {
+		return false;
+	}
+	return true;
+};
 
 /** Scope check, then execution through the injected tRPC caller. */
 export const executeMcpTool = async ({
@@ -337,7 +479,18 @@ export const executeMcpTool = async ({
 		);
 	}
 	try {
-		const result = await call(tool.path, args ?? {});
+		const guarded = guardSecretWriteBack(tool, args ?? {}, scopes);
+		if (guarded.error) return errorResult(guarded.error);
+		const callArgs = applySecretReadPolicy(tool.path, guarded.args, scopes);
+		const raw = await call(tool.path, callArgs);
+		// Second line of defence: whatever a route nests (a service row inside
+		// an environment, a project, a search hit) loses its secret fields.
+		const redacted = shouldRedactResult(tool.path, callArgs)
+			? redactToolResult(raw)
+			: raw;
+		const result = COMMAND_LINE_RESULT_PATHS.has(tool.path)
+			? scrubCommandFields(redacted)
+			: redacted;
 		const text =
 			result === undefined ? "null" : JSON.stringify(result, bigintReplacer);
 		// Reuse the serialized form so structuredContent is JSON-safe too: a

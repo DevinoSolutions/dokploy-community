@@ -34,6 +34,10 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
+import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -45,6 +49,7 @@ import {
 	apiCreateMongo,
 	apiDeployMongo,
 	apiFindOneMongo,
+	apiReadMongo,
 	apiRebuildMongo,
 	apiResetMongo,
 	apiSaveEnvironmentVariablesMongo,
@@ -133,7 +138,23 @@ export const mongoRouter = createTRPCRouter({
 				});
 			}
 		}),
-	one: protectedProcedure
+	one: protectedProcedure.input(apiReadMongo).query(async ({ input, ctx }) => {
+		await checkServiceAccess(ctx, input.mongoId, "read");
+
+		const mongo = await findMongoById(input.mongoId);
+		if (
+			mongo.environment.project.organizationId !==
+			ctx.session.activeOrganizationId
+		) {
+			throw new TRPCError({
+				code: "UNAUTHORIZED",
+				message: "You are not authorized to access this mongo",
+			});
+		}
+		return shapeServiceRead(mongo, input.includeEnv);
+	}),
+
+	envKeys: protectedProcedure
 		.input(apiFindOneMongo)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.mongoId, "read");
@@ -148,7 +169,8 @@ export const mongoRouter = createTRPCRouter({
 					message: "You are not authorized to access this mongo",
 				});
 			}
-			return mongo;
+			// Names only: the values never leave the server.
+			return { env: listEnvKeys(mongo.env) };
 		}),
 
 	start: protectedProcedure
