@@ -2,6 +2,7 @@ import {
 	EMPTIED_SECRET_MAX_DEPTH,
 	findEmptiedSecretField,
 	redactToolResult,
+	scrubCommandFields,
 	scrubCommandText,
 	scrubSecretsInText,
 } from "@dokploy/server/services/service-secrets";
@@ -28,6 +29,7 @@ const { appRouter } = await import("@/server/api/root");
 const { createCallerFactory } = await import("@/server/api/trpc");
 const { buildMcpToolRegistry } = await import("@/server/mcp/registry");
 const {
+	COMMAND_LINE_RESULT_PATHS,
 	CREDENTIAL_RESULT_PATHS,
 	executeMcpTool,
 	guardSecretWriteBack,
@@ -480,5 +482,86 @@ describe("container process lists", () => {
 		expect(scrubCommandText("login -p hunter2")).toBe("login -p ***");
 		expect(scrubCommandText("login -phunter2")).toBe("login -p***");
 		expect(scrubSecretsInText("login -p hunter2")).toBe("login -p hunter2");
+	});
+});
+
+describe("service commands are configuration", () => {
+	const commands = {
+		command: "mkdir -p logs/cache && next start -p $PORT",
+		args: ["pytest", "-p", "no:cacheprovider", "-print", "find . -print"],
+	};
+
+	const rowFor = (name: string) =>
+		name.startsWith("schedule-list")
+			? [{ scheduleId: "s-1", name: "nightly", ...commands }]
+			: { name: "svc", ...commands, env: "A=SECRET-1" };
+
+	it.each([
+		["application-one", "dokploy:read"],
+		["compose-one", "dokploy:read"],
+		["schedule-one", "dokploy:read"],
+		["schedule-list", "dokploy:read"],
+	])("%s returns command and args unchanged", async (name) => {
+		const result = await executeMcpTool({
+			tool: tool(name),
+			args: {},
+			scopes: READ,
+			call: async () => rowFor(name),
+		});
+		expect(result.isError).toBeUndefined();
+		const body = JSON.parse(result.content[0]?.text ?? "null");
+		const row = Array.isArray(body) ? body[0] : body;
+		expect(row.command, name).toBe(commands.command);
+		expect(row.args, name).toEqual(commands.args);
+		expect(result.content[0]?.text).not.toContain("SECRET-");
+	});
+
+	it("round-trips a command through read, then write, without a change", async () => {
+		const read = await executeMcpTool({
+			tool: tool("application-one"),
+			args: { applicationId: "app-1" },
+			scopes: READ,
+			call: async () => rowFor("application-one"),
+		});
+		const row = JSON.parse(read.content[0]?.text ?? "{}");
+		const call = vi.fn(async () => ({ ok: true }));
+		await executeMcpTool({
+			tool: tool("application-update"),
+			args: { applicationId: "app-1", command: row.command, args: row.args },
+			scopes: WRITE,
+			call,
+		});
+		expect(call).toHaveBeenCalledWith("application.update", {
+			applicationId: "app-1",
+			command: commands.command,
+			args: commands.args,
+		});
+	});
+
+	it("only the container process listing is command-scrubbed", () => {
+		expect([...COMMAND_LINE_RESULT_PATHS]).toEqual([
+			"server.getContainerProcesses",
+		]);
+		expect(scrubCommandFields({ command: "mkdir -p /a/b", args: "-p secret1" })).toEqual({
+			command: "mkdir -p /a/b",
+			args: "-p ***",
+		});
+	});
+
+	it("error text is still scrubbed", async () => {
+		const result = await executeMcpTool({
+			tool: tool("application-one"),
+			args: { applicationId: "app-1" },
+			scopes: READ,
+			call: async () => {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "failed: https://u:pw@host/x --token abc",
+				});
+			},
+		});
+		expect(result.content[0]?.text).toBe(
+			"BAD_REQUEST: failed: https://***@host/x --token ***",
+		);
 	});
 });

@@ -12,6 +12,7 @@ import {
 import {
 	findEmptiedSecretField,
 	redactToolResult,
+	scrubCommandFields,
 	scrubSecretsInText,
 } from "@dokploy/server/services/service-secrets";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -433,6 +434,15 @@ export const guardSecretWriteBack = (
 };
 
 /**
+ * Tools whose result carries real argv in `command`/`args`, so the command
+ * line is scrubbed of flag and URL credentials. Only these: a service's own
+ * `command`/`args` is configuration that must read back unchanged.
+ */
+export const COMMAND_LINE_RESULT_PATHS: ReadonlySet<string> = new Set([
+	"server.getContainerProcesses",
+]);
+
+/**
  * Whether a tool result is blanked before it is returned: always, except for
  * a credential tool, an envKeys tool (names only), and a `.one` read whose (already admin-gated)
  * `includeEnv` is true.
@@ -475,9 +485,12 @@ export const executeMcpTool = async ({
 		const raw = await call(tool.path, callArgs);
 		// Second line of defence: whatever a route nests (a service row inside
 		// an environment, a project, a search hit) loses its secret fields.
-		const result = shouldRedactResult(tool.path, callArgs)
+		const redacted = shouldRedactResult(tool.path, callArgs)
 			? redactToolResult(raw)
 			: raw;
+		const result = COMMAND_LINE_RESULT_PATHS.has(tool.path)
+			? scrubCommandFields(redacted)
+			: redacted;
 		const text =
 			result === undefined ? "null" : JSON.stringify(result, bigintReplacer);
 		// Reuse the serialized form so structuredContent is JSON-safe too: a

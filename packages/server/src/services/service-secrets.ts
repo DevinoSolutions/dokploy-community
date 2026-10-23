@@ -286,23 +286,6 @@ const blankEnvArray = (entries: unknown[]): unknown[] => {
 	return copy ?? entries;
 };
 
-/** Fields that hold a command line (`docker top` args, a service command). */
-const COMMAND_KEYS: ReadonlySet<string> = new Set(["command", "args"]);
-
-const scrubCommandValue = (value: unknown): unknown => {
-	if (typeof value === "string") return scrubCommandText(value);
-	if (!Array.isArray(value)) return value;
-	let copy: unknown[] | null = null;
-	value.forEach((entry, index) => {
-		if (typeof entry !== "string") return;
-		const scrubbed = scrubCommandText(entry);
-		if (scrubbed === entry) return;
-		copy ??= value.slice();
-		copy[index] = scrubbed;
-	});
-	return copy ?? value;
-};
-
 interface Walked {
 	value: unknown;
 	changed: boolean;
@@ -343,8 +326,6 @@ const walkSecrets = (node: unknown, path: Set<object>): Walked => {
 			}
 		} else if (key === "customGitUrl") {
 			next = stripUrlCredentials(value);
-		} else if (COMMAND_KEYS.has(key.toLowerCase())) {
-			next = scrubCommandValue(value);
 		} else {
 			const walked = walkSecrets(value, path);
 			if (walked.changed) next = walked.value;
@@ -448,3 +429,48 @@ export const scrubCommandText = (text: string): string =>
 		(match, lead: string, gap: string, value: string) =>
 			looksLikePortMapping(value) ? match : `${lead}-p${gap}***`,
 	);
+
+/**
+ * Runs {@link scrubCommandText} over every `command` and `args` string (or
+ * string array) in a result, at any depth, copying only what changes. For a
+ * result where those fields really are argv (a container process listing);
+ * never for service rows, where `command`/`args` is configuration the
+ * caller may read, edit and write back.
+ */
+export const scrubCommandFields = (node: unknown): unknown => {
+	if (Array.isArray(node)) {
+		let copy: unknown[] | null = null;
+		node.forEach((item, index) => {
+			const next = scrubCommandFields(item);
+			if (next === item) return;
+			copy ??= node.slice();
+			copy[index] = next;
+		});
+		return copy ?? node;
+	}
+	if (!isPlainObject(node)) return node;
+	let copy: AnyRecord | null = null;
+	for (const [key, value] of Object.entries(node)) {
+		const lower = key.toLowerCase();
+		let next: unknown;
+		if ((lower === "command" || lower === "args") && typeof value === "string") {
+			next = scrubCommandText(value);
+		} else if (
+			(lower === "command" || lower === "args") &&
+			Array.isArray(value) &&
+			value.every((entry) => typeof entry === "string")
+		) {
+			next = value.map((entry) => scrubCommandText(entry as string));
+			if ((next as string[]).every((entry, i) => entry === value[i])) {
+				next = value;
+			}
+		} else {
+			next = scrubCommandFields(value);
+		}
+		if (next !== value) {
+			copy ??= { ...node };
+			copy[key] = next;
+		}
+	}
+	return copy ?? node;
+};
