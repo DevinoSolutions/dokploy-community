@@ -87,6 +87,10 @@ const integration = {
 type ToolCall = { name: string; arguments: Record<string, unknown> };
 let toolCalls: ToolCall[] = [];
 let toolHandler: (call: ToolCall) => unknown = () => ({});
+// `uptimely_monitor_list` is answered on its own so the create assertions
+// below keep seeing only creates; one entry per list call.
+let listCalls: ToolCall[] = [];
+let listHandler: (call: ToolCall) => unknown = () => ({ monitors: [] });
 
 /** Reads back `const input = JSON.parse("<json>");\nreturn await external_x(input);`. */
 const decodeProgram = (code: string): ToolCall => {
@@ -103,6 +107,8 @@ const decodeProgram = (code: string): ToolCall => {
 
 const installFetch = () => {
 	toolCalls = [];
+	listCalls = [];
+	listHandler = () => ({ monitors: [] });
 	vi.stubGlobal(
 		"fetch",
 		vi.fn(async (_url: string, init?: RequestInit) => {
@@ -118,10 +124,15 @@ const installFetch = () => {
 			// generated program back into the Uptimely tool call it makes.
 			expect(req.params.name).toBe("execute_typescript");
 			const call = decodeProgram(String(req.params.arguments.code));
-			toolCalls.push(call);
+			const isList = call.name === "uptimely_monitor_list";
+			(isList ? listCalls : toolCalls).push(call);
 			let envelope: unknown;
 			try {
-				envelope = { success: true, result: toolHandler(call), logs: [] };
+				envelope = {
+					success: true,
+					result: isList ? listHandler(call) : toolHandler(call),
+					logs: [],
+				};
 			} catch (error) {
 				envelope = {
 					success: false,
@@ -306,11 +317,274 @@ describe("linkUptimelyService", () => {
 			"www.example.com",
 		]);
 		expect(
-			mocks.insertedLinks.filter((l) => l.kind === "website").map((l) => l.target),
+			mocks.insertedLinks
+				.filter((l) => l.kind === "website")
+				.map((l) => l.target),
 		).toEqual([
 			"https://app.example.com/health",
 			"https://www.example.com/health",
 		]);
+	});
+
+	describe("adopting existing monitors (T-6980)", () => {
+		const link = (extra: Record<string, unknown> = {}) =>
+			linkUptimelyService({
+				integration,
+				serviceType: "application",
+				serviceId: "app-1",
+				includeSslAndDomain: false,
+				...extra,
+			});
+		// The list carries only id, name, type and status, never a URL.
+		const site = (id: string, name: string, monitorType = "Website") => ({
+			id,
+			name,
+			monitorType,
+			currentStatus: "up",
+		});
+		const APP = "Devino/web (app.example.com)";
+		const WWW = "Devino/web (www.example.com)";
+
+		it("links an existing monitor with the same type and name and creates nothing for it", async () => {
+			listHandler = () => ({
+				count: 1,
+				monitors: [site("mon-existing", APP)],
+			});
+			const result = await link();
+
+			expect(toolCalls.map((c) => c.arguments.url)).toEqual([
+				"https://www.example.com",
+			]);
+			expect(result.adopted.map((l) => l.monitorId)).toEqual(["mon-existing"]);
+			expect(result.created).toHaveLength(1);
+			expect(mocks.insertedLinks[0]).toEqual(
+				expect.objectContaining({
+					monitorId: "mon-existing",
+					kind: "website",
+					target: "https://app.example.com",
+				}),
+			);
+		});
+
+		it("creates one monitor per domain when nothing matches", async () => {
+			listHandler = () => ({
+				count: 1,
+				monitors: [site("mon-x", "Devino/other (unrelated.example.org)")],
+			});
+			const result = await link();
+			expect(toolCalls).toHaveLength(2);
+			expect(result.adopted).toHaveLength(0);
+			expect(result.created).toHaveLength(2);
+		});
+
+		it("matches names ignoring case and extra whitespace", async () => {
+			listHandler = () => ({
+				count: 2,
+				monitors: [
+					site("mon-a", "DEVINO/Web (App.Example.com)"),
+					site("mon-b", `  ${WWW}  `),
+				],
+			});
+			const result = await link();
+			expect(toolCalls).toHaveLength(0);
+			expect(result.adopted.map((l) => l.monitorId)).toEqual([
+				"mon-a",
+				"mon-b",
+			]);
+		});
+
+		it("does not match a different monitor type or check path", async () => {
+			mocks.findDomainsByApplicationId.mockResolvedValue([
+				{ host: "app.example.com", https: true, path: "/" },
+			]);
+			listHandler = () => ({
+				count: 2,
+				monitors: [
+					site("mon-ssl", APP, "SSL Certificate"),
+					site("mon-other", "Devino/web (app.example.com/health)"),
+				],
+			});
+			await link();
+			expect(toolCalls).toHaveLength(1);
+		});
+
+		it("lists once per call, however many domains are pending", async () => {
+			await link({ includeSslAndDomain: true });
+			expect(listCalls).toHaveLength(1);
+			expect(listCalls[0]?.arguments).toEqual(
+				expect.objectContaining({ projectId: PROJECT, offset: 0 }),
+			);
+			// 2 website + 2 ssl + 2 domain, all created after the single list.
+			expect(toolCalls).toHaveLength(6);
+		});
+
+		it("pages through a long list until count monitors are seen, then adopts a match on a later page", async () => {
+			const filler = (from: number, n: number) =>
+				Array.from({ length: n }, (_, i) =>
+					site(`mon-f${from + i}`, `Devino/f (${from + i}.example.com)`),
+				);
+			listHandler = (call) => {
+				const offset = call.arguments.offset as number;
+				if (offset === 0) return { count: 130, monitors: filler(0, 100) };
+				return {
+					count: 130,
+					monitors: [...filler(100, 29), site("mon-late", APP)],
+				};
+			};
+			const result = await link();
+			expect(listCalls.map((c) => c.arguments.offset)).toEqual([0, 100]);
+			expect(result.adopted.map((l) => l.monitorId)).toEqual(["mon-late"]);
+			expect(toolCalls).toHaveLength(1);
+		});
+
+		it("stops paging at the hard cap", async () => {
+			listHandler = (call) => ({
+				count: 100000,
+				monitors: Array.from({ length: 100 }, (_, i) =>
+					site(
+						`m-${call.arguments.offset}-${i}`,
+						`n-${call.arguments.offset}-${i}`,
+					),
+				),
+			});
+			await link();
+			expect(listCalls).toHaveLength(10);
+		});
+
+		it("keeps paging when count is just the page size", async () => {
+			const filler = (from: number) =>
+				Array.from({ length: 100 }, (_, i) =>
+					site(`mon-f${from + i}`, `Devino/f (${from + i}.example.com)`),
+				);
+			listHandler = (call) =>
+				call.arguments.offset === 0
+					? { count: 100, monitors: filler(0) }
+					: { count: 2, monitors: [site("mon-p2", APP), site("mon-p2b", "x")] };
+			const result = await link();
+			expect(listCalls.map((c) => c.arguments.offset)).toEqual([0, 100]);
+			expect(result.adopted.map((l) => l.monitorId)).toEqual(["mon-p2"]);
+		});
+
+		it("stops on a short page when count is absent", async () => {
+			listHandler = () => ({ monitors: [site("mon-s", APP)] });
+			const result = await link();
+			expect(listCalls).toHaveLength(1);
+			expect(result.adopted.map((l) => l.monitorId)).toEqual(["mon-s"]);
+		});
+
+		it("handles an empty first page", async () => {
+			listHandler = () => ({ count: 0, monitors: [] });
+			const result = await link();
+			expect(listCalls).toHaveLength(1);
+			expect(result.created).toHaveLength(2);
+		});
+
+		it("counts a create answered with created:false as adopted", async () => {
+			toolHandler = (call) => ({
+				monitorId: `existing-${String(call.arguments.url)}`,
+				created:
+					call.arguments.url === "https://app.example.com" ? false : true,
+			});
+			const result = await link();
+			expect(result.adopted.map((l) => l.monitorId)).toEqual([
+				"existing-https://app.example.com",
+			]);
+			expect(result.created).toHaveLength(1);
+		});
+
+		it("does not list when everything is already linked", async () => {
+			mocks.linksFindMany.mockResolvedValue([
+				{ kind: "website", target: "https://app.example.com" },
+				{ kind: "website", target: "https://www.example.com" },
+			]);
+			await link();
+			expect(listCalls).toHaveLength(0);
+			expect(toolCalls).toHaveLength(0);
+		});
+
+		it("fails closed when the list call fails: nothing is created or linked", async () => {
+			listHandler = () => {
+				throw new Error("quota exhausted");
+			};
+			await expect(link()).rejects.toThrow(
+				/Could not list the existing Uptimely monitors.*quota exhausted/,
+			);
+			expect(listCalls).toHaveLength(1);
+			expect(toolCalls).toHaveLength(0);
+			expect(mocks.insertedLinks).toHaveLength(0);
+		});
+
+		describe("explicit monitorId", () => {
+			beforeEach(() => {
+				mocks.findDomainsByApplicationId.mockResolvedValue([
+					{ host: "app.example.com", https: true, path: "/" },
+				]);
+			});
+
+			it("adopts the monitor after one get, with no list and no create", async () => {
+				toolHandler = (call) => {
+					expect(call.name).toBe("uptimely_monitor_get");
+					return { id: "mon-picked", monitorType: "Website", name: "x" };
+				};
+				const result = await link({ monitorId: "mon-picked" });
+				expect(toolCalls.map((c) => c.name)).toEqual(["uptimely_monitor_get"]);
+				expect(toolCalls[0]?.arguments).toEqual({
+					projectId: PROJECT,
+					monitorId: "mon-picked",
+				});
+				expect(listCalls).toHaveLength(0);
+				expect(result.adopted.map((l) => l.monitorId)).toEqual(["mon-picked"]);
+				expect(mocks.insertedLinks[0]).toEqual(
+					expect.objectContaining({
+						monitorId: "mon-picked",
+						target: "https://app.example.com",
+					}),
+				);
+			});
+
+			it("refuses an id Uptimely cannot find, without creating", async () => {
+				toolHandler = () => {
+					throw new Error("Monitor not found");
+				};
+				await expect(link({ monitorId: "mon-missing" })).rejects.toThrow(
+					/does not exist in this integration/,
+				);
+				expect(toolCalls.map((c) => c.name)).toEqual(["uptimely_monitor_get"]);
+				expect(mocks.insertedLinks).toHaveLength(0);
+			});
+
+			it("refuses a monitor already linked to this service, before any call", async () => {
+				mocks.linksFindMany.mockResolvedValue([
+					{ kind: "website", target: "https://other.example.com", monitorId: "mon-dup" },
+				]);
+				await expect(link({ monitorId: "mon-dup" })).rejects.toThrow(
+					/already linked to this service/,
+				);
+				expect(toolCalls).toHaveLength(0);
+				expect(mocks.insertedLinks).toHaveLength(0);
+			});
+
+			it("refuses an ambiguous type when several specs of it are pending", async () => {
+				mocks.findDomainsByApplicationId.mockResolvedValue([
+					{ host: "app.example.com", https: true, path: "/" },
+					{ host: "www.example.com", https: true, path: "/" },
+				]);
+				toolHandler = () => ({ id: "mon-w", monitorType: "Website" });
+				await expect(link({ monitorId: "mon-w" })).rejects.toThrow(
+					/More than one monitor of that type/,
+				);
+				expect(mocks.insertedLinks).toHaveLength(0);
+			});
+
+			it("refuses a monitor whose type the service has nothing pending for", async () => {
+				toolHandler = () => ({ id: "mon-ssl", monitorType: "SSL Certificate" });
+				await expect(link({ monitorId: "mon-ssl" })).rejects.toThrow(
+					/nothing pending for/,
+				);
+				expect(toolCalls).toHaveLength(1);
+				expect(mocks.insertedLinks).toHaveLength(0);
+			});
+		});
 	});
 
 	it("refuses when the service has nothing to monitor", async () => {
@@ -388,9 +662,13 @@ describe("httpsUrlsFromDomains check path", () => {
 			environment: { project: { name: "Devino", organizationId: "org-1" } },
 		});
 		mocks.findDomainsByApplicationId.mockResolvedValue(domains.slice(0, 1));
-		const withPath = await resolveUptimelyServiceTarget("application", "app-1", {
-			checkPath: "/health",
-		});
+		const withPath = await resolveUptimelyServiceTarget(
+			"application",
+			"app-1",
+			{
+				checkPath: "/health",
+			},
+		);
 		expect(withPath.httpsUrls).toEqual([
 			{ host: "api.example.com", url: "https://api.example.com/health" },
 		]);
