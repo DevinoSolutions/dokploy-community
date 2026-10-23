@@ -56,7 +56,7 @@ export const swarmRouter = createTRPCRouter({
 				? await filterReadableServiceRows(
 						ctx,
 						services,
-						(service: { Name: string }) => service.Name,
+						(service) => service.Name,
 						input.serverId,
 					)
 				: services;
@@ -78,7 +78,8 @@ export const swarmRouter = createTRPCRouter({
 					.regex(containerIdRegex, "Invalid app name.")
 					// the names go to `docker service ps`, which takes flags
 					.refine((name) => !name.startsWith("-"), "Invalid app name.")
-					.array(),
+					.array()
+					.max(500),
 				serverId: z.string().optional(),
 			}),
 		)

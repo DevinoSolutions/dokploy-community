@@ -168,6 +168,11 @@ vi.mock("@dokploy/server", () => {
 	for (const name of names) mocks.services[name] = vi.fn(async () => []);
 	mocks.services.getRemoteDocker = vi.fn(async () => ({
 		listNodes: async () => [],
+		swarmInspect: async () => ({
+			JoinTokens: { Worker: "worker-token", Manager: "manager-token" },
+		}),
+		version: async () => ({ Version: "27" }),
+		info: async () => ({ Swarm: { NodeAddr: "10.0.0.1" } }),
 	}));
 	mocks.services.createNetwork = vi.fn(async () => ({
 		networkId: "net-new",
@@ -185,6 +190,14 @@ vi.mock("@dokploy/server", () => {
 	return {
 		IS_CLOUD: false,
 		findServerById: vi.fn(),
+		execAsync: vi.fn(async (command: string) => {
+			mocks.commands.push({ command });
+			return { stdout: "", stderr: "" };
+		}),
+		execAsyncRemote: vi.fn(async (serverId: string, command: string) => {
+			mocks.commands.push({ serverId, command });
+			return { stdout: "", stderr: "" };
+		}),
 		findNetworkById: vi.fn(async (networkId: string) => {
 			const row = mocks.networks.get(networkId);
 			if (!row)
@@ -390,6 +403,43 @@ describe("swarm nodes", () => {
 	});
 });
 
+describe("cluster join tokens and node removal", () => {
+	it("refuses a member the local swarm's join tokens and node removal", async () => {
+		const caller = cluster("member");
+		await expectUnauthorized(caller.addWorker({}));
+		await expectUnauthorized(caller.addManager({}));
+		await expectUnauthorized(caller.removeWorker({ nodeId: "n1" }));
+		expect(called("getRemoteDocker")).toBe(0);
+		expect(mocks.commands).toEqual([]);
+	});
+
+	it.each(roles)("gives an %s the join commands", async (role) => {
+		expect((await cluster(role).addWorker({})).command).toContain(
+			"worker-token",
+		);
+		expect((await cluster(role).addManager({})).command).toContain(
+			"manager-token",
+		);
+	});
+
+	it("lets an owner remove a node of a reachable server only", async () => {
+		mocks.servers = new Set(["srv-1"]);
+		await cluster("owner").removeWorker({ nodeId: "n1", serverId: "srv-1" });
+		expect(mocks.commands.map((entry) => entry.serverId)).toEqual([
+			"srv-1",
+			"srv-1",
+		]);
+
+		mocks.commands.length = 0;
+		await expectUnauthorized(
+			cluster("owner").removeWorker({ nodeId: "n1", serverId: "x" }),
+		);
+		await expectUnauthorized(cluster("owner").addWorker({ serverId: "x" }));
+		await expectUnauthorized(cluster("owner").addManager({ serverId: "x" }));
+		expect(mocks.commands).toEqual([]);
+	});
+});
+
 describe("swarm services and stats", () => {
 	const serviceRows = [
 		{ ID: "s1", Name: "app-a-abc123" },
@@ -452,6 +502,15 @@ describe("swarm services and stats", () => {
 			["app-a-abc123", "app-b-abc123"],
 			undefined,
 		);
+	});
+
+	it("caps the number of app names", async () => {
+		await expect(
+			swarm("owner").getAppInfos({
+				appName: Array.from({ length: 501 }, (_, i) => `app-${i}`),
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(called("getApplicationInfo")).toBe(0);
 	});
 
 	it("rejects an app name that docker would read as a flag", async () => {

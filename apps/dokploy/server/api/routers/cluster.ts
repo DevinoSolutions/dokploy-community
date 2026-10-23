@@ -11,7 +11,7 @@ import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { assertServerReachable } from "@/server/api/utils/container-service-access";
 import { getLocalServerIp } from "@/server/wss/terminal";
-import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
+import { adminProcedure, createTRPCRouter } from "../trpc";
 
 export const clusterRouter = createTRPCRouter({
 	// The swarm nodes belong to the cluster, not to a service: owner/admin only,
@@ -29,7 +29,11 @@ export const clusterRouter = createTRPCRouter({
 			return workers;
 		}),
 
-	removeWorker: withPermission("server", "delete")
+	// The join tokens (addWorker, addManager) and node removal are the cluster's,
+	// not a service's: with no serverId they act on the local swarm, whose manager
+	// token is a host-wide secret. Owner/admin only (who hold server:create and
+	// server:delete), and a server the caller can reach.
+	removeWorker: adminProcedure
 		.input(
 			z.object({
 				nodeId: z.string(),
@@ -37,15 +41,7 @@ export const clusterRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const targetServer = await findServerById(input.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You don't have access to this server.",
-					});
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			try {
 				const drainCommand = `docker node update --availability drain ${quote([input.nodeId])}`;
 				const removeCommand = `docker node rm ${quote([input.nodeId])} --force`;
@@ -73,22 +69,14 @@ export const clusterRouter = createTRPCRouter({
 			}
 		}),
 
-	addWorker: withPermission("server", "create")
+	addWorker: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const targetServer = await findServerById(input.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You don't have access to this server.",
-					});
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			const docker = await getRemoteDocker(input.serverId);
 			const result = await docker.swarmInspect();
 			const docker_version = await docker.version();
@@ -107,22 +95,14 @@ export const clusterRouter = createTRPCRouter({
 			};
 		}),
 
-	addManager: withPermission("server", "create")
+	addManager: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const targetServer = await findServerById(input.serverId);
-				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You don't have access to this server.",
-					});
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			const docker = await getRemoteDocker(input.serverId);
 			const result = await docker.swarmInspect();
 			const docker_version = await docker.version();
