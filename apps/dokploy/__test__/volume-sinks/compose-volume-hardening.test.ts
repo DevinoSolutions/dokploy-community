@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
 		},
 		warn: vi.fn(),
 		readFileSync: vi.fn(),
+		readDotenv: vi.fn(),
 	};
 });
 
@@ -42,6 +43,18 @@ vi.mock("node:fs", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:fs")>()),
 	readFileSync: mocks.readFileSync,
 }));
+
+// The `.env` of the project directory (T-7160). Not there unless a test says so.
+vi.mock("node:fs/promises", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:fs/promises")>()),
+	open: async (path: string) => {
+		const { dotenvHandle } = await import("./dotenv-fs-mock");
+		const result = await mocks.readDotenv(path);
+		return typeof result === "string" ? dotenvHandle(result) : result;
+	},
+}));
+
+const fsError = (code: string) => Object.assign(new Error(code), { code });
 
 const { paths } = await import("@dokploy/server/constants");
 const { assertComposeVolumesBound } = await import(
@@ -133,6 +146,7 @@ ${definition}
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.readDotenv.mockRejectedValue(fsError("ENOENT"));
 	for (const table of Object.values(mocks.query)) {
 		table.findMany.mockResolvedValue([]);
 	}
@@ -212,7 +226,12 @@ describe("variables set to an empty value", () => {
 
 		await expect(
 			assertComposeVolumesBound(composeRow(yaml, { env: "A=" })),
-		).rejects.toThrow(/Compose volume "victim" is refused/);
+		).rejects.toThrow('Compose volume "${A-app_own}${A+victim}" is refused');
+		// The message shows the compose's text; the log has the resolved name.
+		expect(mocks.warn).toHaveBeenCalledWith(
+			expect.objectContaining({ volumeName: "victim" }),
+			expect.any(String),
+		);
 	});
 
 	it("a stack does not get an empty variable at all", async () => {
@@ -222,7 +241,11 @@ describe("variables set to an empty value", () => {
 			assertComposeVolumesBound(
 				composeRow(yaml, { env: "A=", composeType: "stack" }),
 			),
-		).rejects.toThrow(/Compose volume "app_own" is refused/);
+		).rejects.toThrow('Compose volume "${A-app_own}${A+victim}" is refused');
+		expect(mocks.warn).toHaveBeenCalledWith(
+			expect.objectContaining({ volumeName: "app_own" }),
+			expect.any(String),
+		);
 	});
 
 	it("knows the deploy shell's PATH and HOME are set, without knowing them", async () => {
@@ -232,7 +255,11 @@ describe("variables set to an empty value", () => {
 			assertComposeVolumesBound(
 				composeRow(withVolume("    name: x${HOME+victim}")),
 			),
-		).rejects.toThrow(/Compose volume "xvictim" is refused/);
+		).rejects.toThrow('Compose volume "x${HOME+victim}" is refused');
+		expect(mocks.warn).toHaveBeenCalledWith(
+			expect.objectContaining({ volumeName: "xvictim" }),
+			expect.any(String),
+		);
 		await expect(
 			assertComposeVolumesBound(composeRow(withVolume("    name: ${HOME}"))),
 		).rejects.toThrow(/Compose volume check failed/);

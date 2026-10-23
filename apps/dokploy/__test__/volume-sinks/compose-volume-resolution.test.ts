@@ -1,8 +1,8 @@
+import { randomizeDeployableSpecificationFile } from "@dokploy/server/utils/docker/collision";
 import {
 	interpolateComposeValue,
 	resolveComposeMountedVolumes,
 } from "@dokploy/server/utils/volume-backups/compose-volumes";
-import { randomizeDeployableSpecificationFile } from "@dokploy/server/utils/docker/collision";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
@@ -168,18 +168,18 @@ volumes:
 		]);
 	});
 
-	it("treats an unresolvable source as any declared volume", () => {
+	it("treats a source that stays unresolved as any declared volume", () => {
 		const { uses, unresolved } = resolve(
 			`
 services:
   web:
     volumes:
-      - \${WHICH}:/data
+      - \${WHICH:?set WHICH}:/data
 volumes:
   foreign:
     external: true
 `,
-			{ env: {}, strict: true },
+			{ env: {} },
 		);
 		expect(unresolved).toEqual([]);
 		expect(uses.map((use) => use.volumeName)).toEqual(["foreign"]);
@@ -191,11 +191,41 @@ volumes:
 services:
   web:
     volumes:
-      - \${DATA_DIR}:/data
+      - \${DATA_DIR:?set DATA_DIR}:/data
+`,
+			{ env: {} },
+		);
+		expect(uses).toEqual([]);
+		expect(unresolved).toEqual([]);
+	});
+
+	it("refuses a variable source when the env file cannot be read (strict)", () => {
+		// It can be a path of the host: a variable of a .env nobody read is any
+		// directory (T-7160).
+		for (const source of ["${DATA_DIR}", "${DATA_DIR:-./data}", "./${X}"]) {
+			const { unresolved } = resolve(
+				`
+services:
+  web:
+    volumes:
+      - ${source}:/data
+`,
+				{ env: {}, strict: true },
+			);
+			expect(unresolved).toHaveLength(1);
+		}
+		// The source of a long-syntax `type: volume` is a name, not a path.
+		const { unresolved } = resolve(
+			`
+services:
+  web:
+    volumes:
+      - type: volume
+        source: \${NAME}
+        target: /data
 `,
 			{ env: {}, strict: true },
 		);
-		expect(uses).toEqual([]);
 		expect(unresolved).toEqual([]);
 	});
 

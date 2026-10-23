@@ -28,8 +28,11 @@ export type ComposeVariables = Record<string, string> | null;
 type InterpolationOptions = {
 	// Variables Dokploy writes for the deploy. null: unknown.
 	env: ComposeVariables;
-	// Variables may also come from a file Dokploy does not see (a `.env`
-	// committed to the repository), so no variable can be trusted.
+	// Variables may also come from a file Dokploy could not read (an
+	// `--env-file` of a custom command, a `.env` that is unreadable or that the
+	// check cannot parse), so no variable can be trusted, and a host path that
+	// depends on one is refused (T-7160). When Dokploy could read the `.env`
+	// Compose uses, `env` holds its variables and this stays off.
 	strict?: boolean;
 };
 
@@ -177,6 +180,146 @@ export const resolveEnvironmentReferences = (
 	return resolved;
 };
 
+// The variables of a `.env` file as Compose reads it from the project
+// directory (compose-go `dotenv`), in file order, with the values as written
+// (not yet expanded: see resolveEnvironmentReferences). null when the file is
+// not understood well enough to tell what Compose makes of it (a line that is
+// not `KEY=value`, an unclosed quote, a variable defined twice, a key that
+// moves the env files): the caller then trusts nothing. A value whose escapes
+// or comment are not certain is UNRESOLVED_VARIABLE_VALUE, so only a path that
+// uses that variable is affected. A single-quoted value is a literal, so its
+// `$` is escaped (`$$`) for the expansion that follows.
+export const parseDotenvVariables = (
+	text: string,
+): Record<string, string> | null => {
+	if (/\r(?!\n)/.test(text)) {
+		return null;
+	}
+	const source = text.replace(/^﻿/, "").replace(/\r\n/g, "\n");
+	// Go trims and splits on more white space than JavaScript does (U+0085
+	// is one), so a value with one of them would not be the text read here.
+	if (UNCERTAIN_DOTENV_CHARACTER.test(source)) {
+		return null;
+	}
+	const variables: Record<string, string> = {};
+	// What follows a closing quote must be nothing or a comment.
+	const isTail = (rest: string) => /^\s*(?:#.*)?$/.test(rest);
+	let position = 0;
+	while (position <= source.length) {
+		let lineEnd = source.indexOf("\n", position);
+		if (lineEnd < 0) {
+			lineEnd = source.length;
+		}
+		const line = source.slice(position, lineEnd);
+		// Where the next line starts; a quoted value over several lines moves it.
+		let next = lineEnd + 1;
+		if (/^\s*(?:#.*)?$/.test(line)) {
+			position = next;
+			continue;
+		}
+		const assignment = /^\s*(?:export\s+)?([A-Za-z0-9_.-]+)\s*=\s*(.*)$/.exec(
+			line,
+		);
+		if (!assignment) {
+			return null;
+		}
+		const key = assignment[1] as string;
+		const rest = assignment[2] as string;
+		let value: string;
+		const quote = rest[0];
+		if (quote === "'" || quote === '"') {
+			// One pass up to the closing quote, over lines. A backslash in a double
+			// quoted value skips the next character.
+			const start = lineEnd - rest.length + 1;
+			let closing = -1;
+			if (quote === "'") {
+				closing = source.indexOf("'", start);
+			} else {
+				for (let i = start; i < source.length; i++) {
+					const character = source[i];
+					if (character === "\\") {
+						i += 1;
+					} else if (character === '"') {
+						closing = i;
+						break;
+					}
+				}
+			}
+			if (closing < 0) {
+				return null;
+			}
+			const inner = source.slice(start, closing);
+			// A value is a few lines (a key, a certificate); a quote that spans
+			// more is not read.
+			if (inner.split("\n").length > MAX_DOTENV_VALUE_LINES) {
+				return null;
+			}
+			const tailEnd = source.indexOf("\n", closing);
+			const tailStop = tailEnd < 0 ? source.length : tailEnd;
+			if (!isTail(source.slice(closing + 1, tailStop))) {
+				return null;
+			}
+			next = tailStop + 1;
+			if (quote === "'") {
+				value = inner.replaceAll("$", "$$$$");
+			} else if (/\\[^\\"nrt]/.test(inner)) {
+				value = UNRESOLVED_VARIABLE_VALUE;
+			} else {
+				value = inner.replace(
+					/\\([\\"nrt])/g,
+					(_, escaped: string) =>
+						({ n: "\n", r: "\r", t: "\t" })[escaped] ?? escaped,
+				);
+			}
+		} else if (quote === "`") {
+			return null;
+		} else if (rest.startsWith("#") || rest.includes("\t#")) {
+			// A comment or not: Compose starts one at a space and a `#`, and what a
+			// tab does is not certain.
+			value = UNRESOLVED_VARIABLE_VALUE;
+		} else {
+			const comment = rest.indexOf(" #");
+			value = (comment < 0 ? rest : rest.slice(0, comment)).trimEnd();
+		}
+		if (key === "COMPOSE_ENV_FILES") {
+			return null;
+		}
+		if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+			if (Object.hasOwn(variables, key)) {
+				return null;
+			}
+			variables[key] = value;
+		}
+		// Other names cannot be named by a `$VAR` / `${VAR}`.
+		position = next;
+	}
+	return variables;
+};
+
+const MAX_DOTENV_VALUE_LINES = 200;
+
+// NUL and the other control characters (a tab and a line feed are fine), DEL,
+// the C1 controls (U+0085 NEL), and the Unicode white space that is not
+// ASCII: Compose and this parser may disagree on them.
+const codeUnit = (value: number) => String.raw`\u${value.toString(16).padStart(4, "0")}`;
+const UNCERTAIN_DOTENV_RANGES: Array<[number, number]> = [
+	[0x00, 0x08],
+	[0x0b, 0x0c],
+	[0x0e, 0x1f],
+	[0x7f, 0xa0],
+	[0x1680, 0x1680],
+	[0x2000, 0x200a],
+	[0x2028, 0x2029],
+	[0x202f, 0x202f],
+	[0x205f, 0x205f],
+	[0x3000, 0x3000],
+];
+const UNCERTAIN_DOTENV_CHARACTER = new RegExp(
+	`[${UNCERTAIN_DOTENV_RANGES.map(
+		([from, to]) => `${codeUnit(from)}-${codeUnit(to)}`,
+	).join("")}]`,
+);
+
 // A variable the source names whose value could not be resolved.
 const referencesUnresolvedVariable = (
 	text: string,
@@ -202,6 +345,8 @@ export type ComposeVolumeUse = {
 	volumeName: string;
 	// The name is `<project>_<key>`: the compose's own default.
 	derived: boolean;
+	// What a refusal shows instead of the name, when it came from a variable.
+	display?: string;
 };
 
 export type ComposeVolumeResolution = {
@@ -521,10 +666,24 @@ const createPathChecks = (options: ResolveOptions, into: PathChecks) => {
 	// written before the variable may already put it in Docker's volume
 	// storage, and a `..` anywhere in it can climb out of anywhere; both are
 	// refused, except for a lone variable with a literal default, which is
-	// judged as that default. Returns whether it was refused.
-	const refuseUnresolvedPath = (rawPath: string, what: string) => {
+	// judged as that default. When the env files cannot be read at all
+	// (`strict`), any variable is refused: its value, or the one that replaces a
+	// default, can be any directory (T-7160). `mayBeName`: the value can be the
+	// name of a volume as well, which is not a host path. Returns whether it was
+	// refused.
+	const refuseUnresolvedPath = (
+		rawPath: string,
+		what: string,
+		{ mayBeName = false }: { mayBeName?: boolean } = {},
+	) => {
 		if (unresolvedSourceReachesDockerVolumes(rawPath, options.baseDirs)) {
 			into.forbidden.push(`${what} "${rawPath}"`);
+			return true;
+		}
+		if (options.strict && !mayBeName && firstVariableIndex(rawPath) >= 0) {
+			into.unresolved.push(
+				`${what} "${rawPath}" (a variable in a host path, and the env file it comes from cannot be read)`,
+			);
 			return true;
 		}
 		if (referencesUnresolvedVariable(rawPath, options)) {
@@ -585,7 +744,13 @@ const collectMounts = (
 	};
 	// `cutAtColon`: a short-syntax source is the part before the first colon
 	// of the interpolated text, which a variable can bring.
-	const addSource = (rawSource: string, cutAtColon = false) => {
+	// `namesOnly`: the source of a `type: volume` entry is a volume name, never
+	// a path.
+	const addSource = (
+		rawSource: string,
+		cutAtColon = false,
+		namesOnly = false,
+	) => {
 		const source = interpolateComposeValue(rawSource, options);
 		if (source === null) {
 			// It can name any declared volume, or a path. Besides what
@@ -593,7 +758,9 @@ const collectMounts = (
 			// unlike a volume name or an `external` value: a service source that is
 			// a path (`${DATA_DIR}:/data`) is common and cannot be told from a
 			// name, so every declared volume is checked instead.
-			if (!refuseUnresolvedPath(rawSource, "bind mount")) {
+			if (
+				!refuseUnresolvedPath(rawSource, "bind mount", { mayBeName: namesOnly })
+			) {
 				into.anyKey = true;
 			}
 			return;
@@ -661,7 +828,7 @@ const collectMounts = (
 					if (type === "bind") {
 						checkPath(entry.source, "bind mount");
 					} else {
-						addSource(entry.source);
+						addSource(entry.source, false, type === "volume");
 					}
 				}
 			}
@@ -686,6 +853,13 @@ const OCI_LAYOUT = "oci-layout://";
 const FILE_SCHEME = "file://";
 
 const HAS_CLIMB = /(?:^|[/\\])\.\.(?:[/\\]|$)/;
+
+// A value that is or can be made into a path with a `..` segment: a literal
+// one, or (with a variable in it) a `..` anywhere, also at the end of a
+// default (`${A:-..}${B:-/..}`), which HAS_CLIMB does not see (T-7160).
+const mayClimb = (value: string) =>
+	HAS_CLIMB.test(value) ||
+	(value.includes("$") && unresolvedSourceClimbs(value));
 
 // The fields of a `cache_from` / `cache_to` entry, read like buildx does (CSV:
 // quotes and `""`), with the keys and values trimmed and the keys lowercased.
@@ -786,7 +960,13 @@ const collectHostPaths = (
 			return true;
 		}
 		if (REMOTE_BUILD_CONTEXT.test(text)) {
-			if (HAS_CLIMB.test(text) || HAS_CLIMB.test(raw)) {
+			// Under `strict` a variable could also bring the climb (`${A}/${B}`),
+			// so any of them in a remote-looking value is checked as a path.
+			if (
+				mayClimb(text) ||
+				mayClimb(raw) ||
+				(options.strict && firstVariableIndex(raw) >= 0)
+			) {
 				checkPath(raw, what);
 			}
 			return false;
@@ -839,14 +1019,14 @@ const collectHostPaths = (
 		const local = checkContext(context, "build context", false);
 		const dockerfile = build.dockerfile;
 		if (typeof dockerfile === "string" && dockerfile) {
+			const climbs =
+				mayClimb(dockerfile) ||
+				mayClimb(interpolateComposeValue(dockerfile, options) ?? dockerfile);
 			// Relative to the context. A value that starts with a variable can
 			// resolve to an absolute path, so it is judged on its own as well.
 			// Next to a context that is not a host directory it is only read
 			// when it climbs, since a directory of that name may be the context.
-			if (
-				!dockerfile.startsWith("/") &&
-				(local || HAS_CLIMB.test(dockerfile))
-			) {
+			if (!dockerfile.startsWith("/") && (local || climbs)) {
 				checkPath(
 					`${local ? withSoleDefault(context) : context}/${dockerfile}`,
 					"build dockerfile",
@@ -1093,7 +1273,14 @@ export const resolveComposeFilesMountedVolumes = (
 					unresolved.push(`volume "${key}"`);
 					continue;
 				}
-				addUse({ key, volumeName: name, derived: false });
+				addUse({
+					key,
+					volumeName: name,
+					derived: false,
+					// A name that came out of a variable is not shown: its value may
+					// come from a file the reader of a refusal cannot see.
+					display: rawName.includes("$") ? rawName : undefined,
+				});
 				continue;
 			}
 			if (external) {
