@@ -407,7 +407,7 @@ volumes:
 		});
 
 	describe("reading the volumes", () => {
-		const volumes = (command: string) => getCommandRunVolumes({ command });
+		const volumes = (command: string) => getCommandRunVolumes({ command, composeId: "compose-1" });
 
 		it.each([
 			["compose -f d.yml run -v /a:/b web", ["/a:/b"]],
