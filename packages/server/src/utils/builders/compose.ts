@@ -324,6 +324,20 @@ const getRestoreCommands = (
 		`;
 };
 
+// Whether the compose volume check accepts the compose with its custom
+// command. Imported when needed: the check imports the builders.
+const isCustomCommandAllowed = async (compose: ComposeNested) => {
+	try {
+		const { assertComposeVolumesBound } = await import(
+			"@dokploy/server/services/compose-volume-binding"
+		);
+		await assertComposeVolumesBound(compose);
+		return true;
+	} catch {
+		return false;
+	}
+};
+
 /**
  * Restore script for a deploy that failed *before* the deploy script ran (the
  * build on the build server; for a rolling compose without one, a cancel
@@ -336,7 +350,15 @@ export const getRestoreAfterFailedBuildCommand = async (
 	rawCompose: ComposeNested,
 	options: { deploymentId?: string; freshVolumes?: boolean } = {},
 ) => {
-	const compose = await withResolvedVaultRefs(rawCompose);
+	const resolved = await withResolvedVaultRefs(rawCompose);
+	// This restore runs after a refused compose volume (T-6822, T-7055) and on
+	// a cancel that can come before the check has run, and it re-runs the
+	// custom command. A command the volume check refuses must never be run
+	// here, so it is left out: the restore brings the previous release's files
+	// up with the default command instead.
+	const commandDropped =
+		Boolean(resolved.command) && !(await isCustomCommandAllowed(rawCompose));
+	const compose = commandDropped ? { ...resolved, command: "" } : resolved;
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const projectPath = join(COMPOSE_PATH, compose.appName, "code");
 	const isTransactional =
@@ -360,7 +382,13 @@ export const getRestoreAfterFailedBuildCommand = async (
 	// The deploy script runs from the code directory (it `cd`s there before the
 	// docker command) and the restored `-f` / `--env-file` paths are relative to
 	// it. This script runs as a step of its own, so it has to change there too.
-	return `cd ${quote([projectPath])} 2>/dev/null || true;${restore}`;
+	// The check decides on the whole compose (its files and the command's
+	// effect on them cannot be told apart), so a refused compose file also
+	// drops a command that was fine: say so in the log.
+	const droppedNotice = commandDropped
+		? `echo ${quote(["custom command dropped for the restore: it failed the volume check"])};`
+		: "";
+	return `${droppedNotice}cd ${quote([projectPath])} 2>/dev/null || true;${restore}`;
 };
 
 interface RollingDeployPlan {
