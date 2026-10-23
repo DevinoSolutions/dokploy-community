@@ -671,7 +671,10 @@ const collectMounts = (
 
 // A build context Compose hands to the builder as it is instead of reading it
 // from the host (compose-go `isRemoteContext`, case-sensitive): a git or http(s)
-// URL. The rest of a value is a path of the host.
+// URL. The rest of a value is a path of the host. A remote-looking value is not
+// trusted blindly: Compose keeps it as written (`github.com/../../x`,
+// `https://x/../..`), and a directory of that name in the build tree makes it a
+// local path, so one with a `..` segment is checked as a path too.
 const REMOTE_BUILD_CONTEXT =
 	/^(?:https?:\/\/|git:\/\/|ssh:\/\/|github\.com\/|git@)/;
 
@@ -680,6 +683,50 @@ const REMOTE_BUILD_CONTEXT =
 const BUILDER_REFERENCE = /^(?:service:|docker-image:\/\/)/;
 
 const OCI_LAYOUT = "oci-layout://";
+const FILE_SCHEME = "file://";
+
+const HAS_CLIMB = /(?:^|[/\\])\.\.(?:[/\\]|$)/;
+
+// The fields of a `cache_from` / `cache_to` entry, read like buildx does (CSV:
+// quotes and `""`), with the keys and values trimmed and the keys lowercased.
+// A quote is taken wherever it stands, so a malformed entry is read as the most
+// paths it could mean.
+const parseCacheFields = (entry: string) => {
+	const fields: string[] = [];
+	let current = "";
+	let quoted = false;
+	for (let i = 0; i < entry.length; i++) {
+		const character = entry[i] as string;
+		if (character === '"') {
+			if (quoted && entry[i + 1] === '"') {
+				current += '"';
+				i += 1;
+			} else {
+				quoted = !quoted;
+			}
+		} else if (character === "," && !quoted) {
+			fields.push(current);
+			current = "";
+		} else {
+			current += character;
+		}
+	}
+	fields.push(current);
+	return fields.map((field) => {
+		const separator = field.indexOf("=");
+		return separator < 0
+			? { key: field.trim().toLowerCase(), value: "" }
+			: {
+					key: field.slice(0, separator).trim().toLowerCase(),
+					// Quotes left around a value (`""x""`) are not part of a path, but are
+					// not trusted to be a different one.
+					value: field
+						.slice(separator + 1)
+						.trim()
+						.replace(/^"+|"+$/g, ""),
+				};
+	});
+};
 
 // Compose reads these keys of a service and of the top level from the HOST
 // (T-7142), resolved from the project directory, so the paths get the same
@@ -690,8 +737,8 @@ const OCI_LAYOUT = "oci-layout://";
 // - `develop.watch[].path`, synced into the container by `up --watch`;
 // - `env_file` and `label_file`, in the string, list and `path:` forms;
 // - the `file:` of the top-level `secrets` and `configs`.
-// A remote build context, `docker-image://` and `service:` are not host paths
-// and are left alone.
+// A remote build context without a `..`, `docker-image://` and `service:` are
+// not host paths and are left alone.
 const collectHostPaths = (
 	spec: NonNullable<LooseSpec>,
 	options: ResolveOptions,
@@ -706,64 +753,104 @@ const collectHostPaths = (
 			}
 		}
 	};
-	const isRemoteContext = (raw: string) =>
-		REMOTE_BUILD_CONTEXT.test(interpolateComposeValue(raw, options) ?? raw);
 
-	const checkAdditionalContext = (raw: string) => {
+	// A build context (the main one, or an `additional_contexts` value).
+	// Returns whether it is a host directory (not a URL, a layout or a
+	// reference), which decides how a dockerfile is read.
+	const checkContext = (
+		raw: string,
+		what: string,
+		allowReferences: boolean,
+	) => {
 		const text = interpolateComposeValue(raw, options) ?? raw;
-		if (REMOTE_BUILD_CONTEXT.test(text) || BUILDER_REFERENCE.test(text)) {
-			return;
+		if (allowReferences && BUILDER_REFERENCE.test(text)) {
+			return false;
 		}
 		if (text.startsWith(OCI_LAYOUT)) {
 			// `oci-layout://PATH[:TAG][@DIGEST]` reads a layout directory.
-			const layout = text
-				.slice(OCI_LAYOUT.length)
-				.replace(/@[^/]*$/, "")
-				.replace(/:[^/]*$/, "");
-			checkPath(layout, "additional build context");
-			return;
+			checkPath(
+				text
+					.slice(OCI_LAYOUT.length)
+					.replace(/@[^/]*$/, "")
+					.replace(/:[^/]*$/, ""),
+				what,
+			);
+			return false;
 		}
-		checkPath(raw, "additional build context");
+		if (raw.startsWith(FILE_SCHEME)) {
+			checkPath(raw.slice(FILE_SCHEME.length), what);
+			return true;
+		}
+		if (text.startsWith(FILE_SCHEME)) {
+			checkPath(text.slice(FILE_SCHEME.length), what);
+			return true;
+		}
+		if (REMOTE_BUILD_CONTEXT.test(text)) {
+			if (HAS_CLIMB.test(text) || HAS_CLIMB.test(raw)) {
+				checkPath(raw, what);
+			}
+			return false;
+		}
+		checkPath(raw, what);
+		return true;
 	};
 
+	const checkAdditionalContext = (raw: string) =>
+		checkContext(raw, "additional build context", true);
+
 	// `type=local,src=DIR` (cache_from) and `type=local,dest=DIR` (cache_to).
+	// An entry that is not read as local but has the word or a quote in it is
+	// checked as well, since it cannot be told from here what buildx makes of it.
 	const checkCacheEntry = (entry: unknown, what: string) => {
 		if (typeof entry !== "string") {
 			return;
 		}
-		const fields = (interpolateComposeValue(entry, options) ?? entry).split(",");
-		if (!fields.includes("type=local")) {
+		const text = interpolateComposeValue(entry, options) ?? entry;
+		const fields = parseCacheFields(text);
+		const local = fields.some(
+			(field) => field.key === "type" && field.value.toLowerCase() === "local",
+		);
+		if (!local && !/local|"/i.test(text)) {
 			return;
 		}
 		for (const field of fields) {
-			const [name, ...rest] = field.split("=");
-			if ((name === "src" || name === "dest") && rest.length > 0) {
-				checkPath(rest.join("="), what);
+			if ((field.key === "src" || field.key === "dest") && field.value) {
+				checkPath(field.value, what);
 			}
 		}
 	};
 
+	// The default of a lone `${X:-default}` stands for the variable, as it does
+	// for a bind source (soleDefaultReach), also in the path built from it.
+	const withSoleDefault = (raw: string) => {
+		const text = interpolateComposeValue(raw, options);
+		return text === null ? (SOLE_DEFAULT.exec(raw)?.[1] ?? raw) : text;
+	};
+
 	const checkBuild = (build: unknown) => {
 		if (typeof build === "string") {
-			if (!isRemoteContext(build)) {
-				checkPath(build, "build context");
-			}
+			checkContext(build, "build context", false);
 			return;
 		}
 		if (!isRecord(build)) {
 			return;
 		}
 		const context = typeof build.context === "string" ? build.context : ".";
-		const remote = isRemoteContext(context);
-		if (!remote) {
-			checkPath(context, "build context");
-		}
+		const local = checkContext(context, "build context", false);
 		const dockerfile = build.dockerfile;
 		if (typeof dockerfile === "string" && dockerfile) {
 			// Relative to the context. A value that starts with a variable can
 			// resolve to an absolute path, so it is judged on its own as well.
-			if (!remote && !dockerfile.startsWith("/")) {
-				checkPath(`${context}/${dockerfile}`, "build dockerfile");
+			// Next to a context that is not a host directory it is only read
+			// when it climbs, since a directory of that name may be the context.
+			if (
+				!dockerfile.startsWith("/") &&
+				(local || HAS_CLIMB.test(dockerfile))
+			) {
+				checkPath(
+					`${local ? withSoleDefault(context) : context}/${dockerfile}`,
+					"build dockerfile",
+				);
 			}
 			if (dockerfile.startsWith("/") || dockerfile.startsWith("$")) {
 				checkPath(dockerfile, "build dockerfile");
@@ -783,18 +870,25 @@ const collectHostPaths = (
 				}
 			}
 		}
+		// `ID=PATH[,PATH]`: a bare `default` or id is the SSH agent.
 		const ssh = build.ssh;
-		const sshKeys = Array.isArray(ssh)
+		const sshValues = Array.isArray(ssh)
 			? ssh.map((entry) =>
-					typeof entry === "string" ? entry.slice(entry.indexOf("=") + 1) : "",
+					typeof entry === "string" && entry.includes("=")
+						? entry.slice(entry.indexOf("=") + 1)
+						: "",
 				)
 			: isRecord(ssh)
 				? Object.values(ssh)
 				: [];
-		for (const key of sshKeys) {
-			// `default` (and a bare id) is the SSH agent, not a file.
-			if (typeof key === "string" && key && key !== "default") {
-				checkPath(key, "build ssh key");
+		for (const value of sshValues) {
+			if (typeof value !== "string") {
+				continue;
+			}
+			for (const key of value.split(",")) {
+				if (key.trim() && key.trim() !== "default") {
+					checkPath(key.trim(), "build ssh key");
+				}
 			}
 		}
 		for (const entry of Array.isArray(build.cache_from) ? build.cache_from : []) {

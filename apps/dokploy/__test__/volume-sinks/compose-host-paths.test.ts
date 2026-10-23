@@ -318,13 +318,168 @@ describe("build.dockerfile outside the context", () => {
 	});
 
 	it("does not read the dockerfile of a remote context as a host path", () => {
+		for (const dockerfile of ["Dockerfile", "docker/Dockerfile.prod"]) {
+			expect(
+				check(
+					service(
+						`    build:\n      context: https://github.com/acme/app.git\n      dockerfile: ${dockerfile}`,
+					),
+				),
+			).toEqual(clean);
+		}
+	});
+
+	it("reads a dockerfile that climbs out of a remote-looking context", () => {
+		// A directory named like a URL in the build tree makes it a local path.
+		for (const context of ["https://github.com/acme/app.git", "github.com/a/b"]) {
+			expect(
+				check(
+					service(
+						`    build:\n      context: ${context}\n      dockerfile: ${UP}${VICTIM}/Dockerfile`,
+					),
+				).forbidden.length,
+			).toBeGreaterThan(0);
+		}
+	});
+
+	it("judges the join with a lone default context as that default (strict)", () => {
+		// `${CTX:-..}/Dockerfile` is `../Dockerfile`, not a path that climbs from
+		// an unknown directory.
 		expect(
 			check(
 				service(
-					`    build:\n      context: https://github.com/acme/app.git\n      dockerfile: ${UP}${VICTIM}/Dockerfile`,
+					"    build:\n      context: ${CTX:-..}\n      dockerfile: Dockerfile",
 				),
+				STRICT,
 			),
 		).toEqual(clean);
+		expect(
+			check(
+				service(
+					"    build:\n      context: ${CTX:-./app}\n      dockerfile: docker/Dockerfile",
+				),
+				STRICT,
+			),
+		).toEqual(clean);
+		expect(
+			check(
+				service(
+					"    build:\n      context: ${CTX:-/}\n      dockerfile: Dockerfile",
+				),
+				STRICT,
+			).forbiddenParents.length,
+		).toBeGreaterThan(0);
+		// Any other variable next to a climb is still refused.
+		expect(
+			check(
+				service(
+					"    build:\n      context: ${CTX}\n      dockerfile: ../Dockerfile",
+				),
+				STRICT,
+			).unresolved,
+		).toHaveLength(1);
+	});
+});
+
+describe("remote-looking and file:// contexts that climb", () => {
+	const shapes = (suffix: string) => [
+		`github.com/${suffix}`,
+		`https://x/${suffix}`,
+		`http://x/${suffix}`,
+		`git@x/${suffix}`,
+		`git://x/${suffix}`,
+		`ssh://x/${suffix}`,
+	];
+	const climb = `${UP}${VICTIM}`;
+
+	it("refuses a build context, in both forms", () => {
+		for (const context of shapes(climb)) {
+			expect(
+				check(service(`    build: '${context}'`)).forbidden.length,
+			).toBeGreaterThan(0);
+			expect(
+				check(service(`    build:\n      context: '${context}'`)).forbidden
+					.length,
+			).toBeGreaterThan(0);
+		}
+		expect(
+			check(service(`    build: 'github.com/${UP}'`)).forbiddenParents.length,
+		).toBeGreaterThan(0);
+	});
+
+	it("refuses an additional context", () => {
+		for (const context of shapes(climb)) {
+			expect(
+				check(
+					service(
+						`    build:\n      context: .\n      additional_contexts:\n        a: '${context}'`,
+					),
+				).forbidden.length,
+			).toBeGreaterThan(0);
+		}
+	});
+
+	it("refuses one that a variable turns into such a path", () => {
+		expect(
+			check(service("    build: ${REPO}"), {
+				env: { REPO: `github.com/${climb}` },
+			}).forbidden.length,
+		).toBeGreaterThan(0);
+		expect(
+			check(service("    build: https://${HOST}/../../x"), STRICT).unresolved,
+		).toHaveLength(1);
+	});
+
+	it("keeps real URLs, with and without a fragment, and a harmless climb", () => {
+		for (const context of [
+			"https://github.com/acme/app.git#main:sub",
+			"git@github.com:acme/app.git",
+			"https://example.com/a/../b.tar.gz",
+		]) {
+			expect(check(service(`    build: '${context}'`))).toEqual(clean);
+		}
+	});
+
+	it("reads file:// as a path", () => {
+		expect(
+			check(service(`    build: file://${VICTIM}`)).forbidden.length,
+		).toBeGreaterThan(0);
+		expect(
+			check(service("    build: file:///")).forbiddenParents.length,
+		).toBeGreaterThan(0);
+		expect(
+			check(
+				service(
+					`    build:\n      context: .\n      additional_contexts:\n        a: file://${VICTIM}`,
+				),
+			).forbidden.length,
+		).toBeGreaterThan(0);
+		expect(
+			check(service("    build: ${CTX}"), {
+				env: { CTX: `file://${VICTIM}` },
+			}).forbidden.length,
+		).toBeGreaterThan(0);
+		expect(check(service("    build: file://./app"))).toEqual(clean);
+	});
+});
+
+describe("oci-layout as the build context", () => {
+	it("checks the layout directory of the main context", () => {
+		expect(
+			check(service(`    build: oci-layout://${VICTIM}:latest`)).forbidden
+				.length,
+		).toBeGreaterThan(0);
+		expect(
+			check(
+				service(`    build:\n      context: oci-layout://${UP}${VICTIM}`),
+			).forbidden.length,
+		).toBeGreaterThan(0);
+		expect(
+			check(service("    build: oci-layout:///")).forbiddenParents.length,
+		).toBeGreaterThan(0);
+		expect(check(service("    build: oci-layout://./layouts/base:v1"))).toEqual(
+			clean,
+		);
 	});
 });
 
@@ -416,6 +571,77 @@ describe("build.ssh and the local build cache", () => {
 				),
 			).forbidden,
 		).toHaveLength(2);
+	});
+
+	it("checks every comma-separated key path of ssh", () => {
+		for (const ssh of [
+			`      ssh:\n        - k=./safe,${VICTIM}/id`,
+			`      ssh:\n        - k=${VICTIM}/id,./safe`,
+			`      ssh:\n        k: ./safe,${VICTIM}/id`,
+		]) {
+			expect(
+				check(service(`    build:\n      context: .\n${ssh}`)).forbidden,
+			).toEqual([`build ssh key "${VICTIM}/id"`]);
+		}
+		expect(
+			check(
+				service(
+					"    build:\n      context: .\n      ssh:\n        - default\n        - agent\n        - k=./a,./b",
+				),
+			),
+		).toEqual(clean);
+	});
+
+	it("reads a quoted cache entry the way buildx does", () => {
+		const cache = (key: string, entry: string) =>
+			service(
+				`    build:\n      context: .\n      ${key}:\n        - ${JSON.stringify(entry)}`,
+			);
+		for (const key of ["cache_from", "cache_to"]) {
+			const field = key === "cache_from" ? "src" : "dest";
+			for (const entry of [
+				`type=local,"${field}=${VICTIM}"`,
+				`"type=local",${field}=${VICTIM}`,
+				`type=local,"${field}=${VICTIM}",mode=max`,
+				`TYPE=LOCAL,${field}=${VICTIM}`,
+				` type = local , ${field} = ${VICTIM}`,
+				`type=local,${field}="${VICTIM}"`,
+				`"${field}"=${VICTIM},"type"="local"`,
+				`type=lo"cal",${field}=${VICTIM}`,
+			]) {
+				expect(
+					check(cache(key, entry)).forbidden.length,
+					`${key} ${entry}`,
+				).toBeGreaterThan(0);
+			}
+		}
+		// A doubled quote inside a quoted field is one quote.
+		expect(
+			check(cache("cache_to", `type=local,"dest=""${VICTIM}"""`)).forbidden
+				.length,
+		).toBeGreaterThan(0);
+		// A variable in the entry.
+		expect(
+			check(cache("cache_to", 'type=local,"dest=${D}"'), { env: { D: VICTIM } })
+				.forbidden.length,
+		).toBeGreaterThan(0);
+	});
+
+	it("checks an entry that only mentions local or has a quote, and keeps the rest", () => {
+		expect(
+			check(
+				service(
+					`    build:\n      context: .\n      cache_to:\n        - 'ty"pe"=registry,dest=${VICTIM}'\n        - 'x=local,src=${VICTIM}'`,
+				),
+			).forbidden,
+		).toHaveLength(2);
+		expect(
+			check(
+				service(
+					'    build:\n      context: .\n      cache_from:\n        - "type=registry,ref=acme/local:cache"\n        - "type=gha"\n        - "type=local,src=./cache,mode=max"',
+				),
+			),
+		).toEqual(clean);
 	});
 
 	it("keeps the agent, images and registry or local caches in place", () => {
