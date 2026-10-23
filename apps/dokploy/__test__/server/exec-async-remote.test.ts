@@ -1,3 +1,4 @@
+import { getRemoteBuildCancelTarget } from "@dokploy/server/utils/builders/remote-build-cancel";
 import {
 	ExecError,
 	MAX_EXEC_OUTPUT_TAIL,
@@ -7,6 +8,7 @@ import {
 	execAsyncStream,
 	openRemoteInputSession,
 } from "@dokploy/server/utils/process/execAsync";
+import { hasRunningRemoteBuild } from "@dokploy/server/utils/process/remote-build-registry";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // A stand-in for ssh2: each Client records what it was asked to do, and the
@@ -295,5 +297,93 @@ describe("openRemoteInputSession", () => {
 		await expect(openRemoteInputSession("server-1", "cat")).rejects.toThrow(
 			/SSH connection error: connect ECONNREFUSED/,
 		);
+	});
+});
+
+describe("execAsyncRemote when the connection dies", () => {
+	const lost = /connection to the server was lost before the command finished/i;
+
+	it("pings the server so a half-open link is noticed", async () => {
+		ssh.onExec = (channel) => queueMicrotask(() => channel.emit("close", 0));
+
+		await execAsyncRemote("server-1", "cmd");
+
+		expect(ssh.clients[0].config.keepaliveInterval).toBe(10_000);
+		expect(ssh.clients[0].config.keepaliveCountMax).toBe(3);
+	});
+
+	it("rejects once, and releases the build registration, when the connection closes under a running command", async () => {
+		ssh.onExec = () => {};
+		const target = getRemoteBuildCancelTarget("dep-lost");
+		const outcomes: unknown[] = [];
+
+		const running = execAsyncRemote("server-1", "build", undefined, {
+			cancelable: target,
+		}).then(
+			(value) => outcomes.push(["resolved", value]),
+			(error) => outcomes.push(["rejected", error]),
+		);
+		await tick();
+		expect(hasRunningRemoteBuild("dep-lost")).toBe(true);
+
+		ssh.clients[0].emit("close");
+		// A channel that closes afterwards, without an exit status, changes nothing.
+		ssh.clients[0].channel.emit("close", undefined);
+		await running;
+		await tick();
+
+		expect(outcomes).toHaveLength(1);
+		const [kind, error] = outcomes[0] as [string, ExecError];
+		expect(kind).toBe("rejected");
+		expect(error).toBeInstanceOf(ExecError);
+		expect(error.message).toMatch(lost);
+		expect(hasRunningRemoteBuild("dep-lost")).toBe(false);
+	});
+
+	it("resolves once when the command ends normally and the connection closes after it", async () => {
+		ssh.onExec = (channel) =>
+			queueMicrotask(() => {
+				channel.emit("data", Buffer.from("done\n"));
+				channel.emit("close", 0);
+			});
+		const outcomes: unknown[] = [];
+
+		await execAsyncRemote("server-1", "cmd").then(
+			(value) => outcomes.push(["resolved", value]),
+			(error) => outcomes.push(["rejected", error]),
+		);
+		// What ssh2 does after `conn.end()`.
+		ssh.clients[0].emit("close");
+		await tick();
+
+		expect(outcomes).toEqual([["resolved", { stdout: "done\n", stderr: "" }]]);
+	});
+
+	it("keeps the exit code error when the connection closes after a failed command", async () => {
+		ssh.onExec = (channel) => queueMicrotask(() => channel.emit("close", 2));
+
+		const failure = execAsyncRemote("server-1", "cmd");
+		await expect(failure).rejects.toMatchObject({ exitCode: 2 });
+		ssh.clients[0].emit("close");
+		await tick();
+	});
+
+	it("rejects when ssh2 reports a keepalive timeout", async () => {
+		ssh.onExec = () => {};
+
+		const running = execAsyncRemote("server-1", "build");
+		const outcome = running.catch((error) => error);
+		await tick();
+
+		// ssh2 emits this error, then drops the socket.
+		ssh.clients[0].emit(
+			"error",
+			Object.assign(new Error("Keepalive timeout"), { level: "client-timeout" }),
+		);
+		ssh.clients[0].emit("close");
+
+		const error = await outcome;
+		expect(error).toBeInstanceOf(ExecError);
+		expect(error.message).toMatch(/SSH connection error: Keepalive timeout/);
 	});
 });

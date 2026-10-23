@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**Remote commands detect a dead SSH connection instead of hanging** (T-7441). A command on a build server prints nothing while a build writes its output to a file, so when the link to the server went half-open the SSH channel never closed and the call never returned: a deploy built on a build server stayed `running` for close to an hour after its script had finished. Remote commands now send SSH keepalives (every 10 seconds, giving up after 3 misses) and fail with a clear error when the connection drops before the command finishes, which also releases the deployment queue slot.
+
 ### New in v0.30.8-community.32
 
 No database migrations in this release.
