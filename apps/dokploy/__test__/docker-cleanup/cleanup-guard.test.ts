@@ -130,6 +130,33 @@ describe("countActiveDeploymentsOnHost", () => {
 		expect(await countActiveDeploymentsOnHost("srv-z")).toBe(0);
 	});
 
+	it("ignores queue journal rows older than 12 hours, like stale running rows", async () => {
+		const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600_000);
+		mocks.queueJobs.mockResolvedValue([
+			{
+				enqueuedAt: hoursAgo(30),
+				payload: { applicationType: "application", applicationId: "stuck" },
+			},
+			{
+				enqueuedAt: hoursAgo(1),
+				payload: { applicationType: "application", applicationId: "fresh" },
+			},
+		]);
+		mocks.applications.mockResolvedValue([
+			{ applicationId: "stuck", serverId: "srv-a", buildServerId: null },
+			{ applicationId: "fresh", serverId: "srv-a", buildServerId: null },
+		]);
+		expect(await countActiveDeploymentsOnHost("srv-a")).toBe(1);
+
+		mocks.queueJobs.mockResolvedValue([
+			{
+				enqueuedAt: hoursAgo(30),
+				payload: { applicationType: "application", applicationId: "stuck" },
+			},
+		]);
+		expect(await countActiveDeploymentsOnHost("srv-a")).toBe(0);
+	});
+
 	it("ignores a queued job whose service no longer exists", async () => {
 		mocks.queueJobs.mockResolvedValue([
 			{ payload: { applicationType: "application", applicationId: "gone" } },

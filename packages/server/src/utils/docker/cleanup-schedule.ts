@@ -79,6 +79,9 @@ const expandField = (
 	return { values };
 };
 
+// Longest each month can be; February counts 29 because a leap year has it.
+const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 export type ParsedDockerCleanupCron =
 	| { ok: true; expression: string }
 	| { ok: false; message: string };
@@ -100,12 +103,14 @@ export const parseDockerCleanupCron = (
 				"Use a 5-field cron expression: minute hour day-of-month month day-of-week (UTC), for example 0 4 * * *",
 		};
 	}
+	const expandedFields: Array<Set<number>> = [];
 	for (const [index, field] of fields.entries()) {
 		const spec = FIELDS[index] as FieldSpec;
 		const expanded = expandField(field, spec);
 		if ("error" in expanded) {
 			return { ok: false, message: expanded.error };
 		}
+		expandedFields.push(expanded.values);
 		if (index === 0 && expanded.values.size > 1) {
 			return {
 				ok: false,
@@ -113,6 +118,28 @@ export const parseDockerCleanupCron = (
 					"Docker cleanup can run at most once an hour: the minute field must be a single value",
 			};
 		}
+	}
+	// A day that no listed month has (31 February, 31 April) never fires:
+	// node-schedule then returns no job at all and the host is never cleaned.
+	// With a day-of-week the schedule can still fire on that weekday, so only a
+	// day-of-month-only schedule is checked.
+	const [, , days, months] = expandedFields as [
+		Set<number>,
+		Set<number>,
+		Set<number>,
+		Set<number>,
+		Set<number>,
+	];
+	if (
+		fields[4] === "*" &&
+		![...months].some((month) =>
+			[...days].some((day) => day <= (DAYS_IN_MONTH[month - 1] as number)),
+		)
+	) {
+		return {
+			ok: false,
+			message: `Day ${fields[2]} never occurs in month ${fields[3]}, so the cleanup would never run`,
+		};
 	}
 	return { ok: true, expression: fields.join(" ") };
 };

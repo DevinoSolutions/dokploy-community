@@ -83,6 +83,7 @@ export const HandleServers = ({ serverId, children }: Props) => {
 	);
 
 	const { data: sshKeys } = api.sshKey.all.useQuery();
+	const { data: isCloud } = api.settings.isCloud.useQuery();
 	const { mutateAsync, error, isPending, isError } = serverId
 		? api.server.update.useMutation()
 		: api.server.create.useMutation();
@@ -474,7 +475,7 @@ export const HandleServers = ({ serverId, children }: Props) => {
 								</FormItem>
 							)}
 						/>
-						{form.watch("enableDockerCleanup") && (
+						{form.watch("enableDockerCleanup") && !isCloud && (
 							<FormField
 								control={form.control}
 								name="dockerCleanupCron"

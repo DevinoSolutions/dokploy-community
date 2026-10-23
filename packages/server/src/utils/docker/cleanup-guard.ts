@@ -16,8 +16,9 @@ import { listQueueJobs } from "../../services/deployment-queue-journal";
 export const DOCKER_CLEANUP_RETRY_MS = 15 * 60 * 1000;
 export const DOCKER_CLEANUP_MAX_WAIT_MS = 3 * 60 * 60 * 1000;
 
-// A `running` deployment row older than this is a leftover (a crashed process,
-// a hung command), not a build; it must not hold cleanup off forever.
+// A `running` deployment row or a queue journal row older than this is a
+// leftover (a crashed process, a hung command), not a build; it must not hold
+// cleanup off forever.
 const STALE_RUNNING_AFTER_MS = 12 * 60 * 60 * 1000;
 
 const LOCAL_HOST = "local";
@@ -87,7 +88,13 @@ export const countActiveDeploymentsOnHost = async (
 
 	// Queued and starting jobs have no deployment row yet, and the payload only
 	// names the service, so the hosts come from the service.
-	const jobs = await listQueueJobs();
+	// A journal row that has sat this long is stuck, not queued; like a stale
+	// `running` row it must not hold cleanup off every night.
+	const jobs = (await listQueueJobs()).filter(
+		(row) =>
+			!row.enqueuedAt ||
+			row.enqueuedAt.getTime() >= Date.now() - STALE_RUNNING_AFTER_MS,
+	);
 	const applicationIds = new Set<string>();
 	const composeIds = new Set<string>();
 	for (const { payload } of jobs) {

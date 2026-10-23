@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 	cleanupAll: vi.fn(),
 	sendDockerCleanupNotifications: vi.fn(),
 	scheduleJob: vi.fn(),
+	scheduledJobs: {} as Record<string, unknown>,
 	removeJob: vi.fn(),
 	schedule: vi.fn(),
 	findServerById: vi.fn(),
@@ -20,7 +21,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("node-schedule", () => ({
 	scheduleJob: mocks.scheduleJob,
-	scheduledJobs: {},
+	scheduledJobs: mocks.scheduledJobs,
 }));
 
 vi.mock("@dokploy/server", async () => {
@@ -81,6 +82,12 @@ beforeEach(() => {
 	process.on("unhandledRejection", onUnhandled);
 	errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.clearAllMocks();
+	// A real scheduleJob returns the job; null means the rule never fires.
+	mocks.scheduleJob.mockImplementation((name: string) => {
+		const job = { cancel: () => delete mocks.scheduledJobs[name] };
+		mocks.scheduledJobs[name] = job;
+		return job;
+	});
 	mocks.findServerById.mockResolvedValue({
 		name: "prod",
 		dockerCleanupCron: "0 4 * * *",
@@ -466,13 +473,13 @@ describe("docker cleanup schedule for a remote server", () => {
 		await applyDockerCleanupSchedule("srv-1", "org-1", true);
 		const callback = mocks.scheduleJob.mock
 			.calls[0]?.[2] as () => Promise<void>;
-		mocks.cleanupAll.mockResolvedValue(undefined);
+		mocks.cleanupAll.mockResolvedValue({ aborted: false });
 		mocks.sendDockerCleanupNotifications.mockRejectedValue(
 			new Error("smtp down"),
 		);
 
 		await expect(callback()).resolves.toBeUndefined();
-		expect(mocks.cleanupAll).toHaveBeenCalledWith("srv-1");
+		expect(mocks.cleanupAll).toHaveBeenCalledWith("srv-1", expect.any(Object));
 		expect(mocks.sendDockerCleanupNotifications).toHaveBeenCalledWith("org-1");
 	});
 });

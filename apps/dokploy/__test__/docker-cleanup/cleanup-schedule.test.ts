@@ -88,6 +88,28 @@ describe("parseDockerCleanupCron", () => {
 	])("rejects out-of-range or malformed fields: %s", (cron) => {
 		expect(parseDockerCleanupCron(cron).ok).toBe(false);
 	});
+
+	it.each([
+		"0 4 31 2 *",
+		"0 4 30 2 *",
+		"0 4 31 4 *",
+		"0 4 31 4,6,9,11 *",
+		"0 4 30-31 2 *",
+	])("rejects a day that none of the months has: %s", (cron) => {
+		const result = parseDockerCleanupCron(cron);
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.message).toContain("never");
+	});
+
+	it.each([
+		"0 4 29 2 *", // leap years
+		"0 4 31 1,2 *", // January has it
+		"0 4 31 * *",
+		"0 4 30,31 2,3 *",
+		"0 4 31 2 1", // the weekday can still fire
+	])("accepts a day that some month has: %s", (cron) => {
+		expect(parseDockerCleanupCron(cron).ok).toBe(true);
+	});
 });
 
 describe("dockerCleanupCronSchema (the tRPC input)", () => {

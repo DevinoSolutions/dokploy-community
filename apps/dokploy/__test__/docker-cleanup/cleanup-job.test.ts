@@ -137,7 +137,7 @@ beforeEach(() => {
 		registry[name] = job;
 		return job;
 	});
-	mocks.cleanupAll.mockResolvedValue(undefined);
+	mocks.cleanupAll.mockResolvedValue({ aborted: false });
 	mocks.sendDockerCleanupNotifications.mockResolvedValue(undefined);
 	mocks.runningRows.mockResolvedValue([]);
 	mocks.queueJobs.mockResolvedValue([]);
@@ -213,7 +213,7 @@ describe("scheduleDockerCleanup", () => {
 			afterCleanup,
 		});
 		await scheduledCallbackOf()();
-		expect(mocks.cleanupAll).toHaveBeenCalledWith("srv-1");
+		expect(mocks.cleanupAll).toHaveBeenCalledWith("srv-1", expect.any(Object));
 		expect(afterCleanup).toHaveBeenCalledTimes(1);
 	});
 
@@ -224,7 +224,10 @@ describe("scheduleDockerCleanup", () => {
 			cron: "0 4 * * *",
 		});
 		await scheduledCallbackOf()();
-		expect(mocks.cleanupAll).toHaveBeenCalledWith(undefined);
+		expect(mocks.cleanupAll).toHaveBeenCalledWith(
+			undefined,
+			expect.any(Object),
+		);
 	});
 
 	it("defers instead of cleaning while a deployment is active, then gives up quietly", async () => {
@@ -257,6 +260,63 @@ describe("scheduleDockerCleanup", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("falls back to the default schedule when node-schedule refuses the rule", () => {
+		// A rule that never fires makes node-schedule return null.
+		mocks.scheduleJob.mockImplementationOnce(() => null);
+		const job = scheduleDockerCleanup({
+			jobName: "srv-1",
+			serverId: "srv-1",
+			hostLabel: "server prod",
+			cron: "0 4 31 2 1",
+		});
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringContaining(
+				'schedule "0 4 31 2 1" for server prod never fires',
+			),
+		);
+		expect(mocks.scheduleJob).toHaveBeenCalledTimes(2);
+		expect(mocks.scheduleJob.mock.calls[1]?.[1]).toEqual({
+			rule: "0 4 * * *",
+			tz: "Etc/UTC",
+		});
+		expect(job).toBe(registry["srv-1"]);
+	});
+
+	it("re-checks the host between prunes and skips the rest if a deploy started", async () => {
+		const afterCleanup = vi.fn();
+		mocks.cleanupAll.mockResolvedValue({ aborted: true });
+		scheduleDockerCleanup({
+			jobName: "srv-1",
+			serverId: "srv-1",
+			hostLabel: "server prod (srv-1)",
+			cron: "0 4 * * *",
+			afterCleanup,
+		});
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		await scheduledCallbackOf()();
+		expect(warn).toHaveBeenCalledWith(
+			"Docker cleanup aborted mid-run: deployment started on server prod (srv-1)",
+		);
+		// A partial cleanup is not reported as a finished one.
+		expect(afterCleanup).not.toHaveBeenCalled();
+
+		// The check the job hands cleanupAll looks at the host's deployments.
+		const { shouldAbort } = mocks.cleanupAll.mock.calls[0]?.[1] as {
+			shouldAbort: () => Promise<boolean>;
+		};
+		mocks.runningRows.mockResolvedValue([]);
+		expect(await shouldAbort()).toBe(false);
+		mocks.runningRows.mockResolvedValue([
+			{
+				serverId: "srv-1",
+				buildServerId: null,
+				application: null,
+				compose: null,
+			},
+		]);
+		expect(await shouldAbort()).toBe(true);
 	});
 
 	it("stops waiting once the job is cancelled", async () => {

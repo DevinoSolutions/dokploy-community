@@ -31,6 +31,9 @@ export const ToggleDockerCleanup = ({ serverId }: Props) => {
 		},
 	);
 
+	// Cloud cleanup runs on the jobs service, which keeps its own fixed schedule.
+	const { data: isCloud } = api.settings.isCloud.useQuery();
+
 	const enabled = serverId
 		? server?.enableDockerCleanup
 		: data?.enableDockerCleanup;
@@ -102,7 +105,7 @@ export const ToggleDockerCleanup = ({ serverId }: Props) => {
 					</TooltipContent>
 				</Tooltip>
 			</TooltipProvider>
-			{enabled && cron && (
+			{enabled && cron && !isCloud && (
 				<DockerCleanupScheduleSelect
 					value={cron}
 					onChange={(next) => save(true, next)}
