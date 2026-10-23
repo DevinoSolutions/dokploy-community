@@ -275,7 +275,7 @@ describe("Docker's volume storage directory", () => {
 	});
 
 	it.each([
-		"/var/lib/docker",
+		"/var/lib/dockerx",
 		"/var/lib/docker/volumes-other",
 		"/var/lib/docker/containers/x",
 		"/srv/data",
@@ -366,7 +366,7 @@ services:
 services:
   web:
     volumes:
-      - /var/lib/docker:/docker:ro
+      - /var/lib/docker/containers:/containers:ro
       - /srv/data:/data
       - type: bind
         source: /var/run/docker.sock

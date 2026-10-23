@@ -118,14 +118,14 @@ const getCodeDirectory = (compose: ComposeForVolumeCheck) => {
 export const assertComposeSpecVolumesBound = async (
 	compose: ComposeForVolumeCheck,
 	specs: Spec | Spec[],
+	{ commandVolumes = [] }: { commandVolumes?: string[] } = {},
 ) => {
 	const { env, strict } = getInterpolationVariables(compose);
 	const codeDirectory = getCodeDirectory(compose);
 	const composeFile =
 		compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath;
-	const { uses, unresolved, forbidden } = resolveComposeFilesMountedVolumes(
-		Array.isArray(specs) ? specs : [specs],
-		{
+	const { uses, unresolved, forbidden, forbiddenParents } =
+		resolveComposeFilesMountedVolumes(Array.isArray(specs) ? specs : [specs], {
 			appName: compose.appName,
 			env,
 			strict,
@@ -133,8 +133,8 @@ export const assertComposeSpecVolumesBound = async (
 				codeDirectory,
 				posix.dirname(posix.resolve(codeDirectory, composeFile || ".")),
 			],
-		},
-	);
+			commandVolumes,
+		});
 	if (forbidden.length > 0) {
 		logger.warn(
 			{ composeId: compose.composeId, forbidden },
@@ -142,6 +142,15 @@ export const assertComposeSpecVolumesBound = async (
 		);
 		throw new Error(
 			`Compose volume refused: ${forbidden[0]} is Docker's own volume storage (/var/lib/docker/volumes), which holds every volume on the host.`,
+		);
+	}
+	if (forbiddenParents.length > 0) {
+		logger.warn(
+			{ composeId: compose.composeId, forbiddenParents },
+			"[VolumeBinding] A compose file volume was refused: it mounts a directory that contains Docker's volume storage",
+		);
+		throw new Error(
+			`Compose volume refused: ${forbiddenParents[0]} contains Docker's own volume storage (/var/lib/docker/volumes), which holds every volume on the host. Mount a directory of the compose's own instead.`,
 		);
 	}
 	if (unresolved.length > 0) {
@@ -199,6 +208,71 @@ type CommandSegment = {
 	subcommand?: string;
 	files: string[];
 	projectDirectories: string[];
+	// The `-v` / `--volume` values of a `docker compose run`.
+	volumes: string[];
+};
+
+// `docker compose run` options that take a value (the next word, or the rest
+// of the word after a single-letter option). Without this list the value of
+// `-e` or `--name` could be taken for an option.
+const RUN_SHORT_OPTIONS_WITH_VALUE = new Set(["e", "l", "p", "u", "v", "w"]);
+const RUN_LONG_OPTIONS_WITH_VALUE = new Set([
+	"cap-add",
+	"cap-drop",
+	"entrypoint",
+	"env",
+	"env-from-file",
+	"label",
+	"name",
+	"publish",
+	"pull",
+	"user",
+	"volume",
+	"workdir",
+]);
+
+// The `-v` / `--volume` values in the words after `run`. pflag reads
+// `-v x`, `-vx`, `-v=x`, `--volume x`, `--volume=x`, and a short option can
+// follow other short flags (`-Tv x`). The whole rest of the line is read, not
+// only the words before the service name, because an unknown option that takes
+// a value would otherwise hide a later `-v`; a `-v` after the service name is
+// the service command's own, and is only ever checked more strictly.
+const parseRunVolumes = (words: string[]) => {
+	const volumes: string[] = [];
+	for (let i = 0; i < words.length; i++) {
+		const word = words[i] as string;
+		if (word.startsWith("--")) {
+			const [name = "", ...rest] = word.slice(2).split("=");
+			if (!RUN_LONG_OPTIONS_WITH_VALUE.has(name)) {
+				continue;
+			}
+			const value = rest.length > 0 ? rest.join("=") : words[i + 1];
+			if (rest.length === 0) {
+				i += 1;
+			}
+			if (name === "volume" && value !== undefined) {
+				volumes.push(value);
+			}
+		} else if (/^-[^-]/.test(word)) {
+			for (let j = 1; j < word.length; j++) {
+				const letter = word[j] as string;
+				if (!RUN_SHORT_OPTIONS_WITH_VALUE.has(letter)) {
+					continue;
+				}
+				const attached = word.slice(j + 1).replace(/^=/, "");
+				let value: string | undefined = attached;
+				if (!attached) {
+					value = words[i + 1];
+					i += 1;
+				}
+				if (letter === "v" && value !== undefined) {
+					volumes.push(value);
+				}
+				break;
+			}
+		}
+	}
+	return volumes;
 };
 
 // pflag reads `-f=path` and `-fpath` as the path.
@@ -211,7 +285,11 @@ const shortOptionValue = (word: string) => word.slice(2).replace(/^=/, "");
 // options of `docker` itself (`-H x`, `--context x`, ...) come first.
 const parseComposeCommand = (command: string): CommandSegment[] => {
 	const segments: string[][] = [[]];
-	for (const token of parseShell(command)) {
+	// A shell variable stays in the word as written (`$SRC`) so that a `-v`
+	// value that uses one is seen as unknown, not as an empty string. For a
+	// compose file it makes no difference: either way that file is not the
+	// deployed one and cannot be read.
+	for (const token of parseShell(command, (name) => `$${name}`)) {
 		if (typeof token === "string") {
 			segments[segments.length - 1]?.push(token);
 		} else {
@@ -237,10 +315,12 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 			}
 			const files: string[] = [];
 			const projectDirectories: string[] = [];
+			const volumes: string[] = [];
 			const command = words[start];
 			if (command === "compose") {
 				let subcommand: string | undefined;
-				for (let i = start + 1; i < words.length; ) {
+				let i = start + 1;
+				for (; i < words.length; ) {
 					const word = words[i] as string;
 					if (word.startsWith("--") && word.includes("=")) {
 						const [name, ...rest] = word.split("=");
@@ -270,7 +350,16 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 						break;
 					}
 				}
-				return { kind: "compose", subcommand, files, projectDirectories };
+				if (subcommand === "run") {
+					volumes.push(...parseRunVolumes(words.slice(i + 1)));
+				}
+				return {
+					kind: "compose",
+					subcommand,
+					files,
+					projectDirectories,
+					volumes,
+				};
 			}
 			if (command === "stack") {
 				const rest = words.slice(start + 1);
@@ -288,9 +377,15 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 						files.push(shortOptionValue(word));
 					}
 				}
-				return { kind: "stack", subcommand, files, projectDirectories };
+				return {
+					kind: "stack",
+					subcommand,
+					files,
+					projectDirectories,
+					volumes,
+				};
 			}
-			return { kind: "other", files, projectDirectories };
+			return { kind: "other", files, projectDirectories, volumes };
 		});
 };
 
@@ -354,6 +449,24 @@ export const getCommandOverrideFiles = (
 	return [...overrides];
 };
 
+// The volumes a custom command adds to `docker compose run` with `-v`. Only
+// a command that is `docker compose` is read (the first command runs as
+// `docker <command>`, the chained ones must start with `docker compose`);
+// anything else the command runs (`docker run -v ...`, `docker stack`, ...) is
+// not looked at, as before.
+export const getCommandRunVolumes = (
+	compose: Pick<ComposeNested, "command">,
+) => {
+	if (!compose.command) {
+		return [];
+	}
+	return parseComposeCommand(compose.command).flatMap((segment) =>
+		segment.kind === "compose" && segment.subcommand === "run"
+			? segment.volumes
+			: [],
+	);
+};
+
 const loadOverrideFile = async (
 	compose: ComposeForVolumeCheck,
 	path: string,
@@ -397,7 +510,9 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	const overrides = await Promise.all(
 		overrideFiles.map((path) => loadOverrideFile(compose, path)),
 	);
-	await assertComposeSpecVolumesBound(compose, [spec as Spec, ...overrides]);
+	await assertComposeSpecVolumesBound(compose, [spec as Spec, ...overrides], {
+		commandVolumes: getCommandRunVolumes(compose),
+	});
 };
 
 // Start (`docker compose up -d` from the files on disk): checks the compose

@@ -19,8 +19,9 @@ import { posix } from "node:path";
 // - isolatedDeployment and randomize only rename keys (`<key>-<suffix>`), so
 //   the final YAML is what has to be resolved, not the one the user typed.
 // Bind mounts (host paths), tmpfs and anonymous volumes are not named volumes,
-// except that a bind of Docker's own volume directory is refused (see
-// reachesDockerVolumesDirectory).
+// except that a bind of Docker's own volume directory, or of a directory that
+// contains it (`/`, `/var`, `/var/lib`, `/var/lib/docker`), is refused (see
+// dockerVolumesDirectoryReach).
 
 export type ComposeVariables = Record<string, string> | null;
 
@@ -126,8 +127,12 @@ export type ComposeVolumeResolution = {
 	// Things the effective volume cannot be worked out for (an unresolved
 	// variable in a name or in a service's volume source).
 	unresolved: string[];
-	// Mounts of Docker's own volume storage directory, by path.
+	// Mounts of Docker's own volume storage directory (or of a path under it),
+	// by path.
 	forbidden: string[];
+	// Mounts of a directory that contains Docker's volume storage (`/`,
+	// `/var/lib/docker`, ...), by path.
+	forbiddenParents: string[];
 };
 
 type LooseSpec = {
@@ -146,28 +151,103 @@ const isFilePathSource = (source: string) =>
 	/^[./~]/.test(source) || /^[A-Za-z]:/.test(source);
 
 // Docker keeps every local volume's data here. A bind mount of this directory
-// (or of a path under it) is a named volume by another name.
+// (or of a path under it) is a named volume by another name, and a bind of a
+// directory that contains it (`/`, `/var`, `/var/lib`, `/var/lib/docker`)
+// reaches every volume as well.
 const DOCKER_VOLUMES_DIRECTORY = "/var/lib/docker/volumes";
 
-// `baseDirs` are the directories a relative path may be resolved from; a
-// path is also resolved from `/`, so a `..` chain cannot hide it. `~` is the
-// home of an unknown user.
-export const reachesDockerVolumesDirectory = (
+// `/proc/<pid>/root` and `/proc/<pid>/cwd` are links to the root and the
+// working directory of a process, so a bind of one (or of a path under it) is
+// a bind of the host's `/` when the process is on the host. They are
+// recognised by their shape alone: the check never looks at the host, so any
+// other symlink (one that only exists on the host, such as `/srv/docker` ->
+// `/var/lib/docker`) cannot be seen from here and is not refused.
+const PROC_LINK = /^\/proc\/[^/]+\/(?:task\/[^/]+\/)?(?:root|cwd)(?:\/|$)/;
+
+export type DockerVolumesReach = "inside" | "parent" | null;
+
+const reachOfAbsolutePath = (candidate: string): DockerVolumesReach => {
+	if (
+		candidate === DOCKER_VOLUMES_DIRECTORY ||
+		candidate.startsWith(`${DOCKER_VOLUMES_DIRECTORY}/`)
+	) {
+		return "inside";
+	}
+	if (
+		candidate === "/" ||
+		DOCKER_VOLUMES_DIRECTORY.startsWith(`${candidate}/`) ||
+		PROC_LINK.test(candidate)
+	) {
+		return "parent";
+	}
+	return null;
+};
+
+// How a bind source relates to Docker's volume storage: "inside" (the
+// directory or a path under it), "parent" (a directory that contains it, or a
+// `/proc` link to the root), or null. Paths are normalised with POSIX rules
+// first (repeated slashes, `.`, `..`, a trailing slash), and "inside" wins.
+//
+// `baseDirs` are the directories a relative path may be resolved from. For
+// "inside" a relative path is also resolved from `/`, so a `..` chain cannot
+// hide it; for "parent" it is not, because `.` and `..` from `/` would
+// make every relative bind of the compose's own directory a bind of `/`.
+// `~` is the home of an unknown user.
+export const dockerVolumesDirectoryReach = (
 	path: string,
 	baseDirs: string[] = [],
-) => {
+): DockerVolumesReach => {
 	const normalized = path.replace(/\\/g, "/");
-	const homes = ["/root", "/home/user/a"];
 	const candidates = normalized.startsWith("~")
-		? ["/", ...homes].map((base) =>
+		? ["/", "/root", "/home/user/a"].map((base) =>
 				posix.resolve(base, `.${normalized.slice(1)}`),
 			)
 		: ["/", ...baseDirs].map((base) => posix.resolve(base, normalized));
-	return candidates.some(
-		(candidate) =>
-			candidate === DOCKER_VOLUMES_DIRECTORY ||
-			candidate.startsWith(`${DOCKER_VOLUMES_DIRECTORY}/`),
-	);
+	// The first candidate is the one resolved from `/`.
+	const parentCandidates = posix.isAbsolute(normalized)
+		? candidates
+		: candidates.slice(1);
+	const reaches = candidates.map((candidate) => reachOfAbsolutePath(candidate));
+	if (reaches.includes("inside")) {
+		return "inside";
+	}
+	if (
+		parentCandidates.some(
+			(candidate) => reachOfAbsolutePath(candidate) === "parent",
+		)
+	) {
+		return "parent";
+	}
+	return null;
+};
+
+export const reachesDockerVolumesDirectory = (
+	path: string,
+	baseDirs: string[] = [],
+) => dockerVolumesDirectoryReach(path, baseDirs) !== null;
+
+// A source with a `${VAR}` that cannot be resolved can still be known to sit
+// inside Docker's volume storage by what is written before the variable
+// (`/var/lib/docker/volumes/${NAME}/_data`). Only whole path segments count:
+// `/var/lib/docker/volumes${SUFFIX}` may be another directory. What the
+// variable could add up to (`/var/lib/${X}`, `${X}`) is not known and not
+// refused; the caller decides what an unresolved source is.
+export const unresolvedSourceReachesDockerVolumes = (
+	rawSource: string,
+	baseDirs: string[] = [],
+) => {
+	for (const match of rawSource.matchAll(VARIABLE)) {
+		if (match[0] === "$$") {
+			continue;
+		}
+		const written = rawSource.slice(0, match.index).replaceAll("$$", "$");
+		const prefix = written.slice(0, written.lastIndexOf("/") + 1);
+		return (
+			isFilePathSource(prefix) &&
+			dockerVolumesDirectoryReach(prefix, baseDirs) === "inside"
+		);
+	}
+	return false;
 };
 
 // An empty value is not a boolean: Docker fails on it.
@@ -178,13 +258,39 @@ type ResolveOptions = {
 	appName: string;
 	// Where a relative bind source may be resolved from.
 	baseDirs?: string[];
+	// The `-v` / `--volume` values of `docker compose run` commands in a custom
+	// command (`SOURCE:TARGET[:MODE]`). They are read as written: the shell
+	// has expanded them and Compose does not interpolate command-line values.
+	commandVolumes?: string[];
 } & InterpolationOptions;
 
 type MountedKeys = {
 	keys: Set<string>;
 	unresolved: string[];
 	forbidden: string[];
+	forbiddenParents: string[];
 	anyKey: boolean;
+};
+
+// The source of a short-syntax volume (`SOURCE:TARGET[:MODE]`): up to the
+// first colon that is not inside a `${...}`, which may hold one
+// (`${DATA:-/srv}:/data`). null when there is none (an anonymous volume).
+const shortVolumeSource = (entry: string) => {
+	let depth = 0;
+	for (let i = 0; i < entry.length; i++) {
+		const character = entry[i];
+		if (character === "$" && entry[i + 1] === "$") {
+			i += 1;
+		} else if (character === "$" && entry[i + 1] === "{") {
+			depth += 1;
+			i += 1;
+		} else if (character === "}" && depth > 0) {
+			depth -= 1;
+		} else if (character === ":" && depth === 0) {
+			return entry.slice(0, i);
+		}
+	}
+	return null;
 };
 
 // The top-level keys the services mount by name, plus what cannot be checked.
@@ -196,16 +302,37 @@ const collectMounts = (
 	const checkPath = (rawPath: string, what: string) => {
 		const path = interpolateComposeValue(rawPath, options);
 		if (path === null) {
+			// Not known (a variable Dokploy does not provide): only what is
+			// written before the variable can still show that it is inside
+			// Docker's volume storage.
+			if (unresolvedSourceReachesDockerVolumes(rawPath, options.baseDirs)) {
+				into.forbidden.push(`${what} "${rawPath}"`);
+			}
 			return;
 		}
-		if (path && reachesDockerVolumesDirectory(path, options.baseDirs)) {
+		if (!path) {
+			return;
+		}
+		const reach = dockerVolumesDirectoryReach(path, options.baseDirs);
+		if (reach === "inside") {
 			into.forbidden.push(`${what} "${rawPath}"`);
+		} else if (reach === "parent") {
+			into.forbiddenParents.push(`${what} "${rawPath}"`);
 		}
 	};
 	const addSource = (rawSource: string) => {
 		const source = interpolateComposeValue(rawSource, options);
 		if (source === null) {
-			// It can name any declared volume, or a path.
+			// It can name any declared volume, or a path. What is written before
+			// the variable may already put it inside Docker's volume storage
+			// (refused). Otherwise it is not refused for being unresolved, unlike
+			// a volume name or an `external` value: a service source that is a
+			// path (`${DATA_DIR}:/data`) is common and cannot be told from a name,
+			// so every declared volume is checked instead.
+			if (unresolvedSourceReachesDockerVolumes(rawSource, options.baseDirs)) {
+				into.forbidden.push(`bind mount "${rawSource}"`);
+				return;
+			}
 			into.anyKey = true;
 			return;
 		}
@@ -245,9 +372,9 @@ const collectMounts = (
 		for (const entry of volumes) {
 			if (typeof entry === "string") {
 				// `[SOURCE:]TARGET[:MODE]`: without a colon it is an anonymous volume.
-				const separator = entry.indexOf(":");
-				if (separator > 0) {
-					addSource(entry.slice(0, separator));
+				const source = shortVolumeSource(entry);
+				if (source) {
+					addSource(source);
 				}
 			} else if (isRecord(entry)) {
 				const type = typeof entry.type === "string" ? entry.type : "";
@@ -277,10 +404,12 @@ export const resolveComposeFilesMountedVolumes = (
 	const uses: ComposeVolumeUse[] = [];
 	const unresolved: string[] = [];
 	const forbidden: string[] = [];
+	const forbiddenParents: string[] = [];
 	const mounted: MountedKeys = {
 		keys: new Set<string>(),
 		unresolved,
 		forbidden,
+		forbiddenParents,
 		anyKey: false,
 	};
 	for (const spec of specs) {
@@ -294,6 +423,37 @@ export const resolveComposeFilesMountedVolumes = (
 	const definitionSets = specs.map((spec) =>
 		spec && isRecord(spec.volumes) ? spec.volumes : {},
 	);
+	// `docker compose run -v SOURCE:TARGET`: a path is a bind mount; a name is
+	// the key of a declared volume, or, when no file declares it, the Docker
+	// volume of that name itself.
+	const commandVolumeNames = new Set<string>();
+	for (const volume of options.commandVolumes ?? []) {
+		if (volume.includes("$")) {
+			// A shell variable or substitution: the value is not known here.
+			unresolved.push(`command volume "${volume}"`);
+			continue;
+		}
+		const separator = volume.indexOf(":");
+		// Without a colon it is an anonymous volume.
+		const source = separator > 0 ? volume.slice(0, separator) : "";
+		if (!source) {
+			continue;
+		}
+		if (isFilePathSource(source)) {
+			const reach = dockerVolumesDirectoryReach(source, options.baseDirs);
+			if (reach === "inside") {
+				forbidden.push(`command bind mount "${source}"`);
+			} else if (reach === "parent") {
+				forbiddenParents.push(`command bind mount "${source}"`);
+			}
+		} else if (
+			definitionSets.some((definitions) => Object.hasOwn(definitions, source))
+		) {
+			mounted.keys.add(source);
+		} else {
+			commandVolumeNames.add(source);
+		}
+	}
 	if (mounted.anyKey) {
 		for (const definitions of definitionSets) {
 			for (const key of Object.keys(definitions)) {
@@ -314,6 +474,10 @@ export const resolveComposeFilesMountedVolumes = (
 		}
 	};
 
+	for (const name of commandVolumeNames) {
+		addUse({ key: name, volumeName: name, derived: false });
+	}
+
 	for (const key of mounted.keys) {
 		// A key that is not declared makes compose fail on its own.
 		const declaring = definitionSets.filter((definitions) =>
@@ -331,12 +495,19 @@ export const resolveComposeFilesMountedVolumes = (
 					unresolved.push(`volume "${key}"`);
 					continue;
 				}
-				if (
-					isFilePathSource(resolvedDevice) &&
-					reachesDockerVolumesDirectory(resolvedDevice, options.baseDirs)
-				) {
-					forbidden.push(`volume "${key}" (device "${device}")`);
-					continue;
+				if (isFilePathSource(resolvedDevice)) {
+					const reach = dockerVolumesDirectoryReach(
+						resolvedDevice,
+						options.baseDirs,
+					);
+					if (reach === "inside") {
+						forbidden.push(`volume "${key}" (device "${device}")`);
+						continue;
+					}
+					if (reach === "parent") {
+						forbiddenParents.push(`volume "${key}" (device "${device}")`);
+						continue;
+					}
 				}
 			}
 
@@ -396,7 +567,7 @@ export const resolveComposeFilesMountedVolumes = (
 			}
 		}
 	}
-	return { uses, unresolved, forbidden };
+	return { uses, unresolved, forbidden, forbiddenParents };
 };
 
 export const resolveComposeMountedVolumes = (
