@@ -353,10 +353,10 @@ side of these:
 - `pages/api/auth/[...all].ts` rewrites the 1.6 MCP and SAML callback URLs
   (`rewriteLegacyAuthUrl`) and the authorize response `iss`.
 - Schema: `db/schema/mcp-oauth.ts` and `db/schema/scim.ts` hold the 1.7 tables;
-  the 1.6 tables stay as `legacy*` exports. The 1.7 token and consent tables
-  use new physical names because the 1.6 tables kept `oauth_access_token` and
-  `oauth_consent`. Migrations 0210 (tables) and 0211 (grant copy) are
-  fork-owned; an upstream 1.7 migration for the same tables must be
+  the 1.6 tables and their `legacy*` exports were dropped by migration 0220.
+  The 1.7 token and consent tables use new physical names because the 1.6
+  tables had `oauth_access_token` and `oauth_consent`. Migrations 0210
+  (tables), 0211 (grant copy) and 0220 (drop the 1.6 tables) are fork-owned; an upstream 1.7 migration for the same tables must be
   hand-carried as a no-op.
 - 1.7 checks the Drizzle schema against the plugin set on every request. A new
   better-auth field or a NOT NULL column it does not write (as with
@@ -540,7 +540,7 @@ make sure the regenerated migration does not `DROP` them.
 
 | Table | Schema file | Feature | Landed in |
 |---|---|---|---|
-| `oauth_application`, `oauth_access_token`, `oauth_consent` | `packages/server/src/db/schema/mcp-oauth.ts` | remote MCP server OAuth (better-auth `mcp` plugin storage) | `0198` |
+| `oauth_client`, `oauth_refresh_token`, `oauth_provider_access_token`, `oauth_provider_consent`, `oauth_resource`, `oauth_client_resource`, `oauth_client_assertion` | `packages/server/src/db/schema/mcp-oauth.ts` | remote MCP server OAuth (`@better-auth/oauth-provider`; the 1.6 tables were dropped in `0220`) | `0210` |
 
 ### Migrator ordering gotcha (drizzle `postgres-js` migrator)
 

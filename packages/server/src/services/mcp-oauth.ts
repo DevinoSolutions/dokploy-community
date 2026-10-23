@@ -16,8 +16,6 @@ import {
 import { scheduleJob } from "node-schedule";
 import { db } from "../db";
 import {
-	legacyOauthAccessToken,
-	legacyOauthConsent,
 	member,
 	oauthAccessToken,
 	oauthClient,
@@ -704,12 +702,6 @@ export const isStaleRotatedRefreshToken = async (
  * "Unknown or disabled OAuth client". Wait ABANDONED_REGISTRATION_DAYS before
  * treating such a row as abandoned.
  *
- * The better-auth 1.6 tables (`oauth_application`, `oauth_access_token`,
- * `oauth_consent`) are the rollback copy, so live rows stay. 1.6 stored its
- * tokens in plaintext, though, so a 1.6 token row is removed as soon as both
- * of its tokens have expired: 1.6 would refuse it too, and nothing else ever
- * cleans that table.
- *
  * Finally, the encrypted replay response of a rotated refresh token is
  * cleared once its replay window has closed. The row itself stays for
  * ROTATED_REFRESH_RETENTION_DAYS (stale-token detection needs it), but the
@@ -755,17 +747,6 @@ export const purgeExpiredMcpTokens = async () => {
 			and(
 				isNotNull(oauthRefreshToken.rotationReplayResponse),
 				lt(oauthRefreshToken.rotationReplayExpiresAt, now),
-			),
-		);
-	await db
-		.delete(legacyOauthAccessToken)
-		.where(
-			and(
-				lt(legacyOauthAccessToken.accessTokenExpiresAt, now),
-				or(
-					isNull(legacyOauthAccessToken.refreshTokenExpiresAt),
-					lt(legacyOauthAccessToken.refreshTokenExpiresAt, now),
-				),
 			),
 		);
 
@@ -922,9 +903,7 @@ export const listMcpAuthorizations = async (
 
 /**
  * Deletes every token and consent row for client+user; the client's next call
- * gets 401 and a re-authorization starts a fresh grant. The matching 1.6 rows
- * go too: they hold the same grant in plaintext, and a rollback must not bring
- * back an authorization the user revoked.
+ * gets 401 and a re-authorization starts a fresh grant.
  */
 export const revokeMcpAuthorization = async (
 	userId: string,
@@ -950,21 +929,5 @@ export const revokeMcpAuthorization = async (
 		.delete(oauthConsent)
 		.where(
 			and(eq(oauthConsent.userId, userId), eq(oauthConsent.clientId, clientId)),
-		);
-	await db
-		.delete(legacyOauthAccessToken)
-		.where(
-			and(
-				eq(legacyOauthAccessToken.userId, userId),
-				eq(legacyOauthAccessToken.clientId, clientId),
-			),
-		);
-	await db
-		.delete(legacyOauthConsent)
-		.where(
-			and(
-				eq(legacyOauthConsent.userId, userId),
-				eq(legacyOauthConsent.clientId, clientId),
-			),
 		);
 };

@@ -28,12 +28,13 @@ The 1.6 in-core `mcp` plugin is gone. The OAuth server behind `/api/mcp` is now
   the MCP Server card in Settings → Profile instead;
 - `x-api-key` access to `/api/mcp` and the 429-on-throttle answer are unchanged.
 
-**Existing grants keep working.** Migration 0211 copies every live client,
+**Existing grants keep working.** Migration 0211 copied every live client,
 token and consent from the 1.6 tables (`oauth_application`,
 `oauth_access_token`, `oauth_consent`) into the 1.7 tables (`oauth_client`,
 `oauth_refresh_token`, `oauth_provider_access_token`,
 `oauth_provider_consent`). Tokens are stored hashed, the way the 1.7 provider
-expects. MCP clients do not have to authorize again.
+expects. MCP clients do not have to authorize again. Migration 0220 later
+dropped the 1.6 tables (see Rollback).
 
 The 1.6 endpoint URLs stay as aliases, so clients that cached them keep
 working:
@@ -126,25 +127,32 @@ a rotation.
 
 ## Rollback
 
-Revert the upgrade PR and redeploy. The upgrade never changes a live 1.6 row,
-so 1.6 finds the grants it issued. Two kinds of 1.6 rows are removed after the
-upgrade: token rows whose access and refresh tokens have both expired (the
-daily purge), and the rows of a client a user revokes in Settings, so a
-rollback cannot bring back a revoked authorization. Grants made or refreshed
-after the upgrade exist only in the 1.7 tables, so those MCP clients must
-authorize again after a rollback. SCIM connections created on 1.7 do not exist
-on 1.6.
+Rolling back to better-auth 1.6 is no longer possible. Migration 0220 drops
+the 1.6 tables (`oauth_consent`, `oauth_access_token` and
+`oauth_application`), which held every grant in plaintext, so there is nothing
+left for 1.6 to find. The only way back to the 1.6 data is restoring the
+pg_dump taken before the deploy that ran 0220. After 0220 has run, do not
+redeploy an older release. Releases before community.13 (better-auth 1.6) still
+boot, but their 1.6 MCP/OAuth endpoints no longer work. On community.13 through
+the one before 0220, the daily token purge and `revokeMcpAuthorization` delete
+the 1.7 rows first and then error on the missing 1.6 table; a revoke that shows
+an error has still removed the grant.
 
-Until they expire, the unexpired legacy 1.6 tokens stay in
-`oauth_access_token` in plaintext. They are kept on purpose, as the rollback
-copy: 1.7 never reads them, it only deletes expired rows (the daily purge) and
-the rows of a revoked client. Removing them is the soak-cleanup
-follow-up below.
+On a database whose 0202 catch-up is still pending (an upstream switch-over),
+`applyForkSchemaCatchups` runs after `migrate()` and re-creates the three
+tables empty and unused. That is harmless; do not edit 0202's SQL, since that
+changes its hash.
+
+Until 0220 shipped, the 1.6 tables were kept as the rollback copy: the upgrade
+never changed a live 1.6 row, 1.7 only deleted expired 1.6 token rows (the
+daily purge) and the rows of a client a user revoked in Settings, and grants
+made or refreshed after the upgrade existed only in the 1.7 tables. SCIM
+connections created on 1.7 do not exist on 1.6.
 
 ## Follow-up after a soak
 
-The 1.6 tables keep their tokens in plaintext as the rollback copy. Once the
-upgrade has run long enough that a rollback is off the table, delete the 1.6
-token rows (or null their `access_token`/`refresh_token` columns) in a later
-migration, and then drop `oauth_application`, `oauth_access_token` and
-`oauth_consent` with their `legacy*` schema exports.
+Done. A forced refresh test passed on production after the upgrade and the
+fork moved on, so migration 0220 dropped `oauth_consent`,
+`oauth_access_token` and `oauth_application` (the plaintext 1.6 tokens go with
+them) and the `legacy*` schema exports and their purge/revoke code were
+removed. The 1.7 tables are unchanged.

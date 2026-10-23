@@ -21,11 +21,10 @@ import { user } from "./user";
  * better-auth drizzle adapter resolves `schema[modelName][fieldName]`, and its
  * startup schema check compares these keys with the plugin schema.
  *
- * The 1.6 in-core `mcp` plugin owned `oauth_access_token` and `oauth_consent`
- * with a different layout, so the 1.7 token and consent tables use new
- * physical names. The 1.6 tables are kept (see the `legacy*` exports below) so
- * a rollback of the 1.7 upgrade finds its grants where it left them; migration
- * 0211 copies their live rows into these tables.
+ * The 1.6 in-core `mcp` plugin owned `oauth_application`, `oauth_access_token`
+ * and `oauth_consent` with a different layout, so the 1.7 token and consent
+ * tables use new physical names. Migration 0211 copied the live 1.6 rows into
+ * these tables and migration 0220 dropped the 1.6 tables.
  *
  * Tokens are stored as `base64url(SHA-256(value))`, the plugin's `"hashed"`
  * storage format. Client secrets are encrypted with the auth secret (see
@@ -269,91 +268,4 @@ export const oauthAccessTokenRelations = relations(
 			references: [user.id],
 		}),
 	}),
-);
-
-// ---------------------------------------------------------------------------
-// better-auth 1.6 `mcp` plugin tables, kept read-only for rollback
-// ---------------------------------------------------------------------------
-
-/**
- * 1.6 client registrations. Nothing writes here after the 1.7 upgrade; the
- * table stays so reverting the upgrade finds the grants it issued. Migration
- * 0211 copied every row into `oauth_client`.
- */
-export const legacyOauthApplication = pgTable(
-	"oauth_application",
-	{
-		id: text("id")
-			.primaryKey()
-			.$defaultFn(() => nanoid()),
-		name: text("name"),
-		icon: text("icon"),
-		metadata: text("metadata"),
-		clientId: text("client_id").notNull().unique(),
-		clientSecret: text("client_secret"),
-		redirectUrls: text("redirect_urls").notNull(),
-		type: text("type").notNull(),
-		disabled: boolean("disabled").notNull().default(false),
-		userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
-		createdAt: timestamp("created_at").notNull(),
-		updatedAt: timestamp("updated_at").notNull(),
-	},
-	(table) => [index("oauth_application_user_id_idx").on(table.userId)],
-);
-
-/**
- * 1.6 token rows (plaintext tokens). Kept for rollback; see above. Rows go
- * only once both tokens expired or when the user revokes the client
- * (`purgeExpiredMcpTokens`, `revokeMcpAuthorization`).
- */
-export const legacyOauthAccessToken = pgTable(
-	"oauth_access_token",
-	{
-		id: text("id")
-			.primaryKey()
-			.$defaultFn(() => nanoid()),
-		accessToken: text("access_token").notNull().unique(),
-		refreshToken: text("refresh_token").unique(),
-		accessTokenExpiresAt: timestamp("access_token_expires_at").notNull(),
-		refreshTokenExpiresAt: timestamp("refresh_token_expires_at"),
-		clientId: text("client_id")
-			.notNull()
-			.references(() => legacyOauthApplication.clientId, {
-				onDelete: "cascade",
-			}),
-		userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
-		scopes: text("scopes").notNull(),
-		createdAt: timestamp("created_at").notNull(),
-		updatedAt: timestamp("updated_at").notNull(),
-	},
-	(table) => [
-		index("oauth_access_token_client_id_idx").on(table.clientId),
-		index("oauth_access_token_user_id_idx").on(table.userId),
-	],
-);
-
-/** 1.6 consent rows written by the fork's consent page. Kept for rollback only. */
-export const legacyOauthConsent = pgTable(
-	"oauth_consent",
-	{
-		id: text("id")
-			.primaryKey()
-			.$defaultFn(() => nanoid()),
-		clientId: text("client_id")
-			.notNull()
-			.references(() => legacyOauthApplication.clientId, {
-				onDelete: "cascade",
-			}),
-		userId: text("user_id")
-			.notNull()
-			.references(() => user.id, { onDelete: "cascade" }),
-		scopes: text("scopes").notNull(),
-		consentGiven: boolean("consent_given").notNull().default(false),
-		createdAt: timestamp("created_at").notNull(),
-		updatedAt: timestamp("updated_at").notNull(),
-	},
-	(table) => [
-		index("oauth_consent_client_id_idx").on(table.clientId),
-		index("oauth_consent_user_id_idx").on(table.userId),
-	],
 );
