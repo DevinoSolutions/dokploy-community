@@ -90,7 +90,7 @@
     "toml": "5.0.1",
     "ws": "8.21.0",
     "yaml": "2.8.3",
-    "zod": "^4.5.4"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.7",
