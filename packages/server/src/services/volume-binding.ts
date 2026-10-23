@@ -338,7 +338,6 @@ export const loadVolumeBindingFacts = async ({
 							appName: true,
 							serverId: true,
 							composeFile: true,
-							composeStatus: true,
 						},
 						with: { environment: environmentOrganization },
 					})
@@ -389,20 +388,27 @@ export const loadVolumeBindingFacts = async ({
 		: composeDeclarationRows.filter((row) =>
 				collectComposeDeclaredVolumeNames(row.composeFile).has(volumeName),
 			);
-	// A compose that never deployed owns no data, so a file that was only saved
-	// cannot lock anybody out. Any status counts once it has deployed (a stopped
-	// or failed compose still owns its volumes): it is no longer idle, or it has
-	// a deployment row.
+	// A declaration is a claim only once the compose has a deployment that
+	// finished ("done"): a file that was only saved, or whose deploy was refused,
+	// owns no data and cannot lock anybody out, and the status column is not what
+	// counts. A claim never evicts a record: a service that already has its own
+	// mount or volume backup row for the name is not held to it, so a compose
+	// cannot take a volume away from the service that recorded it.
+	const hasOwnRecord = recordedOnOwnMount || recordedOnOwnVolumeBackup;
 	const deployedRows: typeof declaringRows = [];
-	for (const row of declaringRows) {
-		if (
-			row.composeStatus !== "idle" ||
-			(await db.query.deployments.findFirst({
-				where: eq(deployments.composeId, row.composeId),
-				columns: { deploymentId: true },
-			}))
-		) {
-			deployedRows.push(row);
+	if (!hasOwnRecord) {
+		for (const row of declaringRows) {
+			if (
+				await db.query.deployments.findFirst({
+					where: and(
+						eq(deployments.composeId, row.composeId),
+						eq(deployments.status, "done"),
+					),
+					columns: { deploymentId: true },
+				})
+			) {
+				deployedRows.push(row);
+			}
 		}
 	}
 	const composeDeclarations = deployedRows.map((row) => {

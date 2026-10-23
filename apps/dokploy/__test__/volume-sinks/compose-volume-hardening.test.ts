@@ -50,7 +50,10 @@ const { assertComposeVolumesBound } = await import(
 const { resolveComposeMountedVolumes, reachesDockerVolumesDirectory } =
 	await import("@dokploy/server/utils/volume-backups/compose-volumes");
 const { parse } = await import("yaml");
-const { loadVolumeBindingFacts } = await import(
+const { assertComposeFileVolumesBound } = await import(
+	"@dokploy/server/services/compose-volume-binding"
+);
+const { findRefusedVolumeMounts, loadVolumeBindingFacts } = await import(
 	"@dokploy/server/services/volume-binding"
 );
 const { evaluateVolumeBinding } = await import(
@@ -87,6 +90,27 @@ const composeRow = (
 		environment: { env: "", project: { env: "" } },
 		...overrides,
 	}) as never;
+
+// The bound values of a drizzle where clause.
+const sqlParams = (node: unknown): unknown[] => {
+	const found: unknown[] = [];
+	const visit = (value: unknown) => {
+		if (!value || typeof value !== "object") return;
+		const chunks = (value as { queryChunks?: unknown[] }).queryChunks;
+		if (chunks) {
+			for (const chunk of chunks) visit(chunk);
+			return;
+		}
+		if (
+			(value as { constructor?: { name?: string } }).constructor?.name ===
+			"Param"
+		) {
+			found.push((value as { value: unknown }).value);
+		}
+	};
+	visit(node);
+	return found;
+};
 
 const claimEverything = () =>
 	mocks.query.mounts.findMany.mockResolvedValue([
@@ -366,11 +390,13 @@ describe("volumes other composes declare", () => {
 		composeStatus,
 		...orgOf(organizationId),
 	});
-	const answerDeclarations = (rows: unknown[]) =>
-		mocks.query.compose.findMany.mockImplementation(
+	const answerDeclarations = (rows: unknown[]) => {
+		mocks.query.deployments.findFirst.mockResolvedValue({ deploymentId: "d" });
+		return mocks.query.compose.findMany.mockImplementation(
 			async (args: { columns?: { composeFile?: boolean } }) =>
 				args?.columns?.composeFile ? rows : [],
 		);
+	};
 	const yaml = `
 services:
   web:
@@ -441,34 +467,38 @@ volumes:
 		).resolves.toBeUndefined();
 	});
 
-	it.each(["running", "done", "error"])(
-		"a %s compose claims its declared names",
-		async (status) => {
-			answerDeclarations([
-				declaring("volumes:\n  pg:\n    name: pgdata\n", "org-b", status),
-			]);
-
-			await expect(
-				assertComposeVolumesBound(composeRow(yaml)),
-			).rejects.toThrow(/Compose volume "pgdata" is refused/);
-			expect(mocks.query.deployments.findFirst).not.toHaveBeenCalled();
-		},
-	);
-
-	it("an idle compose claims only once it has a deployment row", async () => {
+	it("claims only through a deployment that finished", async () => {
 		answerDeclarations([
-			declaring("volumes:\n  pg:\n    name: pgdata\n", "org-b", "idle"),
+			declaring("volumes:\n  pg:\n    name: pgdata\n", "org-b", "error"),
 		]);
 
+		// the compose was saved, or its deploys were refused: only error rows
 		mocks.query.deployments.findFirst.mockResolvedValue(undefined);
 		await expect(
 			assertComposeVolumesBound(composeRow(yaml)),
 		).resolves.toBeUndefined();
 
+		// the question asked is "a deployment of that compose with status done",
+		// whatever composeStatus says
+		const asked = mocks.query.deployments.findFirst.mock.calls[0]?.[0];
+		expect(sqlParams(asked.where)).toEqual(
+			expect.arrayContaining(["compose-other", "done"]),
+		);
+
 		mocks.query.deployments.findFirst.mockResolvedValue({ deploymentId: "d" });
 		await expect(assertComposeVolumesBound(composeRow(yaml))).rejects.toThrow(
 			/Compose volume "pgdata" is refused/,
 		);
+	});
+
+	it("does not read composeStatus at all", async () => {
+		answerDeclarations([]);
+		await assertComposeVolumesBound(composeRow(yaml));
+
+		const declarationQuery = mocks.query.compose.findMany.mock.calls
+			.map((call) => call[0])
+			.find((args) => args?.columns?.composeFile);
+		expect(declarationQuery.columns.composeStatus).toBeUndefined();
 	});
 });
 
@@ -478,7 +508,6 @@ describe("another organization's compose declaration on the other volume checks"
 		appName: "other-compose",
 		serverId: null,
 		composeFile: "volumes:\n  pg:\n    name: pgdata\n",
-		composeStatus: "done",
 		...orgOf("org-b"),
 	};
 	const facts = async (volumeName: string) => {
@@ -487,6 +516,7 @@ describe("another organization's compose declaration on the other volume checks"
 			serverId: null,
 			...orgOf("org-a"),
 		});
+		mocks.query.deployments.findFirst.mockResolvedValue({ deploymentId: "d" });
 		mocks.query.compose.findMany.mockImplementation(
 			async (args: { columns?: { composeFile?: boolean } }) =>
 				args?.columns?.composeFile ? [declaration] : [],
@@ -497,16 +527,41 @@ describe("another organization's compose declaration on the other volume checks"
 			volumeName,
 		});
 	};
+	const ownMount = {
+		mountId: "mount-mine",
+		applicationId: "app-1",
+		application: { appName: "app-mine-Zz1111", serverId: null, ...orgOf("org-a") },
+	};
+	const ownVolumeBackup = {
+		volumeBackupId: "vb-mine",
+		applicationId: "app-1",
+		application: { appName: "app-mine-Zz1111", serverId: null, ...orgOf("org-a") },
+	};
 
-	it("counts as an other-organization claim, so creating a mount for it is refused", async () => {
+	it("claims against a name nobody has recorded, once the compose deployed", async () => {
 		const result = await facts("pgdata");
 
 		expect(result.otherOrganizationClaims).toEqual([
 			{ source: "composeFile", id: "other-compose" },
 		]);
+		// creating a mount or a volume backup for it is refused, owner or not
 		for (const privileged of [true, false]) {
 			expect(evaluateVolumeBinding(result, { privileged }).ok).toBe(false);
 		}
+	});
+
+	it("does not claim before the compose has a done deployment", async () => {
+		mocks.query.deployments.findFirst.mockResolvedValue(undefined);
+		const result = await facts("pgdata");
+		mocks.query.deployments.findFirst.mockResolvedValue(undefined);
+		const again = await loadVolumeBindingFacts({
+			serviceType: "application",
+			serviceId: "app-1",
+			volumeName: "pgdata",
+		});
+
+		expect(result.otherOrganizationClaims).toHaveLength(1);
+		expect(again.otherOrganizationClaims).toEqual([]);
 	});
 
 	it("is not counted for a name in the service's own namespace", async () => {
@@ -514,6 +569,118 @@ describe("another organization's compose declaration on the other volume checks"
 
 		expect(result.otherOrganizationClaims).toEqual([]);
 		expect(evaluateVolumeBinding(result, { privileged: false }).ok).toBe(true);
+	});
+
+	it("never evicts a service's own mount: edit, deploy and backup keep working", async () => {
+		mocks.query.mounts.findMany.mockResolvedValue([ownMount]);
+		const result = await facts("pgdata");
+
+		expect(result.otherOrganizationClaims).toEqual([]);
+		expect(mocks.query.deployments.findFirst).not.toHaveBeenCalled();
+		// mount edit / volume backup on the existing row
+		expect(
+			evaluateVolumeBinding(result, { privileged: true }).ok,
+		).toBe(true);
+		// application deploy with the stored mount
+		await expect(
+			findRefusedVolumeMounts(
+				[{ type: "volume", volumeName: "pgdata" }],
+				{ serviceType: "application", serviceId: "app-1" },
+			),
+		).resolves.toEqual([]);
+	});
+
+	it("never evicts a service's own volume backup row either", async () => {
+		mocks.query.volumeBackups.findMany.mockResolvedValue([ownVolumeBackup]);
+		const result = await facts("pgdata");
+
+		expect(result.otherOrganizationClaims).toEqual([]);
+	});
+
+	it("still refuses another organization's mount row (#460)", async () => {
+		mocks.query.mounts.findMany.mockResolvedValue([
+			{
+				mountId: "mount-b",
+				mariadbId: "m-b",
+				mariadb: { appName: "m-b", serverId: null, ...orgOf("org-b") },
+			},
+			ownMount,
+		]);
+		const result = await facts("pgdata");
+
+		expect(result.otherOrganizationClaims).toEqual([
+			{ source: "mount", id: "mount-b" },
+		]);
+	});
+});
+
+describe("composeStatus cannot be written through compose.update", () => {
+	it("is dropped from the input", async () => {
+		const { apiUpdateCompose } = await import(
+			"@dokploy/server/db/schema/compose"
+		);
+
+		const parsed = apiUpdateCompose.parse({
+			composeId: "compose-1",
+			composeStatus: "done",
+			name: "renamed",
+		});
+
+		expect(parsed).toEqual({ composeId: "compose-1", name: "renamed" });
+	});
+});
+
+describe("save-time check of a raw compose file", () => {
+	const typed = `
+services:
+  web:
+    volumes:
+      - shared:/data
+      - data:/more
+volumes:
+  shared:
+    external: true
+  data:
+`;
+
+	it("applies the randomize renames a deploy applies", async () => {
+		claimEverything();
+
+		await expect(
+			assertComposeFileVolumesBound(
+				composeRow(typed, { randomize: true, suffix: "sfx" }),
+				typed,
+			),
+		).rejects.toThrow('Compose volume "shared-sfx" is refused');
+	});
+
+	it("applies the isolated renames, and still refuses an explicit name", async () => {
+		claimEverything();
+
+		await expect(
+			assertComposeFileVolumesBound(
+				composeRow(typed, {
+					isolatedDeployment: true,
+					isolatedDeploymentsVolume: true,
+				}),
+				typed,
+			),
+		).rejects.toThrow(`Compose volume "shared-${APP}" is refused`);
+		await expect(
+			assertComposeFileVolumesBound(
+				composeRow(typed, { isolatedDeployment: true }),
+				withVolume("    name: victim"),
+			),
+		).rejects.toThrow('Compose volume "victim" is refused');
+	});
+
+	it("leaves a compose's own derived names alone with randomize on", async () => {
+		await expect(
+			assertComposeFileVolumesBound(
+				composeRow(typed, { randomize: true, suffix: "sfx" }),
+				withVolume(""),
+			),
+		).resolves.toBeUndefined();
 	});
 });
 

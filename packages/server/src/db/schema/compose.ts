@@ -386,11 +386,14 @@ export const apiUpdateCompose = createSchema
 	})
 	// `snapvisorProjectName` only goes through `snapvisor.setComposeProject`,
 	// which validates the slug and checks the organization.
+	// `composeStatus` is written by deploys only: a compose with a done
+	// deployment claims the volume names its file declares (T-6822).
 	.omit({
 		serverId: true,
 		environmentId: true,
 		appName: true,
 		snapvisorProjectName: true,
+		composeStatus: true,
 	});
 
 export const apiSaveEnvironmentVariablesCompose = createSchema

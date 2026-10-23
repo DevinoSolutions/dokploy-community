@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
+import { randomizeDeployableSpecificationFile } from "@dokploy/server/utils/docker/collision";
+import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	addDomainToCompose,
 	loadDockerCompose,
@@ -12,6 +14,7 @@ import {
 	parseEnvironmentKeyValuePair,
 	prepareEnvironmentVariables,
 } from "@dokploy/server/utils/docker/utils";
+import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import {
@@ -37,6 +40,8 @@ type ComposeForVolumeCheck = Pick<
 	| "serverId"
 	| "sourceType"
 	| "composePath"
+	| "isolatedDeployment"
+	| "isolatedDeploymentsVolume"
 >;
 
 type Spec = Parameters<typeof resolveComposeFilesMountedVolumes>[0][number];
@@ -416,8 +421,10 @@ export const assertComposeFileOnDiskVolumesBound = async (
 	await assertComposeSpecVolumesBound(compose, spec as Spec);
 };
 
-// Save time, raw compose files only: the text the user typed, before the
-// domain labels and the randomize suffixes. A deploy checks again.
+// Save time, raw compose files only: the text the user typed with the same
+// randomize / isolated renames a deploy applies (domain labels do not touch
+// volumes), so explicit names, external keys and derived names are the ones
+// Docker will see. A deploy checks again.
 export const assertComposeFileVolumesBound = async (
 	compose: ComposeForVolumeCheck,
 	composeFile: string,
@@ -429,5 +436,18 @@ export const assertComposeFileVolumesBound = async (
 		// Not valid YAML: nothing deploys from it, and the editor reports it.
 		return;
 	}
-	await assertComposeSpecVolumesBound(compose, spec as Spec);
+	if (!spec || typeof spec !== "object") {
+		return;
+	}
+	let renamed = spec as ComposeSpecification;
+	if (compose.isolatedDeployment) {
+		renamed = randomizeDeployableSpecificationFile(
+			renamed,
+			compose.isolatedDeploymentsVolume,
+			compose.suffix || compose.appName,
+		);
+	} else if (compose.randomize) {
+		renamed = randomizeSpecificationFile(renamed, compose.suffix);
+	}
+	await assertComposeSpecVolumesBound(compose, renamed as Spec);
 };

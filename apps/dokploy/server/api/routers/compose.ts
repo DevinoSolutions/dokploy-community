@@ -322,16 +322,13 @@ export const composeRouter = createTRPCRouter({
 			}
 
 			// A raw compose file that mounts a volume which is not the compose's own
-			// is refused at save (T-6822); a deploy checks the final file again,
-			// which also covers git sources, randomize and isolated deployments.
+			// is refused at save (T-6822), with the randomize / isolated renames
+			// applied; a deploy checks the final file again, which also covers git
+			// sources.
 			if (input.composeFile) {
 				const existing = await findComposeById(input.composeId);
 				const effective = { ...existing, ..._.omitBy(input, _.isUndefined) };
-				if (
-					effective.sourceType === "raw" &&
-					!effective.randomize &&
-					!effective.isolatedDeployment
-				) {
+				if (effective.sourceType === "raw") {
 					try {
 						await assertComposeFileVolumesBound(
 							effective,
@@ -346,7 +343,11 @@ export const composeRouter = createTRPCRouter({
 				}
 			}
 
-			const updated = await updateCompose(input.composeId, input);
+			// The status is written by deploys only (the schema omits it too).
+			const { composeStatus: _composeStatus, ...update } = input as typeof input & {
+				composeStatus?: unknown;
+			};
+			const updated = await updateCompose(input.composeId, update);
 			await audit(ctx, {
 				action: "update",
 				resourceType: "compose",
