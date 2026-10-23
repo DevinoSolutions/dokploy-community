@@ -17,6 +17,7 @@ vi.mock("@dokploy/server/db", () => ({
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkPermission: vi.fn(async () => undefined),
 	checkServicePermissionAndAccess: vi.fn(async () => undefined),
+	findServiceOrganizationId: vi.fn(async () => "org-a"),
 }));
 
 vi.mock("@dokploy/server", () => ({

@@ -1,10 +1,11 @@
 import { TRPCError } from "@trpc/server";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { db } from "../db";
 import {
 	type createVolumeBackupSchema,
 	type updateVolumeBackupSchema,
+	mounts,
 	volumeBackups,
 } from "../db/schema";
 
@@ -146,4 +147,30 @@ export const updateVolumeBackup = async (
 		.where(eq(volumeBackups.volumeBackupId, volumeBackupId))
 		.returning()
 		.then((e) => e[0]);
+};
+
+// The Docker volume names a restore into this application or compose may
+// target: the volumes its own volume backups cover and its own named mounts.
+// A restore removes and recreates the named volume, so any other name (a
+// volume of another service or organization on the same host) is refused.
+export const findRestorableVolumeNames = async (
+	serviceId: string,
+	serviceType: "application" | "compose",
+) => {
+	const serviceColumn = serviceType === "compose" ? "composeId" : "applicationId";
+	const [backupRows, mountRows] = await Promise.all([
+		db.query.volumeBackups.findMany({
+			where: eq(volumeBackups[serviceColumn], serviceId),
+			columns: { volumeName: true },
+		}),
+		db.query.mounts.findMany({
+			where: and(eq(mounts[serviceColumn], serviceId), eq(mounts.type, "volume")),
+			columns: { volumeName: true },
+		}),
+	]);
+	return new Set(
+		[...backupRows, ...mountRows]
+			.map((row) => row.volumeName)
+			.filter((name): name is string => !!name),
+	);
 };

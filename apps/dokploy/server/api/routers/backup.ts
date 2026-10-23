@@ -31,13 +31,18 @@ import {
 import {
 	assertInstanceBackupInOrganization,
 	getBackupServiceId,
+	getBackupServiceIds,
 	isInstanceBackup,
+	validateBackupServiceBinding,
 } from "@dokploy/server/services/backup";
 import {
 	findDestinationById,
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
-import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import {
+	checkServicePermissionAndAccess,
+	findServiceOrganizationId,
+} from "@dokploy/server/services/permission";
 import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
 import {
 	buildRcloneCommand,
@@ -107,20 +112,38 @@ const assertInstanceBackupRole = (ctx: BackupCtx) => {
 	}
 };
 
+// Service backups: every service id on the row must belong to the active
+// organization (a foreign id and a missing one answer alike, with the same
+// not-found as an unknown backup id) and be permitted for the caller.
+const authorizeServiceBackup = async (
+	ctx: BackupCtx,
+	backup: Awaited<ReturnType<typeof findBackupById>>,
+	action: BackupAction,
+) => {
+	for (const serviceId of getBackupServiceIds(backup)) {
+		if (
+			(await findServiceOrganizationId(serviceId)) !==
+			ctx.session.activeOrganizationId
+		) {
+			throw new TRPCError({ code: "NOT_FOUND", message: "Backup not found" });
+		}
+		await checkServicePermissionAndAccess(ctx, serviceId, {
+			backup: [action],
+		});
+	}
+};
+
 // Authorizes a backup row that was loaded by id. Service backups go through
-// the service permission (which also pins the service to the active
-// organization); instance backups are scoped to the active organization
-// through their destination and creator, then gated on the owner/admin role.
+// the service permission; instance backups belong to the organization that
+// owns their destination (so an owner or admin there can still manage a row
+// whose creator no longer qualifies), then are gated on the owner/admin role.
 const authorizeBackupAccess = async (
 	ctx: BackupCtx,
 	backup: Awaited<ReturnType<typeof findBackupById>>,
 	action: BackupAction,
 ) => {
-	const serviceId = getBackupServiceId(backup);
-	if (serviceId && !isInstanceBackup(backup)) {
-		await checkServicePermissionAndAccess(ctx, serviceId, {
-			backup: [action],
-		});
+	if (!isInstanceBackup(backup)) {
+		await authorizeServiceBackup(ctx, backup, action);
 		return;
 	}
 	await assertInstanceBackupInOrganization(
@@ -131,8 +154,9 @@ const authorizeBackupAccess = async (
 };
 
 // Loads the backup behind a manual run of one service type. A row that has no
-// such service (an instance backup, or a row of another type) is not found
-// here, so these routes cannot be pointed at it.
+// such service (an instance backup, or a row of another type) or that does not
+// target exactly one service of its own kind is not found here, so these
+// routes cannot be pointed at it.
 const findServiceBackupForRun = async (
 	ctx: BackupCtx,
 	backupId: string,
@@ -145,13 +169,14 @@ const findServiceBackupForRun = async (
 		| "composeId",
 ) => {
 	const backup = await findBackupById(backupId);
-	const serviceId = backup[serviceKey];
-	if (!serviceId || isInstanceBackup(backup)) {
+	if (
+		!backup[serviceKey] ||
+		isInstanceBackup(backup) ||
+		validateBackupServiceBinding(backup).error
+	) {
 		throw new TRPCError({ code: "NOT_FOUND", message: "Backup not found" });
 	}
-	await checkServicePermissionAndAccess(ctx, serviceId, {
-		backup: ["create"],
-	});
+	await authorizeServiceBackup(ctx, backup, "create");
 	return backup;
 };
 
@@ -159,28 +184,26 @@ export const backupRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(apiCreateBackup)
 		.mutation(async ({ input: rawInput, ctx }) => {
-			let input = rawInput;
-			const serviceId = getBackupServiceId(input);
-			if (input.databaseType === "web-server") {
-				if (serviceId) {
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: "An instance backup cannot be attached to a service.",
-					});
-				}
-				assertInstanceBackupRole(ctx);
-				// The creator is what ties the row to an organization, so it is
-				// never taken from the client.
-				input = { ...input, userId: ctx.user.id };
-			} else if (!serviceId) {
-				throw new TRPCError({
-					code: "BAD_REQUEST",
-					message: "A backup needs a service to back up.",
-				});
-			} else {
-				await checkServicePermissionAndAccess(ctx, serviceId, {
+			// The creator is what ties an instance backup to an organization, so
+			// it is always the session user, never a client-supplied id.
+			const input = {
+				...rawInput,
+				backupType: rawInput.backupType ?? ("database" as const),
+				userId: ctx.user.id,
+			};
+			// Exactly one service, of the kind the row says it is (or none for the
+			// instance), so the permission checked below is the only service the
+			// schedule will ever run against.
+			const binding = validateBackupServiceBinding(input);
+			if (binding.error) {
+				throw new TRPCError({ code: "BAD_REQUEST", message: binding.error });
+			}
+			if (binding.serviceId) {
+				await checkServicePermissionAndAccess(ctx, binding.serviceId, {
 					backup: ["create"],
 				});
+			} else {
+				assertInstanceBackupRole(ctx);
 			}
 			await findDestinationByIdForOrganization(
 				input.destinationId,
@@ -274,13 +297,26 @@ export const backupRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const existing = await findBackupById(input.backupId);
 			await authorizeBackupAccess(ctx, existing, "update");
-			// Flipping a service backup to "web-server" would make the cron run
-			// the instance backup from a row the service permission governed.
-			if (input.databaseType !== existing.databaseType) {
+			// Flipping a service backup to "web-server" (or back) would make the
+			// cron run the instance backup from a row the service permission
+			// governed. Changing the database kind inside a compose backup stays
+			// possible as long as the row still matches its single service.
+			if (
+				(existing.databaseType === "web-server" ||
+					input.databaseType === "web-server") &&
+				input.databaseType !== existing.databaseType
+			) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
-					message: "The database type of a backup cannot be changed.",
+					message: "An instance backup cannot be converted to or from a service backup.",
 				});
+			}
+			const binding = validateBackupServiceBinding({
+				...existing,
+				databaseType: input.databaseType,
+			});
+			if (binding.error) {
+				throw new TRPCError({ code: "BAD_REQUEST", message: binding.error });
 			}
 			await findDestinationByIdForOrganization(
 				input.destinationId,
@@ -288,7 +324,12 @@ export const backupRouter = createTRPCRouter({
 			);
 
 			try {
-				await updateBackupById(input.backupId, input);
+				// Saving an instance backup attributes it to the caller, which is
+				// how a row whose creator no longer qualifies is repaired.
+				await updateBackupById(
+					input.backupId,
+					isInstanceBackup(existing) ? { ...input, userId: ctx.user.id } : input,
+				);
 				const backup = await findBackupById(input.backupId);
 
 				if (IS_CLOUD) {

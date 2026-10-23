@@ -80,9 +80,17 @@ describe("runWebServerBackup checks the destination before zipping or uploading"
 		mocks.findMemberRow.mockResolvedValue({ role: "owner" });
 	});
 
-	const expectNothingRan = () => {
-		expect(mocks.createDeploymentBackup).not.toHaveBeenCalled();
+	// A refusal is a visible failed run, and nothing is zipped or uploaded.
+	const expectRefusedRun = () => {
 		expect(mocks.execAsync).not.toHaveBeenCalled();
+		expect(mocks.createDeploymentBackup).toHaveBeenCalledTimes(1);
+		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+		expect(mocks.sendDokployBackupNotifications).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: "error",
+				errorMessage: expect.stringContaining("Backup refused"),
+			}),
+		);
 	};
 
 	it("fails closed when the backup has no recorded creator", async () => {
@@ -93,9 +101,9 @@ describe("runWebServerBackup checks the destination before zipping or uploading"
 
 		await expect(
 			runWebServerBackup({ ...backup, userId: null } as never),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		).rejects.toThrow("Backup refused");
 
-		expectNothingRan();
+		expectRefusedRun();
 	});
 
 	it("fails closed when the creator does not administer the destination organization", async () => {
@@ -105,11 +113,24 @@ describe("runWebServerBackup checks the destination before zipping or uploading"
 		});
 		mocks.findMemberRow.mockResolvedValue(undefined);
 
-		await expect(runWebServerBackup(backup as never)).rejects.toMatchObject({
-			code: "UNAUTHORIZED",
+		await expect(runWebServerBackup(backup as never)).rejects.toThrow(
+			"Backup refused",
+		);
+
+		expectRefusedRun();
+	});
+
+	it("refuses a row that is attached to a service", async () => {
+		mocks.findDestinationRow.mockResolvedValue({
+			destinationId: "dest-b",
+			organizationId: "org-b",
 		});
 
-		expectNothingRan();
+		await expect(
+			runWebServerBackup({ ...backup, postgresId: "pg-1" } as never),
+		).rejects.toThrow("Backup refused");
+
+		expectRefusedRun();
 	});
 
 	it("runs when the creator administers the destination organization", async () => {

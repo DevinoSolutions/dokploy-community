@@ -22,6 +22,7 @@ import {
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import { findRestorableVolumeNames } from "@dokploy/server/services/volume-backups";
 import { findServerById } from "@dokploy/server/services/server";
 import {
 	execAsyncRemote,
@@ -330,6 +331,18 @@ export const volumeBackupsRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.id, {
 				volumeBackup: ["restore"],
 			});
+			// The restore removes and recreates the named Docker volume, so it
+			// must be one of this service's own volumes, not any volume on the host.
+			const restorableVolumes = await findRestorableVolumeNames(
+				input.id,
+				input.serviceType,
+			);
+			if (!restorableVolumes.has(input.volumeName)) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This volume does not belong to the service.",
+				});
+			}
 			const destination = await findDestinationById(input.destinationId);
 			if (destination.organizationId !== ctx.session.activeOrganizationId) {
 				throw new TRPCError({

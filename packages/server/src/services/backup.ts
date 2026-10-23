@@ -113,62 +113,102 @@ type BackupServiceIds = {
 	composeId?: string | null;
 };
 
+const BACKUP_SERVICE_ID_KEYS = [
+	"postgresId",
+	"mysqlId",
+	"mariadbId",
+	"mongoId",
+	"libsqlId",
+	"composeId",
+] as const;
+
+// Every service id set on a backup row. A well-formed service backup has
+// exactly one; callers that gate on the service must check all of them.
+export const getBackupServiceIds = (backup: BackupServiceIds) =>
+	BACKUP_SERVICE_ID_KEYS.map((key) => backup[key]).filter(
+		(id): id is string => !!id,
+	);
+
 export const getBackupServiceId = (backup: BackupServiceIds) =>
-	backup.postgresId ||
-	backup.mysqlId ||
-	backup.mariadbId ||
-	backup.mongoId ||
-	backup.libsqlId ||
-	backup.composeId ||
-	null;
+	getBackupServiceIds(backup)[0] ?? null;
+
+const DATABASE_SERVICE_KEY = {
+	postgres: "postgresId",
+	mysql: "mysqlId",
+	mariadb: "mariadbId",
+	mongo: "mongoId",
+	libsql: "libsqlId",
+} as const;
+
+// A backup row either targets nothing but the instance ("web-server") or
+// exactly one service whose kind matches the row: a database backup carries
+// the id of its own database type, a compose backup carries a composeId and
+// the kind of database inside it. Rows with a second id, or an id that does
+// not match their type, would run one service's dump on behalf of another
+// service's permission, so they are rejected on write and refused at run time.
+export const validateBackupServiceBinding = (
+	backup: BackupServiceIds & { databaseType: string; backupType: string },
+): { serviceId: string | null; error: string | null } => {
+	const ids = getBackupServiceIds(backup);
+	if (backup.databaseType === "web-server") {
+		if (ids.length > 0) {
+			return {
+				serviceId: null,
+				error: "An instance backup cannot be attached to a service.",
+			};
+		}
+		if (backup.backupType !== "database") {
+			return {
+				serviceId: null,
+				error: "An instance backup must be a database backup.",
+			};
+		}
+		return { serviceId: null, error: null };
+	}
+	if (ids.length === 0) {
+		return { serviceId: null, error: "A backup needs a service to back up." };
+	}
+	if (ids.length > 1) {
+		return {
+			serviceId: null,
+			error: "A backup can only target one service.",
+		};
+	}
+	const expectedKey =
+		backup.backupType === "compose"
+			? "composeId"
+			: DATABASE_SERVICE_KEY[
+					backup.databaseType as keyof typeof DATABASE_SERVICE_KEY
+				];
+	if (!expectedKey || !backup[expectedKey]) {
+		return {
+			serviceId: null,
+			error: "The backup type does not match the service it targets.",
+		};
+	}
+	return { serviceId: ids[0] ?? null, error: null };
+};
 
 // Instance backups (the Dokploy web server itself) belong to no service and
 // no project. The backup row records only its creator (`userId`) and its
-// destination, so an instance backup counts as part of an organization when
-// the destination belongs to it and the creator is still an owner or admin
-// there. A row without a creator cannot be attributed and never matches.
+// destination.
 export const isInstanceBackup = (
 	backup: BackupServiceIds & { databaseType: string },
 ) => backup.databaseType === "web-server" || !getBackupServiceId(backup);
 
 type InstanceBackupRef = { userId?: string | null; destinationId: string };
 
-const instanceBackupBelongsToOrganization = async (
-	backup: InstanceBackupRef,
-	destinationOrganizationId: string,
-	organizationId: string,
-) => {
-	if (
-		!backup.userId ||
-		!organizationId ||
-		destinationOrganizationId !== organizationId
-	) {
-		return false;
-	}
-	const creator = await db.query.member.findFirst({
-		where: and(
-			eq(member.userId, backup.userId),
-			eq(member.organizationId, organizationId),
-			inArray(member.role, ["owner", "admin"]),
-		),
-	});
-	return !!creator;
-};
-
-// Router side: a backup row of another organization is reported exactly like
-// a missing one, so ids cannot be probed across organizations.
+// Router side: an instance backup is part of the organization that owns its
+// destination, whoever created it, so an owner or admin there can still find,
+// re-attribute, disable or delete a row whose creator no longer qualifies. A
+// row of another organization is reported exactly like a missing one, so ids
+// cannot be probed across organizations.
 export const assertInstanceBackupInOrganization = async (
 	backup: InstanceBackupRef,
 	organizationId: string,
 ) => {
 	const destination = await findDestinationById(backup.destinationId);
-	if (
-		!(await instanceBackupBelongsToOrganization(
-			backup,
-			destination.organizationId,
-			organizationId,
-		))
-	) {
+	if (!organizationId || destination.organizationId !== organizationId) {
 		throw new TRPCError({
 			code: "NOT_FOUND",
 			message: "Backup not found",
@@ -176,21 +216,25 @@ export const assertInstanceBackupInOrganization = async (
 	}
 };
 
-// Run side (cron and manual): resolves the destination only after proving it
-// belongs to an organization the backup's creator administers, and fails
+// Run side (cron and manual): the zip holds the whole Dokploy base path, so
+// the destination is only resolved after proving it belongs to an
+// organization the backup's creator still owns or administers. It fails
 // closed when the creator is unknown. Called before anything is zipped or
 // uploaded.
 export const findInstanceBackupDestination = async (
 	backup: InstanceBackupRef,
 ) => {
 	const destination = await findDestinationById(backup.destinationId);
-	if (
-		!(await instanceBackupBelongsToOrganization(
-			backup,
-			destination.organizationId,
-			destination.organizationId,
-		))
-	) {
+	const creator = backup.userId
+		? await db.query.member.findFirst({
+				where: and(
+					eq(member.userId, backup.userId),
+					eq(member.organizationId, destination.organizationId),
+					inArray(member.role, ["owner", "admin"]),
+				),
+			})
+		: undefined;
+	if (!creator) {
 		throw new TRPCError({
 			code: "UNAUTHORIZED",
 			message: "You don't have access to this destination.",

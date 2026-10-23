@@ -7,10 +7,18 @@ const mocks = vi.hoisted(() => ({
 	runVolumeBackup: vi.fn(),
 	checkServicePermissionAndAccess: vi.fn(),
 	findDestinationRow: vi.fn(),
+	findVolumeBackupRows: vi.fn(),
+	findMountRows: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => ({
-	db: { query: { destinations: { findFirst: mocks.findDestinationRow } } },
+	db: {
+		query: {
+			destinations: { findFirst: mocks.findDestinationRow },
+			volumeBackups: { findMany: mocks.findVolumeBackupRows },
+			mounts: { findMany: mocks.findMountRows },
+		},
+	},
 }));
 
 vi.mock("@dokploy/server/services/permission", () => ({
@@ -156,5 +164,48 @@ describe("volume backups stay bound to the services the caller can reach", () =>
 			caller.delete({ volumeBackupId: "vb-1" }),
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
 		expect(mocks.runVolumeBackup).not.toHaveBeenCalled();
+	});
+
+	describe("volume restore", () => {
+		const restoreInput = {
+			id: "app-1",
+			serviceType: "application" as const,
+			destinationId: "dest-a",
+			backupFileName: "app_data-2024.tar",
+			volumeName: "app_data",
+		};
+
+		beforeEach(() => {
+			mocks.findVolumeBackupRows.mockResolvedValue([{ volumeName: "app_data" }]);
+			mocks.findMountRows.mockResolvedValue([{ volumeName: "app_cache" }]);
+		});
+
+		it("rejects a volume name that belongs to no volume of the service", async () => {
+			await expect(
+				caller.restoreVolumeBackupWithLogs({
+					...restoreInput,
+					volumeName: "another_org_volume",
+				}),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		});
+
+		it("accepts the volume of one of the service's volume backups and its named mounts", async () => {
+			for (const volumeName of ["app_data", "app_cache"]) {
+				await expect(
+					caller.restoreVolumeBackupWithLogs({ ...restoreInput, volumeName }),
+				).resolves.toBeDefined();
+			}
+		});
+
+		it("checks the restore permission on the target service first", async () => {
+			mocks.checkServicePermissionAndAccess.mockRejectedValue(
+				new Error("denied"),
+			);
+
+			await expect(
+				caller.restoreVolumeBackupWithLogs(restoreInput),
+			).rejects.toThrow("denied");
+			expect(mocks.findVolumeBackupRows).not.toHaveBeenCalled();
+		});
 	});
 });

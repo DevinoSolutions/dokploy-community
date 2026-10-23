@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 	restorePostgresBackup: vi.fn(),
 	restoreWebServerBackup: vi.fn(),
 	checkServicePermissionAndAccess: vi.fn(),
+	findServiceOrganizationId: vi.fn(),
 	findDestinationRow: vi.fn(),
 	findMemberRow: vi.fn(),
 }));
@@ -29,6 +30,7 @@ vi.mock("@dokploy/server/db", () => ({
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkPermission: vi.fn(async () => undefined),
 	checkServicePermissionAndAccess: mocks.checkServicePermissionAndAccess,
+	findServiceOrganizationId: mocks.findServiceOrganizationId,
 }));
 
 vi.mock("@dokploy/server", () => ({
@@ -155,6 +157,8 @@ beforeEach(() => {
 	mocks.removeBackupById.mockResolvedValue({ schedule: "0 0 * * *" });
 	mocks.runWebServerBackup.mockResolvedValue(true);
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
+	// Every service id belongs to org-a unless a test says otherwise.
+	mocks.findServiceOrganizationId.mockResolvedValue("org-a");
 	mocks.findDestinationRow.mockResolvedValue(ownDestination);
 	// The creator of the stored row administers org-a.
 	mocks.findMemberRow.mockResolvedValue({ role: "admin" });
@@ -296,22 +300,39 @@ describe("an admin of one organization cannot reach another organization", () =>
 		expect(mocks.runWebServerBackup).not.toHaveBeenCalled();
 	});
 
-	it("does not run a web-server backup whose creator is not an administrator of the organization", async () => {
+	it("lets an admin of the destination's organization repair a row whose creator no longer qualifies", async () => {
 		mocks.findMemberRow.mockResolvedValue(undefined);
-
-		await expect(
-			admin.manualBackupWebServer({ backupId: "ws-1" }),
-		).rejects.toMatchObject({ code: "NOT_FOUND" });
-		expect(mocks.runWebServerBackup).not.toHaveBeenCalled();
-	});
-
-	it("does not run a web-server backup that has no recorded creator", async () => {
 		mocks.findBackupById.mockResolvedValue({ ...instanceBackup, userId: null });
 
+		await admin.one({ backupId: "ws-1" });
+		await admin.update({ ...updateInput, enabled: false });
+		await admin.remove({ backupId: "ws-1" });
+
+		// Saving re-attributes the row to the caller.
+		expect(mocks.updateBackupById).toHaveBeenCalledWith(
+			"ws-1",
+			expect.objectContaining({ userId: "user-1" }),
+		);
+		expect(mocks.removeBackupById).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps such a row out of reach of a plain member", async () => {
+		mocks.findBackupById.mockResolvedValue({ ...instanceBackup, userId: null });
+
+		const member = callerAs("member");
+		await expect(member.one({ backupId: "ws-1" })).rejects.toMatchObject({
+			code: "UNAUTHORIZED",
+		});
+		await expect(member.remove({ backupId: "ws-1" })).rejects.toMatchObject({
+			code: "UNAUTHORIZED",
+		});
+	});
+
+	it("rejects a web-server update that targets a service or switches the database type", async () => {
 		await expect(
-			admin.manualBackupWebServer({ backupId: "ws-1" }),
-		).rejects.toMatchObject({ code: "NOT_FOUND" });
-		expect(mocks.runWebServerBackup).not.toHaveBeenCalled();
+			admin.update({ ...updateInput, databaseType: "postgres" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.updateBackupById).not.toHaveBeenCalled();
 	});
 
 	it("rejects restoring an instance backup from a foreign destination, with an empty database id", async () => {
@@ -401,3 +422,173 @@ describe.each(["owner", "admin"] as const)(
 		});
 	},
 );
+
+describe("service backups are bound to exactly one service of their own kind", () => {
+	const admin = callerAs("admin");
+
+	const serviceCreate = {
+		schedule: "0 0 * * *",
+		prefix: "/",
+		database: "app",
+		destinationId: "dest-a",
+		enabled: false,
+		databaseType: "postgres" as const,
+		postgresId: "pg-own",
+	};
+
+	const postgresBackup = {
+		backupId: "pg-backup",
+		databaseType: "postgres",
+		backupType: "database",
+		destinationId: "dest-a",
+		postgresId: "pg-own",
+		mysqlId: null,
+		composeId: null,
+	};
+
+	const serviceUpdate = {
+		backupId: "pg-backup",
+		schedule: "0 0 * * *",
+		enabled: false,
+		prefix: "/",
+		database: "app",
+		keepLatestCount: 0,
+		serviceName: null,
+		metadata: {},
+		databaseType: "postgres" as const,
+		destinationId: "dest-a",
+	};
+
+	it("rejects a second service id on create without checking either of them", async () => {
+		await expect(
+			admin.create({
+				...serviceCreate,
+				databaseType: "mysql",
+				mysqlId: "mysql-foreign",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		await expect(
+			admin.create({
+				...serviceCreate,
+				backupType: "compose",
+				composeId: "compose-foreign",
+			}),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.createBackup).not.toHaveBeenCalled();
+	});
+
+	it("rejects a service id that does not match the database type", async () => {
+		await expect(
+			admin.create({ ...serviceCreate, databaseType: "mysql" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		await expect(
+			admin.create({ ...serviceCreate, backupType: "compose" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.createBackup).not.toHaveBeenCalled();
+	});
+
+	it("creates a database backup and a compose backup with their single service", async () => {
+		await admin.create(serviceCreate);
+		await admin.create({
+			...serviceCreate,
+			backupType: "compose",
+			postgresId: undefined,
+			composeId: "compose-own",
+		});
+
+		expect(mocks.createBackup).toHaveBeenCalledTimes(2);
+		expect(mocks.checkServicePermissionAndAccess).toHaveBeenCalledWith(
+			expect.anything(),
+			"compose-own",
+			{ backup: ["create"] },
+		);
+	});
+
+	it("always records the session user as the creator, never a client-supplied id", async () => {
+		await admin.create({ ...serviceCreate, userId: "someone-else" });
+
+		expect(mocks.createBackup).toHaveBeenCalledWith(
+			expect.objectContaining({ userId: "user-1" }),
+		);
+	});
+
+	it("does not add a second service through update", async () => {
+		mocks.findBackupById.mockResolvedValue({
+			...postgresBackup,
+			mysqlId: "mysql-foreign",
+		});
+		mocks.findServiceOrganizationId.mockImplementation(async (id: string) =>
+			id === "mysql-foreign" ? "org-b" : "org-a",
+		);
+
+		await expect(admin.update(serviceUpdate)).rejects.toMatchObject({
+			code: "NOT_FOUND",
+		});
+		expect(mocks.updateBackupById).not.toHaveBeenCalled();
+	});
+
+	it("rejects an update that makes a database backup mismatch its service", async () => {
+		mocks.findBackupById.mockResolvedValue(postgresBackup);
+
+		await expect(
+			admin.update({ ...serviceUpdate, databaseType: "mysql" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.updateBackupById).not.toHaveBeenCalled();
+	});
+
+	it("still lets a compose backup change the database kind inside it", async () => {
+		mocks.findBackupById.mockResolvedValue({
+			...postgresBackup,
+			backupId: "compose-backup",
+			backupType: "compose",
+			postgresId: null,
+			composeId: "compose-own",
+		});
+
+		await admin.update({
+			...serviceUpdate,
+			backupId: "compose-backup",
+			databaseType: "mysql",
+		});
+
+		expect(mocks.updateBackupById).toHaveBeenCalledTimes(1);
+	});
+
+	it("checks every service id of a stored row before returning it", async () => {
+		mocks.findBackupById.mockResolvedValue({
+			...postgresBackup,
+			mysqlId: "mysql-foreign",
+			mysql: { mysqlId: "mysql-foreign", databaseRootPassword: "secret" },
+		});
+		mocks.findServiceOrganizationId.mockImplementation(async (id: string) =>
+			id === "mysql-foreign" ? "org-b" : "org-a",
+		);
+
+		await expect(admin.one({ backupId: "pg-backup" })).rejects.toMatchObject({
+			code: "NOT_FOUND",
+		});
+		await expect(
+			admin.manualBackupPostgres({ backupId: "pg-backup" }),
+		).rejects.toMatchObject({ code: "NOT_FOUND" });
+		expect(mocks.runPostgresBackup).not.toHaveBeenCalled();
+	});
+
+	it("answers a service backup of another organization like a missing one", async () => {
+		mocks.findBackupById.mockResolvedValue(postgresBackup);
+		mocks.findServiceOrganizationId.mockResolvedValue("org-b");
+		const foreign = await admin
+			.one({ backupId: "pg-backup" })
+			.catch((error) => error);
+
+		mocks.findBackupById.mockRejectedValue(
+			Object.assign(new Error("Backup not found"), { code: "NOT_FOUND" }),
+		);
+		const missing = await admin
+			.one({ backupId: "missing" })
+			.catch((error) => error);
+
+		expect(foreign.code).toBe("NOT_FOUND");
+		expect(foreign.message).toBe("Backup not found");
+		expect(missing.message).toBe("Backup not found");
+	});
+});
