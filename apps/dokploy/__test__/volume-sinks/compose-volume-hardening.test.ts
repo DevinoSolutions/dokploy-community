@@ -1,4 +1,3 @@
-import { inspect } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Review round for T-6822: variable forms Docker reads differently from a
@@ -19,6 +18,7 @@ const mocks = vi.hoisted(() => {
 			mounts: table(),
 			volumeBackups: table(),
 			patch: table(),
+			deployments: table(),
 			network: table(),
 		},
 		warn: vi.fn(),
@@ -50,6 +50,12 @@ const { assertComposeVolumesBound } = await import(
 const { resolveComposeMountedVolumes, reachesDockerVolumesDirectory } =
 	await import("@dokploy/server/utils/volume-backups/compose-volumes");
 const { parse } = await import("yaml");
+const { loadVolumeBindingFacts } = await import(
+	"@dokploy/server/services/volume-binding"
+);
+const { evaluateVolumeBinding } = await import(
+	"@dokploy/server/utils/volume-backups/binding"
+);
 
 const APP = "compose-x-AbC123";
 
@@ -348,10 +354,16 @@ services:
 });
 
 describe("volumes other composes declare", () => {
-	const declaring = (composeFile: string, organizationId = "org-b") => ({
+	const declaring = (
+		composeFile: string,
+		organizationId = "org-b",
+		composeStatus = "done",
+	) => ({
+		composeId: "compose-other",
 		appName: "other-compose",
 		serverId: null,
 		composeFile,
+		composeStatus,
 		...orgOf(organizationId),
 	});
 	const answerDeclarations = (rows: unknown[]) =>
@@ -371,15 +383,15 @@ volumes:
 `;
 
 	it("refuses a name another organization's compose declares", async () => {
-		answerDeclarations([
-			declaring("volumes:\n  pg:\n    name: pgdata\n"),
-		]);
+		answerDeclarations([declaring("volumes:\n  pg:\n    name: pgdata\n")]);
 
 		await expect(assertComposeVolumesBound(composeRow(yaml))).rejects.toThrow(
 			/Compose volume "pgdata" is refused/,
 		);
 		expect(mocks.warn).toHaveBeenCalledWith(
-			expect.objectContaining({ declaredByComposeFiles: ["other-compose"] }),
+			expect.objectContaining({
+				conflictingRows: [{ source: "composeFile", id: "other-compose" }],
+			}),
 			expect.stringContaining("refused"),
 		);
 	});
@@ -394,9 +406,16 @@ volumes:
 		);
 	});
 
-	it("ignores a compose that does not declare the name", async () => {
+	it("lets a compose that records the volume itself keep sharing it", async () => {
 		answerDeclarations([
-			declaring("volumes:\n  pg:\n    name: pgdata-extra\n"),
+			declaring("volumes:\n  pgdata:\n    external: true\n", "org-a"),
+		]);
+		mocks.query.mounts.findMany.mockResolvedValue([
+			{
+				mountId: "mount-own",
+				composeId: "compose-1",
+				compose: { appName: APP, serverId: null, ...orgOf("org-a") },
+			},
 		]);
 
 		await expect(
@@ -404,10 +423,16 @@ volumes:
 		).resolves.toBeUndefined();
 	});
 
+	it("ignores a compose that does not declare the name", async () => {
+		answerDeclarations([declaring("volumes:\n  pg:\n    name: pgdata-extra\n")]);
+
+		await expect(
+			assertComposeVolumesBound(composeRow(yaml)),
+		).resolves.toBeUndefined();
+	});
+
 	it("never blocks the compose's own namespace", async () => {
-		answerDeclarations([
-			declaring(`volumes:\n  pg:\n    name: ${APP}-data\n`),
-		]);
+		answerDeclarations([declaring(`volumes:\n  pg:\n    name: ${APP}-data\n`)]);
 
 		await expect(
 			assertComposeVolumesBound(
@@ -416,15 +441,79 @@ volumes:
 		).resolves.toBeUndefined();
 	});
 
-	it("asks for deployed composes of the same server only", async () => {
-		answerDeclarations([]);
-		await assertComposeVolumesBound(composeRow(yaml));
+	it.each(["running", "done", "error"])(
+		"a %s compose claims its declared names",
+		async (status) => {
+			answerDeclarations([
+				declaring("volumes:\n  pg:\n    name: pgdata\n", "org-b", status),
+			]);
 
-		const declarationQuery = mocks.query.compose.findMany.mock.calls
-			.map((call) => call[0])
-			.find((args) => args?.columns?.composeFile);
-		expect(declarationQuery).toBeDefined();
-		expect(inspect(declarationQuery.where, { depth: 8 })).toContain("done");
+			await expect(
+				assertComposeVolumesBound(composeRow(yaml)),
+			).rejects.toThrow(/Compose volume "pgdata" is refused/);
+			expect(mocks.query.deployments.findFirst).not.toHaveBeenCalled();
+		},
+	);
+
+	it("an idle compose claims only once it has a deployment row", async () => {
+		answerDeclarations([
+			declaring("volumes:\n  pg:\n    name: pgdata\n", "org-b", "idle"),
+		]);
+
+		mocks.query.deployments.findFirst.mockResolvedValue(undefined);
+		await expect(
+			assertComposeVolumesBound(composeRow(yaml)),
+		).resolves.toBeUndefined();
+
+		mocks.query.deployments.findFirst.mockResolvedValue({ deploymentId: "d" });
+		await expect(assertComposeVolumesBound(composeRow(yaml))).rejects.toThrow(
+			/Compose volume "pgdata" is refused/,
+		);
+	});
+});
+
+describe("another organization's compose declaration on the other volume checks", () => {
+	const declaration = {
+		composeId: "compose-other",
+		appName: "other-compose",
+		serverId: null,
+		composeFile: "volumes:\n  pg:\n    name: pgdata\n",
+		composeStatus: "done",
+		...orgOf("org-b"),
+	};
+	const facts = async (volumeName: string) => {
+		mocks.query.applications.findFirst.mockResolvedValue({
+			appName: "app-mine-Zz1111",
+			serverId: null,
+			...orgOf("org-a"),
+		});
+		mocks.query.compose.findMany.mockImplementation(
+			async (args: { columns?: { composeFile?: boolean } }) =>
+				args?.columns?.composeFile ? [declaration] : [],
+		);
+		return loadVolumeBindingFacts({
+			serviceType: "application",
+			serviceId: "app-1",
+			volumeName,
+		});
+	};
+
+	it("counts as an other-organization claim, so creating a mount for it is refused", async () => {
+		const result = await facts("pgdata");
+
+		expect(result.otherOrganizationClaims).toEqual([
+			{ source: "composeFile", id: "other-compose" },
+		]);
+		for (const privileged of [true, false]) {
+			expect(evaluateVolumeBinding(result, { privileged }).ok).toBe(false);
+		}
+	});
+
+	it("is not counted for a name in the service's own namespace", async () => {
+		const result = await facts("app-mine-Zz1111-data");
+
+		expect(result.otherOrganizationClaims).toEqual([]);
+		expect(evaluateVolumeBinding(result, { privileged: false }).ok).toBe(true);
 	});
 });
 
@@ -572,6 +661,135 @@ services:
 				command(`compose -p ${APP} -f other.yml up -d`),
 			),
 		).rejects.toThrow(/could not be read/);
+	});
+
+	const CLEAN_OVERRIDE = `
+services:
+  web:
+    environment:
+      DEBUG: "1"
+`;
+
+	it.each([
+		["-f=override.yml", "up -d"],
+		["--file=override.yml", "up -d"],
+		["-foverride.yml", "up -d"],
+		["--file override.yml", "up -d"],
+	])("reads %s as a file", async (flag) => {
+		mocks.readFileSync.mockReturnValue(CLEAN_OVERRIDE);
+
+		await assertComposeVolumesBound(
+			command(`compose -p ${APP} -f docker-compose.yml ${flag} up -d`),
+		);
+
+		expect(mocks.readFileSync).toHaveBeenCalledWith(
+			`${codeDirectory}/override.yml`,
+			"utf8",
+		);
+	});
+
+	it("reads -c=path and --compose-file=path of a stack", async () => {
+		mocks.readFileSync.mockReturnValue(CLEAN_OVERRIDE);
+
+		for (const flag of ["-c=override.yml", "--compose-file=override.yml"]) {
+			mocks.readFileSync.mockClear();
+			await assertComposeVolumesBound(
+				composeRow(yaml, {
+					composeType: "stack",
+					command: `stack deploy -c docker-compose.yml ${flag} ${APP}`,
+				}),
+			);
+			expect(mocks.readFileSync).toHaveBeenCalledWith(
+				`${codeDirectory}/override.yml`,
+				"utf8",
+			);
+		}
+	});
+
+	it("skips docker's own options before compose and still applies the rules", async () => {
+		mocks.readFileSync.mockReturnValue(CLEAN_OVERRIDE);
+
+		for (const prefix of [
+			"--config /root/.docker",
+			"-H tcp://127.0.0.1:2375",
+			"--host=tcp://127.0.0.1:2375",
+			"--context other",
+			"-c other",
+			"--log-level debug",
+			"-D --tls",
+		]) {
+			mocks.readFileSync.mockClear();
+			// a compose command that starts containers must still name a file
+			await expect(
+				assertComposeVolumesBound(
+					command(`${prefix} compose -p ${APP} up -d`),
+				),
+			).rejects.toThrow(/without naming a compose file/);
+			await expect(
+				assertComposeVolumesBound(
+					command(
+						`compose -p ${APP} -f docker-compose.yml up -d && docker ${prefix} compose -p ${APP} up -d`,
+					),
+				),
+			).rejects.toThrow(/without naming a compose file/);
+			// and an override file after them is still read
+			await assertComposeVolumesBound(
+				command(`${prefix} compose -p ${APP} -f override.yml up -d`),
+			);
+			expect(mocks.readFileSync).toHaveBeenCalledWith(
+				`${codeDirectory}/override.yml`,
+				"utf8",
+			);
+		}
+	});
+
+	it("skips docker's options before stack too", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(yaml, {
+					composeType: "stack",
+					command: `--context other stack deploy ${APP}`,
+				}),
+			),
+		).rejects.toThrow(/without naming a compose file/);
+	});
+
+	it("reads a relative file from --project-directory as well", async () => {
+		mocks.readFileSync.mockReturnValue(CLEAN_OVERRIDE);
+
+		await assertComposeVolumesBound(
+			command(
+				`compose -p ${APP} --project-directory /srv/other -f override.yml up -d`,
+			),
+		);
+
+		const read = mocks.readFileSync.mock.calls.map((call) => call[0]);
+		expect(read).toContain("/srv/other/override.yml");
+		expect(read).toContain(`${codeDirectory}/override.yml`);
+	});
+
+	it("takes the deployed file for granted when --project-directory is the code directory", async () => {
+		await assertComposeVolumesBound(
+			command(
+				`compose -p ${APP} --project-directory ${codeDirectory} -f ./docker-compose.yml up -d --build`,
+			),
+		);
+
+		expect(mocks.readFileSync).not.toHaveBeenCalled();
+	});
+
+	it("does not take a file for the deployed one when --project-directory moves it", async () => {
+		mocks.readFileSync.mockReturnValue(CLEAN_OVERRIDE);
+
+		await assertComposeVolumesBound(
+			command(
+				`compose -p ${APP} --project-directory /srv/other -f docker-compose.yml up -d`,
+			),
+		);
+
+		expect(mocks.readFileSync.mock.calls.map((call) => call[0])).toEqual([
+			"/srv/other/docker-compose.yml",
+		]);
 	});
 
 	it("uses the volume definition of the main file for a key an override mounts", async () => {

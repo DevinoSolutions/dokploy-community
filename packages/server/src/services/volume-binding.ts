@@ -6,6 +6,7 @@ import { db } from "../db";
 import {
 	applications,
 	compose,
+	deployments,
 	libsql,
 	mariadb,
 	mongo,
@@ -278,14 +279,16 @@ export const loadVolumeBindingFacts = async ({
 	serviceId,
 	volumeName,
 	onServerId,
-	includeComposeDeclarations = false,
+	includeComposeDeclarations = true,
 }: {
 	serviceType: ServiceType;
 	serviceId: string;
 	volumeName: string;
-	// Also count the volume names OTHER composes on the same server declare in
-	// their stored compose file (`name:`, `external`) as claims. Only the
-	// compose-file check asks for it.
+	// Count the volume names OTHER composes on the same server declare in
+	// their stored compose file (`name:`, `external`) as claims: another
+	// organization's as an other-organization claim, one of the organization's
+	// own as a claim of another service. Only a compose that has ever deployed
+	// claims (it has a deployment row or is no longer idle).
 	includeComposeDeclarations?: boolean;
 	// Read the claims for another host than the service's own (null is the
 	// local host). A transfer writes the volume on its target server too.
@@ -321,19 +324,22 @@ export const loadVolumeBindingFacts = async ({
 			findOrganizationsClaimingNamespace(volumeName),
 			includeComposeDeclarations
 				? db.query.compose.findMany({
-						// A compose that has not deployed yet owns no data, and a refused
-						// one is not "done": an undeployed file cannot lock anybody out.
 						where: and(
 							serverId === null
 								? isNull(compose.serverId)
 								: eq(compose.serverId, serverId),
-							eq(compose.composeStatus, "done"),
 							serviceType === "compose"
 								? ne(compose.composeId, serviceId)
 								: undefined,
 							sql`strpos(${compose.composeFile}, ${volumeName}::text) > 0`,
 						),
-						columns: { appName: true, serverId: true, composeFile: true },
+						columns: {
+							composeId: true,
+							appName: true,
+							serverId: true,
+							composeFile: true,
+							composeStatus: true,
+						},
 						with: { environment: environmentOrganization },
 					})
 				: Promise.resolve([]),
@@ -372,14 +378,46 @@ export const loadVolumeBindingFacts = async ({
 			claim.id !== service.appName,
 	);
 
-	const composeDeclarations = composeDeclarationRows
-		.filter((row) =>
-			collectComposeDeclaredVolumeNames(row.composeFile).has(volumeName),
-		)
-		.map((row) => ({
+	// A name in the service's own namespace cannot belong to another compose's
+	// file in good faith, so it is not counted (nobody can squat it).
+	const inOwnNamespace = isInServiceVolumeNamespace(
+		volumeName,
+		service.appName,
+	);
+	const declaringRows = inOwnNamespace
+		? []
+		: composeDeclarationRows.filter((row) =>
+				collectComposeDeclaredVolumeNames(row.composeFile).has(volumeName),
+			);
+	// A compose that never deployed owns no data, so a file that was only saved
+	// cannot lock anybody out. Any status counts once it has deployed (a stopped
+	// or failed compose still owns its volumes): it is no longer idle, or it has
+	// a deployment row.
+	const deployedRows: typeof declaringRows = [];
+	for (const row of declaringRows) {
+		if (
+			row.composeStatus !== "idle" ||
+			(await db.query.deployments.findFirst({
+				where: eq(deployments.composeId, row.composeId),
+				columns: { deploymentId: true },
+			}))
+		) {
+			deployedRows.push(row);
+		}
+	}
+	const composeDeclarations = deployedRows.map((row) => {
+		const declaringOrganization = organizationOf(row);
+		return {
+			source: "composeFile" as const,
 			id: row.appName,
-			organizationId: organizationOf(row),
-		}));
+			organizationId: declaringOrganization,
+			serverId: serverOf(row),
+			anyServer: !declaringOrganization,
+		};
+	});
+	const declaredBySameOrgCompose = composeDeclarations.some(
+		(claim) => claim.organizationId === organizationId,
+	);
 
 	// A volume name only collides on one host, so a claim counts only when the
 	// claiming service runs on the same server (local host = null).
@@ -389,6 +427,7 @@ export const loadVolumeBindingFacts = async ({
 		...volumeBackupRows.map((row) =>
 			rowClaim(row, "volumeBackup", row.volumeBackupId),
 		),
+		...composeDeclarations,
 	]
 		.filter(
 			(claim) =>
@@ -406,9 +445,8 @@ export const loadVolumeBindingFacts = async ({
 		recordedOnOwnMount,
 		recordedOnOtherSameOrgMount,
 		recordedOnOwnVolumeBackup,
-		declaredByOtherCompose: composeDeclarations.length > 0,
-		otherComposeDeclarations: composeDeclarations.map(({ id }) => id),
 		claimedByOtherSameOrgService:
+			declaredBySameOrgCompose ||
 			recordedOnOtherSameOrgMount ||
 			recordedOnOtherSameOrgVolumeBackup ||
 			inOtherSameOrgNamespace,
@@ -544,9 +582,10 @@ const composeVolumeRefusal = (volumeName: string, appName: string) =>
 //   claims it (a mount, a volume backup or its appName namespace), unless the
 //   compose has its own mount or volume backup row for it. The volume names
 //   that OTHER composes of the server declare in their stored compose file
-//   (`name:`, `external`) count as such claims, once that compose has
-//   deployed; only a stored (raw) compose file is visible, a fetched one is
-//   not. A volume nothing records stays allowed, so volumes made by hand keep
+//   (`name:`, `external`) count as such claims (another organization's as
+//   an other-organization claim, for every volume check), once that compose
+//   has deployed; only a stored (raw) compose file is visible, a fetched one
+//   is not. A volume nothing records stays allowed, so volumes made by hand keep
 //   working;
 // - a compose's own default names (`<appName>_<key>`) are not looked up.
 export const findRefusedComposeVolumes = async (
@@ -603,8 +642,7 @@ export const findRefusedComposeVolumes = async (
 					!own &&
 					!facts.recordedOnOwnMount &&
 					!facts.recordedOnOwnVolumeBackup &&
-					(facts.claimedByOtherSameOrgService === true ||
-						facts.declaredByOtherCompose === true);
+					facts.claimedByOtherSameOrgService === true;
 				if (!verdict.ok || claimedByOtherService) {
 					// Server side only: the user-facing text stays the one refusal
 					// message, so it cannot tell another service's rows apart.
@@ -616,7 +654,6 @@ export const findRefusedComposeVolumes = async (
 							conflictingRows: claims,
 							claimedByOtherSameOrgService:
 								facts.claimedByOtherSameOrgService ?? false,
-							declaredByComposeFiles: facts.otherComposeDeclarations ?? [],
 						},
 						"[VolumeBinding] A compose file volume was refused",
 					);

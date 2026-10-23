@@ -158,6 +158,20 @@ export const assertComposeSpecVolumesBound = async (
 	}
 };
 
+// `docker` options that take a value, before the command (`-c` is --context).
+const DOCKER_OPTIONS_WITH_VALUE = new Set([
+	"--config",
+	"-H",
+	"--host",
+	"--context",
+	"-c",
+	"--log-level",
+	"-l",
+	"--tlscacert",
+	"--tlscert",
+	"--tlskey",
+]);
+
 // `docker compose` options that take a value, before the subcommand.
 const COMPOSE_OPTIONS_WITH_VALUE = new Set([
 	"-f",
@@ -179,12 +193,17 @@ type CommandSegment = {
 	kind: "compose" | "stack" | "other";
 	subcommand?: string;
 	files: string[];
+	projectDirectories: string[];
 };
+
+// pflag reads `-f=path` and `-fpath` as the path.
+const shortOptionValue = (word: string) => word.slice(2).replace(/^=/, "");
 
 // A custom command replaces the generated one, but it is still `docker
 // <command>` chained with `docker compose ...` commands (sanitizeCommand).
 // A compose file argument is only one in the global options before the
-// subcommand (`rm -f` is not a file), and `-c` only for `docker stack`.
+// subcommand (`rm -f` is not a file), `-c` only for `docker stack`, and the
+// options of `docker` itself (`-H x`, `--context x`, ...) come first.
 const parseComposeCommand = (command: string): CommandSegment[] => {
 	const segments: string[][] = [[]];
 	for (const token of parseShell(command)) {
@@ -198,32 +217,46 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 		.filter((tokens) => tokens.length > 0)
 		.map((tokens, index): CommandSegment => {
 			let words = tokens;
-			if (index > 0) {
-				if (words[0] === "docker") {
-					words = words.slice(1);
-				} else if (words[0] === "docker-compose") {
-					words = ["compose", ...words.slice(1)];
+			let start = 0;
+			if (index > 0 && words[0] === "docker-compose") {
+				words = ["compose", ...words.slice(1)];
+			} else {
+				if (index > 0 && words[0] === "docker") {
+					start = 1;
+				}
+				while (start < words.length && words[start]?.startsWith("-")) {
+					start += DOCKER_OPTIONS_WITH_VALUE.has(words[start] as string)
+						? 2
+						: 1;
 				}
 			}
 			const files: string[] = [];
-			if (words[0] === "compose") {
+			const projectDirectories: string[] = [];
+			const command = words[start];
+			if (command === "compose") {
 				let subcommand: string | undefined;
-				for (let i = 1; i < words.length; ) {
+				for (let i = start + 1; i < words.length; ) {
 					const word = words[i] as string;
 					if (word.startsWith("--") && word.includes("=")) {
 						const [name, ...rest] = word.split("=");
 						if (name === "--file") {
 							files.push(rest.join("="));
+						} else if (name === "--project-directory") {
+							projectDirectories.push(rest.join("="));
 						}
 						i += 1;
 					} else if (COMPOSE_OPTIONS_WITH_VALUE.has(word)) {
 						const value = words[i + 1];
-						if ((word === "-f" || word === "--file") && value !== undefined) {
-							files.push(value);
+						if (value !== undefined) {
+							if (word === "-f" || word === "--file") {
+								files.push(value);
+							} else if (word === "--project-directory") {
+								projectDirectories.push(value);
+							}
 						}
 						i += 2;
 					} else if (/^-f.+/.test(word)) {
-						files.push(word.slice(2));
+						files.push(shortOptionValue(word));
 						i += 1;
 					} else if (word.startsWith("-")) {
 						i += 1;
@@ -232,26 +265,27 @@ const parseComposeCommand = (command: string): CommandSegment[] => {
 						break;
 					}
 				}
-				return { kind: "compose", subcommand, files };
+				return { kind: "compose", subcommand, files, projectDirectories };
 			}
-			if (words[0] === "stack") {
-				const subcommand = words.slice(1).find((word) => !word.startsWith("-"));
-				for (let i = 1; i < words.length; i++) {
-					const word = words[i] as string;
+			if (command === "stack") {
+				const rest = words.slice(start + 1);
+				const subcommand = rest.find((word) => !word.startsWith("-"));
+				for (let i = 0; i < rest.length; i++) {
+					const word = rest[i] as string;
 					if (word === "-c" || word === "--compose-file") {
-						const value = words[i + 1];
+						const value = rest[i + 1];
 						if (value !== undefined) {
 							files.push(value);
 						}
 					} else if (word.startsWith("--compose-file=")) {
 						files.push(word.slice("--compose-file=".length));
 					} else if (/^-c.+/.test(word)) {
-						files.push(word.slice(2));
+						files.push(shortOptionValue(word));
 					}
 				}
-				return { kind: "stack", subcommand, files };
+				return { kind: "stack", subcommand, files, projectDirectories };
 			}
-			return { kind: "other", files };
+			return { kind: "other", files, projectDirectories };
 		});
 };
 
@@ -278,7 +312,10 @@ export const getCommandOverrideFiles = (
 				segment.subcommand !== undefined &&
 				FILE_READING_SUBCOMMANDS.has(segment.subcommand)) ||
 			(segment.kind === "stack" && segment.subcommand === "deploy");
-		if (startsContainers && segment.files.length === 0) {
+		if (!startsContainers) {
+			continue;
+		}
+		if (segment.files.length === 0) {
 			logger.warn(
 				{ composeId: compose.composeId },
 				"[VolumeBinding] A compose command was refused: it names no compose file",
@@ -287,10 +324,25 @@ export const getCommandOverrideFiles = (
 				`Compose command refused: it starts containers without naming a compose file, so Docker would pick one from the project directory and its volumes would not be checked. Pass "-f ${compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath}" (or "-c" for a stack).`,
 			);
 		}
-		for (const file of startsContainers ? segment.files : []) {
-			const absolute = posix.resolve(codeDirectory, file);
-			if (absolute !== deployed) {
-				overrides.add(absolute);
+		// A relative file is read from the working directory, and possibly from
+		// --project-directory: it counts as the deployed file only if every
+		// reading of it is that file.
+		const bases = [
+			codeDirectory,
+			...segment.projectDirectories.map((directory) =>
+				posix.resolve(codeDirectory, directory),
+			),
+		];
+		for (const file of segment.files) {
+			const candidates = new Set(
+				posix.isAbsolute(file)
+					? [posix.normalize(file)]
+					: bases.map((base) => posix.resolve(base, file)),
+			);
+			for (const candidate of candidates) {
+				if (candidate !== deployed) {
+					overrides.add(candidate);
+				}
 			}
 		}
 	}
