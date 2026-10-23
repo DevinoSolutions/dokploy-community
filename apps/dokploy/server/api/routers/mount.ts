@@ -22,6 +22,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { assertVolumeNameForService } from "@/server/api/utils/volume-binding";
 import {
 	apiCreateMount,
 	apiFindMountByApplicationId,
@@ -73,6 +74,17 @@ async function getServiceOrganizationId(
 	}
 }
 
+const MOUNT_SERVICE_KEYS = [
+	"applicationId",
+	"postgresId",
+	"mysqlId",
+	"mariadbId",
+	"mongoId",
+	"redisId",
+	"libsqlId",
+	"composeId",
+] as const;
+
 export const mountRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(apiCreateMount)
@@ -80,6 +92,15 @@ export const mountRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
 				volume: ["create"],
 			});
+			// A named volume is global to the host. Mounting a name that is not
+			// the service's own would attach another tenant's volume to this one.
+			if (input.type === "volume" && input.volumeName) {
+				await assertVolumeNameForService(ctx, {
+					serviceType: input.serviceType ?? "application",
+					serviceId: input.serviceId,
+					volumeName: input.volumeName,
+				});
+			}
 			const mount = await createMount(input);
 			await audit(ctx, {
 				action: "create",
@@ -151,6 +172,33 @@ export const mountRouter = createTRPCRouter({
 			if (serviceId) {
 				await checkServicePermissionAndAccess(ctx, serviceId, {
 					volume: ["create"],
+				});
+			}
+			// The update input carries the service ids too. Re-pointing the mount
+			// at another service would skip the checks below and the permission
+			// check on that service.
+			if (
+				(input.serviceType !== undefined &&
+					input.serviceType !== mount.serviceType) ||
+				MOUNT_SERVICE_KEYS.some(
+					(key) => input[key] !== undefined && input[key] !== mount[key],
+				)
+			) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "The service of a mount cannot be changed.",
+				});
+			}
+			const volumeType = input.type ?? mount.type;
+			const volumeName =
+				input.volumeName === undefined ? mount.volumeName : input.volumeName;
+			if (serviceId && volumeType === "volume" && volumeName) {
+				await assertVolumeNameForService(ctx, {
+					serviceType: mount.serviceType,
+					serviceId,
+					volumeName,
+					existingRow:
+						mount.type === "volume" && volumeName === mount.volumeName,
 				});
 			}
 			await audit(ctx, {

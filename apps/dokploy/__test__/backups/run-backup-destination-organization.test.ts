@@ -39,6 +39,19 @@ vi.mock("@dokploy/server/services/volume-backups", () => ({
 	findVolumeBackupById: mocks.findVolumeBackupById,
 }));
 
+vi.mock("@dokploy/server/services/volume-binding", () => ({
+	loadVolumeBindingFacts: vi.fn(async () => ({
+		volumeName: "app_data",
+		serviceType: "application",
+		serviceId: "app-1",
+		appName: "app",
+		recordedOnOwnMount: false,
+		recordedOnOtherSameOrgMount: false,
+		declaredByComposeFile: false,
+		claimedByOtherOrganization: false,
+	})),
+}));
+
 vi.mock("@dokploy/server/utils/backups/utils", () => ({
 	buildRcloneRcatCommand: vi.fn(() => "rclone rcat"),
 	getBackupCommand: vi.fn(() => "echo backup"),
@@ -121,6 +134,7 @@ const volumeBackup = {
 	appName: "vb-app",
 	volumeName: "app_data",
 	serviceType: "application",
+	applicationId: "app-1",
 	destinationId: "dest-b",
 	keepLatestCount: 0,
 	application: {

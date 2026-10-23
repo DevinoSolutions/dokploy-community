@@ -10,6 +10,7 @@ import {
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
 import { findVolumeBackupById } from "@dokploy/server/services/volume-backups";
+import { loadVolumeBindingFacts } from "@dokploy/server/services/volume-binding";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -24,6 +25,7 @@ import {
 import { getRclonePathAndFlags, normalizeS3Path } from "../backups/utils";
 import { sendVolumeBackupNotifications } from "../notifications/volume-backup";
 import { backupVolume, getVolumeServiceAppName } from "./backup";
+import { evaluateVolumeBinding } from "./binding";
 
 // Helper functions to extract project info from volume backup
 const getProjectName = (
@@ -70,6 +72,43 @@ const getOrganizationId = (
 	}
 
 	return "";
+};
+
+// A volume backup row is checked again every time it runs, whoever created it
+// and whenever: rows written before volume names were bound to their service
+// (or edited straight in the database) can still name another tenant's volume.
+// The creator's role is not stored, so a row gets the owner/admin reach and
+// the claim checks (another organization's namespace, mounts or backups, and
+// Dokploy's own volumes) decide.
+const assertVolumeBackupBinding = async (
+	volumeBackup: Awaited<ReturnType<typeof findVolumeBackupById>>,
+) => {
+	const services = [
+		["application", volumeBackup.applicationId],
+		["compose", volumeBackup.composeId],
+		["postgres", volumeBackup.postgresId],
+		["mysql", volumeBackup.mysqlId],
+		["mariadb", volumeBackup.mariadbId],
+		["mongo", volumeBackup.mongoId],
+		["redis", volumeBackup.redisId],
+		["libsql", volumeBackup.libsqlId],
+	] as const;
+	const owners = services.filter(([, serviceId]) => !!serviceId);
+	const [owner] = owners;
+	if (owners.length !== 1 || !owner?.[1]) {
+		throw new Error(
+			"Volume backup refused: it does not belong to exactly one service.",
+		);
+	}
+	const facts = await loadVolumeBindingFacts({
+		serviceType: owner[0],
+		serviceId: owner[1],
+		volumeName: volumeBackup.volumeName,
+	});
+	const verdict = evaluateVolumeBinding(facts, { privileged: true });
+	if (!verdict.ok) {
+		throw new Error(`Volume backup refused: ${verdict.message}`);
+	}
 };
 
 export const scheduleVolumeBackup = async (volumeBackupId: string) => {
@@ -150,6 +189,23 @@ export const runVolumeBackup = async (volumeBackupId: string) => {
 		description: "Volume Backup",
 	});
 	try {
+		// Recorded as a failed run (log, status, notification) like any other
+		// failure, before any docker command is built.
+		try {
+			await assertVolumeBackupBinding(volumeBackup);
+		} catch (refusal) {
+			const note = `echo ${quote([refusal instanceof Error ? refusal.message : String(refusal)])} >> ${quote([deployment.logPath])}`;
+			try {
+				if (serverId) {
+					await execAsyncRemote(serverId, note);
+				} else {
+					await execAsync(note);
+				}
+			} catch (logError) {
+				console.error("Failed to write the volume backup refusal", logError);
+			}
+			throw refusal;
+		}
 		const command = await backupVolume(volumeBackup);
 
 		const commandWithLog = `(${command}) >> ${quote([deployment.logPath])} 2>&1`;

@@ -22,8 +22,8 @@ import {
 	findDestinationByIdForOrganization,
 } from "@dokploy/server/services/destination";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
-import { findRestorableVolumeNames } from "@dokploy/server/services/volume-backups";
 import { findServerById } from "@dokploy/server/services/server";
+import { findRestorableVolumeNames } from "@dokploy/server/services/volume-backups";
 import {
 	execAsyncRemote,
 	execAsyncStream,
@@ -34,6 +34,7 @@ import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { assertVolumeBackupLimit } from "@/server/api/utils/plan-limits";
+import { assertVolumeNameForService } from "@/server/api/utils/volume-binding";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
 
@@ -47,6 +48,17 @@ const VOLUME_BACKUP_SERVICE_KEYS = [
 	"libsqlId",
 	"composeId",
 ] as const;
+
+const VOLUME_BACKUP_SERVICE_TYPES = {
+	applicationId: "application",
+	postgresId: "postgres",
+	mysqlId: "mysql",
+	mariadbId: "mariadb",
+	mongoId: "mongo",
+	redisId: "redis",
+	libsqlId: "libsql",
+	composeId: "compose",
+} as const;
 
 const getVolumeBackupServiceId = (
 	vb: Partial<
@@ -132,7 +144,7 @@ export const volumeBackupsRouter = createTRPCRouter({
 				] as const
 			).find((type) => input[`${type}Id`]);
 			const serviceId = serviceType ? input[`${serviceType}Id`] : undefined;
-			if (!serviceId) {
+			if (!serviceType || !serviceId) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "A volume backup needs a service to back up.",
@@ -148,6 +160,14 @@ export const volumeBackupsRouter = createTRPCRouter({
 					});
 				}
 			}
+			// The volume must be one of the service's own: the backup runs
+			// `docker run -v <name>` and uploads the result to the caller's
+			// destination, so any other name would exfiltrate another tenant's data.
+			await assertVolumeNameForService(ctx, {
+				serviceType,
+				serviceId,
+				volumeName: input.volumeName,
+			});
 			await findDestinationByIdForOrganization(
 				input.destinationId,
 				ctx.session.activeOrganizationId,
@@ -236,6 +256,17 @@ export const volumeBackupsRouter = createTRPCRouter({
 						message: "The service of a volume backup cannot be changed.",
 					});
 				}
+			}
+			const serviceKey = VOLUME_BACKUP_SERVICE_KEYS.find(
+				(key) => existingVb[key],
+			);
+			if (serviceKey) {
+				await assertVolumeNameForService(ctx, {
+					serviceType: VOLUME_BACKUP_SERVICE_TYPES[serviceKey],
+					serviceId: existingVb[serviceKey] as string,
+					volumeName: input.volumeName,
+					existingRow: input.volumeName === existingVb.volumeName,
+				});
 			}
 			await findDestinationByIdForOrganization(
 				input.destinationId,
@@ -343,6 +374,12 @@ export const volumeBackupsRouter = createTRPCRouter({
 					message: "This volume does not belong to the service.",
 				});
 			}
+			await assertVolumeNameForService(ctx, {
+				serviceType: input.serviceType,
+				serviceId: input.id,
+				volumeName: input.volumeName,
+				existingRow: true,
+			});
 			const destination = await findDestinationById(input.destinationId);
 			if (destination.organizationId !== ctx.session.activeOrganizationId) {
 				throw new TRPCError({

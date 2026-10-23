@@ -21,6 +21,29 @@ vi.mock("@dokploy/server/db", () => ({
 	},
 }));
 
+// The volume-name binding has its own tests (volume-binding*.test.ts); here
+// every volume sits in the service's own namespace.
+vi.mock("@dokploy/server/services/volume-binding", () => ({
+	loadVolumeBindingFacts: async ({
+		serviceType,
+		serviceId,
+		volumeName,
+	}: {
+		serviceType: string;
+		serviceId: string;
+		volumeName: string;
+	}) => ({
+		volumeName,
+		serviceType,
+		serviceId,
+		appName: "app",
+		recordedOnOwnMount: false,
+		recordedOnOtherSameOrgMount: false,
+		declaredByComposeFile: false,
+		claimedByOtherOrganization: false,
+	}),
+}));
+
 vi.mock("@dokploy/server/services/permission", () => ({
 	checkPermission: vi.fn(async () => undefined),
 	checkServicePermissionAndAccess: mocks.checkServicePermissionAndAccess,
@@ -176,7 +199,9 @@ describe("volume backups stay bound to the services the caller can reach", () =>
 		};
 
 		beforeEach(() => {
-			mocks.findVolumeBackupRows.mockResolvedValue([{ volumeName: "app_data" }]);
+			mocks.findVolumeBackupRows.mockResolvedValue([
+				{ volumeName: "app_data" },
+			]);
 			mocks.findMountRows.mockResolvedValue([{ volumeName: "app_cache" }]);
 		});
 
