@@ -43,13 +43,18 @@ vi.mock("node:fs", async (importOriginal) => ({
 	readFileSync: mocks.readFileSync,
 }));
 
-const { assertComposeVolumesBound, getCommandRunVolumes } = await import(
-	"@dokploy/server/services/compose-volume-binding"
-);
+const { paths } = await import("@dokploy/server/constants");
+const {
+	assertComposeVolumesBound,
+	commandUsesEnvFile,
+	getCommandBaseDirectories,
+	getCommandRunVolumes,
+} = await import("@dokploy/server/services/compose-volume-binding");
 const {
 	dockerVolumesDirectoryReach,
 	reachesDockerVolumesDirectory,
 	resolveComposeMountedVolumes,
+	unresolvedSourceClimbs,
 	unresolvedSourceReachesDockerVolumes,
 } = await import("@dokploy/server/utils/volume-backups/compose-volumes");
 const { parse } = await import("yaml");
@@ -676,8 +681,6 @@ volumes:
 				"./${DATA_DIR}",
 				"/srv/${APP}",
 				"/var/lib/${X}",
-				"/var/lib/docker/${X}",
-				"/var/lib/docker/volumes${SUFFIX}",
 				"/var/lib/docker/volumes$${LITERAL}x",
 			]) {
 				await expect(
@@ -736,8 +739,10 @@ volumes:
 			["/var/lib/docker/volumes/${X}", true],
 			["/var/lib/docker/volumes/x/${X}", true],
 			["/var/lib/docker/volumes/", false],
-			["/var/lib/docker/volumes${X}", false],
-			["/var/lib/docker/${X}", false],
+			["/var/lib/docker/volumes${X}", true],
+			["/var/lib/docker/${X}", true],
+			["/var/lib/docker/other/${X}", false],
+			["/var/lib/dockerx/${X}", false],
 			["/var/lib/${X}", false],
 			["${X}", false],
 			["${X}/var/lib/docker/volumes", false],
@@ -850,4 +855,428 @@ volumes:
 			/Compose volume "shared" is refused/,
 		);
 	});
+});
+
+// Review round of PR #470.
+const CODE_DIRECTORY = `${paths(false)
+	.COMPOSE_PATH.replace(/\\/g, "/")
+	.replace(/^[A-Za-z]:/, "")}/${APP}/code`;
+const DEPLOYED = `${CODE_DIRECTORY}/docker-compose.yml`;
+const NOTHING = "services:\n  web:\n    image: nginx\n";
+
+describe("--project-directory moves the base of relative binds", () => {
+	const withDirectory = (flag: string, source: string) =>
+		composeRow(bind(source), {
+			command: `compose --project-directory ${flag} -f ${DEPLOYED} up -d`,
+		});
+	const parentMessage = /contains Docker's own volume storage/;
+
+	it.each([
+		["/", "./"],
+		["/", "."],
+		["/var", "./lib"],
+		["/var/lib", "./docker"],
+		["/var/lib/docker", "."],
+		["/var/lib/docker", "./"],
+		["/etc", "../var/lib"],
+		["../../../../../../../../../../../..", "."],
+	])(
+		"--project-directory %s with %s binds a parent",
+		async (directory, source) => {
+			await expect(
+				assertComposeVolumesBound(withDirectory(directory, source)),
+			).rejects.toThrow(parentMessage);
+		},
+	);
+
+	it("reads --project-directory=/ too", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("./"), {
+					command: `compose --project-directory=/ -f ${DEPLOYED} up -d`,
+				}),
+			),
+		).rejects.toThrow(parentMessage);
+	});
+
+	it("reads a directory climbed to from the project directory", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				withDirectory("/var/lib/docker", "./volumes/x"),
+			),
+		).rejects.toThrow(/is Docker's own volume storage/);
+	});
+
+	it("sees the directory of every file the command names", async () => {
+		mocks.readFileSync.mockReturnValue(NOTHING);
+
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("./docker"), {
+					command: `compose -f /var/lib/x.yml -f ${DEPLOYED} up -d`,
+				}),
+			),
+		).rejects.toThrow(parentMessage);
+	});
+
+	it("still allows a project directory that is not a parent", async () => {
+		await expect(
+			assertComposeVolumesBound(withDirectory("/srv/app", "./data")),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(withDirectory("..", ".")),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("./data"), {
+					command: `compose -f ${DEPLOYED} up -d`,
+				}),
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it("lists the directories of a command", () => {
+		const compose = (command: string) => composeRow("", { command }) as never;
+
+		expect(getCommandBaseDirectories(compose(""))).toEqual([]);
+		expect(
+			getCommandBaseDirectories(
+				compose(`compose --project-directory /var -f ${DEPLOYED} up -d`),
+			),
+		).toEqual(["/var", CODE_DIRECTORY]);
+		expect(
+			getCommandBaseDirectories(compose("compose -f ../shared/a.yml up -d")),
+		).toEqual([CODE_DIRECTORY.replace(/\/code$/, "/shared")]);
+	});
+
+	it("does not trust the compose's variables when the command brings its own --env-file", async () => {
+		const row = (command: string) =>
+			composeRow(bind("${DATA}"), {
+				env: "DATA=/var/lib/docker/volumes/x",
+				command,
+			});
+
+		await expect(
+			assertComposeVolumesBound(row(`compose -f ${DEPLOYED} up -d`)),
+		).rejects.toThrow(/is Docker's own volume storage/);
+		await expect(
+			assertComposeVolumesBound(
+				row(`compose --env-file other.env -f ${DEPLOYED} up -d`),
+			),
+		).resolves.toBeUndefined();
+		expect(commandUsesEnvFile({ command: "compose --env-file a up -d" })).toBe(
+			true,
+		);
+		expect(commandUsesEnvFile({ command: "compose --env-file=a up -d" })).toBe(
+			true,
+		);
+		expect(commandUsesEnvFile({ command: "compose -f a up -d" })).toBe(false);
+		expect(commandUsesEnvFile({ command: "" })).toBe(false);
+	});
+});
+
+describe("run -v hidden by a glob, an operator or a backtick", () => {
+	it("refuses a glob in front of the -v", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(NOTHING, {
+					command: `compose -f ${DEPLOYED} run -e A=* -v /:/h web`,
+				}),
+			),
+		).rejects.toThrow(/Compose command refused: .*shell pattern/);
+	});
+
+	it.each([
+		"compose -f d.yml run -e A=* web",
+		"compose -f d.yml run -e 'A=*' -v /:/h web && docker compose -f d.yml ps *",
+		"compose -f d.yml ps * && docker compose -f d.yml run -v /:/h web",
+		"compose -f d.yml run -v ?:/h web",
+		"compose -f d.yml run web | cat",
+		"compose -f d.yml run web; docker compose -f d.yml ps",
+		"compose -f d.yml run -v /:/h web # comment",
+	])("refuses %s", (command) => {
+		expect(() => getCommandRunVolumes({ command } as never)).toThrow(
+			/Compose command refused/,
+		);
+	});
+
+	it("leaves a glob alone when nothing in the line is a run", () => {
+		expect(
+			getCommandRunVolumes({ command: "compose -f d.yml logs *" } as never),
+		).toEqual([]);
+		expect(
+			getCommandRunVolumes({
+				command: "compose -f d.yml up -d && docker compose -f d.yml ps",
+			} as never),
+		).toEqual([]);
+	});
+
+	it("quoted pattern characters are plain text", () => {
+		expect(
+			getCommandRunVolumes({
+				command: "compose -f d.yml run -e 'A=*' -v /a:/b web",
+			} as never),
+		).toEqual(["/a:/b"]);
+	});
+
+	it.each([
+		"/[v]ar/lib/docker:/h",
+		"'/v*r/lib/docker:/h'",
+		"'/va?/lib:/h'",
+		"'{/var,/etc}:/h'",
+	])("refuses a pattern character in a -v value: %s", async (volume) => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(NOTHING, {
+					command: `compose -f ${DEPLOYED} run -v ${volume} web`,
+				}),
+			),
+		).rejects.toThrow(/Compose volume check failed: command volume/);
+	});
+
+	it("refuses a backtick in a -v value", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(NOTHING, {
+					command: `compose -f ${DEPLOYED} run -v "/\`true\`:/h" web`,
+				}),
+			),
+		).rejects.toThrow(/Compose volume check failed: command volume/);
+	});
+});
+
+describe("a variable followed by .. that cannot be resolved", () => {
+	it.each([
+		["${HOME}/../../../..", {}],
+		["${HOME}/..", {}],
+		["${PATH}/../x", {}],
+		["${HOME}/data/../../..", {}],
+		["/srv/${HOME}/../..", {}],
+		["${HOME}/${NOPE:?err}/..", {}],
+	])("refuses %s with the env file on", async (source, extra) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(bind(source), extra)),
+		).rejects.toThrow(/Compose volume check failed/);
+	});
+
+	it.each([
+		"${PWD}/../../../../..",
+		"${DATA_DIR}/../..",
+		"$PWD/../..",
+		"./${X}/../..",
+	])("refuses %s with the env file off", async (source) => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind(source), { createEnvFile: false }),
+			),
+		).rejects.toThrow(/Compose volume check failed/);
+	});
+
+	it("refuses it for a stack, where PWD is the shell's", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("${PWD}/../../../../.."), { composeType: "stack" }),
+			),
+		).rejects.toThrow(/Compose volume check failed/);
+	});
+
+	it("refuses it in the long syntax", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(longBind('"${PWD}/../.."'), { createEnvFile: false }),
+			),
+		).rejects.toThrow(/Compose volume check failed/);
+	});
+
+	it("still resolves a variable that is known, and normalises the result", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("${BASE}/../../.."), { env: "BASE=/var/lib/docker" }),
+			),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("${BASE}/../app"), { env: "BASE=/srv/data" }),
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it("leaves a source that is only a variable, or a variable and a path", async () => {
+		for (const source of ["${DATA_DIR}", "${DATA_DIR}/x", "${HOME}/data"]) {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(bind(source), { createEnvFile: false }),
+				),
+			).resolves.toBeUndefined();
+		}
+		await expect(
+			assertComposeVolumesBound(composeRow(bind("${HOME}/data"))),
+		).resolves.toBeUndefined();
+	});
+
+	it("refuses Docker's own directory followed by a variable with the env file off", async () => {
+		for (const source of [
+			"/var/lib/docker/${X}",
+			"/var/lib/docker/${X}/_data",
+			"/var/lib/docker//${X}",
+			"/var/./lib/docker/${X}",
+		]) {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(bind(source), { createEnvFile: false }),
+				),
+			).rejects.toThrow(/is Docker's own volume storage/);
+		}
+	});
+
+	it.each([
+		["${HOME}/..", true],
+		["${PWD}/../../x", true],
+		["/srv/${X}/..", true],
+		["${X}..", true],
+		["${X}/..x", false],
+		["${X}/a..b", false],
+		["${X}/data", false],
+		["../${X}", false],
+		["$${X}/../x", false],
+		["${X}", false],
+	])("unresolvedSourceClimbs(%s) is %s", (raw, expected) => {
+		expect(unresolvedSourceClimbs(raw)).toBe(expected);
+	});
+});
+
+describe("the whole entry is interpolated before it is split", () => {
+	const entry = (value: string) => `
+services:
+  web:
+    volumes:
+      - "${value}"
+`;
+
+	it("refuses a colon that comes from a default", async () => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry("${X:-/:/h}"))),
+		).rejects.toThrow(
+			/Compose volume refused: bind mount .* contains Docker's/,
+		);
+	});
+
+	it("refuses an entry that is only a variable holding SOURCE:TARGET", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${VOL}"), { env: "VOL=/:/h" }),
+			),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${VOL}"), {
+					env: "VOL=/var/lib/docker/volumes/x:/h",
+				}),
+			),
+		).rejects.toThrow(/is Docker's own volume storage/);
+	});
+
+	it("refuses a source variable followed by a mode", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${A}:ro"), { env: "A=/:/x" }),
+			),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+	});
+
+	it("refuses a source brought by two variables", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${A}${B}:/h"), { env: "A=/va\nB=r" }),
+			),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${A}${B}"), { env: "A=/var\nB=/lib:/h" }),
+			),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+	});
+
+	it("fails closed on an entry that is only variables when they are not known", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${VOL}"), { createEnvFile: false }),
+			),
+		).rejects.toThrow(/Compose volume check failed: volume "\${VOL}"/);
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${X:-/:/h}"), { createEnvFile: false }),
+			),
+		).rejects.toThrow(/Compose volume check failed/);
+		await expect(
+			assertComposeVolumesBound(composeRow(entry("${HOME}"))),
+		).rejects.toThrow(/Compose volume check failed/);
+	});
+
+	it("keeps ${DATA_DIR}:/data and a variable target allowed", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${DATA_DIR}:/data"), { createEnvFile: false }),
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${A}:ro"), { createEnvFile: false }),
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("/srv/data:${TARGET}"), { createEnvFile: false }),
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("./data:${TARGET}"), { createEnvFile: false }),
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it("still refuses a path source when only the target is unresolved", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("/:${TARGET}"), { createEnvFile: false }),
+			),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+	});
+
+	it("keeps an anonymous volume and a plain entry allowed", async () => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry("/data"))),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(composeRow(entry("${DIR:-/data}"))),
+		).resolves.toBeUndefined();
+	});
+});
+
+describe("process links that collapse away", () => {
+	it.each([
+		"/proc/self/root/..",
+		"/proc/self/cwd/..",
+		"/proc/self/root/../..",
+		"/proc/1/root/../x",
+		"/tmp/../proc/self/root/..",
+		"/proc/self/task/12/root/..",
+		"/proc/./self/./root/./..",
+	])("%s is refused", (path) => {
+		expect(dockerVolumesDirectoryReach(path)).toBe("parent");
+	});
+
+	it("is refused as a bind of the compose", async () => {
+		await expect(
+			assertComposeVolumesBound(composeRow(bind("/proc/self/root/.."))),
+		).rejects.toThrow(/contains Docker's own volume storage/);
+	});
+
+	it.each(["/proc/self", "/proc/self/status", "/proc/1/rootx/.."])(
+		"%s is not",
+		(path) => {
+			expect(dockerVolumesDirectoryReach(path)).toBeNull();
+		},
+	);
 });

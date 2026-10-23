@@ -162,9 +162,31 @@ const DOCKER_VOLUMES_DIRECTORY = "/var/lib/docker/volumes";
 // recognised by their shape alone: the check never looks at the host, so any
 // other symlink (one that only exists on the host, such as `/srv/docker` ->
 // `/var/lib/docker`) cannot be seen from here and is not refused.
-const PROC_LINK = /^\/proc\/[^/]+\/(?:task\/[^/]+\/)?(?:root|cwd)(?:\/|$)/;
+const PROC_LINK = /^\/proc\/[^/]+\/(?:task\/[^/]+\/)?(?:root|cwd)$/;
+
+// Walks the segments of a path and looks at every prefix, so that
+// `/proc/self/root/..` is seen even though it collapses to `/proc/self`.
+const passesThroughProcLink = (path: string) => {
+	const stack: string[] = [];
+	for (const segment of path.split("/")) {
+		if (!segment || segment === ".") {
+			continue;
+		}
+		if (segment === "..") {
+			stack.pop();
+			continue;
+		}
+		stack.push(segment);
+		if (PROC_LINK.test(`/${stack.join("/")}`)) {
+			return true;
+		}
+	}
+	return false;
+};
 
 export type DockerVolumesReach = "inside" | "parent" | null;
+
+const DOCKER_ROOT_DIRECTORY = "/var/lib/docker";
 
 const reachOfAbsolutePath = (candidate: string): DockerVolumesReach => {
 	if (
@@ -175,45 +197,58 @@ const reachOfAbsolutePath = (candidate: string): DockerVolumesReach => {
 	}
 	if (
 		candidate === "/" ||
-		DOCKER_VOLUMES_DIRECTORY.startsWith(`${candidate}/`) ||
-		PROC_LINK.test(candidate)
+		DOCKER_VOLUMES_DIRECTORY.startsWith(`${candidate}/`)
 	) {
 		return "parent";
 	}
 	return null;
 };
 
+// The absolute paths a bind source can mean, not yet resolved: `inputs` are
+// all of them (a relative path also from `/`, so a `..` chain cannot hide
+// it), `parentInputs` the ones that count for the parent rule (a relative
+// path from `/` is not one: `.` and `..` from `/` would make every relative
+// bind of the compose's own directory a bind of `/`). `~` is the home of an
+// unknown user.
+const bindSourceInputs = (path: string, baseDirs: string[]) => {
+	const normalized = path.replace(/\\/g, "/");
+	if (normalized.startsWith("~")) {
+		const rest = `.${normalized.slice(1)}`;
+		const parentInputs = ["/root", "/home/user/a"].map(
+			(home) => `${home}/${rest}`,
+		);
+		return { inputs: [`/${rest}`, ...parentInputs], parentInputs };
+	}
+	if (posix.isAbsolute(normalized)) {
+		return { inputs: [normalized], parentInputs: [normalized] };
+	}
+	const parentInputs = baseDirs.map((base) => `${base}/${normalized}`);
+	return { inputs: [`/${normalized}`, ...parentInputs], parentInputs };
+};
+
 // How a bind source relates to Docker's volume storage: "inside" (the
 // directory or a path under it), "parent" (a directory that contains it, or a
-// `/proc` link to the root), or null. Paths are normalised with POSIX rules
+// `/proc` link to a root), or null. Paths are normalised with POSIX rules
 // first (repeated slashes, `.`, `..`, a trailing slash), and "inside" wins.
-//
-// `baseDirs` are the directories a relative path may be resolved from. For
-// "inside" a relative path is also resolved from `/`, so a `..` chain cannot
-// hide it; for "parent" it is not, because `.` and `..` from `/` would
-// make every relative bind of the compose's own directory a bind of `/`.
-// `~` is the home of an unknown user.
+// `baseDirs` are the directories a relative path may be resolved from: the
+// compose's own, and the ones a custom command sets (`--project-directory`).
 export const dockerVolumesDirectoryReach = (
 	path: string,
 	baseDirs: string[] = [],
 ): DockerVolumesReach => {
-	const normalized = path.replace(/\\/g, "/");
-	const candidates = normalized.startsWith("~")
-		? ["/", "/root", "/home/user/a"].map((base) =>
-				posix.resolve(base, `.${normalized.slice(1)}`),
-			)
-		: ["/", ...baseDirs].map((base) => posix.resolve(base, normalized));
-	// The first candidate is the one resolved from `/`.
-	const parentCandidates = posix.isAbsolute(normalized)
-		? candidates
-		: candidates.slice(1);
-	const reaches = candidates.map((candidate) => reachOfAbsolutePath(candidate));
-	if (reaches.includes("inside")) {
+	const { inputs, parentInputs } = bindSourceInputs(path, baseDirs);
+	if (
+		inputs.some(
+			(input) => reachOfAbsolutePath(posix.resolve("/", input)) === "inside",
+		)
+	) {
 		return "inside";
 	}
 	if (
-		parentCandidates.some(
-			(candidate) => reachOfAbsolutePath(candidate) === "parent",
+		parentInputs.some(
+			(input) =>
+				passesThroughProcLink(input) ||
+				reachOfAbsolutePath(posix.resolve("/", input)) === "parent",
 		)
 	) {
 		return "parent";
@@ -226,28 +261,51 @@ export const reachesDockerVolumesDirectory = (
 	baseDirs: string[] = [],
 ) => dockerVolumesDirectoryReach(path, baseDirs) !== null;
 
-// A source with a `${VAR}` that cannot be resolved can still be known to sit
-// inside Docker's volume storage by what is written before the variable
-// (`/var/lib/docker/volumes/${NAME}/_data`). Only whole path segments count:
-// `/var/lib/docker/volumes${SUFFIX}` may be another directory. What the
-// variable could add up to (`/var/lib/${X}`, `${X}`) is not known and not
-// refused; the caller decides what an unresolved source is.
+// The first variable of a value that is not an escaped `$$`.
+const firstVariableIndex = (raw: string) => {
+	for (const match of raw.matchAll(VARIABLE)) {
+		if (match[0] !== "$$") {
+			return match.index;
+		}
+	}
+	return -1;
+};
+
+// A source with a `${VAR}` that cannot be resolved can still be known to be
+// a problem by what is written before the variable: a path inside Docker's
+// volume storage (`/var/lib/docker/volumes/${NAME}/_data`) or Docker's own
+// directory (`/var/lib/docker/${NAME}`, which is the storage when NAME is
+// `volumes`). Only whole path segments count: `/var/lib/docker/volumes${S}`
+// may be another directory. What a variable could add up to elsewhere
+// (`/var/lib/${X}`, `${X}`) is not known and not refused here; the caller
+// decides what an unresolved source is.
 export const unresolvedSourceReachesDockerVolumes = (
 	rawSource: string,
 	baseDirs: string[] = [],
 ) => {
-	for (const match of rawSource.matchAll(VARIABLE)) {
-		if (match[0] === "$$") {
-			continue;
-		}
-		const written = rawSource.slice(0, match.index).replaceAll("$$", "$");
-		const prefix = written.slice(0, written.lastIndexOf("/") + 1);
-		return (
-			isFilePathSource(prefix) &&
-			dockerVolumesDirectoryReach(prefix, baseDirs) === "inside"
-		);
+	const index = firstVariableIndex(rawSource);
+	if (index < 0) {
+		return false;
 	}
-	return false;
+	const written = rawSource.slice(0, index).replaceAll("$$", "$");
+	const prefix = written.slice(0, written.lastIndexOf("/") + 1);
+	if (!isFilePathSource(prefix)) {
+		return false;
+	}
+	if (dockerVolumesDirectoryReach(prefix, baseDirs) === "inside") {
+		return true;
+	}
+	return bindSourceInputs(prefix, baseDirs).parentInputs.some(
+		(input) => posix.resolve("/", input) === DOCKER_ROOT_DIRECTORY,
+	);
+};
+
+// A `..` after a variable that cannot be resolved (`${PWD}/../..`,
+// `${HOME}/../..`): the variable can be any directory, so the path can end up
+// anywhere above it.
+export const unresolvedSourceClimbs = (rawSource: string) => {
+	const index = firstVariableIndex(rawSource);
+	return index >= 0 && /\.\.(?:\/|$)/.test(rawSource.slice(index));
 };
 
 // An empty value is not a boolean: Docker fails on it.
@@ -272,10 +330,10 @@ type MountedKeys = {
 	anyKey: boolean;
 };
 
-// The source of a short-syntax volume (`SOURCE:TARGET[:MODE]`): up to the
-// first colon that is not inside a `${...}`, which may hold one
-// (`${DATA:-/srv}:/data`). null when there is none (an anonymous volume).
-const shortVolumeSource = (entry: string) => {
+// Where the source of a short-syntax volume (`SOURCE:TARGET[:MODE]`) ends in
+// the text as written: the first colon that is not inside a `${...}`, which
+// may hold one (`${DATA:-/srv}:/data`). -1 when there is none.
+const shortVolumeSourceEnd = (entry: string) => {
 	let depth = 0;
 	for (let i = 0; i < entry.length; i++) {
 		const character = entry[i];
@@ -287,10 +345,10 @@ const shortVolumeSource = (entry: string) => {
 		} else if (character === "}" && depth > 0) {
 			depth -= 1;
 		} else if (character === ":" && depth === 0) {
-			return entry.slice(0, i);
+			return i;
 		}
 	}
-	return null;
+	return -1;
 };
 
 // The top-level keys the services mount by name, plus what cannot be checked.
@@ -299,51 +357,91 @@ const collectMounts = (
 	options: ResolveOptions,
 	into: MountedKeys,
 ) => {
-	const checkPath = (rawPath: string, what: string) => {
-		const path = interpolateComposeValue(rawPath, options);
-		if (path === null) {
-			// Not known (a variable Dokploy does not provide): only what is
-			// written before the variable can still show that it is inside
-			// Docker's volume storage.
-			if (unresolvedSourceReachesDockerVolumes(rawPath, options.baseDirs)) {
-				into.forbidden.push(`${what} "${rawPath}"`);
-			}
-			return;
-		}
+	const checkResolvedPath = (path: string, label: string, what: string) => {
 		if (!path) {
 			return;
 		}
 		const reach = dockerVolumesDirectoryReach(path, options.baseDirs);
 		if (reach === "inside") {
-			into.forbidden.push(`${what} "${rawPath}"`);
+			into.forbidden.push(`${what} "${label}"`);
 		} else if (reach === "parent") {
-			into.forbiddenParents.push(`${what} "${rawPath}"`);
+			into.forbiddenParents.push(`${what} "${label}"`);
 		}
 	};
-	const addSource = (rawSource: string) => {
-		const source = interpolateComposeValue(rawSource, options);
-		if (source === null) {
-			// It can name any declared volume, or a path. What is written before
-			// the variable may already put it inside Docker's volume storage
-			// (refused). Otherwise it is not refused for being unresolved, unlike
-			// a volume name or an `external` value: a service source that is a
-			// path (`${DATA_DIR}:/data`) is common and cannot be told from a name,
-			// so every declared volume is checked instead.
-			if (unresolvedSourceReachesDockerVolumes(rawSource, options.baseDirs)) {
-				into.forbidden.push(`bind mount "${rawSource}"`);
-				return;
-			}
-			into.anyKey = true;
+	// A path that depends on a variable Dokploy does not provide. What is
+	// written before the variable may already put it in Docker's volume
+	// storage, and a `..` after it can climb out of anywhere; both are
+	// refused. Returns whether it was.
+	const refuseUnresolvedPath = (rawPath: string, what: string) => {
+		if (unresolvedSourceReachesDockerVolumes(rawPath, options.baseDirs)) {
+			into.forbidden.push(`${what} "${rawPath}"`);
+			return true;
+		}
+		if (unresolvedSourceClimbs(rawPath)) {
+			into.unresolved.push(`${what} "${rawPath}" (a ".." after a variable)`);
+			return true;
+		}
+		return false;
+	};
+	const checkPath = (rawPath: string, what: string) => {
+		const path = interpolateComposeValue(rawPath, options);
+		if (path === null) {
+			refuseUnresolvedPath(rawPath, what);
 			return;
 		}
+		checkResolvedPath(path, rawPath, what);
+	};
+	const addResolvedSource = (source: string, label: string) => {
 		if (!source) {
 			return;
 		}
 		if (isFilePathSource(source)) {
-			checkPath(source, "bind mount");
+			checkResolvedPath(source, label, "bind mount");
 			return;
 		}
 		into.keys.add(source);
+	};
+	// `cutAtColon`: a short-syntax source is the part before the first colon
+	// of the interpolated text, which a variable can bring.
+	const addSource = (rawSource: string, cutAtColon = false) => {
+		const source = interpolateComposeValue(rawSource, options);
+		if (source === null) {
+			// It can name any declared volume, or a path. Besides what
+			// refuseUnresolvedPath refuses, it is not refused for being unresolved,
+			// unlike a volume name or an `external` value: a service source that is
+			// a path (`${DATA_DIR}:/data`) is common and cannot be told from a
+			// name, so every declared volume is checked instead.
+			if (!refuseUnresolvedPath(rawSource, "bind mount")) {
+				into.anyKey = true;
+			}
+			return;
+		}
+		const colon = cutAtColon ? source.indexOf(":") : -1;
+		addResolvedSource(colon >= 0 ? source.slice(0, colon) : source, rawSource);
+	};
+	// Compose interpolates the whole entry and splits it after that, so a
+	// variable can bring the colon (`${X:-/:/h}`, `${VOL}` with VOL=/:/h).
+	const addShortEntry = (entry: string) => {
+		const end = shortVolumeSourceEnd(entry);
+		const label = end >= 0 ? entry.slice(0, end) : entry;
+		const resolved = interpolateComposeValue(entry, options);
+		if (resolved !== null) {
+			// `[SOURCE:]TARGET[:MODE]`: without a colon it is an anonymous volume.
+			const colon = resolved.indexOf(":");
+			if (colon > 0) {
+				addResolvedSource(resolved.slice(0, colon), label);
+			}
+			return;
+		}
+		if (end < 0) {
+			// Nothing but text that depends on a variable Dokploy does not
+			// provide, and no colon written: it can be a whole `SOURCE:TARGET`.
+			into.unresolved.push(`volume "${entry}"`);
+			return;
+		}
+		if (end > 0) {
+			addSource(entry.slice(0, end), true);
+		}
 	};
 	for (const [serviceName, service] of Object.entries(services)) {
 		if (!isRecord(service)) {
@@ -371,11 +469,7 @@ const collectMounts = (
 		}
 		for (const entry of volumes) {
 			if (typeof entry === "string") {
-				// `[SOURCE:]TARGET[:MODE]`: without a colon it is an anonymous volume.
-				const source = shortVolumeSource(entry);
-				if (source) {
-					addSource(source);
-				}
+				addShortEntry(entry);
 			} else if (isRecord(entry)) {
 				const type = typeof entry.type === "string" ? entry.type : "";
 				if (NON_VOLUME_TYPES.has(type)) {
@@ -428,8 +522,8 @@ export const resolveComposeFilesMountedVolumes = (
 	// volume of that name itself.
 	const commandVolumeNames = new Set<string>();
 	for (const volume of options.commandVolumes ?? []) {
-		if (volume.includes("$")) {
-			// A shell variable or substitution: the value is not known here.
+		if (/[$`*?[\]{}]/.test(volume)) {
+			// A shell variable, substitution or glob: the value is not known here.
 			unresolved.push(`command volume "${volume}"`);
 			continue;
 		}
