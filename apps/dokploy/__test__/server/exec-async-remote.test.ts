@@ -16,6 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const ssh = vi.hoisted(() => ({
 	clients: [] as any[],
 	connectError: null as Error | null,
+	execError: null as Error | null,
 	channelAcceptsWrites: true,
 	onExec: (_channel: any) => {},
 	onEnd: (_channel: any) => {},
@@ -59,6 +60,10 @@ vi.mock("ssh2", async () => {
 		}
 		exec(command: string, callback: (err: Error | undefined, ch: any) => void) {
 			this.command = command;
+			if (ssh.execError) {
+				callback(ssh.execError, undefined);
+				return;
+			}
 			this.channel = new FakeChannel();
 			callback(undefined, this.channel);
 			ssh.onExec(this.channel);
@@ -93,6 +98,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 beforeEach(() => {
 	ssh.clients = [];
 	ssh.connectError = null;
+	ssh.execError = null;
 	ssh.channelAcceptsWrites = true;
 	ssh.onExec = () => {};
 	ssh.onEnd = () => {};
@@ -340,6 +346,68 @@ describe("execAsyncRemote when the connection dies", () => {
 		expect(hasRunningRemoteBuild("dep-lost")).toBe(false);
 	});
 
+	it("keeps the output and logs why when the server closes the connection mid-command", async () => {
+		ssh.onExec = (channel) =>
+			queueMicrotask(() => {
+				channel.emit("data", Buffer.from("step 1 ok\n"));
+				channel.stderr.emit("data", Buffer.from("disk quota exceeded\n"));
+			});
+		const chunks: string[] = [];
+
+		const running = execAsyncRemote("server-1", "build", (chunk) =>
+			chunks.push(chunk),
+		);
+		const outcome = running.catch((error) => error);
+		await tick();
+
+		// ssh2 emits the client's close before it closes the channels.
+		ssh.clients[0].emit("close");
+		ssh.clients[0].channel.emit("close", undefined);
+
+		const error = await outcome;
+		expect(error).toBeInstanceOf(ExecError);
+		expect(error.message).toMatch(lost);
+		expect(error.message).toContain("disk quota exceeded");
+		expect(error).toMatchObject({
+			stdout: "step 1 ok\n",
+			stderr: "disk quota exceeded\n",
+		});
+		expect(chunks.at(-1)).toMatch(lost);
+		expect(chunks.filter((chunk) => lost.test(chunk))).toHaveLength(1);
+	});
+
+	it("logs nothing about a lost connection once the command has finished", async () => {
+		ssh.onExec = (channel) => queueMicrotask(() => channel.emit("close", 0));
+		const chunks: string[] = [];
+
+		await execAsyncRemote("server-1", "cmd", (chunk) => chunks.push(chunk));
+		ssh.clients[0].emit("close");
+		await tick();
+
+		expect(chunks).toEqual([]);
+	});
+
+	it("ends the connection when the command cannot be started", async () => {
+		ssh.execError = new Error("Channel open failure");
+		const target = getRemoteBuildCancelTarget("dep-exec-error");
+		const chunks: string[] = [];
+
+		const failure = execAsyncRemote(
+			"server-1",
+			"cmd",
+			(chunk) => chunks.push(chunk),
+			{
+				cancelable: target,
+			},
+		);
+
+		await expect(failure).rejects.toThrow(
+			/Remote command execution failed: Channel open failure/,
+		);
+		expect(ssh.clients[0].calls).toContain("end");
+		expect(chunks).toEqual(["Channel open failure"]);
+	});
+
 	it("resolves once when the command ends normally and the connection closes after it", async () => {
 		ssh.onExec = (channel) =>
 			queueMicrotask(() => {
@@ -378,7 +446,9 @@ describe("execAsyncRemote when the connection dies", () => {
 		// ssh2 emits this error, then drops the socket.
 		ssh.clients[0].emit(
 			"error",
-			Object.assign(new Error("Keepalive timeout"), { level: "client-timeout" }),
+			Object.assign(new Error("Keepalive timeout"), {
+				level: "client-timeout",
+			}),
 		);
 		ssh.clients[0].emit("close");
 

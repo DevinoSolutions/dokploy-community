@@ -41,7 +41,7 @@ const execAsyncBase = util.promisify(exec);
 
 // A command can print nothing for as long as a build runs, and a link that goes
 // half-open then never closes the channel. The client pings, so ssh2 drops the
-// connection (an "error", then "close") after about 30 seconds of silence.
+// connection (an "error", then "close") about 40 seconds after the last reply.
 const SSH_KEEPALIVE = { keepaliveInterval: 10_000, keepaliveCountMax: 3 };
 
 // Node embeds the full command in error.message; it may carry secrets. A
@@ -416,7 +416,17 @@ export const execAsyncRemote = async (
 		: command;
 	const { signal } = options;
 	let detachAbort = () => {};
-	return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+	return new Promise<{ stdout: string; stderr: string }>((res, rej) => {
+		// Lets the connection-loss handler tell a finished command from a dropped one.
+		let settled = false;
+		const resolve = (value: { stdout: string; stderr: string }) => {
+			settled = true;
+			res(value);
+		};
+		const reject = (error: unknown) => {
+			settled = true;
+			rej(error);
+		};
 		const conn = new Client();
 		if (signal) {
 			const onAbort = () => {
@@ -492,6 +502,7 @@ export const execAsyncRemote = async (
 								originalError: err,
 							}),
 						);
+						conn.end();
 						return;
 					}
 					if (options.stdin !== undefined) {
@@ -581,14 +592,27 @@ export const execAsyncRemote = async (
 				}
 				conn.end();
 			})
-			// A no-op once the command has settled (the normal close ends the
+			// Nothing to do once the command has settled (the normal close ends the
 			// connection itself). Otherwise the link dropped under a running
-			// command and its channel may never report an exit.
+			// command. ssh2 emits this before it closes the channels, so on a
+			// server-side close this wins over the stream's exit-less close and
+			// has to carry the same output and log line.
 			.on("close", () => {
+				if (settled) return;
+				emit(stdoutOutput, stdoutDecoder.end());
+				emit(stderrOutput, stderrDecoder.end());
+				const stdout = stdoutOutput.value;
+				const stderr = stderrOutput.value;
+				onData?.(
+					"Connection to the server was lost before the command finished",
+				);
+				const outputTail = truncateOutputTail(stderr || stdout);
 				reject(
 					new ExecError(
-						"Connection to the server was lost before the command finished",
-						{ command, serverId },
+						`Connection to the server was lost before the command finished${
+							outputTail ? `: ${outputTail}` : ""
+						}`,
+						{ command, stdout, stderr, serverId },
 					),
 				);
 			})
