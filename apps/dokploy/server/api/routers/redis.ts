@@ -33,7 +33,10 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
-import { shapeServiceRead } from "@dokploy/server/services/service-secrets";
+import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -141,6 +144,25 @@ export const redisRouter = createTRPCRouter({
 		}
 		return shapeServiceRead(redis, input.includeEnv);
 	}),
+
+	envKeys: protectedProcedure
+		.input(apiFindOneRedis)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.redisId, "read");
+
+			const redis = await findRedisById(input.redisId);
+			if (
+				redis.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to access this Redis",
+				});
+			}
+			// Names only: the values never leave the server.
+			return { env: listEnvKeys(redis.env) };
+		}),
 
 	start: protectedProcedure
 		.input(apiFindOneRedis)

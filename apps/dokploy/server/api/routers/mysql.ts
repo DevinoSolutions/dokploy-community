@@ -34,7 +34,10 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
-import { shapeServiceRead } from "@dokploy/server/services/service-secrets";
+import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -150,6 +153,24 @@ export const mysqlRouter = createTRPCRouter({
 		}
 		return shapeServiceRead(mysql, input.includeEnv);
 	}),
+
+	envKeys: protectedProcedure
+		.input(apiFindOneMySql)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.mysqlId, "read");
+			const mysql = await findMySqlById(input.mysqlId);
+			if (
+				mysql.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to access this MySQL",
+				});
+			}
+			// Names only: the values never leave the server.
+			return { env: listEnvKeys(mysql.env) };
+		}),
 
 	start: protectedProcedure
 		.input(apiFindOneMySql)

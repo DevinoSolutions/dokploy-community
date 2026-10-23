@@ -9,7 +9,11 @@ import {
 	findMcpAccessToken,
 	resolveDefaultOrganizationId,
 } from "@dokploy/server/services/mcp-oauth";
-import { redactToolResult } from "@dokploy/server/services/service-secrets";
+import {
+	findEmptiedSecretField,
+	redactToolResult,
+	scrubSecretsInText,
+} from "@dokploy/server/services/service-secrets";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
 	CallToolRequestSchema,
@@ -312,8 +316,9 @@ export type ToolCallResult = {
 	isError?: true;
 };
 
+/** Error text goes through the scrub: a message can quote a URL or a flag with a token in it. */
 const errorResult = (text: string): ToolCallResult => ({
-	content: [{ type: "text", text }],
+	content: [{ type: "text", text: scrubSecretsInText(text) }],
 	isError: true,
 });
 
@@ -385,7 +390,47 @@ export const CREDENTIAL_RESULT_PATHS: ReadonlySet<string> = new Set([
 export const KEYS_ONLY_RESULT_PATHS: ReadonlySet<string> = new Set([
 	"application.envKeys",
 	"compose.envKeys",
+	"postgres.envKeys",
+	"mysql.envKeys",
+	"mariadb.envKeys",
+	"mongo.envKeys",
+	"redis.envKeys",
+	"libsql.envKeys",
 ]);
+
+/** Argument that lets an admin write an empty value into a secret field. */
+export const ALLOW_EMPTY_SECRETS_ARG = "allowEmptySecrets";
+
+/**
+ * A read over MCP blanks secret values, so a read-modify-write loop sends the
+ * blank straight back. For a mutation, refuses any secret-named field set to an
+ * empty or whitespace-only string (top level and one object level down), unless
+ * the call passes `allowEmptySecrets: true` AND the grant has `dokploy:admin`.
+ * The flag is stripped before the procedure sees the arguments. A `create*`
+ * mutation has no stored value to erase, so it is not checked.
+ */
+export const guardSecretWriteBack = (
+	tool: Pick<McpToolDefinition, "name" | "type" | "procedureName">,
+	args: unknown,
+	scopes: Set<string>,
+): { args: unknown; error?: string } => {
+	if (tool.type !== "mutation") return { args };
+	if (typeof args !== "object" || args === null || Array.isArray(args)) {
+		return { args };
+	}
+	const { [ALLOW_EMPTY_SECRETS_ARG]: flag, ...rest } = args as Record<
+		string,
+		unknown
+	>;
+	if (flag === true && scopes.has(SECRET_READ_SCOPE)) return { args: rest };
+	if (/^create/i.test(tool.procedureName)) return { args: rest };
+	const field = findEmptiedSecretField(rest);
+	if (!field) return { args: rest };
+	return {
+		args: rest,
+		error: `BAD_REQUEST: ${tool.name} sets \`${field}\` to an empty value. Secret values are redacted when read over MCP (they read back as ""), so writing that back would erase the stored secret. Leave the field out to keep it unchanged, use the envKeys tool to see which variables exist, and send the full set you want to keep (saveEnvironment replaces the whole env). To clear a value on purpose, repeat the call with ${ALLOW_EMPTY_SECRETS_ARG}: true, which needs the ${SECRET_READ_SCOPE} scope.`,
+	};
+};
 
 /**
  * Whether a tool result is blanked before it is returned: always, except for
@@ -424,7 +469,9 @@ export const executeMcpTool = async ({
 		);
 	}
 	try {
-		const callArgs = applySecretReadPolicy(tool.path, args ?? {}, scopes);
+		const guarded = guardSecretWriteBack(tool, args ?? {}, scopes);
+		if (guarded.error) return errorResult(guarded.error);
+		const callArgs = applySecretReadPolicy(tool.path, guarded.args, scopes);
 		const raw = await call(tool.path, callArgs);
 		// Second line of defence: whatever a route nests (a service row inside
 		// an environment, a project, a search hit) loses its secret fields.

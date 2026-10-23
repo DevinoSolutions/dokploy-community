@@ -26,7 +26,10 @@ import {
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 } from "@dokploy/server/services/permission";
-import { shapeServiceRead } from "@dokploy/server/services/service-secrets";
+import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
@@ -123,6 +126,25 @@ export const libsqlRouter = createTRPCRouter({
 		}
 		return shapeServiceRead(libsql, input.includeEnv);
 	}),
+
+	envKeys: protectedProcedure
+		.input(apiFindOneLibsql)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.libsqlId, "read");
+
+			const libsql = await findLibsqlById(input.libsqlId);
+			if (
+				libsql.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to access this Libsql",
+				});
+			}
+			// Names only: the values never leave the server.
+			return { env: listEnvKeys(libsql.env) };
+		}),
 
 	start: protectedProcedure
 		.input(apiFindOneLibsql)

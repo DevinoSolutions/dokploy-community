@@ -22,8 +22,7 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
 });
 
 vi.mock("@dokploy/server/index", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("@dokploy/server/index")>();
+	const actual = await importOriginal<typeof import("@dokploy/server/index")>();
 	return {
 		...actual,
 		findApplicationById: vi.fn(async () => state.application),

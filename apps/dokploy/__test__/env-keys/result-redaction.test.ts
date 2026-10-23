@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
 import {
 	MCP_SECRET_KEYS,
 	redactToolResult,
 } from "@dokploy/server/services/service-secrets";
+import { describe, expect, it } from "vitest";
 
 describe("redactToolResult", () => {
 	it("blanks every known secret key at any depth, in objects and arrays", () => {

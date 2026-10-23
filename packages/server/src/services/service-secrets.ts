@@ -245,6 +245,17 @@ export const MCP_SECRET_KEYS: ReadonlySet<string> = new Set([
 	"githubWebhookSecret",
 ]);
 
+const SECRET_KEYS_LOWER: ReadonlySet<string> = new Set(
+	[...MCP_SECRET_KEYS].map((key) => key.toLowerCase()),
+);
+
+/**
+ * Whether a field name is a secret, ignoring case: `Env`, `Password` and
+ * `Token` from an external API (Docker inspect, a provider) count too.
+ */
+export const isSecretKey = (key: string): boolean =>
+	SECRET_KEYS_LOWER.has(key.toLowerCase());
+
 const isPlainObject = (value: unknown): value is AnyRecord => {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
 		return false;
@@ -261,6 +272,19 @@ const hasContent = (value: unknown): boolean =>
 			: isPlainObject(value)
 				? Object.keys(value).length > 0
 				: false;
+
+/** `["A=1", "B="]` → `["A=", "B="]`; the array is returned as is when nothing has a value. */
+const blankEnvArray = (entries: unknown[]): unknown[] => {
+	let copy: unknown[] | null = null;
+	entries.forEach((entry, index) => {
+		if (typeof entry !== "string") return;
+		const at = entry.indexOf("=");
+		if (at < 0 || at === entry.length - 1) return;
+		copy ??= entries.slice();
+		copy[index] = entry.slice(0, at + 1);
+	});
+	return copy ?? entries;
+};
 
 interface Walked {
 	value: unknown;
@@ -293,8 +317,13 @@ const walkSecrets = (node: unknown, path: Set<object>): Walked => {
 	let copy: AnyRecord | null = null;
 	for (const [key, value] of Object.entries(node)) {
 		let next: unknown = value;
-		if (MCP_SECRET_KEYS.has(key)) {
-			if (hasContent(value)) next = BLANK;
+		if (isSecretKey(key)) {
+			if (key.toLowerCase() === "env" && Array.isArray(value)) {
+				// A container `Env` is KEY=VALUE strings: keep the names, drop the values.
+				next = blankEnvArray(value);
+			} else if (hasContent(value)) {
+				next = BLANK;
+			}
 		} else if (key === "customGitUrl") {
 			next = stripUrlCredentials(value);
 		} else {
@@ -325,3 +354,52 @@ export const redactToolResult = (result: unknown): unknown => {
 	}
 	return walked.value;
 };
+
+/**
+ * Whether an MCP mutation argument sets a secret field to an empty or
+ * whitespace-only string, the shape a read-then-write round trip produces
+ * once the read blanked the value. Looks at the top level and one object
+ * level down (an input that nests a row); returns the offending field name.
+ */
+export const findEmptiedSecretField = (args: unknown): string | null => {
+	if (!isPlainObject(args)) return null;
+	const emptied = (record: AnyRecord): string | null => {
+		for (const [key, value] of Object.entries(record)) {
+			if (
+				isSecretKey(key) &&
+				typeof value === "string" &&
+				value.trim() === ""
+			) {
+				return key;
+			}
+		}
+		return null;
+	};
+	const top = emptied(args);
+	if (top) return top;
+	for (const value of Object.values(args)) {
+		if (isPlainObject(value)) {
+			const nested = emptied(value);
+			if (nested) return nested;
+		}
+	}
+	return null;
+};
+
+/**
+ * Scrubs credentials out of an error message before it reaches an MCP
+ * client: URL userinfo (`scheme://user:pass@` → `scheme://***@`), a
+ * `--token <x>` flag, and `token=<x>`-style assignments (`=` only, so a message like
+ * "password: too short" stays readable).
+ */
+export const scrubSecretsInText = (text: string): string =>
+	text
+		.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1***@")
+		.replace(
+			/(--(?:token|password|secret|api-key)(?:=|\s+))("[^"]*"|'[^']*'|\S+)/gi,
+			"$1***",
+		)
+		.replace(
+			/\b((?:access_?|refresh_?|api_?|auth_?|bearer_?)?(?:token|password|passwd|secret|api_?key))(\s*=\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)/gi,
+			"$1$2***",
+		);
