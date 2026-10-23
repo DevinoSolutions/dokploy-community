@@ -5,8 +5,8 @@ import { spawn as spawnPty } from "node-pty";
 import { Client, type ClientChannel } from "ssh2";
 import { WebSocketServer } from "ws";
 import { canAccessDockerOverWss } from "./authorize";
-import { containerBelongsToService } from "./container-ownership";
 import { onGuardedConnection } from "./guard";
+import { resolveDockerTarget } from "./resolve-container";
 import {
 	buildDockerLogsArguments,
 	createDockerLogsDataHandler,
@@ -136,12 +136,6 @@ export const setupDockerContainerLogsWebSocketServer = (
 				ws.send(data.toString());
 			}
 		};
-		const dockerLogsArguments = buildDockerLogsArguments({
-			containerId,
-			runType,
-			since,
-			tail,
-		});
 		try {
 			const server = serverId ? await findServerById(serverId) : null;
 			if (isClosed) return;
@@ -158,16 +152,30 @@ export const setupDockerContainerLogsWebSocketServer = (
 				return;
 			}
 
-			// Service access only covers that service's own containers; without
-			// this, logs (and `docker attach` input) reach any container on the host.
-			if (
-				serviceId &&
-				!(await containerBelongsToService(serviceId, containerId, serverId))
-			) {
+			// Service access alone does not cover other containers; without this,
+			// logs (and `docker attach` input) reach any container on the host.
+			// The string the client sent is resolved once, to the full id of the
+			// container (or swarm service) that passed the ownership check, and logs
+			// and attach run on that id.
+			const targetId = await resolveDockerTarget({
+				user,
+				session,
+				reference: containerId,
+				serverId,
+				serviceId,
+				kind: runType === "swarm" ? "service" : "container",
+			});
+			if (!targetId) {
 				ws.close(4003, "Not authorized");
 				return;
 			}
 			if (isClosed) return;
+			const dockerLogsArguments = buildDockerLogsArguments({
+				containerId: targetId,
+				runType,
+				since,
+				tail,
+			});
 
 			if (server) {
 				if (!server.sshKeyId) {
@@ -262,7 +270,7 @@ export const setupDockerContainerLogsWebSocketServer = (
 						if (!localAttach) {
 							const attach = spawnPty(
 								"docker",
-								["attach", "--sig-proxy=false", containerId],
+								["attach", "--sig-proxy=false", targetId],
 								{
 									name: "xterm-256color",
 									cwd: process.env.HOME,

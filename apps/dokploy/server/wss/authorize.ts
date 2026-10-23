@@ -19,6 +19,11 @@ const buildCtx = (user: { id: string }, activeOrganizationId: string) => ({
 // remote server, that the server is accessible to the caller. Previously these
 // handlers only checked session + organization, so any member could reach a
 // root shell / logs of any container.
+//
+// This is the coarse gate only. It never looks at the container, so the
+// terminal and logs handlers also resolve the container they were asked for
+// with resolveDockerTarget (resolve-container.ts), with or without a serviceId:
+// docker:read alone does not make any container on a shared host reachable.
 export const canAccessDockerOverWss = async (
 	user: WssUser,
 	session: WssSession,

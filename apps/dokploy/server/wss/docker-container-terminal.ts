@@ -4,8 +4,8 @@ import { spawn } from "node-pty";
 import { Client } from "ssh2";
 import { WebSocketServer } from "ws";
 import { canAccessDockerOverWss } from "./authorize";
-import { containerBelongsToService } from "./container-ownership";
 import { onGuardedConnection } from "./guard";
+import { resolveDockerTarget } from "./resolve-container";
 import {
 	isValidContainerId,
 	isValidShell,
@@ -91,10 +91,16 @@ export const setupDockerContainerTerminalWebSocketServer = (
 				return;
 			}
 
-			if (
-				serviceId &&
-				!(await containerBelongsToService(serviceId, containerId, serverId))
-			) {
+			// The string the client sent is resolved once, to the full id of the
+			// container that passed the ownership check, and exec runs on that id.
+			const targetId = await resolveDockerTarget({
+				user,
+				session,
+				reference: containerId,
+				serverId,
+				serviceId,
+			});
+			if (!targetId) {
 				ws.close(4003, "Not authorized");
 				return;
 			}
@@ -115,7 +121,7 @@ export const setupDockerContainerTerminalWebSocketServer = (
 							"-it",
 							"-w",
 							"/",
-							containerId,
+							targetId,
 							shell,
 						].join(" ");
 						conn.exec(dockerCommand, { pty: { cols, rows } }, (err, stream) => {
@@ -187,7 +193,7 @@ export const setupDockerContainerTerminalWebSocketServer = (
 			} else {
 				const ptyProcess = spawn(
 					"docker",
-					["exec", "-it", "-w", "/", containerId, shell],
+					["exec", "-it", "-w", "/", targetId, shell],
 					{ cols, rows },
 				);
 
