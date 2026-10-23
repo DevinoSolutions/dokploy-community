@@ -74,7 +74,8 @@ Any MCP client that supports the Streamable HTTP transport and either OAuth with
 - The server needs a public address. Set a domain under Settings, Server, or set `BETTER_AUTH_URL`. Without one the Profile card says the server is unconfigured.
 - `DOKPLOY_MCP_DISABLED=true` removes the endpoint entirely.
 - An OAuth tool call is only as powerful as the scopes you granted and the user's own role. Grant the least you need, and keep Administration off for routine agents. This does not apply to API keys, which always get every scope.
-- Some tools return a service's own configuration, including environment values and database passwords, under the read scope. Treat a read grant as access to that data.
+- Secret values are not returned by default. Through MCP, `application-one`, `compose-one` and the database `*-one` tools blank the environment, build args and secrets, passwords, webhook tokens and similar fields (the reply carries `secretsRedacted: true`). To get them back a call must pass `includeEnv: true` and the grant must include `dokploy:admin`; without that scope the flag is ignored. This is enforced on the server, not only in the tool schema. Use `application-envKeys` or `compose-envKeys` when you only need variable names: they return the keys, never the values, under the read scope.
+- Redaction covers stored secret fields, not free-form configuration. A literal secret pasted into a Compose file, a command or a file mount still reads back under the read scope. Other tools that return a project or environment record, such as `environment-one`, can still include environment values.
 
 ## Related guides
 

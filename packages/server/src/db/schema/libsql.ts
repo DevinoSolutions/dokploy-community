@@ -20,6 +20,7 @@ import {
 	EndpointSpecSwarmSchema,
 	type HealthCheckSwarm,
 	HealthCheckSwarmSchema,
+	includeEnvInput,
 	type LabelsSwarm,
 	LabelsSwarmSchema,
 	type NetworkSwarm,
@@ -191,6 +192,10 @@ export const apiCreateLibsql = createSchema
 
 export const apiFindOneLibsql = z.object({
 	libsqlId: z.string().min(1),
+});
+
+export const apiReadLibsql = apiFindOneLibsql.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiChangeLibsqlStatus = createSchema

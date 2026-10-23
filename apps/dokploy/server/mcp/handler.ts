@@ -319,6 +319,48 @@ const errorResult = (text: string): ToolCallResult => ({
 const bigintReplacer = (_key: string, value: unknown) =>
 	typeof value === "bigint" ? value.toString() : value;
 
+/**
+ * `*.one` reads that return a service row with secret values (env, build
+ * args and secrets, database passwords, tokens). They take `includeEnv`; the
+ * dispatcher, not the caller, decides it (T-6991).
+ */
+export const SECRET_READ_PATHS: ReadonlySet<string> = new Set([
+	"application.one",
+	"compose.one",
+	"postgres.one",
+	"mysql.one",
+	"mariadb.one",
+	"mongo.one",
+	"redis.one",
+	"libsql.one",
+]);
+
+/** The one scope whose grant already covers reading stored credentials. */
+export const SECRET_READ_SCOPE = "dokploy:admin";
+
+/**
+ * Forces `includeEnv` on the secret-bearing reads. Values are omitted unless
+ * the call passes `includeEnv: true` AND the grant includes
+ * `dokploy:admin` (the scope that gates every other credential read); any
+ * other value, or a missing one, becomes false. The tool schema only
+ * documents this: the override here is what enforces it.
+ */
+export const applySecretReadPolicy = (
+	path: string,
+	args: unknown,
+	scopes: Set<string>,
+): unknown => {
+	if (!SECRET_READ_PATHS.has(path)) return args;
+	const input =
+		typeof args === "object" && args !== null && !Array.isArray(args)
+			? (args as Record<string, unknown>)
+			: {};
+	return {
+		...input,
+		includeEnv: input.includeEnv === true && scopes.has(SECRET_READ_SCOPE),
+	};
+};
+
 /** Scope check, then execution through the injected tRPC caller. */
 export const executeMcpTool = async ({
 	tool,
@@ -337,7 +379,10 @@ export const executeMcpTool = async ({
 		);
 	}
 	try {
-		const result = await call(tool.path, args ?? {});
+		const result = await call(
+			tool.path,
+			applySecretReadPolicy(tool.path, args ?? {}, scopes),
+		);
 		const text =
 			result === undefined ? "null" : JSON.stringify(result, bigintReplacer);
 		// Reuse the serialized form so structuredContent is JSON-safe too: a

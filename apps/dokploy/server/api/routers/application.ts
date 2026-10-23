@@ -55,6 +55,10 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
+import {
+	listEnvKeys,
+	shapeServiceRead,
+} from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -80,6 +84,7 @@ import {
 	apiDeployApplication,
 	apiFindMonitoringStats,
 	apiFindOneApplication,
+	apiReadApplication,
 	apiRedeployApplication,
 	apiReloadApplication,
 	apiSaveBitbucketProvider,
@@ -317,7 +322,7 @@ export const applicationRouter = createTRPCRouter({
 		}),
 
 	one: protectedProcedure
-		.input(apiFindOneApplication)
+		.input(apiReadApplication)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.applicationId, "read");
 			const application = await findApplicationById(input.applicationId);
@@ -363,9 +368,31 @@ export const applicationRouter = createTRPCRouter({
 			}
 
 			return {
-				...application,
+				...shapeServiceRead(application, input.includeEnv),
 				hasGitProviderAccess,
 				unauthorizedProvider,
+			};
+		}),
+
+	envKeys: protectedProcedure
+		.input(apiFindOneApplication)
+		.query(async ({ input, ctx }) => {
+			await checkServiceAccess(ctx, input.applicationId, "read");
+			const application = await findApplicationById(input.applicationId);
+			if (
+				application.environment.project.organizationId !==
+				ctx.session.activeOrganizationId
+			) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to access this application",
+				});
+			}
+			// Names only: the values never leave the server.
+			return {
+				env: listEnvKeys(application.env),
+				buildArgs: listEnvKeys(application.buildArgs),
+				buildSecrets: listEnvKeys(application.buildSecrets),
 			};
 		}),
 

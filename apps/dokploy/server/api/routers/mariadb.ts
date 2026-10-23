@@ -34,6 +34,7 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
+import { shapeServiceRead } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -45,6 +46,7 @@ import {
 	apiCreateMariaDB,
 	apiDeployMariaDB,
 	apiFindOneMariaDB,
+	apiReadMariaDB,
 	apiRebuildMariadb,
 	apiResetMariadb,
 	apiSaveEnvironmentVariablesMariaDB,
@@ -130,7 +132,7 @@ export const mariadbRouter = createTRPCRouter({
 			}
 		}),
 	one: protectedProcedure
-		.input(apiFindOneMariaDB)
+		.input(apiReadMariaDB)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.mariadbId, "read");
 			const mariadb = await findMariadbById(input.mariadbId);
@@ -143,7 +145,7 @@ export const mariadbRouter = createTRPCRouter({
 					message: "You are not authorized to access this Mariadb",
 				});
 			}
-			return mariadb;
+			return shapeServiceRead(mariadb, input.includeEnv);
 		}),
 
 	start: protectedProcedure

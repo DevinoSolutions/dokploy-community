@@ -35,6 +35,7 @@ import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 } from "@dokploy/server/services/permission";
+import { shapeServiceRead } from "@dokploy/server/services/service-secrets";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -46,6 +47,7 @@ import {
 	apiCreatePostgres,
 	apiDeployPostgres,
 	apiFindOnePostgres,
+	apiReadPostgres,
 	apiRebuildPostgres,
 	apiResetPostgres,
 	apiSaveEnvironmentVariablesPostgres,
@@ -138,7 +140,7 @@ export const postgresRouter = createTRPCRouter({
 			}
 		}),
 	one: protectedProcedure
-		.input(apiFindOnePostgres)
+		.input(apiReadPostgres)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.postgresId, "read");
 
@@ -152,7 +154,7 @@ export const postgresRouter = createTRPCRouter({
 					message: "You are not authorized to access this Postgres",
 				});
 			}
-			return postgres;
+			return shapeServiceRead(postgres, input.includeEnv);
 		}),
 
 	start: protectedProcedure

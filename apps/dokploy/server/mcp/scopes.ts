@@ -18,7 +18,7 @@ export const DOKPLOY_SCOPES: ScopeDefinition[] = [
 		id: "dokploy:read",
 		label: "Read",
 		description:
-			"List and inspect projects, services, deployments, logs and settings, including a service's own configuration (environment, database passwords). Stored credentials, raw file reads and user records require Administration.",
+			"List and inspect projects, services, deployments, logs and settings, including a service's own configuration. Secret values (environment, build args, database passwords, tokens) are omitted unless Administration is also granted and the call asks for them; envKeys lists variable names only. Stored credentials, raw file reads and user records require Administration.",
 		defaultOn: true,
 	},
 	{

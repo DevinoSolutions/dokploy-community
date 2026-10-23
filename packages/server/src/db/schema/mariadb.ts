@@ -20,6 +20,7 @@ import {
 	EndpointSpecSwarmSchema,
 	type HealthCheckSwarm,
 	HealthCheckSwarmSchema,
+	includeEnvInput,
 	type LabelsSwarm,
 	LabelsSwarmSchema,
 	type NetworkSwarm,
@@ -178,6 +179,10 @@ export const apiCreateMariaDB = createSchema.pick({
 
 export const apiFindOneMariaDB = z.object({
 	mariadbId: z.string().min(1),
+});
+
+export const apiReadMariaDB = apiFindOneMariaDB.extend({
+	includeEnv: includeEnvInput,
 });
 
 export const apiChangeMariaDBStatus = createSchema
