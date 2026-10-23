@@ -1,0 +1,15 @@
+name: Security audit
+
+on:
+  pull_request:
+    branches: [canary]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    uses: DevinoSolutions/.github/.github/workflows/security-audit.yml@main
+    with:
+      package-manager: pnpm
