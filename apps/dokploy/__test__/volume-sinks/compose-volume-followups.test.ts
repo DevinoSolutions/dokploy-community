@@ -1540,3 +1540,94 @@ services:
 		expect(soleDefaultReach("${X:-$Y}", base)).toBeUndefined();
 	});
 });
+
+// Round 4 of the review of PR #470: a .. that a known variable brings next to
+// an unknown one.
+describe("a .. brought by a variable next to an unknown one", () => {
+	const entry = (value: string) => `
+services:
+  web:
+    volumes:
+      - "${value}:/h"
+`;
+	const failed = /Compose volume check failed/;
+
+	it.each([
+		["B=..", "${HOME}/${B}/${B}/${B}/${B}/${B}"],
+		["B=..", "${PATH}/${B}/${B}/${B}/${B}/${B}"],
+		["UP=../../../../..", "${HOME}/${UP}"],
+		["E=", "${HOME}/.${E}./.${E}./.${E}./.${E}./.${E}."],
+		["B=..", "${HOME}/${B}"],
+		["UP=../..", "${PATH}/x/${UP}"],
+		["B=..", "$HOME/$B/$B"],
+		["", "${HOME}/.${U}./.${U}./.${U}./.${U}./.${U}."],
+		["", "${HOME}/.${U:-}./.${U:-}."],
+		["", "${HOME}/${U:-..}"],
+		["UP=..", "${HOME}/${UP:-x}/${UP}"],
+	])("refuses %s with %s (env file on)", async (env, source) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry(source), { env })),
+		).rejects.toThrow(failed);
+	});
+
+	it.each([
+		"${A}/.${U}./.${U}./.${U}.",
+		"${A}/.${U}.",
+		"${A}/.${U:-}.",
+	])("refuses %s when no variable is known (env file off)", async (source) => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry(source), { createEnvFile: false }),
+			),
+		).rejects.toThrow(failed);
+	});
+
+	it("refuses the same in the long syntax", async () => {
+		for (const [env, source] of [
+			["B=..", "${HOME}/${B}/${B}/${B}/${B}/${B}"],
+			["B=..", "${PATH}/${B}/${B}/${B}/${B}/${B}"],
+			["UP=../../../../..", "${HOME}/${UP}"],
+			["E=", "${HOME}/.${E}./.${E}./.${E}./.${E}./.${E}."],
+		] as const) {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(longBind(`"${source}"`), { env }),
+				),
+			).rejects.toThrow(failed);
+		}
+	});
+
+	it("refuses it stack too, where PWD and HOME are the shell's", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry("${HOME}/${B}/${B}"), {
+					composeType: "stack",
+					env: "B=..",
+				}),
+			),
+		).rejects.toThrow(failed);
+	});
+
+	it.each([
+		["", "${HOME}/.cache"],
+		["", "${HOME}/data"],
+		["", "${HOME}/.config/app"],
+		["", "${HOME}/.${U}x"],
+		["", "${HOME}/a.${U}b"],
+		["DATA_DIR=/srv", "${DATA_DIR}/x"],
+		["APP=app", "/srv/${APP}/data"],
+		["APP=app", "${HOME}/${APP}/data"],
+		["B=beta", "${HOME}/${B}/data"],
+		["", "${DATA_DIR:-../data}"],
+		["", "${DATA_DIR:-./data}"],
+	])("still allows %s with %s", async (env, source) => {
+		await expect(
+			assertComposeVolumesBound(composeRow(entry(source), { env })),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(entry(source), { env, createEnvFile: false }),
+			),
+		).resolves.toBeUndefined();
+	});
+});

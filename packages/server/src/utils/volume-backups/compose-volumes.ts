@@ -308,6 +308,41 @@ export const unresolvedSourceReachesDockerVolumes = (
 export const unresolvedSourceClimbs = (rawSource: string) =>
 	/\.\.(?:[/}$]|$)/.test(rawSource);
 
+// The worst case of a source that depends on a variable that cannot be
+// resolved: every variable Dokploy knows is replaced by its value, every other
+// one by an empty string (or its default), so that a `..` that comes from a
+// known variable next to an unknown one (`${HOME}/${UP}`, UP=../..), or is
+// put together around one (`.${U}.`), is seen. Nothing is left to the
+// resolver, so this never gives up.
+const substituteVariables = (
+	text: string,
+	{ env, strict }: InterpolationOptions,
+): string =>
+	text.replace(
+		VARIABLE,
+		(match, bare?: string, braced?: string, operator?: string, arg = "") => {
+			if (match === "$$") {
+				return "$";
+			}
+			const key = (bare ?? braced) as string;
+			const current =
+				env && !strict && Object.hasOwn(env, key) ? env[key] : undefined;
+			const value = current === UNKNOWN_VARIABLE_VALUE ? undefined : current;
+			const more = () => substituteVariables(arg, { env, strict });
+			switch (operator) {
+				case ":-":
+					return value ? value : more();
+				case "-":
+					return value ?? more();
+				case ":+":
+				case "+":
+					return more();
+				default:
+					return value ?? "";
+			}
+		},
+	);
+
 const SOLE_DEFAULT = /^\$\{[A-Za-z_][A-Za-z0-9_]*:?-([^${}]*)\}$/;
 
 // The one source with a `..` that is not refused for it: exactly one variable
@@ -407,8 +442,14 @@ const collectMounts = (
 			into.forbiddenParents.push(`${what} "${rawPath}"`);
 			return true;
 		}
-		if (fallback === undefined && unresolvedSourceClimbs(rawPath)) {
-			into.unresolved.push(`${what} "${rawPath}" (a ".." in a path that depends on a variable)`);
+		if (
+			fallback === undefined &&
+			(unresolvedSourceClimbs(rawPath) ||
+				substituteVariables(rawPath, options).split("/").includes(".."))
+		) {
+			into.unresolved.push(
+				`${what} "${rawPath}" (a ".." in a path that depends on a variable)`,
+			);
 			return true;
 		}
 		return false;
