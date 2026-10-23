@@ -273,15 +273,55 @@ const hasContent = (value: unknown): boolean =>
 				? Object.keys(value).length > 0
 				: false;
 
-/** `["A=1", "B="]` → `["A=", "B="]`; the array is returned as is when nothing has a value. */
-const blankEnvArray = (entries: unknown[]): unknown[] => {
+/** Entry fields that name a variable; any other field of an env entry object is a value. */
+const ENV_ENTRY_NAME_KEYS: ReadonlySet<string> = new Set(["name", "key"]);
+
+/** A value-bearing field: a non-empty string, array or object, or any number or boolean. */
+const hasEnvValue = (value: unknown): boolean =>
+	typeof value === "number" ||
+	typeof value === "boolean" ||
+	typeof value === "bigint" ||
+	hasContent(value);
+
+/**
+ * One entry of an `env` array without its value, or the entry itself when it
+ * has none. Covers every shape stored or returned: `"KEY=value"` (docker
+ * `Env`), a bare `"KEY"` (name only), a `{ name, value }` or `{ KEY: value }`
+ * object, and a `["KEY", "value"]` pair.
+ */
+const blankEnvEntry = (entry: unknown): unknown => {
+	if (typeof entry === "string") {
+		const at = entry.indexOf("=");
+		return at < 0 || at === entry.length - 1 ? entry : entry.slice(0, at + 1);
+	}
+	if (Array.isArray(entry)) {
+		if (entry.length < 2 || !entry.slice(1).some(hasEnvValue)) return entry;
+		return [entry[0], ...entry.slice(1).map(() => BLANK)];
+	}
+	if (!isPlainObject(entry)) return entry;
+	let copy: AnyRecord | null = null;
+	for (const [field, value] of Object.entries(entry)) {
+		const isName =
+			ENV_ENTRY_NAME_KEYS.has(field.toLowerCase()) && typeof value === "string";
+		if (isName || !hasEnvValue(value)) continue;
+		copy ??= { ...entry };
+		copy[field] = BLANK;
+	}
+	return copy ?? entry;
+};
+
+/**
+ * Names kept, values dropped: `["A=1", "B="]` → `["A=", "B="]` and
+ * `[{ name: "A", value: "1" }]` → `[{ name: "A", value: "" }]`. The array is
+ * returned as is when nothing has a value.
+ */
+export const blankEnvArray = (entries: unknown[]): unknown[] => {
 	let copy: unknown[] | null = null;
 	entries.forEach((entry, index) => {
-		if (typeof entry !== "string") return;
-		const at = entry.indexOf("=");
-		if (at < 0 || at === entry.length - 1) return;
+		const blanked = blankEnvEntry(entry);
+		if (blanked === entry) return;
 		copy ??= entries.slice();
-		copy[index] = entry.slice(0, at + 1);
+		copy[index] = blanked;
 	});
 	return copy ?? entries;
 };

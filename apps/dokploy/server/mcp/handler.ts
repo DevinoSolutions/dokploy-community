@@ -10,7 +10,12 @@ import {
 	resolveDefaultOrganizationId,
 } from "@dokploy/server/services/mcp-oauth";
 import {
+	EnvMergeError,
+	mergeEnvText,
+} from "@dokploy/server/services/env-merge";
+import {
 	findEmptiedSecretField,
+	listEnvKeys,
 	redactToolResult,
 	scrubCommandFields,
 	scrubSecretsInText,
@@ -26,7 +31,15 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import packageInfo from "../../package.json";
 import { captureError } from "../sentry";
-import { type McpToolDefinition, toolsForScopes } from "./registry";
+import {
+	ENV_BLOCK_FIELDS,
+	MERGE_ENV_ARG,
+	type McpToolDefinition,
+	REPLACE_ALL_ARG,
+	UNSET_KEYS_ARG,
+	isEnvSaveTool,
+	toolsForScopes,
+} from "./registry";
 import { CREDENTIAL_QUERIES } from "./scopes";
 
 export interface McpAuth {
@@ -403,6 +416,27 @@ export const KEYS_ONLY_RESULT_PATHS: ReadonlySet<string> = new Set([
 export const ALLOW_EMPTY_SECRETS_ARG = "allowEmptySecrets";
 
 /**
+ * A `saveDockerProvider` call that names no username has no registry
+ * credentials, so its password is legitimately empty (a public image). The
+ * username has to be sent as empty or null: a missing one leaves the stored
+ * username in place, and a blank password next to it would still erase the
+ * secret.
+ */
+const withoutCredentialFreePassword = (
+	tool: Pick<McpToolDefinition, "procedureName">,
+	args: Record<string, unknown>,
+): Record<string, unknown> => {
+	if (tool.procedureName !== "saveDockerProvider") return args;
+	const { password, ...others } = args;
+	if (typeof password !== "string" || password.trim() !== "") return args;
+	const { username } = args;
+	const noUsername =
+		username === null ||
+		(typeof username === "string" && username.trim() === "");
+	return noUsername ? others : args;
+};
+
+/**
  * A read over MCP blanks secret values, so a read-modify-write loop sends the
  * blank straight back. For a mutation, refuses any secret-named field set to an
  * empty or whitespace-only string (top level and one object level down), unless
@@ -425,12 +459,205 @@ export const guardSecretWriteBack = (
 	>;
 	if (flag === true && scopes.has(SECRET_READ_SCOPE)) return { args: rest };
 	if (/^create/i.test(tool.procedureName)) return { args: rest };
-	const field = findEmptiedSecretField(rest);
+	const field = findEmptiedSecretField(withoutCredentialFreePassword(tool, rest));
 	if (!field) return { args: rest };
 	return {
 		args: rest,
-		error: `BAD_REQUEST: ${tool.name} sets \`${field}\` to an empty value. Secret values are redacted when read over MCP (they read back as ""), so writing that back would erase the stored secret. Leave the field out to keep it unchanged, use the envKeys tool to see which variables exist, and send the full set you want to keep (saveEnvironment replaces the whole env). To clear a value on purpose, repeat the call with ${ALLOW_EMPTY_SECRETS_ARG}: true, which needs the ${SECRET_READ_SCOPE} scope.`,
+		error: `BAD_REQUEST: ${tool.name} sets \`${field}\` to an empty value. Secret values are redacted when read over MCP (they read back as ""), so writing that back would erase the stored secret. Leave the field out to keep it unchanged, use the envKeys tool to see which variables exist, and send the full set you want to keep (saveEnvironment replaces the whole env; pass ${MERGE_ENV_ARG}: true to change only some variables). To clear a value on purpose, repeat the call with ${ALLOW_EMPTY_SECRETS_ARG}: true, which needs the ${SECRET_READ_SCOPE} scope.`,
 	};
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
+type EnvBlockField = (typeof ENV_BLOCK_FIELDS)[number];
+type GuardedArgs = { args: unknown; error?: string };
+
+/** How many dropped variable names an error lists before summarizing the rest. */
+const MAX_LISTED_KEYS = 50;
+
+const describeKeys = (keys: string[]) =>
+	keys.length <= MAX_LISTED_KEYS
+		? keys.join(", ")
+		: `${keys.slice(0, MAX_LISTED_KEYS).join(", ")} and ${keys.length - MAX_LISTED_KEYS} more`;
+
+/** `unsetKeys`: an array of names (for `env`) or `{ env, buildArgs, buildSecrets }` arrays. */
+const parseUnsetKeys = (
+	raw: unknown,
+): { unset: Partial<Record<EnvBlockField, string[]>> } | { error: string } => {
+	const bad = {
+		error: `${UNSET_KEYS_ARG} must be an array of variable names (for env) or an object with env, buildArgs and buildSecrets arrays of names`,
+	};
+	if (raw === undefined) return { unset: {} };
+	const isNames = (value: unknown): value is string[] =>
+		Array.isArray(value) && value.every((name) => typeof name === "string");
+	if (isNames(raw)) return { unset: { env: raw } };
+	if (!isRecord(raw)) return bad;
+	const unset: Partial<Record<EnvBlockField, string[]>> = {};
+	for (const [field, names] of Object.entries(raw)) {
+		if (!(ENV_BLOCK_FIELDS as readonly string[]).includes(field)) return bad;
+		if (!isNames(names)) return bad;
+		unset[field as EnvBlockField] = names;
+	}
+	return { unset };
+};
+
+/**
+ * `saveEnvironment` replaces the whole variable set, and a read over MCP
+ * returns every value blank, so a client that reads and then sends
+ * `NEW=1` silently erases the other variables (T-7007). Over MCP only (the
+ * dashboard calls the procedure directly):
+ *
+ * - default: refuse a call whose result drops variables that exist now,
+ *   naming how many and which (never their values);
+ * - `replaceAll: true`: replace everything on purpose;
+ * - `mergeEnv: true`: the variables sent are set or added, the rest are kept,
+ *   and `unsetKeys` removes named ones. The merge runs here, against the
+ *   stored values, which never leave the server.
+ *
+ * The three flags are stripped before the procedure sees the arguments.
+ */
+export const guardEnvironmentSave = async ({
+	tool,
+	args,
+	scopes,
+	call,
+}: {
+	tool: McpToolDefinition;
+	args: unknown;
+	scopes: Set<string>;
+	call: ProcedureCall;
+}): Promise<GuardedArgs> => {
+	if (!isRecord(args)) return { args };
+	const {
+		[REPLACE_ALL_ARG]: replaceAll,
+		[MERGE_ENV_ARG]: mergeEnv,
+		[UNSET_KEYS_ARG]: unsetKeys,
+		...input
+	} = args;
+	const fail = (message: string): GuardedArgs => ({
+		args: input,
+		error: `BAD_REQUEST: ${tool.name} ${message}`,
+	});
+	const merge = mergeEnv === true;
+	if (merge && replaceAll === true) {
+		return fail(`cannot combine ${MERGE_ENV_ARG} with ${REPLACE_ALL_ARG}.`);
+	}
+	if (unsetKeys !== undefined && !merge) {
+		return fail(`${UNSET_KEYS_ARG} only works together with ${MERGE_ENV_ARG}: true.`);
+	}
+	const idField = `${tool.routerName}Id`;
+	const serviceId = input[idField];
+	if (typeof serviceId !== "string" || serviceId === "") {
+		// Let the procedure's own input validation name the problem.
+		return guardSecretWriteBack(tool, input, scopes);
+	}
+
+	if (merge) {
+		const parsed = parseUnsetKeys(unsetKeys);
+		if ("error" in parsed) return fail(`${parsed.error}.`);
+		// Empty strings in the blocks are "no change" here, not an erased secret.
+		const withoutBlocks = { ...input };
+		for (const field of ENV_BLOCK_FIELDS) delete withoutBlocks[field];
+		const checked = guardSecretWriteBack(tool, withoutBlocks, scopes);
+		if (checked.error) return { args: input, error: checked.error };
+
+		const row = await call(`${tool.routerName}.one`, {
+			[idField]: serviceId,
+			includeEnv: true,
+		});
+		if (!isRecord(row) || row.secretsRedacted === true) {
+			return fail(
+				`could not read the stored variables to merge with; use ${REPLACE_ALL_ARG}: true to replace them instead.`,
+			);
+		}
+		const next: Record<string, unknown> = { ...input };
+		for (const field of Object.keys(parsed.unset)) {
+			if (!(field in row)) {
+				return fail(`${tool.routerName} has no ${field} to unset keys from.`);
+			}
+		}
+		for (const field of ENV_BLOCK_FIELDS) {
+			if (!(field in row)) continue;
+			const stored = row[field];
+			const incoming = input[field];
+			const unset = parsed.unset[field] ?? [];
+			if (incoming !== undefined && typeof incoming !== "string") continue;
+			if ((incoming ?? "") === "" && unset.length === 0) {
+				// Nothing to change: keep the stored block as it is.
+				next[field] = typeof stored === "string" ? stored : "";
+				continue;
+			}
+			try {
+				next[field] = mergeEnvText(
+					typeof stored === "string" ? stored : "",
+					incoming ?? "",
+					unset,
+				);
+			} catch (error) {
+				if (error instanceof EnvMergeError) {
+					return fail(`cannot merge ${field}: ${error.message}. Use ${REPLACE_ALL_ARG}: true to replace it instead.`);
+				}
+				throw error;
+			}
+		}
+		return { args: next };
+	}
+
+	let stored: unknown;
+	let storedRead = false;
+	const readStoredKeys = async () => {
+		if (!storedRead) {
+			stored = await call(`${tool.routerName}.envKeys`, {
+				[idField]: serviceId,
+			});
+			storedRead = true;
+		}
+		return isRecord(stored) ? stored : {};
+	};
+
+	// An empty block is only an erased secret when something is stored in it
+	// (a save always carries all three blocks, and most services have no
+	// build secrets): check the rest as usual.
+	const checked = { ...input };
+	for (const field of ENV_BLOCK_FIELDS) {
+		const incoming = input[field];
+		if (typeof incoming !== "string" || incoming.trim() !== "") continue;
+		const existing = (await readStoredKeys())[field];
+		if (Array.isArray(existing) && existing.length === 0) delete checked[field];
+	}
+	const guarded = guardSecretWriteBack(tool, checked, scopes);
+	if (guarded.error) return { args: input, error: guarded.error };
+	const { [ALLOW_EMPTY_SECRETS_ARG]: _flag, ...forwarded } = input;
+	if (replaceAll === true) return { args: forwarded };
+
+	const current = await readStoredKeys();
+	const dropped: string[] = [];
+	const droppedBy: string[] = [];
+	for (const field of ENV_BLOCK_FIELDS) {
+		const incoming = input[field];
+		if (typeof incoming !== "string") continue;
+		const existing = current[field];
+		if (!Array.isArray(existing)) {
+			if (field === "env") {
+				return fail(
+					`could not read the current variable names to compare with; use ${REPLACE_ALL_ARG}: true to replace the variables anyway.`,
+				);
+			}
+			continue;
+		}
+		const kept = new Set(listEnvKeys(incoming));
+		const lost = existing.filter(
+			(key): key is string => typeof key === "string" && !kept.has(key),
+		);
+		if (lost.length === 0) continue;
+		dropped.push(...lost);
+		droppedBy.push(`${field}: ${describeKeys(lost)}`);
+	}
+	if (dropped.length === 0) return { args: forwarded };
+	return fail(
+		`would drop ${dropped.length} existing variable(s) (${droppedBy.join("; ")}). saveEnvironment replaces the whole block and values read back blank over MCP, so a partial list erases the rest. To set or add only some variables and keep the others, repeat with ${MERGE_ENV_ARG}: true (${UNSET_KEYS_ARG} removes named ones). To replace everything on purpose, repeat with ${REPLACE_ALL_ARG}: true.`,
+	);
 };
 
 /**
@@ -479,7 +706,9 @@ export const executeMcpTool = async ({
 		);
 	}
 	try {
-		const guarded = guardSecretWriteBack(tool, args ?? {}, scopes);
+		const guarded = isEnvSaveTool(tool)
+			? await guardEnvironmentSave({ tool, args: args ?? {}, scopes, call })
+			: guardSecretWriteBack(tool, args ?? {}, scopes);
 		if (guarded.error) return errorResult(guarded.error);
 		const callArgs = applySecretReadPolicy(tool.path, guarded.args, scopes);
 		const raw = await call(tool.path, callArgs);

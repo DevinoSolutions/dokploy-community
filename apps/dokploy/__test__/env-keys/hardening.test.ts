@@ -185,7 +185,10 @@ describe("write-back guard", () => {
 		);
 		const result = await promise;
 		expect(result.isError).toBe(true);
-		expect(call).not.toHaveBeenCalled();
+		expect(call).not.toHaveBeenCalledWith(
+			"application.saveEnvironment",
+			expect.anything(),
+		);
 		const text = result.content[0]?.text ?? "";
 		expect(text).toContain("BAD_REQUEST");
 		expect(text).toContain("`env`");
@@ -272,7 +275,12 @@ describe("write-back guard", () => {
 	it("honours allowEmptySecrets for an admin and strips it before the call", async () => {
 		const { call, promise } = run(
 			"application-saveEnvironment",
-			{ applicationId: "app-1", env: "", allowEmptySecrets: true },
+			{
+				applicationId: "app-1",
+				env: "",
+				allowEmptySecrets: true,
+				replaceAll: true,
+			},
 			WRITE_ADMIN,
 		);
 		const result = await promise;
@@ -291,7 +299,10 @@ describe("write-back guard", () => {
 		);
 		const result = await promise;
 		expect(result.isError).toBe(true);
-		expect(call).not.toHaveBeenCalled();
+		expect(call).not.toHaveBeenCalledWith(
+			"application.saveEnvironment",
+			expect.anything(),
+		);
 	});
 
 	it("still accepts non-secret empty fields, real values and creates", async () => {
