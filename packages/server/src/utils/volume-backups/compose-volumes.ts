@@ -221,6 +221,8 @@ type LooseSpec = {
 	include?: unknown;
 	services?: Record<string, unknown> | null;
 	volumes?: Record<string, unknown> | null;
+	secrets?: Record<string, unknown> | null;
+	configs?: Record<string, unknown> | null;
 } | null;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -494,12 +496,16 @@ const shortVolumeSourceEnd = (entry: string) => {
 	return -1;
 };
 
-// The top-level keys the services mount by name, plus what cannot be checked.
-const collectMounts = (
-	services: Record<string, unknown>,
-	options: ResolveOptions,
-	into: MountedKeys,
-) => {
+type PathChecks = Pick<
+	MountedKeys,
+	"unresolved" | "forbidden" | "forbiddenParents"
+>;
+
+// The checks a host path gets, for a bind source and for the paths of the
+// other compose keys that Compose reads from the host (T-7142): where it ends
+// up relative to Docker's volume storage once resolved, and what to do with one
+// that depends on a variable that cannot be resolved.
+const createPathChecks = (options: ResolveOptions, into: PathChecks) => {
 	const checkResolvedPath = (path: string, label: string, what: string) => {
 		if (!path) {
 			return;
@@ -556,6 +562,17 @@ const collectMounts = (
 		}
 		checkResolvedPath(path, rawPath, what);
 	};
+	return { checkResolvedPath, refuseUnresolvedPath, checkPath };
+};
+
+// The top-level keys the services mount by name, plus what cannot be checked.
+const collectMounts = (
+	services: Record<string, unknown>,
+	options: ResolveOptions,
+	into: MountedKeys,
+) => {
+	const { checkResolvedPath, refuseUnresolvedPath, checkPath } =
+		createPathChecks(options, into);
 	const addResolvedSource = (source: string, label: string) => {
 		if (!source) {
 			return;
@@ -652,6 +669,265 @@ const collectMounts = (
 	}
 };
 
+// A build context Compose hands to the builder as it is instead of reading it
+// from the host (compose-go `isRemoteContext`, case-sensitive): a git or http(s)
+// URL. The rest of a value is a path of the host. A remote-looking value is not
+// trusted blindly: Compose keeps it as written (`github.com/../../x`,
+// `https://x/../..`), and a directory of that name in the build tree makes it a
+// local path, so one with a `..` segment is checked as a path too.
+const REMOTE_BUILD_CONTEXT =
+	/^(?:https?:\/\/|git:\/\/|ssh:\/\/|github\.com\/|git@)/;
+
+// An `additional_contexts` value that names no host path either: another
+// service's build or an image.
+const BUILDER_REFERENCE = /^(?:service:|docker-image:\/\/)/;
+
+const OCI_LAYOUT = "oci-layout://";
+const FILE_SCHEME = "file://";
+
+const HAS_CLIMB = /(?:^|[/\\])\.\.(?:[/\\]|$)/;
+
+// The fields of a `cache_from` / `cache_to` entry, read like buildx does (CSV:
+// quotes and `""`), with the keys and values trimmed and the keys lowercased.
+// A quote is taken wherever it stands, so a malformed entry is read as the most
+// paths it could mean.
+const parseCacheFields = (entry: string) => {
+	const fields: string[] = [];
+	let current = "";
+	let quoted = false;
+	for (let i = 0; i < entry.length; i++) {
+		const character = entry[i] as string;
+		if (character === '"') {
+			if (quoted && entry[i + 1] === '"') {
+				current += '"';
+				i += 1;
+			} else {
+				quoted = !quoted;
+			}
+		} else if (character === "," && !quoted) {
+			fields.push(current);
+			current = "";
+		} else {
+			current += character;
+		}
+	}
+	fields.push(current);
+	return fields.map((field) => {
+		const separator = field.indexOf("=");
+		return separator < 0
+			? { key: field.trim().toLowerCase(), value: "" }
+			: {
+					key: field.slice(0, separator).trim().toLowerCase(),
+					// Quotes left around a value (`""x""`) are not part of a path, but are
+					// not trusted to be a different one.
+					value: field
+						.slice(separator + 1)
+						.trim()
+						.replace(/^"+|"+$/g, ""),
+				};
+	});
+};
+
+// Compose reads these keys of a service and of the top level from the HOST
+// (T-7142), resolved from the project directory, so the paths get the same
+// rules as the source of a bind mount:
+// - `build.context`, `build.additional_contexts` and a `build.dockerfile` that
+//   leaves the context, `build.ssh` key files and local `cache_from` /
+//   `cache_to` directories (also with the default `up -d --build`);
+// - `develop.watch[].path`, synced into the container by `up --watch`;
+// - `env_file` and `label_file`, in the string, list and `path:` forms;
+// - the `file:` of the top-level `secrets` and `configs`.
+// A remote build context without a `..`, `docker-image://` and `service:` are
+// not host paths and are left alone.
+const collectHostPaths = (
+	spec: NonNullable<LooseSpec>,
+	options: ResolveOptions,
+	into: PathChecks,
+) => {
+	const { checkPath } = createPathChecks(options, into);
+	const checkEach = (value: unknown, what: string) => {
+		for (const entry of Array.isArray(value) ? value : [value]) {
+			const path = isRecord(entry) ? entry.path : entry;
+			if (typeof path === "string" && path) {
+				checkPath(path, what);
+			}
+		}
+	};
+
+	// A build context (the main one, or an `additional_contexts` value).
+	// Returns whether it is a host directory (not a URL, a layout or a
+	// reference), which decides how a dockerfile is read.
+	const checkContext = (
+		raw: string,
+		what: string,
+		allowReferences: boolean,
+	) => {
+		const text = interpolateComposeValue(raw, options) ?? raw;
+		if (allowReferences && BUILDER_REFERENCE.test(text)) {
+			return false;
+		}
+		if (text.startsWith(OCI_LAYOUT)) {
+			// `oci-layout://PATH[:TAG][@DIGEST]` reads a layout directory.
+			checkPath(
+				text
+					.slice(OCI_LAYOUT.length)
+					.replace(/@[^/]*$/, "")
+					.replace(/:[^/]*$/, ""),
+				what,
+			);
+			return false;
+		}
+		if (raw.startsWith(FILE_SCHEME)) {
+			checkPath(raw.slice(FILE_SCHEME.length), what);
+			return true;
+		}
+		if (text.startsWith(FILE_SCHEME)) {
+			checkPath(text.slice(FILE_SCHEME.length), what);
+			return true;
+		}
+		if (REMOTE_BUILD_CONTEXT.test(text)) {
+			if (HAS_CLIMB.test(text) || HAS_CLIMB.test(raw)) {
+				checkPath(raw, what);
+			}
+			return false;
+		}
+		checkPath(raw, what);
+		return true;
+	};
+
+	const checkAdditionalContext = (raw: string) =>
+		checkContext(raw, "additional build context", true);
+
+	// `type=local,src=DIR` (cache_from) and `type=local,dest=DIR` (cache_to).
+	// An entry that is not read as local but has the word or a quote in it is
+	// checked as well, since it cannot be told from here what buildx makes of it.
+	const checkCacheEntry = (entry: unknown, what: string) => {
+		if (typeof entry !== "string") {
+			return;
+		}
+		const text = interpolateComposeValue(entry, options) ?? entry;
+		const fields = parseCacheFields(text);
+		const local = fields.some(
+			(field) => field.key === "type" && field.value.toLowerCase() === "local",
+		);
+		if (!local && !/local|"/i.test(text)) {
+			return;
+		}
+		for (const field of fields) {
+			if ((field.key === "src" || field.key === "dest") && field.value) {
+				checkPath(field.value, what);
+			}
+		}
+	};
+
+	// The default of a lone `${X:-default}` stands for the variable, as it does
+	// for a bind source (soleDefaultReach), also in the path built from it.
+	const withSoleDefault = (raw: string) => {
+		const text = interpolateComposeValue(raw, options);
+		return text === null ? (SOLE_DEFAULT.exec(raw)?.[1] ?? raw) : text;
+	};
+
+	const checkBuild = (build: unknown) => {
+		if (typeof build === "string") {
+			checkContext(build, "build context", false);
+			return;
+		}
+		if (!isRecord(build)) {
+			return;
+		}
+		const context = typeof build.context === "string" ? build.context : ".";
+		const local = checkContext(context, "build context", false);
+		const dockerfile = build.dockerfile;
+		if (typeof dockerfile === "string" && dockerfile) {
+			// Relative to the context. A value that starts with a variable can
+			// resolve to an absolute path, so it is judged on its own as well.
+			// Next to a context that is not a host directory it is only read
+			// when it climbs, since a directory of that name may be the context.
+			if (
+				!dockerfile.startsWith("/") &&
+				(local || HAS_CLIMB.test(dockerfile))
+			) {
+				checkPath(
+					`${local ? withSoleDefault(context) : context}/${dockerfile}`,
+					"build dockerfile",
+				);
+			}
+			if (dockerfile.startsWith("/") || dockerfile.startsWith("$")) {
+				checkPath(dockerfile, "build dockerfile");
+			}
+		}
+		const additional = build.additional_contexts;
+		if (Array.isArray(additional)) {
+			for (const entry of additional) {
+				if (typeof entry === "string" && entry.includes("=")) {
+					checkAdditionalContext(entry.slice(entry.indexOf("=") + 1));
+				}
+			}
+		} else if (isRecord(additional)) {
+			for (const value of Object.values(additional)) {
+				if (typeof value === "string") {
+					checkAdditionalContext(value);
+				}
+			}
+		}
+		// `ID=PATH[,PATH]`: a bare `default` or id is the SSH agent.
+		const ssh = build.ssh;
+		const sshValues = Array.isArray(ssh)
+			? ssh.map((entry) =>
+					typeof entry === "string" && entry.includes("=")
+						? entry.slice(entry.indexOf("=") + 1)
+						: "",
+				)
+			: isRecord(ssh)
+				? Object.values(ssh)
+				: [];
+		for (const value of sshValues) {
+			if (typeof value !== "string") {
+				continue;
+			}
+			for (const key of value.split(",")) {
+				if (key.trim() && key.trim() !== "default") {
+					checkPath(key.trim(), "build ssh key");
+				}
+			}
+		}
+		for (const entry of Array.isArray(build.cache_from) ? build.cache_from : []) {
+			checkCacheEntry(entry, "build cache_from directory");
+		}
+		for (const entry of Array.isArray(build.cache_to) ? build.cache_to : []) {
+			checkCacheEntry(entry, "build cache_to directory");
+		}
+	};
+
+	if (isRecord(spec.services)) {
+		for (const service of Object.values(spec.services)) {
+			if (!isRecord(service)) {
+				continue;
+			}
+			checkBuild(service.build);
+			checkEach(service.env_file, "env_file");
+			checkEach(service.label_file, "label_file");
+			if (isRecord(service.develop) && Array.isArray(service.develop.watch)) {
+				checkEach(service.develop.watch, "develop watch path");
+			}
+		}
+	}
+	for (const [section, what] of [
+		["secrets", "secret file"],
+		["configs", "config file"],
+	] as const) {
+		const definitions = spec[section];
+		if (!isRecord(definitions)) {
+			continue;
+		}
+		for (const [name, definition] of Object.entries(definitions)) {
+			if (isRecord(definition) && typeof definition.file === "string") {
+				checkPath(definition.file, `${what} of "${name}"`);
+			}
+		}
+	}
+};
+
 // The volume names a set of compose files (the file Dokploy deploys plus the
 // override files of a custom command) mounts. A key is checked with the
 // definition of every file that declares it, because the merge order of the
@@ -677,6 +953,9 @@ export const resolveComposeFilesMountedVolumes = (
 		}
 		if (spec && isRecord(spec.services)) {
 			collectMounts(spec.services, options, mounted);
+		}
+		if (spec) {
+			collectHostPaths(spec, options, mounted);
 		}
 	}
 	const definitionSets = specs.map((spec) =>
