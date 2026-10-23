@@ -84,6 +84,7 @@ import {
 } from "./deployment-cancel";
 import { generateApplyPatchesCommand } from "./patch";
 import { validUniqueServerAppName } from "./project";
+import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
 export type Compose = typeof compose.$inferSelect;
 
@@ -432,6 +433,9 @@ export const runComposeBuild = async (
 	};
 
 	await checkpoint({ restore: false });
+
+	// A row can still hold a registry or provider of another organization.
+	await assertDeployReferencesInOrganization(entity);
 
 	if (entity.sourceType === "raw") {
 		await assertComposeVolumesBoundForDeploy(entity, deployment, {
@@ -946,6 +950,9 @@ export const rebuildCompose = async ({
 
 	try {
 		await checkpoint({ restore: false });
+
+		// A row can still hold a registry or provider of another organization.
+		await assertDeployReferencesInOrganization(compose);
 
 		if (compose.sourceType === "raw") {
 			await assertComposeVolumesBoundForDeploy(compose, deployment, {

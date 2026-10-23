@@ -1,7 +1,9 @@
 import { dirname, join } from "node:path";
 import {
 	addDomainToCompose,
+	assertCanUseServiceGitProviders,
 	assertComposeBuildSettings,
+	assertDeployReferencesInOrganization,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
 	assertServiceReferencesInOrganization,
@@ -242,6 +244,13 @@ export const composeRouter = createTRPCRouter({
 			await assertServiceReferencesInOrganization(
 				input,
 				ctx.session.activeOrganizationId,
+			);
+			// Being in the organization is not enough: the caller has to be able to use
+			// the git provider (own, shared or assigned), as the provider picker implies.
+			await assertCanUseServiceGitProviders(
+				input,
+				() => findComposeById(input.composeId),
+				ctx.session,
 			);
 
 			// Build server: the caller must be allowed to use the server (same check
@@ -627,6 +636,9 @@ export const composeRouter = createTRPCRouter({
 				}
 				return compose.sourceType;
 			} catch (err) {
+				if (err instanceof TRPCError && err.code === "FORBIDDEN") {
+					throw err;
+				}
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error fetching source type",
@@ -956,6 +968,9 @@ export const composeRouter = createTRPCRouter({
 					message: "You are not authorized to update this compose",
 				});
 			}
+
+			// A stored provider or SSH key of another organization must not be used to clone.
+			await assertDeployReferencesInOrganization(compose, "source");
 
 			const tempAppName = `${compose.appName}-temp-template-${nanoid()}`;
 
