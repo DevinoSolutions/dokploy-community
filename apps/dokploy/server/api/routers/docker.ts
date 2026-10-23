@@ -5,7 +5,6 @@ import {
 	containerStart,
 	containerStop,
 	deleteContainerFile,
-	findServerById,
 	getConfig,
 	getContainers,
 	getContainersByAppLabel,
@@ -23,6 +22,12 @@ import { checkPermission } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import {
+	assertAppNameReadable,
+	assertServerReachable,
+	filterReadableContainers,
+	resolveContainerForRoute,
+} from "@/server/api/utils/container-service-access";
 import { uploadFileToContainerSchema } from "@/utils/schema";
 import { createTRPCRouter, protectedProcedure, withPermission } from "../trpc";
 
@@ -45,13 +50,11 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			return await getContainers(input.serverId);
+			await assertServerReachable(ctx, input.serverId);
+			const containers = await getContainers(input.serverId);
+			return containers
+				? await filterReadableContainers(ctx, containers, input.serverId)
+				: containers;
 		}),
 
 	// Host-level diagnostics, so this requires docker.read AND server.read.
@@ -64,12 +67,7 @@ export const dockerRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await checkPermission(ctx, { docker: ["read"], server: ["read"] });
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			return await getServerHealthData(
 				ctx.session.activeOrganizationId,
 				input.serverId,
@@ -88,13 +86,13 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			await containerRestart(input.containerId, input.serverId);
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+				"write",
+			);
+			await containerRestart(containerId, input.serverId);
 			await audit(ctx, {
 				action: "start",
 				resourceType: "docker",
@@ -114,13 +112,13 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			await containerStart(input.containerId, input.serverId);
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+				"write",
+			);
+			await containerStart(containerId, input.serverId);
 			await audit(ctx, {
 				action: "start",
 				resourceType: "docker",
@@ -140,13 +138,13 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			await containerStop(input.containerId, input.serverId);
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+				"write",
+			);
+			await containerStop(containerId, input.serverId);
 			await audit(ctx, {
 				action: "stop",
 				resourceType: "docker",
@@ -166,13 +164,13 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			await containerKill(input.containerId, input.serverId);
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+				"write",
+			);
+			await containerKill(containerId, input.serverId);
 			await audit(ctx, {
 				action: "stop",
 				resourceType: "docker",
@@ -192,13 +190,13 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			await containerRemove(input.containerId, input.serverId);
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+				"write",
+			);
+			await containerRemove(containerId, input.serverId);
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "docker",
@@ -218,13 +216,12 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			return await getConfig(input.containerId, input.serverId);
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+			);
+			return await getConfig(containerId, input.serverId);
 		}),
 
 	getContainersByAppNameMatch: withPermission("service", "read")
@@ -236,12 +233,7 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertAppNameReadable(ctx, input.appName, input.serverId);
 			return await getContainersByAppNameMatch(
 				input.appName,
 				input.appType,
@@ -258,12 +250,7 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertAppNameReadable(ctx, input.appName, input.serverId);
 			return await getContainersByAppLabel(
 				input.appName,
 				input.type,
@@ -279,12 +266,7 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertAppNameReadable(ctx, input.appName, input.serverId);
 			return await getStackContainersByAppName(input.appName, input.serverId);
 		}),
 
@@ -296,24 +278,19 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertAppNameReadable(ctx, input.appName, input.serverId);
 			return await getServiceContainersByAppName(input.appName, input.serverId);
 		}),
 
 	uploadFileToContainer: withPermission("docker", "read")
 		.input(uploadFileToContainerSchema)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+				"write",
+			);
 
 			const file = input.file;
 			if (!(file instanceof File)) {
@@ -328,7 +305,7 @@ export const dockerRouter = createTRPCRouter({
 			const fileBuffer = Buffer.from(arrayBuffer);
 
 			await uploadFileToContainer(
-				input.containerId,
+				containerId,
 				fileBuffer,
 				file.name,
 				input.destinationPath,
@@ -350,17 +327,12 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			return await listContainerFiles(
+			const containerId = await resolveContainerForRoute(
+				ctx,
 				input.containerId,
-				input.path,
 				input.serverId,
 			);
+			return await listContainerFiles(containerId, input.path, input.serverId);
 		}),
 
 	readContainerFile: withPermission("docker", "read")
@@ -375,17 +347,12 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			return await readContainerFile(
+			const containerId = await resolveContainerForRoute(
+				ctx,
 				input.containerId,
-				input.path,
 				input.serverId,
 			);
+			return await readContainerFile(containerId, input.path, input.serverId);
 		}),
 
 	writeContainerFile: withPermission("docker", "read")
@@ -401,14 +368,14 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			await writeContainerFile(
+			const containerId = await resolveContainerForRoute(
+				ctx,
 				input.containerId,
+				input.serverId,
+				"write",
+			);
+			await writeContainerFile(
+				containerId,
 				input.path,
 				input.content,
 				input.serverId,
@@ -436,13 +403,13 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
-			await deleteContainerFile(input.containerId, input.path, input.serverId);
+			const containerId = await resolveContainerForRoute(
+				ctx,
+				input.containerId,
+				input.serverId,
+				"write",
+			);
+			await deleteContainerFile(containerId, input.path, input.serverId);
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "docker",
@@ -459,12 +426,7 @@ export const dockerRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			return await getDockerEvents(input.serverId, input.minutes);
 		}),
 });
