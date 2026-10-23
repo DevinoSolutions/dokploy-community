@@ -31,12 +31,18 @@ const mocks = vi.hoisted(() => ({
 	containers: new Map<string, Record<string, string>>(),
 	// swarm service name -> its spec labels
 	services: new Map<string, Record<string, string>>(),
+	// swarm task id -> the id of the service it belongs to
+	tasks: new Map<string, string>(),
 	// container name -> the full id docker resolves it to (default: derived)
 	ids: new Map<string, string>(),
 	idOf: (name: string) =>
 		Buffer.from(name).toString("hex").padEnd(64, "0").slice(0, 64),
 	serviceIdOf: (name: string) =>
-		Buffer.from(name).toString("hex").padEnd(25, "z").slice(0, 25),
+		/^[a-z0-9]{25}$/.test(name)
+			? name
+			: Buffer.from(name).toString("hex").padEnd(25, "z").slice(0, 25),
+	// swarm service id -> its name, when it is not the key itself
+	serviceNames: new Map<string, string>(),
 	commands: [] as { serverId?: string; command: string }[],
 }));
 
@@ -74,11 +80,16 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 	const run = async (command: string, serverId?: string) => {
 		mocks.commands.push({ serverId, command });
 		const name = (command.trim().split(/\s+/).pop() ?? "").replace(/'/g, "");
+		if (command.includes("docker inspect --type task")) {
+			const serviceId = mocks.tasks.get(name);
+			if (!serviceId) throw new Error("No such task");
+			return { stdout: `${name} ${serviceId}`, stderr: "" };
+		}
 		if (command.includes("docker service inspect")) {
 			const labels = mocks.services.get(name);
 			if (!labels) throw new Error("No such service");
 			return {
-				stdout: `${mocks.serviceIdOf(name)} ${JSON.stringify(labels)} ${name}`,
+				stdout: `${mocks.serviceIdOf(name)} ${JSON.stringify(labels)} ${mocks.serviceNames.get(name) ?? name}`,
 				stderr: "",
 			};
 		}
@@ -139,6 +150,8 @@ beforeEach(() => {
 	mocks.serviceOrganizations.clear();
 	mocks.containers.clear();
 	mocks.services.clear();
+	mocks.tasks.clear();
+	mocks.serviceNames.clear();
 	mocks.ids.clear();
 	mocks.parents.clear();
 	mocks.commands.length = 0;
@@ -421,6 +434,120 @@ describe("resolveDockerTarget", () => {
 			}
 			mocks.member = { role: "member", accessedServices: [] };
 			expect(await resolve("dokploy", { kind: "service" })).toBeNull();
+		});
+
+		describe("task ids (the swarm pages list `docker service ps`)", () => {
+			const taskId = "t".repeat(25);
+			// ids of the swarm services the tasks belong to
+			const ownId = "a".repeat(25);
+			const foreignId = "b".repeat(25);
+
+			const ownService = () => {
+				mocks.services.set(ownId, {});
+				mocks.serviceNames.set(ownId, "app-a-abc123");
+				mocks.serviceRows.set(applications, [
+					{ serviceId: "app-a", serverId: null },
+				]);
+				mocks.serviceOrganizations.set("app-a", "org-a");
+			};
+
+			it("resolves a task to its service and returns the task id for an owner", async () => {
+				mocks.member = { role: "owner", accessedServices: [] };
+				ownService();
+				mocks.tasks.set(taskId, ownId);
+				expect(
+					await resolve(taskId, { kind: "service", serviceId: "app-a" }),
+				).toBe(taskId);
+				expect(mocks.commands.map((c) => c.command)).toEqual([
+					expect.stringContaining("docker service inspect"),
+					expect.stringContaining("docker inspect --type task"),
+					expect.stringContaining("docker service inspect"),
+				]);
+			});
+
+			it("resolves a task of a member's granted service, on a remote server too", async () => {
+				mocks.member = { role: "member", accessedServices: ["app-a"] };
+				ownService();
+				mocks.serviceRows.set(applications, [
+					{ serviceId: "app-a", serverId: "server-a" },
+				]);
+				mocks.tasks.set(taskId, ownId);
+
+				expect(
+					await resolve(taskId, {
+						kind: "service",
+						serverId: "server-a",
+					}),
+				).toBe(taskId);
+				expect(mocks.commands.every((c) => c.serverId === "server-a")).toBe(
+					true,
+				);
+			});
+
+			it("refuses a task of another organization's service, for every role", async () => {
+				mocks.services.set(foreignId, {});
+				mocks.serviceNames.set(foreignId, "app-b-abc123");
+				mocks.serviceRows.set(applications, [
+					{ serviceId: "app-b", serverId: null },
+				]);
+				mocks.serviceOrganizations.set("app-b", "org-b");
+				mocks.tasks.set(taskId, foreignId);
+
+				for (const role of ["member", "admin", "owner"]) {
+					mocks.member = { role, accessedServices: ["app-b"] };
+					expect(await resolve(taskId, { kind: "service" })).toBeNull();
+					expect(
+						await resolve(taskId, { kind: "service", serviceId: "app-b" }),
+					).toBeNull();
+				}
+			});
+
+			it("refuses a task of another service on a service page", async () => {
+				mocks.member = { role: "owner", accessedServices: [] };
+				ownService();
+				mocks.tasks.set(taskId, ownId);
+				expect(
+					await resolve(taskId, { kind: "service", serviceId: "app-other" }),
+				).toBeNull();
+			});
+
+			it("refuses a task of Dokploy's own service for a member", async () => {
+				mocks.member = { role: "member", accessedServices: ["app-a"] };
+				mocks.services.set(foreignId, {});
+				mocks.serviceNames.set(foreignId, "dokploy");
+				mocks.tasks.set(taskId, foreignId);
+				expect(await resolve(taskId, { kind: "service" })).toBeNull();
+			});
+
+			it("refuses a task whose id or service id is malformed", async () => {
+				mocks.member = { role: "owner", accessedServices: [] };
+				ownService();
+				// docker answers, but not with a 25 character task id
+				mocks.tasks.set("short", ownId);
+				mocks.tasks.set("UPPERCASE".padEnd(25, "X"), ownId);
+				for (const reference of ["short", "UPPERCASE".padEnd(25, "X")]) {
+					expect(await resolve(reference, { kind: "service" })).toBeNull();
+				}
+				// the task names a service docker cannot show
+				mocks.tasks.set(taskId, "c".repeat(25));
+				expect(await resolve(taskId, { kind: "service" })).toBeNull();
+			});
+
+			it("refuses an unknown task and quotes the reference", async () => {
+				mocks.member = { role: "owner", accessedServices: [] };
+				expect(await resolve("nope", { kind: "service" })).toBeNull();
+				await resolve("t; rm -rf /", { kind: "service" });
+				expect(mocks.commands.at(-1)?.command).toContain("'t; rm -rf /'");
+			});
+
+			it("does not look for a task when the service id resolves", async () => {
+				mocks.member = { role: "owner", accessedServices: [] };
+				ownService();
+				expect(await resolve(ownId, { kind: "service" })).toBe(ownId);
+				expect(
+					mocks.commands.some((c) => c.command.includes("--type task")),
+				).toBe(false);
+			});
 		});
 
 		it("refuses a container id sent as a service, and the reverse", async () => {

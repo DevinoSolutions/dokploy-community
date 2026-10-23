@@ -63,41 +63,105 @@ const inspectCommand = (kind: DockerObjectKind, reference: string) =>
 				],
 	);
 
+// The swarm pages list tasks (`docker service ps`), whose ids are not service
+// ids, and `docker service logs` takes either. A task is resolved to the
+// service it belongs to, and that service is what gets checked.
+const taskCommand = (reference: string) =>
+	quote([
+		"docker",
+		"inspect",
+		"--type",
+		"task",
+		"--format",
+		"{{.ID}} {{.ServiceID}}",
+		reference,
+	]);
+
+const runOn = async (command: string, serverId?: string) =>
+	serverId
+		? await execAsyncRemote(serverId, command)
+		: await execAsync(command);
+
+const readService = async (
+	reference: string,
+	serverId?: string,
+): Promise<DockerObject | null> => {
+	const { stdout } = await runOn(
+		inspectCommand("service", reference),
+		serverId,
+	);
+	const output = stdout.trim();
+	const split = output.indexOf(" ");
+	const id = output.slice(0, split);
+	if (split < 0 || !FULL_ID.service.test(id)) return null;
+	// The service name is the last word; docker names hold no spaces.
+	const rest = output.slice(split + 1);
+	const nameAt = rest.lastIndexOf(" ");
+	const labels = (JSON.parse(rest.slice(0, nameAt)) ?? {}) as Record<
+		string,
+		unknown
+	>;
+	return {
+		id,
+		appNames: ownershipNames([rest.slice(nameAt + 1), ...labelValues(labels)]),
+	};
+};
+
+const readTask = async (
+	reference: string,
+	serverId?: string,
+): Promise<DockerObject | null> => {
+	const { stdout } = await runOn(taskCommand(reference), serverId);
+	const [taskId, serviceId, ...extra] = stdout.trim().split(/\s+/);
+	if (
+		extra.length > 0 ||
+		!taskId ||
+		!serviceId ||
+		!FULL_ID.service.test(taskId) ||
+		!FULL_ID.service.test(serviceId)
+	)
+		return null;
+	const service = await readService(serviceId, serverId);
+	// `docker service logs` runs on the task id, so the single-task view stays.
+	return service && { id: taskId, appNames: service.appNames };
+};
+
+const labelValues = (labels: Record<string, unknown>) =>
+	OWNERSHIP_LABELS.map((label) => labels[label]);
+
+const ownershipNames = (names: unknown[]) => [
+	...new Set(
+		names.filter(
+			(value): value is string => typeof value === "string" && value !== "",
+		),
+	),
+];
+
 export const readDockerObject = async (
 	reference: string,
 	serverId?: string,
 	kind: DockerObjectKind = "container",
 ): Promise<DockerObject | null> => {
-	const command = inspectCommand(kind, reference);
 	try {
-		const { stdout } = serverId
-			? await execAsyncRemote(serverId, command)
-			: await execAsync(command);
+		if (kind === "service") {
+			try {
+				const service = await readService(reference, serverId);
+				if (service) return service;
+			} catch {
+				// not a service id: it may be a task of one
+			}
+			return await readTask(reference, serverId);
+		}
+		const { stdout } = await runOn(inspectCommand(kind, reference), serverId);
 		const output = stdout.trim();
 		const split = output.indexOf(" ");
 		const id = output.slice(0, split);
-		if (split < 0 || !FULL_ID[kind].test(id)) return null;
-		let labelsJson = output.slice(split + 1);
-		const names: unknown[] = [];
-		if (kind === "service") {
-			// The service name is the last word; docker names hold no spaces.
-			const nameAt = labelsJson.lastIndexOf(" ");
-			names.push(labelsJson.slice(nameAt + 1));
-			labelsJson = labelsJson.slice(0, nameAt);
-		}
-		const labels = (JSON.parse(labelsJson) ?? {}) as Record<string, unknown>;
-		names.push(...OWNERSHIP_LABELS.map((label) => labels[label]));
-		return {
-			id,
-			appNames: [
-				...new Set(
-					names.filter(
-						(value): value is string =>
-							typeof value === "string" && value !== "",
-					),
-				),
-			],
-		};
+		if (split < 0 || !FULL_ID.container.test(id)) return null;
+		const labels = (JSON.parse(output.slice(split + 1)) ?? {}) as Record<
+			string,
+			unknown
+		>;
+		return { id, appNames: ownershipNames(labelValues(labels)) };
 	} catch {
 		return null;
 	}
