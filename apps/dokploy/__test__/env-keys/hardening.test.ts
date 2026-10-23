@@ -171,7 +171,9 @@ describe("write-back guard", () => {
 		name: string,
 		args: unknown,
 		scopes: Set<string>,
-		call = vi.fn(async () => ({ ok: true })),
+		call: (path: string, args: unknown) => Promise<unknown> = vi.fn(
+			async () => ({ ok: true }),
+		),
 	) => ({
 		call,
 		promise: executeMcpTool({ tool: tool(name), args, scopes, call }),
@@ -185,7 +187,10 @@ describe("write-back guard", () => {
 		);
 		const result = await promise;
 		expect(result.isError).toBe(true);
-		expect(call).not.toHaveBeenCalled();
+		expect(call).not.toHaveBeenCalledWith(
+			"application.saveEnvironment",
+			expect.anything(),
+		);
 		const text = result.content[0]?.text ?? "";
 		expect(text).toContain("BAD_REQUEST");
 		expect(text).toContain("`env`");
@@ -204,7 +209,10 @@ describe("write-back guard", () => {
 			const { call, promise } = run("application-update", args, WRITE);
 			const result = await promise;
 			expect(result.isError, JSON.stringify(args)).toBe(true);
-			expect(call).not.toHaveBeenCalled();
+			expect(call).not.toHaveBeenCalledWith(
+				"application.update",
+				expect.anything(),
+			);
 		}
 	});
 
@@ -272,7 +280,12 @@ describe("write-back guard", () => {
 	it("honours allowEmptySecrets for an admin and strips it before the call", async () => {
 		const { call, promise } = run(
 			"application-saveEnvironment",
-			{ applicationId: "app-1", env: "", allowEmptySecrets: true },
+			{
+				applicationId: "app-1",
+				env: "",
+				allowEmptySecrets: true,
+				replaceAll: true,
+			},
 			WRITE_ADMIN,
 		);
 		const result = await promise;
@@ -291,7 +304,10 @@ describe("write-back guard", () => {
 		);
 		const result = await promise;
 		expect(result.isError).toBe(true);
-		expect(call).not.toHaveBeenCalled();
+		expect(call).not.toHaveBeenCalledWith(
+			"application.saveEnvironment",
+			expect.anything(),
+		);
 	});
 
 	it("still accepts non-secret empty fields, real values and creates", async () => {
@@ -299,6 +315,9 @@ describe("write-back guard", () => {
 			"application-update",
 			{ applicationId: "app-1", description: "", env: "A=1" },
 			WRITE,
+			vi.fn(async (path: string) =>
+				path === "application.one" ? { env: "A=1" } : { ok: true },
+			),
 		);
 		expect((await empty.promise).isError).toBeUndefined();
 		expect(empty.call).toHaveBeenCalledWith("application.update", {
