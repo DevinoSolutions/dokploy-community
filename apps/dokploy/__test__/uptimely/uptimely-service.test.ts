@@ -70,6 +70,9 @@ const {
 	uptimelyDayState,
 	worstUptimelyStatus,
 } = await import("@dokploy/server/services/uptimely");
+const { resetUptimelyCacheForTests } = await import(
+	"@dokploy/server/utils/uptimely/read-cache"
+);
 
 const PROJECT = "11111111-1111-4111-8111-111111111111";
 
@@ -154,6 +157,7 @@ const installFetch = () => {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	resetUptimelyCacheForTests();
 	mocks.insertedLinks = [];
 	mocks.linksFindMany.mockResolvedValue([]);
 	installFetch();
@@ -766,6 +770,54 @@ describe("getUptimelyServiceStatus", () => {
 		],
 	});
 
+	it("shares one upstream read between two callers within the TTL", async () => {
+		mocks.linksFindMany.mockResolvedValue([
+			{ linkId: "l1", monitorId: "m1", kind: "website", target: "a" },
+		]);
+		toolHandler = (call) => detail(call.arguments.monitorId as string, operational);
+		const params = {
+			integration,
+			serviceType: "application" as const,
+			serviceId: "app-1",
+		};
+
+		const [a, b] = await Promise.all([
+			getUptimelyServiceStatus(params),
+			getUptimelyServiceStatus(params),
+		]);
+		await getUptimelyServiceStatus(params);
+
+		expect(toolCalls).toHaveLength(1);
+		expect(a.monitors[0]?.status?.name).toBe("Operational");
+		expect(b.quota).toBeNull();
+	});
+
+	it("serves the quota state without calling Uptimely again after a 429", async () => {
+		mocks.linksFindMany.mockResolvedValue([
+			{ linkId: "l1", monitorId: "m1", kind: "website", target: "a" },
+		]);
+		const fetchMock = vi.fn(async () => new Response("", {
+			status: 429,
+			headers: { "retry-after": "120" },
+		}));
+		vi.stubGlobal("fetch", fetchMock);
+		const params = {
+			integration,
+			serviceType: "application" as const,
+			serviceId: "app-1",
+		};
+
+		const first = await getUptimelyServiceStatus(params);
+		const callsAfterFirst = fetchMock.mock.calls.length;
+		const second = await getUptimelyServiceStatus(params);
+
+		expect(first.quota?.exhausted).toBe(true);
+		expect(second.quota?.exhausted).toBe(true);
+		expect(second.quota?.retryAfter).toBeTruthy();
+		expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
+		expect(second.monitors[0]?.error).toContain("quota exhausted");
+	});
+
 	it("aggregates the worst status across the linked monitors", async () => {
 		mocks.linksFindMany.mockResolvedValue([
 			{ linkId: "l1", monitorId: "m1", kind: "website", target: "a" },
@@ -1026,6 +1078,7 @@ describe("timeline day states and uptime", () => {
 			uptimePercent: 0,
 		});
 		// Without probes (the usual case for Website monitors) there is no last check.
+		resetUptimelyCacheForTests();
 		toolHandler = () => ({
 			id: "m1",
 			name: "m1",
