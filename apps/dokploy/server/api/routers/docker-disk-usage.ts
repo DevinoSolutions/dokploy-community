@@ -1,15 +1,15 @@
 import {
 	cleanupBuilders,
-	findServerById,
 	getBuildCache,
 	getDockerDiskUsage,
 } from "@dokploy/server";
-import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
-import { createTRPCRouter, withPermission } from "../trpc";
+import { assertServerReachable } from "@/server/api/utils/container-service-access";
+import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
 
 export const dockerDiskUsageRouter = createTRPCRouter({
+	// Sizes and counts per resource type, nothing that names a service.
 	getDiskUsage: withPermission("docker", "read")
 		.input(
 			z.object({
@@ -17,44 +17,32 @@ export const dockerDiskUsageRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			return await getDockerDiskUsage(input.serverId);
 		}),
 
-	getBuildCache: withPermission("docker", "read")
+	// The build cache is the host's, shared by every build: its entries name the
+	// build steps of every tenant, and pruning it slows their builds down. No
+	// service owns it, so both routes are owner/admin only.
+	getBuildCache: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			return await getBuildCache(input.serverId);
 		}),
 
-	pruneBuildCache: withPermission("docker", "read")
+	pruneBuildCache: adminProcedure
 		.input(
 			z.object({
 				serverId: z.string().optional(),
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
-			if (input.serverId) {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session?.activeOrganizationId) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await assertServerReachable(ctx, input.serverId);
 			await cleanupBuilders(input.serverId);
 			await audit(ctx, {
 				action: "delete",

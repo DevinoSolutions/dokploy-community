@@ -18,6 +18,7 @@ import {
 	SwarmNotAvailable,
 } from "./empty-states";
 import { NodeSection } from "./node-section";
+import { canListSwarmNodes, swarmQueryGates } from "./query-gates";
 import { SummaryCards } from "./summary-cards";
 import type { ContainerInfo, ContainerStat, SwarmNode } from "./types";
 
@@ -28,13 +29,25 @@ interface Props {
 export const ShowSwarmContainers = ({ serverId }: Props) => {
 	const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
 
+	const { data: auth, isLoading: authLoading } = api.user.get.useQuery();
+
+	// A member is refused the nodes (they are the cluster's), so the nodes query
+	// is only made for an owner or admin and nothing waits for it otherwise.
 	const {
 		data: nodes,
 		isLoading: nodesLoading,
 		isError: nodesError,
 		error: nodesErrorDetail,
 		refetch: refetchNodes,
-	} = api.swarm.getNodes.useQuery({ serverId });
+	} = api.swarm.getNodes.useQuery(
+		{ serverId },
+		{ enabled: canListSwarmNodes(auth?.role) },
+	);
+	const gates = swarmQueryGates({
+		role: auth?.role,
+		nodesLoaded: nodes !== undefined,
+		nodesError,
+	});
 
 	const {
 		data: nodeApps,
@@ -44,7 +57,7 @@ export const ShowSwarmContainers = ({ serverId }: Props) => {
 		refetch: refetchApps,
 	} = api.swarm.getNodeApps.useQuery(
 		{ serverId },
-		{ enabled: !nodesError && nodes !== undefined },
+		{ enabled: gates.appsEnabled },
 	);
 
 	const applicationList =
@@ -66,11 +79,12 @@ export const ShowSwarmContainers = ({ serverId }: Props) => {
 			{ serverId },
 			{
 				refetchInterval: 5000,
-				enabled: applicationList.length > 0 && !nodesError && !appsError,
+				enabled: applicationList.length > 0 && !appsError,
 			},
 		);
 
 	const isLoading =
+		authLoading ||
 		nodesLoading ||
 		appsLoading ||
 		(applicationList.length > 0 && detailsLoading);
@@ -216,7 +230,7 @@ export const ShowSwarmContainers = ({ serverId }: Props) => {
 		);
 	}
 
-	if (!nodesError && nodes === undefined) {
+	if (gates.requiresNodes && !nodesError && nodes === undefined) {
 		return (
 			<SwarmNotAvailable
 				errorMessage="Docker Swarm may not be initialized — docker node ls returned no data."

@@ -22,29 +22,41 @@ import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 
 const DEFAULT_TAB = "containers";
-const DEFAULT_SWARM_TAB = "overview";
+const ADMIN_SWARM_TAB = "overview";
+const MEMBER_SWARM_TAB = "containers";
 
 const Dashboard = () => {
 	const router = useRouter();
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const { data: auth } = api.user.get.useQuery();
-	// Volume names are host-global, so the volumes API is owner/admin only.
-	const canSeeVolumes = auth?.role === "owner" || auth?.role === "admin";
+	// Volume names, images, nodes and the host's health belong to no service, so
+	// their APIs are owner/admin only.
+	const isAdmin = auth?.role === "owner" || auth?.role === "admin";
+	const canSeeVolumes = isAdmin;
+	const canSeeImages = isAdmin;
+	const canSeeNodes = isAdmin;
 	// Host-level diagnostics, so this needs server.read on top of docker.read.
-	const canSeeHealth = !!permissions?.docker.read && !!permissions?.server.read;
+	const canSeeHealth =
+		isAdmin && !!permissions?.docker.read && !!permissions?.server.read;
 
 	const queryTab =
 		typeof router.query.tab === "string" ? router.query.tab : DEFAULT_TAB;
 	const activeTab =
 		(queryTab === "health" && !canSeeHealth) ||
+		(queryTab === "images" && !canSeeImages) ||
 		(queryTab === "volumes" && !canSeeVolumes)
 			? DEFAULT_TAB
 			: queryTab;
 
-	const activeSwarmTab =
+	const defaultSwarmTab = canSeeNodes ? ADMIN_SWARM_TAB : MEMBER_SWARM_TAB;
+	const querySwarmTab =
 		typeof router.query.subtab === "string"
 			? router.query.subtab
-			: DEFAULT_SWARM_TAB;
+			: defaultSwarmTab;
+	const activeSwarmTab =
+		!canSeeNodes && querySwarmTab !== MEMBER_SWARM_TAB
+			? MEMBER_SWARM_TAB
+			: querySwarmTab;
 
 	const setTab = (value: string) => {
 		const { tab: _current, subtab: _subtab, ...query } = router.query;
@@ -63,8 +75,7 @@ const Dashboard = () => {
 		router.replace(
 			{
 				pathname: router.pathname,
-				query:
-					value === DEFAULT_SWARM_TAB ? query : { ...query, subtab: value },
+				query: value === defaultSwarmTab ? query : { ...query, subtab: value },
 			},
 			undefined,
 			{ shallow: true },
@@ -78,7 +89,7 @@ const Dashboard = () => {
 					<TabsList>
 						<TabsTrigger value="containers">Containers</TabsTrigger>
 						<TabsTrigger value="swarm">Swarm</TabsTrigger>
-						<TabsTrigger value="images">Images</TabsTrigger>
+						{canSeeImages && <TabsTrigger value="images">Images</TabsTrigger>}
 						{canSeeVolumes && (
 							<TabsTrigger value="volumes">Volumes</TabsTrigger>
 						)}
@@ -93,13 +104,17 @@ const Dashboard = () => {
 					<TabsContent value="swarm">
 						<Tabs value={activeSwarmTab} onValueChange={setSwarmTab}>
 							<TabsList>
-								<TabsTrigger value="overview">Overview</TabsTrigger>
+								{canSeeNodes && (
+									<TabsTrigger value="overview">Overview</TabsTrigger>
+								)}
 								<TabsTrigger value="containers">Containers</TabsTrigger>
-								<TabsTrigger value="nodes">Nodes</TabsTrigger>
+								{canSeeNodes && <TabsTrigger value="nodes">Nodes</TabsTrigger>}
 							</TabsList>
-							<TabsContent value="overview">
-								<SwarmMonitorCard serverId={serverId} />
-							</TabsContent>
+							{canSeeNodes && (
+								<TabsContent value="overview">
+									<SwarmMonitorCard serverId={serverId} />
+								</TabsContent>
+							)}
 							<TabsContent value="containers">
 								<Card className="h-full bg-sidebar p-2.5 rounded-xl mx-auto w-full">
 									<div className="rounded-xl bg-background shadow-md p-6">
@@ -107,14 +122,18 @@ const Dashboard = () => {
 									</div>
 								</Card>
 							</TabsContent>
-							<TabsContent value="nodes">
-								<ShowNodes serverId={serverId} />
-							</TabsContent>
+							{canSeeNodes && (
+								<TabsContent value="nodes">
+									<ShowNodes serverId={serverId} />
+								</TabsContent>
+							)}
 						</Tabs>
 					</TabsContent>
-					<TabsContent value="images">
-						<ShowImages serverId={serverId} />
-					</TabsContent>
+					{canSeeImages && (
+						<TabsContent value="images">
+							<ShowImages serverId={serverId} />
+						</TabsContent>
+					)}
 					{canSeeVolumes && (
 						<TabsContent value="volumes">
 							<ShowVolumes serverId={serverId} />
