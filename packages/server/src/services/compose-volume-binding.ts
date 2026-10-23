@@ -22,6 +22,7 @@ import {
 	resolveComposeFilesMountedVolumes,
 	resolveEnvironmentReferences,
 	UNKNOWN_VARIABLE_VALUE,
+	dockerVolumesDirectoryReach,
 } from "@dokploy/server/utils/volume-backups/compose-volumes";
 import { parse as parseShell, quote } from "shell-quote";
 import { parse } from "yaml";
@@ -230,6 +231,10 @@ type CommandSegment = {
 	volumes: string[];
 	// The `--env-file` values: they replace the `.env` Dokploy writes.
 	envFiles: string[];
+	// The `--env-from-file` values of a `docker compose run`.
+	envFromFiles: string[];
+	// The `-o` / `--output` option of a `docker compose config`, as written.
+	outputOption?: string;
 	// The first word of an `other` segment (`run`, `exec`, `cp`, ...).
 	command?: string;
 	// The `--mount` / `--volumes-from` options of a `docker compose run`, as
@@ -389,6 +394,30 @@ const findDaemonOptionBeforeService = (words: string[]) => {
 const parseRunUncheckedMounts = (words: string[]) =>
 	words.filter((word) => /^--(?:mount|volumes-from)(?:=|$)/.test(word));
 
+// The `--env-from-file` values in the words after `run`: the file is read by
+// docker compose and its variables go into the container.
+const parseRunEnvFromFiles = (words: string[]) => {
+	const files: string[] = [];
+	for (let i = 0; i < words.length; i++) {
+		const word = words[i] as string;
+		if (word === "--env-from-file") {
+			const value = words[i + 1];
+			if (value !== undefined) {
+				files.push(value);
+			}
+			i += 1;
+		} else if (word.startsWith("--env-from-file=")) {
+			files.push(word.slice("--env-from-file=".length));
+		}
+	}
+	return files;
+};
+
+// `docker compose config -o FILE` writes the rendered file to a path of the
+// caller's choosing. `-o` is the only short `config` option with an o, also in a
+// bundle (`-qo FILE`).
+const OUTPUT_OPTION = /^(?:--output(?:=|$)|-[A-Za-z]*o)/;
+
 // The value of a path option that the shell or Docker would expand into
 // something else: a variable, a substitution or a pattern. The path it ends
 // up as cannot be known here, and the compose files, the project directory
@@ -396,12 +425,14 @@ const parseRunUncheckedMounts = (words: string[]) =>
 const NON_LITERAL = /[$`*?[\]{}]/;
 
 const assertLiteralPathOptions = (
-	segment: Pick<CommandSegment, "files" | "projectDirectories" | "envFiles">,
+	segment: Pick<CommandSegment, "files" | "projectDirectories" | "envFiles"> &
+		Partial<Pick<CommandSegment, "envFromFiles">>,
 ) => {
 	const options: Array<[string, string[]]> = [
 		["compose file", segment.files],
 		["--project-directory", segment.projectDirectories],
 		["--env-file", segment.envFiles],
+		["--env-from-file", segment.envFromFiles ?? []],
 	];
 	for (const [name, values] of options) {
 		const value = values.find((candidate) => NON_LITERAL.test(candidate));
@@ -509,6 +540,11 @@ const parseComposeCommand = (
 					}
 				}
 				const uncheckedMounts: string[] = [];
+				const envFromFiles: string[] = [];
+				const outputOption =
+					subcommand === "config"
+						? words.slice(i + 1).find((word) => OUTPUT_OPTION.test(word))
+						: undefined;
 				const daemonOption =
 					findDaemonOption(words.slice(0, i), { allowShortC: false }) ??
 					(subcommand === "run" || subcommand === "exec"
@@ -517,8 +553,14 @@ const parseComposeCommand = (
 				if (subcommand === "run") {
 					volumes.push(...parseRunVolumes(words.slice(i + 1)));
 					uncheckedMounts.push(...parseRunUncheckedMounts(words.slice(i + 1)));
+					envFromFiles.push(...parseRunEnvFromFiles(words.slice(i + 1)));
 				}
-				assertLiteralPathOptions({ files, projectDirectories, envFiles });
+				assertLiteralPathOptions({
+					files,
+					projectDirectories,
+					envFiles,
+					envFromFiles,
+				});
 				return {
 					kind: "compose",
 					subcommand,
@@ -526,7 +568,9 @@ const parseComposeCommand = (
 					projectDirectories,
 					volumes,
 					envFiles,
+					envFromFiles,
 					uncheckedMounts,
+					outputOption,
 					daemonOption,
 				};
 			}
@@ -559,6 +603,7 @@ const parseComposeCommand = (
 					projectDirectories,
 					volumes,
 					envFiles,
+					envFromFiles: [],
 					uncheckedMounts: [],
 					daemonOption,
 				};
@@ -570,6 +615,7 @@ const parseComposeCommand = (
 				projectDirectories,
 				volumes,
 				envFiles,
+				envFromFiles: [],
 				uncheckedMounts: [],
 				daemonOption: findDaemonOption(words.slice(0, start)),
 			};
@@ -643,8 +689,43 @@ export const getCommandOverrideFiles = (
 // `exec`, `container run`, `service create --mount`, `volume`, ...) can mount,
 // read or write a volume or a container that is not the compose's own, and
 // its `-v` / `--mount` / `--volumes-from` are not parsed, so it is refused.
+//
+// What is left of `docker compose` and `docker stack` is limited to the
+// subcommands a service needs, because the others reach host paths or other
+// containers (`compose cp`, `export`, `config -o FILE`, ...); and the compose
+// file, `--env-file`, `--env-from-file` and `--project-directory` may not lead
+// into Docker's volume storage, which holds the data of every volume on the
+// host.
+const COMPOSE_SUBCOMMANDS = new Set([
+	"build",
+	"config",
+	"create",
+	"down",
+	"exec",
+	"images",
+	"kill",
+	"logs",
+	"ls",
+	"pause",
+	"port",
+	"ps",
+	"pull",
+	"restart",
+	"rm",
+	"run",
+	"start",
+	"stop",
+	"top",
+	"unpause",
+	"up",
+	"version",
+	"wait",
+	"watch",
+]);
+const STACK_SUBCOMMANDS = new Set(["deploy", "ls", "ps", "rm", "services"]);
+
 export const assertCommandRunsComposeOnly = (
-	compose: Pick<ComposeNested, "command" | "composeId">,
+	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
 ) => {
 	if (!compose.command) {
 		return;
@@ -669,6 +750,59 @@ export const assertCommandRunsComposeOnly = (
 		throw new Error(
 			`Compose command refused: it runs \`docker ${other.command ?? ""}\`, which can mount volumes or reach containers that are not this compose's own. A custom command can only run \`docker compose\` (chained: \`docker compose\` or \`docker-compose\`) or \`docker stack\`.`,
 		);
+	}
+	for (const segment of segments) {
+		const allowed =
+			segment.kind === "compose" ? COMPOSE_SUBCOMMANDS : STACK_SUBCOMMANDS;
+		if (segment.subcommand !== undefined && !allowed.has(segment.subcommand)) {
+			logger.warn(
+				{ composeId: compose.composeId, subcommand: segment.subcommand },
+				"[VolumeBinding] A compose command was refused: a docker subcommand that is not allowed",
+			);
+			throw new Error(
+				`Compose command refused: \`docker ${segment.kind} ${segment.subcommand}\` is not allowed in a custom command, because it can read or write host paths or reach containers that are not this compose's own. Allowed: ${[...allowed].join(", ")}.`,
+			);
+		}
+		if (segment.outputOption !== undefined) {
+			throw new Error(
+				`Compose command refused: \`docker compose config ${segment.outputOption}\` writes a file to a path of the command's choosing, which is not allowed in a custom command.`,
+			);
+		}
+	}
+	const codeDirectory = getCodeDirectory(compose);
+	for (const segment of segments) {
+		const baseDirs = [
+			codeDirectory,
+			...segment.projectDirectories.map((directory) =>
+				posix.resolve(codeDirectory, directory),
+			),
+		];
+		const options: Array<[string, string[]]> = [
+			["compose file", segment.files],
+			["--project-directory", segment.projectDirectories],
+			["--env-file", segment.envFiles],
+			["--env-from-file", segment.envFromFiles],
+		];
+		for (const [name, values] of options) {
+			// A project directory that only contains the storage (`/`) is
+			// harmless unless a relative bind lands in it, which the bind rule
+			// refuses; a file option must not lead there at all.
+			const value = values.find((candidate) => {
+				const reach = dockerVolumesDirectoryReach(candidate, baseDirs);
+				return name === "--project-directory"
+					? reach === "inside"
+					: reach !== null;
+			});
+			if (value !== undefined) {
+				logger.warn(
+					{ composeId: compose.composeId, option: name, value },
+					"[VolumeBinding] A compose command was refused: a path option that leads into Docker's volume storage",
+				);
+				throw new Error(
+					`Compose command refused: the ${name} "${value}" is Docker's own volume storage (/var/lib/docker/volumes) or a directory that contains it, which holds every volume on the host. Use a path of the compose's own.`,
+				);
+			}
+		}
 	}
 };
 

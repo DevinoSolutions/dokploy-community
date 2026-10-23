@@ -50,6 +50,9 @@ const {
 	getCommandBaseDirectories,
 	getCommandRunVolumes,
 } = await import("@dokploy/server/services/compose-volume-binding");
+const { getRestoreAfterFailedBuildCommand } = await import(
+	"@dokploy/server/utils/builders/compose"
+);
 const {
 	dockerVolumesDirectoryReach,
 	reachesDockerVolumesDirectory,
@@ -708,6 +711,142 @@ volumes:
 				await expect(
 					assertComposeVolumesBound(custom(command)),
 				).rejects.toThrow(/is not allowed in a custom command/);
+			});
+		});
+
+		describe("compose and stack subcommands", () => {
+			const base = `-p ${APP} -f docker-compose.yml`;
+
+			it.each([
+				"cp web:/etc/passwd /tmp/passwd",
+				"export web",
+				"config -o /var/lib/docker/volumes/victim/_data/x",
+				"config --output /tmp/x",
+				"config --output=/tmp/x",
+				"config -qo /tmp/x",
+				"config -o/tmp/x",
+				"events",
+				"push",
+				"attach web",
+				"commit web img",
+				"stats",
+				"volumes",
+				"scale web=2",
+				"publish repo/x",
+				"alpha dry-run",
+				"bridge convert",
+			])("refuses docker compose %s", async (rest) => {
+				await expect(
+					assertComposeVolumesBound(custom(`compose ${base} ${rest}`)),
+				).rejects.toThrow(/Compose command refused: .*(not allowed|writes a file)/);
+				await expect(
+					assertComposeVolumesBound(
+						custom(
+							`compose ${base} up -d && docker compose ${base} ${rest}`,
+						),
+					),
+				).rejects.toThrow(/Compose command refused: .*(not allowed|writes a file)/);
+			});
+
+			it.each([
+				"build",
+				"config",
+				"config -q",
+				"config --services",
+				"create",
+				"down",
+				"exec web ls",
+				"images",
+				"kill",
+				"logs -f web",
+				"ls",
+				"pause",
+				"port web 80",
+				"ps",
+				"pull",
+				"restart",
+				"rm -f",
+				"start",
+				"stop",
+				"top",
+				"unpause",
+				"up -d --build",
+				"version",
+				"wait web",
+				"watch",
+				"run --rm web sh -c ls",
+			])("allows docker compose %s", async (rest) => {
+				await expect(
+					assertComposeVolumesBound(custom(`compose ${base} ${rest}`)),
+				).resolves.toBeUndefined();
+			});
+
+			it.each([
+				"stack config -c docker-compose.yml",
+				"stack up -c docker-compose.yml app",
+				"stack remove app",
+				"stack inspect app",
+			])("refuses docker %s", async (command) => {
+				await expect(
+					assertComposeVolumesBound(custom(command)),
+				).rejects.toThrow(
+					/Compose command refused: `docker stack \w+` is not allowed/,
+				);
+			});
+
+			it.each([
+				`stack deploy -c docker-compose.yml ${APP}`,
+				`stack rm ${APP}`,
+				`stack ls`,
+				`stack ps ${APP}`,
+				`stack services ${APP}`,
+			])("allows docker %s", async (command) => {
+				await expect(
+					assertComposeVolumesBound(custom(command)),
+				).resolves.toBeUndefined();
+			});
+		});
+
+		describe("path options that lead into Docker's volume storage", () => {
+			const VICTIM = "/var/lib/docker/volumes/victim/_data";
+
+			it.each([
+				`compose -f ${VICTIM}/docker-compose.yml up -d`,
+				`compose -f=${VICTIM}/docker-compose.yml up -d`,
+				`compose -f${VICTIM}/docker-compose.yml up -d`,
+				`compose --file ${VICTIM}/docker-compose.yml up -d`,
+				`compose --file=${VICTIM}/docker-compose.yml up -d`,
+				`compose -f ../../../../../../../../../../var/lib/docker/volumes/victim/_data/c.yml up -d`,
+				`compose -f /var/lib/docker/volumes/../volumes/victim/c.yml up -d`,
+				`compose -p ${APP} --env-file ${VICTIM}/.env -f docker-compose.yml up -d`,
+				`compose -p ${APP} --env-file=${VICTIM}/.env -f docker-compose.yml up -d`,
+				`compose -p ${APP} --project-directory ${VICTIM} -f docker-compose.yml up -d`,
+				`compose -p ${APP} --project-directory=${VICTIM} -f docker-compose.yml up -d`,
+				`compose -p ${APP} -f docker-compose.yml run --env-from-file ${VICTIM}/.env web sh`,
+				`compose -p ${APP} -f docker-compose.yml run --env-from-file=${VICTIM}/.env web sh`,
+				`stack deploy -c ${VICTIM}/docker-compose.yml ${APP}`,
+				`stack deploy --compose-file=${VICTIM}/docker-compose.yml ${APP}`,
+				`compose -p ${APP} -f docker-compose.yml up -d && docker compose -f ${VICTIM}/c.yml up -d`,
+			])("refuses %s", async (command) => {
+				await expect(assertComposeVolumesBound(custom(command))).rejects.toThrow(
+					/Compose command refused: the .* is Docker's own volume storage/,
+				);
+			});
+
+			it("allows paths of the compose's own, and a project directory elsewhere", async () => {
+				mocks.readFileSync.mockReturnValue("services: {}");
+				for (const command of [
+					`compose -p ${APP} -f docker-compose.yml up -d`,
+					`compose -p ${APP} -f ./docker-compose.yml up -d`,
+					`compose -p ${APP} --env-file ./.env -f docker-compose.yml up -d`,
+					`compose -p ${APP} --project-directory /srv/other -f docker-compose.yml up -d`,
+					`compose -p ${APP} -f docker-compose.yml run --env-from-file ./job.env web sh`,
+					`stack deploy -c docker-compose.yml ${APP}`,
+				]) {
+					await expect(
+						assertComposeVolumesBound(custom(command)),
+					).resolves.toBeUndefined();
+				}
 			});
 		});
 
@@ -1960,5 +2099,43 @@ services:
 		});
 		expect(resolve({ V: "${C:?e}" })).toEqual({ V: UNRESOLVED });
 		expect(resolve({ V: "plain" })).toEqual({ V: "plain" });
+	});
+});
+
+describe("the restore after a refused or cancelled deploy (T-7055)", () => {
+	const yaml = `
+services:
+  web:
+    image: nginx
+`;
+	const restoreOf = (command: string) =>
+		getRestoreAfterFailedBuildCommand(
+			composeRow(yaml, { command, mounts: [] }),
+			{ deploymentId: "dep-1" },
+		);
+
+	it.each([
+		"run -v /var/lib/docker/volumes/victim/_data:/x alpine sh",
+		"-H tcp://attacker:2375 compose -p x -f docker-compose.yml up -d",
+		"--context other compose -p x -f docker-compose.yml up -d",
+		"compose -p x -f docker-compose.yml up -d && docker run -v /:/x alpine",
+		"compose -p x -f docker-compose.yml cp web:/etc/passwd /tmp/x",
+		"compose -p x -f /var/lib/docker/volumes/victim/_data/c.yml up -d",
+		"compose -p x -f docker-compose.yml run -v /var/lib/docker/volumes:/x web",
+		"compose -p x -f docker-compose.yml run --mount type=bind,src=/,dst=/x web",
+	])("does not run %s again", async (command) => {
+		const restore = await restoreOf(command);
+		expect(restore).toContain("Restoring previous working deployment");
+		expect(restore).not.toMatch(/docker run|docker -H|--context|\bcp web|\/var\/lib\/docker|--mount/);
+		// the default command brings the restored files up instead
+		expect(restore).toContain(`docker compose -p ${APP}`);
+	});
+
+	it("keeps a custom command the check accepts", async () => {
+		const restore = await restoreOf(
+			`compose -p ${APP} -f docker-compose.yml up -d --build`,
+		);
+		expect(restore).toContain(`docker compose -p ${APP} -f docker-compose.yml up -d`);
+		expect(restore).not.toContain("--remove-orphans");
 	});
 });
