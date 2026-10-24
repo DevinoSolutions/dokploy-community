@@ -7,8 +7,8 @@ import { randomizeDeployableSpecificationFile } from "@dokploy/server/utils/dock
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	addDomainToCompose,
-	loadDockerCompose,
-	loadDockerComposeRemote,
+	getComposePath,
+	readComposeFile,
 } from "@dokploy/server/utils/docker/domain";
 import {
 	isComposeDotenvName,
@@ -310,6 +310,8 @@ const mergeResolutions = (
 		unresolved: [],
 		forbidden: [],
 		forbiddenParents: [],
+		providers: [],
+		models: [],
 	};
 	for (const resolution of resolutions) {
 		for (const use of resolution.uses) {
@@ -319,6 +321,8 @@ const mergeResolutions = (
 			"unresolved",
 			"forbidden",
 			"forbiddenParents",
+			"providers",
+			"models",
 		] as const) {
 			for (const entry of resolution[name]) {
 				if (!merged[name].includes(entry)) {
@@ -375,20 +379,39 @@ export const assertComposeSpecVolumesBound = async (
 		composeDirectory,
 	});
 	const strict = worlds.some((world) => world.strict);
-	const { uses, unresolved, forbidden, forbiddenParents } = mergeResolutions(
-		worlds.map((world) =>
-			resolveComposeFilesMountedVolumes(
-				Array.isArray(specs) ? specs : [specs],
-				{
-					appName: compose.appName,
-					env: world.env,
-					strict: world.strict,
-					baseDirs,
-					commandVolumes,
-				},
+	const { uses, unresolved, forbidden, forbiddenParents, providers, models } =
+		mergeResolutions(
+			worlds.map((world) =>
+				resolveComposeFilesMountedVolumes(
+					Array.isArray(specs) ? specs : [specs],
+					{
+						appName: compose.appName,
+						env: world.env,
+						strict: world.strict,
+						baseDirs,
+						commandVolumes,
+					},
+				),
 			),
-		),
-	);
+		);
+	if (providers.length > 0) {
+		logger.warn(
+			{ composeId: compose.composeId, providers },
+			"[VolumeBinding] A compose file was refused: a service declares a provider",
+		);
+		throw new Error(
+			`Compose refused: ${providers[0]} declares a provider, which makes Docker Compose run a program of the host it deploys on (a Docker CLI plugin, or any program that its type names as a path or finds on the PATH) instead of a container. Provider services are not allowed: remove "provider:" from the service and run it as a regular container service.`,
+		);
+	}
+	if (models.length > 0) {
+		logger.warn(
+			{ composeId: compose.composeId, models },
+			"[VolumeBinding] A compose file was refused: it declares models",
+		);
+		throw new Error(
+			`Compose refused: ${models[0]} uses \`models\`, which uses the host's shared Docker Model Runner (the model options reach \`docker model pull\` and \`docker model configure\`, and the runtime flags are shared by every tenant). Models are not allowed: remove "models:" from the compose file and run the model as a regular container service.`,
+		);
+	}
 	if (forbidden.length > 0) {
 		logger.warn(
 			{ composeId: compose.composeId, forbidden },
@@ -453,14 +476,46 @@ const COMPOSE_OPTIONS_WITH_VALUE = new Set([
 	"--progress",
 ]);
 
-// The subcommands that create containers from the compose files.
-const FILE_READING_SUBCOMMANDS = new Set(["up", "run", "create"]);
+// Which `docker compose` subcommands load the compose files (T-7161), with
+// their providers, volumes and host paths:
+// - `version` loads nothing.
+// - These work from the labels of the containers of the project when they get
+//   a project name (`-p NAME`) and no `-f`: Compose loads no file then and the
+//   project it builds has no provider (docker/compose `projectOrName` /
+//   `toProjectName`). Without a name they load the default file like a loader.
+//   Every `-f` that is given is read in any case.
+// - Every other subcommand (build, config, create, pull, run, up, and one this
+//   list does not know) loads the files, and must name them with `-f`. That
+//   stays so when the default file would be the checked one: without `-f`
+//   Compose also reads `COMPOSE_FILE` from a `.env` of the repository (with
+//   "Create env file" off) and merges the `*.override.yml` next to the default
+//   file, none of which is parsed here.
+const PROJECT_FREE_SUBCOMMANDS = new Set(["version"]);
+const LABEL_DRIVEN_SUBCOMMANDS = new Set([
+	"down",
+	"exec",
+	"images",
+	"kill",
+	"logs",
+	"pause",
+	"port",
+	"ps",
+	"restart",
+	"rm",
+	"start",
+	"stop",
+	"top",
+	"unpause",
+	"wait",
+]);
 
 type CommandSegment = {
 	kind: "compose" | "stack" | "other";
 	subcommand?: string;
 	files: string[];
 	projectDirectories: string[];
+	// A project name is given (`-p NAME`, `--project-name NAME`, `-pNAME`).
+	hasProjectName?: boolean;
 	// The `-v` / `--volume` values of a `docker compose run`.
 	volumes: string[];
 	// The `--env-file` values: they replace the `.env` Dokploy writes.
@@ -603,7 +658,10 @@ const findDaemonOptionBeforeService = (words: string[]) => {
 		if (word.startsWith("--")) {
 			before.push(word);
 			const name = word.slice(2).split("=")[0] ?? "";
-			if (!word.includes("=") && RUN_AND_EXEC_LONG_OPTIONS_WITH_VALUE.has(name)) {
+			if (
+				!word.includes("=") &&
+				RUN_AND_EXEC_LONG_OPTIONS_WITH_VALUE.has(name)
+			) {
 				i += 1;
 			}
 		} else if (/^-[^-]/.test(word)) {
@@ -745,6 +803,7 @@ const parseComposeCommand = (
 			const command = words[start];
 			if (command === "compose") {
 				let subcommand: string | undefined;
+				let hasProjectName = false;
 				let i = start + 1;
 				for (; i < words.length; ) {
 					const word = words[i] as string;
@@ -756,6 +815,9 @@ const parseComposeCommand = (
 							projectDirectories.push(rest.join("="));
 						} else if (name === "--env-file") {
 							envFiles.push(rest.join("="));
+						} else if (name === "--project-name") {
+							// The last one wins, also an empty one.
+							hasProjectName = rest.join("=") !== "";
 						}
 						i += 1;
 					} else if (COMPOSE_OPTIONS_WITH_VALUE.has(word)) {
@@ -767,12 +829,49 @@ const parseComposeCommand = (
 								projectDirectories.push(value);
 							} else if (word === "--env-file") {
 								envFiles.push(value);
+							} else if (word === "-p" || word === "--project-name") {
+								// The last one wins, also an empty one.
+								hasProjectName = value !== "";
 							}
 						}
 						i += 2;
-					} else if (/^-f.+/.test(word)) {
-						files.push(shortOptionValue(word));
-						i += 1;
+					} else if (/^-[^-]/.test(word)) {
+						// A bundle of short flags (pflag): `-fFILE`, `-f=FILE`, `-pNAME`,
+						// `-vfFILE` (`-v` and `-h` are booleans). `f` and `p` take the rest
+						// of the word, or the next word when nothing is left; a letter
+						// that is not known is refused, since it could hide a `-f`.
+						let consumed = 1;
+						for (let j = 1; j < word.length; j++) {
+							const letter = word[j] as string;
+							if (letter === "v" || letter === "h") {
+								continue;
+							}
+							if (letter === "H" || letter === "c") {
+								// A daemon or context option: findDaemonOption refuses it.
+								break;
+							}
+							if (letter !== "f" && letter !== "p") {
+								throw new Error(
+									`Compose command refused: the docker compose option "${word}" is not understood, so the compose files it may name cannot be checked. Write the options out (-f FILE, -p NAME).`,
+								);
+							}
+							const rest = word.slice(j + 1).replace(/^=/, "");
+							let value = rest;
+							if (j === word.length - 1) {
+								value = words[i + 1] ?? "";
+								consumed = 2;
+							}
+							if (letter === "f") {
+								if (value) {
+									files.push(value);
+								}
+							} else {
+								// The last one wins, also an empty one.
+								hasProjectName = value !== "";
+							}
+							break;
+						}
+						i += consumed;
 					} else if (word.startsWith("-")) {
 						i += 1;
 					} else {
@@ -811,6 +910,7 @@ const parseComposeCommand = (
 					subcommand,
 					files,
 					projectDirectories,
+					hasProjectName,
 					volumes,
 					envFiles,
 					envFromFiles,
@@ -870,8 +970,10 @@ const parseComposeCommand = (
 };
 
 // The compose files a custom command passes besides the deployed one. A
-// command that starts containers without naming a file would make Docker find
-// a compose file (or an override) in the project directory by itself.
+// `docker compose` command that loads the project (a loader, or a label-driven
+// subcommand without a project name; see LABEL_DRIVEN_SUBCOMMANDS) without
+// naming a file would make Docker find a compose file (or an override) in the
+// project directory by itself. Every `-f` a command does name is read.
 export const getCommandOverrideFiles = (
 	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
 ) => {
@@ -887,21 +989,29 @@ export const getCommandOverrideFiles = (
 	);
 	const overrides = new Set<string>();
 	for (const segment of parseComposeCommand(compose.command).segments) {
-		const startsContainers =
-			(segment.kind === "compose" &&
-				segment.subcommand !== undefined &&
-				FILE_READING_SUBCOMMANDS.has(segment.subcommand)) ||
+		const loadsFiles =
+			segment.kind === "compose" &&
+			segment.subcommand !== undefined &&
+			!PROJECT_FREE_SUBCOMMANDS.has(segment.subcommand) &&
+			!(
+				LABEL_DRIVEN_SUBCOMMANDS.has(segment.subcommand) &&
+				segment.hasProjectName
+			);
+		const readsFiles =
+			loadsFiles ||
 			(segment.kind === "stack" && segment.subcommand === "deploy");
-		if (!startsContainers) {
+		// A label-driven command with a project name and no `-f` reads nothing;
+		// a `-f` it does get is parsed below like any other.
+		if (!readsFiles && segment.files.length === 0) {
 			continue;
 		}
-		if (segment.files.length === 0) {
+		if (readsFiles && segment.files.length === 0) {
 			logger.warn(
 				{ composeId: compose.composeId },
 				"[VolumeBinding] A compose command was refused: it names no compose file",
 			);
 			throw new Error(
-				`Compose command refused: it starts containers without naming a compose file, so Docker would pick one from the project directory and its volumes would not be checked. Pass "-f ${compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath}" (or "-c" for a stack).`,
+				`Compose command refused: it runs \`docker ${segment.kind} ${segment.subcommand}\` without naming a compose file, so Docker would pick one from the project directory and its volumes, host paths and providers would not be checked. Pass "-f ${compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath}" (or "-c" for a stack).`,
 			);
 		}
 		// A relative file is read from the working directory, and possibly from
@@ -1145,6 +1255,18 @@ export const commandUsesEnvFile = (compose: Pick<ComposeNested, "command">) =>
 		(segment) => segment.envFiles.length > 0,
 	);
 
+// Compose (compose-go) loads every document of a multi-document YAML file and
+// merges them, while the parser used here reads one, so the other documents
+// would never be checked: such a file is refused wherever a compose is
+// checked (T-7161).
+const isMultiDocumentError = (error: unknown) =>
+	(error as { code?: unknown } | null)?.code === "MULTIPLE_DOCS";
+
+const multiDocumentError = (what: string) =>
+	new Error(
+		`Compose refused: ${what} has more than one YAML document (a "---" separator), and Docker Compose merges all of them, so they cannot be checked. Keep a single document in the compose file.`,
+	);
+
 const loadOverrideFile = async (
 	compose: ComposeForVolumeCheck,
 	path: string,
@@ -1161,7 +1283,12 @@ const loadOverrideFile = async (
 			text = readFileSync(path, "utf8");
 		}
 		return parse(text, { maxAliasCount: 10000, merge: true }) as Spec;
-	} catch {
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError(
+				`the compose file "${path}" a custom command uses`,
+			);
+		}
 		throw new Error(
 			`Compose command refused: the compose file "${path}" it uses could not be read, so its volumes cannot be checked.`,
 		);
@@ -1181,7 +1308,10 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	let spec: Awaited<ReturnType<typeof addDomainToCompose>>;
 	try {
 		spec = await addDomainToCompose(compose, compose.domains);
-	} catch {
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError("the compose file");
+		}
 		return;
 	}
 	if (!spec) {
@@ -1199,22 +1329,51 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	});
 };
 
+// The compose file on disk as text, or null when there is none (then `up -d`
+// has nothing to start either). Anything else that goes wrong reading it
+// throws: the file is not checked, so it must not be started.
+const readComposeFileOnDisk = async (compose: ComposeNested) => {
+	const path = getComposePath(compose);
+	try {
+		if (compose.serverId) {
+			const { stdout } = await execAsyncRemote(
+				compose.serverId,
+				`if [ -f ${quote([path])} ]; then cat ${quote([path])}; fi`,
+			);
+			return stdout ? stdout : null;
+		}
+		return await readComposeFile(compose);
+	} catch {
+		throw new Error(
+			"Compose refused: the compose file on disk could not be read, so it cannot be checked before it is started. Redeploy the compose.",
+		);
+	}
+};
+
 // Start (`docker compose up -d` from the files on disk): checks the compose
-// file that is there, which is already the final one of the last deploy.
+// file that is there, which is already the final one of the last deploy. A file
+// that cannot be parsed is refused, not skipped: Compose may read what this
+// parser does not.
 export const assertComposeFileOnDiskVolumesBound = async (
 	rawCompose: ComposeNested,
 ) => {
 	const compose = await withResolvedVaultRefs(rawCompose);
-	let spec: Awaited<ReturnType<typeof loadDockerCompose>>;
-	try {
-		spec = compose.serverId
-			? await loadDockerComposeRemote(compose)
-			: await loadDockerCompose(compose);
-	} catch {
-		// Nothing readable on disk: `up -d` has nothing to start either.
+	const text = await readComposeFileOnDisk(compose);
+	if (text === null) {
 		return;
 	}
-	if (!spec) {
+	let spec: unknown;
+	try {
+		spec = parse(text, { maxAliasCount: 10000, merge: true });
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError("the compose file on disk");
+		}
+		throw new Error(
+			"Compose refused: the compose file on disk is not valid YAML, so it cannot be checked before it is started. Fix the compose file and redeploy.",
+		);
+	}
+	if (!spec || typeof spec !== "object") {
 		return;
 	}
 	await assertComposeSpecVolumesBound(compose, spec as Spec);
@@ -1231,7 +1390,10 @@ export const assertComposeFileVolumesBound = async (
 	let spec: unknown;
 	try {
 		spec = parse(composeFile, { maxAliasCount: 10000, merge: true });
-	} catch {
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError("the compose file");
+		}
 		// Not valid YAML: nothing deploys from it, and the editor reports it.
 		return;
 	}

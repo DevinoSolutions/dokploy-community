@@ -301,7 +301,8 @@ const MAX_DOTENV_VALUE_LINES = 200;
 // NUL and the other control characters (a tab and a line feed are fine), DEL,
 // the C1 controls (U+0085 NEL), and the Unicode white space that is not
 // ASCII: Compose and this parser may disagree on them.
-const codeUnit = (value: number) => String.raw`\u${value.toString(16).padStart(4, "0")}`;
+const codeUnit = (value: number) =>
+	String.raw`\u${value.toString(16).padStart(4, "0")}`;
 const UNCERTAIN_DOTENV_RANGES: Array<[number, number]> = [
 	[0x00, 0x08],
 	[0x0b, 0x0c],
@@ -360,11 +361,18 @@ export type ComposeVolumeResolution = {
 	// Mounts of a directory that contains Docker's volume storage (`/`,
 	// `/var/lib/docker`, ...), by path.
 	forbiddenParents: string[];
+	// Services that declare a `provider`, by name and type as written (T-7161).
+	// They are refused whatever the type is.
+	providers: string[];
+	// Services, hooks and jobs that declare `models`, and the top-level `models`
+	// (T-7161): Compose runs the `docker model` plugin of the host for them.
+	models: string[];
 };
 
 type LooseSpec = {
 	include?: unknown;
 	services?: Record<string, unknown> | null;
+	jobs?: Record<string, unknown> | null;
 	volumes?: Record<string, unknown> | null;
 	secrets?: Record<string, unknown> | null;
 	configs?: Record<string, unknown> | null;
@@ -372,6 +380,41 @@ type LooseSpec = {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	!!value && typeof value === "object" && !Array.isArray(value);
+
+// Everything in a compose file that Compose turns into a container with the
+// full container spec (volumes, env_file, secrets, ...): the services, their
+// `pre_start` hooks (init containers that take the whole spec) and the
+// top-level `jobs`. Each comes with the label a refusal uses.
+const containerSpecs = (spec: NonNullable<LooseSpec>) => {
+	const found: Array<{ label: string; container: Record<string, unknown> }> =
+		[];
+	if (isRecord(spec.services)) {
+		for (const [name, service] of Object.entries(spec.services)) {
+			if (!isRecord(service)) {
+				continue;
+			}
+			found.push({ label: `service "${name}"`, container: service });
+			if (Array.isArray(service.pre_start)) {
+				service.pre_start.forEach((hook, index) => {
+					if (isRecord(hook)) {
+						found.push({
+							label: `service "${name}" pre_start[${index}]`,
+							container: hook,
+						});
+					}
+				});
+			}
+		}
+	}
+	if (isRecord(spec.jobs)) {
+		for (const [name, job] of Object.entries(spec.jobs)) {
+			if (isRecord(job)) {
+				found.push({ label: `job "${name}"`, container: job });
+			}
+		}
+	}
+	return found;
+};
 
 // Long-syntax types that are not named volumes.
 const NON_VOLUME_TYPES = new Set(["tmpfs", "npipe", "cluster", "image"]);
@@ -726,7 +769,7 @@ const createPathChecks = (options: ResolveOptions, into: PathChecks) => {
 
 // The top-level keys the services mount by name, plus what cannot be checked.
 const collectMounts = (
-	services: Record<string, unknown>,
+	containers: ReturnType<typeof containerSpecs>,
 	options: ResolveOptions,
 	into: MountedKeys,
 ) => {
@@ -792,25 +835,18 @@ const collectMounts = (
 			addSource(entry.slice(0, end), true);
 		}
 	};
-	for (const [serviceName, service] of Object.entries(services)) {
-		if (!isRecord(service)) {
-			continue;
-		}
+	for (const { label, container: service } of containers) {
 		// `volumes_from: container:<name>` mounts every volume of any container
 		// on the host, and `extends.file` reads a file the check cannot see.
 		if (Array.isArray(service.volumes_from)) {
 			for (const entry of service.volumes_from) {
 				if (typeof entry === "string" && entry.startsWith("container:")) {
-					into.unresolved.push(
-						`service "${serviceName}" (volumes_from a container)`,
-					);
+					into.unresolved.push(`${label} (volumes_from a container)`);
 				}
 			}
 		}
 		if (isRecord(service.extends) && service.extends.file) {
-			into.unresolved.push(
-				`service "${serviceName}" (extends from another file)`,
-			);
+			into.unresolved.push(`${label} (extends from another file)`);
 		}
 		const volumes = service.volumes;
 		if (!Array.isArray(volumes)) {
@@ -910,8 +946,10 @@ const parseCacheFields = (entry: string) => {
 //   `cache_to` directories (also with the default `up -d --build`);
 // - `develop.watch[].path`, synced into the container by `up --watch`;
 // - `env_file` and `label_file`, in the string, list and `path:` forms;
-// - the `file:` of the top-level `secrets` and `configs`.
-// A remote build context without a `..`, `docker-image://` and `service:` are
+// - the `file:` of the top-level `secrets` and `configs`;
+// - `credential_spec.file` (T-7161).
+// The services, their `pre_start` hooks and the `jobs` are all read
+// (containerSpecs). A remote build context without a `..`, `docker-image://` and `service:` are
 // not host paths and are left alone.
 const collectHostPaths = (
 	spec: NonNullable<LooseSpec>,
@@ -926,6 +964,24 @@ const collectHostPaths = (
 				checkPath(path, what);
 			}
 		}
+	};
+
+	// `credential_spec.file` (T-7161). Compose never reads it (docker/compose
+	// ignores `credential_spec` outside Swarm), and `docker stack deploy` hands it
+	// to the daemon as it is, which on Windows looks it up by name in its
+	// CredentialSpecs directory. It is still a path field, so it is judged like
+	// any other host path, `file://` form included, rather than trusting that
+	// no runtime ever reads it. `config` (a Swarm config name) and `registry`
+	// (a Windows registry value) name no file and are left alone.
+	const checkCredentialSpec = (credentialSpec: unknown) => {
+		if (!isRecord(credentialSpec) || typeof credentialSpec.file !== "string") {
+			return;
+		}
+		const file = credentialSpec.file;
+		checkPath(
+			file.startsWith(FILE_SCHEME) ? file.slice(FILE_SCHEME.length) : file,
+			"credential_spec file",
+		);
 	};
 
 	// A build context (the main one, or an `additional_contexts` value).
@@ -1071,7 +1127,9 @@ const collectHostPaths = (
 				}
 			}
 		}
-		for (const entry of Array.isArray(build.cache_from) ? build.cache_from : []) {
+		for (const entry of Array.isArray(build.cache_from)
+			? build.cache_from
+			: []) {
 			checkCacheEntry(entry, "build cache_from directory");
 		}
 		for (const entry of Array.isArray(build.cache_to) ? build.cache_to : []) {
@@ -1079,18 +1137,14 @@ const collectHostPaths = (
 		}
 	};
 
-	if (isRecord(spec.services)) {
-		for (const service of Object.values(spec.services)) {
-			if (!isRecord(service)) {
-				continue;
-			}
-			checkBuild(service.build);
-			checkEach(service.env_file, "env_file");
-			checkEach(service.label_file, "label_file");
-			if (isRecord(service.develop) && Array.isArray(service.develop.watch)) {
-				checkEach(service.develop.watch, "develop watch path");
-			}
+	for (const { container } of containerSpecs(spec)) {
+		checkBuild(container.build);
+		checkEach(container.env_file, "env_file");
+		checkEach(container.label_file, "label_file");
+		if (isRecord(container.develop) && Array.isArray(container.develop.watch)) {
+			checkEach(container.develop.watch, "develop watch path");
 		}
+		checkCredentialSpec(container.credential_spec);
 	}
 	for (const [section, what] of [
 		["secrets", "secret file"],
@@ -1108,6 +1162,62 @@ const collectHostPaths = (
 	}
 };
 
+// A service with a `provider` is not run as a container: Docker Compose
+// executes a program of the host with it (T-7161). The `type` is looked up
+// as a Docker CLI plugin named `docker-<type>` first and then with a plain
+// `exec.LookPath(type)` (docker/compose `internal/provider`,
+// `getPluginBinaryPath`), so `/bin/sh`, `./x` or any program of the PATH of
+// the deploy host runs there, with the service's `options` as arguments, as
+// the user that runs the deploy, outside every container. Nothing of Dokploy
+// (no template either) uses it, so it is refused for every type, also one that
+// comes from a variable, whatever its value; there is nothing to resolve. A
+// `provider` key that is present and not null counts, so the service, its
+// anchors, merge keys (already resolved by the YAML parse) and `x-` fragments
+// that are merged into it are all seen the same way.
+const collectProviders = (spec: NonNullable<LooseSpec>, into: string[]) => {
+	if (!isRecord(spec.services)) {
+		return;
+	}
+	for (const [name, service] of Object.entries(spec.services)) {
+		if (!isRecord(service)) {
+			continue;
+		}
+		const provider = service.provider;
+		if (provider === undefined || provider === null) {
+			continue;
+		}
+		const type = isRecord(provider) ? provider.type : undefined;
+		into.push(
+			typeof type === "string" && type
+				? `service "${name}" (provider type "${type}")`
+				: `service "${name}" (provider)`,
+		);
+	}
+};
+
+// `models` (a top-level definition, or a reference on a service, a hook or a
+// job) makes Docker Compose run the host's `docker model` CLI plugin (a fixed
+// plugin, not a program the tenant picks) to pull and configure the model, with
+// the options of the definition (`runtime_flags`, `context_size`) as arguments
+// of a runner that every tenant of the host shares. That is abuse of a shared
+// resource, not the code execution a provider is, and nothing of Dokploy uses
+// it, so it is refused as hardening (T-7161).
+const collectModels = (spec: NonNullable<LooseSpec>, into: string[]) => {
+	const present = (value: unknown) =>
+		value !== undefined &&
+		value !== null &&
+		!(Array.isArray(value) && value.length === 0) &&
+		!(isRecord(value) && Object.keys(value).length === 0);
+	if (present((spec as { models?: unknown }).models)) {
+		into.push("top-level models");
+	}
+	for (const { label, container } of containerSpecs(spec)) {
+		if (present(container.models)) {
+			into.push(`${label} (models)`);
+		}
+	}
+};
+
 // The volume names a set of compose files (the file Dokploy deploys plus the
 // override files of a custom command) mounts. A key is checked with the
 // definition of every file that declares it, because the merge order of the
@@ -1120,6 +1230,8 @@ export const resolveComposeFilesMountedVolumes = (
 	const unresolved: string[] = [];
 	const forbidden: string[] = [];
 	const forbiddenParents: string[] = [];
+	const providers: string[] = [];
+	const models: string[] = [];
 	const mounted: MountedKeys = {
 		keys: new Set<string>(),
 		unresolved,
@@ -1131,11 +1243,11 @@ export const resolveComposeFilesMountedVolumes = (
 		if (spec?.include) {
 			unresolved.push("include (volumes from another file)");
 		}
-		if (spec && isRecord(spec.services)) {
-			collectMounts(spec.services, options, mounted);
-		}
 		if (spec) {
+			collectMounts(containerSpecs(spec), options, mounted);
 			collectHostPaths(spec, options, mounted);
+			collectProviders(spec, providers);
+			collectModels(spec, models);
 		}
 	}
 	const definitionSets = specs.map((spec) =>
@@ -1292,7 +1404,7 @@ export const resolveComposeFilesMountedVolumes = (
 			}
 		}
 	}
-	return { uses, unresolved, forbidden, forbiddenParents };
+	return { uses, unresolved, forbidden, forbiddenParents, providers, models };
 };
 
 export const resolveComposeMountedVolumes = (
