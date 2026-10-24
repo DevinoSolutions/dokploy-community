@@ -3,11 +3,13 @@ import {
 	boolean,
 	index,
 	integer,
+	jsonb,
 	pgTable,
 	text,
 	timestamp,
 } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
+import type { ComposePolicyExclusion } from "../../utils/compose-policy/config";
 import { network } from "./network";
 import { projects } from "./project";
 import { server } from "./server";
@@ -76,6 +78,20 @@ export const organization = pgTable("organization", {
 	 * behaviour. See `resolveGeneratedDomainBase` for the precedence chain.
 	 */
 	wildcardDomain: text("wildcard_domain"),
+	/**
+	 * Fork column (T-7455). "Restricted compose: audit mode (read-only)". When on,
+	 * every compose deploy of the organization records what a sandbox WOULD
+	 * refuse; it never blocks or changes a deploy. Off by default. Enforcement is
+	 * a later, separate switch (a second boolean next to this one).
+	 */
+	restrictedComposeAudit: boolean("restricted_compose_audit")
+		.notNull()
+		.default(false),
+	/** Composes the audit skips: [{ id: composeId, reason? }]. Empty by default. */
+	restrictedComposeAuditExclusions: jsonb("restricted_compose_audit_exclusions")
+		.$type<ComposePolicyExclusion[]>()
+		.notNull()
+		.default([]),
 	ownerId: text("owner_id")
 		.notNull()
 		.references(() => user.id, { onDelete: "cascade" }),

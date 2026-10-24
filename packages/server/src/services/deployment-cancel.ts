@@ -438,11 +438,16 @@ const withTimeout = <T>(promise: Promise<T>, ms: number, what: string) => {
 	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 };
 
-/** Appends a line to a deployment log, wherever it lives. Never throws. */
+/**
+ * Appends a line to a deployment log, wherever it lives. Never throws.
+ * `failureMessage` is what the server log says when the write fails (the
+ * default is about a cancellation; other callers name their own line).
+ */
 export const appendLogLine = async (
 	logServerId: string | null,
 	logPath: string,
 	line: string,
+	failureMessage = "Could not write the cancellation to the deployment log",
 ) => {
 	if (!logPath || logPath === ".") return;
 	const text = `\n${line}\n`;
@@ -461,10 +466,7 @@ export const appendLogLine = async (
 			await appendFile(logPath, text);
 		}
 	} catch (error) {
-		console.error(
-			"Could not write the cancellation to the deployment log",
-			error,
-		);
+		console.error(failureMessage, error);
 	}
 };
 

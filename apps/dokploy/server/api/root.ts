@@ -12,6 +12,7 @@ import { cloudflareRouter } from "./routers/cloudflare";
 import { cloudflareAccessRouter } from "./routers/cloudflare-access";
 import { clusterRouter } from "./routers/cluster";
 import { composeRouter } from "./routers/compose";
+import { composePolicyRouter } from "./routers/compose-policy";
 import { deploymentRouter } from "./routers/deployment";
 import { deploymentCancelAuditRouter } from "./routers/deployment-cancel-audit";
 import { destinationRouter } from "./routers/destination";
@@ -85,6 +86,7 @@ export const appRouter = createTRPCRouter({
 	cloudflareAccess: cloudflareAccessRouter,
 	cluster: clusterRouter,
 	compose: composeRouter,
+	composePolicy: composePolicyRouter,
 	deployment: deploymentRouter,
 	deploymentCancelAudit: deploymentCancelAuditRouter,
 	destination: destinationRouter,
