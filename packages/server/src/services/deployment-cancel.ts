@@ -16,6 +16,7 @@ import {
 	execAsyncCancelable,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import {
 	abortRemoteBuild,
 	beginReleaseCancel,
@@ -23,7 +24,7 @@ import {
 	hasRunningRemoteBuild,
 	takeReleaseCancel,
 } from "@dokploy/server/utils/process/remote-build-registry";
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, notInArray } from "drizzle-orm";
 
 /**
  * Cancelling a deployment whose build runs on a build server.
@@ -141,13 +142,24 @@ export const isDeploymentCancelled = async (
 export const markDeploymentDoneUnlessCancelled = async (
 	deploymentId: string,
 ): Promise<boolean> => {
+	// A job the watchdog released must not report a success late.
+	if (
+		skipWriteOfReleasedJob(
+			`the status of deployment ${deploymentId}`,
+			deploymentId,
+		)
+	) {
+		return false;
+	}
 	const updated = await db
 		.update(deployments)
 		.set({ status: "done", finishedAt: new Date().toISOString() })
 		.where(
 			and(
 				eq(deployments.deploymentId, deploymentId),
-				ne(deployments.status, "cancelled"),
+				// `error` is a failure the watchdog (or the flow) recorded: a late
+				// success never replaces it.
+				notInArray(deployments.status, ["cancelled", "error"]),
 			),
 		)
 		.returning({ deploymentId: deployments.deploymentId });

@@ -27,6 +27,10 @@ const baseSettings: WebServerSettings = {
 	enableDockerCleanup: true,
 	dockerCleanupCron: "0 4 * * *",
 	buildsConcurrency: 1,
+	deploymentWatchdogEnabled: true,
+	deploymentWatchdogIdleMinutes: 20,
+	deploymentWatchdogMaxMinutes: 90,
+	deploymentWatchdogExclusions: [],
 	logCleanupCron: null,
 	metricsConfig: {
 		containers: {

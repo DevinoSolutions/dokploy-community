@@ -11,6 +11,15 @@ import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import {
+	DEFAULT_WATCHDOG_ENABLED,
+	DEFAULT_WATCHDOG_IDLE_MINUTES,
+	DEFAULT_WATCHDOG_MAX_MINUTES,
+	type WatchdogExclusion,
+	watchdogExclusionSchema,
+	watchdogIdleMinutesSchema,
+	watchdogMaxMinutesSchema,
+} from "../../utils/deployments/watchdog-config";
+import {
 	DEFAULT_DOCKER_CLEANUP_CRON,
 	dockerCleanupCronSchema,
 } from "../../utils/docker/cleanup-schedule";
@@ -115,6 +124,23 @@ export const webServerSettings = pgTable("webServerSettings", {
 	remoteServersOnly: boolean("remoteServersOnly").notNull().default(false),
 	// Concurrent builds on the local web server
 	buildsConcurrency: integer("buildsConcurrency").notNull().default(1),
+	// Stuck-deployment watchdog (see utils/deployments/watchdog-config.ts):
+	// fails a deployment whose log has been silent for `idleMinutes`, or that has
+	// run for more than `maxMinutes`, and frees its queue slot.
+	deploymentWatchdogEnabled: boolean("deploymentWatchdogEnabled")
+		.notNull()
+		.default(DEFAULT_WATCHDOG_ENABLED),
+	deploymentWatchdogIdleMinutes: integer("deploymentWatchdogIdleMinutes")
+		.notNull()
+		.default(DEFAULT_WATCHDOG_IDLE_MINUTES),
+	deploymentWatchdogMaxMinutes: integer("deploymentWatchdogMaxMinutes")
+		.notNull()
+		.default(DEFAULT_WATCHDOG_MAX_MINUTES),
+	// Services whose deployments the watchdog never fails. Nothing by default.
+	deploymentWatchdogExclusions: jsonb("deploymentWatchdogExclusions")
+		.$type<WatchdogExclusion[]>()
+		.notNull()
+		.default([]),
 	// Auth Configuration (self-hosted only)
 	enforceSSO: boolean("enforceSSO").notNull().default(false),
 	// Domain Restriction Configuration
@@ -190,6 +216,10 @@ export const apiUpdateWebServerSettings = createSchema.partial().extend({
 	remoteServersOnly: z.boolean().optional(),
 	enforceSSO: z.boolean().optional(),
 	buildsConcurrency: z.number().int().min(1).max(100).optional(),
+	deploymentWatchdogEnabled: z.boolean().optional(),
+	deploymentWatchdogIdleMinutes: watchdogIdleMinutesSchema.optional(),
+	deploymentWatchdogMaxMinutes: watchdogMaxMinutesSchema.optional(),
+	deploymentWatchdogExclusions: z.array(watchdogExclusionSchema).optional(),
 });
 
 export const apiUpdateWebServerBuildsConcurrency = z.object({

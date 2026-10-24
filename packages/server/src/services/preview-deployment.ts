@@ -5,6 +5,7 @@ import {
 	organization,
 	previewDeployments,
 } from "@dokploy/server/db/schema";
+import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import type { z } from "zod";
@@ -164,6 +165,10 @@ export const updatePreviewDeployment = async (
 	previewDeploymentId: string,
 	previewDeploymentData: Partial<PreviewDeployment>,
 ) => {
+	// A job the watchdog released must not write over what happened since.
+	if (skipWriteOfReleasedJob(`preview deployment ${previewDeploymentId}`)) {
+		return [];
+	}
 	const application = await db
 		.update(previewDeployments)
 		.set({

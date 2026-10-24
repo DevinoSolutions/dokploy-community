@@ -41,6 +41,7 @@ import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/
 import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignNetworks } from "@/components/dashboard/networks/assign-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
+import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -436,6 +437,7 @@ const Service = (
 												<ShowBuildServer applicationId={applicationId} />
 												{/* build-policy */}
 												<ShowRequiredChecks applicationId={applicationId} />
+												<WatchdogExclusion id={applicationId} type="application" />
 												<ShowResources id={applicationId} type="application" />
 												<ShowVolumes id={applicationId} type="application" />
 												<AssignNetworks id={applicationId} type="application" />
