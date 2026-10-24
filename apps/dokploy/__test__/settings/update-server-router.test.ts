@@ -232,6 +232,10 @@ describe("settings.updateServer with a pinned target", () => {
 	it.each([
 		["manifest unknown", `Image not found in ${REPO}.`],
 		[
+			"no such manifest: ghcr.io/devinosolutions/dokploy-community:v9.9.9-community.1",
+			`Image not found in ${REPO}.`,
+		],
+		[
 			"no such manifest: ghcr.io/devinosolutions/dokploy-community:v9.9.9: not found",
 			`Image not found in ${REPO}.`,
 		],

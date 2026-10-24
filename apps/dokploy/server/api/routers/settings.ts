@@ -924,7 +924,7 @@ export const settingsRouter = createTRPCRouter({
 					);
 					throw new TRPCError({
 						code: "BAD_REQUEST",
-						message: /manifest unknown|not found/i.test(reason)
+						message: /manifest unknown|no such manifest|not found/i.test(reason)
 							? `Image not found in ${DOKPLOY_IMAGE_REPO}.`
 							: "Could not reach ghcr.io to check the image; try again.",
 					});

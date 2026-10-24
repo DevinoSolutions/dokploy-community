@@ -381,7 +381,22 @@ const LAST_MIGRATION_OF_FLOOR = 206;
 // Migrations above the floor that were checked and are known to be safe for
 // the floor's release (a catch-up that drops nothing it reads, say).
 const ALLOWED_DESTRUCTIVE_MIGRATIONS: string[] = [];
-const DESTRUCTIVE = /\b(DROP\s+COLUMN|DROP\s+TABLE|RENAME|SET\s+NOT\s+NULL)\b/i;
+const DESTRUCTIVE =
+	/\b(DROP\s+COLUMN|DROP\s+TABLE|RENAME|SET\s+NOT\s+NULL|SET\s+DATA\s+TYPE|DROP\s+DEFAULT)\b/i;
+
+// True when the SQL drops, renames or tightens something the floor's release
+// uses. A NOT NULL column added without a default breaks its inserts too; a
+// new table's NOT NULL columns don't (the old release never writes to it).
+const isDestructive = (sql: string) =>
+	DESTRUCTIVE.test(sql) ||
+	sql
+		.split(/\bADD\s+COLUMN\b/i)
+		.slice(1)
+		.some(
+			(column) =>
+				/\bNOT\s+NULL\b/i.test(column.split(/;|,\s*ADD\b/i)[0] ?? "") &&
+				!/\bDEFAULT\b/i.test(column.split(/;|,\s*ADD\b/i)[0] ?? ""),
+		);
 
 describe("the pin floor and the migrations", () => {
 	it("no migration after the floor drops, renames or tightens anything", () => {
@@ -391,7 +406,7 @@ describe("the pin floor and the migrations", () => {
 			.filter((name) => Number(name.slice(0, 4)) > LAST_MIGRATION_OF_FLOOR)
 			.filter((name) => !ALLOWED_DESTRUCTIVE_MIGRATIONS.includes(name))
 			.filter((name) =>
-				DESTRUCTIVE.test(readFileSync(join(drizzleDir, name), "utf8")),
+				isDestructive(readFileSync(join(drizzleDir, name), "utf8")),
 			);
 
 		expect(
@@ -408,10 +423,32 @@ describe("the pin floor and the migrations", () => {
 				Number(name.slice(0, 4)) > LAST_MIGRATION_OF_FLOOR,
 		);
 		expect(scanned).toContain("0207_deployment_queue_journal.sql");
-		expect(DESTRUCTIVE.test("ALTER TABLE x DROP COLUMN y;")).toBe(true);
+		expect(isDestructive("ALTER TABLE x DROP COLUMN y;")).toBe(true);
+		expect(isDestructive('ALTER TABLE x ALTER COLUMN "y" SET NOT NULL;')).toBe(
+			true,
+		);
 		expect(
-			DESTRUCTIVE.test('ALTER TABLE x ALTER COLUMN "y" SET NOT NULL;'),
+			isDestructive('ALTER TABLE x ALTER COLUMN "y" SET DATA TYPE integer;'),
 		).toBe(true);
-		expect(DESTRUCTIVE.test("ALTER TABLE x ADD COLUMN y text;")).toBe(false);
+		expect(isDestructive('ALTER TABLE x ALTER COLUMN "y" DROP DEFAULT;')).toBe(
+			true,
+		);
+		expect(isDestructive('ALTER TABLE x ADD COLUMN "y" text NOT NULL;')).toBe(
+			true,
+		);
+		expect(
+			isDestructive(
+				'ALTER TABLE x ADD COLUMN "a" text DEFAULT \'\' NOT NULL, ADD COLUMN "b" text NOT NULL;',
+			),
+		).toBe(true);
+		expect(isDestructive("ALTER TABLE x ADD COLUMN y text;")).toBe(false);
+		expect(
+			isDestructive(
+				'ALTER TABLE x ADD COLUMN "y" boolean DEFAULT false NOT NULL;',
+			),
+		).toBe(false);
+		expect(
+			isDestructive('CREATE TABLE "z" ("id" text PRIMARY KEY NOT NULL);'),
+		).toBe(false);
 	});
 });
