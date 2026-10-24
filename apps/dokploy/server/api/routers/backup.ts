@@ -15,8 +15,11 @@ import {
 	findPostgresByBackupId,
 	findPostgresById,
 	findServerById,
+	getBackupDownloadUrl,
 	IS_CLOUD,
 	keepLatestNBackups,
+	listBackupFilesByBackupId,
+	type RcloneFile,
 	removeBackupById,
 	removeScheduleBackup,
 	runLibsqlBackup,
@@ -80,18 +83,6 @@ import {
 	apiUpdateBackup,
 } from "@/server/db/schema";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
-
-interface RcloneFile {
-	Path: string;
-	Name: string;
-	Size: number;
-	IsDir: boolean;
-	Tier?: string;
-	Hashes?: {
-		MD5?: string;
-		SHA1?: string;
-	};
-}
 
 type BackupAction = "create" | "read" | "update" | "delete" | "restore";
 type BackupCtx = {
@@ -741,6 +732,27 @@ export const backupRouter = createTRPCRouter({
 				metadata: backup.metadata ?? null,
 				canRestore,
 			};
+		}),
+
+	listBackupFilesByBackupId: withPermission("backup", "read")
+		.input(z.object({ backupId: z.string() }))
+		.query(({ input, ctx }) => listBackupFilesByBackupId(ctx, input.backupId)),
+
+	getDownloadUrl: withPermission("backup", "read")
+		.input(z.object({ backupId: z.string(), fileName: z.string().min(1) }))
+		.mutation(async ({ input, ctx }) => {
+			const result = await getBackupDownloadUrl(
+				ctx,
+				input.backupId,
+				input.fileName,
+			);
+			await audit(ctx, {
+				action: "download",
+				resourceType: "backup",
+				resourceId: input.backupId,
+				metadata: { file: input.fileName },
+			});
+			return result;
 		}),
 
 	restoreBackupWithLogs: protectedProcedure
