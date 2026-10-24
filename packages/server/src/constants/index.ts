@@ -11,6 +11,9 @@ export const DOKPLOY_DOCKER_PORT = process.env.DOKPLOY_DOCKER_PORT
 	? Number(process.env.DOKPLOY_DOCKER_PORT)
 	: undefined;
 
+// Legacy schedule (container-local time). Self-hosted cleanup now follows each
+// host's `dockerCleanupCron` in UTC (utils/docker/cleanup-schedule.ts); only the
+// IS_CLOUD jobs service still uses this.
 export const CLEANUP_CRON_JOB = "50 23 * * *";
 
 // Body size limits for the OpenAPI catch-all route (pages/api/[...trpc].ts).

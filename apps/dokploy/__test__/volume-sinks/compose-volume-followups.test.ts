@@ -2268,3 +2268,66 @@ services:
 		expect(restore).not.toContain("custom command dropped");
 	});
 });
+
+// T-7138: the check reads the variables the deploy hands to docker, and the
+// deploy leaves the names docker and compose read as settings out of them.
+describe("variables the deploy leaves out (T-7138)", () => {
+	const dockerStorage = "/var/lib/docker";
+
+	it("treats a stack's DOCKER_* and COMPOSE_* as unset, as docker stack deploy sees them", async () => {
+		// A variable that is passed resolves to the storage and is refused...
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("${DATA}/volumes"), {
+					composeType: "stack",
+					env: `DATA=${dockerStorage}`,
+				}),
+			),
+		).rejects.toThrow(/Docker's own volume storage/);
+		// ...one that is left out is not there to resolve.
+		for (const name of ["DOCKER_CONFIG", "COMPOSE_FILE", "DOCKER_HOST"]) {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(bind(`\${${name}}/volumes`), {
+						composeType: "stack",
+						env: `${name}=${dockerStorage}`,
+					}),
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+
+	it("treats a compose's COMPOSE_FILE as unset and its COMPOSE_PROJECT_NAME as the app name", async () => {
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("${DATA}/volumes"), { env: `DATA=${dockerStorage}` }),
+			),
+		).rejects.toThrow(/Docker's own volume storage/);
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("${COMPOSE_FILE}/volumes"), {
+					env: `COMPOSE_FILE=${dockerStorage}`,
+				}),
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				composeRow(bind("${COMPOSE_PROJECT_NAME}/volumes"), {
+					env: `COMPOSE_PROJECT_NAME=${dockerStorage}`,
+				}),
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it("still reads the COMPOSE_* tuning settings and DOCKER_* of a compose's .env", async () => {
+		for (const name of ["COMPOSE_PROFILES", "DOCKER_CONFIG"]) {
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(bind(`\${${name}}/volumes`), {
+						env: `${name}=${dockerStorage}`,
+					}),
+				),
+			).rejects.toThrow(/Docker's own volume storage/);
+		}
+	});
+});

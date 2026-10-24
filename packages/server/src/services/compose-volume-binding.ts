@@ -10,6 +10,10 @@ import {
 	getComposePath,
 	readComposeFile,
 } from "@dokploy/server/utils/docker/domain";
+import {
+	isComposeDotenvName,
+	isStackEnvName,
+} from "@dokploy/server/utils/docker/env-file";
 import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import {
 	getEnvironmentVariablesObject,
@@ -80,10 +84,16 @@ const getInterpolationVariables = (
 		const projectEnv = compose.environment.project.env;
 		const environmentEnv = compose.environment.env;
 		if (isStack) {
-			const written = getEnvironmentVariablesObject(
-				compose.env ?? "",
-				projectEnv,
-				environmentEnv,
+			// The staged file leaves out the names the docker CLI reads as its own
+			// settings (isStackEnvName), so for `docker stack deploy` they are unset.
+			const written = Object.fromEntries(
+				Object.entries(
+					getEnvironmentVariablesObject(
+						compose.env ?? "",
+						projectEnv,
+						environmentEnv,
+					),
+				).filter(([name]) => isStackEnvName(name)),
 			);
 			const shellNames = ["PATH", "HOME", "PWD", "OLDPWD", "SHLVL", "_"].filter(
 				(name) => !Object.hasOwn(written, name),
@@ -105,8 +115,12 @@ const getInterpolationVariables = (
 			environmentEnv,
 		)) {
 			const [key, value] = parseEnvironmentKeyValuePair(pair);
-			written[key] = value;
+			// getCreateEnvFileCommand leaves out the `COMPOSE_*` settings of the
+			// Environment and always writes Dokploy's own project name.
+			if (key === "COMPOSE_PROJECT_NAME") continue;
+			if (isComposeDotenvName(key)) written[key] = value;
 		}
+		written.COMPOSE_PROJECT_NAME = compose.appName;
 		// The values refer to each other, as Compose expands them.
 		const env = resolveEnvironmentReferences(written, ["PATH", "HOME"]);
 		env.PATH = UNKNOWN_VARIABLE_VALUE;

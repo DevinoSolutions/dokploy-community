@@ -160,6 +160,12 @@ void app
 				// Jobs the previous process left waiting or running. Never throws:
 				// failures are logged and reported inside, startup carries on.
 				await restoreQueuedDeployments();
+				// After the restore, which closes what the previous process left
+				// running: the watchdog only looks at what runs from now on.
+				const { startDeploymentWatchdog } = await import(
+					"./queues/deployment-control"
+				);
+				startDeploymentWatchdog();
 			}
 		} catch (e) {
 			console.error("Main Server Error", e);

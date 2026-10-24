@@ -77,6 +77,7 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const canRemoveWaiting =
 		!isCloud && (permissions?.deployment.cancel ?? false);
+	const canCancelActive = permissions?.deployment.cancel ?? false;
 	const utils = api.useUtils();
 	const { mutateAsync: removeQueued, isPending: isRemoving } =
 		api.deployment.removeQueued.useMutation({
@@ -86,13 +87,21 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 		mutateAsync: cancelApplicationDeployment,
 		isPending: isCancellingApp,
 	} = api.application.cancelDeployment.useMutation({
-		onSuccess: () => void utils.deployment.queueList.invalidate(),
+		onSuccess: (result) => {
+			toast.success(result?.message ?? "Deployment cancellation requested");
+			void utils.deployment.queueList.invalidate();
+		},
+		onError: (error) => toast.error(error.message),
 	});
 	const {
 		mutateAsync: cancelComposeDeployment,
 		isPending: isCancellingCompose,
 	} = api.compose.cancelDeployment.useMutation({
-		onSuccess: () => void utils.deployment.queueList.invalidate(),
+		onSuccess: (result) => {
+			toast.success(result?.message ?? "Deployment cancellation requested");
+			void utils.deployment.queueList.invalidate();
+		},
+		onError: (error) => toast.error(error.message),
 	});
 	const isCancelling = isCancellingApp || isCancellingCompose;
 
@@ -197,8 +206,9 @@ export function ShowQueueTable(props: { embedded?: boolean }) {
 															</Button>
 														</DialogAction>
 													)}
-													{isCloud &&
+													{canCancelActive &&
 														row.state === "active" &&
+														d?.previewDeploymentId == null &&
 														(d?.applicationId != null ||
 															d?.composeId != null) && (
 															<Button

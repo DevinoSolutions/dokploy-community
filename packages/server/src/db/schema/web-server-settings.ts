@@ -10,6 +10,19 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import {
+	DEFAULT_WATCHDOG_ENABLED,
+	DEFAULT_WATCHDOG_IDLE_MINUTES,
+	DEFAULT_WATCHDOG_MAX_MINUTES,
+	type WatchdogExclusion,
+	watchdogExclusionSchema,
+	watchdogIdleMinutesSchema,
+	watchdogMaxMinutesSchema,
+} from "../../utils/deployments/watchdog-config";
+import {
+	DEFAULT_DOCKER_CLEANUP_CRON,
+	dockerCleanupCronSchema,
+} from "../../utils/docker/cleanup-schedule";
 import { certificateType } from "./shared";
 
 export const webServerSettings = pgTable("webServerSettings", {
@@ -25,6 +38,10 @@ export const webServerSettings = pgTable("webServerSettings", {
 	letsEncryptEmail: text("letsEncryptEmail"),
 	sshPrivateKey: text("sshPrivateKey"),
 	enableDockerCleanup: boolean("enableDockerCleanup").notNull().default(true),
+	// 5-field cron, read in UTC. See utils/docker/cleanup-schedule.ts.
+	dockerCleanupCron: text("dockerCleanupCron")
+		.notNull()
+		.default(DEFAULT_DOCKER_CLEANUP_CRON),
 	logCleanupCron: text("logCleanupCron").default("0 0 * * *"),
 	// Metrics Configuration
 	metricsConfig: jsonb("metricsConfig")
@@ -107,6 +124,23 @@ export const webServerSettings = pgTable("webServerSettings", {
 	remoteServersOnly: boolean("remoteServersOnly").notNull().default(false),
 	// Concurrent builds on the local web server
 	buildsConcurrency: integer("buildsConcurrency").notNull().default(1),
+	// Stuck-deployment watchdog (see utils/deployments/watchdog-config.ts):
+	// fails a deployment whose log has been silent for `idleMinutes`, or that has
+	// run for more than `maxMinutes`, and frees its queue slot.
+	deploymentWatchdogEnabled: boolean("deploymentWatchdogEnabled")
+		.notNull()
+		.default(DEFAULT_WATCHDOG_ENABLED),
+	deploymentWatchdogIdleMinutes: integer("deploymentWatchdogIdleMinutes")
+		.notNull()
+		.default(DEFAULT_WATCHDOG_IDLE_MINUTES),
+	deploymentWatchdogMaxMinutes: integer("deploymentWatchdogMaxMinutes")
+		.notNull()
+		.default(DEFAULT_WATCHDOG_MAX_MINUTES),
+	// Services whose deployments the watchdog never fails. Nothing by default.
+	deploymentWatchdogExclusions: jsonb("deploymentWatchdogExclusions")
+		.$type<WatchdogExclusion[]>()
+		.notNull()
+		.default([]),
 	// Auth Configuration (self-hosted only)
 	enforceSSO: boolean("enforceSSO").notNull().default(false),
 	// Domain Restriction Configuration
@@ -150,6 +184,7 @@ export const apiUpdateWebServerSettings = createSchema.partial().extend({
 	letsEncryptEmail: z.string().email().optional().nullable(),
 	sshPrivateKey: z.string().optional(),
 	enableDockerCleanup: z.boolean().optional(),
+	dockerCleanupCron: dockerCleanupCronSchema.optional(),
 	logCleanupCron: z.string().optional().nullable(),
 	metricsConfig: z
 		.object({
@@ -181,6 +216,10 @@ export const apiUpdateWebServerSettings = createSchema.partial().extend({
 	remoteServersOnly: z.boolean().optional(),
 	enforceSSO: z.boolean().optional(),
 	buildsConcurrency: z.number().int().min(1).max(100).optional(),
+	deploymentWatchdogEnabled: z.boolean().optional(),
+	deploymentWatchdogIdleMinutes: watchdogIdleMinutesSchema.optional(),
+	deploymentWatchdogMaxMinutes: watchdogMaxMinutesSchema.optional(),
+	deploymentWatchdogExclusions: z.array(watchdogExclusionSchema).optional(),
 });
 
 export const apiUpdateWebServerBuildsConcurrency = z.object({
@@ -211,6 +250,8 @@ export const apiSaveSSHKey = z
 
 export const apiUpdateDockerCleanup = z.object({
 	enableDockerCleanup: z.boolean(),
+	// Omitted = keep the stored schedule.
+	dockerCleanupCron: dockerCleanupCronSchema.optional(),
 	serverId: z.string().optional(),
 });
 

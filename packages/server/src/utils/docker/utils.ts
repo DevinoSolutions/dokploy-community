@@ -314,12 +314,38 @@ const excludedCleanupAllCommands: (keyof typeof cleanupCommands)[] = [
 	"volumes",
 ];
 
-export const cleanupAll = async (serverId?: string) => {
+export type CleanupAllOptions = {
+	/**
+	 * Asked before every prune after the first. When it answers true (or throws)
+	 * the remaining prunes are skipped: `image prune --all` and `system prune
+	 * --all` delete any tagged image no container uses, so a deploy that started
+	 * after the caller's idle check must not be run over.
+	 */
+	shouldAbort?: () => Promise<boolean> | boolean;
+};
+
+/** `aborted` is true when `shouldAbort` stopped the run before every prune ran. */
+export const cleanupAll = async (
+	serverId?: string,
+	{ shouldAbort }: CleanupAllOptions = {},
+): Promise<{ aborted: boolean }> => {
+	let first = true;
 	for (const [key, command] of Object.entries(cleanupCommands) as [
 		keyof typeof cleanupCommands,
 		string,
 	][]) {
 		if (excludedCleanupAllCommands.includes(key)) continue;
+
+		if (shouldAbort && !first) {
+			let abort = true;
+			try {
+				abort = await shouldAbort();
+			} catch (error) {
+				console.error("Docker cleanup: abort check failed, stopping", error);
+			}
+			if (abort) return { aborted: true };
+		}
+		first = false;
 
 		try {
 			if (serverId) {
@@ -334,6 +360,7 @@ export const cleanupAll = async (serverId?: string) => {
 			);
 		}
 	}
+	return { aborted: false };
 };
 
 export interface DockerDiskUsageItem {

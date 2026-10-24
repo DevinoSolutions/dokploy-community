@@ -39,6 +39,11 @@ export {
 
 const execAsyncBase = util.promisify(exec);
 
+// A command can print nothing for as long as a build runs, and a link that goes
+// half-open then never closes the channel. The client pings, so ssh2 drops the
+// connection (an "error", then "close") about 40 seconds after the last reply.
+const SSH_KEEPALIVE = { keepaliveInterval: 10_000, keepaliveCountMax: 3 };
+
 // Node embeds the full command in error.message; it may carry secrets. A
 // command wrapped by `shSingleQuote` (execAsyncCancelable) appears there with
 // each `'` escaped, so that form is stripped too.
@@ -411,14 +416,24 @@ export const execAsyncRemote = async (
 		: command;
 	const { signal } = options;
 	let detachAbort = () => {};
-	return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+	return new Promise<{ stdout: string; stderr: string }>((res, rej) => {
+		// Lets the connection-loss handler tell a finished command from a dropped one.
+		let settled = false;
+		const resolve = (value: { stdout: string; stderr: string }) => {
+			settled = true;
+			res(value);
+		};
+		const reject = (error: unknown) => {
+			settled = true;
+			rej(error);
+		};
 		const conn = new Client();
 		if (signal) {
 			const onAbort = () => {
-				conn.destroy();
 				reject(
 					new ExecError("Remote command was aborted", { command, serverId }),
 				);
+				conn.destroy();
 			};
 			if (signal.aborted) {
 				reject(
@@ -435,13 +450,13 @@ export const execAsyncRemote = async (
 			const unregister = registerRemoteBuild(
 				cancelable.deploymentId,
 				(reason) => {
-					conn.destroy();
 					reject(
 						new ExecError(`Remote build was cancelled: ${reason}`, {
 							command,
 							serverId,
 						}),
 					);
+					conn.destroy();
 				},
 			);
 			conn.once("close", unregister);
@@ -454,8 +469,8 @@ export const execAsyncRemote = async (
 			try {
 				conn.exec(cmd, callback);
 			} catch (error) {
-				conn.end();
 				reject(error);
+				conn.end();
 			}
 		};
 
@@ -470,8 +485,8 @@ export const execAsyncRemote = async (
 					try {
 						await options.beforeExec();
 					} catch (error) {
-						conn.end();
 						reject(error);
+						conn.end();
 						return;
 					}
 					// Aborted while the check was pending: already destroyed and rejected.
@@ -487,6 +502,7 @@ export const execAsyncRemote = async (
 								originalError: err,
 							}),
 						);
+						conn.end();
 						return;
 					}
 					if (options.stdin !== undefined) {
@@ -496,7 +512,6 @@ export const execAsyncRemote = async (
 					}
 					stream
 						.on("close", (code: number, _signal: string) => {
-							conn.end();
 							emit(stdoutOutput, stdoutDecoder.end());
 							emit(stderrOutput, stderrDecoder.end());
 							const stdout = stdoutOutput.value;
@@ -525,6 +540,8 @@ export const execAsyncRemote = async (
 									),
 								);
 							}
+							// After settling, so a close during `end()` does not look like a loss.
+							conn.end();
 						})
 						.on("data", (data: Buffer) => {
 							emit(stdoutOutput, stdoutDecoder.write(data));
@@ -535,7 +552,6 @@ export const execAsyncRemote = async (
 				});
 			})
 			.on("error", (err) => {
-				conn.end();
 				if (err.level === "client-authentication") {
 					const technicalDetail = `Error: ${err.message} ${err.level}`;
 					const friendlyMessage = [
@@ -574,6 +590,31 @@ export const execAsyncRemote = async (
 						}),
 					);
 				}
+				conn.end();
+			})
+			// Nothing to do once the command has settled (the normal close ends the
+			// connection itself). Otherwise the link dropped under a running
+			// command. ssh2 emits this before it closes the channels, so on a
+			// server-side close this wins over the stream's exit-less close and
+			// has to carry the same output and log line.
+			.on("close", () => {
+				if (settled) return;
+				emit(stdoutOutput, stdoutDecoder.end());
+				emit(stderrOutput, stderrDecoder.end());
+				const stdout = stdoutOutput.value;
+				const stderr = stderrOutput.value;
+				onData?.(
+					"Connection to the server was lost before the command finished",
+				);
+				const outputTail = truncateOutputTail(stderr || stdout);
+				reject(
+					new ExecError(
+						`Connection to the server was lost before the command finished${
+							outputTail ? `: ${outputTail}` : ""
+						}`,
+						{ command, stdout, stderr, serverId },
+					),
+				);
 			})
 			.connect({
 				host: server.ipAddress,
@@ -581,6 +622,7 @@ export const execAsyncRemote = async (
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
 				timeout: 99999,
+				...SSH_KEEPALIVE,
 			});
 	}).finally(() => detachAbort());
 };
@@ -757,8 +799,7 @@ export const openRemoteInputSession = async (
 				privateKey: server.sshKey?.privateKey,
 				// A session can stay open for as long as a deploy hook runs; notice
 				// a dead connection instead of waiting on it forever.
-				keepaliveInterval: 10_000,
-				keepaliveCountMax: 3,
+				...SSH_KEEPALIVE,
 			});
 	});
 };
