@@ -1541,6 +1541,20 @@
       "when": 1792378342003,
       "tag": "0219_deployment_cancel_audit_oauth_client",
       "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1792788326769,
+      "tag": "0220_docker_cleanup_cron",
+      "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
+      "when": 1792792906742,
+      "tag": "0221_deployment_watchdog",
+      "breakpoints": true
     }
   ]
 }

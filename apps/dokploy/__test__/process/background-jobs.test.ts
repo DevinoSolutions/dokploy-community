@@ -13,13 +13,15 @@ const mocks = vi.hoisted(() => ({
 	cleanupAll: vi.fn(),
 	sendDockerCleanupNotifications: vi.fn(),
 	scheduleJob: vi.fn(),
+	scheduledJobs: {} as Record<string, unknown>,
 	removeJob: vi.fn(),
 	schedule: vi.fn(),
+	findServerById: vi.fn(),
 }));
 
 vi.mock("node-schedule", () => ({
 	scheduleJob: mocks.scheduleJob,
-	scheduledJobs: {},
+	scheduledJobs: mocks.scheduledJobs,
 }));
 
 vi.mock("@dokploy/server", async () => {
@@ -29,9 +31,25 @@ vi.mock("@dokploy/server", async () => {
 		CLEANUP_CRON_JOB: "0 0 * * *",
 		IS_CLOUD: false,
 		cleanupAll: mocks.cleanupAll,
+		findServerById: mocks.findServerById,
 		sendDockerCleanupNotifications: mocks.sendDockerCleanupNotifications,
 	};
 });
+
+// The cleanup job itself (utils/docker/cleanup-job) runs for real; only what it
+// reaches out to is replaced: the docker prune, and the deployment lookups of
+// the idle guard (nothing is deploying).
+vi.mock("@dokploy/server/utils/docker/utils", () => ({
+	cleanupAll: mocks.cleanupAll,
+}));
+
+vi.mock("@dokploy/server/db", () => ({
+	db: { query: { deployments: { findMany: async () => [] } } },
+}));
+
+vi.mock("@dokploy/server/services/deployment-queue-journal", () => ({
+	listQueueJobs: async () => [],
+}));
 
 vi.mock("@/server/utils/backup", () => ({
 	schedule: mocks.schedule,
@@ -64,6 +82,16 @@ beforeEach(() => {
 	process.on("unhandledRejection", onUnhandled);
 	errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 	vi.clearAllMocks();
+	// A real scheduleJob returns the job; null means the rule never fires.
+	mocks.scheduleJob.mockImplementation((name: string) => {
+		const job = { cancel: () => delete mocks.scheduledJobs[name] };
+		mocks.scheduledJobs[name] = job;
+		return job;
+	});
+	mocks.findServerById.mockResolvedValue({
+		name: "prod",
+		dockerCleanupCron: "0 4 * * *",
+	});
 });
 
 afterEach(() => {
@@ -435,7 +463,7 @@ describe("docker cleanup schedule for a remote server", () => {
 		expect(unhandled).toEqual([]);
 		expect(mocks.sendDockerCleanupNotifications).not.toHaveBeenCalled();
 		expect(errorSpy).toHaveBeenCalledWith(
-			"Docker cleanup failed",
+			"Docker cleanup (server prod (srv-1)) failed",
 			{ serverId: "srv-1" },
 			expect.stringContaining("Timed out while waiting for handshake"),
 		);
@@ -445,13 +473,13 @@ describe("docker cleanup schedule for a remote server", () => {
 		await applyDockerCleanupSchedule("srv-1", "org-1", true);
 		const callback = mocks.scheduleJob.mock
 			.calls[0]?.[2] as () => Promise<void>;
-		mocks.cleanupAll.mockResolvedValue(undefined);
+		mocks.cleanupAll.mockResolvedValue({ aborted: false });
 		mocks.sendDockerCleanupNotifications.mockRejectedValue(
 			new Error("smtp down"),
 		);
 
 		await expect(callback()).resolves.toBeUndefined();
-		expect(mocks.cleanupAll).toHaveBeenCalledWith("srv-1");
+		expect(mocks.cleanupAll).toHaveBeenCalledWith("srv-1", expect.any(Object));
 		expect(mocks.sendDockerCleanupNotifications).toHaveBeenCalledWith("org-1");
 	});
 });

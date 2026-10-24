@@ -65,6 +65,15 @@ interface DeploymentQueue {
 	run: () => Promise<void>;
 	/** Remove one job while it is still waiting; false when it is not. */
 	removeWaitingJob: (id: string) => boolean;
+	/**
+	 * Free the slot of a running job that will not end (see
+	 * InMemoryQueue.releaseActive); false when no running job has that id.
+	 */
+	releaseActive: (id: string, options?: { keepGroupLock?: boolean }) => boolean;
+	/** True while a released job still holds its service's group lock. */
+	hasKeptGroupLock: (id: string) => boolean;
+	/** Drop that lock (see InMemoryQueue.dropKeptGroupLock). */
+	dropKeptGroupLock: (id: string) => boolean;
 	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
 	keepOldestWaiting: (
 		predicate: (data: DeploymentJob) => boolean,
@@ -88,6 +97,9 @@ const createNoopQueue = (): DeploymentQueue => ({
 	on: () => {},
 	run: () => Promise.resolve(),
 	removeWaitingJob: () => false,
+	releaseActive: () => false,
+	hasKeptGroupLock: () => false,
+	dropKeptGroupLock: () => false,
 	removeWaiting: () => 0,
 	keepOldestWaiting: () => ({ kept: [], removed: [] }),
 	coalesceWaiting: () => ({ merged: null, removed: [], titles: [] }),
@@ -142,6 +154,9 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		on: () => {},
 		run: () => queue.run(),
 		removeWaitingJob: (id) => queue.removeWaitingJob(id),
+		releaseActive: (id, options) => queue.releaseActive(id, options),
+		hasKeptGroupLock: (id) => queue.hasKeptGroupLock(id),
+		dropKeptGroupLock: (id) => queue.dropKeptGroupLock(id),
 		removeWaiting: (predicate) => queue.removeWaiting(predicate),
 		keepOldestWaiting: (predicate) => queue.keepOldestWaiting(predicate),
 		coalesceWaiting: (incoming, predicate) =>

@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
 		},
 		warn: vi.fn(),
 		readFileSync: vi.fn(),
+		readDotenv: vi.fn(),
 	};
 });
 
@@ -42,6 +43,18 @@ vi.mock("node:fs", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:fs")>()),
 	readFileSync: mocks.readFileSync,
 }));
+
+// The `.env` of the project directory (T-7160). Not there unless a test says so.
+vi.mock("node:fs/promises", async (importOriginal) => ({
+	...(await importOriginal<typeof import("node:fs/promises")>()),
+	open: async (path: string) => {
+		const { dotenvHandle } = await import("./dotenv-fs-mock");
+		const result = await mocks.readDotenv(path);
+		return typeof result === "string" ? dotenvHandle(result) : result;
+	},
+}));
+
+const fsError = (code: string) => Object.assign(new Error(code), { code });
 
 const { paths } = await import("@dokploy/server/constants");
 const {
@@ -120,6 +133,7 @@ const mountOf = (volumeName: string, organizationId: string) => ({
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.readDotenv.mockRejectedValue(fsError("ENOENT"));
 	for (const table of Object.values(mocks.query)) {
 		table.findMany.mockResolvedValue([]);
 	}
@@ -1056,17 +1070,13 @@ volumes:
 			}
 		});
 
-		it("leaves a source it cannot tell from a volume name or an ordinary path", async () => {
-			// Unresolved service sources are not refused for being unresolved
-			// (unlike a volume name or `external`), so these keep deploying; every
-			// declared volume is checked instead. Documented gap: a .env that sets
-			// DATA_DIR to /var/lib/docker/volumes is not seen.
+		it("reads a .env that is not there as no variable at all", async () => {
+			// Docker reads the .env of the project directory; with none, a variable
+			// is unset (empty), which is not a path of the host's.
 			for (const value of [
-				"${DATA_DIR}",
 				"${DATA_DIR}/x",
 				"./${DATA_DIR}",
 				"/srv/${APP}",
-				"/var/lib/${X}",
 				"/var/lib/docker/volumes$${LITERAL}x",
 			]) {
 				await expect(
@@ -1075,11 +1085,34 @@ volumes:
 			}
 		});
 
+		it("refuses a variable in a host path when the .env cannot be read (T-7160)", async () => {
+			// A .env Dokploy cannot read may set the variable to any directory, and
+			// a default does not hold against it.
+			mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
+			for (const value of [
+				"${DATA_DIR}",
+				"${DATA_DIR}/x",
+				"./${DATA_DIR}",
+				"/srv/${APP}",
+				"${DATA_DIR:-./data}",
+			]) {
+				await expect(
+					assertComposeVolumesBound(composeRow(source(value), off)),
+				).rejects.toThrow(/Compose volume check failed/);
+			}
+			await expect(
+				assertComposeVolumesBound(
+					composeRow(source("/var/lib/docker/volumes$${LITERAL}x"), off),
+				),
+			).resolves.toBeUndefined();
+		});
+
 		it("still checks every declared volume for a variable source", async () => {
 			mocks.query.mounts.findMany.mockResolvedValue([
 				mountOf("victim", "org-b"),
 			]);
-
+			// A source that stays unresolved after the .env was read (an error
+			// form) can name any declared volume.
 			await expect(
 				assertComposeVolumesBound(
 					composeRow(
@@ -1087,7 +1120,7 @@ volumes:
 services:
   web:
     volumes:
-      - "\${SRC}:/data"
+      - "\${SRC:?set SRC}:/data"
 volumes:
   data:
     name: victim
@@ -1348,11 +1381,12 @@ describe("--project-directory moves the base of relative binds", () => {
 		await expect(
 			assertComposeVolumesBound(row(`compose -f ${DEPLOYED} up -d`)),
 		).rejects.toThrow(/is Docker's own volume storage/);
+		// The env file is not read: no variable of a host path is trusted.
 		await expect(
 			assertComposeVolumesBound(
 				row(`compose --env-file other.env -f ${DEPLOYED} up -d`),
 			),
-		).resolves.toBeUndefined();
+		).rejects.toThrow(/Compose volume check failed/);
 		expect(commandUsesEnvFile({ command: "compose --env-file a up -d" })).toBe(
 			true,
 		);
@@ -1454,6 +1488,8 @@ describe("a variable followed by .. that cannot be resolved", () => {
 		"$PWD/../..",
 		"./${X}/../..",
 	])("refuses %s with the env file off", async (source) => {
+		// The .env is there but cannot be read: nothing is known.
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		await expect(
 			assertComposeVolumesBound(
 				composeRow(bind(source), { createEnvFile: false }),
@@ -1470,6 +1506,8 @@ describe("a variable followed by .. that cannot be resolved", () => {
 	});
 
 	it("refuses it in the long syntax", async () => {
+		// The .env is there but cannot be read: nothing is known.
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		await expect(
 			assertComposeVolumesBound(
 				composeRow(longBind('"${PWD}/../.."'), { createEnvFile: false }),
@@ -1504,6 +1542,8 @@ describe("a variable followed by .. that cannot be resolved", () => {
 	});
 
 	it("refuses Docker's own directory followed by a variable with the env file off", async () => {
+		// The .env is there but cannot be read: nothing is known.
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		for (const source of [
 			"/var/lib/docker/${X}",
 			"/var/lib/docker/${X}/_data",
@@ -1587,6 +1627,8 @@ services:
 	});
 
 	it("fails closed on an entry that is only variables when they are not known", async () => {
+		// The .env is there but cannot be read: nothing is known.
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		await expect(
 			assertComposeVolumesBound(
 				composeRow(entry("${VOL}"), { createEnvFile: false }),
@@ -1803,12 +1845,16 @@ services:
 		"${X:-${Y:-..}}:/h",
 		"/srv/${X:-..}/..:/h",
 	])("refuses %s with the env file off", async (source) => {
+		// The .env is there but cannot be read: nothing is known.
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		await expect(
 			assertComposeVolumesBound(composeRow(entry(source), off)),
 		).rejects.toThrow(climbs);
 	});
 
 	it("refuses the long-syntax bind of the same sources", async () => {
+		// The .env is there but cannot be read: nothing is known.
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		for (const source of [
 			"${A}/${U:-..}/${U:-..}/${U:-..}/${U:-..}/${U:-..}",
 			"${A}${U:-/../../../../..}",
@@ -1879,6 +1925,8 @@ services:
 	});
 
 	it("is not an exception when the default holds a variable or braces", async () => {
+		// The .env is there but cannot be read: nothing is known.
+		mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 		for (const source of [
 			"${X:-${Y:-../data}}:/h",
 			"${X:-$Y/../data}:/h",
@@ -1961,6 +2009,8 @@ services:
 	it.each(["${A}/.${U}./.${U}./.${U}.", "${A}/.${U}.", "${A}/.${U:-}."])(
 		"refuses %s when no variable is known (env file off)",
 		async (source) => {
+			// The .env is there but cannot be read: nothing is known.
+			mocks.readDotenv.mockRejectedValue(fsError("EACCES"));
 			await expect(
 				assertComposeVolumesBound(
 					composeRow(entry(source), { createEnvFile: false }),

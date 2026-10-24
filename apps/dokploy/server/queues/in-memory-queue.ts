@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { runInJobContext } from "@dokploy/server/utils/process/job-context";
 import type { DeploymentJob } from "./queue-types";
 
 /**
@@ -184,6 +185,18 @@ interface InternalJob {
 	/** Started ahead of waiting jobs through the priority lane. */
 	jumped: boolean;
 	wentAheadOf: number;
+	/**
+	 * The slot was freed by `releaseActive` while the processor was still
+	 * running. When it finally returns it must not touch the partition: the
+	 * group may have been started again by then.
+	 */
+	released: boolean;
+	/**
+	 * The release kept the service's group lock: nothing could be stopped, so a
+	 * second deploy of the service must not start next to the first. The lock
+	 * is dropped when the processor really returns.
+	 */
+	groupLockKept: boolean;
 }
 
 interface Partition {
@@ -246,6 +259,8 @@ export interface InMemoryQueueOptions {
 
 export class InMemoryQueue {
 	private partitions = new Map<string, Partition>();
+	/** Released jobs whose service lock is still held, by job id. */
+	private keptLocks = new Map<string, InternalJob>();
 	private processor: Processor | null = null;
 	private running = false;
 	private paused = false;
@@ -492,6 +507,8 @@ export class InMemoryQueue {
 			group: getGroup(data),
 			jumped: false,
 			wentAheadOf: 0,
+			released: false,
+			groupLockKept: false,
 		};
 	}
 
@@ -567,6 +584,67 @@ export class InMemoryQueue {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Free the slot of a running job whose processor will not return (it hangs in
+	 * a command nobody can interrupt). The job leaves the partition's active list
+	 * and its service's group lock, the journal row is settled and the next
+	 * waiting job may start; the processor itself is left alone, and when it ends
+	 * it changes nothing here (and every status write it makes is ignored, see
+	 * utils/process/job-context.ts). True when a running job had that id. The
+	 * deployment watchdog calls this after it has stopped the work.
+	 *
+	 * `keepGroupLock`: free the slot (capacity for the other services) but keep
+	 * the service's group lock until the processor really returns. For a job
+	 * whose process could not be stopped, so a second build of the same service
+	 * does not run next to it.
+	 */
+	releaseActive(
+		id: string,
+		options: { keepGroupLock?: boolean } = {},
+	): boolean {
+		for (const partition of this.partitions.values()) {
+			const job = partition.active.find((candidate) => candidate.id === id);
+			if (!job) continue;
+			job.released = true;
+			job.finishedOn = this.now();
+			job.failedReason = "Released by the deployment watchdog";
+			partition.active = partition.active.filter((j) => j.id !== job.id);
+			if (options.keepGroupLock) {
+				job.groupLockKept = true;
+				this.keptLocks.set(job.id, job);
+			} else {
+				partition.activeGroups.delete(job.group);
+			}
+			if (job.jumped) partition.jumpedLast = false;
+			this.settle([job]);
+			this.wakeIdleWaiters();
+			void this.drainPartition(job.partition);
+			return true;
+		}
+		return false;
+	}
+
+	/** True while a released job still holds its service's group lock. */
+	hasKeptGroupLock(id: string): boolean {
+		return this.keptLocks.get(id)?.groupLockKept === true;
+	}
+
+	/**
+	 * Drop the group lock a released job kept, because its processor has not
+	 * returned for too long: the service can deploy again. The processor's late
+	 * return then changes nothing (the lock is no longer its to drop, and a newer
+	 * job of the service may hold it). False when no lock was kept.
+	 */
+	dropKeptGroupLock(id: string): boolean {
+		const job = this.keptLocks.get(id);
+		if (!job?.groupLockKept) return false;
+		job.groupLockKept = false;
+		this.keptLocks.delete(id);
+		this.partitions.get(job.partition)?.activeGroups.delete(job.group);
+		void this.drainPartition(job.partition);
+		return true;
 	}
 
 	/** Remove waiting jobs matching a predicate. Active jobs are not affected. */
@@ -845,30 +923,47 @@ export class InMemoryQueue {
 	private async runJob(job: InternalJob) {
 		let outcome: JobOutcome | undefined;
 		try {
-			const result = await this.processor?.(this.toPublic(job));
+			const result = await runInJobContext(
+				{ isReleased: () => job.released },
+				() => this.processor?.(this.toPublic(job)),
+			);
 			if (result === "cancelled" || result === "failed") outcome = result;
 		} catch (error) {
 			outcome = "failed";
 			job.failedReason = error instanceof Error ? error.message : String(error);
 			console.error("In-memory deployment job failed", error);
 		} finally {
-			job.finishedOn = this.now();
-			const partition = this.partitions.get(job.partition);
-			if (partition) {
-				partition.active = partition.active.filter((j) => j.id !== job.id);
-				partition.activeGroups.delete(job.group);
-				// A priority job that did not complete frees the "one ahead"
-				// allowance for a retry; it is held for exactly as long as the slot.
-				if (job.jumped && outcome) partition.jumpedLast = false;
+			if (job.released) {
+				// Its slot was already freed (and may be in use again). Only a kept
+				// group lock is still ours to drop, now that the process is over.
+				if (job.groupLockKept) {
+					job.groupLockKept = false;
+					this.keptLocks.delete(job.id);
+					this.partitions.get(job.partition)?.activeGroups.delete(job.group);
+					void this.drainPartition(job.partition);
+				}
+			} else {
+				job.finishedOn = this.now();
+				const partition = this.partitions.get(job.partition);
+				if (partition) {
+					partition.active = partition.active.filter((j) => j.id !== job.id);
+					partition.activeGroups.delete(job.group);
+					// A priority job that did not complete frees the "one ahead"
+					// allowance for a retry; it is held for exactly as long as the slot.
+					if (job.jumped && outcome) partition.jumpedLast = false;
+				}
+				this.settle([job]);
+				this.wakeIdleWaiters();
+				// A slot (and possibly the group) freed up — try to schedule more.
+				void this.drainPartition(job.partition);
 			}
-			this.settle([job]);
-			if (this.activeCount() === 0) {
-				const waiters = this.idleWaiters;
-				this.idleWaiters = [];
-				for (const wake of waiters) wake();
-			}
-			// A slot (and possibly the group) freed up — try to schedule more.
-			void this.drainPartition(job.partition);
 		}
+	}
+
+	private wakeIdleWaiters() {
+		if (this.activeCount() !== 0) return;
+		const waiters = this.idleWaiters;
+		this.idleWaiters = [];
+		for (const wake of waiters) wake();
 	}
 }

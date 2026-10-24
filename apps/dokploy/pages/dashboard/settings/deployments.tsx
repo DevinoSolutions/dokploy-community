@@ -3,6 +3,7 @@ import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
 import superjson from "superjson";
+import { DeploymentWatchdog } from "@/components/dashboard/settings/deployment-watchdog";
 import { BuildsConcurrency } from "@/components/dashboard/settings/servers/actions/builds-concurrency";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AlertBlock } from "@/components/shared/alert-block";
@@ -67,6 +68,11 @@ const Page = () => {
 								)}
 							</div>
 						</CardContent>
+					</div>
+				</Card>
+				<Card className="h-full bg-sidebar p-2.5 rounded-xl mx-auto w-full">
+					<div className="rounded-xl bg-background shadow-md">
+						<DeploymentWatchdog />
 					</div>
 				</Card>
 			</div>

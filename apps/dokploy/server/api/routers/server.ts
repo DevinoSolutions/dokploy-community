@@ -99,6 +99,7 @@ export const serverRouter = createTRPCRouter({
 						project.serverId,
 						ctx.session.activeOrganizationId,
 						input.enableDockerCleanup,
+						project.dockerCleanupCron,
 					);
 				} catch (error) {
 					console.error("Failed to schedule docker cleanup:", error);
@@ -623,6 +624,7 @@ export const serverRouter = createTRPCRouter({
 					input.serverId,
 					ctx.session.activeOrganizationId,
 					input.enableDockerCleanup,
+					input.dockerCleanupCron,
 				);
 
 				await audit(ctx, {

@@ -125,8 +125,13 @@ import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "../utils/deploy-priority";
+import { cancelRunningDeploymentLocally } from "../utils/local-cancel";
 import { coalesceManualComposeDeploy } from "../utils/manual-compose-coalesce";
 import { serializeManualDeploy } from "../utils/manual-deploy-lock";
+import {
+	readServiceWatchdogExclusion,
+	writeServiceWatchdogExclusion,
+} from "../utils/watchdog-exclusion";
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -549,6 +554,43 @@ export const composeRouter = createTRPCRouter({
 			});
 			return true;
 		}),
+	// "Exclude from the stuck-deployment watchdog": the service owner can opt out
+	// of the automatic failing of stuck deployments (see queues/deployment-watchdog.ts).
+	watchdogExclusion: protectedProcedure
+		.input(apiFindCompose)
+		.query(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["read"],
+			});
+			return readServiceWatchdogExclusion({
+				type: "compose",
+				id: input.composeId,
+			});
+		}),
+
+	setWatchdogExclusion: protectedProcedure
+		.input(
+			apiFindCompose.extend({ excluded: z.boolean() }),
+		)
+		.mutation(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["create"],
+			});
+			const compose = await findComposeById(input.composeId);
+			const result = await writeServiceWatchdogExclusion(
+				{ type: "compose", id: input.composeId },
+				input.excluded,
+			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "compose",
+				resourceId: input.composeId,
+				resourceName: compose.appName,
+				metadata: { watchdogExcluded: input.excluded },
+			});
+			return result;
+		}),
+
 	killBuild: protectedProcedure
 		.input(apiFindCompose)
 		.mutation(async ({ input, ctx }) => {
@@ -1657,9 +1699,20 @@ export const composeRouter = createTRPCRouter({
 				}
 			}
 
+			// Self-hosted: stop the running deployment on its host and let the job
+			// free its queue slot (see cancel-active-deployment.ts).
+			if (!IS_CLOUD) {
+				return cancelRunningDeploymentLocally(ctx, {
+					type: "compose",
+					composeId: compose.composeId,
+					appName: compose.appName,
+					name: compose.name,
+				});
+			}
+
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Deployment cancellation only available in cloud version",
+				message: "This service has no server to cancel its deployment on",
 			});
 		}),
 

@@ -10,6 +10,10 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import {
+	DEFAULT_DOCKER_CLEANUP_CRON,
+	dockerCleanupCronSchema,
+} from "../../utils/docker/cleanup-schedule";
 import { organization } from "./account";
 import { applications } from "./application";
 import { certificates } from "./certificate";
@@ -42,6 +46,10 @@ export const server = pgTable("server", {
 		.notNull()
 		.$defaultFn(() => generateAppName("server")),
 	enableDockerCleanup: boolean("enableDockerCleanup").notNull().default(true),
+	// 5-field cron, read in UTC. See utils/docker/cleanup-schedule.ts.
+	dockerCleanupCron: text("dockerCleanupCron")
+		.notNull()
+		.default(DEFAULT_DOCKER_CLEANUP_CRON),
 	buildsConcurrency: integer("buildsConcurrency").notNull().default(1),
 	createdAt: text("createdAt").notNull(),
 	organizationId: text("organizationId")
@@ -161,6 +169,7 @@ export const apiCreateServer = createSchema
 	.required()
 	.extend({
 		enableDockerCleanup: z.boolean().default(true),
+		dockerCleanupCron: dockerCleanupCronSchema.optional(),
 		defaultDomain: z.string().optional().nullable(),
 	});
 
@@ -190,6 +199,7 @@ export const apiUpdateServer = createSchema
 	.extend({
 		command: z.string().optional(),
 		enableDockerCleanup: z.boolean().default(true),
+		dockerCleanupCron: dockerCleanupCronSchema.optional(),
 		defaultDomain: z.string().optional().nullable(),
 	});
 
