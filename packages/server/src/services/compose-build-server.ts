@@ -40,13 +40,22 @@ import {
 	getCreateFilesCommand,
 } from "@dokploy/server/utils/docker/utils";
 import { ExecError } from "@dokploy/server/utils/process/ExecError";
-import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
+import {
+	execAsync,
+	execAsyncRemote,
+} from "@dokploy/server/utils/process/execAsync";
 import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import { cloneBitbucketRepository } from "@dokploy/server/utils/providers/bitbucket";
 import { cloneGitRepository } from "@dokploy/server/utils/providers/git";
 import { cloneGiteaRepository } from "@dokploy/server/utils/providers/gitea";
 import { cloneGithubRepository } from "@dokploy/server/utils/providers/github";
 import { cloneGitlabRepository } from "@dokploy/server/utils/providers/gitlab";
+import {
+	COMMIT_READ_FAILED,
+	describeUnreadableCommit,
+	getCheckedOutCommitCommand,
+	parseCheckedOutCommit,
+} from "@dokploy/server/utils/providers/pin-commit";
 import { getCreateComposeFileCommand } from "@dokploy/server/utils/providers/raw";
 import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import { TRPCError } from "@trpc/server";
@@ -56,7 +65,7 @@ import {
 	isDeploymentCancelledError,
 	toCancelledErrorIfCancelled,
 } from "./deployment-cancel";
-import { generateApplyPatchesCommand } from "./patch";
+import { generateApplyPatchesCommand, type Patch } from "./patch";
 import { findRegistryByIdWithCredentials } from "./registry";
 import { findServerById } from "./server";
 
@@ -67,6 +76,7 @@ import { findServerById } from "./server";
  * that sets `buildServerId` + `buildRegistryId` instead:
  *
  *   1. clones the source on the build server (same provider code, run remotely),
+ *      pinned to the commit the serving host fetched and checked,
  *   2. runs `docker compose build` there,
  *   3. tags and pushes every built service to the build registry as
  *      `<registry>/<appName>-<service>:dpl-<deploymentId>` (and `:latest`),
@@ -253,23 +263,77 @@ type ComposeBuildEntity = ComposeNested & {
 const getCloneCommand = async (
 	entity: ComposeNested,
 	stageOptions: StageOptions,
+	pinCommit: string | null,
 ) => {
 	switch (entity.sourceType) {
 		case "github":
-			return cloneGithubRepository({ ...entity, type: "compose" });
+			return cloneGithubRepository({ ...entity, type: "compose", pinCommit });
 		case "gitlab":
-			return cloneGitlabRepository({ ...entity, type: "compose" });
+			return cloneGitlabRepository({ ...entity, type: "compose", pinCommit });
 		case "bitbucket":
-			return cloneBitbucketRepository({ ...entity, type: "compose" });
+			return cloneBitbucketRepository({
+				...entity,
+				type: "compose",
+				pinCommit,
+			});
 		case "git":
-			return cloneGitRepository({ ...entity, type: "compose" });
+			return cloneGitRepository({ ...entity, type: "compose", pinCommit });
 		case "gitea":
-			return cloneGiteaRepository({ ...entity, type: "compose" });
+			return cloneGiteaRepository({ ...entity, type: "compose", pinCommit });
 		case "raw":
 			return getCreateComposeFileCommand(entity, stageOptions);
 		default:
 			return "";
 	}
+};
+
+/**
+ * What `getCheckedOutCommitCommand` prints for the serving host's copy of the
+ * compose. The deploy path reads it right after the fetch and a rebuild at
+ * its start (see `runComposeBuild`); a read never fails the deploy here, an
+ * empty answer is refused by `prepareComposeBuildServerDeploy`.
+ * A read that could not run at all (an SSH failure) answers
+ * `COMMIT_READ_FAILED`, so the refusal says so.
+ */
+export const readServingHostCommitOutput = async (entity: {
+	appName: string;
+	serverId: string | null;
+}) => {
+	const { COMPOSE_PATH } = paths(!!entity.serverId);
+	const command = getCheckedOutCommitCommand(
+		join(COMPOSE_PATH, entity.appName, "code"),
+	);
+	try {
+		const result = entity.serverId
+			? await execAsyncRemote(entity.serverId, command)
+			: await execAsync(command);
+		return result?.stdout ?? "";
+	} catch {
+		return COMMIT_READ_FAILED;
+	}
+};
+
+/**
+ * The commit checked out in the serving host's copy of the compose: the copy
+ * the compose guards (`assertComposeVolumesBound` and the rest) checked. The
+ * build server builds exactly this commit (T-7282). Throws when there is none:
+ * building the branch tip instead would build unchecked code. The caller
+ * reads it right after the fetch; a read made here, later, is not the same
+ * thing, so a missing read is refused too.
+ */
+const resolveServingHostCommit = (stdout: string | undefined) => {
+	if (stdout === undefined) {
+		throw new Error(
+			"The commit of the serving host was not read right after its fetch, so the build server cannot be pinned to it. Nothing was built.",
+		);
+	}
+	const commit = parseCheckedOutCommit(stdout);
+	if (!commit) {
+		throw new Error(
+			`Could not read the commit checked out on the serving host (${describeUnreadableCommit(stdout)}), so the build server cannot build the code that was checked there. Nothing was built; deploy again.`,
+		);
+	}
+	return commit;
 };
 
 /**
@@ -282,6 +346,7 @@ const buildImagesOnBuildServer = async (
 	applyPatches: boolean,
 	cancellable: boolean,
 	reuseClone: boolean,
+	pinned: { servingCommitOutput?: string; patches?: Patch[] },
 ): Promise<{ images: ComposePushedImage[] }> => {
 	const { buildServerId, buildRegistryId } = entity;
 	if (!buildServerId || !buildRegistryId) {
@@ -376,13 +441,16 @@ const buildImagesOnBuildServer = async (
 	};
 	// Raw composes have no checkout (the clone step only writes the file), so
 	// they always take the normal path. Any probe failure falls back to cloning,
-	// as a deploy does; only a cancel is let through.
-	const hasUsableCheckout = async (path: string) => {
+	// as a deploy does; only a cancel is let through. Only a checkout of the
+	// serving host's commit is reused: an older one (a deploy that failed on
+	// the build server, a compose that built on its serving host before) is
+	// cloned again, pinned to that commit.
+	const hasUsableCheckout = async (path: string, commit: string) => {
 		if (entity.sourceType === "raw") return false;
 		try {
 			await checkpoint();
 			const { stdout } = await execOnBuildServer(
-				getReusableCloneProbeCommand(path),
+				getReusableCloneProbeCommand(path, commit),
 			);
 			return stdout.includes(REUSABLE_CLONE_ANSWER);
 		} catch (error) {
@@ -396,11 +464,35 @@ const buildImagesOnBuildServer = async (
 			`Building on build server ${buildServer.name} (${buildServer.ipAddress})`,
 		);
 
+		// The serving host fetched the source and checked its compose file;
+		// the build server fetches it again. A push in between must not reach
+		// the build, so the build server's checkout is pinned to the commit the
+		// serving host holds. A raw compose has no checkout: both hosts write
+		// the same file from the same row.
+		let servingCommit: string | null = null;
+		if (entity.sourceType !== "raw") {
+			await checkpoint();
+			servingCommit = resolveServingHostCommit(pinned.servingCommitOutput);
+			log.line(
+				`Building commit ${servingCommit}, the one checked on the serving host`,
+			);
+		}
+		// The patch rows the serving host applied and checked, never a second
+		// read: refused before anything runs on the build server.
+		if (applyPatches && entity.sourceType !== "raw" && !pinned.patches) {
+			throw new Error(
+				"The patches the serving host applied were not passed to the build server, so it cannot apply the same ones. Nothing was built.",
+			);
+		}
+
 		// A rebuild means "build the code already on disk", and the serving host
 		// does not re-clone on one. Re-cloning here would build commits newer
 		// than the serving host's bind mounts and config files, so reuse the
 		// checkout from the last deploy when it is usable.
-		const reusing = reuseClone && (await hasUsableCheckout(codePath));
+		const reusing =
+			reuseClone &&
+			servingCommit !== null &&
+			(await hasUsableCheckout(codePath, servingCommit));
 		if (reusing) {
 			log.line(`Rebuilding from the existing clone on ${buildServer.name}`);
 		} else {
@@ -409,7 +501,9 @@ const buildImagesOnBuildServer = async (
 			}
 			// A cancel has to land before anything is staged, not after.
 			await checkpoint();
-			await run(`set -e;${await getCloneCommand(buildEntity, stageOptions)}`);
+			await run(
+				`set -e;${await getCloneCommand(buildEntity, stageOptions, servingCommit)}`,
+			);
 		}
 
 		if (applyPatches && entity.sourceType !== "raw") {
@@ -419,6 +513,8 @@ const buildImagesOnBuildServer = async (
 					id: entity.composeId,
 					type: "compose",
 					serverId: buildServerId,
+					// The rows the serving host applied, not a second read.
+					patches: pinned.patches,
 				},
 				stageOptions,
 			);
@@ -428,6 +524,23 @@ const buildImagesOnBuildServer = async (
 		// Only now is the checkout complete; see getCloneCompleteCommand.
 		if (!reusing && entity.sourceType !== "raw") {
 			await run(`set -e;${getCloneCompleteCommand(codePath)}`);
+		}
+
+		// The clone script already refuses to end on another commit; this is
+		// the check that holds whatever the clone command was, and for a reused
+		// checkout. The checkout must still be the pinned commit here.
+		if (servingCommit) {
+			await checkpoint();
+			const { stdout: headOut } = await execOnBuildServer(
+				getCheckedOutCommitCommand(codePath),
+			);
+			const buildCommit = parseCheckedOutCommit(headOut);
+			if (buildCommit !== servingCommit) {
+				const found = buildCommit ? `commit ${buildCommit}` : "no commit";
+				throw new Error(
+					`The build server's checkout is ${found}, not commit ${servingCommit} that the serving host checked. Nothing was built; deploy again.`,
+				);
+			}
 		}
 
 		// Same compose file the serving host will run (domains, randomize,
@@ -581,6 +694,8 @@ export const prepareComposeBuildServerDeploy = async ({
 	freshVolumes = false,
 	cancellable = true,
 	reuseClone = false,
+	servingCommitOutput,
+	patches,
 }: {
 	entity: ComposeBuildEntity;
 	deployment: { logPath: string; deploymentId?: string };
@@ -601,6 +716,18 @@ export const prepareComposeBuildServerDeploy = async ({
 	 * has on disk. Falls back to cloning when there is none.
 	 */
 	reuseClone?: boolean;
+	/**
+	 * `readServingHostCommitOutput` as read right after the serving host's
+	 * fetch. Required for a non-raw compose: without it the build is refused,
+	 * never read late.
+	 */
+	servingCommitOutput?: string;
+	/**
+	 * The patch rows the serving host applied (and the guards checked); the
+	 * build server applies these. Required when patches are applied: without
+	 * them the build is refused, never read again.
+	 */
+	patches?: Patch[];
 }): Promise<RemoteBuildDeployInfo | undefined> => {
 	if (!entity.buildServerId) {
 		// Deleting a build server nulls `buildServerId` (ON DELETE SET NULL) but
@@ -621,6 +748,7 @@ export const prepareComposeBuildServerDeploy = async ({
 			applyPatches,
 			cancellable,
 			reuseClone,
+			{ servingCommitOutput, patches },
 		);
 
 		// The images are pushed, but the serving host has not been told about

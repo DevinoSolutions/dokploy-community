@@ -13,6 +13,7 @@ import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import { getGitBasicAuthConfig } from "./git";
+import { buildPinCommitCommand } from "./pin-commit";
 
 export type ApplicationWithBitbucket = InferResultType<
 	"applications",
@@ -100,6 +101,11 @@ interface CloneBitbucketRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	/**
+	 * Commit the checkout must end on (T-7282): a compose's build-server copy
+	 * is pinned to the commit its serving host checked. See pin-commit.ts.
+	 */
+	pinCommit?: string | null;
 }
 
 export const cloneBitbucketRepository = async ({
@@ -116,6 +122,7 @@ export const cloneBitbucketRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		pinCommit,
 	} = entity;
 	const { COMPOSE_PATH, APPLICATIONS_PATH } = paths(!!serverId);
 
@@ -139,6 +146,14 @@ export const cloneBitbucketRepository = async ({
 	const { username, secret } = getBitbucketCloneAuth(bitbucket);
 	command += `echo ${quote([`Cloning Repo ${repoclone} to ${outputPath}: ✅`])};`;
 	command += `git ${getGitBasicAuthConfig(cloneUrl, username, secret)} clone --branch ${quote([String(bitbucketBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	if (pinCommit) {
+		command += buildPinCommitCommand({
+			outputPath: String(outputPath ?? ""),
+			commitSha: pinCommit,
+			enableSubmodules,
+			authConfig: getGitBasicAuthConfig(cloneUrl, username, secret),
+		});
+	}
 	return command;
 };
 

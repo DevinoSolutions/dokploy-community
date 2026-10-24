@@ -8,6 +8,7 @@ import { findGithubById, type Github } from "@dokploy/server/services/github";
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
+import { buildPinCommitCommand } from "@dokploy/server/utils/providers/pin-commit";
 import { createAppAuth } from "@octokit/auth-app";
 import { TRPCError } from "@trpc/server";
 import { Octokit } from "octokit";
@@ -199,6 +200,11 @@ interface CloneGithubRepository {
 	enableSubmodules: boolean;
 	serverId: string | null;
 	outputPathOverride?: string;
+	/**
+	 * Commit the checkout must end on (T-7282): a compose's build-server copy
+	 * is pinned to the commit its serving host checked. See pin-commit.ts.
+	 */
+	pinCommit?: string | null;
 }
 export const cloneGithubRepository = async ({
 	type = "application",
@@ -216,6 +222,7 @@ export const cloneGithubRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		pinCommit,
 	} = entity;
 	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths(!!serverId);
 
@@ -243,6 +250,14 @@ export const cloneGithubRepository = async ({
 	command += `rm -rf ${outputPath};`;
 	command += `mkdir -p ${outputPath};`;
 	const cloneUrl = `${cloneBase.protocol}//${repoclone}`;
+	const pin = pinCommit
+		? buildPinCommitCommand({
+				outputPath: String(outputPath ?? ""),
+				commitSha: pinCommit,
+				enableSubmodules,
+				authConfig: getGitTokenAuthConfig(cloneUrl, token),
+			})
+		: "";
 
 	command += `echo ${quote([`Cloning Repo ${repoclone} to ${outputPath}: ✅`])};`;
 	if (headRef) {
@@ -254,9 +269,10 @@ export const cloneGithubRepository = async ({
 			enableSubmodules,
 			authConfig: getGitTokenAuthConfig(cloneUrl, token),
 		});
-		return command;
+		return command + pin;
 	}
 	command += `git ${getGitTokenAuthConfig(cloneUrl, token)} clone --branch ${quote([String(branch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	command += pin;
 
 	return command;
 };
