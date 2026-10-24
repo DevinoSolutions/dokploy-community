@@ -364,6 +364,9 @@ export type ComposeVolumeResolution = {
 	// Services that declare a `provider`, by name and type as written (T-7161).
 	// They are refused whatever the type is.
 	providers: string[];
+	// Services, hooks and jobs that declare `models`, and the top-level `models`
+	// (T-7161): Compose runs the `docker model` plugin of the host for them.
+	models: string[];
 };
 
 type LooseSpec = {
@@ -1192,6 +1195,28 @@ const collectProviders = (spec: NonNullable<LooseSpec>, into: string[]) => {
 	}
 };
 
+// `models` (a top-level definition, or a reference on a service, a hook or a
+// job) makes Docker Compose run the `docker model` CLI plugin of the host to
+// pull and configure the model, with the options of the definition
+// (`runtime_flags`, `context_size`) passed to the runner. Like a provider it
+// acts on the host outside a container and nothing of Dokploy uses it, so it is
+// refused (T-7161).
+const collectModels = (spec: NonNullable<LooseSpec>, into: string[]) => {
+	const present = (value: unknown) =>
+		value !== undefined &&
+		value !== null &&
+		!(Array.isArray(value) && value.length === 0) &&
+		!(isRecord(value) && Object.keys(value).length === 0);
+	if (present((spec as { models?: unknown }).models)) {
+		into.push("top-level models");
+	}
+	for (const { label, container } of containerSpecs(spec)) {
+		if (present(container.models)) {
+			into.push(`${label} (models)`);
+		}
+	}
+};
+
 // The volume names a set of compose files (the file Dokploy deploys plus the
 // override files of a custom command) mounts. A key is checked with the
 // definition of every file that declares it, because the merge order of the
@@ -1205,6 +1230,7 @@ export const resolveComposeFilesMountedVolumes = (
 	const forbidden: string[] = [];
 	const forbiddenParents: string[] = [];
 	const providers: string[] = [];
+	const models: string[] = [];
 	const mounted: MountedKeys = {
 		keys: new Set<string>(),
 		unresolved,
@@ -1220,6 +1246,7 @@ export const resolveComposeFilesMountedVolumes = (
 			collectMounts(containerSpecs(spec), options, mounted);
 			collectHostPaths(spec, options, mounted);
 			collectProviders(spec, providers);
+			collectModels(spec, models);
 		}
 	}
 	const definitionSets = specs.map((spec) =>
@@ -1376,7 +1403,7 @@ export const resolveComposeFilesMountedVolumes = (
 			}
 		}
 	}
-	return { uses, unresolved, forbidden, forbiddenParents, providers };
+	return { uses, unresolved, forbidden, forbiddenParents, providers, models };
 };
 
 export const resolveComposeMountedVolumes = (

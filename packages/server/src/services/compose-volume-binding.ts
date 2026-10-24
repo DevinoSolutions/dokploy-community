@@ -7,8 +7,8 @@ import { randomizeDeployableSpecificationFile } from "@dokploy/server/utils/dock
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	addDomainToCompose,
-	loadDockerCompose,
-	loadDockerComposeRemote,
+	getComposePath,
+	readComposeFile,
 } from "@dokploy/server/utils/docker/domain";
 import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import {
@@ -297,6 +297,7 @@ const mergeResolutions = (
 		forbidden: [],
 		forbiddenParents: [],
 		providers: [],
+		models: [],
 	};
 	for (const resolution of resolutions) {
 		for (const use of resolution.uses) {
@@ -307,6 +308,7 @@ const mergeResolutions = (
 			"forbidden",
 			"forbiddenParents",
 			"providers",
+			"models",
 		] as const) {
 			for (const entry of resolution[name]) {
 				if (!merged[name].includes(entry)) {
@@ -363,7 +365,7 @@ export const assertComposeSpecVolumesBound = async (
 		composeDirectory,
 	});
 	const strict = worlds.some((world) => world.strict);
-	const { uses, unresolved, forbidden, forbiddenParents, providers } =
+	const { uses, unresolved, forbidden, forbiddenParents, providers, models } =
 		mergeResolutions(
 			worlds.map((world) =>
 				resolveComposeFilesMountedVolumes(
@@ -385,6 +387,15 @@ export const assertComposeSpecVolumesBound = async (
 		);
 		throw new Error(
 			`Compose refused: ${providers[0]} declares a provider, which makes Docker Compose run a program of the host it deploys on (a Docker CLI plugin, or any program that its type names as a path or finds on the PATH) instead of a container. Provider services are not allowed: remove "provider:" from the service and run it as a regular container service.`,
+		);
+	}
+	if (models.length > 0) {
+		logger.warn(
+			{ composeId: compose.composeId, models },
+			"[VolumeBinding] A compose file was refused: it declares models",
+		);
+		throw new Error(
+			`Compose refused: ${models[0]} uses \`models\`, which makes Docker Compose run the docker model plugin of the host it deploys on. Models are not allowed: remove "models:" from the compose file and run the model as a regular container service.`,
 		);
 	}
 	if (forbidden.length > 0) {
@@ -451,8 +462,14 @@ const COMPOSE_OPTIONS_WITH_VALUE = new Set([
 	"--progress",
 ]);
 
-// The subcommands that create containers from the compose files.
-const FILE_READING_SUBCOMMANDS = new Set(["up", "run", "create"]);
+// The only `docker compose` subcommand that does not load the project (the
+// compose files, with their providers, volumes and host paths). Every other one
+// does, also `down`, `stop` and `pull`, which run the provider plugins of the
+// services (docker/compose `down.go`, `stop.go`, `ensureProviderImages`), and
+// `ps`, `logs`, `exec` and the like, which read the files named by `-f` or,
+// without one, the default file of the project directory (T-7161). `ls` is not
+// an allowed subcommand anyway.
+const PROJECT_FREE_SUBCOMMANDS = new Set(["version"]);
 
 type CommandSegment = {
 	kind: "compose" | "stack" | "other";
@@ -871,8 +888,10 @@ const parseComposeCommand = (
 };
 
 // The compose files a custom command passes besides the deployed one. A
-// command that starts containers without naming a file would make Docker find
-// a compose file (or an override) in the project directory by itself.
+// `docker compose` command of any subcommand that loads the project (all but
+// `version`: `down`, `stop` and `pull` run providers too) without naming a
+// file would make Docker find a compose file (or an override) in the project
+// directory by itself.
 export const getCommandOverrideFiles = (
 	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
 ) => {
@@ -888,12 +907,12 @@ export const getCommandOverrideFiles = (
 	);
 	const overrides = new Set<string>();
 	for (const segment of parseComposeCommand(compose.command).segments) {
-		const startsContainers =
+		const readsFiles =
 			(segment.kind === "compose" &&
 				segment.subcommand !== undefined &&
-				FILE_READING_SUBCOMMANDS.has(segment.subcommand)) ||
+				!PROJECT_FREE_SUBCOMMANDS.has(segment.subcommand)) ||
 			(segment.kind === "stack" && segment.subcommand === "deploy");
-		if (!startsContainers) {
+		if (!readsFiles) {
 			continue;
 		}
 		if (segment.files.length === 0) {
@@ -902,7 +921,7 @@ export const getCommandOverrideFiles = (
 				"[VolumeBinding] A compose command was refused: it names no compose file",
 			);
 			throw new Error(
-				`Compose command refused: it starts containers without naming a compose file, so Docker would pick one from the project directory and its volumes would not be checked. Pass "-f ${compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath}" (or "-c" for a stack).`,
+				`Compose command refused: it runs \`docker ${segment.kind} ${segment.subcommand}\` without naming a compose file, so Docker would pick one from the project directory and its volumes, host paths and providers would not be checked. Pass "-f ${compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath}" (or "-c" for a stack).`,
 			);
 		}
 		// A relative file is read from the working directory, and possibly from
@@ -1146,6 +1165,18 @@ export const commandUsesEnvFile = (compose: Pick<ComposeNested, "command">) =>
 		(segment) => segment.envFiles.length > 0,
 	);
 
+// Compose (compose-go) loads every document of a multi-document YAML file and
+// merges them, while the parser used here reads one, so the other documents
+// would never be checked: such a file is refused wherever a compose is
+// checked (T-7161).
+const isMultiDocumentError = (error: unknown) =>
+	(error as { code?: unknown } | null)?.code === "MULTIPLE_DOCS";
+
+const multiDocumentError = (what: string) =>
+	new Error(
+		`Compose refused: ${what} has more than one YAML document (a "---" separator), and Docker Compose merges all of them, so they cannot be checked. Keep a single document in the compose file.`,
+	);
+
 const loadOverrideFile = async (
 	compose: ComposeForVolumeCheck,
 	path: string,
@@ -1162,7 +1193,12 @@ const loadOverrideFile = async (
 			text = readFileSync(path, "utf8");
 		}
 		return parse(text, { maxAliasCount: 10000, merge: true }) as Spec;
-	} catch {
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError(
+				`the compose file "${path}" a custom command uses`,
+			);
+		}
 		throw new Error(
 			`Compose command refused: the compose file "${path}" it uses could not be read, so its volumes cannot be checked.`,
 		);
@@ -1182,7 +1218,10 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	let spec: Awaited<ReturnType<typeof addDomainToCompose>>;
 	try {
 		spec = await addDomainToCompose(compose, compose.domains);
-	} catch {
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError("the compose file");
+		}
 		return;
 	}
 	if (!spec) {
@@ -1200,22 +1239,51 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	});
 };
 
+// The compose file on disk as text, or null when there is none (then `up -d`
+// has nothing to start either). Anything else that goes wrong reading it
+// throws: the file is not checked, so it must not be started.
+const readComposeFileOnDisk = async (compose: ComposeNested) => {
+	const path = getComposePath(compose);
+	try {
+		if (compose.serverId) {
+			const { stdout } = await execAsyncRemote(
+				compose.serverId,
+				`if [ -f ${quote([path])} ]; then cat ${quote([path])}; fi`,
+			);
+			return stdout ? stdout : null;
+		}
+		return await readComposeFile(compose);
+	} catch {
+		throw new Error(
+			"Compose refused: the compose file on disk could not be read, so it cannot be checked before it is started. Redeploy the compose.",
+		);
+	}
+};
+
 // Start (`docker compose up -d` from the files on disk): checks the compose
-// file that is there, which is already the final one of the last deploy.
+// file that is there, which is already the final one of the last deploy. A file
+// that cannot be parsed is refused, not skipped: Compose may read what this
+// parser does not.
 export const assertComposeFileOnDiskVolumesBound = async (
 	rawCompose: ComposeNested,
 ) => {
 	const compose = await withResolvedVaultRefs(rawCompose);
-	let spec: Awaited<ReturnType<typeof loadDockerCompose>>;
-	try {
-		spec = compose.serverId
-			? await loadDockerComposeRemote(compose)
-			: await loadDockerCompose(compose);
-	} catch {
-		// Nothing readable on disk: `up -d` has nothing to start either.
+	const text = await readComposeFileOnDisk(compose);
+	if (text === null) {
 		return;
 	}
-	if (!spec) {
+	let spec: unknown;
+	try {
+		spec = parse(text, { maxAliasCount: 10000, merge: true });
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError("the compose file on disk");
+		}
+		throw new Error(
+			"Compose refused: the compose file on disk is not valid YAML, so it cannot be checked before it is started. Fix the compose file and redeploy.",
+		);
+	}
+	if (!spec || typeof spec !== "object") {
 		return;
 	}
 	await assertComposeSpecVolumesBound(compose, spec as Spec);
@@ -1232,7 +1300,10 @@ export const assertComposeFileVolumesBound = async (
 	let spec: unknown;
 	try {
 		spec = parse(composeFile, { maxAliasCount: 10000, merge: true });
-	} catch {
+	} catch (error) {
+		if (isMultiDocumentError(error)) {
+			throw multiDocumentError("the compose file");
+		}
 		// Not valid YAML: nothing deploys from it, and the editor reports it.
 		return;
 	}

@@ -191,9 +191,7 @@ describe("external written as a string or a variable", () => {
 
 	it("cannot check external from a variable that is not provided", async () => {
 		await expect(
-			assertComposeVolumesBound(
-				composeRow(withVolume("    external: ${E}")),
-			),
+			assertComposeVolumesBound(composeRow(withVolume("    external: ${E}"))),
 		).rejects.toThrow(/Compose volume check failed/);
 	});
 
@@ -211,9 +209,7 @@ describe("external written as a string or a variable", () => {
 		claimEverything();
 
 		await expect(
-			assertComposeVolumesBound(
-				composeRow(withVolume('    external: "TRUE"')),
-			),
+			assertComposeVolumesBound(composeRow(withVolume('    external: "TRUE"'))),
 		).rejects.toThrow(/Compose volume "data" is refused/);
 	});
 });
@@ -477,7 +473,9 @@ volumes:
 	});
 
 	it("ignores a compose that does not declare the name", async () => {
-		answerDeclarations([declaring("volumes:\n  pg:\n    name: pgdata-extra\n")]);
+		answerDeclarations([
+			declaring("volumes:\n  pg:\n    name: pgdata-extra\n"),
+		]);
 
 		await expect(
 			assertComposeVolumesBound(composeRow(yaml)),
@@ -557,12 +555,20 @@ describe("another organization's compose declaration on the other volume checks"
 	const ownMount = {
 		mountId: "mount-mine",
 		applicationId: "app-1",
-		application: { appName: "app-mine-Zz1111", serverId: null, ...orgOf("org-a") },
+		application: {
+			appName: "app-mine-Zz1111",
+			serverId: null,
+			...orgOf("org-a"),
+		},
 	};
 	const ownVolumeBackup = {
 		volumeBackupId: "vb-mine",
 		applicationId: "app-1",
-		application: { appName: "app-mine-Zz1111", serverId: null, ...orgOf("org-a") },
+		application: {
+			appName: "app-mine-Zz1111",
+			serverId: null,
+			...orgOf("org-a"),
+		},
 	};
 
 	it("claims against a name nobody has recorded, once the compose deployed", async () => {
@@ -605,15 +611,13 @@ describe("another organization's compose declaration on the other volume checks"
 		expect(result.otherOrganizationClaims).toEqual([]);
 		expect(mocks.query.deployments.findFirst).not.toHaveBeenCalled();
 		// mount edit / volume backup on the existing row
-		expect(
-			evaluateVolumeBinding(result, { privileged: true }).ok,
-		).toBe(true);
+		expect(evaluateVolumeBinding(result, { privileged: true }).ok).toBe(true);
 		// application deploy with the stored mount
 		await expect(
-			findRefusedVolumeMounts(
-				[{ type: "volume", volumeName: "pgdata" }],
-				{ serviceType: "application", serviceId: "app-1" },
-			),
+			findRefusedVolumeMounts([{ type: "volume", volumeName: "pgdata" }], {
+				serviceType: "application",
+				serviceId: "app-1",
+			}),
 		).resolves.toEqual([]);
 	});
 
@@ -767,14 +771,25 @@ services:
 
 	it("does not mistake rm -f, an absolute path to the same file, or other programs for another file", async () => {
 		for (const value of [
-			`compose -p ${APP} -f docker-compose.yml up -d && docker compose -p ${APP} rm -f web`,
+			`compose -p ${APP} -f docker-compose.yml up -d && docker compose -p ${APP} -f docker-compose.yml rm -f web`,
 			`compose -p ${APP} -f ${codeDirectory}/docker-compose.yml up -d`,
 			`compose -p ${APP} -f ./docker-compose.yml logs -f web`,
-			`compose -p ${APP} down`,
+			`compose -p ${APP} -f docker-compose.yml down`,
 		]) {
 			await expect(
 				assertComposeVolumesBound(command(value)),
 			).resolves.toBeUndefined();
+		}
+	});
+
+	it("refuses a command that runs down or rm without naming a file (T-7161: they load the project)", async () => {
+		for (const value of [
+			`compose -p ${APP} down`,
+			`compose -p ${APP} -f docker-compose.yml up -d && docker compose -p ${APP} rm -f web`,
+		]) {
+			await expect(assertComposeVolumesBound(command(value))).rejects.toThrow(
+				/without naming a compose file/,
+			);
 		}
 	});
 
@@ -903,17 +918,11 @@ services:
 	it("skips docker's own options before compose and still applies the rules", async () => {
 		mocks.readFileSync.mockReturnValue(CLEAN_OVERRIDE);
 
-		for (const prefix of [
-			"--log-level debug",
-			"-l info",
-			"-D",
-		]) {
+		for (const prefix of ["--log-level debug", "-l info", "-D"]) {
 			mocks.readFileSync.mockClear();
 			// a compose command that starts containers must still name a file
 			await expect(
-				assertComposeVolumesBound(
-					command(`${prefix} compose -p ${APP} up -d`),
-				),
+				assertComposeVolumesBound(command(`${prefix} compose -p ${APP} up -d`)),
 			).rejects.toThrow(/without naming a compose file/);
 			await expect(
 				assertComposeVolumesBound(
