@@ -137,6 +137,14 @@ interface ApplyPatchesOptions {
 	id: string;
 	type: "application" | "compose";
 	serverId: string | null;
+	/**
+	 * The service's patch rows to apply, instead of reading them. A compose
+	 * that builds on a build server applies the very rows its serving host
+	 * applied and checked (T-7282), not a second read that may differ.
+	 */
+	patches?: Patch[];
+	/** Called with the rows that were read (or given), before anything else. */
+	onLoaded?: (patches: Patch[]) => void;
 }
 
 /**
@@ -147,7 +155,7 @@ interface ApplyPatchesOptions {
  * wipes.
  */
 export const generateApplyPatchesCommand = async (
-	{ id, type, serverId }: ApplyPatchesOptions,
+	{ id, type, serverId, patches: givenPatches, onLoaded }: ApplyPatchesOptions,
 	options: StageOptions = {},
 ) => {
 	const entity =
@@ -158,7 +166,8 @@ export const generateApplyPatchesCommand = async (
 	const basePath = type === "compose" ? COMPOSE_PATH : APPLICATIONS_PATH;
 	const codePath = join(basePath, entity.appName, "code");
 
-	const resultPatches = await findPatchesByEntityId(id, type);
+	const resultPatches = givenPatches ?? (await findPatchesByEntityId(id, type));
+	onLoaded?.(resultPatches);
 	const patches = resultPatches.filter((p) => p.enabled);
 
 	if (patches.length === 0) {

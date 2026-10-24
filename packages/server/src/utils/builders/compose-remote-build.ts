@@ -3,6 +3,11 @@ import {
 	getDockerPushRetryCall,
 	getDockerPushRetryFunction,
 } from "@dokploy/server/utils/process/dockerPush";
+import {
+	getHeadCommitExpression,
+	getOwnCheckoutTest,
+	isCommitSha,
+} from "@dokploy/server/utils/providers/pin-commit";
 import { quote } from "shell-quote";
 import { stringify } from "yaml";
 import {
@@ -295,13 +300,25 @@ export const getCloneCompleteCommand = (codePath: string) =>
 
 /**
  * Prints `dokploy-reusable-clone` when `codePath` is a finished checkout of its
- * own: the completion marker exists, HEAD resolves, and the repository's git
- * dir is the relative `.git`, which git only prints when `codePath` is the top
- * level (a plain `git -C` would walk up into any ancestor repository, such as
- * etckeeper, for an empty directory, and print an absolute path).
+ * own: the completion marker exists, HEAD resolves (to `commitSha` when one is
+ * given), and the repository's git dir is the relative `.git`, which git only
+ * prints when `codePath` is the top level (a plain `git -C` would walk up into
+ * any ancestor repository, such as etckeeper, for an empty directory, and
+ * print an absolute path).
  */
-export const getReusableCloneProbeCommand = (codePath: string) => {
+export const getReusableCloneProbeCommand = (
+	codePath: string,
+	commitSha?: string,
+) => {
 	const dir = quote([codePath]);
 	const marker = quote([`${codePath}/${CLONE_COMPLETE_FILE}`]);
-	return `if [ -f ${marker} ] && [ "$(git -C ${dir} rev-parse --git-dir 2>/dev/null)" = .git ] && git -C ${dir} rev-parse --verify -q HEAD >/dev/null 2>&1; then echo ${REUSABLE_CLONE_ANSWER}; fi`;
+	if (commitSha === undefined) {
+		return `if [ -f ${marker} ] && [ "$(git -C ${dir} rev-parse --git-dir 2>/dev/null)" = .git ] && git -C ${dir} rev-parse --verify -q HEAD >/dev/null 2>&1; then echo ${REUSABLE_CLONE_ANSWER}; fi`;
+	}
+	// With `commitSha`, only a checkout of its own (a real `.git` directory)
+	// whose HEAD is exactly that commit, present in the repository, is reusable.
+	if (!isCommitSha(commitSha)) {
+		throw new Error("Refusing to probe for an invalid commit id");
+	}
+	return `if [ -f ${marker} ] && ${getOwnCheckoutTest(codePath)} && [ "${getHeadCommitExpression(codePath)}" = ${quote([commitSha])} ]; then echo ${REUSABLE_CLONE_ANSWER}; fi`;
 };
