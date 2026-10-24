@@ -140,16 +140,14 @@ const resolveTraefikFilePath = (
 const traefikUpdateLocks = new Map<string, symbol>();
 const traefikUpdateErrors = new Map<string, string>();
 
+// Same server scope as the other Traefik procedures; on Cloud the local
+// Traefik belongs to the platform, so a serverId is required.
 const assertTraefikAccess = async (
 	serverId: string | undefined,
-	organizationId: string,
+	organizationId: string | null | undefined,
 ) => {
-	if (serverId) {
-		const server = await findServerById(serverId);
-		if (server.organizationId !== organizationId) {
-			throw new TRPCError({ code: "UNAUTHORIZED" });
-		}
-	} else if (IS_CLOUD) {
+	await assertServerInOrganization(serverId, organizationId);
+	if (!serverId && IS_CLOUD) {
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
 };
@@ -1365,7 +1363,7 @@ export const settingsRouter = createTRPCRouter({
 		.query(async ({ input, ctx }) => {
 			await assertTraefikAccess(
 				input?.serverId,
-				ctx.session.activeOrganizationId,
+				ctx.session?.activeOrganizationId,
 			);
 			const key = input?.serverId ?? "local";
 			const overview = await getTraefikOverview(input?.serverId);
@@ -1379,7 +1377,7 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.mutation(async ({ input, ctx }) => {
 			const serverId = input?.serverId;
-			await assertTraefikAccess(serverId, ctx.session.activeOrganizationId);
+			await assertTraefikAccess(serverId, ctx.session?.activeOrganizationId);
 
 			const lockKey = serverId ?? "local";
 			if (traefikUpdateLocks.has(lockKey)) {
