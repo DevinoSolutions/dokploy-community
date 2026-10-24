@@ -1,7 +1,9 @@
 import type { IUpdateData } from "@dokploy/server/index";
+import { isDokployUpdateTarget } from "@dokploy/server/utils/dokploy-update-target";
 import {
 	Bug,
 	Download,
+	HardDriveDownload,
 	Info,
 	RefreshCcw,
 	Server,
@@ -21,6 +23,7 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
 	Tooltip,
 	TooltipContent,
@@ -61,6 +64,9 @@ export const UpdateServer = ({
 			{ enabled: isUpdateAvailable && !!latestVersion },
 		);
 	const [isOpenInternal, setIsOpenInternal] = useState(false);
+	const [pinnedTarget, setPinnedTarget] = useState("");
+	const trimmedTarget = pinnedTarget.trim();
+	const isPinnedTargetValid = isDokployUpdateTarget(trimmedTarget);
 
 	const handleCheckUpdates = async () => {
 		try {
@@ -88,6 +94,10 @@ export const UpdateServer = ({
 	};
 
 	const isOpen = isOpenInternal || isOpenProp;
+	const { data: rollbackPoint } = api.settings.getUpdateRollback.useQuery(
+		undefined,
+		{ enabled: !!isOpen, retry: false },
+	);
 	const onOpenChange = (open: boolean) => {
 		setIsOpenInternal(open);
 		onOpenChangeProp?.(open);
@@ -330,6 +340,40 @@ export const UpdateServer = ({
 						</div>
 					</div>
 				)}
+
+				<div className="mb-6 space-y-2">
+					<p className="text-sm font-medium">Install a specific version</p>
+					<div className="flex items-center gap-2">
+						<Input
+							value={pinnedTarget}
+							onChange={(e) => setPinnedTarget(e.target.value)}
+							placeholder="v0.30.8-community.32 or sha256:..."
+							className="font-mono text-xs"
+						/>
+						{isPinnedTargetValid ? (
+							<UpdateWebServer
+								buttonClassName="w-auto"
+								target={trimmedTarget}
+							/>
+						) : (
+							<Button variant="outline" disabled>
+								<HardDriveDownload className="h-4 w-4" />
+								Install
+							</Button>
+						)}
+					</div>
+					{trimmedTarget && !isPinnedTargetValid && (
+						<p className="text-xs text-destructive">
+							Use a release tag like v0.30.8-community.32 or a sha256: digest.
+						</p>
+					)}
+					{rollbackPoint && (
+						<UpdateWebServer
+							buttonClassName="w-auto"
+							rollbackVersion={rollbackPoint.version}
+						/>
+					)}
+				</div>
 
 				<div className="flex items-center justify-between pt-2">
 					<ToggleAutoCheckUpdates disabled={isPending} />

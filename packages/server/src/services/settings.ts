@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
-import { join, posix } from "node:path";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, posix } from "node:path";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -8,6 +10,7 @@ import { and, eq } from "drizzle-orm";
 
 import { quote } from "shell-quote";
 import semver from "semver";
+import { paths } from "../constants";
 import { db } from "../db";
 import { compose } from "../db/schema";
 import {
@@ -22,6 +25,10 @@ import {
 	TRAEFIK_VERSION,
 	type TraefikOptions,
 } from "../setup/traefik-setup";
+import {
+	DOKPLOY_IMAGE_DIGEST_REGEX,
+	DOKPLOY_RELEASE_TAG_REGEX,
+} from "../utils/dokploy-update-target";
 export interface IUpdateData {
 	latestVersion: string | null;
 	updateAvailable: boolean;
@@ -50,6 +57,99 @@ export const getServiceImageDigest = async () => {
 	}
 
 	return currentDigest;
+};
+
+export interface IRollbackPoint {
+	/** Dokploy version that was running when the point was recorded. */
+	version: string;
+	/** `sha256:<hex>` of the image that version ran from. */
+	digest: string;
+}
+
+const SERVICE_IMAGE_REGEX =
+	/^ghcr\.io\/devinosolutions\/dokploy-community(?::([^@\s]+))?@(sha256:[a-f0-9]{64})$/;
+
+// Swarm states in which the spec already names the image being installed, so
+// it says nothing about the version that is running.
+const SETTLED_UPDATE_STATES = new Set(["", "completed", "rollback_completed"]);
+
+export const getRollbackPointPath = () =>
+	join(paths().BASE_PATH, "dokploy-update-rollback.json");
+
+/** Reads the spec image of the `dokploy` service and the state of its last update. */
+const inspectDokployService = async () => {
+	const { stdout } = await execAsync(
+		"docker service inspect dokploy --format '{{.Spec.TaskTemplate.ContainerSpec.Image}} {{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}'",
+	);
+	const [image = "", state = ""] = stdout.trim().split(" ");
+	return { image, state };
+};
+
+/**
+ * Records the image `currentVersion` runs from, before an update replaces it.
+ * Never throws: when the running image can't be pinned to a digest in the fork
+ * repo, the old point is removed so no rollback to a stale version is offered.
+ * While an earlier update is still in flight the point it recorded is kept.
+ */
+export const recordDokployRollbackPoint = async (
+	currentVersion: string,
+	file = getRollbackPointPath(),
+) => {
+	try {
+		const { image, state } = await inspectDokployService();
+		if (!SETTLED_UPDATE_STATES.has(state)) {
+			return;
+		}
+		const match = SERVICE_IMAGE_REGEX.exec(image);
+		const tag = match?.[1];
+		const digest = match?.[2];
+		const tagNamesOtherVersion =
+			!!tag && DOKPLOY_RELEASE_TAG_REGEX.test(tag) && tag !== currentVersion;
+		if (
+			!digest ||
+			tagNamesOtherVersion ||
+			!DOKPLOY_RELEASE_TAG_REGEX.test(currentVersion)
+		) {
+			await rm(file, { force: true });
+			return;
+		}
+		const point: IRollbackPoint = { version: currentVersion, digest };
+		const tmp = `${file}.${randomUUID()}.tmp`;
+		await mkdir(dirname(file), { recursive: true });
+		await writeFile(tmp, JSON.stringify(point));
+		await rename(tmp, file);
+	} catch (error) {
+		console.error(
+			"Could not record the Dokploy rollback point:",
+			error instanceof Error ? error.message : String(error),
+		);
+		await rm(file, { force: true }).catch(() => undefined);
+	}
+};
+
+/** The recorded point, or null when there is none or it is the running version. */
+export const readDokployRollbackPoint = async (
+	currentVersion: string,
+	file = getRollbackPointPath(),
+): Promise<IRollbackPoint | null> => {
+	try {
+		const raw = JSON.parse(await readFile(file, "utf8")) as Partial<
+			Record<keyof IRollbackPoint, unknown>
+		>;
+		const { version, digest } = raw ?? {};
+		if (
+			typeof version !== "string" ||
+			typeof digest !== "string" ||
+			!DOKPLOY_RELEASE_TAG_REGEX.test(version) ||
+			!DOKPLOY_IMAGE_DIGEST_REGEX.test(digest) ||
+			version === currentVersion
+		) {
+			return null;
+		}
+		return { version, digest };
+	} catch {
+		return null;
+	}
 };
 
 /** Returns latest version and whether an update is available by checking

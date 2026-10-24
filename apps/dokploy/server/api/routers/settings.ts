@@ -32,12 +32,14 @@ import {
 	readConfig,
 	readConfigInPath,
 	readDirectory,
+	readDokployRollbackPoint,
 	readEnvironmentVariableList,
 	readEnvironmentVariables,
 	readMainConfig,
 	readMonitoringConfig,
 	readMonitoringStats,
 	readPorts,
+	recordDokployRollbackPoint,
 	recreateDirectory,
 	reloadDockerResource,
 	runBackgroundJob,
@@ -73,6 +75,11 @@ import {
 	scheduleDockerCleanup,
 	WEB_SERVER_CLEANUP_JOB,
 } from "@dokploy/server/utils/docker/cleanup-job";
+import {
+	DOKPLOY_IMAGE_REPO,
+	isDokployUpdateTarget,
+	resolveDokployUpdateImage,
+} from "@dokploy/server/utils/dokploy-update-target";
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
 import { TRPCError } from "@trpc/server";
 import { eq, sql } from "drizzle-orm";
@@ -165,6 +172,24 @@ const assertTraefikAccess = async (
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
 };
+
+// No input keeps the plain "install the latest release" update.
+const apiUpdateDokployServer = z
+	.object({
+		target: z
+			.string()
+			.max(128)
+			.refine(isDokployUpdateTarget, {
+				message:
+					"Use a release tag like v0.30.8-community.32 or a sha256: digest",
+			})
+			.optional(),
+		rollback: z.boolean().optional(),
+	})
+	.refine((input) => !(input.target !== undefined && input.rollback), {
+		message: "Pass either a target or rollback, not both",
+	})
+	.optional();
 
 export const settingsRouter = createTRPCRouter({
 	getWebServerSettings: protectedProcedure.query(async () => {
@@ -822,31 +847,79 @@ export const settingsRouter = createTRPCRouter({
 
 			return await getReleaseNotes(input.version);
 		}),
-	updateServer: adminProcedure.mutation(async ({ ctx }) => {
-		if (IS_CLOUD) {
-			return true;
-		}
+	updateServer: adminProcedure
+		.input(apiUpdateDokployServer)
+		.mutation(async ({ ctx, input }) => {
+			if (IS_CLOUD) {
+				return true;
+			}
 
-		const data = await getUpdateData(packageInfo.version);
-		if (data.updateAvailable) {
-			void runBackgroundJob("settings.updateServer background", () =>
-				spawnAsync("docker", [
+			// Without a target this installs the latest release, as before. A
+			// target (or the recorded rollback digest) only ever selects a tag or
+			// digest inside the fork repo.
+			let target = input?.target;
+			if (input?.rollback) {
+				const point = await readDokployRollbackPoint(packageInfo.version);
+				if (!point) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "No previous version is recorded to roll back to.",
+					});
+				}
+				target = point.digest;
+			}
+
+			let image: string;
+			if (target !== undefined) {
+				const pinned = resolveDokployUpdateImage(target);
+				if (!pinned) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "Unsupported update target.",
+					});
+				}
+				image = pinned;
+			} else {
+				const data = await getUpdateData(packageInfo.version);
+				if (!data.updateAvailable) {
+					return true;
+				}
+				image = `${DOKPLOY_IMAGE_REPO}:${data.latestVersion}`;
+			}
+
+			void runBackgroundJob("settings.updateServer background", async () => {
+				// A pinned image is pulled first: a tag or digest that doesn't
+				// exist then fails here, before the running service is replaced
+				// and before the rollback point of the last update is replaced.
+				if (target !== undefined) {
+					await spawnAsync("docker", ["pull", image]);
+				}
+				await recordDokployRollbackPoint(packageInfo.version);
+				await spawnAsync("docker", [
 					"service",
 					"update",
 					"--force",
 					"--image",
-					`ghcr.io/devinosolutions/dokploy-community:${data.latestVersion}`,
+					image,
 					"dokploy",
-				]),
-			);
+				]);
+			});
 			await audit(ctx, {
 				action: "update",
 				resourceType: "settings",
 				resourceName: "dokploy-version",
+				...(target !== undefined && {
+					metadata: { target, rollback: !!input?.rollback },
+				}),
 			});
-		}
 
-		return true;
+			return true;
+		}),
+	getUpdateRollback: adminProcedure.query(async () => {
+		if (IS_CLOUD) {
+			return null;
+		}
+		return await readDokployRollbackPoint(packageInfo.version);
 	}),
 
 	getDokployVersion: protectedProcedure.query(() => {

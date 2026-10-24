@@ -4,6 +4,7 @@ import {
 	HardDriveDownload,
 	Loader2,
 	RefreshCw,
+	Undo2,
 	XCircle,
 } from "lucide-react";
 import { useState } from "react";
@@ -57,8 +58,14 @@ const ServiceStatusItem = ({
 
 export const UpdateWebServer = ({
 	buttonClassName,
+	target,
+	rollbackVersion,
 }: {
 	buttonClassName?: string;
+	/** Release tag or digest to install instead of the latest release. */
+	target?: string;
+	/** Set to roll back to the recorded previous version (shown by name). */
+	rollbackVersion?: string;
 }) => {
 	const [modalState, setModalState] = useState<ModalState>("idle");
 	const [open, setOpen] = useState(false);
@@ -113,7 +120,9 @@ export const UpdateWebServer = ({
 	const handleConfirm = async () => {
 		try {
 			setModalState("updating");
-			await updateServer();
+			await updateServer(
+				rollbackVersion ? { rollback: true } : target ? { target } : undefined,
+			);
 
 			await new Promise((resolve) => setTimeout(resolve, 8000));
 
@@ -123,6 +132,7 @@ export const UpdateWebServer = ({
 			console.error("Error updating server:", error);
 			toast.error(
 				"An error occurred while updating the server, please try again.",
+				{ description: error instanceof Error ? error.message : undefined },
 			);
 		}
 	};
@@ -140,15 +150,25 @@ export const UpdateWebServer = ({
 			<AlertDialogTrigger asChild>
 				<Button
 					className={cn("relative w-full", buttonClassName)}
-					variant="secondary"
+					variant={rollbackVersion || target ? "outline" : "secondary"}
 					onClick={() => setOpen(true)}
 				>
-					<HardDriveDownload className="h-4 w-4" />
-					<span className="absolute -right-1 -top-2 flex h-3 w-3">
-						<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-						<span className="relative inline-flex rounded-full h-3 w-3 bg-green-500" />
-					</span>
-					Update Server
+					{rollbackVersion ? (
+						<Undo2 className="h-4 w-4" />
+					) : (
+						<HardDriveDownload className="h-4 w-4" />
+					)}
+					{!rollbackVersion && !target && (
+						<span className="absolute -right-1 -top-2 flex h-3 w-3">
+							<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+							<span className="relative inline-flex rounded-full h-3 w-3 bg-green-500" />
+						</span>
+					)}
+					{rollbackVersion
+						? `Roll back to ${rollbackVersion}`
+						: target
+							? "Install"
+							: "Update Server"}
 				</Button>
 			</AlertDialogTrigger>
 			<AlertDialogContent>
@@ -164,9 +184,14 @@ export const UpdateWebServer = ({
 						<div>
 							{modalState === "idle" && (
 								<span>
-									This will update the web server to the new version. You will
-									not be able to use the panel during the update process. The
-									page will be reloaded once the update is finished.
+									{rollbackVersion
+										? `This will roll the web server back to ${rollbackVersion}.`
+										: target
+											? `This will install ${target} on the web server.`
+											: "This will update the web server to the new version."}{" "}
+									You will not be able to use the panel during the update
+									process. The page will be reloaded once the update is
+									finished.
 									<br />
 									<br />
 									We recommend verifying that all services are running before
