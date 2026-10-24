@@ -296,6 +296,7 @@ const mergeResolutions = (
 		unresolved: [],
 		forbidden: [],
 		forbiddenParents: [],
+		providers: [],
 	};
 	for (const resolution of resolutions) {
 		for (const use of resolution.uses) {
@@ -305,6 +306,7 @@ const mergeResolutions = (
 			"unresolved",
 			"forbidden",
 			"forbiddenParents",
+			"providers",
 		] as const) {
 			for (const entry of resolution[name]) {
 				if (!merged[name].includes(entry)) {
@@ -361,20 +363,30 @@ export const assertComposeSpecVolumesBound = async (
 		composeDirectory,
 	});
 	const strict = worlds.some((world) => world.strict);
-	const { uses, unresolved, forbidden, forbiddenParents } = mergeResolutions(
-		worlds.map((world) =>
-			resolveComposeFilesMountedVolumes(
-				Array.isArray(specs) ? specs : [specs],
-				{
-					appName: compose.appName,
-					env: world.env,
-					strict: world.strict,
-					baseDirs,
-					commandVolumes,
-				},
+	const { uses, unresolved, forbidden, forbiddenParents, providers } =
+		mergeResolutions(
+			worlds.map((world) =>
+				resolveComposeFilesMountedVolumes(
+					Array.isArray(specs) ? specs : [specs],
+					{
+						appName: compose.appName,
+						env: world.env,
+						strict: world.strict,
+						baseDirs,
+						commandVolumes,
+					},
+				),
 			),
-		),
-	);
+		);
+	if (providers.length > 0) {
+		logger.warn(
+			{ composeId: compose.composeId, providers },
+			"[VolumeBinding] A compose file was refused: a service declares a provider",
+		);
+		throw new Error(
+			`Compose refused: ${providers[0]} declares a provider, which makes Docker Compose run a program of the host it deploys on (a Docker CLI plugin, or any program that its type names as a path or finds on the PATH) instead of a container. Provider services are not allowed: remove "provider:" from the service and run it as a regular container service.`,
+		);
+	}
 	if (forbidden.length > 0) {
 		logger.warn(
 			{ composeId: compose.composeId, forbidden },
@@ -589,7 +601,10 @@ const findDaemonOptionBeforeService = (words: string[]) => {
 		if (word.startsWith("--")) {
 			before.push(word);
 			const name = word.slice(2).split("=")[0] ?? "";
-			if (!word.includes("=") && RUN_AND_EXEC_LONG_OPTIONS_WITH_VALUE.has(name)) {
+			if (
+				!word.includes("=") &&
+				RUN_AND_EXEC_LONG_OPTIONS_WITH_VALUE.has(name)
+			) {
 				i += 1;
 			}
 		} else if (/^-[^-]/.test(word)) {
