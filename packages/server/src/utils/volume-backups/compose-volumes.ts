@@ -195,7 +195,7 @@ export const parseDotenvVariables = (
 	if (/\r(?!\n)/.test(text)) {
 		return null;
 	}
-	const source = text.replace(/^﻿/, "").replace(/\r\n/g, "\n");
+	const source = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 	// Go trims and splits on more white space than JavaScript does (U+0085
 	// is one), so a value with one of them would not be the text read here.
 	if (UNCERTAIN_DOTENV_CHARACTER.test(source)) {
@@ -653,6 +653,12 @@ type ResolveOptions = {
 	// command (`SOURCE:TARGET[:MODE]`). They are read as written: the shell
 	// has expanded them and Compose does not interpolate command-line values.
 	commandVolumes?: string[];
+	// Also resolve every non-external top-level volume that no service mounts
+	// (T-7135). `docker compose down -v` removes each of them by its resolved name
+	// whether or not anything mounts it, so `volumes: { x: { name: <another
+	// compose's volume> } }` is a use of that volume even though x is never
+	// mounted. Off for a caller that only wants what is mounted.
+	includeDeclaredVolumes?: boolean;
 } & InterpolationOptions;
 
 type MountedKeys = {
@@ -1291,6 +1297,19 @@ export const resolveComposeFilesMountedVolumes = (
 			}
 		}
 	}
+	// The keys that are declared and not mounted: `down -v` removes the
+	// non-external ones, which is checked like a mounted volume below. An external
+	// one is never removed, and is only a use when something mounts it.
+	const declaredKeys = new Set<string>();
+	if (options.includeDeclaredVolumes) {
+		for (const definitions of definitionSets) {
+			for (const key of Object.keys(definitions)) {
+				if (!mounted.keys.has(key)) {
+					declaredKeys.add(key);
+				}
+			}
+		}
+	}
 	const prefixes = [
 		...new Set([options.appName, normalizeComposeProjectName(options.appName)]),
 	];
@@ -1308,7 +1327,8 @@ export const resolveComposeFilesMountedVolumes = (
 		addUse({ key: name, volumeName: name, derived: false });
 	}
 
-	for (const key of mounted.keys) {
+	for (const key of [...mounted.keys, ...declaredKeys]) {
+		const isMounted = mounted.keys.has(key);
 		// A key that is not declared makes compose fail on its own.
 		const declaring = definitionSets.filter((definitions) =>
 			Object.hasOwn(definitions, key),
@@ -1316,9 +1336,12 @@ export const resolveComposeFilesMountedVolumes = (
 		for (const definitions of declaring) {
 			const definition = isRecord(definitions[key]) ? definitions[key] : {};
 
-			const device = isRecord(definition.driver_opts)
-				? definition.driver_opts.device
-				: undefined;
+			// A declared volume nothing mounts cannot expose the path it is bound
+			// to, so its device is only looked at when it is mounted.
+			const device =
+				isMounted && isRecord(definition.driver_opts)
+					? definition.driver_opts.device
+					: undefined;
 			if (typeof device === "string" && device) {
 				const resolvedDevice = interpolateComposeValue(device, options);
 				if (resolvedDevice === null) {
@@ -1369,6 +1392,10 @@ export const resolveComposeFilesMountedVolumes = (
 					unresolved.push(`volume "${key}"`);
 					continue;
 				}
+			}
+
+			if (external && !isMounted) {
+				continue;
 			}
 
 			let rawName: unknown = definition.name;

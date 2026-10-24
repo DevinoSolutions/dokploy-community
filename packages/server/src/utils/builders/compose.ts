@@ -315,11 +315,15 @@ const getRestoreCommands = (
 			fi`;
 	}
 
+	// A `.env` that is a symlink (the repository can bring one, pointing at
+	// another compose's `.env`, when "Create env file" is off) is removed before
+	// the restore writes it, so the copy never goes through the link (T-7135).
 	return `
 		echo "Restoring previous working deployment... ⏪";
 		RESTORE_FILES_OK=1;
 		cp ${qLastGoodCompose} ${qComposeFile} 2>/dev/null || cp ${qPreCompose} ${qComposeFile} 2>/dev/null || RESTORE_FILES_OK=0;
 		RESTORE_ENV_OK=1;
+		if [ -L ${qEnvFile} ]; then rm -f ${qEnvFile}; fi;
 		cp ${qLastGoodEnv} ${qEnvFile} 2>/dev/null || cp ${qPreEnv} ${qEnvFile} 2>/dev/null || RESTORE_ENV_OK=0;${overrideRestore}
 		if [ "$RESTORE_ENV_OK" = "0" ] && { [ "${isEnvRequired}" = "1" ] || [ -f ${qLastGoodEnv} ] || [ -f ${qPreEnv} ]; }; then RESTORE_FILES_OK=0; echo "Warning: ⚠️ Previous .env could not be restored"; fi
 		if [ "$RESTORE_FILES_OK" = "1" ]; then
@@ -986,14 +990,18 @@ export const getCreateEnvFileCommand = async (
 	});
 	options.onStaged?.([stagedPath]);
 
-	// `touch` + `cat >` keeps the mode and owner of an existing `.env`.
+	// `touch` + `cat >` keeps the mode and owner of an existing `.env`. A `.env`
+	// that is a symlink (the repository can bring one, pointing at another
+	// compose's `.env`) is removed first, so the write makes a regular file
+	// instead of going through the link (T-7135).
+	const qEnvFilePath = quote([envFilePath]);
 	return `
 ${getInstallStagedFileCommand({
 	staged: stagedPath,
 	destination: envFilePath,
 	failureMessage: "❌ Error: Could not write the environment file",
 	alsoRemove: options.alsoRemove,
-	prepare: `touch ${quote([envFilePath])}`,
+	prepare: `if [ -L ${qEnvFilePath} ]; then rm -f ${qEnvFilePath}; fi && touch ${qEnvFilePath}`,
 })}
 	`;
 };

@@ -209,6 +209,21 @@ describe("getBuildComposeCommand — rollback decision logic", () => {
 		expect(command).toContain('if [ "$RESTORE_ENV_OK" = "0" ] && { [ "0" = "1" ]');
 	});
 
+	it("removes a .env symlink before the restore copies over it (T-7135)", async () => {
+		// With "Create env file" off the repository's .env is never rewritten, so
+		// a link to another compose's .env would otherwise take the restore's copy.
+		for (const createEnvFile of [false, true]) {
+			const command = await build({ createEnvFile });
+			const lines = command.split("\n").map((line) => line.trim());
+			const start = lines.indexOf("RESTORE_ENV_OK=1;");
+			expect(start).toBeGreaterThan(-1);
+			const env = lines[start + 1] ?? "";
+			expect(env).toMatch(/^if \[ -L (.+) \]; then rm -f \1; fi;$/);
+			expect(env.replace(/\\+/g, "/")).toContain("/my-app/code/.env");
+			expect(lines[start + 2]).toMatch(/^cp /);
+		}
+	});
+
 	it("restores without --build so the known-good artifact is not rebuilt", async () => {
 		const command = await build();
 		const restoreLine = command

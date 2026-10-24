@@ -1,12 +1,14 @@
 import { spawnSync } from "node:child_process";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
 	statSync,
+	symlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
@@ -300,8 +302,10 @@ describe("compose .env (getCreateEnvFileCommand)", () => {
 		expectNoContentIn([command, ...remoteCommands()], [secretEnv]);
 		expect(command).not.toContain("ENVSECRET");
 		// The mode of an existing .env survives: touch, then `cat >` (never `mv`).
+		// A .env that is a symlink is removed first, so the write never goes
+		// through the link (T-7135).
 		expect(command).toContain(
-			"{ touch /etc/dokploy/compose/big-app/code/.env && cat ",
+			"{ if [ -L /etc/dokploy/compose/big-app/code/.env ]; then rm -f /etc/dokploy/compose/big-app/code/.env; fi && touch /etc/dokploy/compose/big-app/code/.env && cat ",
 		);
 		expect(command).toContain(
 			"cat /etc/dokploy/compose/big-app/.dokploy-stage-env-dep-1 > /etc/dokploy/compose/big-app/code/.env",
@@ -471,6 +475,43 @@ describe("staged content in a real shell", () => {
 				expect(statSync(envFile).mode & 0o777).toBe(0o640);
 			}
 			expect(stagedIn(`${tmp}/compose/big-app`)).toEqual([]);
+		},
+	);
+
+	// A repository can bring a `.env` that is a symlink to another compose's
+	// `.env`: the write replaces the link with a regular file (T-7135).
+	(hasSh && process.platform !== "win32" ? it : it.skip)(
+		"writes a regular .env over a symlink and leaves the link's target alone",
+		async () => {
+			const command = await getCreateEnvFileCommand(
+				{ ...baseCompose, env: "MINE=1" },
+				{ deploymentId: "dep-link" },
+			);
+			mkdirSync(`${tmp}/compose/big-app/code`, { recursive: true });
+			mkdirSync(`${tmp}/compose/other-app/code`, { recursive: true });
+			const target = `${tmp}/compose/other-app/code/.env`;
+			writeFileSync(target, "THEIRS=1\n");
+			const envFile = `${tmp}/compose/big-app/code/.env`;
+			symlinkSync(target, envFile);
+			// A dangling link too: `touch` would otherwise create its target.
+			const missing = `${tmp}/compose/other-app/code/missing.env`;
+
+			const result = run(command);
+
+			expect(result.status).toBe(0);
+			expect(lstatSync(envFile).isSymbolicLink()).toBe(false);
+			expect(readFileSync(envFile, "utf8")).toContain("MINE=");
+			expect(readFileSync(target, "utf8")).toBe("THEIRS=1\n");
+
+			rmSync(envFile);
+			symlinkSync(missing, envFile);
+			const again = await getCreateEnvFileCommand(
+				{ ...baseCompose, env: "MINE=2" },
+				{ deploymentId: "dep-link-2" },
+			);
+			expect(run(again).status).toBe(0);
+			expect(lstatSync(envFile).isSymbolicLink()).toBe(false);
+			expect(existsSync(missing)).toBe(false);
 		},
 	);
 
