@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
+import { resolvePatchPath } from "../utils/patch-path";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
 import { cloneBitbucketRepository } from "../utils/providers/bitbucket";
 import { cloneGitRepository } from "../utils/providers/git";
@@ -18,13 +19,15 @@ interface PatchRepoConfig {
 }
 
 /**
- * Ensure patch repo exists and is up-to-date
- * Returns path to the repo
+ * Where a service's patch repo lives: the host that builds it (an
+ * application's build server, else its server; a compose's server) and
+ * `<PATCH_REPOS_PATH>/<type>/<appName>` there. Always derived from the service,
+ * never from a client value (T-7878).
  */
-export const ensurePatchRepo = async ({
-	type,
-	id,
-}: PatchRepoConfig): Promise<string> => {
+const resolvePatchRepo = async (
+	type: "application" | "compose",
+	id: string,
+) => {
 	let serverId: string | null = null;
 
 	if (type === "application") {
@@ -40,11 +43,23 @@ export const ensurePatchRepo = async ({
 			? await findApplicationById(id)
 			: await findComposeById(id);
 
-	// A stored provider or SSH key of another organization must not be used to clone.
-	await assertDeployReferencesInOrganization(application, "source");
-
 	const { PATCH_REPOS_PATH } = paths(!!serverId);
 	const repoPath = join(PATCH_REPOS_PATH, type, application.appName);
+	return { application, serverId, repoPath };
+};
+
+/**
+ * Ensure patch repo exists and is up-to-date
+ * Returns path to the repo
+ */
+export const ensurePatchRepo = async ({
+	type,
+	id,
+}: PatchRepoConfig): Promise<string> => {
+	const { application, serverId, repoPath } = await resolvePatchRepo(type, id);
+
+	// A stored provider or SSH key of another organization must not be used to clone.
+	await assertDeployReferencesInOrganization(application, "source");
 
 	const applicationEntity = {
 		...application,
@@ -83,14 +98,16 @@ interface DirectoryEntry {
 }
 
 /**
- * Read directory tree of the patch repo
+ * Read directory tree of the service's patch repo
  */
 export const readPatchRepoDirectory = async (
-	repoPath: string,
-	serverId?: string | null,
+	id: string,
+	type: "application" | "compose",
 ): Promise<DirectoryEntry[]> => {
-	// Use git ls-tree to get tracked files only
-	const command = `cd ${quote([repoPath])} && git ls-tree -r --name-only HEAD`;
+	const { serverId, repoPath } = await resolvePatchRepo(type, id);
+	// Tracked files only. `--git-dir`, not `cd`, so git never uses a
+	// repository above the patch repo when the clone is missing.
+	const command = `git --git-dir=${quote([join(repoPath, ".git")])} ls-tree -r --name-only HEAD`;
 
 	let stdout: string;
 	try {
@@ -154,26 +171,13 @@ export const readPatchRepoFile = async (
 	type: "application" | "compose",
 	filePath: string,
 ) => {
-	let serverId: string | null = null;
+	const { serverId, repoPath } = await resolvePatchRepo(type, id);
+	// Throws unless the path stays inside the repo and outside .git.
+	resolvePatchPath(repoPath, filePath);
 
-	if (type === "application") {
-		const application = await findApplicationById(id);
-		serverId = application.buildServerId || application.serverId;
-	} else {
-		const compose = await findComposeById(id);
-		serverId = compose.serverId;
-	}
-	const { PATCH_REPOS_PATH } = paths(!!serverId);
-
-	const application =
-		type === "application"
-			? await findApplicationById(id)
-			: await findComposeById(id);
-
-	const repoPath = join(PATCH_REPOS_PATH, type, application.appName);
-	const fullPath = join(repoPath, filePath);
-
-	const command = `cat ${quote([fullPath])}`;
+	// The committed blob (a link shows as its target text). The patch repo is
+	// a fresh clone, so HEAD matches the checkout. `--git-dir` as above.
+	const command = `git --git-dir=${quote([join(repoPath, ".git")])} cat-file blob ${quote([`HEAD:${filePath}`])}`;
 
 	if (serverId) {
 		const result = await execAsyncRemote(serverId, command);
