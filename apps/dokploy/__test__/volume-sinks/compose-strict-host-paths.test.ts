@@ -813,13 +813,13 @@ describe("a stack with chained commands", () => {
 		await expect(
 			assertComposeVolumesBound(
 				row(
-					`compose -p x ${file} config && docker compose -p x ${file} up -d`,
+					`compose -p ${APP} ${file} config && docker compose -p ${APP} ${file} up -d`,
 				),
 			),
 		).rejects.toThrow(refusedByStorage);
 		// One command: the staged variable wins over the .env.
 		await expect(
-			assertComposeVolumesBound(row(`compose -p x ${file} up -d`)),
+			assertComposeVolumesBound(row(`compose -p ${APP} ${file} up -d`)),
 		).resolves.toBeUndefined();
 	});
 });

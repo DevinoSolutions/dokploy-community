@@ -340,7 +340,7 @@ describe("custom commands that chain compose subcommands", () => {
 		for (const sub of SUBCOMMANDS) {
 			await expect(
 				run(
-					`compose -f ${DEPLOYED} up -d && docker compose -f ${DEPLOYED} ${sub} && docker compose -f /tmp/ok.yml ${sub}`,
+					`compose -f ${DEPLOYED} up -d && docker compose -f ${DEPLOYED} ${sub} && docker compose -p ${APP} -f /tmp/ok.yml ${sub}`,
 				),
 			).resolves.toBeUndefined();
 		}

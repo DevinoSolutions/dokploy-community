@@ -1286,7 +1286,7 @@ const NOTHING = "services:\n  web:\n    image: nginx\n";
 describe("--project-directory moves the base of relative binds", () => {
 	const withDirectory = (flag: string, source: string) =>
 		composeRow(bind(source), {
-			command: `compose --project-directory ${flag} -f ${DEPLOYED} up -d`,
+			command: `compose -p ${APP} --project-directory ${flag} -f ${DEPLOYED} up -d`,
 		});
 	const parentMessage = /contains Docker's own volume storage/;
 
@@ -1384,7 +1384,7 @@ describe("--project-directory moves the base of relative binds", () => {
 		// The env file is not read: no variable of a host path is trusted.
 		await expect(
 			assertComposeVolumesBound(
-				row(`compose --env-file other.env -f ${DEPLOYED} up -d`),
+				row(`compose -p ${APP} --env-file other.env -f ${DEPLOYED} up -d`),
 			),
 		).rejects.toThrow(/Compose volume check failed/);
 		expect(commandUsesEnvFile({ command: "compose --env-file a up -d" })).toBe(
@@ -1716,7 +1716,7 @@ describe("process links that collapse away", () => {
 describe("a path option that is not literal", () => {
 	const projectDirectory = (value: string) =>
 		composeRow(bind("."), {
-			command: `compose --project-directory ${value} -f ${DEPLOYED} up -d`,
+			command: `compose -p ${APP} --project-directory ${value} -f ${DEPLOYED} up -d`,
 		});
 	const refused = /Compose command refused: the --project-directory/;
 
@@ -1798,7 +1798,7 @@ describe("a path option that is not literal", () => {
 			await expect(
 				assertComposeVolumesBound(
 					composeRow(bind("./data"), {
-						command: `compose --project-directory ${value} -f ${DEPLOYED} up -d`,
+						command: `compose -p ${APP} --project-directory ${value} -f ${DEPLOYED} up -d`,
 					}),
 				),
 			).resolves.toBeUndefined();
