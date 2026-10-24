@@ -10,6 +10,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
 import { prepareComposeBuildServerDeploy } from "@dokploy/server/services/compose-build-server";
+import { runComposePolicyAudit } from "@dokploy/server/services/compose-policy-audit";
 import { pruneComposeBuildRegistry } from "@dokploy/server/services/compose-registry-retention";
 import {
 	type ComposePathLike,
@@ -291,6 +292,12 @@ const assertComposeVolumesBoundForDeploy = async (
 	deployment: { deploymentId?: string; logPath: string },
 	{ freshVolumes, restoreFiles }: { freshVolumes: boolean; restoreFiles: boolean },
 ) => {
+	// The opt-in restricted-compose audit (T-7455) looks at the compose right
+	// before the guard below, so what the guard refuses is recorded too. Called
+	// once per deploy by every path (deploy, build server, rolling, preview,
+	// redeploy); read-only, never throws, a no-op unless the organization
+	// turned it on. See services/compose-policy-audit.ts.
+	await runComposePolicyAudit(entity, deployment);
 	try {
 		await assertComposeVolumesBound(entity);
 	} catch (error) {

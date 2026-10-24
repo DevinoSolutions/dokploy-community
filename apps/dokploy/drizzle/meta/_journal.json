@@ -1555,6 +1555,13 @@
       "when": 1792792906742,
       "tag": "0221_deployment_watchdog",
       "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1792809766133,
+      "tag": "0222_compose_policy_audit",
+      "breakpoints": true
     }
   ]
 }

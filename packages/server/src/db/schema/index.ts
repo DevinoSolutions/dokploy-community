@@ -10,6 +10,7 @@ export * from "./certificate";
 export * from "./cloudflare";
 export * from "./cloudflare-access";
 export * from "./compose";
+export * from "./compose-policy-finding";
 export * from "./deploy-hook";
 export * from "./deployment";
 export * from "./deployment-cancel-audit";
