@@ -4,6 +4,7 @@ import {
 	HardDriveDownload,
 	Loader2,
 	RefreshCw,
+	Undo2,
 	XCircle,
 } from "lucide-react";
 import { useState } from "react";
@@ -35,6 +36,22 @@ type HealthResult = {
 
 type ModalState = "idle" | "checking" | "results" | "updating";
 
+/** A pinned install: a release tag (or tag@digest), or the recorded rollback. */
+export type UpdateWebServerPin = {
+	/** Sent as the target; left out for the recorded rollback. */
+	target?: string;
+	/** The version the server reports once the install is done. */
+	version: string;
+	/** Button label, e.g. "Install" or "Roll back to v0.30.8-community.31". */
+	label: string;
+	isRollback?: boolean;
+};
+
+// A pinned install pulls the image first, so the panel stays up for a while.
+const PIN_TIMEOUT_MS = 10 * 60_000;
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const ServiceStatusItem = ({
 	name,
 	service,
@@ -57,13 +74,17 @@ const ServiceStatusItem = ({
 
 export const UpdateWebServer = ({
 	buttonClassName,
+	pin,
 }: {
 	buttonClassName?: string;
+	/** Installs this release instead of the latest one. */
+	pin?: UpdateWebServerPin;
 }) => {
 	const [modalState, setModalState] = useState<ModalState>("idle");
 	const [open, setOpen] = useState(false);
 	const [healthResult, setHealthResult] = useState<HealthResult | null>(null);
 
+	const utils = api.useUtils();
 	const { mutateAsync: updateServer } = api.settings.updateServer.useMutation();
 	const { refetch: checkHealth } =
 		api.settings.checkInfrastructureHealth.useQuery(undefined, {
@@ -110,7 +131,57 @@ export const UpdateWebServer = ({
 		}
 	};
 
+	// /api/health answers while the old server is still pulling the image, so a
+	// pinned install waits until the server reports the version it asked for.
+	const waitForPinnedVersion = async (version: string) => {
+		const deadline = Date.now() + PIN_TIMEOUT_MS;
+		while (Date.now() < deadline) {
+			await wait(5000);
+			try {
+				if (
+					(await utils.client.settings.getDokployVersion.query()) === version
+				) {
+					toast.success(
+						`The server now runs ${version}. The page will be reloaded...`,
+					);
+					setTimeout(() => {
+						window.location.reload();
+					}, 2000);
+					return;
+				}
+			} catch {
+				// Expected while the service is being replaced.
+			}
+		}
+		setModalState("results");
+		toast.error(`The server is not running ${version} after 10 minutes.`, {
+			description:
+				"Check the Dokploy server logs (docker service logs dokploy) for the pull or update error.",
+		});
+	};
+
+	const handlePinnedConfirm = async (pinned: UpdateWebServerPin) => {
+		try {
+			setModalState("updating");
+			await updateServer(
+				pinned.target !== undefined
+					? { target: pinned.target }
+					: { rollback: true },
+			);
+			await waitForPinnedVersion(pinned.version);
+		} catch (error) {
+			setModalState("results");
+			console.error("Error updating server:", error);
+			toast.error("The server could not be switched.", {
+				description: error instanceof Error ? error.message : undefined,
+			});
+		}
+	};
+
 	const handleConfirm = async () => {
+		if (pin) {
+			return handlePinnedConfirm(pin);
+		}
 		try {
 			setModalState("updating");
 			await updateServer();
@@ -138,18 +209,33 @@ export const UpdateWebServer = ({
 	return (
 		<AlertDialog open={open}>
 			<AlertDialogTrigger asChild>
-				<Button
-					className={cn("relative w-full", buttonClassName)}
-					variant="secondary"
-					onClick={() => setOpen(true)}
-				>
-					<HardDriveDownload className="h-4 w-4" />
-					<span className="absolute -right-1 -top-2 flex h-3 w-3">
-						<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-						<span className="relative inline-flex rounded-full h-3 w-3 bg-green-500" />
-					</span>
-					Update Server
-				</Button>
+				{pin ? (
+					<Button
+						className={cn("relative w-full", buttonClassName)}
+						variant="outline"
+						onClick={() => setOpen(true)}
+					>
+						{pin.isRollback ? (
+							<Undo2 className="h-4 w-4" />
+						) : (
+							<HardDriveDownload className="h-4 w-4" />
+						)}
+						{pin.label}
+					</Button>
+				) : (
+					<Button
+						className={cn("relative w-full", buttonClassName)}
+						variant="secondary"
+						onClick={() => setOpen(true)}
+					>
+						<HardDriveDownload className="h-4 w-4" />
+						<span className="absolute -right-1 -top-2 flex h-3 w-3">
+							<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+							<span className="relative inline-flex rounded-full h-3 w-3 bg-green-500" />
+						</span>
+						Update Server
+					</Button>
+				)}
 			</AlertDialogTrigger>
 			<AlertDialogContent>
 				<AlertDialogHeader>
@@ -162,7 +248,19 @@ export const UpdateWebServer = ({
 					</AlertDialogTitle>
 					<AlertDialogDescription asChild>
 						<div>
-							{modalState === "idle" && (
+							{modalState === "idle" && pin && (
+								<span>
+									This will install {pin.version} on the web server. You will
+									not be able to use the panel while it is replaced. The page
+									will be reloaded once the server reports {pin.version}.
+									<br />
+									<br />
+									Database migrations applied by newer versions stay; features
+									changed since {pin.version} may not work.
+								</span>
+							)}
+
+							{modalState === "idle" && !pin && (
 								<span>
 									This will update the web server to the new version. You will
 									not be able to use the panel during the update process. The

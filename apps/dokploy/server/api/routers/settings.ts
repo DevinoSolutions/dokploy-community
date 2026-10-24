@@ -32,12 +32,14 @@ import {
 	readConfig,
 	readConfigInPath,
 	readDirectory,
+	readDokployRollbackPoint,
 	readEnvironmentVariableList,
 	readEnvironmentVariables,
 	readMainConfig,
 	readMonitoringConfig,
 	readMonitoringStats,
 	readPorts,
+	recordDokployRollbackPoint,
 	recreateDirectory,
 	reloadDockerResource,
 	runBackgroundJob,
@@ -73,6 +75,15 @@ import {
 	scheduleDockerCleanup,
 	WEB_SERVER_CLEANUP_JOB,
 } from "@dokploy/server/utils/docker/cleanup-job";
+import {
+	DOKPLOY_IMAGE_REPO,
+	DOKPLOY_MIN_PINNED_VERSION,
+	type DokployUpdateTarget,
+	dokployUpdateImage,
+	isBelowDokployPinFloor,
+	isDokployUpdateTarget,
+	parseDokployUpdateTarget,
+} from "@dokploy/server/utils/dokploy-update-target";
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
 import { TRPCError } from "@trpc/server";
 import { eq, sql } from "drizzle-orm";
@@ -165,6 +176,25 @@ const assertTraefikAccess = async (
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
 };
+
+const MANIFEST_INSPECT_TIMEOUT_MS = 60_000;
+
+// No input keeps the plain "install the latest release" update.
+const apiUpdateDokployServer = z
+	.object({
+		target: z
+			.string()
+			.max(128)
+			.refine(isDokployUpdateTarget, {
+				message: "Use a release tag like v0.30.8-community.32",
+			})
+			.optional(),
+		rollback: z.boolean().optional(),
+	})
+	.refine((input) => !(input.target !== undefined && input.rollback), {
+		message: "Pass either a target or rollback, not both",
+	})
+	.optional();
 
 export const settingsRouter = createTRPCRouter({
 	getWebServerSettings: protectedProcedure.query(async () => {
@@ -822,31 +852,126 @@ export const settingsRouter = createTRPCRouter({
 
 			return await getReleaseNotes(input.version);
 		}),
-	updateServer: adminProcedure.mutation(async ({ ctx }) => {
-		if (IS_CLOUD) {
-			return true;
-		}
+	updateServer: adminProcedure
+		.input(apiUpdateDokployServer)
+		.mutation(async ({ ctx, input }) => {
+			if (IS_CLOUD) {
+				return true;
+			}
 
-		const data = await getUpdateData(packageInfo.version);
-		if (data.updateAvailable) {
-			void runBackgroundJob("settings.updateServer background", () =>
-				spawnAsync("docker", [
+			// Without a target this installs the latest release, as before. A
+			// target (or the recorded rollback digest) only ever selects a tag or
+			// digest inside the fork repo.
+			let target = input?.target;
+			let pinned: DokployUpdateTarget | null = null;
+			if (input?.rollback) {
+				const point = await readDokployRollbackPoint(packageInfo.version);
+				if (!point) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "No previous version is recorded to roll back to.",
+					});
+				}
+				target = point.digest;
+			}
+			if (target !== undefined) {
+				pinned = parseDokployUpdateTarget(target);
+				if (!pinned) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "Unsupported update target.",
+					});
+				}
+				if (pinned.tag !== undefined && isBelowDokployPinFloor(pinned.tag)) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: `Releases older than ${DOKPLOY_MIN_PINNED_VERSION} can't be installed from here.`,
+					});
+				}
+				if (pinned.tag === undefined) {
+					// A digest carries no version, so the floor can't be checked:
+					// on its own it is only the recorded rollback.
+					const point = input?.rollback
+						? { digest: target }
+						: await readDokployRollbackPoint(packageInfo.version);
+					if (point?.digest !== pinned.digest) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message:
+								"A digest is only accepted for the recorded rollback. Use a release tag.",
+						});
+					}
+				}
+			}
+
+			let image: string;
+			if (pinned) {
+				image = dokployUpdateImage(pinned);
+				try {
+					await spawnAsync(
+						"docker",
+						["manifest", "inspect", image],
+						undefined,
+						{
+							timeout: MANIFEST_INSPECT_TIMEOUT_MS,
+						},
+					);
+				} catch (error) {
+					const reason = error instanceof Error ? error.message.trim() : "";
+					console.error(
+						"settings.updateServer manifest inspect failed:",
+						reason,
+					);
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: /manifest unknown|no such manifest|not found/i.test(reason)
+							? `Image not found in ${DOKPLOY_IMAGE_REPO}.`
+							: "Could not reach ghcr.io to check the image; try again.",
+					});
+				}
+			} else {
+				const data = await getUpdateData(packageInfo.version);
+				if (!data.updateAvailable) {
+					return true;
+				}
+				image = `${DOKPLOY_IMAGE_REPO}:${data.latestVersion}`;
+			}
+
+			const installing = pinned ?? undefined;
+			void runBackgroundJob("settings.updateServer background", async () => {
+				// A pinned image is pulled first: if that fails, the running service
+				// and the rollback point of the last update are both kept.
+				if (installing) {
+					await spawnAsync("docker", ["pull", image]);
+				}
+				await recordDokployRollbackPoint(packageInfo.version, {
+					installing,
+				}).catch(() => undefined);
+				await spawnAsync("docker", [
 					"service",
 					"update",
 					"--force",
 					"--image",
-					`ghcr.io/devinosolutions/dokploy-community:${data.latestVersion}`,
+					image,
 					"dokploy",
-				]),
-			);
+				]);
+			});
 			await audit(ctx, {
 				action: "update",
 				resourceType: "settings",
 				resourceName: "dokploy-version",
+				...(target !== undefined && {
+					metadata: { target, rollback: !!input?.rollback },
+				}),
 			});
-		}
 
-		return true;
+			return true;
+		}),
+	getUpdateRollback: adminProcedure.query(async () => {
+		if (IS_CLOUD) {
+			return null;
+		}
+		return await readDokployRollbackPoint(packageInfo.version);
 	}),
 
 	getDokployVersion: protectedProcedure.query(() => {
