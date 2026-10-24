@@ -1,4 +1,7 @@
-import { writeTraefikSetup } from "@dokploy/server/services/settings";
+import {
+	assertRunningTraefikImageKept,
+	writeTraefikSetup,
+} from "@dokploy/server/services/settings";
 import {
 	initializeStandaloneTraefik,
 	initializeTraefikService,
@@ -34,14 +37,28 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 const OLDER = "traefik:v3.5.4";
 const NEWER = "traefik:v9.9.9";
 
+const RUNNING_ID = "sha256:aaaa";
+const OTHER_ID = "sha256:bbbb";
+
+// Docker's local image store: tags name image IDs, and an ID is present or
+// not. By default the running container's tag still names its image.
 const fakeDocker = ({
 	container,
 	service,
+	runningId = RUNNING_ID,
+	localTags,
+	localIds,
 }: {
 	container?: string | null;
 	service?: string | null;
+	runningId?: string;
+	localTags?: Record<string, string>;
+	localIds?: string[];
 }) => {
 	const log: string[] = [];
+	const tags: Record<string, string> =
+		localTags ?? (container ? { [container]: runningId } : {});
+	const ids = new Set(localIds ?? [runningId]);
 	const containers: { id: string; name: string; image?: string }[] = [];
 	if (container !== undefined && container !== null) {
 		containers.push({ id: "old", name: "dokploy-traefik", image: container });
@@ -61,6 +78,7 @@ const fakeDocker = ({
 			const c = find(ref);
 			return {
 				Id: c.id,
+				Image: c.id === "old" ? runningId : `sha256:${c.id}`,
 				Config: { Image: c.image },
 				State: { Running: true, StartedAt: "steady" },
 			};
@@ -87,9 +105,22 @@ const fakeDocker = ({
 		getImage: (name: string) => ({
 			inspect: async () => {
 				log.push(`image inspect ${name}`);
-				return {};
+				const id = tags[name] ?? (ids.has(name) ? name : undefined);
+				if (!id) throw new Error(`No such image: ${name}`);
+				return { Id: id };
 			},
 		}),
+		pull: async (name: string) => {
+			log.push(`pull ${name}`);
+			tags[name] = "sha256:pulled";
+			return "stream";
+		},
+		modem: {
+			followProgress: (
+				_stream: unknown,
+				done: (error: Error | null, events: unknown[]) => void,
+			) => done(null, []),
+		},
 		getContainer: (ref: string) => handle(ref),
 		createContainer: async (settings: { name: string; Image: string }) => {
 			created += 1;
@@ -179,7 +210,12 @@ describe("routine Traefik recreates keep the running image", () => {
 		expect(TRAEFIK_IMAGE).toBe("traefik:v3.6.25");
 	});
 
-	it.each([OLDER, NEWER, `${OLDER}@sha256:abc123`, "registry.local:5000/traefik:v3.5.4"])(
+	it.each([
+		OLDER,
+		NEWER,
+		`${OLDER}@sha256:abc123`,
+		"registry.local:5000/traefik:v3.5.4",
+	])(
 		"a routine action on a container running %s recreates it with that image",
 		async (running) => {
 			const fake = fakeDocker({ container: running });
@@ -234,7 +270,7 @@ describe("routine Traefik recreates keep the running image", () => {
 		expect(fake.createdImages).toEqual([TRAEFIK_IMAGE]);
 	});
 
-	it.each(["traefik", "localhost:5000/traefik", "sha256:0123abcd", ""])(
+	it.each(["traefik", "localhost:5000/traefik", ""])(
 		"refuses a routine action when the running image %j has no readable tag, touching nothing",
 		async (running) => {
 			const fake = fakeDocker({ container: running });
@@ -249,6 +285,117 @@ describe("routine Traefik recreates keep the running image", () => {
 			expect(fake.log).toEqual([]);
 		},
 	);
+});
+
+describe("a floating tag never moves Traefik to another image", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.useFakeTimers();
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		mocks.findMany.mockResolvedValue([]);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it("keeps the tag while it still names the running image", async () => {
+		const fake = fakeDocker({ container: "traefik:latest" });
+		use(fake);
+
+		const error = await settle(writeTraefikSetup({ env: ["A=1"] }));
+
+		expect(error).toBeNull();
+		expect(fake.createdImages).toEqual(["traefik:latest"]);
+		expect(fake.log.some((line) => line.startsWith("pull"))).toBe(false);
+	});
+
+	it("keeps the running image ID when the tag has moved locally", async () => {
+		const fake = fakeDocker({
+			container: "traefik:latest",
+			localTags: { "traefik:latest": OTHER_ID },
+			localIds: [RUNNING_ID, OTHER_ID],
+		});
+		use(fake);
+
+		const error = await settle(writeTraefikSetup({ env: ["A=1"] }));
+
+		expect(error).toBeNull();
+		expect(fake.createdImages).toEqual([RUNNING_ID]);
+		expect(fake.log.some((line) => line.startsWith("pull"))).toBe(false);
+	});
+
+	it("keeps the running image ID when the tag is gone but Docker still has the image", async () => {
+		const fake = fakeDocker({
+			container: "traefik:v3",
+			localTags: {},
+			localIds: [RUNNING_ID],
+		});
+		use(fake);
+
+		const error = await settle(writeTraefikSetup({ env: ["A=1"] }));
+
+		expect(error).toBeNull();
+		expect(fake.createdImages).toEqual([RUNNING_ID]);
+		expect(fake.log.some((line) => line.startsWith("pull"))).toBe(false);
+	});
+
+	it("keeps a container created from an image ID by that ID", async () => {
+		const fake = fakeDocker({ container: RUNNING_ID, localTags: {} });
+		use(fake);
+
+		const error = await settle(writeTraefikSetup({ env: ["A=1"] }));
+
+		expect(error).toBeNull();
+		expect(fake.createdImages).toEqual([RUNNING_ID]);
+	});
+
+	it.each([
+		["the tag points elsewhere", { "traefik:v3.6": OTHER_ID }],
+		["the tag is gone", {}],
+	])(
+		"refuses, without pulling or touching anything, when %s and the running image is gone",
+		async (_case, localTags) => {
+			const fake = fakeDocker({
+				container: "traefik:v3.6",
+				localTags,
+				localIds: [OTHER_ID],
+			});
+			use(fake);
+
+			const error = await settle(writeTraefikSetup({ env: ["A=1"] }));
+
+			expect(error?.message).toContain("is no longer on this server");
+			expect(fake.createdImages).toEqual([]);
+			expect(
+				fake.log.filter((line) => !line.startsWith("image inspect")),
+			).toEqual([]);
+			await expect(assertRunningTraefikImageKept()).rejects.toThrow(
+				"is no longer on this server",
+			);
+		},
+	);
+
+	it("the up-front check passes when the tag has moved but the image is still there", async () => {
+		use(
+			fakeDocker({
+				container: "traefik:latest",
+				localTags: { "traefik:latest": OTHER_ID },
+				localIds: [RUNNING_ID, OTHER_ID],
+			}),
+		);
+
+		await expect(assertRunningTraefikImageKept()).resolves.toBeUndefined();
+	});
+
+	it("the up-front check leaves an unreachable host to the action itself", async () => {
+		mocks.getRemoteDocker.mockRejectedValue(new Error("ssh: connect timeout"));
+
+		await expect(
+			assertRunningTraefikImageKept("server-a"),
+		).resolves.toBeUndefined();
+	});
 });
 
 describe("routine Traefik updates of a Swarm service keep its image", () => {

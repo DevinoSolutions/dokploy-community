@@ -49,6 +49,7 @@ const fakeDocker = (initial: FakeContainer[]) => {
 			const c = find(ref);
 			return {
 				Id: c.id,
+				Image: `id:${c.image}`,
 				Config: { Image: c.image },
 				State: { Running: c.running, StartedAt: "steady" },
 			};
@@ -77,7 +78,10 @@ const fakeDocker = (initial: FakeContainer[]) => {
 	});
 
 	const docker = {
-		getImage: () => ({ inspect: async () => ({}) }),
+		// Every tag still names the image its container runs.
+		getImage: (reference: string) => ({
+			inspect: async () => ({ Id: `id:${reference}` }),
+		}),
 		getContainer: (ref: string) => container(ref),
 		createContainer: async (settings: Record<string, unknown>) => {
 			const name = settings.name as string;

@@ -7,9 +7,11 @@ import {
 	writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import type Dockerode from "dockerode";
 import type {
 	Container,
 	ContainerCreateOptions,
+	ContainerInspectInfo,
 	CreateServiceOptions,
 } from "dockerode";
 import { stringify } from "yaml";
@@ -56,6 +58,17 @@ export const splitImageReference = (image: string) => {
 	};
 };
 
+// Checked by name, not instanceof: the server code can be bundled twice.
+export const TRAEFIK_IMAGE_REFUSED = "TraefikImageRefusedError";
+
+const refuseTraefikImage = (message: string) => {
+	const error = new Error(message);
+	error.name = TRAEFIK_IMAGE_REFUSED;
+	return error;
+};
+
+const isImageId = (reference: string) => /^sha256:[0-9a-f]+$/i.test(reference);
+
 // Saving env, ports or the dashboard toggle must not change the Traefik
 // version, so a routine recreate reuses the running image as it is. Without a
 // readable tag the recreate could pull another version, so it is refused.
@@ -66,11 +79,65 @@ export const keepRunningTraefikImage = (image: string | null | undefined) => {
 		reference.startsWith("sha256:") ||
 		!splitImageReference(reference).tag
 	) {
-		throw new Error(
+		throw refuseTraefikImage(
 			`Can't read the version tag of the running Traefik image${reference ? ` "${reference}"` : ""}, so Dokploy won't recreate it: that could change the Traefik version. Run dokploy-traefik from a tagged image (for example ${TRAEFIK_IMAGE}) first.`,
 		);
 	}
 	return reference;
+};
+
+const localImageId = (docker: Dockerode, reference: string) =>
+	docker
+		.getImage(reference)
+		.inspect()
+		.then(
+			(info) => info.Id,
+			() => null,
+		);
+
+// A tag like traefik:latest or traefik:v3 can move after the container was
+// created, so the tag is only reused while it still names the running image;
+// otherwise the running image itself (by ID) is used. A routine recreate never
+// pulls, so when Docker no longer has that image it is refused.
+const keepRunningContainerImage = async (
+	docker: Dockerode,
+	info: ContainerInspectInfo,
+) => {
+	const reference = info.Config?.Image?.trim() ?? "";
+	const runningId = info.Image;
+	// A container recreated from its image ID below names that ID.
+	if (!isImageId(reference)) {
+		keepRunningTraefikImage(reference);
+		if (runningId && (await localImageId(docker, reference)) === runningId) {
+			return reference;
+		}
+	}
+	if (runningId && (await localImageId(docker, runningId)) === runningId) {
+		return runningId;
+	}
+	throw refuseTraefikImage(
+		`The image the running Traefik was created from (${reference || "unknown"}${runningId && runningId !== reference ? `, ${runningId}` : ""}) is no longer on this server, so Dokploy won't recreate it: downloading the tag again could change the Traefik version. Pull that exact image on the server first.`,
+	);
+};
+
+// For a routine Traefik action: the image its recreate would use, or the
+// refusal it would hit. Swarm services keep their image with its digest.
+export const resolveRoutineTraefikImage = async (serverId?: string) => {
+	const docker = await getRemoteDocker(serverId);
+	const service = await docker
+		.getService("dokploy-traefik")
+		.inspect()
+		.catch(() => null);
+	if (service) {
+		return keepRunningTraefikImage(
+			service.Spec?.TaskTemplate?.ContainerSpec?.Image,
+		);
+	}
+	const info = await docker
+		.getContainer("dokploy-traefik")
+		.inspect()
+		.catch(() => null);
+	return info ? keepRunningContainerImage(docker, info) : TRAEFIK_IMAGE;
 };
 
 type PortBinding = { HostPort: string; HostIp: string };
@@ -187,7 +254,7 @@ export const recreateStandaloneTraefik = async ({
 	const imageName =
 		image ??
 		(currentInfo
-			? keepRunningTraefikImage(currentInfo.Config?.Image)
+			? await keepRunningContainerImage(docker, currentInfo)
 			: TRAEFIK_IMAGE);
 
 	const { exposedPorts, portBindings } =
@@ -216,7 +283,10 @@ export const recreateStandaloneTraefik = async ({
 		Env: env,
 	};
 
-	await ensureTraefikImage(serverId, imageName);
+	// Only the explicit update and a first install download an image.
+	if (image || !currentInfo) {
+		await ensureTraefikImage(serverId, imageName);
+	}
 
 	const current = currentInfo ? docker.getContainer(currentInfo.Id) : null;
 	if (current) {
@@ -372,7 +442,9 @@ export const initializeTraefikService = async ({
 	const imageName =
 		image ??
 		(inspect
-			? keepRunningTraefikImage(inspect.Spec?.TaskTemplate?.ContainerSpec?.Image)
+			? keepRunningTraefikImage(
+					inspect.Spec?.TaskTemplate?.ContainerSpec?.Image,
+				)
 			: TRAEFIK_IMAGE);
 
 	const settings: CreateServiceOptions = {

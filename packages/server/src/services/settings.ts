@@ -13,11 +13,12 @@ import { compose } from "../db/schema";
 import {
 	ensureTraefikImage,
 	initializeTraefikService,
-	keepRunningTraefikImage,
 	queueTraefikRecreate,
 	recreateStandaloneTraefik,
+	resolveRoutineTraefikImage,
 	restoreInterruptedTraefik,
 	splitImageReference,
+	TRAEFIK_IMAGE_REFUSED,
 	TRAEFIK_VERSION,
 	type TraefikOptions,
 } from "../setup/traefik-setup";
@@ -725,13 +726,16 @@ fi`;
 	};
 };
 
-// Routine Traefik actions recreate in the background, where an unreadable
-// image tag is refused; check it first so the caller sees why. An unreachable
-// host is left to the action itself.
+// Routine Traefik actions recreate in the background, where an image that
+// can't be kept is refused; check it first so the caller sees why. An
+// unreachable host is left to the action itself.
 export const assertRunningTraefikImageKept = async (serverId?: string) => {
-	const overview = await getTraefikOverview(serverId).catch(() => null);
-	if (overview?.image) {
-		keepRunningTraefikImage(overview.image);
+	try {
+		await resolveRoutineTraefikImage(serverId);
+	} catch (error) {
+		if (error instanceof Error && error.name === TRAEFIK_IMAGE_REFUSED) {
+			throw error;
+		}
 	}
 };
 

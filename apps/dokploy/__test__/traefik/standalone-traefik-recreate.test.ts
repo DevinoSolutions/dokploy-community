@@ -37,6 +37,13 @@ interface FakeOptions {
 	oldImage?: string;
 }
 
+// An image ID that is a pure function of the reference, so every tag here
+// still names the image its container runs.
+const imageId = (reference: string) =>
+	reference.startsWith("sha256:")
+		? reference
+		: `sha256:${Buffer.from(reference).toString("hex")}`;
+
 const fakeDocker = ({
 	oldRunning = true,
 	staleBackup = false,
@@ -88,6 +95,7 @@ const fakeDocker = ({
 				c.id === "new" && crashLoop ? `crash-${++restarts}` : "steady";
 			return {
 				Id: c.id,
+				Image: imageId(c.image ?? ""),
 				Config: { Image: c.image },
 				State: { Running: c.running, StartedAt: startedAt },
 			};
@@ -120,10 +128,10 @@ const fakeDocker = ({
 	});
 
 	const docker = {
-		getImage: () => ({
+		getImage: (reference: string) => ({
 			inspect: async () => {
 				if (!hasImage) throw new Error("No such image");
-				return {};
+				return { Id: imageId(reference) };
 			},
 		}),
 		pull: async () => {
@@ -219,13 +227,16 @@ describe("initializeStandaloneTraefik", () => {
 		});
 	});
 
+	// Only the explicit update (and a first install) downloads an image.
 	it("downloads the image first and touches nothing when the download fails", async () => {
 		const fake = fakeDocker({
 			imagePresent: false,
 			pullEvents: [{ error: "toomanyrequests: pull rate limit reached" }],
 		});
 
-		const error = await recreate(fake);
+		const error = await recreate(fake, {
+			image: `traefik:v${TRAEFIK_VERSION}`,
+		});
 
 		expect(error?.message).toContain("toomanyrequests");
 		expect(fake.log).toEqual(["pull"]);
@@ -237,7 +248,9 @@ describe("initializeStandaloneTraefik", () => {
 	it("downloads a missing image before recreating", async () => {
 		const fake = fakeDocker({ imagePresent: false });
 
-		const error = await recreate(fake);
+		const error = await recreate(fake, {
+			image: `traefik:v${TRAEFIK_VERSION}`,
+		});
 
 		expect(error).toBeNull();
 		expect(fake.log[0]).toBe("pull");
