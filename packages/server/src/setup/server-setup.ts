@@ -241,7 +241,7 @@ ${setupMainDirectory()}
 ${setupDirectories()}
 
 echo -e "8. Setting up Traefik"
-${createTraefikConfig()}
+${createServerTraefikConfig()}
 
 echo -e "9. Setting up Middlewares"
 ${createDefaultMiddlewares()}
@@ -463,10 +463,14 @@ export const setupSwarm = () => `
 		fi
 	`;
 
-const setupNetwork = () => `
+const isSwarmWorker = `[ "$($SUDO_CMD docker info --format '{{.Swarm.LocalNodeState}} {{.Swarm.ControlAvailable}}' 2>/dev/null)" = "active false" ]`;
+
+export const setupNetwork = () => `
 	# Check if the dokploy-network already exists
 	if $SUDO_CMD docker network ls | grep -q 'dokploy-network'; then
 		echo "Network dokploy-network already exists ✅"
+	elif ${isSwarmWorker}; then
+		echo "Swarm worker: dokploy-network is managed by the Swarm manager ✅"
 	else
 		# Create the dokploy-network if it doesn't exist
 		if $SUDO_CMD docker network create --driver overlay --attachable dokploy-network; then
@@ -662,21 +666,75 @@ else
 fi
 `;
 
-const createTraefikConfig = () => {
-	const config = getDefaultServerTraefikConfig();
+const removeSwarmProviderAwk = `
+/^providers:[[:space:]]*(#.*)?$/ { inProviders = 1; childIndent = -1; print; next }
+/^providers:/ && /swarm/ { unsupported = 1 }
+inProviders && /^[^[:space:]#]/ { inProviders = 0 }
+skipping {
+	if ($0 ~ /^[[:space:]]*$/) { blanks = blanks $0 "\\n"; next }
+	match($0, /^[[:space:]]*/)
+	if (RLENGTH > swarmIndent) { blanks = ""; next }
+	skipping = 0; printf "%s", blanks; blanks = ""
+}
+inProviders && /^[[:space:]]+[^[:space:]#]/ {
+	match($0, /^[[:space:]]*/)
+	if (childIndent < 0) childIndent = RLENGTH
+	if (RLENGTH == childIndent) {
+		if ($0 ~ /^[[:space:]]*swarm:[[:space:]]*(#.*)?$/) { swarmIndent = RLENGTH; skipping = 1; removed = 1; next }
+		if ($0 ~ /^[[:space:]]*swarm:[[:space:]]*[{][^{}]*[}][[:space:]]*(#.*)?$/) { removed = 1; next }
+		if ($0 ~ /^[[:space:]]*[^[:space:]]?swarm[^[:space:]]?[[:space:]]*:/) unsupported = 1
+	}
+}
+{ print }
+END { printf "%s", blanks; if (unsupported) exit 2; exit !removed }
+`;
 
-	const command = `
-	if [ -f "/etc/dokploy/traefik/dynamic/acme.json" ]; then
-		chmod 600 "/etc/dokploy/traefik/dynamic/acme.json"
+export const createServerTraefikConfig = (
+	traefikDir = "/etc/dokploy/traefik",
+) => {
+	const config = getDefaultServerTraefikConfig();
+	const workerConfig = getDefaultServerTraefikConfig(false);
+	const configPath = `${traefikDir}/traefik.yml`;
+
+	return `
+	if [ -f "${traefikDir}/dynamic/acme.json" ]; then
+		chmod 600 "${traefikDir}/dynamic/acme.json"
 	fi
-	if [ -f "/etc/dokploy/traefik/traefik.yml" ]; then
+	if [ -f "${configPath}" ]; then
 		echo "Traefik config already exists ✅"
+		if ${isSwarmWorker}; then
+			if [ -L "${configPath}" ]; then
+				echo "⚠️ ${configPath} is a symbolic link, so it is not rewritten. Swarm workers can't use providers.swarm, remove it manually and restart dokploy-traefik."
+			else
+				(
+					command -v flock > /dev/null && flock 9
+					tmp=$(mktemp)
+					trap 'rm -f "$tmp"' EXIT
+					status=0
+					awk '${removeSwarmProviderAwk}' "${configPath}" > "$tmp" || status=$?
+					if [ "$status" -eq 0 ]; then
+						# A new file, never through whatever an old .bak points at.
+						rm -f "${configPath}.bak"
+						cp "${configPath}" "${configPath}.bak"
+						# Write in place: the file is bind-mounted, a new inode would not reach the container.
+						cat "$tmp" > "${configPath}"
+						echo "Removed Swarm provider from Traefik config (Swarm worker), backup at ${configPath}.bak ✅"
+						if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
+							$SUDO_CMD docker restart dokploy-traefik > /dev/null
+							echo "Traefik restarted ✅"
+						fi
+					elif [ "$status" -eq 2 ]; then
+						echo "⚠️ Could not remove providers.swarm from ${configPath} automatically. Swarm workers can't use it, remove it manually and restart dokploy-traefik."
+					fi
+				) 9>> "${traefikDir}/.traefik-config.lock"
+			fi
+		fi
+	elif ${isSwarmWorker}; then
+		echo "${workerConfig}" > "${configPath}"
 	else
-		echo "${config}" > /etc/dokploy/traefik/traefik.yml
+		echo "${config}" > "${configPath}"
 	fi
 	`;
-
-	return command;
 };
 
 const createDefaultMiddlewares = () => {
@@ -704,18 +762,35 @@ export const installRClone = () => `
 export const createTraefikInstance = () => {
 	const command = `
 	    # Check if dokpyloy-traefik exists
+		# The pinned image is only for a server without Traefik: a migrated
+		# service keeps its image, so setup never changes the Traefik version.
+		TRAEFIK_IMAGE="traefik:v${TRAEFIK_VERSION}"
+		TRAEFIK_SKIP_CREATE=false
 		if $SUDO_CMD docker service inspect dokploy-traefik > /dev/null 2>&1; then
-			echo "Migrating Traefik to Standalone..."
-			$SUDO_CMD docker service rm dokploy-traefik
-			sleep 8
-			echo "Traefik migrated to Standalone ✅"
+			TRAEFIK_IMAGE="$($SUDO_CMD docker service inspect dokploy-traefik --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || true)"
+			TRAEFIK_REFERENCE="\${TRAEFIK_IMAGE%%@*}"
+			case "\${TRAEFIK_REFERENCE##*/}" in
+				sha256:*) TRAEFIK_TAGGED=false ;;
+				*:*) TRAEFIK_TAGGED=true ;;
+				*) TRAEFIK_TAGGED=false ;;
+			esac
+			if [ "$TRAEFIK_TAGGED" = true ]; then
+				echo "Migrating Traefik to Standalone..."
+				$SUDO_CMD docker service rm dokploy-traefik
+				sleep 8
+				echo "Traefik migrated to Standalone ✅"
+			else
+				echo "Warning: Can't read the version tag of the Traefik service image '$TRAEFIK_IMAGE', so it is not migrated to a standalone container: that could change the Traefik version. Run dokploy-traefik from a tagged image, then set up the server again."
+				TRAEFIK_SKIP_CREATE=true
+			fi
 		fi
 
-		if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
+		if [ "$TRAEFIK_SKIP_CREATE" = true ]; then
+			:
+		elif $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
 			echo "Traefik already exists ✅"
 		else
 			# Create the dokploy-traefik container
-			TRAEFIK_VERSION=${TRAEFIK_VERSION}
 			$SUDO_CMD docker run -d \
 				--name dokploy-traefik \
 				--restart always \
@@ -725,10 +800,10 @@ export const createTraefikInstance = () => {
 				-p ${TRAEFIK_SSL_PORT}:${TRAEFIK_SSL_PORT} \
 				-p ${TRAEFIK_PORT}:${TRAEFIK_PORT} \
 				-p ${TRAEFIK_HTTP3_PORT}:${TRAEFIK_HTTP3_PORT}/udp \
-				traefik:v$TRAEFIK_VERSION
+				"$TRAEFIK_IMAGE"
 
 			$SUDO_CMD docker network connect dokploy-network dokploy-traefik;
-			echo "Traefik version $TRAEFIK_VERSION installed ✅"
+			echo "Traefik $TRAEFIK_IMAGE installed ✅"
 		fi
 	`;
 

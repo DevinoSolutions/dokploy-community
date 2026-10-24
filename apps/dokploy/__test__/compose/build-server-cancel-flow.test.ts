@@ -1,5 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Both hosts answer the commit read (T-7282) with the same commit, so the
+// build-server pin passes and the calls below are the steps they always were.
+const pin = vi.hoisted(() => {
+	const sha = "0123456789abcdef0123456789abcdef01234567";
+	const isCommitRead = (command: unknown) =>
+		typeof command === "string" &&
+		command.includes(
+			"rev-parse --verify -q HEAD\\^\\{commit\\} 2>/dev/null || true",
+		);
+	return { sha, isCommitRead };
+});
+
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
 	deploymentStatus: vi.fn(),
@@ -10,8 +22,14 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
-	execAsyncRemote: mocks.execAsyncRemote,
-	execAsync: vi.fn(),
+	execAsyncRemote: (...args: unknown[]) =>
+		pin.isCommitRead(args[1])
+			? Promise.resolve({ stdout: `${pin.sha}\n`, stderr: "" })
+			: mocks.execAsyncRemote(...args),
+	execAsync: (command: unknown) =>
+		pin.isCommitRead(command)
+			? Promise.resolve({ stdout: `${pin.sha}\n`, stderr: "" })
+			: undefined,
 }));
 vi.mock("@dokploy/server/db", () => ({
 	db: {
@@ -60,7 +78,20 @@ vi.mock("@dokploy/server/services/patch", () => ({
 	generateApplyPatchesCommand: vi.fn().mockResolvedValue(""),
 }));
 
-import { prepareComposeBuildServerDeploy } from "@dokploy/server/services/compose-build-server";
+import { prepareComposeBuildServerDeploy as prepareWithPinnedInputs } from "@dokploy/server/services/compose-build-server";
+
+// The deploy path reads the serving host's commit right after the fetch and
+// passes it, with the patch rows it applied (T-7282); prepare refuses a call
+// without them. These tests are about the build steps, so every call gets
+// both.
+const prepareComposeBuildServerDeploy = (
+	args: Parameters<typeof prepareWithPinnedInputs>[0],
+) =>
+	prepareWithPinnedInputs({
+		servingCommitOutput: `${pin.sha}\n`,
+		patches: [],
+		...args,
+	});
 
 const compose = {
 	appName: "my-app",

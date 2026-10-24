@@ -1,3 +1,4 @@
+import { patchFilePathSchema } from "@dokploy/server/utils/patch-path";
 import { relations } from "drizzle-orm";
 import { boolean, pgEnum, pgTable, text, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
@@ -54,7 +55,8 @@ export const patchRelations = relations(patch, ({ one }) => ({
 }));
 
 const createSchema = createInsertSchema(patch, {
-	filePath: z.string().min(1),
+	// See utils/patch-path (T-7878).
+	filePath: patchFilePathSchema,
 	content: z.string(),
 	type: z.enum(["create", "update", "delete"]).optional(),
 	enabled: z.boolean().optional(),
@@ -62,14 +64,19 @@ const createSchema = createInsertSchema(patch, {
 	composeId: z.string().optional(),
 });
 
-export const apiCreatePatch = createSchema.pick({
-	filePath: true,
-	content: true,
-	type: true,
-	enabled: true,
-	applicationId: true,
-	composeId: true,
-});
+export const apiCreatePatch = createSchema
+	.pick({
+		filePath: true,
+		content: true,
+		type: true,
+		enabled: true,
+		applicationId: true,
+		composeId: true,
+	})
+	.refine((input) => !input.applicationId !== !input.composeId, {
+		message:
+			"A patch belongs to exactly one service: set applicationId or composeId",
+	});
 
 export const apiFindPatch = z.object({
 	patchId: z.string().min(1),

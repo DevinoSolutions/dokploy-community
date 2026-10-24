@@ -10,6 +10,7 @@ import {
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
+import { buildPinCommitCommand } from "@dokploy/server/utils/providers/pin-commit";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import type { z } from "zod";
@@ -149,6 +150,11 @@ interface CloneGitlabRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	/**
+	 * Commit the checkout must end on (T-7282): a compose's build-server copy
+	 * is pinned to the commit its serving host checked. See pin-commit.ts.
+	 */
+	pinCommit?: string | null;
 }
 
 export const cloneGitlabRepository = async ({
@@ -165,6 +171,7 @@ export const cloneGitlabRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		pinCommit,
 	} = entity;
 	const { COMPOSE_PATH, APPLICATIONS_PATH } = paths(!!serverId);
 
@@ -190,6 +197,17 @@ export const cloneGitlabRepository = async ({
 	command += `mkdir -p ${outputPath};`;
 	const repoClone = getGitlabRepoClone(gitlab, gitlabPathNamespace);
 	const cloneUrl = getGitlabCloneUrl(gitlab, repoClone);
+	const pin = pinCommit
+		? buildPinCommitCommand({
+				outputPath: String(outputPath ?? ""),
+				commitSha: pinCommit,
+				enableSubmodules,
+				authConfig: getGitTokenAuthConfig(
+					cloneUrl,
+					String(gitlab?.accessToken),
+				),
+			})
+		: "";
 	command += `echo ${quote([`Cloning Repo ${repoClone} to ${outputPath}: ✅`])};`;
 	if (headRef) {
 		command += buildHeadRefCheckoutCommand({
@@ -200,9 +218,10 @@ export const cloneGitlabRepository = async ({
 			enableSubmodules,
 			authConfig: getGitTokenAuthConfig(cloneUrl, String(gitlab?.accessToken)),
 		});
-		return command;
+		return command + pin;
 	}
 	command += `git ${getGitTokenAuthConfig(cloneUrl, String(gitlab?.accessToken))} clone --branch ${quote([String(gitlabBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	command += pin;
 	return command;
 };
 

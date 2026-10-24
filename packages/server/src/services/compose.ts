@@ -9,7 +9,10 @@ import {
 	compose,
 } from "@dokploy/server/db/schema";
 import { resyncBackupPoliciesForEnvironment } from "@dokploy/server/services/backup-policy";
-import { prepareComposeBuildServerDeploy } from "@dokploy/server/services/compose-build-server";
+import {
+	prepareComposeBuildServerDeploy,
+	readServingHostCommitOutput,
+} from "@dokploy/server/services/compose-build-server";
 import { runComposePolicyAudit } from "@dokploy/server/services/compose-policy-audit";
 import { pruneComposeBuildRegistry } from "@dokploy/server/services/compose-registry-retention";
 import {
@@ -85,7 +88,7 @@ import {
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { generateApplyPatchesCommand } from "./patch";
+import { generateApplyPatchesCommand, type Patch } from "./patch";
 import { validUniqueServerAppName } from "./project";
 import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
@@ -495,6 +498,15 @@ export const runComposeBuild = async (
 	);
 	await checkpoint();
 
+	// A build server builds the commit just fetched here (T-7282). It is read
+	// right after the fetch, and the build server gets the very patch rows
+	// applied below, not a second read.
+	const servingCommitOutput =
+		entity.buildServerId && entity.sourceType !== "raw"
+			? await readServingHostCommitOutput(entity)
+			: undefined;
+	let appliedPatches: Patch[] | undefined;
+
 	if (applyPatches && entity.sourceType !== "raw") {
 		command = "set -e;";
 		command += await generateApplyPatchesCommand(
@@ -502,6 +514,9 @@ export const runComposeBuild = async (
 				id: entity.composeId,
 				type: "compose",
 				serverId: entity.serverId,
+				onLoaded: (rows) => {
+					appliedPatches = rows;
+				},
 			},
 			{ deploymentId: deployment.deploymentId },
 		);
@@ -541,6 +556,8 @@ export const runComposeBuild = async (
 			applyPatches,
 			freshVolumes,
 			cancellable,
+			servingCommitOutput,
+			patches: appliedPatches,
 		});
 	const remoteBuild = entity.buildServerId
 		? await phases.run("Build images on the build server", prepareBuildServer)
@@ -1008,6 +1025,14 @@ export const rebuildCompose = async ({
 		});
 		await checkpoint();
 
+		// The commit on disk, read at the start of the rebuild, and the patch
+		// rows applied below: what the build server builds (see runComposeBuild).
+		const servingCommitOutput =
+			compose.buildServerId && compose.sourceType !== "raw"
+				? await readServingHostCommitOutput(compose)
+				: undefined;
+		let appliedPatches: Patch[] | undefined;
+
 		if (compose.sourceType !== "raw") {
 			command = "set -e;";
 			command += await generateApplyPatchesCommand(
@@ -1015,6 +1040,9 @@ export const rebuildCompose = async ({
 					id: compose.composeId,
 					type: "compose",
 					serverId: compose.serverId,
+					onLoaded: (rows) => {
+						appliedPatches = rows;
+					},
 				},
 				{ deploymentId: deployment.deploymentId },
 			);
@@ -1072,6 +1100,8 @@ export const rebuildCompose = async ({
 				// A rebuild does not pull on the serving host, so it must not
 				// build newer code on the build server either.
 				reuseClone: true,
+				servingCommitOutput,
+				patches: appliedPatches,
 			});
 		const remoteBuild = compose.buildServerId
 			? await phases.run("Build images on the build server", prepareBuildServer)
