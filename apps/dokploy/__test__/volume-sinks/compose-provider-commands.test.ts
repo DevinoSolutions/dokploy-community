@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// T-7161 review: Compose runs the providers of the services on `down`, `stop`
-// and `pull` too, and every `docker compose` command that loads the project
-// reads the files it names, so a chained command cannot bring a file that the
-// check never parsed. A compose that cannot be parsed, or that has several YAML
-// documents, is refused instead of skipped. `models:` runs a host plugin.
+// T-7161 review: a `docker compose` command that loads the compose files (a
+// loader such as up/build/pull, or a label-driven one such as down/stop with no
+// project name) must name them with -f, and every -f any command names is
+// parsed, so a chained command cannot bring a file that the check never saw
+// (also through a short-flag bundle or an emptied project name). A compose that
+// cannot be parsed, or that has several YAML documents, is refused instead of
+// skipped. `models:` uses the host's shared model runner.
 const mocks = vi.hoisted(() => {
 	const table = () => ({ findFirst: vi.fn(), findMany: vi.fn() });
 	return {
@@ -257,6 +259,63 @@ describe("custom commands that chain compose subcommands", () => {
 				`compose -f ${DEPLOYED} up -d && docker compose --project-name= down`,
 			),
 		).rejects.toThrow(/without naming a compose file/);
+	});
+
+	it("reads a -f hidden in a bundle of short flags", async () => {
+		mocks.readFileSync.mockReturnValue(PROVIDER);
+		for (const command of [
+			`compose -p ${APP} -vf/tmp/evil.yml down`,
+			`compose -p ${APP} -vf=/tmp/evil.yml down`,
+			`compose -p ${APP} -vf /tmp/evil.yml down`,
+			`compose -f ${DEPLOYED} -vf/tmp/evil.yml up -d`,
+			"compose -f /tmp/ok.yml -hvf/tmp/evil.yml up -d",
+			`compose -p ${APP} -f/tmp/evil.yml down`,
+			`compose -p ${APP} -f=/tmp/evil.yml down`,
+		]) {
+			await expect(run(command)).rejects.toThrow(/declares a provider/);
+		}
+	});
+
+	it("refuses a bundle it does not understand", async () => {
+		for (const command of [
+			`compose -p ${APP} -xf/tmp/evil.yml down`,
+			`compose -f ${DEPLOYED} -Pp ${APP} up -d`,
+		]) {
+			await expect(run(command)).rejects.toThrow(/is not understood/);
+		}
+	});
+
+	it("lets bundles of booleans and a project name through", async () => {
+		await expect(run(`compose -p ${APP} -v down`)).resolves.toBeUndefined();
+		await expect(run(`compose -vp ${APP} down`)).resolves.toBeUndefined();
+		await expect(run(`compose -vp${APP} down`)).resolves.toBeUndefined();
+		await expect(run(`compose -vp=${APP} ps`)).resolves.toBeUndefined();
+		mocks.readFileSync.mockReturnValue(CLEAN);
+		await expect(
+			run(
+				`compose -vf ${DEPLOYED} up -d && docker compose -vf/tmp/ok.yml pull`,
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it("lets the last project name decide", async () => {
+		for (const command of [
+			`compose -p ${APP} -p '' down`,
+			`compose -p ${APP} -p= down`,
+			`compose -p ${APP} --project-name= down`,
+			`compose -p ${APP} --project-name '' down`,
+			`compose -p ${APP} --project-name="" down`,
+			`compose --project-name ${APP} --project-name= stop`,
+			`compose -p ${APP} -vp '' down`,
+		]) {
+			await expect(run(command)).rejects.toThrow(
+				/without naming a compose file|invalid|not understood/,
+			);
+		}
+		await expect(run(`compose -p '' -p ${APP} down`)).resolves.toBeUndefined();
+		await expect(
+			run(`compose --project-name= --project-name ${APP} down`),
+		).resolves.toBeUndefined();
 	});
 
 	it("still parses a -f given to a label-driven command with a project name", async () => {

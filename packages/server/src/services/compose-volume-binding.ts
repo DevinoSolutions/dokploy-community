@@ -815,8 +815,9 @@ const parseComposeCommand = (
 							projectDirectories.push(rest.join("="));
 						} else if (name === "--env-file") {
 							envFiles.push(rest.join("="));
-						} else if (name === "--project-name" && rest.join("=")) {
-							hasProjectName = true;
+						} else if (name === "--project-name") {
+							// The last one wins, also an empty one.
+							hasProjectName = rest.join("=") !== "";
 						}
 						i += 1;
 					} else if (COMPOSE_OPTIONS_WITH_VALUE.has(word)) {
@@ -828,21 +829,49 @@ const parseComposeCommand = (
 								projectDirectories.push(value);
 							} else if (word === "--env-file") {
 								envFiles.push(value);
-							} else if (
-								(word === "-p" || word === "--project-name") &&
-								value
-							) {
-								hasProjectName = true;
+							} else if (word === "-p" || word === "--project-name") {
+								// The last one wins, also an empty one.
+								hasProjectName = value !== "";
 							}
 						}
 						i += 2;
-					} else if (/^-f.+/.test(word)) {
-						files.push(shortOptionValue(word));
-						i += 1;
-					} else if (/^-p.+/.test(word)) {
-						// `-pNAME` and `-p=NAME`.
-						hasProjectName = !!shortOptionValue(word);
-						i += 1;
+					} else if (/^-[^-]/.test(word)) {
+						// A bundle of short flags (pflag): `-fFILE`, `-f=FILE`, `-pNAME`,
+						// `-vfFILE` (`-v` and `-h` are booleans). `f` and `p` take the rest
+						// of the word, or the next word when nothing is left; a letter
+						// that is not known is refused, since it could hide a `-f`.
+						let consumed = 1;
+						for (let j = 1; j < word.length; j++) {
+							const letter = word[j] as string;
+							if (letter === "v" || letter === "h") {
+								continue;
+							}
+							if (letter === "H" || letter === "c") {
+								// A daemon or context option: findDaemonOption refuses it.
+								break;
+							}
+							if (letter !== "f" && letter !== "p") {
+								throw new Error(
+									`Compose command refused: the docker compose option "${word}" is not understood, so the compose files it may name cannot be checked. Write the options out (-f FILE, -p NAME).`,
+								);
+							}
+							const rest = word.slice(j + 1).replace(/^=/, "");
+							let value = rest;
+							if (j === word.length - 1) {
+								value = words[i + 1] ?? "";
+								consumed = 2;
+							}
+							if (letter === "f") {
+								if (value) {
+									files.push(value);
+								}
+							} else {
+								// The last one wins, also an empty one.
+								hasProjectName = value !== "";
+							}
+							break;
+						}
+						i += consumed;
 					} else if (word.startsWith("-")) {
 						i += 1;
 					} else {
@@ -941,10 +970,10 @@ const parseComposeCommand = (
 };
 
 // The compose files a custom command passes besides the deployed one. A
-// `docker compose` command of any subcommand that loads the project (all but
-// `version`: `down`, `stop` and `pull` run providers too) without naming a
-// file would make Docker find a compose file (or an override) in the project
-// directory by itself.
+// `docker compose` command that loads the project (a loader, or a label-driven
+// subcommand without a project name; see LABEL_DRIVEN_SUBCOMMANDS) without
+// naming a file would make Docker find a compose file (or an override) in the
+// project directory by itself. Every `-f` a command does name is read.
 export const getCommandOverrideFiles = (
 	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
 ) => {
