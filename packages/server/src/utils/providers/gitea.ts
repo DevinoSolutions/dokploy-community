@@ -9,6 +9,7 @@ import {
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
+import { buildPinCommitCommand } from "@dokploy/server/utils/providers/pin-commit";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import { getGitTokenAuthConfig } from "./git";
@@ -141,6 +142,11 @@ interface CloneGiteaRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	/**
+	 * Commit the checkout must end on (T-7282): a compose's build-server copy
+	 * is pinned to the commit its serving host checked. See pin-commit.ts.
+	 */
+	pinCommit?: string | null;
 }
 
 export const cloneGiteaRepository = async ({
@@ -158,6 +164,7 @@ export const cloneGiteaRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		pinCommit,
 	} = entity;
 	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths(!!serverId);
 
@@ -202,6 +209,15 @@ export const cloneGiteaRepository = async ({
 		giteaRepository!,
 	);
 
+	const pin = pinCommit
+		? buildPinCommitCommand({
+				outputPath: String(outputPath ?? ""),
+				commitSha: pinCommit,
+				enableSubmodules,
+				authConfig: getGitTokenAuthConfig(cloneUrl, giteaProvider.accessToken!),
+			})
+		: "";
+
 	command += `echo ${quote([`Cloning Repo ${repoClone} to ${outputPath}: ✅`])};`;
 	if (headRef) {
 		command += buildHeadRefCheckoutCommand({
@@ -212,9 +228,10 @@ export const cloneGiteaRepository = async ({
 			enableSubmodules,
 			authConfig: getGitTokenAuthConfig(cloneUrl, giteaProvider.accessToken!),
 		});
-		return command;
+		return command + pin;
 	}
 	command += `git ${getGitTokenAuthConfig(cloneUrl, giteaProvider.accessToken!)} clone --branch ${quote([String(giteaBranch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	command += pin;
 	return command;
 };
 

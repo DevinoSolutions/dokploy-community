@@ -6,6 +6,7 @@ import {
 } from "@dokploy/server/services/ssh-key";
 import { quote } from "shell-quote";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
+import { buildPinCommitCommand } from "./pin-commit";
 
 interface CloneGitRepository {
 	appName: string;
@@ -16,6 +17,11 @@ interface CloneGitRepository {
 	serverId: string | null;
 	type?: "application" | "compose";
 	outputPathOverride?: string;
+	/**
+	 * Commit the checkout must end on (T-7282): a compose's build-server copy
+	 * is pinned to the commit its serving host checked. See pin-commit.ts.
+	 */
+	pinCommit?: string | null;
 }
 
 // Header auth keeps the token out of build logs and `.git/config`. The value is
@@ -46,6 +52,7 @@ export const cloneGitRepository = async ({
 		enableSubmodules,
 		serverId,
 		outputPathOverride,
+		pinCommit,
 	} = entity;
 	const { SSH_PATH, COMPOSE_PATH, APPLICATIONS_PATH } = paths(!!serverId);
 
@@ -99,6 +106,15 @@ export const cloneGitRepository = async ({
 				exit 1;
 			fi
 			`;
+	// The fetch reuses the clone's credentials: the URL's own, or the exported
+	// GIT_SSH_COMMAND, both still in effect in this script.
+	if (pinCommit) {
+		command += buildPinCommitCommand({
+			outputPath,
+			commitSha: pinCommit,
+			enableSubmodules,
+		});
+	}
 
 	return command;
 };
