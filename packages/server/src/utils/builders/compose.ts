@@ -278,7 +278,7 @@ const getRestoreCommands = (
 	// `failureMessage` is only ever overridden by the build-server branch; the
 	// default stays the literal string every other compose has always logged.
 	const runRestore = (restoreArgs: string, failureMessage?: string) =>
-		`${getCleanEnvPrefix()} docker ${restoreArgs} 2>&1 && echo ${qRollbackMarker} || echo ${failureMessage ? quote([failureMessage]) : '"Warning: ⚠️ Automatic restore failed, manual intervention may be required"'};`;
+		`${withCleanEnvironment(restoreArgs, getCleanEnvPrefix(), Boolean(compose.command))} 2>&1 && echo ${qRollbackMarker} || echo ${failureMessage ? quote([failureMessage]) : '"Warning: ⚠️ Automatic restore failed, manual intervention may be required"'};`;
 
 	let upRestore = runRestore(restoreCommand);
 	let overrideRestore = "";
@@ -655,7 +655,7 @@ Compose Type: ${composeType} ✅${rollingLogLine}`;
 	// docker line; without it this is the single docker line it always was.
 	const upCommand = rolling.script
 		? rolling.script.call
-		: `${cleanEnvPrefix} docker ${command.split(" ").join(" ")} 2>&1`;
+		: `${withCleanEnvironment(command.split(" ").join(" "), cleanEnvPrefix, Boolean(compose.command))} 2>&1`;
 	const upLine = remotePullBlock
 		? `if [ "$PULL_OK" = "1" ]; then ${upCommand}; else false; fi`
 		: upCommand;
@@ -1049,5 +1049,26 @@ const getStackEnvLoader = (stagedPath: string) =>
  * registry credentials), and a stack gets its own variables from the staged
  * env file. `docker ...` follows it.
  */
+/**
+ * `<prefix> docker <command>`, with the prefix before EVERY docker command
+ * when `chained`: a custom command may chain `docker compose` commands with
+ * `&&` (see sanitizeCommand, which allows nothing else), and a command after
+ * the first that did not get the prefix would run with the whole environment
+ * of the Dokploy process or of the ssh session, and read the project `.env`
+ * without a stack's staged variables. Only a custom command is split: the
+ * generated ones can hold an `&&` inside a quoted path.
+ */
+export const withCleanEnvironment = (
+	command: string,
+	prefix: string,
+	chained: boolean,
+) =>
+	(chained ? command.split("&&").map((segment) => segment.trim()) : [command])
+		.map(
+			(segment, index) =>
+				`${prefix} ${index === 0 ? "docker " : ""}${segment}`,
+		)
+		.join(" && ");
+
 export const getCleanEnvPrefix = (stackEnvFile?: string) =>
 	`env -i PATH="$PATH" HOME="$HOME" ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;
