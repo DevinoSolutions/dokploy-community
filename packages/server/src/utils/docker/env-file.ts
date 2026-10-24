@@ -141,6 +141,68 @@ export const isEnvFileName = (name: string) =>
 	!ENV_FILE_RESERVED_PROXY_NAME.test(name) &&
 	!ENV_FILE_RESERVED_PREFIXES.some((prefix) => name.startsWith(prefix));
 
+/**
+ * Names of the reserved set that a stack's staged environment may still carry:
+ * they change how a program formats text (locale, time zone, the user's name),
+ * not what it loads or whom it talks to, and compose files interpolate them
+ * (`TZ: ${TZ}`). The proxy variables are let through for the same reason.
+ */
+const STACK_ENV_INERT_NAMES = new Set(["LANG", "LOGNAME", "TZ", "USER"]);
+
+/**
+ * Whether `name` may be in the environment of the docker process a stack deploy
+ * runs, which is also the whole of what `docker stack deploy` interpolates from.
+ *
+ * `docker` and `docker compose` read their own settings from the environment:
+ * `DOCKER_HOST` and `DOCKER_CONTEXT` pick the daemon, `DOCKER_CONFIG` the
+ * directory the CLI loads `cli-plugins/` (host binaries) and credentials from,
+ * `COMPOSE_*` what compose reads. The shell that loads the file also resolves
+ * `docker` after sourcing it, so `PATH`, `HOME` and the loader variables
+ * (`LD_*`) would choose the program and what it loads. Those names are left
+ * out, matched exactly as the programs read them: environment names are
+ * case-sensitive on Linux, so `docker_host` is an ordinary variable. The set
+ * is that of `isEnvFileName` (minus the inert names above) and every `COMPOSE_*`.
+ */
+export const isStackEnvName = (name: string) =>
+	ENV_VARIABLE_NAME.test(name) &&
+	!name.startsWith("COMPOSE_") &&
+	(isEnvFileName(name) ||
+		STACK_ENV_INERT_NAMES.has(name) ||
+		name.startsWith("LC_") ||
+		ENV_FILE_RESERVED_PROXY_NAME.test(name));
+
+/**
+ * `COMPOSE_*` settings that compose may read from a `.env` and that only tune
+ * how it runs a project it already loaded: the profiles to start, parallelism,
+ * orphan handling, progress output. `COMPOSE_PREFIX` is Dokploy's own variable
+ * for a randomized compose, not a compose setting.
+ */
+const COMPOSE_DOTENV_NAMES = new Set([
+	"COMPOSE_ANSI",
+	"COMPOSE_BAKE",
+	"COMPOSE_IGNORE_ORPHANS",
+	"COMPOSE_MENU",
+	"COMPOSE_PARALLEL_LIMIT",
+	"COMPOSE_PREFIX",
+	"COMPOSE_PROFILES",
+	"COMPOSE_PROGRESS",
+	"COMPOSE_REMOVE_ORPHANS",
+	"COMPOSE_STATUS_STDOUT",
+]);
+
+/**
+ * Whether a user's variable may be written to the `.env` Dokploy creates for a
+ * compose. Compose copies every `COMPOSE_*` it finds in a `.env` into its own
+ * environment, where it steers the CLI like the real variable does
+ * (`COMPOSE_FILE`, `COMPOSE_ENV_FILES`, `COMPOSE_PROJECT_NAME`,
+ * `COMPOSE_PATH_SEPARATOR`, ...), so only the tuning settings above get
+ * through. Nothing else in the file reaches the CLI: it reads `DOCKER_*` from
+ * its process environment, which `env -i` leaves empty, so those stay for
+ * `${DOCKER_CONFIG}`-style interpolation.
+ */
+export const isComposeDotenvName = (name: string) =>
+	!name.startsWith("COMPOSE_") || COMPOSE_DOTENV_NAMES.has(name);
+
 /** One `KEY='value'` per line, in the order given. Names are the caller's to vet. */
 export const buildEnvFileContent = (entries: Iterable<[string, string]>) => {
 	let content = "";

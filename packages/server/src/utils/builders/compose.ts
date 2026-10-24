@@ -4,7 +4,12 @@ import type { InferResultType } from "@dokploy/server/types/with";
 import boxen from "boxen";
 import { quote } from "shell-quote";
 import { addDomainToCompose, writeDomainsToCompose } from "../docker/domain";
-import { ENV_VARIABLE_NAME, singleQuote } from "../docker/env-file";
+import {
+	ENV_VARIABLE_NAME,
+	isComposeDotenvName,
+	isStackEnvName,
+	singleQuote,
+} from "../docker/env-file";
 import {
 	getInstallStagedFileCommand,
 	getStagedFilePath,
@@ -549,6 +554,7 @@ export const getBuildComposeCommand = async (
 		await removeStagedFiles(compose.serverId, staged);
 		throw error;
 	}
+	const ignoredEnvNotice = getIgnoredEnvNotice(getIgnoredEnvNames(compose));
 	// Opt-in rolling replace (null = off, which is every existing row). It takes
 	// the place of the single `up` below for the selected services; when it
 	// cannot apply, the deploy is the plain one and the log says why.
@@ -733,7 +739,7 @@ Compose Type: ${composeType} ✅${rollingLogLine}`;
 	const bashCommand = `
 	set -e
 	{
-		echo "${logBox}";
+		echo "${logBox}";${ignoredEnvNotice}
 
 		${newCompose}
 
@@ -933,19 +939,29 @@ export const getCreateEnvFileCommand = async (
 		envContent += `\nCOMPOSE_PREFIX=${compose.suffix}`;
 	}
 
-	const envFileContent = (
+	const prepare = (content: string) =>
 		compose.composeType === "stack"
 			? prepareEnvironmentVariables(
-					envContent,
+					content,
 					compose.environment.project.env,
 					compose.environment.env,
 				)
 			: prepareEnvironmentVariablesForFile(
-					envContent,
+					content,
 					compose.environment.project.env,
 					compose.environment.env,
-				)
-	).join("\n");
+				);
+	// Compose reads the `COMPOSE_*` settings of this file as if they were in its
+	// environment (see isComposeDotenvName), so a user's are left out, and the
+	// project name is always Dokploy's own, whatever the Environment holds.
+	const projectNameLine = prepare(`COMPOSE_PROJECT_NAME=${appName}`).join("");
+	const envFileContent = prepare(envContent)
+		.flatMap((pair) => {
+			const name = getPairName(pair);
+			if (name === "COMPOSE_PROJECT_NAME") return [projectNameLine];
+			return isComposeDotenvName(name) ? [pair] : [];
+		})
+		.join("\n");
 
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const stageDirectory = join(COMPOSE_PATH, appName);
@@ -973,16 +989,61 @@ ${getInstallStagedFileCommand({
 	`;
 };
 
+const getPairName = (pair: string) => pair.slice(0, pair.indexOf("="));
+
+/**
+ * Names in the Environment that the docker CLI would read as its own settings,
+ * so they are kept out of the environment of the docker process (a stack) and
+ * out of the `.env` compose reads its `COMPOSE_*` settings from. Sorted, empty
+ * when the Environment reaches neither. Only names, never values.
+ */
+export const getIgnoredEnvNames = (compose: ComposeNested) => {
+	const isStack = compose.composeType === "stack";
+	if (!isStack && !compose.createEnvFile) return [];
+
+	const names = prepareEnvironmentVariables(
+		compose.env,
+		compose.environment.project.env,
+		compose.environment.env,
+	).map(getPairName);
+	return [
+		...new Set(
+			names.filter(
+				(name) =>
+					(isStack && ENV_VARIABLE_NAME.test(name) && !isStackEnvName(name)) ||
+					(Boolean(compose.createEnvFile) && !isComposeDotenvName(name)),
+			),
+		),
+	].sort();
+};
+
+const MAX_LISTED_IGNORED_NAMES = 20;
+
+/** The deploy log line for `getIgnoredEnvNames`, or "" when there are none. */
+const getIgnoredEnvNotice = (names: string[]) => {
+	if (names.length === 0) return "";
+	const listed = names.slice(0, MAX_LISTED_IGNORED_NAMES).join(", ");
+	const more =
+		names.length > MAX_LISTED_IGNORED_NAMES
+			? ` and ${names.length - MAX_LISTED_IGNORED_NAMES} more`
+			: "";
+	return ` echo ${quote([`Warning: ⚠️ Not passed to docker, because docker and compose read them as their own settings: ${listed}${more}`])};`;
+};
+
 /**
  * Content of the file that carries a stack's environment: one `KEY='value'`
  * per line, sourced under `set -a` by the loader `getCleanEnvPrefix` emits.
  * A name that is not a valid shell identifier is left out: `docker stack
  * deploy` can only interpolate identifiers, and any other name would not
- * survive being sourced.
+ * survive being sourced. So is a name docker or compose reads as a setting of
+ * its own (`DOCKER_HOST`, `DOCKER_CONFIG`, `COMPOSE_FILE`, `PATH`, ...; see
+ * `isStackEnvName`): the file is the whole environment of the docker process,
+ * and with one of those a stack could aim the CLI at another daemon or make it
+ * run a host binary.
  */
 export const buildStackEnvFileContent = (envVars: Record<string, string>) =>
 	Object.entries(envVars)
-		.filter(([key]) => ENV_VARIABLE_NAME.test(key))
+		.filter(([key]) => isStackEnvName(key))
 		.map(([key, value]) => `${key}=${singleQuote(value)}\n`)
 		.join("");
 
