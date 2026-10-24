@@ -45,6 +45,7 @@ export const composePolicyRouter = createTRPCRouter({
 			const result = await setComposePolicyAudit(
 				ctx.session.activeOrganizationId,
 				input.auditEnabled,
+				{ userId: ctx.user.id },
 			);
 			await audit(ctx, {
 				action: "update",
@@ -65,6 +66,7 @@ export const composePolicyRouter = createTRPCRouter({
 				ctx.session.activeOrganizationId,
 				input.composeId,
 				false,
+				{ userId: ctx.user.id },
 			);
 			await audit(ctx, {
 				action: "update",

@@ -270,6 +270,21 @@ const usesDeploymentCancel = (
 	resolveComposeRolling(entity.rollingReplace) !== null;
 
 /**
+ * Starts the restricted-compose audit and returns at once. Never throws and
+ * never rejects, whatever the audit does (or is replaced by in a test).
+ */
+const startComposePolicyAudit = (
+	entity: Parameters<typeof runComposePolicyAudit>[0],
+	deployment: Parameters<typeof runComposePolicyAudit>[1],
+) => {
+	try {
+		Promise.resolve(runComposePolicyAudit(entity, deployment)).catch(() => {});
+	} catch {
+		// The audit must never be the reason a deploy fails.
+	}
+};
+
+/**
  * The cancel check between the steps of a compose with a rolling replace that
  * builds on its serving host. A cancel that lands while a step runs (fetching
  * the source, applying patches) has no release step to signal yet: it only
@@ -295,9 +310,10 @@ const assertComposeVolumesBoundForDeploy = async (
 	// The opt-in restricted-compose audit (T-7455) looks at the compose right
 	// before the guard below, so what the guard refuses is recorded too. Called
 	// once per deploy by every path (deploy, build server, rolling, preview,
-	// redeploy); read-only, never throws, a no-op unless the organization
-	// turned it on. See services/compose-policy-audit.ts.
-	await runComposePolicyAudit(entity, deployment);
+	// redeploy). The deploy awaits NOTHING from it: it runs in the background,
+	// read-only, and any failure of it is caught there. A no-op unless the
+	// organization turned it on. See services/compose-policy-audit.ts.
+	startComposePolicyAudit(entity, deployment);
 	try {
 		await assertComposeVolumesBound(entity);
 	} catch (error) {

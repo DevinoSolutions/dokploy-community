@@ -218,7 +218,7 @@ describe("with the setting on", () => {
 		);
 
 		expect(mocks.appendLogLine.mock.calls[0]?.[2]).toBe(
-			"[restricted-compose audit] evaluated: no findings",
+			"[restricted-compose audit] evaluated: no findings deployment=dep-1",
 		);
 		expect(values).not.toHaveBeenCalled();
 	});
@@ -317,7 +317,7 @@ describe("a failure never reaches the deploy", () => {
 
 		await expect(audit).resolves.toBeUndefined();
 		expect(mocks.warn).toHaveBeenCalledTimes(1);
-		expect(AUDIT_TIMEOUT_MS).toBeLessThanOrEqual(30_000);
+		expect(AUDIT_TIMEOUT_MS).toBe(5_000);
 	});
 
 	it("keeps the warning short, whatever the error says", async () => {

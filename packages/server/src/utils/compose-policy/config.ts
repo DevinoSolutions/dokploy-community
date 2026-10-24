@@ -24,9 +24,19 @@ export const COMPOSE_POLICY_RULES = [
 	"build-context-docker-storage",
 	"custom-command",
 	"unparseable-compose",
+	"compose-too-large",
 ] as const;
 
 export type ComposePolicyRuleId = (typeof COMPOSE_POLICY_RULES)[number];
+
+/**
+ * A compose file (or override file) above this many bytes is not parsed: it is
+ * one `compose-too-large` finding. Bounds the CPU the audit can take.
+ */
+export const COMPOSE_POLICY_MAX_BYTES = 512 * 1024;
+
+/** Findings older than this are deleted when a newer batch is recorded. */
+export const COMPOSE_POLICY_RETENTION_DAYS = 90;
 
 /** `serviceName` of a finding that belongs to the whole compose, not one service. */
 export const COMPOSE_LEVEL_SERVICE = "<compose>";

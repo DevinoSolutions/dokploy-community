@@ -3,6 +3,7 @@ import { parse as parseShell } from "shell-quote";
 import { parseAllDocuments } from "yaml";
 import {
 	COMPOSE_LEVEL_SERVICE,
+	COMPOSE_POLICY_MAX_BYTES,
 	type ComposePolicyRuleId,
 	REDACTED,
 } from "./config";
@@ -16,8 +17,13 @@ import {
  * YAML key path, and a path ONLY when it is a literal known system root from
  * the lists below. Everything else that came from the file or the environment
  * (host paths of a project, build contexts, volume names, command arguments,
- * parser messages) is never copied: it shows as `<redacted>`. Interpolated
- * values (`${VAR}`) are not looked up at all.
+ * parser messages) is never copied: it shows as `<redacted>`. The environment
+ * is never read: a `${VAR}` only resolves through a literal default written in
+ * the file (`${VAR:-default}`) or `$PWD`, which is the project directory.
+ *
+ * COST. Everything is linear in the size of the file, and a file above
+ * COMPOSE_POLICY_MAX_BYTES is not parsed at all (one `compose-too-large`
+ * finding), so a large compose cannot hold the event loop.
  */
 
 export interface ComposePolicyFinding {
@@ -33,8 +39,14 @@ export interface ComposePolicyContext {
 	projectDirectory: string;
 	/** `<projectDirectory>/code`: where the source is checked out. */
 	codeDirectory: string;
-	/** The directory of the compose file: relative paths resolve from it. */
-	composeDirectory: string;
+	/**
+	 * The directory relative paths resolve from. A deploy passes
+	 * `--project-directory <codeDirectory>` (see getComposeBaseArgs), so this is
+	 * the code directory even for a compose file in a subdirectory (`composePath`
+	 * `deploy/docker-compose.yml`). A custom command that moves the project
+	 * directory itself is not followed.
+	 */
+	baseDirectory: string;
 }
 
 export const DOCKER_SOCKET_PATHS = [
@@ -69,22 +81,22 @@ const DOCKER_STORAGE = "/var/lib/docker";
 
 const MAX_DETAIL_LENGTH = 300;
 const MAX_FINDINGS = 200;
+const MAX_COMMAND_LENGTH = 64 * 1024;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
-
-// An interpolated value (`privileged: ${X}`) cannot be known here, so it counts.
-const isTrue = (value: unknown) =>
-	value === true ||
-	(typeof value === "string" &&
-		(/^(true|yes|on|1)$/i.test(value.trim()) || value.includes("$")));
 
 const hasEntries = (value: unknown) =>
 	(Array.isArray(value) && value.length > 0) ||
 	(isRecord(value) && Object.keys(value).length > 0) ||
 	(typeof value === "string" && value.length > 0);
 
-/** A name that is safe to print in a log line and a table: no control chars, no spaces. */
+/**
+ * A name that is safe to print in a log line and a table: no control chars, no
+ * spaces. Two names that differ only in characters it replaces (`a b` and
+ * `a_b`) end up as one name, and their findings merge: acceptable for an audit
+ * that never shows the original name, which could hold anything.
+ */
 export const sanitizeName = (name: unknown) =>
 	String(name)
 		.replace(/[^A-Za-z0-9._-]/g, "_")
@@ -93,11 +105,66 @@ export const sanitizeName = (name: unknown) =>
 const isInside = (path: string, root: string) =>
 	path === root || path.startsWith(root === "/" ? "/" : `${root}/`);
 
-const hasVariable = (value: string) => value.includes("$");
-
 // Hosts are Linux; a drive letter only appears on a Windows dev machine.
 const toPosix = (path: string) =>
 	path.replace(/\\/g, "/").replace(/^[A-Za-z]:(?=\/)/, "");
+
+// The same grammar docker compose interpolates with.
+const VARIABLE =
+	/\$(?:\$|([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])((?:[^{}]|\{[^{}]*\})*))?\})/g;
+
+// Stands for the `$` of a `$$` while the rest of the text is resolved.
+const DOLLAR = "\uE000";
+
+/**
+ * Resolves the variables of a value WITHOUT reading any environment: `$$` is a
+ * `$`, `$PWD` is the project directory, `${X:-lit}` and `${X-lit}` are `lit`
+ * (resolved the same way). Anything else (`${X}`, `${X:?msg}`, `${X:+alt}`)
+ * has no literal value: `null`. When X is set in the environment compose would
+ * use it instead of `lit`; the audit deliberately does not look.
+ */
+export const resolveLiteral = (
+	value: string,
+	baseDirectory: string,
+	depth = 0,
+): string | null => {
+	if (!value.includes("$")) return value;
+	if (depth > 5) return null;
+	let failed = false;
+	const resolved = value.replace(
+		VARIABLE,
+		(
+			match,
+			bare?: string,
+			braced?: string,
+			operator?: string,
+			rest?: string,
+		) => {
+			if (match === "$$") return DOLLAR;
+			const name = bare ?? braced;
+			if (name === "PWD") return baseDirectory;
+			if (operator === "-" || operator === ":-") {
+				const fallback = resolveLiteral(rest ?? "", baseDirectory, depth + 1);
+				if (fallback !== null) return fallback;
+			}
+			failed = true;
+			return "";
+		},
+	);
+	// A variable the pattern did not match (nested deeper than one level, or
+	// malformed) is still in the text: it has no literal value either.
+	if (failed || /\$[{A-Za-z_]/.test(resolved)) return null;
+	return resolved.split(DOLLAR).join("$");
+};
+
+/** A boolean key: a value with no literal (`${X}`) counts as true, it cannot be known. */
+const isTrue = (value: unknown, baseDirectory: string) => {
+	if (value === true) return true;
+	if (typeof value !== "string") return false;
+	const resolved = resolveLiteral(value, baseDirectory);
+	if (resolved === null) return true;
+	return /^(true|yes|on|1)$/i.test(resolved.trim());
+};
 
 type PathClass = {
 	ruleId: Extract<
@@ -116,10 +183,12 @@ const classifyHostPath = (
 	raw: string,
 	context: ComposePolicyContext,
 ): PathClass | null => {
-	if (hasVariable(raw) || raw.startsWith("~")) {
+	const base = toPosix(context.baseDirectory);
+	const literal = resolveLiteral(raw, base);
+	if (literal === null || literal.startsWith("~")) {
 		return { ruleId: "foreign-host-bind", shown: `${REDACTED} (unresolved)` };
 	}
-	const resolved = posix.resolve(toPosix(context.composeDirectory), raw);
+	const resolved = posix.resolve(base, toPosix(literal));
 	for (const socket of DOCKER_SOCKET_PATHS) {
 		if (resolved === socket) {
 			return { ruleId: "docker-socket-bind", shown: socket };
@@ -169,14 +238,29 @@ type Collector = {
 const createCollector = (): Collector => {
 	const grouped = new Map<
 		string,
-		{ serviceName: string; ruleId: ComposePolicyRuleId; details: string[] }
+		{
+			serviceName: string;
+			ruleId: ComposePolicyRuleId;
+			details: string[];
+			size: number;
+		}
 	>();
 	return {
 		add(serviceName, ruleId, detail) {
 			const key = `${serviceName}|${ruleId}`;
-			const entry = grouped.get(key) ?? { serviceName, ruleId, details: [] };
-			if (!entry.details.includes(detail)) entry.details.push(detail);
+			const entry = grouped.get(key) ?? {
+				serviceName,
+				ruleId,
+				details: [],
+				size: 0,
+			};
 			grouped.set(key, entry);
+			// Once the text is as long as a finding may be, more details cannot
+			// show: skip them (keeps a huge file from costing a long scan here).
+			if (entry.size >= MAX_DETAIL_LENGTH) return;
+			if (entry.details.includes(detail)) return;
+			entry.details.push(detail);
+			entry.size += detail.length + 2;
 		},
 		result() {
 			return [...grouped.values()]
@@ -190,39 +274,83 @@ const createCollector = (): Collector => {
 	};
 };
 
-const NAMESPACE_KEYS = ["network_mode", "pid", "ipc", "uts"] as const;
+/** Keys whose value `host` shares a namespace of the host. */
+const NAMESPACE_KEYS = ["network_mode", "pid", "ipc", "uts", "cgroup"] as const;
+
+/**
+ * A `security_opt` entry that weakens confinement: seccomp off or custom,
+ * apparmor unconfined, SELinux labels disabled, systempaths unconfined.
+ * `no-new-privileges` and the like are hardening and never a finding. An entry
+ * with no literal value (`${X}`) is not flagged: it cannot be known.
+ */
+const weakensConfinement = (entry: unknown, baseDirectory: string) => {
+	if (typeof entry !== "string") return false;
+	const text = resolveLiteral(entry, baseDirectory);
+	if (text === null) return false;
+	const match = /^([a-z-]+)\s*[=:]\s*(.*)$/i.exec(text.trim());
+	if (!match) return false;
+	const key = (match[1] ?? "").toLowerCase();
+	const value = (match[2] ?? "").trim().toLowerCase();
+	if (key === "seccomp") return value !== "";
+	if (key === "apparmor" || key === "systempaths")
+		return value === "unconfined";
+	if (key === "label") return value === "disable";
+	return false;
+};
 
 /** Rule 1: keys that give a service the privileges of the host. */
 const evaluateHostPrivilege = (
 	name: string,
 	service: Record<string, unknown>,
+	context: ComposePolicyContext,
 	collector: Collector,
 ) => {
 	const at = `services.${name}`;
-	if (isTrue(service.privileged)) {
+	const base = toPosix(context.baseDirectory);
+	if (isTrue(service.privileged, base)) {
 		collector.add(name, "host-privilege", `${at}.privileged`);
 	}
-	if (isTrue(service.use_api_socket)) {
+	if (isTrue(service.use_api_socket, base)) {
 		collector.add(name, "host-privilege", `${at}.use_api_socket`);
 	}
 	for (const key of [
 		"cap_add",
 		"devices",
-		"security_opt",
 		"userns_mode",
 		"cgroup_parent",
+		"sysctls",
+		"device_cgroup_rules",
 	] as const) {
 		if (hasEntries(service[key])) {
 			collector.add(name, "host-privilege", `${at}.${key}`);
 		}
 	}
+	if (
+		Array.isArray(service.security_opt) &&
+		service.security_opt.some((entry) => weakensConfinement(entry, base))
+	) {
+		collector.add(name, "host-privilege", `${at}.security_opt`);
+	}
+	// GPUs and other devices reserved through the deploy section.
+	const deploy = isRecord(service.deploy) ? service.deploy : {};
+	const resources = isRecord(deploy.resources) ? deploy.resources : {};
+	const reservations = isRecord(resources.reservations)
+		? resources.reservations
+		: {};
+	if (hasEntries(reservations.devices)) {
+		collector.add(
+			name,
+			"host-privilege",
+			`${at}.deploy.resources.reservations.devices`,
+		);
+	}
 	for (const key of NAMESPACE_KEYS) {
 		const value = service[key];
 		if (typeof value !== "string") continue;
-		const mode = value.trim();
+		const mode = (resolveLiteral(value, base) ?? "").trim();
 		if (mode === "host") {
 			collector.add(name, "host-privilege", `${at}.${key}=host`);
-		} else if (/^(service|container):/.test(mode)) {
+		} else if (key !== "cgroup" && /^(service|container):/.test(mode)) {
 			collector.add(name, "namespace-join", `${at}.${key}`);
 		}
 	}
@@ -240,42 +368,90 @@ type Mount =
 
 const looksLikePath = (source: string) => /^(\/|\.|~)/.test(source);
 
+/** Splits a short volume entry on `:` outside `${...}` (a default can hold one). */
+const splitOutsideBraces = (entry: string) => {
+	const parts: string[] = [];
+	let depth = 0;
+	let current = "";
+	for (const char of entry) {
+		if (char === "{") depth += 1;
+		else if (char === "}" && depth > 0) depth -= 1;
+		if (char === ":" && depth === 0) {
+			parts.push(current);
+			current = "";
+		} else {
+			current += char;
+		}
+	}
+	parts.push(current);
+	return parts;
+};
+
+/**
+ * A mount source: a host path (`bind`) or the key of a named volume. A source
+ * with no literal value (`${X}`) cannot be told apart: it counts as a bind.
+ */
+const readSource = (
+	source: string,
+	path: string,
+	forced: "bind" | "volume" | undefined,
+	baseDirectory: string,
+): Mount => {
+	const literal = resolveLiteral(source, baseDirectory);
+	if (forced === "bind") return { kind: "bind", source, path };
+	if (literal === null) {
+		return forced === "volume"
+			? { kind: "named", key: source }
+			: { kind: "bind", source, path };
+	}
+	if (forced === "volume") return { kind: "named", key: literal };
+	return looksLikePath(literal)
+		? { kind: "bind", source, path }
+		: { kind: "named", key: literal };
+};
+
 /** The mounts of one service, short and long syntax. Anonymous volumes and tmpfs are skipped. */
 const readMounts = (
 	name: string,
 	service: Record<string, unknown>,
+	baseDirectory: string,
 ): Mount[] => {
 	if (!Array.isArray(service.volumes)) return [];
 	const mounts: Mount[] = [];
 	service.volumes.forEach((entry, index) => {
 		const path = `services.${name}.volumes[${index}]`;
 		if (typeof entry === "string") {
-			const parts = entry.split(":");
+			const parts = splitOutsideBraces(entry);
 			const source = parts[0] ?? "";
 			if (parts.length < 2 || source.length === 0) return;
-			if (looksLikePath(source) || hasVariable(source)) {
-				mounts.push({ kind: "bind", source, path });
-			} else {
-				mounts.push({ kind: "named", key: source });
-			}
+			mounts.push(readSource(source, path, undefined, baseDirectory));
 			return;
 		}
 		if (!isRecord(entry)) return;
 		const source = typeof entry.source === "string" ? entry.source : "";
 		if (!source) return;
 		if (entry.type === "bind") {
-			mounts.push({ kind: "bind", source, path });
+			mounts.push(readSource(source, path, "bind", baseDirectory));
 		} else if (entry.type === "volume") {
-			mounts.push({ kind: "named", key: source });
+			mounts.push(readSource(source, path, "volume", baseDirectory));
 		} else if (entry.type === undefined) {
-			mounts.push(
-				looksLikePath(source)
-					? { kind: "bind", source, path }
-					: { kind: "named", key: source },
-			);
+			mounts.push(readSource(source, path, undefined, baseDirectory));
 		}
 	});
 	return mounts;
+};
+
+/** Records a host path at `keyPath` when a sandbox would refuse it. */
+const checkHostPath = (
+	service: string,
+	keyPath: string,
+	raw: unknown,
+	context: ComposePolicyContext,
+	collector: Collector,
+) => {
+	if (typeof raw !== "string" || raw.length === 0) return;
+	const found = classifyHostPath(raw, context);
+	if (found) collector.add(service, found.ruleId, `${keyPath}: ${found.shown}`);
 };
 
 /** Rule 2 for the bind mounts of a service. */
@@ -287,15 +463,15 @@ const evaluateBinds = (
 ) => {
 	for (const mount of mounts) {
 		if (mount.kind !== "bind") continue;
-		const found = classifyHostPath(mount.source, context);
-		if (found) {
-			collector.add(name, found.ruleId, `${mount.path}: ${found.shown}`);
-		}
+		checkHostPath(name, mount.path, mount.source, context, collector);
 	}
 };
 
-const isExternal = (definition: Record<string, unknown>) =>
-	isTrue(definition.external) || isRecord(definition.external);
+const isExternal = (
+	definition: Record<string, unknown>,
+	baseDirectory: string,
+) =>
+	isTrue(definition.external, baseDirectory) || isRecord(definition.external);
 
 /** `driver_opts: { type: none, o: bind, device: <path> }`: a bind in disguise. */
 const readDeviceBind = (definition: Record<string, unknown>) => {
@@ -312,29 +488,24 @@ const readDeviceBind = (definition: Record<string, unknown>) => {
 /** Rules 2 and 3 for the top-level volumes, attributed to the services that mount them. */
 const evaluateVolumeDefinitions = (
 	spec: Record<string, unknown>,
-	mountsByService: ReadonlyMap<string, readonly Mount[]>,
+	ownersByKey: ReadonlyMap<string, readonly string[]>,
 	context: ComposePolicyContext,
 	collector: Collector,
 ) => {
 	if (!isRecord(spec.volumes)) return;
-	const owners = (key: string) =>
-		[...mountsByService.entries()]
-			.filter(([, mounts]) =>
-				mounts.some((mount) => mount.kind === "named" && mount.key === key),
-			)
-			.map(([service]) => service);
+	const base = toPosix(context.baseDirectory);
 	for (const [key, raw] of Object.entries(spec.volumes)) {
 		const definition = isRecord(raw) ? raw : {};
 		const at = `volumes.${sanitizeName(key)}`;
 		const record = (ruleId: ComposePolicyRuleId, detail: string) => {
-			const names = owners(key);
-			for (const service of names.length > 0
+			const names = ownersByKey.get(key);
+			for (const service of names && names.length > 0
 				? names
 				: [COMPOSE_LEVEL_SERVICE]) {
 				collector.add(service, ruleId, detail);
 			}
 		};
-		if (isExternal(definition)) {
+		if (isExternal(definition, base)) {
 			record("external-volume", `${at}: external`);
 		} else if (
 			typeof definition.name === "string" &&
@@ -360,7 +531,11 @@ const isRemoteContext = (value: string) =>
 	/^[a-z][a-z0-9+.-]*:(\/\/)?/i.test(value) ||
 	/^(github\.com|git@)/.test(value);
 
-/** Rule 4: build contexts, dockerfiles and additional contexts of a service. */
+/**
+ * Rule 4: build contexts, dockerfiles and additional contexts of a service,
+ * and the host paths of `build.ssh` (`build.secrets` names the top-level
+ * secrets, whose `file:` is checked with them).
+ */
 const evaluateBuild = (
 	name: string,
 	service: Record<string, unknown>,
@@ -371,12 +546,12 @@ const evaluateBuild = (
 	if (build === undefined || build === null || build === false) return;
 	const at = `services.${name}.build`;
 	const code = toPosix(context.codeDirectory);
-	const composeDirectory = toPosix(context.composeDirectory);
+	const baseDirectory = toPosix(context.baseDirectory);
 	// Returns the directory the path resolves to (the base of the next path).
 	const checkPath = (value: unknown, base: string, keyPath: string) => {
 		if (typeof value !== "string" || value.length === 0) return base;
-		if (isRemoteContext(value)) return base;
-		if (hasVariable(value)) {
+		const literal = resolveLiteral(value, baseDirectory);
+		if (literal === null) {
 			collector.add(
 				name,
 				"build-context-outside",
@@ -384,7 +559,8 @@ const evaluateBuild = (
 			);
 			return base;
 		}
-		const resolved = posix.resolve(base, toPosix(value));
+		if (isRemoteContext(literal)) return base;
+		const resolved = posix.resolve(base, toPosix(literal));
 		if (isInside(resolved, DOCKER_STORAGE)) {
 			collector.add(
 				name,
@@ -397,13 +573,13 @@ const evaluateBuild = (
 		return resolved;
 	};
 	if (typeof build === "string") {
-		checkPath(build, composeDirectory, at);
+		checkPath(build, baseDirectory, at);
 		return;
 	}
 	if (!isRecord(build)) return;
 	const contextDirectory = checkPath(
 		build.context ?? ".",
-		composeDirectory,
+		baseDirectory,
 		`${at}.context`,
 	);
 	checkPath(build.dockerfile, contextDirectory, `${at}.dockerfile`);
@@ -412,7 +588,7 @@ const evaluateBuild = (
 		for (const [key, value] of Object.entries(additional)) {
 			checkPath(
 				value,
-				composeDirectory,
+				baseDirectory,
 				`${at}.additional_contexts.${sanitizeName(key)}`,
 			);
 		}
@@ -422,9 +598,152 @@ const evaluateBuild = (
 			const value = entry.includes("=")
 				? entry.slice(entry.indexOf("=") + 1)
 				: entry;
-			checkPath(value, composeDirectory, `${at}.additional_contexts[${index}]`);
+			checkPath(value, baseDirectory, `${at}.additional_contexts[${index}]`);
 		});
 	}
+	// `ssh: [default]`, `ssh: ["id=/path/to/key"]` or `ssh: { id: /path }`.
+	const ssh = build.ssh;
+	if (isRecord(ssh)) {
+		for (const [key, value] of Object.entries(ssh)) {
+			checkHostPath(
+				name,
+				`${at}.ssh.${sanitizeName(key)}`,
+				value,
+				context,
+				collector,
+			);
+		}
+	} else if (Array.isArray(ssh)) {
+		ssh.forEach((entry, index) => {
+			if (typeof entry !== "string" || !entry.includes("=")) return;
+			checkHostPath(
+				name,
+				`${at}.ssh[${index}]`,
+				entry.slice(entry.indexOf("=") + 1),
+				context,
+				collector,
+			);
+		});
+	}
+};
+
+/** The `env_file` and `extends.file` paths of a service. */
+const evaluateServiceFiles = (
+	name: string,
+	service: Record<string, unknown>,
+	context: ComposePolicyContext,
+	collector: Collector,
+) => {
+	const at = `services.${name}`;
+	const envFile = service.env_file;
+	if (typeof envFile === "string") {
+		checkHostPath(name, `${at}.env_file`, envFile, context, collector);
+	} else if (Array.isArray(envFile)) {
+		envFile.forEach((entry, index) => {
+			const path = isRecord(entry) ? entry.path : entry;
+			checkHostPath(name, `${at}.env_file[${index}]`, path, context, collector);
+		});
+	}
+	if (isRecord(service.extends)) {
+		checkHostPath(
+			name,
+			`${at}.extends.file`,
+			service.extends.file,
+			context,
+			collector,
+		);
+	}
+};
+
+/** Top-level `configs:` and `secrets:` with a `file:`, and `include:`. */
+const evaluateTopLevelFiles = (
+	spec: Record<string, unknown>,
+	context: ComposePolicyContext,
+	collector: Collector,
+) => {
+	for (const section of ["configs", "secrets"] as const) {
+		const entries = spec[section];
+		if (!isRecord(entries)) continue;
+		for (const [key, definition] of Object.entries(entries)) {
+			if (!isRecord(definition)) continue;
+			checkHostPath(
+				COMPOSE_LEVEL_SERVICE,
+				`${section}.${sanitizeName(key)}.file`,
+				definition.file,
+				context,
+				collector,
+			);
+		}
+	}
+	const include = spec.include;
+	const entries = typeof include === "string" ? [include] : include;
+	if (!Array.isArray(entries)) return;
+	entries.forEach((entry, index) => {
+		const at = `include[${index}]`;
+		if (typeof entry === "string") {
+			checkHostPath(COMPOSE_LEVEL_SERVICE, at, entry, context, collector);
+			return;
+		}
+		if (!isRecord(entry)) return;
+		const paths = Array.isArray(entry.path) ? entry.path : [entry.path];
+		for (const path of paths) {
+			checkHostPath(
+				COMPOSE_LEVEL_SERVICE,
+				`${at}.path`,
+				path,
+				context,
+				collector,
+			);
+		}
+		checkHostPath(
+			COMPOSE_LEVEL_SERVICE,
+			`${at}.project_directory`,
+			entry.project_directory,
+			context,
+			collector,
+		);
+		const envFiles = Array.isArray(entry.env_file)
+			? entry.env_file
+			: [entry.env_file];
+		for (const path of envFiles) {
+			checkHostPath(
+				COMPOSE_LEVEL_SERVICE,
+				`${at}.env_file`,
+				path,
+				context,
+				collector,
+			);
+		}
+	});
+};
+
+const addSpecFindings = (
+	spec: unknown,
+	context: ComposePolicyContext,
+	collector: Collector,
+) => {
+	if (!isRecord(spec)) return;
+	const base = toPosix(context.baseDirectory);
+	const services = isRecord(spec.services) ? spec.services : {};
+	// volume key -> the services that mount it, built once (linear).
+	const ownersByKey = new Map<string, string[]>();
+	for (const [rawName, rawService] of Object.entries(services)) {
+		if (!isRecord(rawService)) continue;
+		const name = sanitizeName(rawName);
+		evaluateHostPrivilege(name, rawService, context, collector);
+		const mounts = readMounts(name, rawService, base);
+		for (const mount of mounts) {
+			if (mount.kind !== "named") continue;
+			const owners = ownersByKey.get(mount.key);
+			if (!owners) ownersByKey.set(mount.key, [name]);
+			else if (!owners.includes(name)) owners.push(name);
+		}
+		evaluateBinds(name, mounts, context, collector);
+		evaluateBuild(name, rawService, context, collector);
+		evaluateServiceFiles(name, rawService, context, collector);
+	}
+	evaluateVolumeDefinitions(spec, ownersByKey, context, collector);
+	evaluateTopLevelFiles(spec, context, collector);
 };
 
 /** Rules 1 to 4 on a parsed compose file. Never throws on a strange shape. */
@@ -432,20 +751,8 @@ export const evaluateComposeSpec = (
 	spec: unknown,
 	context: ComposePolicyContext,
 ): ComposePolicyFinding[] => {
-	if (!isRecord(spec)) return [];
 	const collector = createCollector();
-	const services = isRecord(spec.services) ? spec.services : {};
-	const mountsByService = new Map<string, Mount[]>();
-	for (const [rawName, rawService] of Object.entries(services)) {
-		if (!isRecord(rawService)) continue;
-		const name = sanitizeName(rawName);
-		evaluateHostPrivilege(name, rawService, collector);
-		const mounts = readMounts(name, rawService);
-		mountsByService.set(name, mounts);
-		evaluateBinds(name, mounts, context, collector);
-		evaluateBuild(name, rawService, context, collector);
-	}
-	evaluateVolumeDefinitions(spec, mountsByService, context, collector);
+	addSpecFindings(spec, context, collector);
 	return collector.result();
 };
 
@@ -495,6 +802,9 @@ const REPORTED_SUBCOMMANDS = new Set([
 	"image",
 ]);
 
+/** The shell operators that chain one command after another. A glob is not one. */
+const CHAINING_OPERATORS = new Set(["&&", "||", ";", "|", "&", "|&", ";;"]);
+
 const flagName = (word: string) => {
 	if (word.startsWith("--")) {
 		const name = word.split("=")[0] ?? word;
@@ -517,6 +827,9 @@ const flagName = (word: string) => {
  * never a value. Only words from the lists above are ever printed.
  */
 export const describeCustomCommand = (command: string) => {
+	if (command.length > MAX_COMMAND_LENGTH) {
+		return "custom command (too long to analyse)";
+	}
 	const flags = new Set<string>();
 	const subcommands = new Set<string>();
 	let chained = 0;
@@ -526,7 +839,12 @@ export const describeCustomCommand = (command: string) => {
 				const flag = flagName(word);
 				if (flag) flags.add(flag);
 				else if (REPORTED_SUBCOMMANDS.has(word)) subcommands.add(word);
-			} else if (word && typeof word === "object" && "op" in word) {
+			} else if (
+				word &&
+				typeof word === "object" &&
+				"op" in word &&
+				CHAINING_OPERATORS.has(String(word.op))
+			) {
 				chained += 1;
 			}
 		}
@@ -581,46 +899,63 @@ export const parseComposeText = (text: string): ParsedComposeText => {
 	}
 };
 
+/** Checks the size, parses the text once and records rule 6 or the rules 1 to 4. */
+const evaluateFileText = (
+	text: string,
+	label: string | null,
+	context: ComposePolicyContext,
+	collector: Collector,
+) => {
+	const prefix = label ? `${label}: ` : "";
+	if (Buffer.byteLength(text, "utf8") > COMPOSE_POLICY_MAX_BYTES) {
+		collector.add(
+			COMPOSE_LEVEL_SERVICE,
+			"compose-too-large",
+			`${prefix}larger than ${COMPOSE_POLICY_MAX_BYTES / 1024} KB, not evaluated`,
+		);
+		return;
+	}
+	const parsed = parseComposeText(text);
+	if (!parsed.ok) {
+		collector.add(
+			COMPOSE_LEVEL_SERVICE,
+			"unparseable-compose",
+			`${prefix}${parsed.detail}`,
+		);
+		return;
+	}
+	addSpecFindings(parsed.spec, context, collector);
+};
+
 /**
- * Everything the audit evaluates for one deploy: the compose text (checked for
- * rule 6, and evaluated unless the caller has the final spec the deploy uses),
- * and the custom command.
+ * Everything the audit evaluates for one deploy: the custom command (rule 5),
+ * the compose text and the override files of the command, each size-checked
+ * and parsed once. Pure: the caller reads the files.
  */
 export const evaluateComposePolicy = ({
 	text,
-	spec,
+	overrides = [],
 	command,
 	context,
 }: {
+	/** The compose file as the deploy uses it; `null` when there is none to read. */
 	text: string | null;
-	/** The spec the deploy actually uses (domains, randomize, patches applied). */
-	spec?: unknown;
+	/** The texts of the `-f` override files of a custom command. */
+	overrides?: readonly string[];
 	command?: string | null;
 	context: ComposePolicyContext;
 }): ComposePolicyFinding[] => {
-	const findings: ComposePolicyFinding[] = [];
+	const collector = createCollector();
 	if (command?.trim()) {
-		findings.push({
-			serviceName: COMPOSE_LEVEL_SERVICE,
-			ruleId: "custom-command",
-			detail: describeCustomCommand(command),
-		});
+		collector.add(
+			COMPOSE_LEVEL_SERVICE,
+			"custom-command",
+			describeCustomCommand(command),
+		);
 	}
-	let evaluated = spec;
-	if (text !== null) {
-		const parsed = parseComposeText(text);
-		if (!parsed.ok) {
-			findings.push({
-				serviceName: COMPOSE_LEVEL_SERVICE,
-				ruleId: "unparseable-compose",
-				detail: parsed.detail,
-			});
-			return findings;
-		}
-		if (evaluated === undefined) evaluated = parsed.spec;
+	if (text !== null) evaluateFileText(text, null, context, collector);
+	for (const override of overrides) {
+		evaluateFileText(override, "override file", context, collector);
 	}
-	if (evaluated !== undefined) {
-		findings.push(...evaluateComposeSpec(evaluated, context));
-	}
-	return findings;
+	return collector.result();
 };

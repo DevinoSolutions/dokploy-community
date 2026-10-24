@@ -132,7 +132,9 @@ describe("composePolicy.updateSettings", () => {
 			policyCaller("owner").updateSettings({ auditEnabled: true }),
 		).resolves.toEqual({ auditEnabled: true });
 
-		expect(mocks.setComposePolicyAudit).toHaveBeenCalledWith("org-1", true);
+		expect(mocks.setComposePolicyAudit).toHaveBeenCalledWith("org-1", true, {
+			userId: "user-1",
+		});
 		expect(mocks.audit).toHaveBeenCalledWith(expect.anything(), {
 			action: "update",
 			resourceType: "settings",
@@ -147,7 +149,9 @@ describe("composePolicy.updateSettings", () => {
 			organizationId: "org-2",
 		} as never);
 
-		expect(mocks.setComposePolicyAudit).toHaveBeenCalledWith("org-1", true);
+		expect(mocks.setComposePolicyAudit).toHaveBeenCalledWith("org-1", true, {
+			userId: "user-1",
+		});
 	});
 
 	it("refuses a member and writes nothing", async () => {
@@ -248,6 +252,7 @@ describe("composePolicy.removeExclusion", () => {
 			"org-1",
 			"c1",
 			false,
+			{ userId: "user-1" },
 		);
 		expect(mocks.audit).toHaveBeenCalledWith(expect.anything(), {
 			action: "update",
@@ -307,7 +312,7 @@ describe("the per-service switch on a compose", () => {
 			{ service: ["read"] },
 		);
 
-		await composeCaller("member").setComposePolicyAuditExclusion({
+		await composeCaller("admin").setComposePolicyAuditExclusion({
 			composeId: "c1",
 			excluded: true,
 		});
@@ -318,9 +323,9 @@ describe("the per-service switch on a compose", () => {
 		);
 	});
 
-	it("excludes a compose and audits it", async () => {
+	it("excludes a compose and audits it (owner or admin)", async () => {
 		await expect(
-			composeCaller("member").setComposePolicyAuditExclusion({
+			composeCaller("owner").setComposePolicyAuditExclusion({
 				composeId: "c1",
 				excluded: true,
 			}),
@@ -330,6 +335,7 @@ describe("the per-service switch on a compose", () => {
 			"org-1",
 			"c1",
 			true,
+			{ userId: "user-1" },
 		);
 		expect(mocks.audit).toHaveBeenCalledWith(expect.anything(), {
 			action: "update",
@@ -340,13 +346,36 @@ describe("the per-service switch on a compose", () => {
 		});
 	});
 
+	it.each(["member", "guest"])(
+		"a %s cannot exclude (or put back) a compose, even with access to the service",
+		async (role) => {
+			for (const excluded of [true, false]) {
+				await expect(
+					composeCaller(role).setComposePolicyAuditExclusion({
+						composeId: "c1",
+						excluded,
+					}),
+				).rejects.toMatchObject({ code: "FORBIDDEN" });
+			}
+
+			expect(mocks.setComposePolicyExclusion).not.toHaveBeenCalled();
+			expect(mocks.audit).not.toHaveBeenCalled();
+		},
+	);
+
+	it("reading the switch stays open to a member", async () => {
+		await expect(
+			composeCaller("member").composePolicyAuditExclusion({ composeId: "c1" }),
+		).resolves.toMatchObject({ excluded: false });
+	});
+
 	it("refuses a service the caller may not touch (another organization included)", async () => {
 		mocks.checkServicePermissionAndAccess.mockRejectedValue(
 			new Error("UNAUTHORIZED"),
 		);
 
 		await expect(
-			composeCaller("member").setComposePolicyAuditExclusion({
+			composeCaller("admin").setComposePolicyAuditExclusion({
 				composeId: "c-foreign",
 				excluded: true,
 			}),

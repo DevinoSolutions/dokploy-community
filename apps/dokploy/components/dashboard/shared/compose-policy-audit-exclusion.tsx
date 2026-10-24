@@ -14,12 +14,15 @@ interface Props {
 }
 
 /**
- * "Exclude from the restricted-compose audit": the owner of a compose opts it
- * out of the read-only audit. Off by default. Self-hosted only, like the audit
- * card in Settings > Deployments.
+ * "Exclude from the restricted-compose audit": an organization owner or admin
+ * opts this compose out of the read-only audit (others see the switch, and
+ * cannot change it). Off by default. Self-hosted only, like the audit card in
+ * Settings > Deployments.
  */
 export const ComposePolicyAuditExclusion = ({ composeId }: Props) => {
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: auth } = api.user.get.useQuery();
+	const isAdmin = auth?.role === "owner" || auth?.role === "admin";
 	const query = api.compose.composePolicyAuditExclusion.useQuery(
 		{ composeId },
 		{ enabled: !!composeId && isCloud === false },
@@ -59,6 +62,9 @@ export const ComposePolicyAuditExclusion = ({ composeId }: Props) => {
 							When on, deployments of this compose are never evaluated by the
 							read-only restricted-compose audit and leave no findings. Off by
 							default.
+							{isAdmin
+								? ""
+								: " Only an organization owner or admin can change this."}
 							{query.data && !query.data.auditEnabled
 								? " The audit is currently turned off for the whole organization."
 								: ""}
@@ -67,7 +73,7 @@ export const ComposePolicyAuditExclusion = ({ composeId }: Props) => {
 				</div>
 				<Switch
 					checked={query.data?.excluded ?? false}
-					disabled={isSaving || query.isLoading}
+					disabled={isSaving || query.isLoading || !isAdmin}
 					onCheckedChange={onChange}
 				/>
 			</CardHeader>

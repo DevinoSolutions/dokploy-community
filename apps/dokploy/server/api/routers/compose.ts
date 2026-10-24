@@ -613,6 +613,16 @@ export const composeRouter = createTRPCRouter({
 	setComposePolicyAuditExclusion: protectedProcedure
 		.input(apiFindCompose.extend({ excluded: z.boolean() }))
 		.mutation(async ({ input, ctx }) => {
+			// Leaving a compose out of the audit is the organization's decision,
+			// not the service owner's: owners and admins only (reading is open to
+			// whoever can read the service).
+			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message:
+						"Only an organization owner or admin can exclude a compose from the restricted-compose audit",
+				});
+			}
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
@@ -621,6 +631,7 @@ export const composeRouter = createTRPCRouter({
 				compose.environment.project.organizationId,
 				input.composeId,
 				input.excluded,
+				{ userId: ctx.user.id },
 			);
 			await audit(ctx, {
 				action: "update",

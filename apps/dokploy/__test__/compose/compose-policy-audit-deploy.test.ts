@@ -128,6 +128,14 @@ const composeRow = (auditOn: boolean) => ({
 	},
 });
 
+// The audit runs in the background (the deploy awaits nothing from it): give
+// it a few turns of the event loop to finish before looking at its effects.
+const settle = async () => {
+	for (let i = 0; i < 20; i++) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+};
+
 const useCompose = (row: ReturnType<typeof composeRow>) =>
 	vi.mocked(db.query.compose.findFirst).mockResolvedValue(row as never);
 
@@ -187,6 +195,7 @@ describe.each([
 		useCompose(composeRow(false));
 
 		await run();
+		await settle();
 
 		expect(mocks.evaluateComposePolicy).not.toHaveBeenCalled();
 		expect(mocks.appendLogLine).not.toHaveBeenCalled();
@@ -198,6 +207,7 @@ describe.each([
 		useCompose(composeRow(true));
 
 		await run();
+		await settle();
 
 		expect(mocks.evaluateComposePolicy).toHaveBeenCalledTimes(1);
 		expect(mocks.appendLogLine).toHaveBeenCalledTimes(1);
@@ -218,6 +228,7 @@ describe.each([
 	it("runs the same commands and ends in the same state as with the audit off", async () => {
 		useCompose(composeRow(false));
 		await run();
+		await settle();
 		const baseline = {
 			commands: executed(),
 			deployment: deploymentStatuses(),
@@ -232,6 +243,7 @@ describe.each([
 		});
 		useCompose(composeRow(true));
 		await run();
+		await settle();
 
 		expect(executed()).toEqual(baseline.commands);
 		expect(deploymentStatuses()).toEqual(baseline.deployment);
@@ -241,6 +253,7 @@ describe.each([
 	it("an evaluator that throws changes nothing about the deploy", async () => {
 		useCompose(composeRow(false));
 		await run();
+		await settle();
 		const baseline = {
 			commands: executed(),
 			deployment: deploymentStatuses(),
@@ -259,6 +272,7 @@ describe.each([
 		useCompose(composeRow(true));
 
 		await expect(run()).resolves.not.toThrow();
+		await settle();
 
 		expect(mocks.warn).toHaveBeenCalledTimes(1);
 		expect(db.insert).not.toHaveBeenCalled();
@@ -275,6 +289,7 @@ describe.each([
 		})) as never);
 
 		await run();
+		await settle();
 
 		expect(mocks.warn).toHaveBeenCalledTimes(1);
 		expect(deploymentStatuses()).toContain("done");
@@ -285,6 +300,7 @@ describe.each([
 		useCompose({ ...composeRow(true), serverId: "server-1" });
 
 		await run();
+		await settle();
 
 		expect(mocks.appendLogLine.mock.calls[0]?.[0]).toBe("server-1");
 	});

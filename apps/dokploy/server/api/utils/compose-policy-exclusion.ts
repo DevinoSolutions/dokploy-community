@@ -1,4 +1,5 @@
 import {
+	type ComposePolicyActor,
 	getComposePolicySettings,
 	setComposePolicyExclusion,
 } from "@dokploy/server/services/compose-policy-audit";
@@ -32,4 +33,5 @@ export const writeComposePolicyExclusion = (
 	organizationId: string,
 	composeId: string,
 	excluded: boolean,
-) => setComposePolicyExclusion(organizationId, composeId, excluded);
+	actor: ComposePolicyActor,
+) => setComposePolicyExclusion(organizationId, composeId, excluded, actor);

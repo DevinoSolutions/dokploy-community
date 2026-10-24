@@ -24,7 +24,7 @@ const context: ComposePolicyContext = {
 	appName: "app-xyz",
 	projectDirectory: "/etc/dokploy/compose/app-xyz",
 	codeDirectory: "/etc/dokploy/compose/app-xyz/code",
-	composeDirectory: "/etc/dokploy/compose/app-xyz/code",
+	baseDirectory: "/etc/dokploy/compose/app-xyz/code",
 };
 
 const evaluateYaml = (yaml: string, command?: string | null) =>
@@ -320,17 +320,20 @@ describe("rule 4: build contexts", () => {
 		).toEqual([]);
 	});
 
-	it("resolves a nested compose file from its own directory", () => {
-		const nested = {
-			...context,
-			composeDirectory: "/etc/dokploy/compose/app-xyz/code/deploy",
-		};
-		const spec = parse("services:\n  web:\n    build: ..\n");
-		expect(evaluateComposeSpec(spec, nested)).toEqual([]);
-		const outside = parse("services:\n  web:\n    build: ../..\n");
+	it("resolves relative paths from the directory the deploy passes as --project-directory, also for a nested compose file", () => {
+		// composePath "deploy/docker-compose.yml": the deploy still runs with
+		// "--project-directory <code directory>", so ".." is the project directory
+		// (outside code/), not code/.
+		const nested = parse("services:\n  web:\n    build:\n      context: ..\n");
 		expect(
-			evaluateComposeSpec(outside, nested).map((finding) => finding.ruleId),
+			evaluateComposeSpec(nested, context).map((finding) => finding.ruleId),
 		).toEqual(["build-context-outside"]);
+		expect(
+			evaluateComposeSpec(
+				parse("services:\n  web:\n    build:\n      context: ./deploy\n"),
+				context,
+			),
+		).toEqual([]);
 	});
 });
 
