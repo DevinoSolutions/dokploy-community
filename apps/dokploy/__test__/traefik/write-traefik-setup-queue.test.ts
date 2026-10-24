@@ -1,4 +1,8 @@
 import { writeTraefikSetup } from "@dokploy/server/services/settings";
+import {
+	queueTraefikRecreate,
+	restoreInterruptedTraefik,
+} from "@dokploy/server/setup/traefik-setup";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -138,6 +142,41 @@ describe("writeTraefikSetup", () => {
 		]);
 		expect(fake.containers).toEqual([
 			{ id: "new2", name: "dokploy-traefik", running: true },
+		]);
+	});
+
+	it("a startup restore queued behind an in-flight recreate waits for it", async () => {
+		const fake = fakeDocker([
+			{ id: "old", name: "dokploy-traefik", running: true },
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async () => ({
+			stdout: fake.resourceType(),
+			stderr: "",
+		}));
+
+		const action = writeTraefikSetup({ env: ["A=1"] });
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(fake.containers).toEqual([
+			{ id: "old", name: "dokploy-traefik-previous", running: false },
+		]);
+		// What server.ts does on startup for the local host.
+		const startup = queueTraefikRecreate(undefined, () =>
+			restoreInterruptedTraefik(),
+		);
+		await vi.runAllTimersAsync();
+
+		await expect(action).resolves.toBeUndefined();
+		await expect(startup).resolves.toBeUndefined();
+		expect(fake.log).toEqual([
+			"rename old -> dokploy-traefik-previous",
+			"stop old",
+			"create new",
+			"start new",
+			"remove old",
+		]);
+		expect(fake.containers).toEqual([
+			{ id: "new", name: "dokploy-traefik", running: true },
 		]);
 	});
 

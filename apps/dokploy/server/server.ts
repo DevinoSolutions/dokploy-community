@@ -16,6 +16,7 @@ import {
 	initVolumeBackupsCronJobs,
 	isMcpDisabled,
 	isNotSwarmManagerError,
+	queueTraefikRecreate,
 	restoreInterruptedTraefik,
 	sendDokployRestartNotifications,
 	setBackgroundErrorReporter,
@@ -136,7 +137,11 @@ void app
 						captureError(e, { handler: "initializeNetwork" });
 					}
 				}
-				await restoreInterruptedTraefik().catch((error) => {
+				// Queued: the server is already listening, so a Traefik action may
+				// have a recreate in flight on this host.
+				await queueTraefikRecreate(undefined, () =>
+					restoreInterruptedTraefik(),
+				).catch((error) => {
 					console.error("Failed to restore Traefik:", error);
 				});
 				await initCronJobs();
