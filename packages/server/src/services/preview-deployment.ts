@@ -10,6 +10,7 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";
 import type { z } from "zod";
 import { generatePassword } from "../templates";
+import { NEUTRALISED_CLI_ENV } from "../utils/docker/env-file";
 import { removeService } from "../utils/docker/utils";
 import {
 	removeComposeDirectory,
@@ -946,7 +947,7 @@ export const removeComposePreview = async (previewDeploymentId: string) => {
 					await runQuiet(`docker stack rm ${appName} 2>&1 || true;`);
 				} else {
 					await runQuiet(
-						`env -i PATH="$PATH" docker compose -p ${appName} down --volumes 2>&1 || true;`,
+						`env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${appName} down --volumes 2>&1 || true;`,
 					);
 				}
 			},

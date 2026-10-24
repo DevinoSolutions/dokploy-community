@@ -286,7 +286,7 @@ describe("compose rollback on a unit without a build server", () => {
 		expect(restoreTail(restore)).toBe(
 			[
 				'if [ "$RESTORE_FILES_OK" = "1" ]; then',
-				'\t\t\tenv -i PATH="$PATH" HOME="$HOME"  docker compose -p my-app -f docker-compose.yml up -d --remove-orphans 2>&1 && echo __DOKPLOY_ROLLBACK_OK__\\:dep1 || echo "Warning: ⚠️ Automatic restore failed, manual intervention may be required";',
+				'\t\t\tenv -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD=  docker compose -p my-app -f docker-compose.yml up -d --remove-orphans 2>&1 && echo __DOKPLOY_ROLLBACK_OK__\\:dep1 || echo "Warning: ⚠️ Automatic restore failed, manual intervention may be required";',
 				"\t\telse",
 				'\t\t\techo "Warning: ⚠️ No previous release to restore, leaving the stack as-is";',
 				"\t\tfi",

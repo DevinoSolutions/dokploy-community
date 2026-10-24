@@ -34,6 +34,7 @@ import {
 	loadDockerCompose,
 	loadDockerComposeRemote,
 } from "@dokploy/server/utils/docker/domain";
+import { NEUTRALISED_CLI_ENV } from "@dokploy/server/utils/docker/env-file";
 import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import { sendBuildErrorNotifications } from "@dokploy/server/utils/notifications/build-error";
 import { sendBuildSuccessNotifications } from "@dokploy/server/utils/notifications/build-success";
@@ -530,7 +531,7 @@ export const runComposeBuild = async (
 	const tearsDown = freshVolumes && entity.composeType === "docker-compose";
 	await checkpoint();
 	if (tearsDown) {
-		const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
+		const downCommand = `set -e; env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${entity.appName} down --volumes 2>&1 || true;`;
 		await runStep(downCommand);
 	}
 
@@ -1058,7 +1059,7 @@ export const rebuildCompose = async ({
 		const tearsDown = freshVolumes && compose.composeType === "docker-compose";
 		await checkpoint();
 		if (tearsDown) {
-			const downCommand = `set -e; env -i PATH="$PATH" docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
+			const downCommand = `set -e; env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${compose.appName} down --volumes 2>&1 || true;`;
 			const downWithLog = `(${downCommand}) >> ${deployment.logPath} 2>&1`;
 			if (compose.serverId) {
 				await execAsyncRemote(compose.serverId, downWithLog);
@@ -1177,7 +1178,7 @@ export const removeCompose = async (
 		} else {
 			const command = `
 			docker network disconnect ${compose.appName} dokploy-traefik;
-			env -i PATH="$PATH" docker compose -p ${compose.appName} down ${
+			env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${compose.appName} down ${
 				deleteVolumes ? "--volumes" : ""
 			};
 			rm -rf ${projectPath}`;
@@ -1240,10 +1241,10 @@ export const startCompose = async (composeId: string) => {
 			compose.sourceType === "raw" ? "docker-compose.yml" : compose.composePath;
 		// A compose built on a build server starts from the pushed images: merge
 		// the override (when the last deploy wrote one) and never build here.
-		let baseCommand = `env -i PATH="$PATH" docker compose -p ${quote([compose.appName])} -f ${quote([path])} up -d`;
+		let baseCommand = `env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${quote([compose.appName])} -f ${quote([path])} up -d`;
 		if (compose.buildServerId) {
 			const overridePath = quote([getComposeBuildOverridePath(compose)]);
-			const upBase = `env -i PATH="$PATH" docker compose -p ${quote([compose.appName])} -f ${quote([path])}`;
+			const upBase = `env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${quote([compose.appName])} -f ${quote([path])}`;
 			baseCommand = `if [ -f ${overridePath} ]; then ${upBase} -f ${overridePath} up -d --no-build; else ${upBase} up -d --no-build; fi`;
 		}
 		if (compose.composeType === "docker-compose") {
@@ -1287,13 +1288,13 @@ export const stopCompose = async (composeId: string) => {
 			if (compose.serverId) {
 				await execAsyncRemote(
 					compose.serverId,
-					`cd ${join(COMPOSE_PATH, compose.appName)} && env -i PATH="$PATH" docker compose -p ${
+					`cd ${join(COMPOSE_PATH, compose.appName)} && env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${
 						compose.appName
 					} stop`,
 				);
 			} else {
 				await execAsync(
-					`env -i PATH="$PATH" docker compose -p ${compose.appName} stop`,
+					`env -i PATH="$PATH" ${NEUTRALISED_CLI_ENV} docker compose -p ${compose.appName} stop`,
 					{
 						cwd: join(COMPOSE_PATH, compose.appName),
 					},

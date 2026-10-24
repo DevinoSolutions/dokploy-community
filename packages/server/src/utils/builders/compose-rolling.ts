@@ -4,6 +4,7 @@ import {
 	composeRollingReplaceSchema,
 	ROLLING_HEALTH_TIMEOUT_MAX_SECONDS,
 } from "../../db/validations/compose-rolling";
+import { NEUTRALISED_CLI_ENV } from "../docker/env-file";
 
 export type { ComposeRollingReplace };
 
@@ -651,8 +652,8 @@ export const getRollingReplaceScript = ({
 		DOKPLOY_ROLL_SVC=""; DOKPLOY_ROLL_BEFORE=""; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_REASON="";
 		dokploy_roll_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Rolling replace: $*"; };
 		dokploy_roll_sleep() { sleep "$1" & wait $!; };
-		dokploy_roll_compose() { env -i PATH="$PATH" HOME="$HOME" docker ${invocation} "$@"; };
-		dokploy_roll_compose_shielded() { if command -v setsid >/dev/null 2>&1; then ( exec setsid env -i PATH="$PATH" HOME="$HOME" docker ${invocation} "$@" ); else dokploy_roll_compose "$@"; fi; };
+		dokploy_roll_compose() { env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} docker ${invocation} "$@"; };
+		dokploy_roll_compose_shielded() { if command -v setsid >/dev/null 2>&1; then ( exec setsid env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} docker ${invocation} "$@" ); else dokploy_roll_compose "$@"; fi; };
 		dokploy_roll_ids() { docker ps -aq --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
 		dokploy_roll_running_ids() { docker ps -q --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
 		dokploy_roll_remove() {
