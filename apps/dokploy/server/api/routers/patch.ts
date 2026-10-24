@@ -8,12 +8,14 @@ import {
 	findPatchByFilePath,
 	findPatchById,
 	findPatchesByEntityId,
+	isPatchOnSeveralServices,
 	markPatchForDeletion,
 	readPatchRepoDirectory,
 	readPatchRepoFile,
 	updatePatch,
 } from "@dokploy/server";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import { patchFilePathSchema } from "@dokploy/server/utils/patch-path";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
@@ -31,33 +33,60 @@ import {
 	apiUpdatePatch,
 } from "@/server/db/schema";
 
+type PatchServices = { applicationId: string | null; composeId: string | null };
+
 /**
- * Resolves the serviceId from a patch record (applicationId or composeId).
- * Throws if neither is set.
+ * Checks `permissions` on the patch's service. A row attached to both an
+ * application and a compose passes on either of them, so either owner can
+ * reach it (and delete it).
  */
-const resolvePatchServiceId = (patch: {
-	applicationId: string | null;
-	composeId: string | null;
-}): string => {
-	const serviceId = patch.applicationId ?? patch.composeId;
-	if (!serviceId) {
+const checkPatchServiceAccess = async (
+	ctx: Parameters<typeof checkServicePermissionAndAccess>[0],
+	patch: PatchServices,
+	permissions: Parameters<typeof checkServicePermissionAndAccess>[2],
+) => {
+	const serviceIds = [patch.applicationId, patch.composeId].filter(
+		(id): id is string => !!id,
+	);
+	if (serviceIds.length === 0) {
 		throw new TRPCError({
 			code: "INTERNAL_SERVER_ERROR",
 			message: "Patch has no associated service",
 		});
 	}
-	return serviceId;
+	let firstError: unknown;
+	for (const serviceId of serviceIds) {
+		try {
+			await checkServicePermissionAndAccess(ctx, serviceId, permissions);
+			return;
+		} catch (error) {
+			firstError ??= error;
+		}
+	}
+	throw firstError;
+};
+
+/** A row attached to more than one service can only be deleted. */
+const assertPatchEditable = (patch: PatchServices & { patchId: string }) => {
+	if (isPatchOnSeveralServices(patch)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Patch ${patch.patchId} is attached to more than one service and can only be deleted`,
+		});
+	}
 };
 
 export const patchRouter = createTRPCRouter({
 	create: protectedProcedure
 		.input(apiCreatePatch)
 		.mutation(async ({ input, ctx }) => {
+			// The schema already requires exactly one of the two.
 			const serviceId = input.applicationId ?? input.composeId;
-			if (!serviceId) {
+			if (!serviceId || (input.applicationId && input.composeId)) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
-					message: "Either applicationId or composeId must be provided",
+					message:
+						"A patch belongs to exactly one service: set applicationId or composeId",
 				});
 			}
 			await checkServicePermissionAndAccess(ctx, serviceId, {
@@ -76,10 +105,7 @@ export const patchRouter = createTRPCRouter({
 
 	one: protectedProcedure.input(apiFindPatch).query(async ({ input, ctx }) => {
 		const patch = await findPatchById(input.patchId);
-		const serviceId = resolvePatchServiceId(patch);
-		await checkServicePermissionAndAccess(ctx, serviceId, {
-			service: ["read"],
-		});
+		await checkPatchServiceAccess(ctx, patch, { service: ["read"] });
 		return patch;
 	}),
 
@@ -98,10 +124,8 @@ export const patchRouter = createTRPCRouter({
 		.input(apiUpdatePatch)
 		.mutation(async ({ input, ctx }) => {
 			const patch = await findPatchById(input.patchId);
-			const serviceId = resolvePatchServiceId(patch);
-			await checkServicePermissionAndAccess(ctx, serviceId, {
-				service: ["create"],
-			});
+			await checkPatchServiceAccess(ctx, patch, { service: ["create"] });
+			assertPatchEditable(patch);
 			const { patchId, ...data } = input;
 			const result = await updatePatch(patchId, data);
 			await audit(ctx, {
@@ -118,10 +142,7 @@ export const patchRouter = createTRPCRouter({
 		.input(apiDeletePatch)
 		.mutation(async ({ input, ctx }) => {
 			const patch = await findPatchById(input.patchId);
-			const serviceId = resolvePatchServiceId(patch);
-			await checkServicePermissionAndAccess(ctx, serviceId, {
-				service: ["delete"],
-			});
+			await checkPatchServiceAccess(ctx, patch, { service: ["delete"] });
 			const result = await deletePatch(input.patchId);
 			await audit(ctx, {
 				action: "delete",
@@ -137,10 +158,8 @@ export const patchRouter = createTRPCRouter({
 		.input(apiTogglePatchEnabled)
 		.mutation(async ({ input, ctx }) => {
 			const patch = await findPatchById(input.patchId);
-			const serviceId = resolvePatchServiceId(patch);
-			await checkServicePermissionAndAccess(ctx, serviceId, {
-				service: ["create"],
-			});
+			await checkPatchServiceAccess(ctx, patch, { service: ["create"] });
+			assertPatchEditable(patch);
 			const result = await updatePatch(input.patchId, {
 				enabled: input.enabled,
 			});
@@ -184,22 +203,16 @@ export const patchRouter = createTRPCRouter({
 			z.object({
 				id: z.string().min(1),
 				type: z.enum(["application", "compose"]),
-				repoPath: z.string(),
+				// Ignored: always the service's own patch repo, on the host
+				// `ensureRepo` cloned it to. Kept for the UI.
+				repoPath: z.string().optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.id, {
 				service: ["read"],
 			});
-			let serverId: string | null = null;
-			if (input.type === "application") {
-				const app = await findApplicationById(input.id);
-				serverId = app.serverId;
-			} else {
-				const compose = await findComposeById(input.id);
-				serverId = compose.serverId;
-			}
-			return await readPatchRepoDirectory(input.repoPath, serverId);
+			return await readPatchRepoDirectory(input.id, input.type);
 		}),
 
 	readRepoFile: protectedProcedure
@@ -207,7 +220,7 @@ export const patchRouter = createTRPCRouter({
 			z.object({
 				id: z.string().min(1),
 				type: z.enum(["application", "compose"]),
-				filePath: z.string(),
+				filePath: patchFilePathSchema,
 			}),
 		)
 		.query(async ({ input, ctx }) => {
@@ -246,7 +259,7 @@ export const patchRouter = createTRPCRouter({
 			z.object({
 				id: z.string().min(1),
 				type: z.enum(["application", "compose"]),
-				filePath: z.string(),
+				filePath: patchFilePathSchema,
 				content: z.string(),
 				patchType: z.enum(["create", "update"]).default("update"),
 			}),
@@ -277,6 +290,7 @@ export const patchRouter = createTRPCRouter({
 				});
 				return result;
 			}
+			assertPatchEditable(existingPatch);
 			const result = await updatePatch(existingPatch.patchId, {
 				content: input.content,
 				type: input.patchType,
@@ -296,7 +310,7 @@ export const patchRouter = createTRPCRouter({
 			z.object({
 				id: z.string().min(1),
 				type: z.enum(["application", "compose"]),
-				filePath: z.string(),
+				filePath: patchFilePathSchema,
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {

@@ -3,7 +3,7 @@ import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { type apiCreatePatch, patch } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
@@ -12,16 +12,28 @@ import {
 	type StageOptions,
 	stageFiles,
 } from "../utils/docker/staging";
+import {
+	getPatchPathError,
+	getPatchPathHasLinkTest,
+	resolvePatchPath,
+} from "../utils/patch-path";
 import { findApplicationById } from "./application";
 import { findComposeById } from "./compose";
 
 export type Patch = typeof patch.$inferSelect;
 
+/** A row stored with both ids set: never applied or edited, only deleted. */
+export const isPatchOnSeveralServices = (p: {
+	applicationId: string | null;
+	composeId: string | null;
+}) => !!p.applicationId && !!p.composeId;
+
 export const createPatch = async (input: z.infer<typeof apiCreatePatch>) => {
-	if (!input.applicationId && !input.composeId) {
+	if (!input.applicationId === !input.composeId) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "Either applicationId or composeId must be provided",
+			message:
+				"A patch belongs to exactly one service: set applicationId or composeId",
 		});
 	}
 
@@ -98,7 +110,12 @@ export const updatePatch = async (patchId: string, data: Partial<Patch>) => {
 			}),
 			updatedAt: new Date().toISOString(),
 		})
-		.where(eq(patch.patchId, patchId))
+		.where(
+			and(
+				eq(patch.patchId, patchId),
+				or(isNull(patch.applicationId), isNull(patch.composeId)),
+			),
+		)
 		.returning();
 
 	return result[0];
@@ -119,6 +136,13 @@ export const markPatchForDeletion = async (
 	entityType: "application" | "compose",
 ) => {
 	const existing = await findPatchByFilePath(filePath, entityId, entityType);
+
+	if (existing && isPatchOnSeveralServices(existing)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Patch ${existing.patchId} is attached to more than one service and can only be deleted`,
+		});
+	}
 
 	if (existing) {
 		return await updatePatch(existing.patchId, { type: "delete", content: "" });
@@ -174,6 +198,21 @@ export const generateApplyPatchesCommand = async (
 		return "";
 	}
 
+	// Stored rows are checked again before anything is staged (T-7878): a bad
+	// one stops the deploy, named by its id, and is left in the database.
+	for (const p of patches) {
+		if (isPatchOnSeveralServices(p)) {
+			throw new Error(
+				`Patch ${p.patchId} is attached to more than one service and was not applied. Delete it in the Patches tab, then deploy again.`,
+			);
+		}
+		if (getPatchPathError(p.filePath)) {
+			throw new Error(
+				`Patch ${p.patchId} has a file path outside the service's code directory and was not applied. Edit or delete it in the Patches tab, then deploy again.`,
+			);
+		}
+	}
+
 	const stageDirectory = join(basePath, entity.appName);
 	const written = patches.filter((p) => p.type !== "delete");
 	const stagedPaths = written.map((_, index) =>
@@ -196,15 +235,27 @@ export const generateApplyPatchesCommand = async (
 
 	let command = `echo "Applying ${patches.length} patch(es)...";`;
 
+	// A write or delete through a symbolic link in the checkout is refused,
+	// and every staged file is removed.
+	const removeStaged = stagedPaths.map((path) => ` ${quote([path])}`).join("");
+	command += `
+dokploy_patch_link() { ${removeStaged ? `rm -f${removeStaged}; ` : ""}echo "❌ Error: Patch $1 goes through a symbolic link in the repository and was not applied"; exit 1; };
+`;
+	const refuseLink = (p: Patch, includeFile: boolean) =>
+		`if ${getPatchPathHasLinkTest(codePath, p.filePath, { includeFile })}; then dokploy_patch_link ${quote([String(p.patchId)])}; fi;
+`;
+
 	let stagedIndex = 0;
 	for (const p of patches) {
-		const filePath = join(codePath, p.filePath);
+		const filePath = resolvePatchPath(codePath, p.filePath);
 
 		if (p.type === "delete") {
+			command += refuseLink(p, false);
 			command += `
 			rm -f ${quote([filePath])};
 			`;
 		} else {
+			command += refuseLink(p, true);
 			command += `
 ${getInstallStagedFileCommand({
 	staged: stagedPaths[stagedIndex] as string,
