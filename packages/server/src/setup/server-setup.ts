@@ -704,18 +704,35 @@ export const installRClone = () => `
 export const createTraefikInstance = () => {
 	const command = `
 	    # Check if dokpyloy-traefik exists
+		# The pinned image is only for a server without Traefik: a migrated
+		# service keeps its image, so setup never changes the Traefik version.
+		TRAEFIK_IMAGE="traefik:v${TRAEFIK_VERSION}"
+		TRAEFIK_SKIP_CREATE=false
 		if $SUDO_CMD docker service inspect dokploy-traefik > /dev/null 2>&1; then
-			echo "Migrating Traefik to Standalone..."
-			$SUDO_CMD docker service rm dokploy-traefik
-			sleep 8
-			echo "Traefik migrated to Standalone ✅"
+			TRAEFIK_IMAGE="$($SUDO_CMD docker service inspect dokploy-traefik --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || true)"
+			TRAEFIK_REFERENCE="\${TRAEFIK_IMAGE%%@*}"
+			case "\${TRAEFIK_REFERENCE##*/}" in
+				sha256:*) TRAEFIK_TAGGED=false ;;
+				*:*) TRAEFIK_TAGGED=true ;;
+				*) TRAEFIK_TAGGED=false ;;
+			esac
+			if [ "$TRAEFIK_TAGGED" = true ]; then
+				echo "Migrating Traefik to Standalone..."
+				$SUDO_CMD docker service rm dokploy-traefik
+				sleep 8
+				echo "Traefik migrated to Standalone ✅"
+			else
+				echo "Warning: Can't read the version tag of the Traefik service image '$TRAEFIK_IMAGE', so it is not migrated to a standalone container: that could change the Traefik version. Run dokploy-traefik from a tagged image, then set up the server again."
+				TRAEFIK_SKIP_CREATE=true
+			fi
 		fi
 
-		if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
+		if [ "$TRAEFIK_SKIP_CREATE" = true ]; then
+			:
+		elif $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
 			echo "Traefik already exists ✅"
 		else
 			# Create the dokploy-traefik container
-			TRAEFIK_VERSION=${TRAEFIK_VERSION}
 			$SUDO_CMD docker run -d \
 				--name dokploy-traefik \
 				--restart always \
@@ -725,10 +742,10 @@ export const createTraefikInstance = () => {
 				-p ${TRAEFIK_SSL_PORT}:${TRAEFIK_SSL_PORT} \
 				-p ${TRAEFIK_PORT}:${TRAEFIK_PORT} \
 				-p ${TRAEFIK_HTTP3_PORT}:${TRAEFIK_HTTP3_PORT}/udp \
-				traefik:v$TRAEFIK_VERSION
+				"$TRAEFIK_IMAGE"
 
 			$SUDO_CMD docker network connect dokploy-network dokploy-traefik;
-			echo "Traefik version $TRAEFIK_VERSION installed ✅"
+			echo "Traefik $TRAEFIK_IMAGE installed ✅"
 		fi
 	`;
 
