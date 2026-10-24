@@ -771,25 +771,14 @@ services:
 
 	it("does not mistake rm -f, an absolute path to the same file, or other programs for another file", async () => {
 		for (const value of [
-			`compose -p ${APP} -f docker-compose.yml up -d && docker compose -p ${APP} -f docker-compose.yml rm -f web`,
+			`compose -p ${APP} -f docker-compose.yml up -d && docker compose -p ${APP} rm -f web`,
 			`compose -p ${APP} -f ${codeDirectory}/docker-compose.yml up -d`,
 			`compose -p ${APP} -f ./docker-compose.yml logs -f web`,
-			`compose -p ${APP} -f docker-compose.yml down`,
+			`compose -p ${APP} down`,
 		]) {
 			await expect(
 				assertComposeVolumesBound(command(value)),
 			).resolves.toBeUndefined();
-		}
-	});
-
-	it("refuses a command that runs down or rm without naming a file (T-7161: they load the project)", async () => {
-		for (const value of [
-			`compose -p ${APP} down`,
-			`compose -p ${APP} -f docker-compose.yml up -d && docker compose -p ${APP} rm -f web`,
-		]) {
-			await expect(assertComposeVolumesBound(command(value))).rejects.toThrow(
-				/without naming a compose file/,
-			);
 		}
 	});
 

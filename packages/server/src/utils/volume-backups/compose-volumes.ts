@@ -1196,11 +1196,12 @@ const collectProviders = (spec: NonNullable<LooseSpec>, into: string[]) => {
 };
 
 // `models` (a top-level definition, or a reference on a service, a hook or a
-// job) makes Docker Compose run the `docker model` CLI plugin of the host to
-// pull and configure the model, with the options of the definition
-// (`runtime_flags`, `context_size`) passed to the runner. Like a provider it
-// acts on the host outside a container and nothing of Dokploy uses it, so it is
-// refused (T-7161).
+// job) makes Docker Compose run the host's `docker model` CLI plugin (a fixed
+// plugin, not a program the tenant picks) to pull and configure the model, with
+// the options of the definition (`runtime_flags`, `context_size`) as arguments
+// of a runner that every tenant of the host shares. That is abuse of a shared
+// resource, not the code execution a provider is, and nothing of Dokploy uses
+// it, so it is refused as hardening (T-7161).
 const collectModels = (spec: NonNullable<LooseSpec>, into: string[]) => {
 	const present = (value: unknown) =>
 		value !== undefined &&

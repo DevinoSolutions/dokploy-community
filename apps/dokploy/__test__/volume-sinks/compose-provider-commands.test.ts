@@ -184,8 +184,96 @@ describe("custom commands that chain compose subcommands", () => {
 			).rejects.toThrow(/without naming a compose file/);
 		}
 		await expect(
-			run(`compose -p ${APP} down && docker compose -f ${DEPLOYED} up -d`),
+			run(`compose down && docker compose -f ${DEPLOYED} up -d`),
 		).rejects.toThrow(/without naming a compose file/);
+	});
+
+	it("refuses a loader without -f even with a project name", async () => {
+		for (const sub of [
+			"up -d",
+			"pull",
+			"build",
+			"create",
+			"config",
+			"run web true",
+		]) {
+			await expect(run(`compose -p ${APP} ${sub}`)).rejects.toThrow(
+				/without naming a compose file/,
+			);
+			await expect(run(`compose --project-name=${APP} ${sub}`)).rejects.toThrow(
+				/without naming a compose file/,
+			);
+		}
+	});
+
+	it("lets a label-driven command with a project name and no -f through", async () => {
+		const LABEL_DRIVEN = [
+			"down",
+			"down -v",
+			"stop",
+			"start",
+			"restart",
+			"kill",
+			"rm -f web",
+			"ps",
+			"logs -f web",
+			"exec web true",
+			"images",
+			"port web 80",
+			"top",
+			"pause",
+			"unpause",
+			"wait web",
+		];
+		for (const name of [
+			`-p ${APP}`,
+			`--project-name ${APP}`,
+			`--project-name=${APP}`,
+			`-p=${APP}`,
+			`-p${APP}`,
+		]) {
+			for (const sub of LABEL_DRIVEN) {
+				await expect(
+					run(`compose -f ${DEPLOYED} up -d && docker compose ${name} ${sub}`),
+				).resolves.toBeUndefined();
+			}
+		}
+		await expect(
+			run(
+				`compose -p ${APP} -f ${DEPLOYED} up -d && docker-compose -p ${APP} down`,
+			),
+		).resolves.toBeUndefined();
+	});
+
+	it("refuses a label-driven command without a project name and without -f", async () => {
+		for (const value of ["down", "stop", "ps", "exec web true", "logs"]) {
+			await expect(
+				run(`compose -f ${DEPLOYED} up -d && docker compose ${value}`),
+			).rejects.toThrow(/without naming a compose file/);
+		}
+		// An empty name is no name.
+		await expect(
+			run(
+				`compose -f ${DEPLOYED} up -d && docker compose --project-name= down`,
+			),
+		).rejects.toThrow(/without naming a compose file/);
+	});
+
+	it("still parses a -f given to a label-driven command with a project name", async () => {
+		mocks.readFileSync.mockReturnValue(PROVIDER);
+		for (const sub of ["down -v", "stop", "ps", "exec web true"]) {
+			await expect(
+				run(
+					`compose -f ${DEPLOYED} up -d && docker compose -p ${APP} -f /tmp/evil.yml ${sub}`,
+				),
+			).rejects.toThrow(/declares a provider/);
+		}
+		mocks.readFileSync.mockReturnValue(BAD_MOUNT);
+		await expect(
+			run(
+				`compose -f ${DEPLOYED} up -d && docker compose -p ${APP} -f /tmp/evil.yml down -v`,
+			),
+		).rejects.toThrow(/Docker's own volume storage/);
 	});
 
 	it("lets the deployed file and clean overrides through, and version", async () => {
@@ -309,6 +397,28 @@ describe("multi-document YAML and unparsable files", () => {
 			mocks.readFileSync.mockReturnValue(CLEAN);
 			await expect(start()).resolves.toBeUndefined();
 		});
+	});
+});
+
+describe("a remote git compose with two documents", () => {
+	it("stops at the render step before any docker command", async () => {
+		const { renderComposeWithDomains } = await import(
+			"@dokploy/server/utils/docker/domain"
+		);
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: `${CLEAN}\n---\n${PROVIDER}`,
+			stderr: "",
+		});
+		const row = composeRow("", {
+			sourceType: "git",
+			composePath: "./docker-compose.yml",
+			serverId: "srv-1",
+		});
+		const rendered = await renderComposeWithDomains(row, []);
+		expect(rendered).toHaveProperty("errorCommand");
+		const { errorCommand } = rendered as { errorCommand: string };
+		expect(errorCommand).toMatch(/exit 1/);
+		expect(errorCommand).not.toMatch(/docker/);
 	});
 });
 

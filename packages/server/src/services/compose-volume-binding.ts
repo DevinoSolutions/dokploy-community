@@ -409,7 +409,7 @@ export const assertComposeSpecVolumesBound = async (
 			"[VolumeBinding] A compose file was refused: it declares models",
 		);
 		throw new Error(
-			`Compose refused: ${models[0]} uses \`models\`, which makes Docker Compose run the docker model plugin of the host it deploys on. Models are not allowed: remove "models:" from the compose file and run the model as a regular container service.`,
+			`Compose refused: ${models[0]} uses \`models\`, which uses the host's shared Docker Model Runner (the model options reach \`docker model pull\` and \`docker model configure\`, and the runtime flags are shared by every tenant). Models are not allowed: remove "models:" from the compose file and run the model as a regular container service.`,
 		);
 	}
 	if (forbidden.length > 0) {
@@ -476,20 +476,46 @@ const COMPOSE_OPTIONS_WITH_VALUE = new Set([
 	"--progress",
 ]);
 
-// The only `docker compose` subcommand that does not load the project (the
-// compose files, with their providers, volumes and host paths). Every other one
-// does, also `down`, `stop` and `pull`, which run the provider plugins of the
-// services (docker/compose `down.go`, `stop.go`, `ensureProviderImages`), and
-// `ps`, `logs`, `exec` and the like, which read the files named by `-f` or,
-// without one, the default file of the project directory (T-7161). `ls` is not
-// an allowed subcommand anyway.
+// Which `docker compose` subcommands load the compose files (T-7161), with
+// their providers, volumes and host paths:
+// - `version` loads nothing.
+// - These work from the labels of the containers of the project when they get
+//   a project name (`-p NAME`) and no `-f`: Compose loads no file then and the
+//   project it builds has no provider (docker/compose `projectOrName` /
+//   `toProjectName`). Without a name they load the default file like a loader.
+//   Every `-f` that is given is read in any case.
+// - Every other subcommand (build, config, create, pull, run, up, and one this
+//   list does not know) loads the files, and must name them with `-f`. That
+//   stays so when the default file would be the checked one: without `-f`
+//   Compose also reads `COMPOSE_FILE` from a `.env` of the repository (with
+//   "Create env file" off) and merges the `*.override.yml` next to the default
+//   file, none of which is parsed here.
 const PROJECT_FREE_SUBCOMMANDS = new Set(["version"]);
+const LABEL_DRIVEN_SUBCOMMANDS = new Set([
+	"down",
+	"exec",
+	"images",
+	"kill",
+	"logs",
+	"pause",
+	"port",
+	"ps",
+	"restart",
+	"rm",
+	"start",
+	"stop",
+	"top",
+	"unpause",
+	"wait",
+]);
 
 type CommandSegment = {
 	kind: "compose" | "stack" | "other";
 	subcommand?: string;
 	files: string[];
 	projectDirectories: string[];
+	// A project name is given (`-p NAME`, `--project-name NAME`, `-pNAME`).
+	hasProjectName?: boolean;
 	// The `-v` / `--volume` values of a `docker compose run`.
 	volumes: string[];
 	// The `--env-file` values: they replace the `.env` Dokploy writes.
@@ -777,6 +803,7 @@ const parseComposeCommand = (
 			const command = words[start];
 			if (command === "compose") {
 				let subcommand: string | undefined;
+				let hasProjectName = false;
 				let i = start + 1;
 				for (; i < words.length; ) {
 					const word = words[i] as string;
@@ -788,6 +815,8 @@ const parseComposeCommand = (
 							projectDirectories.push(rest.join("="));
 						} else if (name === "--env-file") {
 							envFiles.push(rest.join("="));
+						} else if (name === "--project-name" && rest.join("=")) {
+							hasProjectName = true;
 						}
 						i += 1;
 					} else if (COMPOSE_OPTIONS_WITH_VALUE.has(word)) {
@@ -799,11 +828,20 @@ const parseComposeCommand = (
 								projectDirectories.push(value);
 							} else if (word === "--env-file") {
 								envFiles.push(value);
+							} else if (
+								(word === "-p" || word === "--project-name") &&
+								value
+							) {
+								hasProjectName = true;
 							}
 						}
 						i += 2;
 					} else if (/^-f.+/.test(word)) {
 						files.push(shortOptionValue(word));
+						i += 1;
+					} else if (/^-p.+/.test(word)) {
+						// `-pNAME` and `-p=NAME`.
+						hasProjectName = !!shortOptionValue(word);
 						i += 1;
 					} else if (word.startsWith("-")) {
 						i += 1;
@@ -843,6 +881,7 @@ const parseComposeCommand = (
 					subcommand,
 					files,
 					projectDirectories,
+					hasProjectName,
 					volumes,
 					envFiles,
 					envFromFiles,
@@ -921,15 +960,23 @@ export const getCommandOverrideFiles = (
 	);
 	const overrides = new Set<string>();
 	for (const segment of parseComposeCommand(compose.command).segments) {
+		const loadsFiles =
+			segment.kind === "compose" &&
+			segment.subcommand !== undefined &&
+			!PROJECT_FREE_SUBCOMMANDS.has(segment.subcommand) &&
+			!(
+				LABEL_DRIVEN_SUBCOMMANDS.has(segment.subcommand) &&
+				segment.hasProjectName
+			);
 		const readsFiles =
-			(segment.kind === "compose" &&
-				segment.subcommand !== undefined &&
-				!PROJECT_FREE_SUBCOMMANDS.has(segment.subcommand)) ||
+			loadsFiles ||
 			(segment.kind === "stack" && segment.subcommand === "deploy");
-		if (!readsFiles) {
+		// A label-driven command with a project name and no `-f` reads nothing;
+		// a `-f` it does get is parsed below like any other.
+		if (!readsFiles && segment.files.length === 0) {
 			continue;
 		}
-		if (segment.files.length === 0) {
+		if (readsFiles && segment.files.length === 0) {
 			logger.warn(
 				{ composeId: compose.composeId },
 				"[VolumeBinding] A compose command was refused: it names no compose file",
