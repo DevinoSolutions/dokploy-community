@@ -3,6 +3,7 @@ import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
 import superjson from "superjson";
+import { ComposePolicyAudit } from "@/components/dashboard/settings/compose-policy-audit";
 import { DeploymentWatchdog } from "@/components/dashboard/settings/deployment-watchdog";
 import { BuildsConcurrency } from "@/components/dashboard/settings/servers/actions/builds-concurrency";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -73,6 +74,11 @@ const Page = () => {
 				<Card className="h-full bg-sidebar p-2.5 rounded-xl mx-auto w-full">
 					<div className="rounded-xl bg-background shadow-md">
 						<DeploymentWatchdog />
+					</div>
+				</Card>
+				<Card className="h-full bg-sidebar p-2.5 rounded-xl mx-auto w-full">
+					<div className="rounded-xl bg-background shadow-md">
+						<ComposePolicyAudit />
 					</div>
 				</Card>
 			</div>

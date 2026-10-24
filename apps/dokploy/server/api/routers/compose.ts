@@ -122,6 +122,10 @@ import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
 import { auditCancel } from "../utils/cancel-audit";
 import {
+	readComposePolicyExclusion,
+	writeComposePolicyExclusion,
+} from "../utils/compose-policy-exclusion";
+import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "../utils/deploy-priority";
@@ -587,6 +591,54 @@ export const composeRouter = createTRPCRouter({
 				resourceId: input.composeId,
 				resourceName: compose.appName,
 				metadata: { watchdogExcluded: input.excluded },
+			});
+			return result;
+		}),
+
+	// "Exclude from the restricted-compose audit": the service owner can opt out
+	// of the read-only audit (see services/compose-policy-audit.ts).
+	composePolicyAuditExclusion: protectedProcedure
+		.input(apiFindCompose)
+		.query(async ({ input, ctx }) => {
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["read"],
+			});
+			const compose = await findComposeById(input.composeId);
+			return readComposePolicyExclusion(
+				compose.environment.project.organizationId,
+				input.composeId,
+			);
+		}),
+
+	setComposePolicyAuditExclusion: protectedProcedure
+		.input(apiFindCompose.extend({ excluded: z.boolean() }))
+		.mutation(async ({ input, ctx }) => {
+			// Leaving a compose out of the audit is the organization's decision,
+			// not the service owner's: owners and admins only (reading is open to
+			// whoever can read the service).
+			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message:
+						"Only an organization owner or admin can exclude a compose from the restricted-compose audit",
+				});
+			}
+			await checkServicePermissionAndAccess(ctx, input.composeId, {
+				service: ["create"],
+			});
+			const compose = await findComposeById(input.composeId);
+			const result = await writeComposePolicyExclusion(
+				compose.environment.project.organizationId,
+				input.composeId,
+				input.excluded,
+				{ userId: ctx.user.id },
+			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "compose",
+				resourceId: input.composeId,
+				resourceName: compose.appName,
+				metadata: { composePolicyAuditExcluded: input.excluded },
 			});
 			return result;
 		}),
