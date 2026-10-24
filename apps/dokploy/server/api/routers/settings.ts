@@ -1,5 +1,6 @@
 import path from "node:path";
 import {
+	assertRunningTraefikImageKept,
 	checkGPUStatus,
 	checkPortInUse,
 	checkPostgresHealth,
@@ -140,6 +141,19 @@ const resolveTraefikFilePath = (
 const traefikUpdateLocks = new Map<string, symbol>();
 const traefikUpdateErrors = new Map<string, string>();
 
+// Env, ports and the dashboard toggle keep the running Traefik image; refuse
+// before queueing when its version tag can't be read.
+const assertTraefikImageKept = async (serverId: string | undefined) => {
+	try {
+		await assertRunningTraefikImageKept(serverId);
+	} catch (error) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: error instanceof Error ? error.message : String(error),
+		});
+	}
+};
+
 // Same server scope as the other Traefik procedures; on Cloud the local
 // Traefik belongs to the platform, so a serverId is required.
 const assertTraefikAccess = async (
@@ -219,6 +233,7 @@ export const settingsRouter = createTRPCRouter({
 				input.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertTraefikImageKept(input.serverId);
 			const ports = await readPorts("dokploy-traefik", input.serverId);
 			const env = await readEnvironmentVariables(
 				"dokploy-traefik",
@@ -1024,6 +1039,7 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertTraefikImageKept(input.serverId);
 			const envs = prepareEnvironmentVariables(input.env);
 			const ports = await readPorts("dokploy-traefik", input?.serverId);
 
@@ -1301,6 +1317,7 @@ export const settingsRouter = createTRPCRouter({
 						message: "Please set a serverId to update Traefik ports",
 					});
 				}
+				await assertTraefikImageKept(input.serverId);
 				const env = await readEnvironmentVariables(
 					"dokploy-traefik",
 					input?.serverId,
@@ -1434,10 +1451,13 @@ export const settingsRouter = createTRPCRouter({
 					});
 				}
 
+				// The only recreate that may change the version: every other
+				// Traefik action keeps the image the host runs.
 				recreate = writeTraefikSetup({
 					env,
 					additionalPorts: ports,
 					serverId,
+					image: `traefik:v${overview.recommendedVersion}`,
 				});
 			} catch (error) {
 				release();

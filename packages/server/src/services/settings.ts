@@ -13,9 +13,11 @@ import { compose } from "../db/schema";
 import {
 	ensureTraefikImage,
 	initializeTraefikService,
+	keepRunningTraefikImage,
 	queueTraefikRecreate,
 	recreateStandaloneTraefik,
 	restoreInterruptedTraefik,
+	splitImageReference,
 	TRAEFIK_VERSION,
 	type TraefikOptions,
 } from "../setup/traefik-setup";
@@ -605,32 +607,20 @@ export const writeTraefikSetup = async (input: TraefikOptions) => {
 				env: input.env,
 				additionalPorts: input.additionalPorts,
 				serverId: input.serverId,
+				image: input.image,
 			});
 		} else if (resourceType === "standalone") {
 			await recreateStandaloneTraefik({
 				env: input.env,
 				additionalPorts: input.additionalPorts,
 				serverId: input.serverId,
+				image: input.image,
 			});
 		} else {
 			throw new Error("Traefik resource type not found");
 		}
 	});
 	await reconnectServicesToTraefik(input.serverId);
-};
-
-const splitImageReference = (image: string) => {
-	// Swarm service images carry a @sha256 digest.
-	const reference = image.split("@")[0] ?? "";
-	const tagStart = reference.lastIndexOf(":");
-	// A colon followed by a slash is a registry port, not a tag.
-	if (tagStart === -1 || reference.slice(tagStart).includes("/")) {
-		return { repository: reference, tag: null };
-	}
-	return {
-		repository: reference.slice(0, tagStart),
-		tag: reference.slice(tagStart + 1),
-	};
 };
 
 export const parseTraefikImageVersion = (image: string) => {
@@ -733,6 +723,16 @@ fi`;
 		recommendedVersion,
 		versionStatus,
 	};
+};
+
+// Routine Traefik actions recreate in the background, where an unreadable
+// image tag is refused; check it first so the caller sees why. An unreachable
+// host is left to the action itself.
+export const assertRunningTraefikImageKept = async (serverId?: string) => {
+	const overview = await getTraefikOverview(serverId).catch(() => null);
+	if (overview?.image) {
+		keepRunningTraefikImage(overview.image);
+	}
 };
 
 // Stays under proxy timeouts (~100s); the download continues in the background.

@@ -27,16 +27,51 @@ export const TRAEFIK_HTTP3_PORT =
 	Number.parseInt(process.env.TRAEFIK_HTTP3_PORT!, 10) || 443;
 export const TRAEFIK_BIND_IP = process.env.TRAEFIK_BIND_IP || "0.0.0.0";
 export const TRAEFIK_VERSION = process.env.TRAEFIK_VERSION || "3.6.25";
+export const TRAEFIK_IMAGE = `traefik:v${TRAEFIK_VERSION}`;
 
 export interface TraefikOptions {
 	env?: string[];
 	serverId?: string;
+	// Only the explicit Traefik update sets this. Without it a recreate keeps
+	// the image the host runs, and uses TRAEFIK_IMAGE only when there is none.
+	image?: string;
 	additionalPorts?: {
 		targetPort: number;
 		publishedPort: number;
 		protocol?: string;
 	}[];
 }
+
+export const splitImageReference = (image: string) => {
+	// Swarm service images carry a @sha256 digest.
+	const reference = image.split("@")[0] ?? "";
+	const tagStart = reference.lastIndexOf(":");
+	// A colon followed by a slash is a registry port, not a tag.
+	if (tagStart === -1 || reference.slice(tagStart).includes("/")) {
+		return { repository: reference, tag: null };
+	}
+	return {
+		repository: reference.slice(0, tagStart),
+		tag: reference.slice(tagStart + 1),
+	};
+};
+
+// Saving env, ports or the dashboard toggle must not change the Traefik
+// version, so a routine recreate reuses the running image as it is. Without a
+// readable tag the recreate could pull another version, so it is refused.
+export const keepRunningTraefikImage = (image: string | null | undefined) => {
+	const reference = image?.trim() ?? "";
+	if (
+		!reference ||
+		reference.startsWith("sha256:") ||
+		!splitImageReference(reference).tag
+	) {
+		throw new Error(
+			`Can't read the version tag of the running Traefik image${reference ? ` "${reference}"` : ""}, so Dokploy won't recreate it: that could change the Traefik version. Run dokploy-traefik from a tagged image (for example ${TRAEFIK_IMAGE}) first.`,
+		);
+	}
+	return reference;
+};
 
 type PortBinding = { HostPort: string; HostIp: string };
 
@@ -136,10 +171,24 @@ export const recreateStandaloneTraefik = async ({
 	env,
 	serverId,
 	additionalPorts = [],
+	image,
 }: TraefikOptions) => {
 	const { MAIN_TRAEFIK_PATH, DYNAMIC_TRAEFIK_PATH } = paths(!!serverId);
-	const imageName = `traefik:v${TRAEFIK_VERSION}`;
 	const containerName = "dokploy-traefik";
+
+	const docker = await getRemoteDocker(serverId);
+	await restoreInterruptedTraefik(serverId);
+
+	// Kept until the new container stays up, so it can be restored on failure.
+	const currentInfo = await docker
+		.getContainer(containerName)
+		.inspect()
+		.catch(() => null);
+	const imageName =
+		image ??
+		(currentInfo
+			? keepRunningTraefikImage(currentInfo.Config?.Image)
+			: TRAEFIK_IMAGE);
 
 	const { exposedPorts, portBindings } =
 		buildStandalonePortBindings(additionalPorts);
@@ -167,15 +216,8 @@ export const recreateStandaloneTraefik = async ({
 		Env: env,
 	};
 
-	const docker = await getRemoteDocker(serverId);
-	await restoreInterruptedTraefik(serverId);
-	await ensureTraefikImage(serverId);
+	await ensureTraefikImage(serverId, imageName);
 
-	// Kept until the new container stays up, so it can be restored on failure.
-	const currentInfo = await docker
-		.getContainer(containerName)
-		.inspect()
-		.catch(() => null);
 	const current = currentInfo ? docker.getContainer(currentInfo.Id) : null;
 	if (current) {
 		await docker
@@ -249,8 +291,10 @@ export const restoreInterruptedTraefik = async (serverId?: string) => {
 };
 
 // docker.pull resolves before the download ends and reports errors in the stream.
-export const ensureTraefikImage = async (serverId?: string) => {
-	const imageName = `traefik:v${TRAEFIK_VERSION}`;
+export const ensureTraefikImage = async (
+	serverId?: string,
+	imageName = TRAEFIK_IMAGE,
+) => {
 	const docker = await getRemoteDocker(serverId);
 	const image = docker.getImage(imageName);
 	if (
@@ -317,10 +361,19 @@ export const initializeTraefikService = async ({
 	env,
 	additionalPorts = [],
 	serverId,
+	image,
 }: TraefikOptions) => {
 	const { MAIN_TRAEFIK_PATH, DYNAMIC_TRAEFIK_PATH } = paths(!!serverId);
-	const imageName = `traefik:v${TRAEFIK_VERSION}`;
 	const appName = "dokploy-traefik";
+	const docker = await getRemoteDocker(serverId);
+	const service = docker.getService(appName);
+	const inspect = await service.inspect().catch(() => null);
+	// The service image keeps its @sha256 digest, so the version stays exact.
+	const imageName =
+		image ??
+		(inspect
+			? keepRunningTraefikImage(inspect.Spec?.TaskTemplate?.ContainerSpec?.Image)
+			: TRAEFIK_IMAGE);
 
 	const settings: CreateServiceOptions = {
 		Name: appName,
@@ -386,11 +439,7 @@ export const initializeTraefikService = async ({
 			],
 		},
 	};
-	const docker = await getRemoteDocker(serverId);
-	try {
-		const service = docker.getService(appName);
-		const inspect = await service.inspect();
-
+	if (inspect) {
 		await service.update({
 			version: Number.parseInt(inspect.Version.Index),
 			...settings,
@@ -400,7 +449,7 @@ export const initializeTraefikService = async ({
 			},
 		});
 		console.log("Traefik Updated ✅");
-	} catch {
+	} else {
 		await docker.createService(settings);
 		console.log("Traefik Started ✅");
 	}

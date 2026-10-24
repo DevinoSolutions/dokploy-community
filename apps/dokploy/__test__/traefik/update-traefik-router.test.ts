@@ -133,12 +133,14 @@ describe("Traefik update endpoints", () => {
 		);
 
 		expect(mocks.pullTraefikImage).toHaveBeenCalledWith("server-a");
+		// The only recreate that changes the version: it names the new image.
 		expect(mocks.writeTraefikSetup).toHaveBeenCalledWith({
 			env: TRAEFIK_ENV,
 			additionalPorts: [
 				{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
 			],
 			serverId: "server-a",
+			image: "traefik:v3.6.25",
 		});
 		expect(mocks.pullTraefikImage.mock.invocationCallOrder[0]).toBeLessThan(
 			mocks.writeTraefikSetup.mock.invocationCallOrder[0]!,

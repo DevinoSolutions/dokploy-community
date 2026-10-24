@@ -34,6 +34,7 @@ interface FakeOptions {
 	startError?: Error;
 	crashLoop?: boolean;
 	restoreError?: Error;
+	oldImage?: string;
 }
 
 const fakeDocker = ({
@@ -44,14 +45,21 @@ const fakeDocker = ({
 	startError,
 	crashLoop = false,
 	restoreError,
+	oldImage = `traefik:v${TRAEFIK_VERSION}`,
 }: FakeOptions = {}) => {
 	const log: string[] = [];
-	const containers: { id: string; name: string; running: boolean }[] = [];
+	const containers: {
+		id: string;
+		name: string;
+		running: boolean;
+		image?: string;
+	}[] = [];
 	if (oldRunning !== null) {
 		containers.push({
 			id: "old",
 			name: "dokploy-traefik",
 			running: oldRunning,
+			image: oldImage,
 		});
 	}
 	if (staleBackup) {
@@ -59,6 +67,7 @@ const fakeDocker = ({
 			id: "stale",
 			name: "dokploy-traefik-previous",
 			running: false,
+			image: oldImage,
 		});
 	}
 	let hasImage = imagePresent;
@@ -77,7 +86,11 @@ const fakeDocker = ({
 			const c = find(ref);
 			const startedAt =
 				c.id === "new" && crashLoop ? `crash-${++restarts}` : "steady";
-			return { Id: c.id, State: { Running: c.running, StartedAt: startedAt } };
+			return {
+				Id: c.id,
+				Config: { Image: c.image },
+				State: { Running: c.running, StartedAt: startedAt },
+			};
 		},
 		rename: async ({ name }: { name: string }) => {
 			const c = find(ref);
@@ -135,7 +148,12 @@ const fakeDocker = ({
 			createdWith = settings;
 			created += 1;
 			const id = created === 1 ? "new" : `new${created}`;
-			containers.push({ id, name, running: false });
+			containers.push({
+				id,
+				name,
+				running: false,
+				image: settings.Image as string,
+			});
 			log.push(`create ${id}`);
 			return container(id);
 		},
@@ -191,7 +209,7 @@ describe("initializeStandaloneTraefik", () => {
 			"start new",
 			"remove old",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "new", name: "dokploy-traefik", running: true },
 		]);
 		expect(fake.createdWith()).toMatchObject({
@@ -211,7 +229,7 @@ describe("initializeStandaloneTraefik", () => {
 
 		expect(error?.message).toContain("toomanyrequests");
 		expect(fake.log).toEqual(["pull"]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "old", name: "dokploy-traefik", running: true },
 		]);
 	});
@@ -245,7 +263,7 @@ describe("initializeStandaloneTraefik", () => {
 			"rename old -> dokploy-traefik",
 			"start old",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "old", name: "dokploy-traefik", running: true },
 		]);
 	});
@@ -258,7 +276,7 @@ describe("initializeStandaloneTraefik", () => {
 		expect(error?.message).toBe(
 			"The new Traefik container stopped right after starting: 2026-10-23T05:00:00Z ERR field not found, node: bogus. The previous Traefik was restored.",
 		);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "old", name: "dokploy-traefik", running: true },
 		]);
 	});
@@ -273,7 +291,7 @@ describe("initializeStandaloneTraefik", () => {
 
 		expect(error?.message).toContain("The previous Traefik was restored");
 		expect(fake.log).not.toContain("start old");
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "old", name: "dokploy-traefik", running: false },
 		]);
 	});
@@ -329,7 +347,7 @@ describe("initializeStandaloneTraefik", () => {
 			"start new2",
 			"remove new",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "new2", name: "dokploy-traefik", running: true },
 		]);
 	});
@@ -354,7 +372,7 @@ describe("initializeStandaloneTraefik", () => {
 			"The previous Traefik was restored",
 		);
 		expect(await second).toBeNull();
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "new2", name: "dokploy-traefik", running: true },
 		]);
 	});
@@ -403,7 +421,7 @@ describe("restoreInterruptedTraefik", () => {
 			"rename stale -> dokploy-traefik",
 			"start stale",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "stale", name: "dokploy-traefik", running: true },
 		]);
 	});
@@ -441,7 +459,7 @@ describe("restoreInterruptedTraefik", () => {
 			"start new",
 			"remove stale",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "new", name: "dokploy-traefik", running: true },
 		]);
 	});

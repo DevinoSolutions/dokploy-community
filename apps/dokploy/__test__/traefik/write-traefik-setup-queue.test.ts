@@ -26,9 +26,14 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 	execAsync: mocks.execAsync,
 }));
 
-const fakeDocker = (
-	initial: { id: string; name: string; running: boolean }[],
-) => {
+type FakeContainer = {
+	id: string;
+	name: string;
+	running: boolean;
+	image?: string;
+};
+
+const fakeDocker = (initial: FakeContainer[]) => {
 	const log: string[] = [];
 	const containers = initial.map((c) => ({ ...c }));
 	let created = 0;
@@ -42,7 +47,11 @@ const fakeDocker = (
 	const container = (ref: string) => ({
 		inspect: async () => {
 			const c = find(ref);
-			return { Id: c.id, State: { Running: c.running, StartedAt: "steady" } };
+			return {
+				Id: c.id,
+				Config: { Image: c.image },
+				State: { Running: c.running, StartedAt: "steady" },
+			};
 		},
 		rename: async ({ name }: { name: string }) => {
 			const c = find(ref);
@@ -77,7 +86,12 @@ const fakeDocker = (
 			}
 			created += 1;
 			const id = created === 1 ? "new" : `new${created}`;
-			containers.push({ id, name, running: false });
+			containers.push({
+				id,
+				name,
+				running: false,
+				image: settings.Image as string,
+			});
 			log.push(`create ${id}`);
 			return container(id);
 		},
@@ -89,7 +103,13 @@ const fakeDocker = (
 			? "standalone"
 			: "unknown";
 
-	return { docker, log, containers, resourceType };
+	return {
+		docker,
+		log,
+		containers,
+		resourceType,
+		images: () => containers.map((c) => [c.id, c.image]),
+	};
 };
 
 describe("writeTraefikSetup", () => {
@@ -107,7 +127,12 @@ describe("writeTraefikSetup", () => {
 
 	it("never restores the backup of a recreate that is still in flight", async () => {
 		const fake = fakeDocker([
-			{ id: "old", name: "dokploy-traefik", running: true },
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+			},
 		]);
 		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
 		mocks.execAsync.mockImplementation(async () => ({
@@ -119,7 +144,7 @@ describe("writeTraefikSetup", () => {
 		// Let the first recreate rename the old container away and sit in its
 		// stop delay before the second action starts.
 		await vi.advanceTimersByTimeAsync(1000);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "old", name: "dokploy-traefik-previous", running: false },
 		]);
 		const second = writeTraefikSetup({ env: ["A=2"] });
@@ -140,14 +165,19 @@ describe("writeTraefikSetup", () => {
 			"start new2",
 			"remove new",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "new2", name: "dokploy-traefik", running: true },
 		]);
 	});
 
 	it("a startup restore queued behind an in-flight recreate waits for it", async () => {
 		const fake = fakeDocker([
-			{ id: "old", name: "dokploy-traefik", running: true },
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+			},
 		]);
 		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
 		mocks.execAsync.mockImplementation(async () => ({
@@ -157,7 +187,7 @@ describe("writeTraefikSetup", () => {
 
 		const action = writeTraefikSetup({ env: ["A=1"] });
 		await vi.advanceTimersByTimeAsync(1000);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "old", name: "dokploy-traefik-previous", running: false },
 		]);
 		// What server.ts does on startup for the local host.
@@ -175,14 +205,19 @@ describe("writeTraefikSetup", () => {
 			"start new",
 			"remove old",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "new", name: "dokploy-traefik", running: true },
 		]);
 	});
 
 	it("restores a backup left by an interrupted recreate inside its own queued job", async () => {
 		const fake = fakeDocker([
-			{ id: "stale", name: "dokploy-traefik-previous", running: false },
+			{
+				id: "stale",
+				name: "dokploy-traefik-previous",
+				running: false,
+				image: "traefik:v3.6.25",
+			},
 		]);
 		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
 		mocks.execAsync.mockImplementation(async () => ({
@@ -203,7 +238,7 @@ describe("writeTraefikSetup", () => {
 			"start new",
 			"remove stale",
 		]);
-		expect(fake.containers).toEqual([
+		expect(fake.containers).toMatchObject([
 			{ id: "new", name: "dokploy-traefik", running: true },
 		]);
 	});

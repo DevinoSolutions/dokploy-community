@@ -204,8 +204,7 @@ export const UpdateTraefikVersion = ({ children, serverId }: Props) => {
 							{data.versionStatus === "custom" && (
 								<AlertBlock type="info" icon={<Info className="size-4" />}>
 									Traefik runs a custom image, so Dokploy won't update it.
-									Saving Traefik env or port mappings replaces it with the
-									official image.
+									Saving Traefik env or port mappings keeps this image.
 								</AlertBlock>
 							)}
 							{data.versionStatus === "unknown" && (
