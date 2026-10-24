@@ -186,8 +186,7 @@ const apiUpdateDokployServer = z
 			.string()
 			.max(128)
 			.refine(isDokployUpdateTarget, {
-				message:
-					"Use a release tag like v0.30.8-community.32, optionally with @sha256:<digest>",
+				message: "Use a release tag like v0.30.8-community.32",
 			})
 			.optional(),
 		rollback: z.boolean().optional(),
@@ -899,7 +898,7 @@ export const settingsRouter = createTRPCRouter({
 						throw new TRPCError({
 							code: "BAD_REQUEST",
 							message:
-								"A digest on its own only installs the recorded rollback. Use <tag>@sha256:<digest>.",
+								"A digest is only accepted for the recorded rollback. Use a release tag.",
 						});
 					}
 				}
@@ -917,10 +916,17 @@ export const settingsRouter = createTRPCRouter({
 							timeout: MANIFEST_INSPECT_TIMEOUT_MS,
 						},
 					);
-				} catch {
+				} catch (error) {
+					const reason = error instanceof Error ? error.message.trim() : "";
+					console.error(
+						"settings.updateServer manifest inspect failed:",
+						reason,
+					);
 					throw new TRPCError({
 						code: "BAD_REQUEST",
-						message: `Image not found in ${DOKPLOY_IMAGE_REPO}.`,
+						message: /manifest unknown|not found/i.test(reason)
+							? `Image not found in ${DOKPLOY_IMAGE_REPO}.`
+							: "Could not reach ghcr.io to check the image; try again.",
 					});
 				}
 			} else {

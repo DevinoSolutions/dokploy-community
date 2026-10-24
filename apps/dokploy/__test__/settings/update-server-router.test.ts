@@ -191,9 +191,11 @@ describe("settings.updateServer with a pinned target", () => {
 			{ tag: "v0.30.8-community.32.1" },
 		],
 		[
-			`v0.30.8-community.32@${DIGEST}`,
-			`${REPO}:v0.30.8-community.32@${DIGEST}`,
-			{ tag: "v0.30.8-community.32", digest: DIGEST },
+			"v0.30.8-community.1",
+			`${REPO}:v0.30.8-community.1`,
+			{
+				tag: "v0.30.8-community.1",
+			},
 		],
 	])("%s checks, pulls and installs %s", async (target, image, installing) => {
 		await expect(caller.updateServer({ target })).resolves.toBe(true);
@@ -227,19 +229,37 @@ describe("settings.updateServer with a pinned target", () => {
 		});
 	});
 
-	it("refuses an image the registry doesn't have, before queueing anything", async () => {
-		mocks.spawnAsync.mockRejectedValueOnce(new Error("manifest unknown"));
+	it.each([
+		["manifest unknown", `Image not found in ${REPO}.`],
+		[
+			"no such manifest: ghcr.io/devinosolutions/dokploy-community:v9.9.9: not found",
+			`Image not found in ${REPO}.`,
+		],
+		[
+			'Get "https://ghcr.io/v2/": dial tcp: i/o timeout',
+			"Could not reach ghcr.io to check the image; try again.",
+		],
+		["", "Could not reach ghcr.io to check the image; try again."],
+	])(
+		"refuses before queueing anything when the check says %j",
+		async (stderr, message) => {
+			mocks.spawnAsync.mockRejectedValueOnce(new Error(stderr));
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await expect(
-			caller.updateServer({ target: "v9.9.9-community.1" }),
-		).rejects.toMatchObject({
-			code: "BAD_REQUEST",
-			message: `Image not found in ${REPO}.`,
-		});
-		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
-		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
-		expect(mocks.audit).not.toHaveBeenCalled();
-	});
+			await expect(
+				caller.updateServer({ target: "v9.9.9-community.1" }),
+			).rejects.toMatchObject({ code: "BAD_REQUEST", message });
+
+			expect(error).toHaveBeenCalledWith(
+				"settings.updateServer manifest inspect failed:",
+				stderr,
+			);
+			expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+			expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+			expect(mocks.audit).not.toHaveBeenCalled();
+			error.mockRestore();
+		},
+	);
 
 	it("keeps the service and the rollback point when the pull fails", async () => {
 		mocks.spawnAsync
@@ -273,8 +293,6 @@ describe("settings.updateServer with a pinned target", () => {
 		"v0.29.12-community.1",
 		"v0.29.11-community.1",
 		"v0.29.8",
-		`v0.29.12-community.1@${DIGEST}`,
-		`v0.30.8@${DIGEST}`,
 	])("refuses %s, below the floor v0.30.8-community.1", async (target) => {
 		await expect(caller.updateServer({ target })).rejects.toMatchObject({
 			code: "BAD_REQUEST",
@@ -306,7 +324,10 @@ describe("settings.updateServer with a pinned target", () => {
 		mocks.readDokployRollbackPoint.mockResolvedValue(point);
 
 		await expect(caller.updateServer({ target: DIGEST })).rejects.toMatchObject(
-			{ code: "BAD_REQUEST", message: expect.stringContaining("@sha256") },
+			{
+				code: "BAD_REQUEST",
+				message: expect.stringContaining("recorded rollback"),
+			},
 		);
 		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
@@ -330,6 +351,9 @@ describe("settings.updateServer with a pinned target", () => {
 		`${REPO}:v0.30.8-community.32`,
 		`${REPO}@${DIGEST}`,
 		`evil.io/x@${DIGEST}`,
+		// A tag with a digest: nothing proves the digest is that tag's image.
+		`v0.30.8-community.32@${DIGEST}`,
+		`v0.29.8@${DIGEST}`,
 		`v0.30.8-community.32@${DIGEST} --detach`,
 		`v0.30.8-community.32@@${DIGEST}`,
 		`v0.30.8-community.32@sha256:${"A".repeat(64)}`,

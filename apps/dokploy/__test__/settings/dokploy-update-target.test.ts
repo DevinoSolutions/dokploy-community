@@ -9,7 +9,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import path, { join } from "node:path";
 import {
 	compareDokployVersions,
 	DOKPLOY_IMAGE_REPO,
@@ -49,10 +49,6 @@ describe("pinned update targets", () => {
 		["v0.30.8-community.32.1", { tag: "v0.30.8-community.32.1" }],
 		["v10.20.30-community.400.5", { tag: "v10.20.30-community.400.5" }],
 		[DIGEST, { digest: DIGEST }],
-		[
-			`v0.30.8-community.32@${DIGEST}`,
-			{ tag: "v0.30.8-community.32", digest: DIGEST },
-		],
 	])("parses %j", (target, parsed) => {
 		expect(parseDokployUpdateTarget(target)).toEqual(parsed);
 		expect(isDokployUpdateTarget(target)).toBe(true);
@@ -103,7 +99,9 @@ describe("pinned update targets", () => {
 		`${REPO}@${DIGEST}`,
 		`${REPO}:v0.30.8@${DIGEST}`,
 		`evil.io/x@${DIGEST}`,
-		// malformed tag@digest
+		// a tag with a digest: nothing proves the digest is that tag's image
+		`v0.30.8-community.32@${DIGEST}`,
+		`v0.30.8@${DIGEST}`,
 		`@${DIGEST}`,
 		"v0.30.8@",
 		`v0.30.8@@${DIGEST}`,
@@ -130,13 +128,10 @@ describe("pinned update targets", () => {
 		expect(resolveDokployUpdateImage(target)).toBeNull();
 	});
 
-	it("pins a tag, a tag@digest and a digest inside the fork repo", () => {
+	it("pins a tag and a digest inside the fork repo", () => {
 		expect(DOKPLOY_IMAGE_REPO).toBe(REPO);
 		expect(resolveDokployUpdateImage("v0.30.8-community.32.1")).toBe(
 			`${REPO}:v0.30.8-community.32.1`,
-		);
-		expect(resolveDokployUpdateImage(`v0.30.8-community.32@${DIGEST}`)).toBe(
-			`${REPO}:v0.30.8-community.32@${DIGEST}`,
 		);
 		expect(resolveDokployUpdateImage(DIGEST)).toBe(`${REPO}@${DIGEST}`);
 	});
@@ -152,6 +147,8 @@ describe("release ordering and the pin floor", () => {
 		["v0.30.9", "v0.30.8-community.99", 1],
 		["v0.29.12-community.5", "v0.30.8-community.1", -1],
 		["v1.0.0", "v0.99.99-community.9.9", 1],
+		["v0.30.10", "v0.30.9-community.40", 1],
+		["v0.30.8-community.1.1", "v0.30.8-community.2", -1],
 	])("compares %s with %s as %i", (a, b, expected) => {
 		expect(compareDokployVersions(a, b)).toBe(expected);
 	});
@@ -255,10 +252,6 @@ describe("Dokploy rollback point", () => {
 
 	it.each([
 		["the running digest", { digest: DIGEST }],
-		[
-			"the running digest with its tag",
-			{ tag: "v0.30.8-community.32", digest: DIGEST },
-		],
 		["the running version's tag", { tag: "v0.30.8-community.31" }],
 	])(
 		"keeps the old point when installing %s (a reinstall)",
@@ -281,7 +274,7 @@ describe("Dokploy rollback point", () => {
 
 		await recordDokployRollbackPoint("v0.30.8-community.31", {
 			file,
-			installing: { tag: "v0.30.8-community.32", digest: OTHER_DIGEST },
+			installing: { digest: OTHER_DIGEST },
 		});
 
 		expect(recorded()).toEqual({
@@ -379,5 +372,46 @@ describe("Dokploy rollback point", () => {
 		await expect(
 			readDokployRollbackPoint("v0.30.8-community.32", file),
 		).resolves.toBeNull();
+	});
+});
+
+// The floor's release ships migrations up to 0206. Every later migration only
+// adds, so an install pinned at the floor still runs on today's schema.
+const LAST_MIGRATION_OF_FLOOR = 206;
+// Migrations above the floor that were checked and are known to be safe for
+// the floor's release (a catch-up that drops nothing it reads, say).
+const ALLOWED_DESTRUCTIVE_MIGRATIONS: string[] = [];
+const DESTRUCTIVE = /\b(DROP\s+COLUMN|DROP\s+TABLE|RENAME|SET\s+NOT\s+NULL)\b/i;
+
+describe("the pin floor and the migrations", () => {
+	it("no migration after the floor drops, renames or tightens anything", () => {
+		const drizzleDir = path.resolve(__dirname, "../../drizzle");
+		const offending = readdirSync(drizzleDir)
+			.filter((name) => /^\d{4}_.*\.sql$/.test(name))
+			.filter((name) => Number(name.slice(0, 4)) > LAST_MIGRATION_OF_FLOOR)
+			.filter((name) => !ALLOWED_DESTRUCTIVE_MIGRATIONS.includes(name))
+			.filter((name) =>
+				DESTRUCTIVE.test(readFileSync(join(drizzleDir, name), "utf8")),
+			);
+
+		expect(
+			offending,
+			`bump DOKPLOY_MIN_PINNED_VERSION (now ${DOKPLOY_MIN_PINNED_VERSION}) past these migrations, or allow-list them after checking that release still runs on the newer schema`,
+		).toEqual([]);
+	});
+
+	it("scans the migrations it should", () => {
+		const drizzleDir = path.resolve(__dirname, "../../drizzle");
+		const scanned = readdirSync(drizzleDir).filter(
+			(name) =>
+				/^\d{4}_.*\.sql$/.test(name) &&
+				Number(name.slice(0, 4)) > LAST_MIGRATION_OF_FLOOR,
+		);
+		expect(scanned).toContain("0207_deployment_queue_journal.sql");
+		expect(DESTRUCTIVE.test("ALTER TABLE x DROP COLUMN y;")).toBe(true);
+		expect(
+			DESTRUCTIVE.test('ALTER TABLE x ALTER COLUMN "y" SET NOT NULL;'),
+		).toBe(true);
+		expect(DESTRUCTIVE.test("ALTER TABLE x ADD COLUMN y text;")).toBe(false);
 	});
 });

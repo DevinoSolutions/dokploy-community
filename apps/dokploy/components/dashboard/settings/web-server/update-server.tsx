@@ -112,13 +112,14 @@ export const UpdateServer = ({
 			: undefined);
 	let pinnedTargetError: string | null = null;
 	if (trimmedTarget && !parsedTarget) {
-		pinnedTargetError =
-			"Use a release tag like v0.30.8-community.32, optionally with @sha256:<digest>.";
+		pinnedTargetError = "Use a release tag like v0.30.8-community.32.";
 	} else if (parsedTarget?.tag && isBelowDokployPinFloor(parsedTarget.tag)) {
 		pinnedTargetError = `Releases older than ${DOKPLOY_MIN_PINNED_VERSION} can't be installed from here.`;
 	} else if (parsedTarget && !pinnedVersion) {
 		pinnedTargetError =
-			"A digest on its own only installs the recorded rollback. Use <tag>@sha256:<digest>.";
+			"A digest is only accepted for the recorded rollback. Use a release tag.";
+	} else if (pinnedVersion && pinnedVersion === dokployVersion) {
+		pinnedTargetError = `Already running ${pinnedVersion}.`;
 	}
 	const compareToRunning = (version: string) =>
 		dokployVersion ? (compareDokployVersions(version, dokployVersion) ?? 0) : 0;
@@ -371,7 +372,7 @@ export const UpdateServer = ({
 						<Input
 							value={pinnedTarget}
 							onChange={(e) => setPinnedTarget(e.target.value)}
-							placeholder="v0.30.8-community.32 or <tag>@sha256:..."
+							placeholder="v0.30.8-community.32"
 							className="font-mono text-xs"
 						/>
 						{pinnedVersion && !pinnedTargetError ? (

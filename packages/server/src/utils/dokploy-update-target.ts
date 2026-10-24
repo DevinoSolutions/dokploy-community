@@ -9,14 +9,18 @@ export const DOKPLOY_IMAGE_DIGEST_REGEX = /^sha256:[a-f0-9]{64}$/;
 
 // Older releases install another image from their own Update Server button, or
 // predate migrations that dropped columns the current schema no longer has, so
-// pinning one strands the install.
+// pinning one strands the install. A migration after 0206 that drops, renames
+// or tightens something must move this up (see the drizzle scan test).
 export const DOKPLOY_MIN_PINNED_VERSION = "v0.30.8-community.1";
 
+// A tag is pinned by its digest when it is pulled. A digest is only taken on
+// its own, as the recorded rollback: nothing proves which version any other
+// digest is, so it could get past the floor.
 export type DokployUpdateTarget =
-	| { tag: string; digest?: string }
+	| { tag: string; digest?: undefined }
 	| { tag?: undefined; digest: string };
 
-/** A release tag, `<tag>@sha256:<hex>`, or a bare digest; null for anything else. */
+/** A release tag or a bare digest; null for anything else. */
 export const parseDokployUpdateTarget = (
 	target: string,
 ): DokployUpdateTarget | null => {
@@ -25,16 +29,6 @@ export const parseDokployUpdateTarget = (
 	}
 	if (DOKPLOY_IMAGE_DIGEST_REGEX.test(target)) {
 		return { digest: target };
-	}
-	const at = target.indexOf("@");
-	const tag = target.slice(0, at);
-	const digest = target.slice(at + 1);
-	if (
-		at > 0 &&
-		DOKPLOY_RELEASE_TAG_REGEX.test(tag) &&
-		DOKPLOY_IMAGE_DIGEST_REGEX.test(digest)
-	) {
-		return { tag, digest };
 	}
 	return null;
 };
@@ -72,11 +66,8 @@ export const compareDokployVersions = (a: string, b: string) => {
 export const isBelowDokployPinFloor = (tag: string) =>
 	(compareDokployVersions(tag, DOKPLOY_MIN_PINNED_VERSION) ?? -1) < 0;
 
-/** `repo:<tag>`, `repo:<tag>@sha256:<hex>` or `repo@sha256:<hex>`. */
+/** `repo:<tag>` or `repo@sha256:<hex>`. */
 export const dokployUpdateImage = (target: DokployUpdateTarget) => {
-	if (target.tag !== undefined && target.digest !== undefined) {
-		return `${DOKPLOY_IMAGE_REPO}:${target.tag}@${target.digest}`;
-	}
 	if (target.tag !== undefined) {
 		return `${DOKPLOY_IMAGE_REPO}:${target.tag}`;
 	}
