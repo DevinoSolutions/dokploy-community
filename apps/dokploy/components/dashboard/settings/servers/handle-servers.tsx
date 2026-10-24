@@ -39,6 +39,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/utils/api";
+import { DockerCleanupScheduleSelect } from "./docker-cleanup-schedule-select";
 
 const Schema = z.object({
 	name: z.string().min(1, {
@@ -55,6 +56,7 @@ const Schema = z.object({
 	}),
 	serverType: z.enum(["deploy", "build"]).default("deploy"),
 	enableDockerCleanup: z.boolean().default(true),
+	dockerCleanupCron: z.string().default("0 4 * * *"),
 	defaultDomain: z.string().optional(),
 });
 
@@ -81,6 +83,7 @@ export const HandleServers = ({ serverId, children }: Props) => {
 	);
 
 	const { data: sshKeys } = api.sshKey.all.useQuery();
+	const { data: isCloud } = api.settings.isCloud.useQuery();
 	const { mutateAsync, error, isPending, isError } = serverId
 		? api.server.update.useMutation()
 		: api.server.create.useMutation();
@@ -94,6 +97,7 @@ export const HandleServers = ({ serverId, children }: Props) => {
 			sshKeyId: "",
 			serverType: "deploy",
 			enableDockerCleanup: true,
+			dockerCleanupCron: "0 4 * * *",
 			defaultDomain: "",
 		},
 		resolver: zodResolver(Schema),
@@ -109,6 +113,7 @@ export const HandleServers = ({ serverId, children }: Props) => {
 			sshKeyId: data?.sshKeyId || "",
 			serverType: data?.serverType || "deploy",
 			enableDockerCleanup: data?.enableDockerCleanup ?? true,
+			dockerCleanupCron: data?.dockerCleanupCron ?? "0 4 * * *",
 			defaultDomain: data?.defaultDomain || "",
 		});
 	}, [form, form.reset, form.formState.isSubmitSuccessful, data]);
@@ -127,6 +132,7 @@ export const HandleServers = ({ serverId, children }: Props) => {
 			sshKeyId: data.sshKeyId || "",
 			serverType: data.serverType || "deploy",
 			enableDockerCleanup: data.enableDockerCleanup,
+			dockerCleanupCron: data.dockerCleanupCron,
 			defaultDomain: data.defaultDomain?.trim() || null,
 			serverId: serverId || "",
 		})
@@ -469,6 +475,29 @@ export const HandleServers = ({ serverId, children }: Props) => {
 								</FormItem>
 							)}
 						/>
+						{form.watch("enableDockerCleanup") && !isCloud && (
+							<FormField
+								control={form.control}
+								name="dockerCleanupCron"
+								render={({ field }) => (
+									<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3">
+										<div className="space-y-0.5">
+											<FormLabel>Cleanup time</FormLabel>
+											<FormDescription>
+												The hour (UTC) the daily cleanup starts. It waits while
+												deployments are running or queued on this server.
+											</FormDescription>
+										</div>
+										<FormControl>
+											<DockerCleanupScheduleSelect
+												value={field.value ?? "0 4 * * *"}
+												onChange={field.onChange}
+											/>
+										</FormControl>
+									</FormItem>
+								)}
+							/>
+						)}
 					</form>
 
 					<DialogFooter>

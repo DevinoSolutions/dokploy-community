@@ -10,6 +10,10 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import {
+	DEFAULT_DOCKER_CLEANUP_CRON,
+	dockerCleanupCronSchema,
+} from "../../utils/docker/cleanup-schedule";
 import { certificateType } from "./shared";
 
 export const webServerSettings = pgTable("webServerSettings", {
@@ -25,6 +29,10 @@ export const webServerSettings = pgTable("webServerSettings", {
 	letsEncryptEmail: text("letsEncryptEmail"),
 	sshPrivateKey: text("sshPrivateKey"),
 	enableDockerCleanup: boolean("enableDockerCleanup").notNull().default(true),
+	// 5-field cron, read in UTC. See utils/docker/cleanup-schedule.ts.
+	dockerCleanupCron: text("dockerCleanupCron")
+		.notNull()
+		.default(DEFAULT_DOCKER_CLEANUP_CRON),
 	logCleanupCron: text("logCleanupCron").default("0 0 * * *"),
 	// Metrics Configuration
 	metricsConfig: jsonb("metricsConfig")
@@ -150,6 +158,7 @@ export const apiUpdateWebServerSettings = createSchema.partial().extend({
 	letsEncryptEmail: z.string().email().optional().nullable(),
 	sshPrivateKey: z.string().optional(),
 	enableDockerCleanup: z.boolean().optional(),
+	dockerCleanupCron: dockerCleanupCronSchema.optional(),
 	logCleanupCron: z.string().optional().nullable(),
 	metricsConfig: z
 		.object({
@@ -211,6 +220,8 @@ export const apiSaveSSHKey = z
 
 export const apiUpdateDockerCleanup = z.object({
 	enableDockerCleanup: z.boolean(),
+	// Omitted = keep the stored schedule.
+	dockerCleanupCron: dockerCleanupCronSchema.optional(),
 	serverId: z.string().optional(),
 });
 
