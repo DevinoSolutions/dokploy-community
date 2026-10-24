@@ -104,11 +104,15 @@ export const buildStandalonePortBindings = (
 // Overlapping recreates of one server would remove each other's containers.
 const recreateQueue = new Map<string, Promise<void>>();
 
-export const initializeStandaloneTraefik = (options: TraefikOptions = {}) => {
-	const key = options.serverId ?? "local";
-	const run = (recreateQueue.get(key) ?? Promise.resolve()).then(() =>
-		recreateStandaloneTraefik(options),
-	);
+// Runs a job that touches the server's Traefik containers after the jobs
+// already queued for that server. A job must not queue another one (it would
+// wait for itself), so jobs call recreateStandaloneTraefik directly.
+export const queueTraefikRecreate = <T>(
+	serverId: string | undefined,
+	job: () => Promise<T>,
+): Promise<T> => {
+	const key = serverId ?? "local";
+	const run = (recreateQueue.get(key) ?? Promise.resolve()).then(job);
 	// So a hung Docker call can't block later recreates.
 	const settled = Promise.race([run.catch(() => {}), sleep(5 * 60_000)]).then(
 		() => {},
@@ -122,7 +126,13 @@ export const initializeStandaloneTraefik = (options: TraefikOptions = {}) => {
 	return run;
 };
 
-const recreateStandaloneTraefik = async ({
+export const initializeStandaloneTraefik = (options: TraefikOptions = {}) =>
+	queueTraefikRecreate(options.serverId, () =>
+		recreateStandaloneTraefik(options),
+	);
+
+// Only from inside a queueTraefikRecreate job for the same server.
+export const recreateStandaloneTraefik = async ({
 	env,
 	serverId,
 	additionalPorts = [],

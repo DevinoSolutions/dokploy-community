@@ -12,8 +12,9 @@ import { db } from "../db";
 import { compose } from "../db/schema";
 import {
 	ensureTraefikImage,
-	initializeStandaloneTraefik,
 	initializeTraefikService,
+	queueTraefikRecreate,
+	recreateStandaloneTraefik,
 	restoreInterruptedTraefik,
 	TRAEFIK_VERSION,
 	type TraefikOptions,
@@ -589,30 +590,33 @@ export const checkPortInUse = async (
 };
 
 export const writeTraefikSetup = async (input: TraefikOptions) => {
-	await restoreInterruptedTraefik(input.serverId);
-	const resourceType = await getDockerResourceType(
-		"dokploy-traefik",
-		input.serverId,
-	);
+	// One queued job per server: restoring the backup while another recreate
+	// has its container renamed away would leave both recreates fighting over
+	// it, and the first one then removes it.
+	await queueTraefikRecreate(input.serverId, async () => {
+		await restoreInterruptedTraefik(input.serverId);
+		const resourceType = await getDockerResourceType(
+			"dokploy-traefik",
+			input.serverId,
+		);
 
-	if (resourceType === "service") {
-		await initializeTraefikService({
-			env: input.env,
-			additionalPorts: input.additionalPorts,
-			serverId: input.serverId,
-		});
-		await reconnectServicesToTraefik(input.serverId);
-	} else if (resourceType === "standalone") {
-		await initializeStandaloneTraefik({
-			env: input.env,
-			additionalPorts: input.additionalPorts,
-			serverId: input.serverId,
-		});
-
-		await reconnectServicesToTraefik(input.serverId);
-	} else {
-		throw new Error("Traefik resource type not found");
-	}
+		if (resourceType === "service") {
+			await initializeTraefikService({
+				env: input.env,
+				additionalPorts: input.additionalPorts,
+				serverId: input.serverId,
+			});
+		} else if (resourceType === "standalone") {
+			await recreateStandaloneTraefik({
+				env: input.env,
+				additionalPorts: input.additionalPorts,
+				serverId: input.serverId,
+			});
+		} else {
+			throw new Error("Traefik resource type not found");
+		}
+	});
+	await reconnectServicesToTraefik(input.serverId);
 };
 
 const splitImageReference = (image: string) => {

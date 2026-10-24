@@ -178,9 +178,12 @@ export const UpdateTraefikVersion = ({ children, serverId }: Props) => {
 									icon={<AlertCircle className="size-4" />}
 								>
 									Dokploy recommends Traefik v{data.recommendedVersion}.
-									Updating is optional and recreates the Traefik container, so
-									your applications may be unreachable for a few seconds. Env
-									variables and port mappings are kept.
+									Updating is optional and replaces Traefik, so your
+									applications may be unreachable for a few seconds. Env
+									variables and port mappings are kept. A standalone Traefik
+									container that doesn't stay up is replaced by the previous
+									one; a Traefik running as a Swarm service is updated in place
+									with no rollback.
 								</AlertBlock>
 							)}
 							{data.versionStatus === "up-to-date" &&
