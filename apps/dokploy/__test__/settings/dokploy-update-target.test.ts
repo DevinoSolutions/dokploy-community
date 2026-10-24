@@ -1,32 +1,36 @@
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	compareDokployVersions,
 	DOKPLOY_IMAGE_REPO,
+	DOKPLOY_MIN_PINNED_VERSION,
+	isBelowDokployPinFloor,
 	isDokployUpdateTarget,
+	parseDokployUpdateTarget,
 	resolveDokployUpdateImage,
 } from "@dokploy/server/utils/dokploy-update-target";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-	execAsync: vi.fn(),
+	spawnAsync: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => ({
 	db: { query: {} },
 }));
 
-vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
-	...(await importOriginal<
-		typeof import("@dokploy/server/utils/process/execAsync")
-	>()),
-	execAsync: mocks.execAsync,
+vi.mock("@dokploy/server/utils/process/spawnAsync", () => ({
+	spawnAsync: mocks.spawnAsync,
 }));
 
 const { readDokployRollbackPoint, recordDokployRollbackPoint } = await import(
@@ -35,16 +39,22 @@ const { readDokployRollbackPoint, recordDokployRollbackPoint } = await import(
 
 const HEX = "0123456789abcdef".repeat(4);
 const DIGEST = `sha256:${HEX}`;
+const OTHER_DIGEST = `sha256:${"f".repeat(64)}`;
 const REPO = "ghcr.io/devinosolutions/dokploy-community";
 
 describe("pinned update targets", () => {
 	it.each([
-		"v0.30.8",
-		"v0.30.8-community.32",
-		"v0.30.8-community.32.1",
-		"v10.20.30-community.400.5",
-		DIGEST,
-	])("accepts %j", (target) => {
+		["v0.30.8", { tag: "v0.30.8" }],
+		["v0.30.8-community.32", { tag: "v0.30.8-community.32" }],
+		["v0.30.8-community.32.1", { tag: "v0.30.8-community.32.1" }],
+		["v10.20.30-community.400.5", { tag: "v10.20.30-community.400.5" }],
+		[DIGEST, { digest: DIGEST }],
+		[
+			`v0.30.8-community.32@${DIGEST}`,
+			{ tag: "v0.30.8-community.32", digest: DIGEST },
+		],
+	])("parses %j", (target, parsed) => {
+		expect(parseDokployUpdateTarget(target)).toEqual(parsed);
 		expect(isDokployUpdateTarget(target)).toBe(true);
 	});
 
@@ -69,6 +79,7 @@ describe("pinned update targets", () => {
 		"v0.30.8\n",
 		"v0.30.8\r",
 		"v0.30.8\t",
+		"v0.30.8 ",
 		"v0.30.8\nid",
 		"v0.30.8;",
 		"v0.30.8; id",
@@ -90,8 +101,18 @@ describe("pinned update targets", () => {
 		"docker.io/library/alpine:latest",
 		`${REPO}:v0.30.8`,
 		`${REPO}@${DIGEST}`,
+		`${REPO}:v0.30.8@${DIGEST}`,
 		`evil.io/x@${DIGEST}`,
-		`v0.30.8@${DIGEST}`,
+		// malformed tag@digest
+		`@${DIGEST}`,
+		"v0.30.8@",
+		`v0.30.8@@${DIGEST}`,
+		`v0.30.8@${DIGEST}@${DIGEST}`,
+		`v0.30.8 @${DIGEST}`,
+		`v0.30.8@ ${DIGEST}`,
+		`v0.30.8@${DIGEST} `,
+		`latest@${DIGEST}`,
+		`v0.30.8@sha256:${HEX.toUpperCase()}`,
 		// malformed digests
 		"sha256:",
 		`sha256:${HEX.slice(1)}`,
@@ -104,16 +125,49 @@ describe("pinned update targets", () => {
 		`${DIGEST} --detach`,
 		` ${DIGEST}`,
 	])("rejects %j", (target) => {
+		expect(parseDokployUpdateTarget(target)).toBeNull();
 		expect(isDokployUpdateTarget(target)).toBe(false);
 		expect(resolveDokployUpdateImage(target)).toBeNull();
 	});
 
-	it("pins a tag and a digest inside the fork repo", () => {
+	it("pins a tag, a tag@digest and a digest inside the fork repo", () => {
 		expect(DOKPLOY_IMAGE_REPO).toBe(REPO);
 		expect(resolveDokployUpdateImage("v0.30.8-community.32.1")).toBe(
 			`${REPO}:v0.30.8-community.32.1`,
 		);
+		expect(resolveDokployUpdateImage(`v0.30.8-community.32@${DIGEST}`)).toBe(
+			`${REPO}:v0.30.8-community.32@${DIGEST}`,
+		);
 		expect(resolveDokployUpdateImage(DIGEST)).toBe(`${REPO}@${DIGEST}`);
+	});
+});
+
+describe("release ordering and the pin floor", () => {
+	it.each([
+		["v0.30.8-community.32", "v0.30.8-community.32", 0],
+		["v0.30.8-community.32.1", "v0.30.8-community.32", 1],
+		["v0.30.8-community.32", "v0.30.8-community.32.1", -1],
+		["v0.30.8-community.10", "v0.30.8-community.9", 1],
+		["v0.30.8-community.1", "v0.30.8", 1],
+		["v0.30.9", "v0.30.8-community.99", 1],
+		["v0.29.12-community.5", "v0.30.8-community.1", -1],
+		["v1.0.0", "v0.99.99-community.9.9", 1],
+	])("compares %s with %s as %i", (a, b, expected) => {
+		expect(compareDokployVersions(a, b)).toBe(expected);
+	});
+
+	it("can't compare something that is not a release tag", () => {
+		expect(compareDokployVersions("latest", "v0.30.8")).toBeNull();
+		expect(isBelowDokployPinFloor("latest")).toBe(true);
+	});
+
+	it("puts the floor at v0.30.8-community.1", () => {
+		expect(DOKPLOY_MIN_PINNED_VERSION).toBe("v0.30.8-community.1");
+		expect(isBelowDokployPinFloor("v0.30.8-community.1")).toBe(false);
+		expect(isBelowDokployPinFloor("v0.30.8-community.32.1")).toBe(false);
+		expect(isBelowDokployPinFloor("v0.30.8")).toBe(true);
+		expect(isBelowDokployPinFloor("v0.29.12-community.1")).toBe(true);
+		expect(isBelowDokployPinFloor("v0.29.8")).toBe(true);
 	});
 });
 
@@ -122,11 +176,16 @@ describe("Dokploy rollback point", () => {
 	let file: string;
 
 	const spec = (image: string, state = "") => {
-		mocks.execAsync.mockResolvedValue({
-			stdout: `${image} ${state}\n`,
-			stderr: "",
-		});
+		mocks.spawnAsync.mockResolvedValue(Buffer.from(`${image} ${state}\n`));
 	};
+
+	const writePoint = (version = "v0.30.8-community.20") => {
+		const point = { version, digest: OTHER_DIGEST };
+		writeFileSync(file, JSON.stringify(point));
+		return point;
+	};
+
+	const recorded = () => JSON.parse(readFileSync(file, "utf8"));
 
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -141,12 +200,21 @@ describe("Dokploy rollback point", () => {
 	it("records the version and digest of the running service image", async () => {
 		spec(`${REPO}:v0.30.8-community.31@${DIGEST}`, "completed");
 
-		await recordDokployRollbackPoint("v0.30.8-community.31", file);
+		await recordDokployRollbackPoint("v0.30.8-community.31", { file });
 
-		expect(mocks.execAsync).toHaveBeenCalledWith(
-			"docker service inspect dokploy --format '{{.Spec.TaskTemplate.ContainerSpec.Image}} {{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}'",
+		expect(mocks.spawnAsync).toHaveBeenCalledWith(
+			"docker",
+			[
+				"service",
+				"inspect",
+				"dokploy",
+				"--format",
+				"{{.Spec.TaskTemplate.ContainerSpec.Image}} {{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}",
+			],
+			undefined,
+			{ timeout: 30_000 },
 		);
-		expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+		expect(recorded()).toEqual({
 			version: "v0.30.8-community.31",
 			digest: DIGEST,
 		});
@@ -155,25 +223,71 @@ describe("Dokploy rollback point", () => {
 		).resolves.toEqual({ version: "v0.30.8-community.31", digest: DIGEST });
 	});
 
+	it("writes the file owner-only and leaves no temp file", async () => {
+		spec(`${REPO}:v0.30.8-community.31@${DIGEST}`);
+
+		await recordDokployRollbackPoint("v0.30.8-community.31", { file });
+
+		expect(readdirSync(dir)).toEqual(["dokploy-update-rollback.json"]);
+		if (process.platform !== "win32") {
+			expect(statSync(file).mode & 0o777).toBe(0o600);
+		}
+	});
+
 	it("records an image without a tag, or with the latest tag", async () => {
 		spec(`${REPO}@${DIGEST}`);
-		await recordDokployRollbackPoint("v0.30.8-community.31", file);
-		expect(JSON.parse(readFileSync(file, "utf8")).digest).toBe(DIGEST);
+		await recordDokployRollbackPoint("v0.30.8-community.31", { file });
+		expect(recorded().digest).toBe(DIGEST);
 
 		spec(`${REPO}:latest@${DIGEST}`);
-		await recordDokployRollbackPoint("v0.30.8-community.30", file);
-		expect(JSON.parse(readFileSync(file, "utf8")).version).toBe(
-			"v0.30.8-community.30",
-		);
+		await recordDokployRollbackPoint("v0.30.8-community.30", { file });
+		expect(recorded().version).toBe("v0.30.8-community.30");
 	});
 
 	it("offers no rollback to the version that is running", async () => {
 		spec(`${REPO}:v0.30.8-community.32@${DIGEST}`);
-		await recordDokployRollbackPoint("v0.30.8-community.32", file);
+		await recordDokployRollbackPoint("v0.30.8-community.32", { file });
 
 		await expect(
 			readDokployRollbackPoint("v0.30.8-community.32", file),
 		).resolves.toBeNull();
+	});
+
+	it.each([
+		["the running digest", { digest: DIGEST }],
+		[
+			"the running digest with its tag",
+			{ tag: "v0.30.8-community.32", digest: DIGEST },
+		],
+		["the running version's tag", { tag: "v0.30.8-community.31" }],
+	])(
+		"keeps the old point when installing %s (a reinstall)",
+		async (_name, installing) => {
+			const point = writePoint();
+			spec(`${REPO}:v0.30.8-community.31@${DIGEST}`);
+
+			await recordDokployRollbackPoint("v0.30.8-community.31", {
+				file,
+				installing,
+			});
+
+			expect(recorded()).toEqual(point);
+		},
+	);
+
+	it("replaces the point when installing another image", async () => {
+		writePoint();
+		spec(`${REPO}:v0.30.8-community.31@${DIGEST}`);
+
+		await recordDokployRollbackPoint("v0.30.8-community.31", {
+			file,
+			installing: { tag: "v0.30.8-community.32", digest: OTHER_DIGEST },
+		});
+
+		expect(recorded()).toEqual({
+			version: "v0.30.8-community.31",
+			digest: DIGEST,
+		});
 	});
 
 	it.each([
@@ -183,13 +297,10 @@ describe("Dokploy rollback point", () => {
 		["a tag naming another version", `${REPO}:v0.30.8-community.33@${DIGEST}`],
 		["an empty spec", ""],
 	])("drops the old point when the spec has %s", async (_name, image) => {
-		writeFileSync(
-			file,
-			JSON.stringify({ version: "v0.30.8-community.20", digest: DIGEST }),
-		);
+		writePoint();
 		spec(image);
 
-		await recordDokployRollbackPoint("v0.30.8-community.31", file);
+		await recordDokployRollbackPoint("v0.30.8-community.31", { file });
 
 		expect(existsSync(file)).toBe(false);
 		await expect(
@@ -200,29 +311,43 @@ describe("Dokploy rollback point", () => {
 	it.each(["updating", "paused", "rollback_started", "rollback_paused"])(
 		"keeps the point of the update in flight while the service is %s",
 		async (state) => {
-			const point = { version: "v0.30.8-community.30", digest: DIGEST };
-			writeFileSync(file, JSON.stringify(point));
-			spec(`${REPO}:v0.30.8-community.31@sha256:${"f".repeat(64)}`, state);
+			const point = writePoint("v0.30.8-community.30");
+			spec(`${REPO}:v0.30.8-community.31@${OTHER_DIGEST}`, state);
 
-			await recordDokployRollbackPoint("v0.30.8-community.30", file);
+			await recordDokployRollbackPoint("v0.30.8-community.30", { file });
 
-			expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(point);
+			expect(recorded()).toEqual(point);
 		},
 	);
 
 	it("never throws, and drops the old point, when docker fails", async () => {
-		writeFileSync(
-			file,
-			JSON.stringify({ version: "v0.30.8-community.20", digest: DIGEST }),
-		);
-		mocks.execAsync.mockRejectedValue(new Error("Cannot connect to docker"));
+		writePoint();
+		mocks.spawnAsync.mockRejectedValue(new Error("Cannot connect to docker"));
 		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 
 		await expect(
-			recordDokployRollbackPoint("v0.30.8-community.31", file),
+			recordDokployRollbackPoint("v0.30.8-community.31", { file }),
 		).resolves.toBeUndefined();
 
 		expect(existsSync(file)).toBe(false);
+		error.mockRestore();
+	});
+
+	it("removes its temp file when the write can't be finished", async () => {
+		spec(`${REPO}:v0.30.8-community.31@${DIGEST}`);
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		// A non-empty directory in the record's place makes the rename fail.
+		const blocked = join(dir, "blocked");
+		mkdirSync(blocked);
+		writeFileSync(join(blocked, "keep"), "");
+
+		await expect(
+			recordDokployRollbackPoint("v0.30.8-community.31", { file: blocked }),
+		).resolves.toBeUndefined();
+
+		expect(readdirSync(dir).filter((name) => name.endsWith(".tmp"))).toEqual(
+			[],
+		);
 		error.mockRestore();
 	});
 
@@ -232,11 +357,18 @@ describe("Dokploy rollback point", () => {
 		["null", "null"],
 		[
 			"a digest with shell syntax",
-			JSON.stringify({ version: "v0.30.8", digest: `${DIGEST}; id` }),
+			JSON.stringify({
+				version: "v0.30.8-community.31",
+				digest: `${DIGEST}; id`,
+			}),
 		],
 		[
 			"a version that is not a release",
 			JSON.stringify({ version: "latest", digest: DIGEST }),
+		],
+		[
+			"a version below the pin floor",
+			JSON.stringify({ version: "v0.29.12-community.1", digest: DIGEST }),
 		],
 		["missing fields", JSON.stringify({ digest: DIGEST })],
 	])("offers no rollback for %s", async (_name, content) => {

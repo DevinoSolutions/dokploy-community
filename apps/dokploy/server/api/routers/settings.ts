@@ -77,8 +77,12 @@ import {
 } from "@dokploy/server/utils/docker/cleanup-job";
 import {
 	DOKPLOY_IMAGE_REPO,
+	DOKPLOY_MIN_PINNED_VERSION,
+	type DokployUpdateTarget,
+	dokployUpdateImage,
+	isBelowDokployPinFloor,
 	isDokployUpdateTarget,
-	resolveDokployUpdateImage,
+	parseDokployUpdateTarget,
 } from "@dokploy/server/utils/dokploy-update-target";
 import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
 import { TRPCError } from "@trpc/server";
@@ -173,6 +177,8 @@ const assertTraefikAccess = async (
 	}
 };
 
+const MANIFEST_INSPECT_TIMEOUT_MS = 60_000;
+
 // No input keeps the plain "install the latest release" update.
 const apiUpdateDokployServer = z
 	.object({
@@ -181,7 +187,7 @@ const apiUpdateDokployServer = z
 			.max(128)
 			.refine(isDokployUpdateTarget, {
 				message:
-					"Use a release tag like v0.30.8-community.32 or a sha256: digest",
+					"Use a release tag like v0.30.8-community.32, optionally with @sha256:<digest>",
 			})
 			.optional(),
 		rollback: z.boolean().optional(),
@@ -858,6 +864,7 @@ export const settingsRouter = createTRPCRouter({
 			// target (or the recorded rollback digest) only ever selects a tag or
 			// digest inside the fork repo.
 			let target = input?.target;
+			let pinned: DokployUpdateTarget | null = null;
 			if (input?.rollback) {
 				const point = await readDokployRollbackPoint(packageInfo.version);
 				if (!point) {
@@ -868,17 +875,54 @@ export const settingsRouter = createTRPCRouter({
 				}
 				target = point.digest;
 			}
-
-			let image: string;
 			if (target !== undefined) {
-				const pinned = resolveDokployUpdateImage(target);
+				pinned = parseDokployUpdateTarget(target);
 				if (!pinned) {
 					throw new TRPCError({
 						code: "BAD_REQUEST",
 						message: "Unsupported update target.",
 					});
 				}
-				image = pinned;
+				if (pinned.tag !== undefined && isBelowDokployPinFloor(pinned.tag)) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: `Releases older than ${DOKPLOY_MIN_PINNED_VERSION} can't be installed from here.`,
+					});
+				}
+				if (pinned.tag === undefined) {
+					// A digest carries no version, so the floor can't be checked:
+					// on its own it is only the recorded rollback.
+					const point = input?.rollback
+						? { digest: target }
+						: await readDokployRollbackPoint(packageInfo.version);
+					if (point?.digest !== pinned.digest) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message:
+								"A digest on its own only installs the recorded rollback. Use <tag>@sha256:<digest>.",
+						});
+					}
+				}
+			}
+
+			let image: string;
+			if (pinned) {
+				image = dokployUpdateImage(pinned);
+				try {
+					await spawnAsync(
+						"docker",
+						["manifest", "inspect", image],
+						undefined,
+						{
+							timeout: MANIFEST_INSPECT_TIMEOUT_MS,
+						},
+					);
+				} catch {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: `Image not found in ${DOKPLOY_IMAGE_REPO}.`,
+					});
+				}
 			} else {
 				const data = await getUpdateData(packageInfo.version);
 				if (!data.updateAvailable) {
@@ -887,14 +931,16 @@ export const settingsRouter = createTRPCRouter({
 				image = `${DOKPLOY_IMAGE_REPO}:${data.latestVersion}`;
 			}
 
+			const installing = pinned ?? undefined;
 			void runBackgroundJob("settings.updateServer background", async () => {
-				// A pinned image is pulled first: a tag or digest that doesn't
-				// exist then fails here, before the running service is replaced
-				// and before the rollback point of the last update is replaced.
-				if (target !== undefined) {
+				// A pinned image is pulled first: if that fails, the running service
+				// and the rollback point of the last update are both kept.
+				if (installing) {
 					await spawnAsync("docker", ["pull", image]);
 				}
-				await recordDokployRollbackPoint(packageInfo.version);
+				await recordDokployRollbackPoint(packageInfo.version, {
+					installing,
+				}).catch(() => undefined);
 				await spawnAsync("docker", [
 					"service",
 					"update",

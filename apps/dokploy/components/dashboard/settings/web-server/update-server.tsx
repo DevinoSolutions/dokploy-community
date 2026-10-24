@@ -1,5 +1,10 @@
 import type { IUpdateData } from "@dokploy/server/index";
-import { isDokployUpdateTarget } from "@dokploy/server/utils/dokploy-update-target";
+import {
+	compareDokployVersions,
+	DOKPLOY_MIN_PINNED_VERSION,
+	isBelowDokployPinFloor,
+	parseDokployUpdateTarget,
+} from "@dokploy/server/utils/dokploy-update-target";
 import {
 	Bug,
 	Download,
@@ -66,7 +71,7 @@ export const UpdateServer = ({
 	const [isOpenInternal, setIsOpenInternal] = useState(false);
 	const [pinnedTarget, setPinnedTarget] = useState("");
 	const trimmedTarget = pinnedTarget.trim();
-	const isPinnedTargetValid = isDokployUpdateTarget(trimmedTarget);
+	const parsedTarget = parseDokployUpdateTarget(trimmedTarget);
 
 	const handleCheckUpdates = async () => {
 		try {
@@ -98,6 +103,25 @@ export const UpdateServer = ({
 		undefined,
 		{ enabled: !!isOpen, retry: false },
 	);
+	// The version the server reports after the install: the tag, or for a bare
+	// digest the recorded rollback (the server accepts no other bare digest).
+	const pinnedVersion =
+		parsedTarget?.tag ??
+		(parsedTarget && rollbackPoint?.digest === parsedTarget.digest
+			? rollbackPoint.version
+			: undefined);
+	let pinnedTargetError: string | null = null;
+	if (trimmedTarget && !parsedTarget) {
+		pinnedTargetError =
+			"Use a release tag like v0.30.8-community.32, optionally with @sha256:<digest>.";
+	} else if (parsedTarget?.tag && isBelowDokployPinFloor(parsedTarget.tag)) {
+		pinnedTargetError = `Releases older than ${DOKPLOY_MIN_PINNED_VERSION} can't be installed from here.`;
+	} else if (parsedTarget && !pinnedVersion) {
+		pinnedTargetError =
+			"A digest on its own only installs the recorded rollback. Use <tag>@sha256:<digest>.";
+	}
+	const compareToRunning = (version: string) =>
+		dokployVersion ? (compareDokployVersions(version, dokployVersion) ?? 0) : 0;
 	const onOpenChange = (open: boolean) => {
 		setIsOpenInternal(open);
 		onOpenChangeProp?.(open);
@@ -347,13 +371,17 @@ export const UpdateServer = ({
 						<Input
 							value={pinnedTarget}
 							onChange={(e) => setPinnedTarget(e.target.value)}
-							placeholder="v0.30.8-community.32 or sha256:..."
+							placeholder="v0.30.8-community.32 or <tag>@sha256:..."
 							className="font-mono text-xs"
 						/>
-						{isPinnedTargetValid ? (
+						{pinnedVersion && !pinnedTargetError ? (
 							<UpdateWebServer
 								buttonClassName="w-auto"
-								target={trimmedTarget}
+								pin={{
+									target: trimmedTarget,
+									version: pinnedVersion,
+									label: "Install",
+								}}
 							/>
 						) : (
 							<Button variant="outline" disabled>
@@ -362,15 +390,27 @@ export const UpdateServer = ({
 							</Button>
 						)}
 					</div>
-					{trimmedTarget && !isPinnedTargetValid && (
-						<p className="text-xs text-destructive">
-							Use a release tag like v0.30.8-community.32 or a sha256: digest.
-						</p>
+					{pinnedTargetError && (
+						<p className="text-xs text-destructive">{pinnedTargetError}</p>
 					)}
+					{!pinnedTargetError &&
+						pinnedVersion &&
+						compareToRunning(pinnedVersion) < 0 && (
+							<p className="text-xs text-yellow-600 dark:text-yellow-400">
+								{pinnedVersion} is older than the running {dokployVersion}.
+							</p>
+						)}
 					{rollbackPoint && (
 						<UpdateWebServer
 							buttonClassName="w-auto"
-							rollbackVersion={rollbackPoint.version}
+							pin={{
+								version: rollbackPoint.version,
+								label:
+									compareToRunning(rollbackPoint.version) > 0
+										? `Switch to ${rollbackPoint.version}`
+										: `Roll back to ${rollbackPoint.version}`,
+								isRollback: true,
+							}}
 						/>
 					)}
 				</div>

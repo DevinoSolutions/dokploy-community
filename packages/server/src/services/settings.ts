@@ -6,6 +6,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { spawnAsync } from "@dokploy/server/utils/process/spawnAsync";
 import { and, eq } from "drizzle-orm";
 
 import { quote } from "shell-quote";
@@ -28,6 +29,8 @@ import {
 import {
 	DOKPLOY_IMAGE_DIGEST_REGEX,
 	DOKPLOY_RELEASE_TAG_REGEX,
+	type DokployUpdateTarget,
+	isBelowDokployPinFloor,
 } from "../utils/dokploy-update-target";
 export interface IUpdateData {
 	latestVersion: string | null;
@@ -73,15 +76,26 @@ const SERVICE_IMAGE_REGEX =
 // it says nothing about the version that is running.
 const SETTLED_UPDATE_STATES = new Set(["", "completed", "rollback_completed"]);
 
+const SERVICE_INSPECT_TIMEOUT_MS = 30_000;
+
 export const getRollbackPointPath = () =>
 	join(paths().BASE_PATH, "dokploy-update-rollback.json");
 
 /** Reads the spec image of the `dokploy` service and the state of its last update. */
 const inspectDokployService = async () => {
-	const { stdout } = await execAsync(
-		"docker service inspect dokploy --format '{{.Spec.TaskTemplate.ContainerSpec.Image}} {{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}'",
+	const stdout = await spawnAsync(
+		"docker",
+		[
+			"service",
+			"inspect",
+			"dokploy",
+			"--format",
+			"{{.Spec.TaskTemplate.ContainerSpec.Image}} {{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}",
+		],
+		undefined,
+		{ timeout: SERVICE_INSPECT_TIMEOUT_MS },
 	);
-	const [image = "", state = ""] = stdout.trim().split(" ");
+	const [image = "", state = ""] = stdout.toString().trim().split(" ");
 	return { image, state };
 };
 
@@ -89,12 +103,17 @@ const inspectDokployService = async () => {
  * Records the image `currentVersion` runs from, before an update replaces it.
  * Never throws: when the running image can't be pinned to a digest in the fork
  * repo, the old point is removed so no rollback to a stale version is offered.
- * While an earlier update is still in flight the point it recorded is kept.
+ * The old point is kept while an earlier update is still in flight, and when
+ * `installing` is the running version itself (a reinstall replaces nothing).
  */
 export const recordDokployRollbackPoint = async (
 	currentVersion: string,
-	file = getRollbackPointPath(),
+	{
+		installing,
+		file = getRollbackPointPath(),
+	}: { installing?: DokployUpdateTarget; file?: string } = {},
 ) => {
+	const tmp = `${file}.${randomUUID()}.tmp`;
 	try {
 		const { image, state } = await inspectDokployService();
 		if (!SETTLED_UPDATE_STATES.has(state)) {
@@ -103,6 +122,12 @@ export const recordDokployRollbackPoint = async (
 		const match = SERVICE_IMAGE_REGEX.exec(image);
 		const tag = match?.[1];
 		const digest = match?.[2];
+		if (
+			(digest && installing?.digest === digest) ||
+			installing?.tag === currentVersion
+		) {
+			return;
+		}
 		const tagNamesOtherVersion =
 			!!tag && DOKPLOY_RELEASE_TAG_REGEX.test(tag) && tag !== currentVersion;
 		if (
@@ -114,20 +139,23 @@ export const recordDokployRollbackPoint = async (
 			return;
 		}
 		const point: IRollbackPoint = { version: currentVersion, digest };
-		const tmp = `${file}.${randomUUID()}.tmp`;
 		await mkdir(dirname(file), { recursive: true });
-		await writeFile(tmp, JSON.stringify(point));
+		await writeFile(tmp, JSON.stringify(point), { mode: 0o600 });
 		await rename(tmp, file);
 	} catch (error) {
 		console.error(
 			"Could not record the Dokploy rollback point:",
 			error instanceof Error ? error.message : String(error),
 		);
+		await rm(tmp, { force: true }).catch(() => undefined);
 		await rm(file, { force: true }).catch(() => undefined);
 	}
 };
 
-/** The recorded point, or null when there is none or it is the running version. */
+/**
+ * The recorded point, or null when there is none, it is the running version,
+ * or it is older than the oldest release a pinned update may install.
+ */
 export const readDokployRollbackPoint = async (
 	currentVersion: string,
 	file = getRollbackPointPath(),
@@ -142,6 +170,7 @@ export const readDokployRollbackPoint = async (
 			typeof digest !== "string" ||
 			!DOKPLOY_RELEASE_TAG_REGEX.test(version) ||
 			!DOKPLOY_IMAGE_DIGEST_REGEX.test(digest) ||
+			isBelowDokployPinFloor(version) ||
 			version === currentVersion
 		) {
 			return null;
