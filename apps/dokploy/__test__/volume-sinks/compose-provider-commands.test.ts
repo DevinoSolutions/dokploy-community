@@ -155,7 +155,7 @@ describe("custom commands that chain compose subcommands", () => {
 
 	it("parses the -f file of every subcommand that loads the project", async () => {
 		for (const sub of SUBCOMMANDS) {
-			const command = `compose -f ${DEPLOYED} up -d && docker compose -f /tmp/evil.yml ${sub}`;
+			const command = `compose -f ${DEPLOYED} up -d && docker compose -f ${CODE}/evil.yml ${sub}`;
 			mocks.readFileSync.mockReturnValue(PROVIDER);
 			await expect(run(command)).rejects.toThrow(/declares a provider/);
 			mocks.readFileSync.mockReturnValue(BAD_MOUNT);
@@ -168,12 +168,12 @@ describe("custom commands that chain compose subcommands", () => {
 		for (const sub of ["down", "down -v", "stop", "pull"]) {
 			await expect(
 				run(
-					`compose -f /tmp/evil.yml ${sub} && docker compose -f ${DEPLOYED} up -d`,
+					`compose -f ${CODE}/evil.yml ${sub} && docker compose -f ${DEPLOYED} up -d`,
 				),
 			).rejects.toThrow(/declares a provider/);
 			await expect(
 				run(
-					`compose -f ${DEPLOYED} up -d && docker-compose -f /tmp/evil.yml ${sub}`,
+					`compose -f ${DEPLOYED} up -d && docker-compose -f ${CODE}/evil.yml ${sub}`,
 				),
 			).rejects.toThrow(/declares a provider/);
 		}
@@ -264,13 +264,13 @@ describe("custom commands that chain compose subcommands", () => {
 	it("reads a -f hidden in a bundle of short flags", async () => {
 		mocks.readFileSync.mockReturnValue(PROVIDER);
 		for (const command of [
-			`compose -p ${APP} -vf/tmp/evil.yml down`,
-			`compose -p ${APP} -vf=/tmp/evil.yml down`,
-			`compose -p ${APP} -vf /tmp/evil.yml down`,
-			`compose -f ${DEPLOYED} -vf/tmp/evil.yml up -d`,
-			"compose -f /tmp/ok.yml -hvf/tmp/evil.yml up -d",
-			`compose -p ${APP} -f/tmp/evil.yml down`,
-			`compose -p ${APP} -f=/tmp/evil.yml down`,
+			`compose -p ${APP} -vf${CODE}/evil.yml down`,
+			`compose -p ${APP} -vf=${CODE}/evil.yml down`,
+			`compose -p ${APP} -vf ${CODE}/evil.yml down`,
+			`compose -f ${DEPLOYED} -vf${CODE}/evil.yml up -d`,
+			`compose -f ${CODE}/ok.yml -hvf${CODE}/evil.yml up -d`,
+			`compose -p ${APP} -f${CODE}/evil.yml down`,
+			`compose -p ${APP} -f=${CODE}/evil.yml down`,
 		]) {
 			await expect(run(command)).rejects.toThrow(/declares a provider/);
 		}
@@ -278,7 +278,7 @@ describe("custom commands that chain compose subcommands", () => {
 
 	it("refuses a bundle it does not understand", async () => {
 		for (const command of [
-			`compose -p ${APP} -xf/tmp/evil.yml down`,
+			`compose -p ${APP} -xf${CODE}/evil.yml down`,
 			`compose -f ${DEPLOYED} -Pp ${APP} up -d`,
 		]) {
 			await expect(run(command)).rejects.toThrow(/is not understood/);
@@ -293,7 +293,7 @@ describe("custom commands that chain compose subcommands", () => {
 		mocks.readFileSync.mockReturnValue(CLEAN);
 		await expect(
 			run(
-				`compose -vf ${DEPLOYED} up -d && docker compose -vf/tmp/ok.yml pull`,
+				`compose -vf ${DEPLOYED} up -d && docker compose -vf${CODE}/ok.yml pull`,
 			),
 		).resolves.toBeUndefined();
 	});
@@ -323,14 +323,14 @@ describe("custom commands that chain compose subcommands", () => {
 		for (const sub of ["down -v", "stop", "ps", "exec web true"]) {
 			await expect(
 				run(
-					`compose -f ${DEPLOYED} up -d && docker compose -p ${APP} -f /tmp/evil.yml ${sub}`,
+					`compose -f ${DEPLOYED} up -d && docker compose -p ${APP} -f ${CODE}/evil.yml ${sub}`,
 				),
 			).rejects.toThrow(/declares a provider/);
 		}
 		mocks.readFileSync.mockReturnValue(BAD_MOUNT);
 		await expect(
 			run(
-				`compose -f ${DEPLOYED} up -d && docker compose -p ${APP} -f /tmp/evil.yml down -v`,
+				`compose -f ${DEPLOYED} up -d && docker compose -p ${APP} -f ${CODE}/evil.yml down -v`,
 			),
 		).rejects.toThrow(/Docker's own volume storage/);
 	});
@@ -340,7 +340,7 @@ describe("custom commands that chain compose subcommands", () => {
 		for (const sub of SUBCOMMANDS) {
 			await expect(
 				run(
-					`compose -f ${DEPLOYED} up -d && docker compose -f ${DEPLOYED} ${sub} && docker compose -p ${APP} -f /tmp/ok.yml ${sub}`,
+					`compose -f ${DEPLOYED} up -d && docker compose -f ${DEPLOYED} ${sub} && docker compose -p ${APP} -f ${CODE}/ok.yml ${sub}`,
 				),
 			).resolves.toBeUndefined();
 		}
@@ -365,7 +365,7 @@ describe("custom commands that chain compose subcommands", () => {
 		mocks.readFileSync.mockReturnValue(`${CLEAN}\n---\n${PROVIDER}`);
 		await expect(
 			run(
-				`compose -f ${DEPLOYED} up -d && docker compose -f /tmp/evil.yml pull`,
+				`compose -f ${DEPLOYED} up -d && docker compose -f ${CODE}/evil.yml pull`,
 			),
 		).rejects.toThrow(/more than one YAML document/);
 	});

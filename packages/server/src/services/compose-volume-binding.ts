@@ -26,7 +26,6 @@ import {
 	type ComposeVariables,
 	type ComposeVolumeResolution,
 	dockerVolumesDirectoryReach,
-	normalizeComposeProjectName,
 	parseDotenvVariables,
 	resolveComposeFilesMountedVolumes,
 	resolveEnvironmentReferences,
@@ -468,7 +467,14 @@ const DOCKER_OPTIONS_WITH_VALUE = new Set([
 	"--tlskey",
 ]);
 
-// `docker compose` options that take a value, before the subcommand.
+// The `docker compose` options before the subcommand, with their arity: the
+// root command's own and addProjectFlags (docker/compose cmd/compose/compose.go,
+// the hidden ones included), and the docker CLI's that the plugin inherits
+// (`--debug`, `--log-level`, and the daemon ones findDaemonOption refuses).
+// Any other option is refused (T-7135): one that takes a value would make
+// Compose read the next word as that value while the parser took it for the
+// subcommand (`--insecure-registry ps -p OTHER down -v` runs `down -v` on
+// OTHER), and a later Compose may add one.
 const COMPOSE_OPTIONS_WITH_VALUE = new Set([
 	"-f",
 	"--file",
@@ -483,7 +489,32 @@ const COMPOSE_OPTIONS_WITH_VALUE = new Set([
 	"--parallel",
 	"--ansi",
 	"--progress",
+	"--insecure-registry",
+	"--log-level",
+	"--host",
+	"--context",
+	"--config",
+	"--tlscacert",
+	"--tlscert",
+	"--tlskey",
 ]);
+const COMPOSE_BOOLEAN_OPTIONS = new Set([
+	"--compatibility",
+	"--all-resources",
+	"--dry-run",
+	"--version",
+	"--no-ansi",
+	"--verbose",
+	"--help",
+	"--debug",
+	"--tls",
+	"--tlsverify",
+]);
+
+const unknownComposeOption = (word: string) =>
+	new Error(
+		`Compose command refused: the docker compose option "${word}" is not understood, so the project name, compose files and env files it may hide cannot be checked. Use only the options Docker Compose documents before the subcommand (-f FILE, -p NAME, --env-file FILE, --project-directory DIR, --profile NAME, ...).`,
+	);
 
 // Which `docker compose` subcommands load the compose files (T-7161), with
 // their providers, volumes and host paths:
@@ -895,7 +926,13 @@ const parseComposeCommand = (
 				for (; i < words.length; ) {
 					const word = words[i] as string;
 					if (word.startsWith("--") && word.includes("=")) {
-						const [name, ...rest] = word.split("=");
+						const [name = "", ...rest] = word.split("=");
+						if (
+							!COMPOSE_OPTIONS_WITH_VALUE.has(name) &&
+							!COMPOSE_BOOLEAN_OPTIONS.has(name)
+						) {
+							throw unknownComposeOption(word);
+						}
 						if (name === "--file") {
 							files.push(rest.join("="));
 						} else if (name === "--project-directory" || name === "--workdir") {
@@ -941,9 +978,7 @@ const parseComposeCommand = (
 								break;
 							}
 							if (letter !== "f" && letter !== "p") {
-								throw new Error(
-									`Compose command refused: the docker compose option "${word}" is not understood, so the compose files it may name cannot be checked. Write the options out (-f FILE, -p NAME).`,
-								);
+								throw unknownComposeOption(word);
 							}
 							const rest = word.slice(j + 1).replace(/^=/, "");
 							let value = rest;
@@ -962,8 +997,11 @@ const parseComposeCommand = (
 							break;
 						}
 						i += consumed;
-					} else if (word.startsWith("-")) {
+					} else if (COMPOSE_BOOLEAN_OPTIONS.has(word)) {
 						i += 1;
+					} else if (word.startsWith("-")) {
+						// Also `--` and `-`, which pflag does not read as an option.
+						throw unknownComposeOption(word);
 					} else {
 						subcommand = word;
 						break;
@@ -1176,19 +1214,31 @@ const STACK_SUBCOMMANDS = new Set(["deploy", "ps", "rm", "services"]);
 // Whether a name a custom command gives (`-p`, a `name:`) is this compose's
 // own project name: the appName every Dokploy command passes as `-p` (the
 // preview and the isolated deployment keep it too; their suffix only renames
-// the services, volumes and networks inside the project). Compose
-// lowercases a name and drops the characters outside [-_a-z0-9] (older
-// versions; newer ones refuse such a name), so a spelling of the appName that
-// ends up as the same project is its own too.
+// the services, volumes and networks inside the project). Exactly, with no
+// normalisation: older Compose versions lowercase a name and drop the
+// characters outside [-_a-z0-9], so `my.app` or `MyApp` would be the project
+// of another appName (`myapp`), and Dokploy itself always passes the appName
+// as it is.
 const isOwnProjectName = (compose: { appName: string }, name: string) =>
-	name === compose.appName ||
-	normalizeComposeProjectName(name) ===
-		normalizeComposeProjectName(compose.appName);
+	name === compose.appName;
+
+// A project name with a shell pattern or a path character: the shell can turn
+// a pattern into a file name of the repository (`-p '*x*'` unquoted), and
+// none of them is in an appName.
+const UNSAFE_PROJECT_NAME = /[*?[\]{}/\\~$`]/;
+
+// A preview deploys the base compose's custom command under its own appName,
+// `preview-<base appName>-<id>` (createComposePreview), so a command written
+// with `-p <base appName>` is not the preview's.
+const previewBaseAppName = (appName: string) =>
+	/^preview-(.+)-[^-]+$/.exec(appName)?.[1];
 
 // `docker compose` subcommands that act on no containers, networks, volumes or
 // images of a project, so the name they would use does not matter: `version`
 // loads nothing, `config` only renders the files and `pull` pulls the images
 // the services name. (`build` tags `<project>-<service>`, so it is not here.)
+// What they read is another matter: their paths are held to the compose's own
+// directory like every other subcommand's (assertCommandPathsInOwnDirectory).
 const PROJECT_NAME_FREE_SUBCOMMANDS = new Set(["version", "config", "pull"]);
 
 // The `docker compose` commands of a custom command that act on a project but
@@ -1227,14 +1277,27 @@ const assertCommandProjectNames = (
 		if (
 			segment.kind === "compose" &&
 			segment.projectName !== undefined &&
+			UNSAFE_PROJECT_NAME.test(segment.projectName)
+		) {
+			throw new Error(
+				`Compose command refused: the project name "${segment.projectName}" has a shell pattern or path character (* ? [ ] { } / \\ ~ $ \`), so the name Compose gets cannot be known. Use "-p ${compose.appName}".`,
+			);
+		}
+		if (
+			segment.kind === "compose" &&
+			segment.projectName !== undefined &&
 			!isOwnProjectName(compose, segment.projectName)
 		) {
 			logger.warn(
 				{ composeId: compose.composeId, projectName: segment.projectName },
 				"[VolumeBinding] A compose command was refused: a project name that is not the compose's own",
 			);
+			const preview =
+				previewBaseAppName(compose.appName) === segment.projectName
+					? ` This is a preview deployment, which runs the custom command of its compose: its project name is "${compose.appName}", not the compose's "${segment.projectName}". Leave -p out of the command (the .env Dokploy writes sets COMPOSE_PROJECT_NAME to the project name of each deployment).`
+					: "";
 			throw new Error(
-				`Compose command refused: it passes the project name "${segment.projectName}", which is not this compose's own ("${compose.appName}"). A custom command can only act on its own project: use "-p ${compose.appName}" (or leave -p out).`,
+				`Compose command refused: it passes the project name "${segment.projectName}", which is not this compose's own ("${compose.appName}"). A custom command can only act on its own project: use "-p ${compose.appName}" (or leave -p out).${preview}`,
 			);
 		}
 		if (segment.kind === "stack") {
@@ -1436,6 +1499,70 @@ export const assertCommandRunsComposeOnly = (
 				);
 				throw new Error(
 					`Compose command refused: the ${name} "${value}" is Docker's own volume storage (/var/lib/docker/volumes) or a directory that contains it, which holds every volume on the host. Use a path of the compose's own.`,
+				);
+			}
+		}
+	}
+	assertCommandPathsInOwnDirectory(compose, segments, codeDirectory);
+};
+
+// Every path a custom command gives Docker must stay in this compose's own
+// directory (`<COMPOSE_PATH>/<appName>`, which holds the code directory the
+// deploy runs in), for every subcommand, `config`, `pull` and `version`
+// included (T-7135). `--env-file <another compose's .env> config` prints that
+// compose's secrets interpolated into the file, `pull` sends them to a
+// registry in an image name, and a project directory or a compose file in
+// another compose's directory reads its `.env`. Paths are resolved like the
+// rest of the check: lexically, from the working directory (the code
+// directory), the project directories and, for an env file, the directory of
+// each compose file; a symlink of the repository is not followed (see
+// dockerVolumesDirectoryReach). `~` is the home of the deploy's user, which
+// the shell expands, so it is never the compose's own.
+const assertCommandPathsInOwnDirectory = (
+	compose: ComposeForVolumeCheck,
+	segments: CommandSegment[],
+	codeDirectory: string,
+) => {
+	const ownDirectory = posix.dirname(codeDirectory);
+	const isOwn = (path: string) =>
+		path === ownDirectory || path.startsWith(`${ownDirectory}/`);
+	const readings = (path: string, bases: string[]) =>
+		posix.isAbsolute(path)
+			? [posix.normalize(path)]
+			: bases.map((base) => posix.resolve(base, path));
+	for (const segment of segments) {
+		const projectDirectories = segment.projectDirectories.map((directory) =>
+			posix.resolve(codeDirectory, directory),
+		);
+		const fileBases = [codeDirectory, ...projectDirectories];
+		const envBases = [
+			...fileBases,
+			...segment.files.flatMap((file) =>
+				readings(file, fileBases).map((path) => posix.dirname(path)),
+			),
+		];
+		const options: Array<[string, string[], string[]]> = [
+			[
+				"--project-directory / --workdir",
+				segment.projectDirectories,
+				[codeDirectory],
+			],
+			["compose file", segment.files, fileBases],
+			["--env-file", segment.envFiles, envBases],
+			["--env-from-file", segment.envFromFiles, envBases],
+		];
+		for (const [name, values, bases] of options) {
+			const value = values.find(
+				(candidate) =>
+					candidate.startsWith("~") || !readings(candidate, bases).every(isOwn),
+			);
+			if (value !== undefined) {
+				logger.warn(
+					{ composeId: compose.composeId, option: name },
+					"[VolumeBinding] A compose command was refused: a path option outside the compose's own directory",
+				);
+				throw new Error(
+					`Compose command refused: the ${name} "${value}" is outside this compose's own directory (${ownDirectory}), so it could read the files, env files or secrets of another compose. Use a path inside the compose's own code (relative paths are read from ${codeDirectory}).`,
 				);
 			}
 		}

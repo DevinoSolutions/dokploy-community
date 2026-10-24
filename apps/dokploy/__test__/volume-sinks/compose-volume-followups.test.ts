@@ -686,7 +686,9 @@ volumes:
 			])("refuses %s up", async (prefix) => {
 				await expect(
 					assertComposeVolumesBound(custom(`${prefix} ${base}`)),
-				).rejects.toThrow(/the docker option ".*" is not allowed in a custom command/);
+				).rejects.toThrow(
+					/the docker option ".*" is not allowed in a custom command/,
+				);
 			});
 
 			it.each([
@@ -721,11 +723,14 @@ volumes:
 				`stack deploy -c docker-compose.yml -H tcp://x ${APP}`,
 				`stack deploy --context x -c docker-compose.yml ${APP}`,
 				`stack -H tcp://x deploy -c docker-compose.yml ${APP}`,
-			])("refuses it among the compose or stack options: %s", async (command) => {
-				await expect(
-					assertComposeVolumesBound(custom(command)),
-				).rejects.toThrow(/is not allowed in a custom command/);
-			});
+			])(
+				"refuses it among the compose or stack options: %s",
+				async (command) => {
+					await expect(
+						assertComposeVolumesBound(custom(command)),
+					).rejects.toThrow(/is not allowed in a custom command/);
+				},
+			);
 		});
 
 		describe("compose and stack subcommands", () => {
@@ -817,9 +822,9 @@ volumes:
 				["stack inspect app", "inspect"],
 				["stack ls", "ls"],
 			])("refuses docker %s", async (command, sub) => {
-				await expect(assertComposeVolumesBound(custom(command))).rejects.toThrow(
-					NOT_ALLOWED(sub, "stack"),
-				);
+				await expect(
+					assertComposeVolumesBound(custom(command)),
+				).rejects.toThrow(NOT_ALLOWED(sub, "stack"));
 			});
 
 			it.each([
@@ -853,7 +858,10 @@ volumes:
 					COMPOSE_FILE,
 				],
 				// a doubled slash and a `~` do not hide it
-				["compose -f //var/lib/docker/volumes/victim/c.yml up -d", COMPOSE_FILE],
+				[
+					"compose -f //var/lib/docker/volumes/victim/c.yml up -d",
+					COMPOSE_FILE,
+				],
 				[
 					"compose -f /var//lib/docker//volumes/victim/c.yml up -d",
 					COMPOSE_FILE,
@@ -916,20 +924,22 @@ volumes:
 					COMPOSE_FILE,
 				],
 			])("refuses %s", async (command, name) => {
-				await expect(assertComposeVolumesBound(custom(command))).rejects.toThrow(
+				await expect(
+					assertComposeVolumesBound(custom(command)),
+				).rejects.toThrow(
 					new RegExp(
 						`Compose command refused: the ${name} ".*" is Docker's own volume storage`,
 					),
 				);
 			});
 
-			it("allows paths of the compose's own, and a project directory elsewhere", async () => {
+			it("allows paths of the compose's own, and its own directory as the project directory", async () => {
 				mocks.readFileSync.mockReturnValue("services: {}");
 				for (const command of [
 					`compose -p ${APP} -f docker-compose.yml up -d`,
 					`compose -p ${APP} -f ./docker-compose.yml up -d`,
 					`compose -p ${APP} --env-file ./.env -f docker-compose.yml up -d`,
-					`compose -p ${APP} --project-directory /srv/other -f docker-compose.yml up -d`,
+					`compose -p ${APP} --project-directory .. -f docker-compose.yml up -d`,
 					`compose -p ${APP} -f docker-compose.yml run --env-from-file ./job.env web sh`,
 					`stack deploy -c docker-compose.yml ${APP}`,
 				]) {
@@ -1288,7 +1298,10 @@ describe("--project-directory moves the base of relative binds", () => {
 		composeRow(bind(source), {
 			command: `compose -p ${APP} --project-directory ${flag} -f ${DEPLOYED} up -d`,
 		});
-	const parentMessage = /contains Docker's own volume storage/;
+	// A project directory or a file outside the compose's own directory is
+	// refused before its binds are looked at (T-7135).
+	const parentMessage =
+		/contains Docker's own volume storage|is outside this compose's own directory/;
 
 	it.each([
 		["/", "./"],
@@ -1326,7 +1339,9 @@ describe("--project-directory moves the base of relative binds", () => {
 			assertComposeVolumesBound(
 				withDirectory("/var/lib/docker", "./volumes/x"),
 			),
-		).rejects.toThrow(/is Docker's own volume storage/);
+		).rejects.toThrow(
+			/is Docker's own volume storage|is outside this compose's own directory/,
+		);
 	});
 
 	it("sees the directory of every file the command names", async () => {
@@ -1343,8 +1358,12 @@ describe("--project-directory moves the base of relative binds", () => {
 
 	it("still allows a project directory that is not a parent", async () => {
 		await expect(
-			assertComposeVolumesBound(withDirectory("/srv/app", "./data")),
+			assertComposeVolumesBound(withDirectory("./app", "./data")),
 		).resolves.toBeUndefined();
+		// Elsewhere it is refused (T-7135).
+		await expect(
+			assertComposeVolumesBound(withDirectory("/srv/app", "./data")),
+		).rejects.toThrow(/is outside this compose's own directory/);
 		await expect(
 			assertComposeVolumesBound(withDirectory("..", ".")),
 		).resolves.toBeUndefined();
@@ -1789,9 +1808,9 @@ describe("a path option that is not literal", () => {
 
 	it("still allows literal paths, quoted or not", async () => {
 		for (const value of [
-			"/srv/app",
-			'"/srv/app"',
-			"'/srv/my app'",
+			`${CODE_DIRECTORY}/app`,
+			`"${CODE_DIRECTORY}/app"`,
+			`'${CODE_DIRECTORY}/my app'`,
 			"..",
 			"./sub",
 		]) {
@@ -2252,9 +2271,13 @@ services:
 	])("does not run %s again", async (command) => {
 		const restore = await restoreOf(command);
 		expect(restore).toContain("Restoring previous working deployment");
-		expect(restore).not.toMatch(/docker run|docker -H|--context|\bcp web|\/var\/lib\/docker|--mount/);
+		expect(restore).not.toMatch(
+			/docker run|docker -H|--context|\bcp web|\/var\/lib\/docker|--mount/,
+		);
 		// the log says the command was left out
-		expect(restore).toContain("custom command dropped for the restore: it failed the volume check");
+		expect(restore).toContain(
+			"custom command dropped for the restore: it failed the volume check",
+		);
 		// the default command brings the restored files up instead
 		expect(restore).toContain(`docker compose -p ${APP}`);
 	});
@@ -2263,7 +2286,9 @@ services:
 		const restore = await restoreOf(
 			`compose -p ${APP} -f docker-compose.yml up -d --build`,
 		);
-		expect(restore).toContain(`docker compose -p ${APP} -f docker-compose.yml up -d`);
+		expect(restore).toContain(
+			`docker compose -p ${APP} -f docker-compose.yml up -d`,
+		);
 		expect(restore).not.toContain("--remove-orphans");
 		expect(restore).not.toContain("custom command dropped");
 	});

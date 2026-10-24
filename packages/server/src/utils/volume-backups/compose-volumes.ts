@@ -195,7 +195,7 @@ export const parseDotenvVariables = (
 	if (/\r(?!\n)/.test(text)) {
 		return null;
 	}
-	const source = text.replace(/^�/, "").replace(/\r\n/g, "\n");
+	const source = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
 	// Go trims and splits on more white space than JavaScript does (U+0085
 	// is one), so a value with one of them would not be the text read here.
 	if (UNCERTAIN_DOTENV_CHARACTER.test(source)) {

@@ -229,6 +229,194 @@ describe("-p / --project-name of a custom command (gap 1)", () => {
 		await expect(
 			run(`compose -p ${APP} -f ${previewFile} up -d`, { appName: preview }),
 		).rejects.toThrow(projectRefusal(APP));
+		// The message names the preview's own project name, the one to use.
+		await expect(
+			run(`compose -p ${APP} -f ${previewFile} up -d`, { appName: preview }),
+		).rejects.toThrow(
+			new RegExp(
+				`This is a preview deployment.*its project name is "${preview}", not the compose's "${APP}"\\. Leave -p out`,
+			),
+		);
+		await expect(
+			run(`compose -p ${APP} -f ${previewFile} up -d`, { appName: preview }),
+		).rejects.toThrow(`use "-p ${preview}"`);
+	});
+});
+
+describe("docker compose options before the subcommand (T-7135 review H1)", () => {
+	it("reads the value of --insecure-registry, so a -p after it is seen", async () => {
+		// Compose reads `ps` as the value of the hidden --insecure-registry and
+		// then runs `down -v` on OTHER.
+		await expect(
+			run(
+				`compose -f docker-compose.yml --insecure-registry ps -p ${OTHER} down -v`,
+			),
+		).rejects.toThrow(projectRefusal(OTHER));
+		await expect(
+			run(
+				`compose -f docker-compose.yml --insecure-registry=reg.local -p ${OTHER} down -v`,
+			),
+		).rejects.toThrow(projectRefusal(OTHER));
+		await expect(
+			run(`compose --insecure-registry reg.local -p ${APP} down -v`),
+		).resolves.toBeUndefined();
+	});
+
+	it.each([
+		`compose -f docker-compose.yml --unknown-option ps -p ${OTHER} down -v`,
+		`compose --unknown-option -p ${APP} down`,
+		`compose --unknown-option=ps -p ${APP} down`,
+		`compose --project-names=${OTHER} -p ${APP} down`,
+		`compose --hostname=x -p ${APP} down`,
+		`compose -x -p ${APP} down`,
+		`compose -vx -p ${APP} down`,
+		`compose -l info -p ${APP} down`,
+		`compose -D -p ${APP} down`,
+		`compose -- -p ${OTHER} down`,
+		`compose - -p ${APP} down`,
+		`compose -p ${APP} -f docker-compose.yml up -d && docker compose --unknown ps -p ${OTHER} down -v`,
+		`compose -p ${APP} -f docker-compose.yml up -d && docker-compose --unknown ps -p ${OTHER} stop`,
+	])("refuses an option it does not know: %s", async (command) => {
+		await expect(run(command)).rejects.toThrow(
+			/docker compose option ".*" is not understood/,
+		);
+	});
+
+	it("lets the documented options through, with their values", async () => {
+		for (const command of [
+			`compose --dry-run --compatibility --all-resources -p ${APP} down`,
+			`compose --verbose --debug --no-ansi -p ${APP} ps`,
+			`compose --ansi never --progress plain --parallel 2 --profile web -p ${APP} -f ${DEPLOYED} up -d`,
+			`compose --ansi=never --progress=quiet --parallel=1 --profile=web -p ${APP} -f ${DEPLOYED} up -d`,
+			`compose --dry-run=true -p ${APP} down`,
+			`compose --log-level warn -p ${APP} down`,
+			`compose -p ${APP} --env-file ./.env -f ${DEPLOYED} config`,
+		]) {
+			await expect(run(command)).resolves.toBeUndefined();
+		}
+	});
+
+	it("still refuses the daemon options as such", async () => {
+		await expect(run(`compose --context x -p ${APP} down`)).rejects.toThrow(
+			/docker option "--context" is not allowed/,
+		);
+		await expect(run(`compose --host=tcp://x -p ${APP} down`)).rejects.toThrow(
+			/docker option "--host=tcp:\/\/x" is not allowed/,
+		);
+		await expect(run(`compose --tls -p ${APP} down`)).rejects.toThrow(
+			/docker option "--tls" is not allowed/,
+		);
+	});
+});
+
+describe("the project name is compared exactly (T-7135 review M1)", () => {
+	const unsafe = /has a shell pattern or path character/;
+
+	it.each([
+		`compose -p ${APP}* down -v`,
+		`compose -p '${APP}*' down -v`,
+		`compose -p '*${APP}*' down -v`,
+		`compose -p '[c]ompose-x-abc123' down -v`,
+		`compose -p 'compose-x-abc12?' down -v`,
+		`compose -p ${APP}/.. down -v`,
+		`compose -p=${APP}/ down -v`,
+		`compose -p '${APP}\\' down -v`,
+		`compose -p '~${APP}' down -v`,
+		`compose --project-name='{${APP}}' down -v`,
+	])("refuses %s", async (command) => {
+		await expect(run(command)).rejects.toThrow(unsafe);
+	});
+
+	it("refuses a spelling that only normalises to the appName", async () => {
+		for (const name of [
+			"COMPOSE-X-ABC123",
+			"Compose-x-abc123",
+			"compose-x-abc.123",
+			"compose.x-abc123",
+		]) {
+			await expect(run(`compose -p ${name} down -v`)).rejects.toThrow(
+				projectRefusal(name.replaceAll(".", "\\.")),
+			);
+		}
+		// A dotted appName is not the project of the appName without the dot,
+		// and the other way round.
+		await expect(
+			run("compose -p my.app down -v", { appName: "myapp" }),
+		).rejects.toThrow(projectRefusal("my\\.app"));
+		await expect(
+			run("compose -p myapp down -v", { appName: "my.app" }),
+		).rejects.toThrow(projectRefusal("myapp"));
+		await expect(
+			run("compose -p my.app down -v", { appName: "my.app" }),
+		).resolves.toBeUndefined();
+	});
+
+	it("compares a name: of the file exactly too", async () => {
+		await expect(
+			run(
+				`compose -f ${DEPLOYED} up -d`,
+				{},
+				`name: COMPOSE-X-ABC123\n${service()}`,
+			),
+		).rejects.toThrow(/sets the project name/);
+	});
+});
+
+describe("path options stay in the compose's own directory (T-7135 review M2)", () => {
+	const outside = /is outside this compose's own directory/;
+
+	it.each([
+		// The review's probe: prints the other compose's interpolated secrets.
+		"compose -f docker-compose.yml --env-file /etc/other/.env config",
+		`compose -p ${APP} --env-file /etc/dokploy/compose/${OTHER}/code/.env -f ${DEPLOYED} up -d`,
+		`compose -p ${APP} --env-file=../../${OTHER}/code/.env -f ${DEPLOYED} pull`,
+		`compose --env-file ../../${OTHER}/code/.env version`,
+		`compose -p ${APP} --env-file ~/.env -f ${DEPLOYED} up -d`,
+		`compose -p ${APP} --project-directory ../../${OTHER}/code -f ${DEPLOYED} up -d`,
+		`compose -p ${APP} --project-directory=/etc/dokploy/compose/${OTHER} -f ${DEPLOYED} config`,
+		`compose -p ${APP} --workdir /srv -f ${DEPLOYED} up -d`,
+		`compose -p ${APP} --workdir=../../${OTHER}/code -f ${DEPLOYED} up -d`,
+		`compose -p ${APP} -f ../../${OTHER}/code/docker-compose.yml config`,
+		`compose -p ${APP} --file=/etc/dokploy/compose/${OTHER}/code/docker-compose.yml pull`,
+		`compose -p ${APP} -f /tmp/c.yml down`,
+		`compose -p ${APP} -vf/tmp/c.yml down`,
+		// Relative to the project directory, a compose file climbs out.
+		`compose -p ${APP} --project-directory .. -f ../${OTHER}/code/docker-compose.yml up -d`,
+		// Relative to the directory of a compose file, an env file climbs out.
+		`compose -p ${APP} -f ${DEPLOYED} -f ./sub/x.yml --env-file ../../../${OTHER}/code/.env config`,
+		`compose -p ${APP} -f ${DEPLOYED} run --env-from-file ../../${OTHER}/code/.env web true`,
+		`compose -p ${APP} -f ${DEPLOYED} up -d && docker compose -p ${APP} --env-file /etc/other/.env -f ${DEPLOYED} config`,
+	])("refuses %s", async (command) => {
+		mocks.readFileSync.mockReturnValue(service());
+		await expect(run(command)).rejects.toThrow(outside);
+	});
+
+	it("refuses a stack compose file of another compose", async () => {
+		await expect(
+			run(`stack deploy -c ../../${OTHER}/code/docker-compose.yml ${APP}`, {
+				composeType: "stack",
+			}),
+		).rejects.toThrow(outside);
+	});
+
+	it("allows relative and absolute paths inside the compose's own directory", async () => {
+		mocks.readFileSync.mockReturnValue(service());
+		for (const command of [
+			`compose -p ${APP} --env-file ./config/app.env -f ${DEPLOYED} config`,
+			`compose -p ${APP} --env-file=${CODE}/.env -f ${DEPLOYED} pull`,
+			`compose -p ${APP} --project-directory ./sub -f ${DEPLOYED} up -d`,
+			`compose -p ${APP} --project-directory .. -f ./code/docker-compose.yml up -d`,
+			`compose -p ${APP} --workdir=${CODE} -f ${DEPLOYED} up -d`,
+			`compose -p ${APP} -f ${DEPLOYED} -f ./override.yml up -d`,
+			`compose -p ${APP} -f ${DEPLOYED} run --env-from-file ./job.env web true`,
+		]) {
+			await expect(run(command)).resolves.toBeUndefined();
+		}
+		await expect(
+			run(`stack deploy -c docker-compose.yml ${APP}`, {
+				composeType: "stack",
+			}),
+		).resolves.toBeUndefined();
 	});
 });
 
@@ -264,9 +452,9 @@ describe("a command that names no project", () => {
 
 	it.each([
 		"--project-directory ..",
-		`--project-directory=/etc/dokploy/compose/${OTHER}`,
+		"--project-directory=./sub",
 		"--workdir ..",
-		`--workdir=/etc/dokploy/compose/${OTHER}/code`,
+		`--workdir=${CODE}/sub`,
 	])(
 		"is refused with %s (the project is named after, and read from, that directory)",
 		async (flag) => {
@@ -282,9 +470,9 @@ describe("a command that names no project", () => {
 	it("is refused with a file outside the directory of the .env", async () => {
 		mocks.readFileSync.mockReturnValue(service());
 		await expect(
-			run(`compose -f ../../${OTHER}/code/docker-compose.yml down -v`),
+			run("compose -f ./sub/docker-compose.yml down -v"),
 		).rejects.toThrow(/passes no project name and its project directory/);
-		await expect(run("compose -f /tmp/c.yml down -v")).rejects.toThrow(
+		await expect(run(`compose -f ${CODE}/sub/c.yml down -v`)).rejects.toThrow(
 			/passes no project name and its project directory/,
 		);
 	});
@@ -293,7 +481,7 @@ describe("a command that names no project", () => {
 		mocks.readFileSync.mockReturnValue(service());
 		await expect(
 			run(
-				`compose -f ${DEPLOYED} up -d && docker compose version && docker compose -f /tmp/c.yml config && docker compose -f /tmp/c.yml pull`,
+				`compose -f ${DEPLOYED} up -d && docker compose version && docker compose -f ${CODE}/sub/c.yml config && docker compose -f ${CODE}/sub/c.yml pull`,
 			),
 		).resolves.toBeUndefined();
 	});
@@ -351,15 +539,15 @@ describe("top-level name: of the compose files (gap 2)", () => {
 	it("looks at the override files a command names", async () => {
 		mocks.readFileSync.mockReturnValue(named(OTHER));
 		await expect(
-			run(`compose -f ${DEPLOYED} -f /srv/override.yml up -d`),
+			run(`compose -f ${DEPLOYED} -f ${CODE}/override.yml up -d`),
 		).rejects.toThrow(/sets the project name/);
 		mocks.readFileSync.mockReturnValue(named(APP));
 		await expect(
-			run(`compose -f ${DEPLOYED} -f /srv/override.yml up -d`),
+			run(`compose -f ${DEPLOYED} -f ${CODE}/override.yml up -d`),
 		).resolves.toBeUndefined();
 		mocks.readFileSync.mockReturnValue(named(OTHER));
 		await expect(
-			run(`compose -p ${APP} -f ${DEPLOYED} -f /srv/override.yml up -d`),
+			run(`compose -p ${APP} -f ${DEPLOYED} -f ${CODE}/override.yml up -d`),
 		).resolves.toBeUndefined();
 	});
 });
@@ -424,7 +612,7 @@ ${definition}
 		claimEverything();
 		await expect(
 			run(
-				`compose -p ${APP} -f ${DEPLOYED} up -d && docker compose -p ${APP} -f /srv/evil.yml down -v`,
+				`compose -p ${APP} -f ${DEPLOYED} up -d && docker compose -p ${APP} -f ${CODE}/evil.yml down -v`,
 				{},
 				service(),
 			),
@@ -442,7 +630,7 @@ ${definition}
 		claimEverything();
 		mocks.readFileSync.mockReturnValue(declared("    name: victim_data"));
 		await expect(
-			run(`compose -p ${APP} -f ${DEPLOYED} -f /srv/evil.yml down -v`),
+			run(`compose -p ${APP} -f ${DEPLOYED} -f ${CODE}/evil.yml down -v`),
 		).rejects.toThrow(/Compose volume "victim_data" is refused/);
 	});
 

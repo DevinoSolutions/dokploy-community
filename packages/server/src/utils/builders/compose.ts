@@ -986,14 +986,18 @@ export const getCreateEnvFileCommand = async (
 	});
 	options.onStaged?.([stagedPath]);
 
-	// `touch` + `cat >` keeps the mode and owner of an existing `.env`.
+	// `touch` + `cat >` keeps the mode and owner of an existing `.env`. A `.env`
+	// that is a symlink (the repository can bring one, pointing at another
+	// compose's `.env`) is removed first, so the write makes a regular file
+	// instead of going through the link (T-7135).
+	const qEnvFilePath = quote([envFilePath]);
 	return `
 ${getInstallStagedFileCommand({
 	staged: stagedPath,
 	destination: envFilePath,
 	failureMessage: "❌ Error: Could not write the environment file",
 	alsoRemove: options.alsoRemove,
-	prepare: `touch ${quote([envFilePath])}`,
+	prepare: `if [ -L ${qEnvFilePath} ]; then rm -f ${qEnvFilePath}; fi && touch ${qEnvFilePath}`,
 })}
 	`;
 };

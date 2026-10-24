@@ -947,12 +947,12 @@ services:
 
 		await assertComposeVolumesBound(
 			command(
-				`compose -p ${APP} --project-directory /srv/other -f override.yml up -d`,
+				`compose -p ${APP} --project-directory ${codeDirectory}/other -f override.yml up -d`,
 			),
 		);
 
 		const read = mocks.readFileSync.mock.calls.map((call) => call[0]);
-		expect(read).toContain("/srv/other/override.yml");
+		expect(read).toContain(`${codeDirectory}/other/override.yml`);
 		expect(read).toContain(`${codeDirectory}/override.yml`);
 	});
 
@@ -971,12 +971,12 @@ services:
 
 		await assertComposeVolumesBound(
 			command(
-				`compose -p ${APP} --project-directory /srv/other -f docker-compose.yml up -d`,
+				`compose -p ${APP} --project-directory ${codeDirectory}/other -f docker-compose.yml up -d`,
 			),
 		);
 
 		expect(mocks.readFileSync.mock.calls.map((call) => call[0])).toEqual([
-			"/srv/other/docker-compose.yml",
+			`${codeDirectory}/other/docker-compose.yml`,
 		]);
 	});
 
