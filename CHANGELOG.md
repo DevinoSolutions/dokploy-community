@@ -4,6 +4,12 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+### New in v0.30.8-community.32.1
+
+Hotfix on top of v0.30.8-community.32. No database migrations in this release.
+
+**Patch file paths are validated more strictly** (T-7878). A patch's path must be a plain relative path inside the repository and the patch must belong to one service; a deploy whose enabled patch breaks this stops with a message naming the patch. Upgrade impact: edit or delete such a patch, then deploy again.
+
 ### New in v0.30.8-community.32
 
 No database migrations in this release.
