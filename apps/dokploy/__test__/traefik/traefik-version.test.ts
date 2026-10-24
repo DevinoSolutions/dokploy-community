@@ -35,7 +35,7 @@ const mockOutput = (exec: typeof mocks.execAsync, stdout: string) => {
 describe("parseTraefikImageVersion", () => {
 	it.each([
 		["traefik:v3.6.25", "3.6.25"],
-		["traefik:v3.7.16@sha256:abc123", "3.7.16"],
+		["traefik:v3.5.4@sha256:abc123", "3.5.4"],
 		["docker.io/library/traefik:3.7", "3.7.0"],
 		["localhost:5000/traefik:v3.6.25", "3.6.25"],
 		["traefik:latest", null],
@@ -52,13 +52,13 @@ describe("getTraefikOverview", () => {
 	});
 
 	it("reports a running container that is older than the recommended version", async () => {
-		mockOutput(mocks.execAsync, `traefik:v3.6.25|running|${startedAt}`);
+		mockOutput(mocks.execAsync, `traefik:v3.5.4|running|${startedAt}`);
 
 		await expect(getTraefikOverview()).resolves.toEqual({
 			state: "running",
 			startedAt,
-			image: "traefik:v3.6.25",
-			currentVersion: "3.6.25",
+			image: "traefik:v3.5.4",
+			currentVersion: "3.5.4",
 			recommendedVersion: TRAEFIK_VERSION,
 			versionStatus: "outdated",
 		});
@@ -174,7 +174,7 @@ describe("getTraefikOverview", () => {
 	});
 
 	it("reads a remote server's Traefik over SSH", async () => {
-		mockOutput(mocks.execAsyncRemote, `traefik:v3.6.25|running|${startedAt}`);
+		mockOutput(mocks.execAsyncRemote, `traefik:v3.5.4|running|${startedAt}`);
 
 		const overview = await getTraefikOverview("server-a");
 

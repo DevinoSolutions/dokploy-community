@@ -48,9 +48,9 @@ const TRAEFIK_ENV = [
 const overview = (versionStatus: string) => ({
 	state: "running",
 	startedAt: "2026-10-23T03:00:00Z",
-	image: "traefik:v3.6.25",
-	currentVersion: "3.6.25",
-	recommendedVersion: "3.7.16",
+	image: "traefik:v3.5.4",
+	currentVersion: "3.5.4",
+	recommendedVersion: "3.6.25",
 	versionStatus,
 });
 
