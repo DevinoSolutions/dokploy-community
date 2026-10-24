@@ -516,6 +516,16 @@ const unknownComposeOption = (word: string) =>
 		`Compose command refused: the docker compose option "${word}" is not understood, so the project name, compose files and env files it may hide cannot be checked. Use only the options Docker Compose documents before the subcommand (-f FILE, -p NAME, --env-file FILE, --project-directory DIR, --profile NAME, ...).`,
 	);
 
+// A value given as the next word that starts with `-` (`--profile -x ps
+// config -o FILE`): the docker CLI's plugin pass reads that word as an option
+// of its own and takes one more word, so the subcommand Compose runs is not
+// the one the parser sees (T-7135). Such a value is only accepted attached
+// (`--profile=-x`, `-f-x`); Dokploy never passes one.
+const dashValueOption = (option: string, value: string) =>
+	new Error(
+		`Compose command refused: the docker compose option "${option}" is given the value "${value}", which starts with "-", so the subcommand Docker runs cannot be told from here. Attach the value instead (${option.startsWith("--") ? `${option}=${value}` : `${option}${value}`}).`,
+	);
+
 // Which `docker compose` subcommands load the compose files (T-7161), with
 // their providers, volumes and host paths:
 // - `version` loads nothing.
@@ -946,6 +956,9 @@ const parseComposeCommand = (
 						i += 1;
 					} else if (COMPOSE_OPTIONS_WITH_VALUE.has(word)) {
 						const value = words[i + 1];
+						if (value?.startsWith("-")) {
+							throw dashValueOption(word, value);
+						}
 						if (value !== undefined) {
 							if (word === "-f" || word === "--file") {
 								files.push(value);
@@ -985,6 +998,9 @@ const parseComposeCommand = (
 							if (j === word.length - 1) {
 								value = words[i + 1] ?? "";
 								consumed = 2;
+								if (value.startsWith("-")) {
+									throw dashValueOption(word, value);
+								}
 							}
 							if (letter === "f") {
 								if (value) {

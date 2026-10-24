@@ -307,6 +307,51 @@ describe("docker compose options before the subcommand (T-7135 review H1)", () =
 			/docker option "--tls" is not allowed/,
 		);
 	});
+
+	// The docker CLI's plugin pass takes one more word after a space-form value
+	// that starts with `-`, so Compose runs the word after the one seen here
+	// (review pass 2, H1-new).
+	const dashValue = /is given the value ".*", which starts with "-"/;
+
+	it.each([
+		`compose -p ${APP} --profile -x ps config -o ../ESC.yml`,
+		`compose -p ${APP} --profile -x ps cp web:/etc/passwd /tmp/x`,
+		`compose -p ${APP} -f ${DEPLOYED} --profile -x ps up -d --watch`,
+		`compose -p ${APP} --parallel -1 ps config`,
+		`compose -p ${APP} --ansi -x ps config`,
+		`compose -p ${APP} --env-file -x ps config`,
+		`compose -p ${APP} --project-directory -x ps config`,
+		`compose -p ${APP} --workdir -x ps config`,
+		`compose -p ${APP} --insecure-registry -x ps config`,
+		`compose -p ${APP} --file -x ps config`,
+		`compose -p ${APP} --project-name -x ps config`,
+		`compose -p ${APP} -f -x ps config`,
+		"compose -p -x ps config",
+		`compose -p ${APP} -vf -x ps config`,
+		"compose -vp -x ps config",
+		"compose -hvp --x ps config",
+		`compose -p ${APP} -f ${DEPLOYED} up -d && docker compose -p ${APP} --profile -x ps config -o ../ESC.yml`,
+	])(
+		"refuses a value that starts with - in the next word: %s",
+		async (command) => {
+			await expect(run(command)).rejects.toThrow(dashValue);
+		},
+	);
+
+	it("allows such a value attached to its option", async () => {
+		for (const command of [
+			`compose -p ${APP} --parallel=-1 down`,
+			`compose -p ${APP} --profile=-x down`,
+		]) {
+			await expect(run(command)).resolves.toBeUndefined();
+		}
+		await expect(run(`compose -p ${APP} --parallel -1 down`)).rejects.toThrow(
+			/Attach the value instead \(--parallel=-1\)/,
+		);
+		await expect(run("compose -vp -x down")).rejects.toThrow(
+			/Attach the value instead \(-vp-x\)/,
+		);
+	});
 });
 
 describe("the project name is compared exactly (T-7135 review M1)", () => {
