@@ -703,25 +703,31 @@ export const createServerTraefikConfig = (
 	if [ -f "${configPath}" ]; then
 		echo "Traefik config already exists ✅"
 		if ${isSwarmWorker}; then
-			(
-				command -v flock > /dev/null && flock 9
-				tmp=$(mktemp)
-				trap 'rm -f "$tmp"' EXIT
-				status=0
-				awk '${removeSwarmProviderAwk}' "${configPath}" > "$tmp" || status=$?
-				if [ "$status" -eq 0 ]; then
-					cp "${configPath}" "${configPath}.bak"
-					# Write in place: the file is bind-mounted, a new inode would not reach the container.
-					cat "$tmp" > "${configPath}"
-					echo "Removed Swarm provider from Traefik config (Swarm worker), backup at ${configPath}.bak ✅"
-					if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
-						$SUDO_CMD docker restart dokploy-traefik > /dev/null
-						echo "Traefik restarted ✅"
+			if [ -L "${configPath}" ]; then
+				echo "⚠️ ${configPath} is a symbolic link, so it is not rewritten. Swarm workers can't use providers.swarm, remove it manually and restart dokploy-traefik."
+			else
+				(
+					command -v flock > /dev/null && flock 9
+					tmp=$(mktemp)
+					trap 'rm -f "$tmp"' EXIT
+					status=0
+					awk '${removeSwarmProviderAwk}' "${configPath}" > "$tmp" || status=$?
+					if [ "$status" -eq 0 ]; then
+						# A new file, never through whatever an old .bak points at.
+						rm -f "${configPath}.bak"
+						cp "${configPath}" "${configPath}.bak"
+						# Write in place: the file is bind-mounted, a new inode would not reach the container.
+						cat "$tmp" > "${configPath}"
+						echo "Removed Swarm provider from Traefik config (Swarm worker), backup at ${configPath}.bak ✅"
+						if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
+							$SUDO_CMD docker restart dokploy-traefik > /dev/null
+							echo "Traefik restarted ✅"
+						fi
+					elif [ "$status" -eq 2 ]; then
+						echo "⚠️ Could not remove providers.swarm from ${configPath} automatically. Swarm workers can't use it, remove it manually and restart dokploy-traefik."
 					fi
-				elif [ "$status" -eq 2 ]; then
-					echo "⚠️ Could not remove providers.swarm from ${configPath} automatically. Swarm workers can't use it, remove it manually and restart dokploy-traefik."
-				fi
-			) 9> /tmp/dokploy-traefik-config.lock
+				) 9>> "${traefikDir}/.traefik-config.lock"
+			fi
 		fi
 	elif ${isSwarmWorker}; then
 		echo "${workerConfig}" > "${configPath}"
