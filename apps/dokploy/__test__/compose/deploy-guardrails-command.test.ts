@@ -109,7 +109,7 @@ describe("guardrails off: the deploy script is untouched", () => {
 	it("keeps the docker line and its failure branch exactly as before", async () => {
 		const command = await build();
 		expect(command).toContain(
-			'env -i PATH="$PATH" HOME="$HOME"  docker compose -p my-app',
+			'env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD=  docker compose -p my-app',
 		);
 		expect(command).toContain('|| { echo "Error: ❌ Docker command failed"; ');
 		expect(command).not.toContain("trap");

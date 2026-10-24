@@ -197,13 +197,13 @@ describe("stack env file content", () => {
 
 describe("getCleanEnvPrefix", () => {
 	it("is the unchanged env -i prefix without a stack env", () => {
-		expect(getCleanEnvPrefix()).toBe('env -i PATH="$PATH" HOME="$HOME" ');
+		expect(getCleanEnvPrefix()).toBe('env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD= ');
 	});
 
 	it("loads the staged file and puts no value on the command line", () => {
 		const prefix = getCleanEnvPrefix("/etc/dokploy/compose/app/.dokploy-x");
 		expect(prefix).toBe(
-			`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh /etc/dokploy/compose/app/.dokploy-x`,
+			`env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD= sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh /etc/dokploy/compose/app/.dokploy-x`,
 		);
 	});
 
@@ -300,7 +300,7 @@ describe("stack deploy script", () => {
 		}
 		// The docker line loads the staged file; nothing is exported on it.
 		expect(command).toContain(
-			`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh ${stagedPath} docker stack deploy -c docker-compose.yml stack-app --prune --with-registry-auth 2>&1`,
+			`env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD= sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh ${stagedPath} docker stack deploy -c docker-compose.yml stack-app --prune --with-registry-auth 2>&1`,
 		);
 		// 0600 before it holds the secrets.
 		const prepare = remoteCommands()[0]!;
@@ -364,7 +364,7 @@ describe("stack deploy script", () => {
 			{ deploymentId: "dep-1" },
 		);
 		expect(command).toContain(
-			'env -i PATH="$PATH" HOME="$HOME"  docker stack deploy',
+			'env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD=  docker stack deploy',
 		);
 		expect(command).not.toContain(".dokploy-stage-stack-env");
 		expect(mocks.writeFileRemote).not.toHaveBeenCalledWith(
@@ -380,7 +380,7 @@ describe("stack deploy script", () => {
 			{ deploymentId: "dep-1" },
 		);
 		expect(command).toContain(
-			'env -i PATH="$PATH" HOME="$HOME"  docker compose',
+			'env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD=  docker compose',
 		);
 		expect(command).not.toContain(".dokploy-stage-stack-env");
 	});
@@ -395,7 +395,7 @@ describe("stack env on the build server", () => {
 			getComposeBuildCommand(compose, "/code", undefined, file),
 		]) {
 			expect(command).toContain(
-				`env -i PATH="$PATH" HOME="$HOME" sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh ${file} docker compose`,
+				`env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD= sh -c 'set -a; . "$1" || exit 1; set +a; shift; exec "$@"' sh ${file} docker compose`,
 			);
 			expect(command).not.toContain("A=");
 		}

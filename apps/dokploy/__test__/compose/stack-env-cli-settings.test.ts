@@ -9,6 +9,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { parse as parseDotenv } from "dotenv";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // T-7138: the Environment of a stack is the whole environment of the docker
@@ -54,9 +55,11 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 import {
 	buildStackEnvFileContent,
 	getBuildComposeCommand,
+	getCleanEnvPrefix,
 	getIgnoredEnvNames,
 	getStackEnvFileContent,
 } from "@dokploy/server/utils/builders/compose";
+import { NEUTRALISED_CLI_ENV } from "@dokploy/server/utils/docker/env-file";
 
 const baseStack = {
 	appName: "stack-app",
@@ -295,7 +298,7 @@ describe("stack env in a real shell", () => {
 			const received = parseEnv0(readFileSync(`${out}/env.bin`, "utf8"));
 			for (const name of CLI_SETTINGS) {
 				if (name === "PATH" || name === "HOME") continue;
-				expect(received.has(name)).toBe(false);
+				expect(received.get(name) ?? "").toBe("");
 			}
 			// The deploy shell's own PATH and HOME, not the Environment's.
 			expect(received.get("PATH")).not.toBe(`${tmp}/x`);
@@ -348,8 +351,8 @@ describe("stack env in a real shell", () => {
 
 			expect(result.status).toBe(0);
 			const received = parseEnv0(readFileSync(`${out}/env.bin`, "utf8"));
-			expect(received.has("DOCKER_HOST")).toBe(false);
-			expect(received.has("DOCKER_CONFIG")).toBe(false);
+			expect(received.get("DOCKER_HOST") ?? "").toBe("");
+			expect(received.get("DOCKER_CONFIG") ?? "").toBe("");
 			expect(received.get("A")).toBe("1");
 		},
 	);
@@ -426,7 +429,7 @@ describe("compose .env: COMPOSE_* settings", () => {
 			{ deploymentId: "dep-2" },
 		);
 		expect(command).toContain(
-			'env -i PATH="$PATH" HOME="$HOME"  docker compose',
+			`env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV}  docker compose`,
 		);
 		expect(command).not.toContain("ssh://x");
 	});
@@ -464,5 +467,176 @@ describe("compose .env: COMPOSE_* settings", () => {
 		expect(content).not.toContain("COMPOSE_FILE");
 		expect(content).toContain("A=1");
 		expect(content).toContain("COMPOSE_PROJECT_NAME=stack-app");
+	});
+});
+
+// Compose before v2.39.3 copies every key of a `.env` into its own environment
+// unless the process environment already has it (set, even empty), and docker
+// 25+ reads DOCKER_HOST and friends lazily; its children (credential helpers,
+// buildx) inherit LD_PRELOAD and BASH_ENV. The prefix every docker command runs
+// under sets those empty, so a `.env` cannot supply them.
+const DANGEROUS_DOTENV = {
+	DOCKER_HOST: "ssh://root@other",
+	DOCKER_CONTEXT: "other",
+	DOCKER_TLS_VERIFY: "1",
+	DOCKER_CERT_PATH: "/tmp/certs",
+	DOCKER_API_VERSION: "1.01",
+	DOCKER_CONFIG: "/tmp/evil",
+	LD_PRELOAD: "/tmp/evil.so",
+	LD_LIBRARY_PATH: "/tmp/evil",
+	LD_AUDIT: "/tmp/evil.so",
+	BASH_ENV: "/tmp/evil.sh",
+	GCONV_PATH: "/tmp/evil",
+};
+
+const writtenEnvOf = async (env: string, overrides = {}) => {
+	await getBuildComposeCommand(
+		{
+			...baseStack,
+			composeType: "docker-compose",
+			serverId: "srv-1",
+			createEnvFile: true,
+			env,
+			...overrides,
+		},
+		{ deploymentId: "dep-1" },
+	);
+	return String(
+		mocks.writeFileRemote.mock.calls.find((call) =>
+			String(call[1]).includes("stage-env"),
+		)?.[2],
+	);
+};
+
+describe("the env -i prefix sets the CLI's settings empty (T-7138)", () => {
+	it("carries the empty assignments, with and without a staged stack env", () => {
+		for (const name of Object.keys(DANGEROUS_DOTENV)) {
+			expect(NEUTRALISED_CLI_ENV).toContain(`${name}=`);
+		}
+		expect(getCleanEnvPrefix()).toBe(
+			`env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} `,
+		);
+		expect(getCleanEnvPrefix("/x/staged")).toContain(
+			`HOME="$HOME" ${NEUTRALISED_CLI_ENV} sh -c`,
+		);
+	});
+
+	itWithSh(
+		"keeps a .env that compose before v2.39.3 copies from setting them (names only)",
+		async () => {
+			const dir = `${tmp}/project`;
+			mkdirSync(dir, { recursive: true });
+			// What Dokploy writes for a compose whose Environment holds the settings.
+			const written = await writtenEnvOf(envText(DANGEROUS_DOTENV));
+			for (const name of Object.keys(DANGEROUS_DOTENV)) {
+				expect(written).toContain(`${name}=`);
+			}
+			writeFileSync(`${dir}/.env`, `${written}\n`);
+			// A docker that does what setEnvWithDotEnv does before v2.39.3 (copy a
+			// key unless the environment has it, empty or not), then writes the
+			// NAMES of the settings that ended up non-empty. Never a value.
+			writeFileSync(
+				`${dir}/docker`,
+				[
+					"#!/bin/sh",
+					"while IFS= read -r line; do",
+					"  key=${line%%=*}; value=${line#*=}",
+					'  [ -n "$key" ] || continue',
+					'  value=${value#\\"}; value=${value%\\"}',
+					'  if ! printenv "$key" >/dev/null 2>&1 && [ -n "$value" ]; then echo "$key"; fi',
+					`done < .env > ${tmp}/names.txt`,
+				].join("\n"),
+			);
+			chmodSync(`${dir}/docker`, 0o755);
+			const run = (prefix: string) => {
+				spawnSync("sh", ["-c", `cd ${dir} && ${prefix} ${dir}/docker`], {
+					encoding: "utf8",
+				});
+				return readFileSync(`${tmp}/names.txt`, "utf8")
+					.split("\n")
+					.filter((name) => name in DANGEROUS_DOTENV)
+					.sort();
+			};
+
+			// The control: the old prefix lets the .env supply every one of them.
+			expect(run('env -i PATH="$PATH" HOME="$HOME"')).toEqual(
+				Object.keys(DANGEROUS_DOTENV).sort(),
+			);
+			// The prefix of a deploy does not let it supply any.
+			expect(run(getCleanEnvPrefix())).toEqual([]);
+		},
+	);
+});
+
+describe("compose .env: other settings and line breaks (T-7138)", () => {
+	it("keeps the neutralised names and other DOCKER_*, leaves out the settings nothing neutralises", async () => {
+		const content = await writtenEnvOf(
+			[
+				"DOCKER_HOST=ssh://x",
+				"DOCKER_REGISTRY=reg.example.com",
+				"LD_PRELOAD=/x.so",
+				"BUILDX_CONFIG=/x",
+				"BUILDKIT_HOST=tcp://x",
+				"GIT_SSH_COMMAND=x",
+				"XDG_CONFIG_HOME=/x",
+				"LD_DEBUG=all",
+				"SSH_ASKPASS=/x",
+				"my-var=1",
+				"KEPT=1",
+			].join("\n"),
+		);
+		expect(content).toContain('DOCKER_HOST="ssh://x"');
+		expect(content).toContain('DOCKER_REGISTRY="reg.example.com"');
+		expect(content).toContain('LD_PRELOAD="/x.so"');
+		expect(content).toContain('my-var="1"');
+		expect(content).toContain('KEPT="1"');
+		for (const name of [
+			"BUILDX_CONFIG",
+			"BUILDKIT_HOST",
+			"GIT_SSH_COMMAND",
+			"XDG_CONFIG_HOME",
+			"LD_DEBUG",
+			"SSH_ASKPASS",
+		]) {
+			expect(content).not.toContain(name);
+		}
+	});
+
+	const dotenvKeys = (content: string) => Object.keys(parseDotenv(content));
+
+	it("does not let a multi-line value of a stack's .env add a variable of its own", async () => {
+		const content = await writtenEnvOf(
+			'A="x\nCOMPOSE_FILE=evil.yml\nDOCKER_HOST=ssh://x"\nB=2',
+			{ composeType: "stack" },
+		);
+		expect(dotenvKeys(content)).toEqual([
+			"APP_NAME",
+			"COMPOSE_PROJECT_NAME",
+			"A",
+			"B",
+			"DOCKER_CONFIG",
+		]);
+		expect(parseDotenv(content).A).toBe(
+			"x\nCOMPOSE_FILE=evil.yml\nDOCKER_HOST=ssh://x",
+		);
+		// A carriage return too.
+		const withCr = await writtenEnvOf('A="x\rCOMPOSE_FILE=evil.yml"', {
+			composeType: "stack",
+		});
+		expect(dotenvKeys(withCr)).not.toContain("COMPOSE_FILE");
+	});
+
+	it("keeps a stack's single-line values unquoted, as its services read them", async () => {
+		const content = await writtenEnvOf("A=1\nB=two words", {
+			composeType: "stack",
+		});
+		expect(content).toContain("\nA=1\n");
+		expect(content).toContain("\nB=two words\n");
+	});
+
+	it("does the same for a compose's .env", async () => {
+		const content = await writtenEnvOf('A="x\nCOMPOSE_FILE=evil.yml"\nB=2');
+		expect(dotenvKeys(content)).not.toContain("COMPOSE_FILE");
+		expect(parseDotenv(content).A).toBe("x\nCOMPOSE_FILE=evil.yml");
 	});
 });

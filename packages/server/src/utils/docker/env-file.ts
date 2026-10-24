@@ -191,17 +191,63 @@ const COMPOSE_DOTENV_NAMES = new Set([
 ]);
 
 /**
+ * Settings of docker and its children that the docker process of a deploy gets
+ * as an empty value (`env -i ... NAME= docker`, see `NEUTRALISED_CLI_ENV`).
+ * Docker treats an empty one as unset (DOCKER_HOST, DOCKER_CONTEXT, DOCKER_TLS,
+ * DOCKER_TLS_VERIFY and DOCKER_CERT_PATH are only used when non-empty, an empty
+ * DOCKER_CONFIG falls back to `$HOME/.docker`, an empty DOCKER_API_VERSION
+ * negotiates), and the loader ignores an empty LD_*, BASH_ENV, ENV and
+ * GCONV_PATH. Compose before v2.39.3 copies every key of a `.env` into its own
+ * environment unless the process environment already has it, empty or not
+ * (`setEnvWithDotEnv`: `if _, ok := os.LookupEnv(k); !ok { os.Setenv(k, v) }`,
+ * cmd/compose/compose.go at v2.39.2), and the children it starts (credential
+ * helpers, buildx) inherit them; with the names set here a `.env` cannot
+ * supply them. v2.39.3 only copies `COMPOSE_*`.
+ */
+const NEUTRALISED_CLI_ENV_NAMES = [
+	"BASH_ENV",
+	"DOCKER_API_VERSION",
+	"DOCKER_CERT_PATH",
+	"DOCKER_CONFIG",
+	"DOCKER_CONTEXT",
+	"DOCKER_HOST",
+	"DOCKER_TLS",
+	"DOCKER_TLS_VERIFY",
+	"ENV",
+	"GCONV_PATH",
+	"LD_AUDIT",
+	"LD_LIBRARY_PATH",
+	"LD_PRELOAD",
+];
+
+/** `NAME=` assignments for `env -i`, placed before every docker or compose command. */
+export const NEUTRALISED_CLI_ENV = NEUTRALISED_CLI_ENV_NAMES.map(
+	(name) => `${name}=`,
+).join(" ");
+
+const NEUTRALISED_CLI_ENV_SET = new Set(NEUTRALISED_CLI_ENV_NAMES);
+
+/**
  * Whether a user's variable may be written to the `.env` Dokploy creates for a
  * compose. Compose copies every `COMPOSE_*` it finds in a `.env` into its own
  * environment, where it steers the CLI like the real variable does
  * (`COMPOSE_FILE`, `COMPOSE_ENV_FILES`, `COMPOSE_PROJECT_NAME`,
  * `COMPOSE_PATH_SEPARATOR`, ...), so only the tuning settings above get
- * through. Nothing else in the file reaches the CLI: it reads `DOCKER_*` from
- * its process environment, which `env -i` leaves empty, so those stay for
- * `${DOCKER_CONFIG}`-style interpolation.
+ * through. Before compose v2.39.3 it copies the other keys too, so a name that
+ * docker, its loader or buildx read as a setting is left out unless the docker
+ * process already has it empty (`NEUTRALISED_CLI_ENV`): `DOCKER_HOST`,
+ * `DOCKER_CONFIG` and the rest of that list stay for interpolation and for
+ * services that read them through `env_file`. Other `DOCKER_*` names are not
+ * settings that aim the CLI or load code and stay as well.
  */
-export const isComposeDotenvName = (name: string) =>
-	!name.startsWith("COMPOSE_") || COMPOSE_DOTENV_NAMES.has(name);
+export const isComposeDotenvName = (name: string) => {
+	if (name.startsWith("COMPOSE_")) return COMPOSE_DOTENV_NAMES.has(name);
+	if (!ENV_VARIABLE_NAME.test(name)) return true;
+	if (name.startsWith("DOCKER_") || NEUTRALISED_CLI_ENV_SET.has(name)) {
+		return true;
+	}
+	return isStackEnvName(name);
+};
 
 /** One `KEY='value'` per line, in the order given. Names are the caller's to vet. */
 export const buildEnvFileContent = (entries: Iterable<[string, string]>) => {

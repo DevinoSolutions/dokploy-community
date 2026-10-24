@@ -8,6 +8,7 @@ import {
 	ENV_VARIABLE_NAME,
 	isComposeDotenvName,
 	isStackEnvName,
+	NEUTRALISED_CLI_ENV,
 	singleQuote,
 } from "../docker/env-file";
 import {
@@ -939,18 +940,26 @@ export const getCreateEnvFileCommand = async (
 		envContent += `\nCOMPOSE_PREFIX=${compose.suffix}`;
 	}
 
-	const prepare = (content: string) =>
-		compose.composeType === "stack"
-			? prepareEnvironmentVariables(
-					content,
-					compose.environment.project.env,
-					compose.environment.env,
-				)
-			: prepareEnvironmentVariablesForFile(
-					content,
-					compose.environment.project.env,
-					compose.environment.env,
-				);
+	const prepare = (content: string) => {
+		const quoted = prepareEnvironmentVariablesForFile(
+			content,
+			compose.environment.project.env,
+			compose.environment.env,
+		);
+		if (compose.composeType !== "stack") return quoted;
+		// A stack's file is written unquoted (its services read it as an
+		// `env_file`, where quotes are literal), but a value with a line break
+		// would put its next lines in the file as variables of their own, so
+		// compose would read a `COMPOSE_FILE=` the filter below never saw. Those
+		// are written quoted, like a compose's. Both lists are in the same order.
+		return prepareEnvironmentVariables(
+			content,
+			compose.environment.project.env,
+			compose.environment.env,
+		).map((pair, index) =>
+			/[\r\n]/.test(pair) ? (quoted[index] ?? pair) : pair,
+		);
+	};
 	// Compose reads the `COMPOSE_*` settings of this file as if they were in its
 	// environment (see isComposeDotenvName), so a user's are left out, and the
 	// project name is always Dokploy's own, whatever the Environment holds.
@@ -1108,7 +1117,10 @@ const getStackEnvLoader = (stagedPath: string) =>
  * `env -i` prefix every docker invocation of a deploy runs under: the host's
  * environment is dropped except PATH and HOME (docker needs HOME for its
  * registry credentials), and a stack gets its own variables from the staged
- * env file. `docker ...` follows it.
+ * env file. The settings docker and its children read from the environment
+ * (`DOCKER_HOST`, `LD_PRELOAD`, ...) are set empty, so a `.env` that compose
+ * before v2.39.3 copies into its own environment cannot supply them (see
+ * `NEUTRALISED_CLI_ENV`). `docker ...` follows it.
  */
 /**
  * `<prefix> docker <command>`, with the prefix before EVERY docker command
@@ -1132,4 +1144,4 @@ export const withCleanEnvironment = (
 		.join(" && ");
 
 export const getCleanEnvPrefix = (stackEnvFile?: string) =>
-	`env -i PATH="$PATH" HOME="$HOME" ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;
+	`env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;
