@@ -823,6 +823,8 @@ export const serverRouter = createTRPCRouter({
 				input.serverId,
 				ctx.session.activeOrganizationId,
 			);
+			// a member also needs the server granted before anything runs on it
+			await assertServerReachable(ctx, input.serverId);
 			// The argv of a container's processes carries its service's secrets, so
 			// the container must belong to a service the caller can read.
 			// `docker top` runs on the id that was checked, not on the string sent.
