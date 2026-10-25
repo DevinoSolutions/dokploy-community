@@ -239,6 +239,27 @@ describe("parseGithubBaseUrl host policy", () => {
 		]);
 	});
 
+	it("ignores an entry with a query, fragment, backslash, percent escape or wildcard", () => {
+		const invalid: string[] = [];
+		const entries = [
+			"ghe.one.internal?x=1",
+			"ghe.two.internal#frag",
+			"ghe.three.internal\\evil.example",
+			"ghe%2Efour.internal",
+			"%67he.five.internal",
+			"*.six.internal",
+			"ghe.*.internal",
+			"*",
+		];
+		const allowed = parseAllowedGithubHosts(
+			[...entries, "ghe.ok.internal"].join(","),
+			(entry) => invalid.push(entry),
+		);
+
+		expect([...allowed]).toEqual(["ghe.ok.internal"]);
+		expect(invalid).toEqual(entries);
+	});
+
 	it("warns once per bad entry on the server log by default", () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		parseAllowedGithubHosts("https://dup.example.internal/");
