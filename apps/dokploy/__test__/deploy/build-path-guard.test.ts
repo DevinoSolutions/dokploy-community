@@ -156,28 +156,33 @@ const linksWork = (() => {
 })();
 const itWithLinks = linksWork ? it : it.skip;
 
-const runGuard = (application: ApplicationNested, cleanup = "") =>
+// `prelude` runs first, e.g. to hide a tool from the guard.
+const runGuard = (application: ApplicationNested, cleanup = "", prelude = "") =>
 	shells.map((shell) => ({
 		shell,
 		result: spawnSync(
 			shell,
 			[
 				"-c",
-				`${getBuildPathGuardCommand(application, cleanup)}\necho GUARD_PASSED`,
+				`${prelude}\n${getBuildPathGuardCommand(application, cleanup)}\necho GUARD_PASSED`,
 			],
 			{ encoding: "utf8", cwd: tmpNative },
 		),
 	}));
 
-const expectAllowed = (application: ApplicationNested) => {
-	for (const { shell, result } of runGuard(application)) {
+const expectAllowed = (application: ApplicationNested, prelude = "") => {
+	for (const { shell, result } of runGuard(application, "", prelude)) {
 		expect(result.status, `${shell}: ${result.stderr}`).toBe(0);
 		expect(result.stdout, shell).toContain("GUARD_PASSED");
 	}
 };
 
-const expectRefused = (application: ApplicationNested, label: string) => {
-	for (const { shell, result } of runGuard(application)) {
+const expectRefused = (
+	application: ApplicationNested,
+	label: string,
+	prelude = "",
+) => {
+	for (const { shell, result } of runGuard(application, "", prelude)) {
 		expect(result.status, shell).toBe(1);
 		expect(result.stdout, shell).not.toContain("GUARD_PASSED");
 		expect(result.stderr, shell).toContain(
@@ -291,6 +296,66 @@ describe("build path guard in a real shell", () => {
 			expect(result.status).toBe(1);
 		}
 		expect(existsSync(`${tmpNative}/${staged}`)).toBe(false);
+	});
+});
+
+// Hosts whose `realpath` has no `-m` (busybox) use the `readlink -f` branch.
+const WITHOUT_REALPATH = "realpath() { return 1; }";
+const WITHOUT_EITHER = "realpath() { return 1; }\nreadlink() { return 1; }";
+
+describe("build path guard on a host without realpath -m", () => {
+	itWithLinks("allows places that do not exist yet, however deep", () => {
+		expectAllowed(createApplication(), WITHOUT_REALPATH);
+		for (const publishDirectory of ["dist", "build/web", "out/site/static"]) {
+			expectAllowed(
+				createApplication({ buildType: "nixpacks", publishDirectory }),
+				WITHOUT_REALPATH,
+			);
+		}
+		expectAllowed(
+			createApplication({
+				buildType: "nixpacks",
+				customGitBuildPath: "apps/web",
+				publishDirectory: "build/web",
+			}),
+			WITHOUT_REALPATH,
+		);
+		expectAllowed(
+			createApplication({ buildType: "railpack" }),
+			WITHOUT_REALPATH,
+		);
+	});
+
+	itWithLinks("refuses places that resolve outside the code directory", () => {
+		linkOutside("ctx");
+		expectRefused(
+			createApplication({ dockerContextPath: "ctx" }),
+			"the Docker context path",
+			WITHOUT_REALPATH,
+		);
+		linkOutside("dist");
+		expectRefused(
+			createApplication({
+				buildType: "nixpacks",
+				publishDirectory: "dist/a/b",
+			}),
+			"the publish directory",
+			WITHOUT_REALPATH,
+		);
+	});
+
+	itWithLinks("refuses the build when neither tool works", () => {
+		for (const { shell, result } of runGuard(
+			createApplication(),
+			"",
+			WITHOUT_EITHER,
+		)) {
+			expect(result.status, shell).toBe(1);
+			expect(result.stdout, shell).not.toContain("GUARD_PASSED");
+			expect(result.stderr, shell).toContain(
+				"neither realpath -m nor readlink -f",
+			);
+		}
 	});
 });
 

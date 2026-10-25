@@ -20,7 +20,7 @@ import {
 // flag) and nothing a shell reads specially.
 const SECRET_ID = /^[A-Za-z0-9_.-]+$/;
 
-const calculateSecretsHash =(envVariables: string[]): string => {
+const calculateSecretsHash = (envVariables: string[]): string => {
 	const hash = createHash("sha256");
 	for (const env of envVariables.sort()) {
 		hash.update(env);
