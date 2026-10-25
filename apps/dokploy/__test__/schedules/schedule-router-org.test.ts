@@ -89,6 +89,13 @@ vi.mock("@dokploy/server/index", async (importOriginal) => ({
 // The native binding is not needed to exercise the router.
 vi.mock("bcrypt", () => ({ default: {}, hash: vi.fn(), compare: vi.fn() }));
 
+// Whether the caller's organization owns the instance is covered in
+// schedule-host-root-org.test.ts.
+vi.mock("@dokploy/server/services/admin", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	isRootOrganization: async () => true,
+}));
+
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
@@ -146,26 +153,29 @@ describe("dokploy-server schedules belong to one organization", () => {
 	it.each([
 		["another organization", "org-2"],
 		["no organization", null],
-	])("rejects every procedure for a schedule owned by %s", async (_label, organizationId) => {
-		mocks.existing = hostSchedule(organizationId);
+	])(
+		"rejects every procedure for a schedule owned by %s",
+		async (_label, organizationId) => {
+			mocks.existing = hostSchedule(organizationId);
 
-		await expect(
-			caller().update({ ...base, scheduleType: "dokploy-server" }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-		await expect(
-			caller().delete({ scheduleId: "sch-1" }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-		await expect(
-			caller().one({ scheduleId: "sch-1" }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-		await expect(
-			caller().runManually({ scheduleId: "sch-1" }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			await expect(
+				caller().update({ ...base, scheduleType: "dokploy-server" }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			await expect(
+				caller().delete({ scheduleId: "sch-1" }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			await expect(caller().one({ scheduleId: "sch-1" })).rejects.toMatchObject(
+				{ code: "UNAUTHORIZED" },
+			);
+			await expect(
+				caller().runManually({ scheduleId: "sch-1" }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 
-		expect(mocks.updateSchedule).not.toHaveBeenCalled();
-		expect(mocks.deleteSchedule).not.toHaveBeenCalled();
-		expect(mocks.runCommand).not.toHaveBeenCalled();
-	});
+			expect(mocks.updateSchedule).not.toHaveBeenCalled();
+			expect(mocks.deleteSchedule).not.toHaveBeenCalled();
+			expect(mocks.runCommand).not.toHaveBeenCalled();
+		},
+	);
 
 	it("allows the same procedures for a schedule of the active organization", async () => {
 		mocks.existing = hostSchedule("org-1");
@@ -183,9 +193,7 @@ describe("dokploy-server schedules belong to one organization", () => {
 	it("keeps the script of a host schedule from members", async () => {
 		mocks.memberRole = "member";
 		mocks.existing = hostSchedule("org-1");
-		await expect(
-			caller().one({ scheduleId: "sch-1" }),
-		).rejects.toBeDefined();
+		await expect(caller().one({ scheduleId: "sch-1" })).rejects.toBeDefined();
 	});
 });
 

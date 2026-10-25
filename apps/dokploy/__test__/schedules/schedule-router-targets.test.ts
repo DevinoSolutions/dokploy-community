@@ -94,6 +94,13 @@ vi.mock("@dokploy/server/services/schedule", async (importOriginal) => ({
 // The native binding is not needed to exercise the router.
 vi.mock("bcrypt", () => ({ default: {}, hash: vi.fn(), compare: vi.fn() }));
 
+// Whether the caller's organization owns the instance is covered in
+// schedule-host-root-org.test.ts.
+vi.mock("@dokploy/server/services/admin", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	isRootOrganization: async () => true,
+}));
+
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
@@ -164,21 +171,27 @@ describe("schedule.create", () => {
 		["compose", { composeId: "comp-own" }],
 		["server", { serverId: "srv-own" }],
 		["dokploy-server", {}],
-	] as const)("accepts a %s schedule with its own target", async (scheduleType, ids) => {
-		await caller().create({ ...base, scheduleType, ...ids });
-		expect(mocks.createSchedule).toHaveBeenCalledTimes(1);
-	});
+	] as const)(
+		"accepts a %s schedule with its own target",
+		async (scheduleType, ids) => {
+			await caller().create({ ...base, scheduleType, ...ids });
+			expect(mocks.createSchedule).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	it.each([
 		["application", { applicationId: "app-foreign" }],
 		["compose", { composeId: "comp-foreign" }],
 		["server", { serverId: "srv-foreign" }],
-	] as const)("rejects a %s target in another organization", async (scheduleType, ids) => {
-		await expect(
-			caller().create({ ...base, scheduleType, ...ids }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-		expect(mocks.createSchedule).not.toHaveBeenCalled();
-	});
+	] as const)(
+		"rejects a %s target in another organization",
+		async (scheduleType, ids) => {
+			await expect(
+				caller().create({ ...base, scheduleType, ...ids }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			expect(mocks.createSchedule).not.toHaveBeenCalled();
+		},
+	);
 
 	it("rejects a foreign composeId hidden behind an accessible applicationId", async () => {
 		await expect(
@@ -206,12 +219,15 @@ describe("schedule.create", () => {
 		["dokploy-server", { serverId: "srv-own" }],
 		["dokploy-server", { applicationId: "app-own" }],
 		["dokploy-server", { composeId: "comp-own" }],
-	] as const)("rejects a %s schedule with ids %j", async (scheduleType, ids) => {
-		await expect(
-			caller().create({ ...base, scheduleType, ...ids }),
-		).rejects.toMatchObject({ code: "BAD_REQUEST" });
-		expect(mocks.createSchedule).not.toHaveBeenCalled();
-	});
+	] as const)(
+		"rejects a %s schedule with ids %j",
+		async (scheduleType, ids) => {
+			await expect(
+				caller().create({ ...base, scheduleType, ...ids }),
+			).rejects.toMatchObject({ code: "BAD_REQUEST" });
+			expect(mocks.createSchedule).not.toHaveBeenCalled();
+		},
+	);
 
 	it("treats an omitted scheduleType as an application schedule", async () => {
 		await expect(
@@ -337,11 +353,14 @@ describe("schedule.update", () => {
 		["compose", { composeId: "comp-own" }],
 		["server", { serverId: "srv-own" }],
 		["dokploy-server", {}],
-	] as const)("lets a %s schedule be edited without naming its target", async (scheduleType, ids) => {
-		mocks.existing = stored(scheduleType, ids);
-		await caller().update({ ...base, scheduleId: "sch-1", scheduleType });
-		expect(mocks.updateSchedule).toHaveBeenCalledTimes(1);
-	});
+	] as const)(
+		"lets a %s schedule be edited without naming its target",
+		async (scheduleType, ids) => {
+			mocks.existing = stored(scheduleType, ids);
+			await caller().update({ ...base, scheduleId: "sch-1", scheduleType });
+			expect(mocks.updateSchedule).toHaveBeenCalledTimes(1);
+		},
+	);
 
 	it("lets an application schedule move to another accessible application", async () => {
 		mocks.existing = stored("application", { applicationId: "app-own" });
