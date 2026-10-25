@@ -19,6 +19,7 @@ vi.mock("@dokploy/server/services/permission", () => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	isRootOrganization: async () => true,
 	paths: (isServer?: boolean) => ({
 		MAIN_TRAEFIK_PATH: isServer ? "/etc/dokploy/traefik" : localTraefikPath,
 	}),
