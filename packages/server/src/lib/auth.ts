@@ -19,6 +19,7 @@ import { IS_CLOUD } from "../constants";
 import { db } from "../db";
 import * as schema from "../db/schema";
 import {
+	assertOrganizationDeletable,
 	getTrustedOrigins,
 	getTrustedProviders,
 	getUserByToken,
@@ -774,8 +775,12 @@ const createBetterAuth = () =>
 					// provider rows (API keys, webhooks) any more. Currently
 					// unreachable ("/organization/delete" is in disabledPaths; the
 					// organization router and services/admin.ts do this cleanup), so
-					// this is defense-in-depth only.
+					// this is defense-in-depth only. The root organization is
+					// refused here too.
 					beforeDeleteOrganization: async ({ organization: deleted }) => {
+						await assertOrganizationDeletable(deleted.id).catch((error) => {
+							throw new APIError("FORBIDDEN", { message: error.message });
+						});
 						await removeOrganizationNotifications(deleted.id);
 					},
 				},

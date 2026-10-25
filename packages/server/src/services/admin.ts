@@ -64,6 +64,20 @@ export const findRootOrganization = async () =>
 export const isRootOrganization = async (organizationId: string) =>
 	(await findRootOrganization())?.id === organizationId;
 
+export const ROOT_ORGANIZATION_DELETE_MESSAGE =
+	"This organization owns the Dokploy instance and can't be deleted";
+
+// Deleting the root organization would hand the instance's own Traefik and
+// settings to the next-oldest one. Dokploy Cloud has no such organization.
+export const assertOrganizationDeletable = async (organizationId: string) => {
+	if (!IS_CLOUD && (await isRootOrganization(organizationId))) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: ROOT_ORGANIZATION_DELETE_MESSAGE,
+		});
+	}
+};
+
 export const findOwner = async () => {
 	const admin = await db.query.member.findFirst({
 		where: eq(member.role, "owner"),
@@ -121,6 +135,11 @@ export const removeUserById = async (userId: string) => {
 			.select({ id: organization.id })
 			.from(organization)
 			.where(eq(organization.ownerId, userId));
+		// Checked before anything is removed, for every organization the user
+		// owns: deleting the user cascades into them.
+		for (const { id } of owned) {
+			await assertOrganizationDeletable(id);
+		}
 		for (const { id } of owned) {
 			await removeOrganizationNotifications(id, tx);
 		}
