@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+Operators can pin the organization that owns the instance with `DOKPLOY_ROOT_ORGANIZATION_ID`; the server logs which organization it uses at startup (T-8810).
+
 ### New in v0.30.8-community.33.1
 
 Hotfix on top of v0.30.8-community.33. No new database migrations; an instance still on v0.30.8-community.32.1 or older also runs the v0.30.8-community.33 migrations (0220-0222, additive).
