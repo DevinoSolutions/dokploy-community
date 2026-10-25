@@ -1,4 +1,9 @@
-import { applications, compose, postgres } from "@dokploy/server/db/schema";
+import {
+	applications,
+	compose,
+	postgres,
+	previewDeployments,
+} from "@dokploy/server/db/schema";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -31,6 +36,15 @@ const mocks = vi.hoisted(() => ({
 	commands: [] as { serverId?: string; command: string }[],
 	// servers the caller was granted
 	servers: new Set<string>(),
+	// preview deployments: their appName and the service they belong to
+	previews: [] as {
+		appName: string;
+		applicationId: string | null;
+		composeId: string | null;
+	}[],
+	// docker commands that fail without saying anything about the object
+	// (the daemon or the SSH connection is down): command prefix -> error
+	failures: new Map<string, Error>(),
 }));
 
 vi.mock("@dokploy/server/db", async (importOriginal) => {
@@ -43,10 +57,23 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
 					where: async (condition: Parameters<PgDialect["sqlToQuery"]>[0]) => {
-						// no preview deployments in these tests
-						if (!("serviceId" in fields)) return [];
-						// a row only answers a lookup for its own appName
 						const { params } = dialect.sqlToQuery(condition);
+						// the server of a preview's parent, looked up by its id
+						if ("parentId" in fields)
+							return mocks.serviceRows
+								.filter(
+									(row) =>
+										row.table === table && params.includes(row.serviceId),
+								)
+								.map(({ serviceId, serverId }) => ({
+									parentId: serviceId,
+									serverId,
+								}));
+						if (table === previewDeployments)
+							return mocks.previews.filter((row) =>
+								params.includes(row.appName),
+							);
+						// a row only answers a lookup for its own appName
 						return mocks.serviceRows
 							.filter(
 								(row) => row.table === table && params.includes(row.appName),
@@ -79,6 +106,8 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => {
 		>();
 	const run = async (command: string, serverId?: string) => {
 		mocks.commands.push({ serverId, command });
+		for (const [prefix, error] of mocks.failures)
+			if (command.startsWith(prefix)) throw error;
 		const host = serverId ?? "local";
 		const reference = (command.trim().split(/\s+/).pop() ?? "").replace(
 			/'/g,
@@ -130,7 +159,8 @@ vi.mock("@dokploy/server/services/server", async (importOriginal) => ({
 	getAccessibleServerIds: vi.fn(async () => mocks.servers),
 }));
 
-// The agent: `container_name = ? OR container_name LIKE ? || '.%'`
+// The agent (SQLite): `container_name = ? OR container_name LIKE ? || '.%'`;
+// `=` is case-sensitive, LIKE is not
 const like = (pattern: string) =>
 	new RegExp(
 		`^${pattern
@@ -143,6 +173,7 @@ const like = (pattern: string) =>
 						: char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
 			)
 			.join("")}$`,
+		"i",
 	);
 
 const fetchMock = vi.fn(async (input: string) => {
@@ -228,6 +259,8 @@ beforeEach(() => {
 	mocks.metrics.clear();
 	mocks.commands.length = 0;
 	mocks.servers = new Set(["server-a"]);
+	mocks.previews = [];
+	mocks.failures.clear();
 	fetchMock.mockClear();
 
 	// org-a: app-a, pg-a, cmp-a (docker compose), stk-a (stack); org-b: app-b
@@ -387,10 +420,9 @@ describe("user.getContainerMetrics: names of another organization", () => {
 	it("does not hand out another organization's tasks under a prefix of their names", async () => {
 		as("owner");
 		// names nothing on the host carries: the agent's prefix match would find
-		// app-b's task, which is dropped
-		await expect(metrics("app-b-abc123.1")).rejects.toThrow(
-			/No monitoring data/,
-		);
+		// app-b's task. A name that extends app-b's appName is refused; a
+		// wildcard for it gets the task dropped from the answer.
+		await expect(metrics("app-b-abc123.1")).rejects.toMatchObject(notFound);
 		await expect(metrics("app_b-abc123")).rejects.toThrow(/No monitoring data/);
 	});
 
@@ -448,5 +480,172 @@ describe("user.getContainerMetrics: names docker would read otherwise", () => {
 		as("owner");
 		await expect(metrics("")).rejects.toThrow(/No Application Selected/);
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("refuses a name longer than 255 characters before running anything", async () => {
+		as("owner");
+		await expect(metrics("a".repeat(256))).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+		});
+		expect(mocks.commands).toEqual([]);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("user.getContainerMetrics: what nothing on the host carries any more", () => {
+	// docker compose down: the containers are gone, the agent keeps their rows
+	const composeDown = (container: string) => {
+		mocks.containers.get("local")?.delete(container);
+		expect(mocks.metrics.get("local")).toContain(container);
+	};
+
+	it.each(["owner", "admin"] as const)(
+		"refuses an %s the rows of another organization's compose that was taken down",
+		async (role) => {
+			as(role);
+			composeDown("cmp-b-abc123-web-1");
+			await expect(metrics("cmp-b-abc123-web-1")).rejects.toMatchObject(
+				notFound,
+			);
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it("gives an admin the rows of their own compose that was taken down", async () => {
+		as("admin");
+		composeDown("cmp-a-abc123-web-1");
+		expect(names(await metrics("cmp-a-abc123-web-1"))).toEqual([
+			"cmp-a-abc123-web-1",
+		]);
+	});
+
+	it("refuses a name that extends another organization's preview appName", async () => {
+		as("owner");
+		mocks.previews = [
+			{ appName: "preview-b-xyz789", applicationId: null, composeId: "cmp-b" },
+		];
+		mocks.metrics.get("local")?.push("preview-b-xyz789-web-1");
+		await expect(metrics("preview-b-xyz789-web-1")).rejects.toMatchObject(
+			notFound,
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("still gives an admin the host's own names, which extend no service's appName", async () => {
+		as("admin");
+		composeDown("dokploy-traefik");
+		expect(names(await metrics("dokploy-traefik"))).toEqual([
+			"dokploy-traefik",
+		]);
+	});
+});
+
+describe("user.getContainerMetrics: docker failures", () => {
+	const daemonDown = () =>
+		new Error(
+			"Command execution failed: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+		);
+
+	it.each([
+		["both lookups fail", ["docker service inspect", "docker inspect"]],
+		["the service lookup fails", ["docker service inspect"]],
+		["the container lookup fails", ["docker inspect --type container"]],
+	])(
+		"refuses an admin when %s without saying the object is absent",
+		async (_, prefixes) => {
+			as("admin");
+			// org-b's compose names its container "redis-cache", which extends
+			// no appName: only docker's answer (its labels) stands between the
+			// admin and org-b's rows
+			mocks.containers
+				.get("local")
+				?.set("redis-cache", { "com.docker.compose.project": "cmp-b-abc123" });
+			mocks.metrics.get("local")?.push("redis-cache");
+			for (const prefix of prefixes) mocks.failures.set(prefix, daemonDown());
+			for (const name of ["redis-cache", "dokploy-traefik"]) {
+				await expect(metrics(name)).rejects.toMatchObject(notFound);
+			}
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
+	it("refuses when the SSH connection to the server fails", async () => {
+		as("admin");
+		mocks.failures.set(
+			"docker service inspect",
+			new Error(
+				"Command execution error: connect ECONNREFUSED 203.0.113.10:22",
+			),
+		);
+		await expect(metrics("dokploy-traefik", "server-a")).rejects.toMatchObject(
+			notFound,
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("reads a host that is no swarm manager as one without services", async () => {
+		as("admin");
+		mocks.failures.set(
+			"docker service inspect",
+			Object.assign(new Error("Command execution failed"), {
+				stderr:
+					'Error response from daemon: This node is not a swarm manager. Use "docker swarm init" or "docker swarm join" to connect this node to swarm and try again.',
+			}),
+		);
+		expect(names(await metrics("dokploy-traefik"))).toEqual([
+			"dokploy-traefik",
+		]);
+	});
+
+	it("reads docker's own not-found answers as absent", async () => {
+		as("admin");
+		mocks.failures.set(
+			"docker service inspect",
+			Object.assign(new Error("Command execution failed"), {
+				stderr: "Status: Error: no such service: dokploy-traefik, Code: 1",
+			}),
+		);
+		expect(names(await metrics("dokploy-traefik"))).toEqual([
+			"dokploy-traefik",
+		]);
+		mocks.failures.clear();
+		mocks.containers.get("local")?.delete("dokploy-traefik");
+		mocks.failures.set(
+			"docker inspect --type container",
+			Object.assign(new Error("Command execution failed"), {
+				stderr:
+					"Error response from daemon: No such container: dokploy-traefik",
+			}),
+		);
+		expect(names(await metrics("dokploy-traefik"))).toEqual([
+			"dokploy-traefik",
+		]);
+	});
+});
+
+describe("user.getContainerMetrics: case variants", () => {
+	// docker names and appNames are case-sensitive, the agent's LIKE is not
+	it.each([
+		"APP-B-ABC123",
+		"App-B-Abc123",
+		"APP-B-ABC123.1",
+		"STK-B-ABC123_WEB",
+		"CMP-B-ABC123-WEB-1",
+	])(
+		"never hands another organization's rows to an owner asking for %s",
+		async (name) => {
+			as("owner");
+			await expect(metrics(name)).rejects.toThrow(/No monitoring data/);
+		},
+	);
+
+	it("drops the rows the agent's LIKE adds for a case variant", async () => {
+		as("owner");
+		await expect(metrics("APP-B-ABC123")).rejects.toThrow(/No monitoring data/);
+		// the agent did answer, with app-b's task: the filter dropped it
+		const answer = await fetchMock.mock.results[0]?.value;
+		expect(names(await answer?.json())).toEqual([
+			"app-b-abc123.1.bbbbbbbbbbbbbbbbbbbbbbbbb",
+		]);
 	});
 });

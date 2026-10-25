@@ -568,7 +568,7 @@ export const userRouter = createTRPCRouter({
 		.input(
 			z.object({
 				serverId: z.string().optional(),
-				appName: z.string(),
+				appName: z.string().max(255),
 				dataPoints: z.string(),
 			}),
 		)

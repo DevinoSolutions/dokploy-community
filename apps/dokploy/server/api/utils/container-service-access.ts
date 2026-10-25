@@ -484,14 +484,34 @@ const isTaskOf = (service: string) => (containerName: string) => {
 const isNamed = (name: string) => (containerName: string) =>
 	containerName === name;
 
-// The container named exactly `name`: docker also resolves an id prefix, which
-// is not what the metrics agent matches on.
+// Whether a failed docker command said the object is not there: "No such
+// container: x" (or "No such object"), "no such service: x", and on a host
+// that is no swarm manager "This node is not a swarm manager", which has no
+// services. Anything else (the daemon or the SSH connection is down, a
+// timeout) says nothing about the host, and the caller refuses.
+const saysAbsent = (error: unknown, pattern: RegExp) => {
+	const { message, stderr } = (error ?? {}) as {
+		message?: unknown;
+		stderr?: unknown;
+	};
+	return [message, stderr].some(
+		(text) => typeof text === "string" && pattern.test(text),
+	);
+};
+
+const NO_SUCH_CONTAINER = /no such (container|object)/i;
+const NO_SUCH_SERVICE = /no such service|not a swarm manager/i;
+
+// The container named exactly `name`, or null when docker says there is none:
+// docker also resolves an id prefix, which is not what the metrics agent
+// matches on. Any other failure throws.
 const readContainerByName = async (
 	name: string,
 	serverId?: string,
 ): Promise<DockerObject | null> => {
+	let stdout: string;
 	try {
-		const { stdout } = await runOn(
+		({ stdout } = await runOn(
 			quote([
 				"docker",
 				"inspect",
@@ -502,28 +522,43 @@ const readContainerByName = async (
 				name,
 			]),
 			serverId,
-		);
-		const [containerName, id, ...labels] = stdout.trim().split(" ");
-		if (containerName !== `/${name}` || !id || !FULL_ID.container.test(id))
-			return null;
-		const parsed = (JSON.parse(labels.join(" ")) ?? {}) as Record<
-			string,
-			unknown
-		>;
-		return { id, appNames: ownershipNames(labelValues(parsed)) };
-	} catch {
-		return null;
+		));
+	} catch (error) {
+		if (saysAbsent(error, NO_SUCH_CONTAINER)) return null;
+		throw error;
 	}
+	const [containerName, id, ...labels] = stdout.trim().split(" ");
+	if (!id || !FULL_ID.container.test(id))
+		throw new Error("Unreadable docker inspect output");
+	// an id prefix resolved to another container: none carries the name
+	if (containerName !== `/${name}`) return null;
+	const parsed = (JSON.parse(labels.join(" ")) ?? {}) as Record<
+		string,
+		unknown
+	>;
+	return { id, appNames: ownershipNames(labelValues(parsed)) };
 };
 
+// The swarm service named exactly `name`, or null when docker says there is
+// none. Any other failure throws.
 const readServiceByName = async (name: string, serverId?: string) => {
+	let service: Awaited<ReturnType<typeof readService>>;
 	try {
-		const service = await readService(name, serverId);
-		return service?.name === name ? service : null;
-	} catch {
-		return null;
+		service = await readService(name, serverId);
+	} catch (error) {
+		if (saysAbsent(error, NO_SUCH_SERVICE)) return null;
+		throw error;
 	}
+	if (!service) throw new Error("Unreadable docker service inspect output");
+	// an id prefix resolved to another service: none carries the name
+	return service.name === name ? service : null;
 };
+
+// The leading parts of a container name, cut where a compose ("-"), stack
+// ("_") or swarm task (".") name continues an appName: "cmp-x-web-1" gives
+// "cmp", "cmp-x" and "cmp-x-web".
+const appNamePrefixes = (name: string) =>
+	[...name.matchAll(/[-_.]/g)].map((match) => name.slice(0, match.index));
 
 /**
  * `user.getContainerMetrics` sends the monitoring agent a name the client
@@ -541,6 +576,13 @@ const readServiceByName = async (name: string, serverId?: string) => {
  * - a container of exactly that name on that server, checked by its labels;
  * - for an owner or admin only, a name nothing on the host carries any more.
  *
+ * Where nothing names a service (the host's own containers, a name nothing
+ * carries any more), the name must not extend the appName of a service the
+ * caller cannot read either: a compose that was taken down leaves its rows
+ * behind under "<appName>-<service>-<n>". A docker failure that does not say
+ * the object is absent refuses, so an unreachable daemon is never read as
+ * "nothing on the host".
+ *
  * Returns which of the agent's rows belong to what was checked: the swarm
  * tasks of the service, or the container of that exact name. The caller drops
  * the rest, so a wildcard in the agent's match cannot widen the answer.
@@ -555,9 +597,19 @@ export const resolveMetricsTarget = async (
 	try {
 		if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) throw containerNotFound();
 		if (!(await canReachServer(ctx, serverId))) throw containerNotFound();
+		// the host's own: owners and admins, and no other service's name in it
+		const hostOwn = async () =>
+			(await isOwnerOrAdmin(ctx)) &&
+			(
+				await checkDockerObjectServices(
+					ctx,
+					{ appNames: appNamePrefixes(name) },
+					serverId,
+				)
+			).outcome !== "refused";
 		const allowed = async (check: ContainerServiceCheck) =>
 			check.outcome === "readable" ||
-			(check.outcome === "unowned" && (await isOwnerOrAdmin(ctx)));
+			(check.outcome === "unowned" && (await hostOwn()));
 
 		const byAppName = await checkDockerObjectServices(
 			ctx,
@@ -589,7 +641,7 @@ export const resolveMetricsTarget = async (
 			return isNamed(name);
 		}
 
-		if (!(await isOwnerOrAdmin(ctx))) throw containerNotFound();
+		if (!(await hostOwn())) throw containerNotFound();
 		return isNamed(name);
 	} catch {
 		throw containerNotFound();
