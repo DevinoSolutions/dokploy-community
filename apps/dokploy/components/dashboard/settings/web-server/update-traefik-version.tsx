@@ -20,6 +20,7 @@ import {
 	DialogTrigger,
 } from "@/components/ui/dialog";
 import { api } from "@/utils/api";
+import { isConnectionLost } from "@/utils/is-connection-lost";
 
 interface Props {
 	children?: React.ReactNode;
@@ -84,7 +85,18 @@ export const UpdateTraefikVersion = ({ children, serverId }: Props) => {
 
 	const handleUpdate = async () => {
 		try {
-			await updateTraefik({ serverId });
+			try {
+				await updateTraefik({ serverId });
+			} catch (error) {
+				// The page is served through the Traefik being replaced, so the reply
+				// can be lost while the update itself goes on.
+				if (!isConnectionLost(error)) {
+					throw error;
+				}
+				toast.info(
+					"Lost the connection while Traefik restarts. Checking its version again...",
+				);
+			}
 			setIsWaiting(true);
 			const result = await waitForTraefik();
 			if (result.ok) {
