@@ -99,6 +99,77 @@ export const authGithub = (githubProvider: Github): Octokit => {
 	return octokit;
 };
 
+/**
+ * The app URL a provider stores (`html_url` of the converted manifest) as a
+ * URL, or null unless it is on the provider's own GitHub instance: same
+ * scheme, host and port as `githubUrl`. `http:` therefore only passes for an
+ * instance that is itself served over http.
+ */
+export const parseGithubAppUrl = (
+	appUrl: string | null | undefined,
+	githubUrl: string | null | undefined,
+): URL | null => {
+	try {
+		const app = new URL(appUrl ?? "");
+		const instance = new URL(githubUrl?.trim() || DEFAULT_GITHUB_URL);
+		if (app.protocol !== "https:" && app.protocol !== "http:") return null;
+		return app.origin === instance.origin ? app : null;
+	} catch {
+		return null;
+	}
+};
+
+export type GithubInstallationCheck =
+	| { ok: true }
+	| { ok: false; reason: "invalid" | "not_found" | "unavailable" };
+
+/**
+ * Asks GitHub, with the app's own JWT, whether `installationId` is an
+ * installation of this app. GitHub only returns the app's own installations
+ * for that call, so an id from another app (or a made-up one) is a 404.
+ */
+export const verifyGithubInstallation = async (
+	githubProvider: Pick<
+		Github,
+		"githubAppId" | "githubPrivateKey" | "githubUrl"
+	>,
+	installationId: string,
+): Promise<GithubInstallationCheck> => {
+	if (!/^[1-9][0-9]{0,14}$/.test(installationId)) {
+		return { ok: false, reason: "invalid" };
+	}
+	if (!githubProvider.githubAppId || !githubProvider.githubPrivateKey) {
+		return { ok: false, reason: "unavailable" };
+	}
+
+	const octokit = new Octokit({
+		authStrategy: createAppAuth,
+		auth: {
+			appId: githubProvider.githubAppId,
+			privateKey: githubProvider.githubPrivateKey,
+		},
+		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
+	});
+
+	try {
+		const { data } = await octokit.request(
+			"GET /app/installations/{installation_id}",
+			{ installation_id: Number(installationId) },
+		);
+		return data.app_id === githubProvider.githubAppId
+			? { ok: true }
+			: { ok: false, reason: "not_found" };
+	} catch (error) {
+		return {
+			ok: false,
+			reason:
+				(error as { status?: number })?.status === 404
+					? "not_found"
+					: "unavailable",
+		};
+	}
+};
+
 export const getGithubToken = async (
 	octokit: ReturnType<typeof authGithub>,
 ) => {

@@ -31,10 +31,15 @@ vi.mock("@dokploy/server", async () => {
 	const real = await vi.importActual<
 		typeof import("@dokploy/server/services/git-provider")
 	>("@dokploy/server/services/git-provider");
+	const realGithub = await vi.importActual<
+		typeof import("@dokploy/server/utils/providers/github")
+	>("@dokploy/server/utils/providers/github");
 	const stubs: Record<string | symbol, unknown> = {};
 	const named: Record<string, unknown> = {
 		IS_CLOUD: false,
 		assertCanUpdateGitProvider: real.assertCanUpdateGitProvider,
+		// the real URL rule github.update applies to a changed app URL
+		parseGithubAppUrl: realGithub.parseGithubAppUrl,
 		canViewGitProviderSecrets: real.canViewGitProviderSecrets,
 		findGithubById: mocks.findGithubById,
 		findGitlabById: mocks.findGitlabById,
@@ -79,7 +84,7 @@ const PROVIDERS = [
 		find: () => mocks.findGithubById,
 		update: () => mocks.updateGithub,
 		input: {
-			githubAppName: "app",
+			githubAppName: "https://github.com/apps/app",
 		},
 	},
 	{

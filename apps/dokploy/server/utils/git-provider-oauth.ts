@@ -12,14 +12,26 @@ import {
 } from "@dokploy/server/lib/auth-secret";
 import { hasPermission } from "@dokploy/server/services/permission";
 
-// OAuth `state` for the GitLab and Gitea connect flows. The callback writes the
-// returned tokens to a provider row, so the flow is bound to the provider and to
-// the user (and organization) that started it, and only lives for a short time.
+// OAuth `state` for the GitLab and Gitea connect flows and for the two GitHub
+// App steps (create the app from a manifest, bind an installation to it). The
+// callback writes tokens or credentials to a provider row, so the flow is bound
+// to the provider and to the user (and organization) that started it, and only
+// lives for a short time.
 
-export type OAuthGitProviderType = "gitlab" | "gitea";
+// `github_init` and `github_setup` are separate types so a state issued for one
+// step is never accepted by the other, and each step has its own nonce cookie.
+export type OAuthGitProviderType =
+	| "gitlab"
+	| "gitea"
+	| "github_init"
+	| "github_setup";
 
 export interface GitProviderOAuthState {
 	provider: OAuthGitProviderType;
+	/**
+	 * The provider the flow writes to. For `github_init` no provider exists yet,
+	 * so it carries the normalized GitHub base URL the app is created on.
+	 */
 	providerId: string;
 	userId: string;
 	organizationId: string;
@@ -35,6 +47,14 @@ export interface VerifiedGitProviderOAuthState extends GitProviderOAuthState {
 }
 
 export const GIT_PROVIDER_OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
+// The user names and confirms the app on GitHub (sign-in, sudo, 2FA) between
+// the state being issued and used; GitHub keeps the manifest code for an hour.
+export const GITHUB_INIT_STATE_TTL_MS = 60 * 60 * 1000;
+
+const stateTtlMs = (provider: OAuthGitProviderType) =>
+	provider === "github_init"
+		? GITHUB_INIT_STATE_TTL_MS
+		: GIT_PROVIDER_OAUTH_STATE_TTL_MS;
 
 const STATE_VERSION = "v1";
 const MAX_STATE_LENGTH = 2048;
@@ -77,7 +97,7 @@ export const createGitProviderOAuthState = (
 			i: state.providerId,
 			u: state.userId,
 			o: state.organizationId,
-			e: now + GIT_PROVIDER_OAUTH_STATE_TTL_MS,
+			e: now + stateTtlMs(state.provider),
 			n: hashNonce(nonce),
 		}),
 	).toString("base64url");
@@ -196,12 +216,7 @@ export const setGitProviderOAuthNonceCookie = (
 ) =>
 	appendSetCookie(
 		res,
-		nonceCookie(
-			req,
-			provider,
-			nonce,
-			Math.floor(GIT_PROVIDER_OAUTH_STATE_TTL_MS / 1000),
-		),
+		nonceCookie(req, provider, nonce, Math.floor(stateTtlMs(provider) / 1000)),
 	);
 
 export const clearGitProviderOAuthNonceCookie = (
@@ -259,18 +274,14 @@ export type GitProviderOAuthAccess =
 	| { ok: true; userId: string; organizationId: string }
 	| { ok: false; status: 401 | 403 | 404; error: string };
 
-/**
- * Checks that the signed-in user may connect the provider: it belongs to their
- * active organization and they hold the rights the provider update routes
- * require (`gitProviders:create`, and being its creator or an org owner/admin).
- * With `expected`, the session also has to be the user and organization the
- * OAuth state was issued to.
- */
-export const checkGitProviderOAuthAccess = async (
+type OAuthSession = Extract<GitProviderOAuthAccess, { ok: true }>;
+
+// The signed-in session, which also has to be the user and organization the
+// OAuth state was issued to when `expected` is given.
+const resolveOAuthSession = async (
 	req: IncomingMessage,
-	gitProvider: { userId: string; organizationId: string },
 	expected?: Pick<GitProviderOAuthState, "userId" | "organizationId">,
-): Promise<GitProviderOAuthAccess> => {
+): Promise<OAuthSession | Extract<GitProviderOAuthAccess, { ok: false }>> => {
 	const { user, session } = await validateRequest(req);
 	if (!user || !session?.activeOrganizationId) {
 		return { ok: false, status: 401, error: "Unauthorized" };
@@ -288,20 +299,44 @@ export const checkGitProviderOAuthAccess = async (
 		};
 	}
 
-	if (gitProvider.organizationId !== organizationId) {
+	return { ok: true, userId: user.id, organizationId };
+};
+
+const canCreateGitProviders = (session: OAuthSession) =>
+	hasPermission(
+		{
+			user: { id: session.userId },
+			session: { activeOrganizationId: session.organizationId },
+		},
+		{ gitProviders: ["create"] },
+	);
+
+/**
+ * Checks that the signed-in user may connect the provider: it belongs to their
+ * active organization and they hold the rights the provider update routes
+ * require (`gitProviders:create`, and being its creator or an org owner/admin).
+ * With `expected`, the session also has to be the user and organization the
+ * OAuth state was issued to.
+ */
+export const checkGitProviderOAuthAccess = async (
+	req: IncomingMessage,
+	gitProvider: { userId: string; organizationId: string },
+	expected?: Pick<GitProviderOAuthState, "userId" | "organizationId">,
+): Promise<GitProviderOAuthAccess> => {
+	const session = await resolveOAuthSession(req, expected);
+	if (!session.ok) return session;
+
+	if (gitProvider.organizationId !== session.organizationId) {
 		return { ok: false, status: 404, error: "Git provider not found" };
 	}
 
 	const canUpdate =
-		(await hasPermission(
-			{
-				user: { id: user.id },
-				session: { activeOrganizationId: organizationId },
-			},
-			{ gitProviders: ["create"] },
-		)) &&
+		(await canCreateGitProviders(session)) &&
 		(await assertCanUpdateGitProvider(
-			{ userId: user.id, activeOrganizationId: organizationId },
+			{
+				userId: session.userId,
+				activeOrganizationId: session.organizationId,
+			},
 			gitProvider,
 		).then(
 			() => true,
@@ -311,5 +346,24 @@ export const checkGitProviderOAuthAccess = async (
 		return { ok: false, status: 403, error: "Forbidden" };
 	}
 
-	return { ok: true, userId: user.id, organizationId };
+	return session;
+};
+
+/**
+ * Same session checks for a flow that creates a provider (there is no row to
+ * compare against yet): the user needs `gitProviders:create` in their active
+ * organization.
+ */
+export const checkGitProviderCreateAccess = async (
+	req: IncomingMessage,
+	expected?: Pick<GitProviderOAuthState, "userId" | "organizationId">,
+): Promise<GitProviderOAuthAccess> => {
+	const session = await resolveOAuthSession(req, expected);
+	if (!session.ok) return session;
+
+	if (!(await canCreateGitProviders(session))) {
+		return { ok: false, status: 403, error: "Forbidden" };
+	}
+
+	return session;
 };

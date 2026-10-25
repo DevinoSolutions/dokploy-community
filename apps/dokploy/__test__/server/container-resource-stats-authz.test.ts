@@ -68,7 +68,9 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 			// a batch of them (findServiceOrganizations), one row per known id
 			execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
 				mocks.queries++;
-				const ids = new Set(dialect.sqlToQuery(query).params as string[]);
+				const ids = new Set(
+					dialect.sqlToQuery(query).params.flat() as string[],
+				);
 				return [...ids].flatMap((serviceId) => {
 					const organizationId = mocks.serviceOrganizations.get(serviceId);
 					return organizationId ? [{ serviceId, organizationId }] : [];

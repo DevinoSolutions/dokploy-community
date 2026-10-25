@@ -90,6 +90,13 @@ import { stringify } from "yaml";
 import { z } from "zod";
 import { slugify } from "@/lib/slug";
 import {
+	assertSafeTemplateGitUrl,
+	buildGuardedTemplateReadCommand,
+	getTemplateReadRefusal,
+	TEMPLATE_CLONE_ENV,
+	TemplateFileRefusedError,
+} from "@/server/utils/template-file-read";
+import {
 	apiCreateCompose,
 	apiDeleteCompose,
 	apiDeployCompose,
@@ -1132,7 +1139,21 @@ export const composeRouter = createTRPCRouter({
 				type: "compose" as const,
 			};
 
-			let command = "set -e;";
+			// The clone is of a repository that is not trusted: only remote URLs, and
+			// owner-only files (T-8413).
+			if (compose.sourceType === "git") {
+				try {
+					assertSafeTemplateGitUrl(compose.customGitUrl);
+				} catch (error) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message:
+							error instanceof Error ? error.message : "Invalid repository URL",
+					});
+				}
+			}
+
+			let command = `set -e;${TEMPLATE_CLONE_ENV}`;
 			if (compose.sourceType === "github") {
 				command += await cloneGithubRepository(entity);
 			} else if (compose.sourceType === "gitlab") {
@@ -1148,9 +1169,13 @@ export const composeRouter = createTRPCRouter({
 			const { COMPOSE_PATH } = paths(!!compose.serverId);
 			const tempPath = join(COMPOSE_PATH, tempAppName, "code");
 			const composeDir = dirname(compose.composePath || "./docker-compose.yml");
-			const templatePath = join(tempPath, composeDir, "template.toml");
 
-			const readCommand = quote(["cat", templatePath]);
+			// A file of the repository is read only when it is a regular file reached
+			// without a symbolic link (T-8413).
+			const readCommand = buildGuardedTemplateReadCommand(
+				tempPath,
+				join(composeDir, "template.toml"),
+			);
 			const cleanCommand = quote([
 				"rm",
 				"-rf",
@@ -1177,6 +1202,10 @@ export const composeRouter = createTRPCRouter({
 						templateContent = stdout;
 					}
 				} catch (e) {
+					const refusal = getTemplateReadRefusal(e);
+					if (refusal) {
+						throw refusal;
+					}
 					if (compose.serverId) {
 						await execAsyncRemote(compose.serverId, cleanCommand);
 					} else {
@@ -1232,6 +1261,13 @@ export const composeRouter = createTRPCRouter({
 						await execAsync(cleanCommand);
 					}
 				} catch {}
+
+				if (error instanceof TemplateFileRefusedError) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: error.message,
+					});
+				}
 
 				throw new TRPCError({
 					code: "INTERNAL_SERVER_ERROR",

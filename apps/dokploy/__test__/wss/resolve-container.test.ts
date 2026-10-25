@@ -55,18 +55,31 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 			query: { member: { findFirst: vi.fn(async () => mocks.member) } },
 			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
-					// service lookup, preview lookup, or the preview parent's server
-					where: async () =>
-						("serviceId" in fields || "applicationId" in fields
-							? mocks.serviceRows.get(table)
-							: mocks.parents.get(table)) ?? [],
+					// service lookup, preview lookup, or the preview parent's server.
+					// The lookups are batched: a row comes back under every appName
+					// looked up, and a parent under every id looked up.
+					where: async (condition: Parameters<PgDialect["sqlToQuery"]>[0]) => {
+						const params = dialect.sqlToQuery(condition).params as string[];
+						if ("serviceId" in fields || "applicationId" in fields)
+							return (mocks.serviceRows.get(table) ?? []).flatMap((row) =>
+								params.map((appName) => ({ appName, ...row })),
+							);
+						return (mocks.parents.get(table) ?? []).flatMap((row) =>
+							params.map((parentId) => ({ parentId, ...row })),
+						);
+					},
 				}),
 			}),
-			// findServiceOrganizationId passes the service id as the first param
+			// the organization of one service id (findServiceOrganizationId) or of
+			// a batch of them (findServiceOrganizations), one row per known id
 			execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
-				const [serviceId] = dialect.sqlToQuery(query).params as string[];
-				const organizationId = mocks.serviceOrganizations.get(serviceId ?? "");
-				return organizationId ? [{ organizationId }] : [];
+				const ids = new Set(
+					dialect.sqlToQuery(query).params.flat() as string[],
+				);
+				return [...ids].flatMap((serviceId) => {
+					const organizationId = mocks.serviceOrganizations.get(serviceId);
+					return organizationId ? [{ serviceId, organizationId }] : [];
+				});
 			}),
 		},
 	};
