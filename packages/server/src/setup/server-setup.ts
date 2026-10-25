@@ -44,26 +44,34 @@ export const slugify = (text: string | undefined) => {
 	});
 };
 
+/**
+ * Runs the setup script on the server and records the result on a "Setup
+ * Server" deployment. A failure marks that deployment as error, is reported
+ * through `onData` as a final "Setup Server: ❌ <reason>" line, and is then
+ * rethrown, so callers do not have to report it to the stream again.
+ */
 export const serverSetup = async (
 	serverId: string,
 	onData?: (data: any) => void,
 ) => {
-	const server = await findServerById(serverId);
-	const { LOGS_PATH } = paths();
-
-	const slugifyName = slugify(`server ${server.name}`);
-
-	const fullPath = path.join(LOGS_PATH, slugifyName);
-
-	await recreateDirectory(fullPath);
-
-	const deployment = await createServerDeployment({
-		serverId: server.serverId,
-		title: "Setup Server",
-		description: "Setup Server",
-	});
-
+	let deploymentId: string | undefined;
 	try {
+		const server = await findServerById(serverId);
+		const { LOGS_PATH } = paths();
+
+		const slugifyName = slugify(`server ${server.name}`);
+
+		const fullPath = path.join(LOGS_PATH, slugifyName);
+
+		await recreateDirectory(fullPath);
+
+		const deployment = await createServerDeployment({
+			serverId: server.serverId,
+			title: "Setup Server",
+			description: "Setup Server",
+		});
+		deploymentId = deployment.deploymentId;
+
 		const isBuildServer = server.serverType === "build";
 		onData?.(
 			isBuildServer
@@ -102,9 +110,75 @@ export const serverSetup = async (
 	} catch (err) {
 		console.log(err);
 
-		await updateDeploymentStatus(deployment.deploymentId, "error");
-		onData?.(`${err} ❌\n`);
+		if (deploymentId) {
+			// The setup failure is the error worth reporting, not this one.
+			await updateDeploymentStatus(deploymentId, "error").catch((error) =>
+				console.error("Could not mark the setup deployment as failed", error),
+			);
+		}
+		onData?.(
+			`\nSetup Server: ❌ ${err instanceof Error ? err.message : String(err)}\n`,
+		);
+		throw err;
 	}
+};
+
+/**
+ * The step headers the setup script echoes ("6. Setting up Network"). The
+ * Docker install also prints "3. Check Docker Installation" inside its own
+ * step, which is not a step of its own.
+ */
+const STEP_HEADER = /^\d+\.\s+\S/;
+const NESTED_STEP_HEADER = /^\d+\.\s+Check Docker Installation\b/;
+
+/**
+ * Remembers the last step header in the setup output, so a failure can name
+ * the step it stopped in. Output arrives in arbitrary chunks, so a line split
+ * across two chunks is joined before it is matched.
+ */
+export const createStepTracker = () => {
+	let partial = "";
+	let lastStep: string | undefined;
+	const consider = (line: string) => {
+		const text = line.trim();
+		if (STEP_HEADER.test(text) && !NESTED_STEP_HEADER.test(text)) {
+			lastStep = text.replace(/[\s.]+$/, "");
+		}
+	};
+	return {
+		push(chunk: string) {
+			const lines = (partial + chunk).split(/\r?\n/);
+			partial = lines.pop() ?? "";
+			for (const line of lines) consider(line);
+		},
+		get lastStep() {
+			if (partial) {
+				consider(partial);
+				partial = "";
+			}
+			return lastStep;
+		},
+	};
+};
+
+/**
+ * The error for a setup script that did not exit with status 0. ssh2 passes a
+ * null code when the command was killed by a signal or the channel closed
+ * without an exit status (the connection dropped); both are failures.
+ */
+export const setupExitError = (
+	code: number | null | undefined,
+	signal: string | null | undefined,
+	lastStep: string | undefined,
+) => {
+	const at = lastStep ? ` at step "${lastStep}"` : "";
+	if (signal) {
+		return new Error(`Setup was killed by signal ${signal}${at}`);
+	}
+	if (code === null || code === undefined) {
+		return new Error(`Setup ended without an exit status${at}`);
+	}
+	return new Error(`Setup failed${at} (exit code ${code})`);
 };
 
 export const reportDockerVersion = () => `
@@ -310,12 +384,30 @@ const installRequirements = async (
 						reject(err);
 						return;
 					}
+					const steps = createStepTracker();
 					stream
-						.on("close", () => {
+						// The script runs under `set -e`, so a failing step ends it with a
+						// non-zero status and skips every step after it.
+						.on("close", (code: number | null, signal?: string | null) => {
 							client.end();
-							resolve();
+							if (code === 0 && !signal) {
+								resolve();
+								return;
+							}
+							reject(setupExitError(code, signal, steps.lastStep));
+						})
+						.on("error", (error: Error) => {
+							client.end();
+							reject(
+								new Error(
+									`Setup output stream failed${
+										steps.lastStep ? ` at step "${steps.lastStep}"` : ""
+									}: ${error.message}`,
+								),
+							);
 						})
 						.on("data", (data: string) => {
+							steps.push(data.toString());
 							onData?.(data.toString());
 						})
 						.stderr.on("data", (data) => {
@@ -364,6 +456,11 @@ const installRequirements = async (
 					onData?.(friendlyMessage);
 					reject(new Error(`SSH connection error: ${technicalDetail}`));
 				}
+			})
+			// A no-op once the script has settled; otherwise the connection went
+			// away before the script reported how it ended.
+			.on("close", () => {
+				reject(new Error("SSH connection closed before setup finished"));
 			})
 			.connect({
 				host: server.ipAddress,

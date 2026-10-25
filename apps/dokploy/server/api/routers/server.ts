@@ -386,8 +386,9 @@ export const serverRouter = createTRPCRouter({
 				}
 				return observable<string>((emit) => {
 					// The subscription outlives this call, so a failure (for example the
-					// server being offline) is reported through the stream rather than
-					// left as an unhandled rejection.
+					// server being offline, or a setup step exiting non-zero) must not
+					// be left as an unhandled rejection. serverSetup has already sent
+					// it to the stream as "Setup Server: ❌ ...", so it is only logged.
 					serverSetup(input.serverId, (log) => {
 						emit.next(log);
 					}).catch((error: unknown) => {
@@ -395,9 +396,6 @@ export const serverRouter = createTRPCRouter({
 							"server.setupWithLogs failed",
 							{ serverId: input.serverId },
 							error instanceof Error ? error.message : String(error),
-						);
-						emit.next(
-							`\n${error instanceof Error ? error.message : String(error)} ❌\n`,
 						);
 					});
 				});
