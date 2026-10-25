@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**Tightened access to the web server settings and monitoring configuration** (T-8810, security).
+
 ### New in v0.30.8-community.33
 
 Upgrade notes: three additive database migrations (0220-0222), guarded so a re-run is a no-op; details at the end of this section. The stuck-deployment watchdog (T-7393) is on after the upgrade: a deployment is failed after 90 minutes of wall time, or after 20 minutes with no log output (both limits, and the switch, are in Settings, Deployments). For a compose with "Create env file" on, the `.env` Dokploy writes no longer carries the docker and compose settings that T-7138 leaves out (`COMPOSE_*` names outside its allowlist, `BUILDX_*`, `BUILDKIT_*`, `GIT_*`, `XDG_*` and the like), as a stack's staged environment no longer does. The Update dialog's "Install a specific version" and rollback (T-7529) start working with this release. The update to v0.30.8-community.33 is still made by the older version's Update Server button, which records no rollback, so "Roll back" is first offered after the next update made from v0.30.8-community.33. Several fixes below refuse composes, custom commands or patches that deployed before; each of those entries has its own upgrade note.
