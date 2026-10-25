@@ -15,6 +15,7 @@ import {
 	IS_CLOUD,
 	redactServerSshKey,
 	removeDeploymentsByServerId,
+	ServerSetupError,
 	serverAudit,
 	serverSetup,
 	serverValidate,
@@ -64,6 +65,43 @@ import {
 	server,
 } from "@/server/db/schema";
 import { applyDockerCleanupSchedule } from "@/server/utils/docker-cleanup";
+
+/**
+ * A setup that failed on the server (a step exited non-zero, SSH failed) is
+ * the server's state, not a Dokploy bug, so it is PRECONDITION_FAILED: the
+ * tRPC handler only sends INTERNAL_SERVER_ERROR to Sentry. Anything else is
+ * rethrown as it is.
+ */
+const toSetupError = (error: unknown) =>
+	error instanceof ServerSetupError
+		? new TRPCError({
+				code: "PRECONDITION_FAILED",
+				message: error.message,
+				cause: error,
+			})
+		: error;
+
+/** Every setup attempt is audited: it runs commands on the server even when it fails. */
+const auditSetup = (
+	ctx: Parameters<typeof audit>[0],
+	target: { serverId: string; name: string },
+	failure?: { error: unknown },
+) =>
+	audit(ctx, {
+		action: "update",
+		resourceType: "server",
+		resourceId: target.serverId,
+		resourceName: target.name,
+		metadata: failure
+			? {
+					outcome: "failure",
+					reason:
+						failure.error instanceof Error
+							? failure.error.message
+							: String(failure.error),
+				}
+			: { outcome: "success" },
+	});
 
 // Users without server.read only get what the server pickers render
 const toServerOptions = async (
@@ -345,24 +383,21 @@ export const serverRouter = createTRPCRouter({
 	setup: withPermission("server", "create")
 		.input(apiFindOneServer)
 		.mutation(async ({ input, ctx }) => {
-			try {
-				const server = await findServerById(input.serverId);
-				if (server.organizationId !== ctx.session.activeOrganizationId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You are not authorized to setup this server",
-					});
-				}
-				const currentServer = await serverSetup(input.serverId);
-				await audit(ctx, {
-					action: "update",
-					resourceType: "server",
-					resourceId: input.serverId,
-					resourceName: server.name,
+			const server = await findServerById(input.serverId);
+			if (server.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "UNAUTHORIZED",
+					message: "You are not authorized to setup this server",
 				});
-				return currentServer;
+			}
+			let failure: { error: unknown } | undefined;
+			try {
+				return await serverSetup(input.serverId);
 			} catch (error) {
-				throw error;
+				failure = { error };
+				throw toSetupError(error);
+			} finally {
+				await auditSetup(ctx, server, failure);
 			}
 		}),
 	setupWithLogs: withPermission("server", "create")
@@ -386,20 +421,22 @@ export const serverRouter = createTRPCRouter({
 				}
 				return observable<string>((emit) => {
 					// The subscription outlives this call, so a failure (for example the
-					// server being offline) is reported through the stream rather than
-					// left as an unhandled rejection.
+					// server being offline, or a setup step exiting non-zero) must not
+					// be left as an unhandled rejection. serverSetup has already sent
+					// it to the stream as "Setup Server: ❌ ...", so it is only logged.
 					serverSetup(input.serverId, (log) => {
 						emit.next(log);
-					}).catch((error: unknown) => {
-						console.error(
-							"server.setupWithLogs failed",
-							{ serverId: input.serverId },
-							error instanceof Error ? error.message : String(error),
-						);
-						emit.next(
-							`\n${error instanceof Error ? error.message : String(error)} ❌\n`,
-						);
-					});
+					}).then(
+						() => auditSetup(ctx, server),
+						(error: unknown) => {
+							console.error(
+								"server.setupWithLogs failed",
+								{ serverId: input.serverId },
+								error instanceof Error ? error.message : String(error),
+							);
+							return auditSetup(ctx, server, { error });
+						},
+					);
 				});
 			} catch (error) {
 				throw error;

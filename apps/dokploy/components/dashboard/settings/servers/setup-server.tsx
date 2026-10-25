@@ -69,6 +69,11 @@ export const SetupServer = ({ serverId, children }: Props) => {
 				if (log === "Deployment completed successfully!") {
 					setIsDeploying(false);
 				}
+				if (typeof log === "string" && log.includes("Setup Server: ❌")) {
+					toast.error("Error setting up the server", {
+						description: log.replace("Setup Server: ❌", "").trim(),
+					});
+				}
 				const parsedLogs = parseLogs(log);
 				setFilteredLogs((prev) => [...prev, ...parsedLogs]);
 			},
