@@ -33,6 +33,18 @@ import {
 import { api } from "@/utils/api";
 import { formatBytes } from "./restore-backup";
 
+// The link is a bearer URL to a whole dump: it is opened without a Referer and
+// without keeping a handle on the new page.
+const openDownload = (url: string) => {
+	const anchor = document.createElement("a");
+	anchor.href = url;
+	anchor.rel = "noreferrer noopener";
+	anchor.referrerPolicy = "no-referrer";
+	document.body.appendChild(anchor);
+	anchor.click();
+	anchor.remove();
+};
+
 interface Props {
 	backupId: string;
 }
@@ -71,7 +83,11 @@ export const ShowBackupFiles = ({ backupId }: Props) => {
 	const canDownload = !!context?.canRestore;
 
 	const download = api.backup.getDownloadUrl.useMutation({
-		onSuccess: ({ url }) => window.location.assign(url),
+		onSuccess: ({ url }) => {
+			openDownload(url);
+			// Drop the link from the mutation cache once it is used.
+			download.reset();
+		},
 		onError: (error) => toast.error(error.message),
 	});
 
