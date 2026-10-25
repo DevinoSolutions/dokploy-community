@@ -76,6 +76,7 @@ import {
 	ComposeFileLinkError,
 	getComposeFileLinkError,
 	getGuardedReadCommand,
+	MV_REFUSAL_MESSAGE,
 } from "@dokploy/server/utils/compose-file-guard";
 import {
 	getInstallStagedComposeCommand,
@@ -912,6 +913,31 @@ describe("putting a file in place in a real shell", () => {
 		const result = put(`${tmp}/staged.yml`, `${code()}/docker-compose.yml`);
 		expect(result.status).not.toBe(0);
 		expect(readdirSync(outside()).sort()).toEqual([".env", "target.yml"]);
+	});
+
+	// A host whose `mv` cannot rename over the name (here: one without `-T`) is
+	// refused, never served by a plain `mv`, which would follow a directory link.
+	itWithShell("refuses when mv -T fails, and leaves no temporary file", () => {
+		writeFileSync(`${tmp}/staged.yml`, SPEC);
+		writeFileSync(`${code()}/docker-compose.yml`, "old: true\n");
+		const stubs = `${tmp}/mvstub`;
+		mkdirSync(stubs, { recursive: true });
+		// Any mv that is given -T fails; a plain mv would work, and must not run.
+		writeFileSync(
+			`${stubs}/mv`,
+			'#!/bin/sh\nfor a in "$@"; do [ "$a" = "-T" ] && exit 1; done\necho PLAIN_MV >> "$0.log"\nexec /bin/mv "$@"\n',
+			{ mode: 0o755 },
+		);
+		const result = run(
+			`PATH='${stubs.replace(/^([A-Za-z]):/, (_, d: string) => `/${d.toLowerCase()}`)}':"$PATH"\n${ATOMIC_PUT_FUNCTION}\n__dokploy_put '${tmp}/staged.yml' '${code()}/docker-compose.yml' '${code()}'`,
+		);
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain(MV_REFUSAL_MESSAGE);
+		expect(readFileSync(`${code()}/docker-compose.yml`, "utf8")).toBe(
+			"old: true\n",
+		);
+		expect(leftovers()).toEqual([]);
+		expect(existsSync(`${stubs}/mv.log`)).toBe(false);
 	});
 });
 

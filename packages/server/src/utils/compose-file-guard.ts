@@ -30,6 +30,10 @@ import {
 export const COMPOSE_FILE_LINK_MESSAGE =
 	"The compose file is, or goes through, a symbolic link that leaves the repository; Dokploy only deploys a regular file inside the repository.";
 
+/** Shown when the host's `mv` cannot replace a file by renaming over it. */
+export const MV_REFUSAL_MESSAGE =
+	"Could not replace the compose file atomically (mv -T is required on this host).";
+
 /**
  * Defines `__dokploy_put SOURCE DESTINATION CODE_DIRECTORY`, which every
  * write of the compose file and its `.env` goes through (see
@@ -37,6 +41,7 @@ export const COMPOSE_FILE_LINK_MESSAGE =
  */
 export const ATOMIC_PUT_FUNCTION = getAtomicPutFunction(
 	`❌ Compose refused: ${COMPOSE_FILE_LINK_MESSAGE}`,
+	`❌ ${MV_REFUSAL_MESSAGE}`,
 );
 
 /** The checkout the compose file is read from and written to. */
