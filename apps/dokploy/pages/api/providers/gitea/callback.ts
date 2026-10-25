@@ -2,6 +2,9 @@ import { updateGitea } from "@dokploy/server";
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
 	checkGitProviderOAuthAccess,
+	clearGitProviderOAuthNonceCookie,
+	gitProviderOAuthNonceMatches,
+	readGitProviderOAuthNonceCookie,
 	verifyGitProviderOAuthState,
 } from "@/server/utils/git-provider-oauth";
 import { findGitea, type Gitea, redirectWithError } from "./helper";
@@ -37,6 +40,10 @@ export default async function handler(
 ) {
 	const { code, state } = req.query;
 
+	// The nonce cookie is single use: it is cleared whatever the outcome.
+	const cookieNonce = readGitProviderOAuthNonceCookie(req, "gitea");
+	clearGitProviderOAuthNonceCookie(req, res, "gitea");
+
 	if (!code || Array.isArray(code) || !state || Array.isArray(state)) {
 		return redirectWithError(
 			res,
@@ -49,6 +56,11 @@ export default async function handler(
 	const oauthState = verifyGitProviderOAuthState(state, "gitea");
 	if (!oauthState) {
 		return res.status(400).json({ error: "Invalid or expired OAuth state" });
+	}
+	if (!gitProviderOAuthNonceMatches(cookieNonce, oauthState.nonce)) {
+		return res
+			.status(403)
+			.json({ error: "OAuth flow was not started from this browser" });
 	}
 
 	const gitea = await findGitea(oauthState.providerId);

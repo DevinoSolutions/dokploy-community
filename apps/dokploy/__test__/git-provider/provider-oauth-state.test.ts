@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+import { HARDCODED_LEGACY_SECRET } from "@dokploy/server/lib/auth-secret";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -85,6 +87,8 @@ const USER = "user-1";
 const OTHER_USER = "user-2";
 const GITLAB_ID = "gitlab-1";
 const GITEA_ID = "gitea-1";
+const NONCE = "browser-nonce-0123456789";
+const NONCE_COOKIES = `session=1; dokploy_gitlab_oauth_nonce=${NONCE}; dokploy_gitea_oauth_nonce=${NONCE}`;
 
 const gitlabRow = (overrides: Record<string, unknown> = {}) => ({
 	gitlabId: GITLAB_ID,
@@ -119,6 +123,17 @@ const buildRes = () => {
 		statusCode: 0,
 		body: undefined as unknown,
 		redirectedTo: undefined as string | undefined,
+		headers: {} as Record<string, unknown>,
+		setHeader(name: string, value: unknown) {
+			res.headers[name.toLowerCase()] = value;
+			return res;
+		},
+		getHeader(name: string) {
+			return res.headers[name.toLowerCase()];
+		},
+		get setCookies() {
+			return (res.headers["set-cookie"] as string[] | undefined) ?? [];
+		},
 		status(code: number) {
 			res.statusCode = code;
 			return res;
@@ -138,12 +153,19 @@ const buildRes = () => {
 
 type Handler = (req: NextApiRequest, res: NextApiResponse) => unknown;
 
-const call = async (handler: Handler, query: Record<string, unknown>) => {
+const call = async (
+	handler: Handler,
+	query: Record<string, unknown>,
+	{
+		cookie = NONCE_COOKIES,
+		headers = {},
+	}: { cookie?: string; headers?: Record<string, string> } = {},
+) => {
 	const res = buildRes();
 	const req = {
 		method: "GET",
 		query,
-		headers: { cookie: "session=1" },
+		headers: { cookie, ...headers },
 	} as unknown as NextApiRequest;
 	await handler(req, res as unknown as NextApiResponse);
 	return res;
@@ -156,7 +178,7 @@ const stateFor = (
 		userId: string;
 		organizationId: string;
 	}> = {},
-	options: { secret?: string; now?: number } = {},
+	options: { secret?: string; now?: number; nonce?: string } = {},
 ) =>
 	createGitProviderOAuthState(
 		{
@@ -166,7 +188,7 @@ const stateFor = (
 			organizationId: ORG,
 			...overrides,
 		},
-		options,
+		{ nonce: NONCE, ...options },
 	);
 
 const tamper = (state: string) => {
@@ -216,6 +238,7 @@ describe("git provider OAuth state", () => {
 			providerId: GITLAB_ID,
 			userId: USER,
 			organizationId: ORG,
+			nonce: NONCE,
 		});
 	});
 
@@ -502,6 +525,7 @@ describe("OAuth authorize routes", () => {
 			providerId: GITLAB_ID,
 			userId: USER,
 			organizationId: ORG,
+			nonce: expect.any(String),
 		});
 	});
 
@@ -532,6 +556,7 @@ describe("OAuth authorize routes", () => {
 			providerId: GITEA_ID,
 			userId: USER,
 			organizationId: ORG,
+			nonce: expect.any(String),
 		});
 	});
 
@@ -599,5 +624,272 @@ describe("GitHub app install callback", () => {
 
 		expect(res.statusCode).toBe(403);
 		expect(mocks.githubUpdateSet).not.toHaveBeenCalled();
+	});
+});
+
+describe("OAuth nonce cookie", () => {
+	const clearedCookie = (provider: "gitlab" | "gitea") =>
+		expect.stringMatching(
+			new RegExp(
+				`^dokploy_${provider}_oauth_nonce=; Path=/api/providers; Max-Age=0; HttpOnly; SameSite=Lax`,
+			),
+		);
+
+	it.each([
+		[
+			"GitLab",
+			"gitlab" as const,
+			() => gitlabCallback,
+			() => ({ code: "c", gitlabId: GITLAB_ID, state: stateFor("gitlab") }),
+		],
+		[
+			"Gitea",
+			"gitea" as const,
+			() => giteaCallback,
+			() => ({ code: "c", state: stateFor("gitea") }),
+		],
+	])(
+		"%s: rejects a callback without the nonce cookie",
+		async (_l, provider, handler, query) => {
+			const res = await call(handler() as Handler, query(), {
+				cookie: "session=1",
+			});
+
+			expect(res.statusCode).toBe(403);
+			expect(mocks.findGitlabById).not.toHaveBeenCalled();
+			expect(mocks.findGiteaById).not.toHaveBeenCalled();
+			expect(mocks.fetch).not.toHaveBeenCalled();
+			expect(mocks.updateGitlab).not.toHaveBeenCalled();
+			expect(mocks.updateGitea).not.toHaveBeenCalled();
+			expect(res.setCookies).toEqual([clearedCookie(provider)]);
+		},
+	);
+
+	it.each([
+		[
+			"GitLab",
+			() => gitlabCallback,
+			() => ({ code: "c", gitlabId: GITLAB_ID, state: stateFor("gitlab") }),
+		],
+		[
+			"Gitea",
+			() => giteaCallback,
+			() => ({ code: "c", state: stateFor("gitea") }),
+		],
+	])(
+		"%s: rejects a callback whose cookie does not match the state",
+		async (_l, handler, query) => {
+			const res = await call(handler() as Handler, query(), {
+				cookie: `dokploy_gitlab_oauth_nonce=${NONCE}x; dokploy_gitea_oauth_nonce=other-nonce-0123456789`,
+			});
+
+			expect(res.statusCode).toBe(403);
+			expect(mocks.fetch).not.toHaveBeenCalled();
+			expect(mocks.updateGitlab).not.toHaveBeenCalled();
+			expect(mocks.updateGitea).not.toHaveBeenCalled();
+		},
+	);
+
+	it("does not accept the Gitea cookie for a GitLab state", async () => {
+		const res = await call(
+			gitlabCallback,
+			{ code: "c", gitlabId: GITLAB_ID, state: stateFor("gitlab") },
+			{ cookie: `dokploy_gitea_oauth_nonce=${NONCE}` },
+		);
+
+		expect(res.statusCode).toBe(403);
+		expect(mocks.updateGitlab).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["a successful exchange", () => ({ state: stateFor("gitlab") })],
+		["a tampered state", () => ({ state: tamper(stateFor("gitlab")) })],
+		["a missing code", () => ({ code: undefined, state: stateFor("gitlab") })],
+	])("GitLab: clears the cookie after %s", async (_l, overrides) => {
+		const res = await call(gitlabCallback, {
+			code: "c",
+			gitlabId: GITLAB_ID,
+			...overrides(),
+		});
+
+		expect(res.setCookies).toEqual([clearedCookie("gitlab")]);
+	});
+
+	it.each([
+		["a successful exchange", () => ({ state: stateFor("gitea") })],
+		["a tampered state", () => ({ state: tamper(stateFor("gitea")) })],
+		["a missing state", () => ({ state: undefined })],
+	])("Gitea: clears the cookie after %s", async (_l, overrides) => {
+		const res = await call(giteaCallback, { code: "c", ...overrides() });
+
+		expect(res.setCookies).toEqual([clearedCookie("gitea")]);
+	});
+
+	it("marks the cleared cookie Secure on https", async () => {
+		const res = await call(
+			gitlabCallback,
+			{ code: "c", gitlabId: GITLAB_ID, state: stateFor("gitlab") },
+			{ headers: { "x-forwarded-proto": "https" } },
+		);
+
+		expect(res.setCookies[0]).toMatch(/; Secure$/);
+	});
+
+	it.each([
+		[
+			"GitLab",
+			"gitlab" as const,
+			() => gitlabAuthorize,
+			{ gitlabId: GITLAB_ID },
+		],
+		["Gitea", "gitea" as const, () => giteaAuthorize, { giteaId: GITEA_ID }],
+	])(
+		"%s: authorize sets the cookie to the state's nonce",
+		async (_l, provider, handler, q) => {
+			const res = await call(handler() as Handler, q, {
+				cookie: "session=1",
+				headers: { "x-forwarded-proto": "https" },
+			});
+
+			const state = new URL(res.redirectedTo ?? "").searchParams.get("state");
+			const nonce = verifyGitProviderOAuthState(state, provider)?.nonce;
+			expect(nonce).toMatch(/^[\w-]{20,}$/);
+			expect(res.setCookies).toEqual([
+				`dokploy_${provider}_oauth_nonce=${nonce}; Path=/api/providers; Max-Age=${GIT_PROVIDER_OAUTH_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax; Secure`,
+			]);
+		},
+	);
+
+	it("leaves Secure off on plain http", async () => {
+		const res = await call(gitlabAuthorize, { gitlabId: GITLAB_ID });
+
+		expect(res.setCookies[0]).not.toMatch(/Secure/);
+	});
+
+	it("accepts the cookie the authorize route set", async () => {
+		const start = await call(gitlabAuthorize, { gitlabId: GITLAB_ID });
+		const cookie = start.setCookies[0]?.split(";")[0] ?? "";
+		const state = new URL(start.redirectedTo ?? "").searchParams.get("state");
+
+		await call(
+			gitlabCallback,
+			{ code: "c", gitlabId: GITLAB_ID, state },
+			{ cookie: `session=1; ${cookie}` },
+		);
+
+		expect(mocks.updateGitlab).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("OAuth authorize: cross-site requests", () => {
+	it.each([
+		["GitLab", () => gitlabAuthorize, { gitlabId: GITLAB_ID }],
+		["Gitea", () => giteaAuthorize, { giteaId: GITEA_ID }],
+	])("%s: refuses Sec-Fetch-Site cross-site", async (_l, handler, q) => {
+		const res = await call(handler() as Handler, q, {
+			headers: { "sec-fetch-site": "cross-site" },
+		});
+
+		expect(res.statusCode).toBe(403);
+		expect(res.redirectedTo).toBeUndefined();
+		expect(res.setCookies).toEqual([]);
+		expect(mocks.validateRequest).not.toHaveBeenCalled();
+	});
+
+	it.each([["same-origin"], ["same-site"], ["none"], [undefined]])(
+		"allows Sec-Fetch-Site %s",
+		async (site) => {
+			const res = await call(
+				gitlabAuthorize,
+				{ gitlabId: GITLAB_ID },
+				{ headers: site ? { "sec-fetch-site": site } : {} },
+			);
+
+			expect(res.statusCode).toBe(307);
+		},
+	);
+});
+
+describe("OAuth state signing key", () => {
+	const LABEL = "dokploy:git-provider-oauth-state:v1";
+	const signatureOf = (state: string) => state.split(".")[2];
+	const signedWith = (key: Buffer | string, state: string) => {
+		const [version, payload] = state.split(".");
+		return createHmac("sha256", key)
+			.update(`${version}.${payload}`)
+			.digest("base64url");
+	};
+
+	it.each([
+		["an empty secret", ""],
+		["the legacy default secret", HARDCODED_LEGACY_SECRET],
+	])("signs with a process-local key for %s", (_l, secret) => {
+		const state = stateFor("gitlab", {}, { secret });
+
+		// Still verifiable inside this process...
+		expect(
+			verifyGitProviderOAuthState(state, "gitlab", { secret }),
+		).not.toBeNull();
+		// ...but not computable from the public value.
+		const derived = createHmac("sha256", secret).update(LABEL).digest();
+		expect(signatureOf(state)).not.toBe(signedWith(derived, state));
+		expect(signatureOf(state)).not.toBe(signedWith(secret, state));
+	});
+
+	it("derives the key from a configured secret", () => {
+		const secret = "a-configured-auth-secret";
+		const state = stateFor("gitlab", {}, { secret });
+		const derived = createHmac("sha256", secret).update(LABEL).digest();
+
+		expect(signatureOf(state)).toBe(signedWith(derived, state));
+	});
+});
+
+describe("OAuth authorize URL encoding", () => {
+	const awkward = "id&scope=sudo#frag x";
+
+	it("encodes the GitLab parameters", async () => {
+		mocks.findGitlabById.mockResolvedValue(
+			gitlabRow({ applicationId: awkward }),
+		);
+		const res = await call(gitlabAuthorize, { gitlabId: GITLAB_ID });
+		const url = new URL(res.redirectedTo ?? "");
+
+		expect(url.hash).toBe("");
+		expect(url.searchParams.get("client_id")).toBe(awkward);
+		expect(url.searchParams.getAll("scope")).toEqual([]);
+		expect(url.searchParams.get("scopes")).toBe(
+			"api read_user read_repository",
+		);
+		expect(url.searchParams.get("response_type")).toBe("code");
+		expect([...url.searchParams.keys()].sort()).toEqual([
+			"client_id",
+			"redirect_uri",
+			"response_type",
+			"scopes",
+			"state",
+		]);
+	});
+
+	it("encodes the Gitea parameters", async () => {
+		mocks.findGiteaById.mockResolvedValue(giteaRow({ clientId: awkward }));
+		const res = await call(giteaAuthorize, { giteaId: GITEA_ID });
+		const url = new URL(res.redirectedTo ?? "");
+
+		expect(url.hash).toBe("");
+		expect(url.searchParams.get("client_id")).toBe(awkward);
+		expect(url.searchParams.getAll("scope")).toEqual([
+			"read:repository write:repository read:user read:organization",
+		]);
+	});
+
+	it("refuses a GitLab URL that does not parse", async () => {
+		mocks.findGitlabById.mockResolvedValue(
+			gitlabRow({ gitlabUrl: "not a url" }),
+		);
+		const res = await call(gitlabAuthorize, { gitlabId: GITLAB_ID });
+
+		expect(res.statusCode).toBe(400);
+		expect(res.setCookies).toEqual([]);
 	});
 });

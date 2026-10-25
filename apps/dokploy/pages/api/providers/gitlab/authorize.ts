@@ -2,7 +2,10 @@ import { findGitlabById } from "@dokploy/server";
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
 	checkGitProviderOAuthAccess,
+	createGitProviderOAuthNonce,
 	createGitProviderOAuthState,
+	isCrossSiteRequest,
+	setGitProviderOAuthNonceCookie,
 } from "@/server/utils/git-provider-oauth";
 
 export default async function handler(
@@ -11,6 +14,10 @@ export default async function handler(
 ) {
 	if (req.method !== "GET") {
 		return res.status(405).json({ error: "Method not allowed" });
+	}
+
+	if (isCrossSiteRequest(req)) {
+		return res.status(403).json({ error: "Forbidden" });
 	}
 
 	const { gitlabId } = req.query;
@@ -32,17 +39,34 @@ export default async function handler(
 		return res.status(400).json({ error: "Incomplete OAuth configuration" });
 	}
 
-	const state = createGitProviderOAuthState({
-		provider: "gitlab",
-		providerId: gitlab.gitlabId,
-		userId: access.userId,
-		organizationId: access.organizationId,
-	});
+	let authUrl: URL;
+	try {
+		authUrl = new URL(`${gitlab.gitlabUrl}/oauth/authorize`);
+	} catch {
+		return res.status(400).json({ error: "Invalid GitLab URL" });
+	}
+
+	const nonce = createGitProviderOAuthNonce();
+	const state = createGitProviderOAuthState(
+		{
+			provider: "gitlab",
+			providerId: gitlab.gitlabId,
+			userId: access.userId,
+			organizationId: access.organizationId,
+		},
+		{ nonce },
+	);
 
 	// Same redirect_uri the callback sends with the token exchange.
-	const redirectUri = `${gitlab.redirectUri}?gitlabId=${gitlab.gitlabId}`;
-	const scope = "api read_user read_repository";
-	const authUrl = `${gitlab.gitlabUrl}/oauth/authorize?client_id=${gitlab.applicationId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scopes=${encodeURIComponent(scope)}&state=${encodeURIComponent(state)}`;
+	authUrl.searchParams.set("client_id", gitlab.applicationId);
+	authUrl.searchParams.set(
+		"redirect_uri",
+		`${gitlab.redirectUri}?gitlabId=${gitlab.gitlabId}`,
+	);
+	authUrl.searchParams.set("response_type", "code");
+	authUrl.searchParams.set("scopes", "api read_user read_repository");
+	authUrl.searchParams.set("state", state);
 
-	return res.redirect(307, authUrl);
+	setGitProviderOAuthNonceCookie(req, res, "gitlab", nonce);
+	return res.redirect(307, authUrl.toString());
 }

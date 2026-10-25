@@ -1,7 +1,10 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
 	checkGitProviderOAuthAccess,
+	createGitProviderOAuthNonce,
 	createGitProviderOAuthState,
+	isCrossSiteRequest,
+	setGitProviderOAuthNonceCookie,
 } from "@/server/utils/git-provider-oauth";
 import { findGitea, redirectWithError } from "./helper";
 
@@ -12,6 +15,10 @@ export default async function handler(
 	try {
 		if (req.method !== "GET") {
 			return res.status(405).json({ error: "Method not allowed" });
+		}
+
+		if (isCrossSiteRequest(req)) {
+			return res.status(403).json({ error: "Forbidden" });
 		}
 
 		const { giteaId } = req.query;
@@ -34,12 +41,16 @@ export default async function handler(
 			return redirectWithError(res, "Incomplete OAuth configuration");
 		}
 
-		const state = createGitProviderOAuthState({
-			provider: "gitea",
-			providerId: gitea.giteaId,
-			userId: access.userId,
-			organizationId: access.organizationId,
-		});
+		const nonce = createGitProviderOAuthNonce();
+		const state = createGitProviderOAuthState(
+			{
+				provider: "gitea",
+				providerId: gitea.giteaId,
+				userId: access.userId,
+				organizationId: access.organizationId,
+			},
+			{ nonce },
+		);
 
 		// Generate the Gitea authorization URL
 		const authorizationUrl = new URL(`${gitea.giteaUrl}/login/oauth/authorize`);
@@ -53,6 +64,7 @@ export default async function handler(
 		authorizationUrl.searchParams.append("state", state);
 
 		// Redirect user to Gitea authorization URL
+		setGitProviderOAuthNonceCookie(req, res, "gitea", nonce);
 		return res.redirect(307, authorizationUrl.toString());
 	} catch (error) {
 		console.error("Error initiating Gitea OAuth flow:", error);
