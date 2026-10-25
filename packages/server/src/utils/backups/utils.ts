@@ -829,3 +829,12 @@ export const getRclonePathAndFlags = async (
 	// are ignored for these providers.
 	return { flags: [], path, envVars: "" };
 };
+
+// Where a backup run writes its dumps in the destination: directly under the
+// backup prefix, except for a libsql database, which keeps them under its app
+// name. Mirrors the run*Backup helpers, not the keepLatestNBackups listing.
+export const getBackupFolder = (backup: BackupSchedule) => {
+	const libsqlAppName =
+		backup.backupType === "database" ? backup.libsql?.appName : undefined;
+	return `${libsqlAppName ? `${libsqlAppName}/` : ""}${normalizeS3Path(backup.prefix)}`;
+};
