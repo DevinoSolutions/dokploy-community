@@ -1,4 +1,8 @@
-import { parseGithubBaseUrl } from "@dokploy/server";
+import {
+	assertGithubHostReachable,
+	GithubHostError,
+	parseGithubBaseUrl,
+} from "@dokploy/server";
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
 	checkGitProviderCreateAccess,
@@ -35,6 +39,17 @@ export default async function handler(
 	const access = await checkGitProviderCreateAccess(req);
 	if (!access.ok) {
 		return res.status(access.status).json({ error: access.error });
+	}
+
+	// Same check the callback makes before it contacts the host, so a refused
+	// host is reported before the user is sent to GitHub.
+	try {
+		await assertGithubHostReachable(parsed.url);
+	} catch (error) {
+		if (error instanceof GithubHostError) {
+			return res.status(400).json({ error: error.message });
+		}
+		throw error;
 	}
 
 	const nonce = createGitProviderOAuthNonce();

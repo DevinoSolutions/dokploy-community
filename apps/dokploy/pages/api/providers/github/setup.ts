@@ -1,6 +1,7 @@
 import {
+	convertGithubManifest,
 	createGithub,
-	deriveGithubApiUrl,
+	GithubHostError,
 	parseGithubAppUrl,
 	parseGithubBaseUrl,
 	verifyGithubInstallation,
@@ -8,7 +9,6 @@ import {
 import { db } from "@dokploy/server/db";
 import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
-import { Octokit } from "octokit";
 import { github } from "@/server/db/schema";
 import {
 	checkGitProviderCreateAccess,
@@ -88,13 +88,16 @@ export default async function handler(
 		}
 
 		const baseUrl = parsed.url;
-		const octokit = new Octokit({ baseUrl: deriveGithubApiUrl(baseUrl) });
-		const { data } = await octokit.request(
-			"POST /app-manifests/{code}/conversions",
-			{
-				code,
-			},
-		);
+		// The host is resolved and checked before anything is sent to it.
+		let data: Awaited<ReturnType<typeof convertGithubManifest>>;
+		try {
+			data = await convertGithubManifest(baseUrl, code);
+		} catch (error) {
+			if (error instanceof GithubHostError) {
+				return res.status(400).json({ error: error.message });
+			}
+			throw error;
+		}
 
 		// The stored link is what the install step later sends the browser to.
 		if (!parseGithubAppUrl(data.html_url, baseUrl)) {

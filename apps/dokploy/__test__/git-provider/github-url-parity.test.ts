@@ -11,7 +11,18 @@ import { DEFAULT_GITHUB_URL, resolveGithubBaseUrl } from "@/utils/github-utils";
  *
  * The invariant: for the same input, both must make the same accept/reject
  * decision, and agree on the URL when they accept.
+ *
+ * Only the shape of the URL is shared. Which hosts are acceptable (no IP
+ * address, no internal name, unless DOKPLOY_GITHUB_ENTERPRISE_ALLOWED_HOSTS
+ * allows it) depends on the server's environment, so the client leaves that to
+ * the server, and the server side here is asked with every host allowed.
  */
+class AllHostsAllowed extends Set<string> {
+	override has() {
+		return true;
+	}
+}
+const allHostsAllowed = new AllHostsAllowed();
 const INPUTS = [
 	// Accepted
 	"https://github.com",
@@ -51,7 +62,7 @@ const INPUTS = [
 describe("client and server agree on GitHub base URLs", () => {
 	it.each(INPUTS)("%j", (input) => {
 		const client = resolveGithubBaseUrl(input);
-		const server = parseGithubBaseUrl(input);
+		const server = parseGithubBaseUrl(input, allHostsAllowed);
 
 		const clientAccepted = !client.error;
 		const serverAccepted = "url" in server;

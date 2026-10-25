@@ -8,6 +8,15 @@ import { findGithubById, type Github } from "@dokploy/server/services/github";
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { GIT_ALLOW_PROTOCOL_ENV } from "@dokploy/server/utils/providers/git-url";
+import {
+	assertGithubHostReachable,
+	GITHUB_REDIRECT_REFUSED,
+	GithubHostError,
+	type GithubHostGuardOptions,
+	getAllowedGithubHosts,
+	githubHostPolicyError,
+	githubInstanceRequestOptions,
+} from "@dokploy/server/utils/providers/github-host";
 import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { buildPinCommitCommand } from "@dokploy/server/utils/providers/pin-commit";
 import { createAppAuth } from "@octokit/auth-app";
@@ -20,12 +29,12 @@ import { getGitTokenAuthConfig } from "./git";
 export const DEFAULT_GITHUB_URL = "https://github.com";
 export const DEFAULT_GITHUB_API_URL = "https://api.github.com";
 
-export const parseGithubBaseUrl = (
+const parseGithubBaseUrlShape = (
 	githubUrl?: string | null,
-): { url: string } | { error: string } => {
+): { url: string; hostname: string } | { error: string } => {
 	const raw = githubUrl?.trim();
 	if (!raw) {
-		return { url: DEFAULT_GITHUB_URL };
+		return { url: DEFAULT_GITHUB_URL, hostname: "github.com" };
 	}
 
 	const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)
@@ -55,11 +64,29 @@ export const parseGithubBaseUrl = (
 		return { error: `"${hostname}" is not a fully qualified hostname` };
 	}
 
-	return { url: `${parsed.protocol}//${parsed.host}` };
+	return { url: `${parsed.protocol}//${parsed.host}`, hostname };
 };
 
+/**
+ * The GitHub base URL a user typed, or why it is refused. An IP address or an
+ * internal host name (localhost, .local, .internal) is refused unless its
+ * hostname is in `allowedHosts` (DOKPLOY_GITHUB_ENTERPRISE_ALLOWED_HOSTS); the
+ * name is resolved later, by assertGithubHostReachable.
+ */
+export const parseGithubBaseUrl = (
+	githubUrl?: string | null,
+	allowedHosts: ReadonlySet<string> = getAllowedGithubHosts(),
+): { url: string } | { error: string } => {
+	const result = parseGithubBaseUrlShape(githubUrl);
+	if ("error" in result) return result;
+	const policyError = githubHostPolicyError(result.hostname, allowedHosts);
+	return policyError ? { error: policyError } : { url: result.url };
+};
+
+// Stored values are only normalized here; the host policy applies when a URL
+// is entered (parseGithubBaseUrl) and before a request is sent.
 export const normalizeGithubUrl = (githubUrl?: string | null): string => {
-	const result = parseGithubBaseUrl(githubUrl);
+	const result = parseGithubBaseUrlShape(githubUrl);
 	return "url" in result ? result.url : DEFAULT_GITHUB_URL;
 };
 
@@ -120,6 +147,40 @@ export const parseGithubAppUrl = (
 	}
 };
 
+/**
+ * Exchanges the code GitHub hands back after the manifest form for the new
+ * app's credentials, at the instance `baseUrl` names. The host is checked
+ * first (GithubHostError when it is refused), redirects are not followed and
+ * the request times out.
+ */
+export const convertGithubManifest = async (
+	baseUrl: string,
+	code: string,
+	guard: GithubHostGuardOptions & { fetch?: typeof fetch } = {},
+) => {
+	await assertGithubHostReachable(baseUrl, guard);
+	const octokit = new Octokit({
+		baseUrl: deriveGithubApiUrl(baseUrl),
+		request: githubInstanceRequestOptions(guard.fetch),
+		// A refused host or redirect surfaces as a 500, which the retry plugin
+		// would repeat, and the manifest code can be used once.
+		retry: { enabled: false },
+	});
+	try {
+		const { data } = await octokit.request(
+			"POST /app-manifests/{code}/conversions",
+			{ code },
+		);
+		return data;
+	} catch (error) {
+		// Octokit re-wraps what the fetch threw, keeping only the message.
+		if (error instanceof Error && error.message === GITHUB_REDIRECT_REFUSED) {
+			throw new GithubHostError(GITHUB_REDIRECT_REFUSED);
+		}
+		throw error;
+	}
+};
+
 export type GithubInstallationCheck =
 	| { ok: true }
 	| { ok: false; reason: "invalid" | "not_found" | "unavailable" };
@@ -135,11 +196,21 @@ export const verifyGithubInstallation = async (
 		"githubAppId" | "githubPrivateKey" | "githubUrl"
 	>,
 	installationId: string,
+	guard: GithubHostGuardOptions & { fetch?: typeof fetch } = {},
 ): Promise<GithubInstallationCheck> => {
 	if (!/^[1-9][0-9]{0,14}$/.test(installationId)) {
 		return { ok: false, reason: "invalid" };
 	}
 	if (!githubProvider.githubAppId || !githubProvider.githubPrivateKey) {
+		return { ok: false, reason: "unavailable" };
+	}
+
+	try {
+		await assertGithubHostReachable(
+			normalizeGithubUrl(githubProvider.githubUrl),
+			guard,
+		);
+	} catch {
 		return { ok: false, reason: "unavailable" };
 	}
 
@@ -150,6 +221,10 @@ export const verifyGithubInstallation = async (
 			privateKey: githubProvider.githubPrivateKey,
 		},
 		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
+		request: githubInstanceRequestOptions(guard.fetch),
+		// A refused host or redirect surfaces as a 500, which the retry plugin
+		// would repeat, and the manifest code can be used once.
+		retry: { enabled: false },
 	});
 
 	try {

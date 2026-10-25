@@ -57,11 +57,16 @@ describe("verifyGithubInstallation", () => {
 		await verifyGithubInstallation(
 			{ ...app, githubUrl: "https://github.corp.acme.com" },
 			"42",
+			{
+				allowedHosts: new Set(),
+				resolveHost: async () => [{ address: "140.82.112.3", family: 4 }],
+			},
 		);
 
 		expect(mocks.constructed).toHaveBeenCalledWith(
 			expect.objectContaining({
 				baseUrl: "https://github.corp.acme.com/api/v3",
+				request: expect.objectContaining({ redirect: "manual" }),
 			}),
 		);
 	});

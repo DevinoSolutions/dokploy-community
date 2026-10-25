@@ -2,6 +2,11 @@
 // This file contains client-safe utilities for GitHub integration.
 // Duplicates parseGithubBaseUrl from @dokploy/server, which cannot be imported
 // here (node-only modules). Kept in step by github-url-parity.test.ts.
+//
+// Only the shape of the URL is checked here. Whether the host is acceptable
+// (no IP address, no internal host name unless DOKPLOY_GITHUB_ENTERPRISE_ALLOWED_HOSTS
+// lists it, and a name that resolves to a public address) is decided by the
+// server, which knows the allowlist; its message is shown when the setup starts.
 
 export const DEFAULT_GITHUB_URL = "https://github.com";
 
