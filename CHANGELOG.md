@@ -4,9 +4,13 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+### New in v0.30.8-community.33.1
+
+Hotfix on top of v0.30.8-community.33. No new database migrations; an instance still on v0.30.8-community.32.1 or older also runs the v0.30.8-community.33 migrations (0220-0222, additive).
+
 **Tightened access to the web server settings and monitoring configuration** (T-8810, security).
 
-**Tightened access to host-level terminals, containers and schedules** (T-8810, security).
+**Tightened access to host-level terminals, containers, schedules, volumes, backups and proxy settings** (T-8810, security). On an instance with several organizations, these host-level settings are managed from the organization that owns the instance (the first one created). Single-organization instances are unaffected.
 
 ### New in v0.30.8-community.33
 
