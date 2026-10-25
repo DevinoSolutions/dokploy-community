@@ -13,6 +13,7 @@ import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
+import { assertSafeComposePath } from "../compose-path";
 import { wildcardHostRegexp } from "../hostname-validation";
 import { execAsyncRemote } from "../process/execAsync";
 import { cloneBitbucketRepository } from "../providers/bitbucket";
@@ -76,6 +77,7 @@ export const getComposePath = (compose: Compose) => {
 	if (sourceType === "raw") {
 		path = "docker-compose.yml";
 	} else {
+		assertSafeComposePath(composePath);
 		path = composePath;
 	}
 
@@ -108,7 +110,7 @@ export const loadDockerComposeRemote = async (
 		}
 		const { stdout, stderr } = await execAsyncRemote(
 			compose.serverId,
-			`cat ${path}`,
+			`cat ${quote([path])}`,
 		);
 
 		if (stderr) {

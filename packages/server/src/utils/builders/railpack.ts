@@ -52,14 +52,16 @@ export const getRailpackCommand = async (
 		{ singleUse: false },
 	);
 
-	// Prepare command
+	// Prepare command. The build directory (from the build path) and the
+	// Railpack version are application settings: each is passed as a single
+	// argument.
 	const prepareArgs = [
 		"prepare",
-		buildAppDirectory,
+		quote([buildAppDirectory]),
 		"--plan-out",
-		`${buildAppDirectory}/railpack-plan.json`,
+		quote([`${buildAppDirectory}/railpack-plan.json`]),
 		"--info-out",
-		`${buildAppDirectory}/railpack-info.json`,
+		quote([`${buildAppDirectory}/railpack-info.json`]),
 	];
 
 	prepareArgs.push(...getEnvFlagArgs("--env", staged));
@@ -81,11 +83,13 @@ export const getRailpackCommand = async (
 		`secrets-hash=${secretsHash}`,
 		...(cacheKey ? ["--build-arg", `cache-key=${cacheKey}`] : []),
 		"--build-arg",
-		`BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend:v${application.railpackVersion}`,
+		quote([
+			`BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend:v${application.railpackVersion}`,
+		]),
 		"-f",
-		`${buildAppDirectory}/railpack-plan.json`,
+		quote([`${buildAppDirectory}/railpack-plan.json`]),
 		"--output",
-		`type=docker,name=${appName}`,
+		quote([`type=docker,name=${appName}`]),
 	];
 
 	// Add secrets properly formatted. The ones in the staged env file are in
@@ -102,13 +106,13 @@ export const getRailpackCommand = async (
 		}
 	}
 
-	buildArgs.push(buildAppDirectory);
+	buildArgs.push(quote([buildAppDirectory]));
 
 	const bashCommand = `
 
 # Ensure we have a builder with containerd (isolated per build)
 
-export RAILPACK_VERSION=${application.railpackVersion}
+export RAILPACK_VERSION=${quote([String(application.railpackVersion)])}
 # use sudo for non-root so the install can write to /usr/local/bin
 if [ "$(id -u)" -eq 0 ]; then
 	SUDO_CMD=""

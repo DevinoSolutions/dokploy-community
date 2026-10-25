@@ -27,7 +27,14 @@ export const getNixpacksCommand = async (
 		application.environment.env,
 	);
 
-	const args = ["build", buildAppDirectory, "--name", appName];
+	// The build directory comes from the application's build path: it is
+	// passed as a single argument.
+	const args = [
+		"build",
+		quote([buildAppDirectory]),
+		"--name",
+		quote([appName]),
+	];
 
 	if (cleanCache) {
 		args.push("--no-cache");
