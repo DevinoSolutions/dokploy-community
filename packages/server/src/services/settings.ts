@@ -17,6 +17,7 @@ import { compose } from "../db/schema";
 import {
 	ensureTraefikImage,
 	initializeTraefikService,
+	isImageId,
 	queueTraefikRecreate,
 	recreateStandaloneTraefik,
 	resolveRoutineTraefikImage,
@@ -749,18 +750,6 @@ export interface TraefikSetupOptions
 	additionalPorts?: FromCurrent<TraefikPorts>;
 }
 
-// Env and ports can be given as a function of what the host runs when the
-// queued job starts, so two overlapping actions don't restore stale values.
-type FromCurrent<T> = T | ((current: T) => T);
-
-type TraefikPorts = NonNullable<TraefikOptions["additionalPorts"]>;
-
-export interface TraefikSetupOptions
-	extends Omit<TraefikOptions, "env" | "additionalPorts"> {
-	env?: FromCurrent<string[]>;
-	additionalPorts?: FromCurrent<TraefikPorts>;
-}
-
 export const writeTraefikSetup = async (input: TraefikSetupOptions) => {
 	// One queued job per server: restoring the backup while another recreate
 	// has its container renamed away would leave both recreates fighting over
@@ -840,6 +829,51 @@ type TraefikVersionStatus =
 	| "up-to-date"
 	| "newer";
 
+const parseJsonList = (line: string | undefined): string[] => {
+	const parsed = JSON.parse(line || "null");
+	return Array.isArray(parsed) ? parsed : [];
+};
+
+// A recreate that couldn't keep the tag runs from the image ID, which names
+// neither a repository nor a version. Name it by the tags, the digests and the
+// version label Docker still has for it; the ID itself when there are none.
+const describeImageId = async (id: string, serverId?: string) => {
+	const command = `docker image inspect ${id} --format '{{json .RepoTags}}{{"\\n"}}{{json .RepoDigests}}{{"\\n"}}{{json .Config.Labels}}'`;
+	try {
+		const { stdout } = await rejectAfter(
+			serverId ? execAsyncRemote(serverId, command) : execAsync(command),
+			30_000,
+			"Timed out reading the Traefik image from this server after 30 seconds.",
+		);
+		const [tagLine, digestLine, labelLine] = stdout.trim().split("\n");
+		const tags = parseJsonList(tagLine);
+		const references = [...tags, ...parseJsonList(digestLine)];
+		const reference =
+			references.find((candidate) =>
+				OFFICIAL_TRAEFIK_REPOSITORIES.includes(
+					splitImageReference(candidate).repository,
+				),
+			) ?? references[0];
+		if (!reference) {
+			return id;
+		}
+		const { repository } = splitImageReference(reference);
+		const versionTag = tags.find(
+			(tag) =>
+				splitImageReference(tag).repository === repository &&
+				parseTraefikImageVersion(tag),
+		);
+		const labels: Record<string, string> =
+			JSON.parse(labelLine || "null") ?? {};
+		const labelVersion = labels["org.opencontainers.image.version"];
+		return (
+			versionTag ?? (labelVersion ? `${repository}:${labelVersion}` : reference)
+		);
+	} catch {
+		return id;
+	}
+};
+
 export const getTraefikOverview = async (serverId?: string) => {
 	const recommendedVersion = TRAEFIK_VERSION;
 
@@ -884,7 +918,10 @@ fi`;
 		};
 	}
 
-	const [image = "", state = "", startedAt = ""] = output.split("|");
+	const [reference = "", state = "", startedAt = ""] = output.split("|");
+	const image = isImageId(reference)
+		? await describeImageId(reference, serverId)
+		: reference;
 	const currentVersion = parseTraefikImageVersion(image);
 	const target = semver.coerce(recommendedVersion)?.version;
 
