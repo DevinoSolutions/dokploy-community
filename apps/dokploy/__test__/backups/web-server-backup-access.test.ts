@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+	// the organization that owns the instance
+	rootOrganization: "org-a",
 	createBackup: vi.fn(),
 	findBackupById: vi.fn(),
 	updateBackupById: vi.fn(),
@@ -35,6 +37,8 @@ vi.mock("@dokploy/server/services/permission", () => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	isRootOrganization: async (organizationId: string) =>
+		organizationId === mocks.rootOrganization,
 	createBackup: mocks.createBackup,
 	findBackupById: mocks.findBackupById,
 	updateBackupById: mocks.updateBackupById,
@@ -151,6 +155,7 @@ const drain = async (stream: unknown) => {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.rootOrganization = "org-a";
 	mocks.createBackup.mockResolvedValue({ backupId: "ws-1" });
 	mocks.findBackupById.mockResolvedValue(instanceBackup);
 	mocks.updateBackupById.mockResolvedValue({});
@@ -162,6 +167,54 @@ beforeEach(() => {
 	mocks.findDestinationRow.mockResolvedValue(ownDestination);
 	// The creator of the stored row administers org-a.
 	mocks.findMemberRow.mockResolvedValue({ role: "admin" });
+});
+
+describe("an admin of an organization that does not own the instance cannot manage web-server backups", () => {
+	const admin = callerAs("admin");
+	const owner = callerAs("owner");
+
+	beforeEach(() => {
+		mocks.rootOrganization = "org-root";
+	});
+
+	it.each([
+		["admin", admin],
+		["owner", owner],
+	])("refuses an %s on every route", async (_role, caller) => {
+		const forbidden = { code: "FORBIDDEN" };
+		await expect(caller.create(createInput)).rejects.toMatchObject(forbidden);
+		await expect(caller.update(updateInput)).rejects.toMatchObject(forbidden);
+		await expect(
+			caller.manualBackupWebServer({ backupId: "ws-1" }),
+		).rejects.toMatchObject(forbidden);
+		await expect(caller.one({ backupId: "ws-1" })).rejects.toMatchObject(
+			forbidden,
+		);
+		await expect(
+			caller.backupContext({ backupId: "ws-1" }),
+		).rejects.toMatchObject(forbidden);
+		await expect(caller.remove({ backupId: "ws-1" })).rejects.toMatchObject(
+			forbidden,
+		);
+		const stream = await caller.restoreBackupWithLogs(restoreInput);
+		await expect(drain(stream)).rejects.toMatchObject(forbidden);
+
+		expect(mocks.createBackup).not.toHaveBeenCalled();
+		expect(mocks.updateBackupById).not.toHaveBeenCalled();
+		expect(mocks.runWebServerBackup).not.toHaveBeenCalled();
+		expect(mocks.removeBackupById).not.toHaveBeenCalled();
+		expect(mocks.restoreWebServerBackup).not.toHaveBeenCalled();
+	});
+
+	it("leaves a service backup alone", async () => {
+		mocks.findBackupById.mockResolvedValue({
+			...instanceBackup,
+			backupId: "pg-bk",
+			databaseType: "postgres",
+			postgresId: "pg-1",
+		});
+		await expect(admin.one({ backupId: "pg-bk" })).resolves.toBeDefined();
+	});
 });
 
 describe("a plain member cannot manage web-server backups", () => {

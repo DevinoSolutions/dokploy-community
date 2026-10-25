@@ -64,6 +64,12 @@ export const findRootOrganization = async () =>
 export const isRootOrganization = async (organizationId: string) =>
 	(await findRootOrganization())?.id === organizationId;
 
+// A row that belongs to no organization can only be attributed to the owner of
+// the instance when the instance has just the one organization.
+export const isSingleOrganizationInstance = async () =>
+	(await db.query.organization.findMany({ columns: { id: true }, limit: 2 }))
+		.length === 1;
+
 export const ROOT_ORGANIZATION_DELETE_MESSAGE =
 	"This organization owns the Dokploy instance and can't be deleted";
 

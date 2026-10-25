@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	rootOrganization: "org-root",
+	singleOrganization: false,
 	findScheduleById: vi.fn(),
 	findScheduleOrganizationId: vi.fn(),
 	createDeploymentSchedule: vi.fn(),
@@ -46,6 +47,7 @@ vi.mock("@dokploy/server/services/admin", () => ({
 	getDokployUrl: vi.fn(),
 	isRootOrganization: async (organizationId: string) =>
 		organizationId === mocks.rootOrganization,
+	isSingleOrganizationInstance: async () => mocks.singleOrganization,
 }));
 
 vi.mock("@dokploy/server/utils/process/spawnAsync", () => ({
@@ -88,6 +90,7 @@ const hostRun = (organizationId: string | null) => ({
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.singleOrganization = false;
 	mocks.createDeploymentSchedule.mockResolvedValue({
 		deploymentId: "dep-1",
 		logPath: "run.log",
@@ -124,12 +127,24 @@ describe("running a host schedule", () => {
 		expect(mocks.spawnAsync).toHaveBeenCalledTimes(1);
 	});
 
-	it("runs a schedule that predates the organization column as before", async () => {
+	it("runs a schedule that has no organization while the instance has a single one", async () => {
+		mocks.singleOrganization = true;
 		mocks.findScheduleById.mockResolvedValue(hostRun(null));
 
 		await runCommand("sch-1");
 
 		expect(mocks.spawnAsync).toHaveBeenCalledTimes(1);
+	});
+
+	it("refuses a schedule that has no organization once the instance has several", async () => {
+		mocks.findScheduleById.mockResolvedValue(hostRun(null));
+
+		await expect(runCommand("sch-1")).rejects.toThrow(
+			/has no organization and this instance has several/,
+		);
+
+		expect(mocks.createDeploymentSchedule).not.toHaveBeenCalled();
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 	});
 
 	it("does not look at the organization of any other kind of schedule", async () => {

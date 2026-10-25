@@ -5,6 +5,7 @@ import type { Schedule } from "@dokploy/server/db/schema/schedule";
 import {
 	getDokployUrl,
 	isRootOrganization,
+	isSingleOrganizationInstance,
 } from "@dokploy/server/services/admin";
 import {
 	createDeploymentSchedule,
@@ -205,16 +206,17 @@ export const runCommand = async (scheduleId: string) => {
 	// A host schedule runs inside the Dokploy process, so only the organization
 	// that owns the instance may have one. Rows from other organizations (made
 	// before that rule) are left in place and not run. A row with no
-	// organization predates the column and is left as it was.
-	if (
-		!IS_CLOUD &&
-		scheduleType === "dokploy-server" &&
-		organizationId &&
-		!(await isRootOrganization(organizationId))
-	) {
-		throw new Error(
-			`Not running host schedule ${scheduleId}: it belongs to an organization that does not own this Dokploy instance.`,
-		);
+	// organization predates the column: it runs only while the instance has a
+	// single organization, which is then its owner.
+	if (!IS_CLOUD && scheduleType === "dokploy-server") {
+		const owned = organizationId
+			? await isRootOrganization(organizationId)
+			: await isSingleOrganizationInstance();
+		if (!owned) {
+			throw new Error(
+				`Not running host schedule ${scheduleId}: it ${organizationId ? "belongs to an organization that does not own this Dokploy instance" : "has no organization and this instance has several"}.`,
+			);
+		}
 	}
 
 	const deployment = await createDeploymentSchedule({
