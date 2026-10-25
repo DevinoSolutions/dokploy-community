@@ -70,6 +70,19 @@ describe("isBlockedGithubAddress", () => {
 		"2002:7f00:1::1",
 		"2002:0a00:0001::1",
 		"fec0::1",
+		// Expanded and mixed spellings get the verdict of the compressed form.
+		"0:0:0:0:0:ffff:7f00:1",
+		"0000:0000:0000:0000:0000:ffff:7f00:0001",
+		"0:0:0:0:0:ffff:127.0.0.1",
+		"0:0:0:0:0:ffff:a9fe:a9fe",
+		"::ffff:0:7f00:1",
+		"0:0:0:0:ffff:0:7f00:1",
+		"64:ff9b:1::7f00:1",
+		"0064:ff9b:0001:0000:0000:0000:7f00:0001",
+		"0064:ff9b:0000:0000:0000:0000:7f00:0001",
+		"2002:0a00:0001:0:0:0:0:1",
+		"FE80:0:0:0:0:0:0:1",
+		"[0:0:0:0:0:ffff:7f00:1]",
 	])("blocks %s", (address) => {
 		expect(isBlockedGithubAddress(address)).toBe(true);
 	});
@@ -88,6 +101,9 @@ describe("isBlockedGithubAddress", () => {
 		"::ffff:8.8.8.8",
 		"64:ff9b::808:808",
 		"2002:808:808::1",
+		"0:0:0:0:0:ffff:808:808",
+		"0000:0000:0000:0000:0000:ffff:0808:0808",
+		"2606:4700:4700:0:0:0:0:1111",
 	])("allows %s", (address) => {
 		expect(isBlockedGithubAddress(address)).toBe(false);
 	});

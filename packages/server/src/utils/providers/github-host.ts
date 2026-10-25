@@ -149,7 +149,18 @@ const embeddedIPv4 = (high: number, low: number) =>
  * compatible, NAT64, 6to4).
  */
 export const isBlockedGithubAddress = (address: string): boolean => {
-	const ip = address.replace(/^\[|\]$/g, "").split("%")[0] as string;
+	const literal = address.replace(/^\[|\]$/g, "").split("%")[0] as string;
+	// An IPv6 address is judged in its canonical spelling (compressed, an
+	// embedded IPv4 written in hex), so 0:0:0:0:0:ffff:7f00:1 gets the verdict
+	// of ::ffff:7f00:1.
+	let ip = literal;
+	if (isIPv6(literal)) {
+		try {
+			ip = new URL(`http://[${literal}]/`).hostname.replace(/^\[|\]$/g, "");
+		} catch {
+			return true;
+		}
+	}
 	if (isNonPublicIp(ip)) return true;
 	if (!isIPv6(ip)) return false;
 	const groups = ipv6Groups(ip);
@@ -167,6 +178,15 @@ export const isBlockedGithubAddress = (address: string): boolean => {
 	// ::/96 (IPv4-compatible, deprecated), fec0::/10 (site-local).
 	if ([g0, g1, g2, g3, g4, g5].every((g) => g === 0)) return true;
 	if ((g0 & 0xffc0) === 0xfec0) return true;
+	// ::ffff:0:0/96 (mapped) and ::ffff:0:0:0/96 (SIIT) embed an IPv4 address.
+	if ([g0, g1, g2, g3, g4].every((g) => g === 0) && g5 === 0xffff) {
+		return isNonPublicIp(embeddedIPv4(g6, g7));
+	}
+	if ([g0, g1, g2, g3].every((g) => g === 0) && g4 === 0xffff && g5 === 0) {
+		return isNonPublicIp(embeddedIPv4(g6, g7));
+	}
+	// 64:ff9b:1::/48 (local-use NAT64) is not routable on the internet.
+	if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return true;
 	// 64:ff9b::/96 (NAT64) and 2002::/16 (6to4) embed an IPv4 address.
 	if (g0 === 0x64 && g1 === 0xff9b && [g2, g3, g4, g5].every((g) => g === 0)) {
 		return isNonPublicIp(embeddedIPv4(g6, g7));
