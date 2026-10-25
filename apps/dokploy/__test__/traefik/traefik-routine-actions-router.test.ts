@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
 	findServerById: vi.fn(),
 	assertRunningTraefikImageKept: vi.fn(),
+	assertTraefikInstalled: vi.fn(),
 	checkPortInUse: vi.fn(),
 	prepareEnvironmentVariables: vi.fn((env: string) =>
 		env ? env.split("\n") : [],
@@ -80,6 +81,7 @@ describe("routine Traefik actions never pick the Traefik image", () => {
 			organizationId: "org-a",
 		}));
 		mocks.assertRunningTraefikImageKept.mockResolvedValue(undefined);
+		mocks.assertTraefikInstalled.mockResolvedValue(undefined);
 		mocks.checkPortInUse.mockResolvedValue({ isInUse: false });
 		mocks.readEnvironmentVariables.mockResolvedValue("A=0");
 		mocks.readPorts.mockResolvedValue([]);
@@ -108,6 +110,20 @@ describe("routine Traefik actions never pick the Traefik image", () => {
 
 			expect(mocks.readEnvironmentVariables).not.toHaveBeenCalled();
 			expect(mocks.readPorts).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(routineActions)(
+		"%s is refused up front when the host has no Traefik",
+		async (_name, run) => {
+			mocks.assertTraefikInstalled.mockRejectedValue(
+				new Error("Resource type not found"),
+			);
+
+			await expect(run()).rejects.toMatchObject({
+				message: "Resource type not found",
+			});
+			expect(mocks.writeTraefikSetup).not.toHaveBeenCalled();
 		},
 	);
 

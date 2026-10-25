@@ -761,6 +761,15 @@ export interface TraefikSetupOptions
 	additionalPorts?: FromCurrent<TraefikPorts>;
 }
 
+// The env and ports are read inside the queued job, so a request would not
+// notice a host without Traefik; this tells the caller before it queues.
+export const assertTraefikInstalled = async (serverId?: string) => {
+	const resourceType = await getDockerResourceType("dokploy-traefik", serverId);
+	if (resourceType === "unknown") {
+		throw new DockerResourceNotFoundError();
+	}
+};
+
 export const writeTraefikSetup = async (input: TraefikSetupOptions) => {
 	// One queued job per server: restoring the backup while another recreate
 	// has its container renamed away would leave both recreates fighting over

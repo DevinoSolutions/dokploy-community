@@ -1,6 +1,7 @@
 import path from "node:path";
 import {
 	assertRunningTraefikImageKept,
+	assertTraefikInstalled,
 	checkGPUStatus,
 	checkPortInUse,
 	checkPostgresHealth,
@@ -152,6 +153,19 @@ const resolveTraefikFilePath = (
 const traefikUpdateLocks = new Map<string, symbol>();
 const traefikUpdateErrors = new Map<string, string>();
 
+// The queued job reads the host's env and ports, so a host without Traefik is
+// refused before queueing instead of failing in the background.
+const assertTraefikPresent = async (serverId: string | undefined) => {
+	try {
+		await assertTraefikInstalled(serverId);
+	} catch (error) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: error instanceof Error ? error.message : String(error),
+		});
+	}
+};
+
 // Env, ports and the dashboard toggle keep the running Traefik image; refuse
 // before queueing when its version tag can't be read.
 const assertTraefikImageKept = async (serverId: string | undefined) => {
@@ -264,6 +278,7 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 			await assertTraefikImageKept(input.serverId);
+			await assertTraefikPresent(input.serverId);
 			// If receive true, add 8080 to ports
 			if (input.enableDashboard) {
 				// Check if port 8080 is already in use before enabling dashboard
@@ -1167,6 +1182,7 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 			await assertTraefikImageKept(input.serverId);
+			await assertTraefikPresent(input.serverId);
 			const envs = prepareEnvironmentVariables(input.env);
 
 			// Run in background so the request returns immediately; client polls /api/health.
@@ -1445,6 +1461,7 @@ export const settingsRouter = createTRPCRouter({
 					});
 				}
 				await assertTraefikImageKept(input.serverId);
+				await assertTraefikPresent(input.serverId);
 
 				for (const port of input.additionalPorts) {
 					const portCheck = await checkPortInUse(
