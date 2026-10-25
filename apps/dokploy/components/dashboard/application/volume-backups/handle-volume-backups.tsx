@@ -39,6 +39,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useComposeFetchFallback } from "@/hooks/use-compose-fetch-fallback";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import type { CacheType } from "../domains/handle-domain";
@@ -161,6 +162,12 @@ export const HandleVolumeBackups = ({
 			refetchOnWindowFocus: false,
 			enabled: !!id && volumeBackupType === "compose",
 		},
+	);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		errorServices,
+		isLoadingServices,
 	);
 
 	const serviceName = form.watch("serviceName");

@@ -34,6 +34,7 @@ import {
 
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { fetchRefusalMessage } from "@/hooks/use-compose-fetch-fallback";
 import { api } from "@/utils/api";
 
 interface Props {
@@ -107,8 +108,8 @@ export const IsolatedDeploymentTab = ({ composeId }: Props) => {
 				await utils.project.all.invalidate();
 				setCompose(data);
 			});
-		} catch {
-			toast.error("Error generating preview");
+		} catch (error) {
+			toast.error(fetchRefusalMessage(error) ?? "Error generating preview");
 			setIsOpenPreview(false);
 		} finally {
 			setIsPreviewLoading(false);
