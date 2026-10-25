@@ -9,7 +9,7 @@ import {
 	findServerById,
 	updateServerById,
 } from "@dokploy/server/services/server";
-import { reloadDockerResource } from "@dokploy/server/services/settings";
+import { finishTraefikAfterSetup } from "@dokploy/server/services/settings";
 import {
 	getDefaultMiddlewares,
 	getDefaultServerTraefikConfig,
@@ -34,6 +34,32 @@ const generateToken = () => {
 // Printed by the setup script when the Traefik it left running needs a restart.
 // It stays in the setup log, so it reads as a status line.
 export const TRAEFIK_RESTART_MARKER = "Dokploy will restart dokploy-traefik";
+
+// What the setup script tells serverSetup about the Traefik it found.
+interface SetupSignals {
+	started: boolean;
+	restartTraefik: boolean;
+}
+
+// Restarts and restores through the server's Traefik queue, so neither can land
+// inside a recreate. A failure is reported, never thrown: the setup's own
+// result is what the caller needs.
+const settleTraefik = async (
+	serverId: string,
+	restart: boolean,
+	onData?: (data: any) => void,
+) => {
+	try {
+		await finishTraefikAfterSetup(serverId, restart);
+		if (restart) {
+			onData?.("\nTraefik restarted ✅\n");
+		}
+	} catch (error) {
+		onData?.(
+			`\nCould not restart or restore Traefik, check dokploy-traefik on the server: ${error instanceof Error ? error.message : String(error)}\n`,
+		);
+	}
+};
 
 export const slugify = (text: string | undefined) => {
 	if (!text) {
@@ -83,17 +109,14 @@ export const serverSetup = async (
 				? "\nInstalling Build Server Dependencies: ✅\n"
 				: "\nInstalling Server Dependencies: ✅\n",
 		);
-		const restartTraefik = await installRequirements(serverId, onData);
-		if (restartTraefik) {
-			// Queued with the other Traefik actions of this server, so it can't
-			// land inside a recreate and make that one roll back.
-			try {
-				await reloadDockerResource("dokploy-traefik", serverId);
-				onData?.("\nTraefik restarted ✅\n");
-			} catch (error) {
-				onData?.(
-					`\n⚠️ Could not restart Traefik, restart dokploy-traefik manually: ${error instanceof Error ? error.message : String(error)}\n`,
-				);
+		const signals: SetupSignals = { started: false, restartTraefik: false };
+		try {
+			await installRequirements(serverId, onData, signals);
+		} finally {
+			// Also after a failed run: the script may have repaired traefik.yml
+			// before a later step failed, and a re-run would not repair it again.
+			if (signals.started && !isBuildServer) {
+				await settleTraefik(serverId, signals.restartTraefik, onData);
 			}
 		}
 
@@ -393,7 +416,8 @@ ${setupPermissions()}
 
 const installRequirements = async (
 	serverId: string,
-	onData?: (data: any) => void,
+	onData: ((data: any) => void) | undefined,
+	signals: SetupSignals,
 ) => {
 	const client = new Client();
 	const server = await findServerById(serverId);
@@ -404,17 +428,17 @@ const installRequirements = async (
 
 	const isBuildServer = server.serverType === "build";
 
-	return new Promise<boolean>((resolve, reject) => {
+	return new Promise<void>((resolve, reject) => {
 		const steps = createStepTracker();
 		// The last output, so a marker split across two chunks is still found.
 		let recent = "";
-		let restartTraefik = false;
 		// The exit status arrives before the channel closes, and is kept in case
 		// the connection closes before the channel does.
 		let exit: { code: number | null; signal?: string | null } | undefined;
 		client
 			.once("ready", () => {
 				const command = server.command || defaultCommand(isBuildServer);
+				signals.started = true;
 				client.exec(command, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
@@ -428,7 +452,7 @@ const installRequirements = async (
 						.on("close", (code: number | null, signal?: string | null) => {
 							client.end();
 							if (code === 0 && !signal) {
-								resolve(restartTraefik);
+								resolve();
 								return;
 							}
 							reject(setupExitError(code, signal, steps.lastStep));
@@ -451,7 +475,9 @@ const installRequirements = async (
 							recent = (recent + data.toString()).slice(
 								-TRAEFIK_RESTART_MARKER.length * 2,
 							);
-							restartTraefik ||= recent.includes(TRAEFIK_RESTART_MARKER);
+							signals.restartTraefik ||= recent.includes(
+								TRAEFIK_RESTART_MARKER,
+							);
 							steps.push(data.toString());
 							onData?.(data.toString());
 						})
@@ -512,7 +538,7 @@ const installRequirements = async (
 			.on("close", () => {
 				if (exit) {
 					if (exit.code === 0 && !exit.signal) {
-						resolve(restartTraefik);
+						resolve();
 					} else {
 						reject(setupExitError(exit.code, exit.signal, steps.lastStep));
 					}
@@ -965,15 +991,16 @@ export const createTraefikInstance = () => {
 			fi
 		fi
 
-		# An interrupted recreate leaves only the stopped backup, which keeps the
-		# env and ports of the Traefik the host ran, so bring it back instead of
-		# creating a fresh one.
+		# A stopped dokploy-traefik-previous is the backup of a Traefik update, which
+		# is either running right now or was interrupted. It keeps the env and ports
+		# of the Traefik the host ran, so a fresh one is not created beside it.
+		# Dokploy restores it after this script, in the server's Traefik queue, so
+		# the restore can't land inside an update that is still running.
 		if [ "$TRAEFIK_SKIP_CREATE" != true ] \
 			&& ! $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1 \
 			&& $SUDO_CMD docker container inspect dokploy-traefik-previous > /dev/null 2>&1; then
-			echo "Restoring Traefik left behind by an interrupted update..."
-			$SUDO_CMD docker rename dokploy-traefik-previous dokploy-traefik
-			$SUDO_CMD docker start dokploy-traefik
+			echo "Traefik was left behind by an update, so no new one is created: Dokploy restores it after setup."
+			TRAEFIK_SKIP_CREATE=true
 		fi
 
 		if [ "$TRAEFIK_SKIP_CREATE" = true ]; then

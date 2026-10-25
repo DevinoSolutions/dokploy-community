@@ -511,6 +511,17 @@ fi`;
 	}
 };
 
+// Run after Setup Server, once its script has finished: a Traefik left as only
+// dokploy-traefik-previous is restored (when the live one is still missing by
+// the time its turn comes), and a repaired config gets its restart.
+export const finishTraefikAfterSetup = (
+	serverId: string | undefined,
+	restart: boolean,
+) =>
+	restart
+		? reloadDockerResource("dokploy-traefik", serverId)
+		: queueTraefikRecreate(serverId, () => restoreInterruptedTraefik(serverId));
+
 export const reloadDockerResource = async (
 	resourceName: string,
 	serverId?: string,

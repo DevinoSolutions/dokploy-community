@@ -69,13 +69,15 @@ describe("remote server setup: Traefik instance", () => {
 		expect(run?.split(" ").slice(-2)).toEqual(["--", TRAEFIK_IMAGE]);
 	});
 
-	it("restores the backup of an interrupted recreate instead of creating a fresh Traefik", () => {
+	it("leaves the backup of an update alone and creates no fresh Traefik", () => {
 		const { calls, output } = runSetup({ previous: true });
 
-		expect(calls).toContain("rename dokploy-traefik-previous dokploy-traefik");
-		expect(calls).toContain("start dokploy-traefik");
+		// A running update owns the backup; Dokploy restores it after setup, in
+		// the server's Traefik queue.
+		expect(calls.some((call) => call.startsWith("rename "))).toBe(false);
+		expect(calls.some((call) => call.startsWith("start "))).toBe(false);
 		expect(calls.some((call) => call.startsWith("run "))).toBe(false);
-		expect(output).toContain("Traefik already exists");
+		expect(output).toContain("Dokploy restores it after setup");
 	});
 
 	it("ignores a backup while the live container exists", () => {

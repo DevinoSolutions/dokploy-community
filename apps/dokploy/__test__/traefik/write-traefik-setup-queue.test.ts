@@ -1,4 +1,5 @@
 import {
+	finishTraefikAfterSetup,
 	reloadDockerResource,
 	writeTraefikSetup,
 } from "@dokploy/server/services/settings";
@@ -345,6 +346,66 @@ describe("writeTraefikSetup", () => {
 			"start new",
 			"remove old",
 			"exec docker restart dokploy-traefik",
+		]);
+	});
+
+	it("the restore after Setup Server leaves a recreate in flight alone", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		const update = writeTraefikSetup({ env: ["A=1"] });
+		await vi.advanceTimersByTimeAsync(1000);
+		// The update has renamed the live container away and is waiting to
+		// create the new one: the moment a restore outside the queue would break it.
+		expect(fake.containers).toMatchObject([
+			{ id: "old", name: "dokploy-traefik-previous" },
+		]);
+		const restore = finishTraefikAfterSetup(undefined, false);
+		await vi.runAllTimersAsync();
+
+		await update;
+		await restore;
+		expect(fake.log).not.toContain("rename old -> dokploy-traefik");
+		expect(fake.containers).toMatchObject([
+			{ id: "new", name: "dokploy-traefik", running: true },
+		]);
+	});
+
+	it("the restore after Setup Server puts back a Traefik that only exists as the backup", async () => {
+		const fake = fakeDocker([
+			{
+				id: "stale",
+				name: "dokploy-traefik-previous",
+				running: false,
+				image: "traefik:v3.6.25",
+				env: ["A=0"],
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		await finishTraefikAfterSetup(undefined, false);
+
+		expect(fake.log).toEqual([
+			"rename stale -> dokploy-traefik",
+			"start stale",
+		]);
+		expect(fake.containers).toMatchObject([
+			{ id: "stale", name: "dokploy-traefik", running: true, env: ["A=0"] },
 		]);
 	});
 
