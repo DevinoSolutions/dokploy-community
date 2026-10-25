@@ -260,6 +260,10 @@ describe("the repository URL", () => {
 		"https://user:secret@git.example.com/owner/repo.git",
 		"https://[2001:db8::1]/r",
 		"ssh://git@[2001:db8::1]:22/r",
+		"https://git.example.com:8443/owner/repo",
+		"ssh://git@host.example:22/owner/repo.git",
+		"git@[2001:db8::1]:owner/repo.git",
+		"deploy_user@git-1.internal:owner/repo.git",
 	])("accepts %s", (url) => {
 		expect(() => assertSafeTemplateGitUrl(url)).not.toThrow();
 	});
@@ -277,6 +281,16 @@ describe("the repository URL", () => {
 		"ext::sh -c id@host:repo",
 		"ssh://a@-oProxyCommand=x/repo",
 		"ssh://-oProxyCommand=x/repo",
+		"ssh://-oProxyCommand=x@host/r",
+		"ssh://[-oProxyCommand=x]/r",
+		"ssh://[-oX]:22/r",
+		"ssh://[::1/r",
+		"ssh://host:22x/r",
+		"ssh://ho$(id)st/r",
+		"https://-u@host/r",
+		"a@[-oX]:r",
+		"x@ho$(id)st:r",
+		"-u@host:r",
 		"-oProxyCommand=x:repo",
 		"a@-oProxyCommand=x:repo",
 		"https://-oProxyCommand=x/repo",
