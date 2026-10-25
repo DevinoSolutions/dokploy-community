@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // The plugin's own /organization/delete endpoint is disabled, so its hook is
@@ -60,13 +61,35 @@ describe("better-auth organization delete hook", () => {
 	});
 
 	it("refuses the root organization before cleaning anything up", async () => {
-		mocks.assertOrganizationDeletable.mockRejectedValue(new Error(MESSAGE));
+		mocks.assertOrganizationDeletable.mockRejectedValue(
+			new TRPCError({ code: "FORBIDDEN", message: MESSAGE }),
+		);
 
 		await expect(
 			hook()({ organization: { id: "org-root" } }),
 		).rejects.toMatchObject({ status: "FORBIDDEN", message: MESSAGE });
 
 		expect(mocks.removeOrganizationNotifications).not.toHaveBeenCalled();
+	});
+
+	it("lets any other failure through unchanged", async () => {
+		const failure = new Error("connection terminated");
+		mocks.assertOrganizationDeletable.mockRejectedValue(failure);
+
+		await expect(hook()({ organization: { id: "org-2" } })).rejects.toBe(
+			failure,
+		);
+
+		expect(mocks.removeOrganizationNotifications).not.toHaveBeenCalled();
+	});
+
+	it("lets a TRPCError of another code through unchanged", async () => {
+		const failure = new TRPCError({ code: "NOT_FOUND", message: "gone" });
+		mocks.assertOrganizationDeletable.mockRejectedValue(failure);
+
+		await expect(hook()({ organization: { id: "org-2" } })).rejects.toBe(
+			failure,
+		);
 	});
 
 	it("cleans up any other organization as before", async () => {
