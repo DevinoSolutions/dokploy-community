@@ -15,6 +15,7 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@dokploy/server")>();
 	return {
 		...actual,
+		isRootOrganization: vi.fn(async () => true),
 		findServerById: vi.fn(async () => ({
 			serverId: "srv-1",
 			organizationId: "org-1",
