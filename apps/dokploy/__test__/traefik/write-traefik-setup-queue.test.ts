@@ -1,4 +1,8 @@
-import { writeTraefikSetup } from "@dokploy/server/services/settings";
+import {
+	finishTraefikAfterSetup,
+	reloadDockerResource,
+	writeTraefikSetup,
+} from "@dokploy/server/services/settings";
 import {
 	queueTraefikRecreate,
 	restoreInterruptedTraefik,
@@ -31,6 +35,8 @@ type FakeContainer = {
 	name: string;
 	running: boolean;
 	image?: string;
+	env?: string[];
+	ports?: Record<string, { HostPort: string }[]>;
 };
 
 const fakeDocker = (initial: FakeContainer[]) => {
@@ -50,7 +56,7 @@ const fakeDocker = (initial: FakeContainer[]) => {
 			return {
 				Id: c.id,
 				Image: `id:${c.image}`,
-				Config: { Image: c.image },
+				Config: { Image: c.image, Env: c.env },
 				State: { Running: c.running, StartedAt: "steady" },
 			};
 		},
@@ -95,6 +101,9 @@ const fakeDocker = (initial: FakeContainer[]) => {
 				name,
 				running: false,
 				image: settings.Image as string,
+				env: settings.Env as string[] | undefined,
+				ports: (settings.HostConfig as { PortBindings: FakeContainer["ports"] })
+					.PortBindings,
 			});
 			log.push(`create ${id}`);
 			return container(id);
@@ -107,11 +116,26 @@ const fakeDocker = (initial: FakeContainer[]) => {
 			? "standalone"
 			: "unknown";
 
+	// What the shell commands that read the live container would print.
+	const shell = (command: string) => {
+		if (command.includes("RESOURCE_NAME")) return resourceType();
+		const live = containers.find((c) => c.name === "dokploy-traefik");
+		if (command.includes(".Config.Env")) {
+			return JSON.stringify(live?.env ?? null);
+		}
+		if (command.includes(".NetworkSettings.Ports")) {
+			return JSON.stringify(live?.ports ?? {});
+		}
+		log.push(`exec ${command}`);
+		return "";
+	};
+
 	return {
 		docker,
 		log,
 		containers,
 		resourceType,
+		shell,
 		images: () => containers.map((c) => [c.id, c.image]),
 	};
 };
@@ -211,6 +235,201 @@ describe("writeTraefikSetup", () => {
 		]);
 		expect(fake.containers).toMatchObject([
 			{ id: "new", name: "dokploy-traefik", running: true },
+		]);
+	});
+
+	it("reads env and ports when the job runs, so an earlier queued action isn't undone", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+				env: ["A=0"],
+				ports: {},
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		// Save env, then save ports: the ports action was prepared before the
+		// env action had recreated Traefik.
+		const saveEnv = writeTraefikSetup({
+			env: ["A=1"],
+			additionalPorts: (current) => current,
+		});
+		await vi.advanceTimersByTimeAsync(1000);
+		const savePorts = writeTraefikSetup({
+			env: (current) => current,
+			additionalPorts: () => [
+				{ targetPort: 9000, publishedPort: 9000, protocol: "tcp" },
+			],
+		});
+		await vi.runAllTimersAsync();
+
+		await expect(saveEnv).resolves.toBeUndefined();
+		await expect(savePorts).resolves.toBeUndefined();
+		expect(fake.containers).toMatchObject([
+			{
+				name: "dokploy-traefik",
+				running: true,
+				env: ["A=1"],
+				ports: expect.objectContaining({ "9000/tcp": expect.anything() }),
+			},
+		]);
+	});
+
+	it("hands the live env and ports to the functions", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+				env: ["A=0", "B=#kept"],
+				ports: {
+					"80/tcp": [{ HostPort: "80" }],
+					"8080/tcp": [{ HostPort: "8080" }],
+				},
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+		const env = vi.fn((current: string[]) => current);
+		const additionalPorts = vi.fn((current: unknown[]) => current);
+
+		const run = writeTraefikSetup({
+			env,
+			additionalPorts: additionalPorts as never,
+		});
+		await vi.runAllTimersAsync();
+		await run;
+
+		expect(env).toHaveBeenCalledWith(["A=0", "B=#kept"]);
+		expect(additionalPorts).toHaveBeenCalledWith([
+			{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
+		]);
+	});
+
+	it("a reload waits for a recreate in flight instead of restarting inside it", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		const action = writeTraefikSetup({ env: ["A=1"] });
+		await vi.advanceTimersByTimeAsync(1000);
+		const reload = reloadDockerResource("dokploy-traefik");
+		await vi.runAllTimersAsync();
+
+		await action;
+		await reload;
+		expect(fake.log).toEqual([
+			"rename old -> dokploy-traefik-previous",
+			"stop old",
+			"create new",
+			"start new",
+			"remove old",
+			"exec docker restart dokploy-traefik",
+		]);
+	});
+
+	it("the restore after Setup Server leaves a recreate in flight alone", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		const update = writeTraefikSetup({ env: ["A=1"] });
+		await vi.advanceTimersByTimeAsync(1000);
+		// The update has renamed the live container away and is waiting to
+		// create the new one: the moment a restore outside the queue would break it.
+		expect(fake.containers).toMatchObject([
+			{ id: "old", name: "dokploy-traefik-previous" },
+		]);
+		const restore = finishTraefikAfterSetup(undefined, false);
+		await vi.runAllTimersAsync();
+
+		await update;
+		await restore;
+		expect(fake.log).not.toContain("rename old -> dokploy-traefik");
+		expect(fake.containers).toMatchObject([
+			{ id: "new", name: "dokploy-traefik", running: true },
+		]);
+	});
+
+	it("the restore after Setup Server puts back a Traefik that only exists as the backup", async () => {
+		const fake = fakeDocker([
+			{
+				id: "stale",
+				name: "dokploy-traefik-previous",
+				running: false,
+				image: "traefik:v3.6.25",
+				env: ["A=0"],
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		await finishTraefikAfterSetup(undefined, false);
+
+		expect(fake.log).toEqual([
+			"rename stale -> dokploy-traefik",
+			"start stale",
+		]);
+		expect(fake.containers).toMatchObject([
+			{ id: "stale", name: "dokploy-traefik", running: true, env: ["A=0"] },
+		]);
+	});
+
+	it("a reload restores the backup of an interrupted recreate first", async () => {
+		const fake = fakeDocker([
+			{
+				id: "stale",
+				name: "dokploy-traefik-previous",
+				running: false,
+				image: "traefik:v3.6.25",
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		await reloadDockerResource("dokploy-traefik");
+
+		expect(fake.log).toEqual([
+			"rename stale -> dokploy-traefik",
+			"start stale",
+			"exec docker restart dokploy-traefik",
 		]);
 	});
 
