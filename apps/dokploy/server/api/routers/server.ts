@@ -41,6 +41,7 @@ import {
 import { audit } from "@/server/api/utils/audit";
 import {
 	assertContainerServiceReadable,
+	assertServerReachable,
 	filterReadableStats,
 } from "@/server/api/utils/container-service-access";
 import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
@@ -755,6 +756,8 @@ export const serverRouter = createTRPCRouter({
 				serverId,
 				ctx.session.activeOrganizationId,
 			);
+			// a member also needs the server granted before anything runs on it
+			await assertServerReachable(ctx, serverId);
 			// `docker stats` lists every container on the host, which several
 			// organizations can share. Everybody gets the containers of services
 			// they can read on that server; the host's own containers (Dokploy,

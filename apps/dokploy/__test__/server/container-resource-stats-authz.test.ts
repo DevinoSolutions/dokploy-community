@@ -24,6 +24,10 @@ const mocks = vi.hoisted(() => ({
 	idOf: (name: string) =>
 		Buffer.from(name).toString("hex").padEnd(64, "0").slice(0, 64),
 	commands: [] as { serverId?: string; command: string }[],
+	// servers the caller was granted
+	servers: new Set<string>(),
+	// database round trips, to show they do not grow with the containers
+	queries: 0,
 }));
 
 vi.mock("@dokploy/server/db", async (importOriginal) => {
@@ -32,10 +36,18 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 	return {
 		...original,
 		db: {
-			query: { member: { findFirst: vi.fn(async () => mocks.member) } },
+			query: {
+				member: {
+					findFirst: vi.fn(async () => {
+						mocks.queries++;
+						return mocks.member;
+					}),
+				},
+			},
 			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
 					where: async (condition: Parameters<PgDialect["sqlToQuery"]>[0]) => {
+						mocks.queries++;
 						// no preview deployments in these tests
 						if (!("serviceId" in fields)) return [];
 						// a row only answers a lookup for its own appName
@@ -44,15 +56,23 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 							.filter(
 								(row) => row.table === table && params.includes(row.appName),
 							)
-							.map(({ serviceId, serverId }) => ({ serviceId, serverId }));
+							.map(({ serviceId, serverId, appName }) => ({
+								serviceId,
+								serverId,
+								appName,
+							}));
 					},
 				}),
 			}),
-			// findServiceOrganizationId passes the service id as the first param
+			// the organization of one service id (findServiceOrganizationId) or of
+			// a batch of them (findServiceOrganizations), one row per known id
 			execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
-				const [serviceId] = dialect.sqlToQuery(query).params as string[];
-				const organizationId = mocks.serviceOrganizations.get(serviceId ?? "");
-				return organizationId ? [{ organizationId }] : [];
+				mocks.queries++;
+				const ids = new Set(dialect.sqlToQuery(query).params as string[]);
+				return [...ids].flatMap((serviceId) => {
+					const organizationId = mocks.serviceOrganizations.get(serviceId);
+					return organizationId ? [{ serviceId, organizationId }] : [];
+				});
 			}),
 		},
 	};
@@ -128,6 +148,7 @@ vi.mock("@dokploy/server/services/server", async (importOriginal) => ({
 		serverId,
 		organizationId: serverId === "server-b" ? "org-b" : "org-a",
 	})),
+	getAccessibleServerIds: vi.fn(async () => mocks.servers),
 }));
 
 const { appRouter } = await import("@/server/api/root");
@@ -185,6 +206,8 @@ beforeEach(() => {
 	mocks.serviceOrganizations.clear();
 	mocks.hosts.clear();
 	mocks.commands.length = 0;
+	mocks.servers = new Set(["server-a"]);
+	mocks.queries = 0;
 
 	// org-a: app-a and app-a2 and cmp-a; org-b: app-b, all on the local host
 	service(applications, "app-a", "org-a");
@@ -288,6 +311,50 @@ describe("server.getContainerResourceStats", () => {
 			"dokploy-traefik",
 		]);
 	});
+
+	it("refuses a member a server of the organization they were not granted, before running anything", async () => {
+		service(applications, "app-r", "org-a", "server-a");
+		host("server-a", { "c-r": swarm("app-r-abc123") });
+		mocks.servers = new Set(["server-c"]);
+		as("member", ["app-r"]);
+		await expect(
+			caller.server.getContainerResourceStats({ serverId: "server-a" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.commands).toHaveLength(0);
+	});
+
+	it.each(["member", "owner"] as const)(
+		"makes as many database queries for 30 containers as for 3, for a %s",
+		async (role) => {
+			const queriesFor = async (count: number) => {
+				mocks.serviceRows = [];
+				mocks.serviceOrganizations.clear();
+				const containers: Record<string, Record<string, string>> = {
+					...systemContainers,
+				};
+				const granted: string[] = [];
+				for (let i = 0; i < count; i++) {
+					const organization = i % 3 === 0 ? "org-b" : "org-a";
+					service(i % 2 ? compose : applications, `svc-${i}`, organization);
+					containers[`c-${i}`] = swarm(`svc-${i}-abc123`);
+					// a second replica of the same service
+					containers[`c-${i}-2`] = swarm(`svc-${i}-abc123`);
+					if (i % 2) granted.push(`svc-${i}`);
+				}
+				host("local", containers);
+				as(role, granted);
+				mocks.queries = 0;
+				const stats = await caller.server.getContainerResourceStats();
+				return { queries: mocks.queries, rows: stats.length };
+			};
+
+			const small = await queriesFor(3);
+			const large = await queriesFor(30);
+			expect(large.rows).toBeGreaterThan(small.rows);
+			expect(large.queries).toBe(small.queries);
+			expect(large.queries).toBeLessThanOrEqual(16);
+		},
+	);
 
 	it("does not show a remote service's containers on the local host", async () => {
 		service(applications, "app-r", "org-a", "server-a");
