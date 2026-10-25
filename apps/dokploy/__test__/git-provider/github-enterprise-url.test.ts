@@ -5,7 +5,8 @@ import {
 	normalizeGithubUrl,
 	parseGithubBaseUrl,
 } from "@dokploy/server/utils/providers/github";
-import { describe, expect, it } from "vitest";
+import { parseAllowedGithubHosts } from "@dokploy/server/utils/providers/github-host";
+import { describe, expect, it, vi } from "vitest";
 
 const urlOf = (result: ReturnType<typeof parseGithubBaseUrl>) =>
 	"url" in result ? result.url : null;
@@ -102,6 +103,185 @@ describe("parseGithubBaseUrl", () => {
 			expect(result, typo).toHaveProperty("error");
 			expect(urlOf(result), typo).not.toBe(DEFAULT_GITHUB_URL);
 		}
+	});
+});
+
+describe("parseGithubBaseUrl host policy", () => {
+	const none = new Set<string>();
+
+	it.each([
+		// Plain, decimal, octal, hex and short IPv4 forms all reach the URL
+		// parser as the same address.
+		"https://127.0.0.1",
+		"https://10.0.0.5:8443",
+		"https://169.254.169.254",
+		"https://192.168.1.10",
+		"https://8.8.8.8",
+		"https://2130706433",
+		"https://017700000001",
+		"https://0x7f000001",
+		"https://0x7f.1",
+		"https://127.1",
+		"https://0",
+		// IPv6, bracketed.
+		"https://[::1]",
+		"https://[::]",
+		"https://[fe80::1]",
+		"https://[fd00::1]",
+		"https://[::ffff:127.0.0.1]",
+		"https://[2001:4860:4860::8888]",
+	])("refuses the IP literal %s", (input) => {
+		expect(parseGithubBaseUrl(input, none)).toHaveProperty("error");
+	});
+
+	it.each([
+		"https://localhost",
+		"https://localhost.",
+		"https://app.localhost",
+		"https://ghe.local",
+		"https://ghe.local.",
+		"https://github.corp.internal",
+		"https://GITHUB.CORP.INTERNAL:8443",
+	])("refuses the internal host name %s", (input) => {
+		expect(parseGithubBaseUrl(input, none)).toHaveProperty("error");
+	});
+
+	it("names only the host the user typed", () => {
+		const result = parseGithubBaseUrl("https://10.1.2.3:8443/x", none);
+		expect(result).toHaveProperty("error");
+		const message = "error" in result ? result.error : "";
+		expect(message).toContain("10.1.2.3");
+		expect(message).not.toContain("8443");
+	});
+
+	it("accepts a public host name, with or without a port", () => {
+		for (const input of [
+			"https://github.com",
+			"https://acme.ghe.com",
+			"https://github.acme.com",
+			"https://github.acme.com:8443",
+			"https://localhost.example.com",
+			"https://internal.example.com",
+			"https://local.example.com",
+			"https://ghe.localhost.example.org",
+		]) {
+			expect(parseGithubBaseUrl(input, none), input).toHaveProperty("url");
+		}
+	});
+
+	it("accepts an allowlisted internal host, exact match, any case", () => {
+		const allowed = parseAllowedGithubHosts(
+			" GHE.corp.internal, 10.0.0.5 ,, git.lan.local.",
+		);
+		expect(
+			urlOf(parseGithubBaseUrl("https://ghe.corp.internal", allowed)),
+		).toBe("https://ghe.corp.internal");
+		expect(
+			urlOf(parseGithubBaseUrl("https://GHE.CORP.INTERNAL:8443", allowed)),
+		).toBe("https://ghe.corp.internal:8443");
+		expect(urlOf(parseGithubBaseUrl("https://10.0.0.5", allowed))).toBe(
+			"https://10.0.0.5",
+		);
+		expect(urlOf(parseGithubBaseUrl("https://git.lan.local", allowed))).toBe(
+			"https://git.lan.local",
+		);
+		// Exact: neither a sibling, a parent nor a subdomain.
+		for (const input of [
+			"https://other.corp.internal",
+			"https://corp.internal",
+			"https://x.ghe.corp.internal",
+			"https://10.0.0.6",
+		]) {
+			expect(parseGithubBaseUrl(input, allowed), input).toHaveProperty("error");
+		}
+	});
+
+	it("matches an allowlisted IP in any spelling the URL parser normalizes", () => {
+		const allowed = parseAllowedGithubHosts("10.0.0.5");
+		expect(parseGithubBaseUrl("https://0xa000005", allowed)).toHaveProperty(
+			"url",
+		);
+	});
+
+	it("keeps the dotless host rule even when allowlisted", () => {
+		const allowed = parseAllowedGithubHosts("metadata, [::1]", () => {});
+		expect(parseGithubBaseUrl("https://metadata", allowed)).toHaveProperty(
+			"error",
+		);
+		expect(parseGithubBaseUrl("https://[::1]", allowed)).toHaveProperty(
+			"error",
+		);
+	});
+
+	it("ignores an entry that is not a bare hostname and reports it", () => {
+		const invalid: string[] = [];
+		const allowed = parseAllowedGithubHosts(
+			[
+				"https://ghe.one.internal/",
+				"ghe.two.internal:8443",
+				"user@ghe.three.internal",
+				"ghe.four.internal/path",
+				"ghe five.internal",
+				"[::1]",
+				"ghe.ok.internal",
+			].join(","),
+			(entry) => invalid.push(entry),
+		);
+
+		expect([...allowed]).toEqual(["ghe.ok.internal"]);
+		expect(invalid).toEqual([
+			"https://ghe.one.internal/",
+			"ghe.two.internal:8443",
+			"user@ghe.three.internal",
+			"ghe.four.internal/path",
+			"ghe five.internal",
+			"[::1]",
+		]);
+	});
+
+	it("warns once per bad entry on the server log by default", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		parseAllowedGithubHosts("https://dup.example.internal/");
+		parseAllowedGithubHosts("https://dup.example.internal/");
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(String(warn.mock.calls[0]?.[0])).toContain(
+			"https://dup.example.internal/",
+		);
+		warn.mockRestore();
+	});
+
+	it("allows any port on an allowlisted host", () => {
+		const allowed = parseAllowedGithubHosts("ghe.corp.internal");
+		expect(
+			urlOf(parseGithubBaseUrl("https://ghe.corp.internal:9443", allowed)),
+		).toBe("https://ghe.corp.internal:9443");
+	});
+
+	it("refuses an empty hostname with the invalid URL message", () => {
+		for (const input of ["https://.", "https://..", "."]) {
+			const result = parseGithubBaseUrl(input, none);
+			expect(result, input).toHaveProperty("error");
+			expect("error" in result ? result.error : "", input).toContain(
+				"is not a valid URL",
+			);
+		}
+	});
+
+	it("is not affected by an empty or absent allowlist value", () => {
+		expect([...parseAllowedGithubHosts(undefined)]).toEqual([]);
+		expect([...parseAllowedGithubHosts("")]).toEqual([]);
+		expect([...parseAllowedGithubHosts(" , ,")]).toEqual([]);
+	});
+
+	it("still normalizes a stored internal URL instead of falling back to github.com", () => {
+		// The policy applies when a URL is entered and before a request is sent;
+		// a provider saved earlier must not silently start talking to github.com.
+		expect(normalizeGithubUrl("https://ghe.corp.internal")).toBe(
+			"https://ghe.corp.internal",
+		);
+		expect(deriveGithubApiUrl("https://10.0.0.5")).toBe(
+			"https://10.0.0.5/api/v3",
+		);
 	});
 });
 

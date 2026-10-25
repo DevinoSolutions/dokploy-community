@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 	verifyGithubInstallation: vi.fn(),
 	findGithubById: vi.fn(),
 	octokitRequest: vi.fn(),
+	assertGithubHostReachable: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => ({
@@ -56,8 +57,24 @@ vi.mock("@dokploy/server", async () => {
 		await vi.importActual<
 			typeof import("@dokploy/server/utils/providers/github")
 		>("@dokploy/server/utils/providers/github");
+	const { GithubHostError } = await vi.importActual<
+		typeof import("@dokploy/server/utils/providers/github-host")
+	>("@dokploy/server/utils/providers/github-host");
+	const { convertGithubManifest } = await vi.importActual<
+		typeof import("@dokploy/server/utils/providers/github")
+	>("@dokploy/server/utils/providers/github");
 	return {
 		assertCanUpdateGitProvider,
+		GithubHostError,
+		assertGithubInstanceReachable: mocks.assertGithubHostReachable,
+		// The real conversion, with the host check pointed at the mock and no DNS.
+		convertGithubManifest: async (baseUrl: string, code: string) => {
+			await mocks.assertGithubHostReachable(baseUrl);
+			return convertGithubManifest(baseUrl, code, {
+				allowedHosts: new Set(),
+				resolveHost: async () => [{ address: "140.82.112.3", family: 4 }],
+			});
+		},
 		parseGithubBaseUrl,
 		parseGithubAppUrl,
 		deriveGithubApiUrl,
@@ -241,6 +258,7 @@ beforeEach(() => {
 	mocks.octokitRequest.mockResolvedValue(manifestResponse);
 	mocks.createGithub.mockResolvedValue(undefined);
 	mocks.verifyGithubInstallation.mockResolvedValue({ ok: true });
+	mocks.assertGithubHostReachable.mockResolvedValue(undefined);
 });
 
 const expectNothingWritten = () => {
@@ -438,6 +456,43 @@ describe("GitHub App creation callback (github_init)", () => {
 		expect(res.statusCode).toBe(403);
 		expectNothingWritten();
 	});
+
+	it("creates nothing when the host is refused before the conversion", async () => {
+		const { GithubHostError } = await import("@dokploy/server");
+		mocks.assertGithubHostReachable.mockRejectedValue(
+			new GithubHostError('"acme.ghe.com" resolves to a private address'),
+		);
+		const res = await call(setup, {
+			query: query(
+				stateFor("github_init", { providerId: "https://acme.ghe.com" }),
+				{ githubUrl: "https://acme.ghe.com" },
+			),
+			cookie: INIT_COOKIE,
+		});
+
+		expect(res.statusCode).toBe(400);
+		expect(res.body).toEqual({
+			error: '"acme.ghe.com" resolves to a private address',
+		});
+		expect(mocks.octokitRequest).not.toHaveBeenCalled();
+		expect(mocks.createGithub).not.toHaveBeenCalled();
+	});
+
+	it.each(["https://10.0.0.5", "https://[::1]", "https://ghe.internal"])(
+		"never contacts %s, even with a state issued for it",
+		async (githubUrl) => {
+			const res = await call(setup, {
+				query: query(stateFor("github_init", { providerId: githubUrl }), {
+					githubUrl,
+				}),
+				cookie: INIT_COOKIE,
+			});
+
+			expect(res.statusCode).toBe(400);
+			expect(mocks.octokitRequest).not.toHaveBeenCalled();
+			expect(mocks.createGithub).not.toHaveBeenCalled();
+		},
+	);
 
 	it("does not store an app URL on another host", async () => {
 		mocks.octokitRequest.mockResolvedValue({
@@ -744,6 +799,24 @@ describe("GitHub App installation callback (github_setup)", () => {
 			expect(mocks.githubUpdateSet).not.toHaveBeenCalled();
 		},
 	);
+
+	it("answers a refused host with the policy text, not a generic 502", async () => {
+		const message =
+			'"ghe.corp.lan" does not resolve to a public address, which is not accepted for a GitHub Enterprise URL. Ask an administrator to allow it with DOKPLOY_GITHUB_ENTERPRISE_ALLOWED_HOSTS.';
+		mocks.verifyGithubInstallation.mockResolvedValue({
+			ok: false,
+			reason: "host_refused",
+			message,
+		});
+		const res = await call(setup, {
+			query: query(stateFor("github_setup")),
+			cookie: SETUP_COOKIE,
+		});
+
+		expect(res.statusCode).toBe(400);
+		expect(res.body).toEqual({ error: message });
+		expect(mocks.githubUpdateSet).not.toHaveBeenCalled();
+	});
 });
 
 describe("GitHub state routes", () => {
@@ -813,6 +886,37 @@ describe("GitHub state routes", () => {
 		const res = await call(initState, { method: "POST", body: { githubUrl } });
 
 		expect(res.statusCode).toBe(400);
+		expect(res.setCookies).toEqual([]);
+	});
+
+	it.each([
+		["https://10.0.0.5"],
+		["https://169.254.169.254"],
+		["https://[::1]"],
+		["https://ghe.local"],
+		["https://localhost.example.com.internal"],
+	])("init-state refuses the internal GitHub URL %j", async (githubUrl) => {
+		const res = await call(initState, { method: "POST", body: { githubUrl } });
+
+		expect(res.statusCode).toBe(400);
+		expect(res.setCookies).toEqual([]);
+		expect(res.body).not.toHaveProperty("state");
+	});
+
+	it("init-state refuses a host that resolves to a private address", async () => {
+		const { GithubHostError } = await import("@dokploy/server");
+		mocks.assertGithubHostReachable.mockRejectedValue(
+			new GithubHostError('"github.acme.com" resolves to a private address'),
+		);
+		const res = await call(initState, {
+			method: "POST",
+			body: { githubUrl: "https://github.acme.com" },
+		});
+
+		expect(res.statusCode).toBe(400);
+		expect(res.body).toEqual({
+			error: '"github.acme.com" resolves to a private address',
+		});
 		expect(res.setCookies).toEqual([]);
 	});
 
