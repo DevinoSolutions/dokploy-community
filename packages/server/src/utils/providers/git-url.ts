@@ -28,7 +28,7 @@ export class GitUrlRefusedError extends Error {
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: refused on purpose
 const UNSAFE_URL_CHARACTER = /[\u0000- \u007f\\]/;
-const URL_WITH_AUTHORITY = /^(https?|ssh):\/\/([^/?#]*)/i;
+const URL_WITH_AUTHORITY = /^(https?|ssh):\/\/([^/?#]*)/;
 // `user@` and then `host:path`, the host a bracketed IPv6 address or not.
 const SCP_ADDRESS = /^([^@/:]+)@(\[[^\]/]*\]|[^:/\]]+):/;
 // A user name that starts with `-` could be read as an option.
@@ -83,15 +83,6 @@ export const assertSafeGitUrl = (url: string | null | undefined) => {
 				isSafeHost(scp[2] ?? "");
 	if (!value || UNSAFE_URL_CHARACTER.test(value) || !safe) {
 		throw new GitUrlRefusedError();
-	}
-};
-
-export const isSafeGitUrl = (url: string | null | undefined) => {
-	try {
-		assertSafeGitUrl(url);
-		return true;
-	} catch {
-		return false;
 	}
 };
 

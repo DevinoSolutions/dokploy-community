@@ -9,8 +9,8 @@ import {
 } from "@dokploy/server/services/gitlab";
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
-import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { GIT_ALLOW_PROTOCOL_ENV } from "@dokploy/server/utils/providers/git-url";
+import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { buildPinCommitCommand } from "@dokploy/server/utils/providers/pin-commit";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";

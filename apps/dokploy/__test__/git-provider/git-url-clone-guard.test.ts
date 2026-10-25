@@ -98,6 +98,26 @@ describe("the shared URL rule", () => {
 	});
 });
 
+describe("the scheme is matched as git does", () => {
+	it.each(["HTTPS://github.com/o/r.git", "Ssh://git@host/o/r.git", "HTTP://h/r"])(
+		"refuses %s at save and at clone time",
+		async (url) => {
+			expect(() => assertSafeGitUrl(url)).toThrow(GitUrlRefusedError);
+			expect(() => assertGitUrlSaveable(url, "https://h/r")).toThrow(
+				GIT_URL_REFUSED_MESSAGE,
+			);
+			await expect(
+				cloneGitRepository({
+					appName: "web",
+					customGitUrl: url,
+					customGitBranch: "main",
+					serverId: null,
+				}),
+			).rejects.toThrow(GIT_URL_REFUSED_MESSAGE);
+		},
+	);
+});
+
 describe("cloneGitRepository", () => {
 	it.each(REFUSED_URLS)(
 		"refuses %s before anything is looked up or run",
