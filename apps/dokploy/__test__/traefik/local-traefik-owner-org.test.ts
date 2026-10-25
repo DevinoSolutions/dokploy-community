@@ -133,6 +133,20 @@ describe("the local host's Traefik belongs to the instance's organization", () =
 	);
 
 	it.each(routes)(
+		"%s treats an empty serverId as the local host",
+		async (_name, run) => {
+			await expect(run(callerIn(OTHER), "")).rejects.toMatchObject({
+				code: "FORBIDDEN",
+			});
+
+			expect(mocks.findServerById).not.toHaveBeenCalled();
+			expect(mocks.writeTraefikSetup).not.toHaveBeenCalled();
+			expect(mocks.reloadDockerResource).not.toHaveBeenCalled();
+			expect(mocks.readEnvironmentVariables).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(routes)(
 		"%s lets the organization that owns the instance through",
 		async (_name, run) => {
 			await expect(run(callerIn(ROOT))).resolves.toBeDefined();
