@@ -1,4 +1,4 @@
-import fs, { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
@@ -17,9 +17,7 @@ import {
 	assertComposeFileInsideCodeDirectory,
 	ComposeFileLinkError,
 	getComposeCodeDirectory,
-	getComposeFileWriteGuardCommand,
 	getGuardedReadCommand,
-	getReplaceLinkCommand,
 	isComposeFileLinkMarker,
 } from "../compose-file-guard";
 import { assertSafeComposePath } from "../compose-path";
@@ -255,24 +253,16 @@ export const getInstallStagedComposeCommand = (
 	composePath: string,
 	alsoRemove: string[] = [],
 	codeDirectory?: string,
-) => {
-	const install = getInstallStagedFileCommand({
+) =>
+	getInstallStagedFileCommand({
 		staged: stagedPath,
 		destination: composePath,
 		failureMessage: "❌ Error: Could not write the compose file",
 		alsoRemove,
-		// A link in the place of the file is replaced by a regular file, so the
-		// copy never goes through it (T-7857).
-		prepare: codeDirectory ? getReplaceLinkCommand(composePath) : undefined,
+		// Replaced by a renamed temporary file, never written in place, and only
+		// when its directory is inside the checkout (T-7857).
+		atomicIn: codeDirectory,
 	});
-	if (!codeDirectory) return install;
-	// And the directory the file is in has to be inside the checkout.
-	return `${getComposeFileWriteGuardCommand({
-		codeDirectory,
-		file: composePath,
-		cleanup: `rm -f ${quote([stagedPath, ...alsoRemove])};`,
-	})}${install}`;
-};
 
 /**
  * Builds the compose file the deploy runs (domain labels, randomize, isolated
@@ -611,30 +601,6 @@ export const declareUsedNetworksInRoot = (
 		if (isUsed(name)) {
 			result.networks = addDokployNetworkToRoot(result.networks, name);
 		}
-	}
-};
-
-export const writeComposeFile = async (
-	compose: Compose,
-	composeSpec: ComposeSpecification,
-) => {
-	const path = getComposePath(compose);
-
-	try {
-		const composeFile = stringify(composeSpec, {
-			lineWidth: 1000,
-		});
-		// Never through a link: a regular file takes its place (T-7857).
-		assertComposeFileInsideCodeDirectory(
-			getComposeCodeDirectory(compose),
-			dirname(path),
-		);
-		if (fs.lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
-			fs.unlinkSync(path);
-		}
-		fs.writeFileSync(path, composeFile, "utf8");
-	} catch (e) {
-		console.error("Error saving the YAML config file:", e);
 	}
 };
 

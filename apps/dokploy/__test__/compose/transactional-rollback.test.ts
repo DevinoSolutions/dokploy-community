@@ -112,7 +112,8 @@ describe("backupCurrentDeployment command", () => {
 	it("drops a stale snapshot when the corresponding file is absent", () => {
 		expect(command).toContain('echo "No previous compose file found"');
 		expect(command).toContain('echo "No previous env file found"');
-		expect(command.match(/rm -f /g)?.length).toBe(2);
+		// (two per file: the other branch is a host that cannot check links)
+		expect(command.match(/rm -f /g)?.length).toBe(4);
 	});
 
 	it("shell-quotes a hostile composePath instead of interpolating it raw", () => {
@@ -219,10 +220,11 @@ describe("getBuildComposeCommand — rollback decision logic", () => {
 			expect(start).toBeGreaterThan(-1);
 			// Inside the check of the directory the restore writes in (T-7857).
 			expect(lines[start + 1]).toBe('if [ "$__dokploy_write_ok" = "1" ]; then');
+			// Renamed into place from a temporary file: a link is replaced, never
+			// written through (T-7857).
 			const env = lines[start + 2] ?? "";
-			expect(env).toMatch(/^if \[ -L (.+) \]; then rm -f \1; fi;$/);
+			expect(env).toMatch(/^__dokploy_put /);
 			expect(env.replace(/\\+/g, "/")).toContain("/my-app/code/.env");
-			expect(lines[start + 3]).toMatch(/^cp /);
 		}
 	});
 
@@ -278,7 +280,7 @@ describe("getBuildComposeCommand — rollback decision logic", () => {
 		// what matters is that the user-controlled destination stays inside a
 		// single-quoted shell word on both the restore and the persist side.
 		expect(command).toMatch(
-			/cp [^\n]*last-good-docker-compose\.yml\.bak'? '[^']*x\.yml"; touch [^']*pwned[^']*'/,
+			/__dokploy_put [^\n]*last-good-docker-compose\.yml\.bak'? '[^']*x\.yml"; touch [^']*pwned[^']*'/,
 		);
 		expect(command).toMatch(
 			/cp '[^']*x\.yml"; touch [^']*pwned[^']*' [^\n]*last-good-docker-compose\.yml\.bak/,

@@ -5,6 +5,7 @@ import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import {
 	DIRECTORY_INSIDE_FUNCTION,
+	getAtomicPutFunction,
 	getPathResolverLines,
 } from "./path-containment";
 
@@ -28,6 +29,15 @@ import {
  */
 export const COMPOSE_FILE_LINK_MESSAGE =
 	"The compose file is, or goes through, a symbolic link that leaves the repository; Dokploy only deploys a regular file inside the repository.";
+
+/**
+ * Defines `__dokploy_put SOURCE DESTINATION CODE_DIRECTORY`, which every
+ * write of the compose file and its `.env` goes through (see
+ * `getAtomicPutFunction`).
+ */
+export const ATOMIC_PUT_FUNCTION = getAtomicPutFunction(
+	`❌ Compose refused: ${COMPOSE_FILE_LINK_MESSAGE}`,
+);
 
 /** The checkout the compose file is read from and written to. */
 export const getComposeCodeDirectory = (compose: {
@@ -113,39 +123,6 @@ export const getGuardedReadCommand = ({
 /** Whether the output of a guarded read is the marker (a link out). */
 export const isComposeFileLinkMarker = (output: string) =>
 	output.trim() === COMPOSE_FILE_LINK_MARKER;
-
-/**
- * Shell lines for a script that is about to write `file` (the compose file or
- * its `.env`): the directory it is in has to resolve inside `codeDirectory`.
- * A code directory or a directory that is not there is let through: the write
- * fails as it always did. `cleanup` runs before the refusal stops the script
- * (the staged files).
- */
-export const getComposeFileWriteGuardCommand = ({
-	codeDirectory,
-	file,
-	cleanup = "",
-}: {
-	codeDirectory: string;
-	file: string;
-	cleanup?: string;
-}) => {
-	const qCode = quote([codeDirectory]);
-	const qDirectory = quote([dirname(file)]);
-	return `
-${DIRECTORY_INSIDE_FUNCTION}
-[ ! -d ${qCode} ] || [ ! -d ${qDirectory} ] || __dokploy_dir_inside ${qCode} ${qDirectory} || { ${cleanup ? `${cleanup} ` : ""}echo ${quote([`❌ Compose refused: ${COMPOSE_FILE_LINK_MESSAGE}`])} >&2; exit 1; }
-`;
-};
-
-/**
- * Shell command that removes `file` when it is a symbolic link, so the write
- * that follows makes a regular file instead of going through the link.
- */
-export const getReplaceLinkCommand = (file: string) => {
-	const qFile = quote([file]);
-	return `if [ -L ${qFile} ]; then rm -f ${qFile}; fi`;
-};
 
 /**
  * For the restore: shell that tells whether `file` may be written (its

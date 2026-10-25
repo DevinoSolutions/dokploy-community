@@ -1,3 +1,5 @@
+import { singleQuote } from "./docker/env-file";
+
 /**
  * Shell lines that define two functions for a script that checks, on the host
  * that runs it, where a path of the repository's checkout really leads:
@@ -33,3 +35,19 @@ export const getPathResolverLines = (unavailable: string) => [
  */
 export const DIRECTORY_INSIDE_FUNCTION =
 	'__dokploy_dir_inside() { __dokploy_c=$(cd -P -- "$1" 2>/dev/null && pwd -P) && __dokploy_p=$(cd -P -- "$2" 2>/dev/null && pwd -P) || return 1; case "$__dokploy_p" in "$__dokploy_c"|"$__dokploy_c"/*) return 0;; esac; return 1; }';
+
+/**
+ * Shell function `__dokploy_put SOURCE DESTINATION CODE_DIRECTORY` that puts a
+ * copy of SOURCE at DESTINATION without ever writing through a link. It moves
+ * into the physical directory of DESTINATION (`cd -P`), checks that this is
+ * CODE_DIRECTORY or inside it, writes a temporary file in that directory
+ * (`mktemp`, which no link can point at), gives it the mode and owner of the
+ * file it replaces (644 when there is none), and renames it over the name
+ * (`mv`, which replaces a link instead of following it). A checkout that is
+ * written concurrently, by a container that has it mounted, can swap a link
+ * in at any moment; `rm` then `cat >` would write through it. `refusal` is
+ * printed when the directory is outside CODE_DIRECTORY (status 3). The
+ * temporary file is removed on any failure.
+ */
+export const getAtomicPutFunction = (refusal: string) =>
+	`__dokploy_put() { ( cd -P -- "\${2%/*}" 2>/dev/null || exit 1; __dp_h=$(pwd -P) && __dp_c=$(cd -P -- "$3" 2>/dev/null && pwd -P) || exit 1; case "$__dp_h" in "$__dp_c"|"$__dp_c"/*) ;; *) echo ${singleQuote(refusal)} >&2; exit 3;; esac; __dp_n=\${2##*/}; [ ! -d "./$__dp_n" ] || exit 1; __dp_t=$(mktemp ./.dokploy-put-XXXXXX) || exit 1; if cat -- "$1" > "$__dp_t"; then if [ -f "$__dp_n" ] && [ ! -L "$__dp_n" ] && chmod --reference="$__dp_n" "$__dp_t" 2>/dev/null; then chown --reference="$__dp_n" "$__dp_t" 2>/dev/null; true; else chmod 644 "$__dp_t"; fi && { mv -f -T -- "$__dp_t" "./$__dp_n" 2>/dev/null || mv -f -- "$__dp_t" "./$__dp_n"; } && exit 0; fi; rm -f -- "$__dp_t"; exit 1 ); }`;

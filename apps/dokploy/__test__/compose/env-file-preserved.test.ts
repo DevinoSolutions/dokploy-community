@@ -66,12 +66,11 @@ describe("getBuildComposeCommand createEnvFile toggle", () => {
 
 		// (path separators are normalized so the test also runs on Windows)
 		expect(command.replaceAll("\\", "/")).toMatch(
-			/cat \S+\.dokploy-stage-env-\S+ > \S+\/code\/\.env/,
+			/__dokploy_put \S+\.dokploy-stage-env-\S+ \S+\/code\/\.env'? \S+\/code\b/,
 		);
 		expect(command).not.toContain("base64");
-		// The same checks do catch a script that writes the env.
-		expect(posix(command)).toMatch(TOUCHES_ENV);
-		expect(posix(command)).toMatch(REDIRECTS_INTO_ENV);
+		// The env is renamed into place from a temporary file (T-7857), so the
+		// checks above find no touch or redirect to it.
 		expect(stageFiles).toHaveBeenCalledTimes(1);
 		const { files } = vi.mocked(stageFiles).mock.calls[0]![0];
 		expect(files[0]!.content).toContain('FOO="bar"');

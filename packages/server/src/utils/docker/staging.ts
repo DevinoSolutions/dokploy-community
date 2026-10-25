@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { quote } from "shell-quote";
+import { ATOMIC_PUT_FUNCTION } from "../compose-file-guard";
 import { ExecError, truncateOutputTail } from "../process/ExecError";
 import { execAsyncRemote, writeFileRemote } from "../process/execAsync";
 
@@ -207,16 +208,30 @@ export const getInstallStagedFileCommand = ({
 	failureMessage,
 	alsoRemove = [],
 	prepare,
+	atomicIn,
 }: {
 	staged: string;
 	destination: string;
 	failureMessage: string;
 	alsoRemove?: string[];
 	prepare?: string;
+	/**
+	 * The checkout the destination is in. When set, the destination is replaced
+	 * by a temporary file renamed over it (`__dokploy_put`), never written in
+	 * place, so a link swapped in meanwhile is not followed (T-7857).
+	 */
+	atomicIn?: string;
 }) => {
 	const qStaged = quote([staged]);
 	const qDestination = quote([destination]);
 	const extra = alsoRemove.map((path) => ` ${quote([path])}`).join("");
 	const before = prepare ? `${prepare} && ` : "";
-	return `{ ${before}cat ${qStaged} > ${qDestination} && rm -f ${qStaged}; } || { rm -f ${qStaged}${extra}; echo "${failureMessage}"; exit 1; };`;
+	const write = atomicIn
+		? `__dokploy_put ${qStaged} ${qDestination} ${quote([atomicIn])}`
+		: `cat ${qStaged} > ${qDestination}`;
+	const definition = atomicIn
+		? `${ATOMIC_PUT_FUNCTION}
+`
+		: "";
+	return `${definition}{ ${before}${write} && rm -f ${qStaged}; } || { rm -f ${qStaged}${extra}; echo "${failureMessage}"; exit 1; };`;
 };

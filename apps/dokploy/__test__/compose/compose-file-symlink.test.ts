@@ -1,11 +1,14 @@
 import { spawnSync } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -57,6 +60,7 @@ vi.mock("@dokploy/server/utils/vault", () => ({
 
 import {
 	getBackupCurrentDeploymentCommand,
+	getBuildComposeCommand,
 	getComposeBackupDir,
 	getCreateEnvFileCommand,
 	getRestoreAfterFailedBuildCommand,
@@ -66,6 +70,7 @@ import {
 	PRE_DEPLOY_ENV_BAK,
 } from "@dokploy/server/utils/builders/compose";
 import {
+	ATOMIC_PUT_FUNCTION,
 	COMPOSE_FILE_LINK_MARKER,
 	COMPOSE_FILE_LINK_MESSAGE,
 	ComposeFileLinkError,
@@ -128,22 +133,19 @@ describe("the commands that write the compose file", () => {
 		return writeDomainsToCompose(compose, [], { deploymentId: "dep-1" });
 	};
 
-	it("checks the directory first, replaces a link in the file's place, then copies", async () => {
+	it("renames a temporary file over the compose file instead of writing it in place", async () => {
 		const command = await install("docker-compose.yml");
-		const guard = command.indexOf("__dokploy_dir_inside");
-		const replace = command.indexOf(
-			`if [ -L ${REMOTE}/code/docker-compose.yml ]`,
+		expect(command).toContain("__dokploy_put() {");
+		expect(command).toContain(
+			`__dokploy_put ${REMOTE}/.dokploy-compose-dep-1.yml ${REMOTE}/code/docker-compose.yml ${REMOTE}/code`,
 		);
-		const copy = command.indexOf(
-			`cat ${REMOTE}/.dokploy-compose-dep-1.yml > ${REMOTE}/code/docker-compose.yml`,
-		);
-		expect(guard).toBeGreaterThan(-1);
-		expect(replace).toBeGreaterThan(guard);
-		expect(copy).toBeGreaterThan(replace);
+		// No redirect into the file, no `rm` of a link beforehand (both race).
+		expect(command).not.toContain(`> ${REMOTE}/code/docker-compose.yml`);
+		expect(command).not.toContain("[ -L");
 		expect(command).toContain(COMPOSE_FILE_LINK_MESSAGE);
-		// The refusal removes the staged compose before it stops the script.
+		// The staged compose is removed when the write fails.
 		expect(command).toMatch(
-			new RegExp(`\\{ rm -f ${REMOTE}/\\.dokploy-compose-dep-1\\.yml; echo `),
+			new RegExp(`|| { rm -f ${REMOTE}/.dokploy-compose-dep-1.yml; echo `),
 		);
 	});
 
@@ -155,19 +157,17 @@ describe("the commands that write the compose file", () => {
 			[],
 			`${REMOTE}/code`,
 		);
-		const test = /if \[ -L (.*?) \]; then rm -f (.*?); fi/.exec(command);
-		expect(test).not.toBeNull();
-		expect(words(`echo ${test?.[1]}`)).toEqual(["echo", file]);
-		expect(words(`echo ${test?.[2]}`)).toEqual(["echo", file]);
-		const guard = /__dokploy_dir_inside (.*?) (.*?) \|\| /.exec(command);
-		expect(words(`echo ${guard?.[1]}`)).toEqual(["echo", `${REMOTE}/code`]);
-		expect(words(`echo ${guard?.[2]}`)).toEqual([
+		const put = /__dokploy_put (?!\(\))(.*?) (.*?) (\S+) &&/.exec(command);
+		expect(put).not.toBeNull();
+		expect(words(`echo ${put?.[1]}`)).toEqual([
 			"echo",
-			`${REMOTE}/code/deploy`,
+			`${REMOTE}/.dokploy-compose-dep-1.yml`,
 		]);
+		expect(words(`echo ${put?.[2]}`)).toEqual(["echo", file]);
+		expect(put?.[3]).toBe(`${REMOTE}/code`);
 	});
 
-	it("also guards the .env written next to the compose file", async () => {
+	it("writes the .env next to the compose file the same way", async () => {
 		const command = await getCreateEnvFileCommand(
 			{
 				...baseCompose,
@@ -177,12 +177,10 @@ describe("the commands that write the compose file", () => {
 			},
 			{ deploymentId: "dep-1" },
 		);
-		const guard = command.indexOf(
-			`__dokploy_dir_inside ${REMOTE}/code ${REMOTE}/code/deploy`,
+		expect(command).toContain(
+			`__dokploy_put ${REMOTE}/.dokploy-stage-env-dep-1 ${REMOTE}/code/deploy/.env ${REMOTE}/code`,
 		);
-		const replace = command.indexOf(`if [ -L ${REMOTE}/code/deploy/.env ]`);
-		expect(guard).toBeGreaterThan(-1);
-		expect(replace).toBeGreaterThan(guard);
+		expect(command).not.toContain(`> ${REMOTE}/code/deploy/.env`);
 	});
 
 	it("snapshots only a compose file and .env that resolve inside the checkout", () => {
@@ -191,14 +189,37 @@ describe("the commands that write the compose file", () => {
 			serverId: "srv-1",
 		});
 		expect(command).toContain(
-			`if [ -f ${REMOTE}/code/docker-compose.yml ] && __dokploy_inside ${REMOTE}/code ${REMOTE}/code/docker-compose.yml; then cp `,
+			`if [ -f ${REMOTE}/code/docker-compose.yml ]; then if __dokploy_inside ${REMOTE}/code ${REMOTE}/code/docker-compose.yml; then cp `,
 		);
 		expect(command).toContain(
-			`if [ -f ${REMOTE}/code/.env ] && __dokploy_inside ${REMOTE}/code ${REMOTE}/code/.env; then cp `,
+			`if [ -f ${REMOTE}/code/.env ]; then if __dokploy_inside ${REMOTE}/code ${REMOTE}/code/.env; then cp `,
 		);
 	});
 
-	it("restores through a link only after replacing it, and not at all out of the checkout", async () => {
+	it("keeps the previous snapshot when the host cannot resolve links", () => {
+		const command = getBackupCurrentDeploymentCommand({
+			...baseCompose,
+			serverId: "srv-1",
+		});
+		// The unresolvable branch is checked before the one that drops a backup.
+		expect(command).toContain("__dokploy_no_resolve=1");
+		expect(command).toMatch(
+			/elif \[ "\$__dokploy_no_resolve" = "1" \]; then echo .*the previous snapshot is kept.*; else echo "No previous compose file found"; rm -f /,
+		);
+	});
+
+	it("persists the last-good .env only when it resolves inside the checkout", async () => {
+		const command = await getBuildComposeCommand({
+			...baseCompose,
+			serverId: "srv-1",
+		});
+		expect(command).toContain(
+			`[ -f ${REMOTE}/code/.env ] && __dokploy_inside ${REMOTE}/code ${REMOTE}/code/.env && cp ${REMOTE}/code/.env ${REMOTE}/.deploy-backup/last-good-env.bak`,
+		);
+		expect(command).toContain('[ "$__dokploy_no_resolve" = "1" ] || rm -f ');
+	});
+
+	it("restores through a renamed temporary file, and not at all out of the checkout", async () => {
 		const command = await getRestoreAfterFailedBuildCommand({
 			...baseCompose,
 			serverId: "srv-1",
@@ -207,8 +228,9 @@ describe("the commands that write the compose file", () => {
 			`__dokploy_dir_inside ${REMOTE}/code ${REMOTE}/code`,
 		);
 		expect(command).toContain(
-			`if [ -L ${REMOTE}/code/docker-compose.yml ]; then rm -f ${REMOTE}/code/docker-compose.yml; fi;`,
+			`__dokploy_put ${REMOTE}/.deploy-backup/last-good-docker-compose.yml.bak ${REMOTE}/code/docker-compose.yml ${REMOTE}/code`,
 		);
+		expect(command).not.toContain(`cp ${REMOTE}/.deploy-backup/last-good`);
 		expect(command).toContain('if [ "$__dokploy_write_ok" = "1" ]; then');
 		expect(command).toContain(COMPOSE_FILE_LINK_MESSAGE);
 	});
@@ -663,4 +685,250 @@ describe("reading the compose file with real links", () => {
 		expect(getComposeFileLinkError(code(), `${code()}/real.yml`)).toBeNull();
 		expect(getComposeFileLinkError(code(), `${code()}/missing.yml`)).toBeNull();
 	});
+});
+
+// ---------------------------------------------------------------------------
+// A link swapped in while the file is written
+// ---------------------------------------------------------------------------
+
+describe("writing while a link is swapped in", () => {
+	// A container that has the code directory mounted read-write can re-create
+	// the link at any moment, also between a check and the write. The writes
+	// rename a temporary file over the name, so none of them reaches the target.
+	// A Windows shell starts processes slowly, so it runs fewer trials.
+	const TRIALS = process.platform === "win32" ? 15 : 100;
+	const RESTORE_TRIALS = process.platform === "win32" ? 6 : 100;
+	const raceEnv = { ...process.env, MSYS: "winsymlinks:nativestrict" };
+	const raceScript = (write: string, trials: number) => `
+D=${JSON.stringify(tmp)}
+code="$D/compose/link-app/code"; out="$D/outside"
+printf 'staged: true\\n' > "$D/staged.yml"
+( while :; do ln -sf "$out/target.yml" "$code/docker-compose.yml"; done ) >/dev/null 2>&1 &
+attacker=$!
+trap 'kill "$attacker" 2>/dev/null' EXIT
+hits=0; i=0
+while [ "$i" -lt ${trials} ]; do
+  printf 'outside: untouched\\n' > "$out/target.yml"
+  ${write}
+  [ "$(cat "$out/target.yml")" = 'outside: untouched' ] || hits=$((hits + 1))
+  i=$((i + 1))
+done
+kill "$attacker" 2>/dev/null
+echo "HITS=$hits"
+`;
+	const runRace = (write: string, trials = TRIALS) => {
+		const file = `${tmp}/race.sh`;
+		writeFileSync(file, raceScript(write, trials));
+		return spawnSync("sh", [file], {
+			encoding: "utf8",
+			env: raceEnv,
+			timeout: 120_000,
+		});
+	};
+
+	// `ln -sf` makes a copy, not a link, in Git Bash without developer mode.
+	const raceWorks = (() => {
+		if (!linksWork) return false;
+		const probe = mkdtempSync(`${tempBase()}/.dokploy-race-probe-`).replaceAll(
+			"\\",
+			"/",
+		);
+		try {
+			writeFileSync(`${probe}/a`, "x");
+			const result = spawnSync(
+				"sh",
+				["-c", 'ln -sf "$1/a" "$1/b" && [ -L "$1/b" ]', "sh", probe],
+				{ encoding: "utf8", env: raceEnv },
+			);
+			return result.status === 0;
+		} catch {
+			return false;
+		} finally {
+			rmSync(probe, { recursive: true, force: true });
+		}
+	})();
+	const itRace = (name: string, fn: () => void | Promise<void>) =>
+		it.skipIf(!raceWorks)(name, { timeout: 120_000 }, fn);
+
+	itRace("the compose file install never writes through the link", () => {
+		const snippet = getInstallStagedComposeCommand(
+			`${tmp}/staged.yml`,
+			`${code()}/docker-compose.yml`,
+			[],
+			code(),
+		);
+		// The snippet removes its staged file, so the script keeps a copy of it.
+		const result = runRace(
+			`cp "$D/staged.yml" "$D/staged.keep"\n{\n${snippet}\n} 2>/dev/null\ncp "$D/staged.keep" "$D/staged.yml"`,
+		);
+		expect(result.stdout, result.stderr).toContain("HITS=0");
+	});
+
+	itRace("the restore never writes through the link", async () => {
+		const backup = getComposeBackupDir(baseCompose);
+		mkdirSync(backup, { recursive: true });
+		writeFileSync(`${backup}/${LAST_GOOD_COMPOSE_BAK}`, "good: true\n");
+		const restore = await getRestoreAfterFailedBuildCommand(baseCompose);
+		// A stub stands in for docker: only the file writes are of interest.
+		const stubs = `${tmp}/stubs`;
+		mkdirSync(stubs, { recursive: true });
+		writeFileSync(`${stubs}/docker`, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		const result = runRace(
+			`export PATH='${stubs}':"$PATH"\n( ${restore}\n) >/dev/null 2>&1`,
+			RESTORE_TRIALS,
+		);
+		expect(result.stdout, result.stderr).toContain("HITS=0");
+	});
+
+	itRace(
+		"the in-place sequence they replace does go through the link (control)",
+		() => {
+			const result = runRace(
+				`{ if [ -L "$code/docker-compose.yml" ]; then rm -f "$code/docker-compose.yml"; fi && cat "$D/staged.yml" > "$code/docker-compose.yml"; } 2>/dev/null`,
+			);
+			const hits = Number(/HITS=(\d+)/.exec(result.stdout)?.[1] ?? "0");
+			expect(hits).toBeGreaterThan(0);
+		},
+	);
+});
+
+describe("putting a file in place in a real shell", () => {
+	const put = (source: string, destination: string, codeDirectory = code()) =>
+		run(
+			`${ATOMIC_PUT_FUNCTION}\n__dokploy_put '${source}' '${destination}' '${codeDirectory}'`,
+		);
+	const leftovers = () =>
+		readdirSync(code()).filter((name) => name.startsWith(".dokploy-put-"));
+	const itWithShell = it.skipIf(shells.length === 0);
+
+	itWithShell("keeps no temporary file behind", () => {
+		writeFileSync(`${tmp}/staged.yml`, SPEC);
+		const result = put(`${tmp}/staged.yml`, `${code()}/docker-compose.yml`);
+		expect(result.status, result.stderr).toBe(0);
+		expect(readFileSync(`${code()}/docker-compose.yml`, "utf8")).toBe(SPEC);
+		expect(leftovers()).toEqual([]);
+	});
+
+	itWithShell(
+		"leaves the old file and no temporary file when the source cannot be read",
+		() => {
+			writeFileSync(`${code()}/docker-compose.yml`, "old: true\n");
+			const result = put(`${tmp}/missing.yml`, `${code()}/docker-compose.yml`);
+			expect(result.status).not.toBe(0);
+			expect(readFileSync(`${code()}/docker-compose.yml`, "utf8")).toBe(
+				"old: true\n",
+			);
+			expect(leftovers()).toEqual([]);
+		},
+	);
+
+	it.skipIf(shells.length === 0 || process.platform === "win32")(
+		"gives the new file the mode of the one it replaces, 644 otherwise",
+		() => {
+			writeFileSync(`${tmp}/staged.yml`, SPEC);
+			writeFileSync(`${code()}/docker-compose.yml`, "old: true\n");
+			chmodSync(`${code()}/docker-compose.yml`, 0o640);
+			put(`${tmp}/staged.yml`, `${code()}/docker-compose.yml`);
+			expect(statSync(`${code()}/docker-compose.yml`).mode & 0o777).toBe(0o640);
+			put(`${tmp}/staged.yml`, `${code()}/fresh.yml`);
+			expect(statSync(`${code()}/fresh.yml`).mode & 0o777).toBe(0o644);
+		},
+	);
+
+	itWithLinks("refuses a destination directory that leads out", () => {
+		rmSync(`${code()}/deploy`, { recursive: true, force: true });
+		link(outside(), "deploy", "junction");
+		writeFileSync(`${tmp}/staged.yml`, SPEC);
+		const result = put(
+			`${tmp}/staged.yml`,
+			`${code()}/deploy/docker-compose.yml`,
+		);
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain(COMPOSE_FILE_LINK_MESSAGE);
+		expect(existsSync(`${outside()}/docker-compose.yml`)).toBe(false);
+	});
+
+	itWithLinks("refuses a name that is a link to a directory", () => {
+		writeFileSync(`${tmp}/staged.yml`, SPEC);
+		link(outside(), "docker-compose.yml", "junction");
+		const result = put(`${tmp}/staged.yml`, `${code()}/docker-compose.yml`);
+		expect(result.status).not.toBe(0);
+		expect(readdirSync(outside()).sort()).toEqual([".env", "target.yml"]);
+	});
+});
+
+describe("a whole deploy script with a link as the .env", () => {
+	// The script runs in a real shell with a stub in place of docker.
+	const deploy = async (overrides: Record<string, unknown> = {}) => {
+		const stubs = `${tmp}/stubs`;
+		mkdirSync(stubs, { recursive: true });
+		writeFileSync(`${stubs}/docker`, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		const command = await getBuildComposeCommand(
+			{ ...baseCompose, ...overrides },
+			{ deploymentId: "dep-1" },
+		);
+		const file = `${tmp}/deploy.sh`;
+		writeFileSync(file, `set -e\n${command}`);
+		return spawnSync("sh", [file], {
+			encoding: "utf8",
+			env: { ...process.env, PATH: `${stubs}:${process.env.PATH}` },
+		});
+	};
+	const backupDir = () => getComposeBackupDir(baseCompose);
+
+	itWithLinks(
+		"does not copy a .env that leads out of the checkout into the last-good snapshot",
+		async () => {
+			writeFileSync(`${code()}/docker-compose.yml`, SPEC);
+			link(`${outside()}/.env`, ".env", "file");
+
+			const result = await deploy({ createEnvFile: false });
+
+			expect(result.stdout, result.stderr).toContain("Docker Compose Deployed");
+			expect(
+				readFileSync(`${backupDir()}/${LAST_GOOD_COMPOSE_BAK}`, "utf8"),
+			).toContain("image: nginx");
+			expect(existsSync(`${backupDir()}/${LAST_GOOD_ENV_BAK}`)).toBe(false);
+			expect(readFileSync(`${outside()}/.env`, "utf8")).toBe(OUTSIDE_TEXT);
+		},
+	);
+
+	itWithLinks("snapshots an ordinary .env as before", async () => {
+		writeFileSync(`${code()}/docker-compose.yml`, SPEC);
+		writeFileSync(`${code()}/.env`, "KEEP=1\n");
+
+		const result = await deploy({ createEnvFile: false });
+
+		expect(result.stdout, result.stderr).toContain("Docker Compose Deployed");
+		expect(readFileSync(`${backupDir()}/${LAST_GOOD_ENV_BAK}`, "utf8")).toBe(
+			"KEEP=1\n",
+		);
+	});
+});
+
+describe("the snapshot on a host that cannot resolve links", () => {
+	const WITHOUT_EITHER = "realpath() { return 1; }\nreadlink() { return 1; }";
+	const backupDir = () => getComposeBackupDir(baseCompose);
+
+	it.skipIf(shells.length === 0)(
+		"keeps the previous snapshot and says so",
+		() => {
+			writeFileSync(`${code()}/docker-compose.yml`, "new: true\n");
+			mkdirSync(backupDir(), { recursive: true });
+			writeFileSync(
+				`${backupDir()}/${PRE_DEPLOY_COMPOSE_BAK}`,
+				"previous: true\n",
+			);
+
+			const result = run(
+				`${WITHOUT_EITHER}\n${getBackupCurrentDeploymentCommand(baseCompose)}`,
+			);
+
+			expect(result.status, result.stderr).toBe(0);
+			expect(result.stdout).toContain("the previous snapshot is kept");
+			expect(
+				readFileSync(`${backupDir()}/${PRE_DEPLOY_COMPOSE_BAK}`, "utf8"),
+			).toBe("previous: true\n");
+		},
+	);
 });
