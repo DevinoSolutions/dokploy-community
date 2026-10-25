@@ -163,7 +163,9 @@ describe("the test compose is past the argv limit", () => {
 		const staged = mocks.writeFileRemote.mock.calls[0]![2] as string;
 		expect(Buffer.byteLength(staged)).toBeGreaterThan(MAX_ARG_STRLEN);
 		expect(Buffer.byteLength(base64Of(staged))).toBeGreaterThan(MAX_ARG_STRLEN);
-		expect(snippet.length).toBeLessThan(1024);
+		// The snippet carries the checks of the compose file's place (T-7857),
+		// never its content.
+		expect(snippet.length).toBeLessThan(4096);
 	});
 });
 
@@ -202,7 +204,9 @@ describe("writeDomainsToCompose on a remote host", () => {
 		expect(prepare).toContain("umask 077");
 		expect(prepare).toContain(stagedPath);
 		// The snippet only moves the staged file into place, and cleans up after itself.
-		expect(snippet).toContain(`cat ${stagedPath} > ${getComposePath(compose)}`);
+		expect(snippet).toContain(
+			`__dokploy_put ${stagedPath} ${getComposePath(compose)} /etc/dokploy/compose/big-app/code`,
+		);
 		expect(snippet).toContain(`rm -f ${stagedPath}`);
 	});
 
@@ -292,7 +296,7 @@ describe("serving-host deploy script", () => {
 		// `cat staged > compose` runs where the old `echo | base64 -d` ran: after
 		// the banner and before the docker command.
 		const install = command.indexOf(
-			"cat /etc/dokploy/compose/big-app/.dokploy-compose-dep-9.yml > /etc/dokploy/compose/big-app/code/docker-compose.yml",
+			"__dokploy_put /etc/dokploy/compose/big-app/.dokploy-compose-dep-9.yml /etc/dokploy/compose/big-app/code/docker-compose.yml /etc/dokploy/compose/big-app/code",
 		);
 		expect(install).toBeGreaterThan(-1);
 		expect(install).toBeLessThan(
@@ -320,7 +324,7 @@ describe("serving-host deploy script", () => {
 
 		const stagedPath = `${tmp}/compose/big-app/.dokploy-compose-dep-9.yml`;
 		expect(command).toContain(
-			`cat ${quote([stagedPath])} > ${quote([`${tmp}/compose/big-app/code/docker-compose.yml`])}`,
+			`__dokploy_put ${quote([stagedPath])} ${quote([`${tmp}/compose/big-app/code/docker-compose.yml`])} ${quote([`${tmp}/compose/big-app/code`])}`,
 		);
 		const staged = readFileSync(stagedPath, "utf8");
 		expect(Buffer.byteLength(staged)).toBeGreaterThan(MAX_ARG_STRLEN);
@@ -425,7 +429,7 @@ describe("build-server handoff", () => {
 		}
 		const install = commands.find((command) =>
 			command.includes(
-				"cat /etc/dokploy/compose/big-app/.dokploy-compose-dep-7.yml > /etc/dokploy/compose/big-app/code/docker-compose.yml",
+				"__dokploy_put /etc/dokploy/compose/big-app/.dokploy-compose-dep-7.yml /etc/dokploy/compose/big-app/code/docker-compose.yml /etc/dokploy/compose/big-app/code",
 			),
 		);
 		expect(install).toBeDefined();

@@ -1,4 +1,4 @@
-import fs, { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
@@ -13,6 +13,13 @@ import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
+import {
+	assertComposeFileInsideCodeDirectory,
+	ComposeFileLinkError,
+	getComposeCodeDirectory,
+	getGuardedReadCommand,
+	isComposeFileLinkMarker,
+} from "../compose-file-guard";
 import { assertSafeComposePath } from "../compose-path";
 import { wildcardHostRegexp } from "../hostname-validation";
 import { execAsyncRemote } from "../process/execAsync";
@@ -123,6 +130,10 @@ export const loadDockerCompose = async (
 	const path = getComposePath(compose);
 
 	if (existsSync(path)) {
+		assertComposeFileInsideCodeDirectory(
+			getComposeCodeDirectory(compose),
+			path,
+		);
 		const yamlStr = readFileSync(path, "utf8");
 		const parsedConfig = parse(yamlStr, {
 			maxAliasCount: 10000,
@@ -137,24 +148,37 @@ export const loadDockerComposeRemote = async (
 	compose: Compose,
 ): Promise<ComposeSpecification | null> => {
 	const path = getComposePath(compose);
+	let stdout: string;
 	try {
 		if (!compose.serverId) {
 			return null;
 		}
-		const { stdout, stderr } = await execAsyncRemote(
+		const result = await execAsyncRemote(
 			compose.serverId,
-			`cat ${quote([path])}`,
+			getGuardedReadCommand({
+				codeDirectory: getComposeCodeDirectory(compose),
+				file: path,
+				read: `cat ${quote([path])}`,
+			}),
 		);
 
-		if (stderr) {
+		if (result.stderr) {
 			return null;
 		}
-		if (!stdout) return null;
-		const parsedConfig = parse(stdout, {
+		stdout = result.stdout;
+	} catch {
+		return null;
+	}
+	// A link out of the checkout is a refusal, not a missing file (T-7857).
+	if (isComposeFileLinkMarker(stdout)) {
+		throw new ComposeFileLinkError();
+	}
+	if (!stdout) return null;
+	try {
+		return parse(stdout, {
 			maxAliasCount: 10000,
 			merge: true,
 		}) as ComposeSpecification;
-		return parsedConfig;
 	} catch {
 		return null;
 	}
@@ -163,6 +187,10 @@ export const loadDockerComposeRemote = async (
 export const readComposeFile = async (compose: Compose) => {
 	const path = getComposePath(compose);
 	if (existsSync(path)) {
+		assertComposeFileInsideCodeDirectory(
+			getComposeCodeDirectory(compose),
+			path,
+		);
 		const yamlStr = readFileSync(path, "utf8");
 		return yamlStr;
 	}
@@ -224,12 +252,16 @@ export const getInstallStagedComposeCommand = (
 	stagedPath: string,
 	composePath: string,
 	alsoRemove: string[] = [],
+	codeDirectory?: string,
 ) =>
 	getInstallStagedFileCommand({
 		staged: stagedPath,
 		destination: composePath,
 		failureMessage: "❌ Error: Could not write the compose file",
 		alsoRemove,
+		// Replaced by a renamed temporary file, never written in place, and only
+		// when its directory is inside the checkout (T-7857).
+		atomicIn: codeDirectory,
 	});
 
 /**
@@ -300,6 +332,7 @@ export const writeDomainsToCompose = async (
 		stagedPath,
 		getComposePath(compose),
 		alsoRemove,
+		getComposeCodeDirectory(compose),
 	);
 };
 export const applyComposeFilePatch = async (
@@ -568,22 +601,6 @@ export const declareUsedNetworksInRoot = (
 		if (isUsed(name)) {
 			result.networks = addDokployNetworkToRoot(result.networks, name);
 		}
-	}
-};
-
-export const writeComposeFile = async (
-	compose: Compose,
-	composeSpec: ComposeSpecification,
-) => {
-	const path = getComposePath(compose);
-
-	try {
-		const composeFile = stringify(composeSpec, {
-			lineWidth: 1000,
-		});
-		fs.writeFileSync(path, composeFile, "utf8");
-	} catch (e) {
-		console.error("Error saving the YAML config file:", e);
 	}
 };
 

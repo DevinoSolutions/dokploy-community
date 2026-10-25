@@ -301,16 +301,13 @@ describe("compose .env (getCreateEnvFileCommand)", () => {
 		expect(content).toContain("APP_NAME=");
 		expectNoContentIn([command, ...remoteCommands()], [secretEnv]);
 		expect(command).not.toContain("ENVSECRET");
-		// The mode of an existing .env survives: touch, then `cat >` (never `mv`).
-		// A .env that is a symlink is removed first, so the write never goes
-		// through the link (T-7135).
+		// The .env is written to a temporary file in its directory and renamed
+		// over the name, taking the mode and owner of the one it replaces. A .env
+		// that is a symlink is replaced, never written through (T-7135, T-7857).
 		expect(command).toContain(
-			"{ if [ -L /etc/dokploy/compose/big-app/code/.env ]; then rm -f /etc/dokploy/compose/big-app/code/.env; fi && touch /etc/dokploy/compose/big-app/code/.env && cat ",
+			"__dokploy_put /etc/dokploy/compose/big-app/.dokploy-stage-env-dep-1 /etc/dokploy/compose/big-app/code/.env /etc/dokploy/compose/big-app/code",
 		);
-		expect(command).toContain(
-			"cat /etc/dokploy/compose/big-app/.dokploy-stage-env-dep-1 > /etc/dokploy/compose/big-app/code/.env",
-		);
-		expect(command).not.toContain(" mv ");
+		expect(command).not.toContain("> /etc/dokploy/compose/big-app/code/.env");
 		// Created 0600 before it holds the secrets.
 		const prepare = remoteCommands()[0]!;
 		expect(prepare).toContain("umask 077");
@@ -744,16 +741,14 @@ describe("a failed remote prepare step", () => {
 });
 
 describe("files staged for a script that stops early", () => {
-	const run = (script: string) =>
-		spawnSync(
-			"sh",
-			[
-				"-c",
-				`set -e
-${script}`,
-			],
-			{ encoding: "utf8" },
-		);
+	// Run from a file: a script past ~8 KB does not fit the command line of a
+	// Windows shell (the hosts it is written for are Linux).
+	const run = (script: string) => {
+		const file = `${tmp}/script-${Math.random().toString(36).slice(2)}.sh`;
+		writeFileSync(file, `set -e
+${script}`);
+		return spawnSync("sh", [file], { encoding: "utf8" });
+	};
 	const hasShHere = spawnSync("sh", ["-c", "true"]).status === 0;
 	const itSh = hasShHere ? it : it.skip;
 	const stagedNames = (dir: string) =>
@@ -941,7 +936,11 @@ describe("build-server step", () => {
 			"/etc/dokploy/compose/big-app/code/docker-compose.yml",
 			"/etc/dokploy/compose/big-app/code/.env",
 		]) {
-			const index = commands.findIndex((c) => c.includes(`> ${destination}`));
+			const index = commands.findIndex(
+				(c) =>
+					c.includes(`> ${destination}`) ||
+					c.includes(`${destination} /etc/dokploy/compose/big-app/code`),
+			);
 			expect(index, destination).toBeGreaterThan(-1);
 			expect(index, destination).toBeLessThan(configIndex);
 		}

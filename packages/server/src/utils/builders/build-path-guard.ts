@@ -7,6 +7,7 @@ import {
 	getDockerContextPath,
 	getPublishDirectoryPath,
 } from "../filesystem/directory";
+import { getPathResolverLines } from "../path-containment";
 import type { ApplicationNested } from ".";
 
 interface BuildPathCheck {
@@ -94,18 +95,11 @@ export const getBuildPathGuardCommand = (
 ) => {
 	const refuse = (message: string) =>
 		`{ ${cleanup ? `${cleanup} ` : ""}echo ${quote([`❌ Build refused: ${message}`])} >&2; exit 1; }`;
-	const lines = [
-		"if realpath -m -- / >/dev/null 2>&1; then",
-		'\t__dokploy_resolve() { realpath -m -- "$1"; }',
-		"elif readlink -f -- / >/dev/null 2>&1; then",
-		// `readlink -f` (busybox) needs the path to exist but for its last part:
-		// resolve the deepest part that exists and append the rest as it is.
-		'\t__dokploy_resolve() { __dokploy_r=$1 __dokploy_t=; while [ ! -e "$__dokploy_r" ] && [ ! -L "$__dokploy_r" ] && [ "$__dokploy_r" != / ]; do __dokploy_t=/${__dokploy_r##*/}$__dokploy_t; __dokploy_r=${__dokploy_r%/*}; __dokploy_r=${__dokploy_r:-/}; done; case "$__dokploy_t" in */..|*/../*) return 1;; esac; __dokploy_r=$(readlink -f -- "$__dokploy_r") && printf "%s%s\\n" "$__dokploy_r" "$__dokploy_t"; }',
-		"else",
-		`\t${refuse("the build host has neither realpath -m nor readlink -f, so the build settings cannot be checked.")}`,
-		"fi",
-		'__dokploy_inside() { __dokploy_c=$(__dokploy_resolve "$1") && [ -d "$__dokploy_c" ] && __dokploy_p=$(__dokploy_resolve "$2") || return 1; case "$__dokploy_p" in "$__dokploy_c"|"$__dokploy_c"/*) return 0;; esac; return 1; }',
-	];
+	const lines = getPathResolverLines(
+		refuse(
+			"the build host has neither realpath -m nor readlink -f, so the build settings cannot be checked.",
+		),
+	);
 	for (const { codeDirectory, place, label } of getBuildPathChecks(
 		application,
 	)) {
