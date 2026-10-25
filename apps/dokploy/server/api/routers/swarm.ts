@@ -118,8 +118,14 @@ export const swarmRouter = createTRPCRouter({
 		.query(async ({ input, ctx }) => {
 			await assertServerReachable(ctx, input.serverId);
 			const stats = await getAllContainerStats(input.serverId);
+			// `docker stats` lists every container on the host, which several
+			// organizations can share: owners and admins are checked too, so they
+			// keep their organization's containers and the host's own, and lose
+			// the containers of every other organization.
 			return stats
-				? await filterReadableStats(ctx, stats, input.serverId)
+				? await filterReadableStats(ctx, stats, input.serverId, {
+						strict: true,
+					})
 				: stats;
 		}),
 });

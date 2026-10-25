@@ -40,6 +40,7 @@ import { and, asc, desc, eq, gt, ne } from "drizzle-orm";
 import { z } from "zod";
 import { apiKeyNameSchema } from "@/lib/api-keys";
 import { audit } from "@/server/api/utils/audit";
+import { resolveMetricsTarget } from "@/server/api/utils/container-service-access";
 import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
 import {
 	adminProcedure,
@@ -590,6 +591,15 @@ export const userRouter = createTRPCRouter({
 						].join("\n"),
 					);
 				}
+				// The agent matches the name against every container on the host,
+				// which several organizations can share: the name has to be one the
+				// caller can read there, and only the rows of what was checked are
+				// returned.
+				const belongs = await resolveMetricsTarget(
+					ctx,
+					input.appName,
+					input.serverId,
+				);
 				const url = new URL(`${baseUrl}/metrics/containers`);
 				url.searchParams.append("limit", input.dataPoints);
 				url.searchParams.append("appName", input.appName);
@@ -604,8 +614,16 @@ export const userRouter = createTRPCRouter({
 					);
 				}
 
-				const data = await response.json();
-				if (!Array.isArray(data) || data.length === 0) {
+				const answer: unknown = await response.json();
+				const data = Array.isArray(answer)
+					? answer.filter((row: { Name?: unknown } | null) => {
+							const name = row?.Name;
+							return (
+								typeof name === "string" && belongs(name.replace(/^\//, ""))
+							);
+						})
+					: [];
+				if (data.length === 0) {
 					throw new Error(
 						[
 							`No monitoring data available for "${input.appName}". This could be because:`,

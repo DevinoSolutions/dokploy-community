@@ -413,36 +413,36 @@ export const findServiceOrganizations = async (
 	if (ids.length === 0) {
 		return organizations;
 	}
-	const idList = sql.join(
-		ids.map((id) => sql`${id}`),
-		sql`, `,
-	);
+	// The list is bound once, as one text[] parameter: a placeholder per id and
+	// per table would reach the 65,535 bind parameters of a Postgres statement
+	// at about 8,000 services.
 	const rows = await db.execute(sql`
+		WITH ids AS (SELECT unnest(${sql.param(ids)}::text[]) AS id)
 		SELECT s."serviceId" AS "serviceId", p."organizationId" AS "organizationId"
 		FROM (
 			SELECT "applicationId" AS "serviceId", "environmentId" FROM "application"
-			WHERE "applicationId" IN (${idList})
+			WHERE "applicationId" IN (SELECT id FROM ids)
 			UNION ALL
 			SELECT "composeId" AS "serviceId", "environmentId" FROM "compose"
-			WHERE "composeId" IN (${idList})
+			WHERE "composeId" IN (SELECT id FROM ids)
 			UNION ALL
 			SELECT "postgresId" AS "serviceId", "environmentId" FROM "postgres"
-			WHERE "postgresId" IN (${idList})
+			WHERE "postgresId" IN (SELECT id FROM ids)
 			UNION ALL
 			SELECT "mysqlId" AS "serviceId", "environmentId" FROM "mysql"
-			WHERE "mysqlId" IN (${idList})
+			WHERE "mysqlId" IN (SELECT id FROM ids)
 			UNION ALL
 			SELECT "mariadbId" AS "serviceId", "environmentId" FROM "mariadb"
-			WHERE "mariadbId" IN (${idList})
+			WHERE "mariadbId" IN (SELECT id FROM ids)
 			UNION ALL
 			SELECT "mongoId" AS "serviceId", "environmentId" FROM "mongo"
-			WHERE "mongoId" IN (${idList})
+			WHERE "mongoId" IN (SELECT id FROM ids)
 			UNION ALL
 			SELECT "redisId" AS "serviceId", "environmentId" FROM "redis"
-			WHERE "redisId" IN (${idList})
+			WHERE "redisId" IN (SELECT id FROM ids)
 			UNION ALL
 			SELECT "libsqlId" AS "serviceId", "environmentId" FROM "libsql"
-			WHERE "libsqlId" IN (${idList})
+			WHERE "libsqlId" IN (SELECT id FROM ids)
 		) s
 		INNER JOIN "environment" e ON e."environmentId" = s."environmentId"
 		INNER JOIN "project" p ON p."projectId" = e."projectId"

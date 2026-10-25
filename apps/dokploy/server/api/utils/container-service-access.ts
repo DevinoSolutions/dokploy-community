@@ -5,7 +5,6 @@ import {
 	previewDeployments,
 } from "@dokploy/server/db/schema";
 import {
-	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
 	findServiceOrganizations,
@@ -18,7 +17,7 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
-import { eq, inArray } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import {
 	OWNERSHIP_LABELS,
@@ -90,7 +89,7 @@ const runOn = async (command: string, serverId?: string) =>
 const readService = async (
 	reference: string,
 	serverId?: string,
-): Promise<DockerObject | null> => {
+): Promise<(DockerObject & { name: string }) | null> => {
 	const { stdout } = await runOn(
 		inspectCommand("service", reference),
 		serverId,
@@ -106,9 +105,11 @@ const readService = async (
 		string,
 		unknown
 	>;
+	const name = rest.slice(nameAt + 1);
 	return {
 		id,
-		appNames: ownershipNames([rest.slice(nameAt + 1), ...labelValues(labels)]),
+		name,
+		appNames: ownershipNames([name, ...labelValues(labels)]),
 	};
 };
 
@@ -172,46 +173,6 @@ export const readDockerObject = async (
 	}
 };
 
-// Every service (and the service behind a preview deployment) whose appName is
-// one of `appNames`, with the server it runs on.
-const findServicesByAppName = async (appNames: string[]) => {
-	const found: { serviceId: string; serverId: string | null }[] = [];
-	for (const { table, id } of SERVICE_TABLES) {
-		const rows = await db
-			.select({ serviceId: id, serverId: table.serverId })
-			.from(table)
-			.where(inArray(table.appName, appNames));
-		found.push(...rows);
-	}
-
-	const previews = await db
-		.select({
-			applicationId: previewDeployments.applicationId,
-			composeId: previewDeployments.composeId,
-		})
-		.from(previewDeployments)
-		.where(inArray(previewDeployments.appName, appNames));
-	for (const { applicationId, composeId } of previews) {
-		if (applicationId) {
-			const [parent] = await db
-				.select({ serverId: applications.serverId })
-				.from(applications)
-				.where(eq(applications.applicationId, applicationId));
-			if (parent)
-				found.push({ serviceId: applicationId, serverId: parent.serverId });
-		}
-		if (composeId) {
-			const [parent] = await db
-				.select({ serverId: compose.serverId })
-				.from(compose)
-				.where(eq(compose.composeId, composeId));
-			if (parent)
-				found.push({ serviceId: composeId, serverId: parent.serverId });
-		}
-	}
-	return found;
-};
-
 export type ContainerServiceCheck =
 	| { outcome: "readable"; serviceIds: string[] }
 	| { outcome: "unowned" }
@@ -234,27 +195,12 @@ export type ContainerServiceCheck =
  */
 export const checkDockerObjectServices = async (
 	ctx: PermissionCtx,
-	object: DockerObject,
+	object: Pick<DockerObject, "appNames">,
 	serverId?: string,
 ): Promise<ContainerServiceCheck> => {
-	if (object.appNames.length === 0) return { outcome: "unowned" };
-
-	const services = await findServicesByAppName(object.appNames);
-	if (services.length === 0) return { outcome: "unowned" };
-
-	for (const service of services) {
-		if ((service.serverId ?? undefined) !== serverId)
-			return { outcome: "refused" };
-		try {
-			await checkServiceAccess(ctx, service.serviceId, "read");
-		} catch {
-			return { outcome: "refused" };
-		}
-	}
-	return {
-		outcome: "readable",
-		serviceIds: [...new Set(services.map((service) => service.serviceId))],
-	};
+	// one rule for one object and for a list: the batched check decides both
+	const [check] = await checkDockerObjectsServices(ctx, [object], serverId);
+	return check ?? { outcome: "refused" };
 };
 
 type ServiceRef = { serviceId: string; serverId: string | null };
@@ -514,12 +460,137 @@ export const assertAppNameReadable = async (
 		if (!(await canReachServer(ctx, serverId))) throw containerNotFound();
 		const check = await checkDockerObjectServices(
 			ctx,
-			{ id: "", appNames: [appName] },
+			{ appNames: [appName] },
 			serverId,
 		);
 		if (check.outcome === "readable") return;
 		if (check.outcome === "unowned" && (await isOwnerOrAdmin(ctx))) return;
 		throw containerNotFound();
+	} catch {
+		throw containerNotFound();
+	}
+};
+
+// A swarm task's container is named "<service>.<slot>.<task id>" (a global
+// service has the node id in place of the slot), and a swarm service name has
+// no dot.
+const isTaskOf = (service: string) => (containerName: string) => {
+	if (containerName === service) return true;
+	if (!containerName.startsWith(`${service}.`)) return false;
+	const rest = containerName.slice(service.length + 1).split(".");
+	return rest.length === 2 && rest.every(Boolean);
+};
+
+const isNamed = (name: string) => (containerName: string) =>
+	containerName === name;
+
+// The container named exactly `name`: docker also resolves an id prefix, which
+// is not what the metrics agent matches on.
+const readContainerByName = async (
+	name: string,
+	serverId?: string,
+): Promise<DockerObject | null> => {
+	try {
+		const { stdout } = await runOn(
+			quote([
+				"docker",
+				"inspect",
+				"--type",
+				"container",
+				"--format",
+				"{{.Name}} {{.Id}} {{json .Config.Labels}}",
+				name,
+			]),
+			serverId,
+		);
+		const [containerName, id, ...labels] = stdout.trim().split(" ");
+		if (containerName !== `/${name}` || !id || !FULL_ID.container.test(id))
+			return null;
+		const parsed = (JSON.parse(labels.join(" ")) ?? {}) as Record<
+			string,
+			unknown
+		>;
+		return { id, appNames: ownershipNames(labelValues(parsed)) };
+	} catch {
+		return null;
+	}
+};
+
+const readServiceByName = async (name: string, serverId?: string) => {
+	try {
+		const service = await readService(name, serverId);
+		return service?.name === name ? service : null;
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * `user.getContainerMetrics` sends the monitoring agent a name the client
+ * picked, and the agent answers every container named that name or starting
+ * with it and a dot (an SQL LIKE, in which "_" matches any character). The UI
+ * sends the appName of an application or a database (whose swarm tasks are
+ * "<appName>.<slot>.<task id>") or, on the compose page, the name of one
+ * container of the compose.
+ *
+ * The name must be, in this order:
+ * - the appName of a service the caller can read on `serverId` (another
+ *   organization's appName, or one on another server, is refused outright);
+ * - a swarm service on that server, checked by its labels like the docker
+ *   routes (Dokploy itself and other host services: owners and admins only);
+ * - a container of exactly that name on that server, checked by its labels;
+ * - for an owner or admin only, a name nothing on the host carries any more.
+ *
+ * Returns which of the agent's rows belong to what was checked: the swarm
+ * tasks of the service, or the container of that exact name. The caller drops
+ * the rest, so a wildcard in the agent's match cannot widen the answer.
+ *
+ * Every refusal is the same NOT_FOUND.
+ */
+export const resolveMetricsTarget = async (
+	ctx: PermissionCtx,
+	name: string,
+	serverId?: string,
+): Promise<(containerName: string) => boolean> => {
+	try {
+		if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) throw containerNotFound();
+		if (!(await canReachServer(ctx, serverId))) throw containerNotFound();
+		const allowed = async (check: ContainerServiceCheck) =>
+			check.outcome === "readable" ||
+			(check.outcome === "unowned" && (await isOwnerOrAdmin(ctx)));
+
+		const byAppName = await checkDockerObjectServices(
+			ctx,
+			{ appNames: [name] },
+			serverId,
+		);
+		if (byAppName.outcome === "readable") return isTaskOf(name);
+		if (byAppName.outcome === "refused") throw containerNotFound();
+
+		const service = await readServiceByName(name, serverId);
+		if (service) {
+			if (
+				!(await allowed(
+					await checkDockerObjectServices(ctx, service, serverId),
+				))
+			)
+				throw containerNotFound();
+			return isTaskOf(name);
+		}
+
+		const container = await readContainerByName(name, serverId);
+		if (container) {
+			if (
+				!(await allowed(
+					await checkDockerObjectServices(ctx, container, serverId),
+				))
+			)
+				throw containerNotFound();
+			return isNamed(name);
+		}
+
+		if (!(await isOwnerOrAdmin(ctx))) throw containerNotFound();
+		return isNamed(name);
 	} catch {
 		throw containerNotFound();
 	}

@@ -33,6 +33,8 @@ const mocks = vi.hoisted(() => ({
 	idOf: (name: string) =>
 		Buffer.from(name).toString("hex").padEnd(64, "0").slice(0, 64),
 	commands: [] as { serverId?: string; command: string }[],
+	// servers the caller may reach (a member only reaches the ones granted)
+	servers: new Set<string>(),
 }));
 
 vi.mock("@dokploy/server/db", async (importOriginal) => {
@@ -44,18 +46,31 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 			query: { member: { findFirst: vi.fn(async () => mocks.member) } },
 			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
-					// service lookup, preview lookup, or the preview parent's server
-					where: async () =>
-						("serviceId" in fields || "applicationId" in fields
-							? mocks.serviceRows.get(table)
-							: mocks.parents.get(table)) ?? [],
+					// service lookup, preview lookup, or the preview parent's server.
+					// The lookups are batched: a row comes back under every appName
+					// looked up, and a parent under every id looked up.
+					where: async (condition: Parameters<PgDialect["sqlToQuery"]>[0]) => {
+						const params = dialect.sqlToQuery(condition).params as string[];
+						if ("serviceId" in fields || "applicationId" in fields)
+							return (mocks.serviceRows.get(table) ?? []).flatMap((row) =>
+								params.map((appName) => ({ appName, ...row })),
+							);
+						return (mocks.parents.get(table) ?? []).flatMap((row) =>
+							params.map((parentId) => ({ parentId, ...row })),
+						);
+					},
 				}),
 			}),
-			// findServiceOrganizationId passes the service id as the first param
+			// the organization of one service id (findServiceOrganizationId) or of
+			// a batch of them (findServiceOrganizations), one row per known id
 			execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
-				const [serviceId] = dialect.sqlToQuery(query).params as string[];
-				const organizationId = mocks.serviceOrganizations.get(serviceId ?? "");
-				return organizationId ? [{ organizationId }] : [];
+				const ids = new Set(
+					dialect.sqlToQuery(query).params.flat() as string[],
+				);
+				return [...ids].flatMap((serviceId) => {
+					const organizationId = mocks.serviceOrganizations.get(serviceId);
+					return organizationId ? [{ serviceId, organizationId }] : [];
+				});
 			}),
 		},
 	};
@@ -102,6 +117,7 @@ vi.mock("@dokploy/server/services/server", async (importOriginal) => ({
 		serverId,
 		organizationId: serverId === "server-b" ? "org-b" : "org-a",
 	})),
+	getAccessibleServerIds: vi.fn(async () => mocks.servers),
 }));
 
 const { appRouter } = await import("@/server/api/root");
@@ -125,6 +141,7 @@ beforeEach(() => {
 	mocks.ids.clear();
 	mocks.parents.clear();
 	mocks.commands.length = 0;
+	mocks.servers = new Set(["server-a"]);
 });
 
 describe("server.getContainerProcesses", () => {
@@ -217,6 +234,26 @@ describe("server.getContainerProcesses", () => {
 			caller.server.getContainerProcesses({ containerId: "c-mixed" }),
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
 		expect(dockerTopRuns()).toHaveLength(0);
+	});
+
+	it("refuses a member a server of the organization they were not granted, before running anything", async () => {
+		mocks.member = { role: "member", accessedServices: ["app-a"] };
+		mocks.servers = new Set();
+		mocks.containers.set("c-a", {
+			"com.docker.swarm.service.name": "app-a-abc123",
+		});
+		mocks.serviceRows.set(applications, [
+			{ serviceId: "app-a", serverId: "server-a" },
+		]);
+		mocks.serviceOrganizations.set("app-a", "org-a");
+
+		await expect(
+			caller.server.getContainerProcesses({
+				containerId: "c-a",
+				serverId: "server-a",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.commands).toHaveLength(0);
 	});
 
 	it("refuses a container whose service runs on another server", async () => {
