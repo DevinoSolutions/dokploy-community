@@ -780,13 +780,71 @@ echo "HITS=$hits"
 		expect(result.stdout, result.stderr).toContain("HITS=0");
 	});
 
+	// The destination name flips between a non-empty real directory (which makes
+	// `mv -T` fail) and a link to a directory outside the checkout (which a plain
+	// `mv` would move the file into). Nothing may land outside, and no temporary
+	// file may stay behind.
+	itRace(
+		"a name flipping between a directory and a link out leaves nothing outside",
+		() => {
+			const snippet = getInstallStagedComposeCommand(
+				`${tmp}/staged.yml`,
+				`${code()}/docker-compose.yml`,
+				[],
+				code(),
+			);
+			const trials = process.platform === "win32" ? 12 : 100;
+			const file = `${tmp}/flip.sh`;
+			writeFileSync(
+				file,
+				[
+					`D=${JSON.stringify(tmp)}`,
+					`code="$D/compose/link-app/code"; out="$D/outside"`,
+					`printf 'staged: true\\n' > "$D/staged.yml"`,
+					`rm -f "$code/docker-compose.yml"`,
+					"( while :; do",
+					`    rm -rf "$code/docker-compose.yml"; mkdir -p "$code/docker-compose.yml/keep"`,
+					`    rm -rf "$code/docker-compose.yml"; ln -sfn "$out" "$code/docker-compose.yml"`,
+					"  done ) >/dev/null 2>&1 &",
+					"attacker=$!",
+					`trap 'kill "$attacker" 2>/dev/null' EXIT`,
+					"i=0",
+					`while [ "$i" -lt ${trials} ]; do`,
+					`  cp "$D/staged.yml" "$D/staged.keep"`,
+					// A failed install ends its script with `exit 1`: run it in a subshell.
+					"  (",
+					snippet,
+					"  ) >/dev/null 2>&1",
+					`  cp "$D/staged.keep" "$D/staged.yml"`,
+					"  i=$((i + 1))",
+					"done",
+					`kill "$attacker" 2>/dev/null`,
+					`echo "OUTSIDE=$(ls -A "$out" | tr '\\n' ' ')"`,
+					`echo "TEMPS=$(ls -A "$code" | grep -c '^\\.dokploy-put-')"`,
+				].join("\n"),
+			);
+			const result = spawnSync("sh", [file], {
+				encoding: "utf8",
+				env: raceEnv,
+				timeout: 120_000,
+			});
+			expect(result.stdout, result.stderr).toContain("OUTSIDE=.env target.yml");
+			expect(result.stdout, result.stderr).toContain("TEMPS=0");
+		},
+	);
+
+	// The old sequence can be hit, but only by chance, so the control retries a
+	// few rounds until it is.
 	itRace(
 		"the in-place sequence they replace does go through the link (control)",
 		() => {
-			const result = runRace(
-				`{ if [ -L "$code/docker-compose.yml" ]; then rm -f "$code/docker-compose.yml"; fi && cat "$D/staged.yml" > "$code/docker-compose.yml"; } 2>/dev/null`,
-			);
-			const hits = Number(/HITS=(\d+)/.exec(result.stdout)?.[1] ?? "0");
+			let hits = 0;
+			for (let round = 0; round < 6 && hits === 0; round++) {
+				const result = runRace(
+					`{ if [ -L "$code/docker-compose.yml" ]; then rm -f "$code/docker-compose.yml"; fi && cat "$D/staged.yml" > "$code/docker-compose.yml"; } 2>/dev/null`,
+				);
+				hits = Number(/HITS=(\d+)/.exec(result.stdout)?.[1] ?? "0");
+			}
 			expect(hits).toBeGreaterThan(0);
 		},
 	);
