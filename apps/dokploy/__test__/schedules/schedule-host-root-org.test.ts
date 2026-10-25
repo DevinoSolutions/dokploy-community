@@ -214,6 +214,31 @@ describe("host schedules belong to the organization that owns the instance", () 
 		},
 	);
 
+	it("lists every host schedule for the organization that owns the instance, and deletes a leftover one", async () => {
+		mocks.rootOrganization = "org-2";
+		mocks.existing = schedule("dokploy-server", { organizationId: "org-3" });
+
+		await caller().list({ id: "org-2", scheduleType: "dokploy-server" });
+		await caller().delete({ scheduleId: "sch-1" });
+
+		expect(mocks.findMany).toHaveBeenCalledTimes(1);
+		expect(mocks.deleteSchedule).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not let the organization that owns the instance edit or run a leftover one", async () => {
+		mocks.rootOrganization = "org-2";
+		mocks.existing = schedule("dokploy-server", { organizationId: "org-3" });
+
+		await expect(
+			caller().update({ ...base, scheduleType: "dokploy-server" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		await expect(
+			caller().runManually({ scheduleId: "sch-1" }),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.updateSchedule).not.toHaveBeenCalled();
+		expect(mocks.runCommand).not.toHaveBeenCalled();
+	});
+
 	it("refuses an update that turns another kind of schedule into a host schedule", async () => {
 		mocks.existing = schedule("server", { serverId: "srv-1" });
 		await expect(

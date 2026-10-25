@@ -150,6 +150,21 @@ beforeEach(() => {
 });
 
 describe("dokploy-server schedules belong to one organization", () => {
+	// The organization that owns the instance clears out what others left.
+	it.each([
+		["another organization", "org-2"],
+		["no organization", null],
+	])(
+		"lets the organization that owns the instance delete a schedule owned by %s",
+		async (_label, organizationId) => {
+			mocks.existing = hostSchedule(organizationId);
+
+			await caller().delete({ scheduleId: "sch-1" });
+
+			expect(mocks.deleteSchedule).toHaveBeenCalledTimes(1);
+		},
+	);
+
 	it.each([
 		["another organization", "org-2"],
 		["no organization", null],
@@ -161,9 +176,6 @@ describe("dokploy-server schedules belong to one organization", () => {
 			await expect(
 				caller().update({ ...base, scheduleType: "dokploy-server" }),
 			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-			await expect(
-				caller().delete({ scheduleId: "sch-1" }),
-			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 			await expect(caller().one({ scheduleId: "sch-1" })).rejects.toMatchObject(
 				{ code: "UNAUTHORIZED" },
 			);
@@ -172,7 +184,6 @@ describe("dokploy-server schedules belong to one organization", () => {
 			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 
 			expect(mocks.updateSchedule).not.toHaveBeenCalled();
-			expect(mocks.deleteSchedule).not.toHaveBeenCalled();
 			expect(mocks.runCommand).not.toHaveBeenCalled();
 		},
 	);
