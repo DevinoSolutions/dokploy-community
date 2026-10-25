@@ -60,6 +60,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useComposeFetchFallback } from "@/hooks/use-compose-fetch-fallback";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import { ScheduleFormField } from "../../application/schedules/handle-schedules";
@@ -261,6 +262,7 @@ export const HandleBackup = ({
 			enabled: backupType === "compose" && !!backup?.composeId && !!id,
 		},
 	);
+	useComposeFetchFallback(cacheType, setCacheType, errorServices);
 
 	useEffect(() => {
 		form.reset({

@@ -122,6 +122,7 @@ import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
 import { auditCancel } from "../utils/cancel-audit";
+import { withComposeFetchLock } from "../utils/compose-fetch-lock";
 import {
 	readComposePolicyExclusion,
 	writeComposePolicyExclusion,
@@ -701,23 +702,44 @@ export const composeRouter = createTRPCRouter({
 			await auditKill(rolling.deploymentIds);
 		}),
 
+	// `cache` reads the compose file on disk. `fetch` clones the source over the
+	// code dir a deploy reads first, so it needs what a deploy needs and runs
+	// under the compose's deploy lock (see compose-fetch-lock.ts).
 	loadServices: protectedProcedure
 		.input(apiFetchServices)
 		.query(async ({ input, ctx }) => {
+			if (input.type !== "fetch") {
+				await checkServicePermissionAndAccess(ctx, input.composeId, {
+					service: ["read"],
+				});
+				return await loadServices(input.composeId, "cache");
+			}
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
-				service: ["read"],
+				deployment: ["create"],
 			});
-			return await loadServices(input.composeId, input.type);
+			const compose = await findComposeById(input.composeId);
+			return await withComposeFetchLock(compose, () =>
+				loadServices(input.composeId, "fetch"),
+			);
 		}),
 	rollingEligibility: protectedProcedure
 		.input(apiFetchServices)
 		.query(async ({ input, ctx }) => {
+			if (input.type !== "fetch") {
+				await checkServicePermissionAndAccess(ctx, input.composeId, {
+					service: ["read"],
+				});
+				return await getComposeRollingReport(input.composeId, {
+					type: "cache",
+				});
+			}
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
-				service: ["read"],
+				deployment: ["create"],
 			});
-			return await getComposeRollingReport(input.composeId, {
-				type: input.type,
-			});
+			const compose = await findComposeById(input.composeId);
+			return await withComposeFetchLock(compose, () =>
+				getComposeRollingReport(input.composeId, { type: "fetch" }),
+			);
 		}),
 	loadMountsByService: protectedProcedure
 		.input(
@@ -741,20 +763,29 @@ export const composeRouter = createTRPCRouter({
 		.input(apiFindCompose)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				// A clone over the code dir, like the Fetch of loadServices.
 				await checkServicePermissionAndAccess(ctx, input.composeId, {
 					service: ["create"],
+					deployment: ["create"],
 				});
 				const compose = await findComposeById(input.composeId);
 
-				const command = await cloneCompose(compose);
-				if (compose.serverId) {
-					await execAsyncRemote(compose.serverId, command);
-				} else {
-					await execAsync(command);
-				}
+				await withComposeFetchLock(compose, async () => {
+					const command = await cloneCompose(compose);
+					if (compose.serverId) {
+						await execAsyncRemote(compose.serverId, command);
+					} else {
+						await execAsync(command);
+					}
+				});
 				return compose.sourceType;
 			} catch (err) {
-				if (err instanceof TRPCError && err.code === "FORBIDDEN") {
+				if (
+					err instanceof TRPCError &&
+					(err.code === "FORBIDDEN" ||
+						err.code === "UNAUTHORIZED" ||
+						err.code === "CONFLICT")
+				) {
 					throw err;
 				}
 				throw new TRPCError({
@@ -784,14 +815,15 @@ export const composeRouter = createTRPCRouter({
 	isolatedDeployment: protectedProcedure
 		.input(apiRandomizeCompose)
 		.mutation(async ({ input, ctx }) => {
+			// The preview clones the source over the code dir first, like a Fetch.
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
+				deployment: ["create"],
 			});
-			const result = await randomizeIsolatedDeploymentComposeFile(
-				input.composeId,
-				input.suffix,
-			);
 			const compose = await findComposeById(input.composeId);
+			const result = await withComposeFetchLock(compose, () =>
+				randomizeIsolatedDeploymentComposeFile(input.composeId, input.suffix),
+			);
 			await audit(ctx, {
 				action: "update",
 				resourceType: "compose",

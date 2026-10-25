@@ -74,6 +74,11 @@ interface DeploymentQueue {
 	hasKeptGroupLock: (id: string) => boolean;
 	/** Drop that lock (see InMemoryQueue.dropKeptGroupLock). */
 	dropKeptGroupLock: (id: string) => boolean;
+	/** Lock a service's group while it is idle (see InMemoryQueue.holdIdleGroup). */
+	holdIdleGroup: (
+		partitionKey: string,
+		group: string,
+	) => { release: () => void } | { busy: "queued" | "held" };
 	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
 	keepOldestWaiting: (
 		predicate: (data: DeploymentJob) => boolean,
@@ -100,6 +105,7 @@ const createNoopQueue = (): DeploymentQueue => ({
 	releaseActive: () => false,
 	hasKeptGroupLock: () => false,
 	dropKeptGroupLock: () => false,
+	holdIdleGroup: () => ({ release: () => {} }),
 	removeWaiting: () => 0,
 	keepOldestWaiting: () => ({ kept: [], removed: [] }),
 	coalesceWaiting: () => ({ merged: null, removed: [], titles: [] }),
@@ -157,6 +163,8 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		releaseActive: (id, options) => queue.releaseActive(id, options),
 		hasKeptGroupLock: (id) => queue.hasKeptGroupLock(id),
 		dropKeptGroupLock: (id) => queue.dropKeptGroupLock(id),
+		holdIdleGroup: (partitionKey, group) =>
+			queue.holdIdleGroup(partitionKey, group),
 		removeWaiting: (predicate) => queue.removeWaiting(predicate),
 		keepOldestWaiting: (predicate) => queue.keepOldestWaiting(predicate),
 		coalesceWaiting: (incoming, predicate) =>

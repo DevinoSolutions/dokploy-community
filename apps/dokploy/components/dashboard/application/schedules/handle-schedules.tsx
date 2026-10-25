@@ -61,6 +61,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useComposeFetchFallback } from "@/hooks/use-compose-fetch-fallback";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import type { CacheType } from "../domains/handle-domain";
@@ -260,6 +261,7 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 			enabled: !!id && scheduleType === "compose",
 		},
 	);
+	useComposeFetchFallback(cacheType, setCacheType, errorServices);
 
 	useEffect(() => {
 		if (scheduleId && schedule) {

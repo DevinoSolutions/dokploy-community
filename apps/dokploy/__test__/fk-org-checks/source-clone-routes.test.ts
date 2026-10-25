@@ -69,7 +69,7 @@ vi.mock("@dokploy/server/lib/auth", () => ({
 vi.mock("@/server/api/utils/audit", () => ({ audit: vi.fn() }));
 
 vi.mock("@/server/queues/queueSetup", () => ({
-	myQueue: { add: vi.fn() },
+	myQueue: { add: vi.fn(), holdIdleGroup: () => ({ release: () => {} }) },
 	cleanQueuesByApplication: vi.fn(),
 	cleanQueuesByCompose: vi.fn(),
 	killDockerBuild: vi.fn(),

@@ -61,6 +61,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useComposeFetchFallback } from "@/hooks/use-compose-fetch-fallback";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import type { ServiceType } from "../../application/advanced/show-resources";
@@ -300,6 +301,7 @@ export const RestoreBackup = ({
 	const {
 		data: services = [],
 		isLoading: isLoadingServices,
+		error: errorServices,
 		refetch: refetchServices,
 	} = api.compose.loadServices.useQuery(
 		{
@@ -312,6 +314,7 @@ export const RestoreBackup = ({
 			enabled: backupType === "compose",
 		},
 	);
+	useComposeFetchFallback(cacheType, setCacheType, errorServices);
 
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>

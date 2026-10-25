@@ -261,6 +261,8 @@ export class InMemoryQueue {
 	private partitions = new Map<string, Partition>();
 	/** Released jobs whose service lock is still held, by job id. */
 	private keptLocks = new Map<string, InternalJob>();
+	/** Groups locked by `holdIdleGroup`, outside any job. */
+	private heldGroups = new Set<string>();
 	private processor: Processor | null = null;
 	private running = false;
 	private paused = false;
@@ -645,6 +647,44 @@ export class InMemoryQueue {
 		this.partitions.get(job.partition)?.activeGroups.delete(job.group);
 		void this.drainPartition(job.partition);
 		return true;
+	}
+
+	/**
+	 * Take a service's group lock for work done outside the queue (a compose
+	 * Fetch rewriting the code dir a deploy reads), only while no job of that
+	 * service waits or runs in any partition. While it is held no job of the
+	 * group starts; it is a lock the queue's own jobs respect, not a status
+	 * check. The check and the take are one synchronous step, so a job cannot
+	 * start in between. Returns the release (safe to call twice), or why the
+	 * lock was not taken: `queued` (a job of the service waits or runs, or a
+	 * released job kept its lock) or `held` (another hold has it).
+	 */
+	holdIdleGroup(
+		partitionKey: string,
+		group: string,
+	): { release: () => void } | { busy: "queued" | "held" } {
+		if (this.heldGroups.has(group)) return { busy: "held" };
+		for (const partition of this.partitions.values()) {
+			if (
+				partition.activeGroups.has(group) ||
+				partition.waiting.some((job) => job.group === group)
+			) {
+				return { busy: "queued" };
+			}
+		}
+		const partition = this.getPartitionState(partitionKey);
+		partition.activeGroups.add(group);
+		this.heldGroups.add(group);
+		let released = false;
+		return {
+			release: () => {
+				if (released) return;
+				released = true;
+				this.heldGroups.delete(group);
+				partition.activeGroups.delete(group);
+				void this.drainPartition(partitionKey);
+			},
+		};
 	}
 
 	/** Remove waiting jobs matching a predicate. Active jobs are not affected. */

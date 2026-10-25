@@ -353,6 +353,47 @@ describe("executeMcpTool", () => {
 		expect(call).not.toHaveBeenCalled();
 	});
 
+	it("refuses a compose Fetch without the deploy scope, and lets the cached read through (T-8239)", async () => {
+		const tool = {
+			...readTool,
+			name: "compose-loadServices",
+			path: "compose.loadServices",
+			routerName: "compose",
+			procedureName: "loadServices",
+		};
+		const call = vi.fn(async () => ["web"]);
+		const readOnly = new Set(["dokploy:read"]);
+
+		const refused = await executeMcpTool({
+			tool,
+			args: { composeId: "cmp-1", type: "fetch" },
+			scopes: readOnly,
+			call,
+		});
+		expect(refused.isError).toBe(true);
+		expect((refused.content[0] as { text: string }).text).toContain(
+			"dokploy:deploy",
+		);
+		expect(call).not.toHaveBeenCalled();
+
+		const cached = await executeMcpTool({
+			tool,
+			args: { composeId: "cmp-1", type: "cache" },
+			scopes: readOnly,
+			call,
+		});
+		expect(cached.isError).toBeUndefined();
+
+		const fetched = await executeMcpTool({
+			tool,
+			args: { composeId: "cmp-1", type: "fetch" },
+			scopes: new Set(["dokploy:read", "dokploy:deploy"]),
+			call,
+		});
+		expect(fetched.isError).toBeUndefined();
+		expect(call).toHaveBeenCalledTimes(2);
+	});
+
 	it("returns the procedure result as text and structuredContent", async () => {
 		const call = vi.fn(async () => ({ applicationId: "app-1" }));
 		const result = await executeMcpTool({

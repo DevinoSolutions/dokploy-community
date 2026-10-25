@@ -29,6 +29,7 @@ import {
 	PopoverTrigger,
 } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
+import { useComposeFetchFallback } from "@/hooks/use-compose-fetch-fallback";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 
@@ -62,6 +63,7 @@ export const AssignComposeNetworks = ({ composeId }: Props) => {
 		{ composeId, type: cacheType },
 		{ retry: false },
 	);
+	useComposeFetchFallback(cacheType, setCacheType, servicesError);
 
 	const onRetry = () => {
 		setCacheType("fetch");
