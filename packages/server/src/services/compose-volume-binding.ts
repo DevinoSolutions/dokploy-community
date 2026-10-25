@@ -1735,6 +1735,8 @@ const readRegularFile = (path: string) => {
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
 		if (code === "ENOENT" || code === "ENOTDIR") {
+			// Safe: the containment check ran first, and a file that is not there
+			// has nothing to block on; this read just reports it.
 			return readFileSync(path, "utf8");
 		}
 		throw error;
@@ -1785,8 +1787,8 @@ const loadOverrideFile = async (
 	} catch (error) {
 		if (isComposeFileLinkError(error)) {
 			logger.warn(
-				{ composeId: compose.composeId, path },
-				"[VolumeBinding] A compose command was refused: an override file leaves the code directory",
+				{ composeId: compose.composeId, path, reason: error.message },
+				"[VolumeBinding] A compose command was refused: an override file was refused (a link out, outside the allowed directories, or not a regular file)",
 			);
 			throw error;
 		}

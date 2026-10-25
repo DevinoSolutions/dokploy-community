@@ -268,7 +268,7 @@ describe("an override file read on a remote host", () => {
 		expect(command).toContain(COMPOSE_FILE_OUTSIDE_MARKER);
 		expect(mocks.warn).toHaveBeenCalledWith(
 			expect.objectContaining({ composeId: "c1" }),
-			expect.stringContaining("an override file leaves the code directory"),
+			expect.stringContaining("an override file was refused"),
 		);
 	});
 
