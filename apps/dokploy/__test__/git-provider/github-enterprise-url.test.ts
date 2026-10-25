@@ -6,7 +6,7 @@ import {
 	parseGithubBaseUrl,
 } from "@dokploy/server/utils/providers/github";
 import { parseAllowedGithubHosts } from "@dokploy/server/utils/providers/github-host";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const urlOf = (result: ReturnType<typeof parseGithubBaseUrl>) =>
 	"url" in result ? result.url : null;
@@ -173,12 +173,12 @@ describe("parseGithubBaseUrl host policy", () => {
 		const allowed = parseAllowedGithubHosts(
 			" GHE.corp.internal, 10.0.0.5 ,, git.lan.local.",
 		);
-		expect(urlOf(parseGithubBaseUrl("https://ghe.corp.internal", allowed))).toBe(
-			"https://ghe.corp.internal",
-		);
-		expect(urlOf(parseGithubBaseUrl("https://GHE.CORP.INTERNAL:8443", allowed))).toBe(
-			"https://ghe.corp.internal:8443",
-		);
+		expect(
+			urlOf(parseGithubBaseUrl("https://ghe.corp.internal", allowed)),
+		).toBe("https://ghe.corp.internal");
+		expect(
+			urlOf(parseGithubBaseUrl("https://GHE.CORP.INTERNAL:8443", allowed)),
+		).toBe("https://ghe.corp.internal:8443");
 		expect(urlOf(parseGithubBaseUrl("https://10.0.0.5", allowed))).toBe(
 			"https://10.0.0.5",
 		);
@@ -204,13 +204,67 @@ describe("parseGithubBaseUrl host policy", () => {
 	});
 
 	it("keeps the dotless host rule even when allowlisted", () => {
-		const allowed = parseAllowedGithubHosts("metadata, [::1]");
+		const allowed = parseAllowedGithubHosts("metadata, [::1]", () => {});
 		expect(parseGithubBaseUrl("https://metadata", allowed)).toHaveProperty(
 			"error",
 		);
 		expect(parseGithubBaseUrl("https://[::1]", allowed)).toHaveProperty(
 			"error",
 		);
+	});
+
+	it("ignores an entry that is not a bare hostname and reports it", () => {
+		const invalid: string[] = [];
+		const allowed = parseAllowedGithubHosts(
+			[
+				"https://ghe.one.internal/",
+				"ghe.two.internal:8443",
+				"user@ghe.three.internal",
+				"ghe.four.internal/path",
+				"ghe five.internal",
+				"[::1]",
+				"ghe.ok.internal",
+			].join(","),
+			(entry) => invalid.push(entry),
+		);
+
+		expect([...allowed]).toEqual(["ghe.ok.internal"]);
+		expect(invalid).toEqual([
+			"https://ghe.one.internal/",
+			"ghe.two.internal:8443",
+			"user@ghe.three.internal",
+			"ghe.four.internal/path",
+			"ghe five.internal",
+			"[::1]",
+		]);
+	});
+
+	it("warns once per bad entry on the server log by default", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		parseAllowedGithubHosts("https://dup.example.internal/");
+		parseAllowedGithubHosts("https://dup.example.internal/");
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(String(warn.mock.calls[0]?.[0])).toContain(
+			"https://dup.example.internal/",
+		);
+		warn.mockRestore();
+	});
+
+	it("allows any port on an allowlisted host", () => {
+		const allowed = parseAllowedGithubHosts("ghe.corp.internal");
+		expect(
+			urlOf(parseGithubBaseUrl("https://ghe.corp.internal:9443", allowed)),
+		).toBe("https://ghe.corp.internal:9443");
+	});
+
+	it("refuses an empty hostname with the invalid URL message", () => {
+		for (const input of ["https://.", "https://..", "."]) {
+			const result = parseGithubBaseUrl(input, none);
+			expect(result, input).toHaveProperty("error");
+			expect("error" in result ? result.error : "", input).toContain(
+				"is not a valid URL",
+			);
+		}
 	});
 
 	it("is not affected by an empty or absent allowlist value", () => {

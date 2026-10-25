@@ -16,6 +16,9 @@ export const GITHUB_ENTERPRISE_ALLOWED_HOSTS_ENV =
 /** Timeout of every request the server makes to a GitHub instance. */
 export const GITHUB_REQUEST_TIMEOUT_MS = 15_000;
 
+/** Timeout of the DNS lookup that precedes the first request. */
+export const GITHUB_DNS_TIMEOUT_MS = 5_000;
+
 export const GITHUB_REDIRECT_REFUSED =
 	"The GitHub instance answered with a redirect, which is not followed";
 
@@ -46,16 +49,38 @@ const normalizeHost = (value: string): string => {
 	return host.replace(/\.+$/, "");
 };
 
-/** The hostnames of a comma-separated allowlist, exact match, case-insensitive. */
+const warnedAllowlistEntries = new Set<string>();
+
+const warnInvalidAllowlistEntry = (entry: string) => {
+	if (warnedAllowlistEntries.has(entry)) return;
+	warnedAllowlistEntries.add(entry);
+	console.warn(
+		`${GITHUB_ENTERPRISE_ALLOWED_HOSTS_ENV}: ignoring "${entry}", entries must be bare host names (no scheme, path, port or user)`,
+	);
+};
+
+/**
+ * The hostnames of a comma-separated allowlist, exact match, case-insensitive.
+ * An entry that is not a bare hostname (scheme, path, port, user, whitespace
+ * inside) is ignored and reported once through `onInvalid`.
+ */
 export const parseAllowedGithubHosts = (
 	raw: string | undefined | null,
-): Set<string> =>
-	new Set(
-		(raw ?? "")
-			.split(",")
-			.map(normalizeHost)
-			.filter((host) => host !== ""),
-	);
+	onInvalid: (entry: string) => void = warnInvalidAllowlistEntry,
+): Set<string> => {
+	const hosts = new Set<string>();
+	for (const part of (raw ?? "").split(",")) {
+		const entry = part.trim();
+		if (entry === "") continue;
+		if (/[\s/:@]/.test(entry)) {
+			onInvalid(entry);
+			continue;
+		}
+		const host = normalizeHost(entry);
+		if (host !== "") hosts.add(host);
+	}
+	return hosts;
+};
 
 export const getAllowedGithubHosts = (): Set<string> =>
 	parseAllowedGithubHosts(process.env.DOKPLOY_GITHUB_ENTERPRISE_ALLOWED_HOSTS);
@@ -153,9 +178,35 @@ export const isBlockedGithubAddress = (address: string): boolean => {
 export interface GithubHostGuardOptions {
 	allowedHosts?: ReadonlySet<string>;
 	resolveHost?: HostLookup;
+	dnsTimeoutMs?: number;
+	/** The host the user typed, when `githubUrl` is a host derived from it. */
+	displayHost?: string;
 }
 
-const PUBLIC_GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
+const PUBLIC_GITHUB_HOSTS = new Set([
+	"github.com",
+	"www.github.com",
+	"api.github.com",
+]);
+
+const lookupWithTimeout = async (
+	resolveHost: HostLookup,
+	hostname: string,
+	timeoutMs: number,
+) => {
+	const signal = AbortSignal.timeout(timeoutMs);
+	let onAbort: (() => void) | undefined;
+	const timedOut = new Promise<never>((_, reject) => {
+		onAbort = () =>
+			reject(new Error(`DNS lookup timed out after ${timeoutMs} ms`));
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([resolveHost(hostname), timedOut]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
+};
 
 /**
  * Throws a GithubHostError unless the server may send requests to the GitHub
@@ -174,22 +225,40 @@ export const assertGithubHostReachable = async (
 	const allowedHosts = options.allowedHosts ?? getAllowedGithubHosts();
 	if (allowedHosts.has(hostname.replace(/^\[|\]$/g, ""))) return;
 
+	const shown = options.displayHost ?? hostname;
 	const policyError = githubHostPolicyError(hostname, allowedHosts);
-	if (policyError) throw new GithubHostError(policyError);
+	if (policyError) {
+		console.warn(`[github] refused host "${hostname}": ${policyError}`);
+		throw new GithubHostError(policyError);
+	}
+
+	// One message for every reason the name is not usable, so the answer does
+	// not tell whether a name exists in the server's internal DNS. The reason
+	// goes to the log, without the addresses.
+	const refuse = (reason: string) => {
+		console.warn(`[github] refused host "${hostname}": ${reason}`);
+		return new GithubHostError(
+			hostNotAccepted(shown, "does not resolve to a public address"),
+		);
+	};
 
 	let addresses: { address: string; family: number }[];
 	try {
-		addresses = await (options.resolveHost ?? defaultLookup)(hostname);
-	} catch {
-		throw new GithubHostError(`Could not resolve "${hostname}"`);
-	}
-	if (
-		addresses.length === 0 ||
-		addresses.some(({ address }) => isBlockedGithubAddress(address))
-	) {
-		throw new GithubHostError(
-			hostNotAccepted(hostname, "resolves to a private or internal address"),
+		addresses = await lookupWithTimeout(
+			options.resolveHost ?? defaultLookup,
+			hostname,
+			options.dnsTimeoutMs ?? GITHUB_DNS_TIMEOUT_MS,
 		);
+	} catch (error) {
+		throw refuse(
+			error instanceof Error
+				? `lookup failed (${error.message})`
+				: "lookup failed",
+		);
+	}
+	if (addresses.length === 0) throw refuse("no address");
+	if (addresses.some(({ address }) => isBlockedGithubAddress(address))) {
+		throw refuse("resolves to a non-public address");
 	}
 };
 
@@ -203,7 +272,13 @@ export const createNoRedirectFetch =
 		const response = await baseFetch(input, { ...init, redirect: "manual" });
 		if (response.status >= 300 && response.status < 400) {
 			await response.body?.cancel().catch(() => {});
-			throw new GithubHostError(GITHUB_REDIRECT_REFUSED);
+			// Answered as a 400, which Octokit's retry plugin never repeats (a
+			// thrown error would reach it as a 500 and be retried); callers
+			// recognise the message.
+			return new Response(JSON.stringify({ message: GITHUB_REDIRECT_REFUSED }), {
+				status: 400,
+				headers: { "content-type": "application/json" },
+			});
 		}
 		return response;
 	};

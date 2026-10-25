@@ -50,6 +50,7 @@ const INPUTS = [
 	"https://[::ffff:127.0.0.1]",
 	"https://metadata",
 	"https://metadata.",
+	"https://.",
 	"https://localhost",
 	"https://localhost.",
 	"htps://acme.ghe.com",

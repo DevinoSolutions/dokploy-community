@@ -1,10 +1,14 @@
+import { generateKeyPairSync } from "node:crypto";
 import {
+	assertGithubInstanceReachable,
 	convertGithubManifest,
 	verifyGithubInstallation,
 } from "@dokploy/server/utils/providers/github";
 import {
 	assertGithubHostReachable,
 	createNoRedirectFetch,
+	GITHUB_DNS_TIMEOUT_MS,
+	GITHUB_REDIRECT_REFUSED,
 	GITHUB_REQUEST_TIMEOUT_MS,
 	GithubHostError,
 	isBlockedGithubAddress,
@@ -19,7 +23,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const resolveTo =
 	(...addresses: string[]) =>
-	async () =>
+	async (_hostname?: string) =>
 		addresses.map((address) => ({
 			address,
 			family: address.includes(":") ? 6 : 4,
@@ -30,6 +34,8 @@ const none = new Set<string>();
 afterEach(() => {
 	vi.restoreAllMocks();
 });
+
+const warnings = () => vi.spyOn(console, "warn").mockImplementation(() => {});
 
 describe("isBlockedGithubAddress", () => {
 	it.each([
@@ -132,10 +138,10 @@ describe("assertGithubHostReachable", () => {
 		["one private among public ones", ["140.82.112.3", "10.0.0.1"]],
 		["no address at all", []],
 	])("refuses a name that resolves to %s", async (_label, addresses) => {
-		const error = await assertGithubHostReachable(
-			"https://github.acme.com",
-			{ allowedHosts: none, resolveHost: resolveTo(...addresses) },
-		).catch((e) => e);
+		const error = await assertGithubHostReachable("https://github.acme.com", {
+			allowedHosts: none,
+			resolveHost: resolveTo(...addresses),
+		}).catch((e) => e);
 		expect(error).toBeInstanceOf(GithubHostError);
 		// Neutral: the host the user typed, no resolved address.
 		expect(error.message).toContain("github.acme.com");
@@ -144,17 +150,53 @@ describe("assertGithubHostReachable", () => {
 		}
 	});
 
-	it("refuses a name that does not resolve", async () => {
-		await expect(
-			assertGithubHostReachable("https://github.acme.com", {
+	it("gives one message for a name that does not resolve, has no address, or is private", async () => {
+		const warn = warnings();
+		const messages: string[] = [];
+		for (const resolveHost of [
+			async () => {
+				throw Object.assign(new Error("getaddrinfo ENOTFOUND"), {
+					code: "ENOTFOUND",
+				});
+			},
+			resolveTo(),
+			resolveTo("10.20.30.40"),
+		]) {
+			const error = await assertGithubHostReachable("https://db.corp.example", {
 				allowedHosts: none,
-				resolveHost: async () => {
-					throw Object.assign(new Error("getaddrinfo ENOTFOUND"), {
-						code: "ENOTFOUND",
-					});
-				},
-			}),
-		).rejects.toThrow('Could not resolve "github.acme.com"');
+				resolveHost,
+			}).catch((e) => e);
+			expect(error).toBeInstanceOf(GithubHostError);
+			messages.push(error.message);
+		}
+		expect(new Set(messages).size).toBe(1);
+		expect(messages[0]).toContain("db.corp.example");
+
+		// The reason is in the server log, without the resolved address.
+		const logged = warn.mock.calls.map((call) => String(call[0]));
+		expect(logged).toHaveLength(3);
+		expect(logged.join("\n")).toContain("ENOTFOUND");
+		expect(logged.join("\n")).toContain("no address");
+		expect(logged.join("\n")).toContain("non-public");
+		expect(logged.join("\n")).not.toContain("10.20.30.40");
+	});
+
+	it("does not wait for a resolver that never answers", async () => {
+		warnings();
+		const started = Date.now();
+		const error = await assertGithubHostReachable("https://github.acme.com", {
+			allowedHosts: none,
+			resolveHost: () => new Promise(() => {}),
+			dnsTimeoutMs: 30,
+		}).catch((e) => e);
+
+		expect(error).toBeInstanceOf(GithubHostError);
+		expect(error.message).toContain("does not resolve to a public address");
+		expect(Date.now() - started).toBeLessThan(2_000);
+	});
+
+	it("allows five seconds for the lookup by default", () => {
+		expect(GITHUB_DNS_TIMEOUT_MS).toBe(5_000);
 	});
 
 	it("refuses an IP address and an internal name without resolving", async () => {
@@ -221,20 +263,27 @@ describe("createNoRedirectFetch", () => {
 		);
 	});
 
-	it.each([301, 302, 303, 307, 308])("refuses a %i answer", async (status) => {
-		const base = vi.fn(
-			async () =>
-				new Response(null, {
-					status,
-					headers: { location: "http://169.254.169.254/latest" },
-				}),
-		);
-		await expect(
-			createNoRedirectFetch(base as unknown as typeof fetch)(
-				"https://github.acme.com/x",
-			),
-		).rejects.toBeInstanceOf(GithubHostError);
-	});
+	it.each([301, 302, 303, 307, 308])(
+		"answers a %i with a 400 that says so, and does not follow it",
+		async (status) => {
+			const base = vi.fn(
+				async () =>
+					new Response(null, {
+						status,
+						headers: { location: "http://169.254.169.254/latest" },
+					}),
+			);
+			const response = await createNoRedirectFetch(
+				base as unknown as typeof fetch,
+			)("https://github.acme.com/x");
+
+			expect(base).toHaveBeenCalledTimes(1);
+			expect(response.status).toBe(400);
+			expect(await response.json()).toEqual({
+				message: GITHUB_REDIRECT_REFUSED,
+			});
+		},
+	);
 
 	it("passes other answers through, errors included", async () => {
 		for (const status of [200, 201, 404, 422, 500]) {
@@ -354,13 +403,77 @@ describe("convertGithubManifest", () => {
 					headers: { "content-type": "application/json" },
 				}),
 		);
-		const error = await convertGithubManifest("https://github.acme.com", "abc", {
+		const error = await convertGithubManifest(
+			"https://github.acme.com",
+			"abc",
+			{
+				allowedHosts: none,
+				resolveHost: resolveTo("140.82.112.3"),
+				fetch: fetchMock as unknown as typeof fetch,
+			},
+		).catch((e) => e);
+		expect(error).not.toBeInstanceOf(GithubHostError);
+		expect(error.status).toBe(404);
+	});
+});
+
+describe("assertGithubInstanceReachable", () => {
+	it("also checks the API host Octokit connects to", async () => {
+		const resolveHost = vi.fn(async (hostname: string) => [
+			{
+				address: hostname.startsWith("api.") ? "10.0.0.9" : "140.82.112.3",
+				family: 4,
+			},
+		]);
+		warnings();
+		const error = await assertGithubInstanceReachable("https://acme.ghe.com", {
+			allowedHosts: none,
+			resolveHost,
+		}).catch((e) => e);
+
+		expect(resolveHost.mock.calls.map((call) => call[0])).toEqual([
+			"acme.ghe.com",
+			"api.acme.ghe.com",
+		]);
+		expect(error).toBeInstanceOf(GithubHostError);
+		// Names the host the user typed, not the derived one.
+		expect(error.message).toContain('"acme.ghe.com"');
+		expect(error.message).not.toContain("api.acme.ghe.com");
+	});
+
+	it("checks one host when the API is on the same host, none for github.com", async () => {
+		const resolveHost = vi.fn(resolveTo("140.82.112.3"));
+		await assertGithubInstanceReachable("https://github.acme.com", {
+			allowedHosts: none,
+			resolveHost,
+		});
+		expect(resolveHost.mock.calls.map((call) => call[0])).toEqual([
+			"github.acme.com",
+		]);
+
+		await assertGithubInstanceReachable("https://github.com", {
+			allowedHosts: none,
+			resolveHost,
+		});
+		expect(resolveHost).toHaveBeenCalledTimes(1);
+	});
+
+	it("lets the manifest POST go to a ghe.com tenant whose hosts are public", async () => {
+		const fetchMock = vi.fn(
+			async (..._args: unknown[]) =>
+				new Response(JSON.stringify({ id: 7 }), {
+					status: 201,
+					headers: { "content-type": "application/json" },
+				}),
+		);
+		await convertGithubManifest("https://acme.ghe.com", "abc", {
 			allowedHosts: none,
 			resolveHost: resolveTo("140.82.112.3"),
 			fetch: fetchMock as unknown as typeof fetch,
-		}).catch((e) => e);
-		expect(error).not.toBeInstanceOf(GithubHostError);
-		expect(error.status).toBe(404);
+		});
+		expect(fetchMock.mock.calls[0]?.[0]).toBe(
+			"https://api.acme.ghe.com/app-manifests/abc/conversions",
+		);
 	});
 });
 
@@ -383,7 +496,95 @@ describe("verifyGithubInstallation host check", () => {
 				resolveHost,
 				fetch: fetchMock as unknown as typeof fetch,
 			}),
-		).resolves.toEqual({ ok: false, reason: "unavailable" });
+		).resolves.toEqual({
+			ok: false,
+			reason: "host_refused",
+			message: expect.stringContaining(
+				"DOKPLOY_GITHUB_ENTERPRISE_ALLOWED_HOSTS",
+			),
+		});
 		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("keeps unrelated failures as unavailable", async () => {
+		const fetchMock = vi.fn();
+		await expect(
+			verifyGithubInstallation(
+				{ ...provider("https://github.acme.com"), githubPrivateKey: null },
+				"42",
+				{ allowedHosts: none, fetch: fetchMock as unknown as typeof fetch },
+			),
+		).resolves.toEqual({ ok: false, reason: "unavailable" });
+	});
+
+	describe("against the real Octokit", () => {
+		const privateKey = generateKeyPairSync("rsa", {
+			modulusLength: 2048,
+			privateKeyEncoding: { type: "pkcs8", format: "pem" },
+			publicKeyEncoding: { type: "spki", format: "pem" },
+		}).privateKey;
+		const real = (githubUrl: string) => ({
+			githubAppId: 7,
+			githubPrivateKey: privateKey,
+			githubUrl,
+		});
+		const json = (status: number, body: unknown) =>
+			new Response(JSON.stringify(body), {
+				status,
+				headers: { "content-type": "application/json" },
+			});
+
+		it("retries a transient 5xx", async () => {
+			const fetchMock = vi
+				.fn()
+				.mockResolvedValueOnce(json(502, { message: "Bad Gateway" }))
+				.mockResolvedValueOnce(json(500, { message: "Oops" }))
+				.mockResolvedValueOnce(json(200, { id: 42, app_id: 7 }));
+
+			await expect(
+				verifyGithubInstallation(real("https://github.com"), "42", {
+					allowedHosts: none,
+					fetch: fetchMock as unknown as typeof fetch,
+					retryAfterBaseValue: 1,
+				}),
+			).resolves.toEqual({ ok: true });
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+		});
+
+		it("does not retry a redirect, and reports the host as refused", async () => {
+			const fetchMock = vi.fn(
+				async () =>
+					new Response(null, {
+						status: 302,
+						headers: { location: "https://10.0.0.5/x" },
+					}),
+			);
+
+			await expect(
+				verifyGithubInstallation(real("https://github.com"), "42", {
+					allowedHosts: none,
+					fetch: fetchMock as unknown as typeof fetch,
+					retryAfterBaseValue: 1,
+				}),
+			).resolves.toEqual({
+				ok: false,
+				reason: "host_refused",
+				message: GITHUB_REDIRECT_REFUSED,
+			});
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it("never reaches the retry plugin for a refused host", async () => {
+			const fetchMock = vi.fn();
+			warnings();
+			await expect(
+				verifyGithubInstallation(real("https://ghe.corp.internal"), "42", {
+					allowedHosts: none,
+					fetch: fetchMock as unknown as typeof fetch,
+					retryAfterBaseValue: 1,
+				}),
+			).resolves.toMatchObject({ ok: false, reason: "host_refused" });
+			expect(fetchMock).not.toHaveBeenCalled();
+		});
 	});
 });

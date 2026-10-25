@@ -148,6 +148,9 @@ export default async function handler(
 			installation_id,
 		);
 		if (!installation.ok) {
+			if (installation.reason === "host_refused") {
+				return res.status(400).json({ error: installation.message });
+			}
 			if (installation.reason === "unavailable") {
 				return res
 					.status(502)

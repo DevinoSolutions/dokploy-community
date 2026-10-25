@@ -66,7 +66,7 @@ vi.mock("@dokploy/server", async () => {
 	return {
 		assertCanUpdateGitProvider,
 		GithubHostError,
-		assertGithubHostReachable: mocks.assertGithubHostReachable,
+		assertGithubInstanceReachable: mocks.assertGithubHostReachable,
 		// The real conversion, with the host check pointed at the mock and no DNS.
 		convertGithubManifest: async (baseUrl: string, code: string) => {
 			await mocks.assertGithubHostReachable(baseUrl);
@@ -799,6 +799,24 @@ describe("GitHub App installation callback (github_setup)", () => {
 			expect(mocks.githubUpdateSet).not.toHaveBeenCalled();
 		},
 	);
+
+	it("answers a refused host with the policy text, not a generic 502", async () => {
+		const message =
+			'"ghe.corp.lan" does not resolve to a public address, which is not accepted for a GitHub Enterprise URL. Ask an administrator to allow it with DOKPLOY_GITHUB_ENTERPRISE_ALLOWED_HOSTS.';
+		mocks.verifyGithubInstallation.mockResolvedValue({
+			ok: false,
+			reason: "host_refused",
+			message,
+		});
+		const res = await call(setup, {
+			query: query(stateFor("github_setup")),
+			cookie: SETUP_COOKIE,
+		});
+
+		expect(res.statusCode).toBe(400);
+		expect(res.body).toEqual({ error: message });
+		expect(mocks.githubUpdateSet).not.toHaveBeenCalled();
+	});
 });
 
 describe("GitHub state routes", () => {

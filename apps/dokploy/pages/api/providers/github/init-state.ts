@@ -1,5 +1,5 @@
 import {
-	assertGithubHostReachable,
+	assertGithubInstanceReachable,
 	GithubHostError,
 	parseGithubBaseUrl,
 } from "@dokploy/server";
@@ -44,7 +44,7 @@ export default async function handler(
 	// Same check the callback makes before it contacts the host, so a refused
 	// host is reported before the user is sent to GitHub.
 	try {
-		await assertGithubHostReachable(parsed.url);
+		await assertGithubInstanceReachable(parsed.url);
 	} catch (error) {
 		if (error instanceof GithubHostError) {
 			return res.status(400).json({ error: error.message });

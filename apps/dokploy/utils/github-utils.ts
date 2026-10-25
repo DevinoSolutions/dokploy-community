@@ -43,6 +43,10 @@ export const resolveGithubBaseUrl = (value: string): ResolvedGithubBaseUrl => {
 
 	const { hostname } = parsed;
 
+	if (/^\.*$/.test(hostname)) {
+		return { baseUrl: parsed.origin, error: `"${raw}" is not a valid URL` };
+	}
+
 	if (!hostname.includes(".")) {
 		return {
 			baseUrl: parsed.origin,

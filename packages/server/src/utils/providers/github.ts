@@ -60,6 +60,11 @@ const parseGithubBaseUrlShape = (
 
 	const { hostname } = parsed;
 
+	// "https://." is nothing once the root label is removed.
+	if (/^\.*$/.test(hostname)) {
+		return { error: `"${raw}" is not a valid URL` };
+	}
+
 	if (!hostname.includes(".")) {
 		return { error: `"${hostname}" is not a fully qualified hostname` };
 	}
@@ -148,6 +153,26 @@ export const parseGithubAppUrl = (
 };
 
 /**
+ * Throws a GithubHostError unless the server may call the GitHub instance at
+ * `baseUrl`: the host the user typed and the API host Octokit connects to
+ * (api.<host> for ghe.com tenants) both have to pass.
+ */
+export const assertGithubInstanceReachable = async (
+	baseUrl: string,
+	guard: GithubHostGuardOptions = {},
+): Promise<void> => {
+	const base = new URL(normalizeGithubUrl(baseUrl));
+	await assertGithubHostReachable(base.origin, guard);
+	const apiHost = new URL(deriveGithubApiUrl(baseUrl)).hostname;
+	if (apiHost !== base.hostname) {
+		await assertGithubHostReachable(`https://${apiHost}`, {
+			...guard,
+			displayHost: base.hostname,
+		});
+	}
+};
+
+/**
  * Exchanges the code GitHub hands back after the manifest form for the new
  * app's credentials, at the instance `baseUrl` names. The host is checked
  * first (GithubHostError when it is refused), redirects are not followed and
@@ -158,12 +183,11 @@ export const convertGithubManifest = async (
 	code: string,
 	guard: GithubHostGuardOptions & { fetch?: typeof fetch } = {},
 ) => {
-	await assertGithubHostReachable(baseUrl, guard);
+	await assertGithubInstanceReachable(baseUrl, guard);
 	const octokit = new Octokit({
 		baseUrl: deriveGithubApiUrl(baseUrl),
 		request: githubInstanceRequestOptions(guard.fetch),
-		// A refused host or redirect surfaces as a 500, which the retry plugin
-		// would repeat, and the manifest code can be used once.
+		// The manifest code can be used once, so a failed POST is not repeated.
 		retry: { enabled: false },
 	});
 	try {
@@ -173,7 +197,6 @@ export const convertGithubManifest = async (
 		);
 		return data;
 	} catch (error) {
-		// Octokit re-wraps what the fetch threw, keeping only the message.
 		if (error instanceof Error && error.message === GITHUB_REDIRECT_REFUSED) {
 			throw new GithubHostError(GITHUB_REDIRECT_REFUSED);
 		}
@@ -183,7 +206,9 @@ export const convertGithubManifest = async (
 
 export type GithubInstallationCheck =
 	| { ok: true }
-	| { ok: false; reason: "invalid" | "not_found" | "unavailable" };
+	| { ok: false; reason: "invalid" | "not_found" | "unavailable" }
+	// The server may not call this host; `message` is safe to show.
+	| { ok: false; reason: "host_refused"; message: string };
 
 /**
  * Asks GitHub, with the app's own JWT, whether `installationId` is an
@@ -196,7 +221,10 @@ export const verifyGithubInstallation = async (
 		"githubAppId" | "githubPrivateKey" | "githubUrl"
 	>,
 	installationId: string,
-	guard: GithubHostGuardOptions & { fetch?: typeof fetch } = {},
+	guard: GithubHostGuardOptions & {
+		fetch?: typeof fetch;
+		retryAfterBaseValue?: number;
+	} = {},
 ): Promise<GithubInstallationCheck> => {
 	if (!/^[1-9][0-9]{0,14}$/.test(installationId)) {
 		return { ok: false, reason: "invalid" };
@@ -205,12 +233,13 @@ export const verifyGithubInstallation = async (
 		return { ok: false, reason: "unavailable" };
 	}
 
+	// Before Octokit exists, so a refusal never reaches its retry plugin.
 	try {
-		await assertGithubHostReachable(
-			normalizeGithubUrl(githubProvider.githubUrl),
-			guard,
-		);
-	} catch {
+		await assertGithubInstanceReachable(githubProvider.githubUrl ?? "", guard);
+	} catch (error) {
+		if (error instanceof GithubHostError) {
+			return { ok: false, reason: "host_refused", message: error.message };
+		}
 		return { ok: false, reason: "unavailable" };
 	}
 
@@ -222,9 +251,9 @@ export const verifyGithubInstallation = async (
 		},
 		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
 		request: githubInstanceRequestOptions(guard.fetch),
-		// A refused host or redirect surfaces as a 500, which the retry plugin
-		// would repeat, and the manifest code can be used once.
-		retry: { enabled: false },
+		...(guard.retryAfterBaseValue !== undefined && {
+			retry: { retryAfterBaseValue: guard.retryAfterBaseValue },
+		}),
 	});
 
 	try {
@@ -236,6 +265,9 @@ export const verifyGithubInstallation = async (
 			? { ok: true }
 			: { ok: false, reason: "not_found" };
 	} catch (error) {
+		if (error instanceof Error && error.message === GITHUB_REDIRECT_REFUSED) {
+			return { ok: false, reason: "host_refused", message: error.message };
+		}
 		return {
 			ok: false,
 			reason:
