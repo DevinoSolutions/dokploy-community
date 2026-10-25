@@ -541,19 +541,24 @@ export const filterReadableServiceRows = async <T>(
 	return await filterReadableTasks(ctx, rows, serviceNameOf, serverId);
 };
 
-/** The same for `docker stats` rows, which carry the container id as `ID`. */
+/**
+ * The same for `docker stats` rows, which carry the container id as `ID`.
+ * `strict` checks owners and admins too (see `filterReadableContainers`).
+ */
 export const filterReadableStats = async <T extends { ID: string }>(
 	ctx: PermissionCtx,
 	rows: T[],
 	serverId?: string,
+	options: { strict?: boolean } = {},
 ): Promise<T[]> => {
-	if (await isOwnerOrAdmin(ctx)) return rows;
+	if (!options.strict && (await isOwnerOrAdmin(ctx))) return rows;
 	const readable = new Set(
 		(
 			await filterReadableContainers(
 				ctx,
 				rows.map((row) => ({ containerId: row.ID })),
 				serverId,
+				options,
 			)
 		).map((row) => row.containerId),
 	);

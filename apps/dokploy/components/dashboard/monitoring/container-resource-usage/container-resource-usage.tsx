@@ -57,9 +57,15 @@ const getTopContainer = (
 type ContainerProcess =
 	RouterOutputs["server"]["getContainerProcesses"][number];
 
-const ContainerProcesses = ({ containerId }: { containerId: string }) => {
+const ContainerProcesses = ({
+	containerId,
+	serverId,
+}: {
+	containerId: string;
+	serverId?: string;
+}) => {
 	const { data, error, isLoading } = api.server.getContainerProcesses.useQuery(
-		{ containerId },
+		{ containerId, serverId },
 		{
 			enabled: Boolean(containerId),
 			refetchInterval: 5000,
@@ -146,7 +152,12 @@ const ContainerProcesses = ({ containerId }: { containerId: string }) => {
 	);
 };
 
-export const ContainerResourceUsage = () => {
+interface Props {
+	/** A remote server; the local Dokploy host when unset. */
+	serverId?: string;
+}
+
+export const ContainerResourceUsage = ({ serverId }: Props) => {
 	const [isExpanded, setIsExpanded] = useState(false);
 	const [expandedContainerId, setExpandedContainerId] = useState<string | null>(
 		null,
@@ -154,11 +165,14 @@ export const ContainerResourceUsage = () => {
 	const [sortBy, setSortBy] = useState<ContainerResourceSort>("cpu");
 
 	const { data, error, isLoading, isRefetching, refetch } =
-		api.server.getContainerResourceStats.useQuery(undefined, {
-			enabled: isExpanded,
-			refetchInterval: isExpanded ? 5000 : undefined,
-			refetchOnWindowFocus: false,
-		});
+		api.server.getContainerResourceStats.useQuery(
+			serverId ? { serverId } : undefined,
+			{
+				enabled: isExpanded,
+				refetchInterval: isExpanded ? 5000 : undefined,
+				refetchOnWindowFocus: false,
+			},
+		);
 
 	const stats = (data ?? []) as ContainerResourceStat[];
 	const sortedStats = useMemo(
@@ -340,7 +354,8 @@ export const ContainerResourceUsage = () => {
 						</div>
 					) : sortedStats.length === 0 ? (
 						<p className="rounded-md border p-4 text-sm text-muted-foreground">
-							No running containers reported by Docker stats.
+							No running containers to show. Only containers of services you can
+							access are listed.
 						</p>
 					) : (
 						<div className="overflow-x-auto">
@@ -448,7 +463,10 @@ export const ContainerResourceUsage = () => {
 												{isContainerExpanded && (
 													<TableRow>
 														<TableCell colSpan={7} className="bg-muted/20 p-0">
-															<ContainerProcesses containerId={stat.ID} />
+															<ContainerProcesses
+																containerId={stat.ID}
+																serverId={serverId}
+															/>
 														</TableCell>
 													</TableRow>
 												)}
