@@ -36,6 +36,7 @@ describe("parseTraefikImageVersion", () => {
 	it.each([
 		["traefik:v3.6.25", "3.6.25"],
 		["traefik:v3.5.4@sha256:abc123", "3.5.4"],
+		[`traefik:v3.7.16@sha256:${"a".repeat(64)}`, "3.7.16"],
 		["docker.io/library/traefik:3.7", "3.7.0"],
 		["localhost:5000/traefik:v3.6.25", "3.6.25"],
 		["traefik:latest", null],
@@ -107,6 +108,7 @@ describe("getTraefikOverview", () => {
 	it.each([
 		["traefik:v3.6.25", "outdated"],
 		["traefik:v3.7.16", "up-to-date"],
+		[`traefik:v3.7.16@sha256:${"a".repeat(64)}`, "up-to-date"],
 	])("a host on %s is %s with the 3.7.16 pin", async (image, status) => {
 		mockOutput(mocks.execAsync, `${image}|running|${startedAt}`);
 
