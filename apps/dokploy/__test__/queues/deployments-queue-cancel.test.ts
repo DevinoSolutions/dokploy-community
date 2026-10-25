@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	deployCompose: vi.fn(),
+	rebuildCompose: vi.fn(),
 	deployApplication: vi.fn(),
 	updateCompose: vi.fn(),
 	updateApplicationStatus: vi.fn(),
@@ -25,9 +26,13 @@ vi.mock("@dokploy/server", () => ({
 		typeof error === "object" &&
 		error !== null &&
 		(error as { deploymentCancelled?: unknown }).deploymentCancelled === true,
+	isRebuildRefusedError: (error: unknown) =>
+		typeof error === "object" &&
+		error !== null &&
+		(error as { rebuildRefused?: unknown }).rebuildRefused === true,
 	readServiceStatus: mocks.readServiceStatus,
 	rebuildApplication: vi.fn(),
-	rebuildCompose: vi.fn(),
+	rebuildCompose: mocks.rebuildCompose,
 	rebuildComposePreview: vi.fn(),
 	rebuildPreviewApplication: vi.fn(),
 	restoreServiceStatusIfUnchanged: mocks.restoreServiceStatusIfUnchanged,
@@ -42,6 +47,13 @@ import { processDeploymentJob } from "@/server/queues/deployments-queue";
 const cancelled = (settledStatus?: string) =>
 	Object.assign(new Error("Deployment cancelled."), {
 		deploymentCancelled: true,
+		settledStatus,
+	});
+
+/** What a compose rebuild throws when the commit pin refused it (T-7960). */
+const refused = (settledStatus?: string) =>
+	Object.assign(new Error("Rebuild refused."), {
+		rebuildRefused: true,
 		settledStatus,
 	});
 
@@ -156,6 +168,22 @@ describe("processDeploymentJob", () => {
 
 		expect(mocks.updateApplicationStatus.mock.calls).toEqual([
 			["a1", "running"],
+		]);
+	});
+
+	it("a compose rebuild the commit pin refused fails the job but puts back the status it had (T-7960)", async () => {
+		mocks.readServiceStatus.mockResolvedValue("idle");
+		mocks.rebuildCompose.mockRejectedValue(refused("done"));
+
+		await expect(
+			processDeploymentJob({
+				data: { ...composeJob.data, type: "redeploy" },
+			} as any),
+		).resolves.toBe("failed");
+
+		expect(composeStatuses()).toEqual(["running"]);
+		expect(mocks.restoreServiceStatusIfUnchanged.mock.calls).toEqual([
+			[{ composeId: "c1" }, "done", "idle"],
 		]);
 	});
 

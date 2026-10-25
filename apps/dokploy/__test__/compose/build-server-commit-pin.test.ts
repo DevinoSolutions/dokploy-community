@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
 	cloneGithubRepository: vi.fn(),
 	getCreateComposeFileCommand: vi.fn(),
 	generateApplyPatchesCommand: vi.fn(),
+	assertComposeVolumesBound: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/utils/process/execAsync", () => ({
@@ -67,6 +68,9 @@ vi.mock("@dokploy/server/utils/providers/raw", () => ({
 }));
 vi.mock("@dokploy/server/services/patch", () => ({
 	generateApplyPatchesCommand: mocks.generateApplyPatchesCommand,
+}));
+vi.mock("@dokploy/server/services/compose-volume-binding", () => ({
+	assertComposeVolumesBound: mocks.assertComposeVolumesBound,
 }));
 
 import {
@@ -185,6 +189,7 @@ beforeEach(() => {
 	mocks.cloneGithubRepository.mockResolvedValue("echo clone-github;");
 	mocks.getCreateComposeFileCommand.mockResolvedValue("echo write-raw;");
 	mocks.generateApplyPatchesCommand.mockResolvedValue("");
+	mocks.assertComposeVolumesBound.mockResolvedValue(undefined);
 	mocks.deploymentStatus.mockResolvedValue({ status: "running" });
 	mocks.execAsyncRemote.mockImplementation(
 		async (serverId: string, command: string) => ({
@@ -431,7 +436,9 @@ describe("what the deploy path read right after the fetch", () => {
 
 	it("refuses a caller that passes no patch rows when patches apply", async () => {
 		const { run } = deploy({ patches: undefined });
-		await expect(run).rejects.toThrow(/patches the serving host applied were not passed/);
+		await expect(run).rejects.toThrow(
+			/patches the serving host applied were not passed/,
+		);
 		expect(mocks.generateApplyPatchesCommand).not.toHaveBeenCalled();
 		expect(callsOn("build-1")).toEqual([]);
 	});
@@ -481,6 +488,58 @@ describe("rebuild (reuseClone)", () => {
 	});
 });
 
+describe("the compose checks on the build server's own files (T-7960)", () => {
+	it("checks the build server's checkout after its commit check, before anything is written or built", async () => {
+		let before: string[] = [];
+		mocks.assertComposeVolumesBound.mockImplementation(async () => {
+			before = callsOn("build-1");
+		});
+		const { run } = deploy({ patches: [] });
+		await expect(run).resolves.toBeDefined();
+
+		expect(mocks.assertComposeVolumesBound).toHaveBeenCalledTimes(1);
+		expect(mocks.assertComposeVolumesBound).toHaveBeenCalledWith(
+			expect.objectContaining({
+				appName: "my-app",
+				composeId: "c1",
+				serverId: "build-1",
+			}),
+		);
+		// After the clone and the commit check, before the compose file and
+		// .env are written and before the configuration is resolved.
+		expect(before.some((c) => c.includes("echo clone;"))).toBe(true);
+		expect(before.some(isCommitRead)).toBe(true);
+		expect(before.some((c) => c.includes("echo write-compose;"))).toBe(false);
+		expect(before.some((c) => c.includes("config --format json"))).toBe(false);
+	});
+
+	it("a refusal there builds and pushes nothing, and puts the previous release back", async () => {
+		mocks.assertComposeVolumesBound.mockRejectedValue(
+			new Error("Compose refused: a build context outside the compose."),
+		);
+		const { run, runStep } = deploy();
+		await expect(run).rejects.toThrow(
+			"Compose refused: a build context outside the compose.",
+		);
+		const onBuildServer = callsOn("build-1").join("\n");
+		expect(onBuildServer).not.toContain("echo write-compose;");
+		expect(onBuildServer).not.toContain("config --format json");
+		expect(onBuildServer).not.toContain("docker push");
+		expect(mocks.loginDockerRegistry).not.toHaveBeenCalled();
+		expectOnlyTheRestore(runStep);
+	});
+
+	it("checks a reused checkout on a rebuild too", async () => {
+		reusable = true;
+		const { run } = deploy({ reuseClone: true });
+		await expect(run).resolves.toBeDefined();
+		expect(mocks.cloneGitRepository).not.toHaveBeenCalled();
+		expect(mocks.assertComposeVolumesBound).toHaveBeenCalledWith(
+			expect.objectContaining({ serverId: "build-1" }),
+		);
+	});
+});
+
 describe("raw composes", () => {
 	it("have no checkout: no commit is read or pinned, both hosts write the row's file", async () => {
 		const { run } = deploy({
@@ -493,5 +552,7 @@ describe("raw composes", () => {
 		expect(all.some(isProbe)).toBe(false);
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 		expect(all.join("\n")).toContain("echo write-raw;");
+		// Its file is the row the serving host checked.
+		expect(mocks.assertComposeVolumesBound).not.toHaveBeenCalled();
 	});
 });
