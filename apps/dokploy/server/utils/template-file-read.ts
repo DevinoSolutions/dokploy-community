@@ -21,9 +21,6 @@ export const TEMPLATE_LINK_REFUSED_MESSAGE =
 export const TEMPLATE_TOO_LARGE_MESSAGE =
 	"The template file in the repository is larger than the 1 MB limit.";
 
-export const TEMPLATE_URL_REFUSED_MESSAGE =
-	"The template repository URL must be an http(s) URL, an ssh:// URL or an SSH address such as git@host:owner/repo.git.";
-
 // Exit statuses of the script below; any other failure means "no template here".
 export const TEMPLATE_EXIT_REFUSED = 40;
 export const TEMPLATE_EXIT_TOO_LARGE = 41;
@@ -82,65 +79,11 @@ export const getTemplateReadRefusal = (
 	return null;
 };
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: refused on purpose
-const UNSAFE_URL_CHARACTER = /[\u0000-\u0020\u007f\\]/;
-const URL_WITH_AUTHORITY = /^(https?|ssh):\/\/([^/?#]*)/i;
-// `user@` and then `host:path`, the host a bracketed IPv6 address or not.
-const SCP_ADDRESS = /^([^@/:]+)@(\[[^\]/]*\]|[^:/\]]+):/;
-// A user name that starts with `-` could be read as an option.
-const URL_USER = /^[A-Za-z0-9._-]+$/;
-// A host name, or an IPv6 address in brackets (with an optional zone).
-const URL_HOST =
-	/^(\[[0-9A-Fa-f:.]+(%25[\w.~-]+)?\]|[A-Za-z0-9][A-Za-z0-9._-]*)$/;
-// A port after the host, or none.
-const URL_PORT = /^(:[0-9]*)?$/;
-
-const isSafeHost = (host: string) => URL_HOST.test(host);
-
-/** Whether `authority` (`[user[:password]@]host[:port]`) names a safe host. */
-const isSafeAuthority = (authority: string) => {
-	if (authority.startsWith("-")) return false;
-	const at = authority.lastIndexOf("@");
-	const userinfo = at === -1 ? "" : authority.slice(0, at);
-	if (userinfo.startsWith("-")) return false;
-	const hostPort = authority.slice(at + 1);
-	const bracketEnd = hostPort.startsWith("[") ? hostPort.indexOf("]") + 1 : 0;
-	const hostEnd =
-		bracketEnd > 0
-			? bracketEnd
-			: hostPort.indexOf(":") === -1
-				? hostPort.length
-				: hostPort.indexOf(":");
-	return (
-		isSafeHost(hostPort.slice(0, hostEnd)) &&
-		URL_PORT.test(hostPort.slice(hostEnd))
-	);
-};
-
-/**
- * Only a remote repository is cloned: http(s), `ssh://` or an SSH address
- * with a user (`git@host:owner/repo.git`). The host must be a host name
- * (letters, digits, `.`, `_`, `-`, starting with a letter or digit) or a
- * bracketed IPv6 address, and neither the authority nor the user name may
- * start with `-`. A `file://` URL, a local path, a transport helper (`ext::`,
- * `fd::`: no form above matches them) or a value git would read as an option
- * is refused.
- */
-export const assertSafeTemplateGitUrl = (url: string | null | undefined) => {
-	const value = url ?? "";
-	const authority = URL_WITH_AUTHORITY.exec(value)?.[2];
-	const scp = authority === undefined ? SCP_ADDRESS.exec(value) : null;
-	const safe =
-		authority !== undefined
-			? isSafeAuthority(authority)
-			: scp !== null &&
-				URL_USER.test(scp[1] ?? "") &&
-				!(scp[1] ?? "").startsWith("-") &&
-				isSafeHost(scp[2] ?? "");
-	if (!value || UNSAFE_URL_CHARACTER.test(value) || !safe) {
-		throw new TemplateFileRefusedError(TEMPLATE_URL_REFUSED_MESSAGE);
-	}
-};
+// The URL rule is shared with the deploy-time clone (T-8420).
+export {
+	assertSafeGitUrl as assertSafeTemplateGitUrl,
+	GIT_URL_REFUSED_MESSAGE as TEMPLATE_URL_REFUSED_MESSAGE,
+} from "@dokploy/server/utils/providers/git-url";
 
 /**
  * Put before the clone: files of the clone are created owner-only, and git is

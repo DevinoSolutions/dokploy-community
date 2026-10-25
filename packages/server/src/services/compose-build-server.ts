@@ -261,7 +261,7 @@ type ComposeBuildEntity = ComposeNested & {
 	server?: { name: string } | null;
 };
 
-const getCloneCommand = async (
+export const getComposeCloneCommand = async (
 	entity: ComposeNested,
 	stageOptions: StageOptions,
 	pinCommit: string | null,
@@ -503,7 +503,7 @@ const buildImagesOnBuildServer = async (
 			// A cancel has to land before anything is staged, not after.
 			await checkpoint();
 			await run(
-				`set -e;${await getCloneCommand(buildEntity, stageOptions, servingCommit)}`,
+				`set -e;${await getComposeCloneCommand(buildEntity, stageOptions, servingCommit)}`,
 			);
 		}
 

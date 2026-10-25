@@ -178,6 +178,7 @@ export * from "./utils/providers/bitbucket";
 export * from "./utils/providers/cloudflare";
 export * from "./utils/providers/docker";
 export * from "./utils/providers/git";
+export * from "./utils/providers/git-url";
 export * from "./utils/providers/gitea";
 export * from "./utils/providers/github";
 export * from "./utils/providers/github";

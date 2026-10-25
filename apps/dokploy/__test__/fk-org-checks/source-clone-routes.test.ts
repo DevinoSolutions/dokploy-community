@@ -1,3 +1,7 @@
+import {
+	GIT_URL_REFUSED_MESSAGE,
+	GitUrlRefusedError,
+} from "@dokploy/server/utils/providers/git-url";
 import { TRPCError } from "@trpc/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -104,6 +108,19 @@ describe("compose.fetchSourceType", { timeout: 60_000 }, () => {
 		await expect(
 			caller.fetchSourceType({ composeId: "cmp-1" }),
 		).rejects.toMatchObject({ code: "FORBIDDEN", message: REFUSAL });
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+	});
+
+	it("says why when the stored git URL is not a remote repository (T-8420)", async () => {
+		mocks.cloneCompose.mockRejectedValue(new GitUrlRefusedError());
+		const caller = await callerOf();
+
+		await expect(
+			caller.fetchSourceType({ composeId: "cmp-1" }),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: GIT_URL_REFUSED_MESSAGE,
+		});
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 

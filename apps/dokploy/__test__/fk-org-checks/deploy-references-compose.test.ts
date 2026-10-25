@@ -153,3 +153,67 @@ describe.each([
 		expect(ran).not.toContain("down --volumes");
 	});
 });
+
+// A custom git source whose URL is not a remote repository (T-8420): the clone
+// is refused before any command runs, so nothing of the host is cloned.
+describe("deployCompose with a git URL that is not a remote repository", () => {
+	beforeEach(async () => {
+		vi.clearAllMocks();
+		mocks.execAsync.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
+		mocks.getBuildComposeCommand.mockResolvedValue("docker compose up -d;");
+		mocks.generateApplyPatchesCommand.mockResolvedValue("");
+		mocks.markDeploymentDoneUnlessCancelled.mockResolvedValue(true);
+		mocks.createDeploymentCompose.mockResolvedValue({
+			deploymentId: "dep-1",
+			logPath: "/var/log/dep-1.log",
+		});
+		vi.mocked(assertDeployReferencesInOrganization).mockResolvedValue(
+			undefined,
+		);
+	});
+
+	it.each([
+		"file:///etc/dokploy",
+		"/srv/x",
+		"../x",
+		"ext::sh -c id",
+		"-oProxyCommand=x:r",
+		"git://h/r",
+	])(
+		"refuses %s: no clone, no build, the deployment ends as error",
+		async (url) => {
+			const { db } = await import("@dokploy/server/db");
+			vi.mocked(db.query.compose.findFirst).mockResolvedValue({
+				...COMPOSE,
+				githubId: null,
+				buildRegistryId: null,
+				sourceType: "git",
+				customGitUrl: url,
+				customGitBranch: "main",
+				customGitSSHKeyId: null,
+			} as never);
+
+			await expect(
+				deployCompose({
+					composeId: "compose-1",
+					titleLog: "Deploy",
+					descriptionLog: "",
+				}),
+			).rejects.toThrow("This git URL is not allowed");
+
+			expect(mocks.getBuildComposeCommand).not.toHaveBeenCalled();
+			const ran = [
+				...mocks.execAsync.mock.calls,
+				...mocks.execAsyncRemote.mock.calls,
+			]
+				.map((call) => String(call[call.length - 1]))
+				.join(" ");
+			expect(ran).not.toContain("git clone");
+			expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith(
+				"dep-1",
+				"error",
+			);
+		},
+	);
+});

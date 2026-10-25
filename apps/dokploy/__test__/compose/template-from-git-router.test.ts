@@ -219,7 +219,7 @@ describe("compose.loadTemplateFromGit", { timeout: 60_000 }, () => {
 				caller.loadTemplateFromGit({ composeId: "cmp-1" }),
 			).rejects.toMatchObject({
 				code: "BAD_REQUEST",
-				message: expect.stringContaining("must be an http(s) URL"),
+				message: expect.stringContaining("This git URL is not allowed"),
 			});
 			expect(mocks.cloneGitRepository).not.toHaveBeenCalled();
 			expect(mocks.execAsync).not.toHaveBeenCalled();
