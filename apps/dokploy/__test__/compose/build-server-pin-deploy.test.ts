@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // fetch (a rebuild at its start), and hands the build server the very patch
 // rows the serving host applied (and the guards checked), not a second read
 // of the table.
+// T-7960: the deploy records that commit on its deployment row, and a rebuild
+// refuses unless the checkout on disk is still the recorded commit.
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
+const OTHER = "89abcdef0123456789abcdef0123456789abcdef";
 const ROWS = [
 	{
 		patchId: "p1",
@@ -25,6 +28,10 @@ const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
 	createDeploymentCompose: vi.fn(),
+	updateDeployment: vi.fn(),
+	updateDeploymentStatus: vi.fn(),
+	/** `pinnedCommit` of the compose's latest recording deployment row. */
+	recordedCommit: null as string | null,
 }));
 
 vi.mock("@dokploy/server/services/compose-build-server", () => ({
@@ -80,8 +87,8 @@ vi.mock("@dokploy/server/services/deployment", async () => {
 	return {
 		...actual,
 		createDeploymentCompose: mocks.createDeploymentCompose,
-		updateDeploymentStatus: vi.fn(),
-		updateDeployment: vi.fn(),
+		updateDeploymentStatus: mocks.updateDeploymentStatus,
+		updateDeployment: mocks.updateDeployment,
 	};
 });
 
@@ -122,6 +129,38 @@ const prepareArgs = () =>
 		unknown
 	>;
 const step = (label: string) => mocks.order.indexOf(label);
+const pinnedWrites = () =>
+	mocks.updateDeployment.mock.calls.filter(
+		([, data]) => (data as { pinnedCommit?: string })?.pinnedCommit,
+	);
+/** The messages the failure path wrote to the deployment log. */
+const loggedErrors = () =>
+	mocks.execAsync.mock.calls
+		.map(([command]) => /echo "([A-Za-z0-9+/=]+)" \| base64 -d/.exec(command))
+		.filter((match): match is RegExpExecArray => match !== null)
+		.map((match) => Buffer.from(match[1] as string, "base64").toString("utf8"));
+const rebuild = () =>
+	rebuildCompose({
+		composeId: "compose-1",
+		titleLog: "Rebuild deployment",
+		descriptionLog: "",
+	});
+// The test db answers every table from one mock; the deployment lookup is the
+// one that asks for `pinnedCommit` alone.
+const answerQueries = async (composeRow: Record<string, unknown>) => {
+	const { db } = await import("@dokploy/server/db");
+	vi.mocked(db.query.compose.findFirst).mockImplementation((async (args?: {
+		columns?: Record<string, boolean>;
+	}) => {
+		if (args?.columns?.pinnedCommit) {
+			mocks.order.push("lookup");
+			return mocks.recordedCommit === null
+				? undefined
+				: { pinnedCommit: mocks.recordedCommit };
+		}
+		return composeRow;
+	}) as never);
+};
 
 beforeEach(async () => {
 	vi.clearAllMocks();
@@ -154,8 +193,14 @@ beforeEach(async () => {
 		return undefined;
 	});
 	mocks.createDeploymentCompose.mockResolvedValue(deployment);
-	const { db } = await import("@dokploy/server/db");
-	vi.mocked(db.query.compose.findFirst).mockResolvedValue(COMPOSE);
+	mocks.updateDeployment.mockImplementation(
+		async (_id: string, data: { pinnedCommit?: string }) => {
+			if (data.pinnedCommit) mocks.order.push("record");
+			return [];
+		},
+	);
+	mocks.recordedCommit = SHA;
+	await answerQueries(COMPOSE);
 });
 
 describe("deploy (runComposeBuild)", () => {
@@ -180,6 +225,28 @@ describe("deploy (runComposeBuild)", () => {
 		});
 		// The very array the serving host applied.
 		expect(prepareArgs().patches).toBe(ROWS);
+	});
+
+	it("records the commit on its deployment row right after the read, before the patches", async () => {
+		await runComposeBuild(COMPOSE, deployment);
+		expect(pinnedWrites()).toEqual([["dep-1", { pinnedCommit: SHA }]]);
+		expect(step("read")).toBeLessThan(step("record"));
+		expect(step("record")).toBeLessThan(step("patches"));
+	});
+
+	it("records the commit of a compose served from a remote host", async () => {
+		await runComposeBuild({ ...COMPOSE, serverId: "srv-1" }, deployment);
+		expect(mocks.readServingHostCommitOutput).toHaveBeenCalledWith(
+			expect.objectContaining({ appName: "stack", serverId: "srv-1" }),
+		);
+		expect(pinnedWrites()).toEqual([["dep-1", { pinnedCommit: SHA }]]);
+	});
+
+	it("records nothing when the read is not a commit (prepare refuses that deploy)", async () => {
+		mocks.readServingHostCommitOutput.mockResolvedValue("");
+		await runComposeBuild(COMPOSE, deployment);
+		expect(pinnedWrites()).toEqual([]);
+		expect(prepareArgs()).toMatchObject({ servingCommitOutput: "" });
 	});
 
 	it("a preview (no patches, not cancellable) is pinned too", async () => {
@@ -213,16 +280,13 @@ describe("deploy (runComposeBuild)", () => {
 		for (const [args] of mocks.prepareComposeBuildServerDeploy.mock.calls) {
 			expect(args.servingCommitOutput).toBeUndefined();
 		}
+		expect(pinnedWrites()).toEqual([]);
 	});
 });
 
 describe("rebuild (rebuildCompose)", () => {
 	it("reads the commit on disk at the start of the rebuild, and passes the applied rows", async () => {
-		await rebuildCompose({
-			composeId: "compose-1",
-			titleLog: "Rebuild deployment",
-			descriptionLog: "",
-		});
+		await rebuild();
 		expect(step("read")).toBeGreaterThanOrEqual(0);
 		expect(step("read")).toBeLessThan(step("patches"));
 		expect(step("patches")).toBeLessThan(step("guard"));
@@ -232,5 +296,73 @@ describe("rebuild (rebuildCompose)", () => {
 			servingCommitOutput: `${SHA}\n`,
 			patches: ROWS,
 		});
+	});
+
+	it("proceeds when the checkout is the commit the last deploy recorded, and carries it forward", async () => {
+		await rebuild();
+		expect(step("read")).toBeLessThan(step("lookup"));
+		expect(step("lookup")).toBeLessThan(step("record"));
+		expect(step("record")).toBeLessThan(step("patches"));
+		expect(pinnedWrites()).toEqual([["dep-1", { pinnedCommit: SHA }]]);
+		expect(mocks.prepareComposeBuildServerDeploy).toHaveBeenCalledTimes(1);
+	});
+
+	it("refuses another commit before anything is patched or built, and logs why", async () => {
+		mocks.readServingHostCommitOutput.mockResolvedValue(`${OTHER}\n`);
+		await expect(rebuild()).rejects.toThrow(
+			`The code on the serving host is commit ${OTHER}, not commit ${SHA} that the last deploy checked out.`,
+		);
+		expect(mocks.generateApplyPatchesCommand).not.toHaveBeenCalled();
+		expect(mocks.assertComposeVolumesBound).not.toHaveBeenCalled();
+		expect(mocks.prepareComposeBuildServerDeploy).not.toHaveBeenCalled();
+		expect(pinnedWrites()).toEqual([]);
+		expect(loggedErrors()).toEqual([
+			expect.stringContaining(
+				`The code on the serving host is commit ${OTHER}, not commit ${SHA}`,
+			),
+		]);
+		expect(mocks.updateDeploymentStatus).toHaveBeenCalledWith("dep-1", "error");
+	});
+
+	it("refuses a compose no deploy recorded a commit for (deployed before this check), and logs why", async () => {
+		mocks.recordedCommit = null;
+		await expect(rebuild()).rejects.toThrow(
+			"No deploy of this compose recorded the commit it checked out",
+		);
+		expect(mocks.generateApplyPatchesCommand).not.toHaveBeenCalled();
+		expect(mocks.prepareComposeBuildServerDeploy).not.toHaveBeenCalled();
+		expect(loggedErrors()).toEqual([
+			expect.stringContaining(
+				"Deploy it once; rebuilds work again after that.",
+			),
+		]);
+	});
+
+	it("refuses a recorded value that is not a full commit id", async () => {
+		mocks.recordedCommit = "$(reboot)";
+		await expect(rebuild()).rejects.toThrow(
+			"The commit recorded by the last deploy is not a full commit id",
+		);
+		expect(mocks.prepareComposeBuildServerDeploy).not.toHaveBeenCalled();
+	});
+
+	it("checks nothing for a raw compose or a compose without a build server", async () => {
+		mocks.recordedCommit = null;
+		await answerQueries({
+			...COMPOSE,
+			buildServerId: null,
+			buildRegistryId: null,
+		});
+		await rebuild();
+		await answerQueries({
+			...COMPOSE,
+			sourceType: "raw",
+			composeFile: "services: {}",
+		});
+		await rebuild();
+		expect(mocks.readServingHostCommitOutput).not.toHaveBeenCalled();
+		expect(step("lookup")).toBe(-1);
+		expect(pinnedWrites()).toEqual([]);
+		expect(mocks.prepareComposeBuildServerDeploy).toHaveBeenCalledTimes(2);
 	});
 });

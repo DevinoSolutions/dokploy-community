@@ -67,6 +67,10 @@ import { getDokployUrl } from "./admin";
 // See services/build-policy/README.md.
 import { waitForComposeRequiredChecks } from "./build-policy/compose-checks";
 import {
+	assertRebuildCommitMatchesDeploy,
+	recordDeployedCommit,
+} from "./compose-rebuild-pin";
+import {
 	assertComposeFileOnDiskVolumesBound,
 	assertComposeVolumesBound,
 } from "./compose-volume-binding";
@@ -505,6 +509,10 @@ export const runComposeBuild = async (
 		entity.buildServerId && entity.sourceType !== "raw"
 			? await readServingHostCommitOutput(entity)
 			: undefined;
+	// What a later rebuild must still find on disk (T-7960).
+	if (servingCommitOutput !== undefined) {
+		await recordDeployedCommit(deployment.deploymentId, servingCommitOutput);
+	}
 	let appliedPatches: Patch[] | undefined;
 
 	if (applyPatches && entity.sourceType !== "raw") {
@@ -1031,6 +1039,15 @@ export const rebuildCompose = async ({
 			compose.buildServerId && compose.sourceType !== "raw"
 				? await readServingHostCommitOutput(compose)
 				: undefined;
+		// A rebuild clones nothing: it builds only the commit the last deploy
+		// checked out, and refuses any other (T-7960).
+		if (servingCommitOutput !== undefined) {
+			await assertRebuildCommitMatchesDeploy({
+				composeId: compose.composeId,
+				deploymentId: deployment.deploymentId,
+				servingCommitOutput,
+			});
+		}
 		let appliedPatches: Patch[] | undefined;
 
 		if (compose.sourceType !== "raw") {
