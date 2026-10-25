@@ -1,5 +1,5 @@
 import { format } from "date-fns";
-import { useEffect, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
@@ -25,10 +25,47 @@ export const AddGithubProvider = () => {
 	const [isOrganization, setIsOrganization] = useState(false);
 	const [organizationName, setOrganization] = useState("");
 	const [githubUrl, setGithubUrl] = useState(DEFAULT_GITHUB_URL);
+	const [isStarting, setIsStarting] = useState(false);
+	const [startError, setStartError] = useState<string | null>(null);
 
 	const { baseUrl, error: githubUrlError } = resolveGithubBaseUrl(githubUrl);
 
 	const randomString = () => Math.random().toString(36).slice(2, 8);
+
+	const appsNewUrl =
+		isOrganization && organizationName
+			? `${baseUrl}/organizations/${organizationName}/settings/apps/new`
+			: `${baseUrl}/settings/apps/new`;
+
+	// The `state` GitHub hands back is signed by the server, which also stores a
+	// cookie that ties it to this browser, so it is requested right before the
+	// manifest form is posted to GitHub.
+	const createApp = async (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		const form = event.currentTarget;
+		setIsStarting(true);
+		setStartError(null);
+		try {
+			const response = await fetch("/api/providers/github/init-state", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ githubUrl: baseUrl }),
+			});
+			const body = await response.json().catch(() => null);
+			if (!response.ok || typeof body?.state !== "string") {
+				throw new Error(body?.error || "Could not start the GitHub App setup");
+			}
+			form.action = `${appsNewUrl}?state=${encodeURIComponent(body.state)}`;
+			form.submit();
+		} catch (error) {
+			setStartError(
+				error instanceof Error
+					? error.message
+					: "Could not start the GitHub App setup",
+			);
+			setIsStarting(false);
+		}
+	};
 
 	useEffect(() => {
 		const url = document.location.origin;
@@ -118,14 +155,7 @@ export const AddGithubProvider = () => {
 									/>
 								)}
 							</div>
-							<form
-								action={
-									isOrganization
-										? `${baseUrl}/organizations/${organizationName}/settings/apps/new?state=gh_init:${activeOrganization?.id}:${session?.user?.id ?? ""}`
-										: `${baseUrl}/settings/apps/new?state=gh_init:${activeOrganization?.id}:${session?.user?.id ?? ""}`
-								}
-								method="post"
-							>
+							<form onSubmit={createApp} method="post">
 								<input
 									type="text"
 									name="manifest"
@@ -135,6 +165,9 @@ export const AddGithubProvider = () => {
 								/>
 								<br />
 
+								{startError && (
+									<span className="text-destructive text-xs">{startError}</span>
+								)}
 								<div className="flex w-full items-center justify-between">
 									<a
 										href={
@@ -154,6 +187,7 @@ export const AddGithubProvider = () => {
 										Unsure if you already have an app?
 									</a>
 									<Button
+										isLoading={isStarting}
 										disabled={
 											!!githubUrlError ||
 											(isOrganization && organizationName.length < 1)
