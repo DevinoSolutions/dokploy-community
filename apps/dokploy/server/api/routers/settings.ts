@@ -16,6 +16,7 @@ import {
 	findComposeById,
 	findServerById,
 	getDockerDiskUsage,
+	getDockerResourceType,
 	getDokployImageTag,
 	getLogCleanupStatus,
 	getReleaseNotes,
@@ -857,6 +858,15 @@ export const settingsRouter = createTRPCRouter({
 		.mutation(async ({ ctx, input }) => {
 			if (IS_CLOUD) {
 				return true;
+			}
+
+			const resourceType = await getDockerResourceType("dokploy");
+			if (resourceType !== "service") {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						"Dokploy is not running as a Docker service, so in-panel updates are unavailable here. Update manually instead.",
+				});
 			}
 
 			// Without a target this installs the latest release, as before. A

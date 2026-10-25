@@ -4,6 +4,7 @@ import packageInfo from "../../package.json";
 const state = vi.hoisted(() => ({ isCloud: false }));
 
 const mocks = vi.hoisted(() => ({
+	getDockerResourceType: vi.fn(),
 	getUpdateData: vi.fn(),
 	readDokployRollbackPoint: vi.fn(),
 	recordDokployRollbackPoint: vi.fn(),
@@ -16,6 +17,7 @@ vi.mock("@dokploy/server", () => ({
 	get IS_CLOUD() {
 		return state.isCloud;
 	},
+	getDockerResourceType: mocks.getDockerResourceType,
 	getUpdateData: mocks.getUpdateData,
 	readDokployRollbackPoint: mocks.readDokployRollbackPoint,
 	recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
@@ -106,6 +108,7 @@ beforeEach(() => {
 	mocks.recordDokployRollbackPoint.mockReset();
 	mocks.recordDokployRollbackPoint.mockResolvedValue(undefined);
 	mocks.readDokployRollbackPoint.mockResolvedValue(null);
+	mocks.getDockerResourceType.mockResolvedValue("service");
 	mocks.getUpdateData.mockResolvedValue({
 		latestVersion: "v0.30.9-community.1",
 		updateAvailable: true,
@@ -481,5 +484,43 @@ describe("permission and cloud guards", () => {
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
 		expect(mocks.readDokployRollbackPoint).not.toHaveBeenCalled();
+	});
+});
+
+describe("settings.updateServer when Dokploy is not a Docker service", () => {
+	it.each(["unknown", "standalone"])(
+		"refuses a %s resource before it checks for updates or runs docker",
+		async (resourceType) => {
+			mocks.getDockerResourceType.mockResolvedValue(resourceType);
+
+			await expect(caller.updateServer()).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				message: expect.stringContaining("not running as a Docker service"),
+			});
+
+			expect(mocks.getDockerResourceType).toHaveBeenCalledWith("dokploy");
+			expect(mocks.getUpdateData).not.toHaveBeenCalled();
+			expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+			expect(await spawned()).toEqual([]);
+		},
+	);
+
+	it("refuses a pinned target and a rollback the same way", async () => {
+		mocks.getDockerResourceType.mockResolvedValue("standalone");
+		mocks.readDokployRollbackPoint.mockResolvedValue(recordedPoint);
+
+		const refused = {
+			code: "BAD_REQUEST",
+			message: expect.stringContaining("not running as a Docker service"),
+		};
+		await expect(
+			caller.updateServer({ target: "v0.30.8-community.31" }),
+		).rejects.toMatchObject(refused);
+		await expect(caller.updateServer({ rollback: true })).rejects.toMatchObject(
+			refused,
+		);
+
+		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(await spawned()).toEqual([]);
 	});
 });
