@@ -59,6 +59,7 @@ import {
 	listEnvKeys,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
+import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -1422,7 +1423,7 @@ export const applicationRouter = createTRPCRouter({
 			zfd.formData({
 				applicationId: z.string(),
 				zip: zfd.file(),
-				dropBuildPath: z.string().optional(),
+				dropBuildPath: checkoutPathSchema("the build path").optional(),
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {

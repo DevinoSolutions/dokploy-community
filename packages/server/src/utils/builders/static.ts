@@ -1,6 +1,9 @@
 import { getDockerCommand } from "@dokploy/server/utils/builders/docker-file";
 import { getCreateFileCommand } from "../docker/utils";
-import { getBuildAppDirectory } from "../filesystem/directory";
+import {
+	getBuildAppDirectory,
+	getPublishDirectoryPath,
+} from "../filesystem/directory";
 import type { ApplicationNested } from ".";
 import type { BuildStageOptions } from "./utils";
 
@@ -35,6 +38,8 @@ export const getStaticCommand = async (
 ) => {
 	const { publishDirectory, isStaticSpa } = application;
 	const buildAppDirectory = getBuildAppDirectory(application);
+	// Refused like the other build settings when it is not inside the checkout.
+	getPublishDirectoryPath(application);
 	let command = "";
 	if (isStaticSpa) {
 		command += getCreateFileCommand(

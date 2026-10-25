@@ -3,13 +3,18 @@ import {
 	prepareEnvironmentVariables,
 } from "@dokploy/server/utils/docker/utils";
 import { quote } from "shell-quote";
-import { buildEnvFileContent, isEnvFileName } from "../docker/env-file";
+import {
+	buildEnvFileContent,
+	getBuildSecretAlias,
+	isEnvFileName,
+} from "../docker/env-file";
 import {
 	getBuildAppDirectory,
 	getDockerContextPath,
 } from "../filesystem/directory";
 import type { ApplicationNested } from ".";
 import {
+	assertBuildSecretName,
 	type BuildStageOptions,
 	createEnvFileCommand,
 	getAppEnvFileContent,
@@ -73,17 +78,29 @@ export const getDockerCommand = async (
 		/*
 			Build args and secrets reach docker through its environment: the values
 			sit in a staged 0600 file that a loader sources, and the command line
-			only names them (`--build-arg KEY`). A name the file cannot carry (see
-			`isEnvFileName`), an empty value, or a build arg that clashes with a
-			secret of the same name keeps the form it always had.
+			only names them (`--build-arg KEY`, `--secret type=env,id=KEY`). A
+			secret whose name the file cannot carry (see `isEnvFileName`) is in the
+			file under an internal name (`getBuildSecretAlias`), never under its
+			own, and a secret name no shell variable can have fails the build
+			(T-8282). A build arg whose name the file cannot carry, an empty
+			value, or a build arg that clashes with a secret of the same name keeps
+			the form it always had.
 		*/
 		const fileVariables = new Map<string, string>();
-		const inlineSecrets: string[] = [];
+		const secretArgs: string[] = [];
+		let aliases = 0;
 		for (const [key, value] of Object.entries(secrets)) {
+			assertBuildSecretName(key);
+			// Although buildx is smart enough to know we may be referring to an environment variable name,
+			// we still make sure it doesn't fall back to `type=file`.
+			// See: https://docs.docker.com/reference/cli/docker/buildx/build/#secret
 			if (isEnvFileName(key)) {
 				fileVariables.set(key, value);
+				secretArgs.push("--secret", `type=env,id=${key}`);
 			} else {
-				inlineSecrets.push(`${key}=${quote([value])}`);
+				const alias = getBuildSecretAlias(aliases++);
+				fileVariables.set(alias, value);
+				secretArgs.push("--secret", `type=env,id=${key},env=${alias}`);
 			}
 		}
 
@@ -104,12 +121,7 @@ export const getDockerCommand = async (
 			}
 		}
 
-		for (const key in secrets) {
-			// Although buildx is smart enough to know we may be referring to an environment variable name,
-			// we still make sure it doesn't fall back to `type=file`.
-			// See: https://docs.docker.com/reference/cli/docker/buildx/build/#secret
-			commandArgs.push("--secret", `type=env,id=${key}`);
-		}
+		commandArgs.push(...secretArgs);
 
 		/*
 			Do not generate an environment file when publishDirectory is specified,
@@ -150,8 +162,6 @@ export const getDockerCommand = async (
 			);
 		}
 
-		const inlineSecretsPrefix = inlineSecrets.map((s) => `${s} `).join("");
-
 		command += `
 echo ${quote([`Building ${appName}`])} ;
 cd ${quote([dockerContextPath])} || {
@@ -162,7 +172,7 @@ cd ${quote([dockerContextPath])} || {
 
 ${getGitCommitInfoCommands()}
 
-${inlineSecretsPrefix}${buildEnvFile.loader}docker ${commandArgs.join(" ")} ${getCommitInfoBuildArgs()} || {
+${buildEnvFile.loader}docker ${commandArgs.join(" ")} ${getCommitInfoBuildArgs()} || {
   ${buildEnvFile.cleanup}
   echo "❌ Docker build failed" ;
   exit 1;
