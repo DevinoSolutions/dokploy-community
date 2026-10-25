@@ -1050,6 +1050,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.query(async ({ ctx, input }) => {
 			try {
+				await assertLocalHostAccess(
+					input?.serverId,
+					ctx.session?.activeOrganizationId,
+				);
 				await checkPermission(ctx, { traefikFiles: ["read"] });
 				await assertServerInOrganization(
 					input?.serverId,
@@ -1066,6 +1070,10 @@ export const settingsRouter = createTRPCRouter({
 	updateTraefikFile: protectedProcedure
 		.input(apiModifyTraefikConfig)
 		.mutation(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await checkPermission(ctx, { traefikFiles: ["write"] });
 			await assertServerInOrganization(
 				input?.serverId,
@@ -1088,6 +1096,10 @@ export const settingsRouter = createTRPCRouter({
 	readTraefikFile: protectedProcedure
 		.input(apiReadTraefikConfig)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await checkPermission(ctx, { traefikFiles: ["read"] });
 			await assertServerInOrganization(
 				input.serverId,

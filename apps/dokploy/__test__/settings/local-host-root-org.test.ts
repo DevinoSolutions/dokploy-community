@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
 	cleanupVolumes: vi.fn(),
 	getDockerResourceType: vi.fn(),
 	readConfig: vi.fn(),
+	readConfigInPath: vi.fn(),
+	readDirectory: vi.fn(),
 	readMainConfig: vi.fn(),
 	recreateDirectory: vi.fn(),
 	reloadDockerResource: vi.fn(),
@@ -28,12 +30,16 @@ const mocks = vi.hoisted(() => ({
 	updateServerTraefik: vi.fn(),
 	updateWebServerSettings: vi.fn(),
 	writeConfig: vi.fn(),
+	writeTraefikConfigInPath: vi.fn(),
 	writeMainConfig: vi.fn(),
 }));
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
-	paths: () => ({ MONITORING_PATH: "/monitoring" }),
+	paths: () => ({
+		MONITORING_PATH: "/monitoring",
+		MAIN_TRAEFIK_PATH: "/etc/dokploy/traefik",
+	}),
 	scheduleDockerCleanup: vi.fn(),
 	WEB_SERVER_CLEANUP_JOB: "web-server-cleanup",
 	...mocks,
@@ -41,6 +47,10 @@ vi.mock("@dokploy/server", () => ({
 
 vi.mock("@dokploy/server/lib/auth", () => ({
 	validateRequest: vi.fn(),
+}));
+
+vi.mock("@dokploy/server/services/permission", () => ({
+	checkPermission: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/server/api/utils/audit", () => ({
@@ -215,6 +225,29 @@ const routes: [
 		(c) => c.updateMiddlewareTraefikConfig({ traefikConfig: "a: 1" }),
 		() => mocks.writeConfig,
 		false,
+	],
+	[
+		"readDirectories",
+		(c, serverId) => c.readDirectories({ serverId }),
+		() => mocks.readDirectory,
+		true,
+	],
+	[
+		"readTraefikFile",
+		(c, serverId) => c.readTraefikFile({ path: "traefik.yml", serverId }),
+		() => mocks.readConfigInPath,
+		true,
+	],
+	[
+		"updateTraefikFile",
+		(c, serverId) =>
+			c.updateTraefikFile({
+				path: "traefik.yml",
+				traefikConfig: "a: 1",
+				serverId,
+			}),
+		() => mocks.writeTraefikConfigInPath,
+		true,
 	],
 	[
 		"setupGPU",

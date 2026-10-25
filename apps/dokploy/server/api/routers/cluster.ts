@@ -10,12 +10,14 @@ import { quote } from "shell-quote";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { assertServerReachable } from "@/server/api/utils/container-service-access";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { getLocalServerIp } from "@/server/wss/terminal";
 import { adminProcedure, createTRPCRouter } from "../trpc";
 
 export const clusterRouter = createTRPCRouter({
 	// The swarm nodes belong to the cluster, not to a service: owner/admin only,
-	// like swarm.getNodes.
+	// like swarm.getNodes. With no serverId they are the local swarm's, which
+	// belongs to the organization that owns the instance.
 	getNodes: adminProcedure
 		.input(
 			z.object({
@@ -23,6 +25,10 @@ export const clusterRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			const docker = await getRemoteDocker(input.serverId);
 			const workers: DockerNode[] = await docker.listNodes();
@@ -41,6 +47,10 @@ export const clusterRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			try {
 				const drainCommand = `docker node update --availability drain ${quote([input.nodeId])}`;
@@ -76,6 +86,10 @@ export const clusterRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			const docker = await getRemoteDocker(input.serverId);
 			const result = await docker.swarmInspect();
@@ -102,6 +116,10 @@ export const clusterRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			const docker = await getRemoteDocker(input.serverId);
 			const result = await docker.swarmInspect();
