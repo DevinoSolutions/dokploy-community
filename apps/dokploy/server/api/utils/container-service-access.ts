@@ -19,6 +19,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
+import { canAccessLocalHost } from "@/server/api/utils/local-host-access";
 import {
 	OWNERSHIP_LABELS,
 	SERVICE_TABLES,
@@ -289,6 +290,19 @@ export const isOwnerOrAdmin = async (ctx: PermissionCtx) => {
 };
 
 /**
+ * Who may use a container that backs no service (Dokploy itself, Traefik, its
+ * database): an owner or admin, and on the local host only those of the
+ * organization that owns the instance, since the host serves every
+ * organization. A remote server's own containers stay with its organization.
+ */
+export const canUseHostOwnContainers = async (
+	ctx: PermissionCtx,
+	serverId?: string,
+) =>
+	(await isOwnerOrAdmin(ctx)) &&
+	(await canAccessLocalHost(serverId, ctx.session.activeOrganizationId));
+
+/**
  * Whether the caller may reach `serverId`: it belongs to their organization and,
  * for a member, is one of the servers they were granted. No `serverId` is the
  * local Dokploy host, which every caller reaches.
@@ -321,7 +335,8 @@ export const assertServerReachable = async (
  * - the labels name the services behind the container, every one of them on
  *   that server and readable by the caller in their organization;
  * - a container that backs no service (Dokploy itself, Traefik, its database,
- *   an unlabelled one) is the host's own: owners and admins only.
+ *   an unlabelled one) is the host's own: owners and admins only, and on the
+ *   local host only those of the organization that owns the instance.
  *
  * `access: "write"` is for routes that change the container or its files
  * (restart, stop, kill, remove, upload, edit, delete). The docker statement has
@@ -346,7 +361,8 @@ export const resolveContainerForRoute = async (
 		const check = await checkDockerObjectServices(ctx, container, serverId);
 		if (check.outcome === "refused") throw containerNotFound();
 		if (check.outcome === "unowned") {
-			if (!(await isOwnerOrAdmin(ctx))) throw containerNotFound();
+			if (!(await canUseHostOwnContainers(ctx, serverId)))
+				throw containerNotFound();
 			return container.id;
 		}
 		if (access === "write") {
@@ -381,7 +397,11 @@ export const assertAppNameReadable = async (
 			serverId,
 		);
 		if (check.outcome === "readable") return;
-		if (check.outcome === "unowned" && (await isOwnerOrAdmin(ctx))) return;
+		if (
+			check.outcome === "unowned" &&
+			(await canUseHostOwnContainers(ctx, serverId))
+		)
+			return;
 		throw containerNotFound();
 	} catch {
 		throw containerNotFound();

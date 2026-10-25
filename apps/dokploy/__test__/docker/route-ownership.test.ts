@@ -13,6 +13,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // docker commands and the docker service functions are scripted; the permission
 // and organization checks are the real ones.
 const mocks = vi.hoisted(() => ({
+	// the organization that owns the instance
+	rootOrganization: "org-a",
 	member: {
 		role: "member",
 		accessedServices: [] as string[],
@@ -53,7 +55,12 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 	return {
 		...original,
 		db: {
-			query: { member: { findFirst: vi.fn(async () => mocks.member) } },
+			query: {
+				member: { findFirst: vi.fn(async () => mocks.member) },
+				organization: {
+					findFirst: vi.fn(async () => ({ id: mocks.rootOrganization })),
+				},
+			},
 			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
 					where: async (condition: Parameters<PgDialect["sqlToQuery"]>[0]) => {
@@ -181,6 +188,8 @@ vi.mock("@dokploy/server", () => {
 	mocks.getContainers = vi.fn();
 	return {
 		IS_CLOUD: false,
+		isRootOrganization: async (organizationId: string) =>
+			organizationId === mocks.rootOrganization,
 		findServerById: vi.fn(),
 		getContainers: mocks.getContainers,
 		...mocks.services,
@@ -361,6 +370,7 @@ beforeEach(() => {
 		accessedServices: [],
 		canAccessToDocker: true,
 	};
+	mocks.rootOrganization = "org-a";
 	mocks.servers = new Set();
 	mocks.serviceRows.clear();
 	mocks.serviceOrganizations.clear();
@@ -409,6 +419,44 @@ describe.each(containerRoutes)("docker.$route", (entry) => {
 				);
 			}
 		}
+	});
+
+	it("refuses the local host's own containers to an owner or admin of an organization that does not own the instance", async () => {
+		mocks.rootOrganization = "org-root";
+		mocks.containers.set("dokploy-traefik", {});
+		mocks.containers.set("dokploy", {
+			"com.docker.swarm.service.name": "dokploy",
+		});
+		for (const role of ["owner", "admin"] as const) {
+			for (const name of ["dokploy-traefik", "dokploy"]) {
+				await expectNotFound(entry.call(callerAs(role), name));
+			}
+		}
+		expect(dockerCalls()).toBe(0);
+	});
+
+	it("still opens a service container to that organization's owner when it is not the instance's", async () => {
+		mocks.rootOrganization = "org-root";
+		ownApp();
+
+		await entry.call(callerAs("owner"), "c-a");
+
+		expect(mocks.services[entry.service]).toHaveBeenCalledWith(
+			...entry.args(mocks.idOf("c-a")),
+		);
+	});
+
+	it("keeps a remote server's own containers with that server's organization", async () => {
+		mocks.rootOrganization = "org-root";
+		mocks.containers.set("dokploy-traefik", {});
+		mocks.servers = new Set(["srv-1"]);
+
+		await entry.call(callerAs("owner"), "dokploy-traefik", "srv-1");
+
+		expect(mocks.commands[0]?.serverId).toBe("srv-1");
+		expect(mocks.services[entry.service]).toHaveBeenCalledWith(
+			...entry.args(mocks.idOf("dokploy-traefik"), "srv-1"),
+		);
 	});
 
 	it("runs the command on the full id, never on the string sent", async () => {
@@ -692,6 +740,14 @@ describe("routes that take an appName", () => {
 				await entry.call(callerAs(role), "dokploy");
 				expect(mocks.services[entry.route]).toHaveBeenCalledTimes(1);
 			}
+		});
+
+		it("leaves the host's own appNames to the organization that owns the instance", async () => {
+			mocks.rootOrganization = "org-root";
+			for (const role of ["owner", "admin"] as const) {
+				await expectNotFound(entry.call(callerAs(role), "dokploy"));
+			}
+			expect(dockerCalls()).toBe(0);
 		});
 
 		it("refuses a server the member cannot reach", async () => {

@@ -14,6 +14,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // commands are scripted; the permission and organization checks are the real
 // ones.
 const mocks = vi.hoisted(() => ({
+	// the organization that owns the instance
+	rootOrganization: "org-a",
 	member: { role: "member", accessedServices: [] as string[] },
 	// table -> rows the service lookup finds for the object's labels
 	serviceRows: new Map<
@@ -52,7 +54,12 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 	return {
 		...original,
 		db: {
-			query: { member: { findFirst: vi.fn(async () => mocks.member) } },
+			query: {
+				member: { findFirst: vi.fn(async () => mocks.member) },
+				organization: {
+					findFirst: vi.fn(async () => ({ id: mocks.rootOrganization })),
+				},
+			},
 			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
 					// service lookup, preview lookup, or the preview parent's server
@@ -145,6 +152,7 @@ const foreignApp = () => {
 };
 
 beforeEach(() => {
+	mocks.rootOrganization = "org-a";
 	mocks.member = { role: "member", accessedServices: [] };
 	mocks.serviceRows.clear();
 	mocks.serviceOrganizations.clear();
@@ -263,6 +271,23 @@ describe("resolveDockerTarget", () => {
 				expect(await resolve("dokploy")).toBe(mocks.idOf("dokploy"));
 				expect(await resolve("unlabelled")).toBe(mocks.idOf("unlabelled"));
 			}
+		});
+
+		it("are refused to an owner or admin of an organization that does not own the instance", async () => {
+			mocks.rootOrganization = "org-root";
+			for (const role of ["owner", "admin"]) {
+				mocks.member = { role, accessedServices: [] };
+				expect(await resolve("dokploy")).toBeNull();
+				expect(await resolve("unlabelled")).toBeNull();
+			}
+		});
+
+		it("stay open to a remote server's owner, whose organization is not the instance's", async () => {
+			mocks.rootOrganization = "org-root";
+			mocks.member = { role: "owner", accessedServices: [] };
+			expect(await resolve("dokploy", { serverId: "srv-1" })).toBe(
+				mocks.idOf("dokploy"),
+			);
 		});
 
 		it("are refused when the caller has no membership in the organization", async () => {
