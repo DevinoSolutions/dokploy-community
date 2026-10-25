@@ -146,6 +146,9 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
 	// `docker top ... args` for any container id: the full argv of its processes,
 	// which carries tokens and passwords given as flags.
 	"server.getContainerProcesses": "dokploy:admin",
+	// A presigned link to a whole backup file (a full database dump): a bearer
+	// URL, the same class of exfiltration as the credential reads above.
+	"backup.getDownloadUrl": "dokploy:admin",
 	// Opting a compose out of the restricted-compose audit is owner/admin only
 	// (the resolver refuses members), like its sibling composePolicy.removeExclusion.
 	"compose.setComposePolicyAuditExclusion": "dokploy:admin",
