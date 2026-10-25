@@ -1,12 +1,15 @@
 import { deployPriorityInput } from "@dokploy/server/db/validations/deploy-priority";
 import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
-import { VALID_GIT_URL_REGEX } from "@dokploy/server/utils/git-url-validation";
 import { getPreviewImageTemplateError } from "@dokploy/server/utils/preview-image";
 import {
 	isValidPreviewWildcard,
 	PREVIEW_WILDCARD_GUIDANCE,
 } from "@dokploy/server/utils/preview-wildcard";
+import {
+	GIT_URL_REFUSED_MESSAGE,
+	isSafeGitUrl,
+} from "@dokploy/server/utils/providers/git-url";
 import { relations } from "drizzle-orm";
 import {
 	bigint,
@@ -605,7 +608,7 @@ export const apiSaveGitProvider = createSchema
 		customGitUrl: z
 			.string()
 			.min(1)
-			.refine(VALID_GIT_URL_REGEX, "Invalid Git URL"),
+			.refine(isSafeGitUrl, GIT_URL_REFUSED_MESSAGE),
 	})
 	.merge(
 		createSchema.pick({
