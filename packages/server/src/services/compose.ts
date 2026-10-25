@@ -554,17 +554,6 @@ export const runComposeBuild = async (
 	// <<< build-policy hook (compose)
 	await checkpoint();
 
-	// What a later rebuild must still find (T-7960), recorded only now that
-	// the compose checks and the required checks passed: a refused deploy
-	// leaves its commit on disk, and must not make a rebuild build it.
-	if (servingCommitOutput !== undefined) {
-		await recordDeployedCommit(deployment.deploymentId, {
-			servingCommitOutput,
-			buildServerId: entity.buildServerId,
-			patches: appliedPatches,
-		});
-	}
-
 	// Build-server composes build and push their images before the running
 	// release is touched, so a failed build never reaches `down --volumes`.
 	// A no-op (undefined) for every compose without a `buildServerId`.
@@ -608,9 +597,21 @@ export const runComposeBuild = async (
 			command: `(${command}) >> ${deployment.logPath} 2>&1`,
 			deploymentId: deployment.deploymentId,
 		});
-		return;
+	} else {
+		await runStep(command);
 	}
-	await runStep(command);
+
+	// What a later rebuild must still find (T-7960), recorded only once this
+	// release is running. A deploy that was refused, cancelled or failed puts
+	// the previous release's files back but leaves its commit on disk, and
+	// must not make a rebuild build that commit.
+	if (servingCommitOutput !== undefined) {
+		await recordDeployedCommit(deployment.deploymentId, {
+			servingCommitOutput,
+			buildServerId: entity.buildServerId,
+			patches: appliedPatches,
+		});
+	}
 };
 
 export const createCompose = async (

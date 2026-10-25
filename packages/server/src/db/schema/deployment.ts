@@ -85,8 +85,8 @@ export const deployments = pgTable("deployment", {
 	imageTag: text("imageTag"),
 	imageDigest: text("imageDigest"),
 	/**
-	 * Fork columns (T-7960). What a build-server compose deploy that passed its
-	 * checks built: the commit its fresh clone checked out on the serving host
+	 * Fork columns (T-7960). What a build-server compose deploy whose release
+	 * is running built: the commit its fresh clone checked out on the serving host
 	 * (read before anything else touched the checkout), the build server, and a
 	 * digest of the enabled patch rows it applied. A rebuild builds the code
 	 * already on disk, so it refuses unless all three still match (see

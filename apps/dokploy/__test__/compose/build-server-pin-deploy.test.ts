@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // fetch (a rebuild at its start), and hands the build server the very patch
 // rows the serving host applied (and the guards checked), not a second read
 // of the table.
-// T-7960: a deploy that passed its checks records that commit, the build
+// T-7960: a deploy whose release is running records that commit, the build
 // server and the patch rows on its deployment row, and a rebuild refuses
 // unless the checkout on disk and those are still the same.
 
@@ -103,6 +103,7 @@ import {
 	runComposeBuild,
 } from "@dokploy/server/services/compose";
 import { digestAppliedPatches } from "@dokploy/server/services/compose-rebuild-pin";
+import { DeploymentCancelledError } from "@dokploy/server/services/deployment-cancel";
 
 const COMPOSE = {
 	composeId: "compose-1",
@@ -181,6 +182,7 @@ beforeEach(async () => {
 	const record = async (command: string) => {
 		if (command.includes("echo clone;")) mocks.order.push("clone");
 		if (command.includes("echo patch;")) mocks.order.push("patch-step");
+		if (command.includes("echo up;")) mocks.order.push("release");
 		return { stdout: "", stderr: "" };
 	};
 	mocks.execAsync.mockImplementation(record);
@@ -264,15 +266,65 @@ describe("deploy (runComposeBuild)", () => {
 		expect(prepareArgs().patches).toBe(ROWS);
 	});
 
-	it("records the commit read before the patches, only once the checks passed", async () => {
+	it("records the commit read before the patches, only once the release is running", async () => {
 		mocks.recorded = null;
 		await runComposeBuild(COMPOSE, deployment);
 		expect(pinnedWrites()).toEqual([["dep-1", recordOf(SHA)]]);
 		expect(step("read")).toBeLessThan(step("patches"));
-		expect(step("guard")).toBeLessThan(step("record"));
-		expect(step("required-checks")).toBeLessThan(step("record"));
-		expect(step("record")).toBeLessThan(step("prepare"));
+		expect(step("guard")).toBeLessThan(step("prepare"));
+		expect(step("required-checks")).toBeLessThan(step("prepare"));
+		expect(step("prepare")).toBeLessThan(step("release"));
+		expect(step("release")).toBeLessThan(step("record"));
 	});
+
+	it.each([
+		[
+			"is cancelled during the build-server build",
+			() =>
+				mocks.prepareComposeBuildServerDeploy.mockRejectedValue(
+					new DeploymentCancelledError("Deployment cancelled."),
+				),
+			"Deployment cancelled.",
+		],
+		[
+			"fails on the build server",
+			() =>
+				mocks.prepareComposeBuildServerDeploy.mockRejectedValue(
+					new Error("build failed"),
+				),
+			"build failed",
+		],
+		[
+			"fails its up",
+			() =>
+				mocks.execAsync.mockImplementation(async (command: string) => {
+					if (command.includes("echo up;")) throw new Error("up failed");
+					return { stdout: "", stderr: "" };
+				}),
+			"up failed",
+		],
+	])(
+		"records nothing when the deploy %s, so the next rebuild is refused",
+		async (_label, arrange, message) => {
+			// An earlier deploy recorded OTHER; this one fetched SHA and passed its
+			// checks, then the previous release's files were put back.
+			mocks.recorded = recordOf(OTHER);
+			arrange();
+			await expect(runComposeBuild(COMPOSE, deployment)).rejects.toThrow(
+				message,
+			);
+			expect(pinnedWrites()).toEqual([]);
+			expect(mocks.recorded).toEqual(recordOf(OTHER));
+
+			mocks.prepareComposeBuildServerDeploy.mockReset();
+			mocks.prepareComposeBuildServerDeploy.mockResolvedValue(undefined);
+			mocks.execAsync.mockResolvedValue({ stdout: "", stderr: "" });
+			await expect(rebuild()).rejects.toThrow(
+				`The code on the serving host is commit ${SHA}, not commit ${OTHER} that the last deploy checked out.`,
+			);
+			expect(mocks.prepareComposeBuildServerDeploy).not.toHaveBeenCalled();
+		},
+	);
 
 	it("records the commit of a compose served from a remote host", async () => {
 		await runComposeBuild({ ...COMPOSE, serverId: "srv-1" }, deployment);

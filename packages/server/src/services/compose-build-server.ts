@@ -60,6 +60,7 @@ import { getCreateComposeFileCommand } from "@dokploy/server/utils/providers/raw
 import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
+import { assertComposeVolumesBound } from "./compose-volume-binding";
 import {
 	assertDeploymentNotCancelled,
 	isDeploymentCancelledError,
@@ -541,6 +542,17 @@ const buildImagesOnBuildServer = async (
 					`The build server's checkout is ${found}, not commit ${servingCommit} that the serving host checked. Nothing was built; deploy again.`,
 				);
 			}
+		}
+
+		// The compose checks again, on the files this build server is about to
+		// build (T-7960): its checkout and patches, the compose's settings as
+		// they are now. The serving host's checks looked at the serving host's
+		// files, which other steps (a restore, a running container) can change
+		// without moving its commit. A raw compose's file is the row the serving
+		// host checked.
+		if (entity.sourceType !== "raw") {
+			await checkpoint();
+			await assertComposeVolumesBound({ ...entity, serverId: buildServerId });
 		}
 
 		// Same compose file the serving host will run (domains, randomize,

@@ -17,14 +17,17 @@ import type { Patch } from "./patch";
  * the commit read there right after the fetch is the commit that was really
  * fetched. A rebuild clones nothing: it builds the checkout earlier steps left
  * on disk, and the build server is pinned to whatever commit that checkout
- * reports. So a deploy that passed its checks records what it built on its
+ * reports. So a deploy whose release is running records what it built on its
  * deployment row: that commit, the build server, and a digest of the enabled
  * patch rows. A rebuild builds only when the checkout on disk still reports
  * that commit and the build server and the patch rows are still the same.
  *
- * - The record is written only after the compose checks and the required
- *   checks passed, never by a deploy they refused: a refused deploy leaves its
- *   commit on disk, and the previous record no longer matches it.
+ * - The record is written only once the deploy's release step succeeded. A
+ *   deploy that was refused, cancelled or failed puts the previous release's
+ *   files back (or none) but leaves its commit on disk, so it records nothing
+ *   and the previous record no longer matches the checkout.
+ * - The build server also runs the compose checks on its own files before it
+ *   builds them (see `buildImagesOnBuildServer`); this pin is the layer before.
  * - The record is the latest compose deployment row that has one. A rebuild
  *   that passed the check carries it forward on its own row, so pruning old
  *   deployment rows does not drop it after a run of rebuilds.
@@ -71,7 +74,7 @@ export const digestAppliedPatches = (rows: Patch[] | undefined) => {
 };
 
 /**
- * Records what a deploy that passed its checks built on `deploymentId`: the
+ * Records what a deploy whose release is running built on `deploymentId`: the
  * commit `readServingHostCommitOutput` read right after its fetch, the build
  * server and the applied patch rows. Records nothing when the read is not a
  * full commit id; prepare refuses that deploy anyway.
