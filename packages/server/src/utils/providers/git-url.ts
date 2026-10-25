@@ -19,6 +19,12 @@ export const GIT_URL_REFUSED_MESSAGE =
 export const GIT_ALLOW_PROTOCOL_ENV =
 	"export GIT_ALLOW_PROTOCOL=https:http:ssh;";
 
+// The save form keeps the stricter character rule; the deploy check does not add it, so stored URLs keep deploying.
+export const GIT_URL_SAVE_REFUSED_CHARACTERS = /[\s;|&$`(){}[\]<>'"\\]/;
+
+export const GIT_URL_SAVE_CHARACTER_MESSAGE =
+	"The git URL contains a character that is not allowed";
+
 export class GitUrlRefusedError extends Error {
 	constructor(message = GIT_URL_REFUSED_MESSAGE) {
 		super(message);
@@ -69,8 +75,12 @@ const isSafeAuthority = (authority: string) => {
  * start with `-`. A `file://` URL, a local path, a transport helper (`ext::`,
  * `fd::`: no form above matches them) or a value git would read as an option
  * is refused.
+ *
+ * This is the one rule for a custom git URL: the form and API schema, the
+ * save-time check and the deploy-time check all use it. Internal and loopback
+ * hosts are allowed on purpose (a self-hosted Gitea or GitLab on a LAN).
  */
-export const assertSafeGitUrl = (url: string | null | undefined) => {
+export const isSafeGitUrl = (url: string | null | undefined) => {
 	const value = url ?? "";
 	const authority = URL_WITH_AUTHORITY.exec(value)?.[2];
 	const scp = authority === undefined ? SCP_ADDRESS.exec(value) : null;
@@ -81,7 +91,11 @@ export const assertSafeGitUrl = (url: string | null | undefined) => {
 				URL_USER.test(scp[1] ?? "") &&
 				!(scp[1] ?? "").startsWith("-") &&
 				isSafeHost(scp[2] ?? "");
-	if (!value || UNSAFE_URL_CHARACTER.test(value) || !safe) {
+	return value !== "" && !UNSAFE_URL_CHARACTER.test(value) && safe;
+};
+
+export const assertSafeGitUrl = (url: string | null | undefined) => {
+	if (!isSafeGitUrl(url)) {
 		throw new GitUrlRefusedError();
 	}
 };

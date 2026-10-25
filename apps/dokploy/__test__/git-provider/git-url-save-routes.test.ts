@@ -156,34 +156,52 @@ describe("application.saveGitProvider", { timeout: 60_000 }, () => {
 		customGitSSHKeyId: null,
 	};
 
-	it("rejects a changed URL the older pattern let through, and saves nothing", async () => {
+	// The input schema holds the same rule as the save and deploy checks (T-8498),
+	// so a URL that is not allowed is refused whether or not it is the stored one.
+	it.each([...BAD_URLS, "git@-oX:r", "HTTPS://h/r", "host:path"])(
+		"refuses %s in the input, and saves nothing",
+		async (url) => {
+			const caller = await applicationCaller();
+
+			await expect(
+				caller.saveGitProvider({ ...input, customGitUrl: url } as never),
+			).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				message: expect.stringContaining(MESSAGE),
+			});
+			expect(mocks.updateApplication).not.toHaveBeenCalled();
+		},
+	);
+
+	it("refuses a stored URL that is no longer allowed until it is changed", async () => {
 		const caller = await applicationCaller();
-
-		await expect(
-			caller.saveGitProvider({ ...input, customGitUrl: "git@-oX:r" } as never),
-		).rejects.toMatchObject({ code: "BAD_REQUEST", message: MESSAGE });
-		expect(mocks.updateApplication).not.toHaveBeenCalled();
-	});
-
-	it("keeps accepting a remote URL, and the same value as stored", async () => {
-		const caller = await applicationCaller();
-
-		await caller.saveGitProvider({
-			...input,
-			customGitUrl: "https://github.com/o/r.git",
-		} as never);
 		mocks.findApplicationById.mockResolvedValue({
 			applicationId: "app-1",
 			appName: "web",
 			name: "Web",
 			customGitUrl: "git@-oX:r",
 		});
+
+		await expect(
+			caller.saveGitProvider({ ...input, customGitUrl: "git@-oX:r" } as never),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
 		await caller.saveGitProvider({
 			...input,
-			customGitUrl: "git@-oX:r",
+			customGitUrl: "git@github.com:o/r.git",
 		} as never);
 
-		expect(mocks.updateApplication).toHaveBeenCalledTimes(2);
+		expect(mocks.updateApplication).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps accepting a remote URL", async () => {
+		const caller = await applicationCaller();
+
+		await caller.saveGitProvider({
+			...input,
+			customGitUrl: "https://github.com/o/r.git",
+		} as never);
+
+		expect(mocks.updateApplication).toHaveBeenCalledTimes(1);
 	});
 });
 
