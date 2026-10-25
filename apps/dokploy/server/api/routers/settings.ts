@@ -91,6 +91,7 @@ import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { auditCancel } from "@/server/api/utils/cancel-audit";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	assertCanManageInstance,
@@ -747,10 +748,11 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 
-	readTraefikConfig: adminProcedure.query(() => {
+	readTraefikConfig: adminProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const traefikConfig = readMainConfig();
 		return traefikConfig;
 	}),
@@ -761,6 +763,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			writeMainConfig(input.traefikConfig);
 			await audit(ctx, {
 				action: "update",
@@ -770,10 +773,11 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 
-	readWebServerTraefikConfig: adminProcedure.query(() => {
+	readWebServerTraefikConfig: adminProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const traefikConfig = readConfig("dokploy");
 		return traefikConfig;
 	}),
@@ -783,6 +787,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			writeConfig("dokploy", input.traefikConfig);
 			await audit(ctx, {
 				action: "update",
@@ -792,10 +797,11 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 
-	readMiddlewareTraefikConfig: adminProcedure.query(() => {
+	readMiddlewareTraefikConfig: adminProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const traefikConfig = readConfig("middlewares");
 		return traefikConfig;
 	}),
@@ -806,6 +812,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			writeConfig("middlewares", input.traefikConfig);
 			await audit(ctx, {
 				action: "update",
@@ -989,6 +996,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.query(async ({ ctx, input }) => {
 			try {
+				await assertLocalHostAccess(
+					input?.serverId,
+					ctx.session?.activeOrganizationId,
+				);
 				await checkPermission(ctx, { traefikFiles: ["read"] });
 				await assertServerInOrganization(
 					input?.serverId,
@@ -1005,6 +1016,10 @@ export const settingsRouter = createTRPCRouter({
 	updateTraefikFile: protectedProcedure
 		.input(apiModifyTraefikConfig)
 		.mutation(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await checkPermission(ctx, { traefikFiles: ["write"] });
 			await assertServerInOrganization(
 				input?.serverId,
@@ -1027,6 +1042,10 @@ export const settingsRouter = createTRPCRouter({
 	readTraefikFile: protectedProcedure
 		.input(apiReadTraefikConfig)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await checkPermission(ctx, { traefikFiles: ["read"] });
 			await assertServerInOrganization(
 				input.serverId,
@@ -1156,6 +1175,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			const envVars = await readEnvironmentVariables(
 				"dokploy-traefik",
 				input?.serverId,
@@ -1167,6 +1190,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(z.object({ env: z.string(), serverId: z.string().optional() }))
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
+			await assertLocalHostAccess(
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
