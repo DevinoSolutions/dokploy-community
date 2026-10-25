@@ -2,7 +2,7 @@ import type { BackupSchedule } from "@dokploy/server/services/backup";
 import type { Destination } from "@dokploy/server/services/destination";
 import { ExecError } from "@dokploy/server/utils/process/execAsync";
 import { parse } from "shell-quote";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
@@ -78,6 +78,12 @@ beforeEach(() => {
 });
 
 describe("getBackupFolder", () => {
+	// utils.ts pulls in the whole backup runner graph; load it once, outside the
+	// 5s test budget, so a loaded machine does not time the first test out.
+	beforeAll(async () => {
+		await import("@dokploy/server/utils/backups/utils");
+	}, 60_000);
+
 	it("is the normalized prefix for every kind but libsql", async () => {
 		const { getBackupFolder } = await import(
 			"@dokploy/server/utils/backups/utils"

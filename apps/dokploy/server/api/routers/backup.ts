@@ -730,6 +730,11 @@ export const backupRouter = createTRPCRouter({
 				destinationId: backup.destinationId,
 				destinationName: backup.destination?.name ?? "",
 				prefix: backup.prefix,
+				// A libsql database keeps its dumps under its app name.
+				libsqlAppName:
+					backup.backupType === "database"
+						? (backup.libsql?.appName ?? null)
+						: null,
 				serverId,
 				metadata: backup.metadata ?? null,
 				canRestore,

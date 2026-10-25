@@ -67,14 +67,23 @@ export const ShowBackupFiles = ({ backupId }: Props) => {
 	} = api.backup.listBackupFiles.useQuery(
 		{
 			destinationId: context?.destinationId ?? "",
-			search: context ? buildBackupListPrefix(context.prefix) : "",
+			search: context
+				? buildBackupListPrefix(
+						`${context.libsqlAppName ? `${context.libsqlAppName}/` : ""}${context.prefix}`,
+					)
+				: "",
 			serverId: context?.serverId ?? "",
 		},
 		{ enabled: isOpen && !!context?.destinationId },
 	);
 
+	// Only the extensions the server will sign a link for.
+	const dumpExtension =
+		context?.databaseType === "web-server"
+			? /\.zip$/
+			: /\.(sql\.gz|bson\.gz)$/;
 	const files = listedFiles?.filter(
-		(file) => !file.IsDir && /\.(sql\.gz|bson\.gz|zip)$/.test(file.Name),
+		(file) => !file.IsDir && dumpExtension.test(file.Name),
 	);
 	const isLoading = isContextLoading || (!!context && isFilesLoading);
 	const error = contextError ?? filesError;
