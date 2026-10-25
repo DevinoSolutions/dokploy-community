@@ -217,10 +217,12 @@ describe("getBuildComposeCommand — rollback decision logic", () => {
 			const lines = command.split("\n").map((line) => line.trim());
 			const start = lines.indexOf("RESTORE_ENV_OK=1;");
 			expect(start).toBeGreaterThan(-1);
-			const env = lines[start + 1] ?? "";
+			// Inside the check of the directory the restore writes in (T-7857).
+			expect(lines[start + 1]).toBe('if [ "$__dokploy_write_ok" = "1" ]; then');
+			const env = lines[start + 2] ?? "";
 			expect(env).toMatch(/^if \[ -L (.+) \]; then rm -f \1; fi;$/);
 			expect(env.replace(/\\+/g, "/")).toContain("/my-app/code/.env");
-			expect(lines[start + 2]).toMatch(/^cp /);
+			expect(lines[start + 3]).toMatch(/^cp /);
 		}
 	});
 

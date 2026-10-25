@@ -11,6 +11,12 @@ import {
 } from "@dokploy/server/db/schema";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
 import {
+	getComposeCodeDirectory,
+	getComposeFileLinkError,
+	getGuardedReadCommand,
+	isComposeFileLinkMarker,
+} from "@dokploy/server/utils/compose-file-guard";
+import {
 	COMPOSE_POLICY_MAX_BYTES,
 	COMPOSE_POLICY_RETENTION_DAYS,
 	type ComposePolicyExclusion,
@@ -187,15 +193,27 @@ export const setComposePolicyExclusion = async (
  * compose lives on, so a larger file is seen as too large without being read
  * whole. `null` when there is nothing to read.
  */
-const readCapped = async (serverId: string | null, path: string) => {
+const readCapped = async (
+	serverId: string | null,
+	path: string,
+	// Set for the compose file: it is not read when it leads out of the
+	// checkout (T-7857).
+	codeDirectory?: string,
+) => {
 	const limit = COMPOSE_POLICY_MAX_BYTES + 1;
 	try {
 		if (serverId) {
+			const read = `head -c ${limit} ${quote([path])}`;
 			const { stdout } = await execAsyncRemote(
 				serverId,
-				`head -c ${limit} ${quote([path])}`,
+				codeDirectory
+					? getGuardedReadCommand({ codeDirectory, file: path, read })
+					: read,
 			);
-			return stdout;
+			return isComposeFileLinkMarker(stdout) ? null : stdout;
+		}
+		if (codeDirectory && getComposeFileLinkError(codeDirectory, path)) {
+			return null;
 		}
 		const handle = await open(path, "r");
 		try {
@@ -214,7 +232,11 @@ const readCapped = async (serverId: string | null, path: string) => {
 const readComposeText = (entity: AuditEntity) =>
 	entity.sourceType === "raw"
 		? Promise.resolve(entity.composeFile ?? "")
-		: readCapped(entity.serverId, getComposePath(entity));
+		: readCapped(
+				entity.serverId,
+				getComposePath(entity),
+				getComposeCodeDirectory(entity),
+			);
 
 /**
  * The `-f` override files of a custom command, read with the same cap. The

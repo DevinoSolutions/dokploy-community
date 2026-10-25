@@ -13,6 +13,15 @@ import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
+import {
+	assertComposeFileInsideCodeDirectory,
+	ComposeFileLinkError,
+	getComposeCodeDirectory,
+	getComposeFileWriteGuardCommand,
+	getGuardedReadCommand,
+	getReplaceLinkCommand,
+	isComposeFileLinkMarker,
+} from "../compose-file-guard";
 import { assertSafeComposePath } from "../compose-path";
 import { wildcardHostRegexp } from "../hostname-validation";
 import { execAsyncRemote } from "../process/execAsync";
@@ -123,6 +132,10 @@ export const loadDockerCompose = async (
 	const path = getComposePath(compose);
 
 	if (existsSync(path)) {
+		assertComposeFileInsideCodeDirectory(
+			getComposeCodeDirectory(compose),
+			path,
+		);
 		const yamlStr = readFileSync(path, "utf8");
 		const parsedConfig = parse(yamlStr, {
 			maxAliasCount: 10000,
@@ -137,24 +150,37 @@ export const loadDockerComposeRemote = async (
 	compose: Compose,
 ): Promise<ComposeSpecification | null> => {
 	const path = getComposePath(compose);
+	let stdout: string;
 	try {
 		if (!compose.serverId) {
 			return null;
 		}
-		const { stdout, stderr } = await execAsyncRemote(
+		const result = await execAsyncRemote(
 			compose.serverId,
-			`cat ${quote([path])}`,
+			getGuardedReadCommand({
+				codeDirectory: getComposeCodeDirectory(compose),
+				file: path,
+				read: `cat ${quote([path])}`,
+			}),
 		);
 
-		if (stderr) {
+		if (result.stderr) {
 			return null;
 		}
-		if (!stdout) return null;
-		const parsedConfig = parse(stdout, {
+		stdout = result.stdout;
+	} catch {
+		return null;
+	}
+	// A link out of the checkout is a refusal, not a missing file (T-7857).
+	if (isComposeFileLinkMarker(stdout)) {
+		throw new ComposeFileLinkError();
+	}
+	if (!stdout) return null;
+	try {
+		return parse(stdout, {
 			maxAliasCount: 10000,
 			merge: true,
 		}) as ComposeSpecification;
-		return parsedConfig;
 	} catch {
 		return null;
 	}
@@ -163,6 +189,10 @@ export const loadDockerComposeRemote = async (
 export const readComposeFile = async (compose: Compose) => {
 	const path = getComposePath(compose);
 	if (existsSync(path)) {
+		assertComposeFileInsideCodeDirectory(
+			getComposeCodeDirectory(compose),
+			path,
+		);
 		const yamlStr = readFileSync(path, "utf8");
 		return yamlStr;
 	}
@@ -224,13 +254,25 @@ export const getInstallStagedComposeCommand = (
 	stagedPath: string,
 	composePath: string,
 	alsoRemove: string[] = [],
-) =>
-	getInstallStagedFileCommand({
+	codeDirectory?: string,
+) => {
+	const install = getInstallStagedFileCommand({
 		staged: stagedPath,
 		destination: composePath,
 		failureMessage: "❌ Error: Could not write the compose file",
 		alsoRemove,
+		// A link in the place of the file is replaced by a regular file, so the
+		// copy never goes through it (T-7857).
+		prepare: codeDirectory ? getReplaceLinkCommand(composePath) : undefined,
 	});
+	if (!codeDirectory) return install;
+	// And the directory the file is in has to be inside the checkout.
+	return `${getComposeFileWriteGuardCommand({
+		codeDirectory,
+		file: composePath,
+		cleanup: `rm -f ${quote([stagedPath, ...alsoRemove])};`,
+	})}${install}`;
+};
 
 /**
  * Builds the compose file the deploy runs (domain labels, randomize, isolated
@@ -300,6 +342,7 @@ export const writeDomainsToCompose = async (
 		stagedPath,
 		getComposePath(compose),
 		alsoRemove,
+		getComposeCodeDirectory(compose),
 	);
 };
 export const applyComposeFilePatch = async (
@@ -581,6 +624,14 @@ export const writeComposeFile = async (
 		const composeFile = stringify(composeSpec, {
 			lineWidth: 1000,
 		});
+		// Never through a link: a regular file takes its place (T-7857).
+		assertComposeFileInsideCodeDirectory(
+			getComposeCodeDirectory(compose),
+			dirname(path),
+		);
+		if (fs.lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+			fs.unlinkSync(path);
+		}
 		fs.writeFileSync(path, composeFile, "utf8");
 	} catch (e) {
 		console.error("Error saving the YAML config file:", e);

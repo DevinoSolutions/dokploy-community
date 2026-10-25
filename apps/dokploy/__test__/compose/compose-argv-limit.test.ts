@@ -163,7 +163,9 @@ describe("the test compose is past the argv limit", () => {
 		const staged = mocks.writeFileRemote.mock.calls[0]![2] as string;
 		expect(Buffer.byteLength(staged)).toBeGreaterThan(MAX_ARG_STRLEN);
 		expect(Buffer.byteLength(base64Of(staged))).toBeGreaterThan(MAX_ARG_STRLEN);
-		expect(snippet.length).toBeLessThan(1024);
+		// The snippet carries the checks of the compose file's place (T-7857),
+		// never its content.
+		expect(snippet.length).toBeLessThan(4096);
 	});
 });
 

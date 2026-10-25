@@ -3,6 +3,12 @@ import { paths } from "@dokploy/server/constants";
 import type { InferResultType } from "@dokploy/server/types/with";
 import boxen from "boxen";
 import { quote } from "shell-quote";
+import {
+	COMPOSE_FILE_LINK_MESSAGE,
+	getComposeCodeDirectory,
+	getComposeFileWriteGuardCommand,
+	getRestoreWriteCheckCommand,
+} from "../compose-file-guard";
 import { addDomainToCompose, writeDomainsToCompose } from "../docker/domain";
 import {
 	ENV_VARIABLE_NAME,
@@ -23,6 +29,7 @@ import {
 	prepareEnvironmentVariables,
 	prepareEnvironmentVariablesForFile,
 } from "../docker/utils";
+import { getPathResolverLines } from "../path-containment";
 import { withResolvedVaultRefs } from "../vault";
 import {
 	DOCKER_EVENTS_FLUSH_COMMAND,
@@ -172,10 +179,15 @@ export const getBackupCurrentDeploymentCommand = (compose: ComposePathLike) => {
 `;
 	}
 
+	// A file that leads out of the checkout (a link in the previous release,
+	// T-7857) is not part of the release and is not copied: a restore would put
+	// its content back into the compose.
+	const qCodeDirectory = quote([getComposeCodeDirectory(compose)]);
 	return `
+${getPathResolverLines("__dokploy_resolve() { return 1; }").join("\n")}
 mkdir -p ${qBackupDir} 2>/dev/null || exit 1;
-if [ -f ${qComposeFile} ]; then cp ${qComposeFile} ${qComposeBak} || exit 1; else echo "No previous compose file found"; rm -f ${qComposeBak}; fi
-if [ -f ${qEnvFile} ]; then cp ${qEnvFile} ${qEnvBak} || exit 1; else echo "No previous env file found"; rm -f ${qEnvBak}; fi
+if [ -f ${qComposeFile} ] && __dokploy_inside ${qCodeDirectory} ${qComposeFile}; then cp ${qComposeFile} ${qComposeBak} || exit 1; else echo "No previous compose file found"; rm -f ${qComposeBak}; fi
+if [ -f ${qEnvFile} ] && __dokploy_inside ${qCodeDirectory} ${qEnvFile}; then cp ${qEnvFile} ${qEnvBak} || exit 1; else echo "No previous env file found"; rm -f ${qEnvBak}; fi
 ${overrideSnapshot}	`;
 };
 
@@ -318,13 +330,30 @@ const getRestoreCommands = (
 	// A `.env` that is a symlink (the repository can bring one, pointing at
 	// another compose's `.env`, when "Create env file" is off) is removed before
 	// the restore writes it, so the copy never goes through the link (T-7135).
+	// The compose file likewise (T-7857), and neither is written when the
+	// directory they are in leads out of the checkout.
+	const restoreWriteCheck = getRestoreWriteCheckCommand({
+		codeDirectory: getComposeCodeDirectory(compose),
+		file: getComposeFilePath(compose),
+	});
+	const qLinkNotice = quote([`Warning: ⚠️ ${COMPOSE_FILE_LINK_MESSAGE}`]);
 	return `
 		echo "Restoring previous working deployment... ⏪";
+		${restoreWriteCheck}
 		RESTORE_FILES_OK=1;
-		cp ${qLastGoodCompose} ${qComposeFile} 2>/dev/null || cp ${qPreCompose} ${qComposeFile} 2>/dev/null || RESTORE_FILES_OK=0;
+		if [ "$__dokploy_write_ok" = "1" ]; then
+			if [ -L ${qComposeFile} ]; then rm -f ${qComposeFile}; fi;
+			cp ${qLastGoodCompose} ${qComposeFile} 2>/dev/null || cp ${qPreCompose} ${qComposeFile} 2>/dev/null || RESTORE_FILES_OK=0;
+		else
+			RESTORE_FILES_OK=0; echo ${qLinkNotice};
+		fi
 		RESTORE_ENV_OK=1;
-		if [ -L ${qEnvFile} ]; then rm -f ${qEnvFile}; fi;
-		cp ${qLastGoodEnv} ${qEnvFile} 2>/dev/null || cp ${qPreEnv} ${qEnvFile} 2>/dev/null || RESTORE_ENV_OK=0;${overrideRestore}
+		if [ "$__dokploy_write_ok" = "1" ]; then
+			if [ -L ${qEnvFile} ]; then rm -f ${qEnvFile}; fi;
+			cp ${qLastGoodEnv} ${qEnvFile} 2>/dev/null || cp ${qPreEnv} ${qEnvFile} 2>/dev/null || RESTORE_ENV_OK=0;
+		else
+			RESTORE_ENV_OK=0;
+		fi;${overrideRestore}
 		if [ "$RESTORE_ENV_OK" = "0" ] && { [ "${isEnvRequired}" = "1" ] || [ -f ${qLastGoodEnv} ] || [ -f ${qPreEnv} ]; }; then RESTORE_FILES_OK=0; echo "Warning: ⚠️ Previous .env could not be restored"; fi
 		if [ "$RESTORE_FILES_OK" = "1" ]; then
 			${upRestore}
@@ -995,7 +1024,13 @@ export const getCreateEnvFileCommand = async (
 	// compose's `.env`) is removed first, so the write makes a regular file
 	// instead of going through the link (T-7135).
 	const qEnvFilePath = quote([envFilePath]);
-	return `
+	// The directory it is written in has to be inside the checkout (T-7857).
+	const writeGuard = getComposeFileWriteGuardCommand({
+		codeDirectory: getComposeCodeDirectory(compose),
+		file: envFilePath,
+		cleanup: `rm -f ${quote([stagedPath, ...(options.alsoRemove ?? [])])};`,
+	});
+	return `${writeGuard}
 ${getInstallStagedFileCommand({
 	staged: stagedPath,
 	destination: envFilePath,
@@ -1146,8 +1181,7 @@ export const withCleanEnvironment = (
 ) =>
 	(chained ? command.split("&&").map((segment) => segment.trim()) : [command])
 		.map(
-			(segment, index) =>
-				`${prefix} ${index === 0 ? "docker " : ""}${segment}`,
+			(segment, index) => `${prefix} ${index === 0 ? "docker " : ""}${segment}`,
 		)
 		.join(" && ");
 
