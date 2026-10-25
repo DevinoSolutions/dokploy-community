@@ -4,6 +4,7 @@ import { posix } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
 import {
+	assertComposeFileInsideCodeDirectory,
 	ComposeFileLinkError,
 	getComposeCodeDirectory,
 	getGuardedReadCommand,
@@ -150,7 +151,10 @@ const MAX_DOTENV_BYTES = 1024 * 1024;
 // The text of the `.env` of a directory: "" when there is none, null when
 // there is something that is not a regular file of a size that is read (a
 // FIFO, a device, a directory, a file over the limit) or that cannot be read.
-// A symlink is followed, as Compose follows it. The local file is opened
+// A symlink is followed, as Compose follows it, but only inside the code
+// directory: a `.env` that leads out of the checkout is refused
+// (ComposeFileLinkError, T-8413) instead of read, so what the file holds
+// cannot reach a message or Compose's interpolation. The local file is opened
 // without blocking and looked at through the handle, so a FIFO swapped in
 // after a look cannot hang the check or be read; the remote one is read under
 // a time limit.
@@ -164,10 +168,16 @@ const readDotenv = async (
 			const read = `head -c ${MAX_DOTENV_BYTES + 1} ${quoted}`;
 			const { stdout } = await execAsyncRemote(
 				compose.serverId,
-				`if [ -f ${quoted} ]; then if command -v timeout >/dev/null 2>&1; then timeout 10 ${read}; else ${read}; fi; elif [ -e ${quoted} ]; then exit 3; fi`,
+				getGuardedReadCommand({
+					codeDirectory: getCodeDirectory(compose),
+					file: path,
+					read: `if [ -f ${quoted} ]; then if command -v timeout >/dev/null 2>&1; then timeout 10 ${read}; else ${read}; fi; elif [ -e ${quoted} ]; then exit 3; fi`,
+				}),
 			);
+			if (isComposeFileLinkMarker(stdout)) throw new ComposeFileLinkError();
 			return Buffer.byteLength(stdout) > MAX_DOTENV_BYTES ? null : stdout;
 		}
+		assertComposeFileInsideCodeDirectory(getCodeDirectory(compose), path);
 		let handle: Awaited<ReturnType<typeof open>>;
 		try {
 			handle = await open(
@@ -204,7 +214,8 @@ const readDotenv = async (
 		} finally {
 			await handle.close();
 		}
-	} catch {
+	} catch (error) {
+		if (isComposeFileLinkError(error)) throw error;
 		return null;
 	}
 };
@@ -1694,6 +1705,9 @@ const multiDocumentError = (what: string) =>
 		`Compose refused: ${what} has more than one YAML document (a "---" separator), and Docker Compose merges all of them, so they cannot be checked. Keep a single document in the compose file.`,
 	);
 
+// An override file is read like the compose file: only inside the code
+// directory, so a link in the repository (or an absolute `-f` path) cannot make
+// Dokploy read a file of the host or of another compose (T-8413).
 const loadOverrideFile = async (
 	compose: ComposeForVolumeCheck,
 	path: string,
@@ -1703,14 +1717,27 @@ const loadOverrideFile = async (
 		if (compose.serverId) {
 			const { stdout } = await execAsyncRemote(
 				compose.serverId,
-				`cat ${quote([path])}`,
+				getGuardedReadCommand({
+					codeDirectory: getCodeDirectory(compose),
+					file: path,
+					read: `cat ${quote([path])}`,
+				}),
 			);
+			if (isComposeFileLinkMarker(stdout)) throw new ComposeFileLinkError();
 			text = stdout;
 		} else {
+			assertComposeFileInsideCodeDirectory(getCodeDirectory(compose), path);
 			text = readFileSync(path, "utf8");
 		}
 		return parse(text, { maxAliasCount: 10000, merge: true }) as Spec;
 	} catch (error) {
+		if (isComposeFileLinkError(error)) {
+			logger.warn(
+				{ composeId: compose.composeId, path },
+				"[VolumeBinding] A compose command was refused: an override file leaves the code directory",
+			);
+			throw error;
+		}
 		if (isMultiDocumentError(error)) {
 			throw multiDocumentError(
 				`the compose file "${path}" a custom command uses`,

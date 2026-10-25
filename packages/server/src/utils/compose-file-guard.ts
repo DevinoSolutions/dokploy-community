@@ -25,6 +25,18 @@ import {
  *   T-7135. A repository that keeps its compose file as a link to another file
  *   of the repository therefore keeps deploying.
  *
+ * The same rule covers the other files Dokploy reads itself (T-8413): the
+ * `-f` override files of a custom command (the volume check and the
+ * restricted-compose audit) and the `.env` of the project directory (the
+ * volume check). `include:` and `extends: file:` are refused by the volume
+ * check, so no file behind them is read. What is not covered: the files
+ * Docker Compose opens on its own and Dokploy never parses (`env_file:`,
+ * `label_file:`, the `file:` of `secrets:` and `configs:`, bind mount
+ * sources). Judging them takes Compose's own path resolution (variables,
+ * `--project-directory`, `include` merging) on every host a deploy can run on,
+ * and the same links reach them through a bind mount; a clone-wide check of
+ * links is a feature of its own, so they stay as they are.
+ *
  * Every shell command quotes the paths it is given.
  */
 export const COMPOSE_FILE_LINK_MESSAGE =

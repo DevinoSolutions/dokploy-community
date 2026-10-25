@@ -196,8 +196,8 @@ export const setComposePolicyExclusion = async (
 const readCapped = async (
 	serverId: string | null,
 	path: string,
-	// Set for the compose file: it is not read when it leads out of the
-	// checkout (T-7857).
+	// Set for the compose file and the override files: a file is not read when
+	// it leads out of the checkout (T-7857, T-8413).
 	codeDirectory?: string,
 ) => {
 	const limit = COMPOSE_POLICY_MAX_BYTES + 1;
@@ -242,7 +242,9 @@ const readComposeText = (entity: AuditEntity) =>
  * The `-f` override files of a custom command, read with the same cap. The
  * command is parsed by the existing volume guard (which refuses the deploy of
  * a command it cannot understand); a refusal, or a file that cannot be read,
- * just means nothing to evaluate here.
+ * just means nothing to evaluate here. A file that is, or goes through, a link
+ * out of the checkout is not read either (T-8413): its text could reach the
+ * findings and the deployment log.
  */
 const readOverrideTexts = async (entity: AuditEntity) => {
 	if (!entity.command) return [];
@@ -253,8 +255,9 @@ const readOverrideTexts = async (entity: AuditEntity) => {
 		return [];
 	}
 	const texts: string[] = [];
+	const codeDirectory = getComposeCodeDirectory(entity);
 	for (const file of files) {
-		const text = await readCapped(entity.serverId, file);
+		const text = await readCapped(entity.serverId, file, codeDirectory);
 		if (text !== null) texts.push(text);
 	}
 	return texts;
