@@ -2,7 +2,10 @@ import { createWriteStream } from "node:fs";
 import path from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Schedule } from "@dokploy/server/db/schema/schedule";
-import { getDokployUrl } from "@dokploy/server/services/admin";
+import {
+	getDokployUrl,
+	isRootOrganization,
+} from "@dokploy/server/services/admin";
 import {
 	createDeploymentSchedule,
 	updateDeployment,
@@ -196,7 +199,23 @@ export const runCommand = async (scheduleId: string) => {
 		serviceName,
 		appName,
 		serverId,
+		organizationId,
 	} = schedule;
+
+	// A host schedule runs inside the Dokploy process, so only the organization
+	// that owns the instance may have one. Rows from other organizations (made
+	// before that rule) are left in place and not run. A row with no
+	// organization predates the column and is left as it was.
+	if (
+		!IS_CLOUD &&
+		scheduleType === "dokploy-server" &&
+		organizationId &&
+		!(await isRootOrganization(organizationId))
+	) {
+		throw new Error(
+			`Not running host schedule ${scheduleId}: it belongs to an organization that does not own this Dokploy instance.`,
+		);
+	}
 
 	const deployment = await createDeploymentSchedule({
 		scheduleId,
@@ -270,9 +289,7 @@ export const runCommand = async (scheduleId: string) => {
 						return { ...deployment, status: "error" as const };
 					}
 					await assertNotCancelled(deployment.deploymentId);
-					writeStream.write(
-						`docker exec ${containerId} ${shellType}\n`,
-					);
+					writeStream.write(`docker exec ${containerId} ${shellType}\n`);
 					const run = spawnAsync(
 						"docker",
 						[

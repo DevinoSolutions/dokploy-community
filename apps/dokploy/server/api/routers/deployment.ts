@@ -47,6 +47,7 @@ import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "@/server/api/utils/deploy-priority";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import {
 	apiFindAllByApplication,
 	apiFindAllByCompose,
@@ -436,6 +437,11 @@ export const deploymentRouter = createTRPCRouter({
 							"You are not authorized to access this resource or it does not exist",
 					});
 				}
+				// Only a dokploy-server schedule resolves to an organization.
+				await assertLocalHostAccess(
+					undefined,
+					ctx.session.activeOrganizationId,
+				);
 			} else {
 				throw new TRPCError({
 					code: "UNAUTHORIZED",

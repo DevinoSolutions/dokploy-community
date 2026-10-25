@@ -1,12 +1,12 @@
 import { IS_CLOUD, removeScheduleJob, scheduleJob } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { deployments } from "@dokploy/server/db/schema/deployment";
+import type { ScheduleType } from "@dokploy/server/db/schema/schedule";
 import {
 	createScheduleSchema,
 	schedules,
 	updateScheduleSchema,
 } from "@dokploy/server/db/schema/schedule";
-import type { ScheduleType } from "@dokploy/server/db/schema/schedule";
 import { runCommand } from "@dokploy/server/index";
 import {
 	checkPermission,
@@ -26,6 +26,7 @@ import { TRPCError } from "@trpc/server";
 import { asc, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { assertScheduledJobLimit } from "@/server/api/utils/plan-limits";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
@@ -337,6 +338,10 @@ export const scheduleRouter = createTRPCRouter({
 							message: "Only owners and admins can list host-level schedules.",
 						});
 					}
+					await assertLocalHostAccess(
+						undefined,
+						ctx.session.activeOrganizationId,
+					);
 				}
 			}
 			const where = {
