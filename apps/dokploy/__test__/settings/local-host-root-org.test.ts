@@ -16,10 +16,13 @@ const mocks = vi.hoisted(() => ({
 	cleanupSystem: vi.fn(),
 	cleanupVolumes: vi.fn(),
 	getDockerResourceType: vi.fn(),
+	parseRawConfig: vi.fn(),
 	readConfig: vi.fn(),
 	readConfigInPath: vi.fn(),
 	readDirectory: vi.fn(),
 	readMainConfig: vi.fn(),
+	readMonitoringConfig: vi.fn(),
+	readMonitoringStats: vi.fn(),
 	recreateDirectory: vi.fn(),
 	reloadDockerResource: vi.fn(),
 	runBackgroundJob: vi.fn(),
@@ -36,6 +39,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	// enterpriseProcedure asks for a licence.
+	hasValidLicense: async () => true,
 	paths: () => ({
 		MONITORING_PATH: "/monitoring",
 		MAIN_TRAEFIK_PATH: "/etc/dokploy/traefik",
@@ -249,6 +254,63 @@ const routes: [
 		() => mocks.writeTraefikConfigInPath,
 		true,
 	],
+	[
+		"saveSSHPrivateKey",
+		(c) => c.saveSSHPrivateKey({ sshPrivateKey: "key" }),
+		() => mocks.updateWebServerSettings,
+		false,
+	],
+	[
+		"cleanSSHPrivateKey",
+		(c) => c.cleanSSHPrivateKey(),
+		() => mocks.updateWebServerSettings,
+		false,
+	],
+	[
+		"updateRemoteServersOnly",
+		(c) => c.updateRemoteServersOnly({ remoteServersOnly: true }),
+		() => mocks.updateWebServerSettings,
+		false,
+	],
+	[
+		"updateBuildsConcurrency",
+		(c) => c.updateBuildsConcurrency({ buildsConcurrency: 2 }),
+		() => mocks.updateWebServerSettings,
+		false,
+	],
+	[
+		"updateDeploymentWatchdog",
+		(c) =>
+			c.updateDeploymentWatchdog({
+				enabled: true,
+				idleMinutes: 30,
+				maxMinutes: 60,
+			}),
+		() => mocks.updateWebServerSettings,
+		false,
+	],
+	[
+		"updateEnforceSSO",
+		(c) => c.updateEnforceSSO({ enforceSSO: true }),
+		() => mocks.updateWebServerSettings,
+		false,
+	],
+	[
+		"updateDomainRestriction",
+		(c) =>
+			c.updateDomainRestriction({
+				domainRestrictionConfig: { enabled: true, allowedWildcards: [] },
+			}),
+		() => mocks.updateWebServerSettings,
+		false,
+	],
+	[
+		"readStatsLogs",
+		(c) => c.readStatsLogs({}),
+		() => mocks.readMonitoringConfig,
+		false,
+	],
+	["readStats", (c) => c.readStats(), () => mocks.readMonitoringStats, false],
 	[
 		"setupGPU",
 		(c, serverId) => c.setupGPU({ serverId }),

@@ -30,6 +30,7 @@ vi.mock("@dokploy/server/services/web-server-settings", () => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	isRootOrganization: async () => true,
 	getWebServerSettings: mocks.getWebServerSettings,
 	updateWebServerSettings: mocks.updateWebServerSettings,
 	findApplicationById: mocks.findApplicationById,

@@ -492,6 +492,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			await updateWebServerSettings({
 				sshPrivateKey: input.sshPrivateKey,
 			});
@@ -539,6 +540,7 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		await updateWebServerSettings({
 			sshPrivateKey: null,
 		});
@@ -627,6 +629,8 @@ export const settingsRouter = createTRPCRouter({
 				});
 			}
 
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
+
 			await updateWebServerSettings({
 				remoteServersOnly: input.remoteServersOnly,
 			});
@@ -648,6 +652,8 @@ export const settingsRouter = createTRPCRouter({
 					message: "This feature is only available for self-hosted instances",
 				});
 			}
+
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 
 			await updateWebServerSettings({
 				buildsConcurrency: input.buildsConcurrency,
@@ -672,6 +678,8 @@ export const settingsRouter = createTRPCRouter({
 					message: "This feature is only available for self-hosted instances",
 				});
 			}
+
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 
 			await updateWebServerSettings({
 				deploymentWatchdogEnabled: input.enabled,
@@ -778,6 +786,8 @@ export const settingsRouter = createTRPCRouter({
 					message: "This feature is only available for self-hosted instances",
 				});
 			}
+
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 
 			await updateWebServerSettings({
 				enforceSSO: input.enforceSSO,
@@ -1291,13 +1301,14 @@ export const settingsRouter = createTRPCRouter({
 			},
 		})
 		.input(apiReadStatsLogs)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				return {
 					data: [],
 					totalCount: 0,
 				};
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			const rawConfig = await readMonitoringConfig(
 				!!input.dateRange?.start && !!input.dateRange?.end,
 				input.dateRange,
@@ -1335,10 +1346,11 @@ export const settingsRouter = createTRPCRouter({
 				})
 				.optional(),
 		)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				return [];
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			return (await readMonitoringStats(input?.dateRange)) || [];
 		}),
 	haveActivateRequests: protectedProcedure.query(async () => {
@@ -1762,6 +1774,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			await updateWebServerSettings({
 				domainRestrictionConfig: input.domainRestrictionConfig,
 			});
