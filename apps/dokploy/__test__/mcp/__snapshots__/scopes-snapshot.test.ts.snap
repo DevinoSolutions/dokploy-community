@@ -135,7 +135,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "compose-getDefaultCommand": "dokploy:read",
   "compose-getTags": "dokploy:read",
   "compose-import": "dokploy:services:write",
-  "compose-isolatedDeployment": "dokploy:services:write",
+  "compose-isolatedDeployment": "dokploy:deploy",
   "compose-killBuild": "dokploy:deploy",
   "compose-loadMountsByService": "dokploy:read",
   "compose-loadServices": "dokploy:read",

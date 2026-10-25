@@ -24,6 +24,7 @@ import { cloneGitlabRepository } from "../providers/gitlab";
 import { getCreateComposeFileCommand } from "../providers/raw";
 import { randomizeDeployableSpecificationFile } from "./collision";
 import { randomizeSpecificationFile } from "./compose";
+import { singleQuote } from "./env-file";
 import {
 	getInstallStagedFileCommand,
 	STAGED_COMPOSE_PREFIX,
@@ -39,10 +40,42 @@ import type {
 } from "./types";
 
 /**
+ * How long a clone outside a deploy may run: it is sent TERM after this many
+ * seconds and KILL `FETCH_CLONE_KILL_AFTER_SECONDS` later. A Fetch holds the
+ * compose's deploy lock while it clones (T-8239), and this keeps the clone well
+ * inside the lock's 10-minute last-resort release, so the lock is given back
+ * after the clone has exited, not while it still writes the code dir.
+ */
+export const FETCH_CLONE_TIMEOUT_SECONDS = 540;
+export const FETCH_CLONE_KILL_AFTER_SECONDS = 15;
+
+/**
+ * Runs `command` in `sh` under `timeout`, on whichever host runs it (the
+ * Dokploy host or a remote server). A host whose `timeout` is missing or does
+ * not take `-k` (BusyBox before 1.30) runs it unbounded, as before. Exits with
+ * the command's status; one stopped by a signal (124, or 137 once killed,
+ * which a kill from elsewhere or the OOM killer also gives) says so on stderr.
+ */
+export const boundFetchCommand = (
+	command: string,
+	seconds = FETCH_CLONE_TIMEOUT_SECONDS,
+	killAfter = FETCH_CLONE_KILL_AFTER_SECONDS,
+) =>
+	[
+		`set -- sh -c ${singleQuote(command)}`,
+		`if timeout -k 1 1 true >/dev/null 2>&1; then set -- timeout -k ${killAfter} ${seconds} "$@"; fi`,
+		`"$@"`,
+		"status=$?",
+		`if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo ${singleQuote(`The clone was stopped (time limit of ${seconds} s reached, or the process was killed)`)} >&2; fi`,
+		`exit "$status"`,
+	].join("; ");
+
+/**
  * Clones (or writes) the compose source for a read outside a deploy: the services
  * list, the source-type fetch, the rolling-replace preflight, the collision
  * rewrite. A stored registry, git provider or SSH key of another organization
- * is refused before anything is cloned, the same as at deploy (T-6902).
+ * is refused before anything is cloned, the same as at deploy (T-6902). The
+ * command is bounded by `boundFetchCommand`.
  */
 export const cloneCompose = async (
 	compose: Compose & DeployReferenceEntity,
@@ -66,7 +99,7 @@ export const cloneCompose = async (
 	} else if (compose.sourceType === "raw") {
 		command += await getCreateComposeFileCommand(compose);
 	}
-	return command;
+	return boundFetchCommand(command);
 };
 
 export const getComposePath = (compose: Compose) => {

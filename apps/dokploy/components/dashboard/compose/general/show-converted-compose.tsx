@@ -12,6 +12,7 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@/components/ui/dialog";
+import { fetchRefusalMessage } from "@/hooks/use-compose-fetch-fallback";
 import { api } from "@/utils/api";
 
 interface Props {
@@ -40,7 +41,15 @@ export const ShowConvertedCompose = ({ composeId }: Props) => {
 				.then(() => {
 					refetch();
 				})
-				.catch(() => {});
+				.catch((error) => {
+					const refusal = fetchRefusalMessage(error);
+					if (refusal) {
+						toast.error(refusal, {
+							description:
+								"The preview shows the compose file as last fetched.",
+						});
+					}
+				});
 		}
 	}, [isOpen]);
 
