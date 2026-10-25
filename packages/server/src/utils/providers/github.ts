@@ -8,6 +8,7 @@ import { findGithubById, type Github } from "@dokploy/server/services/github";
 import type { ChangeRequest } from "@dokploy/server/types/change-request";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
+import { GIT_ALLOW_PROTOCOL_ENV } from "@dokploy/server/utils/providers/git-url";
 import { buildPinCommitCommand } from "@dokploy/server/utils/providers/pin-commit";
 import { createAppAuth } from "@octokit/auth-app";
 import { TRPCError } from "@trpc/server";
@@ -318,6 +319,7 @@ export const cloneGithubRepository = async ({
 	const token = await getGithubToken(octokit);
 	const cloneBase = new URL(normalizeGithubUrl(githubProvider.githubUrl));
 	const repoclone = `${cloneBase.host}/${owner}/${repository}.git`;
+	command += GIT_ALLOW_PROTOCOL_ENV;
 	command += `rm -rf ${outputPath};`;
 	command += `mkdir -p ${outputPath};`;
 	const cloneUrl = `${cloneBase.protocol}//${repoclone}`;

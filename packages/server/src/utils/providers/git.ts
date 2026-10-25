@@ -6,6 +6,7 @@ import {
 } from "@dokploy/server/services/ssh-key";
 import { quote } from "shell-quote";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
+import { assertSafeGitUrl, GIT_ALLOW_PROTOCOL_ENV } from "./git-url";
 import { buildPinCommitCommand } from "./pin-commit";
 
 interface CloneGitRepository {
@@ -60,6 +61,12 @@ export const cloneGitRepository = async ({
 		command += `echo "Error: ❌ Repository not found"; exit 1;`;
 		return command;
 	}
+
+	// Before any command is built or run (T-8420): only a remote repository is
+	// cloned, and git is held to remote protocols for this clone and its
+	// submodules. A stored value that is no longer allowed fails here.
+	assertSafeGitUrl(customGitUrl);
+	command += GIT_ALLOW_PROTOCOL_ENV;
 
 	const temporalKeyPath = path.join("/tmp", "id_rsa");
 
