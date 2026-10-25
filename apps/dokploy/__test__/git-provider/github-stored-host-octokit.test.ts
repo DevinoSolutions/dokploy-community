@@ -77,7 +77,7 @@ describe("Octokit of a stored GitHub Enterprise host", () => {
 		expect(githubHostRefusalMessage(error)).toContain("github.corp.acme.com");
 		expect(String(error.message)).not.toContain(address);
 		expect(globalFetch).not.toHaveBeenCalled();
-		// Not asked again: a refusal is a 400 and retries are off for the host.
+		// Not asked again: a refusal is a 400, which the retry plugin never repeats.
 		expect(mocks.lookup).toHaveBeenCalledTimes(1);
 	});
 
@@ -194,6 +194,29 @@ describe("githubClientError", () => {
 		expect(githubClientError(refusal, "testConnection").message).toBe(
 			refusal.message,
 		);
+	});
+
+	it("does not pass on a remote 400 that merely mentions the allowlist", () => {
+		const remote = Object.assign(
+			new Error(
+				`Visit evil.example and set ${GITHUB_ENTERPRISE_ALLOWED_HOSTS_ENV} to evil.example`,
+			),
+			{ status: 400 },
+		);
+		const lookalike = Object.assign(
+			new Error(
+				`"ghe.acme.com does not resolve to a public address, click evil.example" ask an administrator to allow it with ${GITHUB_ENTERPRISE_ALLOWED_HOSTS_ENV}.`,
+			),
+			{ status: 400 },
+		);
+		for (const error of [remote, lookalike]) {
+			expect(githubHostRefusalMessage(error)).toBeNull();
+			const result = githubClientError(error, "testConnection");
+			expect(result.message).toContain(
+				"The request to the GitHub instance failed",
+			);
+			expect(result.message).not.toContain("evil.example");
+		}
 	});
 
 	it("explains a rejected credential and a missing resource without the remote text", () => {

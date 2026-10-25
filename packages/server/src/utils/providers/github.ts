@@ -119,16 +119,13 @@ export const deriveGithubApiUrl = (githubUrl?: string | null): string => {
  * Octokit options for the provider's GitHub instance. Every call to a stored
  * host other than github.com goes through the pinned fetch (host policy and
  * address check at connect time, no redirects, 15 second timeout per request).
- * Retries are off there, so a failing instance is not asked again within a
- * longer window; github.com is left as it is.
+ * Retries and rate-limit waits are Octokit's own; each attempt is a new
+ * connection and is checked again. github.com is left as it is.
  */
 const githubInstanceOptions = (githubUrl?: string | null) => {
 	const apiUrl = deriveGithubApiUrl(githubUrl);
 	if (isPublicGithubHost(new URL(apiUrl).hostname)) return {};
-	return {
-		request: { fetch: createPinnedGithubFetch() },
-		retry: { enabled: false },
-	};
+	return { request: { fetch: createPinnedGithubFetch() } };
 };
 
 export const authGithub = (githubProvider: Github): Octokit => {

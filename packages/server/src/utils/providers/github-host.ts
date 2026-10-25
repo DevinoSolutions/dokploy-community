@@ -23,6 +23,8 @@ export const GITHUB_REQUEST_TIMEOUT_MS = 15_000;
 /** Timeout of the DNS lookup that precedes the first request. */
 export const GITHUB_DNS_TIMEOUT_MS = 5_000;
 
+const HTTPS_ONLY_REFUSED = "Only https is supported for GitHub instances";
+
 export const GITHUB_REDIRECT_REFUSED =
 	"The GitHub instance answered with a redirect, which is not followed";
 
@@ -392,7 +394,7 @@ export const createPinnedGithubFetch = (
 		const host = target.hostname.replace(/^\[|\]$/g, "").replace(/\.+$/, "");
 		if (isPublicGithubHost(host)) return globalThis.fetch(input, init);
 		if (target.protocol !== "https:") {
-			throw new GithubHostError("Only https is supported for GitHub instances");
+			throw new GithubHostError(HTTPS_ONLY_REFUSED);
 		}
 
 		const allowedHosts = options.allowedHosts ?? getAllowedGithubHosts();
@@ -452,6 +454,8 @@ export const createPinnedGithubFetch = (
 			headers[key] = value;
 		});
 		if (body) headers["content-length"] = String(body.length);
+		// The shim does not decode a compressed answer, so none is asked for.
+		headers["accept-encoding"] = "identity";
 
 		return await new Promise<Response>((resolve, reject) => {
 			const outgoing = transport(
@@ -504,10 +508,17 @@ export const redactAddresses = (text: string): string =>
 			"<address>",
 		);
 
+// The shape of hostNotAccepted() for a host name, and nothing more: a remote
+// answer cannot get its own text passed on as one of our refusals.
+const OWN_REFUSAL = new RegExp(
+	String.raw`^"[A-Za-z0-9.:\[\]-]+" (?:is an IP address|is an internal host name|does not resolve to a public address), which is not accepted for a GitHub Enterprise URL\. Use the public host name of the instance, or ask an administrator to allow it with ${GITHUB_ENTERPRISE_ALLOWED_HOSTS_ENV}\.$`,
+);
+
 /**
  * The message of a refusal by the host policy, or null for any other error.
  * The policy errors reach a caller as a GithubHostError or, from inside
- * Octokit, as a 400 that carries the same message.
+ * Octokit, as a 400 that carries exactly one of our own messages; any other
+ * 400, whatever it says, is a remote answer.
  */
 export const githubHostRefusalMessage = (error: unknown): string | null => {
 	if (error instanceof GithubHostError) return error.message;
@@ -519,7 +530,8 @@ export const githubHostRefusalMessage = (error: unknown): string | null => {
 		status === 400 &&
 		typeof message === "string" &&
 		(message === GITHUB_REDIRECT_REFUSED ||
-			message.includes(GITHUB_ENTERPRISE_ALLOWED_HOSTS_ENV))
+			message === HTTPS_ONLY_REFUSED ||
+			OWN_REFUSAL.test(message))
 	) {
 		return message;
 	}

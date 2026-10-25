@@ -39,7 +39,13 @@ const none = new Set<string>();
 
 let server: Server;
 let port: number;
-let hits: { url: string; method: string; host: string; body: string }[];
+let hits: {
+	url: string;
+	method: string;
+	host: string;
+	body: string;
+	acceptEncoding: string | undefined;
+}[];
 
 beforeAll(async () => {
 	server = createServer((req, res) => {
@@ -51,6 +57,7 @@ beforeAll(async () => {
 				method: req.method ?? "",
 				host: req.headers.host ?? "",
 				body: Buffer.concat(chunks).toString(),
+				acceptEncoding: req.headers["accept-encoding"],
 			});
 			if (req.url?.startsWith("/hang")) return;
 			if (req.url?.startsWith("/redirect")) {
@@ -119,7 +126,24 @@ describe("createPinnedGithubFetch", () => {
 				method: "POST",
 				host: `ghe.test:${port}`,
 				body: '{"a":1}',
+				acceptEncoding: "identity",
 			},
+		]);
+	});
+
+	it("asks for an uncompressed answer, whatever the caller asked for", async () => {
+		const fetchPinned = createPinnedGithubFetch({
+			allowedHosts: parseAllowedGithubHosts("ghe.test"),
+			resolveHost: resolveTo("127.0.0.1"),
+			request: viaHttp,
+		});
+		await fetchPinned(`${stored}${port}/x`);
+		await fetchPinned(`${stored}${port}/x`, {
+			headers: { "Accept-Encoding": "gzip, br" },
+		});
+		expect(hits.map((hit) => hit.acceptEncoding)).toEqual([
+			"identity",
+			"identity",
 		]);
 	});
 
