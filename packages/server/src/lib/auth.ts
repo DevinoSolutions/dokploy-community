@@ -4,6 +4,7 @@ import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 import { scim } from "@better-auth/scim";
 import { sso } from "@better-auth/sso";
+import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -779,7 +780,10 @@ const createBetterAuth = () =>
 					// refused here too.
 					beforeDeleteOrganization: async ({ organization: deleted }) => {
 						await assertOrganizationDeletable(deleted.id).catch((error) => {
-							throw new APIError("FORBIDDEN", { message: error.message });
+							if (error instanceof TRPCError && error.code === "FORBIDDEN") {
+								throw new APIError("FORBIDDEN", { message: error.message });
+							}
+							throw error;
 						});
 						await removeOrganizationNotifications(deleted.id);
 					},
