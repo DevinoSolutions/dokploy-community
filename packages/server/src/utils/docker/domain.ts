@@ -51,9 +51,10 @@ export const FETCH_CLONE_KILL_AFTER_SECONDS = 15;
 
 /**
  * Runs `command` in `sh` under `timeout`, on whichever host runs it (the
- * Dokploy host or a remote server). A host without `timeout` runs it unbounded,
- * as before. Exits with the command's status; a clone stopped for running too
- * long exits 124 (137 once killed) and says so on stderr.
+ * Dokploy host or a remote server). A host whose `timeout` is missing or does
+ * not take `-k` (BusyBox before 1.30) runs it unbounded, as before. Exits with
+ * the command's status; one stopped by a signal (124, or 137 once killed,
+ * which a kill from elsewhere or the OOM killer also gives) says so on stderr.
  */
 export const boundFetchCommand = (
 	command: string,
@@ -62,10 +63,10 @@ export const boundFetchCommand = (
 ) =>
 	[
 		`set -- sh -c ${singleQuote(command)}`,
-		`if command -v timeout >/dev/null 2>&1; then set -- timeout -k ${killAfter} ${seconds} "$@"; fi`,
+		`if timeout -k 1 1 true >/dev/null 2>&1; then set -- timeout -k ${killAfter} ${seconds} "$@"; fi`,
 		`"$@"`,
 		"status=$?",
-		`if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo ${singleQuote(`The clone did not finish within ${seconds} seconds and was stopped`)} >&2; fi`,
+		`if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo ${singleQuote(`The clone was stopped (time limit of ${seconds} s reached, or the process was killed)`)} >&2; fi`,
 		`exit "$status"`,
 	].join("; ");
 

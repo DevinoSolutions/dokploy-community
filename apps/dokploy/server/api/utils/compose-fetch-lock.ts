@@ -8,6 +8,9 @@ import { captureError } from "@/server/sentry";
 export const COMPOSE_FETCH_BUSY_MESSAGE =
 	"A deployment of this compose is running; try Fetch again when it finishes";
 
+export const COMPOSE_FETCH_REBUILD_QUEUED_MESSAGE =
+	"A rebuild of this compose is queued; try Fetch again when it finishes";
+
 export const COMPOSE_FETCH_HELD_MESSAGE =
 	"Another Fetch of this compose is running; try again when it finishes";
 
@@ -22,12 +25,22 @@ export const COMPOSE_FETCH_HELD_MESSAGE =
 const MAX_HOLD_MS = 10 * 60_000;
 
 /**
+ * A queued Rebuild clones nothing: it builds the checkout it finds on disk
+ * (see compose-rebuild-pin.ts), so a Fetch before it would make it build the
+ * fetched commit instead of the deployed one. A queued deploy clones again
+ * and may wait behind a Fetch; a preview builds in its own directory.
+ */
+const isComposeRebuild = (data: DeploymentJob) =>
+	data.applicationType === "compose" && data.type === "redeploy";
+
+/**
  * Runs `work`, a Fetch (a clone of the compose's source outside a deploy), under
  * the compose's group lock in the deployment queue: the lock a deploy, rebuild
  * or preview of the compose holds while it runs. A Fetch rewrites the code dir
  * the deploy reads, so it is refused while a job of the compose runs, and no job
  * of the compose starts until it is done; a job that waits keeps its place and
- * starts after it. Refused before `work` runs, so nothing is cloned.
+ * starts after it, except a Rebuild, which refuses the Fetch. Refused before
+ * `work` runs, so nothing is cloned.
  *
  * Cloud deploys do not go through the queue: there the compose's running
  * deployment rows are checked instead, which is a check, not a lock.
@@ -54,14 +67,20 @@ export const withComposeFetchLock = async <T>(
 		applicationType: "compose",
 		serverId: compose.serverId ?? undefined,
 	};
-	const hold = myQueue.holdIdleGroup(getPartition(job), getGroup(job));
+	const hold = myQueue.holdIdleGroup(
+		getPartition(job),
+		getGroup(job),
+		isComposeRebuild,
+	);
 	if ("busy" in hold) {
 		throw new TRPCError({
 			code: "CONFLICT",
 			message:
 				hold.busy === "held"
 					? COMPOSE_FETCH_HELD_MESSAGE
-					: COMPOSE_FETCH_BUSY_MESSAGE,
+					: hold.busy === "waiting"
+						? COMPOSE_FETCH_REBUILD_QUEUED_MESSAGE
+						: COMPOSE_FETCH_BUSY_MESSAGE,
 		});
 	}
 	const timer = setTimeout(() => {

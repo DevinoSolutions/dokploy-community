@@ -1,4 +1,7 @@
 import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import {
 	boundFetchCommand,
 	FETCH_CLONE_KILL_AFTER_SECONDS,
@@ -11,11 +14,12 @@ import { describe, expect, it } from "vitest";
 // exited. The lock's own 10-minute release is only the last resort.
 
 /** Runs a command the way a host shell does; returns its status and output. */
-const run = (command: string) => {
+const run = (command: string, env?: NodeJS.ProcessEnv) => {
 	try {
 		const stdout = execFileSync("sh", ["-c", command], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
+			env,
 		});
 		return { status: 0, stdout, stderr: "" };
 	} catch (error) {
@@ -52,7 +56,30 @@ describe("boundFetchCommand", { timeout: 30_000 }, () => {
 
 		expect(result.status).toBe(124);
 		expect(result.stderr).toContain(
-			"The clone did not finish within 1 seconds and was stopped",
+			"The clone was stopped (time limit of 1 s reached, or the process was killed)",
 		);
+	});
+
+	it("runs the command unbounded when the host's timeout does not take -k", () => {
+		// A `timeout` that refuses every call, like BusyBox before 1.30 refuses -k.
+		const bin = mkdtempSync(join(tmpdir(), "fetch-timeout-"));
+		try {
+			const stub = join(bin, "timeout");
+			writeFileSync(stub, "#!/bin/sh\nexit 1\n");
+			chmodSync(stub, 0o755);
+			// Windows spells it `Path`: drop every spelling before setting it.
+			const env = { ...process.env };
+			for (const key of Object.keys(env)) {
+				if (/^path$/i.test(key)) delete env[key];
+			}
+			env.PATH = `${bin}${delimiter}${process.env.PATH}`;
+
+			const result = run(boundFetchCommand("sleep 2; echo done", 1, 1), env);
+
+			expect(result.status).toBe(0);
+			expect(result.stdout).toBe("done\n");
+		} finally {
+			rmSync(bin, { recursive: true, force: true });
+		}
 	});
 });

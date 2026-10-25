@@ -108,6 +108,32 @@ describe("InMemoryQueue.holdIdleGroup", () => {
 		expect(started).toEqual(["cmp-other", "cmp-1"]);
 	});
 
+	it("is refused while a waiting job of the compose matches waitingBlocks, and only then", async () => {
+		const { queue } = setup(1);
+		await queue.add({ ...composeJob("cmp-other"), serverId: "srv-1" });
+		await flush();
+		await queue.add({ ...composeJob("cmp-1"), serverId: "srv-1" });
+		const isRedeploy = (data: DeploymentJob) => data.type === "redeploy";
+
+		// A waiting deploy does not match: the lock is taken.
+		const hold = queue.holdIdleGroup("srv-1", group("cmp-1"), isRedeploy);
+		if (!("release" in hold)) throw new Error("expected the lock");
+		hold.release();
+
+		await queue.add({
+			...composeJob("cmp-1"),
+			type: "redeploy",
+			serverId: "srv-1",
+		});
+		expect(queue.holdIdleGroup("srv-1", group("cmp-1"), isRedeploy)).toEqual({
+			busy: "waiting",
+		});
+		// Another compose's waiting rebuild is not this compose's.
+		expect(
+			"release" in queue.holdIdleGroup("srv-1", group("cmp-2"), isRedeploy),
+		).toBe(true);
+	});
+
 	it("is refused while a released job of the compose kept its lock", async () => {
 		const { queue } = setup();
 		const job = await queue.add(composeJob("cmp-1"));

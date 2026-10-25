@@ -78,8 +78,11 @@ vi.mock("@/server/sentry", () => ({ captureError: mocks.captureError }));
 vi.mock("@/server/queues/queueSetup", () => ({
 	myQueue: {
 		add: vi.fn(),
-		holdIdleGroup: (partitionKey: string, group: string) =>
-			mocks.queue?.holdIdleGroup(partitionKey, group),
+		holdIdleGroup: (
+			...args: Parameters<
+				import("@/server/queues/in-memory-queue").InMemoryQueue["holdIdleGroup"]
+			>
+		) => mocks.queue?.holdIdleGroup(...args),
 	},
 	cleanQueuesByApplication: vi.fn(),
 	cleanQueuesByCompose: vi.fn(),
@@ -88,9 +91,11 @@ vi.mock("@/server/queues/queueSetup", () => ({
 
 const { InMemoryQueue } = await import("@/server/queues/in-memory-queue");
 const { composeRouter } = await import("@/server/api/routers/compose");
-const { COMPOSE_FETCH_BUSY_MESSAGE, withComposeFetchLock } = await import(
-	"@/server/api/utils/compose-fetch-lock"
-);
+const {
+	COMPOSE_FETCH_BUSY_MESSAGE,
+	COMPOSE_FETCH_REBUILD_QUEUED_MESSAGE,
+	withComposeFetchLock,
+} = await import("@/server/api/utils/compose-fetch-lock");
 
 const caller = composeRouter.createCaller({
 	session: { activeOrganizationId: "org-1", userId: "user-1" },
@@ -279,6 +284,42 @@ describe("compose Fetch and the deploy queue", { timeout: 60_000 }, () => {
 		await flush();
 		await flush();
 		expect(started).toEqual(["cmp-other", "cmp-1"]);
+	});
+
+	it("is refused while a Rebuild of the compose waits, and runs nothing", async () => {
+		// A Rebuild builds the checkout on disk: a Fetch before it would change
+		// what it ships. Another compose takes the only slot, so it waits.
+		await mocks.queue?.add(deployOf("cmp-other"));
+		await flush();
+		await mocks.queue?.add({ ...deployOf("cmp-1"), type: "redeploy" });
+
+		for (const attempt of [
+			() => caller.loadServices({ composeId: "cmp-1", type: "fetch" }),
+			() => caller.rollingEligibility({ composeId: "cmp-1", type: "fetch" }),
+			() => caller.fetchSourceType({ composeId: "cmp-1" }),
+			() => caller.isolatedDeployment({ composeId: "cmp-1", suffix: "x" }),
+		]) {
+			await expect(attempt()).rejects.toMatchObject({
+				code: "CONFLICT",
+				message: COMPOSE_FETCH_REBUILD_QUEUED_MESSAGE,
+			});
+		}
+		expectNothingRan();
+	});
+
+	it("is allowed while only a preview Rebuild of the compose waits", async () => {
+		await mocks.queue?.add(deployOf("cmp-other"));
+		await flush();
+		await mocks.queue?.add({
+			...deployOf("cmp-1"),
+			type: "redeploy",
+			applicationType: "compose-preview",
+			previewDeploymentId: "prev-1",
+		});
+
+		await expect(
+			caller.loadServices({ composeId: "cmp-1", type: "fetch" }),
+		).resolves.toEqual(["web", "db"]);
 	});
 
 	it("still serves the cache while a deployment runs", async () => {

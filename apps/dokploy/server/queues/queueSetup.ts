@@ -78,7 +78,8 @@ interface DeploymentQueue {
 	holdIdleGroup: (
 		partitionKey: string,
 		group: string,
-	) => { release: () => void } | { busy: "running" | "held" };
+		waitingBlocks?: (data: DeploymentJob) => boolean,
+	) => { release: () => void } | { busy: "running" | "waiting" | "held" };
 	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
 	keepOldestWaiting: (
 		predicate: (data: DeploymentJob) => boolean,
@@ -163,8 +164,8 @@ const createInMemoryQueue = (): DeploymentQueue => {
 		releaseActive: (id, options) => queue.releaseActive(id, options),
 		hasKeptGroupLock: (id) => queue.hasKeptGroupLock(id),
 		dropKeptGroupLock: (id) => queue.dropKeptGroupLock(id),
-		holdIdleGroup: (partitionKey, group) =>
-			queue.holdIdleGroup(partitionKey, group),
+		holdIdleGroup: (partitionKey, group, waitingBlocks) =>
+			queue.holdIdleGroup(partitionKey, group, waitingBlocks),
 		removeWaiting: (predicate) => queue.removeWaiting(predicate),
 		keepOldestWaiting: (predicate) => queue.keepOldestWaiting(predicate),
 		coalesceWaiting: (incoming, predicate) =>
