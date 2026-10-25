@@ -878,17 +878,20 @@ const describeImageId = async (id: string, serverId?: string) => {
 			return id;
 		}
 		const { repository } = splitImageReference(reference);
-		const versionTag = tags.find(
-			(tag) =>
-				splitImageReference(tag).repository === repository &&
-				parseTraefikImageVersion(tag),
-		);
+		// The label is the exact version. Without it, the highest tag wins: an
+		// image tagged traefik:v3 and traefik:v3.9.0 is 3.9.0, not 3.0.0.
 		const labels: Record<string, string> =
 			JSON.parse(labelLine || "null") ?? {};
 		const labelVersion = labels["org.opencontainers.image.version"];
-		return (
-			versionTag ?? (labelVersion ? `${repository}:${labelVersion}` : reference)
-		);
+		if (labelVersion) {
+			return `${repository}:${labelVersion}`;
+		}
+		const versionTag = tags
+			.filter((tag) => splitImageReference(tag).repository === repository)
+			.map((tag) => ({ tag, version: parseTraefikImageVersion(tag) }))
+			.filter((candidate) => candidate.version)
+			.sort((a, b) => semver.rcompare(a.version!, b.version!))[0]?.tag;
+		return versionTag ?? reference;
 	} catch {
 		return id;
 	}

@@ -143,6 +143,32 @@ ${labels}`;
 				"up-to-date",
 			],
 			[
+				"its most specific tag, not the first one",
+				inspected('["traefik:v3","traefik:v3.9.0"]', "[]", "null"),
+				"traefik:v3.9.0",
+				"newer",
+			],
+			[
+				"its highest tag, whatever the order",
+				inspected(
+					'["traefik:v3.9.0","traefik:v3","traefik:v3.6"]',
+					"[]",
+					"null",
+				),
+				"traefik:v3.9.0",
+				"newer",
+			],
+			[
+				"its version label, ahead of its tags",
+				inspected(
+					'["traefik:v3","traefik:latest"]',
+					"[]",
+					'{"org.opencontainers.image.version":"v3.6.25"}',
+				),
+				"traefik:v3.6.25",
+				"outdated",
+			],
+			[
 				"its version label when it has no tag",
 				inspected(
 					"[]",
