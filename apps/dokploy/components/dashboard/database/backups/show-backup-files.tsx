@@ -68,9 +68,7 @@ export const ShowBackupFiles = ({ backupId }: Props) => {
 		{
 			destinationId: context?.destinationId ?? "",
 			search: context
-				? buildBackupListPrefix(
-						`${context.libsqlAppName ? `${context.libsqlAppName}/` : ""}${context.prefix}`,
-					)
+				? `${context.libsqlAppName ? `${context.libsqlAppName}/` : ""}${buildBackupListPrefix(context.prefix)}`
 				: "",
 			serverId: context?.serverId ?? "",
 		},
