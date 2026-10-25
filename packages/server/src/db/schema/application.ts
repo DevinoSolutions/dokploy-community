@@ -8,6 +8,8 @@ import {
 } from "@dokploy/server/utils/preview-wildcard";
 import {
 	GIT_URL_REFUSED_MESSAGE,
+	GIT_URL_SAVE_CHARACTER_MESSAGE,
+	GIT_URL_SAVE_REFUSED_CHARACTERS,
 	isSafeGitUrl,
 } from "@dokploy/server/utils/providers/git-url";
 import { relations } from "drizzle-orm";
@@ -608,7 +610,11 @@ export const apiSaveGitProvider = createSchema
 		customGitUrl: z
 			.string()
 			.min(1)
-			.refine(isSafeGitUrl, GIT_URL_REFUSED_MESSAGE),
+			.refine(isSafeGitUrl, GIT_URL_REFUSED_MESSAGE)
+			.refine(
+				(url) => !GIT_URL_SAVE_REFUSED_CHARACTERS.test(url),
+				GIT_URL_SAVE_CHARACTER_MESSAGE,
+			),
 	})
 	.merge(
 		createSchema.pick({

@@ -19,6 +19,12 @@ export const GIT_URL_REFUSED_MESSAGE =
 export const GIT_ALLOW_PROTOCOL_ENV =
 	"export GIT_ALLOW_PROTOCOL=https:http:ssh;";
 
+// The save form keeps the stricter character rule; the deploy check does not add it, so stored URLs keep deploying.
+export const GIT_URL_SAVE_REFUSED_CHARACTERS = /[\s;|&$`(){}[\]<>'"\\]/;
+
+export const GIT_URL_SAVE_CHARACTER_MESSAGE =
+	"The git URL contains a character that is not allowed";
+
 export class GitUrlRefusedError extends Error {
 	constructor(message = GIT_URL_REFUSED_MESSAGE) {
 		super(message);
