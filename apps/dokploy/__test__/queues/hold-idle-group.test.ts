@@ -8,7 +8,8 @@ import type { DeploymentJob } from "../../server/queues/queue-types";
 
 // A compose Fetch rewrites the code dir a deploy reads, so it takes the
 // compose's group lock, the one the queue's own jobs hold while they run, and
-// only while nothing of the compose waits or runs (T-8239).
+// only while nothing of the compose runs. A deploy that only waits keeps its
+// place and starts once the lock is released (T-8239).
 
 const composeJob = (composeId: string): DeploymentJob => ({
 	composeId,
@@ -68,7 +69,7 @@ describe("InMemoryQueue.holdIdleGroup", () => {
 		await flush();
 
 		expect(queue.holdIdleGroup(LOCAL_PARTITION, group("cmp-1"))).toEqual({
-			busy: "queued",
+			busy: "running",
 		});
 
 		await finish("cmp-1");
@@ -77,16 +78,34 @@ describe("InMemoryQueue.holdIdleGroup", () => {
 		).toBe(true);
 	});
 
-	it("is refused while a job of the compose waits, even in another partition", async () => {
-		const { queue } = setup(1);
+	it("is refused while a job of the compose runs in another partition", async () => {
+		const { queue } = setup();
+		await queue.add({ ...composeJob("cmp-1"), serverId: "srv-1" });
+		await flush();
+
+		expect(queue.holdIdleGroup(LOCAL_PARTITION, group("cmp-1"))).toEqual({
+			busy: "running",
+		});
+	});
+
+	it("is taken while a job of the compose only waits, which starts once it is released", async () => {
+		const { queue, started, finish } = setup(1);
 		// The only slot of the server's lane is taken, so the compose's job waits.
 		await queue.add({ ...composeJob("cmp-other"), serverId: "srv-1" });
 		await flush();
 		await queue.add({ ...composeJob("cmp-1"), serverId: "srv-1" });
 
-		expect(queue.holdIdleGroup(LOCAL_PARTITION, group("cmp-1"))).toEqual({
-			busy: "queued",
-		});
+		const hold = queue.holdIdleGroup("srv-1", group("cmp-1"));
+		if (!("release" in hold)) throw new Error("expected the lock");
+
+		// The slot frees up, but the waiting deploy is held back by the lock.
+		await finish("cmp-other");
+		expect(started).toEqual(["cmp-other"]);
+		expect((await queue.getJobs(["waiting"])).length).toBe(1);
+
+		hold.release();
+		await flush();
+		expect(started).toEqual(["cmp-other", "cmp-1"]);
 	});
 
 	it("is refused while a released job of the compose kept its lock", async () => {
@@ -96,7 +115,7 @@ describe("InMemoryQueue.holdIdleGroup", () => {
 		queue.releaseActive(job.id, { keepGroupLock: true });
 
 		expect(queue.holdIdleGroup(LOCAL_PARTITION, group("cmp-1"))).toEqual({
-			busy: "queued",
+			busy: "running",
 		});
 	});
 

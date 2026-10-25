@@ -302,6 +302,7 @@ export const RestoreBackup = ({
 		data: services = [],
 		isLoading: isLoadingServices,
 		error: errorServices,
+		isFetching: isFetchingServices,
 		refetch: refetchServices,
 	} = api.compose.loadServices.useQuery(
 		{
@@ -314,7 +315,12 @@ export const RestoreBackup = ({
 			enabled: backupType === "compose",
 		},
 	);
-	useComposeFetchFallback(cacheType, setCacheType, errorServices);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		errorServices,
+		isFetchingServices,
+	);
 
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>

@@ -163,7 +163,12 @@ export const HandleVolumeBackups = ({
 			enabled: !!id && volumeBackupType === "compose",
 		},
 	);
-	useComposeFetchFallback(cacheType, setCacheType, errorServices);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		errorServices,
+		isLoadingServices,
+	);
 
 	const serviceName = form.watch("serviceName");
 

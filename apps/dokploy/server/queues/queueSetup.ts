@@ -78,7 +78,7 @@ interface DeploymentQueue {
 	holdIdleGroup: (
 		partitionKey: string,
 		group: string,
-	) => { release: () => void } | { busy: "queued" | "held" };
+	) => { release: () => void } | { busy: "running" | "held" };
 	removeWaiting: (predicate: (data: DeploymentJob) => boolean) => number;
 	keepOldestWaiting: (
 		predicate: (data: DeploymentJob) => boolean,

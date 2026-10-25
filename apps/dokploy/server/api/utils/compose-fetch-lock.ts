@@ -3,17 +3,21 @@ import { TRPCError } from "@trpc/server";
 import { getGroup, getPartition } from "@/server/queues/in-memory-queue";
 import type { DeploymentJob } from "@/server/queues/queue-types";
 import { myQueue } from "@/server/queues/queueSetup";
+import { captureError } from "@/server/sentry";
 
 export const COMPOSE_FETCH_BUSY_MESSAGE =
-	"A deployment of this compose is queued or running; try Fetch again when it finishes";
+	"A deployment of this compose is running; try Fetch again when it finishes";
 
 export const COMPOSE_FETCH_HELD_MESSAGE =
 	"Another Fetch of this compose is running; try again when it finishes";
 
 /**
- * How long a Fetch may keep the compose's queue lock. A clone that hangs past
- * it gives the lock back (and logs a warning), so one stuck Fetch cannot hold
- * the compose's deploys back forever.
+ * Last resort: how long a Fetch may keep the compose's queue lock. The clone
+ * itself is stopped well before (`FETCH_CLONE_TIMEOUT_SECONDS`, see
+ * `boundFetchCommand`), so the lock is normally given back once the clone has
+ * exited. Reaching this means it did not exit (a host without `timeout`, a
+ * dropped connection that never closed): the lock is given back anyway, so the
+ * compose's deploys are not held back forever, and it is reported.
  */
 const MAX_HOLD_MS = 10 * 60_000;
 
@@ -21,9 +25,9 @@ const MAX_HOLD_MS = 10 * 60_000;
  * Runs `work`, a Fetch (a clone of the compose's source outside a deploy), under
  * the compose's group lock in the deployment queue: the lock a deploy, rebuild
  * or preview of the compose holds while it runs. A Fetch rewrites the code dir
- * the deploy reads, so it is refused while a job of the compose waits or runs,
- * and no job of the compose starts until it is done. Refused before `work`
- * runs, so nothing is cloned.
+ * the deploy reads, so it is refused while a job of the compose runs, and no job
+ * of the compose starts until it is done; a job that waits keeps its place and
+ * starts after it. Refused before `work` runs, so nothing is cloned.
  *
  * Cloud deploys do not go through the queue: there the compose's running
  * deployment rows are checked instead, which is a check, not a lock.
@@ -61,9 +65,9 @@ export const withComposeFetchLock = async <T>(
 		});
 	}
 	const timer = setTimeout(() => {
-		console.warn(
-			`[compose-fetch] compose ${compose.composeId}: the Fetch has not finished after ${maxHoldMs} ms, releasing its deploy lock`,
-		);
+		const message = `[compose-fetch] compose ${compose.composeId}: the Fetch has not finished after ${maxHoldMs} ms, releasing its deploy lock while it may still run`;
+		console.error(message);
+		captureError(new Error(message), { handler: "composeFetchLock" });
 		hold.release();
 	}, maxHoldMs);
 	timer.unref?.();

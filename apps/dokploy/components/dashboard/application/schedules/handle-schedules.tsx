@@ -261,7 +261,12 @@ export const HandleSchedules = ({ id, scheduleId, scheduleType }: Props) => {
 			enabled: !!id && scheduleType === "compose",
 		},
 	);
-	useComposeFetchFallback(cacheType, setCacheType, errorServices);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		errorServices,
+		isLoadingServices,
+	);
 
 	useEffect(() => {
 		if (scheduleId && schedule) {

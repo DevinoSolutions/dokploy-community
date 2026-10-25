@@ -344,7 +344,12 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			enabled: isOpen && type === "compose" && !!id,
 		},
 	);
-	useComposeFetchFallback(cacheType, setCacheType, errorServices);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		errorServices,
+		isLoadingServices,
+	);
 
 	const form = useForm<Domain>({
 		resolver: zodResolver(domain),

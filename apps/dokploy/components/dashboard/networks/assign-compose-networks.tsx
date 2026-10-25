@@ -57,13 +57,19 @@ export const AssignComposeNetworks = ({ composeId }: Props) => {
 		data: services,
 		isLoading: isLoadingServices,
 		error: servicesError,
+		isFetching: isFetchingServices,
 		refetch: refetchServices,
 		isRefetching: isRefetchingServices,
 	} = api.compose.loadServices.useQuery(
 		{ composeId, type: cacheType },
 		{ retry: false },
 	);
-	useComposeFetchFallback(cacheType, setCacheType, servicesError);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		servicesError,
+		isFetchingServices,
+	);
 
 	const onRetry = () => {
 		setCacheType("fetch");

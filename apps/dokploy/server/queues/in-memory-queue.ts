@@ -652,25 +652,22 @@ export class InMemoryQueue {
 	/**
 	 * Take a service's group lock for work done outside the queue (a compose
 	 * Fetch rewriting the code dir a deploy reads), only while no job of that
-	 * service waits or runs in any partition. While it is held no job of the
-	 * group starts; it is a lock the queue's own jobs respect, not a status
-	 * check. The check and the take are one synchronous step, so a job cannot
-	 * start in between. Returns the release (safe to call twice), or why the
-	 * lock was not taken: `queued` (a job of the service waits or runs, or a
-	 * released job kept its lock) or `held` (another hold has it).
+	 * service runs in any partition. While it is held no job of the group
+	 * starts; it is the lock the queue's own jobs take, not a status check. A
+	 * job of the service that is only waiting does not stand in the way: it
+	 * keeps its place and starts once the lock is released. The check and the
+	 * take are one synchronous step, so a job cannot start in between. Returns
+	 * the release (safe to call twice), or why the lock was not taken: `running`
+	 * (a job of the service runs, or a released job kept its lock) or `held`
+	 * (another hold has it).
 	 */
 	holdIdleGroup(
 		partitionKey: string,
 		group: string,
-	): { release: () => void } | { busy: "queued" | "held" } {
+	): { release: () => void } | { busy: "running" | "held" } {
 		if (this.heldGroups.has(group)) return { busy: "held" };
 		for (const partition of this.partitions.values()) {
-			if (
-				partition.activeGroups.has(group) ||
-				partition.waiting.some((job) => job.group === group)
-			) {
-				return { busy: "queued" };
-			}
+			if (partition.activeGroups.has(group)) return { busy: "running" };
 		}
 		const partition = this.getPartitionState(partitionKey);
 		partition.activeGroups.add(group);

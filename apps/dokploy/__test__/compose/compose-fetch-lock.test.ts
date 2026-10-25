@@ -5,8 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // "fetch", fetchSourceType, the isolated deployment preview) clones the source
 // over the code dir a deploy reads. It needs the permission a deploy needs,
 // and it runs under the compose's group lock in the deployment queue: refused
-// while a deployment of the compose is queued or running, with nothing run.
-// `type: "cache"` only reads and stays at service read.
+// while a deployment of the compose runs, with nothing run; a deployment that
+// only waits starts after it. `type: "cache"` only reads and stays at service
+// read.
 
 type Role = "reader" | "deployer";
 
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
 	randomizeIsolatedDeploymentComposeFile: vi.fn(),
 	execAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
+	captureError: vi.fn(),
 	queue: null as null | import("@/server/queues/in-memory-queue").InMemoryQueue,
 }));
 
@@ -70,6 +72,7 @@ vi.mock("@dokploy/server/services/permission", () => ({
 
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
 vi.mock("@/server/api/utils/audit", () => ({ audit: vi.fn() }));
+vi.mock("@/server/sentry", () => ({ captureError: mocks.captureError }));
 
 // The real queue, so the lock is the one its jobs hold.
 vi.mock("@/server/queues/queueSetup", () => ({
@@ -85,7 +88,7 @@ vi.mock("@/server/queues/queueSetup", () => ({
 
 const { InMemoryQueue } = await import("@/server/queues/in-memory-queue");
 const { composeRouter } = await import("@/server/api/routers/compose");
-const { COMPOSE_FETCH_BUSY_MESSAGE } = await import(
+const { COMPOSE_FETCH_BUSY_MESSAGE, withComposeFetchLock } = await import(
 	"@/server/api/utils/compose-fetch-lock"
 );
 
@@ -254,24 +257,28 @@ describe("compose Fetch and the deploy queue", { timeout: 60_000 }, () => {
 		expectNothingRan();
 	});
 
-	it("is refused while a deployment of the compose is queued, and runs nothing", async () => {
+	it("is allowed while a deployment of the compose only waits, which starts after it", async () => {
+		const { started } = freshQueue();
 		// Another compose takes the only slot, so this compose's deploy waits.
 		await mocks.queue?.add(deployOf("cmp-other"));
 		await flush();
 		await mocks.queue?.add(deployOf("cmp-1"));
 
 		for (const attempt of [
-			caller.loadServices({ composeId: "cmp-1", type: "fetch" }),
-			caller.rollingEligibility({ composeId: "cmp-1", type: "fetch" }),
-			caller.fetchSourceType({ composeId: "cmp-1" }),
-			caller.isolatedDeployment({ composeId: "cmp-1", suffix: "x" }),
+			() => caller.loadServices({ composeId: "cmp-1", type: "fetch" }),
+			() => caller.rollingEligibility({ composeId: "cmp-1", type: "fetch" }),
+			() => caller.fetchSourceType({ composeId: "cmp-1" }),
+			() => caller.isolatedDeployment({ composeId: "cmp-1", suffix: "x" }),
 		]) {
-			await expect(attempt).rejects.toMatchObject({
-				code: "CONFLICT",
-				message: COMPOSE_FETCH_BUSY_MESSAGE,
-			});
+			await expect(attempt()).resolves.toBeDefined();
 		}
-		expectNothingRan();
+		expect(mocks.loadServices).toHaveBeenCalledWith("cmp-1", "fetch");
+		expect(mocks.execAsync).toHaveBeenCalledTimes(1);
+
+		finishJobs();
+		await flush();
+		await flush();
+		expect(started).toEqual(["cmp-other", "cmp-1"]);
 	});
 
 	it("still serves the cache while a deployment runs", async () => {
@@ -324,5 +331,30 @@ describe("compose Fetch and the deploy queue", { timeout: 60_000 }, () => {
 			"github",
 		);
 		expect(mocks.execAsync).toHaveBeenCalledTimes(1);
+	});
+
+	it("gives the lock back after 10 minutes when the clone never returns, and reports it", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			const { started } = freshQueue();
+			const stuck = withComposeFetchLock(
+				{ composeId: "cmp-1", serverId: null },
+				() => new Promise<never>(() => {}),
+			);
+			await mocks.queue?.add(deployOf("cmp-1"));
+			await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+			expect(started).toEqual([]);
+			expect(mocks.captureError).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(1);
+			expect(started).toEqual(["cmp-1"]);
+			expect(mocks.captureError).toHaveBeenCalledTimes(1);
+			expect(mocks.captureError).toHaveBeenCalledWith(expect.any(Error), {
+				handler: "composeFetchLock",
+			});
+			void stuck;
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

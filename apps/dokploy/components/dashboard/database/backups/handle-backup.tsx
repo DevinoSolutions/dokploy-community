@@ -262,7 +262,12 @@ export const HandleBackup = ({
 			enabled: backupType === "compose" && !!backup?.composeId && !!id,
 		},
 	);
-	useComposeFetchFallback(cacheType, setCacheType, errorServices);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		errorServices,
+		isLoadingServices,
+	);
 
 	useEffect(() => {
 		form.reset({
