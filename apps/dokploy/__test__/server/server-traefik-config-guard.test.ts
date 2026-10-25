@@ -15,12 +15,13 @@ import path from "node:path";
 import {
 	createServerTraefikConfig,
 	getDefaultServerTraefikConfig,
+	TRAEFIK_RESTART_MARKER,
 } from "@dokploy/server";
 import { afterEach, describe, expect, it } from "vitest";
 
 // Fork checks on top of upstream #5764 (T-7820): repairing a Swarm worker's
-// traefik.yml only restarts the existing container (same image, no pull, no
-// recreate), and every write stays inside the traefik directory.
+// traefik.yml only asks for a restart of the existing container (same image,
+// no pull, no recreate), and every write stays inside the traefik directory.
 
 const WORKER = "active false";
 
@@ -79,6 +80,7 @@ exit 0
 			: [];
 	return {
 		traefikDir,
+		binDir,
 		outside,
 		configPath: path.join(traefikDir, "traefik.yml"),
 		run,
@@ -89,17 +91,46 @@ exit 0
 const managerConfig = () => `${getDefaultServerTraefikConfig()}\n`;
 
 describe("Swarm worker Traefik repair (fork guard)", () => {
-	it("only restarts the existing container: no pull, no recreate", () => {
+	it("only asks Dokploy to restart the existing container: no pull, no recreate", () => {
 		const { configPath, run, dockerCalls } = setUp();
 		writeFileSync(configPath, managerConfig());
 
-		run();
+		const output = run();
 
 		const calls = dockerCalls().filter((call) => !call.startsWith("info"));
-		expect(calls).toEqual([
-			"inspect dokploy-traefik",
-			"restart dokploy-traefik",
-		]);
+		expect(calls).toEqual(["inspect dokploy-traefik"]);
+		expect(output).toContain(TRAEFIK_RESTART_MARKER);
+	});
+
+	it("leaves traefik.yml as it was when the staged copy can't be made", () => {
+		const { configPath, binDir, run, dockerCalls } = setUp();
+		writeFileSync(configPath, managerConfig());
+		// Stands in for a full disk: the first copy into the traefik directory
+		// (the backup) works, the next one (the staged file) fails after writing
+		// only part of the file.
+		const realCp = execFileSync("sh", ["-c", "command -v cp"], {
+			encoding: "utf8",
+		}).trim();
+		writeFileSync(
+			path.join(binDir, "cp"),
+			`#!/bin/sh
+case "$2" in
+	*.new) head -c 10 "$1" > "$2"; exit 1 ;;
+esac
+exec "${realCp}" "$@"
+`,
+		);
+		chmodSync(path.join(binDir, "cp"), 0o755);
+
+		const output = run();
+
+		expect(readFileSync(configPath, "utf8")).toBe(managerConfig());
+		expect(existsSync(`${configPath}.new`)).toBe(false);
+		expect(output).toContain("Could not stage the new");
+		expect(output).not.toContain(TRAEFIK_RESTART_MARKER);
+		expect(dockerCalls().some((call) => call.startsWith("restart"))).toBe(
+			false,
+		);
 	});
 
 	it("keeps its lock file inside the traefik directory", () => {

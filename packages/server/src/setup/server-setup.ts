@@ -9,6 +9,7 @@ import {
 	findServerById,
 	updateServerById,
 } from "@dokploy/server/services/server";
+import { reloadDockerResource } from "@dokploy/server/services/settings";
 import {
 	getDefaultMiddlewares,
 	getDefaultServerTraefikConfig,
@@ -29,6 +30,9 @@ const generateToken = () => {
 		"",
 	);
 };
+
+// Printed by the setup script when the Traefik it left running needs a restart.
+export const TRAEFIK_RESTART_MARKER = "DOKPLOY_TRAEFIK_RESTART_REQUIRED";
 
 export const slugify = (text: string | undefined) => {
 	if (!text) {
@@ -78,7 +82,19 @@ export const serverSetup = async (
 				? "\nInstalling Build Server Dependencies: ✅\n"
 				: "\nInstalling Server Dependencies: ✅\n",
 		);
-		await installRequirements(serverId, onData);
+		const restartTraefik = await installRequirements(serverId, onData);
+		if (restartTraefik) {
+			// Queued with the other Traefik actions of this server, so it can't
+			// land inside a recreate and make that one roll back.
+			try {
+				await reloadDockerResource("dokploy-traefik", serverId);
+				onData?.("\nTraefik restarted ✅\n");
+			} catch (error) {
+				onData?.(
+					`\n⚠️ Could not restart Traefik, restart dokploy-traefik manually: ${error instanceof Error ? error.message : String(error)}\n`,
+				);
+			}
+		}
 
 		if (IS_CLOUD) {
 			onData?.("\nConfiguring Monitoring: 🔄\n");
@@ -387,8 +403,11 @@ const installRequirements = async (
 
 	const isBuildServer = server.serverType === "build";
 
-	return new Promise<void>((resolve, reject) => {
+	return new Promise<boolean>((resolve, reject) => {
 		const steps = createStepTracker();
+		// The last output, so a marker split across two chunks is still found.
+		let recent = "";
+		let restartTraefik = false;
 		// The exit status arrives before the channel closes, and is kept in case
 		// the connection closes before the channel does.
 		let exit: { code: number | null; signal?: string | null } | undefined;
@@ -408,7 +427,7 @@ const installRequirements = async (
 						.on("close", (code: number | null, signal?: string | null) => {
 							client.end();
 							if (code === 0 && !signal) {
-								resolve();
+								resolve(restartTraefik);
 								return;
 							}
 							reject(setupExitError(code, signal, steps.lastStep));
@@ -428,6 +447,10 @@ const installRequirements = async (
 							);
 						})
 						.on("data", (data: string) => {
+							recent = (recent + data.toString()).slice(
+								-TRAEFIK_RESTART_MARKER.length * 2,
+							);
+							restartTraefik ||= recent.includes(TRAEFIK_RESTART_MARKER);
 							steps.push(data.toString());
 							onData?.(data.toString());
 						})
@@ -488,7 +511,7 @@ const installRequirements = async (
 			.on("close", () => {
 				if (exit) {
 					if (exit.code === 0 && !exit.signal) {
-						resolve();
+						resolve(restartTraefik);
 					} else {
 						reject(setupExitError(exit.code, exit.signal, steps.lastStep));
 					}
@@ -842,19 +865,31 @@ export const createServerTraefikConfig = (
 				(
 					command -v flock > /dev/null && flock 9
 					tmp=$(mktemp)
-					trap 'rm -f "$tmp"' EXIT
+					staged="${configPath}.new"
+					trap 'rm -f "$tmp" "$staged"' EXIT
 					status=0
 					awk '${removeSwarmProviderAwk}' "${configPath}" > "$tmp" || status=$?
 					if [ "$status" -eq 0 ]; then
 						# A new file, never through whatever an old .bak points at.
 						rm -f "${configPath}.bak"
 						cp "${configPath}" "${configPath}.bak"
-						# Write in place: the file is bind-mounted, a new inode would not reach the container.
-						cat "$tmp" > "${configPath}"
-						echo "Removed Swarm provider from Traefik config (Swarm worker), backup at ${configPath}.bak ✅"
-						if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
-							$SUDO_CMD docker restart dokploy-traefik > /dev/null
-							echo "Traefik restarted ✅"
+						# Staged and compared before the config is touched, so a full disk
+						# can't leave a truncated traefik.yml behind.
+						if [ -s "$tmp" ] && cp "$tmp" "$staged" && cmp -s "$tmp" "$staged"; then
+							# Write in place: the file is bind-mounted, a new inode would not reach the container.
+							if cat "$staged" > "${configPath}" && cmp -s "$staged" "${configPath}"; then
+								echo "Removed Swarm provider from Traefik config (Swarm worker), backup at ${configPath}.bak ✅"
+								# Dokploy restarts it through its Traefik queue, so the restart
+								# can't land inside a Traefik recreate.
+								if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
+									echo "${TRAEFIK_RESTART_MARKER}"
+								fi
+							else
+								cat "${configPath}.bak" > "${configPath}"
+								echo "⚠️ Could not write ${configPath}, so the original was put back. Swarm workers can't use providers.swarm, remove it manually and restart dokploy-traefik."
+							fi
+						else
+							echo "⚠️ Could not stage the new ${configPath}, so it is left as it is. Swarm workers can't use providers.swarm, remove it manually and restart dokploy-traefik."
 						fi
 					elif [ "$status" -eq 2 ]; then
 						echo "⚠️ Could not remove providers.swarm from ${configPath} automatically. Swarm workers can't use it, remove it manually and restart dokploy-traefik."
