@@ -32,7 +32,8 @@ const generateToken = () => {
 };
 
 // Printed by the setup script when the Traefik it left running needs a restart.
-export const TRAEFIK_RESTART_MARKER = "DOKPLOY_TRAEFIK_RESTART_REQUIRED";
+// It stays in the setup log, so it reads as a status line.
+export const TRAEFIK_RESTART_MARKER = "Dokploy will restart dokploy-traefik";
 
 export const slugify = (text: string | undefined) => {
 	if (!text) {
@@ -864,29 +865,40 @@ export const createServerTraefikConfig = (
 			else
 				(
 					command -v flock > /dev/null && flock 9
+					# Whether two files hold the same bytes, on images without diffutils too.
+					same() {
+						if command -v cmp > /dev/null; then
+							cmp -s "$1" "$2"
+						elif command -v cksum > /dev/null; then
+							[ "$(cksum < "$1")" = "$(cksum < "$2")" ]
+						else
+							return 1
+						fi
+					}
 					tmp=$(mktemp)
 					staged="${configPath}.new"
 					trap 'rm -f "$tmp" "$staged"' EXIT
 					status=0
 					awk '${removeSwarmProviderAwk}' "${configPath}" > "$tmp" || status=$?
 					if [ "$status" -eq 0 ]; then
-						# A new file, never through whatever an old .bak points at.
-						rm -f "${configPath}.bak"
+						# New files, never through whatever an old .bak or .new points at.
+						rm -f "${configPath}.bak" "$staged"
 						cp "${configPath}" "${configPath}.bak"
 						# Staged and compared before the config is touched, so a full disk
 						# can't leave a truncated traefik.yml behind.
-						if [ -s "$tmp" ] && cp "$tmp" "$staged" && cmp -s "$tmp" "$staged"; then
+						if [ -s "$tmp" ] && cp "$tmp" "$staged" && same "$tmp" "$staged"; then
 							# Write in place: the file is bind-mounted, a new inode would not reach the container.
-							if cat "$staged" > "${configPath}" && cmp -s "$staged" "${configPath}"; then
+							if cat "$staged" > "${configPath}" && same "$staged" "${configPath}"; then
 								echo "Removed Swarm provider from Traefik config (Swarm worker), backup at ${configPath}.bak ✅"
 								# Dokploy restarts it through its Traefik queue, so the restart
 								# can't land inside a Traefik recreate.
 								if $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
 									echo "${TRAEFIK_RESTART_MARKER}"
 								fi
-							else
-								cat "${configPath}.bak" > "${configPath}"
+							elif cat "${configPath}.bak" > "${configPath}" && same "${configPath}.bak" "${configPath}"; then
 								echo "⚠️ Could not write ${configPath}, so the original was put back. Swarm workers can't use providers.swarm, remove it manually and restart dokploy-traefik."
+							else
+								echo "⚠️ Could not write ${configPath} and could not put the original back. Restore it from ${configPath}.bak, then restart dokploy-traefik."
 							fi
 						else
 							echo "⚠️ Could not stage the new ${configPath}, so it is left as it is. Swarm workers can't use providers.swarm, remove it manually and restart dokploy-traefik."
