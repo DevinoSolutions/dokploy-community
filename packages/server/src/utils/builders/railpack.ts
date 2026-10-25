@@ -1,11 +1,7 @@
 import { createHash } from "node:crypto";
 import { nanoid } from "nanoid";
 import { quote } from "shell-quote";
-import {
-	ENV_VARIABLE_NAME,
-	getBuildSecretAlias,
-	isEnvFileName,
-} from "../docker/env-file";
+import { getBuildSecretAlias, isEnvFileName } from "../docker/env-file";
 import {
 	parseEnvironmentKeyValuePair,
 	prepareEnvironmentVariables,
@@ -20,7 +16,11 @@ import {
 	stageBuildVariables,
 } from "./utils";
 
-const calculateSecretsHash = (envVariables: string[]): string => {
+// The names a buildx secret id may have here: no `,` or `=` (they split the
+// flag) and nothing a shell reads specially.
+const SECRET_ID = /^[A-Za-z0-9_.-]+$/;
+
+const calculateSecretsHash =(envVariables: string[]): string => {
 	const hash = createHash("sha256");
 	for (const env of envVariables.sort()) {
 		hash.update(env);
@@ -45,10 +45,11 @@ export const getRailpackCommand = async (
 	const envVariables = rawEnvVariables.map((variable) => quote([variable]));
 
 	// Every variable is also a buildx secret. A name the env file cannot carry
-	// (`isEnvFileName`) gets its value from an internal name in the file
-	// (`getBuildSecretAlias`): nothing is exported by the script, so no
-	// variable changes how the shell or docker runs. A name no shell variable
-	// can have gets no secret; `railpack prepare` still gets it (T-8282).
+	// (`isEnvFileName`, such as a name the build tools use for themselves or a
+	// dotted one) gets its value from an internal name in the file
+	// (`getBuildSecretAlias`); nothing is exported by the script. A name that
+	// cannot be a secret id gets no secret; `railpack prepare` still gets it
+	// (T-8282).
 	const secretArgs: string[] = [];
 	const secretAliases: [string, string][] = [];
 	for (const pair of rawEnvVariables) {
@@ -56,10 +57,10 @@ export const getRailpackCommand = async (
 		if (!key || !value) continue;
 		if (isEnvFileName(key)) {
 			secretArgs.push("--secret", `id=${key},env=${key}`);
-		} else if (ENV_VARIABLE_NAME.test(key)) {
+		} else if (SECRET_ID.test(key)) {
 			const alias = getBuildSecretAlias(secretAliases.length);
 			secretAliases.push([alias, value]);
-			secretArgs.push("--secret", `id=${key},env=${alias}`);
+			secretArgs.push("--secret", quote([`id=${key},env=${alias}`]));
 		}
 	}
 

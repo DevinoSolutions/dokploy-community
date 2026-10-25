@@ -386,9 +386,8 @@ describe.each(builders)("%s builder keeps values out of the command", (name, bui
 	});
 });
 
-// Names the shell, its loader or docker read for themselves (T-8282): a build
-// secret with one of them reaches docker under an internal name, never as an
-// assignment or an export in the script.
+// Names the build tools use for themselves (T-8282): a build secret with one
+// of them reaches docker under an internal name, never under its own.
 const RESERVED_SECRET_NAMES = [
 	"PATH",
 	"BASH_ENV",
@@ -475,13 +474,16 @@ describe("build secret names", () => {
 			.find((line) => line.includes("docker buildx build")) as string;
 		for (const [index, name] of RESERVED_SECRET_NAMES.entries()) {
 			expect(buildLine, name).toContain(
-				`--secret id=${name},env=__dokploy_secret_${index}`,
+				`--secret ${quote([`id=${name},env=__dokploy_secret_${index}`])}`,
 			);
 		}
 		expect(buildLine).toContain("--secret id=API_TOKEN,env=API_TOKEN");
-		// A name no shell variable can have is not a buildx secret; prepare
-		// still gets it.
-		expect(buildLine).not.toContain("my.setting");
+		// A dotted name is a buildx secret under an internal name too, and
+		// prepare gets it as before.
+		expect(buildLine).toContain(
+			`--secret ${quote([`id=my.setting,env=__dokploy_secret_${RESERVED_SECRET_NAMES.length}`])}`,
+		);
+		expect(buildLine).not.toContain("dotted-value");
 		expect(command).toContain(`--env ${quote(["my.setting=dotted-value"])}`);
 	});
 });
@@ -529,7 +531,9 @@ describe("variables the env file cannot carry keep their command line form", () 
 		expect(command).not.toMatch(/^\s*export (?!RAILPACK_VERSION=)/m);
 		expect(command).not.toContain("railpack-secret");
 		expect(command).toContain("--secret id=API_TOKEN,env=API_TOKEN");
-		expect(command).toContain("--secret id=LD_PRELOAD,env=__dokploy_secret_0");
+		expect(command).toContain(
+			`--secret ${quote(["id=LD_PRELOAD,env=__dokploy_secret_0"])}`,
+		);
 	});
 
 	it("hashes the same variables to the same railpack cache key as before", async () => {
@@ -842,24 +846,26 @@ describe("build commands in a real shell", () => {
 	);
 
 	itWithSh(
-		"a build secret named PATH reaches docker under its internal name",
+		"a reserved build secret name reaches docker under its internal name",
 		async () => {
+			const [RESERVED_NAME_CASE_A, RESERVED_NAME_CASE_B] =
+				RESERVED_SECRET_NAMES as [string, string];
 			const { bin, out } = installFakeTools(0);
 			const script = await getDockerCommand(
 				createApplication({
-					buildSecrets: `PATH=${tmp}/elsewhere\nBASH_ENV=${tmp}/elsewhere/env`,
+					buildSecrets: `${RESERVED_NAME_CASE_A}=x\n${RESERVED_NAME_CASE_B}=y`,
 				}),
-				{ deploymentId: "dep-path" },
+				{ deploymentId: "dep-reserved-sh" },
 			);
 
 			const result = run(script, bin);
 
 			expect(result.status).toBe(0);
 			const env = received(out, "docker-build");
-			expect(env.get("PATH")).not.toBe(`${tmp}/elsewhere`);
-			expect(env.get("BASH_ENV")).toBeUndefined();
-			expect(env.get("__dokploy_secret_0")).toBe(`${tmp}/elsewhere`);
-			expect(env.get("__dokploy_secret_1")).toBe(`${tmp}/elsewhere/env`);
+			expect(env.get(RESERVED_NAME_CASE_A)).not.toBe("x");
+			expect(env.get(RESERVED_NAME_CASE_B)).toBeUndefined();
+			expect(env.get("__dokploy_secret_0")).toBe("x");
+			expect(env.get("__dokploy_secret_1")).toBe("y");
 		},
 	);
 

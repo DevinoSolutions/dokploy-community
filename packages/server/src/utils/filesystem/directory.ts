@@ -134,12 +134,19 @@ export const joinInsideCodeDirectory = (
 	return fullPath;
 };
 
-export const getBuildAppDirectory = (application: Application) => {
-	const serverId = application.buildServerId || application.serverId;
+/** The application's checkout on the host that runs its build. */
+export const getCodeDirectory = (
+	application: Application,
+	serverId = application.buildServerId || application.serverId,
+) => {
 	const { APPLICATIONS_PATH } = paths(!!serverId);
-	const { appName, buildType, sourceType, customGitBuildPath, dockerfile } =
-		application;
-	const codeDirectory = path.join(APPLICATIONS_PATH, appName, "code");
+	return path.join(APPLICATIONS_PATH, application.appName, "code");
+};
+
+/** The directory the build path of the application's provider names. */
+export const getBuildDirectory = (application: Application) => {
+	const { sourceType, customGitBuildPath } = application;
+	const codeDirectory = getCodeDirectory(application);
 	let buildPath = "";
 
 	if (sourceType === "github") {
@@ -155,15 +162,20 @@ export const getBuildAppDirectory = (application: Application) => {
 	} else if (sourceType === "git") {
 		buildPath = customGitBuildPath || "";
 	}
-	const buildDirectory = joinInsideCodeDirectory(
+	return joinInsideCodeDirectory(
 		codeDirectory,
 		codeDirectory,
 		buildPath ?? "",
 		"the build path",
 	);
+};
+
+export const getBuildAppDirectory = (application: Application) => {
+	const { buildType, dockerfile } = application;
+	const buildDirectory = getBuildDirectory(application);
 	if (buildType === "dockerfile") {
 		return joinInsideCodeDirectory(
-			codeDirectory,
+			getCodeDirectory(application),
 			buildDirectory,
 			dockerfile || "Dockerfile",
 			"the Dockerfile path",
@@ -184,10 +196,8 @@ export const getPublishDirectoryPath = (application: Application) => {
 	if (!publishDirectory) {
 		return null;
 	}
-	const serverId = application.buildServerId || application.serverId;
-	const { APPLICATIONS_PATH } = paths(!!serverId);
 	return joinInsideCodeDirectory(
-		path.join(APPLICATIONS_PATH, application.appName, "code"),
+		getCodeDirectory(application),
 		getBuildAppDirectory(application),
 		publishDirectory,
 		"the publish directory",
@@ -195,14 +205,13 @@ export const getPublishDirectoryPath = (application: Application) => {
 };
 
 export const getDockerContextPath = (application: Application) => {
-	const { APPLICATIONS_PATH } = paths(!!application.serverId);
-	const { appName, dockerContextPath } = application;
+	const { dockerContextPath } = application;
 
 	if (!dockerContextPath) {
 		return null;
 	}
 
-	const codeDirectory = path.join(APPLICATIONS_PATH, appName, "code");
+	const codeDirectory = getCodeDirectory(application, application.serverId);
 	return joinInsideCodeDirectory(
 		codeDirectory,
 		codeDirectory,
