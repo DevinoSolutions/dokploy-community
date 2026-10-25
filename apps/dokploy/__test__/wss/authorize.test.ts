@@ -11,8 +11,11 @@ vi.mock("@dokploy/server/services/permission", () => ({
 }));
 
 const mockGetAccessibleServerIds = vi.hoisted(() => vi.fn());
+const mockIsRootOrganization = vi.hoisted(() => vi.fn());
 vi.mock("@dokploy/server", () => ({
+	IS_CLOUD: false,
 	getAccessibleServerIds: mockGetAccessibleServerIds,
+	isRootOrganization: mockIsRootOrganization,
 }));
 
 import {
@@ -26,6 +29,7 @@ const SESSION = { activeOrganizationId: "org-1" };
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mockIsRootOrganization.mockResolvedValue(true);
 });
 
 describe("canAccessDockerOverWss", () => {
@@ -129,6 +133,26 @@ describe("canAccessTerminalOverWss", () => {
 	it("allows the local host terminal to an admin", async () => {
 		mockFindMember.mockResolvedValue({ role: "admin" });
 		expect(await canAccessTerminalOverWss(USER, SESSION, "local")).toBe(true);
+	});
+
+	it("denies the local host terminal to an owner or admin of another organization", async () => {
+		mockIsRootOrganization.mockResolvedValue(false);
+		for (const role of ["owner", "admin"]) {
+			mockFindMember.mockResolvedValue({ role });
+			expect(await canAccessTerminalOverWss(USER, SESSION, "local")).toBe(
+				false,
+			);
+			expect(await canAccessTerminalOverWss(USER, SESSION)).toBe(false);
+		}
+		expect(mockIsRootOrganization).toHaveBeenCalledWith("org-1");
+	});
+
+	it("leaves a remote server terminal to the organization that owns the server", async () => {
+		mockIsRootOrganization.mockResolvedValue(false);
+		mockGetAccessibleServerIds.mockResolvedValue(new Set(["srv-1"]));
+		mockHasPermission.mockResolvedValue(true);
+		expect(await canAccessTerminalOverWss(USER, SESSION, "srv-1")).toBe(true);
+		expect(mockIsRootOrganization).not.toHaveBeenCalled();
 	});
 
 	it("gates a remote server terminal on server access", async () => {

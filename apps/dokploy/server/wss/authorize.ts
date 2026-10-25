@@ -4,6 +4,7 @@ import {
 	findMemberByUserId,
 	hasPermission,
 } from "@dokploy/server/services/permission";
+import { canAccessLocalHost } from "@/server/api/utils/local-host-access";
 
 type WssUser = { id: string } | null | undefined;
 type WssSession = { activeOrganizationId?: string | null } | null | undefined;
@@ -103,8 +104,8 @@ export const isHostStatsBucketName = (
 
 // Authorizes the host/server SSH terminal opened over a WebSocket. The local
 // host terminal is a root shell on the control-plane host, so it is restricted
-// to owner/admin. A remote server terminal needs server access plus
-// server.terminal.
+// to owner/admin of the organization that owns the instance. A remote server
+// terminal needs server access plus server.terminal.
 export const canAccessTerminalOverWss = async (
 	user: WssUser,
 	session: WssSession,
@@ -129,7 +130,8 @@ export const canAccessTerminalOverWss = async (
 			user.id,
 			session.activeOrganizationId,
 		);
-		return member?.role === "owner" || member?.role === "admin";
+		if (member?.role !== "owner" && member?.role !== "admin") return false;
+		return await canAccessLocalHost(undefined, session.activeOrganizationId);
 	} catch {
 		return false;
 	}
