@@ -19,7 +19,10 @@ vi.mock("@dokploy/server/services/permission", () => ({
 	checkPermission: vi.fn(async () => undefined),
 }));
 
-vi.mock("@dokploy/server", () => ({ IS_CLOUD: false }));
+vi.mock("@dokploy/server", () => ({
+	IS_CLOUD: false,
+	isRootOrganization: async () => true,
+}));
 
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
 

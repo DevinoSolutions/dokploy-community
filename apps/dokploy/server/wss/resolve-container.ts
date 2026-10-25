@@ -7,6 +7,7 @@ import {
 	type DockerObjectKind,
 	readDockerObject,
 } from "@/server/api/utils/container-service-access";
+import { canAccessLocalHost } from "@/server/api/utils/local-host-access";
 
 type WssUser = { id: string } | null | undefined;
 type WssSession = { activeOrganizationId?: string | null } | null | undefined;
@@ -27,7 +28,8 @@ type WssSession = { activeOrganizationId?: string | null } | null | undefined;
 // - An object that backs no service (Dokploy itself, Traefik, its database, an
 //   unlabelled container) is the host's own. Only an owner or admin may open
 //   those, the same people who get the host terminal; a member holding
-//   docker:read does not.
+//   docker:read does not. On the local host that is the owners and admins of
+//   the organization that owns the instance.
 //
 // Every refusal is the same `null`, so the answer says nothing about which
 // containers exist.
@@ -69,7 +71,10 @@ export const resolveDockerTarget = async ({
 			user.id,
 			session.activeOrganizationId,
 		);
-		return member.role === "owner" || member.role === "admin"
+		if (member.role !== "owner" && member.role !== "admin") return null;
+		// the local host's own containers belong to the organization that owns
+		// the instance
+		return (await canAccessLocalHost(server, session.activeOrganizationId))
 			? object.id
 			: null;
 	} catch {

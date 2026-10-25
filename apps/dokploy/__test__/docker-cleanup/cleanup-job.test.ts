@@ -37,6 +37,7 @@ vi.mock("@dokploy/server", async () => {
 		...background,
 		CLEANUP_CRON_JOB: "50 23 * * *",
 		IS_CLOUD: false,
+		isRootOrganization: async () => true,
 		findServerById: mocks.findServerById,
 		updateServerById: mocks.updateServerById,
 		updateWebServerSettings: mocks.updateWebServerSettings,
