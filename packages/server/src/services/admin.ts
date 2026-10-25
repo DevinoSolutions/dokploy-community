@@ -49,6 +49,21 @@ export const isAdminPresent = async () => {
 	return true;
 };
 
+// The organization that owns a self-hosted instance: the first one created,
+// which is the one made at the first signup. findOwner can't say, since every
+// organization has an owner.
+export const findRootOrganization = async () =>
+	db.query.organization.findFirst({
+		columns: { id: true },
+		orderBy: (organization, { asc }) => [
+			asc(organization.createdAt),
+			asc(organization.id),
+		],
+	});
+
+export const isRootOrganization = async (organizationId: string) =>
+	(await findRootOrganization())?.id === organizationId;
+
 export const findOwner = async () => {
 	const admin = await db.query.member.findFirst({
 		where: eq(member.role, "owner"),
