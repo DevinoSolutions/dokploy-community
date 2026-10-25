@@ -1,4 +1,7 @@
-import { writeTraefikSetup } from "@dokploy/server/services/settings";
+import {
+	reloadDockerResource,
+	writeTraefikSetup,
+} from "@dokploy/server/services/settings";
 import {
 	queueTraefikRecreate,
 	restoreInterruptedTraefik,
@@ -310,6 +313,62 @@ describe("writeTraefikSetup", () => {
 		expect(env).toHaveBeenCalledWith(["A=0", "B=#kept"]);
 		expect(additionalPorts).toHaveBeenCalledWith([
 			{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
+		]);
+	});
+
+	it("a reload waits for a recreate in flight instead of restarting inside it", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		const action = writeTraefikSetup({ env: ["A=1"] });
+		await vi.advanceTimersByTimeAsync(1000);
+		const reload = reloadDockerResource("dokploy-traefik");
+		await vi.runAllTimersAsync();
+
+		await action;
+		await reload;
+		expect(fake.log).toEqual([
+			"rename old -> dokploy-traefik-previous",
+			"stop old",
+			"create new",
+			"start new",
+			"remove old",
+			"exec docker restart dokploy-traefik",
+		]);
+	});
+
+	it("a reload restores the backup of an interrupted recreate first", async () => {
+		const fake = fakeDocker([
+			{
+				id: "stale",
+				name: "dokploy-traefik-previous",
+				running: false,
+				image: "traefik:v3.6.25",
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		await reloadDockerResource("dokploy-traefik");
+
+		expect(fake.log).toEqual([
+			"rename stale -> dokploy-traefik",
+			"start stale",
+			"exec docker restart dokploy-traefik",
 		]);
 	});
 

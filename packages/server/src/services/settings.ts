@@ -515,6 +515,22 @@ export const reloadDockerResource = async (
 	serverId?: string,
 	version?: string,
 ) => {
+	// A recreate renames Traefik's containers, so a restart waits for it, and
+	// first restores the backup an interrupted one left behind.
+	if (resourceName === "dokploy-traefik") {
+		return queueTraefikRecreate(serverId, async () => {
+			await restoreInterruptedTraefik(serverId);
+			await restartDockerResource(resourceName, serverId, version);
+		});
+	}
+	await restartDockerResource(resourceName, serverId, version);
+};
+
+const restartDockerResource = async (
+	resourceName: string,
+	serverId?: string,
+	version?: string,
+) => {
 	const resourceType = await getDockerResourceType(resourceName, serverId);
 	let command = "";
 	if (resourceType === "service") {
@@ -720,6 +736,18 @@ export const checkPortInUse = async (
 		return { isInUse: false };
 	}
 };
+
+// Env and ports can be given as a function of what the host runs when the
+// queued job starts, so two overlapping actions don't restore stale values.
+type FromCurrent<T> = T | ((current: T) => T);
+
+type TraefikPorts = NonNullable<TraefikOptions["additionalPorts"]>;
+
+export interface TraefikSetupOptions
+	extends Omit<TraefikOptions, "env" | "additionalPorts"> {
+	env?: FromCurrent<string[]>;
+	additionalPorts?: FromCurrent<TraefikPorts>;
+}
 
 // Env and ports can be given as a function of what the host runs when the
 // queued job starts, so two overlapping actions don't restore stale values.

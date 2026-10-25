@@ -918,6 +918,17 @@ export const createTraefikInstance = () => {
 			fi
 		fi
 
+		# An interrupted recreate leaves only the stopped backup, which keeps the
+		# env and ports of the Traefik the host ran, so bring it back instead of
+		# creating a fresh one.
+		if [ "$TRAEFIK_SKIP_CREATE" != true ] \
+			&& ! $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1 \
+			&& $SUDO_CMD docker container inspect dokploy-traefik-previous > /dev/null 2>&1; then
+			echo "Restoring Traefik left behind by an interrupted update..."
+			$SUDO_CMD docker rename dokploy-traefik-previous dokploy-traefik
+			$SUDO_CMD docker start dokploy-traefik
+		fi
+
 		if [ "$TRAEFIK_SKIP_CREATE" = true ]; then
 			:
 		elif $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1; then
@@ -933,7 +944,7 @@ export const createTraefikInstance = () => {
 				-p ${TRAEFIK_SSL_PORT}:${TRAEFIK_SSL_PORT} \
 				-p ${TRAEFIK_PORT}:${TRAEFIK_PORT} \
 				-p ${TRAEFIK_HTTP3_PORT}:${TRAEFIK_HTTP3_PORT}/udp \
-				"$TRAEFIK_IMAGE"
+				-- "$TRAEFIK_IMAGE"
 
 			$SUDO_CMD docker network connect dokploy-network dokploy-traefik;
 			echo "Traefik $TRAEFIK_IMAGE installed ✅"
