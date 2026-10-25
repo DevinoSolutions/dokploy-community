@@ -1,17 +1,57 @@
 import { findGitlabById, updateGitlab } from "@dokploy/server";
 import type { NextApiRequest, NextApiResponse } from "next";
+import {
+	checkGitProviderOAuthAccess,
+	clearGitProviderOAuthNonceCookie,
+	gitProviderOAuthNonceMatches,
+	readGitProviderOAuthNonceCookie,
+	verifyGitProviderOAuthState,
+} from "@/server/utils/git-provider-oauth";
 
 export default async function handler(
 	req: NextApiRequest,
 	res: NextApiResponse,
 ) {
-	const { code, gitlabId } = req.query;
+	const { code, gitlabId, state } = req.query;
+
+	// The nonce cookie is single use: it is cleared whatever the outcome.
+	const cookieNonce = readGitProviderOAuthNonceCookie(req, "gitlab");
+	clearGitProviderOAuthNonceCookie(req, res, "gitlab");
 
 	if (!code || Array.isArray(code)) {
 		return res.status(400).json({ error: "Missing or invalid code" });
 	}
 
-	const gitlab = await findGitlabById(gitlabId as string);
+	if (!gitlabId || Array.isArray(gitlabId)) {
+		return res.status(400).json({ error: "Invalid GitLab provider ID" });
+	}
+
+	// The state has to be one this server signed for this provider, and the
+	// session has to be the one that started the flow and may update it.
+	const oauthState = verifyGitProviderOAuthState(state, "gitlab");
+	if (!oauthState || oauthState.providerId !== gitlabId) {
+		return res.status(400).json({ error: "Invalid or expired OAuth state" });
+	}
+	if (!gitProviderOAuthNonceMatches(cookieNonce, oauthState.nonceHash)) {
+		return res
+			.status(403)
+			.json({ error: "OAuth flow was not started from this browser" });
+	}
+
+	const gitlab = await findGitlabById(gitlabId).catch(() => null);
+	if (!gitlab) {
+		return res.status(404).json({ error: "Git provider not found" });
+	}
+
+	const access = await checkGitProviderOAuthAccess(
+		req,
+		gitlab.gitProvider,
+		oauthState,
+	);
+	if (!access.ok) {
+		return res.status(access.status).json({ error: access.error });
+	}
+
 	// Use internal URL for token exchange when GitLab is on same instance as Dokploy
 	const baseUrl = gitlab.gitlabInternalUrl || gitlab.gitlabUrl;
 	const gitlabUrl = new URL(baseUrl);
