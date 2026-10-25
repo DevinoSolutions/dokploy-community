@@ -34,7 +34,6 @@ import {
 	readConfigInPath,
 	readDirectory,
 	readDokployRollbackPoint,
-	readEnvironmentVariableList,
 	readEnvironmentVariables,
 	readMainConfig,
 	readMonitoringConfig,
@@ -265,13 +264,6 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 			await assertTraefikImageKept(input.serverId);
-			const ports = await readPorts("dokploy-traefik", input.serverId);
-			const env = await readEnvironmentVariables(
-				"dokploy-traefik",
-				input.serverId,
-			);
-			const preparedEnv = prepareEnvironmentVariables(env);
-			let newPorts = ports;
 			// If receive true, add 8080 to ports
 			if (input.enableDashboard) {
 				// Check if port 8080 is already in use before enabling dashboard
@@ -285,20 +277,20 @@ export const settingsRouter = createTRPCRouter({
 						message: `Port 8080 is already in use${conflictInfo}. Please stop the conflicting service or use a different port for the Traefik dashboard.`,
 					});
 				}
-				newPorts.push({
-					targetPort: 8080,
-					publishedPort: 8080,
-					protocol: "tcp",
-				});
-			} else {
-				newPorts = ports.filter((port) => port.targetPort !== 8080);
 			}
 
 			// Run in background so the request returns immediately; client polls /api/health.
-			// Avoids proxy timeouts (520) while Traefik is recreated.
+			// Avoids proxy timeouts (520) while Traefik is recreated. Env and ports
+			// are read when the job runs, so an earlier queued action isn't undone.
 			void writeTraefikSetup({
-				env: preparedEnv,
-				additionalPorts: newPorts,
+				env: (current) => current,
+				additionalPorts: (current) =>
+					input.enableDashboard
+						? [
+								...current,
+								{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
+							]
+						: current.filter((port) => port.targetPort !== 8080),
 				serverId: input.serverId,
 			}).catch((err) => {
 				console.error("toggleDashboard background writeTraefikSetup:", err);
@@ -1176,12 +1168,12 @@ export const settingsRouter = createTRPCRouter({
 			);
 			await assertTraefikImageKept(input.serverId);
 			const envs = prepareEnvironmentVariables(input.env);
-			const ports = await readPorts("dokploy-traefik", input?.serverId);
 
 			// Run in background so the request returns immediately; client polls /api/health.
+			// The ports are read when the job runs, so an earlier queued action isn't undone.
 			void writeTraefikSetup({
 				env: envs,
-				additionalPorts: ports,
+				additionalPorts: (current) => current,
 				serverId: input.serverId,
 			}).catch((err) => {
 				console.error("writeTraefikEnv background writeTraefikSetup:", err);
@@ -1453,10 +1445,6 @@ export const settingsRouter = createTRPCRouter({
 					});
 				}
 				await assertTraefikImageKept(input.serverId);
-				const env = await readEnvironmentVariables(
-					"dokploy-traefik",
-					input?.serverId,
-				);
 
 				for (const port of input.additionalPorts) {
 					const portCheck = await checkPortInUse(
@@ -1470,11 +1458,11 @@ export const settingsRouter = createTRPCRouter({
 						});
 					}
 				}
-				const preparedEnv = prepareEnvironmentVariables(env);
 
 				// Run in background so the request returns immediately; client polls /api/health.
+				// The env is read when the job runs, so an earlier queued action isn't undone.
 				void writeTraefikSetup({
-					env: preparedEnv,
+					env: (current) => current,
 					additionalPorts: input.additionalPorts,
 					serverId: input.serverId,
 				}).catch((err) => {
@@ -1569,13 +1557,6 @@ export const settingsRouter = createTRPCRouter({
 							"Traefik is not running. Start it with Reload, then update it.",
 					});
 				}
-				// Not re-parsed as dotenv, which would cut values at "#".
-				const env = await readEnvironmentVariableList(
-					"dokploy-traefik",
-					serverId,
-				);
-				const ports = await readPorts("dokploy-traefik", serverId);
-
 				try {
 					await pullTraefikImage(serverId);
 				} catch (error) {
@@ -1587,10 +1568,12 @@ export const settingsRouter = createTRPCRouter({
 				}
 
 				// The only recreate that may change the version: every other
-				// Traefik action keeps the image the host runs.
+				// Traefik action keeps the image the host runs. Env and ports are
+				// read when the job runs, and not re-parsed as dotenv, which would
+				// cut values at "#".
 				recreate = writeTraefikSetup({
-					env,
-					additionalPorts: ports,
+					env: (current) => current,
+					additionalPorts: (current) => current,
 					serverId,
 					image: `traefik:v${overview.recommendedVersion}`,
 				});

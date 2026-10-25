@@ -31,6 +31,8 @@ type FakeContainer = {
 	name: string;
 	running: boolean;
 	image?: string;
+	env?: string[];
+	ports?: Record<string, { HostPort: string }[]>;
 };
 
 const fakeDocker = (initial: FakeContainer[]) => {
@@ -50,7 +52,7 @@ const fakeDocker = (initial: FakeContainer[]) => {
 			return {
 				Id: c.id,
 				Image: `id:${c.image}`,
-				Config: { Image: c.image },
+				Config: { Image: c.image, Env: c.env },
 				State: { Running: c.running, StartedAt: "steady" },
 			};
 		},
@@ -95,6 +97,9 @@ const fakeDocker = (initial: FakeContainer[]) => {
 				name,
 				running: false,
 				image: settings.Image as string,
+				env: settings.Env as string[] | undefined,
+				ports: (settings.HostConfig as { PortBindings: FakeContainer["ports"] })
+					.PortBindings,
 			});
 			log.push(`create ${id}`);
 			return container(id);
@@ -107,11 +112,26 @@ const fakeDocker = (initial: FakeContainer[]) => {
 			? "standalone"
 			: "unknown";
 
+	// What the shell commands that read the live container would print.
+	const shell = (command: string) => {
+		if (command.includes("RESOURCE_NAME")) return resourceType();
+		const live = containers.find((c) => c.name === "dokploy-traefik");
+		if (command.includes(".Config.Env")) {
+			return JSON.stringify(live?.env ?? null);
+		}
+		if (command.includes(".NetworkSettings.Ports")) {
+			return JSON.stringify(live?.ports ?? {});
+		}
+		log.push(`exec ${command}`);
+		return "";
+	};
+
 	return {
 		docker,
 		log,
 		containers,
 		resourceType,
+		shell,
 		images: () => containers.map((c) => [c.id, c.image]),
 	};
 };
@@ -211,6 +231,85 @@ describe("writeTraefikSetup", () => {
 		]);
 		expect(fake.containers).toMatchObject([
 			{ id: "new", name: "dokploy-traefik", running: true },
+		]);
+	});
+
+	it("reads env and ports when the job runs, so an earlier queued action isn't undone", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+				env: ["A=0"],
+				ports: {},
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+
+		// Save env, then save ports: the ports action was prepared before the
+		// env action had recreated Traefik.
+		const saveEnv = writeTraefikSetup({
+			env: ["A=1"],
+			additionalPorts: (current) => current,
+		});
+		await vi.advanceTimersByTimeAsync(1000);
+		const savePorts = writeTraefikSetup({
+			env: (current) => current,
+			additionalPorts: () => [
+				{ targetPort: 9000, publishedPort: 9000, protocol: "tcp" },
+			],
+		});
+		await vi.runAllTimersAsync();
+
+		await expect(saveEnv).resolves.toBeUndefined();
+		await expect(savePorts).resolves.toBeUndefined();
+		expect(fake.containers).toMatchObject([
+			{
+				name: "dokploy-traefik",
+				running: true,
+				env: ["A=1"],
+				ports: expect.objectContaining({ "9000/tcp": expect.anything() }),
+			},
+		]);
+	});
+
+	it("hands the live env and ports to the functions", async () => {
+		const fake = fakeDocker([
+			{
+				id: "old",
+				name: "dokploy-traefik",
+				running: true,
+				image: "traefik:v3.6.25",
+				env: ["A=0", "B=#kept"],
+				ports: {
+					"80/tcp": [{ HostPort: "80" }],
+					"8080/tcp": [{ HostPort: "8080" }],
+				},
+			},
+		]);
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+		const env = vi.fn((current: string[]) => current);
+		const additionalPorts = vi.fn((current: unknown[]) => current);
+
+		const run = writeTraefikSetup({
+			env,
+			additionalPorts: additionalPorts as never,
+		});
+		await vi.runAllTimersAsync();
+		await run;
+
+		expect(env).toHaveBeenCalledWith(["A=0", "B=#kept"]);
+		expect(additionalPorts).toHaveBeenCalledWith([
+			{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
 		]);
 	});
 

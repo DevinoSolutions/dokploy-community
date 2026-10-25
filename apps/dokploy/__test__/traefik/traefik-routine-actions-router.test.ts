@@ -63,6 +63,15 @@ const routineActions = [
 	],
 ] as const;
 
+type SetupOptions = {
+	env: string[] | ((current: string[]) => string[]);
+	additionalPorts:
+		| { targetPort: number; publishedPort: number; protocol?: string }[]
+		| ((
+				current: { targetPort: number; publishedPort: number }[],
+		  ) => { targetPort: number; publishedPort: number }[]);
+};
+
 describe("routine Traefik actions never pick the Traefik image", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -91,6 +100,72 @@ describe("routine Traefik actions never pick the Traefik image", () => {
 			expect(options).not.toHaveProperty("image");
 		},
 	);
+
+	it.each(routineActions)(
+		"%s reads the host's Traefik when its job runs, not when it is requested",
+		async (_name, run) => {
+			await run();
+
+			expect(mocks.readEnvironmentVariables).not.toHaveBeenCalled();
+			expect(mocks.readPorts).not.toHaveBeenCalled();
+		},
+	);
+
+	it("save Traefik env keeps the ports the host runs when the job starts", async () => {
+		await caller.writeTraefikEnv({ env: "A=1", serverId: "server-a" });
+
+		const [options] = mocks.writeTraefikSetup.mock.calls[0]! as [SetupOptions];
+		const live = [{ targetPort: 9000, publishedPort: 9000 }];
+		expect(options.env).toEqual(["A=1"]);
+		expect(
+			typeof options.additionalPorts === "function" &&
+				options.additionalPorts(live),
+		).toBe(live);
+	});
+
+	it("save port mappings keeps the env the host runs when the job starts", async () => {
+		await caller.updateTraefikPorts({
+			serverId: "server-a",
+			additionalPorts: [
+				{ targetPort: 9000, publishedPort: 9000, protocol: "tcp" },
+			],
+		});
+
+		const [options] = mocks.writeTraefikSetup.mock.calls[0]! as [SetupOptions];
+		const live = ["A=2", "B=#kept"];
+		expect(options.additionalPorts).toEqual([
+			{ targetPort: 9000, publishedPort: 9000, protocol: "tcp" },
+		]);
+		expect(typeof options.env === "function" && options.env(live)).toBe(live);
+	});
+
+	it("dashboard toggle adds or drops 8080 on the ports the host runs when the job starts", async () => {
+		const live = [
+			{ targetPort: 9000, publishedPort: 9000 },
+			{ targetPort: 8080, publishedPort: 8080 },
+		];
+		await caller.toggleDashboard({
+			enableDashboard: false,
+			serverId: "server-a",
+		});
+		await caller.toggleDashboard({
+			enableDashboard: true,
+			serverId: "server-a",
+		});
+
+		const [off, on] = mocks.writeTraefikSetup.mock.calls.map(
+			([options]) => options as SetupOptions,
+		);
+		const ports = (options: SetupOptions, current: typeof live) =>
+			typeof options.additionalPorts === "function"
+				? options.additionalPorts(current)
+				: options.additionalPorts;
+		expect(ports(off!, live)).toEqual([live[0]]);
+		expect(ports(on!, [live[0]!])).toEqual([
+			live[0],
+			{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
+		]);
+	});
 
 	it.each(routineActions)(
 		"%s is refused up front when the running image has no readable tag",

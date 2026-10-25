@@ -721,7 +721,19 @@ export const checkPortInUse = async (
 	}
 };
 
-export const writeTraefikSetup = async (input: TraefikOptions) => {
+// Env and ports can be given as a function of what the host runs when the
+// queued job starts, so two overlapping actions don't restore stale values.
+type FromCurrent<T> = T | ((current: T) => T);
+
+type TraefikPorts = NonNullable<TraefikOptions["additionalPorts"]>;
+
+export interface TraefikSetupOptions
+	extends Omit<TraefikOptions, "env" | "additionalPorts"> {
+	env?: FromCurrent<string[]>;
+	additionalPorts?: FromCurrent<TraefikPorts>;
+}
+
+export const writeTraefikSetup = async (input: TraefikSetupOptions) => {
 	// One queued job per server: restoring the backup while another recreate
 	// has its container renamed away would leave both recreates fighting over
 	// it, and the first one then removes it.
@@ -732,22 +744,40 @@ export const writeTraefikSetup = async (input: TraefikOptions) => {
 			input.serverId,
 		);
 
+		if (resourceType !== "service" && resourceType !== "standalone") {
+			throw new Error("Traefik resource type not found");
+		}
+
+		const env =
+			typeof input.env === "function"
+				? input.env(
+						await readEnvironmentVariableList(
+							"dokploy-traefik",
+							input.serverId,
+						),
+					)
+				: input.env;
+		const additionalPorts =
+			typeof input.additionalPorts === "function"
+				? input.additionalPorts(
+						await readPorts("dokploy-traefik", input.serverId),
+					)
+				: input.additionalPorts;
+
 		if (resourceType === "service") {
 			await initializeTraefikService({
-				env: input.env,
-				additionalPorts: input.additionalPorts,
-				serverId: input.serverId,
-				image: input.image,
-			});
-		} else if (resourceType === "standalone") {
-			await recreateStandaloneTraefik({
-				env: input.env,
-				additionalPorts: input.additionalPorts,
+				env,
+				additionalPorts,
 				serverId: input.serverId,
 				image: input.image,
 			});
 		} else {
-			throw new Error("Traefik resource type not found");
+			await recreateStandaloneTraefik({
+				env,
+				additionalPorts,
+				serverId: input.serverId,
+				image: input.image,
+			});
 		}
 	});
 	await reconnectServicesToTraefik(input.serverId);
