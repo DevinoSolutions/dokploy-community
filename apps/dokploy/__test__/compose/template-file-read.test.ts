@@ -257,6 +257,9 @@ describe("the repository URL", () => {
 		"http://git.internal:3000/owner/repo",
 		"ssh://git@host.example:2222/owner/repo.git",
 		"git@github.com:owner/repo.git",
+		"https://user:secret@git.example.com/owner/repo.git",
+		"https://[2001:db8::1]/r",
+		"ssh://git@[2001:db8::1]:22/r",
 	])("accepts %s", (url) => {
 		expect(() => assertSafeTemplateGitUrl(url)).not.toThrow();
 	});
@@ -271,6 +274,14 @@ describe("the repository URL", () => {
 		"C:\\repo",
 		"ext::sh -c id",
 		"ext::sh%20-c%20id",
+		"ext::sh -c id@host:repo",
+		"ssh://a@-oProxyCommand=x/repo",
+		"ssh://-oProxyCommand=x/repo",
+		"-oProxyCommand=x:repo",
+		"a@-oProxyCommand=x:repo",
+		"https://-oProxyCommand=x/repo",
+		"https:///repo",
+		"host:owner/repo.git",
 		"fd::17",
 		"-u/bin/sh",
 		"--upload-pack=id",
@@ -285,6 +296,12 @@ describe("the repository URL", () => {
 		expect(() => assertSafeTemplateGitUrl(url)).toThrow(
 			/must be an http\(s\) URL/,
 		);
+	});
+
+	it("refuses a transport helper through the scheme list alone", () => {
+		for (const url of ["ext::sh -c id", "fd::17", "ext::sh%20-c%20id"]) {
+			expect(() => assertSafeTemplateGitUrl(url)).toThrow();
+		}
 	});
 
 	it("limits the clone to remote protocols and owner-only files", () => {

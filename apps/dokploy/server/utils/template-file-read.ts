@@ -84,22 +84,30 @@ export const getTemplateReadRefusal = (
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: refused on purpose
 const UNSAFE_URL_CHARACTER = /[\u0000-\u0020\u007f\\]/;
-const HTTP_URL = /^https?:\/\/[A-Za-z0-9[]/i;
-const SSH_URL = /^ssh:\/\/[A-Za-z0-9[]/i;
-const SCP_ADDRESS = /^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:/;
+const URL_WITH_AUTHORITY = /^(https?|ssh):\/\/([^/?#]*)/i;
+const SCP_ADDRESS = /^([A-Za-z0-9_][A-Za-z0-9._-]*)@([^:/]+):/;
+// A host that starts with anything else (`-`, for one) could be read as an option.
+const HOST_START = /^[A-Za-z0-9[]/;
 
 /**
  * Only a remote repository is cloned: http(s), `ssh://` or an SSH address
- * (`git@host:owner/repo.git`). A `file://` URL, a local path, a transport
- * helper (`ext::`, `fd::`) or a value git would read as an option is refused.
+ * with a user (`git@host:owner/repo.git`), and the host must start with a
+ * letter, a digit or `[` (an IPv6 address). A `file://` URL, a local path, a
+ * transport helper (`ext::`, `fd::`: no form above matches them) or a value
+ * git would read as an option is refused.
  */
 export const assertSafeTemplateGitUrl = (url: string | null | undefined) => {
 	const value = url ?? "";
+	const authority = URL_WITH_AUTHORITY.exec(value)?.[2];
+	const host =
+		authority !== undefined
+			? authority.slice(authority.lastIndexOf("@") + 1)
+			: SCP_ADDRESS.exec(value)?.[2];
 	if (
 		!value ||
 		UNSAFE_URL_CHARACTER.test(value) ||
-		value.includes("::") ||
-		!(HTTP_URL.test(value) || SSH_URL.test(value) || SCP_ADDRESS.test(value))
+		host === undefined ||
+		!HOST_START.test(host)
 	) {
 		throw new TemplateFileRefusedError(TEMPLATE_URL_REFUSED_MESSAGE);
 	}
