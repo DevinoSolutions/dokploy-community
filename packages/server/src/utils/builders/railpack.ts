@@ -53,8 +53,8 @@ export const getRailpackCommand = async (
 	);
 
 	// Prepare command. The build directory (from the build path) and the
-	// Railpack version are application settings: each reaches the shell as a
-	// single quoted word.
+	// Railpack version are application settings: each is passed as a single
+	// argument.
 	const prepareArgs = [
 		"prepare",
 		quote([buildAppDirectory]),

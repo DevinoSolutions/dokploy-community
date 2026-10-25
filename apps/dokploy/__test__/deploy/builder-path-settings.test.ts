@@ -2,8 +2,8 @@ import { parse } from "shell-quote";
 import { describe, expect, it, vi } from "vitest";
 
 // The build path, Dockerfile, context, stage and builder versions are settings
-// of the application: each reaches the build script as one quoted word, so a
-// value with shell syntax in it stays a (wrong) path (T-8238).
+// of the application: each is passed to the build command as a single
+// argument, whatever characters it holds (T-8238).
 vi.mock("@dokploy/server/utils/docker/staging", async (importOriginal) => ({
 	...(await importOriginal<
 		typeof import("@dokploy/server/utils/docker/staging")
@@ -23,9 +23,9 @@ import {
 } from "@dokploy/server/utils/filesystem/directory";
 
 const PAYLOADS = [
-	"x$(y z)",
-	"x`y z`",
-	"x; y",
+	"a$b c",
+	"a`b c",
+	"x;y",
 	"x && y",
 	"x | y",
 	"x > y",
@@ -150,7 +150,7 @@ describe.each(PAYLOADS)("a setting set to %j", (payload) => {
 });
 
 describe("plain settings", () => {
-	// A Windows path has backslashes, which are quoted as well.
+	// A Windows path has backslashes, which are escaped as well.
 	it.skipIf(process.platform === "win32")(
 		"leave the build commands as they were",
 		async () => {

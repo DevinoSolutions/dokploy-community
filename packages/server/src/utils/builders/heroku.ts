@@ -24,8 +24,8 @@ export const getHerokuCommand = async (
 	);
 
 	// The build directory (from the build path) and the builder tag (from the
-	// Heroku version) are application settings: each reaches the shell as a
-	// single quoted word.
+	// Heroku version) are application settings: each is passed as a single
+	// argument.
 	const args = [
 		"build",
 		quote([appName]),

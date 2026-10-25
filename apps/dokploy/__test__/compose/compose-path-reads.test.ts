@@ -4,7 +4,7 @@ import { parse } from "shell-quote";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Every read of the compose file goes through the compose path rules and
-// reaches the shell as one quoted word (T-8238). The remote read runs on the
+// passes the path as a single argument (T-8238). The remote read runs on the
 // serving host, and on the build server for the checks it repeats there.
 const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
@@ -37,7 +37,7 @@ const compose = (composePath: string, serverId: string | null = "server-1") =>
 const remotePath = (composePath: string) =>
 	join(paths(true).COMPOSE_PATH, "my-app", "code", composePath);
 
-// The words the shell sees, with variables left as written.
+// The arguments of the command, with variables left as written.
 const words = (command: string) => parse(command, (name) => `$${name}`);
 
 describe("reading the compose file on a remote host", () => {
@@ -69,12 +69,12 @@ describe("reading the compose file on a remote host", () => {
 
 	it.each([
 		"x.yml;y.yml",
-		"$(x).yml",
-		"`x`.yml",
+		"a$b.yml",
+		"a`b.yml",
 		"x.yml|y.yml",
 		"x.yml\ny.yml",
 		"../other-app/code/docker-compose.yml",
-		"/etc/passwd",
+		"/srv/other/docker-compose.yml",
 	])("refuses the stored path %j without running anything", async (path) => {
 		await expect(loadDockerComposeRemote(compose(path))).rejects.toThrow(
 			/^Compose refused: /,
@@ -84,20 +84,20 @@ describe("reading the compose file on a remote host", () => {
 });
 
 describe("reading the compose file on this host", () => {
-	it.each(["../other-app/code/docker-compose.yml", "/etc/passwd"])(
-		"refuses the stored path %j",
-		async (path) => {
-			await expect(loadDockerCompose(compose(path, null))).rejects.toThrow(
-				/^Compose refused: /,
-			);
-			await expect(readComposeFile(compose(path, null))).rejects.toThrow(
-				/^Compose refused: /,
-			);
-			expect(() => getComposePath(compose(path, null))).toThrow(
-				/^Compose refused: /,
-			);
-		},
-	);
+	it.each([
+		"../other-app/code/docker-compose.yml",
+		"/srv/other/docker-compose.yml",
+	])("refuses the stored path %j", async (path) => {
+		await expect(loadDockerCompose(compose(path, null))).rejects.toThrow(
+			/^Compose refused: /,
+		);
+		await expect(readComposeFile(compose(path, null))).rejects.toThrow(
+			/^Compose refused: /,
+		);
+		expect(() => getComposePath(compose(path, null))).toThrow(
+			/^Compose refused: /,
+		);
+	});
 
 	it("still resolves a raw compose to its own file", () => {
 		expect(

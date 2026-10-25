@@ -8,12 +8,13 @@ import { z } from "zod";
  *
  * Two levels. A path saved through the API must pass all of them. A path read
  * from the database at deploy time (a row saved before these rules) is only
- * refused when it is unsafe, so an unusual but harmless path keeps deploying:
+ * refused for the first group, so an unusual stored path keeps deploying:
  *
- * - unsafe, refused everywhere: empty, absolute (`/` or `~`), a `..` segment,
- *   a control character, or one of `` ` $ ; & | < > ( ) ' " \ ``;
+ * - refused everywhere: empty, absolute (`/` or `~`), a `..` segment, a
+ *   control character, or an unsupported character
+ *   (`` ` $ ; & | < > ( ) ' " \ ``);
  * - also refused when saved: any character other than letters, numbers,
- *   spaces, `.`, `_`, `-` and `/`, a leading or trailing space, a leading
+ *   spaces and `. _ - / @ + , = :`, a leading or trailing space, a leading
  *   `-`, a trailing `/`, or more than COMPOSE_PATH_MAX_LENGTH characters.
  *
  * Each returns the reason a path is refused, or `null` when it is fine.
@@ -22,8 +23,8 @@ export const COMPOSE_PATH_MAX_LENGTH = 255;
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: refused on purpose
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
-const SHELL_CHARACTER = /[`$;&|<>()'"\\]/;
-const SAVED_CHARACTERS = /^[A-Za-z0-9._/ -]+$/;
+const DISALLOWED_CHARACTER = /[`$;&|<>()'"\\]/;
+const SAVED_CHARACTERS = /^[A-Za-z0-9._/ @+,=:-]+$/;
 
 export const getStoredComposePathError = (
 	composePath: unknown,
@@ -37,8 +38,8 @@ export const getStoredComposePathError = (
 	if (CONTROL_CHARACTER.test(composePath)) {
 		return "the compose path contains a control character";
 	}
-	if (SHELL_CHARACTER.test(composePath)) {
-		return "the compose path contains a character that is not allowed in it";
+	if (DISALLOWED_CHARACTER.test(composePath)) {
+		return "the compose path contains an unsupported character";
 	}
 	if (composePath.startsWith("/") || composePath.startsWith("~")) {
 		return "the compose path must be relative to the repository root";
@@ -57,7 +58,7 @@ export const getComposePathError = (composePath: unknown): string | null => {
 		return `the compose path is longer than ${COMPOSE_PATH_MAX_LENGTH} characters`;
 	}
 	if (!SAVED_CHARACTERS.test(path)) {
-		return "the compose path can only contain letters, numbers, spaces, dots, underscores, hyphens and slashes";
+		return "the compose path can only contain letters, numbers, spaces and . _ - / @ + , = :";
 	}
 	if (path.trim() !== path) {
 		return "the compose path starts or ends with a space";
@@ -72,7 +73,7 @@ export const getComposePathError = (composePath: unknown): string | null => {
 };
 
 /**
- * Throws when a stored compose path is unsafe, before anything reads, writes
+ * Throws when a stored compose path is refused, before anything reads, writes
  * or runs a file from it. The message is the one the deployment log shows.
  */
 export const assertSafeComposePath = (composePath: unknown) => {

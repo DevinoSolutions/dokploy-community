@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // A compose path stored before the compose path rules (T-8238) is checked
-// again when the compose is deployed, rebuilt or started: an unsafe one stops
+// again when the compose is deployed, rebuilt or started: a refused one stops
 // the run before anything is fetched, copied or started, with the reason in
 // the deployment log.
 const mocks = vi.hoisted(() => ({
@@ -79,9 +79,9 @@ const compose = (composePath: string, serverId: string | null = null) => ({
 	environment: { project: { organizationId: "org-1" } },
 });
 
-const UNSAFE = [
+const REFUSED = [
 	["a semicolon", "deploy/x.yml;y.yml"],
-	["a dollar sign", "$(x).yml"],
+	["a dollar sign", "a$b.yml"],
 	["a line break", "x.yml\ny.yml"],
 	["a parent directory", "../other-app/code/docker-compose.yml"],
 	[
@@ -128,7 +128,7 @@ describe.each([
 	const deploy = () =>
 		run({ composeId: "compose-1", titleLog: "Deploy", descriptionLog: "" });
 
-	describe.each(UNSAFE)("a stored compose path with %s", (_what, path) => {
+	describe.each(REFUSED)("a stored compose path with %s", (_what, path) => {
 		it.each([
 			["this host", null],
 			["a remote server", "server-1"],
@@ -155,7 +155,7 @@ describe.each([
 		});
 	});
 
-	it("goes on with an unusual but harmless stored path", async () => {
+	it("goes on with an unusual stored path", async () => {
 		await useCompose(compose("deploy/my stack [prod].yml"));
 
 		await deploy().catch(() => undefined);
@@ -171,7 +171,7 @@ describe.each([
 });
 
 describe("startCompose", () => {
-	it.each(UNSAFE)(
+	it.each(REFUSED)(
 		"refuses a stored compose path with %s before anything runs",
 		async (_what, path) => {
 			await useCompose(compose(path, "server-1"));

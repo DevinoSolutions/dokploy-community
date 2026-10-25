@@ -22,11 +22,17 @@ const ACCEPTED = [
 	"a..b/docker-compose.yml",
 	"..docker-compose.yml",
 	"docker_compose-v2.yml",
+	"compose@prod.yml",
+	"compose+prod.yml",
+	"compose,prod.yml",
+	"compose=prod.yml",
+	"compose:prod.yml",
+	"deploy/@scope/app+v2/compose,a=b:c.yml",
 	"x".repeat(COMPOSE_PATH_MAX_LENGTH),
 ];
 
 // Refused when saved and at deploy time.
-const UNSAFE = [
+const REFUSED = [
 	"",
 	"   ",
 	"/etc/dokploy/compose/other/code/docker-compose.yml",
@@ -35,10 +41,9 @@ const UNSAFE = [
 	"../other/code/docker-compose.yml",
 	"deploy/../../other/docker-compose.yml",
 	"./..",
-	"compose.yml;true",
-	"$(true).yml",
-	"${HOME}.yml",
-	"`true`.yml",
+	"x;y.yml",
+	"a$b.yml",
+	"a`b.yml",
 	"a|b.yml",
 	"a&b.yml",
 	"a>b.yml",
@@ -54,15 +59,12 @@ const UNSAFE = [
 	"a\u007fb.yml",
 ];
 
-// Refused when saved, but a stored one still deploys: harmless once quoted.
+// Refused when saved, but a stored one still deploys.
 const SAVED_ONLY = [
 	"déploiement/docker-compose.yml",
 	"compose[prod].yml",
-	"compose,prod.yml",
-	"compose@prod.yml",
-	"compose+prod.yml",
 	"compose#1.yml",
-	"compose:prod.yml",
+	"compose%20.yml",
 	" docker-compose.yml",
 	"docker-compose.yml ",
 	"-docker-compose.yml",
@@ -77,7 +79,7 @@ describe("compose path rules", () => {
 		expect(() => assertSafeComposePath(path)).not.toThrow();
 	});
 
-	it.each(UNSAFE)("refuses %j everywhere", (path) => {
+	it.each(REFUSED)("refuses %j everywhere", (path) => {
 		expect(getComposePathError(path)).not.toBeNull();
 		expect(getStoredComposePathError(path)).not.toBeNull();
 		expect(() => assertSafeComposePath(path)).toThrow(/^Compose refused: /);
@@ -118,8 +120,8 @@ describe("compose.update input", () => {
 		}
 	});
 
-	it("refuses an unsafe or unusual compose path", () => {
-		for (const composePath of [...UNSAFE, ...SAVED_ONLY]) {
+	it("refuses a compose path outside the rules", () => {
+		for (const composePath of [...REFUSED, ...SAVED_ONLY]) {
 			const result = apiUpdateCompose.safeParse({
 				composeId: "c1",
 				composePath,

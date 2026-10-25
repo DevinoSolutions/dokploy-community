@@ -46,7 +46,7 @@ export const getDockerCommand = async (
 			getDockerContextPath(application) || defaultContextPath;
 
 		// The paths and the stage come from the application's settings: each one
-		// reaches the shell as a single quoted word.
+		// is passed as a single argument.
 		const commandArgs = [
 			"build",
 			"-t",
