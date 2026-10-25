@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { HARDCODED_LEGACY_SECRET } from "@dokploy/server/lib/auth-secret";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -88,6 +88,8 @@ const OTHER_USER = "user-2";
 const GITLAB_ID = "gitlab-1";
 const GITEA_ID = "gitea-1";
 const NONCE = "browser-nonce-0123456789";
+const sha256 = (value: string) =>
+	createHash("sha256").update(value).digest("base64url");
 const NONCE_COOKIES = `session=1; dokploy_gitlab_oauth_nonce=${NONCE}; dokploy_gitea_oauth_nonce=${NONCE}`;
 
 const gitlabRow = (overrides: Record<string, unknown> = {}) => ({
@@ -238,7 +240,7 @@ describe("git provider OAuth state", () => {
 			providerId: GITLAB_ID,
 			userId: USER,
 			organizationId: ORG,
-			nonce: NONCE,
+			nonceHash: sha256(NONCE),
 		});
 	});
 
@@ -525,7 +527,7 @@ describe("OAuth authorize routes", () => {
 			providerId: GITLAB_ID,
 			userId: USER,
 			organizationId: ORG,
-			nonce: expect.any(String),
+			nonceHash: expect.any(String),
 		});
 	});
 
@@ -556,7 +558,7 @@ describe("OAuth authorize routes", () => {
 			providerId: GITEA_ID,
 			userId: USER,
 			organizationId: ORG,
-			nonce: expect.any(String),
+			nonceHash: expect.any(String),
 		});
 	});
 
@@ -690,6 +692,80 @@ describe("OAuth nonce cookie", () => {
 		},
 	);
 
+	it.each([
+		[
+			"GitLab",
+			() => gitlabCallback,
+			"gitlab",
+			() => ({ code: "c", gitlabId: GITLAB_ID, state: stateFor("gitlab") }),
+		],
+		[
+			"Gitea",
+			() => giteaCallback,
+			"gitea",
+			() => ({ code: "c", state: stateFor("gitea") }),
+		],
+	])(
+		"%s: does not accept the hash carried in the state as the cookie",
+		async (_l, handler, provider, query) => {
+			const q = query();
+			const nonceHash = verifyGitProviderOAuthState(
+				q.state,
+				provider as "gitlab" | "gitea",
+			)?.nonceHash;
+			expect(nonceHash).toBe(sha256(NONCE));
+
+			const res = await call(handler() as Handler, q, {
+				cookie: `session=1; dokploy_${provider}_oauth_nonce=${nonceHash}`,
+			});
+
+			expect(res.statusCode).toBe(403);
+			expect(mocks.fetch).not.toHaveBeenCalled();
+			expect(mocks.updateGitlab).not.toHaveBeenCalled();
+			expect(mocks.updateGitea).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		[
+			"a planted cookie first",
+			`dokploy_gitlab_oauth_nonce=planted; dokploy_gitlab_oauth_nonce=${NONCE}`,
+		],
+		[
+			"a planted cookie last",
+			`dokploy_gitlab_oauth_nonce=${NONCE}; dokploy_gitlab_oauth_nonce=planted`,
+		],
+		[
+			"the right cookie twice",
+			`dokploy_gitlab_oauth_nonce=${NONCE}; dokploy_gitlab_oauth_nonce=${NONCE}`,
+		],
+	])("GitLab: rejects duplicate nonce cookies (%s)", async (_l, cookie) => {
+		const res = await call(
+			gitlabCallback,
+			{ code: "c", gitlabId: GITLAB_ID, state: stateFor("gitlab") },
+			{ cookie: `session=1; ${cookie}` },
+		);
+
+		expect(res.statusCode).toBe(403);
+		expect(mocks.fetch).not.toHaveBeenCalled();
+		expect(mocks.updateGitlab).not.toHaveBeenCalled();
+		expect(res.setCookies).toEqual([clearedCookie("gitlab")]);
+	});
+
+	it("Gitea: rejects duplicate nonce cookies", async () => {
+		const res = await call(
+			giteaCallback,
+			{ code: "c", state: stateFor("gitea") },
+			{
+				cookie: `session=1; dokploy_gitea_oauth_nonce=${NONCE}; dokploy_gitea_oauth_nonce=planted`,
+			},
+		);
+
+		expect(res.statusCode).toBe(403);
+		expect(mocks.fetch).not.toHaveBeenCalled();
+		expect(mocks.updateGitea).not.toHaveBeenCalled();
+	});
+
 	it("does not accept the Gitea cookie for a GitLab state", async () => {
 		const res = await call(
 			gitlabCallback,
@@ -744,7 +820,7 @@ describe("OAuth nonce cookie", () => {
 		],
 		["Gitea", "gitea" as const, () => giteaAuthorize, { giteaId: GITEA_ID }],
 	])(
-		"%s: authorize sets the cookie to the state's nonce",
+		"%s: authorize sets the cookie to the nonce whose hash the state carries",
 		async (_l, provider, handler, q) => {
 			const res = await call(handler() as Handler, q, {
 				cookie: "session=1",
@@ -752,8 +828,15 @@ describe("OAuth nonce cookie", () => {
 			});
 
 			const state = new URL(res.redirectedTo ?? "").searchParams.get("state");
-			const nonce = verifyGitProviderOAuthState(state, provider)?.nonce;
+			const nonceHash = verifyGitProviderOAuthState(state, provider)?.nonceHash;
+			const nonce = /^[^=]+=([^;]*)/.exec(res.setCookies[0] ?? "")?.[1] ?? "";
 			expect(nonce).toMatch(/^[\w-]{20,}$/);
+			expect(nonceHash).toBe(sha256(nonce));
+			// The raw nonce never appears in the state.
+			expect(state).not.toContain(nonce);
+			expect(
+				Buffer.from(state?.split(".")[1] ?? "", "base64url").toString(),
+			).not.toContain(nonce);
 			expect(res.setCookies).toEqual([
 				`dokploy_${provider}_oauth_nonce=${nonce}; Path=/api/providers; Max-Age=${GIT_PROVIDER_OAUTH_STATE_TTL_MS / 1000}; HttpOnly; SameSite=Lax; Secure`,
 			]);
@@ -782,13 +865,23 @@ describe("OAuth nonce cookie", () => {
 });
 
 describe("OAuth authorize: cross-site requests", () => {
-	it.each([
-		["GitLab", () => gitlabAuthorize, { gitlabId: GITLAB_ID }],
-		["Gitea", () => giteaAuthorize, { giteaId: GITEA_ID }],
-	])("%s: refuses Sec-Fetch-Site cross-site", async (_l, handler, q) => {
-		const res = await call(handler() as Handler, q, {
-			headers: { "sec-fetch-site": "cross-site" },
-		});
+	it.each(
+		[
+			["GitLab", () => gitlabAuthorize, { gitlabId: GITLAB_ID }],
+			["Gitea", () => giteaAuthorize, { giteaId: GITEA_ID }],
+		].flatMap(([label, handler, q]) =>
+			["cross-site", "same-site", "something-else"].map(
+				(site) => [label, site, handler, q] as const,
+			),
+		),
+	)("%s: refuses Sec-Fetch-Site %s", async (_l, site, handler, q) => {
+		const res = await call(
+			(handler as () => Handler)(),
+			q as Record<string, unknown>,
+			{
+				headers: { "sec-fetch-site": site as string },
+			},
+		);
 
 		expect(res.statusCode).toBe(403);
 		expect(res.redirectedTo).toBeUndefined();
@@ -796,7 +889,7 @@ describe("OAuth authorize: cross-site requests", () => {
 		expect(mocks.validateRequest).not.toHaveBeenCalled();
 	});
 
-	it.each([["same-origin"], ["same-site"], ["none"], [undefined]])(
+	it.each([["same-origin"], ["none"], [undefined]])(
 		"allows Sec-Fetch-Site %s",
 		async (site) => {
 			const res = await call(

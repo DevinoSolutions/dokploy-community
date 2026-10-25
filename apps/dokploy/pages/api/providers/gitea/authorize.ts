@@ -3,7 +3,7 @@ import {
 	checkGitProviderOAuthAccess,
 	createGitProviderOAuthNonce,
 	createGitProviderOAuthState,
-	isCrossSiteRequest,
+	isFetchSiteAllowed,
 	setGitProviderOAuthNonceCookie,
 } from "@/server/utils/git-provider-oauth";
 import { findGitea, redirectWithError } from "./helper";
@@ -17,7 +17,7 @@ export default async function handler(
 			return res.status(405).json({ error: "Method not allowed" });
 		}
 
-		if (isCrossSiteRequest(req)) {
+		if (!isFetchSiteAllowed(req)) {
 			return res.status(403).json({ error: "Forbidden" });
 		}
 

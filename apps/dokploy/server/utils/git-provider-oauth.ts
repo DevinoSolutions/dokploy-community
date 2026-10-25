@@ -1,4 +1,9 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+	createHash,
+	createHmac,
+	randomBytes,
+	timingSafeEqual,
+} from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { assertCanUpdateGitProvider, validateRequest } from "@dokploy/server";
 import {
@@ -21,8 +26,12 @@ export interface GitProviderOAuthState {
 }
 
 export interface VerifiedGitProviderOAuthState extends GitProviderOAuthState {
-	/** Also stored in the browser's nonce cookie by the authorize route. */
-	nonce: string;
+	/**
+	 * sha256 (base64url) of the nonce the authorize route stored in the
+	 * browser's cookie. The state never carries the nonce itself, so a state
+	 * seen in a URL or log does not reveal the cookie value.
+	 */
+	nonceHash: string;
 }
 
 export const GIT_PROVIDER_OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
@@ -50,6 +59,9 @@ const sign = (message: string, secret: string) =>
 export const createGitProviderOAuthNonce = () =>
 	randomBytes(16).toString("base64url");
 
+const hashNonce = (nonce: string) =>
+	createHash("sha256").update(nonce).digest("base64url");
+
 /** `v1.<base64url JSON payload>.<base64url HMAC-SHA256 of "v1.<payload>">` */
 export const createGitProviderOAuthState = (
 	state: GitProviderOAuthState,
@@ -66,7 +78,7 @@ export const createGitProviderOAuthState = (
 			u: state.userId,
 			o: state.organizationId,
 			e: now + GIT_PROVIDER_OAUTH_STATE_TTL_MS,
-			n: nonce,
+			n: hashNonce(nonce),
 		}),
 	).toString("base64url");
 	const message = `${STATE_VERSION}.${payload}`;
@@ -124,7 +136,13 @@ export const verifyGitProviderOAuthState = (
 		return null;
 	}
 
-	return { provider, providerId: i, userId: u, organizationId: o, nonce: n };
+	return {
+		provider,
+		providerId: i,
+		userId: u,
+		organizationId: o,
+		nonceHash: n,
+	};
 };
 
 // The nonce cookie ties a state to the browser that started the flow. Lax is
@@ -192,38 +210,49 @@ export const clearGitProviderOAuthNonceCookie = (
 	provider: OAuthGitProviderType,
 ) => appendSetCookie(res, nonceCookie(req, provider, "", 0));
 
+/**
+ * Returns the nonce cookie's value, or null when it is absent, empty or sent
+ * more than once. A sibling subdomain can set a cookie with the same name (for
+ * a parent domain or a longer path), so a duplicate is never resolved by
+ * picking one.
+ */
 export const readGitProviderOAuthNonceCookie = (
 	req: IncomingMessage,
 	provider: OAuthGitProviderType,
 ): string | null => {
 	const name = nonceCookieName(provider);
+	const values: string[] = [];
 	for (const part of (req.headers.cookie ?? "").split(";")) {
 		const eq = part.indexOf("=");
 		if (eq > 0 && part.slice(0, eq).trim() === name) {
-			const value = part.slice(eq + 1).trim();
-			return value || null;
+			values.push(part.slice(eq + 1).trim());
 		}
 	}
-	return null;
+	return values.length === 1 && values[0] ? values[0] : null;
 };
 
 export const gitProviderOAuthNonceMatches = (
 	cookieNonce: string | null,
-	stateNonce: string,
+	stateNonceHash: string,
 ) => {
 	if (!cookieNonce) return false;
-	const given = Buffer.from(cookieNonce);
-	const wanted = Buffer.from(stateNonce);
+	const given = Buffer.from(hashNonce(cookieNonce));
+	const wanted = Buffer.from(stateNonceHash);
 	return given.length === wanted.length && timingSafeEqual(given, wanted);
 };
 
+const ALLOWED_FETCH_SITES = new Set(["same-origin", "none"]);
+
 /**
- * The connect flow is only started from the dashboard, so a navigation from
- * another site is refused. Browsers that send no Sec-Fetch-Site are allowed.
+ * The connect flow is only started from the dashboard itself, so only
+ * same-origin requests, user-initiated navigations (`none`) and browsers that
+ * send no Sec-Fetch-Site are allowed. `same-site` is refused too: other apps
+ * can be served from sibling subdomains of the same site.
  */
-export const isCrossSiteRequest = (req: IncomingMessage) => {
+export const isFetchSiteAllowed = (req: IncomingMessage) => {
 	const value = req.headers["sec-fetch-site"];
-	return (Array.isArray(value) ? value[0] : value) === "cross-site";
+	const site = Array.isArray(value) ? value.join(",") : value;
+	return site === undefined || ALLOWED_FETCH_SITES.has(site);
 };
 
 export type GitProviderOAuthAccess =

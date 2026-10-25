@@ -32,7 +32,7 @@ export default async function handler(
 	if (!oauthState || oauthState.providerId !== gitlabId) {
 		return res.status(400).json({ error: "Invalid or expired OAuth state" });
 	}
-	if (!gitProviderOAuthNonceMatches(cookieNonce, oauthState.nonce)) {
+	if (!gitProviderOAuthNonceMatches(cookieNonce, oauthState.nonceHash)) {
 		return res
 			.status(403)
 			.json({ error: "OAuth flow was not started from this browser" });
