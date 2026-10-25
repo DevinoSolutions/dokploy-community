@@ -64,6 +64,12 @@ export const findRootOrganization = async () =>
 export const isRootOrganization = async (organizationId: string) =>
 	(await findRootOrganization())?.id === organizationId;
 
+// A row that belongs to no organization can only be attributed to the owner of
+// the instance when the instance has just the one organization.
+export const isSingleOrganizationInstance = async () =>
+	(await db.query.organization.findMany({ columns: { id: true }, limit: 2 }))
+		.length === 1;
+
 export const findOwner = async () => {
 	const admin = await db.query.member.findFirst({
 		where: eq(member.role, "owner"),

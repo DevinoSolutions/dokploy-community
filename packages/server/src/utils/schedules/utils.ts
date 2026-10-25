@@ -2,7 +2,11 @@ import { createWriteStream } from "node:fs";
 import path from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import type { Schedule } from "@dokploy/server/db/schema/schedule";
-import { getDokployUrl } from "@dokploy/server/services/admin";
+import {
+	getDokployUrl,
+	isRootOrganization,
+	isSingleOrganizationInstance,
+} from "@dokploy/server/services/admin";
 import {
 	createDeploymentSchedule,
 	updateDeployment,
@@ -196,7 +200,24 @@ export const runCommand = async (scheduleId: string) => {
 		serviceName,
 		appName,
 		serverId,
+		organizationId,
 	} = schedule;
+
+	// A host schedule runs inside the Dokploy process, so only the organization
+	// that owns the instance may have one. Rows from other organizations (made
+	// before that rule) are left in place and not run. A row with no
+	// organization predates the column: it runs only while the instance has a
+	// single organization, which is then its owner.
+	if (!IS_CLOUD && scheduleType === "dokploy-server") {
+		const owned = organizationId
+			? await isRootOrganization(organizationId)
+			: await isSingleOrganizationInstance();
+		if (!owned) {
+			throw new Error(
+				`Not running host schedule ${scheduleId}: it ${organizationId ? "belongs to an organization that does not own this Dokploy instance" : "has no organization and this instance has several"}.`,
+			);
+		}
+	}
 
 	const deployment = await createDeploymentSchedule({
 		scheduleId,

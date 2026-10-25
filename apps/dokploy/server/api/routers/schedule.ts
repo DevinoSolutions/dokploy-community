@@ -26,6 +26,7 @@ import { TRPCError } from "@trpc/server";
 import { asc, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { assertScheduledJobLimit } from "@/server/api/utils/plan-limits";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
@@ -260,7 +261,10 @@ export const scheduleRouter = createTRPCRouter({
 				scheduleItem.scheduleType,
 				scheduleItem.serverId,
 			);
-			assertScheduleOrganization(ctx, scheduleItem);
+			// The organization that owns the instance may delete any host schedule,
+			// including one that another organization (or none) left behind and that
+			// no longer runs: assertHostScheduleAccess has proven the caller is it, so
+			// assertScheduleOrganization (a no-op for other types) is not asked.
 
 			const serviceId = scheduleItem.applicationId || scheduleItem.composeId;
 			if (serviceId) {
@@ -337,16 +341,21 @@ export const scheduleRouter = createTRPCRouter({
 							message: "Only owners and admins can list host-level schedules.",
 						});
 					}
+					await assertLocalHostAccess(
+						undefined,
+						ctx.session.activeOrganizationId,
+					);
 				}
 			}
 			const where = {
 				application: eq(schedules.applicationId, input.id),
 				compose: eq(schedules.composeId, input.id),
 				server: eq(schedules.serverId, input.id),
-				"dokploy-server": eq(
-					schedules.organizationId,
-					ctx.session.activeOrganizationId,
-				),
+				// The caller is the organization that owns the instance (checked
+				// above), so it also sees the host schedules left behind by others.
+				"dokploy-server": IS_CLOUD
+					? eq(schedules.organizationId, ctx.session.activeOrganizationId)
+					: eq(schedules.scheduleType, "dokploy-server"),
 			};
 			return db.query.schedules.findMany({
 				where: where[input.scheduleType],
