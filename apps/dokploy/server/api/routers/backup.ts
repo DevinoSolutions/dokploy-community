@@ -71,6 +71,7 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { assertDatabaseBackupLimit } from "@/server/api/utils/plan-limits";
 import {
 	apiCreateBackup,
@@ -101,15 +102,17 @@ type BackupCtx = {
 
 // The Dokploy instance backup (databaseType "web-server") zips the base path
 // and the database, so it is managed like the instance-level settings
-// (adminProcedure): organization owners and admins only. Service-level backup
-// permissions and `accessedServices` never apply to it.
-const assertInstanceBackupRole = (ctx: BackupCtx) => {
+// (adminProcedure): organization owners and admins only, of the organization
+// that owns the instance. Service-level backup permissions and
+// `accessedServices` never apply to it.
+const assertInstanceBackupRole = async (ctx: BackupCtx) => {
 	if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
 		throw new TRPCError({
 			code: "UNAUTHORIZED",
 			message: "You don't have permission to manage instance backups.",
 		});
 	}
+	await assertLocalHostAccess(undefined, ctx.session.activeOrganizationId);
 };
 
 // Service backups: every service id on the row must belong to the active
@@ -150,7 +153,7 @@ const authorizeBackupAccess = async (
 		backup,
 		ctx.session.activeOrganizationId,
 	);
-	assertInstanceBackupRole(ctx);
+	await assertInstanceBackupRole(ctx);
 };
 
 // Loads the backup behind a manual run of one service type. A row that has no
@@ -203,7 +206,7 @@ export const backupRouter = createTRPCRouter({
 					backup: ["create"],
 				});
 			} else {
-				assertInstanceBackupRole(ctx);
+				await assertInstanceBackupRole(ctx);
 			}
 			await findDestinationByIdForOrganization(
 				input.destinationId,
@@ -765,7 +768,7 @@ export const backupRouter = createTRPCRouter({
 						message: "An instance restore must be a database backup.",
 					});
 				}
-				assertInstanceBackupRole(ctx);
+				await assertInstanceBackupRole(ctx);
 			} else {
 				if (!input.databaseId) {
 					throw new TRPCError({
