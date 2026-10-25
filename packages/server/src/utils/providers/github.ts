@@ -99,6 +99,26 @@ export const authGithub = (githubProvider: Github): Octokit => {
 	return octokit;
 };
 
+/**
+ * The app URL a provider stores (`html_url` of the converted manifest) as a
+ * URL, or null unless it is on the provider's own GitHub instance: same
+ * scheme, host and port as `githubUrl`. `http:` therefore only passes for an
+ * instance that is itself served over http.
+ */
+export const parseGithubAppUrl = (
+	appUrl: string | null | undefined,
+	githubUrl: string | null | undefined,
+): URL | null => {
+	try {
+		const app = new URL(appUrl ?? "");
+		const instance = new URL(githubUrl?.trim() || DEFAULT_GITHUB_URL);
+		if (app.protocol !== "https:" && app.protocol !== "http:") return null;
+		return app.origin === instance.origin ? app : null;
+	} catch {
+		return null;
+	}
+};
+
 export type GithubInstallationCheck =
 	| { ok: true }
 	| { ok: false; reason: "invalid" | "not_found" | "unavailable" };
@@ -115,7 +135,7 @@ export const verifyGithubInstallation = async (
 	>,
 	installationId: string,
 ): Promise<GithubInstallationCheck> => {
-	if (!/^[1-9][0-9]{0,15}$/.test(installationId)) {
+	if (!/^[1-9][0-9]{0,14}$/.test(installationId)) {
 		return { ok: false, reason: "invalid" };
 	}
 	if (!githubProvider.githubAppId || !githubProvider.githubPrivateKey) {

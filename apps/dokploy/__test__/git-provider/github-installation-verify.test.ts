@@ -17,7 +17,7 @@ vi.mock("octokit", () => ({
 	},
 }));
 
-const { verifyGithubInstallation } = await import(
+const { parseGithubAppUrl, verifyGithubInstallation } = await import(
 	"@dokploy/server/utils/providers/github"
 );
 
@@ -122,5 +122,38 @@ describe("verifyGithubInstallation", () => {
 			verifyGithubInstallation({ ...app, githubPrivateKey: null }, "42"),
 		).resolves.toEqual({ ok: false, reason: "unavailable" });
 		expect(mocks.request).not.toHaveBeenCalled();
+	});
+});
+
+describe("parseGithubAppUrl", () => {
+	it.each([
+		["https://github.com/apps/x", "https://github.com"],
+		["https://github.com/apps/x", null],
+		["https://acme.ghe.com/apps/x", "https://acme.ghe.com"],
+		[
+			"https://ghe.corp.example:8443/github-apps/x",
+			"https://ghe.corp.example:8443",
+		],
+		["http://ghe.corp.example/github-apps/x", "http://ghe.corp.example"],
+	])("accepts %s on %s", (appUrl, githubUrl) => {
+		expect(parseGithubAppUrl(appUrl, githubUrl)?.href).toBe(
+			new URL(appUrl).href,
+		);
+	});
+
+	it.each([
+		["javascript:alert(1)", "https://github.com"],
+		["data:text/html,x", "https://github.com"],
+		["https://evil.example/apps/x", "https://github.com"],
+		["https://github.com.evil.example/x", "https://github.com"],
+		["https://github.com@evil.example/x", "https://github.com"],
+		["http://github.com/apps/x", "https://github.com"],
+		["https://github.com:444/apps/x", "https://github.com"],
+		["https://github.com/apps/x", "https://acme.ghe.com"],
+		["", "https://github.com"],
+		[null, "https://github.com"],
+		[undefined, "https://github.com"],
+	])("refuses %s on %s", (appUrl, githubUrl) => {
+		expect(parseGithubAppUrl(appUrl, githubUrl)).toBeNull();
 	});
 });

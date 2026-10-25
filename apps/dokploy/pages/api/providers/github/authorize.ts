@@ -1,4 +1,4 @@
-import { findGithubById } from "@dokploy/server";
+import { findGithubById, parseGithubAppUrl } from "@dokploy/server";
 import type { NextApiRequest, NextApiResponse } from "next";
 import {
 	checkGitProviderOAuthAccess,
@@ -38,13 +38,10 @@ export default async function handler(
 		return res.status(access.status).json({ error: access.error });
 	}
 
-	let installUrl: URL;
-	try {
-		installUrl = new URL(github.githubAppName ?? "");
-		if (installUrl.protocol !== "https:" && installUrl.protocol !== "http:") {
-			throw new Error("unsupported protocol");
-		}
-	} catch {
+	// Only the provider's own GitHub instance: the stored name is editable, and
+	// the browser is sent there with a signed state and a cookie.
+	const installUrl = parseGithubAppUrl(github.githubAppName, github.githubUrl);
+	if (!installUrl) {
 		return res.status(400).json({ error: "Invalid GitHub App URL" });
 	}
 	installUrl.pathname = `${installUrl.pathname.replace(/\/+$/, "")}/installations/new`;

@@ -1,6 +1,7 @@
 import {
 	createGithub,
 	deriveGithubApiUrl,
+	parseGithubAppUrl,
 	parseGithubBaseUrl,
 	verifyGithubInstallation,
 } from "@dokploy/server";
@@ -35,7 +36,7 @@ export default async function handler(
 	req: NextApiRequest,
 	res: NextApiResponse,
 ) {
-	const { code, state, installation_id, githubUrl }: Query = req.query as Query;
+	const { state } = req.query as Partial<Query>;
 
 	const oauthState =
 		verifyGitProviderOAuthState(state, "github_init") ??
@@ -45,9 +46,7 @@ export default async function handler(
 		clearGitProviderOAuthNonceCookie(req, res, "github_init");
 		clearGitProviderOAuthNonceCookie(req, res, "github_setup");
 		return res.status(400).json({
-			error: code
-				? "Invalid or expired setup state, start again from Git Providers"
-				: "Missing code parameter",
+			error: "Invalid or expired setup state, start again from Git Providers",
 		});
 	}
 
@@ -55,13 +54,20 @@ export default async function handler(
 	const cookieNonce = readGitProviderOAuthNonceCookie(req, oauthState.provider);
 	clearGitProviderOAuthNonceCookie(req, res, oauthState.provider);
 
-	if (!code) {
-		return res.status(400).json({ error: "Missing code parameter" });
-	}
 	if (!gitProviderOAuthNonceMatches(cookieNonce, oauthState.nonceHash)) {
 		return res
 			.status(403)
 			.json({ error: "Setup was not started from this browser" });
+	}
+
+	// Single strings only: a repeated parameter is an array, and the code ends
+	// up in a request path.
+	const { code, installation_id, githubUrl } = req.query as Partial<Query>;
+	if (typeof code !== "string" || !/^[A-Za-z0-9_-]+$/.test(code)) {
+		return res.status(400).json({ error: "Missing or invalid code parameter" });
+	}
+	if (githubUrl !== undefined && typeof githubUrl !== "string") {
+		return res.status(400).json({ error: "Invalid GitHub URL" });
 	}
 
 	if (oauthState.provider === "github_init") {
@@ -86,9 +92,16 @@ export default async function handler(
 		const { data } = await octokit.request(
 			"POST /app-manifests/{code}/conversions",
 			{
-				code: code as string,
+				code,
 			},
 		);
+
+		// The stored link is what the install step later sends the browser to.
+		if (!parseGithubAppUrl(data.html_url, baseUrl)) {
+			return res
+				.status(400)
+				.json({ error: "GitHub returned an app URL on another host" });
+		}
 
 		await createGithub(
 			{

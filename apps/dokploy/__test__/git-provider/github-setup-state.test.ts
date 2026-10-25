@@ -52,12 +52,14 @@ vi.mock("@dokploy/server", async () => {
 	const { assertCanUpdateGitProvider } = await vi.importActual<
 		typeof import("@dokploy/server/services/git-provider")
 	>("@dokploy/server/services/git-provider");
-	const { parseGithubBaseUrl, deriveGithubApiUrl } = await vi.importActual<
-		typeof import("@dokploy/server/utils/providers/github")
-	>("@dokploy/server/utils/providers/github");
+	const { parseGithubBaseUrl, parseGithubAppUrl, deriveGithubApiUrl } =
+		await vi.importActual<
+			typeof import("@dokploy/server/utils/providers/github")
+		>("@dokploy/server/utils/providers/github");
 	return {
 		assertCanUpdateGitProvider,
 		parseGithubBaseUrl,
+		parseGithubAppUrl,
 		deriveGithubApiUrl,
 		validateRequest: mocks.validateRequest,
 		createGithub: mocks.createGithub,
@@ -69,6 +71,7 @@ vi.mock("@dokploy/server", async () => {
 const {
 	createGitProviderOAuthState,
 	GIT_PROVIDER_OAUTH_STATE_TTL_MS,
+	GITHUB_INIT_STATE_TTL_MS,
 	gitProviderOAuthNonceMatches,
 	verifyGitProviderOAuthState,
 } = await import("@/server/utils/git-provider-oauth");
@@ -206,7 +209,14 @@ const expired = (provider: Provider) =>
 	stateFor(
 		provider,
 		{},
-		{ now: Date.now() - GIT_PROVIDER_OAUTH_STATE_TTL_MS - 1 },
+		{
+			now:
+				Date.now() -
+				(provider === "github_init"
+					? GITHUB_INIT_STATE_TTL_MS
+					: GIT_PROVIDER_OAUTH_STATE_TTL_MS) -
+				1,
+		},
 	);
 
 const manifestResponse = {
@@ -271,6 +281,12 @@ describe("GitHub App creation callback (github_init)", () => {
 	});
 
 	it("keeps the GitHub Enterprise host the state was issued for", async () => {
+		mocks.octokitRequest.mockResolvedValue({
+			data: {
+				...manifestResponse.data,
+				html_url: "https://acme.ghe.com/apps/x",
+			},
+		});
 		const res = await call(setup, {
 			query: query(
 				stateFor("github_init", { providerId: "https://acme.ghe.com" }),
@@ -376,17 +392,83 @@ describe("GitHub App creation callback (github_init)", () => {
 		expectNothingWritten();
 	});
 
-	it("throws on a repeated githubUrl parameter instead of picking one", async () => {
-		await expect(
-			call(setup, {
-				query: query(stateFor("github_init"), {
-					githubUrl: ["https://github.com", "https://evil.com"],
-				}),
-				cookie: INIT_COOKIE,
+	it("refuses a repeated githubUrl parameter instead of picking one", async () => {
+		const res = await call(setup, {
+			query: query(stateFor("github_init"), {
+				githubUrl: ["https://github.com", "https://evil.com"],
 			}),
-		).rejects.toThrow();
+			cookie: INIT_COOKIE,
+		});
 
+		expect(res.statusCode).toBe(400);
 		expectNothingWritten();
+	});
+
+	it.each([
+		["an array", ["a", "b"]],
+		["path characters", "../x"],
+		["a slash", "a/b"],
+		["an empty string", ""],
+	])("refuses a code that is %s", async (_label, code) => {
+		const res = await call(setup, {
+			query: { state: stateFor("github_init"), code },
+			cookie: INIT_COOKIE,
+		});
+
+		expect(res.statusCode).toBe(400);
+		expectNothingWritten();
+	});
+
+	it("refuses an array state", async () => {
+		const res = await call(setup, {
+			query: query([stateFor("github_init"), stateFor("github_init")]),
+			cookie: INIT_COOKIE,
+		});
+
+		expect(res.statusCode).toBe(400);
+		expectNothingWritten();
+	});
+
+	it("refuses an empty nonce cookie", async () => {
+		const res = await call(setup, {
+			query: query(stateFor("github_init")),
+			cookie: "session=1; dokploy_github_init_oauth_nonce=",
+		});
+
+		expect(res.statusCode).toBe(403);
+		expectNothingWritten();
+	});
+
+	it("does not store an app URL on another host", async () => {
+		mocks.octokitRequest.mockResolvedValue({
+			data: {
+				...manifestResponse.data,
+				html_url: "https://evil.example/apps/x",
+			},
+		});
+		const res = await call(setup, {
+			query: query(stateFor("github_init")),
+			cookie: INIT_COOKIE,
+		});
+
+		expect(res.statusCode).toBe(400);
+		expect(mocks.createGithub).not.toHaveBeenCalled();
+	});
+
+	it("stays valid past the 15 minutes the other steps get", async () => {
+		const issuedAt = Date.now() - GIT_PROVIDER_OAUTH_STATE_TTL_MS - 60_000;
+		const res = await call(setup, {
+			query: query(stateFor("github_init", {}, { now: issuedAt })),
+			cookie: INIT_COOKIE,
+		});
+
+		expect(res.redirectedTo).toBe("/dashboard/settings/git-providers");
+		expect(
+			verifyGitProviderOAuthState(
+				stateFor("github_setup", {}, { now: issuedAt }),
+				"github_setup",
+			),
+		).toBeNull();
 	});
 
 	it("rejects a user without gitProviders:create", async () => {
@@ -625,6 +707,26 @@ describe("GitHub App installation callback (github_setup)", () => {
 		expect(mocks.githubUpdateSet).not.toHaveBeenCalled();
 	});
 
+	it("rejects a repeated installation id", async () => {
+		const res = await call(setup, {
+			query: query(stateFor("github_setup"), { installation_id: ["1", "2"] }),
+			cookie: SETUP_COOKIE,
+		});
+
+		expect(res.statusCode).toBe(400);
+		expectNothingWritten();
+	});
+
+	it("refuses an empty nonce cookie", async () => {
+		const res = await call(setup, {
+			query: query(stateFor("github_setup")),
+			cookie: "session=1; dokploy_github_setup_oauth_nonce=",
+		});
+
+		expect(res.statusCode).toBe(403);
+		expectNothingWritten();
+	});
+
 	it.each([
 		["not_found", 400],
 		["invalid", 400],
@@ -668,6 +770,7 @@ describe("GitHub state routes", () => {
 		).toBe(true);
 		expect(cookie).toContain("HttpOnly");
 		expect(cookie).toContain("SameSite=Lax");
+		expect(cookie).toContain(`Max-Age=${GITHUB_INIT_STATE_TTL_MS / 1000}`);
 		expect(state).not.toContain(nonce as string);
 	});
 
@@ -804,14 +907,55 @@ describe("GitHub state routes", () => {
 		expect(res.redirectedTo).toBeUndefined();
 	});
 
-	it("authorize refuses a stored app URL that is not http(s)", async () => {
+	it("authorize sets the install cookie for the shorter step TTL", async () => {
+		const res = await call(authorize, { query: { githubId: GITHUB_ID } });
+
+		expect(res.setCookies[0]).toContain(
+			`Max-Age=${GIT_PROVIDER_OAUTH_STATE_TTL_MS / 1000}`,
+		);
+	});
+
+	it.each([
+		["a non-http scheme", "javascript:alert(1)", GITHUB_URL],
+		["another host", "https://evil.example/apps/x", GITHUB_URL],
+		["a lookalike host", "https://github.com.evil.example/apps/x", GITHUB_URL],
+		[
+			"credentials on another host",
+			"https://github.com@evil.example/x",
+			GITHUB_URL,
+		],
+		["http on an https instance", "http://github.com/apps/x", GITHUB_URL],
+		["another port", "https://github.com:8443/apps/x", GITHUB_URL],
+		["another instance", "https://github.com/apps/x", "https://acme.ghe.com"],
+		["an unparseable value", "not a url", GITHUB_URL],
+		["an empty value", "", GITHUB_URL],
+	])(
+		"authorize refuses a stored app URL with %s",
+		async (_label, appUrl, githubUrl) => {
+			mocks.findGithubById.mockResolvedValue({
+				...githubRow(),
+				githubAppName: appUrl,
+				githubUrl,
+			});
+			const res = await call(authorize, { query: { githubId: GITHUB_ID } });
+
+			expect(res.statusCode).toBe(400);
+			expect(res.redirectedTo).toBeUndefined();
+			expect(res.setCookies).toEqual([]);
+		},
+	);
+
+	it("authorize accepts the app URL of a self-hosted instance, over http only when the instance is", async () => {
 		mocks.findGithubById.mockResolvedValue({
 			...githubRow(),
-			githubAppName: "javascript:alert(1)",
+			githubAppName: "http://ghe.internal.example:8080/github-apps/x",
+			githubUrl: "http://ghe.internal.example:8080",
 		});
 		const res = await call(authorize, { query: { githubId: GITHUB_ID } });
 
-		expect(res.statusCode).toBe(400);
-		expect(res.redirectedTo).toBeUndefined();
+		expect(res.statusCode).toBe(307);
+		expect(res.redirectedTo).toMatch(
+			/^http:\/\/ghe\.internal\.example:8080\/github-apps\/x\/installations\/new\?state=/,
+		);
 	});
 });

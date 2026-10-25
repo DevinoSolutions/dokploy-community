@@ -47,6 +47,14 @@ export interface VerifiedGitProviderOAuthState extends GitProviderOAuthState {
 }
 
 export const GIT_PROVIDER_OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
+// The user names and confirms the app on GitHub (sign-in, sudo, 2FA) between
+// the state being issued and used; GitHub keeps the manifest code for an hour.
+export const GITHUB_INIT_STATE_TTL_MS = 60 * 60 * 1000;
+
+const stateTtlMs = (provider: OAuthGitProviderType) =>
+	provider === "github_init"
+		? GITHUB_INIT_STATE_TTL_MS
+		: GIT_PROVIDER_OAUTH_STATE_TTL_MS;
 
 const STATE_VERSION = "v1";
 const MAX_STATE_LENGTH = 2048;
@@ -89,7 +97,7 @@ export const createGitProviderOAuthState = (
 			i: state.providerId,
 			u: state.userId,
 			o: state.organizationId,
-			e: now + GIT_PROVIDER_OAUTH_STATE_TTL_MS,
+			e: now + stateTtlMs(state.provider),
 			n: hashNonce(nonce),
 		}),
 	).toString("base64url");
@@ -208,12 +216,7 @@ export const setGitProviderOAuthNonceCookie = (
 ) =>
 	appendSetCookie(
 		res,
-		nonceCookie(
-			req,
-			provider,
-			nonce,
-			Math.floor(GIT_PROVIDER_OAUTH_STATE_TTL_MS / 1000),
-		),
+		nonceCookie(req, provider, nonce, Math.floor(stateTtlMs(provider) / 1000)),
 	);
 
 export const clearGitProviderOAuthNonceCookie = (
