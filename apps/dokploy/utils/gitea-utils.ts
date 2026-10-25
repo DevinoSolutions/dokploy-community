@@ -2,31 +2,25 @@
 // This file contains client-safe utilities for Gitea integration
 
 /**
- * Generates an OAuth URL for Gitea authorization
+ * Returns the URL that starts the Gitea OAuth flow. The server route checks the
+ * session, signs the OAuth state and redirects to the Gitea authorize page.
  *
- * @param giteaId The ID of the Gitea provider to be used as state
+ * @param giteaId The ID of the Gitea provider
  * @param clientId The OAuth client ID
  * @param giteaUrl The base URL of the Gitea instance
- * @param baseUrl The base URL of the application for callback
- * @returns The complete OAuth authorization URL
+ * @returns The URL to open, or "#" when the configuration is incomplete
  */
 export const getGiteaOAuthUrl = (
 	giteaId: string,
 	clientId: string,
 	giteaUrl: string,
-	baseUrl: string,
 ): string => {
-	if (!clientId || !giteaUrl || !baseUrl) {
+	if (!giteaId || !clientId || !giteaUrl) {
 		// Return a marker that can be checked by the caller
 		return "#";
 	}
 
-	const redirectUri = `${baseUrl}/api/providers/gitea/callback`;
-	const scopes = "read:repository write:repository read:user read:organization";
-
-	return `${giteaUrl}/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(
-		redirectUri,
-	)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${encodeURIComponent(giteaId)}`;
+	return `/api/providers/gitea/authorize?giteaId=${encodeURIComponent(giteaId)}`;
 };
 
 // Interfaces for Gitea API responses and components

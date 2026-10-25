@@ -1,17 +1,10 @@
 import { updateGitea } from "@dokploy/server";
 import type { NextApiRequest, NextApiResponse } from "next";
+import {
+	checkGitProviderOAuthAccess,
+	verifyGitProviderOAuthState,
+} from "@/server/utils/git-provider-oauth";
 import { findGitea, type Gitea, redirectWithError } from "./helper";
-
-// Helper to parse the state parameter
-const parseState = (state: string): string | null => {
-	try {
-		const stateObj =
-			state.startsWith("{") && state.endsWith("}") ? JSON.parse(state) : {};
-		return stateObj.giteaId || state || null;
-	} catch {
-		return null;
-	}
-};
 
 // Helper to fetch access token from Gitea
 const fetchAccessToken = async (gitea: Gitea, code: string) => {
@@ -51,11 +44,26 @@ export default async function handler(
 		);
 	}
 
-	const giteaId = parseState(state as string);
-	if (!giteaId) return redirectWithError(res, "Invalid state format");
+	// The state has to be one this server signed for this provider, and the
+	// session has to be the one that started the flow and may update it.
+	const oauthState = verifyGitProviderOAuthState(state, "gitea");
+	if (!oauthState) {
+		return res.status(400).json({ error: "Invalid or expired OAuth state" });
+	}
 
-	const gitea = await findGitea(giteaId);
-	if (!gitea) return redirectWithError(res, "Failed to find Gitea provider");
+	const gitea = await findGitea(oauthState.providerId);
+	if (!gitea) {
+		return res.status(404).json({ error: "Git provider not found" });
+	}
+
+	const access = await checkGitProviderOAuthAccess(
+		req,
+		gitea.gitProvider,
+		oauthState,
+	);
+	if (!access.ok) {
+		return res.status(access.status).json({ error: access.error });
+	}
 
 	// Fetch the access token from Gitea
 	const result = await fetchAccessToken(gitea, code as string);

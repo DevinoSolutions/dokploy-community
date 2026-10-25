@@ -1,4 +1,5 @@
 import {
+	assertCanUpdateGitProvider,
 	createGithub,
 	deriveGithubApiUrl,
 	parseGithubBaseUrl,
@@ -89,6 +90,18 @@ export default async function handler(
 			provider.gitProvider.organizationId !== session.activeOrganizationId
 		) {
 			return res.status(404).json({ error: "Github provider not found" });
+		}
+		// Same rule as the provider update route: only its creator or an org
+		// owner/admin may change the installation it uses.
+		const canUpdate = await assertCanUpdateGitProvider(
+			{ userId: user.id, activeOrganizationId: session.activeOrganizationId },
+			provider.gitProvider,
+		).then(
+			() => true,
+			() => false,
+		);
+		if (!canUpdate) {
+			return res.status(403).json({ error: "Forbidden" });
 		}
 
 		await db

@@ -26,7 +26,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { api } from "@/utils/api";
 import { getGiteaOAuthUrl } from "@/utils/gitea-utils";
-import { useUrl } from "@/utils/hooks/use-url";
 
 const formSchema = z.object({
 	name: z.string().min(1, "Name is required"),
@@ -54,7 +53,6 @@ export const EditGiteaProvider = ({ giteaId }: Props) => {
 	const { mutateAsync, isPending: isUpdating } = api.gitea.update.useMutation();
 	const { mutateAsync: testConnection, isPending: isTesting } =
 		api.gitea.testConnection.useMutation();
-	const url = useUrl();
 	const utils = api.useUtils();
 
 	useEffect(() => {
@@ -148,12 +146,7 @@ export const EditGiteaProvider = ({ giteaId }: Props) => {
 			const formValues = form.getValues();
 			const authUrl =
 				error.authorizationUrl ||
-				getGiteaOAuthUrl(
-					giteaId,
-					formValues.clientId,
-					formValues.giteaUrl,
-					typeof url === "string" ? url : (url as any).url || "",
-				);
+				getGiteaOAuthUrl(giteaId, formValues.clientId, formValues.giteaUrl);
 
 			toast.error("Gitea Not Connected", {
 				description:
@@ -304,7 +297,6 @@ export const EditGiteaProvider = ({ giteaId }: Props) => {
 										giteaId,
 										formValues.clientId,
 										formValues.giteaUrl,
-										typeof url === "string" ? url : (url as any).url || "",
 									);
 									if (authUrl !== "#") {
 										window.open(authUrl, "_blank");
