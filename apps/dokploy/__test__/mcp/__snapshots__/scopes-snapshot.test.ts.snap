@@ -60,6 +60,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "auditLog-all": "dokploy:read",
   "backup-backupContext": "dokploy:read",
   "backup-create": "dokploy:backups",
+  "backup-getDownloadUrl": "dokploy:admin",
   "backup-listBackupFiles": "dokploy:read",
   "backup-manualBackupCompose": "dokploy:backups",
   "backup-manualBackupLibsql": "dokploy:backups",
