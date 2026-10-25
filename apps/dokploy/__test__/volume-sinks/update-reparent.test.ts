@@ -30,6 +30,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server", async () => {
 	const { TRPCError } = await import("@trpc/server");
+	// the real URL rule github.update applies to a changed app URL
+	const { parseGithubAppUrl } = await vi.importActual<
+		typeof import("@dokploy/server/utils/providers/github")
+	>("@dokploy/server/utils/providers/github");
 	const stubs: Record<string | symbol, unknown> = {};
 	const named: Record<string, unknown> = {
 		IS_CLOUD: false,
@@ -42,6 +46,7 @@ vi.mock("@dokploy/server", async () => {
 		findServerById: mocks.findServerById,
 		updateServerById: mocks.updateServerById,
 		findSSHKeyById: mocks.findSSHKeyById,
+		parseGithubAppUrl,
 		findGithubById: mocks.findGithubById,
 		findGitlabById: mocks.findGitlabById,
 		findGiteaById: mocks.findGiteaById,
@@ -307,7 +312,7 @@ describe.each([
 		find: mocks.findGithubById,
 		update: mocks.updateGithub,
 		idKey: "githubId",
-		extra: { githubAppName: "app" },
+		extra: { githubAppName: "https://github.com/apps/app" },
 	},
 	{
 		router: "gitlab",

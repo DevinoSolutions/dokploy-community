@@ -8,6 +8,7 @@ import {
 	getGithubPullRequests,
 	getGithubRepositories,
 	haveGithubRequirements,
+	parseGithubAppUrl,
 	updateGithub,
 	updateGitProvider,
 } from "@dokploy/server";
@@ -123,6 +124,18 @@ export const githubRouter = createTRPCRouter({
 			// organization), and its own gitProviderId is the one that is updated.
 			const github = await findGithubById(input.githubId);
 			await assertCanUpdateGitProvider(ctx.session, github.gitProvider);
+			// A changed link has to stay on the provider's GitHub instance (the
+			// install step redirects there). An unchanged value is kept as it is,
+			// so providers saved earlier can still be edited.
+			if (
+				input.githubAppName !== github.githubAppName &&
+				!parseGithubAppUrl(input.githubAppName, github.githubUrl)
+			) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "The app URL has to be on the provider's GitHub instance",
+				});
+			}
 			await updateGitProvider(github.gitProviderId, {
 				name: input.name,
 				organizationId: ctx.session.activeOrganizationId,

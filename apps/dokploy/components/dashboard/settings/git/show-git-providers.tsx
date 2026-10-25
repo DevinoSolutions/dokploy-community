@@ -54,10 +54,12 @@ export const ShowGitProviders = () => {
 	const isOrgAdmin =
 		currentMember?.role === "owner" || currentMember?.role === "admin";
 
-	// The server route checks the session, signs the OAuth state and redirects
-	// to the GitLab authorize page.
+	// The server routes check the session, sign the state and redirect to the
+	// provider's authorize or installation page.
 	const getGitlabUrl = (gitlabId: string) =>
 		`/api/providers/gitlab/authorize?gitlabId=${encodeURIComponent(gitlabId)}`;
+	const getGithubInstallUrl = (githubId: string) =>
+		`/api/providers/github/authorize?githubId=${encodeURIComponent(githubId)}`;
 
 	return (
 		<div className="w-full">
@@ -238,15 +240,19 @@ export const ShowGitProviders = () => {
 																		>
 																			Action Required
 																		</Badge>
-																		<Link
-																			href={`${gitProvider?.github?.githubAppName}/installations/new?state=gh_setup:${gitProvider?.github?.githubId}`}
-																			className={buttonVariants({
-																				size: "icon",
-																				variant: "ghost",
-																			})}
-																		>
-																			<ImportIcon className="size-4 text-primary" />
-																		</Link>
+																		{canManage && (
+																			<Link
+																				href={getGithubInstallUrl(
+																					gitProvider.github?.githubId || "",
+																				)}
+																				className={buttonVariants({
+																					size: "icon",
+																					variant: "ghost",
+																				})}
+																			>
+																				<ImportIcon className="size-4 text-primary" />
+																			</Link>
+																		)}
 																	</div>
 																)}
 																{haveGithubRequirements && isGithub && (
@@ -271,18 +277,20 @@ export const ShowGitProviders = () => {
 																		>
 																			Action Required
 																		</Badge>
-																		<Link
-																			href={getGitlabUrl(
-																				gitProvider.gitlab?.gitlabId || "",
-																			)}
-																			target="_blank"
-																			className={buttonVariants({
-																				size: "icon",
-																				variant: "ghost",
-																			})}
-																		>
-																			<ImportIcon className="size-4 text-primary" />
-																		</Link>
+																		{canManage && (
+																			<Link
+																				href={getGitlabUrl(
+																					gitProvider.gitlab?.gitlabId || "",
+																				)}
+																				target="_blank"
+																				className={buttonVariants({
+																					size: "icon",
+																					variant: "ghost",
+																				})}
+																			>
+																				<ImportIcon className="size-4 text-primary" />
+																			</Link>
+																		)}
 																	</div>
 																)}
 

@@ -15,8 +15,6 @@ const mocks = vi.hoisted(() => ({
 	updateGitea: vi.fn(),
 	hasPermission: vi.fn(),
 	memberFindFirst: vi.fn(),
-	githubFindFirst: vi.fn(),
-	githubUpdateSet: vi.fn(),
 	fetch: vi.fn(),
 }));
 
@@ -24,14 +22,7 @@ vi.mock("@dokploy/server/db", () => ({
 	db: {
 		query: {
 			member: { findFirst: mocks.memberFindFirst },
-			github: { findFirst: mocks.githubFindFirst },
 		},
-		update: () => ({
-			set: (values: unknown) => {
-				mocks.githubUpdateSet(values);
-				return { where: () => ({ returning: async () => [] }) };
-			},
-		}),
 	},
 }));
 
@@ -54,9 +45,6 @@ vi.mock("@dokploy/server", async () => {
 		updateGitlab: mocks.updateGitlab,
 		findGiteaById: mocks.findGiteaById,
 		updateGitea: mocks.updateGitea,
-		createGithub: vi.fn(),
-		deriveGithubApiUrl: vi.fn(),
-		parseGithubBaseUrl: vi.fn(),
 	};
 });
 
@@ -76,9 +64,6 @@ const { default: giteaCallback } = await import(
 );
 const { default: giteaAuthorize } = await import(
 	"@/pages/api/providers/gitea/authorize"
-);
-const { default: githubSetup } = await import(
-	"@/pages/api/providers/github/setup"
 );
 
 const ORG = "org-1";
@@ -266,6 +251,38 @@ describe("git provider OAuth state", () => {
 
 	it("rejects a state issued for the other provider type", () => {
 		expect(verifyGitProviderOAuthState(stateFor("gitea"), "gitlab")).toBeNull();
+	});
+
+	it("keeps the GitHub steps apart from each other and from the OAuth flows", () => {
+		const issue = (provider: "github_init" | "github_setup") =>
+			createGitProviderOAuthState(
+				{
+					provider,
+					providerId: "x",
+					userId: USER,
+					organizationId: ORG,
+				},
+				{ nonce: NONCE },
+			);
+
+		expect(
+			verifyGitProviderOAuthState(issue("github_init"), "github_init"),
+		).toMatchObject({ provider: "github_init", providerId: "x" });
+		expect(
+			verifyGitProviderOAuthState(issue("github_setup"), "github_setup"),
+		).toMatchObject({ provider: "github_setup", providerId: "x" });
+		expect(
+			verifyGitProviderOAuthState(issue("github_init"), "github_setup"),
+		).toBeNull();
+		expect(
+			verifyGitProviderOAuthState(issue("github_setup"), "github_init"),
+		).toBeNull();
+		expect(
+			verifyGitProviderOAuthState(issue("github_setup"), "gitlab"),
+		).toBeNull();
+		expect(
+			verifyGitProviderOAuthState(stateFor("gitlab"), "github_setup"),
+		).toBeNull();
 	});
 
 	it.each([
@@ -589,44 +606,6 @@ describe("OAuth authorize routes", () => {
 			expect(res.redirectedTo).toBeUndefined();
 		},
 	);
-});
-
-describe("GitHub app install callback", () => {
-	const githubRow = (userId: string) => ({
-		githubId: "github-1",
-		gitProvider: { gitProviderId: "gp-3", userId, organizationId: ORG },
-	});
-	const query = {
-		code: "install-code",
-		state: "gh_setup:github-1",
-		installation_id: "42",
-	};
-
-	it("stores the installation for the provider's creator", async () => {
-		mocks.githubFindFirst.mockResolvedValue(githubRow(USER));
-		const res = await call(githubSetup, query);
-
-		expect(res.redirectedTo).toBe("/dashboard/settings/git-providers");
-		expect(mocks.githubUpdateSet).toHaveBeenCalledWith({
-			githubInstallationId: "42",
-		});
-	});
-
-	it("stores the installation for an org admin", async () => {
-		mocks.memberFindFirst.mockResolvedValue({ role: "admin" });
-		mocks.githubFindFirst.mockResolvedValue(githubRow(OTHER_USER));
-		await call(githubSetup, query);
-
-		expect(mocks.githubUpdateSet).toHaveBeenCalledTimes(1);
-	});
-
-	it("rejects a member who did not create the provider", async () => {
-		mocks.githubFindFirst.mockResolvedValue(githubRow(OTHER_USER));
-		const res = await call(githubSetup, query);
-
-		expect(res.statusCode).toBe(403);
-		expect(mocks.githubUpdateSet).not.toHaveBeenCalled();
-	});
 });
 
 describe("OAuth nonce cookie", () => {
