@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
 	grantAll: false,
 	// servers the caller may reach
 	servers: new Set<string>(),
+	// the organization that owns the instance
+	rootOrganization: "org-a",
 	serviceRows: [] as {
 		serviceId: string;
 		serverId: string | null;
@@ -189,6 +191,10 @@ vi.mock("@dokploy/server", () => {
 		}));
 	return {
 		IS_CLOUD: false,
+		isRootOrganization: vi.fn(
+			async (organizationId: string) =>
+				organizationId === mocks.rootOrganization,
+		),
 		findServerById: vi.fn(),
 		execAsync: vi.fn(async (command: string) => {
 			mocks.commands.push({ command });
@@ -283,6 +289,7 @@ beforeEach(() => {
 	};
 	mocks.grantAll = false;
 	mocks.servers = new Set();
+	mocks.rootOrganization = "org-a";
 	mocks.serviceRows = [];
 	mocks.serviceOrganizations.clear();
 	mocks.containers.clear();
@@ -438,6 +445,47 @@ describe("cluster join tokens and node removal", () => {
 		await expectUnauthorized(cluster("owner").addManager({ serverId: "x" }));
 		expect(mocks.commands).toEqual([]);
 	});
+});
+
+describe("the local swarm belongs to the organization that owns the instance", () => {
+	const forbidden = async (promise: Promise<unknown>) =>
+		expect(promise).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+	it.each(roles)(
+		"refuses the local nodes and join tokens to an %s of another organization",
+		async (role) => {
+			mocks.rootOrganization = "org-root";
+			const caller = cluster(role);
+			await forbidden(caller.getNodes({}));
+			await forbidden(caller.addWorker({}));
+			await forbidden(caller.addManager({}));
+			await forbidden(caller.removeWorker({ nodeId: "n1" }));
+			await forbidden(caller.getNodes({ serverId: "" }));
+			expect(called("getRemoteDocker")).toBe(0);
+			expect(mocks.commands).toEqual([]);
+		},
+	);
+
+	it.each(roles)(
+		"leaves a server of the caller's organization alone for an %s of another organization",
+		async (role) => {
+			mocks.rootOrganization = "org-root";
+			mocks.servers = new Set(["srv-1"]);
+			const caller = cluster(role);
+			await caller.getNodes({ serverId: "srv-1" });
+			expect((await caller.addWorker({ serverId: "srv-1" })).command).toContain(
+				"worker-token",
+			);
+			expect(
+				(await caller.addManager({ serverId: "srv-1" })).command,
+			).toContain("manager-token");
+			await caller.removeWorker({ nodeId: "n1", serverId: "srv-1" });
+			expect(mocks.commands.map((entry) => entry.serverId)).toEqual([
+				"srv-1",
+				"srv-1",
+			]);
+		},
+	);
 });
 
 describe("swarm services and stats", () => {
