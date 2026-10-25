@@ -699,11 +699,15 @@ describe("reading the .env", () => {
 		expect(command).toContain("timeout 10 head -c");
 		// Present but not a regular file: the command exits non-zero.
 		expect(command).toMatch(
-			/elif \[ -e [^\]]+\]; then exit 3; fi; else printf /,
+			/elif \[ -e [^\]]+\]; then exit 3; fi; else __dokploy_r=/,
 		);
 		// And only inside the code directory (T-8413).
 		expect(command).toContain(
 			`__dokploy_inside ${REMOTE_CODE} ${REMOTE_CODE}/.env`,
+		);
+		// The files directory of the compose is the second place.
+		expect(command).toContain(
+			`__dokploy_inside ${REMOTE_CODE.slice(0, -"code".length)}files ${REMOTE_CODE}/.env`,
 		);
 	});
 });

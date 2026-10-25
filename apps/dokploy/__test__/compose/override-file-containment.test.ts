@@ -59,6 +59,10 @@ import { assertComposeVolumesBound } from "@dokploy/server/services/compose-volu
 import {
 	COMPOSE_FILE_LINK_MARKER,
 	COMPOSE_FILE_LINK_MESSAGE,
+	COMPOSE_FILE_NOT_REGULAR_MARKER,
+	COMPOSE_FILE_NOT_REGULAR_MESSAGE,
+	COMPOSE_FILE_OUTSIDE_MARKER,
+	COMPOSE_FILE_OUTSIDE_MESSAGE,
 	ComposeFileLinkError,
 } from "@dokploy/server/utils/compose-file-guard";
 
@@ -84,6 +88,29 @@ const shellPath = (path: string) =>
 				(_, drive: string) => `/${drive.toLowerCase()}`,
 			)
 		: path;
+
+// A FIFO has to be a real one: the cases run where `mkfifo` makes a file the
+// shell sees as a pipe (Git Bash does; Node on Windows does not see it as one,
+// so the local read is tested on Linux and macOS only).
+const fifosWork = (() => {
+	if (shells.length === 0) return false;
+	const probe = mkdtempSync(`${tempBase()}/.dokploy-fifo-probe-`).replaceAll(
+		"\\",
+		"/",
+	);
+	try {
+		return (
+			spawnSync("mkfifo", [`${probe}/fifo`]).status === 0 &&
+			spawnSync("sh", ["-c", '[ -p "$1/fifo" ]', "sh", probe]).status === 0
+		);
+	} catch {
+		return false;
+	} finally {
+		rmSync(probe, { recursive: true, force: true });
+	}
+})();
+const itWithFifos = (remote: boolean) =>
+	it.skipIf(!fifosWork || (!remote && process.platform === "win32"));
 
 // The links have to be real for the shell: a file link needs a privilege on
 // Windows, and Git Bash does not always see it as one. The cases below run
@@ -138,7 +165,11 @@ const link = (target: string, name: string, type: "file" | "junction") => {
 
 // A remote host that is the local shell.
 const runInShell = async (_serverId: string, command: string) => {
-	const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+	// A read that blocks (a FIFO) must fail the test, not hang it.
+	const result = spawnSync("sh", ["-c", command], {
+		encoding: "utf8",
+		timeout: 10_000,
+	});
 	if (result.status !== 0) {
 		throw new Error(`exit ${result.status}: ${result.stderr}`);
 	}
@@ -188,14 +219,17 @@ afterAll(() => {
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
 });
 
-const refusal = async (promise: Promise<unknown>) => {
+const refusal = async (
+	promise: Promise<unknown>,
+	message = COMPOSE_FILE_LINK_MESSAGE,
+) => {
 	const error = await promise.then(
 		() => undefined,
 		(e: unknown) => e,
 	);
 	expect(error, String((error as Error)?.message)).toBeInstanceOf(ComposeFileLinkError);
 	// A clear refusal, and never what the file holds.
-	expect((error as Error).message).toContain(COMPOSE_FILE_LINK_MESSAGE);
+	expect((error as Error).message).toContain(message);
 	expect((error as Error).message).not.toContain("leaked-host-file");
 	expect((error as Error).message).not.toContain("untouched");
 	return error as Error;
@@ -222,13 +256,42 @@ describe("an override file read on a remote host", () => {
 		expect(command).toContain(
 			`__dokploy_inside ${mocks.base.remote}/${APP}/code ${mocks.base.remote}/${APP}/code/override.yml`,
 		);
+		// The files directory of the compose is the second place.
 		expect(command).toContain(
-			`cat ${mocks.base.remote}/${APP}/code/override.yml`,
+			`__dokploy_inside ${mocks.base.remote}/${APP}/files ${mocks.base.remote}/${APP}/code/override.yml`,
+		);
+		// Only a regular file is read.
+		expect(command).toContain(
+			`if [ -f ${mocks.base.remote}/${APP}/code/override.yml ]; then cat ${mocks.base.remote}/${APP}/code/override.yml;`,
 		);
 		expect(command).toContain(COMPOSE_FILE_LINK_MARKER);
+		expect(command).toContain(COMPOSE_FILE_OUTSIDE_MARKER);
 		expect(mocks.warn).toHaveBeenCalledWith(
 			expect.objectContaining({ composeId: "c1" }),
 			expect.stringContaining("an override file leaves the code directory"),
+		);
+	});
+
+	it("says where the file is when it is not a link", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: COMPOSE_FILE_OUTSIDE_MARKER,
+			stderr: "",
+		});
+		const error = await refusal(
+			assertComposeVolumesBound(withOverride("override.yml", "srv-1")),
+			COMPOSE_FILE_OUTSIDE_MESSAGE,
+		);
+		expect(error.message).not.toContain("symbolic link");
+	});
+
+	it("says so when the file is not a regular file", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: COMPOSE_FILE_NOT_REGULAR_MARKER,
+			stderr: "",
+		});
+		await refusal(
+			assertComposeVolumesBound(withOverride("override.yml", "srv-1")),
+			COMPOSE_FILE_NOT_REGULAR_MESSAGE,
 		);
 	});
 
@@ -303,19 +366,96 @@ describe.each([
 		},
 	);
 
+	it("reads an override file of the files directory of the compose", async () => {
+		// Where Dokploy writes the file mounts, reached as `../files/...`.
+		mkdirSync(`${code()}/../files`, { recursive: true });
+		writeFileSync(`${code()}/../files/override.yml`, OVERRIDE);
+		await expect(
+			assertComposeVolumesBound(withOverride("../files/override.yml", serverId)),
+		).resolves.toBeUndefined();
+		await expect(
+			assertComposeVolumesBound(
+				withOverride(`${where()}/../files/override.yml`, serverId),
+			),
+		).resolves.toBeUndefined();
+	});
+
 	itWithLinks(
-		"refuses an absolute override path outside the code directory",
+		"refuses an override file of the files directory that is a link out",
 		async () => {
-			// Inside the compose's own directory, which the command rules allow.
 			mkdirSync(`${code()}/../files`, { recursive: true });
-			writeFileSync(`${code()}/../files/override.yml`, OVERRIDE);
+			const place = `${code()}/../files/override.yml`;
+			symlinkSync(
+				relative(dirname(place), `${outside()}/override.yml`),
+				place,
+				"file",
+			);
 			await refusal(
 				assertComposeVolumesBound(
-					withOverride(`${where()}/../files/override.yml`, serverId),
+					withOverride("../files/override.yml", serverId),
 				),
 			);
 		},
 	);
+
+	itWithLinks(
+		"refuses an override file in a directory of files/ that is a link out",
+		async () => {
+			mkdirSync(`${code()}/../files`, { recursive: true });
+			symlinkSync(outside(), `${code()}/../files/linked`, "junction");
+			await refusal(
+				assertComposeVolumesBound(
+					withOverride("../files/linked/override.yml", serverId),
+				),
+			);
+		},
+	);
+
+	it("refuses an override file in the project directory, beside code/ and files/, and says so", async () => {
+		writeFileSync(`${code()}/../override.yml`, OVERRIDE);
+		const error = await refusal(
+			assertComposeVolumesBound(withOverride("../override.yml", serverId)),
+			COMPOSE_FILE_OUTSIDE_MESSAGE,
+		);
+		// No link is involved: the message must not send anyone looking for one.
+		expect(error.message).not.toContain("symbolic link");
+	});
+
+	it("refuses an existing file when the code directory is not there", async () => {
+		// The remote guard needs the directory to exist; this host agrees.
+		writeFileSync(`${code()}/../override.yml`, OVERRIDE);
+		rmSync(code(), { recursive: true, force: true });
+		await refusal(
+			assertComposeVolumesBound(withOverride("../override.yml", serverId)),
+			COMPOSE_FILE_OUTSIDE_MESSAGE,
+		);
+	});
+
+	it("reads from the files directory when the code directory is not there", async () => {
+		rmSync(code(), { recursive: true, force: true });
+		mkdirSync(`${code()}/../files`, { recursive: true });
+		writeFileSync(`${code()}/../files/override.yml`, OVERRIDE);
+		await expect(
+			assertComposeVolumesBound(withOverride("../files/override.yml", serverId)),
+		).resolves.toBeUndefined();
+	});
+
+	itWithFifos(!!serverId)("refuses an override file that is a FIFO", async () => {
+		expect(spawnSync("mkfifo", [`${code()}/override.yml`]).status).toBe(0);
+		await refusal(
+			assertComposeVolumesBound(withOverride("override.yml", serverId)),
+			COMPOSE_FILE_NOT_REGULAR_MESSAGE,
+		);
+	});
+
+	itWithFifos(!!serverId)("does not wait on a .env that is a FIFO", async () => {
+		expect(spawnSync("mkfifo", [`${code()}/.env`]).status).toBe(0);
+		// A .env that is not a regular file is not known, not read: the check
+		// goes on without blocking.
+		await expect(
+			assertComposeVolumesBound({ ...baseCompose, serverId }),
+		).resolves.toBeUndefined();
+	});
 
 	itWithLinks(
 		"reads an override file, and a link to a file of the checkout",

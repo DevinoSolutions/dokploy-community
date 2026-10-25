@@ -66,7 +66,7 @@ describe("reading the compose file on a remote host", () => {
 		expect(host).toBe(serverId);
 		// The read is guarded against a link out of the checkout (T-7857); the
 		// path is still one word of the `cat` it runs.
-		const read = /then (cat [^;]*); else printf/.exec(command)?.[1] ?? "";
+		const read = /then (cat [^;]*); else __dokploy_r=/.exec(command)?.[1] ?? "";
 		expect(words(read)).toEqual(["cat", remotePath(composePath)]);
 	});
 

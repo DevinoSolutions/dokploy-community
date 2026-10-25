@@ -122,6 +122,29 @@ const linksWork = (() => {
 })();
 const itWithLinks = it.skipIf(!linksWork);
 
+// A FIFO has to be a real one: the cases run where `mkfifo` makes a file the
+// shell sees as a pipe (Git Bash does; Node on Windows does not see it as one,
+// so the local read is tested on Linux and macOS only).
+const fifosWork = (() => {
+	if (shells.length === 0) return false;
+	const probe = mkdtempSync(`${tempBase()}/.dokploy-fifo-probe-`).replaceAll(
+		"\\",
+		"/",
+	);
+	try {
+		return (
+			spawnSync("mkfifo", [`${probe}/fifo`]).status === 0 &&
+			spawnSync("sh", ["-c", '[ -p "$1/fifo" ]', "sh", probe]).status === 0
+		);
+	} catch {
+		return false;
+	} finally {
+		rmSync(probe, { recursive: true, force: true });
+	}
+})();
+const itWithFifos = (remote: boolean) =>
+	it.skipIf(!fifosWork || (!remote && process.platform === "win32"));
+
 let tmp = "";
 const code = () => `${tmp}/compose/${APP}/code`;
 const outside = () => `${tmp}/outside`;
@@ -139,7 +162,11 @@ const link = (target: string, name: string, type: "file" | "junction") => {
 
 // A remote host that is the local shell.
 const runInShell = async (_serverId: string, command: string) => {
-	const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+	// A read that blocks (a FIFO) must fail the test, not hang it.
+	const result = spawnSync("sh", ["-c", command], {
+		encoding: "utf8",
+		timeout: 10_000,
+	});
 	if (result.status !== 0) {
 		throw new Error(`exit ${result.status}: ${result.stderr}`);
 	}
@@ -209,8 +236,15 @@ describe("an override file read by the audit on a remote host", () => {
 		expect(command).toContain(
 			`__dokploy_inside ${mocks.base.remote}/${APP}/code ${mocks.base.remote}/${APP}/code/override.yml`,
 		);
-		// The size cap of the compose file read applies to it too.
-		expect(command).toContain("head -c 524289");
+		// The files directory of the compose is the second place.
+		expect(command).toContain(
+			`__dokploy_inside ${mocks.base.remote}/${APP}/files ${mocks.base.remote}/${APP}/code/override.yml`,
+		);
+		// The size cap of the compose file read applies to it too, and only a
+		// regular file is read.
+		expect(command).toContain(
+			`[ -f ${mocks.base.remote}/${APP}/code/override.yml ] && head -c 524289`,
+		);
 		expect(overrides).toEqual([]);
 		expect(log).not.toContain(COMPOSE_FILE_LINK_MARKER);
 	});
@@ -261,4 +295,49 @@ describe.each([
 			]);
 		},
 	);
+
+	it("evaluates an override file of the files directory of the compose", async () => {
+		// Where Dokploy writes the file mounts, reached as `../files/...`.
+		mkdirSync(`${code()}/../files`, { recursive: true });
+		writeFileSync(`${code()}/../files/override.yml`, OVERRIDE);
+		expect(
+			(await audit("../files/override.yml", serverId)).overrides,
+		).toEqual([OVERRIDE]);
+	});
+
+	itWithLinks(
+		"does not evaluate an override file of the files directory that is a link out",
+		async () => {
+			mkdirSync(`${code()}/../files`, { recursive: true });
+			const place = `${code()}/../files/override.yml`;
+			symlinkSync(
+				relative(dirname(place), `${outside()}/override.yml`),
+				place,
+				"file",
+			);
+			const { overrides, log } = await audit("../files/override.yml", serverId);
+			expect(overrides).toEqual([]);
+			expect(log).not.toContain("leaked-host-file");
+		},
+	);
+
+	it("does not evaluate an override file in the project directory, beside code/ and files/", async () => {
+		writeFileSync(`${code()}/../override.yml`, OVERRIDE);
+		expect((await audit("../override.yml", serverId)).overrides).toEqual([]);
+	});
+
+	it("does not evaluate an existing file when the code directory is not there", async () => {
+		// The remote guard needs the directory to exist; this host agrees.
+		writeFileSync(`${code()}/../override.yml`, OVERRIDE);
+		rmSync(code(), { recursive: true, force: true });
+		expect((await audit("../override.yml", serverId)).overrides).toEqual([]);
+	});
+
+	itWithFifos(!!serverId)("does not wait on an override file that is a FIFO", async () => {
+		expect(spawnSync("mkfifo", [`${code()}/override.yml`]).status).toBe(0);
+		const started = Date.now();
+		expect((await audit("override.yml", serverId)).overrides).toEqual([]);
+		// Not read at all, rather than given up on after a time limit.
+		expect(Date.now() - started).toBeLessThan(5000);
+	});
 });

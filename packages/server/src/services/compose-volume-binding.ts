@@ -1,12 +1,21 @@
-import { constants, readFileSync } from "node:fs";
+import {
+	closeSync,
+	constants,
+	fstatSync,
+	openSync,
+	readFileSync,
+} from "node:fs";
 import { open } from "node:fs/promises";
 import { posix } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
 import {
 	assertComposeFileInsideCodeDirectory,
+	COMPOSE_FILE_NOT_REGULAR_MARKER,
+	COMPOSE_FILE_NOT_REGULAR_MESSAGE,
 	ComposeFileLinkError,
 	getComposeCodeDirectory,
+	getComposeFileRefusal,
 	getGuardedReadCommand,
 	isComposeFileLinkError,
 	isComposeFileLinkMarker,
@@ -170,14 +179,19 @@ const readDotenv = async (
 				compose.serverId,
 				getGuardedReadCommand({
 					codeDirectory: getCodeDirectory(compose),
+					extraDirectory: getFilesDirectory(compose),
 					file: path,
 					read: `if [ -f ${quoted} ]; then if command -v timeout >/dev/null 2>&1; then timeout 10 ${read}; else ${read}; fi; elif [ -e ${quoted} ]; then exit 3; fi`,
 				}),
 			);
-			if (isComposeFileLinkMarker(stdout)) throw new ComposeFileLinkError();
+			if (isComposeFileLinkMarker(stdout)) throw getComposeFileRefusal(stdout);
 			return Buffer.byteLength(stdout) > MAX_DOTENV_BYTES ? null : stdout;
 		}
-		assertComposeFileInsideCodeDirectory(getCodeDirectory(compose), path);
+		assertComposeFileInsideCodeDirectory(
+			getCodeDirectory(compose),
+			path,
+			getFilesDirectory(compose),
+		);
 		let handle: Awaited<ReturnType<typeof open>>;
 		try {
 			handle = await open(
@@ -359,6 +373,11 @@ const getCodeDirectory = (compose: ComposeForVolumeCheck) => {
 	const root = COMPOSE_PATH.replace(/\\/g, "/").replace(/^[A-Za-z]:/, "");
 	return posix.join(root, compose.appName, "code");
 };
+
+// The directory of the compose's file mounts: override files and the project
+// `.env` may be read from it too (`-f ../files/override.yml`, T-8413).
+const getFilesDirectory = (compose: ComposeForVolumeCheck) =>
+	posix.join(posix.dirname(getCodeDirectory(compose)), "files");
 
 // Refuses (throws) when the compose files mount a named volume that is not
 // the compose's own (T-6822). The first spec is the YAML that is deployed
@@ -1705,9 +1724,36 @@ const multiDocumentError = (what: string) =>
 		`Compose refused: ${what} has more than one YAML document (a "---" separator), and Docker Compose merges all of them, so they cannot be checked. Keep a single document in the compose file.`,
 	);
 
-// An override file is read like the compose file: only inside the code
-// directory, so a link in the repository (or an absolute `-f` path) cannot make
-// Dokploy read a file of the host or of another compose (T-8413).
+// The text of a local override file, which has to be a regular file: it is
+// opened without blocking and looked at through the descriptor, so a FIFO or a
+// device cannot hang the check or be read, also when it is swapped in after a
+// look. A file that is not there is left to the plain read, which reports it.
+const readRegularFile = (path: string) => {
+	let fd: number;
+	try {
+		fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") {
+			return readFileSync(path, "utf8");
+		}
+		throw error;
+	}
+	try {
+		if (!fstatSync(fd).isFile()) {
+			throw new ComposeFileLinkError(COMPOSE_FILE_NOT_REGULAR_MESSAGE);
+		}
+		return readFileSync(fd, "utf8");
+	} finally {
+		closeSync(fd);
+	}
+};
+
+// An override file is read like the compose file: only a regular file inside
+// the code directory, or the files directory of the compose where the file
+// mounts live (`../files/override.yml`), so a link in the repository (or an
+// absolute `-f` path) cannot make Dokploy read a file of the host or of
+// another compose (T-8413).
 const loadOverrideFile = async (
 	compose: ComposeForVolumeCheck,
 	path: string,
@@ -1715,19 +1761,25 @@ const loadOverrideFile = async (
 	let text: string;
 	try {
 		if (compose.serverId) {
+			const qPath = quote([path]);
 			const { stdout } = await execAsyncRemote(
 				compose.serverId,
 				getGuardedReadCommand({
 					codeDirectory: getCodeDirectory(compose),
+					extraDirectory: getFilesDirectory(compose),
 					file: path,
-					read: `cat ${quote([path])}`,
+					read: `if [ -f ${qPath} ]; then cat ${qPath}; elif [ -e ${qPath} ]; then printf '%s' ${COMPOSE_FILE_NOT_REGULAR_MARKER}; else cat ${qPath}; fi`,
 				}),
 			);
-			if (isComposeFileLinkMarker(stdout)) throw new ComposeFileLinkError();
+			if (isComposeFileLinkMarker(stdout)) throw getComposeFileRefusal(stdout);
 			text = stdout;
 		} else {
-			assertComposeFileInsideCodeDirectory(getCodeDirectory(compose), path);
-			text = readFileSync(path, "utf8");
+			assertComposeFileInsideCodeDirectory(
+				getCodeDirectory(compose),
+				path,
+				getFilesDirectory(compose),
+			);
+			text = readRegularFile(path);
 		}
 		return parse(text, { maxAliasCount: 10000, merge: true }) as Spec;
 	} catch (error) {
@@ -1805,7 +1857,7 @@ const readComposeFileOnDisk = async (compose: ComposeNested) => {
 				}),
 			);
 			// A link out of the checkout is a refusal of its own (T-7857).
-			if (isComposeFileLinkMarker(stdout)) throw new ComposeFileLinkError();
+			if (isComposeFileLinkMarker(stdout)) throw getComposeFileRefusal(stdout);
 			return stdout ? stdout : null;
 		}
 		return await readComposeFile(compose);

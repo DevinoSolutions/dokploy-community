@@ -15,8 +15,8 @@ import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
 import {
 	assertComposeFileInsideCodeDirectory,
-	ComposeFileLinkError,
 	getComposeCodeDirectory,
+	getComposeFileRefusal,
 	getGuardedReadCommand,
 	isComposeFileLinkMarker,
 } from "../compose-file-guard";
@@ -171,7 +171,7 @@ export const loadDockerComposeRemote = async (
 	}
 	// A link out of the checkout is a refusal, not a missing file (T-7857).
 	if (isComposeFileLinkMarker(stdout)) {
-		throw new ComposeFileLinkError();
+		throw getComposeFileRefusal(stdout);
 	}
 	if (!stdout) return null;
 	try {
