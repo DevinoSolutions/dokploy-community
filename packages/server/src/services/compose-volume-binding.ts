@@ -3,6 +3,13 @@ import { open } from "node:fs/promises";
 import { posix } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
+import {
+	ComposeFileLinkError,
+	getComposeCodeDirectory,
+	getGuardedReadCommand,
+	isComposeFileLinkError,
+	isComposeFileLinkMarker,
+} from "@dokploy/server/utils/compose-file-guard";
 import { randomizeDeployableSpecificationFile } from "@dokploy/server/utils/docker/collision";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
@@ -1732,6 +1739,9 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 		if (isMultiDocumentError(error)) {
 			throw multiDocumentError("the compose file");
 		}
+		// A compose file that leads out of the checkout is refused, and the
+		// previous release's files are put back by the caller (T-7857).
+		if (isComposeFileLinkError(error)) throw error;
 		return;
 	}
 	if (!spec) {
@@ -1761,12 +1771,19 @@ const readComposeFileOnDisk = async (compose: ComposeNested) => {
 		if (compose.serverId) {
 			const { stdout } = await execAsyncRemote(
 				compose.serverId,
-				`if [ -f ${quote([path])} ]; then cat ${quote([path])}; fi`,
+				getGuardedReadCommand({
+					codeDirectory: getComposeCodeDirectory(compose),
+					file: path,
+					read: `if [ -f ${quote([path])} ]; then cat ${quote([path])}; fi`,
+				}),
 			);
+			// A link out of the checkout is a refusal of its own (T-7857).
+			if (isComposeFileLinkMarker(stdout)) throw new ComposeFileLinkError();
 			return stdout ? stdout : null;
 		}
 		return await readComposeFile(compose);
-	} catch {
+	} catch (error) {
+		if (isComposeFileLinkError(error)) throw error;
 		throw new Error(
 			"Compose refused: the compose file on disk could not be read, so it cannot be checked before it is started. Redeploy the compose.",
 		);
