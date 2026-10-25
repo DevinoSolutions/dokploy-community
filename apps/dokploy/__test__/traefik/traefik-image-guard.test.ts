@@ -206,8 +206,8 @@ describe("routine Traefik recreates keep the running image", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("the pin is the 3.6.25 this release keeps", () => {
-		expect(TRAEFIK_IMAGE).toBe("traefik:v3.6.25");
+	it("the pin is 3.7.16", () => {
+		expect(TRAEFIK_IMAGE).toBe("traefik:v3.7.16");
 	});
 
 	it.each([
