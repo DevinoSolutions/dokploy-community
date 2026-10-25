@@ -278,7 +278,13 @@ export const ContainerFreeMonitoring = ({
 				</div>
 			</header>
 
-			{appName === "dokploy" && <ContainerResourceUsage />}
+			{appName === "dokploy" && (
+				<ContainerResourceUsage
+					serverId={
+						serverId && serverId !== LOCAL_SERVER_ID ? serverId : undefined
+					}
+				/>
+			)}
 
 			<div className="grid gap-6 lg:grid-cols-2">
 				<Card className="bg-background">

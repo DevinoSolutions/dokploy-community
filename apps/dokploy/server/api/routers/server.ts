@@ -39,7 +39,11 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
-import { assertContainerServiceReadable } from "@/server/api/utils/container-service-access";
+import {
+	assertContainerServiceReadable,
+	assertServerReachable,
+	filterReadableStats,
+} from "@/server/api/utils/container-service-access";
 import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
@@ -737,8 +741,9 @@ export const serverRouter = createTRPCRouter({
 				throw error;
 			}
 		}),
-	getContainerResourceStats: withPermission("monitoring", "read").query(
-		async () => {
+	getContainerResourceStats: withPermission("monitoring", "read")
+		.input(z.object({ serverId: z.string().optional() }).optional())
+		.query(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				throw new TRPCError({
 					code: "UNAUTHORIZED",
@@ -746,9 +751,22 @@ export const serverRouter = createTRPCRouter({
 				});
 			}
 
-			return await getAllContainerStats();
-		},
-	),
+			const serverId = input?.serverId;
+			await assertServerInOrganization(
+				serverId,
+				ctx.session.activeOrganizationId,
+			);
+			// a member also needs the server granted before anything runs on it
+			await assertServerReachable(ctx, serverId);
+			// `docker stats` lists every container on the host, which several
+			// organizations can share. Everybody gets the containers of services
+			// they can read on that server; the host's own containers (Dokploy,
+			// its database, Traefik, anything unlabelled) only an owner or admin.
+			const stats = await getAllContainerStats(serverId);
+			return await filterReadableStats(ctx, stats, serverId, {
+				strict: true,
+			});
+		}),
 	getContainerProcesses: withPermission("monitoring", "read")
 		.input(
 			z.object({

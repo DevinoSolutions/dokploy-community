@@ -8,6 +8,7 @@ import {
 	checkServiceAccess,
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
+	findServiceOrganizations,
 	hasPermission,
 	type PermissionCtx,
 } from "@dokploy/server/services/permission";
@@ -256,6 +257,142 @@ export const checkDockerObjectServices = async (
 	};
 };
 
+type ServiceRef = { serviceId: string; serverId: string | null };
+
+// `findServicesByAppName` for every appName of a list at once: one query per
+// service table, one for the previews and one per parent table, keyed by the
+// appName that found the service.
+const findServicesByAppNames = async (appNames: string[]) => {
+	const found = new Map<string, ServiceRef[]>();
+	if (appNames.length === 0) return found;
+	const add = (appName: string, service: ServiceRef) =>
+		found.set(appName, [...(found.get(appName) ?? []), service]);
+
+	const tables = await Promise.all(
+		SERVICE_TABLES.map(({ table, id }) =>
+			db
+				.select({
+					serviceId: id,
+					serverId: table.serverId,
+					appName: table.appName,
+				})
+				.from(table)
+				.where(inArray(table.appName, appNames)),
+		),
+	);
+	for (const rows of tables) {
+		for (const { appName, serviceId, serverId } of rows)
+			add(appName, { serviceId, serverId });
+	}
+
+	const previews = await db
+		.select({
+			appName: previewDeployments.appName,
+			applicationId: previewDeployments.applicationId,
+			composeId: previewDeployments.composeId,
+		})
+		.from(previewDeployments)
+		.where(inArray(previewDeployments.appName, appNames));
+	const applicationIds = [
+		...new Set(previews.flatMap((row) => row.applicationId ?? [])),
+	];
+	const composeIds = [
+		...new Set(previews.flatMap((row) => row.composeId ?? [])),
+	];
+	const [applicationParents, composeParents] = await Promise.all([
+		applicationIds.length > 0
+			? db
+					.select({
+						parentId: applications.applicationId,
+						serverId: applications.serverId,
+					})
+					.from(applications)
+					.where(inArray(applications.applicationId, applicationIds))
+			: [],
+		composeIds.length > 0
+			? db
+					.select({ parentId: compose.composeId, serverId: compose.serverId })
+					.from(compose)
+					.where(inArray(compose.composeId, composeIds))
+			: [],
+	]);
+	const parentServer = new Map<string, string | null>();
+	for (const { parentId, serverId } of [
+		...applicationParents,
+		...composeParents,
+	])
+		parentServer.set(parentId, serverId);
+	for (const { appName, applicationId, composeId } of previews) {
+		for (const parentId of [applicationId, composeId]) {
+			if (parentId && parentServer.has(parentId))
+				add(appName, {
+					serviceId: parentId,
+					serverId: parentServer.get(parentId) ?? null,
+				});
+		}
+	}
+	return found;
+};
+
+/**
+ * `checkDockerObjectServices` for a whole list, with the same answer for each
+ * object, at a cost that does not grow with the list: the services behind
+ * every appName are looked up together, the member and the `service.read`
+ * permission once, and the organizations of all the services in one query.
+ * The rest of the decision (`checkServiceAccess`: the role's `service.read`,
+ * the member allow-list, the organization scope) is made in memory.
+ */
+export const checkDockerObjectsServices = async (
+	ctx: PermissionCtx,
+	objects: Pick<DockerObject, "appNames">[],
+	serverId?: string,
+): Promise<ContainerServiceCheck[]> => {
+	const appNames = [...new Set(objects.flatMap((object) => object.appNames))];
+	const servicesByName = await findServicesByAppNames(appNames);
+	const servicesOf = (object: Pick<DockerObject, "appNames">) =>
+		object.appNames.flatMap((appName) => servicesByName.get(appName) ?? []);
+
+	const serviceIds = [
+		...new Set(
+			objects.flatMap((object) =>
+				servicesOf(object).map((service) => service.serviceId),
+			),
+		),
+	];
+	let readable: (serviceId: string) => boolean = () => false;
+	if (serviceIds.length > 0) {
+		try {
+			const organizationId = ctx.session.activeOrganizationId;
+			const member = await findMemberByUserId(ctx.user.id, organizationId);
+			const admin = member.role === "owner" || member.role === "admin";
+			const [canRead, organizations] = await Promise.all([
+				hasPermission(ctx, { service: ["read"] }),
+				findServiceOrganizations(serviceIds),
+			]);
+			readable = (serviceId) =>
+				canRead &&
+				(admin || member.accessedServices.includes(serviceId)) &&
+				organizations.get(serviceId) === organizationId;
+		} catch {
+			// no member: every service is refused
+		}
+	}
+
+	return objects.map((object): ContainerServiceCheck => {
+		const services = servicesOf(object);
+		if (services.length === 0) return { outcome: "unowned" };
+		for (const service of services) {
+			if ((service.serverId ?? undefined) !== serverId)
+				return { outcome: "refused" };
+			if (!readable(service.serviceId)) return { outcome: "refused" };
+		}
+		return {
+			outcome: "readable",
+			serviceIds: [...new Set(services.map((service) => service.serviceId))],
+		};
+	});
+};
+
 /**
  * Proves the caller may read the service a container belongs to, before
  * anything is run against the container (`docker top` prints the full argv of
@@ -463,22 +600,21 @@ export const filterReadableContainers = async <
 		}
 	}
 
-	const outcomes = new Map<string, Promise<ContainerServiceCheck>>();
-	const kept: T[] = [];
-	for (const container of listed) {
+	const rows = listed.flatMap((container) => {
 		const object = labelled.find((entry) =>
 			entry.id.startsWith(container.containerId),
 		);
-		if (!object) continue;
-		const key = [...object.appNames].sort().join("|");
-		let outcome = outcomes.get(key);
-		if (!outcome) {
-			outcome = checkDockerObjectServices(ctx, object, serverId);
-			outcomes.set(key, outcome);
-		}
-		if (rowVisible(await outcome, admin)) kept.push(container);
-	}
-	return kept;
+		return object ? [{ container, object }] : [];
+	});
+	const outcomes = await checkDockerObjectsServices(
+		ctx,
+		rows.map((row) => row.object),
+		serverId,
+	);
+	return rows.flatMap(({ container }, index) => {
+		const outcome = outcomes[index];
+		return outcome && rowVisible(outcome, admin) ? [container] : [];
+	});
 };
 
 /**
@@ -541,19 +677,24 @@ export const filterReadableServiceRows = async <T>(
 	return await filterReadableTasks(ctx, rows, serviceNameOf, serverId);
 };
 
-/** The same for `docker stats` rows, which carry the container id as `ID`. */
+/**
+ * The same for `docker stats` rows, which carry the container id as `ID`.
+ * `strict` checks owners and admins too (see `filterReadableContainers`).
+ */
 export const filterReadableStats = async <T extends { ID: string }>(
 	ctx: PermissionCtx,
 	rows: T[],
 	serverId?: string,
+	options: { strict?: boolean } = {},
 ): Promise<T[]> => {
-	if (await isOwnerOrAdmin(ctx)) return rows;
+	if (!options.strict && (await isOwnerOrAdmin(ctx))) return rows;
 	const readable = new Set(
 		(
 			await filterReadableContainers(
 				ctx,
 				rows.map((row) => ({ containerId: row.ID })),
 				serverId,
+				options,
 			)
 		).map((row) => row.containerId),
 	);
@@ -581,9 +722,7 @@ export const filterReadableEvents = async <T extends DockerEventLike>(
 ): Promise<T[]> => {
 	if (events.length === 0 || (await isOwnerOrAdmin(ctx))) return events;
 
-	const outcomes = new Map<string, Promise<ContainerServiceCheck>>();
-	const kept: T[] = [];
-	for (const event of events) {
+	const rows = events.flatMap((event) => {
 		const attributes = event.Actor?.Attributes ?? {};
 		let appNames: string[];
 		if (event.Type === "container") {
@@ -591,19 +730,15 @@ export const filterReadableEvents = async <T extends DockerEventLike>(
 		} else if (event.Type === "service") {
 			appNames = ownershipNames([attributes.name, ...labelValues(attributes)]);
 		} else {
-			continue;
+			return [];
 		}
-		if (appNames.length === 0) continue;
-
-		const key = [...appNames].sort().join("|");
-		let outcome = outcomes.get(key);
-		if (!outcome) {
-			outcome = checkDockerObjectServices(ctx, { id: "", appNames }, serverId);
-			outcomes.set(key, outcome);
-		}
-		if (rowVisible(await outcome, false)) kept.push(event);
-	}
-	return kept;
+		return appNames.length > 0 ? [{ event, appNames }] : [];
+	});
+	const outcomes = await checkDockerObjectsServices(ctx, rows, serverId);
+	return rows.flatMap(({ event }, index) => {
+		const outcome = outcomes[index];
+		return outcome && rowVisible(outcome, false) ? [event] : [];
+	});
 };
 
 /**
