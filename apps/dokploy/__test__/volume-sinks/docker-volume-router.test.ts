@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // The docker-volume router reads, writes, deletes and removes any volume of the
 // host by name, so it is owner/admin only (T-6822).
 const mocks = vi.hoisted(() => ({
+	// the organization that owns the instance
+	rootOrganization: "org-a",
 	getVolumes: vi.fn(),
 	getVolumesSize: vi.fn(),
 	listVolumeFiles: vi.fn(),
@@ -16,6 +18,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@dokploy/server", () => ({
+	IS_CLOUD: false,
+	isRootOrganization: async (organizationId: string) =>
+		organizationId === mocks.rootOrganization,
 	getVolumes: mocks.getVolumes,
 	getVolumesSize: mocks.getVolumesSize,
 	listVolumeFiles: mocks.listVolumeFiles,
@@ -68,6 +73,7 @@ const calls = (caller: ReturnType<typeof callerAs>) => ({
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	mocks.rootOrganization = "org-a";
 	mocks.getVolumes.mockResolvedValue([]);
 	mocks.getVolumesSize.mockResolvedValue([]);
 	mocks.listVolumeFiles.mockResolvedValue([]);
@@ -130,5 +136,83 @@ describe("dockerVolume router", () => {
 			callerAs("owner").getVolumes({ serverId: "server-b" }),
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 		expect(mocks.getVolumes).not.toHaveBeenCalled();
+	});
+});
+
+describe("the local host's volumes belong to the organization that owns the instance", () => {
+	const effects = () => [
+		mocks.getVolumes,
+		mocks.getVolumesSize,
+		mocks.listVolumeFiles,
+		mocks.readVolumeFile,
+		mocks.writeVolumeFile,
+		mocks.deleteVolumeFile,
+		mocks.getVolumeConfig,
+		mocks.removeVolume,
+	];
+
+	it.each(["owner", "admin"])(
+		"refuses every procedure to an %s of another organization",
+		async (role) => {
+			mocks.rootOrganization = "org-root";
+
+			for (const [name, call] of Object.entries(calls(callerAs(role)))) {
+				await expect(call(), name).rejects.toMatchObject({
+					code: "FORBIDDEN",
+				});
+			}
+			for (const mock of effects()) expect(mock).not.toHaveBeenCalled();
+			expect(mocks.audit).not.toHaveBeenCalled();
+		},
+	);
+
+	it("treats an empty serverId as the local host", async () => {
+		mocks.rootOrganization = "org-root";
+
+		await expect(
+			callerAs("admin").getVolumes({ serverId: "" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.getVolumes).not.toHaveBeenCalled();
+	});
+
+	it("lets the organization that owns the instance through", async () => {
+		for (const [name, call] of Object.entries(calls(callerAs("admin")))) {
+			await expect(call(), name).resolves.not.toThrow();
+		}
+		for (const mock of effects()) expect(mock).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves a remote server of the caller's organization alone", async () => {
+		mocks.rootOrganization = "org-root";
+		mocks.findServerById.mockResolvedValue({ organizationId: "org-a" });
+		const caller = callerAs("admin");
+
+		await caller.getVolumes({ serverId: "server-a" });
+		await caller.getVolumesSize({ serverId: "server-a" });
+		await caller.listVolumeFiles({
+			volumeName: "data",
+			path: "/",
+			serverId: "server-a",
+		});
+		await caller.readVolumeFile({
+			volumeName: "data",
+			path: "/x",
+			serverId: "server-a",
+		});
+		await caller.writeVolumeFile({
+			volumeName: "data",
+			path: "/x",
+			content: "y",
+			serverId: "server-a",
+		});
+		await caller.deleteVolumeFile({
+			volumeName: "data",
+			path: "/x",
+			serverId: "server-a",
+		});
+		await caller.getVolumeConfig({ volumeName: "data", serverId: "server-a" });
+		await caller.removeVolume({ volumeName: "data", serverId: "server-a" });
+
+		for (const mock of effects()) expect(mock).toHaveBeenCalledTimes(1);
 	});
 });
