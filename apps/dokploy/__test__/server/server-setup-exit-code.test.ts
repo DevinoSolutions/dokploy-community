@@ -1,5 +1,6 @@
 import {
 	createStepTracker,
+	ServerSetupError,
 	serverSetup,
 	setupExitError,
 } from "@dokploy/server/setup/server-setup";
@@ -9,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // `ssh.onExec`, so no shell or host is involved.
 const ssh = vi.hoisted(() => ({
 	clients: [] as any[],
+	execError: null as Error | null,
 	onExec: (_channel: any, _client: any) => {},
 }));
 
@@ -29,6 +31,10 @@ vi.mock("ssh2", async () => {
 		}
 		exec(command: string, callback: (err: Error | undefined, ch: any) => void) {
 			this.command = command;
+			if (ssh.execError) {
+				callback(ssh.execError, undefined);
+				return;
+			}
 			const channel = new FakeChannel();
 			callback(undefined, channel);
 			ssh.onExec(channel, this);
@@ -92,6 +98,7 @@ const runSetup = async () => {
 
 beforeEach(() => {
 	ssh.clients = [];
+	ssh.execError = null;
 	ssh.onExec = () => {};
 	deployment.createServerDeployment.mockClear();
 	deployment.updateDeploymentStatus.mockReset();
@@ -133,6 +140,7 @@ describe("serverSetup exit status", () => {
 
 		expect(outcome.ok).toBe(false);
 		if (outcome.ok) return;
+		expect(outcome.error).toBeInstanceOf(ServerSetupError);
 		expect(outcome.error.message).toBe(
 			'Setup failed at step "6. Setting up Network" (exit code 1)',
 		);
@@ -201,6 +209,54 @@ describe("serverSetup exit status", () => {
 			"SSH connection closed before setup finished",
 		);
 		expect(statuses()).toEqual(["error"]);
+	});
+
+	it("resolves when the connection closes after an exit status of 0", async () => {
+		// The channel never closes: the server dropped the connection right
+		// after it sent the exit status.
+		ssh.onExec = (channel, client) =>
+			queueMicrotask(() => {
+				channel.emit("exit", 0);
+				client.emit("close");
+			});
+
+		const { logs, outcome } = await runSetup();
+
+		expect(outcome.ok).toBe(true);
+		expect(statuses()).toEqual(["done"]);
+		expect(logs.at(-1)).toBe("\nSetup Server: ✅\n");
+	});
+
+	it("rejects with the step when the connection closes after a non-zero exit status", async () => {
+		ssh.onExec = (channel, client) =>
+			queueMicrotask(() => {
+				channel.emit("data", Buffer.from("8. Setting up Traefik\n"));
+				channel.emit("exit", 1);
+				client.emit("close");
+			});
+
+		const { outcome } = await runSetup();
+
+		expect(outcome.ok).toBe(false);
+		if (outcome.ok) return;
+		expect(outcome.error.message).toBe(
+			'Setup failed at step "8. Setting up Traefik" (exit code 1)',
+		);
+	});
+
+	it("ends the connection and fails when the command cannot be started", async () => {
+		ssh.execError = new Error("Channel open failure");
+
+		const { logs, outcome } = await runSetup();
+
+		expect(outcome.ok).toBe(false);
+		if (outcome.ok) return;
+		expect(outcome.error).toBeInstanceOf(ServerSetupError);
+		expect(outcome.error.message).toBe("Channel open failure");
+		expect(outcome.error.cause).toBe(ssh.execError);
+		expect(ssh.clients[0].ended).toBe(true);
+		expect(statuses()).toEqual(["error"]);
+		expect(logs.at(-1)).toBe("\nSetup Server: ❌ Channel open failure\n");
 	});
 
 	it("still rethrows the setup failure when marking the deployment fails", async () => {

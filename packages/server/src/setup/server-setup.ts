@@ -162,6 +162,19 @@ export const createStepTracker = () => {
 };
 
 /**
+ * A setup that failed on the server: the script exited non-zero, the
+ * connection failed or dropped, or the server has no SSH key. The server's own
+ * state is the cause, not a Dokploy bug, so callers report it to the user
+ * rather than as an internal error.
+ */
+export class ServerSetupError extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = "ServerSetupError";
+	}
+}
+
+/**
  * The error for a setup script that did not exit with status 0. ssh2 passes a
  * null code when the command was killed by a signal or the channel closed
  * without an exit status (the connection dropped); both are failures.
@@ -173,12 +186,12 @@ export const setupExitError = (
 ) => {
 	const at = lastStep ? ` at step "${lastStep}"` : "";
 	if (signal) {
-		return new Error(`Setup was killed by signal ${signal}${at}`);
+		return new ServerSetupError(`Setup was killed by signal ${signal}${at}`);
 	}
 	if (code === null || code === undefined) {
-		return new Error(`Setup ended without an exit status${at}`);
+		return new ServerSetupError(`Setup ended without an exit status${at}`);
 	}
-	return new Error(`Setup failed${at} (exit code ${code})`);
+	return new ServerSetupError(`Setup failed${at} (exit code ${code})`);
 };
 
 export const reportDockerVersion = () => `
@@ -369,22 +382,26 @@ const installRequirements = async (
 	const server = await findServerById(serverId);
 	if (!server.sshKeyId) {
 		onData?.("❌ No SSH Key found, please assign one to this server");
-		throw new Error("No SSH Key found");
+		throw new ServerSetupError("No SSH Key found");
 	}
 
 	const isBuildServer = server.serverType === "build";
 
 	return new Promise<void>((resolve, reject) => {
+		const steps = createStepTracker();
+		// The exit status arrives before the channel closes, and is kept in case
+		// the connection closes before the channel does.
+		let exit: { code: number | null; signal?: string | null } | undefined;
 		client
 			.once("ready", () => {
 				const command = server.command || defaultCommand(isBuildServer);
 				client.exec(command, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
-						reject(err);
+						client.end();
+						reject(new ServerSetupError(err.message, { cause: err }));
 						return;
 					}
-					const steps = createStepTracker();
 					stream
 						// The script runs under `set -e`, so a failing step ends it with a
 						// non-zero status and skips every step after it.
@@ -396,13 +413,17 @@ const installRequirements = async (
 							}
 							reject(setupExitError(code, signal, steps.lastStep));
 						})
+						.on("exit", (code: number | null, signal?: string | null) => {
+							exit = { code, signal };
+						})
 						.on("error", (error: Error) => {
 							client.end();
 							reject(
-								new Error(
+								new ServerSetupError(
 									`Setup output stream failed${
 										steps.lastStep ? ` at step "${steps.lastStep}"` : ""
 									}: ${error.message}`,
+									{ cause: error },
 								),
 							);
 						})
@@ -434,8 +455,9 @@ const installRequirements = async (
 					].join("\n");
 					onData?.(friendlyMessage);
 					reject(
-						new Error(
+						new ServerSetupError(
 							`Authentication failed: Invalid SSH private key. ${technicalDetail}`,
+							{ cause: err },
 						),
 					);
 				} else {
@@ -454,13 +476,27 @@ const installRequirements = async (
 						"  • Make sure the SSH port (usually 22) is open and the SSH service is running on the server.",
 					].join("\n");
 					onData?.(friendlyMessage);
-					reject(new Error(`SSH connection error: ${technicalDetail}`));
+					reject(
+						new ServerSetupError(`SSH connection error: ${technicalDetail}`, {
+							cause: err,
+						}),
+					);
 				}
 			})
-			// A no-op once the script has settled; otherwise the connection went
-			// away before the script reported how it ended.
+			// A no-op once the script has settled. Otherwise the connection went
+			// away before the channel closed: the exit status, if it came, decides.
 			.on("close", () => {
-				reject(new Error("SSH connection closed before setup finished"));
+				if (exit) {
+					if (exit.code === 0 && !exit.signal) {
+						resolve();
+					} else {
+						reject(setupExitError(exit.code, exit.signal, steps.lastStep));
+					}
+					return;
+				}
+				reject(
+					new ServerSetupError("SSH connection closed before setup finished"),
+				);
 			})
 			.connect({
 				host: server.ipAddress,
