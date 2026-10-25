@@ -7,6 +7,7 @@ import {
 	composeRollingReplaceSchema,
 } from "@dokploy/server/db/validations/compose-rolling";
 import { deployPriorityInput } from "@dokploy/server/db/validations/deploy-priority";
+import { composePathSchema } from "@dokploy/server/utils/compose-path";
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import {
 	isValidPreviewWildcard,
@@ -296,7 +297,8 @@ const createSchema = createInsertSchema(compose, {
 	buildRegistryId: z.string().nullable().optional(),
 	command: z.string().optional(),
 	createEnvFile: z.boolean().optional(),
-	composePath: z.string().min(1),
+	// See utils/compose-path (T-8238).
+	composePath: composePathSchema,
 	composeType: z.enum(["docker-compose", "stack"]).optional(),
 	watchPaths: z.array(z.string()).optional(),
 	// build-policy hook: array column, needs the same explicit zod shape.
@@ -378,7 +380,7 @@ export const apiRedeployCompose = z.object({
 
 export const apiDeleteCompose = z.object({
 	composeId: z.string().min(1),
-	deleteVolumes: z.boolean(),
+	deleteVolumes: z.boolean().default(false),
 });
 
 export const apiFetchServices = z.object({

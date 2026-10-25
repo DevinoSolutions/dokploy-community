@@ -104,6 +104,18 @@ describe("getTraefikOverview", () => {
 		expect(overview.startedAt).toBeNull();
 	});
 
+	it.each([
+		["traefik:v3.6.25", "outdated"],
+		["traefik:v3.7.16", "up-to-date"],
+	])("a host on %s is %s with the 3.7.16 pin", async (image, status) => {
+		mockOutput(mocks.execAsync, `${image}|running|${startedAt}`);
+
+		const overview = await getTraefikOverview();
+
+		expect(overview.recommendedVersion).toBe("3.7.16");
+		expect(overview.versionStatus).toBe(status);
+	});
+
 	it("reports newer and never asks for a downgrade", async () => {
 		mockOutput(mocks.execAsync, "traefik:v99.0.0|running|");
 

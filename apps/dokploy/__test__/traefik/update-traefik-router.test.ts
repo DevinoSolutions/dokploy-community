@@ -50,7 +50,7 @@ const overview = (versionStatus: string) => ({
 	startedAt: "2026-10-23T03:00:00Z",
 	image: "traefik:v3.5.4",
 	currentVersion: "3.5.4",
-	recommendedVersion: "3.6.25",
+	recommendedVersion: "3.7.16",
 	versionStatus,
 });
 
@@ -140,7 +140,7 @@ describe("Traefik update endpoints", () => {
 				{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
 			],
 			serverId: "server-a",
-			image: "traefik:v3.6.25",
+			image: "traefik:v3.7.16",
 		});
 		expect(mocks.pullTraefikImage.mock.invocationCallOrder[0]).toBeLessThan(
 			mocks.writeTraefikSetup.mock.invocationCallOrder[0]!,

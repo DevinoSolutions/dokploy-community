@@ -291,7 +291,7 @@ Effort: small. A possible add-on to (a) rather than an answer by itself.
 
 - Traefik retry middleware on the domain's router (`retry.attempts`,
   `initialinterval`, `timeout`, and a `status` list in recent Traefik; the pin
-  is `TRAEFIK_VERSION` 3.6.25 in `traefik-setup.ts:24`, so confirm the
+  is `TRAEFIK_VERSION` 3.7.16 in `traefik-setup.ts:31`, so confirm the
   `status` option exists in that version before relying on it). It covers
   connection errors and sub-second to a few-second blips. It cannot cover a
   135 s gap, and it does not retry non-idempotent methods by default. Useful

@@ -78,6 +78,11 @@ import {
 	fetchTemplateLogo,
 	fetchTemplatesList,
 } from "@dokploy/server/templates/github";
+import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
+import {
+	assertGitUrlSaveable,
+	GitUrlRefusedError,
+} from "@dokploy/server/utils/providers/git-url";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -88,6 +93,13 @@ import { parse } from "toml";
 import { stringify } from "yaml";
 import { z } from "zod";
 import { slugify } from "@/lib/slug";
+import {
+	assertSafeTemplateGitUrl,
+	buildGuardedTemplateReadCommand,
+	getTemplateReadRefusal,
+	TEMPLATE_CLONE_ENV,
+	TemplateFileRefusedError,
+} from "@/server/utils/template-file-read";
 import {
 	apiCreateCompose,
 	apiDeleteCompose,
@@ -121,6 +133,7 @@ import { generatePassword } from "@/templates/utils";
 import { createTRPCRouter, protectedProcedure } from "../trpc";
 import { audit } from "../utils/audit";
 import { auditCancel } from "../utils/cancel-audit";
+import { withComposeFetchLock } from "../utils/compose-fetch-lock";
 import {
 	readComposePolicyExclusion,
 	writeComposePolicyExclusion,
@@ -284,6 +297,15 @@ export const composeRouter = createTRPCRouter({
 				() => findComposeById(input.composeId),
 				ctx.session,
 			);
+
+			// A URL that is not a remote repository is refused when it is set or
+			// changed; a row that already holds one can still be saved (T-8420).
+			if (typeof input.customGitUrl === "string") {
+				assertGitUrlSaveable(
+					input.customGitUrl,
+					(await findComposeById(input.composeId)).customGitUrl,
+				);
+			}
 
 			// Build server: the caller must be allowed to use the server (same check
 			// as applications), and the settings as a whole must be valid. Checked
@@ -700,23 +722,44 @@ export const composeRouter = createTRPCRouter({
 			await auditKill(rolling.deploymentIds);
 		}),
 
+	// `cache` reads the compose file on disk. `fetch` clones the source over the
+	// code dir a deploy reads first, so it needs what a deploy needs and runs
+	// under the compose's deploy lock (see compose-fetch-lock.ts).
 	loadServices: protectedProcedure
 		.input(apiFetchServices)
 		.query(async ({ input, ctx }) => {
+			if (input.type !== "fetch") {
+				await checkServicePermissionAndAccess(ctx, input.composeId, {
+					service: ["read"],
+				});
+				return await loadServices(input.composeId, "cache");
+			}
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
-				service: ["read"],
+				deployment: ["create"],
 			});
-			return await loadServices(input.composeId, input.type);
+			const compose = await findComposeById(input.composeId);
+			return await withComposeFetchLock(compose, () =>
+				loadServices(input.composeId, "fetch"),
+			);
 		}),
 	rollingEligibility: protectedProcedure
 		.input(apiFetchServices)
 		.query(async ({ input, ctx }) => {
+			if (input.type !== "fetch") {
+				await checkServicePermissionAndAccess(ctx, input.composeId, {
+					service: ["read"],
+				});
+				return await getComposeRollingReport(input.composeId, {
+					type: "cache",
+				});
+			}
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
-				service: ["read"],
+				deployment: ["create"],
 			});
-			return await getComposeRollingReport(input.composeId, {
-				type: input.type,
-			});
+			const compose = await findComposeById(input.composeId);
+			return await withComposeFetchLock(compose, () =>
+				getComposeRollingReport(input.composeId, { type: "fetch" }),
+			);
 		}),
 	loadMountsByService: protectedProcedure
 		.input(
@@ -740,21 +783,33 @@ export const composeRouter = createTRPCRouter({
 		.input(apiFindCompose)
 		.mutation(async ({ input, ctx }) => {
 			try {
+				// A clone over the code dir, like the Fetch of loadServices.
 				await checkServicePermissionAndAccess(ctx, input.composeId, {
 					service: ["create"],
+					deployment: ["create"],
 				});
 				const compose = await findComposeById(input.composeId);
 
-				const command = await cloneCompose(compose);
-				if (compose.serverId) {
-					await execAsyncRemote(compose.serverId, command);
-				} else {
-					await execAsync(command);
-				}
+				await withComposeFetchLock(compose, async () => {
+					const command = await cloneCompose(compose);
+					if (compose.serverId) {
+						await execAsyncRemote(compose.serverId, command);
+					} else {
+						await execAsync(command);
+					}
+				});
 				return compose.sourceType;
 			} catch (err) {
-				if (err instanceof TRPCError && err.code === "FORBIDDEN") {
+				if (
+					err instanceof TRPCError &&
+					(err.code === "FORBIDDEN" ||
+						err.code === "UNAUTHORIZED" ||
+						err.code === "CONFLICT")
+				) {
 					throw err;
+				}
+				if (err instanceof GitUrlRefusedError) {
+					throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
 				}
 				throw new TRPCError({
 					code: "BAD_REQUEST",
@@ -783,14 +838,15 @@ export const composeRouter = createTRPCRouter({
 	isolatedDeployment: protectedProcedure
 		.input(apiRandomizeCompose)
 		.mutation(async ({ input, ctx }) => {
+			// The preview clones the source over the code dir first, like a Fetch.
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
+				deployment: ["create"],
 			});
-			const result = await randomizeIsolatedDeploymentComposeFile(
-				input.composeId,
-				input.suffix,
-			);
 			const compose = await findComposeById(input.composeId);
+			const result = await withComposeFetchLock(compose, () =>
+				randomizeIsolatedDeploymentComposeFile(input.composeId, input.suffix),
+			);
 			await audit(ctx, {
 				action: "update",
 				resourceType: "compose",
@@ -1088,6 +1144,8 @@ export const composeRouter = createTRPCRouter({
 
 			// A stored provider or SSH key of another organization must not be used to clone.
 			await assertDeployReferencesInOrganization(compose, "source");
+			// The template is read next to the compose file.
+			assertSafeComposePath(compose.composePath || "./docker-compose.yml");
 
 			const tempAppName = `${compose.appName}-temp-template-${nanoid()}`;
 
@@ -1097,7 +1155,21 @@ export const composeRouter = createTRPCRouter({
 				type: "compose" as const,
 			};
 
-			let command = "set -e;";
+			// The clone is of a repository that is not trusted: only remote URLs, and
+			// owner-only files (T-8413).
+			if (compose.sourceType === "git") {
+				try {
+					assertSafeTemplateGitUrl(compose.customGitUrl);
+				} catch (error) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message:
+							error instanceof Error ? error.message : "Invalid repository URL",
+					});
+				}
+			}
+
+			let command = `set -e;${TEMPLATE_CLONE_ENV}`;
 			if (compose.sourceType === "github") {
 				command += await cloneGithubRepository(entity);
 			} else if (compose.sourceType === "gitlab") {
@@ -1113,9 +1185,13 @@ export const composeRouter = createTRPCRouter({
 			const { COMPOSE_PATH } = paths(!!compose.serverId);
 			const tempPath = join(COMPOSE_PATH, tempAppName, "code");
 			const composeDir = dirname(compose.composePath || "./docker-compose.yml");
-			const templatePath = join(tempPath, composeDir, "template.toml");
 
-			const readCommand = quote(["cat", templatePath]);
+			// A file of the repository is read only when it is a regular file reached
+			// without a symbolic link (T-8413).
+			const readCommand = buildGuardedTemplateReadCommand(
+				tempPath,
+				join(composeDir, "template.toml"),
+			);
 			const cleanCommand = quote([
 				"rm",
 				"-rf",
@@ -1142,6 +1218,10 @@ export const composeRouter = createTRPCRouter({
 						templateContent = stdout;
 					}
 				} catch (e) {
+					const refusal = getTemplateReadRefusal(e);
+					if (refusal) {
+						throw refusal;
+					}
 					if (compose.serverId) {
 						await execAsyncRemote(compose.serverId, cleanCommand);
 					} else {
@@ -1197,6 +1277,13 @@ export const composeRouter = createTRPCRouter({
 						await execAsync(cleanCommand);
 					}
 				} catch {}
+
+				if (error instanceof TemplateFileRefusedError) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: error.message,
+					});
+				}
 
 				throw new TRPCError({
 					code: "INTERNAL_SERVER_ERROR",

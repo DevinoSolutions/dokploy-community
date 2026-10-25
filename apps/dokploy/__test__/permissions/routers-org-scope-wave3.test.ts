@@ -45,6 +45,18 @@ vi.mock("@dokploy/server/services/server", async (importOriginal) => {
 	};
 });
 
+// which container names a caller may ask the metrics agent about is covered by
+// container-metrics-authz.test.ts; here every name is one of the caller's
+vi.mock(
+	"@/server/api/utils/container-service-access",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("@/server/api/utils/container-service-access")
+		>()),
+		resolveMetricsTarget: vi.fn(async () => () => true),
+	}),
+);
+
 vi.mock("@dokploy/server/services/ai", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("@dokploy/server/services/ai")>();
@@ -184,7 +196,7 @@ beforeEach(() => {
 		ok: true,
 		status: 200,
 		statusText: "OK",
-		json: async () => [{ cpu: "1", timestamp: "now" }],
+		json: async () => [{ cpu: "1", timestamp: "now", Name: "app.1.abc" }],
 	});
 	vi.stubGlobal("fetch", fetchMock);
 });

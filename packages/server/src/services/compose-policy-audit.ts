@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { posix } from "node:path";
 import { IS_CLOUD, paths } from "@dokploy/server/constants";
@@ -10,6 +11,13 @@ import {
 	projects,
 } from "@dokploy/server/db/schema";
 import type { ComposeNested } from "@dokploy/server/utils/builders/compose";
+import {
+	getComposeCodeDirectory,
+	getComposeFileLinkError,
+	getComposeFilesDirectory,
+	getGuardedReadCommand,
+	isComposeFileLinkMarker,
+} from "@dokploy/server/utils/compose-file-guard";
 import {
 	COMPOSE_POLICY_MAX_BYTES,
 	COMPOSE_POLICY_RETENTION_DAYS,
@@ -187,18 +195,45 @@ export const setComposePolicyExclusion = async (
  * compose lives on, so a larger file is seen as too large without being read
  * whole. `null` when there is nothing to read.
  */
-const readCapped = async (serverId: string | null, path: string) => {
+const readCapped = async (
+	serverId: string | null,
+	path: string,
+	// Set for the compose file and the override files: a file is not read when
+	// it leads out of the checkout (T-7857, T-8413). The override files may also
+	// come from the files directory of the compose (extraDirectory).
+	codeDirectory?: string,
+	extraDirectory?: string,
+) => {
 	const limit = COMPOSE_POLICY_MAX_BYTES + 1;
 	try {
 		if (serverId) {
+			// Only a regular file is read: a FIFO or a device would block or stream.
+			const read = `[ -f ${quote([path])} ] && head -c ${limit} ${quote([path])}`;
 			const { stdout } = await execAsyncRemote(
 				serverId,
-				`head -c ${limit} ${quote([path])}`,
+				codeDirectory
+					? getGuardedReadCommand({
+							codeDirectory,
+							extraDirectory,
+							file: path,
+							read,
+						})
+					: read,
 			);
-			return stdout;
+			return isComposeFileLinkMarker(stdout) ? null : stdout;
 		}
-		const handle = await open(path, "r");
+		if (
+			codeDirectory &&
+			getComposeFileLinkError(codeDirectory, path, extraDirectory)
+		) {
+			return null;
+		}
+		const handle = await open(
+			path,
+			constants.O_RDONLY | (constants.O_NONBLOCK ?? 0),
+		);
 		try {
+			if (!(await handle.stat()).isFile()) return null;
 			const buffer = Buffer.alloc(limit);
 			const { bytesRead } = await handle.read(buffer, 0, limit, 0);
 			return buffer.toString("utf8", 0, bytesRead);
@@ -214,13 +249,19 @@ const readCapped = async (serverId: string | null, path: string) => {
 const readComposeText = (entity: AuditEntity) =>
 	entity.sourceType === "raw"
 		? Promise.resolve(entity.composeFile ?? "")
-		: readCapped(entity.serverId, getComposePath(entity));
+		: readCapped(
+				entity.serverId,
+				getComposePath(entity),
+				getComposeCodeDirectory(entity),
+			);
 
 /**
  * The `-f` override files of a custom command, read with the same cap. The
  * command is parsed by the existing volume guard (which refuses the deploy of
  * a command it cannot understand); a refusal, or a file that cannot be read,
- * just means nothing to evaluate here.
+ * just means nothing to evaluate here. A file that is, or goes through, a link
+ * out of the checkout is not read either (T-8413): its text could reach the
+ * findings and the deployment log.
  */
 const readOverrideTexts = async (entity: AuditEntity) => {
 	if (!entity.command) return [];
@@ -231,8 +272,15 @@ const readOverrideTexts = async (entity: AuditEntity) => {
 		return [];
 	}
 	const texts: string[] = [];
+	const codeDirectory = getComposeCodeDirectory(entity);
+	const filesDirectory = getComposeFilesDirectory(entity);
 	for (const file of files) {
-		const text = await readCapped(entity.serverId, file);
+		const text = await readCapped(
+			entity.serverId,
+			file,
+			codeDirectory,
+			filesDirectory,
+		);
 		if (text !== null) texts.push(text);
 	}
 	return texts;

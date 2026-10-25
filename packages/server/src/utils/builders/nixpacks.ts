@@ -3,7 +3,10 @@ import { getStaticCommand } from "@dokploy/server/utils/builders/static";
 import { nanoid } from "nanoid";
 import { quote } from "shell-quote";
 import { prepareEnvironmentVariables } from "../docker/utils";
-import { getBuildAppDirectory } from "../filesystem/directory";
+import {
+	getBuildAppDirectory,
+	getPublishDirectoryPath,
+} from "../filesystem/directory";
 import type { ApplicationNested } from ".";
 import {
 	type BuildStageOptions,
@@ -20,6 +23,7 @@ export const getNixpacksCommand = async (
 	const { env, appName, publishDirectory, cleanCache } = application;
 
 	const buildAppDirectory = getBuildAppDirectory(application);
+	const localPath = getPublishDirectoryPath(application);
 	const buildContainerId = `${appName}-${nanoid(10)}`;
 	const envVariables = prepareEnvironmentVariables(
 		env,
@@ -27,7 +31,14 @@ export const getNixpacksCommand = async (
 		application.environment.env,
 	);
 
-	const args = ["build", buildAppDirectory, "--name", appName];
+	// The build directory comes from the application's build path: it is
+	// passed as a single argument.
+	const args = [
+		"build",
+		quote([buildAppDirectory]),
+		"--name",
+		quote([appName]),
+	];
 
 	if (cleanCache) {
 		args.push("--no-cache");
@@ -78,8 +89,7 @@ export const getNixpacksCommand = async (
 		and copy the artifacts on the host filesystem.
 		Then, remove the container and create a static build.
 	 */
-	if (publishDirectory) {
-		const localPath = path.join(buildAppDirectory, publishDirectory);
+	if (publishDirectory && localPath) {
 		const isDirectory =
 			publishDirectory.endsWith("/") || !path.extname(publishDirectory);
 

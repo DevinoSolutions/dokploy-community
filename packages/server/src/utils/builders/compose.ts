@@ -3,6 +3,12 @@ import { paths } from "@dokploy/server/constants";
 import type { InferResultType } from "@dokploy/server/types/with";
 import boxen from "boxen";
 import { quote } from "shell-quote";
+import {
+	ATOMIC_PUT_FUNCTION,
+	COMPOSE_FILE_LINK_MESSAGE,
+	getComposeCodeDirectory,
+	getRestoreWriteCheckCommand,
+} from "../compose-file-guard";
 import { addDomainToCompose, writeDomainsToCompose } from "../docker/domain";
 import {
 	ENV_VARIABLE_NAME,
@@ -23,6 +29,7 @@ import {
 	prepareEnvironmentVariables,
 	prepareEnvironmentVariablesForFile,
 } from "../docker/utils";
+import { getPathResolverLines } from "../path-containment";
 import { withResolvedVaultRefs } from "../vault";
 import {
 	DOCKER_EVENTS_FLUSH_COMMAND,
@@ -154,6 +161,10 @@ export const LAST_GOOD_OVERRIDE_BAK = `last-good-${COMPOSE_BUILD_OVERRIDE_FILE}.
  * Every interpolated path goes through shell-quote: `composePath` and `appName`
  * are user-controlled fields.
  */
+const SNAPSHOT_UNCHECKED_NOTICE = quote([
+	"Warning: ⚠️ This host has neither realpath -m nor readlink -f, so the files of the previous release cannot be checked; the previous snapshot is kept.",
+]);
+
 export const getBackupCurrentDeploymentCommand = (compose: ComposePathLike) => {
 	const backupDir = getComposeBackupDir(compose);
 	const qBackupDir = quote([backupDir]);
@@ -172,10 +183,19 @@ export const getBackupCurrentDeploymentCommand = (compose: ComposePathLike) => {
 `;
 	}
 
+	// A file that leads out of the checkout (a link in the previous release,
+	// T-7857) is not part of the release and is not copied: a restore would put
+	// its content back into the compose. On a host that cannot resolve links
+	// nothing can be checked: the snapshot is skipped and the previous one kept.
+	const qCodeDirectory = quote([getComposeCodeDirectory(compose)]);
+	const snapshot = (file: string, bak: string, label: string) =>
+		`if [ -f ${file} ]; then if __dokploy_inside ${qCodeDirectory} ${file}; then cp ${file} ${bak} || exit 1; elif [ "$__dokploy_no_resolve" = "1" ]; then echo ${SNAPSHOT_UNCHECKED_NOTICE}; else echo "No previous ${label} found"; rm -f ${bak}; fi; else echo "No previous ${label} found"; rm -f ${bak}; fi`;
 	return `
+__dokploy_no_resolve=0
+${getPathResolverLines("__dokploy_no_resolve=1; __dokploy_resolve() { return 1; }").join("\n")}
 mkdir -p ${qBackupDir} 2>/dev/null || exit 1;
-if [ -f ${qComposeFile} ]; then cp ${qComposeFile} ${qComposeBak} || exit 1; else echo "No previous compose file found"; rm -f ${qComposeBak}; fi
-if [ -f ${qEnvFile} ]; then cp ${qEnvFile} ${qEnvBak} || exit 1; else echo "No previous env file found"; rm -f ${qEnvBak}; fi
+${snapshot(qComposeFile, qComposeBak, "compose file")}
+${snapshot(qEnvFile, qEnvBak, "env file")}
 ${overrideSnapshot}	`;
 };
 
@@ -318,13 +338,33 @@ const getRestoreCommands = (
 	// A `.env` that is a symlink (the repository can bring one, pointing at
 	// another compose's `.env`, when "Create env file" is off) is removed before
 	// the restore writes it, so the copy never goes through the link (T-7135).
+	// The compose file likewise (T-7857), and neither is written when the
+	// directory they are in leads out of the checkout.
+	const restoreWriteCheck = getRestoreWriteCheckCommand({
+		codeDirectory: getComposeCodeDirectory(compose),
+		file: getComposeFilePath(compose),
+	});
+	const qLinkNotice = quote([`Warning: ⚠️ ${COMPOSE_FILE_LINK_MESSAGE}`]);
+	// Written as a renamed temporary file, never in place (see __dokploy_put).
+	const qCodeDirectory = quote([getComposeCodeDirectory(compose)]);
+	const put = (source: string, destination: string) =>
+		`__dokploy_put ${source} ${destination} ${qCodeDirectory}`;
 	return `
 		echo "Restoring previous working deployment... ⏪";
+		${ATOMIC_PUT_FUNCTION}
+		${restoreWriteCheck}
 		RESTORE_FILES_OK=1;
-		cp ${qLastGoodCompose} ${qComposeFile} 2>/dev/null || cp ${qPreCompose} ${qComposeFile} 2>/dev/null || RESTORE_FILES_OK=0;
+		if [ "$__dokploy_write_ok" = "1" ]; then
+			${put(qLastGoodCompose, qComposeFile)} 2>/dev/null || ${put(qPreCompose, qComposeFile)} 2>/dev/null || RESTORE_FILES_OK=0;
+		else
+			RESTORE_FILES_OK=0; echo ${qLinkNotice};
+		fi
 		RESTORE_ENV_OK=1;
-		if [ -L ${qEnvFile} ]; then rm -f ${qEnvFile}; fi;
-		cp ${qLastGoodEnv} ${qEnvFile} 2>/dev/null || cp ${qPreEnv} ${qEnvFile} 2>/dev/null || RESTORE_ENV_OK=0;${overrideRestore}
+		if [ "$__dokploy_write_ok" = "1" ]; then
+			${put(qLastGoodEnv, qEnvFile)} 2>/dev/null || ${put(qPreEnv, qEnvFile)} 2>/dev/null || RESTORE_ENV_OK=0;
+		else
+			RESTORE_ENV_OK=0;
+		fi;${overrideRestore}
 		if [ "$RESTORE_ENV_OK" = "0" ] && { [ "${isEnvRequired}" = "1" ] || [ -f ${qLastGoodEnv} ] || [ -f ${qPreEnv} ]; }; then RESTORE_FILES_OK=0; echo "Warning: ⚠️ Previous .env could not be restored"; fi
 		if [ "$RESTORE_FILES_OK" = "1" ]; then
 			${upRestore}
@@ -636,8 +676,13 @@ Compose Type: ${composeType} ✅${rollingLogLine}`;
 			overrideSnapshot = ` && { { [ -f ${qOverrideFile} ] && cp ${qOverrideFile} ${qLastGoodOverride}; } || rm -f ${qLastGoodOverride}; }`;
 			overrideCleanup = ` ${qLastGoodOverride}`;
 		}
+		// The `.env` is copied only when it resolves inside the checkout (T-7857);
+		// on a host that cannot resolve links the previous copy is left alone.
+		const qCodeDirectory = quote([getComposeCodeDirectory(compose)]);
 		persistLastGood = `
-		{ mkdir -p ${qBackupDir} && cp ${qComposeFile} ${qLastGoodCompose} && { { [ -f ${qEnvFile} ] && cp ${qEnvFile} ${qLastGoodEnv}; } || rm -f ${qLastGoodEnv}; }${overrideSnapshot}; } 2>/dev/null || { rm -f ${qLastGoodCompose} ${qLastGoodEnv}${overrideCleanup} 2>/dev/null; echo "Warning: ⚠️ Could not refresh the last-good snapshot"; true; }
+		__dokploy_no_resolve=0
+		${getPathResolverLines("__dokploy_no_resolve=1; __dokploy_resolve() { return 1; }").join("\n")}
+		{ mkdir -p ${qBackupDir} && cp ${qComposeFile} ${qLastGoodCompose} && { { [ -f ${qEnvFile} ] && __dokploy_inside ${qCodeDirectory} ${qEnvFile} && cp ${qEnvFile} ${qLastGoodEnv}; } || [ "$__dokploy_no_resolve" = "1" ] || rm -f ${qLastGoodEnv}; }${overrideSnapshot}; } 2>/dev/null || { rm -f ${qLastGoodCompose} ${qLastGoodEnv}${overrideCleanup} 2>/dev/null; echo "Warning: ⚠️ Could not refresh the last-good snapshot"; true; }
 		`;
 	}
 
@@ -990,18 +1035,19 @@ export const getCreateEnvFileCommand = async (
 	});
 	options.onStaged?.([stagedPath]);
 
-	// `touch` + `cat >` keeps the mode and owner of an existing `.env`. A `.env`
+	// The new `.env` takes the mode and owner of the one it replaces. A `.env`
 	// that is a symlink (the repository can bring one, pointing at another
-	// compose's `.env`) is removed first, so the write makes a regular file
-	// instead of going through the link (T-7135).
-	const qEnvFilePath = quote([envFilePath]);
+	// compose's `.env`) is replaced by a regular file, never written through
+	// (T-7135, T-7857).
 	return `
 ${getInstallStagedFileCommand({
 	staged: stagedPath,
 	destination: envFilePath,
 	failureMessage: "❌ Error: Could not write the environment file",
 	alsoRemove: options.alsoRemove,
-	prepare: `if [ -L ${qEnvFilePath} ]; then rm -f ${qEnvFilePath}; fi && touch ${qEnvFilePath}`,
+	// Replaced by a renamed temporary file, in the directory of the compose
+	// file and only when that is inside the checkout (T-7857).
+	atomicIn: getComposeCodeDirectory(compose),
 })}
 	`;
 };

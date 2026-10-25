@@ -3,6 +3,7 @@ import { paths } from "@dokploy/server/constants";
 import { quote } from "shell-quote";
 import {
 	buildEnvFileContent,
+	ENV_VARIABLE_NAME,
 	getEnvFileLoader,
 	isEnvFileName,
 } from "../docker/env-file";
@@ -72,6 +73,19 @@ export const splitEnvironmentPair = (pair: string): [string, string] => {
 };
 
 /**
+ * Refuses a build secret whose name no shell variable can have (letters,
+ * digits and `_`, not starting with a digit): the deploy fails and names the
+ * secret, never its value (T-8282).
+ */
+export const assertBuildSecretName = (key: string) => {
+	if (!ENV_VARIABLE_NAME.test(key)) {
+		throw new Error(
+			`Build refused: the build secret name ${JSON.stringify(key)} is not valid. A name holds only letters, numbers and _ and does not start with a number. Rename it in the application's environment settings and deploy again.`,
+		);
+	}
+};
+
+/**
  * Whether a build variable can travel in the staged env file, to be passed to
  * the build tool by name (`--env KEY`, `--build-arg KEY`). An empty value has
  * nothing to hide, and a name that would change how the tool itself runs, or
@@ -117,16 +131,19 @@ export const getBuildEnvFile = (
  * and stages the file. `passByName` is for the stageable ones: the build tool
  * gets `--env KEY` (or `--build-arg KEY`) and reads the value from its
  * environment. `inline` keeps the form `KEY=value`, already shell-quoted.
+ * `fileOnly` entries go in the file with no flag (the build secrets that
+ * travel under an internal name, see `getBuildSecretAlias`).
  */
 export const stageBuildVariables = async (
 	appName: string,
 	variables: string[],
 	options: BuildStageOptions = {},
 	envFileOptions?: { singleUse?: boolean },
+	fileOnly: [string, string][] = [],
 ) => {
 	const passByName: string[] = [];
 	const inline: string[] = [];
-	const fileEntries: [string, string][] = [];
+	const fileEntries: [string, string][] = [...fileOnly];
 	for (const variable of variables) {
 		const [key, value] = splitEnvironmentPair(variable);
 		if (isStageableBuildVariable(key, value)) {

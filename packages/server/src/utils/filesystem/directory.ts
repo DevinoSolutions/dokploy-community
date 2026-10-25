@@ -2,6 +2,8 @@ import fs, { promises as fsPromises } from "node:fs";
 import path from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { Application } from "@dokploy/server/services/application";
+import { TRPCError } from "@trpc/server";
+import { getCheckoutPathError } from "../compose-path";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
 
 export const recreateDirectory = async (pathFolder: string): Promise<void> => {
@@ -101,11 +103,50 @@ export const removeMonitoringDirectory = async (
 	}
 };
 
-export const getBuildAppDirectory = (application: Application) => {
-	const serverId = application.buildServerId || application.serverId;
+/**
+ * `value`, a build setting of the application, joined to `directory`. The
+ * deploy is refused when the setting holds a control character or a
+ * backslash, or when the joined path is not inside `codeDirectory`, the
+ * application's checkout (T-8282). Rows saved before the API checked these
+ * settings go through here as well.
+ */
+export const joinInsideCodeDirectory = (
+	codeDirectory: string,
+	directory: string,
+	value: string,
+	label: string,
+) => {
+	const fullPath = path.join(directory, value);
+	const relative = path.relative(codeDirectory, fullPath);
+	const reason =
+		getCheckoutPathError(value, label, { parentSegments: true }) ??
+		(relative === ".." ||
+		relative.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relative)
+			? `${label} leaves the repository`
+			: null);
+	if (reason) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: `Build refused: ${reason}. Set it in the application's settings to a path inside the repository and deploy again.`,
+		});
+	}
+	return fullPath;
+};
+
+/** The application's checkout on the host that runs its build. */
+export const getCodeDirectory = (
+	application: Application,
+	serverId = application.buildServerId || application.serverId,
+) => {
 	const { APPLICATIONS_PATH } = paths(!!serverId);
-	const { appName, buildType, sourceType, customGitBuildPath, dockerfile } =
-		application;
+	return path.join(APPLICATIONS_PATH, application.appName, "code");
+};
+
+/** The directory the build path of the application's provider names. */
+export const getBuildDirectory = (application: Application) => {
+	const { sourceType, customGitBuildPath } = application;
+	const codeDirectory = getCodeDirectory(application);
 	let buildPath = "";
 
 	if (sourceType === "github") {
@@ -121,26 +162,60 @@ export const getBuildAppDirectory = (application: Application) => {
 	} else if (sourceType === "git") {
 		buildPath = customGitBuildPath || "";
 	}
+	return joinInsideCodeDirectory(
+		codeDirectory,
+		codeDirectory,
+		buildPath ?? "",
+		"the build path",
+	);
+};
+
+export const getBuildAppDirectory = (application: Application) => {
+	const { buildType, dockerfile } = application;
+	const buildDirectory = getBuildDirectory(application);
 	if (buildType === "dockerfile") {
-		return path.join(
-			APPLICATIONS_PATH,
-			appName,
-			"code",
-			buildPath ?? "",
+		return joinInsideCodeDirectory(
+			getCodeDirectory(application),
+			buildDirectory,
 			dockerfile || "Dockerfile",
+			"the Dockerfile path",
 		);
 	}
 
-	return path.join(APPLICATIONS_PATH, appName, "code", buildPath ?? "");
+	return buildDirectory;
+};
+
+/**
+ * Where the publish directory (`publishDirectory`) of a nixpacks or static
+ * build lands on the host: inside the build directory, and refused like the
+ * other build settings when it is not inside the checkout. `null` when it is
+ * not set.
+ */
+export const getPublishDirectoryPath = (application: Application) => {
+	const { publishDirectory } = application;
+	if (!publishDirectory) {
+		return null;
+	}
+	return joinInsideCodeDirectory(
+		getCodeDirectory(application),
+		getBuildAppDirectory(application),
+		publishDirectory,
+		"the publish directory",
+	);
 };
 
 export const getDockerContextPath = (application: Application) => {
-	const { APPLICATIONS_PATH } = paths(!!application.serverId);
-	const { appName, dockerContextPath } = application;
+	const { dockerContextPath } = application;
 
 	if (!dockerContextPath) {
 		return null;
 	}
 
-	return path.join(APPLICATIONS_PATH, appName, "code", dockerContextPath);
+	const codeDirectory = getCodeDirectory(application, application.serverId);
+	return joinInsideCodeDirectory(
+		codeDirectory,
+		codeDirectory,
+		dockerContextPath,
+		"the Docker context path",
+	);
 };

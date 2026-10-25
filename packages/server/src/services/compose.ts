@@ -32,6 +32,7 @@ import {
 	resolveComposeRolling,
 } from "@dokploy/server/utils/builders/compose-rolling";
 import { RELEASE_KILL_GRACE_SECONDS } from "@dokploy/server/utils/builders/remote-build-cancel";
+import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	cloneCompose,
@@ -67,6 +68,11 @@ import { getDokployUrl } from "./admin";
 // See services/build-policy/README.md.
 import { waitForComposeRequiredChecks } from "./build-policy/compose-checks";
 import {
+	assertRebuildCommitMatchesDeploy,
+	isRebuildRefusedError,
+	recordDeployedCommit,
+} from "./compose-rebuild-pin";
+import {
 	assertComposeFileOnDiskVolumesBound,
 	assertComposeVolumesBound,
 } from "./compose-volume-binding";
@@ -88,7 +94,11 @@ import {
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { generateApplyPatchesCommand, type Patch } from "./patch";
+import {
+	findPatchesByEntityId,
+	generateApplyPatchesCommand,
+	type Patch,
+} from "./patch";
 import { validUniqueServerAppName } from "./project";
 import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
@@ -464,6 +474,8 @@ export const runComposeBuild = async (
 
 	// A row can still hold a registry or provider of another organization.
 	await assertDeployReferencesInOrganization(entity);
+	// And a compose path saved before the compose path rules (T-8238).
+	assertSafeComposePath(entity.composePath);
 
 	if (entity.sourceType === "raw") {
 		await assertComposeVolumesBoundForDeploy(entity, deployment, {
@@ -588,9 +600,21 @@ export const runComposeBuild = async (
 			command: `(${command}) >> ${deployment.logPath} 2>&1`,
 			deploymentId: deployment.deploymentId,
 		});
-		return;
+	} else {
+		await runStep(command);
 	}
-	await runStep(command);
+
+	// What a later rebuild must still find (T-7960), recorded only once this
+	// release is running. A deploy that was refused, cancelled or failed puts
+	// the previous release's files back but leaves its commit on disk, and
+	// must not make a rebuild build that commit.
+	if (servingCommitOutput !== undefined) {
+		await recordDeployedCommit(deployment.deploymentId, {
+			servingCommitOutput,
+			buildServerId: entity.buildServerId,
+			patches: appliedPatches,
+		});
+	}
 };
 
 export const createCompose = async (
@@ -997,6 +1021,8 @@ export const rebuildCompose = async ({
 
 		// A row can still hold a registry or provider of another organization.
 		await assertDeployReferencesInOrganization(compose);
+		// And a compose path saved before the compose path rules (T-8238).
+		assertSafeComposePath(compose.composePath);
 
 		if (compose.sourceType === "raw") {
 			await assertComposeVolumesBoundForDeploy(compose, deployment, {
@@ -1031,6 +1057,21 @@ export const rebuildCompose = async ({
 			compose.buildServerId && compose.sourceType !== "raw"
 				? await readServingHostCommitOutput(compose)
 				: undefined;
+		// A rebuild clones nothing: it builds only what the last deploy built
+		// (its commit, build server and patch rows), and refuses anything else
+		// (T-7960). The patch rows are read once, here: the ones compared are
+		// the ones applied below and on the build server.
+		let pinnedPatches: Patch[] | undefined;
+		if (servingCommitOutput !== undefined) {
+			pinnedPatches = await findPatchesByEntityId(compose.composeId, "compose");
+			await assertRebuildCommitMatchesDeploy({
+				composeId: compose.composeId,
+				deploymentId: deployment.deploymentId,
+				servingCommitOutput,
+				buildServerId: compose.buildServerId,
+				patches: pinnedPatches,
+			});
+		}
 		let appliedPatches: Patch[] | undefined;
 
 		if (compose.sourceType !== "raw") {
@@ -1040,6 +1081,7 @@ export const rebuildCompose = async ({
 					id: compose.composeId,
 					type: "compose",
 					serverId: compose.serverId,
+					patches: pinnedPatches,
 					onLoaded: (rows) => {
 						appliedPatches = rows;
 					},
@@ -1195,6 +1237,15 @@ export const rebuildCompose = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		// A rebuild the pin refused touched nothing: the compose keeps the status
+		// of the release that is still serving (the queue puts back the exact
+		// status it had before the job).
+		if (isRebuildRefusedError(error)) {
+			const settledStatus = await statusAfterCancelledDeploy({ composeId });
+			await updateCompose(composeId, { composeStatus: settledStatus });
+			error.settledStatus = settledStatus;
+			throw error;
+		}
 		const rollbackSucceeded = await didRollbackSucceed(
 			compose,
 			deployment.logPath,
@@ -1279,6 +1330,7 @@ const assertComposeDirectoryExists = async (
 
 export const startCompose = async (composeId: string) => {
 	const compose = await findComposeById(composeId);
+	assertSafeComposePath(compose.composePath);
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const projectPath = join(COMPOSE_PATH, compose.appName, "code");
 	if (compose.composeType === "docker-compose") {

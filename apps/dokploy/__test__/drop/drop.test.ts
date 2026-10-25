@@ -333,6 +333,89 @@ describe("security: traversal inside BASE_PATH (sandbox escape)", () => {
 	});
 });
 
+// AdmZip normalises a name on add, so a zip whose entry keeps its raw name
+// is built with a placeholder of the same length, then patched.
+const zipWithRawEntry = (rawName: string, content = "data") => {
+	const placeholder = "x".repeat(rawName.length);
+	const zip = new AdmZip();
+	zip.addFile("package.json", Buffer.from('{"name":"app"}'));
+	zip.addFile(placeholder, Buffer.from(content));
+	const buffer = Buffer.from(
+		Buffer.from(zip.toBuffer())
+			.toString("binary")
+			.split(placeholder)
+			.join(rawName),
+		"binary",
+	);
+	return new File([buffer as unknown as ArrayBuffer], "app.zip");
+};
+
+const exists = (file: string) =>
+	fs
+		.access(file)
+		.then(() => true)
+		.catch(() => false);
+
+describe("unzipDrop keeps every entry in the application's code directory (T-8282)", () => {
+	beforeAll(async () => {
+		await fs.rm(APPLICATIONS_PATH, { recursive: true, force: true });
+	});
+	afterAll(async () => {
+		await fs.rm(APPLICATIONS_PATH, { recursive: true, force: true });
+	});
+
+	it("rejects an entry outside the application's code directory", async () => {
+		const appName = "own-dir-a";
+		await expect(
+			unzipDrop(zipWithRawEntry("../../own-dir-b/code/x.txt"), {
+				...baseApp,
+				appName,
+			}),
+		).rejects.toThrow(/output directory/);
+		expect(
+			await exists(path.join(APPLICATIONS_PATH, "own-dir-b/code/x.txt")),
+		).toBe(false);
+	});
+
+	it.each([
+		"../x.txt",
+		"../../../other/x.yml",
+		"a/../b.txt",
+		"a/../../b.txt",
+		"/abs/x.txt",
+		"..\\x.txt",
+	])("rejects the entry %j", async (rawName) => {
+		await expect(
+			unzipDrop(zipWithRawEntry(rawName), {
+				...baseApp,
+				appName: "own-dir-entries",
+			}),
+		).rejects.toThrow(/output directory/);
+	});
+
+	it("extracts ordinary nested entries", async () => {
+		const appName = "own-dir-ok";
+		const zip = new AdmZip();
+		zip.addFile("src/lib/a.txt", Buffer.from("a"));
+		zip.addFile("a..b/c.txt", Buffer.from("c"));
+		zip.addFile("..hidden.txt", Buffer.from("h"));
+		await unzipDrop(
+			new File([zip.toBuffer() as unknown as ArrayBuffer], "app.zip"),
+			{ ...baseApp, appName },
+		);
+		const output = path.join(APPLICATIONS_PATH, appName, "code");
+		expect(await fs.readFile(path.join(output, "src/lib/a.txt"), "utf8")).toBe(
+			"a",
+		);
+		expect(await fs.readFile(path.join(output, "a..b/c.txt"), "utf8")).toBe(
+			"c",
+		);
+		expect(await fs.readFile(path.join(output, "..hidden.txt"), "utf8")).toBe(
+			"h",
+		);
+	});
+});
+
 describe("unzipDrop using real zip files", () => {
 	// const { APPLICATIONS_PATH } = paths();
 	beforeAll(async () => {

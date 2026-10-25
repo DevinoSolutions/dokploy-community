@@ -59,6 +59,8 @@ import {
 	listEnvKeys,
 	shapeServiceRead,
 } from "@dokploy/server/services/service-secrets";
+import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
+import { assertGitUrlSaveable } from "@dokploy/server/utils/providers/git-url";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -904,6 +906,11 @@ export const applicationRouter = createTRPCRouter({
 				{ customGitSSHKeyId: input.customGitSSHKeyId },
 				ctx.session.activeOrganizationId,
 			);
+			// Only a remote repository is cloned; a value kept as it is stays saveable (T-8420).
+			assertGitUrlSaveable(
+				input.customGitUrl,
+				(await findApplicationById(input.applicationId)).customGitUrl,
+			);
 			await updateApplication(input.applicationId, {
 				customGitBranch: input.customGitBranch,
 				customGitBuildPath: input.customGitBuildPath,
@@ -1020,6 +1027,15 @@ export const applicationRouter = createTRPCRouter({
 			}
 
 			const { applicationId, ...rest } = input;
+
+			// A URL that is not a remote repository is refused when it is set or
+			// changed; a row that already holds one can still be saved (T-8420).
+			if (typeof input.customGitUrl === "string") {
+				assertGitUrlSaveable(
+					input.customGitUrl,
+					(await findApplicationById(applicationId)).customGitUrl,
+				);
+			}
 
 			// >>> build-policy hook: refuse a required check the unit can never
 			// satisfy, here rather than on every deploy for ever after. Reading a
@@ -1422,7 +1438,7 @@ export const applicationRouter = createTRPCRouter({
 			zfd.formData({
 				applicationId: z.string(),
 				zip: zfd.file(),
-				dropBuildPath: z.string().optional(),
+				dropBuildPath: checkoutPathSchema("the build path").optional(),
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {

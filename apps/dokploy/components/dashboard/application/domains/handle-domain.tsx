@@ -42,6 +42,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useComposeFetchFallback } from "@/hooks/use-compose-fetch-fallback";
 import { api } from "@/utils/api";
 import {
 	DoDomainHostCheck,
@@ -342,6 +343,12 @@ export const AddDomain = ({ id, type, domainId = "", children }: Props) => {
 			refetchOnWindowFocus: false,
 			enabled: isOpen && type === "compose" && !!id,
 		},
+	);
+	useComposeFetchFallback(
+		cacheType,
+		setCacheType,
+		errorServices,
+		isLoadingServices,
 	);
 
 	const form = useForm<Domain>({

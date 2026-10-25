@@ -1562,6 +1562,13 @@
       "when": 1792809766133,
       "tag": "0222_compose_policy_audit",
       "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1792895563500,
+      "tag": "0224_deployment_pinned_commit",
+      "breakpoints": true
     }
   ]
 }

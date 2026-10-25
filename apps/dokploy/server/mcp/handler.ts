@@ -45,7 +45,7 @@ import {
 	isEnvUpdateTool,
 	toolsForScopes,
 } from "./registry";
-import { CREDENTIAL_QUERIES } from "./scopes";
+import { CREDENTIAL_QUERIES, resolveInputScope } from "./scopes";
 
 export interface McpAuth {
 	userId: string;
@@ -857,6 +857,12 @@ export const executeMcpTool = async ({
 	if (!scopes.has(tool.scope)) {
 		return errorResult(
 			`Tool ${tool.name} requires scope ${tool.scope}, which this authorization does not include. Re-authorize with that scope enabled.`,
+		);
+	}
+	const inputScope = resolveInputScope(tool.path, args);
+	if (inputScope && !scopes.has(inputScope)) {
+		return errorResult(
+			`Tool ${tool.name} with type "fetch" clones the source and requires scope ${inputScope}, which this authorization does not include. Use type "cache", or re-authorize with that scope enabled.`,
 		);
 	}
 	try {

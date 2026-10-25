@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -11,6 +11,8 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
  * the findings of the organization older than 90 days when it records a batch,
  * writes nothing once its overall cap has passed, and does not run on Cloud.
  */
+
+const state = vi.hoisted(() => ({ composeRoot: "" }));
 
 const mocks = vi.hoisted(() => ({
 	appendLogLine: vi.fn().mockResolvedValue(undefined),
@@ -48,6 +50,12 @@ vi.mock("@dokploy/server/constants", async () => {
 		get IS_CLOUD() {
 			return mocks.cloud.value;
 		},
+		// The compose files of the tests live in the code directory of a compose
+		// under the temp directory: the audit reads only inside it (T-7857).
+		paths: (isServer = false) => ({
+			...actual.paths(isServer),
+			COMPOSE_PATH: state.composeRoot,
+		}),
 	};
 });
 
@@ -61,6 +69,10 @@ import {
 import { COMPOSE_POLICY_MAX_BYTES } from "@dokploy/server/utils/compose-policy/config";
 
 const directory = mkdtempSync(join(tmpdir(), "t7455-"));
+state.composeRoot = join(directory, "compose");
+// The checkout of the entity below.
+const codeDirectory = join(state.composeRoot, "app-xyz", "code");
+mkdirSync(codeDirectory, { recursive: true });
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
 const deployment = { deploymentId: "dep-1", logPath: "/var/log/dep-1.log" };
@@ -179,7 +191,7 @@ describe("retention", () => {
 
 describe("files it reads", () => {
 	it("evaluates the compose file of a fetched compose from disk", async () => {
-		const file = join(directory, "docker-compose.yml");
+		const file = join(codeDirectory, "docker-compose.yml");
 		writeFileSync(file, "services:\n  web:\n    privileged: true\n");
 		mocks.getComposePath.mockReturnValue(file);
 		const values = insertSpy();
@@ -194,7 +206,7 @@ describe("files it reads", () => {
 	});
 
 	it("a compose file that cannot be read is nothing to evaluate, not a failure", async () => {
-		mocks.getComposePath.mockReturnValue(join(directory, "missing.yml"));
+		mocks.getComposePath.mockReturnValue(join(codeDirectory, "missing.yml"));
 		const values = insertSpy();
 
 		await runComposePolicyAudit(
@@ -208,7 +220,7 @@ describe("files it reads", () => {
 	});
 
 	it("a file above the cap is one finding, and is read only up to the cap", async () => {
-		const file = join(directory, "huge.yml");
+		const file = join(codeDirectory, "huge.yml");
 		writeFileSync(
 			file,
 			`services: [unclosed\n# ${"x".repeat(COMPOSE_POLICY_MAX_BYTES * 2)}\n`,
@@ -231,7 +243,7 @@ describe("files it reads", () => {
 	});
 
 	it("evaluates the -f override files of a custom command", async () => {
-		const override = join(directory, "override.yml");
+		const override = join(codeDirectory, "override.yml");
 		writeFileSync(
 			override,
 			"services:\n  web:\n    volumes:\n      - /var/run/docker.sock:/s\n",
@@ -254,11 +266,11 @@ describe("files it reads", () => {
 	});
 
 	it("an override file above the cap is one finding, and one that is gone is skipped", async () => {
-		const huge = join(directory, "huge-override.yml");
+		const huge = join(codeDirectory, "huge-override.yml");
 		writeFileSync(huge, `# ${"x".repeat(COMPOSE_POLICY_MAX_BYTES * 2)}\n`);
 		mocks.getCommandOverrideFiles.mockReturnValue([
 			huge,
-			join(directory, "gone.yml"),
+			join(codeDirectory, "gone.yml"),
 		]);
 		const values = insertSpy();
 

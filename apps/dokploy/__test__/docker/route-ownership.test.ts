@@ -57,23 +57,36 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 			select: (fields: Record<string, unknown>) => ({
 				from: (table: unknown) => ({
 					where: async (condition: Parameters<PgDialect["sqlToQuery"]>[0]) => {
+						const params = dialect.sqlToQuery(condition).params as string[];
+						// the lookups are batched: a parent comes back under every id
+						// looked up
 						if (!("serviceId" in fields || "applicationId" in fields))
-							return mocks.parents.get(table) ?? [];
-						// a row with an appName only answers a lookup for that name
-						const { params } = dialect.sqlToQuery(condition);
-						return (mocks.serviceRows.get(table) ?? []).filter(
-							(row) =>
-								!("appName" in row) ||
-								!row.appName ||
-								params.includes(row.appName),
+							return (mocks.parents.get(table) ?? []).flatMap((row) =>
+								params.map((parentId) => ({ parentId, ...row })),
+							);
+						// a row with an appName only answers a lookup for that name; one
+						// without answers every appName looked up
+						return (mocks.serviceRows.get(table) ?? []).flatMap(
+							(row): object[] =>
+								"appName" in row && row.appName
+									? params.includes(row.appName)
+										? [row]
+										: []
+									: params.map((appName) => ({ ...row, appName })),
 						);
 					},
 				}),
 			}),
+			// the organization of one service id (findServiceOrganizationId) or of
+			// a batch of them (findServiceOrganizations), one row per known id
 			execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
-				const [serviceId] = dialect.sqlToQuery(query).params as string[];
-				const organizationId = mocks.serviceOrganizations.get(serviceId ?? "");
-				return organizationId ? [{ organizationId }] : [];
+				const ids = new Set(
+					dialect.sqlToQuery(query).params.flat() as string[],
+				);
+				return [...ids].flatMap((serviceId) => {
+					const organizationId = mocks.serviceOrganizations.get(serviceId);
+					return organizationId ? [{ serviceId, organizationId }] : [];
+				});
 			}),
 		},
 	};
@@ -854,7 +867,7 @@ describe("docker.getContainers when a container vanishes during the listing", ()
 			"com.docker.swarm.service.name": "app-a-abc123",
 		});
 		mocks.serviceRows.set(applications, [
-			{ serviceId: "app-a", serverId: null },
+			{ serviceId: "app-a", serverId: null, appName: "app-a-abc123" },
 		]);
 		mocks.serviceOrganizations.set("app-a", "org-a");
 		grant("app-a");

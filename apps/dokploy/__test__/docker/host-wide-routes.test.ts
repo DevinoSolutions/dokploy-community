@@ -66,10 +66,16 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 					},
 				}),
 			}),
+			// the organization of one service id (findServiceOrganizationId) or of
+			// a batch of them (findServiceOrganizations), one row per known id
 			execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
-				const [serviceId] = dialect.sqlToQuery(query).params as string[];
-				const organizationId = mocks.serviceOrganizations.get(serviceId ?? "");
-				return organizationId ? [{ organizationId }] : [];
+				const ids = new Set(
+					dialect.sqlToQuery(query).params.flat() as string[],
+				);
+				return [...ids].flatMap((serviceId) => {
+					const organizationId = mocks.serviceOrganizations.get(serviceId);
+					return organizationId ? [{ serviceId, organizationId }] : [];
+				});
 			}),
 		},
 	};
@@ -520,7 +526,7 @@ describe("swarm services and stats", () => {
 		expect(called("getApplicationInfo")).toBe(0);
 	});
 
-	it("filters the container stats for a member and not for an owner", async () => {
+	it("filters the container stats for every role: another organization's containers stay hidden from an owner or admin", async () => {
 		const stats = ["c-a", "c-b", "traefik"].map((name) => ({
 			ID: mocks.idOf(name).slice(0, 12),
 			Name: name,
@@ -533,11 +539,15 @@ describe("swarm services and stats", () => {
 				(row: { Name: string }) => row.Name,
 			),
 		).toEqual(["c-a"]);
-		expect(
-			(await swarm("admin").getContainerStats({})).map(
-				(row: { Name: string }) => row.Name,
-			),
-		).toEqual(["c-a", "c-b", "traefik"]);
+		// c-b is org-b's: the host is shared, so org-a's admin does not see it,
+		// and keeps their own containers and the host's own (traefik)
+		for (const role of roles) {
+			expect(
+				(await swarm(role).getContainerStats({})).map(
+					(row: { Name: string }) => row.Name,
+				),
+			).toEqual(["c-a", "traefik"]);
+		}
 	});
 });
 

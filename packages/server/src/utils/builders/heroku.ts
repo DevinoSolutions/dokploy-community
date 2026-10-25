@@ -1,3 +1,4 @@
+import { quote } from "shell-quote";
 import { prepareEnvironmentVariables } from "../docker/utils";
 import { getBuildAppDirectory } from "../filesystem/directory";
 import type { ApplicationNested } from ".";
@@ -22,13 +23,16 @@ export const getHerokuCommand = async (
 		application.environment.env,
 	);
 
+	// The build directory (from the build path) and the builder tag (from the
+	// Heroku version) are application settings: each is passed as a single
+	// argument.
 	const args = [
 		"build",
-		appName,
+		quote([appName]),
 		"--path",
-		buildAppDirectory,
+		quote([buildAppDirectory]),
 		"--builder",
-		`heroku/builder:${application.herokuVersion || "24"}`,
+		quote([`heroku/builder:${application.herokuVersion || "24"}`]),
 	];
 
 	if (cleanCache) {

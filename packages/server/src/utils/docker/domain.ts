@@ -1,4 +1,4 @@
-import fs, { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
@@ -13,6 +13,14 @@ import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
+import {
+	assertComposeFileInsideCodeDirectory,
+	getComposeCodeDirectory,
+	getComposeFileRefusal,
+	getGuardedReadCommand,
+	isComposeFileLinkMarker,
+} from "../compose-file-guard";
+import { assertSafeComposePath } from "../compose-path";
 import { wildcardHostRegexp } from "../hostname-validation";
 import { execAsyncRemote } from "../process/execAsync";
 import { cloneBitbucketRepository } from "../providers/bitbucket";
@@ -23,6 +31,7 @@ import { cloneGitlabRepository } from "../providers/gitlab";
 import { getCreateComposeFileCommand } from "../providers/raw";
 import { randomizeDeployableSpecificationFile } from "./collision";
 import { randomizeSpecificationFile } from "./compose";
+import { singleQuote } from "./env-file";
 import {
 	getInstallStagedFileCommand,
 	STAGED_COMPOSE_PREFIX,
@@ -38,10 +47,42 @@ import type {
 } from "./types";
 
 /**
+ * How long a clone outside a deploy may run: it is sent TERM after this many
+ * seconds and KILL `FETCH_CLONE_KILL_AFTER_SECONDS` later. A Fetch holds the
+ * compose's deploy lock while it clones (T-8239), and this keeps the clone well
+ * inside the lock's 10-minute last-resort release, so the lock is given back
+ * after the clone has exited, not while it still writes the code dir.
+ */
+export const FETCH_CLONE_TIMEOUT_SECONDS = 540;
+export const FETCH_CLONE_KILL_AFTER_SECONDS = 15;
+
+/**
+ * Runs `command` in `sh` under `timeout`, on whichever host runs it (the
+ * Dokploy host or a remote server). A host whose `timeout` is missing or does
+ * not take `-k` (BusyBox before 1.30) runs it unbounded, as before. Exits with
+ * the command's status; one stopped by a signal (124, or 137 once killed,
+ * which a kill from elsewhere or the OOM killer also gives) says so on stderr.
+ */
+export const boundFetchCommand = (
+	command: string,
+	seconds = FETCH_CLONE_TIMEOUT_SECONDS,
+	killAfter = FETCH_CLONE_KILL_AFTER_SECONDS,
+) =>
+	[
+		`set -- sh -c ${singleQuote(command)}`,
+		`if timeout -k 1 1 true >/dev/null 2>&1; then set -- timeout -k ${killAfter} ${seconds} "$@"; fi`,
+		`"$@"`,
+		"status=$?",
+		`if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then echo ${singleQuote(`The clone was stopped (time limit of ${seconds} s reached, or the process was killed)`)} >&2; fi`,
+		`exit "$status"`,
+	].join("; ");
+
+/**
  * Clones (or writes) the compose source for a read outside a deploy: the services
  * list, the source-type fetch, the rolling-replace preflight, the collision
  * rewrite. A stored registry, git provider or SSH key of another organization
- * is refused before anything is cloned, the same as at deploy (T-6902).
+ * is refused before anything is cloned, the same as at deploy (T-6902). The
+ * command is bounded by `boundFetchCommand`.
  */
 export const cloneCompose = async (
 	compose: Compose & DeployReferenceEntity,
@@ -65,7 +106,7 @@ export const cloneCompose = async (
 	} else if (compose.sourceType === "raw") {
 		command += await getCreateComposeFileCommand(compose);
 	}
-	return command;
+	return boundFetchCommand(command);
 };
 
 export const getComposePath = (compose: Compose) => {
@@ -76,6 +117,7 @@ export const getComposePath = (compose: Compose) => {
 	if (sourceType === "raw") {
 		path = "docker-compose.yml";
 	} else {
+		assertSafeComposePath(composePath);
 		path = composePath;
 	}
 
@@ -88,6 +130,10 @@ export const loadDockerCompose = async (
 	const path = getComposePath(compose);
 
 	if (existsSync(path)) {
+		assertComposeFileInsideCodeDirectory(
+			getComposeCodeDirectory(compose),
+			path,
+		);
 		const yamlStr = readFileSync(path, "utf8");
 		const parsedConfig = parse(yamlStr, {
 			maxAliasCount: 10000,
@@ -102,24 +148,37 @@ export const loadDockerComposeRemote = async (
 	compose: Compose,
 ): Promise<ComposeSpecification | null> => {
 	const path = getComposePath(compose);
+	let stdout: string;
 	try {
 		if (!compose.serverId) {
 			return null;
 		}
-		const { stdout, stderr } = await execAsyncRemote(
+		const result = await execAsyncRemote(
 			compose.serverId,
-			`cat ${path}`,
+			getGuardedReadCommand({
+				codeDirectory: getComposeCodeDirectory(compose),
+				file: path,
+				read: `cat ${quote([path])}`,
+			}),
 		);
 
-		if (stderr) {
+		if (result.stderr) {
 			return null;
 		}
-		if (!stdout) return null;
-		const parsedConfig = parse(stdout, {
+		stdout = result.stdout;
+	} catch {
+		return null;
+	}
+	// A link out of the checkout is a refusal, not a missing file (T-7857).
+	if (isComposeFileLinkMarker(stdout)) {
+		throw getComposeFileRefusal(stdout);
+	}
+	if (!stdout) return null;
+	try {
+		return parse(stdout, {
 			maxAliasCount: 10000,
 			merge: true,
 		}) as ComposeSpecification;
-		return parsedConfig;
 	} catch {
 		return null;
 	}
@@ -128,6 +187,10 @@ export const loadDockerComposeRemote = async (
 export const readComposeFile = async (compose: Compose) => {
 	const path = getComposePath(compose);
 	if (existsSync(path)) {
+		assertComposeFileInsideCodeDirectory(
+			getComposeCodeDirectory(compose),
+			path,
+		);
 		const yamlStr = readFileSync(path, "utf8");
 		return yamlStr;
 	}
@@ -189,12 +252,16 @@ export const getInstallStagedComposeCommand = (
 	stagedPath: string,
 	composePath: string,
 	alsoRemove: string[] = [],
+	codeDirectory?: string,
 ) =>
 	getInstallStagedFileCommand({
 		staged: stagedPath,
 		destination: composePath,
 		failureMessage: "❌ Error: Could not write the compose file",
 		alsoRemove,
+		// Replaced by a renamed temporary file, never written in place, and only
+		// when its directory is inside the checkout (T-7857).
+		atomicIn: codeDirectory,
 	});
 
 /**
@@ -265,6 +332,7 @@ export const writeDomainsToCompose = async (
 		stagedPath,
 		getComposePath(compose),
 		alsoRemove,
+		getComposeCodeDirectory(compose),
 	);
 };
 export const applyComposeFilePatch = async (
@@ -533,22 +601,6 @@ export const declareUsedNetworksInRoot = (
 		if (isUsed(name)) {
 			result.networks = addDokployNetworkToRoot(result.networks, name);
 		}
-	}
-};
-
-export const writeComposeFile = async (
-	compose: Compose,
-	composeSpec: ComposeSpecification,
-) => {
-	const path = getComposePath(compose);
-
-	try {
-		const composeFile = stringify(composeSpec, {
-			lineWidth: 1000,
-		});
-		fs.writeFileSync(path, composeFile, "utf8");
-	} catch (e) {
-		console.error("Error saving the YAML config file:", e);
 	}
 };
 

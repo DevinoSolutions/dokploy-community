@@ -38,6 +38,9 @@ const baseCompose = {
 // normalized so the checks hold with Windows backslashes as well as on Linux.
 const TOUCHES_ENV = /touch [^\n]*\.env/;
 const REDIRECTS_INTO_ENV = />\s*['"]?[^\s;&|'"]*\.env\b/;
+// The install of the staged env through `__dokploy_put`, the only writer of
+// the .env since T-7857.
+const PUTS_STAGED_ENV = /__dokploy_put [^\n]*dokploy-stage-env/;
 const posix = (command: string) => command.replaceAll("\\", "/");
 
 describe("getBuildComposeCommand createEnvFile toggle", () => {
@@ -54,8 +57,17 @@ describe("getBuildComposeCommand createEnvFile toggle", () => {
 		expect(command).not.toContain("dokploy-stage-env");
 		expect(posix(command)).not.toMatch(TOUCHES_ENV);
 		expect(posix(command)).not.toMatch(REDIRECTS_INTO_ENV);
+		expect(posix(command)).not.toMatch(PUTS_STAGED_ENV);
 		expect(command).not.toContain("base64");
 		expect(stageFiles).not.toHaveBeenCalled();
+	});
+
+	it("the checks above catch each way of writing the .env", () => {
+		expect("touch /code/.env").toMatch(TOUCHES_ENV);
+		expect("cat /x/stage > /code/.env").toMatch(REDIRECTS_INTO_ENV);
+		expect("__dokploy_put /x/.dokploy-stage-env-1 /code/.env /code").toMatch(
+			PUTS_STAGED_ENV,
+		);
 	});
 
 	it("createEnvFile: true (default) writes Dokploy's vars", async () => {
@@ -66,12 +78,13 @@ describe("getBuildComposeCommand createEnvFile toggle", () => {
 
 		// (path separators are normalized so the test also runs on Windows)
 		expect(command.replaceAll("\\", "/")).toMatch(
-			/cat \S+\.dokploy-stage-env-\S+ > \S+\/code\/\.env/,
+			/__dokploy_put \S+\.dokploy-stage-env-\S+ \S+\/code\/\.env'? \S+\/code\b/,
 		);
 		expect(command).not.toContain("base64");
-		// The same checks do catch a script that writes the env.
-		expect(posix(command)).toMatch(TOUCHES_ENV);
-		expect(posix(command)).toMatch(REDIRECTS_INTO_ENV);
+		// The env is renamed into place from a temporary file (T-7857), so it is
+		// the `__dokploy_put` check that finds the writer.
+		expect(posix(command)).toMatch(PUTS_STAGED_ENV);
+		expect(posix(command)).not.toMatch(REDIRECTS_INTO_ENV);
 		expect(stageFiles).toHaveBeenCalledTimes(1);
 		const { files } = vi.mocked(stageFiles).mock.calls[0]![0];
 		expect(files[0]!.content).toContain('FOO="bar"');

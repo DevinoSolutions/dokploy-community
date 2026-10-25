@@ -38,6 +38,7 @@ import type { ServiceType } from "../../application/advanced/show-resources";
 import { ShowDeploymentsModal } from "../../application/deployments/show-deployments-modal";
 import { HandleBackup } from "./handle-backup";
 import { RestoreBackup } from "./restore-backup";
+import { ShowBackupFiles } from "./show-backup-files";
 
 interface Props {
 	id: string;
@@ -356,6 +357,7 @@ export const ShowBackups = ({
 															</Tooltip>
 														</TooltipProvider>
 
+														<ShowBackupFiles backupId={backup.backupId} />
 														{managedByPolicy ? (
 															<TooltipProvider delayDuration={0}>
 																<Tooltip>

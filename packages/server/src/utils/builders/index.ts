@@ -6,6 +6,7 @@ import { assertVolumeMountsBound } from "@dokploy/server/services/volume-binding
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
 import { eq } from "drizzle-orm";
+import { quote } from "shell-quote";
 import { getECRAuthToken } from "../aws/ecr";
 import { getRegistryTag, uploadImageRemoteCommand } from "../cluster/upload";
 import {
@@ -21,6 +22,7 @@ import {
 import { getRemoteDocker } from "../servers/remote-docker";
 import { removeStagedFiles, type StageOptions } from "../docker/staging";
 import { withResolvedVaultRefs } from "../vault";
+import { getBuildPathGuardCommand } from "./build-path-guard";
 import { getDockerCommand } from "./docker-file";
 import { getHerokuCommand } from "./heroku";
 import { getNixpacksCommand } from "./nixpacks";
@@ -98,6 +100,12 @@ export const getBuildCommand = async (
 					command = await getRailpackCommand(application, stageOptions);
 					break;
 			}
+			// Runs on the build host after the clone, before any build step.
+			command =
+				getBuildPathGuardCommand(
+					application,
+					staged.length > 0 ? `rm -f ${quote(staged)};` : "",
+				) + command;
 		}
 
 		if (

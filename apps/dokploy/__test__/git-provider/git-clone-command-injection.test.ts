@@ -69,7 +69,7 @@ describe("cloneGitRepository command (customGitUrl path)", () => {
 
 	it("does not let a malicious customGitUrl inject shell operators", async () => {
 		const command = await buildClone(
-			"https://github.com/o/r.git$(touch /tmp/pwned)",
+			"https://github.com/o/r.git$(touch${IFS}/tmp/pwned)",
 			"main",
 		);
 		expect(markerLeaksAsShellSyntax(command, "touch")).toBe(false);

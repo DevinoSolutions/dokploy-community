@@ -400,6 +400,68 @@ export const findServiceOrganizationId = async (
 };
 
 /**
+ * Batched form of `findServiceOrganizationId` over every kind of service, so a
+ * list of containers costs one query instead of one per service. Ids that match
+ * no service are left out of the map, and callers must treat them like ids of
+ * another organization.
+ */
+export const findServiceOrganizations = async (
+	serviceIds: string[],
+): Promise<Map<string, string>> => {
+	const ids = [...new Set(serviceIds.filter(Boolean))];
+	const organizations = new Map<string, string>();
+	if (ids.length === 0) {
+		return organizations;
+	}
+	// The list is bound once, as one text[] parameter: a placeholder per id and
+	// per table would reach the 65,535 bind parameters of a Postgres statement
+	// at about 8,000 services.
+	const rows = await db.execute(sql`
+		WITH ids AS (SELECT unnest(${sql.param(ids)}::text[]) AS id)
+		SELECT s."serviceId" AS "serviceId", p."organizationId" AS "organizationId"
+		FROM (
+			SELECT "applicationId" AS "serviceId", "environmentId" FROM "application"
+			WHERE "applicationId" IN (SELECT id FROM ids)
+			UNION ALL
+			SELECT "composeId" AS "serviceId", "environmentId" FROM "compose"
+			WHERE "composeId" IN (SELECT id FROM ids)
+			UNION ALL
+			SELECT "postgresId" AS "serviceId", "environmentId" FROM "postgres"
+			WHERE "postgresId" IN (SELECT id FROM ids)
+			UNION ALL
+			SELECT "mysqlId" AS "serviceId", "environmentId" FROM "mysql"
+			WHERE "mysqlId" IN (SELECT id FROM ids)
+			UNION ALL
+			SELECT "mariadbId" AS "serviceId", "environmentId" FROM "mariadb"
+			WHERE "mariadbId" IN (SELECT id FROM ids)
+			UNION ALL
+			SELECT "mongoId" AS "serviceId", "environmentId" FROM "mongo"
+			WHERE "mongoId" IN (SELECT id FROM ids)
+			UNION ALL
+			SELECT "redisId" AS "serviceId", "environmentId" FROM "redis"
+			WHERE "redisId" IN (SELECT id FROM ids)
+			UNION ALL
+			SELECT "libsqlId" AS "serviceId", "environmentId" FROM "libsql"
+			WHERE "libsqlId" IN (SELECT id FROM ids)
+		) s
+		INNER JOIN "environment" e ON e."environmentId" = s."environmentId"
+		INNER JOIN "project" p ON p."projectId" = e."projectId"
+	`);
+	const result = rows as unknown;
+	const list = (
+		Array.isArray(result)
+			? result
+			: ((result as { rows?: unknown[] } | null)?.rows ?? [])
+	) as { serviceId?: string; organizationId?: string }[];
+	for (const { serviceId, organizationId } of list) {
+		if (serviceId && organizationId) {
+			organizations.set(serviceId, organizationId);
+		}
+	}
+	return organizations;
+};
+
+/**
  * Batched form of `findServiceOrganizationId` for the two kinds of service
  * a deploy can be queued for, so a list of jobs costs one query instead of one
  * per row. Ids that match no application or compose are left out of the map,

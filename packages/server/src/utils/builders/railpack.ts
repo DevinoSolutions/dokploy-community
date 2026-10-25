@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { nanoid } from "nanoid";
 import { quote } from "shell-quote";
-import { isEnvFileName } from "../docker/env-file";
+import { getBuildSecretAlias, isEnvFileName } from "../docker/env-file";
 import {
 	parseEnvironmentKeyValuePair,
 	prepareEnvironmentVariables,
@@ -15,6 +15,10 @@ import {
 	getGitCommitInfoCommands,
 	stageBuildVariables,
 } from "./utils";
+
+// The names a buildx secret id may have here: no `,` or `=` (they split the
+// flag) and nothing a shell reads specially.
+const SECRET_ID = /^[A-Za-z0-9_.-]+$/;
 
 const calculateSecretsHash = (envVariables: string[]): string => {
 	const hash = createHash("sha256");
@@ -40,6 +44,26 @@ export const getRailpackCommand = async (
 	// change with how the variables reach railpack.
 	const envVariables = rawEnvVariables.map((variable) => quote([variable]));
 
+	// Every variable is also a buildx secret. A name the env file cannot carry
+	// (`isEnvFileName`, such as a name the build tools use for themselves or a
+	// dotted one) gets its value from an internal name in the file
+	// (`getBuildSecretAlias`); nothing is exported by the script. A name that
+	// cannot be a secret id gets no secret; `railpack prepare` still gets it
+	// (T-8282).
+	const secretArgs: string[] = [];
+	const secretAliases: [string, string][] = [];
+	for (const pair of rawEnvVariables) {
+		const [key, value] = parseEnvironmentKeyValuePair(pair);
+		if (!key || !value) continue;
+		if (isEnvFileName(key)) {
+			secretArgs.push("--secret", `id=${key},env=${key}`);
+		} else if (SECRET_ID.test(key)) {
+			const alias = getBuildSecretAlias(secretAliases.length);
+			secretAliases.push([alias, value]);
+			secretArgs.push("--secret", quote([`id=${key},env=${alias}`]));
+		}
+	}
+
 	// The values reach `railpack prepare` and the buildx secrets through their
 	// environment (a staged 0600 file), not through the command line or the
 	// script: `--env KEY` takes the value from there. The loader runs twice
@@ -50,16 +74,19 @@ export const getRailpackCommand = async (
 		rawEnvVariables,
 		stageOptions,
 		{ singleUse: false },
+		secretAliases,
 	);
 
-	// Prepare command
+	// Prepare command. The build directory (from the build path) and the
+	// Railpack version are application settings: each is passed as a single
+	// argument.
 	const prepareArgs = [
 		"prepare",
-		buildAppDirectory,
+		quote([buildAppDirectory]),
 		"--plan-out",
-		`${buildAppDirectory}/railpack-plan.json`,
+		quote([`${buildAppDirectory}/railpack-plan.json`]),
 		"--info-out",
-		`${buildAppDirectory}/railpack-info.json`,
+		quote([`${buildAppDirectory}/railpack-info.json`]),
 	];
 
 	prepareArgs.push(...getEnvFlagArgs("--env", staged));
@@ -81,34 +108,25 @@ export const getRailpackCommand = async (
 		`secrets-hash=${secretsHash}`,
 		...(cacheKey ? ["--build-arg", `cache-key=${cacheKey}`] : []),
 		"--build-arg",
-		`BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend:v${application.railpackVersion}`,
+		quote([
+			`BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend:v${application.railpackVersion}`,
+		]),
 		"-f",
-		`${buildAppDirectory}/railpack-plan.json`,
+		quote([`${buildAppDirectory}/railpack-plan.json`]),
 		"--output",
-		`type=docker,name=${appName}`,
+		quote([`type=docker,name=${appName}`]),
 	];
 
-	// Add secrets properly formatted. The ones in the staged env file are in
-	// docker's environment when the loader runs it; a name the file cannot carry
-	// is exported by the script, as it always was.
-	const exportEnvs = [];
-	for (const pair of rawEnvVariables) {
-		const [key, value] = parseEnvironmentKeyValuePair(pair);
-		if (key && value) {
-			buildArgs.push("--secret", `id=${key},env=${key}`);
-			if (!isEnvFileName(key)) {
-				exportEnvs.push(`export ${key}=${quote([value])}`);
-			}
-		}
-	}
+	// The secrets are in docker's environment when the loader runs it.
+	buildArgs.push(...secretArgs);
 
-	buildArgs.push(buildAppDirectory);
+	buildArgs.push(quote([buildAppDirectory]));
 
 	const bashCommand = `
 
 # Ensure we have a builder with containerd (isolated per build)
 
-export RAILPACK_VERSION=${application.railpackVersion}
+export RAILPACK_VERSION=${quote([String(application.railpackVersion)])}
 # use sudo for non-root so the install can write to /usr/local/bin
 if [ "$(id -u)" -eq 0 ]; then
 	SUDO_CMD=""
@@ -130,8 +148,6 @@ ${staged.envFile.loader}railpack ${prepareArgs.join(" ")} || {
 echo "✅ Railpack prepare completed." ;
 
 echo "Building with Railpack frontend..." ;
-# Export environment variables for secrets
-${exportEnvs.join("\n")}
 ${getGitCommitInfoCommands()}
 ${staged.envFile.loader}docker ${buildArgs.join(" ")} ${getCommitInfoBuildArgs()} || {
 	${staged.envFile.cleanup}

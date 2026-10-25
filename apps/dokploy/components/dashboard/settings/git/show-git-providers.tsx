@@ -34,7 +34,6 @@ import {
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
 import { DEFAULT_GITHUB_URL } from "@/utils/github-utils";
-import { useUrl } from "@/utils/hooks/use-url";
 import { AddBitbucketProvider } from "./bitbucket/add-bitbucket-provider";
 import { EditBitbucketProvider } from "./bitbucket/edit-bitbucket-provider";
 import { AddGiteaProvider } from "./gitea/add-gitea-provider";
@@ -52,20 +51,15 @@ export const ShowGitProviders = () => {
 		api.gitProvider.toggleShare.useMutation();
 	const { data: currentMember } = api.user.get.useQuery();
 	const { data: permissions } = api.user.getPermissions.useQuery();
-	const url = useUrl();
 	const isOrgAdmin =
 		currentMember?.role === "owner" || currentMember?.role === "admin";
 
-	const getGitlabUrl = (
-		clientId: string,
-		gitlabId: string,
-		gitlabUrl: string,
-	) => {
-		const redirectUri = `${url}/api/providers/gitlab/callback?gitlabId=${gitlabId}`;
-		const scope = "api read_user read_repository";
-		const authUrl = `${gitlabUrl}/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scopes=${encodeURIComponent(scope)}`;
-		return authUrl;
-	};
+	// The server routes check the session, sign the state and redirect to the
+	// provider's authorize or installation page.
+	const getGitlabUrl = (gitlabId: string) =>
+		`/api/providers/gitlab/authorize?gitlabId=${encodeURIComponent(gitlabId)}`;
+	const getGithubInstallUrl = (githubId: string) =>
+		`/api/providers/github/authorize?githubId=${encodeURIComponent(githubId)}`;
 
 	return (
 		<div className="w-full">
@@ -246,15 +240,19 @@ export const ShowGitProviders = () => {
 																		>
 																			Action Required
 																		</Badge>
-																		<Link
-																			href={`${gitProvider?.github?.githubAppName}/installations/new?state=gh_setup:${gitProvider?.github?.githubId}`}
-																			className={buttonVariants({
-																				size: "icon",
-																				variant: "ghost",
-																			})}
-																		>
-																			<ImportIcon className="size-4 text-primary" />
-																		</Link>
+																		{canManage && (
+																			<Link
+																				href={getGithubInstallUrl(
+																					gitProvider.github?.githubId || "",
+																				)}
+																				className={buttonVariants({
+																					size: "icon",
+																					variant: "ghost",
+																				})}
+																			>
+																				<ImportIcon className="size-4 text-primary" />
+																			</Link>
+																		)}
 																	</div>
 																)}
 																{haveGithubRequirements && isGithub && (
@@ -279,20 +277,20 @@ export const ShowGitProviders = () => {
 																		>
 																			Action Required
 																		</Badge>
-																		<Link
-																			href={getGitlabUrl(
-																				gitProvider.gitlab?.applicationId || "",
-																				gitProvider.gitlab?.gitlabId || "",
-																				gitProvider.gitlab?.gitlabUrl || "",
-																			)}
-																			target="_blank"
-																			className={buttonVariants({
-																				size: "icon",
-																				variant: "ghost",
-																			})}
-																		>
-																			<ImportIcon className="size-4 text-primary" />
-																		</Link>
+																		{canManage && (
+																			<Link
+																				href={getGitlabUrl(
+																					gitProvider.gitlab?.gitlabId || "",
+																				)}
+																				target="_blank"
+																				className={buttonVariants({
+																					size: "icon",
+																					variant: "ghost",
+																				})}
+																			>
+																				<ImportIcon className="size-4 text-primary" />
+																			</Link>
+																		)}
 																	</div>
 																)}
 

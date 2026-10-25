@@ -3,8 +3,8 @@ import path, { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import type { Application } from "@dokploy/server/services/application";
 import { findServerById } from "@dokploy/server/services/server";
-import { readValidDirectory } from "@dokploy/server/wss/utils";
 import AdmZip from "adm-zip";
+import { quote } from "shell-quote";
 import { Client, type SFTPWrapper } from "ssh2";
 import {
 	recreateDirectory,
@@ -67,7 +67,7 @@ export const unzipDrop = async (zipFile: File, application: Application) => {
 			if (!filePath) continue;
 
 			const fullPath = path.join(outputPath, filePath).replace(/\\/g, "/");
-			if (!readValidDirectory(fullPath, application.serverId)) {
+			if (!isInsideOutputPath(outputPath, filePath)) {
 				throw new Error(
 					`Path traversal detected: resolved path escapes output directory: ${filePath}`,
 				);
@@ -84,7 +84,10 @@ export const unzipDrop = async (zipFile: File, application: Application) => {
 					if (sftp === null) throw new Error("No SFTP connection available");
 					try {
 						const dirPath = path.dirname(fullPath);
-						await execAsyncRemote(targetServerId, `mkdir -p "${dirPath}"`);
+						await execAsyncRemote(
+							targetServerId,
+							`mkdir -p ${quote([dirPath])}`,
+						);
 						await uploadFileToServer(sftp, entry.getData(), fullPath);
 					} catch (err) {
 						console.error(`Error uploading file ${fullPath}:`, err);
@@ -144,6 +147,27 @@ const uploadFileToServer = (
 			resolve();
 		});
 	});
+};
+
+/**
+ * Whether a zip entry's path lands inside the application's own `code`
+ * directory (T-8282): an absolute path or a `..` segment is refused outright,
+ * and the resolved path has to be `outputPath` or below it.
+ */
+const isInsideOutputPath = (outputPath: string, filePath: string) => {
+	if (path.posix.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
+		return false;
+	}
+	if (filePath.split(/[\\/]/).includes("..")) {
+		return false;
+	}
+	const base = path.resolve(outputPath);
+	const relative = path.relative(base, path.resolve(base, filePath));
+	return !(
+		relative === ".." ||
+		relative.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relative)
+	);
 };
 
 function isDangerousNode(entry: AdmZip.IZipEntry) {

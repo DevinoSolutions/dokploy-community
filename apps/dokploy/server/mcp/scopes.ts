@@ -133,6 +133,8 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
 	"patch.cleanPatchRepos": "dokploy:deploy",
 	// Inspects the source by running a clone through execAsync, so it is not read-only.
 	"compose.fetchSourceType": "dokploy:deploy",
+	// Its preview clones the source over the code dir first, like fetchSourceType.
+	"compose.isolatedDeployment": "dokploy:deploy",
 	// Update check: a mutation in shape, read-only in effect.
 	"settings.getUpdateData": "dokploy:read",
 	// Personal bookmark on a template; must not require administration.
@@ -144,6 +146,9 @@ const OVERRIDES: Record<string, DokployMcpScope> = {
 	// `docker top ... args` for any container id: the full argv of its processes,
 	// which carries tokens and passwords given as flags.
 	"server.getContainerProcesses": "dokploy:admin",
+	// A presigned link to a whole backup file (a full database dump): a bearer
+	// URL, the same class of exfiltration as the credential reads above.
+	"backup.getDownloadUrl": "dokploy:admin",
 	// Opting a compose out of the restricted-compose audit is owner/admin only
 	// (the resolver refuses members), like its sibling composePolicy.removeExclusion.
 	"compose.setComposePolicyAuditExclusion": "dokploy:admin",
@@ -213,6 +218,28 @@ export const CREDENTIAL_QUERIES: ReadonlySet<string> = new Set([
 	"dockerVolume.readVolumeFile",
 	"settings.readTraefikFile",
 ]);
+
+/**
+ * Read-scope queries that clone when called with `type: "fetch"`: the clone
+ * rewrites the code dir a deploy reads (T-8239), so that call also needs the
+ * deploy scope. `type: "cache"` stays a plain read.
+ */
+const FETCH_QUERIES: ReadonlySet<string> = new Set([
+	"compose.loadServices",
+	"compose.rollingEligibility",
+]);
+
+/** A scope the call needs on top of its tool's, from its input; null if none. */
+export const resolveInputScope = (
+	path: string,
+	args: unknown,
+): DokployMcpScope | null =>
+	FETCH_QUERIES.has(path) &&
+	typeof args === "object" &&
+	args !== null &&
+	(args as { type?: unknown }).type === "fetch"
+		? "dokploy:deploy"
+		: null;
 
 const DELETE_PATTERN = /^(delete|remove|drop|clear|clean)/i;
 const DEPLOY_PATTERN =
