@@ -65,6 +65,8 @@ const SAVE_ONLY_REFUSED = [
 	'https://github.com/o/r"x".git',
 	"https://github.com/o/{r}.git",
 	"https://github.com/o/[r].git",
+	"https://h/a b",
+	"https://h/a b",
 	"git@[2001:db8::1]:owner/repo.git",
 	"https://[::1]:3000/o/r.git",
 ];
@@ -130,6 +132,12 @@ describe("the save schema keeps the character rule of the older pattern", () => 
 			expect(() => assertSafeGitUrl(url)).not.toThrow();
 		},
 	);
+
+	it("gives one message for a URL the shared rule already refuses", () => {
+		expect(schemaIssues("git@-oX:r;id").map((issue) => issue.message)).toEqual([
+			GIT_URL_REFUSED_MESSAGE,
+		]);
+	});
 
 	it("refuses exactly the characters the older pattern refused", () => {
 		for (const char of [

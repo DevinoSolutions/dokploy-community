@@ -612,7 +612,8 @@ export const apiSaveGitProvider = createSchema
 			.min(1)
 			.refine(isSafeGitUrl, GIT_URL_REFUSED_MESSAGE)
 			.refine(
-				(url) => !GIT_URL_SAVE_REFUSED_CHARACTERS.test(url),
+				(url) =>
+					!isSafeGitUrl(url) || !GIT_URL_SAVE_REFUSED_CHARACTERS.test(url),
 				GIT_URL_SAVE_CHARACTER_MESSAGE,
 			),
 	})
