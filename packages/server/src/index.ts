@@ -23,6 +23,7 @@ export * from "./services/cluster";
 export * from "./services/compose";
 export * from "./services/compose-build-server";
 export * from "./services/compose-policy-audit";
+export * from "./services/compose-rebuild-pin";
 export * from "./services/compose-rolling";
 export * from "./services/deployment";
 export * from "./services/deployment-cancel";

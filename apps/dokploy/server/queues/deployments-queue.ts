@@ -7,6 +7,7 @@ import {
 	deployPreviewApplication,
 	findUserById,
 	isDeploymentCancelledError,
+	isRebuildRefusedError,
 	readServiceStatus,
 	rebuildApplication,
 	rebuildCompose,
@@ -204,6 +205,27 @@ export const processDeploymentJob = async (
 				}
 			}
 			return "cancelled";
+		}
+		// A compose rebuild the commit pin refused (T-7960) touched nothing: the
+		// deployment row says why, and the compose goes back to the status it
+		// had when this job started instead of "error", as for a cancel.
+		if (
+			job.data.applicationType === "compose" &&
+			isRebuildRefusedError(error)
+		) {
+			console.log(`Rebuild refused: ${error.message}`);
+			const { settledStatus } = error;
+			if (
+				isRestorableStatus(statusBeforeJob) &&
+				isRestorableStatus(settledStatus)
+			) {
+				await restoreServiceStatusIfUnchanged(
+					{ composeId: job.data.composeId },
+					settledStatus,
+					statusBeforeJob,
+				).catch(() => {});
+			}
+			return "failed";
 		}
 		console.log("Error", error);
 		// Roll back the status set at the start of the job so a failed deployment

@@ -68,6 +68,7 @@ import { getDokployUrl } from "./admin";
 import { waitForComposeRequiredChecks } from "./build-policy/compose-checks";
 import {
 	assertRebuildCommitMatchesDeploy,
+	isRebuildRefusedError,
 	recordDeployedCommit,
 } from "./compose-rebuild-pin";
 import {
@@ -92,7 +93,11 @@ import {
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { generateApplyPatchesCommand, type Patch } from "./patch";
+import {
+	findPatchesByEntityId,
+	generateApplyPatchesCommand,
+	type Patch,
+} from "./patch";
 import { validUniqueServerAppName } from "./project";
 import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
@@ -509,10 +514,6 @@ export const runComposeBuild = async (
 		entity.buildServerId && entity.sourceType !== "raw"
 			? await readServingHostCommitOutput(entity)
 			: undefined;
-	// What a later rebuild must still find on disk (T-7960).
-	if (servingCommitOutput !== undefined) {
-		await recordDeployedCommit(deployment.deploymentId, servingCommitOutput);
-	}
 	let appliedPatches: Patch[] | undefined;
 
 	if (applyPatches && entity.sourceType !== "raw") {
@@ -552,6 +553,17 @@ export const runComposeBuild = async (
 	});
 	// <<< build-policy hook (compose)
 	await checkpoint();
+
+	// What a later rebuild must still find (T-7960), recorded only now that
+	// the compose checks and the required checks passed: a refused deploy
+	// leaves its commit on disk, and must not make a rebuild build it.
+	if (servingCommitOutput !== undefined) {
+		await recordDeployedCommit(deployment.deploymentId, {
+			servingCommitOutput,
+			buildServerId: entity.buildServerId,
+			patches: appliedPatches,
+		});
+	}
 
 	// Build-server composes build and push their images before the running
 	// release is touched, so a failed build never reaches `down --volumes`.
@@ -1039,13 +1051,19 @@ export const rebuildCompose = async ({
 			compose.buildServerId && compose.sourceType !== "raw"
 				? await readServingHostCommitOutput(compose)
 				: undefined;
-		// A rebuild clones nothing: it builds only the commit the last deploy
-		// checked out, and refuses any other (T-7960).
+		// A rebuild clones nothing: it builds only what the last deploy built
+		// (its commit, build server and patch rows), and refuses anything else
+		// (T-7960). The patch rows are read once, here: the ones compared are
+		// the ones applied below and on the build server.
+		let pinnedPatches: Patch[] | undefined;
 		if (servingCommitOutput !== undefined) {
+			pinnedPatches = await findPatchesByEntityId(compose.composeId, "compose");
 			await assertRebuildCommitMatchesDeploy({
 				composeId: compose.composeId,
 				deploymentId: deployment.deploymentId,
 				servingCommitOutput,
+				buildServerId: compose.buildServerId,
+				patches: pinnedPatches,
 			});
 		}
 		let appliedPatches: Patch[] | undefined;
@@ -1057,6 +1075,7 @@ export const rebuildCompose = async ({
 					id: compose.composeId,
 					type: "compose",
 					serverId: compose.serverId,
+					patches: pinnedPatches,
 					onLoaded: (rows) => {
 						appliedPatches = rows;
 					},
@@ -1212,6 +1231,15 @@ export const rebuildCompose = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		// A rebuild the pin refused touched nothing: the compose keeps the status
+		// of the release that is still serving (the queue puts back the exact
+		// status it had before the job).
+		if (isRebuildRefusedError(error)) {
+			const settledStatus = await statusAfterCancelledDeploy({ composeId });
+			await updateCompose(composeId, { composeStatus: settledStatus });
+			error.settledStatus = settledStatus;
+			throw error;
+		}
 		const rollbackSucceeded = await didRollbackSucceed(
 			compose,
 			deployment.logPath,

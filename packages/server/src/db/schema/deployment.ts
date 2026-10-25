@@ -85,13 +85,17 @@ export const deployments = pgTable("deployment", {
 	imageTag: text("imageTag"),
 	imageDigest: text("imageDigest"),
 	/**
-	 * Fork column (T-7960). The commit a build-server compose deploy's fresh
-	 * clone checked out on the serving host, read before anything else touches
-	 * the checkout. A rebuild builds the code already on disk, so it refuses
-	 * unless that is still this commit (see `assertRebuildCommitMatchesDeploy`).
-	 * A rebuild that passed carries it forward. Null everywhere else.
+	 * Fork columns (T-7960). What a build-server compose deploy that passed its
+	 * checks built: the commit its fresh clone checked out on the serving host
+	 * (read before anything else touched the checkout), the build server, and a
+	 * digest of the enabled patch rows it applied. A rebuild builds the code
+	 * already on disk, so it refuses unless all three still match (see
+	 * `assertRebuildCommitMatchesDeploy`). A rebuild that passed carries them
+	 * forward. Null everywhere else.
 	 */
 	pinnedCommit: text("pinnedCommit"),
+	pinnedBuildServerId: text("pinnedBuildServerId"),
+	pinnedPatchDigest: text("pinnedPatchDigest"),
 });
 
 export const deploymentsRelations = relations(deployments, ({ one }) => ({

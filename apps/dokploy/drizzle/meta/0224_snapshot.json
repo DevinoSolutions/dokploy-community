@@ -4351,6 +4351,18 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "pinnedBuildServerId": {
+          "name": "pinnedBuildServerId",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pinnedPatchDigest": {
+          "name": "pinnedPatchDigest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
