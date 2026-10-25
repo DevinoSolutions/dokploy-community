@@ -44,26 +44,34 @@ export const slugify = (text: string | undefined) => {
 	});
 };
 
+/**
+ * Runs the setup script on the server and records the result on a "Setup
+ * Server" deployment. A failure marks that deployment as error, is reported
+ * through `onData` as a final "Setup Server: ❌ <reason>" line, and is then
+ * rethrown, so callers do not have to report it to the stream again.
+ */
 export const serverSetup = async (
 	serverId: string,
 	onData?: (data: any) => void,
 ) => {
-	const server = await findServerById(serverId);
-	const { LOGS_PATH } = paths();
-
-	const slugifyName = slugify(`server ${server.name}`);
-
-	const fullPath = path.join(LOGS_PATH, slugifyName);
-
-	await recreateDirectory(fullPath);
-
-	const deployment = await createServerDeployment({
-		serverId: server.serverId,
-		title: "Setup Server",
-		description: "Setup Server",
-	});
-
+	let deploymentId: string | undefined;
 	try {
+		const server = await findServerById(serverId);
+		const { LOGS_PATH } = paths();
+
+		const slugifyName = slugify(`server ${server.name}`);
+
+		const fullPath = path.join(LOGS_PATH, slugifyName);
+
+		await recreateDirectory(fullPath);
+
+		const deployment = await createServerDeployment({
+			serverId: server.serverId,
+			title: "Setup Server",
+			description: "Setup Server",
+		});
+		deploymentId = deployment.deploymentId;
+
 		const isBuildServer = server.serverType === "build";
 		onData?.(
 			isBuildServer
@@ -102,9 +110,88 @@ export const serverSetup = async (
 	} catch (err) {
 		console.log(err);
 
-		await updateDeploymentStatus(deployment.deploymentId, "error");
-		onData?.(`${err} ❌\n`);
+		if (deploymentId) {
+			// The setup failure is the error worth reporting, not this one.
+			await updateDeploymentStatus(deploymentId, "error").catch((error) =>
+				console.error("Could not mark the setup deployment as failed", error),
+			);
+		}
+		onData?.(
+			`\nSetup Server: ❌ ${err instanceof Error ? err.message : String(err)}\n`,
+		);
+		throw err;
 	}
+};
+
+/**
+ * The step headers the setup script echoes ("6. Setting up Network"). The
+ * Docker install also prints "3. Check Docker Installation" inside its own
+ * step, which is not a step of its own.
+ */
+const STEP_HEADER = /^\d+\.\s+\S/;
+const NESTED_STEP_HEADER = /^\d+\.\s+Check Docker Installation\b/;
+
+/**
+ * Remembers the last step header in the setup output, so a failure can name
+ * the step it stopped in. Output arrives in arbitrary chunks, so a line split
+ * across two chunks is joined before it is matched.
+ */
+export const createStepTracker = () => {
+	let partial = "";
+	let lastStep: string | undefined;
+	const consider = (line: string) => {
+		const text = line.trim();
+		if (STEP_HEADER.test(text) && !NESTED_STEP_HEADER.test(text)) {
+			lastStep = text.replace(/[\s.]+$/, "");
+		}
+	};
+	return {
+		push(chunk: string) {
+			const lines = (partial + chunk).split(/\r?\n/);
+			partial = lines.pop() ?? "";
+			for (const line of lines) consider(line);
+		},
+		get lastStep() {
+			if (partial) {
+				consider(partial);
+				partial = "";
+			}
+			return lastStep;
+		},
+	};
+};
+
+/**
+ * A setup that failed on the server: the script exited non-zero, the
+ * connection failed or dropped, or the server has no SSH key. The server's own
+ * state is the cause, not a Dokploy bug, so callers report it to the user
+ * rather than as an internal error.
+ */
+export class ServerSetupError extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = "ServerSetupError";
+	}
+}
+
+/**
+ * The error for a setup script that did not exit with status 0. ssh2 passes a
+ * null code when the command was killed by a signal or the channel closed
+ * without an exit status (the connection dropped); both are failures.
+ */
+export const setupExitError = (
+	code: number | null | undefined,
+	signal: string | null | undefined,
+	lastStep: string | undefined,
+) => {
+	const at = lastStep ? ` at step "${lastStep}"` : "";
+	if (signal) {
+		return new ServerSetupError(`Setup was killed by signal ${signal}${at}`);
+	}
+	if (code === null || code === undefined) {
+		return new ServerSetupError(`Setup ended without an exit status${at}`);
+	}
+	return new ServerSetupError(`Setup failed${at} (exit code ${code})`);
 };
 
 export const reportDockerVersion = () => `
@@ -295,27 +382,53 @@ const installRequirements = async (
 	const server = await findServerById(serverId);
 	if (!server.sshKeyId) {
 		onData?.("❌ No SSH Key found, please assign one to this server");
-		throw new Error("No SSH Key found");
+		throw new ServerSetupError("No SSH Key found");
 	}
 
 	const isBuildServer = server.serverType === "build";
 
 	return new Promise<void>((resolve, reject) => {
+		const steps = createStepTracker();
+		// The exit status arrives before the channel closes, and is kept in case
+		// the connection closes before the channel does.
+		let exit: { code: number | null; signal?: string | null } | undefined;
 		client
 			.once("ready", () => {
 				const command = server.command || defaultCommand(isBuildServer);
 				client.exec(command, (err, stream) => {
 					if (err) {
 						onData?.(err.message);
-						reject(err);
+						client.end();
+						reject(new ServerSetupError(err.message, { cause: err }));
 						return;
 					}
 					stream
-						.on("close", () => {
+						// The script runs under `set -e`, so a failing step ends it with a
+						// non-zero status and skips every step after it.
+						.on("close", (code: number | null, signal?: string | null) => {
 							client.end();
-							resolve();
+							if (code === 0 && !signal) {
+								resolve();
+								return;
+							}
+							reject(setupExitError(code, signal, steps.lastStep));
+						})
+						.on("exit", (code: number | null, signal?: string | null) => {
+							exit = { code, signal };
+						})
+						.on("error", (error: Error) => {
+							client.end();
+							reject(
+								new ServerSetupError(
+									`Setup output stream failed${
+										steps.lastStep ? ` at step "${steps.lastStep}"` : ""
+									}: ${error.message}`,
+									{ cause: error },
+								),
+							);
 						})
 						.on("data", (data: string) => {
+							steps.push(data.toString());
 							onData?.(data.toString());
 						})
 						.stderr.on("data", (data) => {
@@ -342,8 +455,9 @@ const installRequirements = async (
 					].join("\n");
 					onData?.(friendlyMessage);
 					reject(
-						new Error(
+						new ServerSetupError(
 							`Authentication failed: Invalid SSH private key. ${technicalDetail}`,
+							{ cause: err },
 						),
 					);
 				} else {
@@ -362,8 +476,27 @@ const installRequirements = async (
 						"  • Make sure the SSH port (usually 22) is open and the SSH service is running on the server.",
 					].join("\n");
 					onData?.(friendlyMessage);
-					reject(new Error(`SSH connection error: ${technicalDetail}`));
+					reject(
+						new ServerSetupError(`SSH connection error: ${technicalDetail}`, {
+							cause: err,
+						}),
+					);
 				}
+			})
+			// A no-op once the script has settled. Otherwise the connection went
+			// away before the channel closed: the exit status, if it came, decides.
+			.on("close", () => {
+				if (exit) {
+					if (exit.code === 0 && !exit.signal) {
+						resolve();
+					} else {
+						reject(setupExitError(exit.code, exit.signal, steps.lastStep));
+					}
+					return;
+				}
+				reject(
+					new ServerSetupError("SSH connection closed before setup finished"),
+				);
 			})
 			.connect({
 				host: server.ipAddress,

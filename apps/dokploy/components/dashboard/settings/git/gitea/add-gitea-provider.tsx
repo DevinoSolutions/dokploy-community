@@ -129,7 +129,6 @@ export const AddGiteaProvider = () => {
 				result.giteaId,
 				data.clientId,
 				data.giteaUrl,
-				baseUrl,
 			);
 
 			// Open the Gitea OAuth URL

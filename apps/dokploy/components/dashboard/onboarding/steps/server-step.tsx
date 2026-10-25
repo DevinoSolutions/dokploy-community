@@ -159,6 +159,11 @@ export const ServerStep = ({ onNext, plainTitle }: Props) => {
 				if (typeof log === "string" && log.includes("Setup Server:")) {
 					setIsSettingUp(false);
 					refetchValidation();
+					if (log.includes("Setup Server: ❌")) {
+						toast.error("Error setting up the server", {
+							description: log.replace("Setup Server: ❌", "").trim(),
+						});
+					}
 				}
 			},
 			onError(error) {
