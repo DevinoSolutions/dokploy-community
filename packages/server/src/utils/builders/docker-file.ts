@@ -45,17 +45,19 @@ export const getDockerCommand = async (
 		const dockerContextPath =
 			getDockerContextPath(application) || defaultContextPath;
 
+		// The paths and the stage come from the application's settings: each one
+		// reaches the shell as a single quoted word.
 		const commandArgs = [
 			"build",
 			"-t",
-			image,
+			quote([image]),
 			"-f",
-			dockerFilePath,
-			dockerContextPath,
+			quote([dockerFilePath]),
+			quote([dockerContextPath]),
 		];
 
 		if (dockerBuildStage) {
-			commandArgs.push("--target", dockerBuildStage);
+			commandArgs.push("--target", quote([dockerBuildStage]));
 		}
 
 		if (cleanCache) {

@@ -32,6 +32,7 @@ import {
 	resolveComposeRolling,
 } from "@dokploy/server/utils/builders/compose-rolling";
 import { RELEASE_KILL_GRACE_SECONDS } from "@dokploy/server/utils/builders/remote-build-cancel";
+import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
 	cloneCompose,
@@ -473,6 +474,8 @@ export const runComposeBuild = async (
 
 	// A row can still hold a registry or provider of another organization.
 	await assertDeployReferencesInOrganization(entity);
+	// And a compose path saved before the compose path rules (T-8238).
+	assertSafeComposePath(entity.composePath);
 
 	if (entity.sourceType === "raw") {
 		await assertComposeVolumesBoundForDeploy(entity, deployment, {
@@ -1018,6 +1021,8 @@ export const rebuildCompose = async ({
 
 		// A row can still hold a registry or provider of another organization.
 		await assertDeployReferencesInOrganization(compose);
+		// And a compose path saved before the compose path rules (T-8238).
+		assertSafeComposePath(compose.composePath);
 
 		if (compose.sourceType === "raw") {
 			await assertComposeVolumesBoundForDeploy(compose, deployment, {
@@ -1325,6 +1330,7 @@ const assertComposeDirectoryExists = async (
 
 export const startCompose = async (composeId: string) => {
 	const compose = await findComposeById(composeId);
+	assertSafeComposePath(compose.composePath);
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const projectPath = join(COMPOSE_PATH, compose.appName, "code");
 	if (compose.composeType === "docker-compose") {

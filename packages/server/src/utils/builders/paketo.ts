@@ -1,3 +1,4 @@
+import { quote } from "shell-quote";
 import { prepareEnvironmentVariables } from "../docker/utils";
 import { getBuildAppDirectory } from "../filesystem/directory";
 import type { ApplicationNested } from ".";
@@ -22,11 +23,13 @@ export const getPaketoCommand = async (
 		application.environment.env,
 	);
 
+	// The build directory comes from the application's build path: it reaches
+	// the shell as a single quoted word.
 	const args = [
 		"build",
-		appName,
+		quote([appName]),
 		"--path",
-		buildAppDirectory,
+		quote([buildAppDirectory]),
 		"--builder",
 		"paketobuildpacks/builder-jammy-full",
 	];

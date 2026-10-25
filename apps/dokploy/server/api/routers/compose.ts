@@ -78,6 +78,7 @@ import {
 	fetchTemplateLogo,
 	fetchTemplatesList,
 } from "@dokploy/server/templates/github";
+import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -1088,6 +1089,8 @@ export const composeRouter = createTRPCRouter({
 
 			// A stored provider or SSH key of another organization must not be used to clone.
 			await assertDeployReferencesInOrganization(compose, "source");
+			// The template is read next to the compose file.
+			assertSafeComposePath(compose.composePath || "./docker-compose.yml");
 
 			const tempAppName = `${compose.appName}-temp-template-${nanoid()}`;
 
