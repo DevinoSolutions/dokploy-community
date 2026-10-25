@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { paths } from "@dokploy/server/constants";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
@@ -25,10 +25,42 @@ import {
  *   T-7135. A repository that keeps its compose file as a link to another file
  *   of the repository therefore keeps deploying.
  *
+ * The same rule covers the other files Dokploy reads itself (T-8413): the
+ * `-f` override files of a custom command (the volume check and the
+ * restricted-compose audit) and the `.env` of the project directory (the
+ * volume check). For these, the files directory of the compose
+ * (`<compose path>/<appName>/files`, where Dokploy writes the file mounts, and
+ * which a command reaches as `../files/...`) is a second allowed place next to
+ * the code directory; a link that leaves both is still refused. They are also
+ * read only when they are regular files, so a FIFO or a device put in the
+ * checkout can neither block the deploy nor stream. The volume check, which
+ * runs on every deploy and cannot be turned off, refuses `include:` and
+ * `extends: file:`, so the deploy stops before Docker Compose reads such a
+ * file. What is not covered: the files Docker Compose opens on its own and
+ * Dokploy never parses (`env_file:`, `label_file:`, the `file:` of `secrets:`
+ * and `configs:`, bind mount sources). Judging them takes Compose's own path
+ * resolution (variables, `--project-directory`, `include` merging) on every
+ * host a deploy can run on, and the same links reach them through a bind
+ * mount; a clone-wide check of links is a feature of its own, so they stay as
+ * they are. Two more gaps remain, as no check of a path can close them: a hard
+ * link to a file outside the directory is an ordinary file there (making one
+ * takes the same filesystem and write access to the target), and a link
+ * swapped in between the check and the read (only a writer inside the
+ * checkout, such as a container that has it mounted, can do that) is not
+ * seen.
+ *
  * Every shell command quotes the paths it is given.
  */
 export const COMPOSE_FILE_LINK_MESSAGE =
 	"The compose file is, or goes through, a symbolic link that leaves the repository; Dokploy only deploys a regular file inside the repository.";
+
+/** The file is not reached through a link, but it is in no directory that may be read. */
+export const COMPOSE_FILE_OUTSIDE_MESSAGE =
+	"The file is outside the allowed directories (the repository and the files directory of the compose); Dokploy only reads a regular file inside them.";
+
+/** The file is a FIFO, a device, a directory, ... */
+export const COMPOSE_FILE_NOT_REGULAR_MESSAGE =
+	"The file is not a regular file; Dokploy only reads regular files.";
 
 /** Shown when the host's `mv` cannot replace a file by renaming over it. */
 export const MV_REFUSAL_MESSAGE =
@@ -50,14 +82,30 @@ export const getComposeCodeDirectory = (compose: {
 	serverId?: string | null;
 }) => join(paths(!!compose.serverId).COMPOSE_PATH, compose.appName, "code");
 
+/**
+ * The directory of the compose's file mounts, next to the checkout. Override
+ * files and the project `.env` may also be read from it (T-8413).
+ */
+export const getComposeFilesDirectory = (compose: {
+	appName: string;
+	serverId?: string | null;
+}) => join(paths(!!compose.serverId).COMPOSE_PATH, compose.appName, "files");
+
 /** Printed instead of the file by a guarded read that found a link out. */
 export const COMPOSE_FILE_LINK_MARKER = "__DOKPLOY_COMPOSE_FILE_LINK__";
 
+/** Printed instead of the file by a guarded read of a file outside the allowed directories. */
+export const COMPOSE_FILE_OUTSIDE_MARKER = "__DOKPLOY_COMPOSE_FILE_OUTSIDE__";
+
+/** Printed by a guarded read of something that is not a regular file. */
+export const COMPOSE_FILE_NOT_REGULAR_MARKER =
+	"__DOKPLOY_COMPOSE_FILE_NOT_REGULAR__";
+
 export class ComposeFileLinkError extends TRPCError {
-	constructor() {
+	constructor(reason: string = COMPOSE_FILE_LINK_MESSAGE) {
 		super({
 			code: "BAD_REQUEST",
-			message: `Compose refused: ${COMPOSE_FILE_LINK_MESSAGE}`,
+			message: `Compose refused: ${reason}`,
 		});
 		this.name = "ComposeFileLinkError";
 	}
@@ -69,65 +117,109 @@ export const isComposeFileLinkError = (
 
 /**
  * For a file on this machine: the reason it may not be read, or `null`. A
- * file that is not there is fine (the read reports that itself).
+ * file that is not there is fine (the read reports that itself). The file has
+ * to resolve inside `codeDirectory` or, when given, `extraDirectory`; a
+ * directory that is not there contains nothing, so an existing file is
+ * refused when neither exists (the shell guard does the same).
  */
 export const getComposeFileLinkError = (
 	codeDirectory: string,
 	file: string,
+	extraDirectory?: string,
 ): string | null => {
 	// A path of the local filesystem, in one form to compare.
 	const normal = (value: string) =>
 		process.platform === "win32" ? value.replaceAll("\\", "/") : value;
+	// Without a drive letter, which only a Windows dev machine has.
+	const bare = (value: string) => normal(value).replace(/^[A-Za-z]:/, "");
+	let resolved: string;
 	try {
-		const root = normal(realpathSync(codeDirectory)).replace(/\/+$/, "");
-		const resolved = normal(realpathSync(file));
-		return resolved === root || resolved.startsWith(`${root}/`)
-			? null
-			: COMPOSE_FILE_LINK_MESSAGE;
+		resolved = normal(realpathSync(file));
 	} catch (error) {
 		const code = (error as { code?: string } | null)?.code;
 		return code === "ENOENT" || code === "ENOTDIR"
 			? null
 			: COMPOSE_FILE_LINK_MESSAGE;
 	}
+	for (const directory of [codeDirectory, extraDirectory]) {
+		if (!directory) continue;
+		try {
+			const root = normal(realpathSync(directory)).replace(/\/+$/, "");
+			if (resolved === root || resolved.startsWith(`${root}/`)) return null;
+		} catch {
+			// Not there, or not readable: the file cannot be inside it.
+		}
+	}
+	// Inside neither. A link on the way is what led out when the resolved path
+	// differs from the one given.
+	return bare(resolved) === bare(resolve(file))
+		? COMPOSE_FILE_OUTSIDE_MESSAGE
+		: COMPOSE_FILE_LINK_MESSAGE;
 };
 
-/** Throws when `file` on this machine resolves outside `codeDirectory`. */
+/** Throws when `file` on this machine resolves outside the allowed directories. */
 export const assertComposeFileInsideCodeDirectory = (
 	codeDirectory: string,
 	file: string,
+	extraDirectory?: string,
 ) => {
-	if (getComposeFileLinkError(codeDirectory, file)) {
-		throw new ComposeFileLinkError();
-	}
+	const reason = getComposeFileLinkError(codeDirectory, file, extraDirectory);
+	if (reason) throw new ComposeFileLinkError(reason);
 };
 
 /**
  * Shell command that runs `read` (a command that prints the file) only when
- * `file` resolves inside `codeDirectory`; otherwise it prints
- * `COMPOSE_FILE_LINK_MARKER` and exits 0. A file that is not there is let
+ * `file` resolves inside `codeDirectory` or `extraDirectory` (each has to
+ * exist); otherwise it prints `COMPOSE_FILE_LINK_MARKER` (a link leads out) or
+ * `COMPOSE_FILE_OUTSIDE_MARKER` and exits 0. A file that is not there is let
  * through, so the read fails the way it always did. A host that cannot resolve
  * links counts as a link.
  */
 export const getGuardedReadCommand = ({
 	codeDirectory,
+	extraDirectory,
 	file,
 	read,
 }: {
 	codeDirectory: string;
+	extraDirectory?: string;
 	file: string;
 	read: string;
 }) => {
 	const qFile = quote([file]);
+	const inside = [codeDirectory, extraDirectory]
+		.filter((directory): directory is string => !!directory)
+		.map((directory) => `__dokploy_inside ${quote([directory])} ${qFile}`)
+		.join(" || ");
 	return [
 		...getPathResolverLines("__dokploy_resolve() { return 1; }"),
-		`if __dokploy_inside ${quote([codeDirectory])} ${qFile} || [ ! -e ${qFile} ]; then ${read}; else printf '%s' ${COMPOSE_FILE_LINK_MARKER}; fi`,
+		// The files given are absolute and clean, so a path that resolves to
+		// itself has no link on the way: it is just somewhere else.
+		`if ${inside} || [ ! -e ${qFile} ]; then ${read}; else __dokploy_r=$(__dokploy_resolve ${qFile}); if [ -n "$__dokploy_r" ] && [ "$__dokploy_r" = ${qFile} ]; then printf '%s' ${COMPOSE_FILE_OUTSIDE_MARKER}; else printf '%s' ${COMPOSE_FILE_LINK_MARKER}; fi; fi`,
 	].join("\n");
 };
 
-/** Whether the output of a guarded read is the marker (a link out). */
-export const isComposeFileLinkMarker = (output: string) =>
-	output.trim() === COMPOSE_FILE_LINK_MARKER;
+/** Whether the output of a guarded read is one of the refusal markers. */
+export const isComposeFileLinkMarker = (output: string) => {
+	const text = output.trim();
+	return (
+		text === COMPOSE_FILE_LINK_MARKER ||
+		text === COMPOSE_FILE_OUTSIDE_MARKER ||
+		text === COMPOSE_FILE_NOT_REGULAR_MARKER
+	);
+};
+
+/** The refusal for an output that `isComposeFileLinkMarker` accepted. */
+export const getComposeFileRefusal = (output: string) => {
+	const text = output.trim();
+	return new ComposeFileLinkError(
+		text === COMPOSE_FILE_OUTSIDE_MARKER
+			? COMPOSE_FILE_OUTSIDE_MESSAGE
+			: text === COMPOSE_FILE_NOT_REGULAR_MARKER
+				? COMPOSE_FILE_NOT_REGULAR_MESSAGE
+				: COMPOSE_FILE_LINK_MESSAGE,
+	);
+};
 
 /**
  * For the restore: shell that tells whether `file` may be written (its
