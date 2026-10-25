@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.32**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.33**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.32 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.33 \
   --with-registry-auth \
   dokploy
 ```
@@ -120,28 +120,14 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.32
+## What's new in v0.30.8-community.33
 
-- Security: Next.js 16.4.2 with dompurify 3.4.17 or newer (sharp 0.35.5 or newer enforced) clears the Next.js and critical dompurify advisories ([#454](https://github.com/DevinoSolutions/dokploy-community/pull/454)), toml 5 and ip-address are bumped for the audit findings ([#456](https://github.com/DevinoSolutions/dokploy-community/pull/456)), and Dependabot version updates and a security audit workflow are added ([#455](https://github.com/DevinoSolutions/dokploy-community/pull/455)), and zod and body-parser are bumped for GHSA-mrhx-c7xc-m3w5 ([#476](https://github.com/DevinoSolutions/dokploy-community/pull/476)) and GHSA-27r3-jxmh-p828 ([#478](https://github.com/DevinoSolutions/dokploy-community/pull/478)).
-- Security: the upstream authz bundle for backups, certificates and compose is ported ([#457](https://github.com/DevinoSolutions/dokploy-community/pull/457)), backups of the Dokploy instance itself are owner/admin-only with organization-scoped destinations ([#458](https://github.com/DevinoSolutions/dokploy-community/pull/458)), and registry, git provider and SSH key ids written by service updates are checked against the organization, with user profile updates limited to an allowlist ([#461](https://github.com/DevinoSolutions/dokploy-community/pull/461)), plus git provider access and the deploy-time organization re-check and duplicate refusal ([#463](https://github.com/DevinoSolutions/dokploy-community/pull/463)).
-- Security: volume backups, restores and named mounts are bound to the service's own volumes ([#459](https://github.com/DevinoSolutions/dokploy-community/pull/459)), volume names are refused at deploy, rebuild and transfer with the Docker volumes API admin-only ([#460](https://github.com/DevinoSolutions/dokploy-community/pull/460)), and a compose file can only mount its own volumes or ones nothing else uses ([#462](https://github.com/DevinoSolutions/dokploy-community/pull/462)).
-- Security: service reads can leave secrets out, with the MCP doing so by default ([#464](https://github.com/DevinoSolutions/dokploy-community/pull/464)).
-- Linking a service to Uptimely adopts the monitor that already exists instead of creating a second one ([#465](https://github.com/DevinoSolutions/dokploy-community/pull/465)).
-- Container process lists only show containers of services you can read, and system containers are hidden ([#466](https://github.com/DevinoSolutions/dokploy-community/pull/466)).
-- An MCP saveEnvironment or update no longer silently drops variables it was not sent ([#467](https://github.com/DevinoSolutions/dokploy-community/pull/467)).
-- Members who are not owner or admin no longer get a Docker-page shell or logs for containers outside their granted services, or for Dokploy's own containers; the terminal, logs and attach sockets run on the one container that passed the ownership check ([#469](https://github.com/DevinoSolutions/dokploy-community/pull/469)).
-- The Uptimely service panel no longer burns the project's monthly quota with background refetches ([#468](https://github.com/DevinoSolutions/dokploy-community/pull/468)).
-- The Docker image, swarm, event, health, build cache and network routes no longer act on the whole host for a member, and the Docker page and file routes only act on containers the caller can reach ([#472](https://github.com/DevinoSolutions/dokploy-community/pull/472), [#471](https://github.com/DevinoSolutions/dokploy-community/pull/471)).
-- Compose volume check: binds of the directories above Docker's volume storage and `compose run -v` are refused too ([#470](https://github.com/DevinoSolutions/dokploy-community/pull/470)).
-- A custom compose command can only run `docker compose` or `docker stack` ([#473](https://github.com/DevinoSolutions/dokploy-community/pull/473)).
-- Compose file host paths other than `volumes:` get the same Docker-volume-storage check ([#474](https://github.com/DevinoSolutions/dokploy-community/pull/474)).
-- Security: WebSocket terminal, logs and stats access is bound to the member's own service containers, with follow-ups for compose stats names and monitoring history ([#446](https://github.com/DevinoSolutions/dokploy-community/pull/446), [#447](https://github.com/DevinoSolutions/dokploy-community/pull/447), [#448](https://github.com/DevinoSolutions/dokploy-community/pull/448), [#449](https://github.com/DevinoSolutions/dokploy-community/pull/449)); Docker disk usage follows the member's accessible servers ([#452](https://github.com/DevinoSolutions/dokploy-community/pull/452)).
-- Upstream ports: host Monitoring requires Docker read access ([#451](https://github.com/DevinoSolutions/dokploy-community/pull/451)), Cloud schedules register without a timezone ([#450](https://github.com/DevinoSolutions/dokploy-community/pull/450)), and the Select no longer clears form values on reset ([#453](https://github.com/DevinoSolutions/dokploy-community/pull/453)).
-- Four new site guides on dokploy-community.devino.ca for the MCP server with OAuth, enforced remote builds, deploy queue controls and Compose rolling replace ([#444](https://github.com/DevinoSolutions/dokploy-community/pull/444)).
-- Manual Application Deploy and Redeploy now coalesce waiting duplicates like the Compose ones, a manual drop is audited under the person who clicked, and two quick clicks on one service are handled one after the other ([#443](https://github.com/DevinoSolutions/dokploy-community/pull/443)).
-- Build-server composes write a failed `docker compose config` to the deployment log, and an image that vanished before the push is rebuilt once ([#439](https://github.com/DevinoSolutions/dokploy-community/pull/439)); the Dependabot alerts are cleared ([#442](https://github.com/DevinoSolutions/dokploy-community/pull/442)).
-- Upgrade notes: a Compose deploy, redeploy or Start now fails when its file shares a volume with another service or organization, binds `/`, `/var`, `/var/lib` or `/var/lib/docker`, or points a build context, env file, secret or config into Docker's volume storage; a custom command must be `docker compose` or `docker stack`; volume names outside the service are refused at deploy, rebuild and transfer; the Docker volumes API, image, swarm, build cache and network sync routes, and web-server backups, are now owner/admin only. See the changelog for each fix.
-- No database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- A stuck-deployment watchdog fails a deployment whose log has been quiet for 20 minutes or that has run for 90 minutes, and frees its queue slot; a running deploy can now be cancelled on self-hosted ([#480](https://github.com/DevinoSolutions/dokploy-community/pull/480)), and remote commands detect a dead SSH connection instead of hanging ([#481](https://github.com/DevinoSolutions/dokploy-community/pull/481)).
+- The Web Server Update dialog can install a pinned release and roll back to the version that ran before the last update, first offered after the next update made from this release ([#493](https://github.com/DevinoSolutions/dokploy-community/pull/493)); the nightly Docker cleanup moves to 04:00 UTC, is configurable and waits for running deployments ([#477](https://github.com/DevinoSolutions/dokploy-community/pull/477)).
+- Compose hardening: custom commands stay inside their own project and directory, `provider` services are refused, docker's own settings in the Environment are kept out of the docker CLI, host paths from a committed `.env` are checked, and a build server builds exactly the commit the serving host checked ([#475](https://github.com/DevinoSolutions/dokploy-community/pull/475), [#482](https://github.com/DevinoSolutions/dokploy-community/pull/482), [#484](https://github.com/DevinoSolutions/dokploy-community/pull/484), [#486](https://github.com/DevinoSolutions/dokploy-community/pull/486), [#489](https://github.com/DevinoSolutions/dokploy-community/pull/489)); an opt-in, read-only audit records what a restricted-compose sandbox would refuse ([#483](https://github.com/DevinoSolutions/dokploy-community/pull/483)).
+- Traefik "Check Version" with one Traefik action at a time per server, a working Traefik on Swarm worker servers, and cron jobs scheduled on a fresh install, ported from upstream ([#490](https://github.com/DevinoSolutions/dokploy-community/pull/490), [#491](https://github.com/DevinoSolutions/dokploy-community/pull/491), [#492](https://github.com/DevinoSolutions/dokploy-community/pull/492)); undici, nodemailer and fast-uri security updates ([#479](https://github.com/DevinoSolutions/dokploy-community/pull/479), [#485](https://github.com/DevinoSolutions/dokploy-community/pull/485)).
+- Upgrade notes: the stuck-deployment watchdog is on by default, so a deployment is failed after 90 minutes, or after 20 minutes with no log output (both configurable in Settings, Deployments). A compose deploy now stops before anything runs when, among others, its custom command names another project, uses an unknown option, a path outside the compose's own directory or no `-f` where it loads files; when the file declares `provider:` or `models:`; or, with "Create env file" off, when its committed `.env` points a host path into Docker's volume storage. A stack's Environment no longer passes docker's own settings (`DOCKER_HOST`, `COMPOSE_*` and the like) to the docker CLI, and with "Create env file" on the `.env` Dokploy writes no longer carries `COMPOSE_*` names outside a short allowlist, `BUILDX_*`, `GIT_*`, `XDG_*` and the like. A deploy whose enabled patch breaks the stricter patch path rules stops with a message naming the patch. See the changelog for each fix.
+- Three additive database migrations (0220-0222), and the fixes of v0.30.8-community.32.1. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -156,7 +142,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.32
+export DOKPLOY_VERSION=v0.30.8-community.33
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -169,7 +155,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.32      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.33      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -212,7 +198,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.32` is the 32nd fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.33` is the 33rd fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
