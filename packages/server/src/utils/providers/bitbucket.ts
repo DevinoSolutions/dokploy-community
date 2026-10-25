@@ -13,6 +13,7 @@ import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import { getGitBasicAuthConfig } from "./git";
+import { GIT_ALLOW_PROTOCOL_ENV } from "./git-url";
 import { buildPinCommitCommand } from "./pin-commit";
 
 export type ApplicationWithBitbucket = InferResultType<
@@ -138,6 +139,7 @@ export const cloneBitbucketRepository = async ({
 	}
 	const basePath = type === "compose" ? COMPOSE_PATH : APPLICATIONS_PATH;
 	const outputPath = outputPathOverride ?? join(basePath, appName, "code");
+	command += GIT_ALLOW_PROTOCOL_ENV;
 	command += `rm -rf ${outputPath};`;
 	command += `mkdir -p ${outputPath};`;
 	const repoToUse = entity.bitbucketRepositorySlug || bitbucketRepository;

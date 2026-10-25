@@ -79,6 +79,10 @@ import {
 	fetchTemplatesList,
 } from "@dokploy/server/templates/github";
 import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
+import {
+	assertGitUrlSaveable,
+	GitUrlRefusedError,
+} from "@dokploy/server/utils/providers/git-url";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -293,6 +297,15 @@ export const composeRouter = createTRPCRouter({
 				() => findComposeById(input.composeId),
 				ctx.session,
 			);
+
+			// A URL that is not a remote repository is refused when it is set or
+			// changed; a row that already holds one can still be saved (T-8420).
+			if (typeof input.customGitUrl === "string") {
+				assertGitUrlSaveable(
+					input.customGitUrl,
+					(await findComposeById(input.composeId)).customGitUrl,
+				);
+			}
 
 			// Build server: the caller must be allowed to use the server (same check
 			// as applications), and the settings as a whole must be valid. Checked
@@ -794,6 +807,9 @@ export const composeRouter = createTRPCRouter({
 						err.code === "CONFLICT")
 				) {
 					throw err;
+				}
+				if (err instanceof GitUrlRefusedError) {
+					throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
 				}
 				throw new TRPCError({
 					code: "BAD_REQUEST",

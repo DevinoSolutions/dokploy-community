@@ -151,52 +151,50 @@ const loggedMessages = () =>
 				: [];
 		});
 
+const arrange = () => {
+	vi.clearAllMocks();
+	vi.mocked(db.query.applications.findFirst).mockResolvedValue(app as any);
+	vi.mocked(applicationService.findApplicationById).mockResolvedValue(
+		app as any,
+	);
+	vi.mocked(db.query.deployHook.findFirst).mockResolvedValue(undefined as any);
+	vi.mocked(adminService.getDokployUrl).mockResolvedValue(
+		"http://localhost:3000",
+	);
+	vi.mocked(deploymentService.createDeployment).mockResolvedValue({
+		deploymentId: "deployment-id",
+		logPath: LOG_PATH,
+	} as any);
+	vi.mocked(deploymentService.updateDeploymentStatus).mockResolvedValue(
+		undefined as any,
+	);
+	vi.mocked(deploymentService.updateDeployment).mockResolvedValue({} as any);
+	vi.mocked(deploymentService.getDeploymentErrorMessage).mockResolvedValue(
+		"error message",
+	);
+	vi.mocked(applicationService.updateApplicationStatus).mockResolvedValue(
+		{} as any,
+	);
+	vi.mocked(notifications.sendBuildErrorNotifications).mockResolvedValue(
+		undefined as any,
+	);
+	vi.mocked(gitProvider.getGitCommitInfo).mockResolvedValue({
+		message: "test commit",
+		hash: "abc123",
+	});
+	vi.mocked(execProcess.execAsync).mockResolvedValue({
+		stdout: "",
+		stderr: "",
+	} as any);
+	vi.mocked(builders.getBuildCommand).mockResolvedValue("echo build");
+	vi.mocked(assertDeployReferencesInOrganization).mockResolvedValue(undefined);
+};
+
 describe.each([
 	["deployApplication", deployApplication],
 	["rebuildApplication", rebuildApplication],
 ])("%s", (_name, run) => {
-	beforeEach(() => {
-		vi.clearAllMocks();
-		vi.mocked(db.query.applications.findFirst).mockResolvedValue(app as any);
-		vi.mocked(applicationService.findApplicationById).mockResolvedValue(
-			app as any,
-		);
-		vi.mocked(db.query.deployHook.findFirst).mockResolvedValue(
-			undefined as any,
-		);
-		vi.mocked(adminService.getDokployUrl).mockResolvedValue(
-			"http://localhost:3000",
-		);
-		vi.mocked(deploymentService.createDeployment).mockResolvedValue({
-			deploymentId: "deployment-id",
-			logPath: LOG_PATH,
-		} as any);
-		vi.mocked(deploymentService.updateDeploymentStatus).mockResolvedValue(
-			undefined as any,
-		);
-		vi.mocked(deploymentService.updateDeployment).mockResolvedValue({} as any);
-		vi.mocked(deploymentService.getDeploymentErrorMessage).mockResolvedValue(
-			"error message",
-		);
-		vi.mocked(applicationService.updateApplicationStatus).mockResolvedValue(
-			{} as any,
-		);
-		vi.mocked(notifications.sendBuildErrorNotifications).mockResolvedValue(
-			undefined as any,
-		);
-		vi.mocked(gitProvider.getGitCommitInfo).mockResolvedValue({
-			message: "test commit",
-			hash: "abc123",
-		});
-		vi.mocked(execProcess.execAsync).mockResolvedValue({
-			stdout: "",
-			stderr: "",
-		} as any);
-		vi.mocked(builders.getBuildCommand).mockResolvedValue("echo build");
-		vi.mocked(assertDeployReferencesInOrganization).mockResolvedValue(
-			undefined,
-		);
-	});
+	beforeEach(arrange);
 
 	const deploy = () =>
 		run({ applicationId: "test-app-id", titleLog: "t", descriptionLog: "" });
@@ -221,4 +219,53 @@ describe.each([
 			"error",
 		);
 	});
+});
+
+// A custom git source whose URL is not a remote repository (T-8420): the clone
+// is refused before any command runs, so nothing of the host is cloned.
+describe("deployApplication with a git URL that is not a remote repository", () => {
+	beforeEach(arrange);
+
+	it.each([
+		"file:///etc/dokploy",
+		"/srv/x",
+		"../x",
+		"ext::sh -c id",
+		"-oProxyCommand=x:r",
+		"git://h/r",
+	])(
+		"refuses %s: no clone, no build, the deployment ends as error",
+		async (url) => {
+			const row = {
+				...app,
+				registryId: null,
+				customGitUrl: url,
+				customGitBranch: "main",
+				customGitSSHKeyId: null,
+			};
+			vi.mocked(db.query.applications.findFirst).mockResolvedValue(row as any);
+			vi.mocked(applicationService.findApplicationById).mockResolvedValue(
+				row as any,
+			);
+
+			await expect(
+				deployApplication({
+					applicationId: "test-app-id",
+					titleLog: "t",
+					descriptionLog: "",
+				}),
+			).rejects.toThrow("This git URL is not allowed");
+
+			expect(builders.getBuildCommand).not.toHaveBeenCalled();
+			const ran = vi
+				.mocked(execProcess.execAsync)
+				.mock.calls.map(([command]) => String(command))
+				.join(" ");
+			expect(ran).not.toContain("git clone");
+			expect(deploymentService.updateDeploymentStatus).toHaveBeenCalledWith(
+				"deployment-id",
+				"error",
+			);
+		},
+	);
 });

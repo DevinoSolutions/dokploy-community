@@ -277,6 +277,18 @@ describe("providers append the pin only when asked", () => {
 		});
 	}
 
+	// T-8420: every provider holds git to remote protocols (submodules
+	// included) before the clone; deleting the export from one fails here.
+	for (const [name, clone] of Object.entries(clones)) {
+		it(`${name}: exports GIT_ALLOW_PROTOCOL before git runs`, async () => {
+			const command = await clone();
+			const exported = command.indexOf("export GIT_ALLOW_PROTOCOL=https:http:ssh;");
+			expect(exported).toBeGreaterThanOrEqual(0);
+			expect(exported).toBeLessThan(command.indexOf("git "));
+			expect(exported).toBeLessThan(command.search(/git .*(clone|fetch)/));
+		});
+	}
+
 	it("refuses an invalid commit before any command is built", async () => {
 		await expect(clones.github("main")).rejects.toThrow(/invalid commit id/);
 	});

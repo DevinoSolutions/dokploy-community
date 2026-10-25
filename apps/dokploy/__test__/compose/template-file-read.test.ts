@@ -308,7 +308,7 @@ describe("the repository URL", () => {
 		undefined,
 	])("refuses %j", (url) => {
 		expect(() => assertSafeTemplateGitUrl(url)).toThrow(
-			/must be an http\(s\) URL/,
+			/This git URL is not allowed; use an http\(s\), ssh, or user@host:path URL/,
 		);
 	});
 
