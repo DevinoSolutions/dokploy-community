@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**Backup files can be downloaded from the service's Backups tab** (T-7866, upstream #5260). A new Backup Files button on each backup lists the dumps stored under its prefix, and the download icon next to a dump opens a signed link that expires after 5 minutes, so the browser fetches the file straight from the S3 bucket. It needs the restore permission on the service (owners and admins for the Dokploy instance backup), because a dump holds the whole database; the destination and the server must belong to your organization, and each download is written to the audit log. Only unencrypted S3 destinations are supported: SFTP/FTP, generic rclone remotes and rclone-crypt destinations answer that a download is not available, and the backup can be restored instead. No migration.
+
 **Update Server stops early when Dokploy does not run as a Docker service** (T-8588, upstream #5676). The in-panel update replaces the `dokploy` Swarm service, so on an install where Dokploy runs as a standalone container, or where no `dokploy` service is found, the update, a pinned version and the rollback now fail at once with "Dokploy is not running as a Docker service, so in-panel updates are unavailable here. Update manually instead." before anything is checked, pulled or recorded, and the error toast shows that message. Swarm installs are unchanged. No migration.
 
 **Deleting a compose through the API keeps its volumes unless asked** (T-8588, upstream #5666). `compose.delete` now treats a missing `deleteVolumes` as `false` instead of refusing the call; the dashboard always sends it, so the dialog is unchanged. No migration.

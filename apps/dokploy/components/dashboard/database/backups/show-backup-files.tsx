@@ -26,6 +26,10 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+	buildBackupListPrefix,
+	parseBackupTimestamp,
+} from "@/lib/backup-coverage";
 import { api } from "@/utils/api";
 import { formatBytes } from "./restore-backup";
 
@@ -36,15 +40,35 @@ interface Props {
 export const ShowBackupFiles = ({ backupId }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 
+	// The same lookup the Backup Center uses: the backup's context, then the
+	// files under its prefix.
 	const {
-		data: files,
-		isLoading,
-		isError,
-		error,
-	} = api.backup.listBackupFilesByBackupId.useQuery(
-		{ backupId },
-		{ enabled: isOpen },
+		data: context,
+		isLoading: isContextLoading,
+		error: contextError,
+	} = api.backup.backupContext.useQuery({ backupId }, { enabled: isOpen });
+
+	const {
+		data: listedFiles,
+		isLoading: isFilesLoading,
+		error: filesError,
+	} = api.backup.listBackupFiles.useQuery(
+		{
+			destinationId: context?.destinationId ?? "",
+			search: context ? buildBackupListPrefix(context.prefix) : "",
+			serverId: context?.serverId ?? "",
+		},
+		{ enabled: isOpen && !!context?.destinationId },
 	);
+
+	const files = listedFiles?.filter(
+		(file) => !file.IsDir && /\.(sql\.gz|bson\.gz|zip)$/.test(file.Name),
+	);
+	const isLoading = isContextLoading || (!!context && isFilesLoading);
+	const error = contextError ?? filesError;
+	const isError = !!error;
+	// A dump is the whole database: downloading takes the restore permission.
+	const canDownload = !!context?.canRestore;
 
 	const download = api.backup.getDownloadUrl.useMutation({
 		onSuccess: ({ url }) => window.location.assign(url),
@@ -74,7 +98,7 @@ export const ShowBackupFiles = ({ backupId }: Props) => {
 					</DialogDescription>
 				</DialogHeader>
 
-				{isError && <AlertBlock type="error">{error.message}</AlertBlock>}
+				{error && <AlertBlock type="error">{error.message}</AlertBlock>}
 
 				{isLoading && (
 					<div className="flex items-center justify-center py-16">
@@ -104,14 +128,12 @@ export const ShowBackupFiles = ({ backupId }: Props) => {
 							</TableHeader>
 							<TableBody>
 								{files.map((file) => (
-									<TableRow key={file.Name}>
+									<TableRow key={file.Path}>
 										<TableCell className="font-medium break-all">
 											{file.Name}
 										</TableCell>
 										<TableCell className="whitespace-nowrap text-sm text-muted-foreground">
-											{file.ModTime
-												? new Date(file.ModTime).toLocaleString()
-												: "—"}
+											{parseBackupTimestamp(file.Name)?.toLocaleString() ?? "—"}
 										</TableCell>
 										<TableCell className="whitespace-nowrap text-sm text-muted-foreground">
 											{formatBytes(file.Size)}
@@ -121,7 +143,7 @@ export const ShowBackupFiles = ({ backupId }: Props) => {
 												variant="ghost"
 												size="icon"
 												className="size-8"
-												disabled={download.isPending}
+												disabled={!canDownload || download.isPending}
 												onClick={() =>
 													download.mutate({ backupId, fileName: file.Name })
 												}

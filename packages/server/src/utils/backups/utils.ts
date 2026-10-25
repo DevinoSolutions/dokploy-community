@@ -830,21 +830,11 @@ export const getRclonePathAndFlags = async (
 	return { flags: [], path, envVars: "" };
 };
 
-const getServiceAppName = (backup: BackupSchedule) => {
-	if (backup.compose?.appName) {
-		return backup.serviceName
-			? `${backup.compose.appName}_${backup.serviceName}`
-			: backup.compose.appName;
-	}
-	return (
-		backup.postgres?.appName ||
-		backup.mysql?.appName ||
-		backup.mariadb?.appName ||
-		backup.mongo?.appName ||
-		backup.libsql?.appName ||
-		backup.appName
-	);
+// Where a backup run writes its dumps in the destination: directly under the
+// backup prefix, except for a libsql database, which keeps them under its app
+// name. Mirrors the run*Backup helpers, not the keepLatestNBackups listing.
+export const getBackupFolder = (backup: BackupSchedule) => {
+	const libsqlAppName =
+		backup.backupType === "database" ? backup.libsql?.appName : undefined;
+	return `${libsqlAppName ? `${libsqlAppName}/` : ""}${normalizeS3Path(backup.prefix)}`;
 };
-
-export const getBackupFolder = (backup: BackupSchedule) =>
-	`${getServiceAppName(backup)}/${normalizeS3Path(backup.prefix)}`;

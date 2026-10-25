@@ -64,6 +64,8 @@ export const execAsync = async (
 		env?: NodeJS.ProcessEnv;
 		shell?: string;
 		maxBuffer?: number;
+		// Kills the command after this many milliseconds.
+		timeout?: number;
 		// Written to the command's stdin. Secrets go here, never in `command`:
 		// the command line is visible to every user on the host through ps.
 		stdin?: string;

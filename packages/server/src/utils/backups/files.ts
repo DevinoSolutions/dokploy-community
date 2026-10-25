@@ -1,20 +1,17 @@
 import { IS_CLOUD } from "@dokploy/server/constants";
-import {
-	type BackupSchedule,
-	findBackupById,
-} from "@dokploy/server/services/backup";
-import { findDestinationById } from "@dokploy/server/services/destination";
-import {
-	checkServicePermissionAndAccess,
-	findMemberByUserId,
-	type PermissionCtx,
-} from "@dokploy/server/services/permission";
-import { findServerById } from "@dokploy/server/services/server";
+import type { BackupSchedule } from "@dokploy/server/services/backup";
+import type { Destination } from "@dokploy/server/services/destination";
 import { TRPCError } from "@trpc/server";
 import { quote } from "shell-quote";
 import { ExecError, execAsync, execAsyncRemote } from "../process/execAsync";
 import { redactRcloneCredentials } from "./redact";
-import { getBackupFolder, getS3Credentials } from "./utils";
+import {
+	buildRcloneCommand,
+	getBackupFolder,
+	getRclonePathAndFlags,
+	isDestinationEncrypted,
+	isGenericRcloneDestination,
+} from "./utils";
 
 export interface RcloneFile {
 	Path: string;
@@ -29,136 +26,118 @@ export interface RcloneFile {
 	};
 }
 
-const BACKUP_FILE_NAME = /^[^/.][^/]*\.(sql\.gz|bson\.gz|zip)$/;
+// How long a download link stays valid. The browser starts the request as soon
+// as it gets the link, and S3 only checks the expiry when the request starts.
+const DOWNLOAD_LINK_EXPIRY = "5m";
+const DOWNLOAD_LINK_TIMEOUT_MS = 30_000;
 
-export const getBackupServerId = (backup: BackupSchedule) =>
-	backup.postgres?.serverId ??
-	backup.mysql?.serverId ??
-	backup.mariadb?.serverId ??
-	backup.mongo?.serverId ??
-	backup.libsql?.serverId ??
-	backup.compose?.serverId ??
-	null;
+// A dump is named by the backup run (`<timestamp>.sql.gz`, `.bson.gz`, or
+// `webserver-backup-<timestamp>.zip`) and sits directly under the backup
+// folder, so a file name is a single path segment: no separator, no control
+// character, no leading dot.
+const MAX_FILE_NAME_LENGTH = 255;
 
-export const resolveBackupAccess = async (
-	ctx: PermissionCtx,
-	backupId: string,
-) => {
-	const backup = await findBackupById(backupId);
-	const destination = await findDestinationById(backup.destinationId);
-	if (destination.organizationId !== ctx.session.activeOrganizationId) {
-		throw new TRPCError({
-			code: "UNAUTHORIZED",
-			message: "You don't have access to this destination.",
-		});
+const isSingleSegmentName = (fileName: string) => {
+	if (fileName.length === 0 || fileName.length > MAX_FILE_NAME_LENGTH) {
+		return false;
 	}
-
-	const serviceId =
-		backup.postgresId ||
-		backup.mysqlId ||
-		backup.mariadbId ||
-		backup.mongoId ||
-		backup.libsqlId ||
-		backup.composeId;
-
-	if (serviceId) {
-		await checkServicePermissionAndAccess(ctx, serviceId, { backup: ["read"] });
-	} else {
-		const member = await findMemberByUserId(
-			ctx.user.id,
-			ctx.session.activeOrganizationId,
-		);
-		if (member.role !== "owner" && member.role !== "admin") {
-			throw new TRPCError({
-				code: "UNAUTHORIZED",
-				message: "You don't have access to this backup.",
-			});
+	if (fileName.startsWith(".")) return false;
+	for (const char of fileName) {
+		const code = char.charCodeAt(0);
+		if (char === "/" || char === "\\" || code < 0x20 || code === 0x7f) {
+			return false;
 		}
 	}
-
-	const serverId = getBackupServerId(backup);
-	if (serverId) {
-		const server = await findServerById(serverId);
-		if (server.organizationId !== ctx.session.activeOrganizationId) {
-			throw new TRPCError({
-				code: "UNAUTHORIZED",
-				message: "You don't have access to this server.",
-			});
-		}
-	} else if (IS_CLOUD) {
-		throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
-	}
-
-	return {
-		backup,
-		destination,
-		serverId,
-		path: `:s3:${destination.bucket}/${getBackupFolder(backup)}`,
-	};
+	return true;
 };
 
-const runRclone = (command: string, serverId: string | null) =>
-	serverId
-		? execAsyncRemote(serverId, command)
-		: execAsync(command, { maxBuffer: 32 * 1024 * 1024 });
+export const getBackupFileExtensions = (
+	backup: Pick<BackupSchedule, "databaseType">,
+) =>
+	backup.databaseType === "web-server"
+		? ([".zip"] as const)
+		: ([".sql.gz", ".bson.gz"] as const);
+
+export const isBackupFileName = (
+	backup: Pick<BackupSchedule, "databaseType">,
+	fileName: string,
+) =>
+	isSingleSegmentName(fileName) &&
+	getBackupFileExtensions(backup).some(
+		(extension) =>
+			fileName.length > extension.length && fileName.endsWith(extension),
+	);
+
+// `rclone link` signs a link for S3-compatible remotes only. A generic rclone
+// remote or an SFTP/FTP server has no such link, and an encrypted destination
+// would hand out the ciphertext.
+export const isDownloadableDestination = (destination: Destination) =>
+	!isGenericRcloneDestination(destination) &&
+	!["sftp", "ftp"].includes(destination.provider || "") &&
+	!isDestinationEncrypted(destination);
 
 const getErrorDetail = (error: unknown) =>
 	error instanceof ExecError
 		? error.stderr || (error.serverId ? error.message : "")
 		: String(error);
 
-const modTime = (file: RcloneFile) => Date.parse(file.ModTime ?? "") || 0;
-
-export const listBackupFilesByBackupId = async (
-	ctx: PermissionCtx,
-	backupId: string,
-): Promise<RcloneFile[]> => {
-	const { backup, destination, serverId, path } = await resolveBackupAccess(
-		ctx,
-		backupId,
-	);
-	const include =
-		backup.databaseType === "web-server" ? "*.zip" : "*.{sql.gz,bson.gz}";
-	const command = `rclone lsjson ${getS3Credentials(destination).join(" ")} --files-only --no-mimetype --use-server-modtime --include ${quote([include])} ${quote([path])}`;
-
-	try {
-		const { stdout } = await runRclone(command, serverId);
-		const files = JSON.parse(stdout) as RcloneFile[];
-		return files.sort((a, b) => modTime(b) - modTime(a));
-	} catch (error) {
-		const detail = getErrorDetail(error);
-		if (/directory not found|object not found/i.test(detail)) {
-			return [];
-		}
-		console.error("rclone lsjson failed:", redactRcloneCredentials(detail));
-		throw new TRPCError({
-			code: "BAD_REQUEST",
-			message: "Error listing backup files",
-		});
-	}
-};
-
-export const getBackupDownloadUrl = async (
-	ctx: PermissionCtx,
-	backupId: string,
-	fileName: string,
-) => {
-	if (!BACKUP_FILE_NAME.test(fileName)) {
+export const getBackupDownloadUrl = async ({
+	backup,
+	destination,
+	serverId,
+	fileName,
+}: {
+	backup: BackupSchedule;
+	destination: Destination;
+	serverId: string | null;
+	fileName: string;
+}) => {
+	if (!isBackupFileName(backup, fileName)) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
 			message: "Invalid backup file name",
 		});
 	}
-	const { destination, serverId, path } = await resolveBackupAccess(
-		ctx,
-		backupId,
-	);
-	const command = `rclone link --expire 15m ${getS3Credentials(destination).join(" ")} ${quote([`${path}${fileName}`])}`;
+	if (!serverId && IS_CLOUD) {
+		throw new TRPCError({ code: "NOT_FOUND", message: "Server not found" });
+	}
+	if (!isDownloadableDestination(destination)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				"Downloads are only available for unencrypted S3 destinations. Restore the backup instead.",
+		});
+	}
+
+	// The key is the backup's own folder plus a single file name. A folder with
+	// a dot segment (the prefix is free text) could leave it, so it is refused.
+	const folder = getBackupFolder(backup);
+	if (
+		folder.split("/").some((segment) => segment === "." || segment === "..")
+	) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Invalid backup folder",
+		});
+	}
 
 	try {
-		const { stdout } = await runRclone(command, serverId);
+		const {
+			flags: rcloneFlags,
+			path,
+			envVars,
+		} = await getRclonePathAndFlags(destination, `${folder}${fileName}`);
+		const command = buildRcloneCommand(
+			`rclone link --expire ${DOWNLOAD_LINK_EXPIRY} ${rcloneFlags.join(" ")} --retries 1 --low-level-retries 1 --contimeout 10s --timeout 30s ${quote([path])}`,
+			envVars,
+		);
+		const { stdout } = serverId
+			? await execAsyncRemote(serverId, command, undefined, {
+					signal: AbortSignal.timeout(DOWNLOAD_LINK_TIMEOUT_MS),
+				})
+			: await execAsync(command, { timeout: DOWNLOAD_LINK_TIMEOUT_MS });
 		const url = stdout.trim().split("\n").pop();
-		if (!url) {
+		if (!url || !/^https?:\/\//.test(url)) {
 			throw new Error("rclone link returned no URL");
 		}
 		return { url };
@@ -170,6 +149,7 @@ export const getBackupDownloadUrl = async (
 				message: "Backup file not found",
 			});
 		}
+		// The detail can carry the command line with the destination keys.
 		console.error("rclone link failed:", redactRcloneCredentials(detail));
 		throw new TRPCError({
 			code: "BAD_REQUEST",
