@@ -386,6 +386,106 @@ describe.each(builders)("%s builder keeps values out of the command", (name, bui
 	});
 });
 
+// Names the shell, its loader or docker read for themselves (T-8282): a build
+// secret with one of them reaches docker under an internal name, never as an
+// assignment or an export in the script.
+const RESERVED_SECRET_NAMES = [
+	"PATH",
+	"BASH_ENV",
+	"ENV",
+	"IFS",
+	"SHELLOPTS",
+	"BASHOPTS",
+	"PS4",
+	"HOME",
+	"CDPATH",
+	"LD_PRELOAD",
+	"LD_LIBRARY_PATH",
+	"DOCKER_HOST",
+	"DOCKER_CONFIG",
+	"BUILDKIT_HOST",
+	"GIT_SSH_COMMAND",
+];
+
+describe("build secret names", () => {
+	it("keeps reserved docker build secret names out of the script", async () => {
+		const buildSecrets = RESERVED_SECRET_NAMES.map(
+			(name, index) => `${name}=reserved-value-${index}`,
+		).join("\n");
+		const command = await getDockerCommand(
+			createApplication({ buildSecrets }),
+			{ deploymentId: "dep-reserved" },
+		);
+
+		expect(command).not.toContain("export ");
+		expect(command).not.toContain("reserved-value-");
+		for (const [index, name] of RESERVED_SECRET_NAMES.entries()) {
+			expect(command, name).not.toMatch(new RegExp(`(^|[\\s;])${name}=`));
+			expect(command, name).toContain(
+				`--secret type=env,id=${name},env=__dokploy_secret_${index}`,
+			);
+		}
+	});
+
+	it("keeps ordinary docker build secret names as they were", async () => {
+		const command = await getDockerCommand(
+			createApplication({ buildSecrets: "NPM_TOKEN=ordinary-value" }),
+			{ deploymentId: "dep-ordinary" },
+		);
+
+		expect(command).toContain("--secret type=env,id=NPM_TOKEN");
+		expect(command).not.toContain("__dokploy_secret_");
+		expect(command).not.toContain("ordinary-value");
+	});
+
+	it.each(["MY-SECRET", "my.secret", "1SECRET"])(
+		"refuses the docker build secret name %j, naming it but not its value",
+		async (name) => {
+			const error = await getDockerCommand(
+				createApplication({ buildSecrets: `${name}=refused-value` }),
+				{ deploymentId: "dep-refused" },
+			).catch((caught: unknown) => caught);
+
+			expect(error).toBeInstanceOf(Error);
+			const message = (error as Error).message;
+			expect(message).toContain(`build secret name ${JSON.stringify(name)}`);
+			expect(message).not.toContain("refused-value");
+			// Refused before anything is staged.
+			expect(stagedIn(stagedDir())).toEqual([]);
+		},
+	);
+
+	it("never exports a railpack variable, whatever its name", async () => {
+		const env = [
+			...RESERVED_SECRET_NAMES.map(
+				(name, index) => `${name}=reserved-value-${index}`,
+			),
+			"my.setting=dotted-value",
+			"API_TOKEN=plain-value",
+		].join("\n");
+		const command = await getRailpackCommand(
+			createApplication({ buildType: "railpack", env }),
+			{ deploymentId: "dep-rp-names" },
+		);
+
+		// The script's only export is the railpack version it installs.
+		expect(command).not.toMatch(/^\s*export (?!RAILPACK_VERSION=)/m);
+		const buildLine = command
+			.split("\n")
+			.find((line) => line.includes("docker buildx build")) as string;
+		for (const [index, name] of RESERVED_SECRET_NAMES.entries()) {
+			expect(buildLine, name).toContain(
+				`--secret id=${name},env=__dokploy_secret_${index}`,
+			);
+		}
+		expect(buildLine).toContain("--secret id=API_TOKEN,env=API_TOKEN");
+		// A name no shell variable can have is not a buildx secret; prepare
+		// still gets it.
+		expect(buildLine).not.toContain("my.setting");
+		expect(command).toContain(`--env ${quote(["my.setting=dotted-value"])}`);
+	});
+});
+
 describe("variables the env file cannot carry keep their command line form", () => {
 	it("passes reserved and empty ones inline, unchanged", async () => {
 		const command = await getNixpacksCommand(
@@ -417,7 +517,7 @@ describe("variables the env file cannot carry keep their command line form", () 
 		expect(command).not.toContain("from-secret");
 	});
 
-	it("exports a railpack secret the env file cannot carry, as before", async () => {
+	it("gives a railpack secret the env file cannot carry an internal name", async () => {
 		const command = await getRailpackCommand(
 			createApplication({
 				buildType: "railpack",
@@ -426,10 +526,10 @@ describe("variables the env file cannot carry keep their command line form", () 
 			{ deploymentId: "dep-rp" },
 		);
 
-		expect(command).toContain(`export LD_PRELOAD=${quote(["/x.so"])}`);
+		expect(command).not.toMatch(/^\s*export (?!RAILPACK_VERSION=)/m);
 		expect(command).not.toContain("railpack-secret");
 		expect(command).toContain("--secret id=API_TOKEN,env=API_TOKEN");
-		expect(command).toContain("--secret id=LD_PRELOAD,env=LD_PRELOAD");
+		expect(command).toContain("--secret id=LD_PRELOAD,env=__dokploy_secret_0");
 	});
 
 	it("hashes the same variables to the same railpack cache key as before", async () => {
@@ -641,18 +741,27 @@ describe("build commands in a real shell", () => {
 		},
 	);
 
-	itWithSh("docker build still reads an inline-only secret name", async () => {
-		const { bin, out } = installFakeTools(0);
-		const script = await getDockerCommand(
-			createApplication({ buildSecrets: "DOCKER_SECRET=inline-ok" }),
-			{ deploymentId: "dep-inline" },
-		);
+	itWithSh(
+		"docker build reads a secret the env file cannot carry from its internal name",
+		async () => {
+			const { bin, out } = installFakeTools(0);
+			const script = await getDockerCommand(
+				createApplication({ buildSecrets: "DOCKER_SECRET=internal-ok" }),
+				{ deploymentId: "dep-alias" },
+			);
 
-		const result = run(script, bin);
+			const result = run(script, bin);
 
-		expect(result.status).toBe(0);
-		expect(received(out, "docker-build").get("DOCKER_SECRET")).toBe("inline-ok");
-	});
+			expect(result.status).toBe(0);
+			const env = received(out, "docker-build");
+			expect(env.get("DOCKER_SECRET")).toBeUndefined();
+			expect(env.get("__dokploy_secret_0")).toBe("internal-ok");
+			expect(argsOf(out, "docker-build")).toContain(
+				"--secret\ntype=env,id=DOCKER_SECRET,env=__dokploy_secret_0\n",
+			);
+			expect(argsOf(out, "docker-build")).not.toContain("internal-ok");
+		},
+	);
 
 	itWithSh(
 		"nixpacks, heroku and paketo get their env from the environment",
@@ -721,10 +830,36 @@ describe("build commands in a real shell", () => {
 			for (const [key, value] of Object.entries(TRICKY)) {
 				expect(buildEnv.get(key), `buildx ${key}`).toBe(value);
 			}
-			expect(buildEnv.get("LD_PRELOAD")).toBe("/x.so");
+			expect(buildEnv.get("LD_PRELOAD")).toBeUndefined();
+			expect(buildEnv.get("__dokploy_secret_0")).toBe("/x.so");
 			const buildArgs = argsOf(out, "docker-buildx");
 			expect(buildArgs).toContain("--secret\nid=T_QUOTES,env=T_QUOTES\n");
+			expect(buildArgs).toContain(
+				"--secret\nid=LD_PRELOAD,env=__dokploy_secret_0\n",
+			);
 			expect(buildArgs).not.toContain("pwned");
+		},
+	);
+
+	itWithSh(
+		"a build secret named PATH reaches docker under its internal name",
+		async () => {
+			const { bin, out } = installFakeTools(0);
+			const script = await getDockerCommand(
+				createApplication({
+					buildSecrets: `PATH=${tmp}/elsewhere\nBASH_ENV=${tmp}/elsewhere/env`,
+				}),
+				{ deploymentId: "dep-path" },
+			);
+
+			const result = run(script, bin);
+
+			expect(result.status).toBe(0);
+			const env = received(out, "docker-build");
+			expect(env.get("PATH")).not.toBe(`${tmp}/elsewhere`);
+			expect(env.get("BASH_ENV")).toBeUndefined();
+			expect(env.get("__dokploy_secret_0")).toBe(`${tmp}/elsewhere`);
+			expect(env.get("__dokploy_secret_1")).toBe(`${tmp}/elsewhere/env`);
 		},
 	);
 

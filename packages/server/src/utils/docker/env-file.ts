@@ -142,6 +142,16 @@ export const isEnvFileName = (name: string) =>
 	!ENV_FILE_RESERVED_PREFIXES.some((prefix) => name.startsWith(prefix));
 
 /**
+ * The variable a build secret's value travels in when its own name is not one
+ * the env file may carry (`isEnvFileName`): the secret keeps its id and docker
+ * reads the value from this name (`--secret id=KEY,env=...`). No shell or tool
+ * reads `__dokploy_*` names, and a user's name never has that prefix in the
+ * file (T-8282).
+ */
+export const getBuildSecretAlias = (index: number) =>
+	`__dokploy_secret_${index}`;
+
+/**
  * Names of the reserved set that a stack's staged environment may still carry:
  * they change how a program formats text (locale, time zone, the user's name),
  * not what it loads or whom it talks to, and compose files interpolate them

@@ -1,4 +1,5 @@
 import { deployPriorityInput } from "@dokploy/server/db/validations/deploy-priority";
+import { checkoutPathSchema } from "@dokploy/server/utils/compose-path";
 import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
 import { VALID_GIT_URL_REGEX } from "@dokploy/server/utils/git-url-validation";
 import { getPreviewImageTemplateError } from "@dokploy/server/utils/preview-image";
@@ -359,12 +360,22 @@ const createSchema = createInsertSchema(applications, {
 	registryUrl: z.string().optional(),
 	customGitSSHKeyId: z.string().optional(),
 	repository: z.string().optional(),
-	dockerfile: z.string().optional(),
+	// Build settings inside the checkout (T-8282). The Dockerfile path is
+	// relative to the build path, so `..` stays allowed there: the deploy checks
+	// where it resolves (`getBuildAppDirectory`).
+	dockerfile: checkoutPathSchema("the Dockerfile path", {
+		parentSegments: true,
+	}).optional(),
 	branch: z.string().optional(),
 	customGitBranch: z.string().optional(),
-	customGitBuildPath: z.string().optional(),
+	customGitBuildPath: checkoutPathSchema("the build path").optional(),
 	customGitUrl: z.string().optional(),
-	buildPath: z.string().optional(),
+	buildPath: checkoutPathSchema("the build path").optional(),
+	gitlabBuildPath: checkoutPathSchema("the build path").optional(),
+	bitbucketBuildPath: checkoutPathSchema("the build path").optional(),
+	giteaBuildPath: checkoutPathSchema("the build path").optional(),
+	dropBuildPath: checkoutPathSchema("the build path").optional(),
+	dockerContextPath: checkoutPathSchema("the Docker context path").optional(),
 	environmentId: z.string(),
 	sourceType: z
 		.enum(["github", "docker", "git", "gitlab", "bitbucket", "gitea", "drop"])
@@ -381,7 +392,7 @@ const createSchema = createInsertSchema(applications, {
 	]),
 	railpackVersion: z.string().optional(),
 	herokuVersion: z.string().optional(),
-	publishDirectory: z.string().optional(),
+	publishDirectory: checkoutPathSchema("the publish directory").optional(),
 	isStaticSpa: z.boolean().optional(),
 	createEnvFile: z.boolean().optional(),
 	owner: z.string(),

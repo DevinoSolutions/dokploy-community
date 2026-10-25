@@ -2,7 +2,9 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 
 /**
- * Rules for the compose file path of a compose (`composePath`, T-8238): a
+ * Rules for the compose file path of a compose (`composePath`, T-8238), and
+ * the part of them an application's build settings share
+ * (`getCheckoutPathError`, T-8282). The compose path is a
  * relative path naming the compose file inside the repository checkout, such
  * as `./docker-compose.yml` or `deploy/compose.prod.yml`.
  *
@@ -44,11 +46,48 @@ export const getStoredComposePathError = (
 	if (composePath.startsWith("/") || composePath.startsWith("~")) {
 		return "the compose path must be relative to the repository root";
 	}
-	if (composePath.split("/").some((segment) => segment === "..")) {
-		return "the compose path leaves the repository";
+	return getCheckoutPathError(composePath, "the compose path");
+};
+
+/**
+ * The rules every path inside the checkout shares, the compose path above or
+ * an application's build settings (build path, Dockerfile, Docker context,
+ * publish directory, T-8282): a control character, a backslash or a `..`
+ * segment is refused. `label` names the path in the reason. `parentSegments`
+ * lets `..` through, for a caller that checks where the joined path resolves.
+ */
+export const getCheckoutPathError = (
+	value: string,
+	label: string,
+	{ parentSegments = false }: { parentSegments?: boolean } = {},
+): string | null => {
+	if (CONTROL_CHARACTER.test(value)) {
+		return `${label} contains a control character`;
+	}
+	if (value.includes("\\")) {
+		return `${label} contains a backslash`;
+	}
+	if (!parentSegments && value.split("/").some((segment) => segment === "..")) {
+		return `${label} leaves the repository`;
 	}
 	return null;
 };
+
+/**
+ * The zod form of `getCheckoutPathError`, for the API inputs that take an
+ * application's build settings. A leading `/` is the top of the repository,
+ * so `/`, `/apps/web`, `./apps/web` and `apps/web` are all accepted.
+ */
+export const checkoutPathSchema = (
+	label: string,
+	options?: { parentSegments?: boolean },
+) =>
+	z.string().superRefine((value, ctx) => {
+		const reason = getCheckoutPathError(value, label, options);
+		if (reason) {
+			ctx.addIssue({ code: "custom", message: `Invalid path: ${reason}` });
+		}
+	});
 
 export const getComposePathError = (composePath: unknown): string | null => {
 	const stored = getStoredComposePathError(composePath);
