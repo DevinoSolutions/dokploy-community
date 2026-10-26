@@ -160,20 +160,33 @@ describe("with the real root organization check", () => {
 		expect(result).toMatchObject({ serverIp: null, metricsConfig: null });
 	});
 
-	it("user.getMetricsToken blanks the token outside the root organization", async () => {
+	it("user.getMetricsToken sends the host's address and settings to no other organization", async () => {
 		const result = await callerAs("admin", OTHER_ORG).user.getMetricsToken();
 
-		expect(result.serverIp).toBe("10.0.0.1");
-		expect(result.metricsConfig?.server.token).toBe("");
-		expect(result.metricsConfig?.server.port).toBe(4500);
+		expect(result.serverIp).toBeNull();
+		expect(result.metricsConfig).toBeNull();
 		expect(JSON.stringify(result)).not.toContain(TOKEN);
+		expect(JSON.stringify(result)).not.toContain("10.0.0.1");
+		expect(JSON.stringify(result)).not.toContain("4500");
 		// the monitoring page leaves the Dokploy host out for this organization
 		expect(result.localHostAccess).toBe(false);
 	});
 
-	it("user.getMetricsToken blanks the token for a member of the root organization", async () => {
+	it("user.getMetricsToken keeps the user-level fields for another organization", async () => {
+		mocks.findUserById.mockResolvedValueOnce({ enablePaidFeatures: true });
+
+		const result = await callerAs("owner", OTHER_ORG).user.getMetricsToken();
+
+		expect(result.enabledFeatures).toBe(true);
+		expect(result.serverIp).toBeNull();
+		expect(result.metricsConfig).toBeNull();
+	});
+
+	it("user.getMetricsToken gives a member of the root organization the address and settings, not the token", async () => {
 		const result = await callerAs("member", ROOT_ORG).user.getMetricsToken();
 
+		expect(result.serverIp).toBe("10.0.0.1");
+		expect(result.metricsConfig?.server.port).toBe(4500);
 		expect(result.metricsConfig?.server.token).toBe("");
 		expect(result.localHostAccess).toBe(true);
 	});
@@ -181,7 +194,9 @@ describe("with the real root organization check", () => {
 	it("user.getMetricsToken gives the token to the root organization's owner", async () => {
 		const result = await callerAs("owner", ROOT_ORG).user.getMetricsToken();
 
+		expect(result.serverIp).toBe("10.0.0.1");
 		expect(result.metricsConfig?.server.token).toBe(TOKEN);
+		expect(result.metricsConfig?.server.port).toBe(4500);
 		expect(result.localHostAccess).toBe(true);
 	});
 
