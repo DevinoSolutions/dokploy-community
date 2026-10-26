@@ -43,6 +43,8 @@ const Dashboard = () => {
 			);
 		}
 	}, [canMonitorLocalHost, firstServerId]);
+	// Nothing to pick: the host is not this organization's and it has no servers
+	const noServersToPick = !canMonitorLocalHost && servers?.length === 0;
 	const hostRefused =
 		!canMonitorLocalHost && selectedServerId === LOCAL_SERVER_ID;
 	const isRemoteSelected = selectedServerId !== LOCAL_SERVER_ID;
@@ -144,35 +146,41 @@ const Dashboard = () => {
 			</AlertBlock> */}
 			<div className="flex items-center gap-2">
 				<Label htmlFor="monitoring-server-select">Server</Label>
-				<Select value={selectedServerId} onValueChange={setSelectedServerId}>
-					<SelectTrigger id="monitoring-server-select" className="w-[260px]">
-						<SelectValue />
-					</SelectTrigger>
-					<SelectContent>
-						{canMonitorLocalHost && (
-							<SelectItem value={LOCAL_SERVER_ID}>
-								<span className="flex items-center gap-2 justify-between w-full">
-									<span>Dokploy (Main)</span>
-									{monitoring?.serverIp ? (
-										<span className="text-muted-foreground text-xs">
-											{monitoring.serverIp}
-										</span>
-									) : null}
-								</span>
-							</SelectItem>
-						)}
-						{servers?.map((server) => (
-							<SelectItem key={server.serverId} value={server.serverId}>
-								<span className="flex items-center gap-2 justify-between w-full">
-									<span>{server.name}</span>
-									<span className="text-muted-foreground text-xs">
-										{server.ipAddress}
+				{noServersToPick ? (
+					<p className="text-sm text-muted-foreground">
+						No servers yet. Add a server under Remote Servers to monitor it.
+					</p>
+				) : (
+					<Select value={selectedServerId} onValueChange={setSelectedServerId}>
+						<SelectTrigger id="monitoring-server-select" className="w-[260px]">
+							<SelectValue />
+						</SelectTrigger>
+						<SelectContent>
+							{canMonitorLocalHost && (
+								<SelectItem value={LOCAL_SERVER_ID}>
+									<span className="flex items-center gap-2 justify-between w-full">
+										<span>Dokploy (Main)</span>
+										{monitoring?.serverIp ? (
+											<span className="text-muted-foreground text-xs">
+												{monitoring.serverIp}
+											</span>
+										) : null}
 									</span>
-								</span>
-							</SelectItem>
-						))}
-					</SelectContent>
-				</Select>
+								</SelectItem>
+							)}
+							{servers?.map((server) => (
+								<SelectItem key={server.serverId} value={server.serverId}>
+									<span className="flex items-center gap-2 justify-between w-full">
+										<span>{server.name}</span>
+										<span className="text-muted-foreground text-xs">
+											{server.ipAddress}
+										</span>
+									</span>
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				)}
 			</div>
 			{isPending ? (
 				<Card className="bg-sidebar  p-2.5 rounded-xl  mx-auto  items-center">

@@ -8,6 +8,7 @@ import { ShowDiskUsage } from "@/components/dashboard/docker/disk-usage/show-dis
 import { ShowDockerEvents } from "@/components/dashboard/docker/events/show-docker-events";
 import { ShowHealth } from "@/components/dashboard/docker/health/show-health";
 import { ShowImages } from "@/components/dashboard/docker/images/show-images";
+import { LocalHostOnlyNotice } from "@/components/dashboard/docker/local-host-only";
 import { ShowContainers } from "@/components/dashboard/docker/show/show-containers";
 import { ShowVolumes } from "@/components/dashboard/docker/volumes/show-volumes";
 import { ShowNetworks } from "@/components/dashboard/networks/show-networks";
@@ -38,6 +39,23 @@ const Dashboard = () => {
 	// Host-level diagnostics, so this needs server.read on top of docker.read.
 	const canSeeHealth =
 		isAdmin && !!permissions?.docker.read && !!permissions?.server.read;
+	// The Dokploy host serves every organization of the instance, so only the
+	// one that owns it sees the host's Docker data; a remote server is unaffected.
+	// The flag comes from a monitoring:read route, so users without monitoring.read
+	// keep the old behaviour (the content, whatever the host answers).
+	const { data: metrics, isLoading: isLoadingMetrics } =
+		api.user.getMetricsToken.useQuery(undefined, {
+			enabled: !!permissions?.monitoring.read,
+		});
+	const canSeeLocalHost = metrics?.localHostAccess !== false;
+	// Hold the host's tabs back until the flag is known, so an organization that
+	// does not own the host never fires a query the host would refuse.
+	const isHostFlagPending = !permissions || isLoadingMetrics;
+	const hostGate = (serverId: string | undefined, content: ReactElement) => {
+		if (serverId) return content;
+		if (isHostFlagPending) return null;
+		return canSeeLocalHost ? content : <LocalHostOnlyNotice />;
+	};
 
 	const queryTab =
 		typeof router.query.tab === "string" ? router.query.tab : DEFAULT_TAB;
@@ -112,7 +130,7 @@ const Dashboard = () => {
 							</TabsList>
 							{canSeeNodes && (
 								<TabsContent value="overview">
-									<SwarmMonitorCard serverId={serverId} />
+									{hostGate(serverId, <SwarmMonitorCard serverId={serverId} />)}
 								</TabsContent>
 							)}
 							<TabsContent value="containers">
@@ -124,19 +142,19 @@ const Dashboard = () => {
 							</TabsContent>
 							{canSeeNodes && (
 								<TabsContent value="nodes">
-									<ShowNodes serverId={serverId} />
+									{hostGate(serverId, <ShowNodes serverId={serverId} />)}
 								</TabsContent>
 							)}
 						</Tabs>
 					</TabsContent>
 					{canSeeImages && (
 						<TabsContent value="images">
-							<ShowImages serverId={serverId} />
+							{hostGate(serverId, <ShowImages serverId={serverId} />)}
 						</TabsContent>
 					)}
 					{canSeeVolumes && (
 						<TabsContent value="volumes">
-							<ShowVolumes serverId={serverId} />
+							{hostGate(serverId, <ShowVolumes serverId={serverId} />)}
 						</TabsContent>
 					)}
 					<TabsContent value="networks">
@@ -146,11 +164,11 @@ const Dashboard = () => {
 						<ShowDockerEvents serverId={serverId} />
 					</TabsContent>
 					<TabsContent value="disk-usage">
-						<ShowDiskUsage serverId={serverId} />
+						{hostGate(serverId, <ShowDiskUsage serverId={serverId} />)}
 					</TabsContent>
 					{canSeeHealth && (
 						<TabsContent value="health">
-							<ShowHealth serverId={serverId} />
+							{hostGate(serverId, <ShowHealth serverId={serverId} />)}
 						</TabsContent>
 					)}
 				</Tabs>
