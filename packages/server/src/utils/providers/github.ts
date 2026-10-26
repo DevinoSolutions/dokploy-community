@@ -93,7 +93,7 @@ export const parseGithubBaseUrl = (
 };
 
 export const STORED_GITHUB_URL_UNUSABLE =
-	"The GitHub provider's stored instance URL can't be used: it has to be an https URL with a fully qualified host name. Edit the GitHub provider and save its instance URL again.";
+	"The GitHub provider's stored instance URL can't be used: it has to be an https URL with a fully qualified host name. Remove this GitHub provider and add it again with the instance's https URL.";
 
 // Stored values are only normalized here; the host policy applies when a URL
 // is entered (parseGithubBaseUrl) and before a request is sent. An empty value
