@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 	organizationFindFirst: vi.fn(),
 	serverFindFirst: vi.fn(),
 	webServerSettingsFindFirst: vi.fn(),
+	isRootOrganization: vi.fn(),
 	updateTable: vi.fn(),
 	updateSet: vi.fn(),
 	updateWhere: vi.fn(),
@@ -82,6 +83,7 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@dokploy/server")>();
 	return {
 		...actual,
+		isRootOrganization: mocks.isRootOrganization,
 		generateTraefikMeDomain: vi.fn(async () => generatedDomain),
 	};
 });
@@ -179,6 +181,10 @@ beforeEach(() => {
 		wildcardDomain: "apps.org.example",
 	});
 	restriction({ enabled: false, allowedWildcards: [] });
+	// org-1 owns the instance unless a test says otherwise
+	mocks.isRootOrganization.mockImplementation(
+		async (organizationId: string) => organizationId === "org-1",
+	);
 });
 
 describe("project wildcard-domain procedures are organization-scoped", () => {
@@ -391,6 +397,66 @@ describe("domain.canGenerateTraefikMeDomains", () => {
 		await expect(
 			caller.domain.canGenerateTraefikMeDomains({ serverId: "srv-1" }),
 		).resolves.toBe("203.0.113.10");
+	});
+
+	describe("for a service on the Dokploy host (empty serverId)", () => {
+		const HOST_IP = "198.51.100.7";
+
+		const hostIp = () =>
+			mocks.webServerSettingsFindFirst.mockResolvedValue({
+				serverIp: HOST_IP,
+				domainRestrictionConfig: { enabled: false, allowedWildcards: [] },
+			});
+
+		it("returns the host ip to the organization that owns the instance", async () => {
+			hostIp();
+			const caller = createCaller(ownerCtx);
+
+			await expect(
+				caller.domain.canGenerateTraefikMeDomains({ serverId: "" }),
+			).resolves.toBe(HOST_IP);
+		});
+
+		it("returns no ip to another organization", async () => {
+			hostIp();
+			mocks.isRootOrganization.mockResolvedValue(false);
+			projectInOrganization("org-1");
+			const caller = createCaller(ownerCtx);
+
+			await expect(
+				caller.domain.canGenerateTraefikMeDomains({
+					serverId: "",
+					projectId: "project-1",
+				}),
+			).resolves.toBe("");
+			expect(mocks.webServerSettingsFindFirst).not.toHaveBeenCalled();
+		});
+
+		it("gives another organization the wildcard base, never the ip", async () => {
+			hostIp();
+			mocks.isRootOrganization.mockResolvedValue(false);
+			projectInOrganization("org-1", {
+				organizationWildcardDomain: "apps.org.example",
+			});
+			const caller = createCaller(ownerCtx);
+
+			await expect(
+				caller.domain.canGenerateTraefikMeDomains({
+					serverId: "",
+					projectId: "project-1",
+				}),
+			).resolves.toBe("apps.org.example");
+		});
+
+		it("leaves a remote server of another organization as it was", async () => {
+			hostIp();
+			mocks.isRootOrganization.mockResolvedValue(false);
+			const caller = createCaller(ownerCtx);
+
+			await expect(
+				caller.domain.canGenerateTraefikMeDomains({ serverId: "srv-1" }),
+			).resolves.toBe("203.0.113.10");
+		});
 	});
 
 	it("falls back to the resolved wildcard base when no ip is available", async () => {
