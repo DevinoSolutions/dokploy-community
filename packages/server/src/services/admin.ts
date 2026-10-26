@@ -8,6 +8,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
+import { sendDockerCleanupNotifications } from "../utils/notifications/docker-cleanup";
 import { scrubDeploymentCancelAuditActorEmail } from "./deployment-cancel-audit";
 import { removeOrganizationNotifications } from "./notification-channels";
 import { getWebServerSettings } from "./web-server-settings";
@@ -136,6 +137,18 @@ export const assertOrganizationDeletable = async (organizationId: string) => {
 			code: "FORBIDDEN",
 			message: ROOT_ORGANIZATION_DELETE_MESSAGE,
 		});
+	}
+};
+
+// The web server's Docker cleanup is reported to the organization that owns
+// the instance, and to nobody when none does.
+export const sendWebServerDockerCleanupNotifications = async () => {
+	if (IS_CLOUD) {
+		return;
+	}
+	const root = await findRootOrganization();
+	if (root) {
+		await sendDockerCleanupNotifications(root.id);
 	}
 };
 

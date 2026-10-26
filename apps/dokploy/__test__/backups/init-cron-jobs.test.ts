@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-	findOwner: vi.fn(),
+	findRoot: vi.fn(),
 	findBackups: vi.fn(),
 	getAllServers: vi.fn(),
 	scheduleDockerCleanup: vi.fn(),
@@ -13,13 +13,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@dokploy/server/db", () => ({
 	db: {
 		query: {
+			organization: { findFirst: mocks.findRoot },
 			backups: { findMany: mocks.findBackups },
 		},
 	},
-}));
-
-vi.mock("@dokploy/server/services/admin", () => ({
-	findOwner: mocks.findOwner,
 }));
 
 vi.mock("@dokploy/server/services/web-server-settings", () => ({
@@ -71,12 +68,13 @@ describe("initCronJobs (#5403)", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "");
 		mocks.findBackups.mockResolvedValue([]);
 		mocks.getAllServers.mockResolvedValue([]);
 	});
 
-	it("registers docker and log cleanup before the owner exists", async () => {
-		mocks.findOwner.mockResolvedValue(undefined);
+	it("registers docker and log cleanup before the root organization exists", async () => {
+		mocks.findRoot.mockResolvedValue(undefined);
 
 		await initCronJobs();
 
@@ -89,8 +87,8 @@ describe("initCronJobs (#5403)", () => {
 		expect(mocks.startLogCleanup).toHaveBeenCalledWith("0 0 * * *");
 	});
 
-	it("registers enabled backups before the owner exists", async () => {
-		mocks.findOwner.mockResolvedValue(undefined);
+	it("registers enabled backups before the root organization exists", async () => {
+		mocks.findRoot.mockResolvedValue(undefined);
 		const backup = { enabled: true, databaseType: "postgres", schedule: "x" };
 		mocks.findBackups.mockResolvedValue([backup]);
 
@@ -99,19 +97,19 @@ describe("initCronJobs (#5403)", () => {
 		expect(mocks.scheduleBackup).toHaveBeenCalledWith(backup);
 	});
 
-	it("notifies the owner's organization when the cleanup runs", async () => {
-		mocks.findOwner.mockResolvedValue(undefined);
+	it("notifies the root organization when the cleanup runs", async () => {
+		mocks.findRoot.mockResolvedValue(undefined);
 		await initCronJobs();
 		const afterCleanup = afterCleanupOf("docker-cleanup");
 
-		mocks.findOwner.mockResolvedValue({ organizationId: "org-1" });
+		mocks.findRoot.mockResolvedValue({ id: "org-1", name: "One" });
 		await afterCleanup?.();
 
 		expect(mocks.sendDockerCleanupNotifications).toHaveBeenCalledWith("org-1");
 	});
 
-	it("skips the notification while there is still no owner", async () => {
-		mocks.findOwner.mockResolvedValue(undefined);
+	it("skips the notification while no organization owns the instance", async () => {
+		mocks.findRoot.mockResolvedValue(undefined);
 		await initCronJobs();
 
 		await afterCleanupOf("docker-cleanup")?.();
@@ -120,7 +118,7 @@ describe("initCronJobs (#5403)", () => {
 	});
 
 	it("notifies a remote server's own organization", async () => {
-		mocks.findOwner.mockResolvedValue(undefined);
+		mocks.findRoot.mockResolvedValue(undefined);
 		mocks.getAllServers.mockResolvedValue([
 			{
 				serverId: "srv-1",
