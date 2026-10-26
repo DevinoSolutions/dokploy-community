@@ -35,6 +35,8 @@ import {
 	getComposeContainer,
 	getContainerLogs,
 	getWebServerSettings,
+	GithubHostError,
+	GitUrlRefusedError,
 	IS_CLOUD,
 	// build-policy hook: narrows a thrown support error to a 400.
 	isBuildPolicyError,
@@ -79,10 +81,7 @@ import {
 	fetchTemplatesList,
 } from "@dokploy/server/templates/github";
 import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
-import {
-	assertGitUrlSaveable,
-	GitUrlRefusedError,
-} from "@dokploy/server/utils/providers/git-url";
+import { assertGitUrlSaveable } from "@dokploy/server/utils/providers/git-url";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
@@ -149,6 +148,20 @@ import {
 	readServiceWatchdogExclusion,
 	writeServiceWatchdogExclusion,
 } from "../utils/watchdog-exclusion";
+
+// A clone refused for the address it would call is the caller's input, so it
+// answers 400 with the reason instead of a generic failure. The class names
+// are checked too: a service that reaches the clone through a deep import
+// (compose-rolling) throws a second copy of the class in the bundled server,
+// which instanceof alone misses.
+const CLONE_REFUSAL_NAMES = new Set(["GithubHostError", "GitUrlRefusedError"]);
+
+const cloneRefusal = (error: unknown): TRPCError | null =>
+	error instanceof GithubHostError ||
+	error instanceof GitUrlRefusedError ||
+	(error instanceof Error && CLONE_REFUSAL_NAMES.has(error.name))
+		? new TRPCError({ code: "BAD_REQUEST", message: error.message })
+		: null;
 
 export const composeRouter = createTRPCRouter({
 	create: protectedProcedure
@@ -738,9 +751,13 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const compose = await findComposeById(input.composeId);
-			return await withComposeFetchLock(compose, () =>
-				loadServices(input.composeId, "fetch"),
-			);
+			try {
+				return await withComposeFetchLock(compose, () =>
+					loadServices(input.composeId, "fetch"),
+				);
+			} catch (error) {
+				throw cloneRefusal(error) ?? error;
+			}
 		}),
 	rollingEligibility: protectedProcedure
 		.input(apiFetchServices)
@@ -757,9 +774,13 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const compose = await findComposeById(input.composeId);
-			return await withComposeFetchLock(compose, () =>
-				getComposeRollingReport(input.composeId, { type: "fetch" }),
-			);
+			try {
+				return await withComposeFetchLock(compose, () =>
+					getComposeRollingReport(input.composeId, { type: "fetch" }),
+				);
+			} catch (error) {
+				throw cloneRefusal(error) ?? error;
+			}
 		}),
 	loadMountsByService: protectedProcedure
 		.input(
@@ -808,9 +829,8 @@ export const composeRouter = createTRPCRouter({
 				) {
 					throw err;
 				}
-				if (err instanceof GitUrlRefusedError) {
-					throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
-				}
+				const refusal = cloneRefusal(err);
+				if (refusal) throw refusal;
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "Error fetching source type",
@@ -1170,16 +1190,20 @@ export const composeRouter = createTRPCRouter({
 			}
 
 			let command = `set -e;${TEMPLATE_CLONE_ENV}`;
-			if (compose.sourceType === "github") {
-				command += await cloneGithubRepository(entity);
-			} else if (compose.sourceType === "gitlab") {
-				command += await cloneGitlabRepository(entity);
-			} else if (compose.sourceType === "bitbucket") {
-				command += await cloneBitbucketRepository(entity);
-			} else if (compose.sourceType === "git") {
-				command += await cloneGitRepository(entity);
-			} else if (compose.sourceType === "gitea") {
-				command += await cloneGiteaRepository(entity);
+			try {
+				if (compose.sourceType === "github") {
+					command += await cloneGithubRepository(entity);
+				} else if (compose.sourceType === "gitlab") {
+					command += await cloneGitlabRepository(entity);
+				} else if (compose.sourceType === "bitbucket") {
+					command += await cloneBitbucketRepository(entity);
+				} else if (compose.sourceType === "git") {
+					command += await cloneGitRepository(entity);
+				} else if (compose.sourceType === "gitea") {
+					command += await cloneGiteaRepository(entity);
+				}
+			} catch (error) {
+				throw cloneRefusal(error) ?? error;
 			}
 
 			const { COMPOSE_PATH } = paths(!!compose.serverId);

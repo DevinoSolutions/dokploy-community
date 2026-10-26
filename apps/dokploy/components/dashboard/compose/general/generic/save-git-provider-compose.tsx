@@ -35,6 +35,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { refusalDescription } from "@/lib/refusal-description";
 import { api } from "@/utils/api";
 
 const GitProviderSchema = z.object({
@@ -104,8 +105,10 @@ export const SaveGitProviderCompose = ({ composeId }: Props) => {
 				toast.success("Git Provider Saved");
 				await refetch();
 			})
-			.catch(() => {
-				toast.error("Error saving the Git provider");
+			.catch((error) => {
+				toast.error("Error saving the Git provider", {
+					description: refusalDescription(error),
+				});
 			});
 	};
 
