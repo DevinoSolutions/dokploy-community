@@ -23,9 +23,13 @@ vi.mock("@octokit/auth-app", () => ({
 	createAppAuth: vi.fn(),
 }));
 
+const mockOctokitAuth = vi.hoisted(() =>
+	vi.fn(async () => ({ token: "gh-token" })),
+);
+
 vi.mock("octokit", () => ({
 	Octokit: class {
-		auth = async () => ({ token: "gh-token" });
+		auth = mockOctokitAuth;
 	},
 }));
 
@@ -111,5 +115,7 @@ describe("cloneGithubRepository host", () => {
 		await expect(clone()).rejects.toThrow(
 			"The GitHub provider's stored instance URL can't be used",
 		);
+		// Refused before an installation token is minted from the app's key.
+		expect(mockOctokitAuth).not.toHaveBeenCalled();
 	});
 });
