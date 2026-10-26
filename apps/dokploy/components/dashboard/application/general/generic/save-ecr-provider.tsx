@@ -36,6 +36,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { refusalDescription } from "@/lib/refusal-description";
 import { api } from "@/utils/api";
 
 const EcrProviderSchema = z.object({
@@ -131,8 +132,10 @@ export const SaveEcrProvider = ({ applicationId }: Props) => {
 				toast.success("Docker Provider Saved");
 				await refetch();
 			})
-			.catch(() => {
-				toast.error("Error saving the Docker provider");
+			.catch((error) => {
+				toast.error("Error saving the Docker provider", {
+					description: refusalDescription(error),
+				});
 			});
 	};
 

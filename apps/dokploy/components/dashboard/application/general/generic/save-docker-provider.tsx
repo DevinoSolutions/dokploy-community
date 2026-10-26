@@ -21,6 +21,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { refusalDescription } from "@/lib/refusal-description";
 import { api } from "@/utils/api";
 import { ConfirmableProviderSave } from "./confirmable-provider-save";
 
@@ -89,8 +90,10 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 				toast.success("Docker Provider Saved");
 				await utils.application.one.invalidate({ applicationId });
 			})
-			.catch(() => {
-				toast.error("Error saving the Docker provider");
+			.catch((error) => {
+				toast.error("Error saving the Docker provider", {
+					description: refusalDescription(error),
+				});
 			});
 	};
 
