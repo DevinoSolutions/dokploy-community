@@ -44,7 +44,7 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
-import { canAccessLocalHost } from "@/server/api/utils/local-host-access";
+import { canUseLocalHostForServices } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateDomain,
@@ -393,10 +393,10 @@ export const domainRouter = createTRPCRouter({
 					return server.ipAddress;
 				}
 			} else if (
-				// The Dokploy host's own address goes only to the organization that
-				// owns the instance; any other organization takes the base-domain
-				// path below, as if no address were set.
-				await canAccessLocalHost(undefined, ctx.session.activeOrganizationId)
+				// The Dokploy host's own address goes only to an organization that
+				// may run services on it; any other takes the base-domain path
+				// below, as if no address were set.
+				await canUseLocalHostForServices(ctx.session.activeOrganizationId)
 			) {
 				const settings = await getWebServerSettings();
 				if (settings?.serverIp) {

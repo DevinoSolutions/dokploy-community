@@ -402,14 +402,17 @@ describe("domain.canGenerateTraefikMeDomains", () => {
 	describe("for a service on the Dokploy host (empty serverId)", () => {
 		const HOST_IP = "198.51.100.7";
 
-		const hostIp = () =>
+		const hostIp = (remoteServersOnly: boolean) =>
 			mocks.webServerSettingsFindFirst.mockResolvedValue({
 				serverIp: HOST_IP,
+				remoteServersOnly,
 				domainRestrictionConfig: { enabled: false, allowedWildcards: [] },
 			});
 
+		const notTheOwner = () => mocks.isRootOrganization.mockResolvedValue(false);
+
 		it("returns the host ip to the organization that owns the instance", async () => {
-			hostIp();
+			hostIp(false);
 			const caller = createCaller(ownerCtx);
 
 			await expect(
@@ -417,9 +420,28 @@ describe("domain.canGenerateTraefikMeDomains", () => {
 			).resolves.toBe(HOST_IP);
 		});
 
-		it("returns no ip to another organization", async () => {
-			hostIp();
-			mocks.isRootOrganization.mockResolvedValue(false);
+		it("returns it to the owner even when the instance is remote servers only", async () => {
+			hostIp(true);
+			const caller = createCaller(ownerCtx);
+
+			await expect(
+				caller.domain.canGenerateTraefikMeDomains({ serverId: "" }),
+			).resolves.toBe(HOST_IP);
+		});
+
+		it("returns it to another organization that may run services on the host", async () => {
+			hostIp(false);
+			notTheOwner();
+			const caller = createCaller(ownerCtx);
+
+			await expect(
+				caller.domain.canGenerateTraefikMeDomains({ serverId: "" }),
+			).resolves.toBe(HOST_IP);
+		});
+
+		it("returns no ip to another organization when the instance is remote servers only", async () => {
+			hostIp(true);
+			notTheOwner();
 			projectInOrganization("org-1");
 			const caller = createCaller(ownerCtx);
 
@@ -429,12 +451,11 @@ describe("domain.canGenerateTraefikMeDomains", () => {
 					projectId: "project-1",
 				}),
 			).resolves.toBe("");
-			expect(mocks.webServerSettingsFindFirst).not.toHaveBeenCalled();
 		});
 
-		it("gives another organization the wildcard base, never the ip", async () => {
-			hostIp();
-			mocks.isRootOrganization.mockResolvedValue(false);
+		it("gives that organization the wildcard base, never the ip", async () => {
+			hostIp(true);
+			notTheOwner();
 			projectInOrganization("org-1", {
 				organizationWildcardDomain: "apps.org.example",
 			});
@@ -448,9 +469,9 @@ describe("domain.canGenerateTraefikMeDomains", () => {
 			).resolves.toBe("apps.org.example");
 		});
 
-		it("leaves a remote server of another organization as it was", async () => {
-			hostIp();
-			mocks.isRootOrganization.mockResolvedValue(false);
+		it("leaves a remote server as it was", async () => {
+			hostIp(true);
+			notTheOwner();
 			const caller = createCaller(ownerCtx);
 
 			await expect(
