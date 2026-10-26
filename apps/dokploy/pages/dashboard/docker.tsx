@@ -19,6 +19,7 @@ import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { ServerFilter } from "@/components/shared/server-filter";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { canShowLocalHost } from "@/lib/local-host-flag";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 
@@ -43,11 +44,21 @@ const Dashboard = () => {
 	// one that owns it sees the host's Docker data; a remote server is unaffected.
 	// The flag comes from a monitoring:read route, so users without monitoring.read
 	// keep the old behaviour (the content, whatever the host answers).
-	const { data: metrics, isLoading: isLoadingMetrics } =
-		api.user.getMetricsToken.useQuery(undefined, {
-			enabled: !!permissions?.monitoring.read,
-		});
-	const canSeeLocalHost = metrics?.localHostAccess !== false;
+	// A flag that failed to load shows no host, like an organization that does
+	// not own it.
+	const canReadMonitoring = !!permissions?.monitoring.read;
+	const {
+		data: metrics,
+		isLoading: isLoadingMetrics,
+		isError: isMetricsError,
+	} = api.user.getMetricsToken.useQuery(undefined, {
+		enabled: canReadMonitoring,
+	});
+	const canSeeLocalHost = canShowLocalHost({
+		enabled: canReadMonitoring,
+		isError: isMetricsError,
+		localHostAccess: metrics?.localHostAccess,
+	});
 	// Hold the host's tabs back until the flag is known, so an organization that
 	// does not own the host never fires a query the host would refuse.
 	const isHostFlagPending = !permissions || isLoadingMetrics;

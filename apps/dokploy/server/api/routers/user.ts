@@ -429,19 +429,24 @@ export const userRouter = createTRPCRouter({
 		async ({ ctx }) => {
 			const user = await findUserById(ctx.user.ownerId);
 			const settings = await getWebServerSettings();
+			// whether the Dokploy host's own metrics are this organization's to
+			// read (the Monitoring page lists the host only then)
+			const localHostAccess = await canAccessLocalHost(
+				undefined,
+				ctx.session.activeOrganizationId,
+			);
 			return {
-				serverIp: settings?.serverIp,
+				// the host's address and metrics settings go only to the
+				// organization that owns the instance
+				serverIp: localHostAccess ? settings?.serverIp : null,
 				enabledFeatures: user.enablePaidFeatures,
-				// whether the Dokploy host's own metrics are this organization's to
-				// read (the Monitoring page lists the host only then)
-				localHostAccess: await canAccessLocalHost(
-					undefined,
-					ctx.session.activeOrganizationId,
-				),
-				metricsConfig: redactMetricsConfig(
-					settings?.metricsConfig,
-					await canSeeMetricsToken(ctx),
-				),
+				localHostAccess,
+				metricsConfig: localHostAccess
+					? redactMetricsConfig(
+							settings?.metricsConfig,
+							await canSeeMetricsToken(ctx),
+						)
+					: null,
 			};
 		},
 	),
