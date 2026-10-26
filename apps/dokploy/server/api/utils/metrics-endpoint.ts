@@ -25,7 +25,7 @@ export const resolveMetricsEndpoint = async (
 	const notConfigured = new TRPCError({
 		code: "BAD_REQUEST",
 		message:
-			"Monitoring is not configured for this server. Go to Settings → Servers → Setup Monitoring.",
+			"Monitoring is not configured for this server. Go to Remote Servers → Setup Monitoring.",
 	});
 
 	if (serverId) {

@@ -129,11 +129,11 @@ export const SaveEcrProvider = ({ applicationId }: Props) => {
 			registryUrl: null,
 		})
 			.then(async () => {
-				toast.success("Docker Provider Saved");
+				toast.success("ECR Provider Saved");
 				await refetch();
 			})
 			.catch((error) => {
-				toast.error("Error saving the Docker provider", {
+				toast.error("Error saving the ECR provider", {
 					description: refusalDescription(error),
 				});
 			});

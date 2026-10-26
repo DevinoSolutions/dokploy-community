@@ -83,8 +83,11 @@ const Dashboard = () => {
 		paidMonitoringContent = (
 			<Card className="bg-sidebar p-2.5 rounded-xl mx-auto">
 				<div className="rounded-xl bg-background shadow-md p-6 text-sm text-muted-foreground">
-					Monitoring is available for your servers. Add one under Settings →
-					Servers to see its metrics here.
+					Monitoring is available for your servers. Add one under{" "}
+					<Link className="underline" href="/dashboard/settings/servers">
+						Remote Servers
+					</Link>{" "}
+					to see its metrics here.
 				</div>
 			</Card>
 		);
@@ -111,7 +114,7 @@ const Dashboard = () => {
 						<p>
 							Go to{" "}
 							<Link className="underline" href="/dashboard/settings/servers">
-								Settings → Servers
+								Remote Servers
 							</Link>{" "}
 							→ {selectedServer.name} → Setup Monitoring.
 						</p>
