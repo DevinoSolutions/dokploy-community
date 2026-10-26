@@ -26,6 +26,43 @@ describe("refusalDescription", () => {
 		expect(refusalDescription("boom")).toBeUndefined();
 	});
 
+	it("returns the issue messages of an input the schema refused, not its JSON", () => {
+		const issue =
+			"This git URL is not allowed; use an http(s), ssh, or user@host:path URL";
+		expect(
+			refusalDescription({
+				message: JSON.stringify([
+					{ code: "custom", path: ["customGitUrl"], message: issue },
+				]),
+				data: {
+					code: "BAD_REQUEST",
+					zodError: { formErrors: [], fieldErrors: { customGitUrl: [issue] } },
+				},
+			}),
+		).toBe(issue);
+		expect(
+			refusalDescription({
+				message: "[]",
+				data: {
+					code: "BAD_REQUEST",
+					zodError: {
+						formErrors: ["Pick a source"],
+						fieldErrors: { a: ["Too short"], b: ["Too short"] },
+					},
+				},
+			}),
+		).toBe("Pick a source Too short");
+		expect(
+			refusalDescription({
+				message: "[]",
+				data: {
+					code: "BAD_REQUEST",
+					zodError: { formErrors: [], fieldErrors: {} },
+				},
+			}),
+		).toBeUndefined();
+	});
+
 	it("returns nothing for an empty message", () => {
 		expect(
 			refusalDescription({ message: "", data: { code: "BAD_REQUEST" } }),

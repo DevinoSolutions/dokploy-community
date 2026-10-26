@@ -150,9 +150,16 @@ import {
 } from "../utils/watchdog-exclusion";
 
 // A clone refused for the address it would call is the caller's input, so it
-// answers 400 with the reason instead of a generic failure.
+// answers 400 with the reason instead of a generic failure. The class names
+// are checked too: a service that reaches the clone through a deep import
+// (compose-rolling) throws a second copy of the class in the bundled server,
+// which instanceof alone misses.
+const CLONE_REFUSAL_NAMES = new Set(["GithubHostError", "GitUrlRefusedError"]);
+
 const cloneRefusal = (error: unknown): TRPCError | null =>
-	error instanceof GithubHostError || error instanceof GitUrlRefusedError
+	error instanceof GithubHostError ||
+	error instanceof GitUrlRefusedError ||
+	(error instanceof Error && CLONE_REFUSAL_NAMES.has(error.name))
 		? new TRPCError({ code: "BAD_REQUEST", message: error.message })
 		: null;
 

@@ -224,6 +224,34 @@ describe("compose.rollingEligibility", { timeout: 60_000 }, () => {
 			message: GIT_URL_REFUSED_MESSAGE,
 		});
 	});
+
+	it("answers 400 for a refusal thrown by a second copy of the class", async () => {
+		// compose-rolling reaches the clone through a deep import, which the
+		// bundled server can load as a separate module copy of the error class.
+		class GithubHostErrorCopy extends Error {
+			constructor(message: string) {
+				super(message);
+				this.name = "GithubHostError";
+			}
+		}
+		mocks.getComposeRollingReport.mockRejectedValue(
+			new GithubHostErrorCopy(HOST_REFUSAL),
+		);
+		const caller = await callerOf();
+
+		await expect(
+			caller.rollingEligibility({ composeId: "cmp-1", type: "fetch" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message: HOST_REFUSAL });
+	});
+
+	it("leaves any other failure as it was", async () => {
+		mocks.getComposeRollingReport.mockRejectedValue(new Error("boom"));
+		const caller = await callerOf();
+
+		await expect(
+			caller.rollingEligibility({ composeId: "cmp-1", type: "fetch" }),
+		).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+	});
 });
 
 describe("compose.loadTemplateFromGit", { timeout: 60_000 }, () => {
