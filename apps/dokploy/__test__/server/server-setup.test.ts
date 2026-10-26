@@ -1,8 +1,12 @@
-import { execFileSync, execSync } from "node:child_process";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { defaultCommand, reportDockerVersion } from "@dokploy/server";
+import {
+	defaultCommand,
+	installRClone,
+	reportDockerVersion,
+} from "@dokploy/server";
 import { describe, expect, it } from "vitest";
 
 const resolveBin = (name: string) =>
@@ -93,6 +97,107 @@ describe("defaultCommand", () => {
 			expect(script).not.toContain(
 				'echo "| Docker            | $DOCKER_VERSION"',
 			);
+		},
+	);
+});
+
+describe("unsupported operating systems", () => {
+	it("exit non-zero instead of reporting a successful setup", () => {
+		const script = defaultCommand(false);
+		const branches = script.match(
+			/This script only supports[^\n]*\n\s*(exit[^\n]*)\n/g,
+		);
+		expect(branches).toHaveLength(2);
+		for (const branch of branches ?? []) {
+			expect(branch).toMatch(/\n\s*exit 1\n$/);
+		}
+	});
+});
+
+/** The part of the setup script between a step's opening `if` and its closing `fi`. */
+const installerStep = (script: string, tool: string) => {
+	const start = script.indexOf(`if command_exists ${tool}; then`);
+	const end = script.indexOf("\n\tfi\n", start);
+	expect(start).toBeGreaterThan(-1);
+	expect(end).toBeGreaterThan(start);
+	return script.slice(start, end + "\n\tfi\n".length);
+};
+
+/**
+ * Run an installer step with a fake curl that either fails or serves an
+ * installer which leaves a marker, so nothing is downloaded or installed.
+ */
+const runInstaller = (step: string, curl: "fails" | "serves") => {
+	const dir = mkdtempSync(path.join(tmpdir(), "dokploy-installer-"));
+	const marker = path.join(dir, "installer-ran");
+	const shim = path.join(dir, "curl");
+	writeFileSync(
+		shim,
+		curl === "fails"
+			? "#!/bin/sh\necho 'curl: (22) The requested URL returned error: 404' >&2\nexit 22\n"
+			: [
+					"#!/bin/sh",
+					'while [ "$#" -gt 0 ]; do',
+					'	if [ "$1" = "-o" ]; then OUT="$2"; fi',
+					"	shift",
+					"done",
+					`echo 'echo ran > "${marker.replaceAll(path.sep, "/")}"' > "$OUT"`,
+					"",
+				].join("\n"),
+	);
+	chmodSync(shim, 0o755);
+	const script = [
+		"set -e",
+		"SUDO_CMD=",
+		// The tool is never installed here, whatever the machine running the test has.
+		"command_exists() { return 1; }",
+		step,
+		'echo "step finished"',
+	].join("\n");
+	const result = spawnSync("bash", ["-c", script], {
+		encoding: "utf8",
+		env: { ...process.env, PATH: [dir, process.env.PATH].join(path.delimiter) },
+	});
+	return { ...result, installerRan: existsSync(marker) };
+};
+
+describe("installers downloaded by the setup script", () => {
+	const script = defaultCommand(false);
+	const steps = {
+		RClone: installRClone(),
+		Nixpacks: installerStep(script, "nixpacks"),
+		Railpack: installerStep(script, "railpack"),
+	};
+
+	it.each(Object.entries(steps))(
+		"%s is downloaded to a file before it runs, not piped or substituted",
+		(_tool, step) => {
+			expect(step).toContain("curl -fsSL");
+			expect(step).not.toMatch(/curl[^\n]*\|/);
+			expect(step).not.toContain("bash -c");
+		},
+	);
+
+	it.each(Object.entries(steps))(
+		"%s fails the step when the download fails",
+		(tool, step) => {
+			const result = runInstaller(step, "fails");
+			expect(result.status).toBe(1);
+			expect(result.installerRan).toBe(false);
+			expect(result.stdout).not.toContain("step finished");
+			expect(result.stderr).toContain(
+				`Failed to download the ${tool} installer`,
+			);
+		},
+	);
+
+	it.each(Object.entries(steps))(
+		"%s runs the downloaded installer",
+		(_tool, step) => {
+			const result = runInstaller(step, "serves");
+			expect(result.status).toBe(0);
+			expect(result.installerRan).toBe(true);
+			expect(result.stdout).toContain("step finished");
 		},
 	);
 });
