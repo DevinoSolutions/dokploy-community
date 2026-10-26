@@ -149,7 +149,8 @@ const runInstaller = (step: string, curl: "fails" | "serves") => {
 	const script = [
 		"set -e",
 		"SUDO_CMD=",
-		'command_exists() { command -v "$@" > /dev/null 2>&1; }',
+		// The tool is never installed here, whatever the machine running the test has.
+		"command_exists() { return 1; }",
 		step,
 		'echo "step finished"',
 	].join("\n");
