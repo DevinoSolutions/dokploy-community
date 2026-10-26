@@ -46,6 +46,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { refusalDescription } from "@/lib/refusal-description";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 
@@ -165,8 +166,10 @@ export const SaveBitbucketProviderCompose = ({ composeId }: Props) => {
 				toast.success("Service Provider Saved");
 				await refetch();
 			})
-			.catch(() => {
-				toast.error("Error saving the Bitbucket provider");
+			.catch((error) => {
+				toast.error("Error saving the Bitbucket provider", {
+					description: refusalDescription(error),
+				});
 			});
 	};
 

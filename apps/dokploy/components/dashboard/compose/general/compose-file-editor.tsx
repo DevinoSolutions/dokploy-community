@@ -12,6 +12,7 @@ import {
 	FormItem,
 	FormMessage,
 } from "@/components/ui/form";
+import { refusalDescription } from "@/lib/refusal-description";
 import { api } from "@/utils/api";
 import { validateAndFormatYAML } from "../../application/advanced/traefik/update-traefik-config";
 
@@ -87,8 +88,10 @@ export const ComposeFileEditor = ({ composeId }: Props) => {
 					composeId,
 				});
 			})
-			.catch(() => {
-				toast.error("Error updating the Compose config");
+			.catch((error) => {
+				toast.error("Error updating the Compose config", {
+					description: refusalDescription(error),
+				});
 			});
 	};
 
