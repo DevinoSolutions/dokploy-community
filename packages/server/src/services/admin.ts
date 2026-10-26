@@ -49,34 +49,89 @@ export const isAdminPresent = async () => {
 	return true;
 };
 
-// The organization that owns a self-hosted instance: the first one created,
-// which is the one made at the first signup. findOwner can't say, since every
-// organization has an owner.
-export const findRootOrganization = async () =>
-	db.query.organization.findFirst({
-		columns: { id: true },
+// The organization that owns a self-hosted instance: the one named by
+// DOKPLOY_ROOT_ORGANIZATION_ID when that is set, otherwise the first one
+// created, which is the one made at the first signup. findOwner can't say,
+// since every organization has an owner. A pinned id that matches no
+// organization gives no root at all rather than the oldest one, so the
+// host-level guards refuse everyone until it is fixed.
+const pinnedRootOrganizationId = () =>
+	process.env.DOKPLOY_ROOT_ORGANIZATION_ID?.trim() || undefined;
+
+let missingPinnedLogged = false;
+
+export const findRootOrganization = async () => {
+	const pinned = pinnedRootOrganizationId();
+	if (pinned) {
+		const found = await db.query.organization.findFirst({
+			columns: { id: true, name: true },
+			where: eq(organization.id, pinned),
+		});
+		if (!found && !missingPinnedLogged) {
+			missingPinnedLogged = true;
+			console.error(
+				`root organization: ${pinned} not found (source: env), host-level settings are refused`,
+			);
+		}
+		return found ?? null;
+	}
+	return db.query.organization.findFirst({
+		columns: { id: true, name: true },
 		orderBy: (organization, { asc }) => [
 			asc(organization.createdAt),
 			asc(organization.id),
 		],
 	});
+};
 
-export const isRootOrganization = async (organizationId: string) =>
-	(await findRootOrganization())?.id === organizationId;
+// Once at server start: which organization the host-level guards will accept.
+export const logRootOrganization = async () => {
+	if (IS_CLOUD) {
+		return;
+	}
+	const root = await findRootOrganization();
+	if (root) {
+		console.log(
+			`root organization: ${root.id} ${JSON.stringify(root.name)} (source: ${pinnedRootOrganizationId() ? "env" : "first-created"})`,
+		);
+	}
+};
+
+export const isRootOrganization = async (organizationId: string) => {
+	const root = await findRootOrganization();
+	return !!root && !!organizationId && root.id === organizationId;
+};
 
 // A row that belongs to no organization can only be attributed to the owner of
-// the instance when the instance has just the one organization.
+// the instance when the instance has just the one organization, and that
+// organization is the root one (a pinned id that matches nothing leaves none).
 export const isSingleOrganizationInstance = async () =>
 	(await db.query.organization.findMany({ columns: { id: true }, limit: 2 }))
-		.length === 1;
+		.length === 1 && !!(await findRootOrganization());
 
 export const ROOT_ORGANIZATION_DELETE_MESSAGE =
 	"This organization owns the Dokploy instance and can't be deleted";
 
+export const PINNED_ROOT_ORGANIZATION_MISSING_DELETE_MESSAGE =
+	"DOKPLOY_ROOT_ORGANIZATION_ID names no organization, so organizations can't be deleted until it is fixed";
+
 // Deleting the root organization would hand the instance's own Traefik and
-// settings to the next-oldest one. Dokploy Cloud has no such organization.
+// settings to the next-oldest one. While a pinned id matches no organization
+// there is no root to protect, so no organization can be deleted: otherwise
+// the one that owned the instance before the pin could be. Dokploy Cloud has
+// no such organization.
 export const assertOrganizationDeletable = async (organizationId: string) => {
-	if (!IS_CLOUD && (await isRootOrganization(organizationId))) {
+	if (IS_CLOUD) {
+		return;
+	}
+	const root = await findRootOrganization();
+	if (!root && pinnedRootOrganizationId()) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: PINNED_ROOT_ORGANIZATION_MISSING_DELETE_MESSAGE,
+		});
+	}
+	if (root && root.id === organizationId) {
 		throw new TRPCError({
 			code: "FORBIDDEN",
 			message: ROOT_ORGANIZATION_DELETE_MESSAGE,

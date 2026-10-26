@@ -16,6 +16,7 @@ import {
 	initVolumeBackupsCronJobs,
 	isMcpDisabled,
 	isNotSwarmManagerError,
+	logRootOrganization,
 	queueTraefikRecreate,
 	restoreInterruptedTraefik,
 	sendDokployRestartNotifications,
@@ -118,6 +119,9 @@ void app
 			});
 			isServerListening = true;
 			console.log(`Server Started on: http://${HOST}:${PORT}`);
+			await logRootOrganization().catch((error) => {
+				console.error("Failed to read the root organization:", error);
+			});
 
 			if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
 				createDefaultMiddlewares();
