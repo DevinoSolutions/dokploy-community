@@ -95,6 +95,10 @@ import { auditCancel } from "@/server/api/utils/cancel-audit";
 import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
+	assertCanManageInstance,
+	toWebServerSettingsView,
+} from "@/server/api/utils/web-server-settings-view";
+import {
 	apiAssignDomain,
 	apiEnableDashboard,
 	apiModifyTraefikConfig,
@@ -212,12 +216,12 @@ const apiUpdateDokployServer = z
 	.optional();
 
 export const settingsRouter = createTRPCRouter({
-	getWebServerSettings: protectedProcedure.query(async () => {
+	getWebServerSettings: protectedProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return null;
 		}
 		const settings = await getWebServerSettings();
-		return settings;
+		return await toWebServerSettingsView(settings, ctx);
 	}),
 	reloadServer: adminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
@@ -509,7 +513,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
-			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
+			await assertCanManageInstance(ctx);
 			const settings = await updateWebServerSettings({
 				host: input.host,
 				letsEncryptEmail: input.letsEncryptEmail,
@@ -534,7 +538,7 @@ export const settingsRouter = createTRPCRouter({
 				resourceType: "settings",
 				resourceName: "assign-domain-server",
 			});
-			return settings;
+			return await toWebServerSettingsView(settings, ctx);
 		}),
 	cleanSSHPrivateKey: adminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
@@ -1136,7 +1140,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
-			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
+			await assertCanManageInstance(ctx);
 			const settings = await updateWebServerSettings({
 				serverIp: input.serverIp,
 			});
@@ -1145,7 +1149,7 @@ export const settingsRouter = createTRPCRouter({
 				resourceType: "settings",
 				resourceName: "server-ip",
 			});
-			return settings;
+			return await toWebServerSettingsView(settings, ctx);
 		}),
 
 	getOpenApiDocument: protectedProcedure.query(

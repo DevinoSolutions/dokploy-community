@@ -88,6 +88,8 @@ const callerIn = (organizationId: string) =>
 	} as Parameters<typeof settingsRouter.createCaller>[0]);
 
 // [route, how it is called, what it does once let through, takes a serverId]
+// assignDomainServer and updateServerIp also need an owner or admin of that
+// organization; web-server-settings-root-org.test.ts covers them.
 const routes: [
 	string,
 	(c: Caller, serverId?: string) => Promise<unknown>,
@@ -155,25 +157,8 @@ const routes: [
 		false,
 	],
 	[
-		"assignDomainServer",
-		(c) =>
-			c.assignDomainServer({
-				host: "dokploy.example.com",
-				certificateType: "none",
-				https: false,
-			}),
-		() => mocks.updateWebServerSettings,
-		false,
-	],
-	[
 		"updateDockerCleanup",
 		(c) => c.updateDockerCleanup({ enableDockerCleanup: false }),
-		() => mocks.updateWebServerSettings,
-		false,
-	],
-	[
-		"updateServerIp",
-		(c) => c.updateServerIp({ serverIp: "203.0.113.7" }),
 		() => mocks.updateWebServerSettings,
 		false,
 	],
