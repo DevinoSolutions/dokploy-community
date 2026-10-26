@@ -23,9 +23,13 @@ vi.mock("@octokit/auth-app", () => ({
 	createAppAuth: vi.fn(),
 }));
 
+const mockOctokitAuth = vi.hoisted(() =>
+	vi.fn(async () => ({ token: "gh-token" })),
+);
+
 vi.mock("octokit", () => ({
 	Octokit: class {
-		auth = async () => ({ token: "gh-token" });
+		auth = mockOctokitAuth;
 	},
 }));
 
@@ -103,5 +107,15 @@ describe("cloneGithubRepository host", () => {
 		const command = await clone();
 
 		expect(command).toContain("https://github.com/acme/web.git");
+	});
+
+	it("refuses a stored URL it can't use instead of cloning from github.com", async () => {
+		mockFindGithubById.mockResolvedValue(provider("http://github.acme.com"));
+
+		await expect(clone()).rejects.toThrow(
+			"The GitHub provider's stored instance URL can't be used",
+		);
+		// Refused before an installation token is minted from the app's key.
+		expect(mockOctokitAuth).not.toHaveBeenCalled();
 	});
 });

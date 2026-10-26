@@ -92,11 +92,19 @@ export const parseGithubBaseUrl = (
 	return policyError ? { error: policyError } : { url: result.url };
 };
 
+export const STORED_GITHUB_URL_UNUSABLE =
+	"The GitHub provider's stored instance URL can't be used: it has to be an https URL with a fully qualified host name. Remove this GitHub provider and add it again with the instance's https URL.";
+
 // Stored values are only normalized here; the host policy applies when a URL
-// is entered (parseGithubBaseUrl) and before a request is sent.
+// is entered (parseGithubBaseUrl) and before a request is sent. An empty value
+// is github.com (providers stored before Enterprise support). Any other value
+// that can't be used is refused rather than replaced by github.com, which would
+// send the app's credentials to a host the provider was never set up for. The
+// message leaves out the stored value, which can carry credentials.
 export const normalizeGithubUrl = (githubUrl?: string | null): string => {
 	const result = parseGithubBaseUrlShape(githubUrl);
-	return "url" in result ? result.url : DEFAULT_GITHUB_URL;
+	if ("error" in result) throw new GithubHostError(STORED_GITHUB_URL_UNUSABLE);
+	return result.url;
 };
 
 export const deriveGithubApiUrl = (githubUrl?: string | null): string => {
