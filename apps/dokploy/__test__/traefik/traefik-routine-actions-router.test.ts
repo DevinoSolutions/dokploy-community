@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	findServerById: vi.fn(),
+	isRootOrganization: vi.fn(),
 	assertRunningTraefikImageKept: vi.fn(),
 	assertTraefikInstalled: vi.fn(),
 	checkPortInUse: vi.fn(),
@@ -80,6 +81,7 @@ describe("routine Traefik actions never pick the Traefik image", () => {
 			serverId,
 			organizationId: "org-a",
 		}));
+		mocks.isRootOrganization.mockResolvedValue(true);
 		mocks.assertRunningTraefikImageKept.mockResolvedValue(undefined);
 		mocks.assertTraefikInstalled.mockResolvedValue(undefined);
 		mocks.checkPortInUse.mockResolvedValue({ isInUse: false });

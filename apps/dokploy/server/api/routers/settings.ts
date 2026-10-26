@@ -26,6 +26,7 @@ import {
 	getWebServerSettings,
 	IS_CLOUD,
 	isResponseCompressionEnabled,
+	isRootOrganization,
 	isTraefikDashboardPortEnabled,
 	parseRawConfig,
 	paths,
@@ -195,6 +196,25 @@ const assertTraefikAccess = async (
 	}
 };
 
+// The Traefik of the Dokploy host serves every organization of a self-hosted
+// instance, so only the organization that owns the instance may change it or
+// read its env. A remote server is covered by assertServerInOrganization.
+const assertLocalHostAccess = async (
+	serverId: string | undefined,
+	organizationId: string | null | undefined,
+) => {
+	if (serverId || IS_CLOUD) {
+		return;
+	}
+	if (!organizationId || !(await isRootOrganization(organizationId))) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message:
+				"Only the organization that owns this Dokploy instance can change its own Traefik",
+		});
+	}
+};
+
 const MANIFEST_INSPECT_TIMEOUT_MS = 60_000;
 
 // No input keeps the plain "install the latest release" update.
@@ -261,6 +281,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			// Run in background so the request returns immediately; avoids proxy timeouts.
 			void reloadDockerResource("dokploy-traefik", input?.serverId).catch(
 				(err) => {
@@ -278,6 +302,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiEnableDashboard)
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
+			await assertLocalHostAccess(
 				input.serverId,
 				ctx.session?.activeOrganizationId,
 			);
@@ -1173,6 +1201,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			const envVars = await readEnvironmentVariables(
 				"dokploy-traefik",
 				input?.serverId,
@@ -1184,6 +1216,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(z.object({ env: z.string(), serverId: z.string().optional() }))
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
+			await assertLocalHostAccess(
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
@@ -1458,6 +1494,10 @@ export const settingsRouter = createTRPCRouter({
 				input.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 
 			try {
 				if (IS_CLOUD && !input.serverId) {
@@ -1541,6 +1581,7 @@ export const settingsRouter = createTRPCRouter({
 		.mutation(async ({ input, ctx }) => {
 			const serverId = input?.serverId;
 			await assertTraefikAccess(serverId, ctx.session?.activeOrganizationId);
+			await assertLocalHostAccess(serverId, ctx.session?.activeOrganizationId);
 
 			const lockKey = serverId ?? "local";
 			if (traefikUpdateLocks.has(lockKey)) {
