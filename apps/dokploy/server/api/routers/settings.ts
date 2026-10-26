@@ -94,7 +94,7 @@ import { audit } from "@/server/api/utils/audit";
 import { auditCancel } from "@/server/api/utils/cancel-audit";
 import {
 	assertLocalHostAccess,
-	canUseLocalHostForServices,
+	resolveHostIpForOrg,
 } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
@@ -1133,12 +1133,8 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return "";
 		}
-		// the host's address goes to an organization that may run services on it
-		if (!(await canUseLocalHostForServices(ctx.session.activeOrganizationId))) {
-			return null;
-		}
-		const settings = await getWebServerSettings();
-		return settings?.serverIp || "";
+		// empty for an organization that may not run services on the host
+		return await resolveHostIpForOrg(ctx.session.activeOrganizationId);
 	}),
 	updateServerIp: adminProcedure
 		.input(

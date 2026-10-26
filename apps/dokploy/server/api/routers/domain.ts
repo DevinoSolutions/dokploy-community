@@ -14,7 +14,6 @@ import {
 	generateTraefikMeDomain,
 	getCertificateResolvers,
 	getServerIpCandidates,
-	getWebServerSettings,
 	IS_CLOUD,
 	isCloudflarePublished,
 	manageDomain,
@@ -44,7 +43,10 @@ import {
 	withPermission,
 } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
-import { canUseLocalHostForServices } from "@/server/api/utils/local-host-access";
+import {
+	canUseLocalHostForServices,
+	resolveHostIpForOrg,
+} from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateDomain,
@@ -345,6 +347,24 @@ export const domainRouter = createTRPCRouter({
 					ctx.session.activeOrganizationId,
 				);
 			}
+			// On the Dokploy host the sslip.io host is built from its address, which
+			// only an organization that may run services on it gets; any other
+			// needs a wildcard base to generate from.
+			if (
+				!input.serverId &&
+				!(await canUseLocalHostForServices(ctx.session.activeOrganizationId))
+			) {
+				const { baseDomain } = await resolveGeneratedDomainBase({
+					projectId: input.projectId,
+				});
+				if (!baseDomain) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message:
+							"Set a wildcard domain to generate domains for this organization",
+					});
+				}
+			}
 			const generated = await generateTraefikMeDomain(
 				input.appName,
 				ctx.user.ownerId,
@@ -392,15 +412,15 @@ export const domainRouter = createTRPCRouter({
 				if (server.ipAddress) {
 					return server.ipAddress;
 				}
-			} else if (
+			} else {
 				// The Dokploy host's own address goes only to an organization that
 				// may run services on it; any other takes the base-domain path
 				// below, as if no address were set.
-				await canUseLocalHostForServices(ctx.session.activeOrganizationId)
-			) {
-				const settings = await getWebServerSettings();
-				if (settings?.serverIp) {
-					return settings.serverIp;
+				const hostIp = await resolveHostIpForOrg(
+					ctx.session.activeOrganizationId,
+				);
+				if (hostIp) {
+					return hostIp;
 				}
 			}
 
@@ -741,7 +761,13 @@ export const domainRouter = createTRPCRouter({
 				}
 			}
 
-			const expectedIps = await getServerIpCandidates(input.serverId);
+			// The Dokploy host's own addresses are only compared against for an
+			// organization that may run services on it.
+			const expectedIps =
+				input.serverId ||
+				(await canUseLocalHostForServices(ctx.session.activeOrganizationId))
+					? await getServerIpCandidates(input.serverId)
+					: [];
 			return validateDomain(input.domain, expectedIps);
 		}),
 });

@@ -1,4 +1,5 @@
 import {
+	findServerById,
 	getWebServerSettings,
 	IS_CLOUD,
 	isRootOrganization,
@@ -36,6 +37,24 @@ export const canUseLocalHostForServices = async (
 	}
 	const settings = await getWebServerSettings();
 	return !settings?.remoteServersOnly;
+};
+
+// The address a service on the given server is reached at: a remote server's
+// own (the caller has checked it belongs to the organization), or the Dokploy
+// host's, which only an organization that may run services on it gets. Empty
+// when there is none to give.
+export const resolveHostIpForOrg = async (
+	organizationId: string | null | undefined,
+	serverId?: string | null,
+) => {
+	if (serverId) {
+		return (await findServerById(serverId)).ipAddress;
+	}
+	if (!(await canUseLocalHostForServices(organizationId))) {
+		return "";
+	}
+	const settings = await getWebServerSettings();
+	return settings?.serverIp || "";
 };
 
 export const assertLocalHostAccess = async (

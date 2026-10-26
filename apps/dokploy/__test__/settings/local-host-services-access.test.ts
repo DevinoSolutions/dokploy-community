@@ -119,10 +119,10 @@ describe("settings.getIp", () => {
 		await expect(callerIn(OTHER_ORG).settings.getIp()).resolves.toBe(HOST_IP);
 	});
 
-	it("gives another organization nothing when remote servers only", async () => {
+	it("gives another organization an empty address when remote servers only", async () => {
 		instance(true);
 
-		await expect(callerIn(OTHER_ORG).settings.getIp()).resolves.toBeNull();
+		await expect(callerIn(OTHER_ORG).settings.getIp()).resolves.toBe("");
 	});
 
 	it("is empty on cloud", async () => {
