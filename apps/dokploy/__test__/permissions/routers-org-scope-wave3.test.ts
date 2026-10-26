@@ -85,6 +85,8 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 		createNetwork: vi.fn(async () => ({ networkId: "net-1", name: "net" })),
 		importDockerNetworks: vi.fn(async () => ({ imported: [], errors: [] })),
 		findNetworksToSync: vi.fn(async () => []),
+		// org-1 owns the instance
+		isRootOrganization: vi.fn(async (id: string) => id === "org-1"),
 		// Returns the wildcard-domain shape ({ domain, baseDomain, source }) the
 		// generator gained with the user-owned wildcard base feature.
 		generateTraefikMeDomain: vi.fn(async () => ({
@@ -251,12 +253,28 @@ describe("network router is organization-scoped", () => {
 		expect(findNetworksToSync).not.toHaveBeenCalled();
 	});
 
-	it("network.networksToSync still works for the local host", async () => {
+	it("network.networksToSync still works for the local host of the organization that owns the instance", async () => {
 		const caller = createCaller(ownerCtx);
 
 		await expect(caller.network.networksToSync({})).resolves.toEqual([]);
 		expect(findServerById).not.toHaveBeenCalled();
 		expect(findNetworksToSync).toHaveBeenCalledWith("org-1", null);
+	});
+
+	it("network.networksToSync and network.import refuse the local host to another organization", async () => {
+		const caller = createCaller({
+			...ownerCtx,
+			session: { activeOrganizationId: "org-2" },
+		} as never);
+
+		await expect(caller.network.networksToSync({})).rejects.toMatchObject({
+			code: "FORBIDDEN",
+		});
+		await expect(
+			caller.network.import({ names: ["net"] }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(findNetworksToSync).not.toHaveBeenCalled();
+		expect(importDockerNetworks).not.toHaveBeenCalled();
 	});
 });
 
