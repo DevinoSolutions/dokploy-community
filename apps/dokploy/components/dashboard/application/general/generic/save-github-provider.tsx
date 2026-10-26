@@ -105,20 +105,24 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 			?.githubUrl ?? DEFAULT_GITHUB_URL;
 	const triggerType = form.watch("triggerType");
 
-	const { data: repositories, isPending: isLoadingRepositories } =
-		api.github.getGithubRepositories.useQuery(
-			{
-				githubId,
-			},
-			{
-				enabled: !!githubId,
-			},
-		);
+	const {
+		data: repositories,
+		isPending: isLoadingRepositories,
+		error: repositoriesError,
+	} = api.github.getGithubRepositories.useQuery(
+		{
+			githubId,
+		},
+		{
+			enabled: !!githubId,
+		},
+	);
 
 	const {
 		data: branches,
 		fetchStatus,
 		status,
+		error: branchesError,
 	} = api.github.getGithubBranches.useQuery(
 		{
 			owner: repository?.owner,
@@ -163,8 +167,10 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 				toast.success("Service Provider Saved");
 				await utils.application.one.invalidate({ applicationId });
 			})
-			.catch(() => {
-				toast.error("Error saving the github provider");
+			.catch((error) => {
+				toast.error("Error saving the github provider", {
+					description: error.message,
+				});
 			});
 	};
 
@@ -285,8 +291,14 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 													<span className="py-6 text-center text-sm">
 														Loading Repositories....
 													</span>
+												) : repositoriesError ? (
+													<span className="px-3 py-6 text-center text-sm text-destructive">
+														{repositoriesError.message}
+													</span>
 												) : null}
-												<CommandEmpty>No repositories found.</CommandEmpty>
+												{!repositoriesError && (
+													<CommandEmpty>No repositories found.</CommandEmpty>
+												)}
 												<ScrollArea className="h-96">
 													<CommandGroup>
 														{repositories?.map((repo) => (
@@ -378,7 +390,13 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 													</span>
 												)}
 												<ScrollArea className="h-96">
-													<CommandEmpty>No branch found.</CommandEmpty>
+													{branchesError ? (
+														<span className="block px-3 py-6 text-center text-sm text-destructive">
+															{branchesError.message}
+														</span>
+													) : (
+														<CommandEmpty>No branch found.</CommandEmpty>
+													)}
 
 													<CommandGroup>
 														{branches?.map((branch) => (

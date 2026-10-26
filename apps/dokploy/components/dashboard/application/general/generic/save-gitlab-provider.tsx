@@ -177,8 +177,10 @@ export const SaveGitlabProvider = ({ applicationId }: Props) => {
 				toast.success("Service Provider Saved");
 				await utils.application.one.invalidate({ applicationId });
 			})
-			.catch(() => {
-				toast.error("Error saving the gitlab provider");
+			.catch((error) => {
+				toast.error("Error saving the gitlab provider", {
+					description: error.message,
+				});
 			});
 	};
 

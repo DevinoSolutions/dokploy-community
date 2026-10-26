@@ -181,8 +181,10 @@ export const SaveGiteaProvider = ({ applicationId }: Props) => {
 				toast.success("Service Provider Saved");
 				await utils.application.one.invalidate({ applicationId });
 			})
-			.catch(() => {
-				toast.error("Error saving the Gitea provider");
+			.catch((error) => {
+				toast.error("Error saving the Gitea provider", {
+					description: error.message,
+				});
 			});
 	};
 

@@ -104,8 +104,10 @@ export const SaveGitProviderCompose = ({ composeId }: Props) => {
 				toast.success("Git Provider Saved");
 				await refetch();
 			})
-			.catch(() => {
-				toast.error("Error saving the Git provider");
+			.catch((error) => {
+				toast.error("Error saving the Git provider", {
+					description: error.message,
+				});
 			});
 	};
 

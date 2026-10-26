@@ -177,8 +177,10 @@ export const SaveGitlabProviderCompose = ({ composeId }: Props) => {
 				toast.success("Service Provider Saved");
 				await refetch();
 			})
-			.catch(() => {
-				toast.error("Error saving the Gitlab provider");
+			.catch((error) => {
+				toast.error("Error saving the Gitlab provider", {
+					description: error.message,
+				});
 			});
 	};
 

@@ -116,8 +116,10 @@ export const WebDomain = () => {
 				await refetch();
 				toast.success("Domain Assigned");
 			})
-			.catch(() => {
-				toast.error("Error assigning the domain");
+			.catch((error) => {
+				toast.error("Error assigning the domain", {
+					description: error.message,
+				});
 			});
 	};
 

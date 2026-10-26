@@ -2,6 +2,7 @@ import {
 	GIT_URL_REFUSED_MESSAGE,
 	GitUrlRefusedError,
 } from "@dokploy/server/utils/providers/git-url";
+import { GithubHostError } from "@dokploy/server/utils/providers/github-host";
 import { TRPCError } from "@trpc/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -15,11 +16,15 @@ const mocks = vi.hoisted(() => ({
 	cloneGithubRepository: vi.fn(),
 	execAsync: vi.fn(),
 	execAsyncRemote: vi.fn(),
+	loadServices: vi.fn(),
 	checkServicePermissionAndAccess: vi.fn(),
 }));
 
 const REFUSAL =
 	"Deployment refused: the GitHub provider set on this service does not belong to its organization.";
+
+const HOST_REFUSAL =
+	"The GitHub provider's stored instance URL can't be used.";
 
 const composeRow = {
 	composeId: "cmp-1",
@@ -41,6 +46,7 @@ vi.mock("@dokploy/server", () => {
 		cloneGithubRepository: mocks.cloneGithubRepository,
 		execAsync: mocks.execAsync,
 		execAsyncRemote: mocks.execAsyncRemote,
+		loadServices: mocks.loadServices,
 		findComposeById: vi.fn(async () => composeRow),
 	};
 	return new Proxy(stubs, {
@@ -124,6 +130,16 @@ describe("compose.fetchSourceType", { timeout: 60_000 }, () => {
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 
+	it("says why when the stored GitHub instance URL is refused", async () => {
+		mocks.cloneCompose.mockRejectedValue(new GithubHostError(HOST_REFUSAL));
+		const caller = await callerOf();
+
+		await expect(
+			caller.fetchSourceType({ composeId: "cmp-1" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message: HOST_REFUSAL });
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+	});
+
 	it("still reports other failures as the generic error", async () => {
 		mocks.cloneCompose.mockRejectedValue(new Error("boom"));
 		const caller = await callerOf();
@@ -134,6 +150,38 @@ describe("compose.fetchSourceType", { timeout: 60_000 }, () => {
 			code: "BAD_REQUEST",
 			message: "Error fetching source type",
 		});
+	});
+});
+
+describe("compose.loadServices", { timeout: 60_000 }, () => {
+	it("answers 400 with the reason when the Fetch clone is refused", async () => {
+		mocks.loadServices.mockRejectedValue(new GithubHostError(HOST_REFUSAL));
+		const caller = await callerOf();
+
+		await expect(
+			caller.loadServices({ composeId: "cmp-1", type: "fetch" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message: HOST_REFUSAL });
+	});
+
+	it("answers 400 with the reason when the stored git URL is refused", async () => {
+		mocks.loadServices.mockRejectedValue(new GitUrlRefusedError());
+		const caller = await callerOf();
+
+		await expect(
+			caller.loadServices({ composeId: "cmp-1", type: "fetch" }),
+		).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: GIT_URL_REFUSED_MESSAGE,
+		});
+	});
+
+	it("leaves any other failure as it was", async () => {
+		mocks.loadServices.mockRejectedValue(new Error("boom"));
+		const caller = await callerOf();
+
+		await expect(
+			caller.loadServices({ composeId: "cmp-1", type: "fetch" }),
+		).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
 	});
 });
 
@@ -148,6 +196,18 @@ describe("compose.loadTemplateFromGit", { timeout: 60_000 }, () => {
 			caller.loadTemplateFromGit({ composeId: "cmp-1" }),
 		).rejects.toMatchObject({ code: "FORBIDDEN", message: REFUSAL });
 		expect(mocks.cloneGithubRepository).not.toHaveBeenCalled();
+		expect(mocks.execAsync).not.toHaveBeenCalled();
+	});
+
+	it("answers 400 with the reason when the clone is refused, and runs nothing", async () => {
+		mocks.cloneGithubRepository.mockRejectedValue(
+			new GithubHostError(HOST_REFUSAL),
+		);
+		const caller = await callerOf();
+
+		await expect(
+			caller.loadTemplateFromGit({ composeId: "cmp-1" }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST", message: HOST_REFUSAL });
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 

@@ -165,8 +165,10 @@ export const SaveBitbucketProviderCompose = ({ composeId }: Props) => {
 				toast.success("Service Provider Saved");
 				await refetch();
 			})
-			.catch(() => {
-				toast.error("Error saving the Bitbucket provider");
+			.catch((error) => {
+				toast.error("Error saving the Bitbucket provider", {
+					description: error.message,
+				});
 			});
 	};
 
