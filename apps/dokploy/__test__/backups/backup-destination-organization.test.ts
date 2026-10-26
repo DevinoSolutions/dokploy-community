@@ -22,6 +22,7 @@ vi.mock("@dokploy/server/services/permission", () => ({
 
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	isRootOrganization: async () => true,
 	createBackup: mocks.createBackup,
 	findBackupById: mocks.findBackupById,
 	updateBackupById: mocks.updateBackupById,

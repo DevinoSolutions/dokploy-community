@@ -19,15 +19,21 @@ import {
 	stageFiles,
 } from "../utils/docker/staging";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
+import { isRootOrganization } from "./admin";
 import { findMemberByUserId } from "./permission";
 import { findServerById } from "./server";
 
 export type ScheduleExtended = Awaited<ReturnType<typeof findScheduleById>>;
 
+export const HOST_SCHEDULE_FORBIDDEN_MESSAGE =
+	"Only the organization that owns this Dokploy instance can change its own host";
+
 // Host-level schedules (server / dokploy-server) run their script as root on the
 // host and must stay restricted to owners/admins, regardless of whether the
 // request is also tied to a service. Attaching an accessible applicationId must
-// not downgrade this to a service-access check.
+// not downgrade this to a service-access check. A dokploy-server schedule runs
+// on the Dokploy host itself, so it also belongs to the organization that owns
+// the instance.
 export const assertHostScheduleAccess = async (
 	ctx: { user: { id: string }; session: { activeOrganizationId: string } },
 	scheduleType: Schedule["scheduleType"] | null | undefined,
@@ -50,6 +56,16 @@ export const assertHostScheduleAccess = async (
 		throw new TRPCError({
 			code: "FORBIDDEN",
 			message: "Only owners and admins can manage server-level schedules.",
+		});
+	}
+
+	if (
+		scheduleType === "dokploy-server" &&
+		!(await isRootOrganization(ctx.session.activeOrganizationId))
+	) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: HOST_SCHEDULE_FORBIDDEN_MESSAGE,
 		});
 	}
 

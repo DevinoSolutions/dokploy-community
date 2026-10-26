@@ -48,11 +48,14 @@ vi.mock("@dokploy/server/services/deployment", async (importOriginal) => ({
 }));
 
 // Claiming a run as cancelled is a database update (see run-status.ts).
-vi.mock("@dokploy/server/utils/schedules/run-status", async (importOriginal) => ({
-	...(await importOriginal<object>()),
-	claimScheduleRunCancel: vi.fn(async () => true),
-	revertScheduleRunCancel: vi.fn(async () => undefined),
-}));
+vi.mock(
+	"@dokploy/server/utils/schedules/run-status",
+	async (importOriginal) => ({
+		...(await importOriginal<object>()),
+		claimScheduleRunCancel: vi.fn(async () => true),
+		revertScheduleRunCancel: vi.fn(async () => undefined),
+	}),
+);
 
 vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 	...(await importOriginal<object>()),
@@ -63,6 +66,13 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 vi.mock("bcrypt", () => ({ default: {}, hash: vi.fn(), compare: vi.fn() }));
 
 vi.mock("@/server/api/utils/cancel-audit", () => ({ auditCancel: vi.fn() }));
+// Whether the caller's organization owns the instance is covered in
+// schedule-host-root-org.test.ts.
+vi.mock("@dokploy/server/services/admin", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	isRootOrganization: async () => true,
+}));
+
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
@@ -105,22 +115,25 @@ describe("deployments of a dokploy-server schedule", () => {
 	it.each([
 		["another organization", "org-2"],
 		["no organization", null],
-	])("are off limits when the schedule belongs to %s", async (_label, organizationId) => {
-		mocks.deployment = deploymentOf(organizationId);
+	])(
+		"are off limits when the schedule belongs to %s",
+		async (_label, organizationId) => {
+			mocks.deployment = deploymentOf(organizationId);
 
-		await expect(
-			caller().killProcess({ deploymentId: "dep-1" }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-		await expect(
-			caller().removeDeployment({ deploymentId: "dep-1" }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-		await expect(
-			caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
-		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			await expect(
+				caller().killProcess({ deploymentId: "dep-1" }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			await expect(
+				caller().removeDeployment({ deploymentId: "dep-1" }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+			await expect(
+				caller().readLogs({ deploymentId: "dep-1", tail: 10 }),
+			).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 
-		expect(mocks.execAsync).not.toHaveBeenCalled();
-		expect(mocks.removeDeployment).not.toHaveBeenCalled();
-	});
+			expect(mocks.execAsync).not.toHaveBeenCalled();
+			expect(mocks.removeDeployment).not.toHaveBeenCalled();
+		},
+	);
 
 	it("are available to an admin of the owning organization", async () => {
 		mocks.deployment = deploymentOf("org-1");

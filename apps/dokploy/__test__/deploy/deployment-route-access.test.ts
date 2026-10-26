@@ -10,6 +10,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	memberRole: "member" as string,
+	// the organization that owns the instance
+	rootOrganization: "org-1",
 	accessedServices: [] as string[],
 	// serviceId -> organizationId
 	serviceOrgs: {
@@ -130,6 +132,12 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 vi.mock("bcrypt", () => ({ default: {}, hash: vi.fn(), compare: vi.fn() }));
 
 vi.mock("@/server/api/utils/cancel-audit", () => ({ auditCancel: vi.fn() }));
+vi.mock("@dokploy/server/services/admin", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	isRootOrganization: async (organizationId: string) =>
+		organizationId === mocks.rootOrganization,
+}));
+
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => {}),
 }));
@@ -261,6 +269,7 @@ const kinds: Kind[] = [
 beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.memberRole = "member";
+	mocks.rootOrganization = "org-1";
 	mocks.accessedServices = [];
 	mocks.removeDeployment.mockResolvedValue(true);
 	mocks.execAsync.mockResolvedValue({ stdout: "", stderr: "" });
@@ -277,9 +286,9 @@ const everyRoute = async (code: string) => {
 	await expect(
 		c.readLogs({ deploymentId: "dep-1", tail: 10 }),
 	).rejects.toMatchObject({ code });
-	await expect(
-		c.killProcess({ deploymentId: "dep-1" }),
-	).rejects.toMatchObject({ code });
+	await expect(c.killProcess({ deploymentId: "dep-1" })).rejects.toMatchObject({
+		code,
+	});
 	await expect(
 		c.removeDeployment({ deploymentId: "dep-1" }),
 	).rejects.toMatchObject({ code });
@@ -320,6 +329,26 @@ describe.each(kinds)("$name deployments", (kind) => {
 			await everyRoute(kind.hostLevel ? "FORBIDDEN" : "UNAUTHORIZED");
 		},
 	);
+});
+
+describe("dokploy-server schedule deployments of another organization's admin", () => {
+	it("are refused when the organization does not own the instance", async () => {
+		mocks.memberRole = "admin";
+		mocks.rootOrganization = "org-9";
+		mocks.deployment = row({
+			scheduleId: "sch-1",
+			schedule: {
+				scheduleId: "sch-1",
+				scheduleType: "dokploy-server",
+				organizationId: "org-1",
+				serverId: null,
+				applicationId: null,
+				composeId: null,
+			},
+		});
+
+		await everyRoute("FORBIDDEN");
+	});
 });
 
 describe("server setup deployments", () => {

@@ -7,6 +7,7 @@ import {
 	ENCRYPTION_KEY_BACKUP_FILE,
 	exportEncryptionKeys,
 } from "@dokploy/server/lib/encryption";
+import { isRootOrganization } from "@dokploy/server/services/admin";
 import {
 	type BackupSchedule,
 	findInstanceBackupDestination,
@@ -69,6 +70,14 @@ export const runWebServerBackup = async (backup: BackupSchedule) => {
 				);
 			}
 			throw error;
+		}
+		// The zip holds every organization's data, so the instance backup belongs
+		// to the organization that owns the instance. A row of another
+		// organization is kept and not run.
+		if (!(await isRootOrganization(destination.organizationId))) {
+			throw new Error(
+				"Backup refused: its destination belongs to an organization that does not own this Dokploy instance. Nothing was uploaded.",
+			);
 		}
 		const timestamp = getBackupTimestamp();
 		const { BASE_PATH } = paths();

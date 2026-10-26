@@ -53,6 +53,8 @@ vi.mock("node:fs/promises", async (importOriginal) => ({
 
 vi.mock("@dokploy/server/services/admin", () => ({
 	getDokployUrl: mocks.getDokployUrl,
+	isRootOrganization: async () => true,
+	isSingleOrganizationInstance: async () => true,
 }));
 
 vi.mock("@dokploy/server/utils/docker/utils", () => ({

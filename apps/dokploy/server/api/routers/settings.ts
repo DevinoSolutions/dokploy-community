@@ -26,7 +26,6 @@ import {
 	getWebServerSettings,
 	IS_CLOUD,
 	isResponseCompressionEnabled,
-	isRootOrganization,
 	isTraefikDashboardPortEnabled,
 	parseRawConfig,
 	paths,
@@ -93,6 +92,7 @@ import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { auditCancel } from "@/server/api/utils/cancel-audit";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	assertCanManageInstance,
@@ -196,25 +196,6 @@ const assertTraefikAccess = async (
 	}
 };
 
-// The Traefik of the Dokploy host serves every organization of a self-hosted
-// instance, so only the organization that owns the instance may change it or
-// read its env. A remote server is covered by assertServerInOrganization.
-const assertLocalHostAccess = async (
-	serverId: string | undefined,
-	organizationId: string | null | undefined,
-) => {
-	if (serverId || IS_CLOUD) {
-		return;
-	}
-	if (!organizationId || !(await isRootOrganization(organizationId))) {
-		throw new TRPCError({
-			code: "FORBIDDEN",
-			message:
-				"Only the organization that owns this Dokploy instance can change its own Traefik",
-		});
-	}
-};
-
 const MANIFEST_INSPECT_TIMEOUT_MS = 60_000;
 
 // No input keeps the plain "install the latest release" update.
@@ -246,6 +227,7 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		await reloadDockerResource("dokploy", undefined, packageInfo.version);
 		await audit(ctx, {
 			action: "reload",
@@ -258,6 +240,7 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const removed = await cleanAllDeploymentQueue();
 		await auditCancel(ctx, {
 			action: "clear_all_queues",
@@ -356,6 +339,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await cleanupImages(input?.serverId);
 			await audit(ctx, {
 				action: "delete",
@@ -368,6 +355,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
+			await assertLocalHostAccess(
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
@@ -386,6 +377,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await cleanupContainers(input?.serverId);
 			await audit(ctx, {
 				action: "delete",
@@ -398,6 +393,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
+			await assertLocalHostAccess(
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
@@ -415,6 +414,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await cleanupSystem(input?.serverId);
 			await cleanupBuilders(input?.serverId);
 			await audit(ctx, {
@@ -428,6 +431,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
+			await assertLocalHostAccess(
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
@@ -451,6 +458,7 @@ export const settingsRouter = createTRPCRouter({
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const { MONITORING_PATH } = paths();
 		await recreateDirectory(MONITORING_PATH);
 		await audit(ctx, {
@@ -581,6 +589,10 @@ export const settingsRouter = createTRPCRouter({
 					server.dockerCleanupCron,
 				);
 			} else if (!IS_CLOUD) {
+				await assertLocalHostAccess(
+					undefined,
+					ctx.session?.activeOrganizationId,
+				);
 				const settingsUpdated = await updateWebServerSettings({
 					enableDockerCleanup: input.enableDockerCleanup,
 					...(input.dockerCleanupCron && {
@@ -783,10 +795,11 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 
-	readTraefikConfig: adminProcedure.query(() => {
+	readTraefikConfig: adminProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const traefikConfig = readMainConfig();
 		return traefikConfig;
 	}),
@@ -797,6 +810,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			writeMainConfig(input.traefikConfig);
 			await audit(ctx, {
 				action: "update",
@@ -806,10 +820,11 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 
-	readWebServerTraefikConfig: adminProcedure.query(() => {
+	readWebServerTraefikConfig: adminProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const traefikConfig = readConfig("dokploy");
 		return traefikConfig;
 	}),
@@ -819,6 +834,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			writeConfig("dokploy", input.traefikConfig);
 			await audit(ctx, {
 				action: "update",
@@ -828,10 +844,11 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 
-	readMiddlewareTraefikConfig: adminProcedure.query(() => {
+	readMiddlewareTraefikConfig: adminProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		const traefikConfig = readConfig("middlewares");
 		return traefikConfig;
 	}),
@@ -842,6 +859,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			writeConfig("middlewares", input.traefikConfig);
 			await audit(ctx, {
 				action: "update",
@@ -864,6 +882,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			updateResponseCompression(input.enable);
 			// Run in background so the request returns immediately; client polls /api/health.
 			// The main Traefik config only reloads on restart.
@@ -900,6 +919,7 @@ export const settingsRouter = createTRPCRouter({
 				return true;
 			}
 
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			const resourceType = await getDockerResourceType("dokploy");
 			if (resourceType !== "service") {
 				throw new TRPCError({
@@ -1034,6 +1054,10 @@ export const settingsRouter = createTRPCRouter({
 		.input(apiServerSchema)
 		.query(async ({ ctx, input }) => {
 			try {
+				await assertLocalHostAccess(
+					input?.serverId,
+					ctx.session?.activeOrganizationId,
+				);
 				await checkPermission(ctx, { traefikFiles: ["read"] });
 				await assertServerInOrganization(
 					input?.serverId,
@@ -1050,6 +1074,10 @@ export const settingsRouter = createTRPCRouter({
 	updateTraefikFile: protectedProcedure
 		.input(apiModifyTraefikConfig)
 		.mutation(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await checkPermission(ctx, { traefikFiles: ["write"] });
 			await assertServerInOrganization(
 				input?.serverId,
@@ -1072,6 +1100,10 @@ export const settingsRouter = createTRPCRouter({
 	readTraefikFile: protectedProcedure
 		.input(apiReadTraefikConfig)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await checkPermission(ctx, { traefikFiles: ["read"] });
 			await assertServerInOrganization(
 				input.serverId,
@@ -1338,6 +1370,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			const mainConfig = readMainConfig();
 			if (!mainConfig) return false;
 
@@ -1422,6 +1455,10 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			try {
 				await setupGPUSupport(input.serverId);
 				await audit(ctx, {
@@ -1463,6 +1500,10 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			try {
 				return await checkGPUStatus(input.serverId || "");
 			} catch (error) {
@@ -1679,6 +1720,7 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 			let result: boolean;
 			if (input.cronExpression) {
 				result = await startLogCleanup(input.cronExpression);

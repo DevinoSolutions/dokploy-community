@@ -17,6 +17,7 @@ vi.mock("@dokploy/server", () => ({
 	get IS_CLOUD() {
 		return state.isCloud;
 	},
+	isRootOrganization: async () => true,
 	getDockerResourceType: mocks.getDockerResourceType,
 	getUpdateData: mocks.getUpdateData,
 	readDokployRollbackPoint: mocks.readDokployRollbackPoint,

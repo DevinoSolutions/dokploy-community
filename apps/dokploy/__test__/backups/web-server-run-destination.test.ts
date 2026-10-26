@@ -3,6 +3,8 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+	// the organization that owns the instance
+	rootOrganization: "org-b",
 	findDestinationRow: vi.fn(),
 	findMemberRow: vi.fn(),
 	createDeploymentBackup: vi.fn(),
@@ -18,6 +20,11 @@ vi.mock("@dokploy/server/db", () => ({
 			member: { findFirst: mocks.findMemberRow },
 		},
 	},
+}));
+
+vi.mock("@dokploy/server/services/admin", () => ({
+	isRootOrganization: async (organizationId: string) =>
+		organizationId === mocks.rootOrganization,
 }));
 
 vi.mock("@dokploy/server/constants", () => ({
@@ -72,6 +79,7 @@ const backup = {
 describe("runWebServerBackup checks the destination before zipping or uploading", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
+		mocks.rootOrganization = "org-b";
 		mocks.createDeploymentBackup.mockResolvedValue({
 			deploymentId: "dep-1",
 			logPath: join(tmpdir(), "t6800-web-server-backup.log"),
@@ -129,6 +137,21 @@ describe("runWebServerBackup checks the destination before zipping or uploading"
 		await expect(
 			runWebServerBackup({ ...backup, postgresId: "pg-1" } as never),
 		).rejects.toThrow("Backup refused");
+
+		expectRefusedRun();
+	});
+
+	it("refuses a row whose destination belongs to an organization that does not own the instance", async () => {
+		mocks.rootOrganization = "org-root";
+		mocks.findDestinationRow.mockResolvedValue({
+			destinationId: "dest-b",
+			organizationId: "org-b",
+			provider: "s3",
+		});
+
+		await expect(runWebServerBackup(backup as never)).rejects.toThrow(
+			/does not own this Dokploy instance/,
+		);
 
 		expectRefusedRun();
 	});

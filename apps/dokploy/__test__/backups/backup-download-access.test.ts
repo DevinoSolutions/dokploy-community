@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
 	findDestinationRow: vi.fn(),
 	getBackupDownloadUrl: vi.fn(),
 	audit: vi.fn(),
+	isRootOrganization: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/db", () => ({
@@ -26,6 +27,7 @@ vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
 	findBackupById: mocks.findBackupById,
 	findServerById: mocks.findServerById,
+	isRootOrganization: mocks.isRootOrganization,
 	scheduleBackup: vi.fn(),
 	removeScheduleBackup: vi.fn(),
 }));
@@ -118,6 +120,7 @@ beforeEach(() => {
 	});
 	mocks.getBackupDownloadUrl.mockResolvedValue({ url: "https://s3/x" });
 	mocks.audit.mockResolvedValue(undefined);
+	mocks.isRootOrganization.mockResolvedValue(true);
 });
 
 const expectNoLink = () => {
@@ -261,6 +264,19 @@ describe("backup.getDownloadUrl access", () => {
 			callerAs("admin").getDownloadUrl(webServerInput),
 		).resolves.toEqual({ url: "https://s3/x" });
 		expect(mocks.checkServicePermissionAndAccess).not.toHaveBeenCalled();
+	});
+
+	it("keeps the instance backup to the organization that owns the instance", async () => {
+		mocks.findBackupById.mockResolvedValue(instanceBackup);
+		mocks.isRootOrganization.mockResolvedValue(false);
+
+		await expect(
+			callerAs("owner").getDownloadUrl({
+				backupId: "ws-1",
+				fileName: "webserver-x.zip",
+			}),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expectNoLink();
 	});
 
 	it("answers an instance backup of another organization like a missing one", async () => {
