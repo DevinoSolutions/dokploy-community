@@ -1,11 +1,18 @@
 import { execFileSync, execSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
 	defaultCommand,
 	installRClone,
 	reportDockerVersion,
+	runRemoteInstaller,
 } from "@dokploy/server";
 import { describe, expect, it } from "vitest";
 
@@ -125,12 +132,28 @@ const installerStep = (script: string, tool: string) => {
 
 /**
  * Run an installer step with a fake curl that either fails or serves an
- * installer which leaves a marker, so nothing is downloaded or installed.
+ * installer, so nothing is downloaded or installed. The served installer leaves
+ * a marker, prints the version variables it sees and can be made to fail.
  */
-const runInstaller = (step: string, curl: "fails" | "serves") => {
+const runInstaller = (
+	step: string,
+	curl: "fails" | "serves" | "serves-failing",
+	{ sudoCmd = "" }: { sudoCmd?: string } = {},
+) => {
 	const dir = mkdtempSync(path.join(tmpdir(), "dokploy-installer-"));
+	const tmp = mkdtempSync(path.join(tmpdir(), "dokploy-installer-tmp-"));
 	const marker = path.join(dir, "installer-ran");
+	const fixture = path.join(dir, "installer.sh");
 	const shim = path.join(dir, "curl");
+	writeFileSync(
+		fixture,
+		[
+			`echo ran > "${marker.replaceAll(path.sep, "/")}"`,
+			'echo "versions: $NIXPACKS_VERSION $RAILPACK_VERSION"',
+			curl === "serves-failing" ? "exit 7" : "",
+			"",
+		].join("\n"),
+	);
 	writeFileSync(
 		shim,
 		curl === "fails"
@@ -141,24 +164,33 @@ const runInstaller = (step: string, curl: "fails" | "serves") => {
 					'	if [ "$1" = "-o" ]; then OUT="$2"; fi',
 					"	shift",
 					"done",
-					`echo 'echo ran > "${marker.replaceAll(path.sep, "/")}"' > "$OUT"`,
+					`cp "${fixture.replaceAll(path.sep, "/")}" "$OUT"`,
 					"",
 				].join("\n"),
 	);
 	chmodSync(shim, 0o755);
 	const script = [
 		"set -e",
-		"SUDO_CMD=",
+		`SUDO_CMD=${sudoCmd}`,
 		// The tool is never installed here, whatever the machine running the test has.
 		"command_exists() { return 1; }",
+		runRemoteInstaller,
 		step,
 		'echo "step finished"',
 	].join("\n");
 	const result = spawnSync("bash", ["-c", script], {
 		encoding: "utf8",
-		env: { ...process.env, PATH: [dir, process.env.PATH].join(path.delimiter) },
+		env: {
+			...process.env,
+			PATH: [dir, process.env.PATH].join(path.delimiter),
+			TMPDIR: tmp.replaceAll(path.sep, "/"),
+		},
 	});
-	return { ...result, installerRan: existsSync(marker) };
+	return {
+		...result,
+		installerRan: existsSync(marker),
+		leftoverFiles: readdirSync(tmp),
+	};
 };
 
 describe("installers downloaded by the setup script", () => {
@@ -169,14 +201,16 @@ describe("installers downloaded by the setup script", () => {
 		Railpack: installerStep(script, "railpack"),
 	};
 
-	it.each(Object.entries(steps))(
-		"%s is downloaded to a file before it runs, not piped or substituted",
-		(_tool, step) => {
-			expect(step).toContain("curl -fsSL");
-			expect(step).not.toMatch(/curl[^\n]*\|/);
-			expect(step).not.toContain("bash -c");
-		},
-	);
+	it("defines the download helper once and uses it for every installer", () => {
+		expect(script.split("run_remote_installer() {")).toHaveLength(2);
+		expect(runRemoteInstaller).toContain("curl -fsSL");
+		expect(runRemoteInstaller).not.toMatch(/curl[^\n]*\|/);
+		expect(runRemoteInstaller).not.toContain("bash -c");
+		for (const step of Object.values(steps)) {
+			expect(step).toContain("run_remote_installer");
+			expect(step).not.toContain("curl");
+		}
+	});
 
 	it.each(Object.entries(steps))(
 		"%s fails the step when the download fails",
@@ -184,6 +218,7 @@ describe("installers downloaded by the setup script", () => {
 			const result = runInstaller(step, "fails");
 			expect(result.status).toBe(1);
 			expect(result.installerRan).toBe(false);
+			expect(result.leftoverFiles).toEqual([]);
 			expect(result.stdout).not.toContain("step finished");
 			expect(result.stderr).toContain(
 				`Failed to download the ${tool} installer`,
@@ -192,12 +227,48 @@ describe("installers downloaded by the setup script", () => {
 	);
 
 	it.each(Object.entries(steps))(
-		"%s runs the downloaded installer",
+		"%s runs the downloaded installer and removes the file",
 		(_tool, step) => {
 			const result = runInstaller(step, "serves");
-			expect(result.status).toBe(0);
 			expect(result.installerRan).toBe(true);
+			expect(result.leftoverFiles).toEqual([]);
 			expect(result.stdout).toContain("step finished");
+		},
+	);
+
+	it.each(Object.entries(steps))(
+		"%s stops the setup and removes the file when the installer fails",
+		(_tool, step) => {
+			const result = runInstaller(step, "serves-failing");
+			expect(result.status).toBe(7);
+			expect(result.installerRan).toBe(true);
+			expect(result.leftoverFiles).toEqual([]);
+			expect(result.stdout).not.toContain("step finished");
+		},
+	);
+
+	it("passes the pinned version to the installer when SUDO_CMD is empty", () => {
+		expect(runInstaller(steps.Nixpacks, "serves").stdout).toContain(
+			"versions: 1.41.0 ",
+		);
+		expect(runInstaller(steps.Railpack, "serves").stdout).toContain(
+			"versions:  0.15.4",
+		);
+	});
+
+	it.each([
+		["Nixpacks", "versions: 1.41.0 "],
+		["Railpack", "versions:  0.15.4"],
+	] as const)(
+		"%s pin reaches the installer through a sudo that drops exported variables",
+		(tool, expected) => {
+			// Stands in for sudo, which runs its command without the exported variables.
+			const sudo =
+				'sudo_stub() { env -u NIXPACKS_VERSION -u RAILPACK_VERSION "$@"; }';
+			const result = runInstaller(`${sudo}\n${steps[tool]}`, "serves", {
+				sudoCmd: "sudo_stub",
+			});
+			expect(result.stdout).toContain(expected);
 		},
 	);
 });
