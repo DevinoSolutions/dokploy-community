@@ -10,12 +10,16 @@ import type { InferResultType } from "@dokploy/server/types/with";
 import { GIT_ALLOW_PROTOCOL_ENV } from "@dokploy/server/utils/providers/git-url";
 import {
 	assertGithubHostReachable,
-	GITHUB_REDIRECT_REFUSED,
+	createPinnedGithubFetch,
+	GIT_NO_REDIRECTS_CONFIG,
 	GithubHostError,
 	type GithubHostGuardOptions,
 	getAllowedGithubHosts,
 	githubHostPolicyError,
+	githubHostRefusalMessage,
 	githubInstanceRequestOptions,
+	isPublicGithubHost,
+	redactAddresses,
 } from "@dokploy/server/utils/providers/github-host";
 import { buildHeadRefCheckoutCommand } from "@dokploy/server/utils/providers/head-ref";
 import { buildPinCommitCommand } from "@dokploy/server/utils/providers/pin-commit";
@@ -111,6 +115,19 @@ export const deriveGithubApiUrl = (githubUrl?: string | null): string => {
 	return `${protocol}//${host}/api/v3`;
 };
 
+/**
+ * Octokit options for the provider's GitHub instance. Every call to a stored
+ * host other than github.com goes through the pinned fetch (host policy and
+ * address check at connect time, no redirects, 15 second timeout per request).
+ * Retries and rate-limit waits are Octokit's own; each attempt is a new
+ * connection and is checked again. github.com is left as it is.
+ */
+const githubInstanceOptions = (githubUrl?: string | null) => {
+	const apiUrl = deriveGithubApiUrl(githubUrl);
+	if (isPublicGithubHost(new URL(apiUrl).hostname)) return {};
+	return { request: { fetch: createPinnedGithubFetch() } };
+};
+
 export const authGithub = (githubProvider: Github): Octokit => {
 	if (!haveGithubRequirements(githubProvider)) {
 		throw new TRPCError({
@@ -127,6 +144,7 @@ export const authGithub = (githubProvider: Github): Octokit => {
 			installationId: githubProvider?.githubInstallationId,
 		},
 		baseUrl: deriveGithubApiUrl(githubProvider?.githubUrl),
+		...githubInstanceOptions(githubProvider?.githubUrl),
 	});
 
 	return octokit;
@@ -186,7 +204,7 @@ export const convertGithubManifest = async (
 	await assertGithubInstanceReachable(baseUrl, guard);
 	const octokit = new Octokit({
 		baseUrl: deriveGithubApiUrl(baseUrl),
-		request: githubInstanceRequestOptions(guard.fetch),
+		request: githubInstanceRequestOptions(guard.fetch, guard),
 		// The manifest code can be used once, so a failed POST is not repeated.
 		retry: { enabled: false },
 	});
@@ -197,9 +215,8 @@ export const convertGithubManifest = async (
 		);
 		return data;
 	} catch (error) {
-		if (error instanceof Error && error.message === GITHUB_REDIRECT_REFUSED) {
-			throw new GithubHostError(GITHUB_REDIRECT_REFUSED);
-		}
+		const refusal = githubHostRefusalMessage(error);
+		if (refusal) throw new GithubHostError(refusal);
 		throw error;
 	}
 };
@@ -250,7 +267,7 @@ export const verifyGithubInstallation = async (
 			privateKey: githubProvider.githubPrivateKey,
 		},
 		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
-		request: githubInstanceRequestOptions(guard.fetch),
+		request: githubInstanceRequestOptions(guard.fetch, guard),
 		...(guard.retryAfterBaseValue !== undefined && {
 			retry: { retryAfterBaseValue: guard.retryAfterBaseValue },
 		}),
@@ -265,8 +282,9 @@ export const verifyGithubInstallation = async (
 			? { ok: true }
 			: { ok: false, reason: "not_found" };
 	} catch (error) {
-		if (error instanceof Error && error.message === GITHUB_REDIRECT_REFUSED) {
-			return { ok: false, reason: "host_refused", message: error.message };
+		const refusal = githubHostRefusalMessage(error);
+		if (refusal) {
+			return { ok: false, reason: "host_refused", message: refusal };
 		}
 		return {
 			ok: false,
@@ -276,6 +294,50 @@ export const verifyGithubInstallation = async (
 					: "unavailable",
 		};
 	}
+};
+
+export const GITHUB_REQUEST_FAILED_MESSAGE =
+	"The request to the GitHub instance failed. Check the instance URL and the app's credentials; the server log has the details.";
+
+/**
+ * The error to give a client when a call to a GitHub instance failed. The text
+ * of the remote answer and of a connection error can name an internal address
+ * or carry what a service there replied, so it is not passed on: the client
+ * gets the host policy's own message, or a generic one, and the detail goes to
+ * the server log with addresses removed.
+ */
+export const githubClientError = (
+	error: unknown,
+	action: string,
+): TRPCError => {
+	const { name, status, code, message } = (error ?? {}) as {
+		name?: unknown;
+		status?: unknown;
+		code?: unknown;
+		message?: unknown;
+	};
+	console.error(
+		`[github] ${action} failed: ${String(name ?? "Error")} status=${String(status ?? "-")} code=${String(code ?? "-")} ${redactAddresses(String(message ?? error))}`,
+	);
+	const refusal = githubHostRefusalMessage(error);
+	if (refusal) return new TRPCError({ code: "BAD_REQUEST", message: refusal });
+	if (status === 401 || status === 403) {
+		return new TRPCError({
+			code: "BAD_REQUEST",
+			message:
+				"The GitHub instance rejected the app's credentials or permissions.",
+		});
+	}
+	if (status === 404) {
+		return new TRPCError({
+			code: "BAD_REQUEST",
+			message: "The GitHub instance could not find what was asked for.",
+		});
+	}
+	return new TRPCError({
+		code: "BAD_REQUEST",
+		message: GITHUB_REQUEST_FAILED_MESSAGE,
+	});
 };
 
 export const getGithubToken = async (
@@ -420,6 +482,9 @@ export const cloneGithubRepository = async ({
 	}
 
 	const githubProvider = await findGithubById(githubId);
+	// The stored host is checked before the token is minted and before anything
+	// is cloned from it (a clone runs under git, outside the pinned fetch).
+	await assertGithubInstanceReachable(githubProvider.githubUrl ?? "");
 	const basePath = isCompose ? COMPOSE_PATH : APPLICATIONS_PATH;
 	const outputPath = outputPathOverride ?? join(basePath, appName, "code");
 	const octokit = authGithub(githubProvider);
@@ -430,12 +495,14 @@ export const cloneGithubRepository = async ({
 	command += `rm -rf ${outputPath};`;
 	command += `mkdir -p ${outputPath};`;
 	const cloneUrl = `${cloneBase.protocol}//${repoclone}`;
+	// Git does not follow a redirect from an Enterprise host to another one.
+	const authConfig = `${isPublicGithubHost(cloneBase.hostname) ? "" : `${GIT_NO_REDIRECTS_CONFIG} `}${getGitTokenAuthConfig(cloneUrl, token)}`;
 	const pin = pinCommit
 		? buildPinCommitCommand({
 				outputPath: String(outputPath ?? ""),
 				commitSha: pinCommit,
 				enableSubmodules,
-				authConfig: getGitTokenAuthConfig(cloneUrl, token),
+				authConfig,
 			})
 		: "";
 
@@ -447,11 +514,11 @@ export const cloneGithubRepository = async ({
 			headRef,
 			outputPath: String(outputPath ?? ""),
 			enableSubmodules,
-			authConfig: getGitTokenAuthConfig(cloneUrl, token),
+			authConfig,
 		});
 		return command + pin;
 	}
-	command += `git ${getGitTokenAuthConfig(cloneUrl, token)} clone --branch ${quote([String(branch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
+	command += `git ${authConfig} clone --branch ${quote([String(branch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
 	command += pin;
 
 	return command;
@@ -472,6 +539,7 @@ export const getGithubRepositories = async (githubId?: string) => {
 			installationId: githubProvider.githubInstallationId,
 		},
 		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
+		...githubInstanceOptions(githubProvider.githubUrl),
 	});
 
 	const repositories = (await octokit.paginate(
@@ -499,6 +567,7 @@ export const getGithubPullRequests = async (
 			installationId: githubProvider.githubInstallationId,
 		},
 		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
+		...githubInstanceOptions(githubProvider.githubUrl),
 	});
 
 	const pullRequests = (await octokit.paginate(octokit.rest.pulls.list, {
@@ -541,6 +610,7 @@ export const getGithubBranches = async (
 			installationId: githubProvider.githubInstallationId,
 		},
 		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
+		...githubInstanceOptions(githubProvider.githubUrl),
 	});
 
 	const branches = (await octokit.paginate(octokit.rest.repos.listBranches, {
