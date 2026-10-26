@@ -1,4 +1,4 @@
-import { PgDialect } from "drizzle-orm/pg-core";
+import { PgDialect, QueryBuilder } from "drizzle-orm/pg-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // better-auth's email sign-in only accepts a credential account whose
@@ -39,6 +39,9 @@ vi.mock("@dokploy/server/db", async (importOriginal) => {
 		...actual,
 		db: {
 			transaction: async (fn: (t: typeof tx) => unknown) => fn(tx),
+			// The real builder, so the subquery in the repair's WHERE is genuine SQL.
+			select: (...args: Parameters<QueryBuilder["select"]>) =>
+				new QueryBuilder().select(...args),
 			update: () => ({
 				set: mocks.set.mockReturnValue({
 					where: mocks.where.mockReturnValue({ returning: mocks.returning }),
@@ -90,10 +93,11 @@ describe("repairCredentialAccountIds", () => {
 		const set = dialect.sqlToQuery(mocks.set.mock.calls[0][0].accountId);
 		expect(set.sql).toBe('"account"."user_id"');
 		const where = dialect.sqlToQuery(mocks.where.mock.calls[0][0]);
+		// A user who already has a matching credential row is left alone.
 		expect(where.sql).toBe(
-			'("account"."provider_id" = $1 and "account"."account_id" <> "account"."user_id")',
+			'("account"."provider_id" = $1 and "account"."account_id" <> "account"."user_id" and not exists (select 1 from "account" "valid_credential" where ("valid_credential"."user_id" = "account"."user_id" and "valid_credential"."provider_id" = $2 and "valid_credential"."account_id" = "valid_credential"."user_id")))',
 		);
-		expect(where.params).toEqual(["credential"]);
+		expect(where.params).toEqual(["credential", "credential"]);
 		expect(log).toHaveBeenCalledTimes(1);
 		log.mockRestore();
 	});
@@ -107,15 +111,9 @@ describe("repairCredentialAccountIds", () => {
 		log.mockRestore();
 	});
 
-	it("rejects on a database failure so the startup call can log it", async () => {
+	it("rejects on a database failure so the startup call can catch and log it", async () => {
 		mocks.returning.mockRejectedValue(new Error("db down"));
-		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		// Same shape as the call in server.ts: a failure only logs.
-		await repairCredentialAccountIds().catch((e) => {
-			console.error("Failed to repair credential accounts:", e);
-		});
-		expect(error).toHaveBeenCalledTimes(1);
-		error.mockRestore();
+		await expect(repairCredentialAccountIds()).rejects.toThrow("db down");
 	});
 });

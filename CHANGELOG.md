@@ -4,7 +4,7 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
-**Users created with initial credentials can sign in again** (T-9007). Existing ones are repaired at startup.
+**Users created with initial credentials can sign in again** (T-9007). Settings > Users > Add user with Initial Credentials stored the login with a random account id, but the sign-in library only accepts a credential login whose account id equals the user id, so every such user got "Invalid email or password". New users now get the matching id, and the server repairs the existing ones at startup, including credential logins left from much older versions (migration 0066) with a random id. A user who already has a matching login, for example after a password reset, is left alone. No migration.
 
 **Password managers can fill the two-factor code on the login page** (T-7060, ported from upstream Dokploy [#5735](https://github.com/Dokploy/dokploy/pull/5735) by Yash Kumar). The six-box code input hid its real field behind layered boxes, so Bitwarden and similar tools could not offer their inline suggestion. The code is now typed into one visible field marked as a one-time code, drawn as six boxes in a row, and it checks itself as soon as the sixth digit is in. The fork's sign-in redirect and MCP consent return are unchanged. No migration.
 

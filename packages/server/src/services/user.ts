@@ -9,7 +9,8 @@ import {
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
-import { and, desc, eq, ne, sql } from "drizzle-orm";
+import { and, desc, eq, ne, notExists, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { auth } from "../lib/auth";
 
 export type User = typeof user.$inferSelect;
@@ -278,8 +279,11 @@ export const createOrganizationUserWithCredentials = async ({
 };
 
 // Initial-credentials users were created with a random accountId, which
-// better-auth's email sign-in rejects. Idempotent; returns the rows fixed.
+// better-auth's email sign-in rejects. A user who already has a matching
+// credential row (for example from a password reset) is left alone, so the
+// repair never leaves two matching rows. Idempotent; returns the rows fixed.
 export const repairCredentialAccountIds = async () => {
+	const valid = alias(account, "valid_credential");
 	const fixed = await db
 		.update(account)
 		.set({ accountId: sql`${account.userId}` })
@@ -287,6 +291,18 @@ export const repairCredentialAccountIds = async () => {
 			and(
 				eq(account.providerId, "credential"),
 				ne(account.accountId, account.userId),
+				notExists(
+					db
+						.select({ one: sql`1` })
+						.from(valid)
+						.where(
+							and(
+								eq(valid.userId, account.userId),
+								eq(valid.providerId, "credential"),
+								eq(valid.accountId, valid.userId),
+							),
+						),
+				),
 			),
 		)
 		.returning({ id: account.id });
