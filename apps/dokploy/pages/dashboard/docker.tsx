@@ -24,6 +24,8 @@ import { api } from "@/utils/api";
 const DEFAULT_TAB = "containers";
 const ADMIN_SWARM_TAB = "overview";
 const MEMBER_SWARM_TAB = "containers";
+const LOCAL_HOST_OWNER_ONLY =
+	"Only the organization that owns this instance can see the Dokploy host here.";
 
 const Dashboard = () => {
 	const router = useRouter();
@@ -38,6 +40,12 @@ const Dashboard = () => {
 	// Host-level diagnostics, so this needs server.read on top of docker.read.
 	const canSeeHealth =
 		isAdmin && !!permissions?.docker.read && !!permissions?.server.read;
+	// The Dokploy host serves every organization of the instance, so only the
+	// one that owns it sees the host's health; a remote server is unaffected.
+	const { data: metrics } = api.user.getMetricsToken.useQuery(undefined, {
+		enabled: canSeeHealth,
+	});
+	const canSeeLocalHost = metrics?.localHostAccess !== false;
 
 	const queryTab =
 		typeof router.query.tab === "string" ? router.query.tab : DEFAULT_TAB;
@@ -150,7 +158,15 @@ const Dashboard = () => {
 					</TabsContent>
 					{canSeeHealth && (
 						<TabsContent value="health">
-							<ShowHealth serverId={serverId} />
+							{serverId || canSeeLocalHost ? (
+								<ShowHealth serverId={serverId} />
+							) : (
+								<Card className="h-full bg-sidebar p-2.5 rounded-xl mx-auto w-full">
+									<div className="rounded-xl bg-background shadow-md p-6 text-sm text-muted-foreground">
+										{LOCAL_HOST_OWNER_ONLY}
+									</div>
+								</Card>
+							)}
 						</TabsContent>
 					)}
 				</Tabs>

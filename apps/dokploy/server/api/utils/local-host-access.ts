@@ -23,7 +23,7 @@ export const assertLocalHostAccess = async (
 		throw new TRPCError({
 			code: "FORBIDDEN",
 			message:
-				"Only the organization that owns this Dokploy instance can change its own host",
+				"Only the organization that owns this Dokploy instance can access its host",
 		});
 	}
 };
