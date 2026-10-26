@@ -38,7 +38,9 @@ let findRootOrganization: typeof import("@dokploy/server/services/admin").findRo
 let isRootOrganization: typeof import("@dokploy/server/services/admin").isRootOrganization;
 let logRootOrganization: typeof import("@dokploy/server/services/admin").logRootOrganization;
 let isSingleOrganizationInstance: typeof import("@dokploy/server/services/admin").isSingleOrganizationInstance;
+let assertOrganizationDeletable: typeof import("@dokploy/server/services/admin").assertOrganizationDeletable;
 let assertLocalHostAccess: typeof import("@/server/api/utils/local-host-access").assertLocalHostAccess;
+let canSeeMetricsToken: typeof import("@/server/api/utils/web-server-settings-view").canSeeMetricsToken;
 
 const FIRST = { id: "org-first", name: "First" };
 const PINNED = { id: "org-pinned", name: "Pinned" };
@@ -71,9 +73,13 @@ beforeEach(async () => {
 		isRootOrganization,
 		logRootOrganization,
 		isSingleOrganizationInstance,
+		assertOrganizationDeletable,
 	} = await import("@dokploy/server/services/admin"));
 	({ assertLocalHostAccess } = await import(
 		"@/server/api/utils/local-host-access"
+	));
+	({ canSeeMetricsToken } = await import(
+		"@/server/api/utils/web-server-settings-view"
 	));
 });
 
@@ -121,6 +127,17 @@ describe("the organization that owns the instance", () => {
 				assertLocalHostAccess(undefined, organizationId),
 			).rejects.toMatchObject({ code: "FORBIDDEN" });
 		}
+		for (const organizationId of ["org-first", "org-pinned"]) {
+			await expect(
+				canSeeMetricsToken({
+					session: { activeOrganizationId: organizationId },
+					user: { role: "owner" },
+				}),
+			).resolves.toBe(false);
+			await expect(
+				assertOrganizationDeletable(organizationId),
+			).rejects.toMatchObject({ code: "FORBIDDEN" });
+		}
 	});
 
 	it("reports a pinned id that matches nothing once", async () => {
@@ -131,6 +148,41 @@ describe("the organization that owns the instance", () => {
 		await isRootOrganization("org-first");
 
 		expect(error).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("deleting an organization", () => {
+	it("is refused for the first one created when nothing is pinned", async () => {
+		organizations([FIRST, PINNED]);
+
+		await expect(
+			assertOrganizationDeletable("org-first"),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(
+			assertOrganizationDeletable("org-pinned"),
+		).resolves.toBeUndefined();
+	});
+
+	it("is refused for the pinned one, and allowed for the others", async () => {
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-pinned");
+		organizations([FIRST, PINNED]);
+
+		await expect(
+			assertOrganizationDeletable("org-pinned"),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(
+			assertOrganizationDeletable("org-first"),
+		).resolves.toBeUndefined();
+	});
+
+	it("is not limited on Dokploy Cloud", async () => {
+		state.isCloud = true;
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-gone");
+		organizations([FIRST]);
+
+		await expect(
+			assertOrganizationDeletable("org-first"),
+		).resolves.toBeUndefined();
 	});
 });
 

@@ -112,10 +112,26 @@ export const isSingleOrganizationInstance = async () =>
 export const ROOT_ORGANIZATION_DELETE_MESSAGE =
 	"This organization owns the Dokploy instance and can't be deleted";
 
+export const PINNED_ROOT_ORGANIZATION_MISSING_DELETE_MESSAGE =
+	"DOKPLOY_ROOT_ORGANIZATION_ID names no organization, so organizations can't be deleted until it is fixed";
+
 // Deleting the root organization would hand the instance's own Traefik and
-// settings to the next-oldest one. Dokploy Cloud has no such organization.
+// settings to the next-oldest one. While a pinned id matches no organization
+// there is no root to protect, so no organization can be deleted: otherwise
+// the one that owned the instance before the pin could be. Dokploy Cloud has
+// no such organization.
 export const assertOrganizationDeletable = async (organizationId: string) => {
-	if (!IS_CLOUD && (await isRootOrganization(organizationId))) {
+	if (IS_CLOUD) {
+		return;
+	}
+	const root = await findRootOrganization();
+	if (!root && pinnedRootOrganizationId()) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: PINNED_ROOT_ORGANIZATION_MISSING_DELETE_MESSAGE,
+		});
+	}
+	if (root && root.id === organizationId) {
 		throw new TRPCError({
 			code: "FORBIDDEN",
 			message: ROOT_ORGANIZATION_DELETE_MESSAGE,
