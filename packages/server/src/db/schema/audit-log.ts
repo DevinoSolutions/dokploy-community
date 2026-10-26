@@ -55,6 +55,7 @@ export type AuditAction =
 	| "login"
 	| "logout"
 	| "restore"
+	| "download"
 	| "run"
 	| "start"
 	| "stop"

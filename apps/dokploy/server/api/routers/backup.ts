@@ -45,7 +45,12 @@ import {
 } from "@dokploy/server/services/permission";
 import { runComposeBackup } from "@dokploy/server/utils/backups/compose";
 import {
+	getBackupDownloadUrl,
+	type RcloneFile,
+} from "@dokploy/server/utils/backups/files";
+import {
 	buildRcloneCommand,
+	getBackupServerId,
 	getRclonePathAndFlags,
 	normalizeS3Path,
 } from "@dokploy/server/utils/backups/utils";
@@ -80,18 +85,6 @@ import {
 	apiUpdateBackup,
 } from "@/server/db/schema";
 import { removeJob, schedule, updateJob } from "@/server/utils/backup";
-
-interface RcloneFile {
-	Path: string;
-	Name: string;
-	Size: number;
-	IsDir: boolean;
-	Tier?: string;
-	Hashes?: {
-		MD5?: string;
-		SHA1?: string;
-	};
-}
 
 type BackupAction = "create" | "read" | "update" | "delete" | "restore";
 type BackupCtx = {
@@ -737,10 +730,60 @@ export const backupRouter = createTRPCRouter({
 				destinationId: backup.destinationId,
 				destinationName: backup.destination?.name ?? "",
 				prefix: backup.prefix,
+				// A libsql database keeps its dumps under its app name.
+				libsqlAppName:
+					backup.backupType === "database"
+						? (backup.libsql?.appName ?? null)
+						: null,
 				serverId,
 				metadata: backup.metadata ?? null,
 				canRestore,
 			};
+		}),
+
+	// Hands out a short-lived signed link to one dump of a backup, so the
+	// browser downloads it straight from the destination. A dump holds the whole
+	// database, so it takes the restore permission on the owning service (or the
+	// owner/admin role for the instance backup), not just read. The file is a
+	// bare name inside the backup's own folder; the destination, and the server
+	// the service runs on, must belong to the active organization.
+	getDownloadUrl: withPermission("backup", "restore")
+		.input(
+			z.object({
+				backupId: z.string(),
+				fileName: z.string().min(1).max(255),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			const backup = await findBackupById(input.backupId);
+			await authorizeBackupAccess(ctx, backup, "restore");
+			const destination = await findDestinationByIdForOrganization(
+				backup.destinationId,
+				ctx.session.activeOrganizationId,
+			);
+			const serverId = getBackupServerId(backup);
+			if (serverId) {
+				const server = await findServerById(serverId);
+				if (server.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server.",
+					});
+				}
+			}
+			const result = await getBackupDownloadUrl({
+				backup,
+				destination,
+				serverId,
+				fileName: input.fileName,
+			});
+			await audit(ctx, {
+				action: "download",
+				resourceType: "backup",
+				resourceId: backup.backupId,
+				metadata: { file: input.fileName },
+			});
+			return result;
 		}),
 
 	restoreBackupWithLogs: protectedProcedure

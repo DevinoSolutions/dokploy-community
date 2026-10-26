@@ -5,13 +5,17 @@ import {
 	updateWebServerSettings,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
+import {
+	assertCanManageInstance,
+	toWebServerSettingsView,
+} from "@/server/api/utils/web-server-settings-view";
 import { apiUpdateWebServerMonitoring } from "@/server/db/schema";
 import { adminProcedure, createTRPCRouter } from "../trpc";
 
 export const adminRouter = createTRPCRouter({
 	setupMonitoring: adminProcedure
 		.input(apiUpdateWebServerMonitoring)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			try {
 				if (IS_CLOUD) {
 					throw new TRPCError({
@@ -19,6 +23,8 @@ export const adminRouter = createTRPCRouter({
 						message: "Feature disabled on cloud",
 					});
 				}
+
+				await assertCanManageInstance(ctx);
 
 				await updateWebServerSettings({
 					metricsConfig: {
@@ -47,7 +53,7 @@ export const adminRouter = createTRPCRouter({
 
 				await setupWebMonitoring();
 				const settings = await getWebServerSettings();
-				return settings;
+				return await toWebServerSettingsView(settings, ctx);
 			} catch (error) {
 				throw error;
 			}

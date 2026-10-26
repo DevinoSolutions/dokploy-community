@@ -43,6 +43,10 @@ import { audit } from "@/server/api/utils/audit";
 import { resolveMetricsTarget } from "@/server/api/utils/container-service-access";
 import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
 import {
+	canSeeMetricsToken,
+	redactMetricsConfig,
+} from "@/server/api/utils/web-server-settings-view";
+import {
 	adminProcedure,
 	createTRPCRouter,
 	protectedProcedure,
@@ -427,7 +431,10 @@ export const userRouter = createTRPCRouter({
 			return {
 				serverIp: settings?.serverIp,
 				enabledFeatures: user.enablePaidFeatures,
-				metricsConfig: settings?.metricsConfig,
+				metricsConfig: redactMetricsConfig(
+					settings?.metricsConfig,
+					await canSeeMetricsToken(ctx),
+				),
 			};
 		},
 	),
