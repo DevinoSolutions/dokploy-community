@@ -56,6 +56,14 @@ const deployment = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server/services/deployment", () => deployment);
 
+// What serverSetup does about Traefik afterwards is covered by
+// server-setup-traefik-followup.test.ts; here it must not open a second
+// connection on the fake ssh2.
+vi.mock("@dokploy/server/services/settings", () => ({
+	finishTraefikAfterSetup: vi.fn(async () => {}),
+	hasTraefikBackup: vi.fn(async () => false),
+}));
+
 vi.mock("@dokploy/server/services/server", () => ({
 	findServerById: vi.fn(async () => ({
 		serverId: "srv-1",
