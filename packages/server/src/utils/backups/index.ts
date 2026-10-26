@@ -1,9 +1,8 @@
-import { member } from "@dokploy/server/db/schema";
+import { findOwner } from "@dokploy/server/services/admin";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
 import { findDestinationById } from "@dokploy/server/services/destination";
 import { getAllServers } from "@dokploy/server/services/server";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
-import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { db } from "../../db/index";
 import { startLogCleanup } from "../access-log/handler";
@@ -32,9 +31,8 @@ export const initCronJobs = async () => {
 				hostLabel: "the Dokploy server",
 				cron: webServerSettings.dockerCleanupCron,
 				afterCleanup: async () => {
-					const owner = await db.query.member.findFirst({
-						where: eq(member.role, "owner"),
-					});
+					// The same organization the settings toggle attributes it to.
+					const owner = await findOwner().catch(() => null);
 					if (owner) {
 						await sendDockerCleanupNotifications(owner.organizationId);
 					}

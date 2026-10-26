@@ -13,10 +13,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@dokploy/server/db", () => ({
 	db: {
 		query: {
-			member: { findFirst: mocks.findOwner },
 			backups: { findMany: mocks.findBackups },
 		},
 	},
+}));
+
+vi.mock("@dokploy/server/services/admin", () => ({
+	findOwner: mocks.findOwner,
 }));
 
 vi.mock("@dokploy/server/services/web-server-settings", () => ({

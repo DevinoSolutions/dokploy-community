@@ -15,6 +15,7 @@ import {
 	DEFAULT_UPDATE_DATA,
 	findApplicationById,
 	findComposeById,
+	findOwner,
 	findServerById,
 	getDockerDiskUsage,
 	getDockerResourceType,
@@ -603,12 +604,17 @@ export const settingsRouter = createTRPCRouter({
 				});
 
 				if (settingsUpdated?.enableDockerCleanup) {
-					const organizationId = ctx.session.activeOrganizationId;
 					scheduleDockerCleanup({
 						jobName: WEB_SERVER_CLEANUP_JOB,
 						hostLabel: "the Dokploy server",
 						cron: settingsUpdated.dockerCleanupCron,
-						afterCleanup: () => sendDockerCleanupNotifications(organizationId),
+						// The same organization a restart attributes it to.
+						afterCleanup: async () => {
+							const owner = await findOwner().catch(() => null);
+							if (owner) {
+								await sendDockerCleanupNotifications(owner.organizationId);
+							}
+						},
 					});
 				} else {
 					cancelDockerCleanup(WEB_SERVER_CLEANUP_JOB);
