@@ -18,6 +18,7 @@ import {
 	isNotSwarmManagerError,
 	logRootOrganization,
 	queueTraefikRecreate,
+	repairCredentialAccountIds,
 	restoreInterruptedTraefik,
 	sendDokployRestartNotifications,
 	setBackgroundErrorReporter,
@@ -121,6 +122,9 @@ void app
 			console.log(`Server Started on: http://${HOST}:${PORT}`);
 			await logRootOrganization().catch((error) => {
 				console.error("Failed to read the root organization:", error);
+			});
+			await repairCredentialAccountIds().catch((error) => {
+				console.error("Failed to repair credential accounts:", error);
 			});
 
 			if (process.env.NODE_ENV === "production" && !IS_CLOUD) {
