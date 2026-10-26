@@ -4,8 +4,12 @@ import {
 	deriveGithubApiUrl,
 	normalizeGithubUrl,
 	parseGithubBaseUrl,
+	STORED_GITHUB_URL_UNUSABLE,
 } from "@dokploy/server/utils/providers/github";
-import { parseAllowedGithubHosts } from "@dokploy/server/utils/providers/github-host";
+import {
+	GithubHostError,
+	parseAllowedGithubHosts,
+} from "@dokploy/server/utils/providers/github-host";
 import { describe, expect, it, vi } from "vitest";
 
 const urlOf = (result: ReturnType<typeof parseGithubBaseUrl>) =>
@@ -41,14 +45,29 @@ describe("normalizeGithubUrl", () => {
 		);
 	});
 
-	it("falls back to github.com on unusable input", () => {
-		expect(normalizeGithubUrl("ftp://github.acme.com")).toBe(
-			DEFAULT_GITHUB_URL,
+	it("refuses a stored value it can't use instead of falling back to github.com", () => {
+		for (const stored of [
+			"ftp://github.acme.com",
+			"http://github.internal",
+			"http://oauth2:secret-token@github.acme.com",
+			"https://",
+			"https://github",
+			"acme .ghe.com",
+		]) {
+			let thrown: unknown;
+			try {
+				normalizeGithubUrl(stored);
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown, stored).toBeInstanceOf(GithubHostError);
+			expect((thrown as Error).message).toBe(STORED_GITHUB_URL_UNUSABLE);
+			// The stored value can carry credentials; it is not echoed back.
+			expect((thrown as Error).message).not.toContain("secret-token");
+		}
+		expect(() => deriveGithubApiUrl("http://github.internal")).toThrow(
+			STORED_GITHUB_URL_UNUSABLE,
 		);
-		expect(normalizeGithubUrl("http://github.internal")).toBe(
-			DEFAULT_GITHUB_URL,
-		);
-		expect(normalizeGithubUrl("https://")).toBe(DEFAULT_GITHUB_URL);
 	});
 });
 

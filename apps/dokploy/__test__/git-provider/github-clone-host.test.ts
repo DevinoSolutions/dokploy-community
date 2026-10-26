@@ -104,4 +104,12 @@ describe("cloneGithubRepository host", () => {
 
 		expect(command).toContain("https://github.com/acme/web.git");
 	});
+
+	it("refuses a stored URL it can't use instead of cloning from github.com", async () => {
+		mockFindGithubById.mockResolvedValue(provider("http://github.acme.com"));
+
+		await expect(clone()).rejects.toThrow(
+			"The GitHub provider's stored instance URL can't be used",
+		);
+	});
 });
