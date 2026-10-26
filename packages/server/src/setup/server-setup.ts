@@ -9,7 +9,10 @@ import {
 	findServerById,
 	updateServerById,
 } from "@dokploy/server/services/server";
-import { finishTraefikAfterSetup } from "@dokploy/server/services/settings";
+import {
+	finishTraefikAfterSetup,
+	hasTraefikBackup,
+} from "@dokploy/server/services/settings";
 import {
 	getDefaultMiddlewares,
 	getDefaultServerTraefikConfig,
@@ -124,12 +127,16 @@ export const serverSetup = async (
 		} finally {
 			// Also after a failed run: the script may have repaired traefik.yml
 			// before a later step failed, and a re-run would not repair it again.
-			// Only when the script left Traefik something to restart or restore, so
-			// a setup that stopped before that does not wait on the queue.
+			// Only when there is something to restart or restore, so a setup that
+			// stopped early on a host without one does not wait on the queue. A
+			// backup left by an interrupted update is restored even when the script
+			// stopped before it noticed.
 			if (
 				signals.started &&
 				!isBuildServer &&
-				(signals.restartTraefik || signals.restoreTraefik)
+				(signals.restartTraefik ||
+					signals.restoreTraefik ||
+					(await hasTraefikBackup(serverId)))
 			) {
 				await settleTraefik(serverId, signals.restartTraefik, onData);
 			}

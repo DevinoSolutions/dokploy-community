@@ -40,10 +40,11 @@ vi.mock("ssh2", async () => {
 	return { Client };
 });
 
-const traefik = vi.hoisted(() => ({ finish: vi.fn() }));
+const traefik = vi.hoisted(() => ({ finish: vi.fn(), backup: vi.fn() }));
 
 vi.mock("@dokploy/server/services/settings", () => ({
 	finishTraefikAfterSetup: traefik.finish,
+	hasTraefikBackup: traefik.backup,
 }));
 
 vi.mock("@dokploy/server/services/deployment", () => ({
@@ -107,6 +108,8 @@ beforeEach(() => {
 	ssh.onExec = () => {};
 	traefik.finish.mockReset();
 	traefik.finish.mockResolvedValue(undefined);
+	traefik.backup.mockReset();
+	traefik.backup.mockResolvedValue(false);
 });
 
 describe("serverSetup: Traefik after the script", () => {
@@ -216,6 +219,26 @@ describe("serverSetup: Traefik after the script", () => {
 		expect(outcome.ok).toBe(false);
 		expect(traefik.finish).not.toHaveBeenCalled();
 		expect(logs.join("")).not.toContain("Could not restart or restore Traefik");
+	});
+
+	it("still restores a backup left by an interrupted update when the setup died early", async () => {
+		traefik.backup.mockResolvedValue(true);
+		ssh.onExec = script("3. Installing Docker\n", 1);
+
+		const { outcome } = await run();
+
+		expect(outcome.ok).toBe(false);
+		expect(traefik.backup).toHaveBeenCalledWith("srv-1");
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+	});
+
+	it("restores a left-behind backup after a script that printed nothing about Traefik", async () => {
+		traefik.backup.mockResolvedValue(true);
+		ssh.onExec = script("10. Setting up Traefik Instance\n", 0);
+
+		await run();
+
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
 	});
 
 	it("leaves a build server's Traefik alone", async () => {

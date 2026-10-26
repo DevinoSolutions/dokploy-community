@@ -512,6 +512,11 @@ fi`;
 	}
 };
 
+// Whether an interrupted Traefik update left its backup on the host.
+export const hasTraefikBackup = async (serverId?: string) =>
+	(await getDockerResourceType(PREVIOUS_TRAEFIK_CONTAINER, serverId)) !==
+	"unknown";
+
 // Run after Setup Server, once its script has finished: a Traefik left as only
 // dokploy-traefik-previous is restored (when the live one is still missing by
 // the time its turn comes), and a repaired config gets its restart.

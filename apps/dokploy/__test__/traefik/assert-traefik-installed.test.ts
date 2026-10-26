@@ -1,4 +1,7 @@
-import { assertTraefikInstalled } from "@dokploy/server/services/settings";
+import {
+	assertTraefikInstalled,
+	hasTraefikBackup,
+} from "@dokploy/server/services/settings";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Between a recreate's rename and its create only dokploy-traefik-previous
@@ -63,5 +66,32 @@ describe("assertTraefikInstalled", () => {
 		await expect(assertTraefikInstalled()).rejects.toMatchObject({
 			name: "DockerResourceNotFoundError",
 		});
+	});
+});
+
+describe("hasTraefikBackup", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.present = new Set();
+		mocks.execAsync.mockImplementation(answer);
+	});
+
+	it("is true while dokploy-traefik-previous exists", async () => {
+		mocks.present = new Set(["dokploy-traefik-previous"]);
+
+		await expect(hasTraefikBackup()).resolves.toBe(true);
+	});
+
+	it("is false when only the live Traefik exists", async () => {
+		mocks.present = new Set(["dokploy-traefik"]);
+
+		await expect(hasTraefikBackup()).resolves.toBe(false);
+	});
+
+	it("is false when docker cannot be asked", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		mocks.execAsync.mockRejectedValue(new Error("docker: command not found"));
+
+		await expect(hasTraefikBackup()).resolves.toBe(false);
 	});
 });
