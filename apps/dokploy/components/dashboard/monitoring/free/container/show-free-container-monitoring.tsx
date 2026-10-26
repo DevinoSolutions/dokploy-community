@@ -174,6 +174,8 @@ export const ContainerFreeMonitoring = ({
 		{ appName: effectiveAppName },
 		{
 			refetchOnWindowFocus: false,
+			// a refused name (not a service of the caller's) will not turn into data
+			retry: false,
 		},
 	);
 	const [accumulativeData, setAccumulativeData] = useState<DockerStatsJSON>({

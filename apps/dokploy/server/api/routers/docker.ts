@@ -33,6 +33,7 @@ import {
 	redactContainerEnv,
 	resolveContainerForRoute,
 } from "@/server/api/utils/container-service-access";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { uploadFileToContainerSchema } from "@/utils/schema";
 import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
 
@@ -73,7 +74,8 @@ export const dockerRouter = createTRPCRouter({
 
 	// Host-level diagnostics of the whole server (every tenant's containers and
 	// their restarts), so this requires docker.read AND server.read and is
-	// owner/admin only: no service owns it to check a member against.
+	// owner/admin only: no service owns it to check a member against. On the
+	// local host it is also limited to the organization that owns the instance.
 	getServerHealth: adminProcedure
 		.input(
 			z.object({
@@ -83,6 +85,10 @@ export const dockerRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await checkPermission(ctx, { docker: ["read"], server: ["read"] });
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getServerHealthData(
 				ctx.session.activeOrganizationId,

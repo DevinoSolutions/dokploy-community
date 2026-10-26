@@ -65,6 +65,21 @@ export const canAccessDockerOverWss = async (
 	return true;
 };
 
+// Whether the stats socket may read the local host's stats: with no service
+// pinned and no remote server resolved they are the Dokploy host's own, or any
+// container on it by name, and the host serves every organization of the
+// instance, so only the organization that owns it. A service is pinned to its
+// own containers and a remote server was checked against the caller's
+// organization before this is asked.
+export const canReadHostStatsOverWss = async (
+	session: WssSession,
+	resolvedServerId: string | null | undefined,
+	serviceId: string | null | undefined,
+): Promise<boolean> => {
+	if (serviceId || resolvedServerId) return true;
+	return await canAccessLocalHost(undefined, session?.activeOrganizationId);
+};
+
 // Whether a stats request for `appName` targets the service named
 // `serviceAppName`. Applications and databases run as one swarm service named
 // after the app; stack tasks are namespaced "<stack>_<service>". Compose
