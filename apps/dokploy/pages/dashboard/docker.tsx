@@ -7,6 +7,7 @@ import superjson from "superjson";
 import { ShowDiskUsage } from "@/components/dashboard/docker/disk-usage/show-disk-usage";
 import { ShowDockerEvents } from "@/components/dashboard/docker/events/show-docker-events";
 import { ShowHealth } from "@/components/dashboard/docker/health/show-health";
+import { LocalHostOnlyNotice } from "@/components/dashboard/docker/local-host-only";
 import { ShowImages } from "@/components/dashboard/docker/images/show-images";
 import { ShowContainers } from "@/components/dashboard/docker/show/show-containers";
 import { ShowVolumes } from "@/components/dashboard/docker/volumes/show-volumes";
@@ -24,8 +25,6 @@ import { api } from "@/utils/api";
 const DEFAULT_TAB = "containers";
 const ADMIN_SWARM_TAB = "overview";
 const MEMBER_SWARM_TAB = "containers";
-const LOCAL_HOST_OWNER_ONLY =
-	"Only the organization that owns this instance can see the Dokploy host here.";
 
 const Dashboard = () => {
 	const router = useRouter();
@@ -41,11 +40,12 @@ const Dashboard = () => {
 	const canSeeHealth =
 		isAdmin && !!permissions?.docker.read && !!permissions?.server.read;
 	// The Dokploy host serves every organization of the instance, so only the
-	// one that owns it sees the host's health; a remote server is unaffected.
+	// one that owns it sees the host's Docker data; a remote server is unaffected.
 	const { data: metrics } = api.user.getMetricsToken.useQuery(undefined, {
-		enabled: canSeeHealth,
+		enabled: !!permissions?.monitoring.read,
 	});
 	const canSeeLocalHost = metrics?.localHostAccess !== false;
+	const hostRefused = (serverId?: string) => !serverId && !canSeeLocalHost;
 
 	const queryTab =
 		typeof router.query.tab === "string" ? router.query.tab : DEFAULT_TAB;
@@ -132,19 +132,31 @@ const Dashboard = () => {
 							</TabsContent>
 							{canSeeNodes && (
 								<TabsContent value="nodes">
-									<ShowNodes serverId={serverId} />
+									{hostRefused(serverId) ? (
+										<LocalHostOnlyNotice />
+									) : (
+										<ShowNodes serverId={serverId} />
+									)}
 								</TabsContent>
 							)}
 						</Tabs>
 					</TabsContent>
 					{canSeeImages && (
 						<TabsContent value="images">
-							<ShowImages serverId={serverId} />
+							{hostRefused(serverId) ? (
+								<LocalHostOnlyNotice />
+							) : (
+								<ShowImages serverId={serverId} />
+							)}
 						</TabsContent>
 					)}
 					{canSeeVolumes && (
 						<TabsContent value="volumes">
-							<ShowVolumes serverId={serverId} />
+							{hostRefused(serverId) ? (
+								<LocalHostOnlyNotice />
+							) : (
+								<ShowVolumes serverId={serverId} />
+							)}
 						</TabsContent>
 					)}
 					<TabsContent value="networks">
@@ -154,18 +166,18 @@ const Dashboard = () => {
 						<ShowDockerEvents serverId={serverId} />
 					</TabsContent>
 					<TabsContent value="disk-usage">
-						<ShowDiskUsage serverId={serverId} />
+						{hostRefused(serverId) ? (
+							<LocalHostOnlyNotice />
+						) : (
+							<ShowDiskUsage serverId={serverId} />
+						)}
 					</TabsContent>
 					{canSeeHealth && (
 						<TabsContent value="health">
-							{serverId || canSeeLocalHost ? (
-								<ShowHealth serverId={serverId} />
+							{hostRefused(serverId) ? (
+								<LocalHostOnlyNotice />
 							) : (
-								<Card className="h-full bg-sidebar p-2.5 rounded-xl mx-auto w-full">
-									<div className="rounded-xl bg-background shadow-md p-6 text-sm text-muted-foreground">
-										{LOCAL_HOST_OWNER_ONLY}
-									</div>
-								</Card>
+								<ShowHealth serverId={serverId} />
 							)}
 						</TabsContent>
 					)}
