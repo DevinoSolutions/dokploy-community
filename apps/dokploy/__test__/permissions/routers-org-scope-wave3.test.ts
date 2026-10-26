@@ -84,7 +84,9 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 		})),
 		createNetwork: vi.fn(async () => ({ networkId: "net-1", name: "net" })),
 		importDockerNetworks: vi.fn(async () => ({ imported: [], errors: [] })),
-		findNetworksToSync: vi.fn(async () => []),
+		findNetworksToSync: vi.fn(async () => syncResult),
+		// org-1 owns the instance
+		isRootOrganization: vi.fn(async (id: string) => id === "org-1"),
 		// Returns the wildcard-domain shape ({ domain, baseDomain, source }) the
 		// generator gained with the user-owned wildcard base feature.
 		generateTraefikMeDomain: vi.fn(async () => ({
@@ -116,6 +118,27 @@ vi.mock("@dokploy/server/services/compose", async (importOriginal) => {
 
 let serverRow: Record<string, unknown> = {};
 let aiRow: Record<string, unknown> = {};
+const syncResult = {
+	importable: [
+		{
+			name: "host-net",
+			driver: "bridge",
+			internal: false,
+			attachable: false,
+			subnets: ["10.0.0.0/24"],
+		},
+	],
+	missing: [{ networkId: "net-1", name: "gone" }],
+	changed: [
+		{
+			networkId: "net-2",
+			name: "swapped",
+			driver: "bridge",
+			internal: false,
+			attachable: false,
+		},
+	],
+};
 let projectRow: Record<string, unknown> = {};
 
 const { appRouter } = await import("@/server/api/root");
@@ -135,6 +158,13 @@ const { createComposeByTemplate } = await import(
 );
 
 const createCaller = createCallerFactory(appRouter);
+
+const otherOrganizationCtx = {
+	user: { id: "user-2", email: "admin@test.com", role: "admin" },
+	session: { activeOrganizationId: "org-2" },
+	req: {} as unknown,
+	res: {} as unknown,
+} as never;
 
 const ownerCtx = {
 	user: {
@@ -251,12 +281,54 @@ describe("network router is organization-scoped", () => {
 		expect(findNetworksToSync).not.toHaveBeenCalled();
 	});
 
-	it("network.networksToSync still works for the local host", async () => {
+	it("network.networksToSync gives the organization that owns the instance the importable networks of the local host", async () => {
 		const caller = createCaller(ownerCtx);
 
-		await expect(caller.network.networksToSync({})).resolves.toEqual([]);
+		await expect(caller.network.networksToSync({})).resolves.toEqual(
+			syncResult,
+		);
 		expect(findServerById).not.toHaveBeenCalled();
 		expect(findNetworksToSync).toHaveBeenCalledWith("org-1", null);
+	});
+
+	it("network.networksToSync gives another organization its own missing and changed networks but nothing to import on the local host", async () => {
+		const caller = createCaller(otherOrganizationCtx);
+
+		for (const input of [{}, { serverId: "" }]) {
+			await expect(caller.network.networksToSync(input)).resolves.toEqual({
+				...syncResult,
+				importable: [],
+			});
+		}
+		expect(findNetworksToSync).toHaveBeenCalledWith("org-2", null);
+	});
+
+	it("network.networksToSync leaves a remote server of the caller's organization alone", async () => {
+		serverInOrganization("org-2");
+		const caller = createCaller(otherOrganizationCtx);
+
+		await expect(
+			caller.network.networksToSync({ serverId: "srv-1" }),
+		).resolves.toEqual(syncResult);
+		expect(findNetworksToSync).toHaveBeenCalledWith("org-2", "srv-1");
+	});
+
+	it("network.import refuses the local host to another organization", async () => {
+		const caller = createCaller(otherOrganizationCtx);
+
+		for (const serverId of [undefined, ""]) {
+			await expect(
+				caller.network.import({ names: ["net"], serverId }),
+			).rejects.toMatchObject({ code: "FORBIDDEN" });
+		}
+		expect(importDockerNetworks).not.toHaveBeenCalled();
+	});
+
+	it("network.import still adopts networks on the local host for the organization that owns the instance", async () => {
+		const caller = createCaller(ownerCtx);
+
+		await caller.network.import({ names: ["net"] });
+		expect(importDockerNetworks).toHaveBeenCalledWith("org-1", null, ["net"]);
 	});
 });
 

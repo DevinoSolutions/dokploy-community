@@ -18,6 +18,7 @@ import {
 	ensureTraefikImage,
 	initializeTraefikService,
 	isImageId,
+	PREVIOUS_TRAEFIK_CONTAINER,
 	queueTraefikRecreate,
 	recreateStandaloneTraefik,
 	resolveRoutineTraefikImage,
@@ -511,6 +512,11 @@ fi`;
 	}
 };
 
+// Whether an interrupted Traefik update left its backup on the host.
+export const hasTraefikBackup = async (serverId?: string) =>
+	(await getDockerResourceType(PREVIOUS_TRAEFIK_CONTAINER, serverId)) !==
+	"unknown";
+
 // Run after Setup Server, once its script has finished: a Traefik left as only
 // dokploy-traefik-previous is restored (when the live one is still missing by
 // the time its turn comes), and a repaired config gets its restart.
@@ -763,11 +769,16 @@ export interface TraefikSetupOptions
 
 // The env and ports are read inside the queued job, so a request would not
 // notice a host without Traefik; this tells the caller before it queues.
+// Between a recreate's rename and its create the live container is missing for
+// a few seconds and only the backup exists: that is a Traefik being updated,
+// and the next action waits in the queue for it.
 export const assertTraefikInstalled = async (serverId?: string) => {
-	const resourceType = await getDockerResourceType("dokploy-traefik", serverId);
-	if (resourceType === "unknown") {
-		throw new DockerResourceNotFoundError();
+	for (const name of ["dokploy-traefik", PREVIOUS_TRAEFIK_CONTAINER]) {
+		if ((await getDockerResourceType(name, serverId)) !== "unknown") {
+			return;
+		}
 	}
+	throw new DockerResourceNotFoundError();
 };
 
 export const writeTraefikSetup = async (input: TraefikSetupOptions) => {

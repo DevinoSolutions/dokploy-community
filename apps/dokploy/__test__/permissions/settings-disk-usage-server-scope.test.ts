@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * `settings.getDockerDiskUsage` only needs `docker.read`, and the org check
  * proves the server belongs to the caller's organization. Members must also be
  * limited to the servers they were granted (`getAccessibleServerIds`), like the
- * rest of the server-scoped routers. The local host (no serverId) stays open.
+ * rest of the server-scoped routers. The local host (no serverId) belongs to
+ * the organization that owns the instance, since its disk usage covers every
+ * organization.
  */
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(() => Promise.resolve()),
@@ -40,6 +42,8 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 			serverStatus: "active",
 		})),
 		getDockerDiskUsage: vi.fn(async () => []),
+		// org-1 owns the instance
+		isRootOrganization: vi.fn(async (id: string) => id === "org-1"),
 	};
 });
 
@@ -48,14 +52,16 @@ const { createCallerFactory } = await import("@/server/api/trpc");
 const { getAccessibleServerIds } = await import(
 	"@dokploy/server/services/server"
 );
-const { getDockerDiskUsage } = await import("@dokploy/server");
+const { findServerById, getDockerDiskUsage, isRootOrganization } = await import(
+	"@dokploy/server"
+);
 
 const createCaller = createCallerFactory(appRouter);
 
-const ctx = (role: string) =>
+const ctx = (role: string, activeOrganizationId = "org-1") =>
 	({
 		user: { id: "user-1", email: "u@test.com", role },
-		session: { userId: "user-1", activeOrganizationId: "org-1" },
+		session: { userId: "user-1", activeOrganizationId },
 		req: {} as unknown,
 		res: {} as unknown,
 	}) as never;
@@ -103,11 +109,53 @@ describe("settings.getDockerDiskUsage server scope", () => {
 		expect(getDockerDiskUsage).toHaveBeenCalledWith("srv-3");
 	});
 
-	it("allows the local host without a serverId and skips the grant lookup", async () => {
+	it("allows the local host without a serverId to the organization that owns the instance and skips the grant lookup", async () => {
 		await expect(
 			createCaller(ctx("member")).settings.getDockerDiskUsage(),
 		).resolves.toEqual([]);
 		expect(getAccessibleServerIds).not.toHaveBeenCalled();
 		expect(getDockerDiskUsage).toHaveBeenCalledWith(undefined);
+	});
+
+	it.each([undefined, ""])(
+		"refuses the local host (serverId %j) to another organization",
+		async (serverId) => {
+			for (const role of ["member", "admin"]) {
+				await expect(
+					createCaller(ctx(role, "org-2")).settings.getDockerDiskUsage({
+						serverId,
+					}),
+				).rejects.toMatchObject({ code: "FORBIDDEN" });
+			}
+			expect(getDockerDiskUsage).not.toHaveBeenCalled();
+		},
+	);
+
+	it("leaves a remote server of the caller's own organization alone", async () => {
+		vi.mocked(findServerById).mockResolvedValueOnce({
+			serverId: "srv-9",
+			organizationId: "org-2",
+			serverStatus: "active",
+		} as Awaited<ReturnType<typeof findServerById>>);
+		grant("srv-9");
+
+		await expect(
+			createCaller(ctx("admin", "org-2")).settings.getDockerDiskUsage({
+				serverId: "srv-9",
+			}),
+		).resolves.toEqual([]);
+		expect(isRootOrganization).not.toHaveBeenCalled();
+		expect(getDockerDiskUsage).toHaveBeenCalledWith("srv-9");
+	});
+
+	it("refuses a remote server of another organization", async () => {
+		grant("srv-1");
+
+		await expect(
+			createCaller(ctx("admin", "org-2")).settings.getDockerDiskUsage({
+				serverId: "srv-1",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(getDockerDiskUsage).not.toHaveBeenCalled();
 	});
 });

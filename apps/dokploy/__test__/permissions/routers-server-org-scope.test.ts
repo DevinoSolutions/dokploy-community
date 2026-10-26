@@ -39,6 +39,8 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 			name: "cert",
 		})),
 		cleanPatchRepos: vi.fn(async () => {}),
+		// org-1 owns the instance
+		isRootOrganization: vi.fn(async (id: string) => id === "org-1"),
 		execAsync: vi.fn(async () => ({ stdout: "", stderr: "" })),
 		execAsyncRemote: vi.fn(async () => ({ stdout: "", stderr: "" })),
 		runDockerLogin: vi.fn(async () => {}),
@@ -287,11 +289,28 @@ describe("patch.cleanPatchRepos is organization-scoped", () => {
 		expect(cleanPatchRepos).toHaveBeenCalledWith("srv-1");
 	});
 
-	it("still allows the local cleanup without a server lookup", async () => {
+	it("still allows the local cleanup of the organization that owns the instance without a server lookup", async () => {
 		const caller = createCaller(ownerCtx);
 
 		await expect(caller.patch.cleanPatchRepos({})).resolves.toBe(true);
 		expect(cleanPatchRepos).toHaveBeenCalledWith(undefined);
 		expect(findServerById).not.toHaveBeenCalled();
+	});
+
+	it("refuses the local cleanup to another organization", async () => {
+		const caller = createCaller({
+			user: { id: "user-1", email: "owner@test.com", role: "owner" },
+			session: { activeOrganizationId: "org-2" },
+			req: {} as unknown,
+			res: {} as unknown,
+		} as never);
+
+		await expect(caller.patch.cleanPatchRepos({})).rejects.toMatchObject({
+			code: "FORBIDDEN",
+		});
+		await expect(
+			caller.patch.cleanPatchRepos({ serverId: "" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(cleanPatchRepos).not.toHaveBeenCalled();
 	});
 });

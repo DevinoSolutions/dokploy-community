@@ -18,6 +18,18 @@ vi.mock("@dokploy/server/services/permission", async (importOriginal) => {
 	};
 });
 
+vi.mock("@dokploy/server/services/settings", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("@dokploy/server/services/settings")
+		>();
+	return {
+		...actual,
+		finishTraefikAfterSetup: vi.fn(async () => {}),
+		hasTraefikBackup: vi.fn(async () => false),
+	};
+});
+
 vi.mock("@dokploy/server", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("@dokploy/server")>();
 	return {

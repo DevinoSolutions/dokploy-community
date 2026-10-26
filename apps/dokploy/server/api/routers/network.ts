@@ -28,6 +28,10 @@ import {
 	assertServerReachable,
 	canReachServer,
 } from "../utils/container-service-access";
+import {
+	assertLocalHostAccess,
+	canAccessLocalHost,
+} from "../utils/local-host-access";
 
 // The row of the caller's organization, on a server the caller can reach (an
 // organization's networks live on its servers, and a member only gets the ones
@@ -92,15 +96,24 @@ export const networkRouter = createTRPCRouter({
 	// host, every tenant's included, and an imported row can then be recreated or
 	// removed through this router. A host network is not owned by an
 	// organization, so there is nothing to scope a member to: owner/admin only
-	// (they always hold the network statement).
+	// (they always hold the network statement). On the local host only those of
+	// the organization that owns the instance may adopt a network: the others
+	// still see which of their own networks went missing or changed, but not the
+	// importable ones.
 	networksToSync: adminProcedure
 		.input(z.object({ serverId: z.string().optional() }))
 		.query(async ({ ctx, input }) => {
 			await assertServerReachable(ctx, input.serverId);
-			return findNetworksToSync(
+			const result = await findNetworksToSync(
 				ctx.session.activeOrganizationId,
 				input.serverId ?? null,
 			);
+			return (await canAccessLocalHost(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			))
+				? result
+				: { ...result, importable: [] as typeof result.importable };
 		}),
 
 	import: adminProcedure
@@ -111,6 +124,10 @@ export const networkRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			const result = await importDockerNetworks(
 				ctx.session.activeOrganizationId,
