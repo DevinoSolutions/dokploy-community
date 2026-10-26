@@ -35,6 +35,8 @@ import {
 	getComposeContainer,
 	getContainerLogs,
 	getWebServerSettings,
+	GithubHostError,
+	GitUrlRefusedError,
 	IS_CLOUD,
 	// build-policy hook: narrows a thrown support error to a 400.
 	isBuildPolicyError,
@@ -79,11 +81,7 @@ import {
 	fetchTemplatesList,
 } from "@dokploy/server/templates/github";
 import { assertSafeComposePath } from "@dokploy/server/utils/compose-path";
-import {
-	assertGitUrlSaveable,
-	GitUrlRefusedError,
-} from "@dokploy/server/utils/providers/git-url";
-import { GithubHostError } from "@dokploy/server/utils/providers/github-host";
+import { assertGitUrlSaveable } from "@dokploy/server/utils/providers/git-url";
 import { TRPCError } from "@trpc/server";
 import { observable } from "@trpc/server/observable";
 import { and, desc, eq, ilike, or, sql } from "drizzle-orm";

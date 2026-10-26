@@ -35,6 +35,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { refusalDescription } from "@/lib/refusal-description";
 import { api } from "@/utils/api";
 import { ConfirmableProviderSave } from "./confirmable-provider-save";
 
@@ -108,7 +109,7 @@ export const SaveGitProvider = ({ applicationId }: Props) => {
 			})
 			.catch((error) => {
 				toast.error("Error saving the Git provider", {
-					description: error.message,
+					description: refusalDescription(error),
 				});
 			});
 	};

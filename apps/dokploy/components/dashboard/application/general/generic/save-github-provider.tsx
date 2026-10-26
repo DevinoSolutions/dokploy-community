@@ -45,6 +45,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { refusalDescription } from "@/lib/refusal-description";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import { DEFAULT_GITHUB_URL } from "@/utils/github-utils";
@@ -115,6 +116,7 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 		},
 		{
 			enabled: !!githubId,
+			retry: false,
 		},
 	);
 
@@ -131,6 +133,7 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 		},
 		{
 			enabled: !!repository?.owner && !!repository?.repo && !!githubId,
+			retry: false,
 		},
 	);
 
@@ -169,7 +172,7 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 			})
 			.catch((error) => {
 				toast.error("Error saving the github provider", {
-					description: error.message,
+					description: refusalDescription(error),
 				});
 			});
 	};
@@ -293,7 +296,8 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 													</span>
 												) : repositoriesError ? (
 													<span className="px-3 py-6 text-center text-sm text-destructive">
-														{repositoriesError.message}
+														{refusalDescription(repositoriesError) ??
+															"Couldn't load repositories"}
 													</span>
 												) : null}
 												{!repositoriesError && (
@@ -392,7 +396,8 @@ export const SaveGithubProvider = ({ applicationId }: Props) => {
 												<ScrollArea className="h-96">
 													{branchesError ? (
 														<span className="block px-3 py-6 text-center text-sm text-destructive">
-															{branchesError.message}
+															{refusalDescription(branchesError) ??
+																"Couldn't load branches"}
 														</span>
 													) : (
 														<CommandEmpty>No branch found.</CommandEmpty>

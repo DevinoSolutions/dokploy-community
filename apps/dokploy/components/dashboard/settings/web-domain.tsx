@@ -35,6 +35,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { refusalDescription } from "@/lib/refusal-description";
 import { api } from "@/utils/api";
 
 const addServerDomain = z
@@ -118,7 +119,7 @@ export const WebDomain = () => {
 			})
 			.catch((error) => {
 				toast.error("Error assigning the domain", {
-					description: error.message,
+					description: refusalDescription(error),
 				});
 			});
 	};

@@ -46,6 +46,7 @@ import {
 	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { refusalDescription } from "@/lib/refusal-description";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
 import type { Repository } from "@/utils/gitea-utils";
@@ -166,7 +167,7 @@ export const SaveGiteaProviderCompose = ({ composeId }: Props) => {
 			})
 			.catch((error) => {
 				toast.error("Error saving the Gitea provider", {
-					description: error.message,
+					description: refusalDescription(error),
 				});
 			});
 	};
