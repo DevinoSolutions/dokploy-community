@@ -90,9 +90,9 @@ describe("repairCredentialAccountIds", () => {
 
 		await expect(repairCredentialAccountIds()).resolves.toBe(2);
 
-		const set = dialect.sqlToQuery(mocks.set.mock.calls[0][0].accountId);
+		const set = dialect.sqlToQuery(mocks.set.mock.calls[0]?.[0].accountId);
 		expect(set.sql).toBe('"account"."user_id"');
-		const where = dialect.sqlToQuery(mocks.where.mock.calls[0][0]);
+		const where = dialect.sqlToQuery(mocks.where.mock.calls[0]?.[0]);
 		// A user who already has a matching credential row is left alone.
 		expect(where.sql).toBe(
 			'("account"."provider_id" = $1 and "account"."account_id" <> "account"."user_id" and not exists (select 1 from "account" "valid_credential" where ("valid_credential"."user_id" = "account"."user_id" and "valid_credential"."provider_id" = $2 and "valid_credential"."account_id" = "valid_credential"."user_id")))',
