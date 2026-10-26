@@ -135,6 +135,29 @@ describe("serverSetup: Traefik after the script", () => {
 		expect(traefik.finish).toHaveBeenCalledWith("srv-1", true);
 	});
 
+	it("finds the marker on a line of its own, whatever the line ending", async () => {
+		ssh.onExec = script(
+			`8. Setting up Traefik\r\n${TRAEFIK_RESTART_MARKER}\r\n`,
+			0,
+		);
+
+		await run();
+
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", true);
+	});
+
+	it.each([
+		["inside another line", `echo: ${TRAEFIK_RESTART_MARKER}\n`],
+		["at the start of a longer line", `${TRAEFIK_RESTART_MARKER} later\n`],
+		["inside a line split across chunks", `a ${TRAEFIK_RESTART_MARKER}`],
+	])("ignores the marker %s", async (_name, output) => {
+		ssh.onExec = script(output, "\n", 0);
+
+		await run();
+
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+	});
+
 	it("still restarts Traefik when a later setup step fails", async () => {
 		ssh.onExec = script(
 			`8. Setting up Traefik\n${TRAEFIK_RESTART_MARKER}\n`,

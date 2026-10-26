@@ -430,8 +430,9 @@ const installRequirements = async (
 
 	return new Promise<void>((resolve, reject) => {
 		const steps = createStepTracker();
-		// The last output, so a marker split across two chunks is still found.
-		let recent = "";
+		// The unfinished last line, so a marker split across two chunks is still
+		// found. Only a whole line counts, not text that merely contains it.
+		let partial = "";
 		// The exit status arrives before the channel closes, and is kept in case
 		// the connection closes before the channel does.
 		let exit: { code: number | null; signal?: string | null } | undefined;
@@ -472,12 +473,11 @@ const installRequirements = async (
 							);
 						})
 						.on("data", (data: string) => {
-							recent = (recent + data.toString()).slice(
+							const lines = (partial + data.toString()).split(/\r?\n/);
+							partial = (lines.pop() ?? "").slice(
 								-TRAEFIK_RESTART_MARKER.length * 2,
 							);
-							signals.restartTraefik ||= recent.includes(
-								TRAEFIK_RESTART_MARKER,
-							);
+							signals.restartTraefik ||= lines.includes(TRAEFIK_RESTART_MARKER);
 							steps.push(data.toString());
 							onData?.(data.toString());
 						})
