@@ -6,8 +6,9 @@ import {
 	user,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
+import { sendDockerCleanupNotifications } from "../utils/notifications/docker-cleanup";
 import { scrubDeploymentCancelAuditActorEmail } from "./deployment-cancel-audit";
 import { removeOrganizationNotifications } from "./notification-channels";
 import { getWebServerSettings } from "./web-server-settings";
@@ -139,13 +140,45 @@ export const assertOrganizationDeletable = async (organizationId: string) => {
 	}
 };
 
+// The web server's Docker cleanup is reported to the organization that owns
+// the instance, and to nobody when none does.
+export const sendWebServerDockerCleanupNotifications = async () => {
+	if (IS_CLOUD) {
+		return;
+	}
+	const root = await findRootOrganization();
+	if (root) {
+		await sendDockerCleanupNotifications(root.id);
+	}
+};
+
+// The owner of the instance: the owner of the root organization, or the
+// oldest owner when there is none. Several organizations each have an owner,
+// so an unordered lookup could answer with any of them.
 export const findOwner = async () => {
-	const admin = await db.query.member.findFirst({
-		where: eq(member.role, "owner"),
-		with: {
-			user: true,
-		},
-	});
+	const root = await findRootOrganization();
+	const rootOwner = root
+		? await db.query.member.findFirst({
+				where: and(
+					eq(member.role, "owner"),
+					eq(member.organizationId, root.id),
+				),
+				orderBy: (member, { asc }) => [asc(member.createdAt), asc(member.id)],
+				with: {
+					user: true,
+				},
+			})
+		: undefined;
+
+	const admin =
+		rootOwner ??
+		(await db.query.member.findFirst({
+			where: eq(member.role, "owner"),
+			orderBy: (member, { asc }) => [asc(member.createdAt), asc(member.id)],
+			with: {
+				user: true,
+			},
+		}));
 
 	if (!admin) {
 		throw new TRPCError({

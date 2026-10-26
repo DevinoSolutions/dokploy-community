@@ -23,7 +23,7 @@ const mocks = vi.hoisted(() => ({
 	queueJobs: vi.fn(),
 	cloudSchedule: vi.fn(),
 	cloudRemove: vi.fn(),
-	findOwner: vi.fn(),
+	findRoot: vi.fn(),
 }));
 
 vi.mock("node-schedule", () => ({
@@ -33,8 +33,12 @@ vi.mock("node-schedule", () => ({
 
 vi.mock("@dokploy/server", async () => {
 	const background = await import("@dokploy/server/utils/process/background");
+	const { sendWebServerDockerCleanupNotifications } = await import(
+		"@dokploy/server/services/admin"
+	);
 	return {
 		...background,
+		sendWebServerDockerCleanupNotifications,
 		CLEANUP_CRON_JOB: "50 23 * * *",
 		IS_CLOUD: false,
 		isRootOrganization: async () => true,
@@ -55,7 +59,7 @@ vi.mock("@dokploy/server/db", () => ({
 			deployments: { findMany: mocks.runningRows },
 			applications: { findMany: async () => [] },
 			compose: { findMany: async () => [] },
-			member: { findFirst: mocks.findOwner },
+			organization: { findFirst: mocks.findRoot },
 		},
 	},
 }));
@@ -104,12 +108,12 @@ vi.mock("@/server/utils/backup", () => ({
 	removeJob: mocks.cloudRemove,
 }));
 
+import { initCronJobs } from "@dokploy/server/utils/backups/index";
 import {
 	cancelDockerCleanup,
 	scheduleDockerCleanup,
 	WEB_SERVER_CLEANUP_JOB,
 } from "@dokploy/server/utils/docker/cleanup-job";
-import { initCronJobs } from "@dokploy/server/utils/backups/index";
 import { applyDockerCleanupSchedule } from "@/server/utils/docker-cleanup";
 
 const { settingsRouter } = await import("@/server/api/routers/settings");
@@ -140,6 +144,8 @@ beforeEach(() => {
 	});
 	mocks.cleanupAll.mockResolvedValue({ aborted: false });
 	mocks.sendDockerCleanupNotifications.mockResolvedValue(undefined);
+	vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "");
+	mocks.findRoot.mockResolvedValue({ id: "org-root", name: "Root" });
 	mocks.runningRows.mockResolvedValue([]);
 	mocks.queueJobs.mockResolvedValue([]);
 	mocks.findServerById.mockResolvedValue({
@@ -447,6 +453,35 @@ describe("settings.updateDockerCleanup", () => {
 		expect(job.cancel).toHaveBeenCalledTimes(1);
 	});
 
+	it("reports the web server cleanup to the organization that owns the instance", async () => {
+		mocks.updateWebServerSettings.mockResolvedValue({
+			enableDockerCleanup: true,
+			dockerCleanupCron: "0 4 * * *",
+		});
+		await caller.updateDockerCleanup({ enableDockerCleanup: true });
+
+		await scheduledCallbackOf()();
+
+		expect(mocks.sendDockerCleanupNotifications).toHaveBeenCalledWith(
+			"org-root",
+		);
+	});
+
+	it("reports it to nobody when no organization owns the instance", async () => {
+		mocks.updateWebServerSettings.mockResolvedValue({
+			enableDockerCleanup: true,
+			dockerCleanupCron: "0 4 * * *",
+		});
+		await caller.updateDockerCleanup({ enableDockerCleanup: true });
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-gone");
+		mocks.findRoot.mockResolvedValue(undefined);
+
+		await scheduledCallbackOf()();
+
+		expect(mocks.cleanupAll).toHaveBeenCalled();
+		expect(mocks.sendDockerCleanupNotifications).not.toHaveBeenCalled();
+	});
+
 	it("stores a remote server's cron and reschedules its job", async () => {
 		mocks.findServerById.mockResolvedValue({
 			serverId: "srv-1",
@@ -505,7 +540,6 @@ describe("settings.updateDockerCleanup", () => {
 
 describe("initCronJobs", () => {
 	it("schedules the web server and each server from their own cron", async () => {
-		mocks.findOwner.mockResolvedValue({ user: { id: "owner-1" } });
 		mocks.getWebServerSettings.mockResolvedValue({
 			enableDockerCleanup: true,
 			dockerCleanupCron: "0 3 * * *",
@@ -546,5 +580,29 @@ describe("initCronJobs", () => {
 			["srv-1", { rule: "0 4 * * *", tz: "Etc/UTC" }],
 			["srv-2", { rule: "30 5 * * 0", tz: "Etc/UTC" }],
 		]);
+	});
+
+	it("reports the web server cleanup to the organization that owns the instance, or to nobody", async () => {
+		mocks.getWebServerSettings.mockResolvedValue({
+			enableDockerCleanup: true,
+			dockerCleanupCron: "0 3 * * *",
+		});
+		mocks.getAllServers.mockResolvedValue([]);
+		const { db } = await import("@dokploy/server/db");
+		(db.query as Record<string, unknown>).backups = {
+			findMany: async () => [],
+		};
+
+		await initCronJobs();
+		await scheduledCallbackOf()();
+		expect(mocks.sendDockerCleanupNotifications).toHaveBeenCalledWith(
+			"org-root",
+		);
+
+		mocks.sendDockerCleanupNotifications.mockClear();
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-gone");
+		mocks.findRoot.mockResolvedValue(undefined);
+		await scheduledCallbackOf()();
+		expect(mocks.sendDockerCleanupNotifications).not.toHaveBeenCalled();
 	});
 });
