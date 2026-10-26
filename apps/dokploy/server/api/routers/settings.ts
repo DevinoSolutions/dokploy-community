@@ -478,6 +478,10 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input?.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			if (input?.serverId) {
 				// Owners/admins get every org server; members only the ones granted to them.
 				const accessibleIds = await getAccessibleServerIds(ctx.session);

@@ -2,6 +2,7 @@ import { getImageConfig, getImages, removeImage } from "@dokploy/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { assertServerReachable } from "@/server/api/utils/container-service-access";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { adminProcedure, createTRPCRouter } from "../trpc";
 
 // An image is not owned by a service: the list, the inspect output (the
@@ -11,7 +12,8 @@ import { adminProcedure, createTRPCRouter } from "../trpc";
 // not a boundary for that and there is no service to check a member against.
 // The whole router is owner/admin only instead (adminProcedure; owners and
 // admins always hold docker:read), and the Docker page hides its Images tab for
-// everybody else.
+// everybody else. On the local host the router is also limited to the
+// organization that owns the instance.
 export const dockerImageRouter = createTRPCRouter({
 	getImages: adminProcedure
 		.input(
@@ -20,6 +22,10 @@ export const dockerImageRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getImages(input.serverId);
 		}),
@@ -32,6 +38,10 @@ export const dockerImageRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getImageConfig(input.imageRef, input.serverId);
 		}),
@@ -47,6 +57,10 @@ export const dockerImageRouter = createTRPCRouter({
 			}),
 		)
 		.mutation(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			await removeImage(
 				{
