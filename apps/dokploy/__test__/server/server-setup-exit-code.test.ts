@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const ssh = vi.hoisted(() => ({
 	clients: [] as any[],
 	execError: null as Error | null,
+	connectError: null as Error | null,
 	onExec: (_channel: any, _client: any) => {},
 }));
 
@@ -26,6 +27,7 @@ vi.mock("ssh2", async () => {
 		ended = false;
 		connect() {
 			ssh.clients.push(this);
+			if (ssh.connectError) throw ssh.connectError;
 			queueMicrotask(() => this.emit("ready"));
 			return this;
 		}
@@ -99,6 +101,7 @@ const runSetup = async () => {
 beforeEach(() => {
 	ssh.clients = [];
 	ssh.execError = null;
+	ssh.connectError = null;
 	ssh.onExec = () => {};
 	deployment.createServerDeployment.mockClear();
 	deployment.updateDeploymentStatus.mockReset();
@@ -257,6 +260,31 @@ describe("serverSetup exit status", () => {
 		expect(ssh.clients[0].ended).toBe(true);
 		expect(statuses()).toEqual(["error"]);
 		expect(logs.at(-1)).toBe("\nSetup Server: ❌ Channel open failure\n");
+	});
+
+	it("fails with a ServerSetupError when connect throws instead of emitting an error", async () => {
+		// ssh2 throws for an invalid username or a private key it cannot parse.
+		ssh.connectError = new Error(
+			"Cannot parse privateKey: Unsupported key format",
+		);
+
+		const { logs, outcome } = await runSetup();
+
+		expect(outcome.ok).toBe(false);
+		if (outcome.ok) return;
+		expect(outcome.error).toBeInstanceOf(ServerSetupError);
+		expect(outcome.error.message).toBe(
+			"SSH connection error: Cannot parse privateKey: Unsupported key format",
+		);
+		expect(outcome.error.cause).toBe(ssh.connectError);
+		expect(ssh.clients[0].ended).toBe(true);
+		expect(statuses()).toEqual(["error"]);
+		expect(logs).toContain(
+			"❌ Couldn't connect to your server: Cannot parse privateKey: Unsupported key format",
+		);
+		expect(logs.at(-1)).toBe(
+			"\nSetup Server: ❌ SSH connection error: Cannot parse privateKey: Unsupported key format\n",
+		);
 	});
 
 	it("still rethrows the setup failure when marking the deployment fails", async () => {

@@ -324,7 +324,7 @@ case "$OS_TYPE" in
 arch | ubuntu | debian | raspbian | centos | fedora | rhel | ol | rocky | sles | opensuse-leap | opensuse-tumbleweed | almalinux | opencloudos | amzn | alpine) ;;
 *)
 	echo "This script only supports Debian, Redhat, Arch Linux, Alpine Linux, or SLES based operating systems for now."
-	exit
+	exit 1
 	;;
 esac
 
@@ -547,13 +547,26 @@ const installRequirements = async (
 				reject(
 					new ServerSetupError("SSH connection closed before setup finished"),
 				);
-			})
-			.connect({
+			});
+		// connect throws instead of emitting "error" for an invalid username or a
+		// private key it cannot parse.
+		try {
+			client.connect({
 				host: server.ipAddress,
 				port: server.port,
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
 			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			onData?.(`❌ Couldn't connect to your server: ${message}`);
+			reject(
+				new ServerSetupError(`SSH connection error: ${message}`, {
+					cause: error,
+				}),
+			);
+			client.end();
+		}
 	});
 };
 
@@ -712,7 +725,7 @@ const installUtilities = () => `
 		;;
 	*)
 		echo "This script only supports Debian, Redhat, Arch Linux, or SLES based operating systems for now."
-		exit
+		exit 1
 		;;
 	esac
 `;
@@ -959,7 +972,15 @@ export const installRClone = () => `
     if command_exists rclone; then
 		echo "RClone already installed ✅"
 	else
-		curl https://rclone.org/install.sh | $SUDO_CMD bash
+		# Download first: a failed curl in a pipe would still leave bash with an empty script
+		RCLONE_INSTALLER=$(mktemp)
+		if ! curl -fsSL https://rclone.org/install.sh -o "$RCLONE_INSTALLER"; then
+			rm -f "$RCLONE_INSTALLER"
+			echo "Failed to download the RClone installer ❌" >&2
+			exit 1
+		fi
+		$SUDO_CMD bash "$RCLONE_INSTALLER"
+		rm -f "$RCLONE_INSTALLER"
 		RCLONE_VERSION=$(rclone --version | head -n 1 | awk '{print $2}' | sed 's/^v//')
 		echo "RClone version $RCLONE_VERSION installed ✅"
 	fi
@@ -1033,7 +1054,14 @@ const installNixpacks = () => `
 		echo "Nixpacks already installed ✅"
 	else
 	    export NIXPACKS_VERSION=1.41.0
-        $SUDO_CMD bash -c "$(curl -fsSL https://nixpacks.com/install.sh)"
+		NIXPACKS_INSTALLER=$(mktemp)
+		if ! curl -fsSL https://nixpacks.com/install.sh -o "$NIXPACKS_INSTALLER"; then
+			rm -f "$NIXPACKS_INSTALLER"
+			echo "Failed to download the Nixpacks installer ❌" >&2
+			exit 1
+		fi
+		$SUDO_CMD bash "$NIXPACKS_INSTALLER"
+		rm -f "$NIXPACKS_INSTALLER"
 		echo "Nixpacks version $NIXPACKS_VERSION installed ✅"
 	fi
 `;
@@ -1043,7 +1071,14 @@ const installRailpack = () => `
 		echo "Railpack already installed ✅"
 	else
 	    export RAILPACK_VERSION=0.15.4
-		$SUDO_CMD bash -c "$(curl -fsSL https://railpack.com/install.sh)"
+		RAILPACK_INSTALLER=$(mktemp)
+		if ! curl -fsSL https://railpack.com/install.sh -o "$RAILPACK_INSTALLER"; then
+			rm -f "$RAILPACK_INSTALLER"
+			echo "Failed to download the Railpack installer ❌" >&2
+			exit 1
+		fi
+		$SUDO_CMD bash "$RAILPACK_INSTALLER"
+		rm -f "$RAILPACK_INSTALLER"
 		echo "Railpack version $RAILPACK_VERSION installed ✅"
 	fi
 `;
