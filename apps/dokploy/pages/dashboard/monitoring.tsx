@@ -6,7 +6,7 @@ import { Loader2 } from "lucide-react";
 import type { GetServerSidePropsContext } from "next";
 import Link from "next/link";
 import type { ReactElement } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ContainerFreeMonitoring } from "@/components/dashboard/monitoring/free/container/show-free-container-monitoring";
 import { ShowPaidMonitoring } from "@/components/dashboard/monitoring/paid/servers/show-paid-monitoring";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
@@ -32,6 +32,19 @@ const Dashboard = () => {
 	const [selectedServerId, setSelectedServerId] =
 		useState<string>(LOCAL_SERVER_ID);
 	const { data: servers } = api.server.getServersForMonitoring.useQuery();
+	// The Dokploy host serves every organization of the instance, so only the
+	// one that owns it monitors it: any other starts on its first server.
+	const canMonitorLocalHost = monitoring?.localHostAccess !== false;
+	const firstServerId = servers?.[0]?.serverId;
+	useEffect(() => {
+		if (!canMonitorLocalHost && firstServerId) {
+			setSelectedServerId((current) =>
+				current === LOCAL_SERVER_ID ? firstServerId : current,
+			);
+		}
+	}, [canMonitorLocalHost, firstServerId]);
+	const hostRefused =
+		!canMonitorLocalHost && selectedServerId === LOCAL_SERVER_ID;
 	const isRemoteSelected = selectedServerId !== LOCAL_SERVER_ID;
 	const selectedServer = isRemoteSelected
 		? servers?.find((s) => s.serverId === selectedServerId)
@@ -54,7 +67,16 @@ const Dashboard = () => {
 	// is still queried so we can show the "not configured" hint before firing a
 	// metrics request that would fail.
 	let paidMonitoringContent: ReactElement;
-	if (selectedServer) {
+	if (hostRefused) {
+		paidMonitoringContent = (
+			<Card className="bg-sidebar p-2.5 rounded-xl mx-auto">
+				<div className="rounded-xl bg-background shadow-md p-6 text-sm text-muted-foreground">
+					Monitoring is available for your servers. Add one under Settings →
+					Servers to see its metrics here.
+				</div>
+			</Card>
+		);
+	} else if (selectedServer) {
 		const remotePort = remoteMonitoringConfig?.port;
 		const remoteToken = remoteMonitoringConfig?.token;
 		// Hold the loader while the remote config is in flight so the user
@@ -127,16 +149,18 @@ const Dashboard = () => {
 						<SelectValue />
 					</SelectTrigger>
 					<SelectContent>
-						<SelectItem value={LOCAL_SERVER_ID}>
-							<span className="flex items-center gap-2 justify-between w-full">
-								<span>Dokploy (Main)</span>
-								{monitoring?.serverIp ? (
-									<span className="text-muted-foreground text-xs">
-										{monitoring.serverIp}
-									</span>
-								) : null}
-							</span>
-						</SelectItem>
+						{canMonitorLocalHost && (
+							<SelectItem value={LOCAL_SERVER_ID}>
+								<span className="flex items-center gap-2 justify-between w-full">
+									<span>Dokploy (Main)</span>
+									{monitoring?.serverIp ? (
+										<span className="text-muted-foreground text-xs">
+											{monitoring.serverIp}
+										</span>
+									) : null}
+								</span>
+							</SelectItem>
+						)}
 						{servers?.map((server) => (
 							<SelectItem key={server.serverId} value={server.serverId}>
 								<span className="flex items-center gap-2 justify-between w-full">
@@ -167,7 +191,7 @@ const Dashboard = () => {
 							/>
 						</div>
 					)} */}
-					{toggleMonitoring ? (
+					{hostRefused || toggleMonitoring ? (
 						paidMonitoringContent
 					) : (
 						<Card className="h-full bg-sidebar  p-2.5 rounded-xl">

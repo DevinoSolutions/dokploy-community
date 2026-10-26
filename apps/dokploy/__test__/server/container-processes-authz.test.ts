@@ -13,6 +13,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Only the database rows and the docker commands are scripted; the permission
 // and organization checks are the real ones.
 const mocks = vi.hoisted(() => ({
+	// the organization that owns the instance; the host's own containers are its
+	// owners' and admins' alone
+	rootOrganization: "org-a",
 	member: { role: "member", accessedServices: [] as string[] },
 	// table -> rows the service lookup finds for the container's labels
 	serviceRows: new Map<
@@ -35,6 +38,12 @@ const mocks = vi.hoisted(() => ({
 	commands: [] as { serverId?: string; command: string }[],
 	// servers the caller may reach (a member only reaches the ones granted)
 	servers: new Set<string>(),
+}));
+
+vi.mock("@dokploy/server", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@dokploy/server")>()),
+	isRootOrganization: async (organizationId: string) =>
+		organizationId === mocks.rootOrganization,
 }));
 
 vi.mock("@dokploy/server/db", async (importOriginal) => {

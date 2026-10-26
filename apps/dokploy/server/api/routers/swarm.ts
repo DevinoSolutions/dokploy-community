@@ -9,9 +9,9 @@ import { z } from "zod";
 import {
 	assertAppNameReadable,
 	assertServerReachable,
+	canUseHostOwnContainers,
 	filterReadableServiceRows,
 	filterReadableStats,
-	isOwnerOrAdmin,
 } from "@/server/api/utils/container-service-access";
 import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
@@ -26,8 +26,10 @@ const taskService = (row: { Name: string }) =>
 // to. The node routes are owner/admin only (adminProcedure; owners and admins
 // always hold docker:read) and the Docker page hides the Overview and Nodes
 // tabs for everybody else. On the local host they are also limited to the
-// organization that owns the instance. The service, task and stats routes name services, so
-// a member gets the rows of the services they can read on the server.
+// organization that owns the instance. The service, task and stats routes name
+// services, so a member gets the rows of the services they can read on the
+// server, and so does an owner or admin of another organization on the local
+// host (the host's own rows are the instance's).
 export const swarmRouter = createTRPCRouter({
 	getNodes: adminProcedure
 		.input(
@@ -95,11 +97,13 @@ export const swarmRouter = createTRPCRouter({
 		)
 		.query(async ({ input, ctx }) => {
 			await assertServerReachable(ctx, input.serverId);
-			if (await isOwnerOrAdmin(ctx))
+			if (await canUseHostOwnContainers(ctx, input.serverId))
 				return await getApplicationInfo(input.appName, input.serverId);
 
-			// a member is asked about the services they can read; the rest are
-			// left out of the command instead of failing the whole page
+			// a member, or an owner or admin of an organization that does not own
+			// the instance on the local host, is asked about the services they can
+			// read; the rest are left out of the command instead of failing the
+			// whole page
 			const readable: string[] = [];
 			for (const appName of new Set(input.appName)) {
 				try {
@@ -133,9 +137,7 @@ export const swarmRouter = createTRPCRouter({
 			// keep their organization's containers and the host's own, and lose
 			// the containers of every other organization.
 			return stats
-				? await filterReadableStats(ctx, stats, input.serverId, {
-						strict: true,
-					})
+				? await filterReadableStats(ctx, stats, input.serverId)
 				: stats;
 		}),
 });

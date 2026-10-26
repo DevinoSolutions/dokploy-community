@@ -21,6 +21,7 @@ vi.mock("@dokploy/server", () => ({
 import {
 	canAccessDockerOverWss,
 	canAccessTerminalOverWss,
+	canReadHostStatsOverWss,
 	isServiceContainerName,
 } from "@/server/wss/authorize";
 
@@ -116,6 +117,39 @@ describe("isServiceContainerName", () => {
 		// The socket would apply no ownership filter for it.
 		expect(isServiceContainerName("web-abc", "invalid", "web-abc")).toBe(false);
 		expect(isServiceContainerName("web-abc", "", "web-abc")).toBe(false);
+	});
+});
+
+describe("canReadHostStatsOverWss", () => {
+	it("gives the organization that owns the instance the local host's stats", async () => {
+		mockIsRootOrganization.mockResolvedValue(true);
+		expect(await canReadHostStatsOverWss(SESSION, null, null)).toBe(true);
+	});
+
+	it("refuses another organization the local host's stats", async () => {
+		mockIsRootOrganization.mockResolvedValue(false);
+		expect(await canReadHostStatsOverWss(SESSION, null, null)).toBe(false);
+		expect(await canReadHostStatsOverWss(SESSION, undefined, undefined)).toBe(
+			false,
+		);
+		expect(await canReadHostStatsOverWss(SESSION, undefined, "")).toBe(false);
+	});
+
+	it("refuses a session without an organization", async () => {
+		expect(await canReadHostStatsOverWss({}, null, null)).toBe(false);
+		expect(await canReadHostStatsOverWss(null, null, null)).toBe(false);
+	});
+
+	it("leaves the stats of a service to the service check", async () => {
+		mockIsRootOrganization.mockResolvedValue(false);
+		expect(await canReadHostStatsOverWss(SESSION, null, "svc-1")).toBe(true);
+		expect(mockIsRootOrganization).not.toHaveBeenCalled();
+	});
+
+	it("leaves a remote server that was checked against the organization alone", async () => {
+		mockIsRootOrganization.mockResolvedValue(false);
+		expect(await canReadHostStatsOverWss(SESSION, "srv-1", null)).toBe(true);
+		expect(mockIsRootOrganization).not.toHaveBeenCalled();
 	});
 });
 
