@@ -41,6 +41,7 @@ import { z } from "zod";
 import { apiKeyNameSchema } from "@/lib/api-keys";
 import { audit } from "@/server/api/utils/audit";
 import { resolveMetricsTarget } from "@/server/api/utils/container-service-access";
+import { canAccessLocalHost } from "@/server/api/utils/local-host-access";
 import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
 import {
 	canSeeMetricsToken,
@@ -431,6 +432,12 @@ export const userRouter = createTRPCRouter({
 			return {
 				serverIp: settings?.serverIp,
 				enabledFeatures: user.enablePaidFeatures,
+				// whether the Dokploy host's own metrics are this organization's to
+				// read (the Monitoring page lists the host only then)
+				localHostAccess: await canAccessLocalHost(
+					undefined,
+					ctx.session.activeOrganizationId,
+				),
 				metricsConfig: redactMetricsConfig(
 					settings?.metricsConfig,
 					await canSeeMetricsToken(ctx),

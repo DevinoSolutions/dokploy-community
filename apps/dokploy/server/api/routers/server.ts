@@ -45,6 +45,7 @@ import {
 	assertServerReachable,
 	filterReadableStats,
 } from "@/server/api/utils/container-service-access";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { resolveMetricsEndpoint } from "@/server/api/utils/metrics-endpoint";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
@@ -721,6 +722,14 @@ export const serverRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ ctx, input }) => {
+			// The local host's metrics are the Dokploy host's own, shared by every
+			// organization of the instance: only the organization that owns the
+			// instance reads them. A remote server is checked by
+			// `resolveMetricsEndpoint`.
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
 			// Endpoint + token come from the server row (or the web-server
 			// settings for the local host), never from the client -- see
 			// `resolveMetricsEndpoint` for the SSRF this closes. Resolved outside
@@ -793,6 +802,9 @@ export const serverRouter = createTRPCRouter({
 				serverId,
 				ctx.session.activeOrganizationId,
 			);
+			// the local host's containers are shared by every organization of the
+			// instance: only the organization that owns it gets their breakdown
+			await assertLocalHostAccess(serverId, ctx.session.activeOrganizationId);
 			// a member also needs the server granted before anything runs on it
 			await assertServerReachable(ctx, serverId);
 			// `docker stats` lists every container on the host, which several
@@ -820,6 +832,10 @@ export const serverRouter = createTRPCRouter({
 			}
 
 			await assertServerInOrganization(
+				input.serverId,
+				ctx.session.activeOrganizationId,
+			);
+			await assertLocalHostAccess(
 				input.serverId,
 				ctx.session.activeOrganizationId,
 			);

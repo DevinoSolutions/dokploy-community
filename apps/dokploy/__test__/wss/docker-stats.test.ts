@@ -7,8 +7,11 @@ const mockValidateRequest = vi.hoisted(() => vi.fn());
 const mockGetHostSystemStats = vi.hoisted(() => vi.fn());
 const mockRecordAdvancedStats = vi.hoisted(() => vi.fn());
 const mockListContainers = vi.hoisted(() => vi.fn());
+const mockIsRootOrganization = vi.hoisted(() => vi.fn());
 vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
+	isRootOrganization: mockIsRootOrganization,
+	LOCAL_SERVER_ID: "local",
 	validateRequest: mockValidateRequest,
 	getHostSystemStats: mockGetHostSystemStats,
 	recordAdvancedStats: mockRecordAdvancedStats,
@@ -53,6 +56,7 @@ beforeEach(async () => {
 	vi.clearAllMocks();
 	mockGetHostSystemStats.mockResolvedValue({});
 	mockCanAccessDockerOverWss.mockResolvedValue(true);
+	mockIsRootOrganization.mockResolvedValue(true);
 	mockListContainers.mockResolvedValue([]);
 	mockIsOtherServiceAppName.mockResolvedValue(false);
 	server = http.createServer();
@@ -314,5 +318,62 @@ describe("docker stats websocket scoped to a service", () => {
 
 		expect((await closed).code).toBe(4000);
 		expect(mockCanAccessDockerOverWss).not.toHaveBeenCalled();
+	});
+});
+
+describe("docker stats websocket on the local host", () => {
+	const connectTo = async (query: string) => {
+		const base = url.split("?")[0];
+		const ws = new WebSocket(`${base}?${query}`);
+		const closed = new Promise<{ code: number; reason: string }>((r) =>
+			ws.once("close", (code, reason) =>
+				r({ code, reason: reason.toString() }),
+			),
+		);
+		return { ws, closed };
+	};
+
+	it.each([
+		"appName=dokploy",
+		"appName=dokploy&serverId=local",
+		"appName=dokploy-postgres&appType=application",
+		"appName=app-of-another-organization-abc&appType=docker-compose",
+	])(
+		"refuses %s to an organization that does not own the instance",
+		async (query) => {
+			mockValidateRequest.mockResolvedValue(AUTH);
+			mockIsRootOrganization.mockResolvedValue(false);
+			const { closed } = await connectTo(query);
+
+			expect((await closed).code).toBe(4403);
+			await wait(POLL_INTERVAL + 200);
+			expect(mockGetHostSystemStats).not.toHaveBeenCalled();
+			expect(mockListContainers).not.toHaveBeenCalled();
+			expect(mockRecordAdvancedStats).not.toHaveBeenCalled();
+		},
+	);
+
+	it("gives the organization that owns the instance the host's stats", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		const { ws } = await connectTo("appName=dokploy");
+		await wait(POLL_INTERVAL + 200);
+
+		expect(mockIsRootOrganization).toHaveBeenCalledWith("org-1");
+		expect(mockGetHostSystemStats).toHaveBeenCalled();
+		ws.close();
+	});
+
+	it("still serves the stats of a service of the caller's own", async () => {
+		mockValidateRequest.mockResolvedValue(AUTH);
+		mockIsRootOrganization.mockResolvedValue(false);
+		mockFindServiceAppName.mockResolvedValue("web-abc");
+		const { ws } = await connectTo(
+			"appName=web-abc&appType=application&serviceId=svc-1",
+		);
+		await wait(POLL_INTERVAL + 200);
+
+		expect(mockIsRootOrganization).not.toHaveBeenCalled();
+		expect(mockListContainers).toHaveBeenCalled();
+		ws.close();
 	});
 });

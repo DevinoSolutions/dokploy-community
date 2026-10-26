@@ -78,7 +78,12 @@ import {
 	assertCanPrioritize,
 	recordPriorityUse,
 } from "@/server/api/utils/deploy-priority";
+import {
+	assertAppNameReadable,
+	assertServerReachable,
+} from "@/server/api/utils/container-service-access";
 import { cancelRunningDeploymentLocally } from "@/server/api/utils/local-cancel";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import {
 	readServiceWatchdogExclusion,
 	writeServiceWatchdogExclusion,
@@ -86,6 +91,7 @@ import {
 import { coalesceManualApplicationDeploy } from "@/server/api/utils/manual-application-coalesce";
 import { serializeManualDeploy } from "@/server/api/utils/manual-deploy-lock";
 import { getRailpackVersions } from "@/server/api/utils/railpack-versions";
+import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	apiCreateApplication,
 	apiDeployApplication,
@@ -1516,12 +1522,35 @@ export const applicationRouter = createTRPCRouter({
 		}),
 	readAppMonitoring: withPermission("monitoring", "read")
 		.input(apiFindMonitoringStats)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				throw new TRPCError({
 					code: "UNAUTHORIZED",
 					message: "Functionality not available in cloud version",
 				});
+			}
+			// "dokploy" is the stats history of the Dokploy host, which serves every
+			// organization of the instance, and "dokploy-<serverId>" that of a remote
+			// server. The first is limited to the organization that owns the
+			// instance, the second to a server the caller can reach; any other name
+			// is the stats history of a service, which the caller has to be able to
+			// read.
+			const hostBucket = /^dokploy(?:-([A-Za-z0-9_-]{21}))?$/.exec(
+				input.appName,
+			);
+			if (hostBucket) {
+				const hostServerId = hostBucket[1];
+				await assertLocalHostAccess(
+					hostServerId,
+					ctx.session.activeOrganizationId,
+				);
+				await assertServerInOrganization(
+					hostServerId,
+					ctx.session.activeOrganizationId,
+				);
+				await assertServerReachable(ctx, hostServerId);
+			} else {
+				await assertAppNameReadable(ctx, input.appName);
 			}
 			const stats = await getApplicationStats(input.appName);
 
