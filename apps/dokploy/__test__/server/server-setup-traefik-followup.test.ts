@@ -1,6 +1,7 @@
 import {
 	serverSetup,
 	TRAEFIK_RESTART_MARKER,
+	TRAEFIK_RESTORE_MARKER,
 } from "@dokploy/server/setup/server-setup";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -155,7 +156,7 @@ describe("serverSetup: Traefik after the script", () => {
 
 		await run();
 
-		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+		expect(traefik.finish).not.toHaveBeenCalledWith("srv-1", true);
 	});
 
 	it("still restarts Traefik when a later setup step fails", async () => {
@@ -173,11 +174,48 @@ describe("serverSetup: Traefik after the script", () => {
 	});
 
 	it("only restores a left-behind Traefik when the script asked for nothing", async () => {
-		ssh.onExec = script("10. Setting up Traefik Instance\n", 0);
+		ssh.onExec = script(
+			"10. Setting up Traefik Instance\n",
+			`${TRAEFIK_RESTORE_MARKER}\n`,
+			0,
+		);
 
 		await run();
 
 		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+	});
+
+	it("finds the restore line when it arrives in two chunks", async () => {
+		const half = Math.floor(TRAEFIK_RESTORE_MARKER.length / 2);
+		ssh.onExec = script(
+			TRAEFIK_RESTORE_MARKER.slice(0, half),
+			`${TRAEFIK_RESTORE_MARKER.slice(half)}\n`,
+			0,
+		);
+
+		await run();
+
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+	});
+
+	it("does not wait on the Traefik queue when there is nothing to restart or restore", async () => {
+		ssh.onExec = script("10. Setting up Traefik Instance\n", 0);
+
+		const { outcome } = await run();
+
+		expect(outcome.ok).toBe(true);
+		expect(traefik.finish).not.toHaveBeenCalled();
+	});
+
+	it("keeps a failed Docker install to its own error", async () => {
+		traefik.finish.mockRejectedValue(new Error("docker: command not found"));
+		ssh.onExec = script("3. Installing Docker\n", 1);
+
+		const { outcome, logs } = await run();
+
+		expect(outcome.ok).toBe(false);
+		expect(traefik.finish).not.toHaveBeenCalled();
+		expect(logs.join("")).not.toContain("Could not restart or restore Traefik");
 	});
 
 	it("leaves a build server's Traefik alone", async () => {
