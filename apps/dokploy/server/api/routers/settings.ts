@@ -44,7 +44,7 @@ import {
 	recreateDirectory,
 	reloadDockerResource,
 	runBackgroundJob,
-	sendDockerCleanupNotifications,
+	sendWebServerDockerCleanupNotifications,
 	setupGPUSupport,
 	spawnAsync,
 	startLogCleanup,
@@ -603,12 +603,11 @@ export const settingsRouter = createTRPCRouter({
 				});
 
 				if (settingsUpdated?.enableDockerCleanup) {
-					const organizationId = ctx.session.activeOrganizationId;
 					scheduleDockerCleanup({
 						jobName: WEB_SERVER_CLEANUP_JOB,
 						hostLabel: "the Dokploy server",
 						cron: settingsUpdated.dockerCleanupCron,
-						afterCleanup: () => sendDockerCleanupNotifications(organizationId),
+						afterCleanup: sendWebServerDockerCleanupNotifications,
 					});
 				} else {
 					cancelDockerCleanup(WEB_SERVER_CLEANUP_JOB);
