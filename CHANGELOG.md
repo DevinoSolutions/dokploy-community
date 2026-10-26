@@ -4,7 +4,11 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
-Operators can pin the organization that owns the instance with `DOKPLOY_ROOT_ORGANIZATION_ID`; the server logs which organization it uses at startup (T-8810).
+### New in v0.30.8-community.33.2
+
+Hotfix on top of v0.30.8-community.33.1. No new database migrations.
+
+**The organization that owns the instance can be pinned** (T-8810). Set `DOKPLOY_ROOT_ORGANIZATION_ID` on the Dokploy service to that organization's id; without it, the first organization created owns the instance, as in v0.30.8-community.33.1. If the variable names an organization that doesn't exist, host-level settings are refused until it is corrected. At startup the server logs `root organization: <id> "<name>" (source: env|first-created)`, so you can check which organization it uses.
 
 ### New in v0.30.8-community.33.1
 
