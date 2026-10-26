@@ -81,6 +81,31 @@ describe("getComposeRollingReport", () => {
 		expect(report.stackWarnings).toEqual([]);
 	});
 
+	it("an eligible service whose healthcheck is exec form carries a drain warning, not a blocker (T-9197)", async () => {
+		const report = await getComposeRollingReport("compose-1");
+		if (!report.available) throw new Error("expected a report");
+		const web = report.services.find((s) => s.name === "web");
+		expect(web?.eligible).toBe(true);
+		expect(web?.warnings).toHaveLength(1);
+		expect(web?.warnings[0]).toContain("not shell form");
+
+		domain.addDomainToCompose.mockResolvedValue({
+			services: {
+				web: {
+					image: "x",
+					healthcheck: { ...healthcheck, test: ["CMD-SHELL", "true"] },
+				},
+			},
+		});
+		const shell = await getComposeRollingReport("compose-1");
+		if (!shell.available) throw new Error("expected a report");
+		expect(shell.services[0]?.warnings).toEqual([]);
+		// A service that cannot roll at all has its blockers, not a warning.
+		expect(
+			report.services.find((s) => s.name === "api")?.warnings,
+		).toEqual([]);
+	});
+
 	it("a healthcheck that cannot settle in the longest wait is reported", async () => {
 		domain.addDomainToCompose.mockResolvedValue({
 			services: {

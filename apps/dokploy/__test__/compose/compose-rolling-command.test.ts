@@ -360,3 +360,89 @@ describe("rolling replace: the generated script", () => {
 		);
 	});
 });
+
+describe("rolling replace: the healthchecks the deploy writes (T-9197)", () => {
+	const shellSpec = {
+		services: {
+			web: {
+				build: ".",
+				healthcheck: { test: ["CMD-SHELL", "curl -f localhost"], interval: "5s" },
+			},
+			worker: {
+				image: "ghcr.io/acme/worker:1",
+				healthcheck: { test: ["CMD", "true"], interval: "5s" },
+			},
+		},
+	};
+	const stagingOptions = () =>
+		domain.writeDomainsToCompose.mock.calls[0]?.[2] as Record<string, unknown>;
+
+	beforeEach(() => {
+		domain.writeDomainsToCompose.mockClear();
+	});
+
+	it("tells the compose writer which services are rolled", async () => {
+		domain.addDomainToCompose.mockResolvedValue(shellSpec);
+		await build(rolling(["web", "worker"]));
+		expect(stagingOptions().rollingDrainServices).toEqual(["web", "worker"]);
+	});
+
+	it("only the services that are really rolled (drift: a blocked one is not)", async () => {
+		domain.addDomainToCompose.mockResolvedValue({
+			services: {
+				...shellSpec.services,
+				worker: { ...shellSpec.services.worker, container_name: "w" },
+			},
+		});
+		await build(rolling(["web", "worker"]));
+		expect(stagingOptions().rollingDrainServices).toEqual(["web"]);
+	});
+
+	it("the plan is made before the compose is written", async () => {
+		const order: string[] = [];
+		domain.addDomainToCompose.mockImplementation(async () => {
+			order.push("spec");
+			return shellSpec;
+		});
+		domain.writeDomainsToCompose.mockImplementationOnce(async () => {
+			order.push("write");
+			return "";
+		});
+		await build(rolling(["web"]));
+		expect(order[0]).toBe("spec");
+		expect(order).toContain("write");
+		expect(order.indexOf("write")).toBeGreaterThan(order.indexOf("spec"));
+	});
+
+	it.each([
+		["no rollingReplace", {}],
+		["null", { rollingReplace: null }],
+		["disabled", { rollingReplace: { enabled: false, services: ["web"] } }],
+		["a stack", { composeType: "stack", ...rolling(["web"]) }],
+		["a custom command", { command: "up -d", ...rolling(["web"]) }],
+	])("%s: the writer gets no rolling option at all", async (_label, overrides) => {
+		domain.addDomainToCompose.mockResolvedValue(shellSpec);
+		await build(overrides);
+		expect("rollingDrainServices" in stagingOptions()).toBe(false);
+	});
+
+	it("a fresh-volumes deploy does not roll, so nothing is wrapped", async () => {
+		domain.addDomainToCompose.mockResolvedValue(shellSpec);
+		await build(rolling(["web"]), { freshVolumes: true });
+		expect("rollingDrainServices" in stagingOptions()).toBe(false);
+	});
+
+	it("says in the log which rolled service cannot be taken out of rotation", async () => {
+		domain.addDomainToCompose.mockResolvedValue(shellSpec);
+		const command = await build(rolling(["web", "worker"]));
+		expect(command).toContain('The healthcheck of "worker" is not shell form');
+		expect(command).not.toContain('The healthcheck of "web" is not shell form');
+	});
+
+	it("no such line when every rolled service has a shell-form healthcheck", async () => {
+		domain.addDomainToCompose.mockResolvedValue(shellSpec);
+		const command = await build(rolling(["web"]));
+		expect(command).not.toContain("Rolling replace: The healthcheck of");
+		expect(parses(command)).toBe("ok");
+	});
+});

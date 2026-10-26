@@ -125,12 +125,27 @@ Traefik:
   routing. Therefore a Docker healthcheck on the service is a hard requirement,
   and the health timeout must exceed `start_period` plus `interval` times
   `retries`; the setting is validated against the service's healthcheck.
-- Traefik removes the old backend only on the `die` event, so for the whole
-  stop grace period it still receives new requests while the app shuts down.
-  The new replica being healthy does not cover this window. The drain delay in
-  the first PR is a wait between "new replica healthy" and "stop old". It does
-  not make the old container unroutable, and the Traefik retry middleware
-  (option e) is the only mitigation for this window.
+- Traefik's docker provider lists containers again only on the `start`,
+  `die` and `health_status` events, and it keeps a container that is running
+  and healthy (`keepContainer` in v3.6 `pkg/provider/docker`). The old container
+  therefore stays a backend until it dies, so for the whole stop grace period
+  it still receives new requests while the app shuts down, and an app that
+  ignores SIGTERM is SIGKILLed with Traefik still routing to it (T-9197).
+  The new replica being healthy does not cover this window, and neither does a
+  plain wait.
+  **Unhealthy-first** does: the healthcheck of a rolled service (shell form
+  only) is wrapped at deploy time so it fails while a marker file exists, the
+  script puts the marker in the old container with `docker cp`, waits for
+  `health=unhealthy` (a `health_status` event drops it from the pool), waits
+  past the providers throttle (2 s default, plus 1 s), then the drain delay for
+  requests in flight, then stops it. An experiment on a throwaway Traefik v3.6
+  (an app that ignores SIGTERM): unhealthy-first 0 failures in 283 requests,
+  plain stop 1 timeout, pause-first 2 failures (rejected: a paused container is
+  still a backend until the event). Exec-form healthchecks cannot be wrapped
+  without a binary in the image, and fall back to the plain stop; so do a
+  failed `docker cp` and an old container that never becomes unhealthy within
+  the bound. The Traefik retry middleware (option e) stays the mitigation for
+  those cases. Details and the exact wrap: docs/compose-rolling-replace.md.
 - Docker DNS ignores health for non-swarm containers, so container-to-container
   traffic by service name reaches the not-yet-healthy replica too; this path is
   not gated during the overlap. It resolves to both replicas for the length of
@@ -367,8 +382,8 @@ Behaviour:
   script (same guarantee the guardrails keep with their golden test,
   `apps/dokploy/__test__/compose/deploy-guardrails-golden.test.ts`).
 - Per compose setting: a list of service names to roll, a health timeout, and
-  a drain delay (a wait between "new replica healthy" and "stop old"; it does
-  not make the old container unroutable, see the Traefik notes in option a).
+  a drain delay (a wait between "old container out of rotation" and "stop old",
+  for requests in flight; see the Traefik notes in option a).
   Only `docker-compose` type, no custom command, no fresh-volumes.
 - Deploy script order: build/pull as today; `up -d --no-deps <others>` for the
   non-selected services, emitted only when that set is non-empty; for each
@@ -382,9 +397,11 @@ Behaviour:
   isolated-deployment `docker network connect` (`builders/compose.ts:576`) still
   run on the rolling path. Phase timestamps and docker events from the existing
   guardrails wrap it when enabled.
-  The Traefik retry middleware (option e) is the only mitigation of the
-  stop-grace window in this PR. It is not injected; the first PR documents it
-  as a manual step (decision 5).
+  The stop-grace window is covered by taking the old container out of rotation
+  first (T-9197, see the Traefik notes in option a) when its healthcheck is
+  shell form, and otherwise by the Traefik retry middleware (option e). The
+  middleware is not injected; the first PR documents it as a manual step
+  (decision 5).
 - Timeout or unhealthy new replica: remove the new replica, keep the old
   container, mark the deployment as an error with the reason, fire the
   existing failure notification. No transactional restore for rolled services.
