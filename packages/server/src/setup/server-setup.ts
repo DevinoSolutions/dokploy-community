@@ -363,6 +363,8 @@ command_exists() {
 	command -v "$@" > /dev/null 2>&1
 }
 
+${runRemoteInstaller}
+
 ${installUtilities()}
 
 ${
@@ -991,19 +993,34 @@ const createDefaultMiddlewares = () => {
 	return command;
 };
 
+// Defined once in the setup script. The installer is downloaded to a file instead
+// of piped into bash, because a failed curl in a pipe would lose its exit code and
+// still leave bash with an empty script. The file is removed whether the installer
+// succeeds or fails. "env" passes the pinned versions through sudo, which drops
+// exported variables.
+export const runRemoteInstaller = `
+run_remote_installer() {
+	INSTALLER_NAME="$1"
+	INSTALLER_URL="$2"
+	shift 2
+	INSTALLER_FILE=$(mktemp)
+	if ! curl -fsSL "$INSTALLER_URL" -o "$INSTALLER_FILE"; then
+		rm -f "$INSTALLER_FILE"
+		echo "Failed to download the $INSTALLER_NAME installer ❌" >&2
+		return 1
+	fi
+	INSTALLER_STATUS=0
+	$SUDO_CMD env "$@" bash "$INSTALLER_FILE" || INSTALLER_STATUS=$?
+	rm -f "$INSTALLER_FILE"
+	return $INSTALLER_STATUS
+}
+`;
+
 export const installRClone = () => `
     if command_exists rclone; then
 		echo "RClone already installed ✅"
 	else
-		# Download first: a failed curl in a pipe would still leave bash with an empty script
-		RCLONE_INSTALLER=$(mktemp)
-		if ! curl -fsSL https://rclone.org/install.sh -o "$RCLONE_INSTALLER"; then
-			rm -f "$RCLONE_INSTALLER"
-			echo "Failed to download the RClone installer ❌" >&2
-			exit 1
-		fi
-		$SUDO_CMD bash "$RCLONE_INSTALLER"
-		rm -f "$RCLONE_INSTALLER"
+		run_remote_installer RClone https://rclone.org/install.sh
 		RCLONE_VERSION=$(rclone --version | head -n 1 | awk '{print $2}' | sed 's/^v//')
 		echo "RClone version $RCLONE_VERSION installed ✅"
 	fi
@@ -1077,14 +1094,7 @@ const installNixpacks = () => `
 		echo "Nixpacks already installed ✅"
 	else
 	    export NIXPACKS_VERSION=1.41.0
-		NIXPACKS_INSTALLER=$(mktemp)
-		if ! curl -fsSL https://nixpacks.com/install.sh -o "$NIXPACKS_INSTALLER"; then
-			rm -f "$NIXPACKS_INSTALLER"
-			echo "Failed to download the Nixpacks installer ❌" >&2
-			exit 1
-		fi
-		$SUDO_CMD bash "$NIXPACKS_INSTALLER"
-		rm -f "$NIXPACKS_INSTALLER"
+		run_remote_installer Nixpacks https://nixpacks.com/install.sh NIXPACKS_VERSION="$NIXPACKS_VERSION"
 		echo "Nixpacks version $NIXPACKS_VERSION installed ✅"
 	fi
 `;
@@ -1094,14 +1104,7 @@ const installRailpack = () => `
 		echo "Railpack already installed ✅"
 	else
 	    export RAILPACK_VERSION=0.15.4
-		RAILPACK_INSTALLER=$(mktemp)
-		if ! curl -fsSL https://railpack.com/install.sh -o "$RAILPACK_INSTALLER"; then
-			rm -f "$RAILPACK_INSTALLER"
-			echo "Failed to download the Railpack installer ❌" >&2
-			exit 1
-		fi
-		$SUDO_CMD bash "$RAILPACK_INSTALLER"
-		rm -f "$RAILPACK_INSTALLER"
+		run_remote_installer Railpack https://railpack.com/install.sh RAILPACK_VERSION="$RAILPACK_VERSION"
 		echo "Railpack version $RAILPACK_VERSION installed ✅"
 	fi
 `;
