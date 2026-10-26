@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**Users created with initial credentials can sign in again** (T-9007). Existing ones are repaired at startup.
+
 **Password managers can fill the two-factor code on the login page** (T-7060, ported from upstream Dokploy [#5735](https://github.com/Dokploy/dokploy/pull/5735) by Yash Kumar). The six-box code input hid its real field behind layered boxes, so Bitwarden and similar tools could not offer their inline suggestion. The code is now typed into one visible field marked as a one-time code, drawn as six boxes in a row, and it checks itself as soon as the sixth digit is in. The fork's sign-in redirect and MCP consent return are unchanged. No migration.
 
 **A failed step of the server setup script now fails the setup** (T-8331, follow-up to T-7981). The setup script stopped with exit code 0 on an unsupported operating system, so the setup was reported as successful; it now exits 1. The Nixpacks, Railpack and RClone installers are downloaded to a temporary file before they run, so a failed download fails the step instead of running an empty script. An SSH username or private key that the SSH client can't use is now reported as a setup error rather than an internal server error. No migration.

@@ -9,7 +9,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { auth } from "../lib/auth";
 
 export type User = typeof user.$inferSelect;
@@ -240,6 +240,8 @@ export const createOrganizationUserWithCredentials = async ({
 
 		await tx.insert(account).values({
 			userId: createdUser.id,
+			// better-auth only signs in a credential account whose accountId is the user id.
+			accountId: createdUser.id,
 			providerId: "credential",
 			password: bcrypt.hashSync(password, 10),
 			createdAt: now,
@@ -273,6 +275,28 @@ export const createOrganizationUserWithCredentials = async ({
 			role,
 		};
 	});
+};
+
+// Initial-credentials users were created with a random accountId, which
+// better-auth's email sign-in rejects. Idempotent; returns the rows fixed.
+export const repairCredentialAccountIds = async () => {
+	const fixed = await db
+		.update(account)
+		.set({ accountId: sql`${account.userId}` })
+		.where(
+			and(
+				eq(account.providerId, "credential"),
+				ne(account.accountId, account.userId),
+			),
+		)
+		.returning({ id: account.id });
+
+	if (fixed.length > 0) {
+		console.log(
+			`Repaired ${fixed.length} credential account(s) that could not sign in`,
+		);
+	}
+	return fixed.length;
 };
 
 export const updateUser = async (userId: string, userData: Partial<User>) => {
