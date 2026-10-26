@@ -1,6 +1,7 @@
 import {
 	serverSetup,
 	TRAEFIK_RESTART_MARKER,
+	TRAEFIK_RESTORE_MARKER,
 } from "@dokploy/server/setup/server-setup";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -39,10 +40,11 @@ vi.mock("ssh2", async () => {
 	return { Client };
 });
 
-const traefik = vi.hoisted(() => ({ finish: vi.fn() }));
+const traefik = vi.hoisted(() => ({ finish: vi.fn(), backup: vi.fn() }));
 
 vi.mock("@dokploy/server/services/settings", () => ({
 	finishTraefikAfterSetup: traefik.finish,
+	hasTraefikBackup: traefik.backup,
 }));
 
 vi.mock("@dokploy/server/services/deployment", () => ({
@@ -106,6 +108,8 @@ beforeEach(() => {
 	ssh.onExec = () => {};
 	traefik.finish.mockReset();
 	traefik.finish.mockResolvedValue(undefined);
+	traefik.backup.mockReset();
+	traefik.backup.mockResolvedValue(false);
 });
 
 describe("serverSetup: Traefik after the script", () => {
@@ -135,6 +139,29 @@ describe("serverSetup: Traefik after the script", () => {
 		expect(traefik.finish).toHaveBeenCalledWith("srv-1", true);
 	});
 
+	it("finds the marker on a line of its own, whatever the line ending", async () => {
+		ssh.onExec = script(
+			`8. Setting up Traefik\r\n${TRAEFIK_RESTART_MARKER}\r\n`,
+			0,
+		);
+
+		await run();
+
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", true);
+	});
+
+	it.each([
+		["inside another line", `echo: ${TRAEFIK_RESTART_MARKER}\n`],
+		["at the start of a longer line", `${TRAEFIK_RESTART_MARKER} later\n`],
+		["inside a line split across chunks", `a ${TRAEFIK_RESTART_MARKER}`],
+	])("ignores the marker %s", async (_name, output) => {
+		ssh.onExec = script(output, "\n", 0);
+
+		await run();
+
+		expect(traefik.finish).not.toHaveBeenCalledWith("srv-1", true);
+	});
+
 	it("still restarts Traefik when a later setup step fails", async () => {
 		ssh.onExec = script(
 			`8. Setting up Traefik\n${TRAEFIK_RESTART_MARKER}\n`,
@@ -150,6 +177,63 @@ describe("serverSetup: Traefik after the script", () => {
 	});
 
 	it("only restores a left-behind Traefik when the script asked for nothing", async () => {
+		ssh.onExec = script(
+			"10. Setting up Traefik Instance\n",
+			`${TRAEFIK_RESTORE_MARKER}\n`,
+			0,
+		);
+
+		await run();
+
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+	});
+
+	it("finds the restore line when it arrives in two chunks", async () => {
+		const half = Math.floor(TRAEFIK_RESTORE_MARKER.length / 2);
+		ssh.onExec = script(
+			TRAEFIK_RESTORE_MARKER.slice(0, half),
+			`${TRAEFIK_RESTORE_MARKER.slice(half)}\n`,
+			0,
+		);
+
+		await run();
+
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+	});
+
+	it("does not wait on the Traefik queue when there is nothing to restart or restore", async () => {
+		ssh.onExec = script("10. Setting up Traefik Instance\n", 0);
+
+		const { outcome } = await run();
+
+		expect(outcome.ok).toBe(true);
+		expect(traefik.finish).not.toHaveBeenCalled();
+	});
+
+	it("keeps a failed Docker install to its own error", async () => {
+		traefik.finish.mockRejectedValue(new Error("docker: command not found"));
+		ssh.onExec = script("3. Installing Docker\n", 1);
+
+		const { outcome, logs } = await run();
+
+		expect(outcome.ok).toBe(false);
+		expect(traefik.finish).not.toHaveBeenCalled();
+		expect(logs.join("")).not.toContain("Could not restart or restore Traefik");
+	});
+
+	it("still restores a backup left by an interrupted update when the setup died early", async () => {
+		traefik.backup.mockResolvedValue(true);
+		ssh.onExec = script("3. Installing Docker\n", 1);
+
+		const { outcome } = await run();
+
+		expect(outcome.ok).toBe(false);
+		expect(traefik.backup).toHaveBeenCalledWith("srv-1");
+		expect(traefik.finish).toHaveBeenCalledWith("srv-1", false);
+	});
+
+	it("restores a left-behind backup after a script that printed nothing about Traefik", async () => {
+		traefik.backup.mockResolvedValue(true);
 		ssh.onExec = script("10. Setting up Traefik Instance\n", 0);
 
 		await run();

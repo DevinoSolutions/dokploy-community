@@ -9,7 +9,10 @@ import {
 	findServerById,
 	updateServerById,
 } from "@dokploy/server/services/server";
-import { finishTraefikAfterSetup } from "@dokploy/server/services/settings";
+import {
+	finishTraefikAfterSetup,
+	hasTraefikBackup,
+} from "@dokploy/server/services/settings";
 import {
 	getDefaultMiddlewares,
 	getDefaultServerTraefikConfig,
@@ -35,10 +38,15 @@ const generateToken = () => {
 // It stays in the setup log, so it reads as a status line.
 export const TRAEFIK_RESTART_MARKER = "Dokploy will restart dokploy-traefik";
 
+// Printed when it found only the backup of an interrupted Traefik update.
+export const TRAEFIK_RESTORE_MARKER =
+	"Traefik was left behind by an update, so no new one is created: Dokploy restores it after setup.";
+
 // What the setup script tells serverSetup about the Traefik it found.
 interface SetupSignals {
 	started: boolean;
 	restartTraefik: boolean;
+	restoreTraefik: boolean;
 }
 
 // Restarts and restores through the server's Traefik queue, so neither can land
@@ -109,13 +117,27 @@ export const serverSetup = async (
 				? "\nInstalling Build Server Dependencies: ✅\n"
 				: "\nInstalling Server Dependencies: ✅\n",
 		);
-		const signals: SetupSignals = { started: false, restartTraefik: false };
+		const signals: SetupSignals = {
+			started: false,
+			restartTraefik: false,
+			restoreTraefik: false,
+		};
 		try {
 			await installRequirements(serverId, onData, signals);
 		} finally {
 			// Also after a failed run: the script may have repaired traefik.yml
 			// before a later step failed, and a re-run would not repair it again.
-			if (signals.started && !isBuildServer) {
+			// Only when there is something to restart or restore, so a setup that
+			// stopped early on a host without one does not wait on the queue. A
+			// backup left by an interrupted update is restored even when the script
+			// stopped before it noticed.
+			if (
+				signals.started &&
+				!isBuildServer &&
+				(signals.restartTraefik ||
+					signals.restoreTraefik ||
+					(await hasTraefikBackup(serverId)))
+			) {
 				await settleTraefik(serverId, signals.restartTraefik, onData);
 			}
 		}
@@ -430,8 +452,9 @@ const installRequirements = async (
 
 	return new Promise<void>((resolve, reject) => {
 		const steps = createStepTracker();
-		// The last output, so a marker split across two chunks is still found.
-		let recent = "";
+		// The unfinished last line, so a marker split across two chunks is still
+		// found. Only a whole line counts, not text that merely contains it.
+		let partial = "";
 		// The exit status arrives before the channel closes, and is kept in case
 		// the connection closes before the channel does.
 		let exit: { code: number | null; signal?: string | null } | undefined;
@@ -472,12 +495,12 @@ const installRequirements = async (
 							);
 						})
 						.on("data", (data: string) => {
-							recent = (recent + data.toString()).slice(
-								-TRAEFIK_RESTART_MARKER.length * 2,
+							const lines = (partial + data.toString()).split(/\r?\n/);
+							partial = (lines.pop() ?? "").slice(
+								-TRAEFIK_RESTORE_MARKER.length * 2,
 							);
-							signals.restartTraefik ||= recent.includes(
-								TRAEFIK_RESTART_MARKER,
-							);
+							signals.restartTraefik ||= lines.includes(TRAEFIK_RESTART_MARKER);
+							signals.restoreTraefik ||= lines.includes(TRAEFIK_RESTORE_MARKER);
 							steps.push(data.toString());
 							onData?.(data.toString());
 						})
@@ -999,7 +1022,7 @@ export const createTraefikInstance = () => {
 		if [ "$TRAEFIK_SKIP_CREATE" != true ] \
 			&& ! $SUDO_CMD docker inspect dokploy-traefik > /dev/null 2>&1 \
 			&& $SUDO_CMD docker container inspect dokploy-traefik-previous > /dev/null 2>&1; then
-			echo "Traefik was left behind by an update, so no new one is created: Dokploy restores it after setup."
+			echo "${TRAEFIK_RESTORE_MARKER}"
 			TRAEFIK_SKIP_CREATE=true
 		fi
 
