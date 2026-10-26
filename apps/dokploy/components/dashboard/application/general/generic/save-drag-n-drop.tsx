@@ -14,6 +14,7 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { refusalDescription } from "@/lib/refusal-description";
 import { api } from "@/utils/api";
 import { type UploadFile, uploadFileSchema } from "@/utils/schema";
 import { ConfirmableProviderSave } from "./confirmable-provider-save";
@@ -57,8 +58,10 @@ export const SaveDragNDrop = ({ applicationId }: Props) => {
 				toast.success("Deployment saved");
 				await utils.application.one.invalidate({ applicationId });
 			})
-			.catch(() => {
-				toast.error("Error saving the deployment");
+			.catch((error) => {
+				toast.error("Error saving the deployment", {
+					description: refusalDescription(error),
+				});
 			});
 	};
 
