@@ -26,7 +26,7 @@ import { findServerById } from "./server";
 export type ScheduleExtended = Awaited<ReturnType<typeof findScheduleById>>;
 
 export const HOST_SCHEDULE_FORBIDDEN_MESSAGE =
-	"Only the organization that owns this Dokploy instance can change its own host";
+	"Only the organization that owns this Dokploy instance can access its host";
 
 // Host-level schedules (server / dokploy-server) run their script as root on the
 // host and must stay restricted to owners/admins, regardless of whether the
