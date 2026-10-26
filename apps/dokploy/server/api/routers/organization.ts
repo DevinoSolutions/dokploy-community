@@ -1,5 +1,6 @@
 import { db } from "@dokploy/server/db";
 import {
+	assertOrganizationDeletable,
 	hasValidLicense,
 	IS_CLOUD,
 	removeOrganizationNotifications,
@@ -327,6 +328,8 @@ export const organizationRouter = createTRPCRouter({
 					message: "Only the organization owner can delete it",
 				});
 			}
+
+			await assertOrganizationDeletable(input.organizationId);
 
 			const ownerOrgs = await db.query.organization.findMany({
 				where: eq(organization.ownerId, ctx.user.id),

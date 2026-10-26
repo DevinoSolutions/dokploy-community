@@ -4,6 +4,7 @@ import { oauthProvider } from "@better-auth/oauth-provider";
 import { passkey } from "@better-auth/passkey";
 import { scim } from "@better-auth/scim";
 import { sso } from "@better-auth/sso";
+import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -19,6 +20,7 @@ import { IS_CLOUD } from "../constants";
 import { db } from "../db";
 import * as schema from "../db/schema";
 import {
+	assertOrganizationDeletable,
 	getTrustedOrigins,
 	getTrustedProviders,
 	getUserByToken,
@@ -774,8 +776,15 @@ const createBetterAuth = () =>
 					// provider rows (API keys, webhooks) any more. Currently
 					// unreachable ("/organization/delete" is in disabledPaths; the
 					// organization router and services/admin.ts do this cleanup), so
-					// this is defense-in-depth only.
+					// this is defense-in-depth only. The root organization is
+					// refused here too.
 					beforeDeleteOrganization: async ({ organization: deleted }) => {
+						await assertOrganizationDeletable(deleted.id).catch((error) => {
+							if (error instanceof TRPCError && error.code === "FORBIDDEN") {
+								throw new APIError("FORBIDDEN", { message: error.message });
+							}
+							throw error;
+						});
 						await removeOrganizationNotifications(deleted.id);
 					},
 				},
