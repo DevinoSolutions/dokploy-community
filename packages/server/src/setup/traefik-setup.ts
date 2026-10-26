@@ -331,7 +331,7 @@ export const recreateStandaloneTraefik = async ({
 	console.log("Traefik Started ✅");
 };
 
-const PREVIOUS_TRAEFIK_CONTAINER = "dokploy-traefik-previous";
+export const PREVIOUS_TRAEFIK_CONTAINER = "dokploy-traefik-previous";
 
 // An interrupted recreate (e.g. a Dokploy restart) leaves only the stopped backup.
 export const restoreInterruptedTraefik = async (serverId?: string) => {

@@ -13,6 +13,7 @@ import {
 	filterReadableStats,
 	isOwnerOrAdmin,
 } from "@/server/api/utils/container-service-access";
+import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
 import { containerIdRegex } from "./docker";
 
@@ -24,7 +25,8 @@ const taskService = (row: { Name: string }) =>
 // labels are the same for every tenant, so there is nothing to scope a member
 // to. The node routes are owner/admin only (adminProcedure; owners and admins
 // always hold docker:read) and the Docker page hides the Overview and Nodes
-// tabs for everybody else. The service, task and stats routes name services, so
+// tabs for everybody else. On the local host they are also limited to the
+// organization that owns the instance. The service, task and stats routes name services, so
 // a member gets the rows of the services they can read on the server.
 export const swarmRouter = createTRPCRouter({
 	getNodes: adminProcedure
@@ -34,12 +36,20 @@ export const swarmRouter = createTRPCRouter({
 			}),
 		)
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getSwarmNodes(input.serverId);
 		}),
 	getNodeInfo: adminProcedure
 		.input(z.object({ nodeId: z.string(), serverId: z.string().optional() }))
 		.query(async ({ input, ctx }) => {
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getNodeInfo(input.nodeId, input.serverId);
 		}),
