@@ -8,6 +8,17 @@ vi.mock("@dokploy/server/services/github", () => ({
 	findGithubById: mockFindGithubById,
 }));
 
+// The host check resolves names; here the hosts are only names in a URL.
+vi.mock(
+	"@dokploy/server/utils/providers/github-host",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("@dokploy/server/utils/providers/github-host")
+		>()),
+		assertGithubHostReachable: vi.fn(async () => {}),
+	}),
+);
+
 vi.mock("@octokit/auth-app", () => ({
 	createAppAuth: vi.fn(),
 }));
