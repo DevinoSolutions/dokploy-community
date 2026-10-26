@@ -14,6 +14,7 @@ import {
 	createServerTraefikConfig,
 	getDefaultServerTraefikConfig,
 	setupNetwork,
+	TRAEFIK_RESTART_MARKER,
 } from "@dokploy/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -139,7 +140,7 @@ describe("createServerTraefikConfig", () => {
 		expect(parse(config).providers.file).toBeDefined();
 	});
 
-	it("removes the Swarm provider from an existing default worker config and restarts Traefik", () => {
+	it("removes the Swarm provider from an existing default worker config and asks for a Traefik restart", () => {
 		const original = `${getDefaultServerTraefikConfig()}\n`;
 		const { config, backup, tmpLeft, dockerCalls, output } = runStep(
 			WORKER,
@@ -149,12 +150,14 @@ describe("createServerTraefikConfig", () => {
 		expect(config).toBe(`${getDefaultServerTraefikConfig(false)}\n`);
 		expect(backup).toBe(original);
 		expect(tmpLeft).toBe(false);
-		expect(dockerCalls).toContain("restart dokploy-traefik");
+		// Dokploy restarts it through its queue, never the script itself.
+		expect(output).toContain(TRAEFIK_RESTART_MARKER);
+		expect(dockerCalls.some((call) => call.startsWith("restart"))).toBe(false);
 		expect(output).toContain("Removed Swarm provider");
 	});
 
 	it("removes only providers.swarm from a hand-edited worker config", () => {
-		const { config, backup, dockerCalls } = runStep(WORKER, handEdited);
+		const { config, backup, output } = runStep(WORKER, handEdited);
 
 		expect(parse(config)).toEqual(withoutSwarm(handEdited));
 		expect(parse(config).experimental.plugins.swarm).toBeDefined();
@@ -162,7 +165,7 @@ describe("createServerTraefikConfig", () => {
 		expect(config).toContain("# Custom Traefik config");
 		expect(config).not.toContain("keep watching");
 		expect(backup).toBe(handEdited);
-		expect(dockerCalls).toContain("restart dokploy-traefik");
+		expect(output).toContain(TRAEFIK_RESTART_MARKER);
 	});
 
 	it("removes an inline Swarm provider on a worker", () => {

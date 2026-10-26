@@ -184,7 +184,7 @@ export const CREDENTIAL_QUERIES: ReadonlySet<string> = new Set([
 	"cluster.addManager",
 	// raw Traefik container env → ACME DNS-01 credentials
 	"settings.readTraefikEnv",
-	// webServerSettings row → sshPrivateKey and metricsConfig.server.token
+	// webServerSettings row: the instance's own configuration, admin only
 	"settings.getWebServerSettings",
 	"user.getMetricsToken",
 	// member.user joined unprojected → user.licenseKey

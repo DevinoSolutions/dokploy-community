@@ -17,6 +17,7 @@ import { compose } from "../db/schema";
 import {
 	ensureTraefikImage,
 	initializeTraefikService,
+	isImageId,
 	queueTraefikRecreate,
 	recreateStandaloneTraefik,
 	resolveRoutineTraefikImage,
@@ -510,7 +511,34 @@ fi`;
 	}
 };
 
+// Run after Setup Server, once its script has finished: a Traefik left as only
+// dokploy-traefik-previous is restored (when the live one is still missing by
+// the time its turn comes), and a repaired config gets its restart.
+export const finishTraefikAfterSetup = (
+	serverId: string | undefined,
+	restart: boolean,
+) =>
+	restart
+		? reloadDockerResource("dokploy-traefik", serverId)
+		: queueTraefikRecreate(serverId, () => restoreInterruptedTraefik(serverId));
+
 export const reloadDockerResource = async (
+	resourceName: string,
+	serverId?: string,
+	version?: string,
+) => {
+	// A recreate renames Traefik's containers, so a restart waits for it, and
+	// first restores the backup an interrupted one left behind.
+	if (resourceName === "dokploy-traefik") {
+		return queueTraefikRecreate(serverId, async () => {
+			await restoreInterruptedTraefik(serverId);
+			await restartDockerResource(resourceName, serverId, version);
+		});
+	}
+	await restartDockerResource(resourceName, serverId, version);
+};
+
+const restartDockerResource = async (
 	resourceName: string,
 	serverId?: string,
 	version?: string,
@@ -721,7 +749,28 @@ export const checkPortInUse = async (
 	}
 };
 
-export const writeTraefikSetup = async (input: TraefikOptions) => {
+// Env and ports can be given as a function of what the host runs when the
+// queued job starts, so two overlapping actions don't restore stale values.
+type FromCurrent<T> = T | ((current: T) => T);
+
+type TraefikPorts = NonNullable<TraefikOptions["additionalPorts"]>;
+
+export interface TraefikSetupOptions
+	extends Omit<TraefikOptions, "env" | "additionalPorts"> {
+	env?: FromCurrent<string[]>;
+	additionalPorts?: FromCurrent<TraefikPorts>;
+}
+
+// The env and ports are read inside the queued job, so a request would not
+// notice a host without Traefik; this tells the caller before it queues.
+export const assertTraefikInstalled = async (serverId?: string) => {
+	const resourceType = await getDockerResourceType("dokploy-traefik", serverId);
+	if (resourceType === "unknown") {
+		throw new DockerResourceNotFoundError();
+	}
+};
+
+export const writeTraefikSetup = async (input: TraefikSetupOptions) => {
 	// One queued job per server: restoring the backup while another recreate
 	// has its container renamed away would leave both recreates fighting over
 	// it, and the first one then removes it.
@@ -732,22 +781,40 @@ export const writeTraefikSetup = async (input: TraefikOptions) => {
 			input.serverId,
 		);
 
+		if (resourceType !== "service" && resourceType !== "standalone") {
+			throw new Error("Traefik resource type not found");
+		}
+
+		const env =
+			typeof input.env === "function"
+				? input.env(
+						await readEnvironmentVariableList(
+							"dokploy-traefik",
+							input.serverId,
+						),
+					)
+				: input.env;
+		const additionalPorts =
+			typeof input.additionalPorts === "function"
+				? input.additionalPorts(
+						await readPorts("dokploy-traefik", input.serverId),
+					)
+				: input.additionalPorts;
+
 		if (resourceType === "service") {
 			await initializeTraefikService({
-				env: input.env,
-				additionalPorts: input.additionalPorts,
-				serverId: input.serverId,
-				image: input.image,
-			});
-		} else if (resourceType === "standalone") {
-			await recreateStandaloneTraefik({
-				env: input.env,
-				additionalPorts: input.additionalPorts,
+				env,
+				additionalPorts,
 				serverId: input.serverId,
 				image: input.image,
 			});
 		} else {
-			throw new Error("Traefik resource type not found");
+			await recreateStandaloneTraefik({
+				env,
+				additionalPorts,
+				serverId: input.serverId,
+				image: input.image,
+			});
 		}
 	});
 	await reconnectServicesToTraefik(input.serverId);
@@ -781,6 +848,54 @@ type TraefikVersionStatus =
 	| "outdated"
 	| "up-to-date"
 	| "newer";
+
+const parseJsonList = (line: string | undefined): string[] => {
+	const parsed = JSON.parse(line || "null");
+	return Array.isArray(parsed) ? parsed : [];
+};
+
+// A recreate that couldn't keep the tag runs from the image ID, which names
+// neither a repository nor a version. Name it by the tags, the digests and the
+// version label Docker still has for it; the ID itself when there are none.
+const describeImageId = async (id: string, serverId?: string) => {
+	const command = `docker image inspect ${id} --format '{{json .RepoTags}}{{"\\n"}}{{json .RepoDigests}}{{"\\n"}}{{json .Config.Labels}}'`;
+	try {
+		const { stdout } = await rejectAfter(
+			serverId ? execAsyncRemote(serverId, command) : execAsync(command),
+			30_000,
+			"Timed out reading the Traefik image from this server after 30 seconds.",
+		);
+		const [tagLine, digestLine, labelLine] = stdout.trim().split("\n");
+		const tags = parseJsonList(tagLine);
+		const references = [...tags, ...parseJsonList(digestLine)];
+		const reference =
+			references.find((candidate) =>
+				OFFICIAL_TRAEFIK_REPOSITORIES.includes(
+					splitImageReference(candidate).repository,
+				),
+			) ?? references[0];
+		if (!reference) {
+			return id;
+		}
+		const { repository } = splitImageReference(reference);
+		// The label is the exact version. Without it, the highest tag wins: an
+		// image tagged traefik:v3 and traefik:v3.9.0 is 3.9.0, not 3.0.0.
+		const labels: Record<string, string> =
+			JSON.parse(labelLine || "null") ?? {};
+		const labelVersion = labels["org.opencontainers.image.version"];
+		if (labelVersion) {
+			return `${repository}:${labelVersion}`;
+		}
+		const versionTag = tags
+			.filter((tag) => splitImageReference(tag).repository === repository)
+			.map((tag) => ({ tag, version: parseTraefikImageVersion(tag) }))
+			.filter((candidate) => candidate.version)
+			.sort((a, b) => semver.rcompare(a.version!, b.version!))[0]?.tag;
+		return versionTag ?? reference;
+	} catch {
+		return id;
+	}
+};
 
 export const getTraefikOverview = async (serverId?: string) => {
 	const recommendedVersion = TRAEFIK_VERSION;
@@ -826,7 +941,10 @@ fi`;
 		};
 	}
 
-	const [image = "", state = "", startedAt = ""] = output.split("|");
+	const [reference = "", state = "", startedAt = ""] = output.split("|");
+	const image = isImageId(reference)
+		? await describeImageId(reference, serverId)
+		: reference;
 	const currentVersion = parseTraefikImageVersion(image);
 	const target = semver.coerce(recommendedVersion)?.version;
 

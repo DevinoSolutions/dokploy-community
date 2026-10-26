@@ -18,18 +18,28 @@ docker() {
 		"inspect dokploy-traefik")
 			[ "$FAKE_CONTAINER" = 1 ] && return 0
 			return 1 ;;
+		"container inspect")
+			[ "$3" = dokploy-traefik-previous ] && [ "$FAKE_PREVIOUS" = 1 ] && return 0
+			return 1 ;;
+		"rename dokploy-traefik-previous")
+			FAKE_CONTAINER=1 ;;
 	esac
 	return 0
 }
 sleep() { :; }
 `;
 
-const runSetup = (env: { service?: string; container?: boolean }) => {
+const runSetup = (env: {
+	service?: string;
+	container?: boolean;
+	previous?: boolean;
+}) => {
 	const script = [
 		"set -e",
 		"SUDO_CMD=",
 		`FAKE_SERVICE_IMAGE='${env.service ?? ""}'`,
 		`FAKE_CONTAINER=${env.container ? 1 : 0}`,
+		`FAKE_PREVIOUS=${env.previous ? 1 : 0}`,
 		FAKE_DOCKER,
 		createTraefikInstance(),
 	].join("\n");
@@ -51,6 +61,29 @@ describe("remote server setup: Traefik instance", () => {
 		const { run } = runSetup({});
 
 		expect(run?.split(" ").at(-1)).toBe(TRAEFIK_IMAGE);
+	});
+
+	it("puts the image after -- so it can't be read as an option", () => {
+		const { run } = runSetup({});
+
+		expect(run?.split(" ").slice(-2)).toEqual(["--", TRAEFIK_IMAGE]);
+	});
+
+	it("leaves the backup of an update alone and creates no fresh Traefik", () => {
+		const { calls, output } = runSetup({ previous: true });
+
+		// A running update owns the backup; Dokploy restores it after setup, in
+		// the server's Traefik queue.
+		expect(calls.some((call) => call.startsWith("rename "))).toBe(false);
+		expect(calls.some((call) => call.startsWith("start "))).toBe(false);
+		expect(calls.some((call) => call.startsWith("run "))).toBe(false);
+		expect(output).toContain("Dokploy restores it after setup");
+	});
+
+	it("ignores a backup while the live container exists", () => {
+		const { calls } = runSetup({ container: true, previous: true });
+
+		expect(calls.some((call) => call.startsWith("rename "))).toBe(false);
 	});
 
 	it("leaves an existing Traefik container alone", () => {
