@@ -18,6 +18,9 @@ const mocks = vi.hoisted(() => ({
 	// the organization that owns the instance; the host's own containers are its
 	// owners' and admins' alone
 	rootOrganization: "org-a",
+	isCloud: false,
+	// server id -> organization, where it is not the default
+	serverOrganizations: new Map<string, string>(),
 	member: { role: "member", accessedServices: [] as string[] },
 	// service rows the appName lookup finds, per table
 	serviceRows: [] as {
@@ -52,6 +55,9 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@dokploy/server", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@dokploy/server")>()),
+	get IS_CLOUD() {
+		return mocks.isCloud;
+	},
 	isRootOrganization: async (organizationId: string) =>
 		organizationId === mocks.rootOrganization,
 }));
@@ -161,7 +167,9 @@ vi.mock("@dokploy/server/services/server", async (importOriginal) => ({
 	...(await importOriginal<typeof import("@dokploy/server/services/server")>()),
 	findServerById: vi.fn(async (serverId: string) => ({
 		serverId,
-		organizationId: serverId === "server-b" ? "org-b" : "org-a",
+		organizationId:
+			mocks.serverOrganizations.get(serverId) ??
+			(serverId === "server-b" ? "org-b" : "org-a"),
 		ipAddress: "203.0.113.10",
 		metricsConfig: { server: { port: 4500, token: "remote-token" } },
 	})),
@@ -250,6 +258,20 @@ const host = (
 const metrics = (appName: string, serverId?: string) =>
 	caller.user.getContainerMetrics({ appName, serverId, dataPoints: "50" });
 
+// an owner or admin of org-b, which does not own the instance (org-a does)
+const callerOfOtherOrganization = createCallerFactory(appRouter)({
+	user: { id: "user-2", email: "v@example.com", role: "member", ownerId: "o" },
+	session: { activeOrganizationId: "org-b" },
+	req: { headers: {} },
+	res: {},
+} as never);
+const metricsOfOtherOrganization = (appName: string, serverId?: string) =>
+	callerOfOtherOrganization.user.getContainerMetrics({
+		appName,
+		serverId,
+		dataPoints: "50",
+	});
+
 const names = (rows: unknown[]) =>
 	rows.map((row) => (row as { Name: string }).Name).sort();
 
@@ -270,6 +292,8 @@ beforeEach(() => {
 	mocks.servers = new Set(["server-a"]);
 	mocks.previews = [];
 	mocks.failures.clear();
+	mocks.isCloud = false;
+	mocks.serverOrganizations.clear();
 	fetchMock.mockClear();
 
 	// org-a: app-a, pg-a, cmp-a (docker compose), stk-a (stack); org-b: app-b
@@ -472,6 +496,89 @@ describe("user.getContainerMetrics: the host's own names", () => {
 			]);
 		},
 	);
+});
+
+describe("user.getContainerMetrics: an organization that does not own the instance", () => {
+	// the host's own names: Dokploy itself, Traefik, a name nothing carries
+	const hostOwnNames = ["dokploy", "dokploy-traefik", "dokploy-postgres"];
+
+	it.each(
+		hostOwnNames.flatMap((name) =>
+			(["owner", "admin"] as const).map((role) => [role, name] as const),
+		),
+	)("refuses an %s of it the host's own name %s", async (role, name) => {
+		as(role);
+		mocks.metrics.get("local")?.push("dokploy-postgres");
+		await expect(metricsOfOtherOrganization(name)).rejects.toMatchObject(
+			notFound,
+		);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("refuses an admin of it a host container that was taken down", async () => {
+		as("admin");
+		mocks.containers.get("local")?.delete("dokploy-traefik");
+		await expect(
+			metricsOfOtherOrganization("dokploy-traefik"),
+		).rejects.toMatchObject(notFound);
+	});
+
+	it.each(["owner", "admin"] as const)(
+		"still gives an %s of it the rows of its own service",
+		async (role) => {
+			as(role);
+			expect(names(await metricsOfOtherOrganization("app-b-abc123"))).toEqual([
+				"app-b-abc123.1.bbbbbbbbbbbbbbbbbbbbbbbbb",
+			]);
+			expect(
+				names(await metricsOfOtherOrganization("cmp-b-abc123-web-1")),
+			).toEqual(["cmp-b-abc123-web-1"]);
+		},
+	);
+
+	it("refuses an admin of it another organization's service", async () => {
+		as("admin");
+		await expect(
+			metricsOfOtherOrganization("app-a-abc123"),
+		).rejects.toMatchObject(notFound);
+	});
+
+	it("gives the admin of the organization that owns the instance the same host names", async () => {
+		as("admin");
+		expect(names(await metrics("dokploy"))).toEqual([
+			"dokploy.1.ddddddddddddddddddddddddd",
+		]);
+		expect(names(await metrics("dokploy-traefik"))).toEqual([
+			"dokploy-traefik",
+		]);
+	});
+
+	it("gives an admin of it the names of its own remote server", async () => {
+		as("admin");
+		mocks.serverOrganizations.set("server-a", "org-b");
+		mocks.servers = new Set(["server-a"]);
+		host("server-a", {
+			containers: { "dokploy-traefik": {} },
+		});
+		expect(
+			names(await metricsOfOtherOrganization("dokploy-traefik", "server-a")),
+		).toEqual(["dokploy-traefik"]);
+	});
+
+	it("refuses an admin of it a remote server of another organization", async () => {
+		as("admin");
+		await expect(
+			metricsOfOtherOrganization("dokploy-traefik", "server-a"),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+	});
+
+	it("is unchanged on Dokploy Cloud", async () => {
+		as("admin");
+		mocks.isCloud = true;
+		expect(names(await metricsOfOtherOrganization("dokploy-traefik"))).toEqual([
+			"dokploy-traefik",
+		]);
+	});
 });
 
 describe("user.getContainerMetrics: names docker would read otherwise", () => {

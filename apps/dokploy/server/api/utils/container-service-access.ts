@@ -829,23 +829,21 @@ export const filterReadableServiceRows = async <T>(
 
 /**
  * The same for `docker stats` rows, which carry the container id as `ID`.
- * `strict` checks owners and admins too (see `filterReadableContainers`).
+ * Owners and admins are checked too (`strict`, see `filterReadableContainers`):
+ * every route that lists stats shares the host with other organizations.
  */
 export const filterReadableStats = async <T extends { ID: string }>(
 	ctx: PermissionCtx,
 	rows: T[],
 	serverId?: string,
-	options: { strict?: boolean } = {},
 ): Promise<T[]> => {
-	if (!options.strict && (await canUseHostOwnContainers(ctx, serverId)))
-		return rows;
 	const readable = new Set(
 		(
 			await filterReadableContainers(
 				ctx,
 				rows.map((row) => ({ containerId: row.ID })),
 				serverId,
-				options,
+				{ strict: true },
 			)
 		).map((row) => row.containerId),
 	);

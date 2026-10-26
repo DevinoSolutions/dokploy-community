@@ -101,8 +101,9 @@ export const swarmRouter = createTRPCRouter({
 				return await getApplicationInfo(input.appName, input.serverId);
 
 			// a member, or an owner or admin of an organization that does not own
-			// the instance on the local host, is asked about the services they can read; the rest are
-			// left out of the command instead of failing the whole page
+			// the instance on the local host, is asked about the services they can
+			// read; the rest are left out of the command instead of failing the
+			// whole page
 			const readable: string[] = [];
 			for (const appName of new Set(input.appName)) {
 				try {
@@ -136,9 +137,7 @@ export const swarmRouter = createTRPCRouter({
 			// keep their organization's containers and the host's own, and lose
 			// the containers of every other organization.
 			return stats
-				? await filterReadableStats(ctx, stats, input.serverId, {
-						strict: true,
-					})
+				? await filterReadableStats(ctx, stats, input.serverId)
 				: stats;
 		}),
 });

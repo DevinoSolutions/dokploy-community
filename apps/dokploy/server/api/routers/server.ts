@@ -812,9 +812,7 @@ export const serverRouter = createTRPCRouter({
 			// they can read on that server; the host's own containers (Dokploy,
 			// its database, Traefik, anything unlabelled) only an owner or admin.
 			const stats = await getAllContainerStats(serverId);
-			return await filterReadableStats(ctx, stats, serverId, {
-				strict: true,
-			});
+			return await filterReadableStats(ctx, stats, serverId);
 		}),
 	getContainerProcesses: withPermission("monitoring", "read")
 		.input(
