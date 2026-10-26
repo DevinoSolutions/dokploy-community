@@ -18,6 +18,7 @@ import { quote } from "shell-quote";
 import { WebSocketServer } from "ws";
 import {
 	canAccessDockerOverWss,
+	canReadHostStatsOverWss,
 	hasComposeProjectPrefix,
 	isHostStatsBucketName,
 	isServiceContainerName,
@@ -220,6 +221,16 @@ export const setupDockerStatsMonitoringSocketServer = (
 				ws.close(4403, "forbidden");
 				return;
 			}
+		}
+
+		// Without a service the stats are the host's: its own, or any container
+		// on it by name. They serve every organization of the instance, so only
+		// the one that owns it reads them; a service is pinned above.
+		if (
+			!(await canReadHostStatsOverWss(session, resolvedServerId, serviceId))
+		) {
+			ws.close(4403, "forbidden");
+			return;
 		}
 
 		// `inFlight` guards against overlapping ticks. The tick body awaits SSH

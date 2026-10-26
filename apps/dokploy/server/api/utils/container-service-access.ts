@@ -617,9 +617,10 @@ export const resolveMetricsTarget = async (
 	try {
 		if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) throw containerNotFound();
 		if (!(await canReachServer(ctx, serverId))) throw containerNotFound();
-		// the host's own: owners and admins, and no other service's name in it
+		// the host's own: owners and admins (on the local host, those of the
+		// organization that owns the instance), and no other service's name in it
 		const hostOwn = async () =>
-			(await isOwnerOrAdmin(ctx)) &&
+			(await canUseHostOwnContainers(ctx, serverId)) &&
 			(
 				await checkDockerObjectServices(
 					ctx,
@@ -669,7 +670,8 @@ export const resolveMetricsTarget = async (
 };
 
 // What one list row may show a caller: a service they can read, or, for the
-// host's own containers (no service behind them), only an owner or admin.
+// host's own containers (no service behind them), only whoever may use them
+// (canUseHostOwnContainers).
 const rowVisible = (check: ContainerServiceCheck, admin: boolean) =>
 	check.outcome === "readable" || (check.outcome === "unowned" && admin);
 
@@ -681,11 +683,14 @@ const rowVisible = (check: ContainerServiceCheck, admin: boolean) =>
  * is everything when the labels cannot be read.
  *
  * Owners and admins see the list as it is (the Docker page lists everything on
- * the host). With `strict` they are checked too: a container of another
- * organization is dropped, and the host's own containers stay. The routes that
- * list by an appName use `strict`, because the command behind them matches more
- * than the appName (a prefix, a substring, an id prefix) and the appName is
- * something the caller can rename their own service to.
+ * the host), except on the local host when their organization does not own the
+ * instance: there they are checked like a member, so they keep the containers
+ * of their own services and lose the host's own and every other organization's.
+ * With `strict` they are checked too: a container of another organization is
+ * dropped, and the host's own containers stay. The routes that list by an
+ * appName use `strict`, because the command behind them matches more than the
+ * appName (a prefix, a substring, an id prefix) and the appName is something
+ * the caller can rename their own service to.
  *
  * The batched `docker inspect` exits non-zero when one container has vanished
  * but still prints the others; those are used and only the missing ones are
@@ -700,7 +705,7 @@ export const filterReadableContainers = async <
 	options: { strict?: boolean } = {},
 ): Promise<T[]> => {
 	if (containers.length === 0) return containers;
-	const admin = await isOwnerOrAdmin(ctx);
+	const admin = await canUseHostOwnContainers(ctx, serverId);
 	if (admin && !options.strict) return containers;
 
 	// the placeholder "No container id" is not something docker can inspect
@@ -775,7 +780,7 @@ export const filterReadableTasks = async <T>(
 	serverId?: string,
 ): Promise<T[]> => {
 	if (rows.length === 0) return rows;
-	const admin = await isOwnerOrAdmin(ctx);
+	const admin = await canUseHostOwnContainers(ctx, serverId);
 
 	const visible = new Map<string, Promise<boolean>>();
 	const kept: T[] = [];
@@ -806,9 +811,11 @@ export const filterReadableTasks = async <T>(
 /**
  * Narrows rows that name a swarm service (`docker service ls`, `docker service
  * ps`) the way the container lists are narrowed: a member gets only the rows of
- * services they can read on this server. Owners and admins see the host's list
- * as it is (the Docker page lists everything on the host), without one
- * `docker service inspect` per row.
+ * services they can read on this server. Whoever may use the host's own
+ * containers (canUseHostOwnContainers) sees the host's list as it is (the Docker
+ * page lists everything on the host), without one `docker service inspect` per
+ * row; an owner or admin of another organization on the local host is narrowed
+ * like a member.
  */
 export const filterReadableServiceRows = async <T>(
 	ctx: PermissionCtx,
@@ -816,28 +823,27 @@ export const filterReadableServiceRows = async <T>(
 	serviceNameOf: (row: T) => string,
 	serverId?: string,
 ): Promise<T[]> => {
-	if (await isOwnerOrAdmin(ctx)) return rows;
+	if (await canUseHostOwnContainers(ctx, serverId)) return rows;
 	return await filterReadableTasks(ctx, rows, serviceNameOf, serverId);
 };
 
 /**
  * The same for `docker stats` rows, which carry the container id as `ID`.
- * `strict` checks owners and admins too (see `filterReadableContainers`).
+ * Owners and admins are checked too (`strict`, see `filterReadableContainers`):
+ * every route that lists stats shares the host with other organizations.
  */
 export const filterReadableStats = async <T extends { ID: string }>(
 	ctx: PermissionCtx,
 	rows: T[],
 	serverId?: string,
-	options: { strict?: boolean } = {},
 ): Promise<T[]> => {
-	if (!options.strict && (await isOwnerOrAdmin(ctx))) return rows;
 	const readable = new Set(
 		(
 			await filterReadableContainers(
 				ctx,
 				rows.map((row) => ({ containerId: row.ID })),
 				serverId,
-				options,
+				{ strict: true },
 			)
 		).map((row) => row.containerId),
 	);
@@ -855,15 +861,17 @@ type DockerEventLike = {
  * name) in `Actor.Attributes`, which are mapped to Dokploy services like any
  * other container's. Events that belong to no service (images, networks,
  * volumes, nodes, the daemon, a container nobody labelled) are the host's own
- * and only an owner or admin sees them, so everything else is dropped for a
- * member.
+ * and only whoever may use the host's own containers sees them, so everything
+ * else is dropped for a member, and for an owner or admin of an organization
+ * that does not own the instance on the local host.
  */
 export const filterReadableEvents = async <T extends DockerEventLike>(
 	ctx: PermissionCtx,
 	events: T[],
 	serverId?: string,
 ): Promise<T[]> => {
-	if (events.length === 0 || (await isOwnerOrAdmin(ctx))) return events;
+	if (events.length === 0 || (await canUseHostOwnContainers(ctx, serverId)))
+		return events;
 
 	const rows = events.flatMap((event) => {
 		const attributes = event.Actor?.Attributes ?? {};

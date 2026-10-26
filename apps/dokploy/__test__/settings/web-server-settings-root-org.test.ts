@@ -144,18 +144,22 @@ describe("with the real root organization check", () => {
 		expect(result.metricsConfig?.server.token).toBe("");
 		expect(result.metricsConfig?.server.port).toBe(4500);
 		expect(JSON.stringify(result)).not.toContain(TOKEN);
+		// the monitoring page leaves the Dokploy host out for this organization
+		expect(result.localHostAccess).toBe(false);
 	});
 
 	it("user.getMetricsToken blanks the token for a member of the root organization", async () => {
 		const result = await callerAs("member", ROOT_ORG).user.getMetricsToken();
 
 		expect(result.metricsConfig?.server.token).toBe("");
+		expect(result.localHostAccess).toBe(true);
 	});
 
 	it("user.getMetricsToken gives the token to the root organization's owner", async () => {
 		const result = await callerAs("owner", ROOT_ORG).user.getMetricsToken();
 
 		expect(result.metricsConfig?.server.token).toBe(TOKEN);
+		expect(result.localHostAccess).toBe(true);
 	});
 
 	const monitoring = {
