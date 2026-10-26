@@ -65,6 +65,14 @@ export const validateBuildpacks = () => `
 
 export const validateTraefik = () => `
   image=$(docker service inspect dokploy-traefik --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null || docker container inspect dokploy-traefik --format '{{.Config.Image}}' 2>/dev/null)
+  case "$image" in
+    sha256:*)
+      # Running from an image ID: name it by its tag, else its version label.
+      resolved=$(docker image inspect "$image" --format '{{range .RepoTags}}{{println .}}{{end}}' 2>/dev/null | head -n 1)
+      [ -z "$resolved" ] && resolved=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null)
+      [ -n "$resolved" ] && image="$resolved"
+      ;;
+  esac
   if [ -n "$image" ]; then
     echo "$(echo "$image" | sed 's/@.*//' | awk -F: '{print $NF}' | sed 's/^v//') true"
   else

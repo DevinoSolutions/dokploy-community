@@ -135,26 +135,26 @@ describe("Traefik update endpoints", () => {
 		expect(mocks.pullTraefikImage).toHaveBeenCalledWith("server-a");
 		// The only recreate that changes the version: it names the new image.
 		expect(mocks.writeTraefikSetup).toHaveBeenCalledWith({
-			env: TRAEFIK_ENV,
-			additionalPorts: [
-				{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
-			],
+			env: expect.any(Function),
+			additionalPorts: expect.any(Function),
 			serverId: "server-a",
 			image: "traefik:v3.7.16",
 		});
+		// What the host runs when the job starts is what the recreate keeps.
+		const [options] = mocks.writeTraefikSetup.mock.calls[0]!;
+		expect(options.env(TRAEFIK_ENV)).toBe(TRAEFIK_ENV);
+		const ports = [{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" }];
+		expect(options.additionalPorts(ports)).toBe(ports);
 		expect(mocks.pullTraefikImage.mock.invocationCallOrder[0]).toBeLessThan(
 			mocks.writeTraefikSetup.mock.invocationCallOrder[0]!,
 		);
 	});
 
-	it("reads env and ports before the download, while Traefik is still running", async () => {
+	it("leaves reading env and ports to the queued job, not the request", async () => {
 		await caller.updateTraefik({ serverId: "server-a" });
 
-		const pulledAt = mocks.pullTraefikImage.mock.invocationCallOrder[0]!;
-		expect(
-			mocks.readEnvironmentVariableList.mock.invocationCallOrder[0],
-		).toBeLessThan(pulledAt);
-		expect(mocks.readPorts.mock.invocationCallOrder[0]).toBeLessThan(pulledAt);
+		expect(mocks.readEnvironmentVariableList).not.toHaveBeenCalled();
+		expect(mocks.readPorts).not.toHaveBeenCalled();
 	});
 
 	it("reports why the background update failed, and clears it on the next attempt", async () => {

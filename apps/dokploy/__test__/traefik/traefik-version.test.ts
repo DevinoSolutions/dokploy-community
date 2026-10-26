@@ -36,6 +36,7 @@ describe("parseTraefikImageVersion", () => {
 	it.each([
 		["traefik:v3.6.25", "3.6.25"],
 		["traefik:v3.5.4@sha256:abc123", "3.5.4"],
+		[`traefik:v3.7.16@sha256:${"a".repeat(64)}`, "3.7.16"],
 		["docker.io/library/traefik:3.7", "3.7.0"],
 		["localhost:5000/traefik:v3.6.25", "3.6.25"],
 		["traefik:latest", null],
@@ -107,6 +108,7 @@ describe("getTraefikOverview", () => {
 	it.each([
 		["traefik:v3.6.25", "outdated"],
 		["traefik:v3.7.16", "up-to-date"],
+		[`traefik:v3.7.16@sha256:${"a".repeat(64)}`, "up-to-date"],
 	])("a host on %s is %s with the 3.7.16 pin", async (image, status) => {
 		mockOutput(mocks.execAsync, `${image}|running|${startedAt}`);
 
@@ -114,6 +116,123 @@ describe("getTraefikOverview", () => {
 
 		expect(overview.recommendedVersion).toBe("3.7.16");
 		expect(overview.versionStatus).toBe(status);
+	});
+
+	describe("a host recreated from its image ID", () => {
+		const imageId = `sha256:${"0123abcd".repeat(8)}`;
+		const inspected = (tags: string, digests: string, labels: string) =>
+			`${tags}
+${digests}
+${labels}`;
+
+		it.each([
+			[
+				"its tag",
+				inspected('["traefik:v3.6.25"]', "[]", "null"),
+				"traefik:v3.6.25",
+				"outdated",
+			],
+			[
+				"its tag, ahead of other tags",
+				inspected(
+					'["registry.example.com/mirror:latest","traefik:v3.7.16"]',
+					"[]",
+					"null",
+				),
+				"traefik:v3.7.16",
+				"up-to-date",
+			],
+			[
+				"its most specific tag, not the first one",
+				inspected('["traefik:v3","traefik:v3.9.0"]', "[]", "null"),
+				"traefik:v3.9.0",
+				"newer",
+			],
+			[
+				"its highest tag, whatever the order",
+				inspected(
+					'["traefik:v3.9.0","traefik:v3","traefik:v3.6"]',
+					"[]",
+					"null",
+				),
+				"traefik:v3.9.0",
+				"newer",
+			],
+			[
+				"its version label, ahead of its tags",
+				inspected(
+					'["traefik:v3","traefik:latest"]',
+					"[]",
+					'{"org.opencontainers.image.version":"v3.6.25"}',
+				),
+				"traefik:v3.6.25",
+				"outdated",
+			],
+			[
+				"its version label when it has no tag",
+				inspected(
+					"[]",
+					'["traefik@sha256:aaa"]',
+					'{"org.opencontainers.image.version":"v3.6.25"}',
+				),
+				"traefik:v3.6.25",
+				"outdated",
+			],
+			[
+				"a repository that is not Traefik's",
+				inspected('["registry.example.com/traefik:v3.6.25"]', "[]", "null"),
+				"registry.example.com/traefik:v3.6.25",
+				"custom",
+			],
+		])("is classified by %s", async (_name, inspect, image, status) => {
+			mockOutput(mocks.execAsync, `${imageId}|running|${startedAt}`);
+			mockOutput(mocks.execAsync, inspect);
+
+			const overview = await getTraefikOverview();
+
+			expect(overview).toMatchObject({ image, versionStatus: status });
+			expect(mocks.execAsync).toHaveBeenLastCalledWith(
+				expect.stringContaining(`docker image inspect ${imageId}`),
+			);
+		});
+
+		it("keeps the ID, as a custom image, when nothing names it", async () => {
+			mockOutput(mocks.execAsync, `${imageId}|running|${startedAt}`);
+			mockOutput(mocks.execAsync, inspected("[]", "[]", "null"));
+
+			const overview = await getTraefikOverview();
+
+			expect(overview).toMatchObject({
+				image: imageId,
+				currentVersion: null,
+				versionStatus: "custom",
+			});
+		});
+
+		it("keeps the ID when the image can't be inspected", async () => {
+			mockOutput(mocks.execAsync, `${imageId}|running|${startedAt}`);
+			mocks.execAsync.mockRejectedValueOnce(new Error("No such image"));
+
+			const overview = await getTraefikOverview();
+
+			expect(overview).toMatchObject({
+				image: imageId,
+				versionStatus: "custom",
+			});
+		});
+
+		it("asks a remote server about the image on that server", async () => {
+			mockOutput(mocks.execAsyncRemote, `${imageId}|running|${startedAt}`);
+			mockOutput(
+				mocks.execAsyncRemote,
+				inspected('["traefik:v3.6.25"]', "[]", "null"),
+			);
+
+			const overview = await getTraefikOverview("server-a");
+
+			expect(overview.versionStatus).toBe("outdated");
+			expect(mocks.execAsync).not.toHaveBeenCalled();
+		});
 	});
 
 	it("reports newer and never asks for a downgrade", async () => {

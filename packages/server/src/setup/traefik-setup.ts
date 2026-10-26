@@ -67,7 +67,8 @@ const refuseTraefikImage = (message: string) => {
 	return error;
 };
 
-const isImageId = (reference: string) => /^sha256:[0-9a-f]+$/i.test(reference);
+export const isImageId = (reference: string) =>
+	/^sha256:[0-9a-f]+$/i.test(reference);
 
 // Saving env, ports or the dashboard toggle must not change the Traefik
 // version, so a routine recreate reuses the running image as it is. Without a
