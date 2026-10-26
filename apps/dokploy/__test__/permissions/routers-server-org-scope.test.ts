@@ -299,8 +299,10 @@ describe("patch.cleanPatchRepos is organization-scoped", () => {
 
 	it("refuses the local cleanup to another organization", async () => {
 		const caller = createCaller({
-			...ownerCtx,
+			user: { id: "user-1", email: "owner@test.com", role: "owner" },
 			session: { activeOrganizationId: "org-2" },
+			req: {} as unknown,
+			res: {} as unknown,
 		} as never);
 
 		await expect(caller.patch.cleanPatchRepos({})).rejects.toMatchObject({
