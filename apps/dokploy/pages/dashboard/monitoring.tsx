@@ -20,6 +20,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { useLocalStorage } from "@/hooks/useLocalStorage";
+import { canShowLocalHost } from "@/lib/local-host-flag";
 import { api } from "@/utils/api";
 
 const Dashboard = () => {
@@ -28,13 +29,22 @@ const Dashboard = () => {
 		false,
 	);
 
-	const { data: monitoring, isPending } = api.user.getMetricsToken.useQuery();
+	const {
+		data: monitoring,
+		isPending,
+		isError: isMonitoringError,
+	} = api.user.getMetricsToken.useQuery();
 	const [selectedServerId, setSelectedServerId] =
 		useState<string>(LOCAL_SERVER_ID);
 	const { data: servers } = api.server.getServersForMonitoring.useQuery();
 	// The Dokploy host serves every organization of the instance, so only the
-	// one that owns it monitors it: any other starts on its first server.
-	const canMonitorLocalHost = monitoring?.localHostAccess !== false;
+	// one that owns it monitors it: any other starts on its first server, and so
+	// does one whose flag failed to load.
+	const canMonitorLocalHost = canShowLocalHost({
+		enabled: true,
+		isError: isMonitoringError,
+		localHostAccess: monitoring?.localHostAccess,
+	});
 	const firstServerId = servers?.[0]?.serverId;
 	useEffect(() => {
 		if (!canMonitorLocalHost && firstServerId) {
