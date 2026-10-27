@@ -205,6 +205,21 @@ describe("host schedules belong to the organization that owns the instance", () 
 	);
 
 	it.each(hostRoutes)(
+		"%s says so when the pinned id matches no organization",
+		async (_name, run) => {
+			vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-gone");
+			try {
+				await expect(run(caller())).rejects.toMatchObject({
+					code: "FORBIDDEN",
+					message: expect.stringContaining("DOKPLOY_ROOT_ORGANIZATION_ID"),
+				});
+			} finally {
+				vi.unstubAllEnvs();
+			}
+		},
+	);
+
+	it.each(hostRoutes)(
 		"%s lets the organization that owns the instance through",
 		async (_name, run, effect) => {
 			mocks.rootOrganization = "org-2";

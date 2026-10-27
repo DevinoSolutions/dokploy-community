@@ -40,7 +40,7 @@ export const swarmRouter = createTRPCRouter({
 		.query(async ({ input, ctx }) => {
 			await assertLocalHostAccess(
 				input.serverId,
-				ctx.session?.activeOrganizationId,
+				ctx.session.activeOrganizationId,
 			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getSwarmNodes(input.serverId);
@@ -50,7 +50,7 @@ export const swarmRouter = createTRPCRouter({
 		.query(async ({ input, ctx }) => {
 			await assertLocalHostAccess(
 				input.serverId,
-				ctx.session?.activeOrganizationId,
+				ctx.session.activeOrganizationId,
 			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getNodeInfo(input.nodeId, input.serverId);
