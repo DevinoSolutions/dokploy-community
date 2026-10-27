@@ -242,13 +242,15 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 														))}
 													</ul>
 												)}
-												{service.eligible && service.warnings.length > 0 && (
-													<ul className="ml-6 list-disc text-xs text-muted-foreground">
-														{service.warnings.map((warning) => (
-															<li key={warning}>{warning}</li>
-														))}
-													</ul>
-												)}
+												{service.eligible &&
+													isSelected &&
+													service.warnings.length > 0 && (
+														<ul className="ml-6 list-disc text-xs text-muted-foreground">
+															{service.warnings.map((warning) => (
+																<li key={warning}>{warning}</li>
+															))}
+														</ul>
+													)}
 											</li>
 										);
 									})}
@@ -297,8 +299,8 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 								/>
 								<p className="text-xs text-muted-foreground">
 									{ROLLING_DRAIN_MIN_SECONDS} to {ROLLING_DRAIN_MAX_SECONDS}.
-									Wait after the old container is out of rotation and before
-									it is stopped, so requests already in flight on it finish. The
+									Wait after the old container is out of rotation and before it
+									is stopped, so requests already in flight on it finish. The
 									old container is made unhealthy first, which needs a
 									shell-form healthcheck (see the docs). Without one the old
 									container is stopped while still routed: add a Traefik retry

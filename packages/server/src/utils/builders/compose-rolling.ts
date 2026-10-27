@@ -294,6 +294,9 @@ export const ROLLING_ROUTE_SETTLE_SECONDS = 3;
 /** Slack added to the bound of the wait for `unhealthy`, which is capped at the longest health timeout. */
 const ROLLING_UNHEALTHY_SLACK_SECONDS = 3;
 
+/** Slack added to the wait for the old container to be healthy again (interval + timeout + this). */
+const ROLLING_RECOVER_SLACK_SECONDS = 5;
+
 const DRAIN_WRAP_PREFIX = `[ ! -s ${ROLLING_DRAIN_MARKER_PATH} ] && (`;
 
 /** The shell command of a healthcheck test, when the test is shell form. */
@@ -428,9 +431,13 @@ export const getRollingDrainWarnings = (
 		const stoppedAsBefore =
 			"the old container is stopped while Traefik still routes to it.";
 		if (getShellTestCommand(healthcheck.test) === undefined) {
+			const execForm =
+				Array.isArray(healthcheck.test) && healthcheck.test[0] === "CMD";
 			warnings.push({
 				service,
-				message: `"${service}": the healthcheck is exec form, so ${stoppedAsBefore} A CMD-SHELL healthcheck (it needs a shell in the image) avoids that.`,
+				message: execForm
+					? `"${service}": the healthcheck is exec form, so ${stoppedAsBefore} A CMD-SHELL healthcheck (it needs a shell in the image) avoids that.`
+					: `"${service}": the healthcheck test has a shape Dokploy cannot wrap, so ${stoppedAsBefore} Use a plain string or ["CMD-SHELL", "..."].`,
 			});
 			continue;
 		}
@@ -846,7 +853,7 @@ export const getRollingReplaceScript = ({
 		DOKPLOY_ROLL_BUILD=${quote([buildServices.join(" ")])};
 		DOKPLOY_ROLL_PULL=${quote([pullServices.join(" ")])};
 		DOKPLOY_ROLL_PROMOTED=0; DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_ABORTING=0;
-		DOKPLOY_ROLL_SVC=""; DOKPLOY_ROLL_BEFORE=""; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_REASON="";
+		DOKPLOY_ROLL_SVC=""; DOKPLOY_ROLL_BEFORE=""; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_REASON=""; DR_EMPTY="";
 		dokploy_roll_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Rolling replace: $*"; };
 		dokploy_roll_sleep() { sleep "$1" & wait $!; };
 		dokploy_roll_compose() { env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} docker ${invocation} "$@"; };
@@ -860,15 +867,19 @@ export const getRollingReplaceScript = ({
 		};
 		dokploy_roll_honours_drain() {
 			DR_WHY="";
-			DR_I=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}|{{range .Mounts}}{{.Destination}} {{end}}|{{range $k, $v := .HostConfig.Tmpfs}}{{$k}} {{end}}|{{json .Config.Healthcheck.Test}}' "$1" 2>/dev/null) || DR_I="";
+			DR_I=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}|{{range .Mounts}}{{.Destination}} {{end}}|{{range $k, $v := .HostConfig.Tmpfs}}{{$k}} {{end}}' "$1" 2>/dev/null) || DR_I="";
 			if [ -z "$DR_I" ]; then DR_WHY="the old container could not be inspected"; return 1; fi;
 			if [ "$(printf '%s' "$DR_I" | cut -d'|' -f1)" = "true" ]; then DR_WHY="its root file system is read-only"; return 1; fi;
+			set -f;
 			for DR_M in $(printf '%s' "$DR_I" | cut -d'|' -f2) $(printf '%s' "$DR_I" | cut -d'|' -f3); do
 				case "$DR_M" in
-					/|/tmp|/tmp/|${ROLLING_DRAIN_MARKER_PATH}) DR_WHY="$DR_M is a mount or a tmpfs, so the marker would be shared with the new replica or lost"; return 1;;
+					/|/tmp|/tmp/|${ROLLING_DRAIN_MARKER_PATH}) set +f; DR_WHY="$DR_M is a mount or a tmpfs, so the marker would be shared with the new replica or lost"; return 1;;
 				esac;
 			done;
-			if ! printf '%s' "$DR_I" | cut -d'|' -f4- | grep -qF -- '${ROLLING_DRAIN_MARKER_PATH}'; then DR_WHY="its healthcheck does not honour the marker (it is not shell form, or the container was started before the marker existed)"; return 1; fi;
+			set +f;
+			DR_T=$(docker inspect -f '{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}' "$1" 2>/dev/null) || { DR_WHY="the old container could not be inspected"; return 1; };
+			if [ -z "$DR_T" ]; then DR_WHY="it has no healthcheck"; return 1; fi;
+			if ! printf '%s' "$DR_T" | grep -qF -- '${ROLLING_DRAIN_MARKER_PATH}'; then DR_WHY="its healthcheck does not honour the marker (Dokploy could not wrap its test, or the container was started before the marker existed)"; return 1; fi;
 			return 0;
 		};
 		dokploy_roll_drain_bound() {
@@ -894,11 +905,29 @@ export const getRollingReplaceScript = ({
 				dokploy_roll_sleep ${poll};
 			done;
 		};
+		dokploy_roll_clear_empty() {
+			if [ -n "$DR_EMPTY" ]; then rm -f "$DR_EMPTY"; fi;
+			DR_EMPTY="";
+		};
 		dokploy_roll_unmark() {
-			DR_TMP=$(mktemp 2>/dev/null) || return 0;
-			chmod 644 "$DR_TMP" 2>/dev/null || true;
-			for DR_O in $1; do docker cp "$DR_TMP" "$DR_O:${ROLLING_DRAIN_MARKER_PATH}" >/dev/null 2>&1 || true; done;
-			rm -f "$DR_TMP";
+			if [ -z "$DR_EMPTY" ] || [ ! -f "$DR_EMPTY" ]; then return 1; fi;
+			DR_UOK=1;
+			for DR_O in $1; do docker cp "$DR_EMPTY" "$DR_O:${ROLLING_DRAIN_MARKER_PATH}" >/dev/null 2>&1 || DR_UOK=0; done;
+			[ "$DR_UOK" = "1" ];
+		};
+		dokploy_roll_recover_bound() {
+			DR_HC=$(docker inspect -f '{{printf "%d %d" .Config.Healthcheck.Interval .Config.Healthcheck.Timeout}}' "$1" 2>/dev/null) || DR_HC="";
+			printf '%s\\n' "$DR_HC" | awk -v cap=${ROLLING_HEALTH_TIMEOUT_MAX_SECONDS} '{ i = $1 / 1e9; t = $2 / 1e9; if (i <= 0) i = 30; if (t <= 0) t = 30; b = i + t + ${ROLLING_RECOVER_SLACK_SECONDS}; b = int(b) + (b > int(b)); if (b > cap) b = cap; print b }';
+		};
+		dokploy_roll_wait_recovered() {
+			DR_RBOUND=$(dokploy_roll_recover_bound "$1");
+			case "$DR_RBOUND" in ''|*[!0-9]*) DR_RBOUND=${ROLLING_HEALTH_TIMEOUT_MAX_SECONDS};; esac;
+			DR_RDEADLINE=$(( $(date +%s) + DR_RBOUND ));
+			while :; do
+				if [ "$(dokploy_roll_new_state "$1")" = "running healthy" ]; then return 0; fi;
+				if [ "$(date +%s)" -ge "$DR_RDEADLINE" ]; then return 1; fi;
+				dokploy_roll_sleep ${poll};
+			done;
 		};
 		dokploy_roll_take_out() {
 			DR_OUT=0; DR_MARKED=0;
@@ -913,6 +942,14 @@ export const getRollingReplaceScript = ({
 			if [ -z "$DR_TMP" ] || ! { printf 'drain\\n' >"$DR_TMP" && chmod 644 "$DR_TMP"; } 2>/dev/null; then
 				if [ -n "$DR_TMP" ]; then rm -f "$DR_TMP"; fi;
 				dokploy_roll_log "$1: could not prepare the drain marker";
+				dokploy_roll_log "$1: the old container could not be taken out of rotation before it was stopped; requests in flight at the stop may fail";
+				return 1;
+			fi;
+			dokploy_roll_clear_empty;
+			DR_EMPTY=$(mktemp 2>/dev/null) || DR_EMPTY="";
+			if [ -z "$DR_EMPTY" ] || ! chmod 644 "$DR_EMPTY" 2>/dev/null; then
+				rm -f "$DR_TMP"; dokploy_roll_clear_empty;
+				dokploy_roll_log "$1: could not prepare the file that undoes the drain marker";
 				dokploy_roll_log "$1: the old container could not be taken out of rotation before it was stopped; requests in flight at the stop may fail";
 				return 1;
 			fi;
@@ -954,10 +991,24 @@ export const getRollingReplaceScript = ({
 			DR_NST=$(dokploy_roll_new_state "$2");
 			if [ "$DR_NST" = "running healthy" ]; then return 0; fi;
 			dokploy_roll_log "$1: the new replica is $DR_NST, putting the old container back in rotation";
-			if [ "$DR_MARKED" = "1" ]; then dokploy_roll_unmark "$3"; fi;
-			DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED; DOKPLOY_ROLL_ACTIVE=1;
+			DR_BACK=1;
+			if [ "$DR_MARKED" = "1" ]; then
+				if dokploy_roll_unmark "$3"; then
+					for DR_O in $3; do dokploy_roll_wait_recovered "$DR_O" || DR_BACK=0; done;
+				else
+					DR_BACK=0;
+				fi;
+			fi;
+			DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED;
 			DOKPLOY_ROLL_REASON="the new replica was $DR_NST after the old container was taken out of rotation";
-			dokploy_roll_fail "$1";
+			if [ "$DR_BACK" = "1" ]; then
+				DOKPLOY_ROLL_ACTIVE=1;
+				dokploy_roll_fail "$1";
+				return 1;
+			fi;
+			# Neither container is known to serve: remove nothing, leave both for the next deploy to reconcile.
+			DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTED=1;
+			echo "Error: ❌ Rolling replace of $1 failed: $DOKPLOY_ROLL_REASON, and the old container did not become healthy again after the drain marker was removed. Both containers were left running and nothing was removed; the next deploy reconciles them.";
 			return 1;
 		};
 		dokploy_roll_discard() {
@@ -971,6 +1022,7 @@ export const getRollingReplaceScript = ({
 		};
 		dokploy_roll_abort() {
 			if [ "$DOKPLOY_ROLL_ABORTING" = "1" ]; then exit 130; fi;
+			dokploy_roll_clear_empty;
 			DOKPLOY_ROLL_ABORTING=1;
 			dokploy_roll_log "the deployment was interrupted";
 			if [ "$DOKPLOY_ROLL_ACTIVE" = "1" ]; then
@@ -1114,6 +1166,7 @@ export const getRollingReplaceScript = ({
 		${ROLLING_RUN_FUNCTION}() {
 			trap 'dokploy_roll_abort; dokploy_roll_signal_done; exit 130' INT TERM HUP;
 			dokploy_roll_body; DR_RC=$?;
+			dokploy_roll_clear_empty;
 			trap - INT TERM HUP;
 			return $DR_RC;
 		};

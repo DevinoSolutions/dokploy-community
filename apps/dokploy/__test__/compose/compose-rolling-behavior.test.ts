@@ -85,6 +85,8 @@ interface ContainerSeed {
 	healthTest?: string;
 	/** "<interval> <timeout> <retries> [<start period>]", durations in nanoseconds. */
 	healthCfg?: string;
+	/** What an empty copy over the marker does: healthy (default), delay:<polls>, never. */
+	recoverMode?: string;
 	/** HostConfig.ReadonlyRootfs. */
 	readonlyRootfs?: boolean;
 	/** Destinations of the container's mounts. */
@@ -159,6 +161,7 @@ const createWorld = (seed: WorldSeed) => {
 		}
 		if (container.drainMode !== undefined)
 			files.drain_mode = container.drainMode;
+		if (container.recoverMode) files.recover_mode = container.recoverMode;
 		if (container.readonlyRootfs) files.readonly = "true";
 		if (container.mounts) files.mounts = container.mounts.join(" ");
 		if (container.tmpfs) files.tmpfs = container.tmpfs.join(" ");
@@ -901,7 +904,8 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			const world = createWorld(changedWeb());
 			const result = runRoll(world, OPTIONS);
 			expect(result.rc).toBe(0);
-			expect(result.stdout).toContain("could not be inspected");
+			expect(result.stdout).toContain("it has no healthcheck");
+			expect(result.stdout).not.toContain("could not be inspected");
 			expect(result.stdout).toContain(FALLBACK_LINE);
 			expect(calls(world).some((line) => line.startsWith("docker cp"))).toBe(
 				false,
@@ -990,6 +994,90 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			expect(log.some((line) => line.startsWith("docker stop"))).toBe(false);
 			expect(containersOf(world, "web")).toEqual([OLD]);
 			expect(runningOf(world, "web")).toEqual([OLD]);
+		});
+
+		it("the new replica is removed only after the old container is healthy again", {
+			timeout: 90_000,
+		}, () => {
+			// The old container needs three polls to recover from the empty marker.
+			const world = createWorld(
+				drainableWeb({ recoverMode: "delay:3" }, { flags: ["flip_new_on_cp"] }),
+			);
+			const result = runRoll(world, OPTIONS);
+			const log = calls(world);
+			expect(result.rc).not.toBe(0);
+			expect(result.promoted).toBe("0");
+			const emptyCopy = log.reduce(
+				(last, line, index) => (line.startsWith("docker cp") ? index : last),
+				-1,
+			);
+			const discard = log.findIndex(
+				(line, index) =>
+					index > emptyCopy && line.startsWith("docker rm -f web-new-"),
+			);
+			expect(discard).toBeGreaterThan(-1);
+			const recovered = log
+				.slice(emptyCopy, discard)
+				.filter(
+					(line) => line.endsWith(` ${OLD}`) && line.includes("State.Status"),
+				);
+			// unhealthy, unhealthy, unhealthy, then healthy: four polls before the discard.
+			expect(recovered.length).toBeGreaterThanOrEqual(4);
+			expect(containersOf(world, "web")).toEqual([OLD]);
+			expect(runningOf(world, "web")).toEqual([OLD]);
+		});
+
+		it("an old container that does not recover keeps the new replica: nothing is removed, the deploy still fails", {
+			timeout: 90_000,
+		}, () => {
+			const world = createWorld(
+				drainableWeb({ recoverMode: "never" }, { flags: ["flip_new_on_cp"] }),
+			);
+			const started = Date.now();
+			const result = runRoll(world, OPTIONS);
+			const log = calls(world);
+			expect(result.rc).not.toBe(0);
+			expect(result.stdout).toContain(
+				"the old container did not become healthy again",
+			);
+			expect(result.stdout).toContain("nothing was removed");
+			// Nothing is stopped or removed, so whatever still serves stays.
+			expect(log.some((line) => /^docker (stop|rm)/.test(line))).toBe(false);
+			expect(containersOf(world, "web")).toHaveLength(2);
+			expect(runningOf(world, "web")).toHaveLength(2);
+			// No automatic restore over two live containers.
+			expect(result.promoted).toBe("1");
+			// Bounded by interval + timeout + 5 s of its own healthcheck (1 s + 1 s).
+			expect(Date.now() - started).toBeLessThan(30_000);
+		});
+
+		it("an unmark that fails keeps the new replica and removes nothing", {
+			timeout: 90_000,
+		}, () => {
+			const world = createWorld(
+				drainableWeb({}, { flags: ["flip_new_on_cp", "cp.fail.empty"] }),
+			);
+			const result = runRoll(world, OPTIONS);
+			const log = calls(world);
+			expect(result.rc).not.toBe(0);
+			expect(result.stdout).toContain(
+				"the old container did not become healthy again",
+			);
+			expect(log.some((line) => /^docker (stop|rm)/.test(line))).toBe(false);
+			expect(containersOf(world, "web")).toHaveLength(2);
+			expect(result.promoted).toBe("1");
+		});
+
+		it("the file that undoes the marker is prepared before the marker is written", () => {
+			const { definitions } = getRollingReplaceScript({
+				...baseOptions,
+				drainSeconds: 1,
+			});
+			const takeOut = definitions.indexOf("dokploy_roll_take_out() {");
+			const empty = definitions.indexOf("DR_EMPTY=$(mktemp", takeOut);
+			const firstCopy = definitions.indexOf('docker cp "$DR_TMP"', takeOut);
+			expect(empty).toBeGreaterThan(takeOut);
+			expect(firstCopy).toBeGreaterThan(empty);
 		});
 
 		it("a new replica that goes bad while the old one is still healthy ends the unhealthy wait early", {

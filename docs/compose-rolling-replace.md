@@ -254,7 +254,11 @@ replica: the draining container is never the one left serving. The new replica
 is checked again while waiting and right before the stop. If it is no longer
 healthy, the marker is emptied (an empty file counts as no marker), the old
 container goes back in rotation and keeps serving, the new replica is removed and
-the deploy fails like any other unhealthy replica.
+the deploy fails like any other unhealthy replica. The new replica is removed only
+once the old container reports healthy again, which takes up to one healthcheck
+interval plus its timeout and a few seconds. If it does not (or the marker cannot
+be emptied), nothing is stopped or removed, both containers are left running, the
+deploy fails, and the next deploy reconciles them.
 
 **What it costs.** Docker marks the old container unhealthy only after
 `retries` failed probes, `interval` apart, so each rolled service takes longer

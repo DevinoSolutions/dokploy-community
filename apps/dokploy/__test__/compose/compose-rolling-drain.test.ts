@@ -362,6 +362,7 @@ describe("getRollingDrainWarnings", () => {
 				tmpfs: ["/run", "/tmp:size=64m"],
 			},
 			readonly: { healthcheck: { test: shell }, read_only: true },
+			shape: { healthcheck: { test: ["CMD-SHELL", "a", "b"] } },
 			other: {
 				healthcheck: { test: shell },
 				volumes: ["data:/data", "x:/tmp/app"],
@@ -378,6 +379,12 @@ describe("getRollingDrainWarnings", () => {
 		expect(warnings).toHaveLength(1);
 		expect(warnings[0]?.message).toBe(
 			'"exec": the healthcheck is exec form, so the old container is stopped while Traefik still routes to it. A CMD-SHELL healthcheck (it needs a shell in the image) avoids that.',
+		);
+	});
+
+	it("a test of a shape that cannot be wrapped is not called exec form", () => {
+		expect(getRollingDrainWarnings(input, ["shape"])[0]?.message).toBe(
+			'"shape": the healthcheck test has a shape Dokploy cannot wrap, so the old container is stopped while Traefik still routes to it. Use a plain string or ["CMD-SHELL", "..."].',
 		);
 	});
 
@@ -629,7 +636,9 @@ describe("the drain in the generated script", () => {
 			script(),
 			[
 				"dokploy_roll_unmark",
-				"DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED; DOKPLOY_ROLL_ACTIVE=1;",
+				"dokploy_roll_wait_recovered",
+				"DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED",
+				'if [ "$DR_BACK" = "1" ]; then',
 				'dokploy_roll_fail "$1"',
 			],
 			"dokploy_roll_new_still_ok() {",
@@ -638,6 +647,47 @@ describe("the drain in the generated script", () => {
 		expect(script()).toContain(
 			'if [ "$(dokploy_roll_new_state "$3")" != "running healthy" ]; then return 2; fi;',
 		);
+	});
+
+	it("the new replica is only discarded once the old container is healthy again; otherwise nothing is removed", () => {
+		const definitions = script();
+		const stillOk = definitions.indexOf("dokploy_roll_new_still_ok() {");
+		const fail = definitions.indexOf('dokploy_roll_fail "$1"', stillOk);
+		const kept = definitions.indexOf("nothing was removed", stillOk);
+		expect(fail).toBeGreaterThan(definitions.indexOf("DR_BACK=1;", stillOk));
+		expect(kept).toBeGreaterThan(fail);
+		// The never-recovers path removes and stops nothing.
+		const keptBlock = definitions.slice(
+			definitions.lastIndexOf("# Neither container", kept),
+			kept,
+		);
+		expect(keptBlock).not.toMatch(
+			/docker (stop|rm)|dokploy_roll_(remove|discard|fail)/,
+		);
+		// The recovery wait is interval + timeout + 5 s.
+		expect(definitions).toContain("b = i + t + 5");
+	});
+
+	it("reads the healthcheck test on its own, so no healthcheck and a failed inspect are told apart", () => {
+		const definitions = script();
+		expect(definitions).toContain(
+			"docker inspect -f '{{if .Config.Healthcheck}}{{json .Config.Healthcheck.Test}}{{end}}'",
+		);
+		expect(definitions).toContain('DR_WHY="it has no healthcheck"');
+		expect(definitions).toContain(
+			'DR_WHY="the old container could not be inspected"',
+		);
+	});
+
+	it("the mount loop does not glob, on every way out of it", () => {
+		const definitions = script();
+		const loop = definitions.indexOf("for DR_M in");
+		expect(definitions.lastIndexOf("set -f;", loop)).toBeGreaterThan(
+			definitions.indexOf("dokploy_roll_honours_drain() {"),
+		);
+		// The early return and the normal exit both turn globbing back on.
+		expect(definitions).toContain("set +f; DR_WHY=");
+		expect(definitions).toContain("done;\n\t\t\tset +f;");
 	});
 
 	it("guards the bound: an empty or non-numeric value falls back to the longest timeout", () => {
