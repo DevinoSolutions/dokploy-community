@@ -62,7 +62,6 @@ const rebuild = (
 ) =>
 	assertRebuildCommitMatchesDeploy({
 		composeId: "compose-1",
-		deploymentId: "dep-2",
 		servingCommitOutput,
 		buildServerId,
 		patches: patches as never,
@@ -189,14 +188,10 @@ describe("the recorded commit", () => {
 });
 
 describe("rebuild", () => {
-	it("proceeds when everything matches, and carries the record forward", async () => {
+	it("proceeds when everything matches, writing nothing: the rebuild records after its release (T-8260)", async () => {
 		recorded(SHA);
 		await expect(rebuild(`${SHA}\n`)).resolves.toBe(SHA);
-		expect(mocks.updateDeployment).toHaveBeenCalledWith("dep-2", {
-			pinnedCommit: SHA,
-			pinnedBuildServerId: "build-1",
-			pinnedPatchDigest: digestAppliedPatches([PATCH] as never),
-		});
+		expect(mocks.updateDeployment).not.toHaveBeenCalled();
 	});
 
 	it("proceeds when only a disabled row changed", async () => {

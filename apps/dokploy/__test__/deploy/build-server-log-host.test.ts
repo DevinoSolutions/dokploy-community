@@ -395,6 +395,73 @@ describe("old deployment cleanup", () => {
 		expect(rmCalls()).toHaveLength(1);
 		expect(rmCalls()[0]?.[0]).toBe("srv-c");
 	});
+
+	describe("a compose keeps its latest row that recorded a rebuild pin (T-8260)", () => {
+		const SHA = "0123456789abcdef0123456789abcdef01234567";
+		const recorded = (n: number) =>
+			row(n, { serverId: "srv-c", pinnedCommit: SHA });
+		const deployCompose = () =>
+			createDeploymentCompose({
+				composeId: "compose-1",
+				title: "t",
+			} as never);
+
+		beforeEach(() => {
+			mocks.findComposeById.mockResolvedValue({
+				composeId: "compose-1",
+				appName: "stack",
+				serverId: "srv-c",
+			});
+		});
+
+		it("when ten rows without a record pushed it out of the window", async () => {
+			// Newest first: the ten kept rows have no record, 80 and 81 are old,
+			// 80 is the latest that recorded one (81 is older and recorded too).
+			mocks.rows = [
+				...keptRows(),
+				recorded(80),
+				row(81, { serverId: "srv-c", pinnedCommit: SHA }),
+				row(82, { serverId: "srv-c" }),
+			];
+
+			await deployCompose();
+
+			expect(mocks.deletedIds.sort()).toEqual(["dep-81", "dep-82"]);
+			const logs = rmCalls().map(([, command]) => command);
+			expect(logs.join()).not.toContain("web-80.log");
+			expect(logs.join()).toContain("web-81.log");
+		});
+
+		it("and prunes normally when the latest recorded row is in the window", async () => {
+			mocks.rows = [
+				recorded(0),
+				...keptRows().slice(1),
+				recorded(80),
+				row(81, { serverId: "srv-c" }),
+			];
+
+			await deployCompose();
+
+			expect(mocks.deletedIds.sort()).toEqual(["dep-80", "dep-81"]);
+		});
+
+		it("but a service that is not a compose prunes by age alone", async () => {
+			mocks.findApplicationById.mockResolvedValue({
+				applicationId: "app-1",
+				appName: "web",
+				serverId: "srv-1",
+				buildServerId: null,
+			});
+			mocks.rows = [...keptRows(), recorded(80)];
+
+			await createDeployment({
+				applicationId: "app-1",
+				title: "Deploy",
+			} as never);
+
+			expect(mocks.deletedIds).toEqual(["dep-80"]);
+		});
+	});
 });
 
 describe("cleanup of preview rows that predate the recorded build server", () => {

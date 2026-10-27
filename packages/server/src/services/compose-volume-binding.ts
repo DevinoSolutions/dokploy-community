@@ -51,6 +51,7 @@ import {
 import { parse as parseShell, quote } from "shell-quote";
 import { parse } from "yaml";
 import { logger } from "../lib/logger";
+import type { Patch } from "./patch";
 import { findRefusedComposeVolumes } from "./volume-binding";
 
 type ComposeForVolumeCheck = Pick<
@@ -1808,14 +1809,21 @@ const loadOverrideFile = async (
 // before anything is built, torn down or started. A file that cannot be
 // rendered is left to the render step, which reports it and stops the script
 // before any docker command.
-export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
+//
+// `patches` are the patch rows the deploy already read: the compose file is
+// rendered from them, so the file checked here is the one the deploy builds
+// even if a patch is edited in between (T-8260).
+export const assertComposeVolumesBound = async (
+	rawCompose: ComposeNested,
+	{ patches }: { patches?: Patch[] } = {},
+) => {
 	const compose = await withResolvedVaultRefs(rawCompose);
 	assertCommandRunsComposeOnly(compose);
 	const overrideFiles = getCommandOverrideFiles(compose);
 	const commandVolumes = getCommandRunVolumes(compose);
 	let spec: Awaited<ReturnType<typeof addDomainToCompose>>;
 	try {
-		spec = await addDomainToCompose(compose, compose.domains);
+		spec = await addDomainToCompose(compose, compose.domains, { patches });
 	} catch (error) {
 		if (isMultiDocumentError(error)) {
 			throw multiDocumentError("the compose file");

@@ -318,7 +318,16 @@ const startComposePolicyAudit = (
 const assertComposeVolumesBoundForDeploy = async (
 	entity: Awaited<ReturnType<typeof findComposeById>>,
 	deployment: { deploymentId?: string; logPath: string },
-	{ freshVolumes, restoreFiles }: { freshVolumes: boolean; restoreFiles: boolean },
+	{
+		freshVolumes,
+		restoreFiles,
+		patches,
+	}: {
+		freshVolumes: boolean;
+		restoreFiles: boolean;
+		/** The patch rows the deploy applied, rendered from as read (T-8260). */
+		patches?: Patch[];
+	},
 ) => {
 	// The opt-in restricted-compose audit (T-7455) looks at the compose right
 	// before the guard below, so what the guard refuses is recorded too. Called
@@ -328,7 +337,7 @@ const assertComposeVolumesBoundForDeploy = async (
 	// organization turned it on. See services/compose-policy-audit.ts.
 	startComposePolicyAudit(entity, deployment);
 	try {
-		await assertComposeVolumesBound(entity);
+		await assertComposeVolumesBound(entity, { patches });
 	} catch (error) {
 		if (restoreFiles) {
 			try {
@@ -540,6 +549,7 @@ export const runComposeBuild = async (
 		await assertComposeVolumesBoundForDeploy(entity, deployment, {
 			freshVolumes,
 			restoreFiles: true,
+			patches: appliedPatches,
 		});
 	}
 
@@ -592,6 +602,7 @@ export const runComposeBuild = async (
 		deploymentId: deployment.deploymentId,
 		freshVolumes,
 		remoteBuild,
+		patches: appliedPatches,
 	});
 	if (!tearsDown) await checkpoint();
 	if (deployment.deploymentId && isReleaseCancelable(command, cancellable)) {
@@ -1066,7 +1077,6 @@ export const rebuildCompose = async ({
 			pinnedPatches = await findPatchesByEntityId(compose.composeId, "compose");
 			await assertRebuildCommitMatchesDeploy({
 				composeId: compose.composeId,
-				deploymentId: deployment.deploymentId,
 				servingCommitOutput,
 				buildServerId: compose.buildServerId,
 				patches: pinnedPatches,
@@ -1103,6 +1113,7 @@ export const rebuildCompose = async ({
 			await assertComposeVolumesBoundForDeploy(compose, deployment, {
 				freshVolumes,
 				restoreFiles: true,
+				patches: appliedPatches,
 			});
 		}
 
@@ -1168,6 +1179,7 @@ export const rebuildCompose = async ({
 			deploymentId: deployment.deploymentId,
 			freshVolumes,
 			remoteBuild,
+			patches: appliedPatches,
 		});
 		if (!tearsDown) await checkpoint();
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
@@ -1181,6 +1193,17 @@ export const rebuildCompose = async ({
 			await execAsyncRemote(compose.serverId, commandWithLog);
 		} else {
 			await execAsync(commandWithLog);
+		}
+
+		// Carries the record of the deploy forward on this row (T-7960), once the
+		// release is running, like a deploy (see runComposeBuild). The values are
+		// the ones the check above compared.
+		if (servingCommitOutput !== undefined) {
+			await recordDeployedCommit(deployment.deploymentId, {
+				servingCommitOutput,
+				buildServerId: compose.buildServerId,
+				patches: appliedPatches,
+			});
 		}
 		await phases.note(
 			`Deployment finished (total ${phases.elapsed(deployStartedAt)})`,

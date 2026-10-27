@@ -47,6 +47,8 @@ import type {
 	PropertiesNetworks,
 } from "./types";
 
+type PatchRow = typeof patch.$inferSelect;
+
 /**
  * How long a clone outside a deploy may run: it is sent TERM after this many
  * seconds and KILL `FETCH_CLONE_KILL_AFTER_SECONDS` later. A Fetch holds the
@@ -281,11 +283,15 @@ export const renderComposeWithDomains = async (
 		 * rendered exactly as before.
 		 */
 		rollingDrainServices?: string[];
+		/** The patch rows the deploy already read, see `addDomainToCompose`. */
+		patches?: PatchRow[];
 	} = {},
 ): Promise<{ content: string } | { errorCommand: string }> => {
 	try {
 		const composeConverted = applyRollingDrainHealthchecks(
-			await addDomainToCompose(compose, domains),
+			await addDomainToCompose(compose, domains, {
+				patches: options.patches,
+			}),
 			options.rollingDrainServices ?? [],
 		);
 
@@ -326,11 +332,14 @@ export const writeDomainsToCompose = async (
 		alsoRemove?: string[];
 		/** Services rolled by this deploy, see `renderComposeWithDomains`. */
 		rollingDrainServices?: string[];
+		/** The patch rows the deploy already read, see `addDomainToCompose`. */
+		patches?: PatchRow[];
 	} = {},
 ) => {
 	const alsoRemove = options.alsoRemove ?? [];
 	const rendered = await renderComposeWithDomains(compose, domains, {
 		rollingDrainServices: options.rollingDrainServices,
+		patches: options.patches,
 	});
 	if ("errorCommand" in rendered) {
 		// The script stops here: files staged for it would never be consumed.
@@ -354,14 +363,19 @@ export const writeDomainsToCompose = async (
 };
 export const applyComposeFilePatch = async (
 	compose: Compose,
+	patches?: PatchRow[],
 ): Promise<ComposeSpecification | null> => {
 	if (compose.sourceType === "raw") {
 		return null;
 	}
 
-	const composePatches = await db.query.patch.findMany({
-		where: eq(patch.composeId, compose.composeId),
-	});
+	// The rows a deploy already read (and checked) when it passes them, so a
+	// patch edited in between is not built unchecked.
+	const composePatches =
+		patches ??
+		(await db.query.patch.findMany({
+			where: eq(patch.composeId, compose.composeId),
+		}));
 
 	const composeFilePatch = composePatches.find(
 		(p) =>
@@ -411,9 +425,15 @@ const removeDomainLabels = (
 	return labels;
 };
 
+/**
+ * `options.patches` are the patch rows the deploy already read: the compose
+ * file patch comes from them, not from a second read of the table (T-8260).
+ * Unset, the rows are read here.
+ */
 export const addDomainToCompose = async (
 	compose: Compose,
 	domains: Domain[],
+	options: { patches?: PatchRow[] } = {},
 ) => {
 	const { appName } = compose;
 
@@ -434,7 +454,7 @@ export const addDomainToCompose = async (
 		return null;
 	}
 
-	result = (await applyComposeFilePatch(compose)) ?? result;
+	result = (await applyComposeFilePatch(compose, options.patches)) ?? result;
 
 	if (compose.isolatedDeployment) {
 		const randomized = randomizeDeployableSpecificationFile(
