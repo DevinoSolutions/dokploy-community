@@ -24,6 +24,7 @@ import {
 	getReleaseNotes,
 	getTraefikOverview,
 	getUpdateData,
+	getUpdateMigrationDelta,
 	getWebServerSettings,
 	IS_CLOUD,
 	isResponseCompressionEnabled,
@@ -80,6 +81,7 @@ import {
 import {
 	DOKPLOY_IMAGE_REPO,
 	DOKPLOY_MIN_PINNED_VERSION,
+	DOKPLOY_RELEASE_TAG_REGEX,
 	type DokployUpdateTarget,
 	dokployUpdateImage,
 	isBelowDokployPinFloor,
@@ -1044,6 +1046,7 @@ export const settingsRouter = createTRPCRouter({
 				}
 				await recordDokployRollbackPoint(packageInfo.version, {
 					installing,
+					installedImage: image,
 				}).catch(() => undefined);
 				await spawnAsync("docker", [
 					"service",
@@ -1071,6 +1074,22 @@ export const settingsRouter = createTRPCRouter({
 		}
 		return await readDokployRollbackPoint(packageInfo.version);
 	}),
+	// The migrations installing a release applies, so the Update dialog can say
+	// so before it starts. Same guards as updateServer; a target that can't be
+	// checked comes back as "unavailable" rather than as an error.
+	getUpdateMigrationDelta: adminProcedure
+		.input(
+			z.object({
+				version: z.string().max(128).regex(DOKPLOY_RELEASE_TAG_REGEX),
+			}),
+		)
+		.query(async ({ ctx, input }) => {
+			if (IS_CLOUD) {
+				return { status: "unavailable" as const };
+			}
+			await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
+			return await getUpdateMigrationDelta(packageInfo.version, input.version);
+		}),
 
 	getDokployVersion: protectedProcedure.query(() => {
 		return packageInfo.version;

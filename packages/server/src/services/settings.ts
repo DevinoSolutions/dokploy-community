@@ -33,6 +33,7 @@ import {
 	DOKPLOY_RELEASE_TAG_REGEX,
 	type DokployUpdateTarget,
 	isBelowDokployPinFloor,
+	isInstalledDokployImage,
 } from "../utils/dokploy-update-target";
 export interface IUpdateData {
 	latestVersion: string | null;
@@ -69,6 +70,14 @@ export interface IRollbackPoint {
 	version: string;
 	/** `sha256:<hex>` of the image that version ran from. */
 	digest: string;
+	/**
+	 * The image the update installed (`repo:tag` or `repo@sha256:<hex>`). The
+	 * rollback is only offered while the service still runs it. Absent on a
+	 * point recorded before this was kept.
+	 */
+	installedImage?: string;
+	/** ISO time the point was recorded, when the update started. */
+	recordedAt?: string;
 }
 
 const SERVICE_IMAGE_REGEX =
@@ -105,20 +114,29 @@ const inspectDokployService = async () => {
  * Records the image `currentVersion` runs from, before an update replaces it.
  * Never throws: when the running image can't be pinned to a digest in the fork
  * repo, the old point is removed so no rollback to a stale version is offered.
- * The old point is kept while an earlier update is still in flight, and when
- * `installing` is the running version itself (a reinstall replaces nothing).
+ * `installedImage` is the image the update is about to install. The old point
+ * is kept when `installing` is the running version itself (a reinstall
+ * replaces nothing). It is removed while an earlier update is still settling:
+ * the service spec already names that update's image, so what is running, and
+ * what the old point would roll back from, is unknown.
  */
 export const recordDokployRollbackPoint = async (
 	currentVersion: string,
 	{
 		installing,
+		installedImage,
 		file = getRollbackPointPath(),
-	}: { installing?: DokployUpdateTarget; file?: string } = {},
+	}: {
+		installing?: DokployUpdateTarget;
+		installedImage?: string;
+		file?: string;
+	} = {},
 ) => {
 	const tmp = `${file}.${randomUUID()}.tmp`;
 	try {
 		const { image, state } = await inspectDokployService();
 		if (!SETTLED_UPDATE_STATES.has(state)) {
+			await rm(file, { force: true });
 			return;
 		}
 		const match = SERVICE_IMAGE_REGEX.exec(image);
@@ -140,7 +158,12 @@ export const recordDokployRollbackPoint = async (
 			await rm(file, { force: true });
 			return;
 		}
-		const point: IRollbackPoint = { version: currentVersion, digest };
+		const point: IRollbackPoint = {
+			version: currentVersion,
+			digest,
+			...(installedImage && { installedImage }),
+			recordedAt: new Date().toISOString(),
+		};
 		await mkdir(dirname(file), { recursive: true });
 		await writeFile(tmp, JSON.stringify(point), { mode: 0o600 });
 		await rename(tmp, file);
@@ -156,7 +179,10 @@ export const recordDokployRollbackPoint = async (
 
 /**
  * The recorded point, or null when there is none, it is the running version,
- * or it is older than the oldest release a pinned update may install.
+ * it is older than the oldest release a pinned update may install, or the
+ * service no longer runs the image the update installed (something else has
+ * been installed since, so the point is stale). A point recorded without an
+ * installed image, by an older release, is not checked.
  */
 export const readDokployRollbackPoint = async (
 	currentVersion: string,
@@ -166,7 +192,7 @@ export const readDokployRollbackPoint = async (
 		const raw = JSON.parse(await readFile(file, "utf8")) as Partial<
 			Record<keyof IRollbackPoint, unknown>
 		>;
-		const { version, digest } = raw ?? {};
+		const { version, digest, installedImage, recordedAt } = raw ?? {};
 		if (
 			typeof version !== "string" ||
 			typeof digest !== "string" ||
@@ -177,7 +203,19 @@ export const readDokployRollbackPoint = async (
 		) {
 			return null;
 		}
-		return { version, digest };
+		if (typeof installedImage === "string") {
+			const { image } = await inspectDokployService();
+			if (!isInstalledDokployImage(image, installedImage)) {
+				return null;
+			}
+		}
+		return {
+			version,
+			digest,
+			...(typeof installedImage === "string" && { installedImage }),
+			...(typeof recordedAt === "string" &&
+				!Number.isNaN(Date.parse(recordedAt)) && { recordedAt }),
+		};
 	} catch {
 		return null;
 	}

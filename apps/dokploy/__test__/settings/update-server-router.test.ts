@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import packageInfo from "../../package.json";
 
-const state = vi.hoisted(() => ({ isCloud: false }));
+const state = vi.hoisted(() => ({ isCloud: false, isRoot: true }));
 
 const mocks = vi.hoisted(() => ({
 	getDockerResourceType: vi.fn(),
 	getUpdateData: vi.fn(),
+	getUpdateMigrationDelta: vi.fn(),
 	readDokployRollbackPoint: vi.fn(),
 	recordDokployRollbackPoint: vi.fn(),
 	runBackgroundJob: vi.fn(),
@@ -17,9 +18,10 @@ vi.mock("@dokploy/server", () => ({
 	get IS_CLOUD() {
 		return state.isCloud;
 	},
-	isRootOrganization: async () => true,
+	isRootOrganization: async () => state.isRoot,
 	getDockerResourceType: mocks.getDockerResourceType,
 	getUpdateData: mocks.getUpdateData,
+	getUpdateMigrationDelta: mocks.getUpdateMigrationDelta,
 	readDokployRollbackPoint: mocks.readDokployRollbackPoint,
 	recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
 	runBackgroundJob: mocks.runBackgroundJob,
@@ -90,6 +92,7 @@ const recordedPoint = { version: "v0.30.8-community.31", digest: DIGEST };
 beforeEach(() => {
 	vi.clearAllMocks();
 	state.isCloud = false;
+	state.isRoot = true;
 	jobs = [];
 	failures = [];
 	// Like the real one: runs the job and never rejects.
@@ -142,7 +145,10 @@ describe("settings.updateServer without a target", () => {
 
 		expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledWith(
 			packageInfo.version,
-			{ installing: undefined },
+			{
+				installing: undefined,
+				installedImage: `${REPO}:v0.30.9-community.1`,
+			},
 		);
 		expect(
 			mocks.recordDokployRollbackPoint.mock.invocationCallOrder[0],
@@ -219,7 +225,7 @@ describe("settings.updateServer with a pinned target", () => {
 		// Recorded after the pull, before the service update.
 		expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledWith(
 			packageInfo.version,
-			{ installing },
+			{ installing, installedImage: image },
 		);
 		const [, pull, update] = mocks.spawnAsync.mock.invocationCallOrder;
 		const [record] = mocks.recordDokployRollbackPoint.mock.invocationCallOrder;
@@ -404,7 +410,7 @@ describe("settings.updateServer rollback", () => {
 		]);
 		expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledWith(
 			packageInfo.version,
-			{ installing: { digest: DIGEST } },
+			{ installing: { digest: DIGEST }, installedImage: `${REPO}@${DIGEST}` },
 		);
 		expect(mocks.audit.mock.calls[0]![1]).toMatchObject({
 			resourceName: "dokploy-version",
@@ -447,6 +453,84 @@ describe("settings.getUpdateRollback", () => {
 
 	it("offers nothing when no point is recorded", async () => {
 		await expect(caller.getUpdateRollback()).resolves.toBeNull();
+	});
+
+	it("passes the record date through", async () => {
+		const dated = { ...recordedPoint, recordedAt: "2026-10-27T10:00:00.000Z" };
+		mocks.readDokployRollbackPoint.mockResolvedValue(dated);
+
+		await expect(caller.getUpdateRollback()).resolves.toEqual(dated);
+	});
+});
+
+describe("settings.getUpdateMigrationDelta", () => {
+	const delta = {
+		status: "ok",
+		runningVersion: packageInfo.version,
+		targetVersion: "v0.30.8-community.35",
+		applies: ["0225_example"],
+		staysApplied: [],
+	};
+
+	beforeEach(() => {
+		mocks.getUpdateMigrationDelta.mockResolvedValue(delta);
+	});
+
+	it("checks the running version against the target tag", async () => {
+		await expect(
+			caller.getUpdateMigrationDelta({ version: "v0.30.8-community.35" }),
+		).resolves.toEqual(delta);
+		expect(mocks.getUpdateMigrationDelta).toHaveBeenCalledWith(
+			packageInfo.version,
+			"v0.30.8-community.35",
+		);
+	});
+
+	it("passes an unavailable check through instead of failing", async () => {
+		mocks.getUpdateMigrationDelta.mockResolvedValue({ status: "unavailable" });
+
+		await expect(
+			caller.getUpdateMigrationDelta({ version: "v0.30.8-community.35" }),
+		).resolves.toEqual({ status: "unavailable" });
+	});
+
+	it.each([
+		"latest",
+		DIGEST,
+		"../v0.30.8-community.35",
+		"v0.30.8-community.35/../../x",
+	])("rejects %s, which is not a release tag", async (version) => {
+		await expect(
+			caller.getUpdateMigrationDelta({ version }),
+		).rejects.toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.getUpdateMigrationDelta).not.toHaveBeenCalled();
+	});
+
+	it("a member can't run it", async () => {
+		await expect(
+			callerAs("member").getUpdateMigrationDelta({
+				version: "v0.30.8-community.35",
+			}),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		expect(mocks.getUpdateMigrationDelta).not.toHaveBeenCalled();
+	});
+
+	it("is refused to an organization that doesn't own the instance", async () => {
+		state.isRoot = false;
+
+		await expect(
+			caller.getUpdateMigrationDelta({ version: "v0.30.8-community.35" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		expect(mocks.getUpdateMigrationDelta).not.toHaveBeenCalled();
+	});
+
+	it("does nothing on cloud", async () => {
+		state.isCloud = true;
+
+		await expect(
+			caller.getUpdateMigrationDelta({ version: "v0.30.8-community.35" }),
+		).resolves.toEqual({ status: "unavailable" });
+		expect(mocks.getUpdateMigrationDelta).not.toHaveBeenCalled();
 	});
 });
 
