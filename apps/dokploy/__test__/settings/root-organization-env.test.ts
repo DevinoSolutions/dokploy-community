@@ -34,12 +34,14 @@ vi.mock("@dokploy/server", async () => ({
 }));
 
 // A fresh copy of the module for each test: it reports a missing pinned id once.
+let PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE: typeof import("@dokploy/server/services/admin").PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE;
 let findRootOrganization: typeof import("@dokploy/server/services/admin").findRootOrganization;
 let isRootOrganization: typeof import("@dokploy/server/services/admin").isRootOrganization;
 let logRootOrganization: typeof import("@dokploy/server/services/admin").logRootOrganization;
 let isSingleOrganizationInstance: typeof import("@dokploy/server/services/admin").isSingleOrganizationInstance;
 let assertOrganizationDeletable: typeof import("@dokploy/server/services/admin").assertOrganizationDeletable;
 let assertLocalHostAccess: typeof import("@/server/api/utils/local-host-access").assertLocalHostAccess;
+let assertCanManageInstance: typeof import("@/server/api/utils/web-server-settings-view").assertCanManageInstance;
 let canSeeMetricsToken: typeof import("@/server/api/utils/web-server-settings-view").canSeeMetricsToken;
 
 const FIRST = { id: "org-first", name: "First" };
@@ -69,6 +71,7 @@ beforeEach(async () => {
 	log = vi.spyOn(console, "log").mockImplementation(() => {});
 	error = vi.spyOn(console, "error").mockImplementation(() => {});
 	({
+		PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE,
 		findRootOrganization,
 		isRootOrganization,
 		logRootOrganization,
@@ -78,7 +81,7 @@ beforeEach(async () => {
 	({ assertLocalHostAccess } = await import(
 		"@/server/api/utils/local-host-access"
 	));
-	({ canSeeMetricsToken } = await import(
+	({ assertCanManageInstance, canSeeMetricsToken } = await import(
 		"@/server/api/utils/web-server-settings-view"
 	));
 });
@@ -138,6 +141,87 @@ describe("the organization that owns the instance", () => {
 				assertOrganizationDeletable(organizationId),
 			).rejects.toMatchObject({ code: "FORBIDDEN" });
 		}
+	});
+
+	it("says so when the pinned id matches no organization", async () => {
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-gone");
+		organizations([FIRST, PINNED]);
+
+		for (const organizationId of ["org-first", "org-pinned", undefined]) {
+			await expect(
+				assertLocalHostAccess(undefined, organizationId),
+			).rejects.toMatchObject({
+				code: "FORBIDDEN",
+				message: PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE,
+			});
+		}
+		expect(PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE).toContain(
+			"DOKPLOY_ROOT_ORGANIZATION_ID",
+		);
+	});
+
+	it("says so for the instance-management routes too, and keeps their usual message otherwise", async () => {
+		const owner = {
+			session: { activeOrganizationId: "org-first" },
+			user: { role: "owner" },
+		};
+		organizations([FIRST, PINNED]);
+
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-gone");
+		await expect(assertCanManageInstance(owner)).rejects.toMatchObject({
+			code: "FORBIDDEN",
+			message: PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE,
+		});
+
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-pinned");
+		await expect(assertCanManageInstance(owner)).rejects.toMatchObject({
+			code: "FORBIDDEN",
+			message: expect.stringContaining("owns this instance"),
+		});
+		await expect(
+			assertCanManageInstance({
+				...owner,
+				session: { activeOrganizationId: "org-pinned" },
+			}),
+		).resolves.toBeUndefined();
+
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "");
+		await expect(
+			assertCanManageInstance({
+				...owner,
+				session: { activeOrganizationId: "org-pinned" },
+			}),
+		).rejects.toMatchObject({
+			message: expect.stringContaining("owns this instance"),
+		});
+	});
+
+	it("refuses a caller outside a matched pin with the usual message", async () => {
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-pinned");
+		organizations([FIRST, PINNED]);
+
+		await expect(
+			assertLocalHostAccess(undefined, "org-first"),
+		).rejects.toMatchObject({
+			code: "FORBIDDEN",
+			message: expect.stringContaining("owns this Dokploy instance"),
+		});
+		await expect(
+			assertLocalHostAccess(undefined, "org-pinned"),
+		).resolves.toBeUndefined();
+	});
+
+	it("refuses a caller outside the first organization with the usual message when nothing is pinned", async () => {
+		organizations([FIRST, PINNED]);
+
+		await expect(
+			assertLocalHostAccess(undefined, "org-pinned"),
+		).rejects.toMatchObject({
+			code: "FORBIDDEN",
+			message: expect.stringContaining("owns this Dokploy instance"),
+		});
+		// No pin, so the refusal doesn't look the pin up again.
+		expect(mocks.findFirst).toHaveBeenCalledTimes(1);
 	});
 
 	it("reports a pinned id that matches nothing once", async () => {

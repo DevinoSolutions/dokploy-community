@@ -110,6 +110,18 @@ export const isSingleOrganizationInstance = async () =>
 	(await db.query.organization.findMany({ columns: { id: true }, limit: 2 }))
 		.length === 1 && !!(await findRootOrganization());
 
+export const PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE =
+	"DOKPLOY_ROOT_ORGANIZATION_ID names an organization that doesn't exist, so host-level settings are turned off. Set it to an existing organization's id on the Dokploy service, or remove it.";
+
+// The message for a refused host-level request: a pinned id that matches no
+// organization is what refuses everyone then, so say that rather than blaming
+// the caller. Only a refusal pays for the lookup, and an instance without a
+// pinned id never does.
+export const describeHostAccessRefusal = async (message: string) =>
+	pinnedRootOrganizationId() && !(await findRootOrganization())
+		? PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE
+		: message;
+
 export const ROOT_ORGANIZATION_DELETE_MESSAGE =
 	"This organization owns the Dokploy instance and can't be deleted";
 

@@ -584,7 +584,20 @@ const installRequirements = async (
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			onData?.(`❌ Couldn't connect to your server: ${message}`);
+			onData?.(
+				[
+					"",
+					"❌ Couldn't connect to your server — the connection settings were rejected before any connection was made.",
+					"",
+					"This usually means the SSH username is invalid or the private key can't be read.",
+					"",
+					`Technical details: ${message}`,
+					"",
+					"💡 Hints:",
+					"  • Check the SSH username saved for this server.",
+					"  • Check that the SSH key assigned to this server is a complete private key in a supported format.",
+				].join("\n"),
+			);
 			reject(
 				new ServerSetupError(`SSH connection error: ${message}`, {
 					cause: error,

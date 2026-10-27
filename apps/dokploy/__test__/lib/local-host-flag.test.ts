@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { canShowLocalHost } from "@/lib/local-host-flag";
+import {
+	canShowLocalHost,
+	explainsEmptyLocalHost,
+	waitsForLocalHostFlag,
+} from "@/lib/local-host-flag";
 
 describe("canShowLocalHost", () => {
 	it("shows the host to the organization that owns it", () => {
@@ -60,5 +64,64 @@ describe("canShowLocalHost", () => {
 				localHostAccess: undefined,
 			}),
 		).toBe(true);
+	});
+});
+
+describe("explainsEmptyLocalHost", () => {
+	it("explains an empty host to an organization that does not own it", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: undefined,
+				isFlagPending: false,
+				canSeeLocalHost: false,
+			}),
+		).toBe(true);
+	});
+
+	it("keeps the usual empty state for the organization that owns the host", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: undefined,
+				isFlagPending: false,
+				canSeeLocalHost: true,
+			}),
+		).toBe(false);
+	});
+
+	it("keeps the usual empty state for a remote server", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: "server-1",
+				isFlagPending: false,
+				canSeeLocalHost: false,
+			}),
+		).toBe(false);
+	});
+
+	it("waits for the flag before explaining anything", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: undefined,
+				isFlagPending: true,
+				canSeeLocalHost: false,
+			}),
+		).toBe(false);
+	});
+});
+
+describe("waitsForLocalHostFlag", () => {
+	it("waits on the host while the flag loads", () => {
+		expect(
+			waitsForLocalHostFlag({ serverId: undefined, isFlagPending: true }),
+		).toBe(true);
+	});
+
+	it("does not wait once the flag is known, or for a remote server", () => {
+		expect(
+			waitsForLocalHostFlag({ serverId: undefined, isFlagPending: false }),
+		).toBe(false);
+		expect(
+			waitsForLocalHostFlag({ serverId: "server-1", isFlagPending: true }),
+		).toBe(false);
 	});
 });

@@ -87,7 +87,7 @@ export const dockerRouter = createTRPCRouter({
 			await checkPermission(ctx, { docker: ["read"], server: ["read"] });
 			await assertLocalHostAccess(
 				input.serverId,
-				ctx.session?.activeOrganizationId,
+				ctx.session.activeOrganizationId,
 			);
 			await assertServerReachable(ctx, input.serverId);
 			return await getServerHealthData(

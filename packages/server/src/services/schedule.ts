@@ -19,7 +19,7 @@ import {
 	stageFiles,
 } from "../utils/docker/staging";
 import { execAsync, execAsyncRemote } from "../utils/process/execAsync";
-import { isRootOrganization } from "./admin";
+import { describeHostAccessRefusal, isRootOrganization } from "./admin";
 import { findMemberByUserId } from "./permission";
 import { findServerById } from "./server";
 
@@ -65,7 +65,7 @@ export const assertHostScheduleAccess = async (
 	) {
 		throw new TRPCError({
 			code: "FORBIDDEN",
-			message: HOST_SCHEDULE_FORBIDDEN_MESSAGE,
+			message: await describeHostAccessRefusal(HOST_SCHEDULE_FORBIDDEN_MESSAGE),
 		});
 	}
 
