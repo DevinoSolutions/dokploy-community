@@ -1,14 +1,14 @@
 import { spawnSync } from "node:child_process";
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { getPathResolverLines } from "@dokploy/server/utils/path-containment";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	boundedDockerSh,
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
 // The path resolver that deploy scripts carry (`getPathResolverLines`), on a
 // host that has `readlink -f` and no `realpath -m` (minimal images): a link
@@ -21,7 +21,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // case runs its shell checks in one script, with room to spare.
 vi.setConfig({ testTimeout: 180_000 });
 
-const shellWorks = spawnSync("sh", ["-c", "true"]).status === 0;
+const shellWorks = boundedShellAvailable;
 const posix = process.platform !== "win32";
 
 const tempBase = () =>
@@ -47,7 +47,7 @@ const lines = getPathResolverLines("__dokploy_resolve() { return 1; }").join(
 const MINIMAL = "realpath() { return 1; }\n";
 
 const run = (script: string) =>
-	spawnSync("sh", ["-c", `${MINIMAL}${lines}\n${script}`], {
+	boundedSh(["-c", `${MINIMAL}${lines}\n${script}`], {
 		encoding: "utf8",
 		timeout: 150_000,
 	});
@@ -62,7 +62,7 @@ const link = (target: string, place: string) =>
 	symlinkSync(target, `${tmp}/${place}`, "dir");
 
 beforeAll(() => {
-	tmp = mkdtempSync(`${tempBase()}/.dokploy-hops-`).replaceAll("\\", "/");
+	tmp = makeTempDir(`${tempBase()}/.dokploy-hops-`).replaceAll("\\", "/");
 	sh = shellPath(tmp);
 	for (const dir of [
 		"own/code/real",
@@ -164,20 +164,23 @@ const everywhere = (inputs: string[], expected: string[]) => {
 };
 
 describe("the readlink -f fallback of the path resolver", () => {
-	itWithLinks("follows a link to a missing target from the link's own directory", () => {
-		everywhere(
-			[
-				`${sh}/own/code/dangle_out`,
-				`${sh}/own/code/dangle_out/more/deeper`,
-				`${sh}/own/code/dangle_in`,
-			],
-			[
-				`${sh}/other/code/far_a`,
-				`${sh}/other/code/far_a/more/deeper`,
-				`${sh}/own/code/in_miss`,
-			],
-		);
-	});
+	itWithLinks(
+		"follows a link to a missing target from the link's own directory",
+		() => {
+			everywhere(
+				[
+					`${sh}/own/code/dangle_out`,
+					`${sh}/own/code/dangle_out/more/deeper`,
+					`${sh}/own/code/dangle_in`,
+				],
+				[
+					`${sh}/other/code/far_a`,
+					`${sh}/other/code/far_a/more/deeper`,
+					`${sh}/own/code/in_miss`,
+				],
+			);
+		},
+	);
 
 	itWithLinks("follows a chain of links hop by hop", () => {
 		everywhere(
@@ -186,29 +189,29 @@ describe("the readlink -f fallback of the path resolver", () => {
 		);
 	});
 
-	itWithLinks("follows a link to an existing directory, and a link then ..", () => {
-		everywhere(
-			[
-				`${sh}/own/code/rel_dir`,
-				`${sh}/own/code/rel_dir/file`,
-				`${sh}/own/code/rel_dir/../a`,
-				`${sh}/own/code/rel_dir/missing`,
-			],
-			[
-				`${sh}/own/code/real`,
-				`${sh}/own/code/real/file`,
-				`${sh}/own/code/a`,
-				`${sh}/own/code/real/missing`,
-			],
-		);
-	});
+	itWithLinks(
+		"follows a link to an existing directory, and a link then ..",
+		() => {
+			everywhere(
+				[
+					`${sh}/own/code/rel_dir`,
+					`${sh}/own/code/rel_dir/file`,
+					`${sh}/own/code/rel_dir/../a`,
+					`${sh}/own/code/rel_dir/missing`,
+				],
+				[
+					`${sh}/own/code/real`,
+					`${sh}/own/code/real/file`,
+					`${sh}/own/code/a`,
+					`${sh}/own/code/real/missing`,
+				],
+			);
+		},
+	);
 
 	itWithLinks("follows a link to an absolute path", () => {
 		if (!posix) return;
-		everywhere(
-			[`${sh}/own/code/abs/x`],
-			[`${sh}/other/code/abs_miss/x`],
-		);
+		everywhere([`${sh}/own/code/abs/x`], [`${sh}/other/code/abs_miss/x`]);
 	});
 
 	itWithLinks("reads a target that climbs from the link's directory", () => {
@@ -216,39 +219,45 @@ describe("the readlink -f fallback of the path resolver", () => {
 		everywhere([`${sh}/own/code/sub/up`], [`${sh}/v/own/code/sub/z`]);
 	});
 
-	itWithLinks("fails on a link loop, a self link and a missing component before ..", () => {
-		// One directory: each failing hop costs a few processes on some hosts.
-		const [answer] = resolveAll(
-			[
-				`${sh}/own/code/loop1`,
-				`${sh}/own/code/self`,
-				`${sh}/own/code/dotdot`,
-				"relative/link",
-			],
-			[`${tmp}/own/code/a/b`],
-		);
-		expect(answer).toEqual(Array(4).fill("unresolved"));
-	});
+	itWithLinks(
+		"fails on a link loop, a self link and a missing component before ..",
+		() => {
+			// One directory: each failing hop costs a few processes on some hosts.
+			const [answer] = resolveAll(
+				[
+					`${sh}/own/code/loop1`,
+					`${sh}/own/code/self`,
+					`${sh}/own/code/dotdot`,
+					"relative/link",
+				],
+				[`${tmp}/own/code/a/b`],
+			);
+			expect(answer).toEqual(Array(4).fill("unresolved"));
+		},
+	);
 
-	itWithLinks("gives the same inside and outside verdicts from every directory", () => {
-		const cases: Array<[string, "in" | "out"]> = [
-			["dangle_out", "out"],
-			["dangle_out/x", "out"],
-			["dangle_in", "in"],
-			["c1", "out"],
-			["rel_dir/file", "in"],
-			["sub/up", "out"],
-			["not_there/at/all", "in"],
-			...(posix ? [["abs", "out"] as [string, "in" | "out"]] : []),
-		];
-		const answers = verdictsAll(
-			cases.map(([path]) => `${sh}/own/code/${path}`),
-			cwds().slice(1, 2),
-		);
-		for (const answer of answers) {
-			expect(answer).toEqual(cases.map(([, verdict]) => verdict));
-		}
-	});
+	itWithLinks(
+		"gives the same inside and outside verdicts from every directory",
+		() => {
+			const cases: Array<[string, "in" | "out"]> = [
+				["dangle_out", "out"],
+				["dangle_out/x", "out"],
+				["dangle_in", "in"],
+				["c1", "out"],
+				["rel_dir/file", "in"],
+				["sub/up", "out"],
+				["not_there/at/all", "in"],
+				...(posix ? [["abs", "out"] as [string, "in" | "out"]] : []),
+			];
+			const answers = verdictsAll(
+				cases.map(([path]) => `${sh}/own/code/${path}`),
+				cwds().slice(1, 2),
+			);
+			for (const answer of answers) {
+				expect(answer).toEqual(cases.map(([, verdict]) => verdict));
+			}
+		},
+	);
 
 	it("prints a path below the root without a doubled slash", () => {
 		if (!shellWorks) return;
@@ -264,18 +273,17 @@ describe("the readlink -f fallback of the path resolver", () => {
 		// ones that read a script as text), so those cases run where it is kept.
 		const cr = posix ? [`${sh}/own/code/dir\rx`, `${sh}/own/code/dir\r`] : [];
 		const [answer] = resolveAll(
-			[
-				`${sh}/own/code/dir\nx`,
-				`${sh}/own/code/dir\n`,
-				"/a\n/b",
-				...cr,
-			],
+			[`${sh}/own/code/dir\nx`, `${sh}/own/code/dir\n`, "/a\n/b", ...cr],
 			[tmp],
 		);
 		// Each input is printed on lines of its own only when it resolves.
 		expect(answer).toEqual(Array(3 + cr.length).fill("unresolved"));
 		const verdicts = verdictsAll(
-			[`${sh}/own/code/ok\nx`, ...(posix ? [`${sh}/own/code/ok\rx`] : []), `${sh}/own/ok`],
+			[
+				`${sh}/own/code/ok\nx`,
+				...(posix ? [`${sh}/own/code/ok\rx`] : []),
+				`${sh}/own/ok`,
+			],
 			[tmp],
 		);
 		expect(verdicts[0]).toEqual(posix ? ["out", "out", "in"] : ["out", "in"]);
@@ -291,7 +299,12 @@ describe("the readlink -f fallback of the path resolver", () => {
 				`${sh}/own/code/dangle_in`,
 			];
 			const [answer] = resolveAll(inputs, [tmp]);
-			expect(answer).toEqual(["unresolved", "unresolved", "unresolved", `${sh}/own/code/in_miss`]);
+			expect(answer).toEqual([
+				"unresolved",
+				"unresolved",
+				"unresolved",
+				`${sh}/own/code/in_miss`,
+			]);
 			const [verdict] = verdictsAll(inputs, [`${tmp}/own/code/a/b`]);
 			expect(verdict).toEqual(["out", "out", "out", "in"]);
 		},
@@ -341,11 +354,11 @@ for cwd in / /w/own/code/a/b /w/c/d; do
 done`;
 
 	it("resolves a link from its own directory wherever it runs, and refuses control characters", () => {
-		const result = spawnSync(
-			"docker",
-			["run", "--rm", "-i", "alpine:3", "sh", "-s"],
-			{ input: script, encoding: "utf8", timeout: 150_000 },
-		);
+		const result = boundedDockerSh("alpine:3", {
+			input: script,
+			encoding: "utf8",
+			timeout: 150_000,
+		});
 		const out = result.stdout.trim().split("\n");
 		expect(out).toHaveLength(33);
 		const expected: Record<string, string> = {

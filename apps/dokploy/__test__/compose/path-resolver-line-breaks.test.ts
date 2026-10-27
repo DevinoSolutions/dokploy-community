@@ -1,11 +1,5 @@
 import { spawnSync } from "node:child_process";
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
 	checkReadingsInOwnDirectoryLocal,
@@ -17,6 +11,12 @@ import {
 	getPathResolverLines,
 } from "@dokploy/server/utils/path-containment";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	boundedDockerSh,
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
 // The path resolver that deploy scripts carry (`getPathResolverLines`) and the
 // own-directory check refuse a path with a line feed or a carriage return in
@@ -25,7 +25,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // Each case starts a shell, which is slow on Windows and under load.
 vi.setConfig({ testTimeout: 180_000 });
 
-const shellWorks = spawnSync("sh", ["-c", "true"]).status === 0;
+const shellWorks = boundedShellAvailable;
 const posix = process.platform !== "win32";
 
 const tempBase = () =>
@@ -54,7 +54,7 @@ const MODES = [
 ] as const;
 
 const run = (prefix: string, script: string) =>
-	spawnSync("sh", ["-c", `${prefix}${script}`], {
+	boundedSh(["-c", `${prefix}${script}`], {
 		encoding: "utf8",
 		timeout: 150_000,
 	});
@@ -71,7 +71,7 @@ let sh = "";
 let linksWork = false;
 
 beforeAll(() => {
-	tmp = mkdtempSync(`${tempBase()}/.dokploy-lb-`).replaceAll("\\", "/");
+	tmp = makeTempDir(`${tempBase()}/.dokploy-lb-`).replaceAll("\\", "/");
 	sh = shellPath(tmp);
 	mkdirSync(`${tmp}/compose/app/code`, { recursive: true });
 	mkdirSync(`${tmp}/compose/other/code`, { recursive: true });
@@ -351,11 +351,11 @@ describe.each([
 	it.skipIf(!hasImage(image))(
 		"is never inside through a name that differs only by a trailing line break",
 		() => {
-			const result = spawnSync(
-				"docker",
-				["run", "--rm", "-i", image, "sh", "-s"],
-				{ input: containerScript, encoding: "utf8", timeout: 150_000 },
-			);
+			const result = boundedDockerSh(image, {
+				input: containerScript,
+				encoding: "utf8",
+				timeout: 150_000,
+			});
 			expect(result.stdout.trim().split("\n")).toEqual([
 				"/w/compose/app/code/lnk_a => unresolved => out",
 				"/w/compose/app/code/lnk_a_x => unresolved => out",
@@ -383,11 +383,11 @@ for p in /w/compose/app/code/ok /w/compose/app/code/lnk_a /w/compose/app/code/ln
   echo "$n => $s"
 done
 if __dokploy_dir_inside "/w/compose/app$NL" /w/compose/app/code/ok; then echo "own with line feed => in"; else echo "own with line feed => out"; fi`;
-			const result = spawnSync(
-				"docker",
-				["run", "--rm", "-i", image, "sh", "-s"],
-				{ input: script, encoding: "utf8", timeout: 150_000 },
-			);
+			const result = boundedDockerSh(image, {
+				input: script,
+				encoding: "utf8",
+				timeout: 150_000,
+			});
 			expect(result.stdout.trim().split("\n")).toEqual([
 				"/w/compose/app/code/ok => in",
 				"/w/compose/app/code/lnk_a => out",
@@ -409,15 +409,11 @@ if __dokploy_dir_inside "/w/compose/app$NL" /w/compose/app/code/ok; then echo "o
 				{ raw: "/w/compose/app\r/x", normal: "/w/compose/app/x" },
 				{ raw: "/w/compose/other/f", normal: "/w/compose/other/f" },
 			];
-			const result = spawnSync(
-				"docker",
-				["run", "--rm", "-i", image, "sh", "-s"],
-				{
-					input: `mkdir -p /w/compose/app/code /w/compose/other\n${getOwnDirectoryCheckCommand("/w/compose/app", readings)}`,
-					encoding: "utf8",
-					timeout: 150_000,
-				},
-			);
+			const result = boundedDockerSh(image, {
+				input: `mkdir -p /w/compose/app/code /w/compose/other\n${getOwnDirectoryCheckCommand("/w/compose/app", readings)}`,
+				encoding: "utf8",
+				timeout: 150_000,
+			});
 			expect(result.stdout.split("\n")[0]).toBe("own:ok");
 			expect(parseOwnDirectoryVerdicts(result.stdout, readings.length)).toEqual(
 				["in", "unresolved", "unresolved", "out"],

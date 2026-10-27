@@ -1,11 +1,5 @@
 import { spawnSync } from "node:child_process";
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, relative } from "node:path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -66,15 +60,19 @@ vi.mock("@dokploy/server/lib/logger", () => ({
 import { db } from "@dokploy/server/db";
 import { runComposePolicyAudit } from "@dokploy/server/services/compose-policy-audit";
 import { COMPOSE_FILE_LINK_MARKER } from "@dokploy/server/utils/compose-file-guard";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
 const APP = "audit-link-app";
 const SPEC = "services:\n  web:\n    image: nginx\n";
 const OVERRIDE = "services:\n  web:\n    privileged: true\n";
-const OUTSIDE_TEXT = "services:\n  web:\n    privileged: true\n    image: leaked-host-file\n";
+const OUTSIDE_TEXT =
+	"services:\n  web:\n    privileged: true\n    image: leaked-host-file\n";
 
-const shells = ["sh"].filter(
-	(shell) => spawnSync(shell, ["-c", "true"]).status === 0,
-);
+const shells = boundedShellAvailable ? ["sh"] : [];
 const tempBase = () =>
 	(process.platform === "win32" ? process.cwd() : tmpdir()).replaceAll(
 		"\\",
@@ -94,7 +92,7 @@ const shellPath = (path: string) =>
 // (Linux, macOS), and are skipped elsewhere.
 const linksWork = (() => {
 	if (shells.length === 0) return false;
-	const probe = mkdtempSync(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
+	const probe = makeTempDir(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
 		"\\",
 		"/",
 	);
@@ -103,8 +101,7 @@ const linksWork = (() => {
 		writeFileSync(`${probe}/dir/file`, "x");
 		symlinkSync(`${probe}/dir/file`, `${probe}/file-link`, "file");
 		symlinkSync(`${probe}/dir`, `${probe}/dir-link`, "junction");
-		const result = spawnSync(
-			"sh",
+		const result = boundedSh(
 			[
 				"-c",
 				'[ -L "$1/file-link" ] && [ -L "$1/dir-link" ] && [ "$(cd -P "$1/dir-link" && pwd -P)" = "$(cd -P "$1/dir" && pwd -P)" ]',
@@ -127,14 +124,15 @@ const itWithLinks = it.skipIf(!linksWork);
 // so the local read is tested on Linux and macOS only).
 const fifosWork = (() => {
 	if (shells.length === 0) return false;
-	const probe = mkdtempSync(`${tempBase()}/.dokploy-fifo-probe-`).replaceAll(
+	const probe = makeTempDir(`${tempBase()}/.dokploy-fifo-probe-`).replaceAll(
 		"\\",
 		"/",
 	);
 	try {
 		return (
 			spawnSync("mkfifo", [`${probe}/fifo`]).status === 0 &&
-			spawnSync("sh", ["-c", '[ -p "$1/fifo" ]', "sh", probe]).status === 0
+			boundedSh(["-c", '[ -p "$1/fifo" ]', "sh", probe], { encoding: "utf8" })
+				.status === 0
 		);
 	} catch {
 		return false;
@@ -163,7 +161,7 @@ const link = (target: string, name: string, type: "file" | "junction") => {
 // A remote host that is the local shell.
 const runInShell = async (_serverId: string, command: string) => {
 	// A read that blocks (a FIFO) must fail the test, not hang it.
-	const result = spawnSync("sh", ["-c", command], {
+	const result = boundedSh(["-c", command], {
 		encoding: "utf8",
 		timeout: 10_000,
 	});
@@ -230,7 +228,7 @@ beforeEach(() => {
 		values: vi.fn().mockResolvedValue(undefined),
 	})) as never);
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
-	tmp = mkdtempSync(`${tempBase()}/.dokploy-audit-`).replaceAll("\\", "/");
+	tmp = makeTempDir(`${tempBase()}/.dokploy-audit-`).replaceAll("\\", "/");
 	mocks.base.local = `${tmp}/compose`;
 	mocks.base.remote = `${shellPath(tmp)}/compose`;
 	mkdirSync(`${code()}/deploy`, { recursive: true });
@@ -299,9 +297,7 @@ describe.each([
 		async () => {
 			writeFileSync(`${code()}/real.yml`, OVERRIDE);
 			link(`${code()}/real.yml`, "override.yml", "file");
-			expect((await audit("real.yml", serverId)).overrides).toEqual([
-				OVERRIDE,
-			]);
+			expect((await audit("real.yml", serverId)).overrides).toEqual([OVERRIDE]);
 			vi.clearAllMocks();
 			expect((await audit("override.yml", serverId)).overrides).toEqual([
 				OVERRIDE,
@@ -313,9 +309,9 @@ describe.each([
 		// Where Dokploy writes the file mounts, reached as `../files/...`.
 		mkdirSync(`${code()}/../files`, { recursive: true });
 		writeFileSync(`${code()}/../files/override.yml`, OVERRIDE);
-		expect(
-			(await audit("../files/override.yml", serverId)).overrides,
-		).toEqual([OVERRIDE]);
+		expect((await audit("../files/override.yml", serverId)).overrides).toEqual([
+			OVERRIDE,
+		]);
 	});
 
 	itWithLinks(
@@ -351,7 +347,8 @@ describe.each([
 	describe("a file outside the compose's own directory", () => {
 		const OTHER = "other-app";
 		const otherOverride = () => `${tmp}/compose/${OTHER}/code/override.yml`;
-		const skipped = /\[restricted-compose audit\] skipped: 1 override file\(s\)/;
+		const skipped =
+			/\[restricted-compose audit\] skipped: 1 override file\(s\)/;
 
 		beforeEach(() => {
 			mkdirSync(`${tmp}/compose/${OTHER}/code`, { recursive: true });
@@ -371,9 +368,10 @@ describe.each([
 			expect(log).not.toContain(OTHER);
 			// The shell host is only asked for what is inside.
 			expect(
-				mocks.execAsyncRemote.mock.calls.some(([, command]) =>
-					String(command).includes(`${OTHER}/code/override.yml`) &&
-					!String(command).includes("__dokploy_verdict"),
+				mocks.execAsyncRemote.mock.calls.some(
+					([, command]) =>
+						String(command).includes(`${OTHER}/code/override.yml`) &&
+						!String(command).includes("__dokploy_verdict"),
 				),
 			).toBe(false);
 		});
@@ -387,7 +385,10 @@ describe.each([
 
 		itWithLinks("is skipped behind a link of the checkout", async () => {
 			link(`${tmp}/compose/${OTHER}/code`, "elsewhere", "junction");
-			const { overrides, log } = await audit("elsewhere/override.yml", serverId);
+			const { overrides, log } = await audit(
+				"elsewhere/override.yml",
+				serverId,
+			);
 			expect(overrides).toEqual([]);
 			expect(log).toMatch(skipped);
 			expect(log).not.toContain("leaked-host-file");
@@ -407,7 +408,9 @@ describe.each([
 			];
 			expect(overrides).toEqual([OVERRIDE]);
 			expect(
-				mocks.appendLogLine.mock.calls.map((call) => String(call[2])).join("\n"),
+				mocks.appendLogLine.mock.calls
+					.map((call) => String(call[2]))
+					.join("\n"),
 			).toMatch(skipped);
 		});
 
@@ -419,11 +422,14 @@ describe.each([
 		});
 	});
 
-	itWithFifos(!!serverId)("does not wait on an override file that is a FIFO", async () => {
-		expect(spawnSync("mkfifo", [`${code()}/override.yml`]).status).toBe(0);
-		const started = Date.now();
-		expect((await audit("override.yml", serverId)).overrides).toEqual([]);
-		// Not read at all, rather than given up on after a time limit.
-		expect(Date.now() - started).toBeLessThan(5000);
-	});
+	itWithFifos(!!serverId)(
+		"does not wait on an override file that is a FIFO",
+		async () => {
+			expect(spawnSync("mkfifo", [`${code()}/override.yml`]).status).toBe(0);
+			const started = Date.now();
+			expect((await audit("override.yml", serverId)).overrides).toEqual([]);
+			// Not read at all, rather than given up on after a time limit.
+			expect(Date.now() - started).toBeLessThan(5000);
+		},
+	);
 });
