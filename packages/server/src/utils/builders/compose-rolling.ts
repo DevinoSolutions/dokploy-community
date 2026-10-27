@@ -3,8 +3,13 @@ import {
 	type ComposeRollingReplace,
 	composeRollingReplaceSchema,
 	ROLLING_HEALTH_TIMEOUT_MAX_SECONDS,
+	ROLLING_MAX_REPLICAS,
 } from "../../db/validations/compose-rolling";
 import { NEUTRALISED_CLI_ENV } from "../docker/env-file";
+import {
+	type ComposeVariableLookup,
+	interpolateComposeValue,
+} from "./compose-interpolate";
 
 export type { ComposeRollingReplace };
 
@@ -144,30 +149,122 @@ export const getImageBaseName = (image: string) => {
 	return (lastSegment.split(":")[0] ?? "").toLowerCase();
 };
 
-/** True when a short-syntax port string publishes a fixed host port. */
-const shortPortPublishes = (entry: string) => {
-	// The protocol suffix and a bracketed IPv6 host address are not ports.
-	let value = entry.replace(/\/[a-z]+$/i, "").replace(/^\[[^\]]*\]:/, "");
-	value = value.trim();
-	const parts = value.split(":");
-	if (parts.length === 1) return false;
-	// `host:container` or `ip:host:container`; `ip::container` publishes a random port.
-	const host = parts[parts.length - 2] ?? "";
-	return host.length > 0;
+/** `a-b` with a <= b, as host port numbers. `undefined` for anything else. */
+const parsePortRange = (value: string) => {
+	const match = /^(\d+)-(\d+)$/.exec(value.trim());
+	if (!match) return undefined;
+	const first = Number(match[1]);
+	const last = Number(match[2]);
+	if (first < 1 || last > 65535 || first > last) return undefined;
+	return { first, last, size: last - first + 1 };
 };
 
-const hasPublishedPort = (ports: unknown) => {
-	if (!Array.isArray(ports)) return false;
-	return ports.some((port) => {
-		if (isObject(port)) {
-			return (
-				port.published !== undefined &&
-				port.published !== null &&
-				String(port.published) !== ""
-			);
+/**
+ * What one port entry publishes on the host: nothing (`none`: only a container
+ * port, or `ip::container`, a random host port), a host port range with one
+ * container port (`range`, with its size), or anything else (`fixed`: one host
+ * port, a container port range, a value that is still a variable).
+ */
+type PublishedPort =
+	| { kind: "none" }
+	| { kind: "range"; size: number }
+	| { kind: "fixed" };
+
+const describePublishedPort = (port: unknown): PublishedPort => {
+	if (isObject(port)) {
+		const published = port.published;
+		if (published === undefined || published === null) return { kind: "none" };
+		const text = String(published).trim();
+		if (text === "") return { kind: "none" };
+		const range = parsePortRange(text);
+		const target = String(port.target ?? "").trim();
+		if (!range || !/^\d+$/.test(target)) return { kind: "fixed" };
+		return { kind: "range", size: range.size };
+	}
+	// The protocol suffix and a bracketed IPv6 host address are not ports.
+	let value = String(port)
+		.replace(/\/[a-z]+$/i, "")
+		.replace(/^\[[^\]]*\]:/, "");
+	value = value.trim();
+	const parts = value.split(":");
+	if (parts.length === 1) return { kind: "none" };
+	// `host:container` or `ip:host:container`; `ip::container` publishes a random port.
+	const host = (parts[parts.length - 2] ?? "").trim();
+	if (host.length === 0) return { kind: "none" };
+	const container = (parts[parts.length - 1] ?? "").trim();
+	const range = parsePortRange(host);
+	if (!range || !/^\d+$/.test(container)) return { kind: "fixed" };
+	return { kind: "range", size: range.size };
+};
+
+/**
+ * Why the published ports of a service with `replicas` containers cannot roll,
+ * or `undefined`. During the rollout the old and the new replicas run side by
+ * side, so a host port range must hold at least 2 x replicas ports (Docker
+ * gives each container a free port of the range); a single host port cannot be
+ * bound twice.
+ */
+const getPublishedPortsProblem = (ports: unknown, replicas: number) => {
+	if (!Array.isArray(ports)) return undefined;
+	const needed = 2 * replicas;
+	const described = ports.map(describePublishedPort);
+	if (described.some((port) => port.kind === "fixed")) {
+		return `A fixed host port is published: the second replica could not bind it. Use expose and Traefik, or publish a host port range for one container port; the range must hold at least 2 x replicas ports (${needed} here).`;
+	}
+	const small = described.find(
+		(port): port is { kind: "range"; size: number } =>
+			port.kind === "range" && port.size < needed,
+	);
+	if (small) {
+		return `A published host port range holds ${small.size} ports, but the range must hold at least 2 x replicas ports (${needed} here): the old and the new replicas run side by side during the rollout.`;
+	}
+	return undefined;
+};
+
+/** A whole number as Compose takes it for `scale` / `deploy.replicas`, or `undefined`. */
+const parseReplicaValue = (value: unknown) => {
+	if (typeof value === "number") {
+		return Number.isInteger(value) ? value : undefined;
+	}
+	if (typeof value === "string" && /^\s*\d+\s*$/.test(value)) {
+		return Number(value.trim());
+	}
+	return undefined;
+};
+
+/**
+ * How many containers the service runs (`scale` or `deploy.replicas`, 1 when
+ * neither is set), or why that cannot be rolled: a value that is not a whole
+ * number from 1 to `ROLLING_MAX_REPLICAS` (after interpolation), or `scale` and
+ * `deploy.replicas` that disagree.
+ */
+export const getRollingReplicaCount = (
+	definition: SpecObject,
+): { count: number } | { problem: string } => {
+	const deploy = isObject(definition.deploy) ? definition.deploy : undefined;
+	const values: Array<[string, unknown]> = [];
+	if (definition.scale !== undefined && definition.scale !== null) {
+		values.push(["scale", definition.scale]);
+	}
+	if (deploy?.replicas !== undefined && deploy.replicas !== null) {
+		values.push(["deploy.replicas", deploy.replicas]);
+	}
+	let count: number | undefined;
+	for (const [key, raw] of values) {
+		const parsed = parseReplicaValue(raw);
+		if (parsed === undefined || parsed < 1 || parsed > ROLLING_MAX_REPLICAS) {
+			return {
+				problem: `${key} is "${String(raw)}": only a whole number from 1 to ${ROLLING_MAX_REPLICAS} can be rolled.`,
+			};
 		}
-		return shortPortPublishes(String(port));
-	});
+		if (count !== undefined && count !== parsed) {
+			return {
+				problem: `scale (${count}) and deploy.replicas (${parsed}) disagree.`,
+			};
+		}
+		count = parsed;
+	}
+	return { count: count ?? 1 };
 };
 
 /** True when a port entry binds a host address (`127.0.0.1:80:80`, `host_ip`). */
@@ -250,8 +347,9 @@ export const getHealthcheckSettleSeconds = (healthcheck: SpecObject) => {
 	);
 	const startPeriod =
 		parseComposeDurationSeconds(healthcheck.start_period) ?? 0;
+	// An interpolated value (`retries: ${RETRIES:-3}`) is a string of digits.
 	const retries = positive(
-		typeof healthcheck.retries === "number" ? healthcheck.retries : undefined,
+		parseReplicaValue(healthcheck.retries),
 		HEALTHCHECK_DEFAULT_RETRIES,
 	);
 	const probeTimeout = positive(
@@ -504,12 +602,12 @@ export const getRollingEligibility = ({
 			"container_name is set: Compose cannot run two replicas.",
 		);
 	}
-	if (hasPublishedPort(definition.ports)) {
-		add(
-			"published-ports",
-			"A host port is published: the second replica could not bind it. Use expose and Traefik instead.",
-		);
-	}
+	const replicaCount = getRollingReplicaCount(definition);
+	const portsProblem = getPublishedPortsProblem(
+		definition.ports,
+		"count" in replicaCount ? replicaCount.count : 1,
+	);
+	if (portsProblem) add("published-ports", portsProblem);
 	const networkMode =
 		typeof definition.network_mode === "string" ? definition.network_mode : "";
 	if (
@@ -522,18 +620,7 @@ export const getRollingEligibility = ({
 			`network_mode "${networkMode}" shares a network namespace, two replicas cannot.`,
 		);
 	}
-	const scale = definition.scale;
-	const deploy = isObject(definition.deploy) ? definition.deploy : undefined;
-	const replicas = deploy?.replicas;
-	if (
-		(scale !== undefined && Number(scale) !== 1) ||
-		(replicas !== undefined && Number(replicas) !== 1)
-	) {
-		add(
-			"replicas",
-			"scale or deploy.replicas is not 1: --scale would conflict with it.",
-		);
-	}
+	if ("problem" in replicaCount) add("replicas", replicaCount.problem);
 	if (hasStaticAddress(definition)) {
 		add(
 			"static-address",
@@ -660,6 +747,83 @@ export const getEffectiveHealthTimeoutSeconds = (
 	return Math.min(needed, ROLLING_HEALTH_TIMEOUT_MAX_SECONDS);
 };
 
+export interface RollingInterpolatedSpec {
+	/** The spec to judge: services interpolated where that worked, raw otherwise. */
+	spec: RollingSpec;
+	/** Selected services judged on the raw compose file, and why (one line each). */
+	notices: Array<{ service: string; message: string }>;
+}
+
+const RAW_SPEC_NOTE =
+	"is judged on the compose file as written (variables not resolved).";
+
+/**
+ * A copy of `spec` with the `${VAR}` references of each service resolved the
+ * way `docker compose` resolves them on the deploy, so that `deploy.replicas:
+ * ${WEB_REPLICAS:-1}` or a port range built from variables is judged on its
+ * value. Only used to decide what is rolled: the compose file that is written
+ * and deployed is never changed.
+ *
+ * Never throws. A service that cannot be interpolated (an invalid `${`, a
+ * required variable that is unset, a variable whose value is not known) keeps
+ * its raw definition, which is exactly what was judged before; so does every
+ * service when the variables cannot be prepared (`getLookup` throws, e.g. an
+ * unresolved vault reference). A notice is returned for each selected service
+ * that falls back and holds a `$`.
+ */
+export const interpolateRollingSpec = (
+	spec: RollingSpec,
+	selected: string[],
+	getLookup: () => ComposeVariableLookup,
+): RollingInterpolatedSpec => {
+	const services = spec.services;
+	if (!services) return { spec, notices: [] };
+	const hasDollar = (value: unknown) => {
+		try {
+			return JSON.stringify(value)?.includes("$") ?? false;
+		} catch {
+			return false;
+		}
+	};
+	if (!Object.values(services).some(hasDollar)) return { spec, notices: [] };
+	const notices: RollingInterpolatedSpec["notices"] = [];
+	const reasonOf = (error: unknown) =>
+		error instanceof Error ? error.message : String(error);
+	let lookup: ComposeVariableLookup;
+	try {
+		lookup = getLookup();
+	} catch (error) {
+		for (const name of selected) {
+			if (hasDollar(services[name])) {
+				notices.push({
+					service: name,
+					message: `Rolling replace: the variables of the compose could not be prepared (${reasonOf(error)}), so "${name}" ${RAW_SPEC_NOTE}`,
+				});
+			}
+		}
+		return { spec, notices };
+	}
+	const interpolated: Record<string, SpecObject | null | undefined> = {};
+	for (const [name, definition] of Object.entries(services)) {
+		if (!hasDollar(definition)) {
+			interpolated[name] = definition;
+			continue;
+		}
+		try {
+			interpolated[name] = interpolateComposeValue(definition, lookup);
+		} catch (error) {
+			interpolated[name] = definition;
+			if (selected.includes(name)) {
+				notices.push({
+					service: name,
+					message: `Rolling replace: the variables of "${name}" could not be resolved (${reasonOf(error)}), so it ${RAW_SPEC_NOTE}`,
+				});
+			}
+		}
+	}
+	return { spec: { ...spec, services: interpolated }, notices };
+};
+
 export interface RollingPlanInput {
 	settings: ComposeRollingReplace;
 	spec: RollingSpec;
@@ -671,6 +835,8 @@ export interface RollingPlanInput {
 export interface RollingServicePlan {
 	/** Eligible at deploy time: rolled. */
 	rolled: string[];
+	/** Containers each rolled service runs (`scale` / `deploy.replicas`, 1 when unset). */
+	replicas: Record<string, number>;
 	/** The wait for the new replica, raised to cover the rolled services' healthchecks. */
 	healthTimeoutSeconds: number;
 	/** Selected but no longer eligible: a normal recreate, with a warning. */
@@ -692,6 +858,7 @@ export const planRollingServices = ({
 }: RollingPlanInput): RollingServicePlan => {
 	const plan: RollingServicePlan = {
 		rolled: [],
+		replicas: {},
 		fallbacks: [],
 		healthTimeoutSeconds: settings.healthTimeoutSeconds,
 	};
@@ -703,8 +870,16 @@ export const planRollingServices = ({
 			hasCustomCommand,
 			freshVolumes,
 		});
-		if (blockers.length === 0) plan.rolled.push(service);
-		else plan.fallbacks.push({ service, blockers });
+		if (blockers.length === 0) {
+			plan.rolled.push(service);
+			const definition = spec.services?.[service];
+			const count = isObject(definition)
+				? getRollingReplicaCount(definition)
+				: { count: 1 };
+			plan.replicas[service] = "count" in count ? count.count : 1;
+		} else {
+			plan.fallbacks.push({ service, blockers });
+		}
 	}
 	plan.healthTimeoutSeconds = getEffectiveHealthTimeoutSeconds(
 		spec,
@@ -728,6 +903,12 @@ export interface RollingScriptOptions {
 	invocation: string;
 	/** Services to roll, in the order they are rolled. Already validated names. */
 	services: string[];
+	/**
+	 * Containers each rolled service runs (`scale` / `deploy.replicas`); a
+	 * service that is not listed runs one. All of them are replaced together:
+	 * N new replicas next to the old ones, then the old ones are removed.
+	 */
+	replicas?: Record<string, number>;
 	/** Rolled services with a `build:` section (built before anything is touched). */
 	buildServices?: string[];
 	/** Rolled image-only services to pull first (`pullImagesOnDeploy`). */
@@ -799,6 +980,7 @@ export const getRollingReplaceScript = ({
 	appName,
 	invocation,
 	services,
+	replicas = {},
 	buildServices = [],
 	pullServices = [],
 	remoteBuild,
@@ -815,6 +997,19 @@ export const getRollingReplaceScript = ({
 	const projectFilter = quote([`label=com.docker.compose.project=${appName}`]);
 	const buildFlag = remoteBuild ? "--no-build" : "--build";
 	const pullFlag = pullAlways ? "--pull always " : "";
+	// `web=2 docs=1`: only whole numbers 1..ROLLING_MAX_REPLICAS get in (the
+	// names are validated); anything else leaves the service at one.
+	const replicaList = services
+		.map((service) => {
+			const count = replicas[service];
+			return count !== undefined &&
+				Number.isInteger(count) &&
+				count >= 1 &&
+				count <= ROLLING_MAX_REPLICAS
+				? `${service}=${count}`
+				: `${service}=1`;
+		})
+		.join(" ");
 
 	const buildBlock =
 		buildServices.length > 0
@@ -852,6 +1047,7 @@ export const getRollingReplaceScript = ({
 		DOKPLOY_ROLL_SELECTED=${quote([services.join(" ")])};
 		DOKPLOY_ROLL_BUILD=${quote([buildServices.join(" ")])};
 		DOKPLOY_ROLL_PULL=${quote([pullServices.join(" ")])};
+		DOKPLOY_ROLL_REPLICAS=${quote([replicaList])};
 		DOKPLOY_ROLL_PROMOTED=0; DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_ABORTING=0;
 		DOKPLOY_ROLL_SVC=""; DOKPLOY_ROLL_BEFORE=""; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_REASON=""; DR_EMPTY="";
 		dokploy_roll_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Rolling replace: $*"; };
@@ -860,6 +1056,12 @@ export const getRollingReplaceScript = ({
 		dokploy_roll_compose_shielded() { if command -v setsid >/dev/null 2>&1; then ( exec setsid env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} docker ${invocation} "$@" ); else dokploy_roll_compose "$@"; fi; };
 		dokploy_roll_ids() { docker ps -aq --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
 		dokploy_roll_running_ids() { docker ps -q --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
+		dokploy_roll_replicas() {
+			DR_RN=1;
+			for DR_R in $DOKPLOY_ROLL_REPLICAS; do case "$DR_R" in "$1="*) DR_RN=$(printf '%s' "$DR_R" | cut -d= -f2);; esac; done;
+			case "$DR_RN" in ''|*[!0-9]*|0) DR_RN=1;; esac;
+			echo "$DR_RN";
+		};
 		dokploy_roll_remove() {
 			if [ $# -eq 0 ]; then return 0; fi;
 			docker stop "$@" >/dev/null 2>&1 || true;
@@ -889,6 +1091,13 @@ export const getRollingReplaceScript = ({
 		dokploy_roll_new_state() {
 			docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null || echo "missing none";
 		};
+		dokploy_roll_new_bad_state() {
+			for DR_NB in $1; do
+				DR_NBS=$(dokploy_roll_new_state "$DR_NB");
+				if [ "$DR_NBS" != "running healthy" ]; then echo "$DR_NBS"; return 0; fi;
+			done;
+			return 1;
+		};
 		dokploy_roll_wait_out() {
 			DR_UDEADLINE=$(( $(date +%s) + $2 ));
 			DR_ULAST="";
@@ -900,7 +1109,7 @@ export const getRollingReplaceScript = ({
 					"running none") return 1;;
 				esac;
 				# A new replica that went bad is for the caller to undo: stop waiting.
-				if [ "$(dokploy_roll_new_state "$3")" != "running healthy" ]; then return 2; fi;
+				if dokploy_roll_new_bad_state "$3" >/dev/null; then return 2; fi;
 				if [ "$(date +%s)" -ge "$DR_UDEADLINE" ]; then return 1; fi;
 				dokploy_roll_sleep ${poll};
 			done;
@@ -988,8 +1197,7 @@ export const getRollingReplaceScript = ({
 			return 0;
 		};
 		dokploy_roll_new_still_ok() {
-			DR_NST=$(dokploy_roll_new_state "$2");
-			if [ "$DR_NST" = "running healthy" ]; then return 0; fi;
+			DR_NST=$(dokploy_roll_new_bad_state "$2") || return 0;
 			dokploy_roll_log "$1: the new replica is $DR_NST, putting the old container back in rotation";
 			DR_BACK=1;
 			# The old container is being restored: a cancel from here on discards the new replica and keeps it.
@@ -1042,21 +1250,22 @@ export const getRollingReplaceScript = ({
 			echo "Error: ❌ Rolling replace of $1 failed: $DOKPLOY_ROLL_REASON. The new replica was removed and the previous container was left as it was.";
 		};
 		dokploy_roll_reconcile() {
+			DR_WANT_N=$(dokploy_roll_replicas "$1");
 			DR_ALL_IDS=$(dokploy_roll_ids "$1");
 			DR_COUNT=$(printf '%s\\n' "$DR_ALL_IDS" | grep -c .);
-			if [ "$DR_COUNT" -le 1 ]; then return 0; fi;
-			dokploy_roll_log "$1: found $DR_COUNT containers (an interrupted rollout?), keeping the newest healthy one";
+			if [ "$DR_COUNT" -le "$DR_WANT_N" ]; then return 0; fi;
+			if [ "$DR_WANT_N" = "1" ]; then dokploy_roll_log "$1: found $DR_COUNT containers (an interrupted rollout?), keeping the newest healthy one"; else dokploy_roll_log "$1: found $DR_COUNT containers for $DR_WANT_N replicas (an interrupted rollout?), keeping the newest $DR_WANT_N, healthy ones first"; fi;
 			DR_LIST=$(for DR_C in $DR_ALL_IDS; do docker inspect -f '{{.Created}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} {{.Id}}' "$DR_C" 2>/dev/null; done | sort -r);
-			DR_KEEP=$(printf '%s\\n' "$DR_LIST" | awk '$2 == "true" && $3 == "healthy" { print $4; exit }');
-			if [ -z "$DR_KEEP" ]; then DR_KEEP=$(printf '%s\\n' "$DR_LIST" | awk '$2 == "true" { print $4; exit }'); fi;
+			# The newest healthy running ones first, then the newest running ones, at most N.
+			DR_KEEP=$(printf '%s\\n' "$DR_LIST" | awk -v n="$DR_WANT_N" '$2 == "true" && $3 == "healthy" { h[++hc] = $4; next } $2 == "true" { r[++rc] = $4 } END { k = 0; for (i = 1; i <= hc && k < n; i++) { print h[i]; k++ } for (i = 1; i <= rc && k < n; i++) { print r[i]; k++ } }');
 			if [ -z "$DR_KEEP" ]; then return 0; fi;
 			DR_DROP="";
-			for DR_C in $DR_ALL_IDS; do if [ "$DR_C" != "$DR_KEEP" ]; then DR_DROP="$DR_DROP $DR_C"; fi; done;
+			for DR_C in $DR_ALL_IDS; do if ! printf '%s\\n' "$DR_KEEP" | grep -qxF -- "$DR_C"; then DR_DROP="$DR_DROP $DR_C"; fi; done;
 			dokploy_roll_remove $DR_DROP || true;
 			DR_STILL=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_KEEP" || true);
 			if [ -n "$DR_STILL" ]; then docker rm -f $DR_STILL >/dev/null 2>&1 || true; DR_STILL=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_KEEP" || true); fi;
 			if [ -n "$DR_STILL" ]; then
-				echo "Error: ❌ Rolling replace of $1: a leftover container could not be removed ($DR_STILL). The container $DR_KEEP is serving. No compose up is run for this service: Compose would scale to one container and could keep the stuck one instead.";
+				echo "Error: ❌ Rolling replace of $1: a leftover container could not be removed ($(echo $DR_STILL)). The container $(echo $DR_KEEP) is serving. No compose up is run for this service: Compose would scale to $DR_WANT_N container(s) and could keep the stuck one instead.";
 				return 1;
 			fi;
 			return 0;
@@ -1076,24 +1285,34 @@ export const getRollingReplaceScript = ({
 			return 0;
 		};
 		dokploy_roll_wait_healthy() {
+			# One deadline for every new replica of the service.
 			DR_DEADLINE=$(( $(date +%s) + ${timeout} ));
-			DR_LAST=""; DR_NONE=0;
-			while :; do
-				DR_STATE=$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1" 2>/dev/null) || DR_STATE="missing none";
-				if [ "$DR_STATE" != "$DR_LAST" ]; then dokploy_roll_log "$DOKPLOY_ROLL_SVC: the new replica is $DR_STATE"; DR_LAST="$DR_STATE"; fi;
-				if [ "$DR_STATE" != "running none" ]; then DR_NONE=0; fi;
-				case "$DR_STATE" in
-					"running healthy") return 0;;
-					"running unhealthy") DOKPLOY_ROLL_REASON="the new replica reported unhealthy"; return 1;;
-					"running none")
-						# The engine may not have attached the health monitor on the first poll.
-						DR_NONE=$((DR_NONE + 1));
-						if [ "$DR_NONE" -ge 2 ]; then DOKPLOY_ROLL_REASON="the new replica has no health status, the healthcheck is missing or disabled"; return 1; fi;;
-					"exited "*|"dead "*|"removing "*|"missing "*) DOKPLOY_ROLL_REASON="the new replica stopped before it became healthy ($DR_STATE)"; return 1;;
-				esac;
-				if [ "$(date +%s)" -ge "$DR_DEADLINE" ]; then DOKPLOY_ROLL_REASON="the new replica was not healthy within ${timeout}s (last state: $DR_STATE)"; return 1; fi;
-				dokploy_roll_sleep ${poll};
+			DR_WHO="the new replica";
+			for DR_W in "$@"; do
+				if [ $# -gt 1 ]; then DR_WHO="the new replica $(printf '%.12s' "$DR_W")"; fi;
+				DR_LAST=""; DR_NONE=0;
+				while :; do
+					DR_STATE=$(docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$DR_W" 2>/dev/null) || DR_STATE="missing none";
+					if [ "$DR_STATE" != "$DR_LAST" ]; then dokploy_roll_log "$DOKPLOY_ROLL_SVC: $DR_WHO is $DR_STATE"; DR_LAST="$DR_STATE"; fi;
+					if [ "$DR_STATE" != "running none" ]; then DR_NONE=0; fi;
+					case "$DR_STATE" in
+						"running healthy") break;;
+						"running unhealthy") DOKPLOY_ROLL_REASON="$DR_WHO reported unhealthy"; return 1;;
+						"running none")
+							# The engine may not have attached the health monitor on the first poll.
+							DR_NONE=$((DR_NONE + 1));
+							if [ "$DR_NONE" -ge 2 ]; then DOKPLOY_ROLL_REASON="$DR_WHO has no health status, the healthcheck is missing or disabled"; return 1; fi;;
+						"exited "*|"dead "*|"removing "*|"missing "*) DOKPLOY_ROLL_REASON="$DR_WHO stopped before it became healthy ($DR_STATE)"; return 1;;
+					esac;
+					if [ "$(date +%s)" -ge "$DR_DEADLINE" ]; then DOKPLOY_ROLL_REASON="$DR_WHO was not healthy within ${timeout}s (last state: $DR_STATE)"; return 1; fi;
+					dokploy_roll_sleep ${poll};
+				done;
 			done;
+			# A replica judged early may have gone bad while a later one was awaited.
+			if [ $# -gt 1 ]; then
+				if DR_LATE=$(dokploy_roll_new_bad_state "$*"); then DOKPLOY_ROLL_REASON="a new replica was $DR_LATE once every new replica had been judged"; return 1; fi;
+			fi;
+			return 0;
 		};
 		dokploy_roll_service() {
 			DOKPLOY_ROLL_SVC="$1"; DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_REASON=""; DOKPLOY_ROLL_BEFORE="";
@@ -1108,23 +1327,36 @@ export const getRollingReplaceScript = ({
 				dokploy_roll_log "$1: unchanged (config hash and image id match), left running";
 				return 0;
 			fi;
+			DR_N=$(dokploy_roll_replicas "$1");
+			# A stopped container of the service serves nothing, and a scale-up could start it on the old release.
+			DR_STOPPED=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_OLD" || true);
+			if [ -n "$DR_STOPPED" ]; then
+				dokploy_roll_log "$1: removing the stopped container(s) $(echo $DR_STOPPED) before the rollout";
+				dokploy_roll_discard $DR_STOPPED || true;
+				if [ -n "$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_OLD" || true)" ]; then
+					echo "Error: ❌ Rolling replace of $1: a stopped container could not be removed. Nothing was replaced: the running containers were left as they were.";
+					return 1;
+				fi;
+			fi;
+			DR_OLD_COUNT=$(printf '%s\\n' "$DR_OLD" | grep -c .);
 			DOKPLOY_ROLL_BEFORE=$(dokploy_roll_ids "$1" | tr '\\n' ' ');
 			DOKPLOY_ROLL_ACTIVE=1;
-			dokploy_roll_log "$1: starting a second replica from the new release";
-			if ! dokploy_roll_compose up -d --no-deps --no-recreate --no-build --scale "$1=2" "$1" 2>&1; then
+			if [ "$DR_N" = "1" ]; then dokploy_roll_log "$1: starting a second replica from the new release"; else dokploy_roll_log "$1: starting $DR_N new replicas from the new release next to the $DR_OLD_COUNT running one(s)"; fi;
+			if ! dokploy_roll_compose up -d --no-deps --no-recreate --no-build --scale "$1=$((DR_OLD_COUNT + DR_N))" "$1" 2>&1; then
 				DOKPLOY_ROLL_REASON="docker compose could not start the second replica";
+				if [ "$DR_N" != "1" ]; then DOKPLOY_ROLL_REASON="docker compose could not start the new replicas"; fi;
 				dokploy_roll_fail "$1";
 				return 1;
 			fi;
 			DR_NEW=$(dokploy_roll_extras);
 			DR_NEW_COUNT=$(printf '%s\\n' "$DR_NEW" | grep -c .);
-			if [ "$DR_NEW_COUNT" != "1" ]; then
-				DOKPLOY_ROLL_REASON="the new replica could not be told apart from the old container ($DR_NEW_COUNT new containers)";
+			if [ "$DR_NEW_COUNT" != "$DR_N" ]; then
+				DOKPLOY_ROLL_REASON="the new replica could not be told apart from the old container ($DR_NEW_COUNT new containers, $DR_N expected)";
 				dokploy_roll_fail "$1";
 				return 1;
 			fi;
-			dokploy_roll_log "$1: waiting up to ${timeout}s for the new replica to be healthy";
-			if ! dokploy_roll_wait_healthy "$DR_NEW"; then
+			if [ "$DR_N" = "1" ]; then dokploy_roll_log "$1: waiting up to ${timeout}s for the new replica to be healthy"; else dokploy_roll_log "$1: waiting up to ${timeout}s for the $DR_N new replicas to be healthy"; fi;
+			if ! dokploy_roll_wait_healthy $DR_NEW; then
 				dokploy_roll_fail "$1";
 				return 1;
 			fi;
@@ -1138,7 +1370,7 @@ export const getRollingReplaceScript = ({
 			DR_LEFT=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_NEW" || true);
 			if [ -n "$DR_LEFT" ]; then docker rm -f $DR_LEFT >/dev/null 2>&1 || true; DR_LEFT=$(dokploy_roll_ids "$1" | grep -vxF -- "$DR_NEW" || true); fi;
 			if [ -n "$DR_LEFT" ]; then
-				echo "Error: ❌ Rolling replace of $1: the old container could not be removed ($DR_LEFT). The new replica $DR_NEW is serving. No compose up is run for this service: Compose would scale back to one container and keep the lowest-numbered (old) one. The next deploy reconciles it.";
+				echo "Error: ❌ Rolling replace of $1: the old container could not be removed ($(echo $DR_LEFT)). The new replica $(echo $DR_NEW) is serving. No compose up is run for this service: Compose would scale back to $DR_N container(s) and keep the lowest-numbered (old) one. The next deploy reconciles it.";
 				return 1;
 			fi;
 			for DR_C in $DR_OLD; do
