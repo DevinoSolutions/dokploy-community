@@ -4,7 +4,7 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
-**A root organization pin that matches no organization now says so when host-level settings are refused** (T-8932). When `DOKPLOY_ROOT_ORGANIZATION_ID` names an organization that does not exist, the refusal now says so and what to set instead of the generic message. Who is allowed does not change. A server setup that cannot start the SSH connection (an invalid username or an unreadable key) now lists what to check, in the same layout as the other connection errors. No migration.
+**A root organization pin that matches no organization now says so when host-level settings are refused** (T-8932). When `DOKPLOY_ROOT_ORGANIZATION_ID` names an organization that does not exist, the refusal now says so and what to set instead of the generic message. Who is allowed does not change. A server setup that cannot start the SSH connection (an invalid username or an unreadable key) now lists what to check, in the same layout as the other connection errors. The Docker page's Containers tab on the Dokploy host now says why it is empty for an organization that does not own the instance, instead of "No results.". Containers of that organization's own services on the host are still listed. No migration.
 
 ### New in v0.30.8-community.34
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { canShowLocalHost } from "@/lib/local-host-flag";
+import {
+	canShowLocalHost,
+	explainsEmptyLocalHost,
+} from "@/lib/local-host-flag";
 
 describe("canShowLocalHost", () => {
 	it("shows the host to the organization that owns it", () => {
@@ -60,5 +63,47 @@ describe("canShowLocalHost", () => {
 				localHostAccess: undefined,
 			}),
 		).toBe(true);
+	});
+});
+
+describe("explainsEmptyLocalHost", () => {
+	it("explains an empty host to an organization that does not own it", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: undefined,
+				isFlagPending: false,
+				canSeeLocalHost: false,
+			}),
+		).toBe(true);
+	});
+
+	it("keeps the usual empty state for the organization that owns the host", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: undefined,
+				isFlagPending: false,
+				canSeeLocalHost: true,
+			}),
+		).toBe(false);
+	});
+
+	it("keeps the usual empty state for a remote server", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: "server-1",
+				isFlagPending: false,
+				canSeeLocalHost: false,
+			}),
+		).toBe(false);
+	});
+
+	it("waits for the flag before explaining anything", () => {
+		expect(
+			explainsEmptyLocalHost({
+				serverId: undefined,
+				isFlagPending: true,
+				canSeeLocalHost: false,
+			}),
+		).toBe(false);
 	});
 });
