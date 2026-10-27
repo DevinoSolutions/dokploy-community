@@ -8,6 +8,8 @@
 #   cfg/imageid.<ref, / and : as _>  id of an image (`image inspect`)
 #   cfg/newimage.<svc>               image id of a replica created by `up`
 #   cfg/newhealth.<svc>              healthy | unhealthy | never | none | noneonce | delay:<n>
+#   cfg/newhealth.<svc>.<k>          the same, for the k-th replica `up` creates for the service (1-based)
+#   cfg/replicas.<svc>               containers an `up` without --scale converges to (deploy.replicas, default 1)
 #   cfg/up.fail.<svc>                `up` naming the service fails
 #   cfg/stop.noop, cfg/rm.fail       stop does nothing / rm fails
 #   cfg/stop.slow                    stop takes 3 s before it acts
@@ -64,7 +66,8 @@ create() {
   cset "$id" image "$(cat "$D/cfg/newimage.$1")"
   cset "$id" running true
   cset "$id" created "$(printf '2026-10-15T10:%02d:00.000000000Z' "$n")"
-  mode=$(cat "$D/cfg/newhealth.$1" 2>/dev/null || echo healthy)
+  k=$(cat "$D/cfg/created.$1" 2>/dev/null || echo 0); k=$((k + 1)); echo "$k" > "$D/cfg/created.$1"
+  if [ -f "$D/cfg/newhealth.$1.$k" ]; then mode=$(cat "$D/cfg/newhealth.$1.$k"); else mode=$(cat "$D/cfg/newhealth.$1" 2>/dev/null || echo healthy); fi
   case "$mode" in
     healthy) cset "$id" final_health healthy; cset "$id" polls_left 0;;
     delay:*) cset "$id" final_health healthy; cset "$id" polls_left "$(echo "$mode" | cut -d: -f2)";;
@@ -202,14 +205,18 @@ case "$cmd" in
         for svc in $names; do
           if [ -f "$D/cfg/up.fail.$svc" ]; then echo "up failed for $svc" >&2; exit 1; fi
           have=$(ids_of "$svc" all | grep -c .)
+          replicas=$(cat "$D/cfg/replicas.$svc" 2>/dev/null || echo 1)
           if [ -z "$scale" ]; then
-            # Without --scale Compose converges to the default of one container
+            # Without --scale Compose converges to deploy.replicas (one by default)
             # and removes the highest-numbered one, whatever its state or release.
-            while [ "$have" -gt 1 ]; do
+            while [ "$have" -gt "$replicas" ]; do
               last=$(ids_of "$svc" all | tail -n 1)
               rm -rf "$D/containers/$last"
               have=$((have - 1))
             done
+            if [ "$have" -gt 0 ]; then
+              while [ "$have" -lt "$replicas" ]; do create "$svc" > /dev/null; have=$((have + 1)); done
+            fi
           fi
           if [ -n "$scale" ]; then
             want=$(echo "$scale" | cut -d= -f2)
@@ -221,7 +228,7 @@ case "$cmd" in
               have=$((have - 1))
             done
           elif [ "$have" -eq 0 ]; then
-            create "$svc" > /dev/null
+            while [ "$have" -lt "$replicas" ]; do create "$svc" > /dev/null; have=$((have + 1)); done
           elif [ "$norecreate" -eq 0 ]; then
             # Like Compose: a container whose config hash is current is left alone.
             for id in $(ids_of "$svc" all); do
