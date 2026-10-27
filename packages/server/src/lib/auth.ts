@@ -197,6 +197,7 @@ const createBetterAuth = () =>
 			"/oauth2/update-client",
 			"/oauth2/delete-client",
 			"/oauth2/client/rotate-secret",
+			"/oauth2/client/rotate-keys",
 			"/oauth2/get-consent",
 			"/oauth2/get-consents",
 			"/oauth2/update-consent",
