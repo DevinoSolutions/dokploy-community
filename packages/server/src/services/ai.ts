@@ -7,9 +7,6 @@ import { TRPCError } from "@trpc/server";
 import { generateText, Output } from "ai";
 import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { IS_CLOUD } from "../constants";
-import { findServerById } from "./server";
-import { getWebServerSettings } from "./web-server-settings";
 
 interface SuggestionItem {
 	id: string;
@@ -142,6 +139,9 @@ interface Props {
 	aiId: string;
 	input: string;
 	serverId?: string | undefined;
+	// The address the organization may use for its services: its server's, or
+	// the Dokploy host's when it may run services there, otherwise empty.
+	hostIp: string;
 }
 
 export const suggestVariants = async ({
@@ -149,6 +149,7 @@ export const suggestVariants = async ({
 	aiId,
 	input,
 	serverId,
+	hostIp,
 }: Props) => {
 	try {
 		const aiSettings = await getAiSettingById(aiId);
@@ -162,16 +163,8 @@ export const suggestVariants = async ({
 		const provider = selectAIProvider(aiSettings);
 		const model = provider(aiSettings.model);
 
-		let ip = "";
-		if (!IS_CLOUD) {
-			const settings = await getWebServerSettings();
-			ip = settings?.serverIp || "";
-		}
-
-		if (serverId) {
-			const server = await findServerById(serverId);
-			ip = server.ipAddress;
-		} else if (process.env.NODE_ENV === "development") {
+		let ip = hostIp;
+		if (!serverId && process.env.NODE_ENV === "development") {
 			ip = "127.0.0.1";
 		}
 
@@ -207,6 +200,19 @@ export const suggestVariants = async ({
 				}),
 			),
 		});
+
+		// Without an address there is no sslip.io host to give, so the user adds
+		// the domain themselves.
+		const domainRules = ip
+			? `Domain Rules - For each service that needs to be exposed to the internet:
+		    1. Define a domain with:
+		       - host: {service-name}-{random-3-chars-hex}-${ip.replaceAll(".", "-")}.sslip.io
+		       - port: the internal port the service runs on
+		       - serviceName: the name of the service in the docker-compose
+		    2. Make sure the service is properly configured to work with the specified port`
+			: `Domain Rules:
+		    1. Return an empty domains array for every suggestion; the user adds a domain later
+		    2. Still make sure each service is configured to listen on its internal port`;
 
 		const result = await generateText({
 			model,
@@ -294,12 +300,7 @@ export const suggestVariants = async ({
 		    4. ONLY include environment variables that are actually used in the docker-compose
 		    5. Every environment variable referenced in the docker-compose MUST have a corresponding entry in envVariables
 
-		    Domain Rules - For each service that needs to be exposed to the internet:
-		    1. Define a domain with:
-		       - host: {service-name}-{random-3-chars-hex}-${ip ? ip.replaceAll(".", "-") : ""}.sslip.io
-		       - port: the internal port the service runs on
-		       - serviceName: the name of the service in the docker-compose
-		    2. Make sure the service is properly configured to work with the specified port
+		    ${domainRules}
 
 		    User's request: ${input}
 		  `,
