@@ -25,15 +25,22 @@ of rotation before it stops it (see "Taking the old container out of rotation").
 For each service you select, instead of stop-then-start:
 
 1. Build or pull the new image first. Nothing running is touched.
-2. Record the container ids of the service, then start a second replica from
-   the new release (`up -d --no-deps --no-recreate --scale <svc>=2 <svc>`).
-3. Wait until the new replica is healthy, up to the health timeout.
-4. Take the old container out of rotation: make its healthcheck fail, wait for
-   `unhealthy` and for Traefik to reload (see below).
-5. Wait the drain delay, then stop and remove the old container by id.
+2. Record the container ids of the service, then start N new replicas from
+   the new release next to the old ones (`up -d --no-deps --no-recreate
+   --scale <svc>=<old + N> <svc>`). N is the service's `scale` or
+   `deploy.replicas` (1 when neither is set), so a one-container service gets
+   a second replica.
+3. Wait until every new replica is healthy, all within one health timeout.
+4. Take every old container out of rotation: make their healthchecks fail,
+   wait for `unhealthy` and, once, for Traefik to reload (see below).
+5. Wait the drain delay, then stop and remove all the old containers by id.
 
-If the new replica never becomes healthy, it is removed and the old container,
-which was never touched, keeps serving. Services you did not select are
+If any new replica does not become healthy in time, all the new replicas are
+removed and the old containers, which were never touched, keep serving.
+Exactly N new containers must appear after the scale-up; any other number is
+treated the same way. Stopped containers of the service (they serve nothing)
+are removed before the scale-up, so it cannot start one of them on the old
+release. Services you did not select are
 deployed as before (`up -d --no-deps <others>`), and a final
 `up -d --no-recreate --remove-orphans` over `docker compose config --services`
 reconciles orphans and stopped services.
@@ -76,9 +83,10 @@ hold:
 | Condition | Why |
 | --- | --- |
 | `container_name` is set | Compose cannot scale it to two |
-| a host port is published (`ports: "8080:80"`) | the second replica could not bind it. `expose:` and Traefik-only access are fine |
+| a fixed host port is published (`ports: "8080:80"`) | the second replica could not bind it. `expose:` and Traefik-only access are fine |
+| a host port range smaller than 2 x replicas (`"54000-54001:3000"` with 2 replicas), or a container port range (`"8000-8001:80-81"`) | during the overlap the old and the new replicas run side by side, and Docker gives each container one free port of the range, so the range must hold at least 2 x replicas ports |
 | `network_mode: host`, `service:x` or `container:x` | shared network namespace |
-| `scale` or `deploy.replicas` is not 1 | `--scale` would conflict |
+| `scale` or `deploy.replicas` is not a whole number from 1 to 10, or the two disagree | the rollout runs N new replicas next to N old ones |
 | static `ipv4_address`, `ipv6_address` or `mac_address` | the second replica cannot take it |
 | another service uses `network_mode` / `pid` / `ipc: service:<svc>` or `volumes_from: <svc>` on it | replacing it breaks the dependent |
 | no compose-level `healthcheck`, `healthcheck.disable: true` or `test: ["NONE"]` | no readiness signal. An image-level `HEALTHCHECK` is not visible to Dokploy, so put the healthcheck in the compose file |
@@ -100,12 +108,33 @@ Things Dokploy cannot see, so you decide before selecting a service:
 - Exec, terminal and backup actions pick the first running container, which can
   be either replica for a few seconds.
 - **Anything only visible after Compose renders the file.** Eligibility is read
-  from the compose file as Dokploy sees it, without variable interpolation,
-  `extends`, `include`, profiles or `.env` values. A `ports`,
+  from the compose file with its `${VAR}` references resolved (see "Variables"
+  below), but without `extends`, `include` or profiles. A `ports`,
   `container_name` or `scale` that only appears after those are applied is
   not detected. It fails safe: a second replica that cannot bind its port or
-  take its name makes the `up` fail, the new replica is removed and the old
-  container keeps serving.
+  take its name makes the `up` fail, the new replicas are removed and the old
+  containers keep serving.
+
+### Variables
+
+Eligibility, the replica count and the health timeout are judged on the values
+`docker compose` will use on the deploy, so `deploy.replicas:
+${WEB_REPLICAS:-1}` or a port range built from variables counts by its value.
+Dokploy resolves the references the way Compose does (`$$`, `$VAR`, `${VAR}`,
+`${VAR:-default}`, `${VAR-default}`, `${VAR:+alt}`, `${VAR+alt}`,
+`${VAR:?err}`, `${VAR?err}`, defaults that hold references of their own), with
+the variables of the `.env` Dokploy writes for the deploy (the compose,
+environment and project variables). An unset variable without a default is
+empty, as in Compose. This only decides what is rolled: the compose file that
+is deployed is the one you wrote, unchanged.
+
+A service keeps being judged on the file as written (exactly as before
+interpolation was added), with a line in the deploy log, when Dokploy cannot
+know the value: a `${` it cannot parse, a `:?` or `?` on a variable that is
+not set, a variable whose `.env` value itself holds `${` (Compose expands it),
+`PATH` or `HOME`, a vault reference or variable that cannot be prepared, or a
+compose without **Create env file** (Compose then reads whatever `.env` the
+repository has).
 
 ## When the compose changes after you selected a service (drift)
 
@@ -208,9 +237,18 @@ deploy is never failed because of drift.
     a service that is mid-recreate could be interrupted, and `kill -9` cannot
     be caught, so it could leave two containers until the next deploy
     reconciles them.
-- **Interrupted deploys can leave two containers.** The next deploy finds more
-  than one container for a selected service and reconciles first: it keeps the
-  newest healthy one, removes the rest, and goes on.
+- **Interrupted deploys can leave extra containers.** The next deploy finds
+  more containers than the service's replicas for a selected service and
+  reconciles first: it keeps the newest N, healthy ones first and then running
+  ones, removes the rest, and goes on. With one replica that is the newest
+  healthy one, as before.
+- **Several replicas:** a cancel, a failure or a new replica that turns bad is
+  handled for all of them at once. Before the take-out a cancel or failure
+  removes every new replica and keeps every old one. From the first marker copy
+  a cancel removes the old containers and keeps the new ones (the old ones are
+  out of rotation). A new replica that turns bad during the take-out or the
+  drain puts every old container back in rotation; the new ones are removed
+  only once all the old ones are healthy again.
 
 ## Taking the old container out of rotation
 
@@ -396,8 +434,14 @@ copy first. What a trial run (a real compose copied to a stack) showed:
 - A service whose healthcheck is not shell form (or whose old container predates
   the wrap) is stopped while Traefik still routes to it; only the manual retry
   middleware covers that window.
-- A deploy that is `kill -9`ed leaves two containers until the next deploy
+- A deploy that is `kill -9`ed leaves extra containers until the next deploy
   reconciles them.
+- At most 10 replicas per rolled service. During the overlap the service runs
+  twice its replicas, so it needs the memory and CPU for both.
+- With a host port range, the ports a replica gets are whatever Docker picks
+  from the range, so after a rollout the service can be on different ports of
+  the range than before. Anything that targets one fixed port of the range
+  (another proxy on the host, a firewall rule) has to target the whole range.
 - Compose previews, stacks, custom commands, fresh-volumes deploys and stateful
   services are out of scope.
 - The skip check compares against every image the service resolves to, which can

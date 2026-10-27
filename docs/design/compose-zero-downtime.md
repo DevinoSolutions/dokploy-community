@@ -159,6 +159,10 @@ Constraints:
 - `network_mode: host` or `service:x`: blocker.
 - `scale:` or `deploy.replicas` greater than 1: `--scale svc=2` would shrink
   or conflict with it. Blocker (or use 2xN; the first PR refuses).
+  Later (T-9197 follow-up): 1..10 replicas roll with 2xN (`--scale
+  svc=<old + N>`), host port ranges of at least 2xN ports are allowed, and
+  eligibility reads the spec with `${VAR}` interpolated; see
+  [../compose-rolling-replace.md](../compose-rolling-replace.md).
 - Static `ipv4_address`, `ipv6_address` or `mac_address`: the second replica
   cannot take it. Blocker.
 - Any other service that points at the rolled one with `network_mode:
