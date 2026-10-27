@@ -176,6 +176,16 @@ const runInShell = async (_serverId: string, command: string) => {
 	return { stdout: result.stdout, stderr: result.stderr };
 };
 
+// A host that answers the reads with `read` and the resolution of the paths
+// against the own directory (T-7845) for real, with the local shell.
+const answerReads = (read: string) =>
+	mocks.execAsyncRemote.mockImplementation(
+		async (serverId: string, command: string) =>
+			command.includes("__dokploy_verdict")
+				? runInShell(serverId, command)
+				: { stdout: read, stderr: "" },
+	);
+
 const baseCompose = {
 	appName: APP,
 	composeId: "c1",
@@ -296,7 +306,7 @@ describe("an override file read on a remote host", () => {
 	});
 
 	it("still reads an ordinary override file", async () => {
-		mocks.execAsyncRemote.mockResolvedValue({ stdout: OVERRIDE, stderr: "" });
+		answerReads(OVERRIDE);
 		await expect(
 			assertComposeVolumesBound(withOverride("override.yml", "srv-1")),
 		).resolves.toBeUndefined();

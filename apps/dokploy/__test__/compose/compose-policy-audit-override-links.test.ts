@@ -173,6 +173,22 @@ const runInShell = async (_serverId: string, command: string) => {
 	return { stdout: result.stdout, stderr: result.stderr };
 };
 
+// A host that answers the reads with `read` and the resolution of the paths
+// against the own directory (T-7845) for real, with the local shell.
+const answerReads = (read: string) =>
+	mocks.execAsyncRemote.mockImplementation(
+		async (serverId: string, command: string) =>
+			command.includes("__dokploy_verdict")
+				? runInShell(serverId, command)
+				: { stdout: read, stderr: "" },
+	);
+
+// The guarded read of an override file, which is not the resolution command.
+const readCommand = () =>
+	(mocks.execAsyncRemote.mock.calls as [string, string][])
+		.map(([, command]) => command)
+		.find((command) => !command.includes("__dokploy_verdict")) as string;
+
 const entity = (file: string, serverId: string | null) =>
 	({
 		composeId: "compose-1",
@@ -227,12 +243,9 @@ afterAll(() => {
 
 describe("an override file read by the audit on a remote host", () => {
 	it("goes through the guarded read, and a link out is not evaluated", async () => {
-		mocks.execAsyncRemote.mockResolvedValue({
-			stdout: COMPOSE_FILE_LINK_MARKER,
-			stderr: "",
-		});
+		answerReads(COMPOSE_FILE_LINK_MARKER);
 		const { overrides, log } = await audit("override.yml", "srv-1");
-		const [, command] = mocks.execAsyncRemote.mock.calls[0] as [string, string];
+		const command = readCommand();
 		expect(command).toContain(
 			`__dokploy_inside ${mocks.base.remote}/${APP}/code ${mocks.base.remote}/${APP}/code/override.yml`,
 		);
@@ -250,7 +263,7 @@ describe("an override file read by the audit on a remote host", () => {
 	});
 
 	it("still evaluates an ordinary override file", async () => {
-		mocks.execAsyncRemote.mockResolvedValue({ stdout: OVERRIDE, stderr: "" });
+		answerReads(OVERRIDE);
 		const { overrides, log } = await audit("override.yml", "srv-1");
 		expect(overrides).toEqual([OVERRIDE]);
 		expect(log).toContain("rule=host-privilege");
@@ -331,6 +344,79 @@ describe.each([
 		writeFileSync(`${code()}/../override.yml`, OVERRIDE);
 		rmSync(code(), { recursive: true, force: true });
 		expect((await audit("../override.yml", serverId)).overrides).toEqual([]);
+	});
+
+	// T-7845: the audit applies the own-directory check of the deploy before it
+	// reads, skips what is outside, and says so in the log.
+	describe("a file outside the compose's own directory", () => {
+		const OTHER = "other-app";
+		const otherOverride = () => `${tmp}/compose/${OTHER}/code/override.yml`;
+		const skipped = /\[restricted-compose audit\] skipped: 1 override file\(s\)/;
+
+		beforeEach(() => {
+			mkdirSync(`${tmp}/compose/${OTHER}/code`, { recursive: true });
+			writeFileSync(otherOverride(), OUTSIDE_TEXT);
+		});
+
+		it("is skipped, and the log says so", async () => {
+			const { overrides, log } = await audit(
+				`../../${OTHER}/code/override.yml`,
+				serverId,
+			);
+			expect(overrides).toEqual([]);
+			expect(log).toMatch(skipped);
+			expect(log).toContain("deployment=dep-1");
+			// Nothing of it, not even its name, reaches the log.
+			expect(log).not.toContain("leaked-host-file");
+			expect(log).not.toContain(OTHER);
+			// The shell host is only asked for what is inside.
+			expect(
+				mocks.execAsyncRemote.mock.calls.some(([, command]) =>
+					String(command).includes(`${OTHER}/code/override.yml`) &&
+					!String(command).includes("__dokploy_verdict"),
+				),
+			).toBe(false);
+		});
+
+		it("is skipped when it is an absolute path of another compose", async () => {
+			const absolute = `${(serverId ? mocks.base.remote : mocks.base.local).replace(/^[A-Za-z]:/, "")}/${OTHER}/code/override.yml`;
+			const { overrides, log } = await audit(absolute, serverId);
+			expect(overrides).toEqual([]);
+			expect(log).toMatch(skipped);
+		});
+
+		itWithLinks("is skipped behind a link of the checkout", async () => {
+			link(`${tmp}/compose/${OTHER}/code`, "elsewhere", "junction");
+			const { overrides, log } = await audit("elsewhere/override.yml", serverId);
+			expect(overrides).toEqual([]);
+			expect(log).toMatch(skipped);
+			expect(log).not.toContain("leaked-host-file");
+		});
+
+		it("does not stop the files that are inside from being read", async () => {
+			writeFileSync(`${code()}/real.yml`, OVERRIDE);
+			await runComposePolicyAudit(
+				{
+					...entity("real.yml", serverId),
+					command: `compose -p ${APP} -f docker-compose.yml -f ../../${OTHER}/code/override.yml -f real.yml up -d`,
+				} as never,
+				deployment,
+			);
+			const [{ overrides }] = mocks.evaluateComposePolicy.mock.calls[0] as [
+				{ overrides: string[] },
+			];
+			expect(overrides).toEqual([OVERRIDE]);
+			expect(
+				mocks.appendLogLine.mock.calls.map((call) => String(call[2])).join("\n"),
+			).toMatch(skipped);
+		});
+
+		it("is not mentioned when every file is inside", async () => {
+			writeFileSync(`${code()}/real.yml`, OVERRIDE);
+			const { overrides, log } = await audit("real.yml", serverId);
+			expect(overrides).toEqual([OVERRIDE]);
+			expect(log).not.toContain("skipped");
+		});
 	});
 
 	itWithFifos(!!serverId)("does not wait on an override file that is a FIFO", async () => {
