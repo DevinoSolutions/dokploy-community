@@ -1016,15 +1016,26 @@ export const reconnectServicesToTraefik = async (serverId?: string) => {
 	if (composeResult.length === 0) {
 		return;
 	}
-	let commands = "";
-
+	// A compose whose network is gone (a stale row) must not fail the whole
+	// update through the exit code of the last line: log the first line of
+	// Docker's reason and go on. Only Docker's already-connected wording counts
+	// as connected (the overlay one reads "... is already attached to network
+	// X"); any other error, such as a failed endpoint_table entry, is a skip.
+	// The exact-name anchor keeps dokploy-traefik-previous out of the lookup.
+	let commands =
+		'id=$(docker ps --filter "name=^dokploy-traefik$" -q)\n' +
+		'if [ -z "$id" ]; then\n' +
+		'echo "Traefik is not running; skipped reconnecting isolated composes"\n' +
+		"else\n";
 	for (const compose of composeResult) {
-		commands += `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1\n`;
+		commands += `out=$(docker network connect ${compose.appName} "$id" 2>&1) || case "$out" in *"already exists in network"*|*"already attached to network"*) echo "Traefik is already connected to ${compose.appName}";; *) echo "Skipped ${compose.appName}: $(printf '%s' "$out" | head -n 1)";; esac\n`;
 	}
+	commands += "fi\n";
 
-	if (serverId) {
-		await execAsyncRemote(serverId, commands);
-	} else {
-		await execAsync(commands);
+	const { stdout } = serverId
+		? await execAsyncRemote(serverId, commands)
+		: await execAsync(commands);
+	if (stdout?.trim()) {
+		console.log(stdout.trim());
 	}
 };
