@@ -260,14 +260,25 @@ describe("the readlink -f fallback of the path resolver", () => {
 
 	it("refuses a path with a control character in it", () => {
 		if (!shellWorks) return;
+		// A carriage return in the text of a script is dropped on some hosts (the
+		// ones that read a script as text), so those cases run where it is kept.
+		const cr = posix ? [`${sh}/own/code/dir\rx`, `${sh}/own/code/dir\r`] : [];
 		const [answer] = resolveAll(
-			[`${sh}/own/code/dir\nx`, `${sh}/own/code/dir\n`, "/a\n/b"],
+			[
+				`${sh}/own/code/dir\nx`,
+				`${sh}/own/code/dir\n`,
+				"/a\n/b",
+				...cr,
+			],
 			[tmp],
 		);
 		// Each input is printed on lines of its own only when it resolves.
-		expect(answer).toEqual(Array(3).fill("unresolved"));
-		const verdicts = verdictsAll([`${sh}/own/code/ok\nx`, `${sh}/own/ok`], [tmp]);
-		expect(verdicts[0]).toEqual(["out", "in"]);
+		expect(answer).toEqual(Array(3 + cr.length).fill("unresolved"));
+		const verdicts = verdictsAll(
+			[`${sh}/own/code/ok\nx`, ...(posix ? [`${sh}/own/code/ok\rx`] : []), `${sh}/own/ok`],
+			[tmp],
+		);
+		expect(verdicts[0]).toEqual(posix ? ["out", "out", "in"] : ["out", "in"]);
 	});
 
 	(posix ? itWithLinks : it.skip)(
@@ -317,9 +328,11 @@ ln -s a/b/c /w/own/code/nl
 ln -s ../../../far_c/x "/w/own/code/nl$NL/l"
 ln -s "nl$NL/l" /w/own/code/start
 ln -s "end_target$NL" /w/own/code/nlt
+CR=$(printf '\\rx'); CR=\${CR%x}
+ln -s "end_target$CR" /w/own/code/crt
 for cwd in / /w/own/code/a/b /w/c/d; do
   cd "$cwd"
-  for p in /w/own/code/dangle_out /w/own/code/dangle_out/more /w/own/code/c1 /w/own/code/sub/up /w/own/code/filelink /w/own/code/loop1 /w/own/code/in_dangle /w/own/code/start /w/own/code/nlt "/w/own/code/nl$NL/l"; do
+  for p in /w/own/code/dangle_out /w/own/code/dangle_out/more /w/own/code/c1 /w/own/code/sub/up /w/own/code/filelink /w/own/code/loop1 /w/own/code/in_dangle /w/own/code/start /w/own/code/nlt /w/own/code/crt "/w/own/code/nl$NL/l"; do
     n=$(printf '%s' "$p" | tr '\\n' '~')
     if r=$(__dokploy_resolve "$p"); then v=$r; else v=unresolved; fi
     if __dokploy_inside /w/own "$p"; then s=in; else s=out; fi
@@ -334,7 +347,7 @@ done`;
 			{ input: script, encoding: "utf8", timeout: 150_000 },
 		);
 		const out = result.stdout.trim().split("\n");
-		expect(out).toHaveLength(30);
+		expect(out).toHaveLength(33);
 		const expected: Record<string, string> = {
 			"/w/own/code/dangle_out": "/w/other/code/far_a => out",
 			"/w/own/code/dangle_out/more": "/w/other/code/far_a/more => out",
@@ -346,6 +359,7 @@ done`;
 			// Names that differ only by a trailing control character.
 			"/w/own/code/start": "unresolved => out",
 			"/w/own/code/nlt": "unresolved => out",
+			"/w/own/code/crt": "unresolved => out",
 			"/w/own/code/nl~/l": "unresolved => out",
 		};
 		for (const line of out) {
