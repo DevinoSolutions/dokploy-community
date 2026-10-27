@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { reconnectServicesToTraefik } from "@dokploy/server/services/settings";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -21,6 +25,10 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 	execAsync: mocks.execAsync,
 	execAsyncRemote: mocks.execAsyncRemote,
 }));
+
+// What reconnectServicesToTraefik writes for one compose.
+const connectLine = (app: string) =>
+	`out=$(docker network connect ${app} $(docker ps --filter "name=dokploy-traefik" -q) 2>&1) || case "$out" in *"already exists"*) echo "Traefik is already connected to ${app}";; *) echo "Skipped ${app}: $out";; esac`;
 
 describe("reconnectServicesToTraefik", () => {
 	beforeEach(() => {
@@ -52,8 +60,8 @@ describe("reconnectServicesToTraefik", () => {
 
 		expect(mocks.execAsync).toHaveBeenCalledOnce();
 		expect(mocks.execAsync).toHaveBeenCalledWith(
-			'docker network connect first-compose $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1 || echo "Skipped first-compose: Traefik could not be connected to its network"\n' +
-				'docker network connect second-compose $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1 || echo "Skipped second-compose: Traefik could not be connected to its network"\n',
+			`${connectLine("first-compose")}\n` +
+				`${connectLine("second-compose")}\n`,
 		);
 		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
 	});
@@ -66,40 +74,69 @@ describe("reconnectServicesToTraefik", () => {
 		expect(mocks.execAsyncRemote).toHaveBeenCalledOnce();
 		expect(mocks.execAsyncRemote).toHaveBeenCalledWith(
 			"server-id",
-			'docker network connect remote-compose $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1 || echo "Skipped remote-compose: Traefik could not be connected to its network"\n',
+			`${connectLine("remote-compose")}\n`,
 		);
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 	});
 
 	// A stale isolated-compose row whose network is gone used to fail the whole
-	// Traefik update through the exit code of the last command.
-	it("never lets one missing network fail the script", async () => {
-		mocks.findMany.mockResolvedValue([
-			{ appName: "gone-compose" },
-			{ appName: "live-compose" },
-		]);
+	// Traefik update through the exit code of the last command. The generated
+	// script is run for real, with a docker stub that answers like the engine.
+	const hasSh = spawnSync("sh", ["-c", "true"]).status === 0;
+	it.skipIf(!hasSh)(
+		"runs to exit code 0 and says why a network was skipped",
+		async () => {
+			mocks.findMany.mockResolvedValue([
+				{ appName: "live-compose" },
+				{ appName: "joined-compose" },
+				{ appName: "gone-compose" },
+			]);
+			await reconnectServicesToTraefik();
+			const script = mocks.execAsync.mock.calls[0]?.[0] as string;
 
-		await reconnectServicesToTraefik();
+			const dir = mkdtempSync(join(tmpdir(), "t9412-"));
+			try {
+				writeFileSync(
+					join(dir, "docker"),
+					[
+						"#!/bin/sh",
+						'if [ "$1" = ps ]; then echo traefikid; exit 0; fi',
+						'case "$3" in',
+						"live-compose) exit 0 ;;",
+						'joined-compose) echo "Error response from daemon: endpoint with name dokploy-traefik already exists in network joined-compose"; exit 1 ;;',
+						'*) echo "Error response from daemon: network $3 not found"; exit 1 ;;',
+						"esac",
+					].join("\n"),
+				);
+				chmodSync(join(dir, "docker"), 0o755);
+				const run = spawnSync("sh", ["-c", script], {
+					encoding: "utf8",
+					env: { ...process.env, PATH: `${dir}${delimiter}${process.env.PATH}` },
+				});
 
-		const script = mocks.execAsync.mock.calls[0]?.[0] as string;
-		for (const line of script.trim().split("\n")) {
-			expect(line).toMatch(/ \|\| echo "Skipped [\w-]+: /);
-		}
-	});
+				expect(run.status).toBe(0);
+				expect(run.stdout.trim().split("\n")).toEqual([
+					"Traefik is already connected to joined-compose",
+					'Skipped gone-compose: Error response from daemon: network gone-compose not found',
+				]);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		},
+	);
 
-	it("logs which networks were skipped", async () => {
+	it("logs what the script printed", async () => {
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 		mocks.findMany.mockResolvedValue([{ appName: "gone-compose" }]);
 		mocks.execAsync.mockResolvedValue({
-			stdout:
-				"Skipped gone-compose: Traefik could not be connected to its network\n",
+			stdout: "Skipped gone-compose: network gone-compose not found\n",
 			stderr: "",
 		});
 
 		await reconnectServicesToTraefik();
 
 		expect(log).toHaveBeenCalledWith(
-			"Skipped gone-compose: Traefik could not be connected to its network",
+			"Skipped gone-compose: network gone-compose not found",
 		);
 		log.mockRestore();
 	});

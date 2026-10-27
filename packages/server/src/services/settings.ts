@@ -1019,9 +1019,10 @@ export const reconnectServicesToTraefik = async (serverId?: string) => {
 	let commands = "";
 
 	// A compose whose network is gone (a stale row) must not fail the whole
-	// update through the exit code of the last line: skip it with a log line.
+	// update through the exit code of the last line: log why it was skipped,
+	// and a Traefik that is already connected is not a skip.
 	for (const compose of composeResult) {
-		commands += `docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) >/dev/null 2>&1 || echo "Skipped ${compose.appName}: Traefik could not be connected to its network"\n`;
+		commands += `out=$(docker network connect ${compose.appName} $(docker ps --filter "name=dokploy-traefik" -q) 2>&1) || case "$out" in *"already exists"*) echo "Traefik is already connected to ${compose.appName}";; *) echo "Skipped ${compose.appName}: $out";; esac\n`;
 	}
 
 	const { stdout } = serverId

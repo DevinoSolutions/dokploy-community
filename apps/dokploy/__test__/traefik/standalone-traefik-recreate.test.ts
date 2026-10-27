@@ -42,6 +42,7 @@ interface FakeOptions {
 	renameError?: Error;
 	stopError?: Error;
 	startOldError?: Error;
+	restartOnRename?: boolean;
 	backupRunning?: boolean;
 	oldImage?: string;
 }
@@ -64,6 +65,7 @@ const fakeDocker = ({
 	renameError,
 	stopError,
 	startOldError,
+	restartOnRename = false,
 	backupRunning = false,
 	oldImage = `traefik:v${TRAEFIK_VERSION}`,
 }: FakeOptions = {}) => {
@@ -129,6 +131,10 @@ const fakeDocker = ({
 			}
 			log.push(`rename ${c.id} -> ${name}`);
 			c.name = name;
+			// The restart policy brings it back once it has its name again.
+			if (restartOnRename && c.id === "old" && name === "dokploy-traefik") {
+				c.running = true;
+			}
 		},
 		stop: async () => {
 			const c = find(ref);
@@ -139,6 +145,8 @@ const fakeDocker = ({
 		start: async () => {
 			const c = find(ref);
 			log.push(`start ${c.id}`);
+			// What Docker answers for a container that already runs.
+			if (c.running) throw new Error("container already started");
 			if (startError && c.id === "new") throw startError;
 			if (startOldError && c.id === "old") throw startOldError;
 			c.running = true;
@@ -410,10 +418,27 @@ describe("initializeStandaloneTraefik", () => {
 		const error = await recreate(fake);
 
 		expect(error?.message).toBe(
-			`Could not rename the Traefik container: ${RENAME_RUNNING_ERROR}. The previous Traefik was started again.`,
+			`Could not rename the Traefik container: ${RENAME_RUNNING_ERROR}. The previous Traefik was left running.`,
 		);
-		// It never stopped, so there is nothing to start again.
+		// It never stopped, so it is not started again.
 		expect(fake.log).toEqual(["stop old"]);
+		expect(fake.containers).toMatchObject([
+			{ id: "old", name: "dokploy-traefik", running: true },
+		]);
+	});
+
+	it("does not fail the put-back when the old Traefik is already running again", async () => {
+		const fake = fakeDocker({
+			startError: new Error("port is already allocated"),
+			restartOnRename: true,
+		});
+
+		const error = await recreate(fake);
+
+		expect(error?.message).toBe(
+			"port is already allocated. The previous Traefik was restored.",
+		);
+		expect(fake.log).not.toContain("start old");
 		expect(fake.containers).toMatchObject([
 			{ id: "old", name: "dokploy-traefik", running: true },
 		]);

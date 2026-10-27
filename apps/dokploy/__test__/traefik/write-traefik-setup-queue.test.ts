@@ -481,7 +481,7 @@ describe("writeTraefikSetup", () => {
 	});
 });
 
-// On Docker 25 to 29.6 a running container on the swarm overlay network can't
+// On Docker 25.0.5 to 29.6.1 a running container on the swarm overlay network can't
 // be renamed (moby/moby#42351), and the fake above refuses that rename the same
 // way. Every action that recreates Traefik, or puts a backup back, has to get
 // past it, on the local host and on a remote server.
