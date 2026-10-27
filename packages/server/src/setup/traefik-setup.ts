@@ -295,8 +295,31 @@ export const recreateStandaloneTraefik = async ({
 			.getContainer(PREVIOUS_TRAEFIK_CONTAINER)
 			.remove({ force: true })
 			.catch(() => {});
-		await current.rename({ name: PREVIOUS_TRAEFIK_CONTAINER });
+		// Docker 25.0.5 to 29.6.1 refuse to rename a running container that is attached
+		// to a swarm overlay network ("could not add service state for endpoint ...
+		// already exists", moby/moby#42351), and Traefik is attached to
+		// dokploy-network. A stopped container renames fine, so stop it first.
 		await current.stop().catch(() => {});
+		try {
+			await current.rename({ name: PREVIOUS_TRAEFIK_CONTAINER });
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			let outcome = "left as it was";
+			try {
+				if (currentInfo?.State.Running) {
+					outcome = (await startIfStopped(current))
+						? "started again"
+						: "left running";
+				}
+			} catch (startError) {
+				throw new Error(
+					`Could not rename the Traefik container: ${reason}. Starting it again also failed: ${startError instanceof Error ? startError.message : startError}`,
+				);
+			}
+			throw new Error(
+				`Could not rename the Traefik container: ${reason}. The previous Traefik was ${outcome}.`,
+			);
+		}
 		await sleep(5000);
 	}
 
@@ -317,7 +340,7 @@ export const recreateStandaloneTraefik = async ({
 		try {
 			await current.rename({ name: containerName });
 			if (currentInfo?.State.Running) {
-				await current.start();
+				await startIfStopped(current);
 			}
 		} catch (restoreError) {
 			throw new Error(
@@ -332,6 +355,16 @@ export const recreateStandaloneTraefik = async ({
 };
 
 export const PREVIOUS_TRAEFIK_CONTAINER = "dokploy-traefik-previous";
+
+// Start is an error on a container that already runs. Whether it was started.
+const startIfStopped = async (container: Container) => {
+	const info = await container.inspect();
+	if (info.State.Running) {
+		return false;
+	}
+	await container.start();
+	return true;
+};
 
 // An interrupted recreate (e.g. a Dokploy restart) leaves only the stopped backup.
 export const restoreInterruptedTraefik = async (serverId?: string) => {
@@ -354,10 +387,21 @@ export const restoreInterruptedTraefik = async (serverId?: string) => {
 		return;
 	}
 	const backup = docker.getContainer(backupInfo.Id);
-	await backup.rename({ name: "dokploy-traefik" });
-	if (!backupInfo.State.Running) {
-		await backup.start();
+	// Normally stopped already; a running one is stopped for the rename (a
+	// running container on the overlay network can't be renamed) and started
+	// again below.
+	if (backupInfo.State.Running) {
+		await backup.stop();
 	}
+	try {
+		await backup.rename({ name: "dokploy-traefik" });
+	} catch (error) {
+		if (backupInfo.State.Running) {
+			await backup.start().catch(() => {});
+		}
+		throw error;
+	}
+	await backup.start();
 	console.log("Restored Traefik left behind by an interrupted recreate");
 };
 

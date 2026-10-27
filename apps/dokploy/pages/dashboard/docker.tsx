@@ -19,7 +19,11 @@ import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { ServerFilter } from "@/components/shared/server-filter";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { canShowLocalHost } from "@/lib/local-host-flag";
+import {
+	canShowLocalHost,
+	explainsEmptyLocalHost,
+	waitsForLocalHostFlag,
+} from "@/lib/local-host-flag";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
 
@@ -128,7 +132,21 @@ const Dashboard = () => {
 						{canSeeHealth && <TabsTrigger value="health">Health</TabsTrigger>}
 					</TabsList>
 					<TabsContent value="containers">
-						<ShowContainers serverId={serverId} />
+						{/* The list is filtered to the services the caller can read, which
+							include their own on the host, so it is not held back like the
+							host's other tabs; only its empty state explains the host. */}
+						<ShowContainers
+							serverId={serverId}
+							waitingForHost={waitsForLocalHostFlag({
+								serverId,
+								isFlagPending: isHostFlagPending,
+							})}
+							explainEmptyHost={explainsEmptyLocalHost({
+								serverId,
+								isFlagPending: isHostFlagPending,
+								canSeeLocalHost,
+							})}
+						/>
 					</TabsContent>
 					<TabsContent value="swarm">
 						<Tabs value={activeSwarmTab} onValueChange={setSwarmTab}>

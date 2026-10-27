@@ -42,6 +42,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { api, type RouterOutputs } from "@/utils/api";
+import { LOCAL_HOST_EMPTY_CONTAINERS_MESSAGE } from "../local-host-only";
 import { columns } from "./columns";
 export type Container = NonNullable<
 	RouterOutputs["docker"]["getContainers"]
@@ -49,6 +50,12 @@ export type Container = NonNullable<
 
 interface Props {
 	serverId?: string;
+	// The list is empty on the Dokploy host of an organization that does not own
+	// it: say why instead of "No results."
+	explainEmptyHost?: boolean;
+	// Whether the host flag is still loading, so an empty list is not yet known
+	// to be "No results." rather than the explanation.
+	waitingForHost?: boolean;
 }
 
 const CONTAINER_STATES = [
@@ -61,7 +68,11 @@ const CONTAINER_STATES = [
 	"dead",
 ];
 
-export const ShowContainers = ({ serverId }: Props) => {
+export const ShowContainers = ({
+	serverId,
+	explainEmptyHost,
+	waitingForHost,
+}: Props) => {
 	const { data, isPending, refetch, isRefetching } =
 		api.docker.getContainers.useQuery(
 			{
@@ -196,7 +207,7 @@ export const ShowContainers = ({ serverId }: Props) => {
 									</DropdownMenu>
 								</div>
 								<div className="rounded-md border">
-									{isPending ? (
+									{isPending || (waitingForHost && data?.length === 0) ? (
 										<div className="w-full flex-col gap-2 flex items-center justify-center h-[55vh]">
 											<span className="text-muted-foreground text-lg font-medium">
 												Loading...
@@ -205,7 +216,9 @@ export const ShowContainers = ({ serverId }: Props) => {
 									) : data?.length === 0 ? (
 										<div className="flex-col gap-2 flex items-center justify-center h-[55vh]">
 											<span className="text-muted-foreground text-lg font-medium">
-												No results.
+												{explainEmptyHost
+													? LOCAL_HOST_EMPTY_CONTAINERS_MESSAGE
+													: "No results."}
 											</span>
 										</div>
 									) : (

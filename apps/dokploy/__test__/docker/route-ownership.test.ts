@@ -673,6 +673,45 @@ describe("docker.getContainers", () => {
 		}
 	});
 
+	describe("the instance's own containers", () => {
+		const instanceOwn = ["dokploy", "dokploy-postgres", "dokploy-traefik"];
+
+		beforeEach(() => {
+			mocks.containers.set("dokploy", {
+				"com.docker.swarm.service.name": "dokploy",
+			});
+			mocks.containers.set("dokploy-postgres", {
+				"com.docker.swarm.service.name": "dokploy-postgres",
+			});
+			mocks.containers.set("dokploy-traefik", {
+				"com.docker.swarm.service.name": "dokploy-traefik",
+			});
+			mocks.getContainers.mockImplementation(async () =>
+				listed(["c-a", ...instanceOwn]),
+			);
+		});
+
+		it("are listed to the owner of the organization that owns the instance", async () => {
+			const result = await callerAs("owner").getContainers({});
+			expect(result?.map((container) => container.name)).toEqual([
+				"c-a",
+				...instanceOwn,
+			]);
+		});
+
+		it("are dropped for everyone while the pinned root organization matches no organization, the owner of the first one included", async () => {
+			// DOKPLOY_ROOT_ORGANIZATION_ID names nothing: no organization is the
+			// root one, so isRootOrganization is false for org-a, which would be
+			// the first one created
+			mocks.rootOrganization = "";
+			for (const role of ["owner", "admin"] as const) {
+				const result = await callerAs(role).getContainers({});
+				// only the caller's own service stays
+				expect(result?.map((container) => container.name)).toEqual(["c-a"]);
+			}
+		});
+	});
+
 	it("refuses a server the member cannot reach", async () => {
 		mocks.servers = new Set(["srv-2"]);
 		await expect(

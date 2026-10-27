@@ -3,6 +3,7 @@ import {
 	getWebServerSettings,
 	IS_CLOUD,
 	isRootOrganization,
+	PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE,
 } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
 
@@ -57,6 +58,19 @@ export const resolveHostIpForOrg = async (
 	return settings?.serverIp || "";
 };
 
+// A pinned id that matches no organization leaves the instance without an
+// owner, which refuses everyone: say that, since nothing the caller does would
+// help. Only a refusal pays for the lookup, and only when an id is pinned.
+// The same rule as describeHostAccessRefusal in @dokploy/server, kept here
+// because many tests replace that module with a handful of exports.
+export const hostAccessRefusalMessage = async (message: string) => {
+	const pinned = process.env.DOKPLOY_ROOT_ORGANIZATION_ID?.trim();
+	if (pinned && !(await isRootOrganization(pinned))) {
+		return PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE;
+	}
+	return message;
+};
+
 export const assertLocalHostAccess = async (
 	serverId: string | undefined,
 	organizationId: string | null | undefined,
@@ -64,8 +78,9 @@ export const assertLocalHostAccess = async (
 	if (!(await canAccessLocalHost(serverId, organizationId))) {
 		throw new TRPCError({
 			code: "FORBIDDEN",
-			message:
+			message: await hostAccessRefusalMessage(
 				"Only the organization that owns this Dokploy instance can access its host",
+			),
 		});
 	}
 };

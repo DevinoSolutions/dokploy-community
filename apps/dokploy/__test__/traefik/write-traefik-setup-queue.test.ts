@@ -4,14 +4,19 @@ import {
 	writeTraefikSetup,
 } from "@dokploy/server/services/settings";
 import {
+	initializeStandaloneTraefik,
 	queueTraefikRecreate,
 	restoreInterruptedTraefik,
 } from "@dokploy/server/setup/traefik-setup";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const RENAME_RUNNING_ERROR =
+	"could not add service state for endpoint dokploy-traefik-previous to cluster on UpdateDNSNames: cannot create entry in table endpoint_table, already exists";
+
 const mocks = vi.hoisted(() => ({
 	getRemoteDocker: vi.fn(),
 	execAsync: vi.fn(),
+	execAsyncRemote: vi.fn(),
 	findMany: vi.fn(),
 }));
 
@@ -28,6 +33,7 @@ vi.mock("@dokploy/server/utils/process/execAsync", async (importOriginal) => ({
 		typeof import("@dokploy/server/utils/process/execAsync")
 	>()),
 	execAsync: mocks.execAsync,
+	execAsyncRemote: mocks.execAsyncRemote,
 }));
 
 type FakeContainer = {
@@ -39,7 +45,10 @@ type FakeContainer = {
 	ports?: Record<string, { HostPort: string }[]>;
 };
 
-const fakeDocker = (initial: FakeContainer[]) => {
+const fakeDocker = (
+	initial: FakeContainer[],
+	{ failStartOf = [] as string[] } = {},
+) => {
 	const log: string[] = [];
 	const containers = initial.map((c) => ({ ...c }));
 	let created = 0;
@@ -62,6 +71,8 @@ const fakeDocker = (initial: FakeContainer[]) => {
 		},
 		rename: async ({ name }: { name: string }) => {
 			const c = find(ref);
+			// Docker refuses this for a container on a swarm overlay network.
+			if (c.running) throw new Error(RENAME_RUNNING_ERROR);
 			log.push(`rename ${c.id} -> ${name}`);
 			c.name = name;
 		},
@@ -73,6 +84,9 @@ const fakeDocker = (initial: FakeContainer[]) => {
 		start: async () => {
 			const c = find(ref);
 			log.push(`start ${c.id}`);
+			if (failStartOf.includes(c.id)) {
+				throw new Error("port is already allocated");
+			}
 			c.running = true;
 		},
 		remove: async () => {
@@ -182,13 +196,13 @@ describe("writeTraefikSetup", () => {
 		await expect(second).resolves.toBeUndefined();
 		expect(fake.log).not.toContain("rename old -> dokploy-traefik");
 		expect(fake.log).toEqual([
-			"rename old -> dokploy-traefik-previous",
 			"stop old",
+			"rename old -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove old",
-			"rename new -> dokploy-traefik-previous",
 			"stop new",
+			"rename new -> dokploy-traefik-previous",
 			"create new2",
 			"start new2",
 			"remove new",
@@ -227,8 +241,8 @@ describe("writeTraefikSetup", () => {
 		await expect(action).resolves.toBeUndefined();
 		await expect(startup).resolves.toBeUndefined();
 		expect(fake.log).toEqual([
-			"rename old -> dokploy-traefik-previous",
 			"stop old",
+			"rename old -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove old",
@@ -340,8 +354,8 @@ describe("writeTraefikSetup", () => {
 		await action;
 		await reload;
 		expect(fake.log).toEqual([
-			"rename old -> dokploy-traefik-previous",
 			"stop old",
+			"rename old -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove old",
@@ -455,11 +469,230 @@ describe("writeTraefikSetup", () => {
 		expect(fake.log).toEqual([
 			"rename stale -> dokploy-traefik",
 			"start stale",
-			"rename stale -> dokploy-traefik-previous",
 			"stop stale",
+			"rename stale -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove stale",
+		]);
+		expect(fake.containers).toMatchObject([
+			{ id: "new", name: "dokploy-traefik", running: true },
+		]);
+	});
+});
+
+// On Docker 25.0.5 to 29.6.1 a running container on the swarm overlay network can't
+// be renamed (moby/moby#42351), and the fake above refuses that rename the same
+// way. Every action that recreates Traefik, or puts a backup back, has to get
+// past it, on the local host and on a remote server.
+describe("every Traefik recreate path on an engine that refuses to rename a running container", () => {
+	const live = (extra: Partial<FakeContainer> = {}): FakeContainer => ({
+		id: "old",
+		name: "dokploy-traefik",
+		running: true,
+		image: "traefik:v3.6.25",
+		env: ["A=0"],
+		ports: { "80/tcp": [{ HostPort: "80" }] },
+		...extra,
+	});
+
+	const wire = (fake: ReturnType<typeof fakeDocker>) => {
+		mocks.getRemoteDocker.mockResolvedValue(fake.docker);
+		mocks.execAsync.mockImplementation(async (command: string) => ({
+			stdout: fake.shell(command),
+			stderr: "",
+		}));
+		mocks.execAsyncRemote.mockImplementation(
+			async (_serverId: string, command: string) => ({
+				stdout: fake.shell(command),
+				stderr: "",
+			}),
+		);
+	};
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.useFakeTimers();
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		mocks.findMany.mockResolvedValue([]);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	const actions: [
+		string,
+		(serverId?: string) => Parameters<typeof writeTraefikSetup>[0],
+	][] = [
+		[
+			"the version update (Check Version)",
+			(serverId) => ({
+				env: (current) => current,
+				additionalPorts: (current) => current,
+				serverId,
+				image: "traefik:v3.7.16",
+			}),
+		],
+		[
+			"saving the environment",
+			(serverId) => ({
+				env: ["A=1"],
+				additionalPorts: (current) => current,
+				serverId,
+			}),
+		],
+		[
+			"saving the port mappings",
+			(serverId) => ({
+				env: (current) => current,
+				additionalPorts: [
+					{ targetPort: 9000, publishedPort: 9000, protocol: "tcp" },
+				],
+				serverId,
+			}),
+		],
+		[
+			"turning the dashboard on",
+			(serverId) => ({
+				env: (current) => current,
+				additionalPorts: (current) => [
+					...current,
+					{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
+				],
+				serverId,
+			}),
+		],
+		[
+			"turning the dashboard off",
+			(serverId) => ({
+				env: (current) => current,
+				additionalPorts: (current) =>
+					current.filter((port) => port.targetPort !== 8080),
+				serverId,
+			}),
+		],
+	];
+
+	describe.each([
+		["the local host", undefined],
+		["a remote server", "remote-server"],
+	])("on %s", (_where, serverId) => {
+		it.each(actions)("%s stops the old Traefik before renaming it", async (_name, build) => {
+			const fake = fakeDocker([live()]);
+			wire(fake);
+
+			const run = writeTraefikSetup(build(serverId));
+			await vi.runAllTimersAsync();
+
+			await expect(run).resolves.toBeUndefined();
+			expect(fake.log).toEqual([
+				"stop old",
+				"rename old -> dokploy-traefik-previous",
+				"create new",
+				"start new",
+				"remove old",
+			]);
+			expect(fake.containers).toMatchObject([
+				{ id: "new", name: "dokploy-traefik", running: true },
+			]);
+		});
+
+		it.each(actions)("%s puts the old Traefik back when the new one cannot start", async (_name, build) => {
+			const fake = fakeDocker([live()], { failStartOf: ["new"] });
+			wire(fake);
+
+			const run = writeTraefikSetup(build(serverId)).then(
+				() => null,
+				(error: Error) => error,
+			);
+			await vi.runAllTimersAsync();
+
+			expect((await run)?.message).toBe(
+				"port is already allocated. The previous Traefik was restored.",
+			);
+			expect(fake.log).toEqual([
+				"stop old",
+				"rename old -> dokploy-traefik-previous",
+				"create new",
+				"start new",
+				"remove new",
+				"rename old -> dokploy-traefik",
+				"start old",
+			]);
+			expect(fake.containers).toMatchObject([
+				{ id: "old", name: "dokploy-traefik", running: true },
+			]);
+		});
+
+		it("puts back a running backup left behind (Setup Server, no restart)", async () => {
+			const fake = fakeDocker([
+				live({ id: "stale", name: "dokploy-traefik-previous" }),
+			]);
+			wire(fake);
+
+			const run = finishTraefikAfterSetup(serverId, false);
+			await vi.runAllTimersAsync();
+
+			await expect(run).resolves.toBeUndefined();
+			expect(fake.log).toEqual([
+				"stop stale",
+				"rename stale -> dokploy-traefik",
+				"start stale",
+			]);
+			expect(fake.containers).toMatchObject([
+				{ id: "stale", name: "dokploy-traefik", running: true },
+			]);
+		});
+
+		it("puts back a running backup before a reload", async () => {
+			const fake = fakeDocker([
+				live({ id: "stale", name: "dokploy-traefik-previous" }),
+			]);
+			wire(fake);
+
+			const run = reloadDockerResource("dokploy-traefik", serverId);
+			await vi.runAllTimersAsync();
+
+			await expect(run).resolves.toBeUndefined();
+			expect(fake.log.slice(0, 3)).toEqual([
+				"stop stale",
+				"rename stale -> dokploy-traefik",
+				"start stale",
+			]);
+		});
+	});
+
+	it("puts back a running backup on Dokploy startup", async () => {
+		const fake = fakeDocker([
+			live({ id: "stale", name: "dokploy-traefik-previous" }),
+		]);
+		wire(fake);
+
+		// What server.ts does on startup for the local host.
+		const startup = queueTraefikRecreate(undefined, () =>
+			restoreInterruptedTraefik(),
+		);
+		await vi.runAllTimersAsync();
+
+		await expect(startup).resolves.toBeUndefined();
+		expect(fake.containers).toMatchObject([
+			{ id: "stale", name: "dokploy-traefik", running: true },
+		]);
+	});
+
+	it("recreates Traefik from the setup script (initializeStandaloneTraefik)", async () => {
+		const fake = fakeDocker([live()]);
+		wire(fake);
+
+		const run = initializeStandaloneTraefik();
+		await vi.runAllTimersAsync();
+
+		await expect(run).resolves.toBeUndefined();
+		expect(fake.log.slice(0, 2)).toEqual([
+			"stop old",
+			"rename old -> dokploy-traefik-previous",
 		]);
 		expect(fake.containers).toMatchObject([
 			{ id: "new", name: "dokploy-traefik", running: true },

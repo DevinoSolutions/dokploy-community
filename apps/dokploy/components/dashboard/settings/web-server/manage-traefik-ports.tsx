@@ -34,7 +34,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
-import { useHealthCheckAfterMutation } from "@/hooks/use-health-check-after-mutation";
+import { useTraefikSetupJob } from "@/hooks/use-traefik-setup-job";
 import { api } from "@/utils/api";
 
 interface Props {
@@ -80,12 +80,16 @@ export const ManageTraefikPorts = ({ children, serverId }: Props) => {
 	const {
 		execute: executeWithHealthCheck,
 		isExecuting: isHealthCheckExecuting,
-	} = useHealthCheckAfterMutation({
-		initialDelay: 5000,
+	} = useTraefikSetupJob({
+		serverId,
+		applyingMessage: "Ports saved. Applying...",
 		successMessage: "Ports updated successfully",
-		onSuccess: () => {
+		failureMessage: "Ports update failed",
+		onSettled: (ok) => {
 			refetchPorts();
-			setOpen(false);
+			if (ok) {
+				setOpen(false);
+			}
 		},
 	});
 
@@ -106,13 +110,13 @@ export const ManageTraefikPorts = ({ children, serverId }: Props) => {
 
 	const onSubmit = async (data: TraefikPortsForm) => {
 		try {
-			await executeWithHealthCheck(() =>
+			await executeWithHealthCheck((jobId) =>
 				updatePorts({
 					serverId,
 					additionalPorts: data.ports,
+					jobId,
 				}),
 			);
-			setOpen(false);
 		} catch (error) {
 			toast.error((error as Error).message || "Error updating Traefik ports");
 		}

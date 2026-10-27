@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
 import { ToggleAutoCheckUpdates } from "./toggle-auto-check-updates";
+import { UpdateMigrationNotice } from "./update-migration-notice";
 import { UpdateWebServer } from "./update-webserver";
 
 interface Props {
@@ -307,6 +308,10 @@ export const UpdateServer = ({
 								</div>
 							)}
 						</div>
+
+						<div className="mt-6">
+							<UpdateMigrationNotice version={latestVersion} />
+						</div>
 					</div>
 				)}
 
@@ -401,18 +406,30 @@ export const UpdateServer = ({
 								{pinnedVersion} is older than the running {dokployVersion}.
 							</p>
 						)}
+					{pinnedVersion && !pinnedTargetError && (
+						<UpdateMigrationNotice version={pinnedVersion} debounceMs={500} />
+					)}
 					{rollbackPoint && (
-						<UpdateWebServer
-							buttonClassName="w-auto"
-							pin={{
-								version: rollbackPoint.version,
-								label:
-									compareToRunning(rollbackPoint.version) > 0
-										? `Switch to ${rollbackPoint.version}`
-										: `Roll back to ${rollbackPoint.version}`,
-								isRollback: true,
-							}}
-						/>
+						<div className="space-y-2">
+							<UpdateWebServer
+								buttonClassName="w-auto"
+								pin={{
+									version: rollbackPoint.version,
+									label:
+										compareToRunning(rollbackPoint.version) > 0
+											? `Switch to ${rollbackPoint.version}`
+											: `Roll back to ${rollbackPoint.version}`,
+									isRollback: true,
+								}}
+							/>
+							{rollbackPoint.recordedAt && (
+								<p className="text-xs text-muted-foreground">
+									Rollback point recorded{" "}
+									{new Date(rollbackPoint.recordedAt).toLocaleString()}
+								</p>
+							)}
+							<UpdateMigrationNotice version={rollbackPoint.version} />
+						</div>
 					)}
 				</div>
 
