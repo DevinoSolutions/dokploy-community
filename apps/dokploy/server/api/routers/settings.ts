@@ -1669,6 +1669,10 @@ export const settingsRouter = createTRPCRouter({
 				input.serverId,
 				ctx.session?.activeOrganizationId,
 			);
+			await assertLocalHostAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
 			return getTraefikSetupJob(input.serverId, input.jobId);
 		}),
 	updateTraefik: adminProcedure

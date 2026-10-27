@@ -49,7 +49,7 @@ describe("waitForTraefikSetup", () => {
 	it("succeeds once the run is done and the dashboard answers", async () => {
 		const t = setup([pending, pending, done]);
 
-		await expect(t.run()).resolves.toEqual({ ok: true });
+		await expect(t.run()).resolves.toEqual({ status: "applied" });
 		expect(t.getStatus).toHaveBeenCalledTimes(3);
 		expect(t.isHealthy).toHaveBeenCalledTimes(1);
 	});
@@ -67,13 +67,13 @@ describe("waitForTraefikSetup", () => {
 	it("waits through unreachable polls while Traefik is replaced", async () => {
 		const t = setup([new Error("fetch failed"), new Error("502"), done]);
 
-		await expect(t.run()).resolves.toEqual({ ok: true });
+		await expect(t.run()).resolves.toEqual({ status: "applied" });
 	});
 
 	it("keeps polling the dashboard until it answers", async () => {
 		const t = setup([done], [false, false, true]);
 
-		await expect(t.run()).resolves.toEqual({ ok: true });
+		await expect(t.run()).resolves.toEqual({ status: "applied" });
 		expect(t.isHealthy).toHaveBeenCalledTimes(3);
 	});
 
@@ -84,49 +84,38 @@ describe("waitForTraefikSetup", () => {
 		]);
 
 		await expect(t.run()).resolves.toEqual({
-			ok: false,
+			status: "failed",
 			error: "Cannot rename container",
 		});
 		expect(t.isHealthy).not.toHaveBeenCalled();
 	});
 
-	it("reports a failure without a message as unconfirmed", async () => {
+	it("reports a failure without a message as failed, not unconfirmed", async () => {
 		const t = setup([{ state: "failed", error: "" }]);
 
-		await expect(t.run()).resolves.toEqual({ ok: false, error: null });
+		await expect(t.run()).resolves.toEqual({ status: "failed", error: null });
 	});
 
 	it("gives up when the server does not know the run", async () => {
 		const t = setup([unknown]);
 
-		await expect(t.run()).resolves.toEqual({ ok: false, error: null });
-		expect(t.getStatus).toHaveBeenCalledTimes(5);
+		await expect(t.run()).resolves.toEqual({ status: "unconfirmed" });
+		expect(t.getStatus).toHaveBeenCalledTimes(10);
 		expect(t.isHealthy).not.toHaveBeenCalled();
 	});
 
 	it("does not count unknown polls that are not in a row", async () => {
-		const t = setup([
-			unknown,
-			unknown,
-			unknown,
-			unknown,
-			pending,
-			unknown,
-			unknown,
-			unknown,
-			unknown,
-			done,
-		]);
+		const nine = Array<TraefikSetupStatus>(9).fill(unknown);
+		const t = setup([...nine, pending, ...nine, done]);
 
-		await expect(t.run()).resolves.toEqual({ ok: true });
+		await expect(t.run()).resolves.toEqual({ status: "applied" });
 	});
 
 	it("times out as unconfirmed when the run never ends", async () => {
 		const t = setup([pending]);
 
 		await expect(t.run({ timeoutMs: 20_000 })).resolves.toEqual({
-			ok: false,
-			error: null,
+			status: "unconfirmed",
 		});
 		expect(t.isHealthy).not.toHaveBeenCalled();
 	});
@@ -135,9 +124,40 @@ describe("waitForTraefikSetup", () => {
 		const t = setup([done], [false]);
 
 		await expect(t.run({ timeoutMs: 20_000 })).resolves.toEqual({
-			ok: false,
-			error: null,
+			status: "unconfirmed",
 		});
+	});
+});
+
+describe("waitForTraefikSetup with hung requests", () => {
+	const hang = () => new Promise<never>(() => {});
+
+	it("treats a status request that never answers as unreachable", async () => {
+		let calls = 0;
+		const result = await waitForTraefikSetup({
+			getStatus: () => (++calls === 1 ? hang() : Promise.resolve(done)),
+			isHealthy: async () => true,
+			sleep: async () => {},
+			now: () => 0,
+			requestTimeoutMs: 5,
+		});
+
+		expect(result).toEqual({ status: "applied" });
+		expect(calls).toBe(2);
+	});
+
+	it("treats a health request that never answers as not healthy yet", async () => {
+		let calls = 0;
+		const result = await waitForTraefikSetup({
+			getStatus: async () => done,
+			isHealthy: () => (++calls === 1 ? hang() : Promise.resolve(true)),
+			sleep: async () => {},
+			now: () => 0,
+			requestTimeoutMs: 5,
+		});
+
+		expect(result).toEqual({ status: "applied" });
+		expect(calls).toBe(2);
 	});
 });
 

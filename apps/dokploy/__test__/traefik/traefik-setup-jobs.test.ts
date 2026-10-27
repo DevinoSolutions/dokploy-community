@@ -94,4 +94,93 @@ describe("traefik setup jobs", () => {
 		expect(getTraefikSetupJob("s1", "job-5").state).toBe("done");
 		expect(getTraefikSetupJob("s1", "job-204").state).toBe("done");
 	});
+
+	it("drops runs that ended, failed ones included, before one that is still pending", async () => {
+		trackTraefikSetupJob("s1", "waiting", new Promise(() => {}), "test");
+		trackTraefikSetupJob("s1", "bad-0", Promise.reject(new Error("x")), "test");
+		for (let i = 0; i < 250; i++) {
+			trackTraefikSetupJob(
+				"s1",
+				`bad-${i + 1}`,
+				Promise.reject(new Error("x")),
+				"test",
+			);
+			await flush();
+		}
+
+		expect(getTraefikSetupJob("s1", "waiting").state).toBe("pending");
+		expect(getTraefikSetupJob("s1", "bad-0").state).toBe("unknown");
+		expect(getTraefikSetupJob("s1", "bad-250").state).toBe("failed");
+	});
+
+	it("drops the oldest pending run only when none has ended", () => {
+		for (let i = 0; i < 205; i++) {
+			trackTraefikSetupJob("s1", `job-${i}`, new Promise(() => {}), "test");
+		}
+
+		expect(getTraefikSetupJob("s1", "job-0").state).toBe("unknown");
+		expect(getTraefikSetupJob("s1", "job-5").state).toBe("pending");
+		expect(getTraefikSetupJob("s1", "job-204").state).toBe("pending");
+	});
+
+	it("caps a very long error message", async () => {
+		trackTraefikSetupJob(
+			"s1",
+			"a",
+			Promise.reject(new Error("x".repeat(5000))),
+			"test",
+		);
+		await flush();
+
+		expect(getTraefikSetupJob("s1", "a").error).toHaveLength(2000);
+	});
+
+	it("does not show the result of an earlier run as the result of a reused job id", async () => {
+		let finishFirst: () => void = () => {};
+		let finishSecond: () => void = () => {};
+		trackTraefikSetupJob(
+			"s1",
+			"same",
+			new Promise<void>((resolve) => {
+				finishFirst = resolve;
+			}),
+			"test",
+		);
+		trackTraefikSetupJob(
+			"s1",
+			"same",
+			new Promise<void>((resolve) => {
+				finishSecond = resolve;
+			}),
+			"test",
+		);
+
+		finishFirst();
+		await flush();
+		expect(getTraefikSetupJob("s1", "same").state).toBe("pending");
+
+		finishSecond();
+		await flush();
+		expect(getTraefikSetupJob("s1", "same").state).toBe("done");
+	});
+
+	it("does not take the failure of an earlier run for the reused job id either", async () => {
+		let failFirst: (error: Error) => void = () => {};
+		trackTraefikSetupJob(
+			"s1",
+			"same",
+			new Promise<void>((_, reject) => {
+				failFirst = reject;
+			}),
+			"test",
+		);
+		trackTraefikSetupJob("s1", "same", new Promise(() => {}), "test");
+
+		failFirst(new Error("old"));
+		await flush();
+		expect(getTraefikSetupJob("s1", "same")).toEqual({
+			state: "pending",
+			error: null,
+		});
+	});
 });

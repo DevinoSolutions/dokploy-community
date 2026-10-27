@@ -12,9 +12,14 @@ const HEALTH_CHECK_URL = "/api/health";
 const sleep = (ms: number) =>
 	new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+// So a hung request ends before the wait does.
+const REQUEST_TIMEOUT_MS = 10_000;
+
 const checkHealth = async () => {
 	try {
-		const response = await fetch(HEALTH_CHECK_URL);
+		const response = await fetch(HEALTH_CHECK_URL, {
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+		});
 		return response.ok;
 	} catch {
 		return false;
@@ -61,23 +66,32 @@ export const useTraefikSetupJob = ({
 				const toastId = toast.loading(applyingMessage);
 				const result = await waitForTraefikSetup({
 					getStatus: () =>
-						utils.client.settings.getTraefikSetupJob.query({ serverId, jobId }),
+						utils.client.settings.getTraefikSetupJob.query(
+							{ serverId, jobId },
+							{ signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
+						),
 					isHealthy: checkHealth,
 					sleep,
 					now: Date.now,
 				});
-				if (result.ok) {
+				if (result.status === "applied") {
 					toast.success(successMessage, { id: toastId });
-				} else {
+				} else if (result.status === "failed") {
 					toast.error(
 						result.error
 							? `${failureMessage}: ${result.error}`
-							: `${failureMessage}. Check View Logs for errors.`,
+							: `${failureMessage}.`,
+						{ id: toastId },
+					);
+				} else {
+					toast.warning(
+						"Saved, but couldn't confirm it was applied. Check View Logs.",
 						{ id: toastId },
 					);
 				}
-				await onSettled?.(result.ok);
-				return result.ok;
+				const applied = result.status === "applied";
+				await onSettled?.(applied);
+				return applied;
 			} finally {
 				setIsExecuting(false);
 			}

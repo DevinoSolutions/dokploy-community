@@ -3,10 +3,12 @@ export type TraefikSetupStatus = {
 	error: string | null;
 };
 
-// error is null when the outcome could not be confirmed.
+// "unconfirmed" is a timeout, a run the server doesn't know, or a dashboard
+// that never answered: the save is not known to have failed.
 export type TraefikSetupResult =
-	| { ok: true }
-	| { ok: false; error: string | null };
+	| { status: "applied" }
+	| { status: "failed"; error: string | null }
+	| { status: "unconfirmed" };
 
 export interface WaitForTraefikSetupOptions {
 	getStatus: () => Promise<TraefikSetupStatus>;
@@ -18,10 +20,23 @@ export interface WaitForTraefikSetupOptions {
 	healthIntervalMs?: number;
 	// The server gives up on a hung recreate after 5 minutes.
 	timeoutMs?: number;
+	// A request that hangs must not outlive the deadline.
+	requestTimeoutMs?: number;
 }
 
-// The server lost the run (restart) or never received it.
-const MAX_UNKNOWN_POLLS = 5;
+// About 30 seconds with the default interval. The server records a run only
+// after its pre-checks (port check, SSH to a remote server), so a run it does
+// not know yet is not a lost one. Past that it lost the run (restart) or never
+// received it.
+const MAX_UNKNOWN_POLLS = 10;
+
+const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> => {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => reject(new Error("Request timed out")), ms);
+	});
+	return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+};
 
 // The first line of a Docker or SSH failure is the reason; the rest is detail.
 export const firstErrorLine = (message: string) => {
@@ -54,6 +69,7 @@ export const waitForTraefikSetup = async ({
 	statusIntervalMs = 3000,
 	healthIntervalMs = 2000,
 	timeoutMs = 5 * 60_000,
+	requestTimeoutMs = 10_000,
 }: WaitForTraefikSetupOptions): Promise<TraefikSetupResult> => {
 	const deadline = now() + timeoutMs;
 	let unknownPolls = 0;
@@ -63,13 +79,13 @@ export const waitForTraefikSetup = async ({
 	while (!finished && now() < deadline) {
 		let status: TraefikSetupStatus | null = null;
 		try {
-			status = await getStatus();
+			status = await withTimeout(getStatus(), requestTimeoutMs);
 		} catch {
 			// Expected while Traefik is replaced.
 		}
 		if (status?.state === "failed") {
 			return {
-				ok: false,
+				status: "failed",
 				error: status.error ? firstErrorLine(status.error) : null,
 			};
 		}
@@ -79,19 +95,22 @@ export const waitForTraefikSetup = async ({
 		}
 		unknownPolls = status?.state === "unknown" ? unknownPolls + 1 : 0;
 		if (unknownPolls >= MAX_UNKNOWN_POLLS) {
-			return { ok: false, error: null };
+			return { status: "unconfirmed" };
 		}
 		await sleep(statusIntervalMs);
 	}
 	if (!finished) {
-		return { ok: false, error: null };
+		return { status: "unconfirmed" };
 	}
 
 	while (now() < deadline) {
-		if (await isHealthy()) {
-			return { ok: true };
+		const healthy = await withTimeout(isHealthy(), requestTimeoutMs).catch(
+			() => false,
+		);
+		if (healthy) {
+			return { status: "applied" };
 		}
 		await sleep(healthIntervalMs);
 	}
-	return { ok: false, error: null };
+	return { status: "unconfirmed" };
 };

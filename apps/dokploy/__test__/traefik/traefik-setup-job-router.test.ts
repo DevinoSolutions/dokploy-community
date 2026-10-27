@@ -168,6 +168,17 @@ describe("routine Traefik actions report how their queued recreate ended", () =>
 		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
 	});
 
+	it("refuses to report the local host's runs to an organization that does not own it", async () => {
+		mocks.isRootOrganization.mockResolvedValue(false);
+
+		await expect(
+			caller.getTraefikSetupJob({ jobId: "run-1" }),
+		).rejects.toMatchObject({ code: "FORBIDDEN" });
+		await expect(
+			caller.getTraefikSetupJob({ serverId: "server-a", jobId: "run-1" }),
+		).resolves.toEqual({ state: "unknown", error: null });
+	});
+
 	it("refuses an empty or oversized job id", async () => {
 		await expect(save("")).rejects.toBeDefined();
 		await expect(save("x".repeat(65))).rejects.toBeDefined();
