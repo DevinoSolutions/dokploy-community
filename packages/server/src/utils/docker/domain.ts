@@ -13,6 +13,7 @@ import { TRPCError } from "@trpc/server";
 import { eq, inArray } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { parse, stringify } from "yaml";
+import { applyRollingDrainHealthchecks } from "../builders/compose-rolling";
 import {
 	assertComposeFileInsideCodeDirectory,
 	getComposeCodeDirectory,
@@ -272,9 +273,21 @@ export const getInstallStagedComposeCommand = (
 export const renderComposeWithDomains = async (
 	compose: Compose,
 	domains: Domain[],
+	options: {
+		/**
+		 * Rolled services of this deploy: their shell-form healthcheck is made to
+		 * fail while the drain marker exists, so the old container can be taken out
+		 * of rotation before it is stopped (T-9197). Empty or unset: the compose is
+		 * rendered exactly as before.
+		 */
+		rollingDrainServices?: string[];
+	} = {},
 ): Promise<{ content: string } | { errorCommand: string }> => {
 	try {
-		const composeConverted = await addDomainToCompose(compose, domains);
+		const composeConverted = applyRollingDrainHealthchecks(
+			await addDomainToCompose(compose, domains),
+			options.rollingDrainServices ?? [],
+		);
 
 		if (!composeConverted) {
 			return {
@@ -311,10 +324,14 @@ export const writeDomainsToCompose = async (
 	options: StageOptions & {
 		/** Other files staged for the same script, removed if it stops early. */
 		alsoRemove?: string[];
+		/** Services rolled by this deploy, see `renderComposeWithDomains`. */
+		rollingDrainServices?: string[];
 	} = {},
 ) => {
 	const alsoRemove = options.alsoRemove ?? [];
-	const rendered = await renderComposeWithDomains(compose, domains);
+	const rendered = await renderComposeWithDomains(compose, domains, {
+		rollingDrainServices: options.rollingDrainServices,
+	});
 	if ("errorCommand" in rendered) {
 		// The script stops here: files staged for it would never be consumed.
 		return alsoRemove.length > 0

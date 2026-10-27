@@ -45,6 +45,7 @@ import {
 } from "./compose-guardrails";
 import {
 	describeRollingBlockers,
+	getRollingDrainWarnings,
 	getRollingNoticeCommand,
 	getRollingReplaceScript,
 	getRollingRestoreGuard,
@@ -515,6 +516,12 @@ const getRollingDeployPlan = async ({
 		);
 	}
 
+	// A rolled service whose healthcheck cannot honour the drain marker still
+	// rolls; only the take-out before the stop is missing.
+	for (const warning of getRollingDrainWarnings(spec, plan.rolled)) {
+		notices.push(`Rolling replace: ${warning.message}`);
+	}
+
 	const definitions = spec.services;
 	const hasBuild = (service: string) =>
 		Boolean((definitions[service] as { build?: unknown } | null)?.build);
@@ -571,6 +578,22 @@ export const getBuildComposeCommand = async (
 		remoteOptions,
 	);
 
+	// Opt-in rolling replace (null = off, which is every existing row). It takes
+	// the place of the single `up` below for the selected services; when it
+	// cannot apply, the deploy is the plain one and the log says why. Decided
+	// before the compose is staged: the healthcheck of a rolled service is
+	// written into it (see `rollingDrainServices`).
+	const rolling = await getRollingDeployPlan({
+		compose,
+		freshVolumes,
+		remoteBuild: Boolean(remoteBuild),
+		invocation: getComposeUpPrefix(
+			compose,
+			mounts.length > 0 ? projectPath : undefined,
+			remoteOptions,
+		),
+	});
+
 	// The stack env, the env file and the compose are staged on the host before
 	// the script runs; if a later one cannot be, the earlier ones are not left
 	// behind.
@@ -594,25 +617,16 @@ export const getBuildComposeCommand = async (
 		newCompose = await writeDomainsToCompose(compose, domains, {
 			...stageOptions,
 			alsoRemove: [...staged],
+			// Only a deploy that rolls changes the healthchecks it writes.
+			...(rolling.rolled.length > 0
+				? { rollingDrainServices: rolling.rolled }
+				: {}),
 		});
 	} catch (error) {
 		await removeStagedFiles(compose.serverId, staged);
 		throw error;
 	}
 	const ignoredEnvNotice = getIgnoredEnvNotice(getIgnoredEnvNames(compose));
-	// Opt-in rolling replace (null = off, which is every existing row). It takes
-	// the place of the single `up` below for the selected services; when it
-	// cannot apply, the deploy is the plain one and the log says why.
-	const rolling = await getRollingDeployPlan({
-		compose,
-		freshVolumes,
-		remoteBuild: Boolean(remoteBuild),
-		invocation: getComposeUpPrefix(
-			compose,
-			mounts.length > 0 ? projectPath : undefined,
-			remoteOptions,
-		),
-	});
 	const rollingLogLine = rolling.script
 		? `\nRolling replace: ${rolling.rolled.join(", ")} 🔁`
 		: "";

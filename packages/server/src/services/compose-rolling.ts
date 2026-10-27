@@ -1,5 +1,6 @@
 import {
 	type ComposeRollingReplace,
+	getRollingDrainWarnings,
 	getRollingEligibility,
 	getStackPreflightWarnings,
 	type RollingBlocker,
@@ -21,6 +22,8 @@ export interface ComposeRollingServiceReport {
 	name: string;
 	eligible: boolean;
 	blockers: RollingBlocker[];
+	/** Does not stop the service from rolling (e.g. a healthcheck that cannot drain). */
+	warnings: string[];
 }
 
 export type ComposeRollingReport =
@@ -88,7 +91,11 @@ export const getComposeRollingReport = async (
 			composeType: compose.composeType,
 			hasCustomCommand: Boolean(compose.command),
 		});
-		return { name, eligible: blockers.length === 0, blockers };
+		const warnings =
+			blockers.length === 0
+				? getRollingDrainWarnings(spec, [name]).map(({ message }) => message)
+				: [];
+		return { name, eligible: blockers.length === 0, blockers, warnings };
 	});
 	return {
 		available: true,
