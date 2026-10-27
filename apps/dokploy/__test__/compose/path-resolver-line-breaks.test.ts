@@ -12,7 +12,10 @@ import {
 	getOwnDirectoryCheckCommand,
 	parseOwnDirectoryVerdicts,
 } from "@dokploy/server/utils/compose-own-directory";
-import { getPathResolverLines } from "@dokploy/server/utils/path-containment";
+import {
+	DIRECTORY_INSIDE_FUNCTION,
+	getPathResolverLines,
+} from "@dokploy/server/utils/path-containment";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // The path resolver that deploy scripts carry (`getPathResolverLines`) and the
@@ -82,6 +85,8 @@ beforeAll(() => {
 		symlinkSync("../../app\n", `${tmp}/compose/app/code/lnk_a`);
 		symlinkSync("../../app\n/x", `${tmp}/compose/app/code/lnk_a_x`);
 		symlinkSync("../../app\r", `${tmp}/compose/app/code/lnk_b`);
+		symlinkSync("../../app\n", `${tmp}/compose/app/code/lnk_dir_a`);
+		symlinkSync("../../app\r", `${tmp}/compose/app/code/lnk_dir_b`);
 		symlinkSync("../../app/code/ok_miss", `${tmp}/compose/app/code/lnk_ok`);
 		symlinkSync("../../other/code/gone", `${tmp}/compose/app/code/lnk_far`);
 		linksWork = true;
@@ -257,6 +262,58 @@ describe("the own-directory check on this host", () => {
 	});
 });
 
+describe("the directory check (__dokploy_dir_inside)", () => {
+	// 0: inside, 1: not inside (including a refusal), for each place.
+	const verdicts = (own: string, places: string[]) => {
+		const script = [
+			'lit() { __v=$(printf "$1"); __v=${__v%x}; }',
+			DIRECTORY_INSIDE_FUNCTION,
+			`lit '${spelled(own)}x'; own=$__v`,
+			...places.map(
+				(place) =>
+					`lit '${spelled(place)}x'; if __dokploy_dir_inside "$own" "$__v"; then echo in; else echo out; fi`,
+			),
+		].join("\n");
+		const result = run("", script);
+		expect(result.error).toBeUndefined();
+		return result.stdout.trim().split("\n");
+	};
+
+	it("still tells ordinary directories apart", () => {
+		if (!shellWorks) return;
+		expect(
+			verdicts(`${sh}/compose/app`, [
+				`${sh}/compose/app`,
+				`${sh}/compose/app/code`,
+				`${sh}/compose/other/code`,
+				`${sh}/compose/app/code/../../other`,
+			]),
+		).toEqual(["in", "in", "out", "out"]);
+	});
+
+	(posix ? it : it.skip)(
+		"never reads a directory that differs only by a trailing line break as inside",
+		() => {
+			if (!linksWork) return;
+			const nl = `${sh}/compose/app\n`;
+			expect(
+				verdicts(`${sh}/compose/app`, [
+					nl,
+					`${sh}/compose/app\r`,
+					`${sh}/compose/app/code/lnk_dir_a`,
+					`${sh}/compose/app/code/lnk_dir_b`,
+					`${sh}/compose/app/code`,
+				]),
+			).toEqual(["out", "out", "out", "out", "in"]);
+			// An own directory with a line break in it matches nothing.
+			expect(verdicts(nl, [nl, `${sh}/compose/app/code`])).toEqual([
+				"out",
+				"out",
+			]);
+		},
+	);
+});
+
 // The same on real hosts: a GNU one (debian) and a BusyBox one (alpine). Runs
 // only where docker and the images are already there.
 const hasImage = (image: string) => {
@@ -307,6 +364,39 @@ describe.each([
 				"/w/compose/app/code/lnk_far => /w/compose/other/code/gone => out",
 				"/w/compose/app~ => unresolved => out",
 				"/w/compose/app^/x => unresolved => out",
+			]);
+		},
+	);
+	it.skipIf(!hasImage(image))(
+		"never reads a directory next to the own directory, named with a trailing line break, as inside",
+		() => {
+			const script = `${DIRECTORY_INSIDE_FUNCTION}
+NL=$(printf '\\nx'); NL=\${NL%x}; CR=$(printf '\\rx'); CR=\${CR%x}
+mkdir -p /w/compose/app/code/ok /w/compose/other/code
+mkdir "/w/compose/app$NL" "/w/compose/app$CR"
+ln -s "../../app$NL" /w/compose/app/code/lnk_a
+ln -s "../../app$CR" /w/compose/app/code/lnk_b
+ln -s ../../other/code /w/compose/app/code/lnk_far
+for p in /w/compose/app/code/ok /w/compose/app/code/lnk_a /w/compose/app/code/lnk_b /w/compose/app/code/lnk_far "/w/compose/app$NL" "/w/compose/app$CR" /w/compose/other/code; do
+  n=$(printf '%s' "$p" | tr '\\n\\r' '~^')
+  if __dokploy_dir_inside /w/compose/app "$p"; then s=in; else s=out; fi
+  echo "$n => $s"
+done
+if __dokploy_dir_inside "/w/compose/app$NL" /w/compose/app/code/ok; then echo "own with line feed => in"; else echo "own with line feed => out"; fi`;
+			const result = spawnSync(
+				"docker",
+				["run", "--rm", "-i", image, "sh", "-s"],
+				{ input: script, encoding: "utf8", timeout: 150_000 },
+			);
+			expect(result.stdout.trim().split("\n")).toEqual([
+				"/w/compose/app/code/ok => in",
+				"/w/compose/app/code/lnk_a => out",
+				"/w/compose/app/code/lnk_b => out",
+				"/w/compose/app/code/lnk_far => out",
+				"/w/compose/app~ => out",
+				"/w/compose/app^ => out",
+				"/w/compose/other/code => out",
+				"own with line feed => out",
 			]);
 		},
 	);

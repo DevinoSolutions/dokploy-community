@@ -1,6 +1,17 @@
 import { singleQuote } from "./docker/env-file";
 
 /**
+ * One shell line that defines `__dokploy_nl` and `__dokploy_cr`, the
+ * characters a path here never has (a line feed, a carriage return). Each is
+ * made on one line from one printf, so that the line endings of a script cannot
+ * change them. The resolvers and `__dokploy_dir_inside` refuse a path with
+ * either in it, and read each result with a marker so that the end of a name
+ * is kept (command substitution drops trailing line feeds).
+ */
+export const LINE_BREAK_DEFINITIONS =
+	"__dokploy_cr=$(printf '\\n\\rx'); __dokploy_nl=${__dokploy_cr%\"${__dokploy_cr#?}\"}; __dokploy_cr=${__dokploy_cr#?}; __dokploy_cr=${__dokploy_cr%x}";
+
+/**
  * Shell lines that define two functions for a script that checks, on the host
  * that runs it, where a path of the repository's checkout really leads:
  *
@@ -14,11 +25,8 @@ import { singleQuote } from "./docker/env-file";
  * carry on without the file.
  */
 export const getPathResolverLines = (unavailable: string) => [
-	// The characters a path here never has (a line feed, a carriage return), each
-	// defined on one line from one printf so that the line endings of a script
-	// cannot change them. A resolver refuses a path with either in it, and each result
-	// is read with a marker so that the end of a name is kept.
-	"__dokploy_cr=$(printf '\\n\\rx'); __dokploy_nl=${__dokploy_cr%\"${__dokploy_cr#?}\"}; __dokploy_cr=${__dokploy_cr#?}; __dokploy_cr=${__dokploy_cr%x}",
+	// Both are defined in the first line (see `LINE_BREAK_DEFINITIONS`).
+	LINE_BREAK_DEFINITIONS,
 	"if realpath -m -- / >/dev/null 2>&1; then",
 	'\t__dokploy_resolve() { [ "${#__dokploy_nl}" = 1 ] && [ "${#__dokploy_cr}" = 1 ] || return 1; case "$1" in *"$__dokploy_nl"*|*"$__dokploy_cr"*) return 1;; esac; __dokploy_x=$(realpath -m -- "$1" && echo .) || return 1; __dokploy_x=${__dokploy_x%??}; case "$__dokploy_x" in *"$__dokploy_nl"*|*"$__dokploy_cr"*) return 1;; esac; printf "%s\\n" "$__dokploy_x"; }',
 	"elif readlink -f -- / >/dev/null 2>&1; then",
@@ -35,15 +43,20 @@ export const getPathResolverLines = (unavailable: string) => [
 	'__dokploy_inside() { __dokploy_c=$(__dokploy_resolve "$1") && [ -d "$__dokploy_c" ] && __dokploy_p=$(__dokploy_resolve "$2") || return 1; case "$__dokploy_p" in "$__dokploy_c"|"$__dokploy_c"/*) return 0;; esac; return 1; }',
 ];
 
+const DIR_INSIDE_BODY =
+	'__dokploy_dir_inside() { [ "${#__dokploy_nl}" = 1 ] && [ "${#__dokploy_cr}" = 1 ] || return 1; case "$1$2" in *"$__dokploy_nl"*|*"$__dokploy_cr"*) return 1;; esac; __dokploy_c=$(cd -P -- "$1" 2>/dev/null && pwd -P && echo .) && __dokploy_p=$(cd -P -- "$2" 2>/dev/null && pwd -P && echo .) || return 1; __dokploy_c=${__dokploy_c%??}; __dokploy_p=${__dokploy_p%??}; case "$__dokploy_c$__dokploy_p" in *"$__dokploy_nl"*|*"$__dokploy_cr"*) return 1;; esac; case "$__dokploy_p" in "$__dokploy_c"|"$__dokploy_c"/*) return 0;; esac; return 1; }';
+
 /**
- * One shell line that defines `__dokploy_dir_inside DIRECTORY PLACE`: it
- * succeeds when PLACE, an existing directory, resolves (every link in its path
- * followed, `cd -P`) to DIRECTORY or to a place inside it. It needs no
- * `realpath`, so a script can carry it on any host; `getPathResolverLines`
- * is the one that also handles a place that does not exist yet.
+ * Shell (the line break definitions, then one line) that defines
+ * `__dokploy_dir_inside DIRECTORY PLACE`: it succeeds when PLACE, an existing
+ * directory, resolves (every link in its path followed, `cd -P`) to DIRECTORY
+ * or to a place inside it, and fails for a name with a line feed or a carriage
+ * return in it. It needs no `realpath`, so a script can carry it on any host;
+ * `getPathResolverLines` is the one that also handles a place that does not
+ * exist yet.
  */
-export const DIRECTORY_INSIDE_FUNCTION =
-	'__dokploy_dir_inside() { __dokploy_c=$(cd -P -- "$1" 2>/dev/null && pwd -P) && __dokploy_p=$(cd -P -- "$2" 2>/dev/null && pwd -P) || return 1; case "$__dokploy_p" in "$__dokploy_c"|"$__dokploy_c"/*) return 0;; esac; return 1; }';
+export const DIRECTORY_INSIDE_FUNCTION = `${LINE_BREAK_DEFINITIONS}
+${DIR_INSIDE_BODY}`;
 
 /**
  * Shell function `__dokploy_put SOURCE DESTINATION CODE_DIRECTORY` that puts a
