@@ -14,8 +14,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // host that has `readlink -f` and no `realpath -m` (minimal images): a link
 // whose target is relative is read from the link's own directory, whatever the
 // working directory is, a link chain is followed hop by hop with a cap, and
-// anything that cannot be followed fails (T-9540). A path with a line break in
-// it is never resolved.
+// anything that cannot be followed fails (T-9540), and so does a path with a
+// control character in it.
 
 // Each case starts a shell, which is slow on Windows and under load: every
 // case runs its shell checks in one script, with room to spare.
@@ -76,27 +76,27 @@ beforeAll(() => {
 	try {
 		// Relative targets, as a checkout brings them.
 		link("real", "own/code/rel_dir");
-		link("../../other/code/secret", "own/code/dangle_out");
+		link("../../other/code/far_a", "own/code/dangle_out");
 		link("../code/in_miss", "own/code/dangle_in");
 		link("c2", "own/code/c1");
-		link("../../other/code/miss", "own/code/c2");
+		link("../../other/code/far_b", "own/code/c2");
 		link("loop2", "own/code/loop1");
 		link("loop1", "own/code/loop2");
 		link("self", "own/code/self");
 		link("miss/../x", "own/code/dotdot");
-		link("../../../w/own/code/sub/m", "own/code/sub/up");
+		link("../../../v/own/code/sub/z", "own/code/sub/up");
 		// An absolute target (a Windows path there, which has no meaning here).
 		if (posix) {
 			link(`${sh}/other/code/abs_miss`, "own/code/abs");
 		}
-		// A directory whose name ends in a line break, a link of the same name
-		// without it to a deeper directory, and links through them.
+		// Names that differ only by a trailing control character, and links through
+		// them.
 		if (posix) {
 			mkdirSync(`${tmp}/own/code/nl\n`, { recursive: true });
 			link("a/b/c", "own/code/nl");
-			link("../../../outside/x", "own/code/nl\n/l");
+			link("../../../far_c/x", "own/code/nl\n/l");
 			link("nl\n/l", "own/code/start");
-			link("tail_target\n", "own/code/nlt");
+			link("end_target\n", "own/code/nlt");
 		}
 		linksWork =
 			run(`[ -L '${sh}/own/code/dangle_out' ]`).status === 0 &&
@@ -110,7 +110,7 @@ afterAll(() => {
 });
 
 // Working directories to start from: far from the links, and deep inside the
-// compose's own directory (where a wrong reading would land inside it).
+// compose's own directory.
 const cwds = () => [tmp, `${tmp}/own/code/a/b`];
 
 // One shell, every working directory: for each, the answer of `expression`
@@ -172,8 +172,8 @@ describe("the readlink -f fallback of the path resolver", () => {
 				`${sh}/own/code/dangle_in`,
 			],
 			[
-				`${sh}/other/code/secret`,
-				`${sh}/other/code/secret/more/deeper`,
+				`${sh}/other/code/far_a`,
+				`${sh}/other/code/far_a/more/deeper`,
 				`${sh}/own/code/in_miss`,
 			],
 		);
@@ -182,7 +182,7 @@ describe("the readlink -f fallback of the path resolver", () => {
 	itWithLinks("follows a chain of links hop by hop", () => {
 		everywhere(
 			[`${sh}/own/code/c1`, `${sh}/own/code/c1/tail`],
-			[`${sh}/other/code/miss`, `${sh}/other/code/miss/tail`],
+			[`${sh}/other/code/far_b`, `${sh}/other/code/far_b/tail`],
 		);
 	});
 
@@ -213,7 +213,7 @@ describe("the readlink -f fallback of the path resolver", () => {
 
 	itWithLinks("reads a target that climbs from the link's directory", () => {
 		// Three levels above own/code/sub is the temp directory, not the compose's.
-		everywhere([`${sh}/own/code/sub/up`], [`${sh}/w/own/code/sub/m`]);
+		everywhere([`${sh}/own/code/sub/up`], [`${sh}/v/own/code/sub/z`]);
 	});
 
 	itWithLinks("fails on a link loop, a self link and a missing component before ..", () => {
@@ -258,7 +258,7 @@ describe("the readlink -f fallback of the path resolver", () => {
 		expect(answer).toBe("/definitely/not/there");
 	});
 
-	it("never resolves a path that has a line break in it", () => {
+	it("refuses a path with a control character in it", () => {
 		if (!shellWorks) return;
 		const [answer] = resolveAll(
 			[`${sh}/own/code/dir\nx`, `${sh}/own/code/dir\n`, "/a\n/b"],
@@ -271,7 +271,7 @@ describe("the readlink -f fallback of the path resolver", () => {
 	});
 
 	(posix ? itWithLinks : it.skip)(
-		"does not resolve through a directory with a line break in its name",
+		"refuses a path through a directory with a control character in its name",
 		() => {
 			const inputs = [
 				`${sh}/own/code/start`,
@@ -305,18 +305,18 @@ const busybox = (() => {
 describe.skipIf(!busybox)("on a real busybox (alpine:3)", () => {
 	const script = `${lines}
 NL=$(printf '\\nx'); NL=\${NL%x}
-mkdir -p /w/own/code/a/b/c /w/own/code/sub /w/other/code /w/c/d /w/outside
-ln -s ../../other/code/secret /w/own/code/dangle_out
-ln -s c2 /w/own/code/c1; ln -s ../../other/code/miss /w/own/code/c2
+mkdir -p /w/own/code/a/b/c /w/own/code/sub /w/other/code /w/c/d /w/far_c
+ln -s ../../other/code/far_a /w/own/code/dangle_out
+ln -s c2 /w/own/code/c1; ln -s ../../other/code/far_b /w/own/code/c2
 ln -s loop2 /w/own/code/loop1; ln -s loop1 /w/own/code/loop2
-ln -s ../../../w/own/code/sub/m /w/own/code/sub/up
+ln -s ../../../v/own/code/sub/z /w/own/code/sub/up
 ln -s ../x/y/file /w/own/code/filelink
 ln -s ../ok_miss /w/own/code/in_dangle
 mkdir "/w/own/code/nl$NL"
 ln -s a/b/c /w/own/code/nl
-ln -s ../../../outside/x "/w/own/code/nl$NL/l"
+ln -s ../../../far_c/x "/w/own/code/nl$NL/l"
 ln -s "nl$NL/l" /w/own/code/start
-ln -s "tail_target$NL" /w/own/code/nlt
+ln -s "end_target$NL" /w/own/code/nlt
 for cwd in / /w/own/code/a/b /w/c/d; do
   cd "$cwd"
   for p in /w/own/code/dangle_out /w/own/code/dangle_out/more /w/own/code/c1 /w/own/code/sub/up /w/own/code/filelink /w/own/code/loop1 /w/own/code/in_dangle /w/own/code/start /w/own/code/nlt "/w/own/code/nl$NL/l"; do
@@ -327,7 +327,7 @@ for cwd in / /w/own/code/a/b /w/c/d; do
   done
 done`;
 
-	it("resolves a link from its own directory wherever it runs, and refuses line breaks", () => {
+	it("resolves a link from its own directory wherever it runs, and refuses control characters", () => {
 		const result = spawnSync(
 			"docker",
 			["run", "--rm", "-i", "alpine:3", "sh", "-s"],
@@ -336,15 +336,14 @@ done`;
 		const out = result.stdout.trim().split("\n");
 		expect(out).toHaveLength(30);
 		const expected: Record<string, string> = {
-			"/w/own/code/dangle_out": "/w/other/code/secret => out",
-			"/w/own/code/dangle_out/more": "/w/other/code/secret/more => out",
-			"/w/own/code/c1": "/w/other/code/miss => out",
-			"/w/own/code/sub/up": "/w/w/own/code/sub/m => out",
+			"/w/own/code/dangle_out": "/w/other/code/far_a => out",
+			"/w/own/code/dangle_out/more": "/w/other/code/far_a/more => out",
+			"/w/own/code/c1": "/w/other/code/far_b => out",
+			"/w/own/code/sub/up": "/w/v/own/code/sub/z => out",
 			"/w/own/code/filelink": "/w/own/x/y/file => in",
 			"/w/own/code/loop1": "unresolved => out",
 			"/w/own/code/in_dangle": "/w/own/ok_miss => in",
-			// A directory whose name ends in a line break, next to a link of the
-			// same name without it to a deeper directory.
+			// Names that differ only by a trailing control character.
 			"/w/own/code/start": "unresolved => out",
 			"/w/own/code/nlt": "unresolved => out",
 			"/w/own/code/nl~/l": "unresolved => out",
