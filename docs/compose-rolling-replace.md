@@ -12,6 +12,14 @@ no backend, as short as a few seconds or as long as the removal takes (135 s in
 #374). Traefik drops the old container on its `die` event, so the router has
 nothing to send traffic to until the new container is running and healthy.
 
+Starting the new container first is not enough on its own. The old container is
+still a running, healthy backend of the same Traefik load balancer (the replica
+carries identical labels), and Traefik only lists containers again on the
+`start`, `die` and `health_status` events. An app that ignores SIGTERM is
+SIGKILLed at the stop grace with Traefik still routing to it: a 502 or a
+timeout until the reload. Rolling replace therefore takes the old container out
+of rotation before it stops it (see "Taking the old container out of rotation").
+
 ## What rolling replace does
 
 For each service you select, instead of stop-then-start:
@@ -20,7 +28,9 @@ For each service you select, instead of stop-then-start:
 2. Record the container ids of the service, then start a second replica from
    the new release (`up -d --no-deps --no-recreate --scale <svc>=2 <svc>`).
 3. Wait until the new replica is healthy, up to the health timeout.
-4. Wait the drain delay, then stop and remove the old container by id.
+4. Take the old container out of rotation: make its healthcheck fail, wait for
+   `unhealthy` and for Traefik to reload (see below).
+5. Wait the drain delay, then stop and remove the old container by id.
 
 If the new replica never becomes healthy, it is removed and the old container,
 which was never touched, keeps serving. Services you did not select are
@@ -48,9 +58,12 @@ guardrails):
   up to its `timeout` before the next one starts; the Compose defaults are 30 s
   each, so 180 s with only a `test`), the wait is raised to cover it at deploy
   time, up to the 900 s maximum.
-- **Drain delay** (0 to 120 s, default 5): the wait between "new replica
-  healthy" and "stop the old container". It does not make the old container
-  unroutable (see "The stop window" below).
+- **Drain delay** (0 to 120 s, default 5): the wait between "the old container
+  is out of rotation" and "stop the old container", so that requests already in
+  flight on it finish. It runs after the old container has been taken out of
+  rotation, not instead of it. When the old container could not be taken out of
+  rotation (see below) it is the wait between "new replica healthy" and the
+  stop, as it was before.
 
 Only `docker-compose` type composes, without a custom command and not on a
 fresh-volumes deploy. Compose previews never roll.
@@ -199,13 +212,113 @@ deploy is never failed because of drift.
   than one container for a selected service and reconciles first: it keeps the
   newest healthy one, removes the rest, and goes on.
 
-## The stop window: add a Traefik retry middleware yourself
+## Taking the old container out of rotation
 
-Traefik removes the old backend only on the container's `die` event, so for the
-whole stop grace period it still sends requests to an app that is shutting
-down. The new replica being healthy does not cover that window, and neither
-does the drain delay. Dokploy does **not** inject any Traefik middleware for
-this. The mitigation is a retry middleware that you add once, manually:
+Traefik's docker provider keeps a container that is running and healthy, and
+reloads its routes only on the container events `start`, `die` and
+`health_status`. So the old container has to become unhealthy before it is
+stopped. Dokploy does it with the healthcheck you already have:
+
+1. **At deploy time**, for each rolled service whose healthcheck `test` is
+   `CMD-SHELL` or a plain string (a string is `CMD-SHELL`), the compose file
+   Dokploy writes has the test wrapped, and only then:
+
+   ```
+   [ ! -s /tmp/.dokploy-drain ] && ( <your test> )
+   ```
+
+   The test fails while `/tmp/.dokploy-drain` is a non-empty file, and is your
+   test otherwise. `interval`, `timeout`, `retries` and `start_period` are
+   untouched, no `$` is added (your own `$$` and `$VAR` stay exactly as you
+   wrote them), and the wrap is the same text on every deploy, so the service's
+   config hash does not change from one deploy to the next. A compose without
+   rolling replace is written exactly as before. The compose file in your
+   repository is not changed; only the file Dokploy deploys.
+2. **After the new replica is healthy**, the script copies a small file with
+   the word `drain` to `/tmp/.dokploy-drain` in the old container with
+   `docker cp` (no binary is needed in the image; `/tmp` has to exist), waits
+   until the old container reports `unhealthy`, then waits 3 s for Traefik to
+   reload (its `providersThrottleDuration` is 2 s unless set, and Dokploy does
+   not set it; one second of margin is added).
+3. **Then** the drain delay runs, so requests already in flight on the old
+   container finish, and the old container is stopped and removed. `docker
+   stop` has no `-t`: the container's own grace period (`stop_grace_period`)
+   applies.
+
+The wait for `unhealthy` is bounded by the old container's own healthcheck:
+`start_period + (interval + timeout) x retries + interval` plus 3 s (Docker's
+defaults, 30 s, 30 s and 3, when unset), never longer than 900 s, the longest
+health timeout. The promotion is recorded just before the marker is copied, so a
+cancel during this wait or the drain removes the old container and keeps the new
+replica: the draining container is never the one left serving. The new replica
+is checked again while waiting and right before the stop. If it is no longer
+healthy, the marker is emptied (an empty file counts as no marker), the old
+container goes back in rotation and keeps serving, the new replica is removed and
+the deploy fails like any other unhealthy replica. The new replica is removed only
+once the old container reports healthy again, which takes up to one healthcheck
+interval plus its timeout and a few seconds. If it does not (or the marker cannot
+be emptied), nothing is stopped or removed, both containers are left running, the
+deploy fails, and the next deploy reconciles them.
+
+**What it costs.** Docker marks the old container unhealthy only after
+`retries` failed probes, `interval` apart, so each rolled service takes longer
+to deploy: about 60 to 90 s with Docker's defaults (30 s interval, 3 retries),
+plus 3 s and the drain delay. A shorter `interval` or fewer `retries` in the
+healthcheck makes it proportionally faster (a 5 s interval with 3 retries is
+about 15 s). The wait ends as soon as the old container is unhealthy, and is
+never longer than the bound above.
+
+Measured on a throwaway Traefik v3.6 with an app that ignores SIGTERM: this
+sequence failed 0 of 283 requests (maximum latency about 0 s), a plain stop
+failed 1 (a timeout on the dead address), and pausing the old container first
+failed 2.
+
+### When it cannot be done
+
+The deploy never fails because of it. The log says "the old container could not
+be taken out of rotation before it was stopped; requests in flight at the stop
+may fail" and the old behaviour follows (the drain delay, then the stop). This
+happens when:
+
+- the healthcheck is exec form (`test: ["CMD", "curl", "-f", "..."]`): it is
+  left untouched. The Rolling replace card and the deploy log warn about it.
+  Write it as `["CMD-SHELL", "curl -f ..."]` to get the take-out;
+- the old container was started before the wrap existed, which is the case for
+  the first rolling deploy of a service (its healthcheck is the unwrapped one).
+  That deploy rolls as before; the next one takes the old container out of
+  rotation;
+- `/tmp` of the container is not its own, or cannot be written. Dokploy checks
+  before it copies anything, and does not take the container out of rotation
+  when:
+  - a **named volume or a bind mount** is mounted on `/tmp` (or on `/`): the
+    marker would land in the shared mount, the new replica would see it too and
+    go unhealthy, and the next deploy's replica would start with it;
+  - a **tmpfs** is mounted on `/tmp`: `docker cp` does not write into a tmpfs, so the marker would never be seen;
+  - the root file system is **read-only** (`read_only: true`): there is nowhere
+    to write.
+
+  The Rolling replace card and the deploy log name such a service before the
+  deploy. Put the volume, bind mount or tmpfs on a more specific path than
+  `/tmp` to get the take-out;
+- `docker cp` fails (for example there is no `/tmp` in the image);
+- the old container does not report `unhealthy` within the bound above.
+
+The take-out also does not help requests that never go through Traefik
+(container-to-container traffic by service name, see above).
+
+**The healthcheck text changes with rolling replace.** A service that rolling
+replace deploys has a different `healthcheck.test` (the wrapped one) than the
+same service deployed plainly, so its config hash differs. Turning rolling
+replace off for a service, or a deploy that recreates it normally because it no
+longer qualifies (drift), recreates that service once, with the plain stop and
+start, to put the original healthcheck back. The first rolling deploy of a
+service does the opposite and is covered above.
+
+### A retry middleware is still worth having
+
+A retry covers what the take-out cannot (the cases above, and a connection that
+was already open). Dokploy does **not** inject any Traefik middleware. Add one
+once, manually:
 
 1. Create a file in the Traefik dynamic configuration directory on the host
    (`/etc/dokploy/traefik/dynamic/rolling-retry.yml`):
@@ -280,7 +393,9 @@ copy first. What a trial run (a real compose copied to a stack) showed:
 
 ## Known limits
 
-- The stop-grace window (above) is covered only by the manual retry middleware.
+- A service whose healthcheck is not shell form (or whose old container predates
+  the wrap) is stopped while Traefik still routes to it; only the manual retry
+  middleware covers that window.
 - A deploy that is `kill -9`ed leaves two containers until the next deploy
   reconciles them.
 - Compose previews, stacks, custom commands, fresh-volumes deploys and stateful

@@ -148,8 +148,9 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 				<CardDescription>
 					Optional, per service, off by default. A selected service is replaced
 					by starting a second replica from the new release, waiting until it is
-					healthy and only then stopping the old container. A new replica that
-					never becomes healthy is removed and the old container keeps serving.
+					healthy, taking the old container out of rotation and only then
+					stopping it. A new replica that never becomes healthy is removed and
+					the old container keeps serving.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="grid gap-4">
@@ -241,6 +242,15 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 														))}
 													</ul>
 												)}
+												{service.eligible &&
+													isSelected &&
+													service.warnings.length > 0 && (
+														<ul className="ml-6 list-disc text-xs text-muted-foreground">
+															{service.warnings.map((warning) => (
+																<li key={warning}>{warning}</li>
+															))}
+														</ul>
+													)}
 											</li>
 										);
 									})}
@@ -289,9 +299,12 @@ export const RollingReplaceCompose = ({ composeId }: Props) => {
 								/>
 								<p className="text-xs text-muted-foreground">
 									{ROLLING_DRAIN_MIN_SECONDS} to {ROLLING_DRAIN_MAX_SECONDS}.
-									Wait between "new replica healthy" and "stop the old
-									container". It does not make the old container unroutable: add
-									a Traefik retry middleware for the stop window (see the docs).
+									Wait after the old container is out of rotation and before it
+									is stopped, so requests already in flight on it finish. The
+									old container is made unhealthy first, which needs a
+									shell-form healthcheck (see the docs). Without one the old
+									container is stopped while still routed: add a Traefik retry
+									middleware for the stop window.
 								</p>
 							</div>
 						</div>
