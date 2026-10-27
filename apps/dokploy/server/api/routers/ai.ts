@@ -40,6 +40,7 @@ import {
 	createTRPCRouter,
 	protectedProcedure,
 } from "@/server/api/trpc";
+import { resolveHostIpForOrg } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import { generatePassword } from "@/templates/utils";
 
@@ -378,10 +379,15 @@ ${input.logs}`,
 				input.serverId,
 				ctx.session.activeOrganizationId,
 			);
+			const hostIp = await resolveHostIpForOrg(
+				ctx.session.activeOrganizationId,
+				input.serverId,
+			);
 			try {
 				return await suggestVariants({
 					...input,
 					organizationId: ctx.session.activeOrganizationId,
+					hostIp,
 				});
 			} catch (error) {
 				throw new TRPCError({

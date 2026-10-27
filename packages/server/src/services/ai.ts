@@ -7,9 +7,6 @@ import { TRPCError } from "@trpc/server";
 import { generateText, Output } from "ai";
 import { desc, eq } from "drizzle-orm";
 import { z } from "zod";
-import { IS_CLOUD } from "../constants";
-import { findServerById } from "./server";
-import { getWebServerSettings } from "./web-server-settings";
 
 interface SuggestionItem {
 	id: string;
@@ -142,6 +139,9 @@ interface Props {
 	aiId: string;
 	input: string;
 	serverId?: string | undefined;
+	// The address the organization may use for its services: its server's, or
+	// the Dokploy host's when it may run services there, otherwise empty.
+	hostIp: string;
 }
 
 export const suggestVariants = async ({
@@ -149,6 +149,7 @@ export const suggestVariants = async ({
 	aiId,
 	input,
 	serverId,
+	hostIp,
 }: Props) => {
 	try {
 		const aiSettings = await getAiSettingById(aiId);
@@ -162,16 +163,8 @@ export const suggestVariants = async ({
 		const provider = selectAIProvider(aiSettings);
 		const model = provider(aiSettings.model);
 
-		let ip = "";
-		if (!IS_CLOUD) {
-			const settings = await getWebServerSettings();
-			ip = settings?.serverIp || "";
-		}
-
-		if (serverId) {
-			const server = await findServerById(serverId);
-			ip = server.ipAddress;
-		} else if (process.env.NODE_ENV === "development") {
+		let ip = hostIp;
+		if (!serverId && process.env.NODE_ENV === "development") {
 			ip = "127.0.0.1";
 		}
 

@@ -11,11 +11,15 @@ const HOST_IP = "198.51.100.7";
 const PUBLIC_IP = "198.51.100.8";
 const OWNER_ORG = "org-owner";
 const OTHER_ORG = "org-other";
+const SERVER_IP = "198.51.100.9";
 
 const mocks = vi.hoisted(() => ({
 	getWebServerSettings: vi.fn(),
 	isRootOrganization: vi.fn(),
 	getPublicIpWithFallback: vi.fn(),
+	findServerById: vi.fn(),
+	getAiSettingById: vi.fn(),
+	suggestVariants: vi.fn(),
 }));
 
 vi.mock("@/server/api/utils/audit", () => ({
@@ -32,6 +36,17 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 		getWebServerSettings: mocks.getWebServerSettings,
 		isRootOrganization: mocks.isRootOrganization,
 		getPublicIpWithFallback: mocks.getPublicIpWithFallback,
+		findServerById: mocks.findServerById,
+	};
+});
+
+vi.mock("@dokploy/server/services/ai", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("@dokploy/server/services/ai")>();
+	return {
+		...actual,
+		getAiSettingById: mocks.getAiSettingById,
+		suggestVariants: mocks.suggestVariants,
 	};
 });
 
@@ -43,8 +58,11 @@ const { canUseLocalHostForServices } = await import(
 
 const createCaller = createCallerFactory(appRouter);
 
-const callerIn = (organizationId: string) =>
-	createCaller({
+let currentOrg = OWNER_ORG;
+
+const callerIn = (organizationId: string) => {
+	currentOrg = organizationId;
+	return createCaller({
 		user: {
 			id: "user-1",
 			email: "user@example.com",
@@ -55,6 +73,7 @@ const callerIn = (organizationId: string) =>
 		req: {} as unknown,
 		res: {} as unknown,
 	} as never);
+};
 
 const instance = (remoteServersOnly: boolean) =>
 	mocks.getWebServerSettings.mockResolvedValue({
@@ -71,6 +90,16 @@ beforeEach(() => {
 	mocks.isRootOrganization.mockImplementation(
 		async (organizationId: string) => organizationId === OWNER_ORG,
 	);
+	mocks.getAiSettingById.mockImplementation(async () => ({
+		aiId: "ai-1",
+		organizationId: currentOrg,
+	}));
+	mocks.findServerById.mockImplementation(async () => ({
+		serverId: "srv-1",
+		organizationId: currentOrg,
+		ipAddress: SERVER_IP,
+	}));
+	mocks.suggestVariants.mockResolvedValue({ suggestions: [] });
 });
 
 describe("canUseLocalHostForServices", () => {
@@ -158,5 +187,55 @@ describe("server.publicIp", () => {
 		state.isCloud = true;
 
 		await expect(callerIn(OTHER_ORG).server.publicIp()).resolves.toBe("");
+	});
+});
+
+describe("ai.suggest", () => {
+	const suggest = (organizationId: string, serverId?: string) =>
+		callerIn(organizationId).ai.suggest({
+			aiId: "ai-1",
+			input: "a wordpress site",
+			serverId,
+		});
+
+	const hostIpGiven = () =>
+		mocks.suggestVariants.mock.calls[0]?.[0]?.hostIp as string | undefined;
+
+	it("passes the owner the host address, even when remote servers only", async () => {
+		instance(true);
+
+		await suggest(OWNER_ORG);
+
+		expect(hostIpGiven()).toBe(HOST_IP);
+	});
+
+	it("passes another organization the host address while services may run on the host", async () => {
+		await suggest(OTHER_ORG);
+
+		expect(hostIpGiven()).toBe(HOST_IP);
+	});
+
+	it("passes another organization an empty address when remote servers only", async () => {
+		instance(true);
+
+		await suggest(OTHER_ORG);
+
+		expect(hostIpGiven()).toBe("");
+	});
+
+	it("passes an empty address on cloud", async () => {
+		state.isCloud = true;
+
+		await suggest(OWNER_ORG);
+
+		expect(hostIpGiven()).toBe("");
+	});
+
+	it("passes the server's own address when a server is given, even when remote servers only", async () => {
+		instance(true);
+
+		await suggest(OTHER_ORG, "srv-1");
+
+		expect(hostIpGiven()).toBe(SERVER_IP);
 	});
 });
