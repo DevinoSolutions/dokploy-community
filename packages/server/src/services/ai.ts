@@ -201,6 +201,19 @@ export const suggestVariants = async ({
 			),
 		});
 
+		// Without an address there is no sslip.io host to give, so the user adds
+		// the domain themselves.
+		const domainRules = ip
+			? `Domain Rules - For each service that needs to be exposed to the internet:
+		    1. Define a domain with:
+		       - host: {service-name}-{random-3-chars-hex}-${ip.replaceAll(".", "-")}.sslip.io
+		       - port: the internal port the service runs on
+		       - serviceName: the name of the service in the docker-compose
+		    2. Make sure the service is properly configured to work with the specified port`
+			: `Domain Rules:
+		    1. Return an empty domains array for every suggestion; the user adds a domain later
+		    2. Still make sure each service is configured to listen on its internal port`;
+
 		const result = await generateText({
 			model,
 			// @ts-ignore - Zod + AI SDK Output.object() causes excessively deep instantiation
@@ -287,12 +300,7 @@ export const suggestVariants = async ({
 		    4. ONLY include environment variables that are actually used in the docker-compose
 		    5. Every environment variable referenced in the docker-compose MUST have a corresponding entry in envVariables
 
-		    Domain Rules - For each service that needs to be exposed to the internet:
-		    1. Define a domain with:
-		       - host: {service-name}-{random-3-chars-hex}-${ip ? ip.replaceAll(".", "-") : ""}.sslip.io
-		       - port: the internal port the service runs on
-		       - serviceName: the name of the service in the docker-compose
-		    2. Make sure the service is properly configured to work with the specified port
+		    ${domainRules}
 
 		    User's request: ${input}
 		  `,
