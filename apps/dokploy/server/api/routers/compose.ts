@@ -60,7 +60,10 @@ import {
 	assertComposeRollingSettings,
 	getComposeRollingReport,
 } from "@dokploy/server/services/compose-rolling";
-import { assertComposeFileVolumesBound } from "@dokploy/server/services/compose-volume-binding";
+import {
+	assertCommandSaveable,
+	assertComposeFileVolumesBound,
+} from "@dokploy/server/services/compose-volume-binding";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
@@ -366,6 +369,28 @@ export const composeRouter = createTRPCRouter({
 					},
 					ctx.session.activeOrganizationId,
 				);
+			}
+
+			// A custom command that a deploy would refuse is refused here, with the
+			// same message, when the command is set or changed (T-7607). Only the
+			// checks that need neither the compose file nor the host run; the
+			// deploy runs all of them again. A command that is left as it is, or
+			// cleared, saves.
+			if (typeof input.command === "string" && input.command !== "") {
+				const existing = await findComposeById(input.composeId);
+				if (input.command !== existing.command) {
+					try {
+						assertCommandSaveable({
+							...existing,
+							..._.omitBy(input, _.isUndefined),
+						});
+					} catch (error) {
+						throw new TRPCError({
+							code: "BAD_REQUEST",
+							message: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 			}
 
 			// >>> build-policy hook: refuse a required check this compose unit can

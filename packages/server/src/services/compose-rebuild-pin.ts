@@ -29,8 +29,9 @@ import type { Patch } from "./patch";
  * - The build server also runs the compose checks on its own files before it
  *   builds them (see `buildImagesOnBuildServer`); this pin is the layer before.
  * - The record is the latest compose deployment row that has one. A rebuild
- *   that passed the check carries it forward on its own row, so pruning old
- *   deployment rows does not drop it after a run of rebuilds.
+ *   that passed the check and whose release is running carries it forward on
+ *   its own row, like a deploy (see `recordDeployedCommit`). Pruning keeps the
+ *   latest recorded row too (see `removeLastTenDeployments`).
  * - No record (a compose last deployed before this check existed, or before it
  *   had a build server), a record that is not a full commit id, a checkout
  *   whose commit cannot be read, another commit, another build server or other
@@ -122,19 +123,18 @@ export const findLastRecordedComposeCommit = async (composeId: string) => {
  * Refuses a build-server compose rebuild unless the serving host's checkout
  * (`servingCommitOutput`, read at the start of the rebuild) is the commit the
  * last deploy recorded, and `buildServerId` and the patch rows the rebuild
- * applies are the ones it recorded. On a match the record is carried forward
- * on the rebuild's own row and the commit returned. Every refusal is a
+ * applies are the ones it recorded. On a match the commit is returned and
+ * nothing is written: the rebuild carries the record forward with
+ * `recordDeployedCommit` once its release is running. Every refusal is a
  * `RebuildRefusedError`.
  */
 export const assertRebuildCommitMatchesDeploy = async ({
 	composeId,
-	deploymentId,
 	servingCommitOutput,
 	buildServerId,
 	patches,
 }: {
 	composeId: string;
-	deploymentId: string;
 	servingCommitOutput: string | undefined;
 	buildServerId: string | null | undefined;
 	patches: Patch[] | undefined;
@@ -168,16 +168,10 @@ export const assertRebuildCommitMatchesDeploy = async ({
 			"The compose builds on another build server than at its last deploy. A rebuild only builds what the last deploy built, so nothing was built. Deploy it once; rebuilds work again after that.",
 		);
 	}
-	const patchDigest = digestAppliedPatches(patches);
-	if (recorded.pinnedPatchDigest !== patchDigest) {
+	if (recorded.pinnedPatchDigest !== digestAppliedPatches(patches)) {
 		throw new RebuildRefusedError(
 			"The compose's patches changed since its last deploy. A rebuild only builds what the last deploy built, so nothing was built. Deploy it once; rebuilds work again after that.",
 		);
 	}
-	await updateDeployment(deploymentId, {
-		pinnedCommit: commit,
-		pinnedBuildServerId: buildServerId,
-		pinnedPatchDigest: patchDigest,
-	});
 	return commit;
 };

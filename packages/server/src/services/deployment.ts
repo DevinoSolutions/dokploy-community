@@ -786,6 +786,8 @@ const logHostForRemoval = async (row: LogHostRow) => {
 // build server when there is one and the serving host otherwise, so each old
 // row is cleaned on its own host. Never throws: a host that cannot be reached
 // must not fail (or block) the deployment that triggered the cleanup.
+// A compose also keeps its latest row that recorded a rebuild pin (T-7960),
+// however old: rows without a record must not push it out of the window.
 const removeLastTenDeployments = async (
 	id: string,
 	type:
@@ -802,7 +804,13 @@ const removeLastTenDeployments = async (
 		if (deploymentList.length <= 10) {
 			return;
 		}
-		const deploymentsToDelete = deploymentList.slice(10);
+		const keepRecorded =
+			type === "compose"
+				? deploymentList.find((row) => row.pinnedCommit)
+				: undefined;
+		const deploymentsToDelete = deploymentList
+			.slice(10)
+			.filter((row) => row !== keepRecorded);
 		// Remote log paths grouped by host: one command per host.
 		const remoteLogPaths = new Map<string, string[]>();
 		// Legacy preview rows resolve their host through the preview, once per

@@ -552,16 +552,21 @@ const buildImagesOnBuildServer = async (
 		// host checked.
 		if (entity.sourceType !== "raw") {
 			await checkpoint();
-			await assertComposeVolumesBound({ ...entity, serverId: buildServerId });
+			await assertComposeVolumesBound(
+				{ ...entity, serverId: buildServerId },
+				{ patches: pinned.patches },
+			);
 		}
 
 		// Same compose file the serving host will run (domains, randomize,
 		// isolated deployment), and the same .env, so build args interpolate alike.
 		await checkpoint();
+		// Rendered from the rows the serving host applied, the ones the check above
+		// read, not from a second read of the patch table (T-8260).
 		const writeCompose = await writeDomainsToCompose(
 			buildEntity,
 			buildEntity.domains,
-			stageOptions,
+			{ ...stageOptions, patches: pinned.patches },
 		);
 		const envCommand = buildEntity.createEnvFile
 			? await getCreateEnvFileCommand(buildEntity, stageOptions)

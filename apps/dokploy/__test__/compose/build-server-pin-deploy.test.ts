@@ -243,6 +243,19 @@ beforeEach(async () => {
 });
 
 describe("deploy (runComposeBuild)", () => {
+	it("renders the compose file from the rows it applied (T-8260)", async () => {
+		const { getBuildComposeCommand } = await import(
+			"@dokploy/server/utils/builders/compose"
+		);
+		await runComposeBuild(COMPOSE, deployment);
+		expect(mocks.assertComposeVolumesBound.mock.calls[0]?.[1].patches).toBe(
+			ROWS,
+		);
+		expect(vi.mocked(getBuildComposeCommand).mock.calls[0]?.[1]?.patches).toBe(
+			ROWS,
+		);
+	});
+
 	it("reads the commit right after the fetch, and passes the applied rows", async () => {
 		await runComposeBuild(COMPOSE, deployment);
 
@@ -437,8 +450,10 @@ describe("rebuild (rebuildCompose)", () => {
 		await rebuild();
 		expect(step("read")).toBeLessThan(step("patch-rows"));
 		expect(step("patch-rows")).toBeLessThan(step("lookup"));
-		expect(step("lookup")).toBeLessThan(step("record"));
-		expect(step("record")).toBeLessThan(step("patches"));
+		expect(step("lookup")).toBeLessThan(step("patches"));
+		// Carried forward once the release is running, like a deploy (T-8260).
+		expect(step("prepare")).toBeLessThan(step("release"));
+		expect(step("release")).toBeLessThan(step("record"));
 		expect(pinnedWrites()).toEqual([["dep-1", recordOf(SHA)]]);
 		expect(mocks.prepareComposeBuildServerDeploy).toHaveBeenCalledTimes(1);
 		// One read of the patch rows: the ones compared are the ones applied.
@@ -447,6 +462,53 @@ describe("rebuild (rebuildCompose)", () => {
 			patches: ROWS,
 		});
 		expect(prepareArgs().patches).toBe(ROWS);
+	});
+
+	it.each([
+		[
+			"is refused by the compose guard",
+			() =>
+				mocks.assertComposeVolumesBound.mockRejectedValue(
+					new Error("refused by the check"),
+				),
+			"refused by the check",
+		],
+		[
+			"fails on the build server",
+			() =>
+				mocks.prepareComposeBuildServerDeploy.mockRejectedValue(
+					new Error("boom"),
+				),
+			"boom",
+		],
+		[
+			"fails its up",
+			() =>
+				mocks.execAsync.mockImplementation(async (command: string) => {
+					if (command.includes("echo up;")) throw new Error("up failed");
+					return { stdout: "", stderr: "" };
+				}),
+			"up failed",
+		],
+	])(
+		"carries nothing forward when the rebuild %s",
+		async (_label, arrange, message) => {
+			arrange();
+			await expect(rebuild()).rejects.toThrow(message);
+			expect(pinnedWrites()).toEqual([]);
+		},
+	);
+
+	it("renders the compose file from the rows the guard read, in one read of the patch table (T-8260)", async () => {
+		const { getBuildComposeCommand } = await import(
+			"@dokploy/server/utils/builders/compose"
+		);
+		await rebuild();
+		expect(mocks.findPatchesByEntityId).toHaveBeenCalledTimes(1);
+		const guardOptions = mocks.assertComposeVolumesBound.mock.calls[0]?.[1];
+		expect(guardOptions.patches).toBe(ROWS);
+		const buildOptions = vi.mocked(getBuildComposeCommand).mock.calls[0]?.[1];
+		expect(buildOptions?.patches).toBe(ROWS);
 	});
 
 	it("refuses patch rows that changed since the deploy, and logs why", async () => {
