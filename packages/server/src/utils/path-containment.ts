@@ -20,7 +20,11 @@ export const getPathResolverLines = (unavailable: string) => [
 	// `readlink -f` (busybox) needs the path to exist but for its last part:
 	// resolve the deepest part that exists and append the rest as it is.
 	// A relative input fails (the walk up ends at /, which it never reaches).
-	'\t__dokploy_resolve() { __dokploy_r=$1 __dokploy_t=; [ "${__dokploy_r#/}" != "$__dokploy_r" ] || return 1; while [ ! -e "$__dokploy_r" ] && [ ! -L "$__dokploy_r" ] && [ "$__dokploy_r" != / ]; do __dokploy_t=/${__dokploy_r##*/}$__dokploy_t; __dokploy_r=${__dokploy_r%/*}; __dokploy_r=${__dokploy_r:-/}; done; case "$__dokploy_t" in */..|*/../*) return 1;; esac; __dokploy_r=$(readlink -f -- "$__dokploy_r") && printf "%s%s\\n" "$__dokploy_r" "$__dokploy_t"; }',
+	// A link whose target is missing is followed here, one hop at a time from
+	// the link's own directory (at most 40), as on full hosts. Anything that
+	// cannot be followed fails, and so does a path with a control character.
+	"\t__dokploy_nl='\n'",
+	'\t__dokploy_resolve() { __dokploy_r=$1 __dokploy_t= __dokploy_n=0; [ "${__dokploy_r#/}" != "$__dokploy_r" ] || return 1; case "$__dokploy_r" in *"$__dokploy_nl"*) return 1;; esac; while :; do while [ ! -e "$__dokploy_r" ] && [ ! -L "$__dokploy_r" ] && [ "$__dokploy_r" != / ]; do __dokploy_t=/${__dokploy_r##*/}$__dokploy_t; __dokploy_r=${__dokploy_r%/*}; __dokploy_r=${__dokploy_r:-/}; done; case "$__dokploy_t" in */..|*/../*) return 1;; esac; if [ -e "$__dokploy_r" ] || [ ! -L "$__dokploy_r" ]; then break; fi; __dokploy_n=$((__dokploy_n+1)); [ "$__dokploy_n" -le 40 ] || return 1; __dokploy_l=$(readlink -- "$__dokploy_r" && echo .) || return 1; __dokploy_l=${__dokploy_l%??}; [ -n "$__dokploy_l" ] || return 1; __dokploy_d=${__dokploy_r%/*}; __dokploy_d=$(cd -P -- "${__dokploy_d:-/}" 2>/dev/null && pwd -P && echo .) || return 1; __dokploy_d=${__dokploy_d%??}; case "$__dokploy_l$__dokploy_d" in *"$__dokploy_nl"*) return 1;; esac; case "$__dokploy_l" in /*) __dokploy_r=$__dokploy_l;; *) __dokploy_r=${__dokploy_d%/}/$__dokploy_l;; esac; done; __dokploy_r=$(readlink -f -- "$__dokploy_r" && echo .) || return 1; __dokploy_r=${__dokploy_r%??}; case "$__dokploy_r" in *"$__dokploy_nl"*) return 1;; esac; [ -z "$__dokploy_t" ] || __dokploy_r=${__dokploy_r%/}; printf "%s%s\\n" "$__dokploy_r" "$__dokploy_t"; }',
 	"else",
 	`\t${unavailable}`,
 	"fi",

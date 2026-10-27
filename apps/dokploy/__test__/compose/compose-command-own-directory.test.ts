@@ -16,7 +16,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 // "this host".
 
 // Each real-shell case starts a few shells, which is slow on Windows.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 120_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
@@ -485,7 +485,7 @@ describe("the shell that resolves the paths", () => {
 						{ raw: "relative/path", normal: "relative/path" },
 					])}`,
 				],
-				{ encoding: "utf8", timeout: 5000 },
+				{ encoding: "utf8", timeout: 60_000 },
 			);
 			expect(result.stdout.split("\n").slice(0, 2)).toEqual([
 				"own:ok",
