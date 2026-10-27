@@ -23,7 +23,7 @@ import {
 	FormLabel,
 	FormMessage,
 } from "@/components/ui/form";
-import { useHealthCheckAfterMutation } from "@/hooks/use-health-check-after-mutation";
+import { useTraefikSetupJob } from "@/hooks/use-traefik-setup-job";
 import { api } from "@/utils/api";
 
 const schema = z.object({
@@ -50,9 +50,11 @@ export const EditTraefikEnv = ({ children, serverId }: Props) => {
 	const {
 		execute: executeWithHealthCheck,
 		isExecuting: isHealthCheckExecuting,
-	} = useHealthCheckAfterMutation({
-		initialDelay: 5000,
+	} = useTraefikSetupJob({
+		serverId,
+		applyingMessage: "Traefik env saved. Applying...",
 		successMessage: "Traefik Env Updated",
+		failureMessage: "Traefik env update failed",
 	});
 
 	const form = useForm<Schema>({
@@ -73,10 +75,11 @@ export const EditTraefikEnv = ({ children, serverId }: Props) => {
 
 	const onSubmit = async (data: Schema) => {
 		try {
-			await executeWithHealthCheck(() =>
+			await executeWithHealthCheck((jobId) =>
 				mutateAsync({
 					env: data.env,
 					serverId,
+					jobId,
 				}),
 			);
 		} catch {
