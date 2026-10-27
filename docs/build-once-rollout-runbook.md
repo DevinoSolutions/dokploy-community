@@ -15,6 +15,11 @@ Secrets: this document names secrets and tokens by name only. Four Notifly
 application units carry an OAuth token inside their custom git URL; they are
 referred to by unit name throughout and their URLs are never reproduced.
 
+See also: [update rollback runbook](update-rollback-runbook.md) (rolling any
+update back by digest, and when the database must be restored) and
+[off-canary hotfix runbook](off-canary-hotfix-runbook.md) (releasing a fix from
+a release tag while canary holds unreleased work).
+
 ---
 
 ## 1. Current state
