@@ -20,7 +20,11 @@ export const getPathResolverLines = (unavailable: string) => [
 	// `readlink -f` (busybox) needs the path to exist but for its last part:
 	// resolve the deepest part that exists and append the rest as it is.
 	// A relative input fails (the walk up ends at /, which it never reaches).
-	'\t__dokploy_resolve() { __dokploy_r=$1 __dokploy_t=; [ "${__dokploy_r#/}" != "$__dokploy_r" ] || return 1; while [ ! -e "$__dokploy_r" ] && [ ! -L "$__dokploy_r" ] && [ "$__dokploy_r" != / ]; do __dokploy_t=/${__dokploy_r##*/}$__dokploy_t; __dokploy_r=${__dokploy_r%/*}; __dokploy_r=${__dokploy_r:-/}; done; case "$__dokploy_t" in */..|*/../*) return 1;; esac; __dokploy_r=$(readlink -f -- "$__dokploy_r") && printf "%s%s\\n" "$__dokploy_r" "$__dokploy_t"; }',
+	// A link whose target is missing is followed here, one hop at a time from
+	// the link's own directory (at most 40): `readlink -f` reads the relative
+	// target of such a link from the working directory instead. Anything that
+	// cannot be followed fails.
+	'\t__dokploy_resolve() { __dokploy_r=$1 __dokploy_t= __dokploy_n=0; [ "${__dokploy_r#/}" != "$__dokploy_r" ] || return 1; while :; do while [ ! -e "$__dokploy_r" ] && [ ! -L "$__dokploy_r" ] && [ "$__dokploy_r" != / ]; do __dokploy_t=/${__dokploy_r##*/}$__dokploy_t; __dokploy_r=${__dokploy_r%/*}; __dokploy_r=${__dokploy_r:-/}; done; case "$__dokploy_t" in */..|*/../*) return 1;; esac; if [ -e "$__dokploy_r" ] || [ ! -L "$__dokploy_r" ]; then break; fi; __dokploy_n=$((__dokploy_n+1)); [ "$__dokploy_n" -le 40 ] || return 1; __dokploy_l=$(readlink -- "$__dokploy_r") && [ -n "$__dokploy_l" ] || return 1; __dokploy_d=${__dokploy_r%/*}; __dokploy_d=$(cd -P -- "${__dokploy_d:-/}" 2>/dev/null && pwd -P) || return 1; case "$__dokploy_l" in /*) __dokploy_r=$__dokploy_l;; *) __dokploy_r=${__dokploy_d%/}/$__dokploy_l;; esac; done; __dokploy_r=$(readlink -f -- "$__dokploy_r") && { [ -z "$__dokploy_t" ] || __dokploy_r=${__dokploy_r%/}; printf "%s%s\\n" "$__dokploy_r" "$__dokploy_t"; }; }',
 	"else",
 	`\t${unavailable}`,
 	"fi",
