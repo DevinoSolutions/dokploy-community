@@ -12,6 +12,7 @@ import {
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useHealthCheckAfterMutation } from "@/hooks/use-health-check-after-mutation";
+import { useTraefikSetupJob } from "@/hooks/use-traefik-setup-job";
 import { api } from "@/utils/api";
 import { EditTraefikEnv } from "../../web-server/edit-traefik-env";
 import { ManageTraefikPorts } from "../../web-server/manage-traefik-ports";
@@ -46,11 +47,12 @@ export const ShowTraefikActions = ({ serverId }: Props) => {
 	const {
 		execute: executeWithHealthCheck,
 		isExecuting: isHealthCheckExecuting,
-	} = useHealthCheckAfterMutation({
-		initialDelay: 5000,
-		pollInterval: 4000,
+	} = useTraefikSetupJob({
+		serverId,
+		applyingMessage: "Dashboard change saved. Applying...",
 		successMessage: "Traefik dashboard updated successfully",
-		onSuccess: () => {
+		failureMessage: "Traefik dashboard update failed",
+		onSettled: () => {
 			refetchDashboard();
 		},
 	});
@@ -168,10 +170,11 @@ export const ShowTraefikActions = ({ serverId }: Props) => {
 						}
 						onClick={async () => {
 							try {
-								await executeWithHealthCheck(() =>
+								await executeWithHealthCheck((jobId) =>
 									toggleDashboard({
 										enableDashboard: !haveTraefikDashboardPortEnabled,
 										serverId: serverId,
+										jobId,
 									}),
 								);
 							} catch (error) {

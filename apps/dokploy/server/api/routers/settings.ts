@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
 	assertRunningTraefikImageKept,
@@ -98,6 +99,10 @@ import {
 } from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
+	getTraefikSetupJob,
+	trackTraefikSetupJob,
+} from "@/server/api/utils/traefik-setup-jobs";
+import {
 	assertCanManageInstance,
 	toWebServerSettingsView,
 } from "@/server/api/utils/web-server-settings-view";
@@ -157,6 +162,10 @@ const resolveTraefikFilePath = (
 	}
 	return resolved;
 };
+
+// The page that saves env, ports or the dashboard toggle names its run, so it
+// can poll how that run ended (getTraefikSetupJob) before it reports success.
+const traefikSetupJobId = z.string().min(1).max(64).optional();
 
 const traefikUpdateLocks = new Map<string, symbol>();
 const traefikUpdateErrors = new Map<string, string>();
@@ -285,7 +294,7 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 	toggleDashboard: adminProcedure
-		.input(apiEnableDashboard)
+		.input(apiEnableDashboard.extend({ jobId: traefikSetupJobId }))
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
 				input.serverId,
@@ -315,19 +324,22 @@ export const settingsRouter = createTRPCRouter({
 			// Run in background so the request returns immediately; client polls /api/health.
 			// Avoids proxy timeouts (520) while Traefik is recreated. Env and ports
 			// are read when the job runs, so an earlier queued action isn't undone.
-			void writeTraefikSetup({
-				env: (current) => current,
-				additionalPorts: (current) =>
-					input.enableDashboard
-						? [
-								...current,
-								{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
-							]
-						: current.filter((port) => port.targetPort !== 8080),
-				serverId: input.serverId,
-			}).catch((err) => {
-				console.error("toggleDashboard background writeTraefikSetup:", err);
-			});
+			trackTraefikSetupJob(
+				input.serverId,
+				input.jobId ?? randomUUID(),
+				writeTraefikSetup({
+					env: (current) => current,
+					additionalPorts: (current) =>
+						input.enableDashboard
+							? [
+									...current,
+									{ targetPort: 8080, publishedPort: 8080, protocol: "tcp" },
+								]
+							: current.filter((port) => port.targetPort !== 8080),
+					serverId: input.serverId,
+				}),
+				"toggleDashboard",
+			);
 			await audit(ctx, {
 				action: "update",
 				resourceType: "settings",
@@ -1261,7 +1273,13 @@ export const settingsRouter = createTRPCRouter({
 		}),
 
 	writeTraefikEnv: adminProcedure
-		.input(z.object({ env: z.string(), serverId: z.string().optional() }))
+		.input(
+			z.object({
+				env: z.string(),
+				serverId: z.string().optional(),
+				jobId: traefikSetupJobId,
+			}),
+		)
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
 				input?.serverId,
@@ -1277,13 +1295,16 @@ export const settingsRouter = createTRPCRouter({
 
 			// Run in background so the request returns immediately; client polls /api/health.
 			// The ports are read when the job runs, so an earlier queued action isn't undone.
-			void writeTraefikSetup({
-				env: envs,
-				additionalPorts: (current) => current,
-				serverId: input.serverId,
-			}).catch((err) => {
-				console.error("writeTraefikEnv background writeTraefikSetup:", err);
-			});
+			trackTraefikSetupJob(
+				input.serverId,
+				input.jobId ?? randomUUID(),
+				writeTraefikSetup({
+					env: envs,
+					additionalPorts: (current) => current,
+					serverId: input.serverId,
+				}),
+				"writeTraefikEnv",
+			);
 			await audit(ctx, {
 				action: "update",
 				resourceType: "settings",
@@ -1537,6 +1558,7 @@ export const settingsRouter = createTRPCRouter({
 		.input(
 			z.object({
 				serverId: z.string().optional(),
+				jobId: traefikSetupJobId,
 				additionalPorts: z.array(
 					z.object({
 						targetPort: z.number(),
@@ -1583,16 +1605,16 @@ export const settingsRouter = createTRPCRouter({
 
 				// Run in background so the request returns immediately; client polls /api/health.
 				// The env is read when the job runs, so an earlier queued action isn't undone.
-				void writeTraefikSetup({
-					env: (current) => current,
-					additionalPorts: input.additionalPorts,
-					serverId: input.serverId,
-				}).catch((err) => {
-					console.error(
-						"updateTraefikPorts background writeTraefikSetup:",
-						err,
-					);
-				});
+				trackTraefikSetupJob(
+					input.serverId,
+					input.jobId ?? randomUUID(),
+					writeTraefikSetup({
+						env: (current) => current,
+						additionalPorts: input.additionalPorts,
+						serverId: input.serverId,
+					}),
+					"updateTraefikPorts",
+				);
 				await audit(ctx, {
 					action: "update",
 					resourceType: "settings",
@@ -1634,6 +1656,20 @@ export const settingsRouter = createTRPCRouter({
 				isUpdating: traefikUpdateLocks.has(key),
 				lastUpdateError: traefikUpdateErrors.get(key) ?? null,
 			};
+		}),
+	getTraefikSetupJob: adminProcedure
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+				jobId: z.string().min(1).max(64),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			await assertTraefikAccess(
+				input.serverId,
+				ctx.session?.activeOrganizationId,
+			);
+			return getTraefikSetupJob(input.serverId, input.jobId);
 		}),
 	updateTraefik: adminProcedure
 		.input(apiServerSchema)
