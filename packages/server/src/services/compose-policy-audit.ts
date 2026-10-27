@@ -36,7 +36,7 @@ import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { logger } from "../lib/logger";
-import { getCommandOverrideFiles } from "./compose-volume-binding";
+import { getReadableCommandOverrideFiles } from "./compose-volume-binding";
 import { appendLogLine } from "./deployment-cancel";
 
 /**
@@ -261,15 +261,21 @@ const readComposeText = (entity: AuditEntity) =>
  * a command it cannot understand); a refusal, or a file that cannot be read,
  * just means nothing to evaluate here. A file that is, or goes through, a link
  * out of the checkout is not read either (T-8413): its text could reach the
- * findings and the deployment log.
+ * findings and the deployment log. Nor is a file outside the compose's own
+ * directory, with its links resolved on the host like the deploy's own check
+ * does (T-7845); those are counted so the log can say they were skipped.
  */
 const readOverrideTexts = async (entity: AuditEntity) => {
-	if (!entity.command) return [];
+	if (!entity.command) return { texts: [], skipped: 0 };
 	let files: string[];
+	let skipped: number;
 	try {
-		files = getCommandOverrideFiles(entity).slice(0, MAX_OVERRIDE_FILES);
+		({ files, skipped } = await getReadableCommandOverrideFiles(
+			entity,
+			MAX_OVERRIDE_FILES,
+		));
 	} catch {
-		return [];
+		return { texts: [], skipped: 0 };
 	}
 	const texts: string[] = [];
 	const codeDirectory = getComposeCodeDirectory(entity);
@@ -283,7 +289,7 @@ const readOverrideTexts = async (entity: AuditEntity) => {
 		);
 		if (text !== null) texts.push(text);
 	}
-	return texts;
+	return { texts, skipped };
 };
 
 export const getComposePolicyContext = (
@@ -307,10 +313,21 @@ export const getComposePolicyContext = (
 const formatLogLines = (
 	findings: readonly ComposePolicyFinding[],
 	deploymentId: string | undefined,
+	skippedOverrides = 0,
 ) => {
 	const tag = `deployment=${deploymentId ?? "-"}`;
+	// An override file that was not read (T-7845): said in the log, no findings.
+	const skipped =
+		skippedOverrides > 0
+			? [
+					`${AUDIT_LOG_PREFIX} skipped: ${skippedOverrides} override file(s) of the custom command were not read (outside the compose's own directory, or not resolvable) ${tag}`,
+				]
+			: [];
 	if (findings.length === 0) {
-		return `${AUDIT_LOG_PREFIX} evaluated: no findings ${tag}`;
+		return [
+			`${AUDIT_LOG_PREFIX} evaluated: no findings ${tag}`,
+			...skipped,
+		].join("\n");
 	}
 	return [
 		`${AUDIT_LOG_PREFIX} evaluated: ${findings.length} finding(s); audit only, nothing was blocked ${tag}`,
@@ -318,6 +335,7 @@ const formatLogLines = (
 			(finding) =>
 				`${AUDIT_LOG_PREFIX} would refuse: service=${finding.serviceName} rule=${finding.ruleId} ${tag} detail=${finding.detail}`,
 		),
+		...skipped,
 	].join("\n");
 };
 
@@ -335,7 +353,7 @@ const runAudit = async (
 	if (isComposePolicyExcluded(settings.exclusions, entity.composeId)) return;
 
 	const text = await readComposeText(entity);
-	const overrides = await readOverrideTexts(entity);
+	const { texts: overrides, skipped } = await readOverrideTexts(entity);
 	if (state.aborted) return;
 	const findings = evaluateComposePolicy({
 		text,
@@ -348,7 +366,7 @@ const runAudit = async (
 	await appendLogLine(
 		entity.serverId,
 		deployment.logPath,
-		formatLogLines(findings, deployment.deploymentId),
+		formatLogLines(findings, deployment.deploymentId, skipped),
 		"Could not write the restricted-compose audit to the deployment log",
 	);
 	if (findings.length === 0 || state.aborted) return;

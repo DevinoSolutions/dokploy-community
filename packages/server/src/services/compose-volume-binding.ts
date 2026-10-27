@@ -20,6 +20,10 @@ import {
 	isComposeFileLinkError,
 	isComposeFileLinkMarker,
 } from "@dokploy/server/utils/compose-file-guard";
+import {
+	checkReadingsInOwnDirectory,
+	type PathReading,
+} from "@dokploy/server/utils/compose-own-directory";
 import { randomizeDeployableSpecificationFile } from "@dokploy/server/utils/docker/collision";
 import { randomizeSpecificationFile } from "@dokploy/server/utils/docker/compose";
 import {
@@ -1015,20 +1019,22 @@ const parseComposeCommand = (
 						i += 2;
 					} else if (/^-[^-]/.test(word)) {
 						// A bundle of short flags (pflag): `-fFILE`, `-f=FILE`, `-pNAME`,
-						// `-vfFILE` (`-v` and `-h` are booleans). `f` and `p` take the rest
-						// of the word, or the next word when nothing is left; a letter
-						// that is not known is refused, since it could hide a `-f`.
+						// `-vfFILE` (`-v`, `-h` and the docker CLI's `-D` / `--debug` are
+						// booleans). `f`, `p` and the docker CLI's `-l` / `--log-level` take
+						// the rest of the word, or the next word when nothing is left, with
+						// the same value rules as their long spellings; a letter that is not
+						// known is refused, since it could hide a `-f`.
 						let consumed = 1;
 						for (let j = 1; j < word.length; j++) {
 							const letter = word[j] as string;
-							if (letter === "v" || letter === "h") {
+							if (letter === "v" || letter === "h" || letter === "D") {
 								continue;
 							}
 							if (letter === "H" || letter === "c") {
 								// A daemon or context option: findDaemonOption refuses it.
 								break;
 							}
-							if (letter !== "f" && letter !== "p") {
+							if (letter !== "f" && letter !== "p" && letter !== "l") {
 								throw unknownComposeOption(word);
 							}
 							const rest = word.slice(j + 1).replace(/^=/, "");
@@ -1044,10 +1050,11 @@ const parseComposeCommand = (
 								if (value) {
 									files.push(value);
 								}
-							} else {
+							} else if (letter === "p") {
 								// The last one wins, also an empty one.
 								projectName = value || undefined;
 							}
+							// `-l` names a log level, which no check reads.
 							break;
 						}
 						i += consumed;
@@ -1567,60 +1574,196 @@ export const assertCommandRunsComposeOnly = (
 // compose's secrets interpolated into the file, `pull` sends them to a
 // registry in an image name, and a project directory or a compose file in
 // another compose's directory reads its `.env`. Paths are resolved like the
-// rest of the check: lexically, from the working directory (the code
-// directory), the project directories and, for an env file, the directory of
-// each compose file; a symlink of the repository is not followed (see
-// dockerVolumesDirectoryReach). `~` is the home of the deploy's user, which
-// the shell expands, so it is never the compose's own.
-const assertCommandPathsInOwnDirectory = (
-	compose: ComposeForVolumeCheck,
+// rest of the check: from the working directory (the code directory), the
+// project directories and, for an env file, the directory of each compose
+// file. This one is lexical; assertCommandPathsResolveInOwnDirectory follows
+// the links on the deploy host (T-7845). `~` is the home of the deploy's user,
+// which the shell expands, so it is never the compose's own.
+const getOwnDirectory = (codeDirectory: string) => posix.dirname(codeDirectory);
+
+const isInOwnDirectory = (ownDirectory: string, path: string) =>
+	path === ownDirectory || path.startsWith(`${ownDirectory}/`);
+
+type CommandPath = { name: string; value: string; readings: PathReading[] };
+
+const rawDirname = (path: string) => path.replace(/\/[^/]*$/, "") || "/";
+
+// Every path option of the segments with the places it can be read from. A
+// reading keeps the path as written (`raw`, joined to its base without being
+// cleaned up) next to its lexical form (`normal`).
+const collectCommandPaths = (
 	segments: CommandSegment[],
 	codeDirectory: string,
-) => {
-	const ownDirectory = posix.dirname(codeDirectory);
-	const isOwn = (path: string) =>
-		path === ownDirectory || path.startsWith(`${ownDirectory}/`);
-	const readings = (path: string, bases: string[]) =>
+): CommandPath[] => {
+	const code: PathReading = { raw: codeDirectory, normal: codeDirectory };
+	const readings = (path: string, bases: PathReading[]): PathReading[] =>
 		posix.isAbsolute(path)
-			? [posix.normalize(path)]
-			: bases.map((base) => posix.resolve(base, path));
+			? [{ raw: path, normal: posix.normalize(path) }]
+			: bases.map((base) => ({
+					raw: `${base.raw}/${path}`,
+					normal: posix.resolve(base.normal, path),
+				}));
+	const collected: CommandPath[] = [];
 	for (const segment of segments) {
-		const projectDirectories = segment.projectDirectories.map((directory) =>
-			posix.resolve(codeDirectory, directory),
+		const projectDirectories = segment.projectDirectories.flatMap((directory) =>
+			readings(directory, [code]),
 		);
-		const fileBases = [codeDirectory, ...projectDirectories];
+		const fileBases = [code, ...projectDirectories];
 		const envBases = [
 			...fileBases,
 			...segment.files.flatMap((file) =>
-				readings(file, fileBases).map((path) => posix.dirname(path)),
+				readings(file, fileBases).map((reading) => ({
+					raw: rawDirname(reading.raw),
+					normal: posix.dirname(reading.normal),
+				})),
 			),
 		];
-		const options: Array<[string, string[], string[]]> = [
-			[
-				"--project-directory / --workdir",
-				segment.projectDirectories,
-				[codeDirectory],
-			],
+		const options: Array<[string, string[], PathReading[]]> = [
+			["--project-directory / --workdir", segment.projectDirectories, [code]],
 			["compose file", segment.files, fileBases],
 			["--env-file", segment.envFiles, envBases],
 			["--env-from-file", segment.envFromFiles, envBases],
 		];
 		for (const [name, values, bases] of options) {
-			const value = values.find(
-				(candidate) =>
-					candidate.startsWith("~") || !readings(candidate, bases).every(isOwn),
-			);
-			if (value !== undefined) {
-				logger.warn(
-					{ composeId: compose.composeId, option: name },
-					"[VolumeBinding] A compose command was refused: a path option outside the compose's own directory",
-				);
-				throw new Error(
-					`Compose command refused: the ${name} "${value}" is outside this compose's own directory (${ownDirectory}), so it could read the files, env files or secrets of another compose. Use a path inside the compose's own code (relative paths are read from ${codeDirectory}).`,
-				);
+			for (const value of values) {
+				collected.push({ name, value, readings: readings(value, bases) });
 			}
 		}
 	}
+	return collected;
+};
+
+const assertCommandPathsInOwnDirectory = (
+	compose: ComposeForVolumeCheck,
+	segments: CommandSegment[],
+	codeDirectory: string,
+) => {
+	const ownDirectory = getOwnDirectory(codeDirectory);
+	for (const { name, value, readings } of collectCommandPaths(
+		segments,
+		codeDirectory,
+	)) {
+		if (
+			value.startsWith("~") ||
+			!readings.every((reading) =>
+				isInOwnDirectory(ownDirectory, reading.normal),
+			)
+		) {
+			logger.warn(
+				{ composeId: compose.composeId, option: name },
+				"[VolumeBinding] A compose command was refused: a path option outside the compose's own directory",
+			);
+			throw new Error(
+				`Compose command refused: the ${name} "${value}" is outside this compose's own directory (${ownDirectory}), so it could read the files, env files or secrets of another compose. Use a path inside the compose's own code (relative paths are read from ${codeDirectory}).`,
+			);
+		}
+	}
+};
+
+const readingKey = (reading: PathReading) =>
+	`${reading.raw}\u0000${reading.normal}`;
+
+// Resolves the readings with one command on the deploy host and returns the
+// verdict of each, by key.
+const resolveReadings = async (
+	compose: ComposeForVolumeCheck,
+	ownDirectory: string,
+	commandPaths: CommandPath[],
+) => {
+	const unique = new Map<string, PathReading>();
+	for (const { readings } of commandPaths) {
+		for (const reading of readings) {
+			unique.set(readingKey(reading), reading);
+		}
+	}
+	const keys = [...unique.keys()];
+	const verdicts = await checkReadingsInOwnDirectory({
+		serverId: compose.serverId,
+		ownDirectory,
+		readings: [...unique.values()],
+	});
+	return new Map(keys.map((key, index) => [key, verdicts[index]]));
+};
+
+// The paths of the command are checked against the resolved own directory on
+// the host the compose deploys on, with one command for all of them (T-7845). A
+// path that cannot be verified is refused.
+export const assertCommandPathsResolveInOwnDirectory = async (
+	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
+) => {
+	if (!compose.command) {
+		return;
+	}
+	const codeDirectory = getCodeDirectory(compose);
+	const ownDirectory = getOwnDirectory(codeDirectory);
+	const commandPaths = collectCommandPaths(
+		parseComposeCommand(compose.command).segments,
+		codeDirectory,
+	);
+	if (commandPaths.length === 0) {
+		return;
+	}
+	const verdicts = await resolveReadings(compose, ownDirectory, commandPaths);
+	for (const { name, value, readings } of commandPaths) {
+		const verdict = readings
+			.map((reading) => verdicts.get(readingKey(reading)))
+			.find((candidate) => candidate !== "in");
+		if (verdict === undefined) {
+			continue;
+		}
+		logger.warn(
+			{ composeId: compose.composeId, option: name, verdict },
+			"[VolumeBinding] A compose command was refused: a path option that does not resolve inside the compose's own directory",
+		);
+		throw new Error(
+			verdict === "out"
+				? `Compose command refused: the ${name} "${value}" leads outside this compose's own directory (${ownDirectory}) through a symbolic link, so it could read the files, env files or secrets of another compose. Use a path inside the compose's own code that does not go through a link out of it.`
+				: verdict === "moved"
+					? `Compose command refused: the ${name} "${value}" does not resolve to the place it is written as, so it cannot be checked. Write the path in a direct form.`
+					: `Compose command refused: the ${name} "${value}" could not be resolved on the host this compose deploys on, so it cannot be checked against the compose's own directory (${ownDirectory}). Deploy again once the host answers and has realpath or readlink installed.`,
+		);
+	}
+};
+
+// The override files of a custom command that may be read for the restricted
+// compose audit (T-7845, which only observes): the ones in the compose's own
+// directory, also after the links on their path are followed. The rest are
+// skipped and counted, not read; `skipped` includes the files that could not be
+// resolved. Throws when the command cannot be understood, like
+// getCommandOverrideFiles.
+export const getReadableCommandOverrideFiles = async (
+	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
+	limit = Number.POSITIVE_INFINITY,
+) => {
+	const files = getCommandOverrideFiles(compose).slice(0, limit);
+	if (files.length === 0) {
+		return { files: [], skipped: 0 };
+	}
+	const codeDirectory = getCodeDirectory(compose);
+	const ownDirectory = getOwnDirectory(codeDirectory);
+	const lexical = files.filter((file) => isInOwnDirectory(ownDirectory, file));
+	const commandPaths = collectCommandPaths(
+		parseComposeCommand(compose.command as string).segments,
+		codeDirectory,
+	)
+		.filter(({ name }) => name === "compose file")
+		.map((commandPath) => ({
+			...commandPath,
+			readings: commandPath.readings.filter((reading) =>
+				lexical.includes(reading.normal),
+			),
+		}));
+	const verdicts = await resolveReadings(compose, ownDirectory, commandPaths);
+	const readable = lexical.filter((file) => {
+		const readings = commandPaths.flatMap((commandPath) =>
+			commandPath.readings.filter((reading) => reading.normal === file),
+		);
+		return (
+			readings.length > 0 &&
+			readings.every((reading) => verdicts.get(readingKey(reading)) === "in")
+		);
+	});
+	return { files: readable, skipped: files.length - readable.length };
 };
 
 // The volumes a custom command adds to `docker compose run` with `-v`.
@@ -1831,14 +1974,19 @@ export const assertComposeVolumesBound = async (
 		// A compose file that leads out of the checkout is refused, and the
 		// previous release's files are put back by the caller (T-7857).
 		if (isComposeFileLinkError(error)) throw error;
+		await assertCommandPathsResolveInOwnDirectory(compose);
 		return;
 	}
 	if (!spec) {
+		await assertCommandPathsResolveInOwnDirectory(compose);
 		return;
 	}
 	const overrides = await Promise.all(
 		overrideFiles.map((path) => loadOverrideFile(compose, path)),
 	);
+	// The resolved check of the paths (T-7845), after the override files were
+	// read through their own guarded read (T-8413).
+	await assertCommandPathsResolveInOwnDirectory(compose);
 	await assertComposeSpecVolumesBound(compose, [spec as Spec, ...overrides], {
 		commandVolumes,
 		commandBaseDirs: getCommandBaseDirectories(compose),

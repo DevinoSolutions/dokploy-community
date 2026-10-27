@@ -270,8 +270,8 @@ describe("docker compose options before the subcommand (T-7135 review H1)", () =
 		`compose --hostname=x -p ${APP} down`,
 		`compose -x -p ${APP} down`,
 		`compose -vx -p ${APP} down`,
-		`compose -l info -p ${APP} down`,
-		`compose -D -p ${APP} down`,
+		`compose -Dx -p ${APP} down`,
+		`compose -lD -x ps config`,
 		`compose -- -p ${OTHER} down`,
 		`compose - -p ${APP} down`,
 		`compose -p ${APP} -f docker-compose.yml up -d && docker compose --unknown ps -p ${OTHER} down -v`,
@@ -290,6 +290,14 @@ describe("docker compose options before the subcommand (T-7135 review H1)", () =
 			`compose --ansi=never --progress=quiet --parallel=1 --profile=web -p ${APP} -f ${DEPLOYED} up -d`,
 			`compose --dry-run=true -p ${APP} down`,
 			`compose --log-level warn -p ${APP} down`,
+			// The docker CLI's short spellings of --debug and --log-level (T-7845).
+			`compose -D -p ${APP} down`,
+			`compose -l info -p ${APP} down`,
+			`compose -Dl info -p ${APP} down`,
+			`compose -vDl warn -p ${APP} down`,
+			`compose -l=info -p ${APP} down`,
+			`compose -linfo -p ${APP} -f ${DEPLOYED} up -d`,
+			`compose -D --log-level=debug -p ${APP} down`,
 			`compose -p ${APP} --env-file ./.env -f ${DEPLOYED} config`,
 		]) {
 			await expect(run(command)).resolves.toBeUndefined();
@@ -324,6 +332,9 @@ describe("docker compose options before the subcommand (T-7135 review H1)", () =
 		`compose -p ${APP} --workdir -x ps config`,
 		`compose -p ${APP} --insecure-registry -x ps config`,
 		`compose -p ${APP} --file -x ps config`,
+		`compose -p ${APP} --log-level -x ps config`,
+		`compose -p ${APP} -l -x ps config`,
+		`compose -p ${APP} -Dl -x ps config`,
 		`compose -p ${APP} --project-name -x ps config`,
 		`compose -p ${APP} -f -x ps config`,
 		"compose -p -x ps config",
@@ -342,6 +353,8 @@ describe("docker compose options before the subcommand (T-7135 review H1)", () =
 		for (const command of [
 			`compose -p ${APP} --parallel=-1 down`,
 			`compose -p ${APP} --profile=-x down`,
+			`compose -p ${APP} --log-level=-x down`,
+			`compose -p ${APP} -l-x down`,
 		]) {
 			await expect(run(command)).resolves.toBeUndefined();
 		}

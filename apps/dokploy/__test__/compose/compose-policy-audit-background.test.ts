@@ -32,8 +32,18 @@ vi.mock("@dokploy/server/services/deployment-cancel", async () => {
 vi.mock("@dokploy/server/lib/logger", () => ({
 	logger: { warn: mocks.warn, info: mocks.info, error: vi.fn() },
 }));
+// The own-directory check of the files (T-7845) is the real one's business: here
+// every file the command names is in the compose's own directory.
 vi.mock("@dokploy/server/services/compose-volume-binding", () => ({
-	getCommandOverrideFiles: mocks.getCommandOverrideFiles,
+	getReadableCommandOverrideFiles: async (
+		...args: unknown[]
+	) => ({
+		files: (mocks.getCommandOverrideFiles(...args) as string[]).slice(
+			0,
+			args[1] as number,
+		),
+		skipped: 0,
+	}),
 }));
 vi.mock("@dokploy/server/utils/docker/domain", async () => {
 	const actual = await vi.importActual<
