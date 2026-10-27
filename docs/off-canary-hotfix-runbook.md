@@ -3,14 +3,14 @@
 Use this when production needs a fix while `canary` already holds unreleased
 work, so the fix cannot ship by releasing canary. The fix is released from the
 previous release tag as `v0.30.8-community.NN.1`, where `NN` is the release being
-patched. When disclosure is not yet allowed, describe such a fix only as "a fix
+patched. Release notes describe the fix in general terms, for example "a fix
 shipped from the release tag".
 
 Related: [update rollback runbook](update-rollback-runbook.md),
 [build-once rollout runbook](build-once-rollout-runbook.md).
 
 1. **Fix commit.** Build the fix as one commit on `canary`. Open its PR into
-   canary only when disclosure allows. Cherry-pick it with `-x` onto
+   canary. Cherry-pick it with `-x` onto
    `release/v0.30.8-community.NN.1`, cut from the release tag, and check the code
    diff is identical (compare an md5 of `git diff`, excluding `CHANGELOG.md`).
 2. **Release commit.** Bump `apps/dokploy/package.json` to
@@ -30,8 +30,9 @@ Related: [update rollback runbook](update-rollback-runbook.md),
    the dialog says "You are using the latest version". Verify that
    `settings.getUpdateData` returns `updateAvailable: true`.
 6. **Image.** Run `gh workflow run "Dokploy Docker Build" --ref release/v0.30.8-community.NN.1`.
-   It publishes only `:v0.30.8-community.NN.1`, because canary's tip differs, so
-   `:canary` and `:latest` are untouched. Note the **index** digest
+   Because canary's tip differs, it moves only the version tag
+   `:v0.30.8-community.NN.1` and the per-architecture working tags, not `:canary`
+   or `:latest`. Note the **index** digest
    (`docker buildx imagetools inspect`); that is the rollback and pin target.
 7. **Smoke test.** On a scratch host with no Docker socket mounted, start a
    throwaway Postgres and Redis. Start the previous release first, then
