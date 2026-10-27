@@ -87,7 +87,7 @@ describe("getComposeRollingReport", () => {
 		const web = report.services.find((s) => s.name === "web");
 		expect(web?.eligible).toBe(true);
 		expect(web?.warnings).toHaveLength(1);
-		expect(web?.warnings[0]).toContain("not shell form");
+		expect(web?.warnings[0]).toContain("exec form");
 
 		domain.addDomainToCompose.mockResolvedValue({
 			services: {
@@ -101,9 +101,7 @@ describe("getComposeRollingReport", () => {
 		if (!shell.available) throw new Error("expected a report");
 		expect(shell.services[0]?.warnings).toEqual([]);
 		// A service that cannot roll at all has its blockers, not a warning.
-		expect(
-			report.services.find((s) => s.name === "api")?.warnings,
-		).toEqual([]);
+		expect(report.services.find((s) => s.name === "api")?.warnings).toEqual([]);
 	});
 
 	it("a healthcheck that cannot settle in the longest wait is reported", async () => {

@@ -366,7 +366,10 @@ describe("rolling replace: the healthchecks the deploy writes (T-9197)", () => {
 		services: {
 			web: {
 				build: ".",
-				healthcheck: { test: ["CMD-SHELL", "curl -f localhost"], interval: "5s" },
+				healthcheck: {
+					test: ["CMD-SHELL", "curl -f localhost"],
+					interval: "5s",
+				},
 			},
 			worker: {
 				image: "ghcr.io/acme/worker:1",
@@ -420,11 +423,14 @@ describe("rolling replace: the healthchecks the deploy writes (T-9197)", () => {
 		["disabled", { rollingReplace: { enabled: false, services: ["web"] } }],
 		["a stack", { composeType: "stack", ...rolling(["web"]) }],
 		["a custom command", { command: "up -d", ...rolling(["web"]) }],
-	])("%s: the writer gets no rolling option at all", async (_label, overrides) => {
-		domain.addDomainToCompose.mockResolvedValue(shellSpec);
-		await build(overrides);
-		expect("rollingDrainServices" in stagingOptions()).toBe(false);
-	});
+	])(
+		"%s: the writer gets no rolling option at all",
+		async (_label, overrides) => {
+			domain.addDomainToCompose.mockResolvedValue(shellSpec);
+			await build(overrides);
+			expect("rollingDrainServices" in stagingOptions()).toBe(false);
+		},
+	);
 
 	it("a fresh-volumes deploy does not roll, so nothing is wrapped", async () => {
 		domain.addDomainToCompose.mockResolvedValue(shellSpec);
@@ -435,14 +441,34 @@ describe("rolling replace: the healthchecks the deploy writes (T-9197)", () => {
 	it("says in the log which rolled service cannot be taken out of rotation", async () => {
 		domain.addDomainToCompose.mockResolvedValue(shellSpec);
 		const command = await build(rolling(["web", "worker"]));
-		expect(command).toContain('The healthcheck of "worker" is not shell form');
-		expect(command).not.toContain('The healthcheck of "web" is not shell form');
+		expect(command).toContain(
+			'Rolling replace: "worker": the healthcheck is exec form',
+		);
+		expect(command).not.toContain('"web": the healthcheck');
+	});
+
+	it("says so when /tmp is a volume or read-only, and not for other mounts", async () => {
+		domain.addDomainToCompose.mockResolvedValue({
+			services: {
+				web: { ...shellSpec.services.web, volumes: ["data:/tmp"] },
+				worker: {
+					...shellSpec.services.worker,
+					healthcheck: { test: ["CMD-SHELL", "true"] },
+					volumes: ["data:/data"],
+				},
+			},
+		});
+		const command = await build(rolling(["web", "worker"]));
+		expect(command).toContain(
+			'Rolling replace: "web": /tmp is read-only or a volume, bind mount or tmpfs',
+		);
+		expect(command).not.toContain('"worker": /tmp');
 	});
 
 	it("no such line when every rolled service has a shell-form healthcheck", async () => {
 		domain.addDomainToCompose.mockResolvedValue(shellSpec);
 		const command = await build(rolling(["web"]));
-		expect(command).not.toContain("Rolling replace: The healthcheck of");
+		expect(command).not.toContain("the healthcheck is exec form");
 		expect(parses(command)).toBe("ok");
 	});
 });

@@ -246,11 +246,23 @@ stopped. Dokploy does it with the healthcheck you already have:
    applies.
 
 The wait for `unhealthy` is bounded by the old container's own healthcheck:
-`(interval + timeout) x retries + interval` plus 3 s (Docker's defaults, 30 s,
-30 s and 3, when unset), never longer than the health timeout. The promotion is
-recorded before the marker is written, so a cancel during this wait or the drain
-removes the old container and keeps the new replica: the draining container is
-never the one left serving.
+`start_period + (interval + timeout) x retries + interval` plus 3 s (Docker's
+defaults, 30 s, 30 s and 3, when unset), never longer than 900 s, the longest
+health timeout. The promotion is recorded just before the marker is copied, so a
+cancel during this wait or the drain removes the old container and keeps the new
+replica: the draining container is never the one left serving. The new replica
+is checked again while waiting and right before the stop. If it is no longer
+healthy, the marker is emptied (an empty file counts as no marker), the old
+container goes back in rotation and keeps serving, the new replica is removed and
+the deploy fails like any other unhealthy replica.
+
+**What it costs.** Docker marks the old container unhealthy only after
+`retries` failed probes, `interval` apart, so each rolled service takes longer
+to deploy: about 60 to 90 s with Docker's defaults (30 s interval, 3 retries),
+plus 3 s and the drain delay. A shorter `interval` or fewer `retries` in the
+healthcheck makes it proportionally faster (a 5 s interval with 3 retries is
+about 15 s). The wait ends as soon as the old container is unhealthy, and is
+never longer than the bound above.
 
 Measured on a throwaway Traefik v3.6 with an app that ignores SIGTERM: this
 sequence failed 0 of 283 requests (maximum latency about 0 s), a plain stop
@@ -271,11 +283,32 @@ happens when:
   the first rolling deploy of a service (its healthcheck is the unwrapped one).
   That deploy rolls as before; the next one takes the old container out of
   rotation;
+- `/tmp` of the container is not its own, or cannot be written. Dokploy checks
+  before it copies anything, and does not take the container out of rotation
+  when:
+  - a **named volume or a bind mount** is mounted on `/tmp` (or on `/`): the
+    marker would land in the shared mount, the new replica would see it too and
+    go unhealthy, and the next deploy's replica would start with it;
+  - a **tmpfs** is mounted on `/tmp`: `docker cp` does not write into a tmpfs, so the marker would never be seen;
+  - the root file system is **read-only** (`read_only: true`): there is nowhere
+    to write.
+
+  The Rolling replace card and the deploy log name such a service before the
+  deploy. Put the volume, bind mount or tmpfs on a more specific path than
+  `/tmp` to get the take-out;
 - `docker cp` fails (for example there is no `/tmp` in the image);
 - the old container does not report `unhealthy` within the bound above.
 
 The take-out also does not help requests that never go through Traefik
 (container-to-container traffic by service name, see above).
+
+**The healthcheck text changes with rolling replace.** A service that rolling
+replace deploys has a different `healthcheck.test` (the wrapped one) than the
+same service deployed plainly, so its config hash differs. Turning rolling
+replace off for a service, or a deploy that recreates it normally because it no
+longer qualifies (drift), recreates that service once, with the plain stop and
+start, to put the original healthcheck back. The first rolling deploy of a
+service does the opposite and is covered above.
 
 ### A retry middleware is still worth having
 

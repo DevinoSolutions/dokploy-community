@@ -1,10 +1,5 @@
 import { spawnSync } from "node:child_process";
-import {
-	existsSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -131,7 +126,8 @@ describe("wrapHealthcheckTestForDrain", () => {
 	});
 
 	it("keeps the `$$` and `$VAR` the user wrote exactly as they were", () => {
-		const original = 'curl -f "http://localhost:$$PORT/health?x=$TOKEN" || exit 1';
+		const original =
+			'curl -f "http://localhost:$$PORT/health?x=$TOKEN" || exit 1';
 		const wrapped = wrapHealthcheckTestForDrain(["CMD-SHELL", original]) as [
 			string,
 			string,
@@ -252,10 +248,7 @@ describe("applyRollingDrainHealthchecks", () => {
 		]) as ReturnType<typeof spec>;
 		expect(output.services.web.healthcheck).toEqual({
 			...input.services.web.healthcheck,
-			test: [
-				"CMD-SHELL",
-				`[ ! -s ${MARKER} ] && ( curl -f localhost )`,
-			],
+			test: ["CMD-SHELL", `[ ! -s ${MARKER} ] && ( curl -f localhost )`],
 		});
 		expect(output.services.api.healthcheck).toEqual({
 			test: `[ ! -s ${MARKER} ] && ( wget -q localhost )`,
@@ -283,9 +276,7 @@ describe("applyRollingDrainHealthchecks", () => {
 		expect(applyRollingDrainHealthchecks(input, ["exec", "none"])).toBe(input);
 		expect(applyRollingDrainHealthchecks(null, ["web"])).toBe(null);
 		const noServices = {};
-		expect(applyRollingDrainHealthchecks(noServices, ["web"])).toBe(
-			noServices,
-		);
+		expect(applyRollingDrainHealthchecks(noServices, ["web"])).toBe(noServices);
 	});
 
 	it("a healthcheck shared through a YAML anchor is wrapped for the rolled service only", () => {
@@ -341,30 +332,87 @@ describe("applyRollingDrainHealthchecks", () => {
 });
 
 describe("getRollingDrainWarnings", () => {
+	const shell = ["CMD-SHELL", "true"];
 	const input = {
 		services: {
-			shell: { healthcheck: { test: ["CMD-SHELL", "true"] } },
+			shell: { healthcheck: { test: shell } },
 			text: { healthcheck: { test: "true" } },
 			exec: { healthcheck: { test: ["CMD", "curl", "-f", "localhost"] } },
 			none: { image: "n" },
+			off: { healthcheck: { test: ["NONE"] } },
+			disabled: { healthcheck: { disable: true } },
+			named: {
+				healthcheck: { test: shell },
+				volumes: ["data:/tmp", "logs:/var/log"],
+			},
+			bind: { healthcheck: { test: shell }, volumes: ["./t:/tmp:ro"] },
+			slash: { healthcheck: { test: shell }, volumes: ["/host/tmp:/tmp/"] },
+			object: {
+				healthcheck: { test: shell },
+				volumes: [{ type: "volume", source: "d", target: "/tmp" }],
+			},
+			anon: { healthcheck: { test: shell }, volumes: ["/tmp"] },
+			marker: {
+				healthcheck: { test: shell },
+				volumes: [`x:${MARKER}`],
+			},
+			tmpfsString: { healthcheck: { test: shell }, tmpfs: "/tmp" },
+			tmpfsList: {
+				healthcheck: { test: shell },
+				tmpfs: ["/run", "/tmp:size=64m"],
+			},
+			readonly: { healthcheck: { test: shell }, read_only: true },
+			other: {
+				healthcheck: { test: shell },
+				volumes: ["data:/data", "x:/tmp/app"],
+				tmpfs: ["/run"],
+				read_only: false,
+			},
 		},
 	};
+	const warned = (...names: string[]) =>
+		getRollingDrainWarnings(input, names).map((w) => w.service);
 
-	it("names a rolled service whose healthcheck cannot honour the marker", () => {
-		const warnings = getRollingDrainWarnings(input, [
-			"shell",
-			"text",
-			"exec",
-			"none",
-		]);
+	it("names a rolled service whose healthcheck is exec form, and says why in one line", () => {
+		const warnings = getRollingDrainWarnings(input, ["exec"]);
 		expect(warnings).toHaveLength(1);
-		expect(warnings[0]?.service).toBe("exec");
-		expect(warnings[0]?.message).toContain("CMD-SHELL");
+		expect(warnings[0]?.message).toBe(
+			'"exec": the healthcheck is exec form, so the old container is stopped while Traefik still routes to it. A CMD-SHELL healthcheck (it needs a shell in the image) avoids that.',
+		);
 	});
 
-	it("is empty when every rolled service can be drained", () => {
-		expect(getRollingDrainWarnings(input, ["shell", "text"])).toEqual([]);
+	it("is silent when the old container can be drained", () => {
+		expect(warned("shell", "text", "none", "off", "disabled", "other")).toEqual(
+			[],
+		);
+		expect(getRollingDrainWarnings(input, [])).toEqual([]);
 		expect(getRollingDrainWarnings(null, ["shell"])).toEqual([]);
+	});
+
+	it.each([
+		["a named volume on /tmp", "named"],
+		["a bind mount on /tmp", "bind"],
+		["a mount on /tmp/ with a trailing slash", "slash"],
+		["a long-syntax volume on /tmp", "object"],
+		["an anonymous volume on /tmp", "anon"],
+		["a mount on the marker path", "marker"],
+		["tmpfs as a string", "tmpfsString"],
+		["tmpfs in a list, with options", "tmpfsList"],
+		["read_only", "readonly"],
+	])("%s: warns that /tmp cannot carry the marker", (_label, name) => {
+		const warnings = getRollingDrainWarnings(input, [name]);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.message).toBe(
+			`"${name}": /tmp is read-only or a volume, bind mount or tmpfs, so the old container is stopped while Traefik still routes to it.`,
+		);
+	});
+
+	it("one warning per service, in the order given", () => {
+		expect(warned("exec", "shell", "named", "readonly")).toEqual([
+			"exec",
+			"named",
+			"readonly",
+		]);
 	});
 });
 
@@ -415,7 +463,10 @@ describe("the compose the deploy writes", () => {
 			rollingDrainServices: ["web"],
 		});
 		const parsed = parse(staged()) as {
-			services: Record<string, { healthcheck: { test: string[]; interval?: string } }>;
+			services: Record<
+				string,
+				{ healthcheck: { test: string[]; interval?: string } }
+			>;
 		};
 		expect(parsed.services.web?.healthcheck.test).toEqual([
 			"CMD-SHELL",
@@ -520,15 +571,84 @@ describe("the drain in the generated script", () => {
 		);
 	});
 
-	it("checks the old container's healthcheck for the marker before touching it", () => {
+	it("checks the old container's healthcheck, mounts and root file system before touching it", () => {
 		const definitions = script();
+		expect(definitions).toContain("{{.HostConfig.ReadonlyRootfs}}");
+		expect(definitions).toContain("{{range .Mounts}}{{.Destination}} {{end}}");
 		expect(definitions).toContain(
-			"docker inspect -f '{{json .Config.Healthcheck.Test}}'",
+			"{{range $k, $v := .HostConfig.Tmpfs}}{{$k}} {{end}}",
 		);
+		expect(definitions).toContain("{{json .Config.Healthcheck.Test}}");
 		expect(definitions).toContain(`grep -qF -- '${MARKER}'`);
+		// A mount on /, /tmp or the marker refuses the drain.
+		expect(definitions).toContain(`/|/tmp|/tmp/|${MARKER})`);
+		expect(definitions).toContain("its root file system is read-only");
 		inOrder(
 			definitions,
 			["dokploy_roll_honours_drain", "DOKPLOY_ROLL_PROMOTING", "docker cp"],
+			"dokploy_roll_take_out() {",
+		);
+	});
+
+	it("the promotion is marked just before the first copy, and undone when the copy fails", () => {
+		const definitions = script();
+		inOrder(
+			definitions,
+			[
+				"mktemp",
+				"chmod 644",
+				'DOKPLOY_ROLL_PROMOTING="$2"',
+				'docker cp "$DR_TMP"',
+				'DOKPLOY_ROLL_ACTIVE=1; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED;',
+			],
+			"dokploy_roll_take_out() {",
+		);
+		// What a previous service promoted is kept, not reset to 0.
+		inOrder(
+			definitions,
+			["DR_WAS_PROMOTED=$DOKPLOY_ROLL_PROMOTED", "dokploy_roll_take_out"],
+			"dokploy_roll_service() {",
+		);
+	});
+
+	it("re-checks the new replica after the take-out and again after the drain delay, before the stop", () => {
+		inOrder(
+			script(),
+			[
+				'dokploy_roll_take_out "$1"',
+				'dokploy_roll_new_still_ok "$1"',
+				"dokploy_roll_sleep 5",
+				'dokploy_roll_new_still_ok "$1"',
+				'DOKPLOY_ROLL_PROMOTING="$DR_OLD"',
+				"dokploy_roll_remove $DR_OLD",
+			],
+			"dokploy_roll_service() {",
+		);
+		// The undo: an empty file over the marker, the promotion reset, the usual failure path.
+		inOrder(
+			script(),
+			[
+				"dokploy_roll_unmark",
+				"DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED; DOKPLOY_ROLL_ACTIVE=1;",
+				'dokploy_roll_fail "$1"',
+			],
+			"dokploy_roll_new_still_ok() {",
+		);
+		// The unhealthy wait gives up as soon as the new replica is not healthy.
+		expect(script()).toContain(
+			'if [ "$(dokploy_roll_new_state "$3")" != "running healthy" ]; then return 2; fi;',
+		);
+	});
+
+	it("guards the bound: an empty or non-numeric value falls back to the longest timeout", () => {
+		const definitions = script();
+		inOrder(
+			definitions,
+			[
+				'DR_BOUND=$(dokploy_roll_drain_bound "$DR_O");',
+				"case \"$DR_BOUND\" in ''|*[!0-9]*) DR_BOUND=900;; esac;",
+				"dokploy_roll_wait_out",
+			],
 			"dokploy_roll_take_out() {",
 		);
 	});
@@ -538,19 +658,21 @@ describe("the drain in the generated script", () => {
 		expect(definitions).toContain("mktemp");
 		expect(definitions).toContain("chmod 644");
 		expect(definitions).toContain(`docker cp "$DR_TMP" "$DR_O:${MARKER}"`);
-		expect(definitions).toContain("rm -f \"$DR_TMP\"");
+		expect(definitions).toContain('rm -f "$DR_TMP"');
 		// No docker exec: the image may have no binary at all.
 		expect(definitions).not.toContain("docker exec");
 	});
 
-	it("waits for unhealthy, bounded by the old container's own healthcheck and capped at the health timeout", () => {
+	it("waits for unhealthy, bounded by the old container's own healthcheck and capped at 900 s", () => {
 		const definitions = script({ healthTimeoutSeconds: 77 });
 		expect(definitions).toContain(
-			'{{printf "%d %d %d" .Config.Healthcheck.Interval .Config.Healthcheck.Timeout .Config.Healthcheck.Retries}}',
+			'{{printf "%d %d %d %d" .Config.Healthcheck.Interval .Config.Healthcheck.Timeout .Config.Healthcheck.Retries .Config.Healthcheck.StartPeriod}}',
 		);
-		expect(definitions).toContain("awk -v cap=77");
-		// (interval + timeout) x retries + interval + slack, Docker's defaults when unset.
-		expect(definitions).toContain("(i + t) * r + i + 3");
+		// The longest health timeout, not this deploy's.
+		expect(definitions).toContain("awk -v cap=900");
+		expect(definitions).not.toContain("awk -v cap=77");
+		// start period + (interval + timeout) x retries + interval + slack, Docker's defaults when unset.
+		expect(definitions).toContain("b = p + (i + t) * r + i + 3");
 		expect(definitions).toContain("if (i <= 0) i = 30");
 		expect(definitions).toContain("if (t <= 0) t = 30");
 		expect(definitions).toContain("if (r <= 0) r = 3");
