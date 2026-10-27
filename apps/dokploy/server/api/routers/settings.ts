@@ -92,7 +92,10 @@ import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import { auditCancel } from "@/server/api/utils/cancel-audit";
-import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
+import {
+	assertLocalHostAccess,
+	resolveHostIpForOrg,
+} from "@/server/api/utils/local-host-access";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
 import {
 	assertCanManageInstance,
@@ -1126,12 +1129,12 @@ export const settingsRouter = createTRPCRouter({
 			const safePath = resolveTraefikFilePath(input.path, input.serverId);
 			return readConfigInPath(safePath, input.serverId);
 		}),
-	getIp: protectedProcedure.query(async () => {
+	getIp: protectedProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return "";
 		}
-		const settings = await getWebServerSettings();
-		return settings?.serverIp || "";
+		// empty for an organization that may not run services on the host
+		return await resolveHostIpForOrg(ctx.session.activeOrganizationId);
 	}),
 	updateServerIp: adminProcedure
 		.input(

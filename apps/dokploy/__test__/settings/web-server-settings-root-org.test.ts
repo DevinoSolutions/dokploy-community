@@ -111,7 +111,7 @@ describe("with the real root organization check", () => {
 			ROOT_ORG,
 		).settings.getWebServerSettings();
 
-		expect(result?.metricsConfig.server.token).toBe(TOKEN);
+		expect(result?.metricsConfig?.server.token).toBe(TOKEN);
 		expect(JSON.stringify(result)).not.toContain(SSH_KEY);
 		expect(result).toMatchObject({ hasSSHPrivateKey: true });
 	});
@@ -126,6 +126,29 @@ describe("with the real root organization check", () => {
 		expect(JSON.stringify(result)).not.toContain(TOKEN);
 	});
 
+	it("settings.getWebServerSettings: another organization gets no host address or metrics settings", async () => {
+		const result = await callerAs(
+			"owner",
+			OTHER_ORG,
+		).settings.getWebServerSettings();
+
+		expect(result).toMatchObject({ serverIp: null, metricsConfig: null });
+		expect(JSON.stringify(result)).not.toContain("10.0.0.1");
+	});
+
+	it("settings.getWebServerSettings: a member of the root organization gets the host values, token blank", async () => {
+		const result = await callerAs(
+			"member",
+			ROOT_ORG,
+		).settings.getWebServerSettings();
+
+		expect(result?.serverIp).toBe("10.0.0.1");
+		expect(result?.metricsConfig?.server).toMatchObject({
+			port: 4500,
+			token: "",
+		});
+	});
+
 	it("settings.getWebServerSettings: no organization at all gets no token", async () => {
 		findFirst.mockResolvedValue(undefined as never);
 
@@ -134,7 +157,7 @@ describe("with the real root organization check", () => {
 			OTHER_ORG,
 		).settings.getWebServerSettings();
 
-		expect(result?.metricsConfig.server.token).toBe("");
+		expect(result).toMatchObject({ serverIp: null, metricsConfig: null });
 	});
 
 	it("user.getMetricsToken sends the host's address and settings to no other organization", async () => {
