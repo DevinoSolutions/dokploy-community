@@ -94,9 +94,6 @@ beforeEach(() => {
 describe("settings.getWebServerSettings", () => {
 	it.each([
 		["a member of the root organization", "member", ROOT_ORG],
-		["a member of another organization", "member", OTHER_ORG],
-		["an admin of another organization", "admin", OTHER_ORG],
-		["an owner of another organization", "owner", OTHER_ORG],
 		["a member with a custom role", "support", ROOT_ORG],
 	])(
 		"never returns the SSH key or the token to %s",
@@ -104,18 +101,56 @@ describe("settings.getWebServerSettings", () => {
 			const result = await settingsAs(role, org).getWebServerSettings();
 
 			expect(result).not.toHaveProperty("sshPrivateKey");
-			expect(result?.metricsConfig.server.token).toBe("");
+			expect(result?.metricsConfig?.server.token).toBe("");
 			expect(JSON.stringify(result)).not.toContain(SSH_KEY);
 			expect(JSON.stringify(result)).not.toContain(TOKEN);
 		},
 	);
+
+	it.each([
+		["a member of another organization", "member", OTHER_ORG],
+		["an admin of another organization", "admin", OTHER_ORG],
+		["an owner of another organization", "owner", OTHER_ORG],
+	])(
+		"gives no host address or metrics settings to %s",
+		async (_who, role, org) => {
+			const result = await settingsAs(role, org).getWebServerSettings();
+
+			expect(result).toMatchObject({ serverIp: null, metricsConfig: null });
+			expect(result).not.toHaveProperty("sshPrivateKey");
+			const json = JSON.stringify(result);
+			for (const value of [
+				SSH_KEY,
+				TOKEN,
+				"10.0.0.1",
+				"4500",
+				"https://dokploy.example.com/callback",
+			]) {
+				expect(json).not.toContain(value);
+			}
+		},
+	);
+
+	it("gives the root organization's members the host address and metrics settings, token blank", async () => {
+		const result = await settingsAs("member", ROOT_ORG).getWebServerSettings();
+
+		expect(result?.serverIp).toBe("10.0.0.1");
+		expect(result?.metricsConfig?.server).toMatchObject({
+			port: 4500,
+			refreshRate: 60,
+			urlCallback: "https://dokploy.example.com/callback",
+			retentionDays: 2,
+			token: "",
+		});
+	});
 
 	it.each(["owner", "admin"])(
 		"gives the token, but never the SSH key, to the root organization's %s",
 		async (role) => {
 			const result = await settingsAs(role, ROOT_ORG).getWebServerSettings();
 
-			expect(result?.metricsConfig.server.token).toBe(TOKEN);
+			expect(result?.serverIp).toBe("10.0.0.1");
+			expect(result?.metricsConfig?.server.token).toBe(TOKEN);
 			expect(result).not.toHaveProperty("sshPrivateKey");
 			expect(JSON.stringify(result)).not.toContain(SSH_KEY);
 		},
@@ -126,14 +161,19 @@ describe("settings.getWebServerSettings", () => {
 
 		expect(result).toMatchObject({
 			id: "settings-1",
+			host: "dokploy.example.com",
+		});
+	});
+
+	it("keeps the whole row for the root organization", async () => {
+		const result = await settingsAs("member", ROOT_ORG).getWebServerSettings();
+
+		expect(result).toMatchObject({
+			id: "settings-1",
 			serverIp: "10.0.0.1",
 			host: "dokploy.example.com",
 		});
-		expect(result?.metricsConfig.server).toMatchObject({
-			port: 4500,
-			refreshRate: 60,
-		});
-		expect(result?.metricsConfig.containers.refreshRate).toBe(60);
+		expect(result?.metricsConfig?.containers.refreshRate).toBe(60);
 	});
 
 	it("says whether the instance has an SSH key", async () => {

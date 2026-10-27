@@ -1,4 +1,9 @@
-import { IS_CLOUD, isRootOrganization } from "@dokploy/server";
+import {
+	findServerById,
+	getWebServerSettings,
+	IS_CLOUD,
+	isRootOrganization,
+} from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
 
 // The Dokploy host's own parts (its Traefik, its containers, its settings and
@@ -13,6 +18,43 @@ export const canAccessLocalHost = async (
 		return true;
 	}
 	return !!organizationId && (await isRootOrganization(organizationId));
+};
+
+// Whether an organization may run its services on the Dokploy host, which is
+// what makes the host's address its to know. This is the rule the create routes
+// of applications, composes and databases apply when a service has no server:
+// refused when the instance is set to remote servers only. The organization
+// that owns the instance keeps its own host in any case, and Dokploy Cloud has
+// no such host.
+export const canUseLocalHostForServices = async (
+	organizationId: string | null | undefined,
+) => {
+	if (IS_CLOUD || !organizationId) {
+		return false;
+	}
+	if (await isRootOrganization(organizationId)) {
+		return true;
+	}
+	const settings = await getWebServerSettings();
+	return !settings?.remoteServersOnly;
+};
+
+// The address a service on the given server is reached at: a remote server's
+// own (the caller has checked it belongs to the organization), or the Dokploy
+// host's, which only an organization that may run services on it gets. Empty
+// when there is none to give.
+export const resolveHostIpForOrg = async (
+	organizationId: string | null | undefined,
+	serverId?: string | null,
+) => {
+	if (serverId) {
+		return (await findServerById(serverId)).ipAddress;
+	}
+	if (!(await canUseLocalHostForServices(organizationId))) {
+		return "";
+	}
+	const settings = await getWebServerSettings();
+	return settings?.serverIp || "";
 };
 
 export const assertLocalHostAccess = async (

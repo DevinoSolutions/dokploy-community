@@ -1,5 +1,6 @@
 import { type getWebServerSettings, isRootOrganization } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
+import { canAccessLocalHost } from "./local-host-access";
 
 type WebServerSettings = NonNullable<
 	Awaited<ReturnType<typeof getWebServerSettings>>
@@ -32,7 +33,12 @@ export const redactMetricsConfig = <
 		? metricsConfig
 		: { ...metricsConfig, server: { ...metricsConfig.server, token: "" } };
 
-/** The row as the API returns it: no SSH key, only whether there is one. */
+/**
+ * The row as the API returns it: no SSH key, only whether there is one. The
+ * host's address and its metrics settings go only to the organization that owns
+ * the instance (null for any other), the rest of the row serves every
+ * organization.
+ */
 export const toWebServerSettingsView = async (
 	settings: WebServerSettings | undefined,
 	caller: Caller,
@@ -41,12 +47,19 @@ export const toWebServerSettingsView = async (
 		return null;
 	}
 	const { sshPrivateKey, ...rest } = settings;
+	const ownsHost = await canAccessLocalHost(
+		undefined,
+		caller.session.activeOrganizationId,
+	);
 	return {
 		...rest,
-		metricsConfig: redactMetricsConfig(
-			rest.metricsConfig,
-			await canSeeMetricsToken(caller),
-		),
+		serverIp: ownsHost ? rest.serverIp : null,
+		metricsConfig: ownsHost
+			? redactMetricsConfig(
+					rest.metricsConfig,
+					await canSeeMetricsToken(caller),
+				)
+			: null,
 		hasSSHPrivateKey: !!sshPrivateKey,
 	};
 };
