@@ -1947,6 +1947,22 @@ const loadOverrideFile = async (
 	}
 };
 
+// The checks of a custom command that need neither the compose file nor the
+// host: what it runs, its project and stack names, and its path options
+// (T-7607). Run when the command is saved, so a refusal shows in the form;
+// the deploy runs them again with the rest, and stays the security boundary.
+export const assertCommandSaveable = (
+	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
+) => {
+	if (!compose.command) {
+		return;
+	}
+	assertCommandRunsComposeOnly(compose);
+	getCommandOverrideFiles(compose);
+	getCommandRunVolumes(compose);
+	assertCommandActsOnOwnProject(compose, []);
+};
+
 // Deploy, redeploy and preview: checks the final compose file (the one
 // `writeDomainsToCompose` stages), and the override files of a custom command,
 // before anything is built, torn down or started. A file that cannot be
