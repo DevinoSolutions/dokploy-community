@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path";
 import { paths } from "@dokploy/server/constants";
+import type { Patch } from "@dokploy/server/services/patch";
 import type { InferResultType } from "@dokploy/server/types/with";
 import boxen from "boxen";
 import { quote } from "shell-quote";
@@ -230,6 +231,11 @@ export interface BuildComposeCommandOptions {
 	 * and runs (`up --no-build`), and refuses to build on its own.
 	 */
 	remoteBuild?: RemoteBuildDeployInfo;
+	/**
+	 * The patch rows the deploy already read and checked. The compose file the
+	 * command stages is rendered from them, not from a second read (T-8260).
+	 */
+	patches?: Patch[];
 }
 
 /** One service whose image was built on the build server and pushed. */
@@ -459,11 +465,13 @@ const getRollingDeployPlan = async ({
 	freshVolumes,
 	remoteBuild,
 	invocation,
+	patches,
 }: {
 	compose: ComposeNested;
 	freshVolumes: boolean;
 	remoteBuild: boolean;
 	invocation: string;
+	patches?: Patch[];
 }): Promise<RollingDeployPlan> => {
 	const off: RollingDeployPlan = { script: null, rolled: [], notices: [] };
 	const settings = resolveComposeRolling(compose.rollingReplace);
@@ -487,10 +495,9 @@ const getRollingDeployPlan = async ({
 
 	let spec: RollingSpec | null = null;
 	try {
-		spec = (await addDomainToCompose(
-			compose,
-			compose.domains,
-		)) as unknown as RollingSpec | null;
+		spec = (await addDomainToCompose(compose, compose.domains, {
+			patches,
+		})) as unknown as RollingSpec | null;
 	} catch {
 		spec = null;
 	}
@@ -547,7 +554,7 @@ export const getBuildComposeCommand = async (
 	rawCompose: ComposeNested,
 	options: BuildComposeCommandOptions = {},
 ) => {
-	const { deploymentId, freshVolumes = false, remoteBuild } = options;
+	const { deploymentId, freshVolumes = false, remoteBuild, patches } = options;
 	const compose = await withResolvedVaultRefs(rawCompose);
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const { sourceType, appName, mounts, composeType, domains } = compose;
@@ -592,6 +599,7 @@ export const getBuildComposeCommand = async (
 			mounts.length > 0 ? projectPath : undefined,
 			remoteOptions,
 		),
+		patches,
 	});
 
 	// The stack env, the env file and the compose are staged on the host before
@@ -617,6 +625,7 @@ export const getBuildComposeCommand = async (
 		newCompose = await writeDomainsToCompose(compose, domains, {
 			...stageOptions,
 			alsoRemove: [...staged],
+			patches,
 			// Only a deploy that rolls changes the healthchecks it writes.
 			...(rolling.rolled.length > 0
 				? { rollingDrainServices: rolling.rolled }
