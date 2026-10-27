@@ -287,9 +287,15 @@ describe("serverSetup exit status", () => {
 		expect(outcome.error.cause).toBe(ssh.connectError);
 		expect(ssh.clients[0].ended).toBe(true);
 		expect(statuses()).toEqual(["error"]);
-		expect(logs).toContain(
-			"❌ Couldn't connect to your server: Cannot parse privateKey: Unsupported key format",
+		const friendly = logs.find((line) => line.includes("Technical details"));
+		expect(friendly).toContain("❌ Couldn't connect to your server");
+		expect(friendly).toContain(
+			"Technical details: Cannot parse privateKey: Unsupported key format",
 		);
+		expect(friendly).toContain("username");
+		expect(friendly).toContain("IP address");
+		expect(friendly).toContain("SSH port");
+		expect(friendly).toContain("SSH key");
 		expect(logs.at(-1)).toBe(
 			"\nSetup Server: ❌ SSH connection error: Cannot parse privateKey: Unsupported key format\n",
 		);
