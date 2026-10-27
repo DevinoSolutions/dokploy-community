@@ -81,8 +81,8 @@ export const AddCommandCompose = ({ composeId }: Props) => {
 					composeId,
 				});
 			})
-			.catch(() => {
-				toast.error("Error updating the command");
+			.catch((error) => {
+				toast.error(error?.message || "Error updating the command");
 			});
 	};
 
