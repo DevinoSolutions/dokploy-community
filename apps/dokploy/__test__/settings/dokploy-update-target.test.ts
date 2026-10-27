@@ -214,10 +214,15 @@ describe("Dokploy rollback point", () => {
 		expect(recorded()).toEqual({
 			version: "v0.30.8-community.31",
 			digest: DIGEST,
+			recordedAt: expect.any(String),
 		});
 		await expect(
 			readDokployRollbackPoint("v0.30.8-community.32", file),
-		).resolves.toEqual({ version: "v0.30.8-community.31", digest: DIGEST });
+		).resolves.toEqual({
+			version: "v0.30.8-community.31",
+			digest: DIGEST,
+			recordedAt: recorded().recordedAt,
+		});
 	});
 
 	it("writes the file owner-only and leaves no temp file", async () => {
@@ -280,6 +285,7 @@ describe("Dokploy rollback point", () => {
 		expect(recorded()).toEqual({
 			version: "v0.30.8-community.31",
 			digest: DIGEST,
+			recordedAt: expect.any(String),
 		});
 	});
 
@@ -302,14 +308,17 @@ describe("Dokploy rollback point", () => {
 	});
 
 	it.each(["updating", "paused", "rollback_started", "rollback_paused"])(
-		"keeps the point of the update in flight while the service is %s",
+		"drops the point of the update in flight while the service is %s",
 		async (state) => {
-			const point = writePoint("v0.30.8-community.30");
+			writePoint("v0.30.8-community.30");
 			spec(`${REPO}:v0.30.8-community.31@${OTHER_DIGEST}`, state);
 
-			await recordDokployRollbackPoint("v0.30.8-community.30", { file });
+			await recordDokployRollbackPoint("v0.30.8-community.30", {
+				file,
+				installedImage: `${REPO}:v0.30.8-community.32`,
+			});
 
-			expect(recorded()).toEqual(point);
+			expect(existsSync(file)).toBe(false);
 		},
 	);
 

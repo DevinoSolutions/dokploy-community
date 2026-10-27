@@ -79,3 +79,23 @@ export const resolveDokployUpdateImage = (target: string): string | null => {
 	const parsed = parseDokployUpdateTarget(target);
 	return parsed ? dokployUpdateImage(parsed) : null;
 };
+
+const FORK_IMAGE_REGEX =
+	/^([^:@\s]+(?::\d+)?\/[^:@\s]+)(?::([^@\s]+))?(?:@(sha256:[a-f0-9]{64}))?$/;
+
+/**
+ * True when the image the `dokploy` service runs (`repo:tag@sha256:<hex>` once
+ * Docker has resolved it) is the one an update installed (`repo:tag` or
+ * `repo@sha256:<hex>`). A digest is compared by digest, a tag by tag.
+ */
+export const isInstalledDokployImage = (current: string, installed: string) => {
+	const now = FORK_IMAGE_REGEX.exec(current);
+	const wanted = FORK_IMAGE_REGEX.exec(installed);
+	if (!now || !wanted || now[1] !== wanted[1]) {
+		return false;
+	}
+	if (wanted[3]) {
+		return now[3] === wanted[3];
+	}
+	return !!wanted[2] && now[2] === wanted[2];
+};

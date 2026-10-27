@@ -86,6 +86,7 @@ export * from "./services/snapvisor";
 export * from "./services/snapvisor-checks";
 export * from "./services/ssh-key";
 export * from "./services/transfer";
+export * from "./services/update-migration-delta";
 export * from "./services/uptimely";
 export * from "./services/uptimely-deploy";
 export * from "./services/user";
