@@ -63,7 +63,6 @@ import {
 	getOwnDirectoryCheckCommand,
 	parseOwnDirectoryVerdicts,
 } from "@dokploy/server/utils/compose-own-directory";
-import { getPathResolverLines } from "@dokploy/server/utils/path-containment";
 
 const SPEC = "services:\n  web:\n    image: nginx\n";
 const OVERRIDE = 'services:\n  web:\n    environment:\n      DEBUG: "1"\n';
@@ -475,18 +474,23 @@ describe("the shell that resolves the paths", () => {
 	);
 
 	itWithShell(
-		"does not loop on a relative path where only readlink is available",
+		"refuses a relative path without looping, with only readlink available",
 		() => {
 			// realpath is hidden, so the readlink -f fallback is the resolver.
 			const result = spawnSync(
 				"sh",
 				[
 					"-c",
-					`realpath() { return 1; }; ${getPathResolverLines("__dokploy_resolve() { return 1; }").join("\n")}\nif __dokploy_resolve relative/path; then echo resolved; else echo refused; fi`,
+					`realpath() { return 1; }; ${getOwnDirectoryCheckCommand("/own", [
+						{ raw: "relative/path", normal: "relative/path" },
+					])}`,
 				],
 				{ encoding: "utf8", timeout: 5000 },
 			);
-			expect(result.stdout.trim()).toBe("refused");
+			expect(result.stdout.split("\n").slice(0, 2)).toEqual([
+				"own:ok",
+				"unresolved",
+			]);
 		},
 	);
 

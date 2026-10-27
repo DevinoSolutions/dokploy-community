@@ -44,8 +44,9 @@ export const getOwnDirectoryCheckCommand = (
 		...getPathResolverLines("__dokploy_resolve() { return 1; }"),
 		`__dokploy_own=$(__dokploy_resolve ${quote([ownDirectory])}) || __dokploy_own=`,
 		'if [ -n "$__dokploy_own" ]; then echo own:ok; else echo own:unresolved; fi',
-		// $1: the raw path, $2: its cleaned-up form.
-		`__dokploy_verdict() { if [ -z "$__dokploy_own" ]; then echo unresolved; return; fi; __dokploy_a=$(__dokploy_resolve "$1") && __dokploy_b=$(__dokploy_resolve "$2") || { echo unresolved; return; }; case "$__dokploy_a" in "$__dokploy_own"|"$__dokploy_own"/*) ;; *) echo out; return;; esac; if [ "$__dokploy_a" = "$__dokploy_b" ]; then echo in; else echo moved; fi; }`,
+		// $1: the raw path, $2: its cleaned-up form. A path that is not absolute is
+		// not resolved (the readlink fallback of the resolver needs one).
+		`__dokploy_verdict() { if [ -z "$__dokploy_own" ]; then echo unresolved; return; fi; case "$1" in /*) ;; *) echo unresolved; return;; esac; case "$2" in /*) ;; *) echo unresolved; return;; esac; __dokploy_a=$(__dokploy_resolve "$1") && __dokploy_b=$(__dokploy_resolve "$2") || { echo unresolved; return; }; case "$__dokploy_a" in "$__dokploy_own"|"$__dokploy_own"/*) ;; *) echo out; return;; esac; if [ "$__dokploy_a" = "$__dokploy_b" ]; then echo in; else echo moved; fi; }`,
 		...readings.map(
 			(reading) =>
 				`__dokploy_verdict ${quote([reading.raw])} ${quote([reading.normal])}`,
