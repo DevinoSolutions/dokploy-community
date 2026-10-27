@@ -22,6 +22,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
 	canShowLocalHost,
 	explainsEmptyLocalHost,
+	waitsForLocalHostFlag,
 } from "@/lib/local-host-flag";
 import { appRouter } from "@/server/api/root";
 import { api } from "@/utils/api";
@@ -136,6 +137,10 @@ const Dashboard = () => {
 							host's other tabs; only its empty state explains the host. */}
 						<ShowContainers
 							serverId={serverId}
+							waitingForHost={waitsForLocalHostFlag({
+								serverId,
+								isFlagPending: isHostFlagPending,
+							})}
 							explainEmptyHost={explainsEmptyLocalHost({
 								serverId,
 								isFlagPending: isHostFlagPending,

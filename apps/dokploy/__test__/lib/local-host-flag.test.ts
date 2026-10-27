@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	canShowLocalHost,
 	explainsEmptyLocalHost,
+	waitsForLocalHostFlag,
 } from "@/lib/local-host-flag";
 
 describe("canShowLocalHost", () => {
@@ -104,6 +105,23 @@ describe("explainsEmptyLocalHost", () => {
 				isFlagPending: true,
 				canSeeLocalHost: false,
 			}),
+		).toBe(false);
+	});
+});
+
+describe("waitsForLocalHostFlag", () => {
+	it("waits on the host while the flag loads", () => {
+		expect(
+			waitsForLocalHostFlag({ serverId: undefined, isFlagPending: true }),
+		).toBe(true);
+	});
+
+	it("does not wait once the flag is known, or for a remote server", () => {
+		expect(
+			waitsForLocalHostFlag({ serverId: undefined, isFlagPending: false }),
+		).toBe(false);
+		expect(
+			waitsForLocalHostFlag({ serverId: "server-1", isFlagPending: true }),
 		).toBe(false);
 	});
 });

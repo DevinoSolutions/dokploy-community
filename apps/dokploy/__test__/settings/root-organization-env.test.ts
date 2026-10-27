@@ -41,6 +41,7 @@ let logRootOrganization: typeof import("@dokploy/server/services/admin").logRoot
 let isSingleOrganizationInstance: typeof import("@dokploy/server/services/admin").isSingleOrganizationInstance;
 let assertOrganizationDeletable: typeof import("@dokploy/server/services/admin").assertOrganizationDeletable;
 let assertLocalHostAccess: typeof import("@/server/api/utils/local-host-access").assertLocalHostAccess;
+let assertCanManageInstance: typeof import("@/server/api/utils/web-server-settings-view").assertCanManageInstance;
 let canSeeMetricsToken: typeof import("@/server/api/utils/web-server-settings-view").canSeeMetricsToken;
 
 const FIRST = { id: "org-first", name: "First" };
@@ -80,7 +81,7 @@ beforeEach(async () => {
 	({ assertLocalHostAccess } = await import(
 		"@/server/api/utils/local-host-access"
 	));
-	({ canSeeMetricsToken } = await import(
+	({ assertCanManageInstance, canSeeMetricsToken } = await import(
 		"@/server/api/utils/web-server-settings-view"
 	));
 });
@@ -157,6 +158,42 @@ describe("the organization that owns the instance", () => {
 		expect(PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE).toContain(
 			"DOKPLOY_ROOT_ORGANIZATION_ID",
 		);
+	});
+
+	it("says so for the instance-management routes too, and keeps their usual message otherwise", async () => {
+		const owner = {
+			session: { activeOrganizationId: "org-first" },
+			user: { role: "owner" },
+		};
+		organizations([FIRST, PINNED]);
+
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-gone");
+		await expect(assertCanManageInstance(owner)).rejects.toMatchObject({
+			code: "FORBIDDEN",
+			message: PINNED_ROOT_ORGANIZATION_MISSING_HOST_MESSAGE,
+		});
+
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "org-pinned");
+		await expect(assertCanManageInstance(owner)).rejects.toMatchObject({
+			code: "FORBIDDEN",
+			message: expect.stringContaining("owns this instance"),
+		});
+		await expect(
+			assertCanManageInstance({
+				...owner,
+				session: { activeOrganizationId: "org-pinned" },
+			}),
+		).resolves.toBeUndefined();
+
+		vi.stubEnv("DOKPLOY_ROOT_ORGANIZATION_ID", "");
+		await expect(
+			assertCanManageInstance({
+				...owner,
+				session: { activeOrganizationId: "org-pinned" },
+			}),
+		).rejects.toMatchObject({
+			message: expect.stringContaining("owns this instance"),
+		});
 	});
 
 	it("refuses a caller outside a matched pin with the usual message", async () => {

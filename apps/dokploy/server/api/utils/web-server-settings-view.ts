@@ -1,6 +1,9 @@
 import { type getWebServerSettings, isRootOrganization } from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
-import { canAccessLocalHost } from "./local-host-access";
+import {
+	canAccessLocalHost,
+	hostAccessRefusalMessage,
+} from "./local-host-access";
 
 type WebServerSettings = NonNullable<
 	Awaited<ReturnType<typeof getWebServerSettings>>
@@ -73,8 +76,9 @@ export const assertCanManageInstance = async (caller: Caller) => {
 	if (!(await canSeeMetricsToken(caller))) {
 		throw new TRPCError({
 			code: "FORBIDDEN",
-			message:
+			message: await hostAccessRefusalMessage(
 				"Only an owner or admin of the organization that owns this instance can do this",
+			),
 		});
 	}
 };

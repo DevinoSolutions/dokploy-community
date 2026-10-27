@@ -594,7 +594,7 @@ const installRequirements = async (
 					`Technical details: ${message}`,
 					"",
 					"💡 Hints:",
-					"  • Check the username, IP address and SSH port saved for this server.",
+					"  • Check the SSH username saved for this server.",
 					"  • Check that the SSH key assigned to this server is a complete private key in a supported format.",
 				].join("\n"),
 			);

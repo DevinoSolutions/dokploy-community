@@ -39,3 +39,13 @@ export const explainsEmptyLocalHost = ({
 	isFlagPending: boolean;
 	canSeeLocalHost: boolean;
 }) => !serverId && !isFlagPending && !canSeeLocalHost;
+
+// Whether an empty list on the Dokploy host has to wait for the flag before it
+// can say "No results." or explain the host.
+export const waitsForLocalHostFlag = ({
+	serverId,
+	isFlagPending,
+}: {
+	serverId: string | undefined;
+	isFlagPending: boolean;
+}) => !serverId && isFlagPending;
