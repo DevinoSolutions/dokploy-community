@@ -14,12 +14,15 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // host that has `readlink -f` and no `realpath -m` (minimal images): a link
 // whose target is relative is read from the link's own directory, whatever the
 // working directory is, a link chain is followed hop by hop with a cap, and
-// anything that cannot be followed fails (T-9540).
+// anything that cannot be followed fails (T-9540). A path with a line break in
+// it is never resolved.
 
-// Each case starts a shell, which is slow on Windows and under load.
-vi.setConfig({ testTimeout: 60_000 });
+// Each case starts a shell, which is slow on Windows and under load: every
+// case runs its shell checks in one script, with room to spare.
+vi.setConfig({ testTimeout: 180_000 });
 
 const shellWorks = spawnSync("sh", ["-c", "true"]).status === 0;
+const posix = process.platform !== "win32";
 
 const tempBase = () =>
 	(process.platform === "win32" ? process.cwd() : tmpdir()).replaceAll(
@@ -43,12 +46,13 @@ const lines = getPathResolverLines("__dokploy_resolve() { return 1; }").join(
 // branch, as it does on a host that has no `realpath -m`.
 const MINIMAL = "realpath() { return 1; }\n";
 
-const run = (script: string, cwd?: string) =>
+const run = (script: string) =>
 	spawnSync("sh", ["-c", `${MINIMAL}${lines}\n${script}`], {
 		encoding: "utf8",
-		timeout: 30_000,
-		cwd,
+		timeout: 150_000,
 	});
+
+const quoted = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 let tmp = "";
 let sh = "";
@@ -62,7 +66,7 @@ beforeAll(() => {
 	sh = shellPath(tmp);
 	for (const dir of [
 		"own/code/real",
-		"own/code/a/b",
+		"own/code/a/b/c",
 		"own/code/sub",
 		"other/code",
 	]) {
@@ -81,9 +85,18 @@ beforeAll(() => {
 		link("self", "own/code/self");
 		link("miss/../x", "own/code/dotdot");
 		link("../../../w/own/code/sub/m", "own/code/sub/up");
-		// An absolute target.
-		if (process.platform !== "win32") {
+		// An absolute target (a Windows path there, which has no meaning here).
+		if (posix) {
 			link(`${sh}/other/code/abs_miss`, "own/code/abs");
+		}
+		// A directory whose name ends in a line break, a link of the same name
+		// without it to a deeper directory, and links through them.
+		if (posix) {
+			mkdirSync(`${tmp}/own/code/nl\n`, { recursive: true });
+			link("a/b/c", "own/code/nl");
+			link("../../../outside/x", "own/code/nl\n/l");
+			link("nl\n/l", "own/code/start");
+			link("tail_target\n", "own/code/nlt");
 		}
 		linksWork =
 			run(`[ -L '${sh}/own/code/dangle_out' ]`).status === 0 &&
@@ -96,6 +109,45 @@ afterAll(() => {
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
 });
 
+// Working directories to start from: far from the links, and deep inside the
+// compose's own directory (where a wrong reading would land inside it).
+const cwds = () => [tmp, `${tmp}/own/code/a/b`];
+
+// One shell, every working directory: for each, the answer of `expression`
+// (it sees the path as "$p") for every input, one line each.
+const batch = (
+	inputs: string[],
+	expression: string,
+	starts: string[] = cwds(),
+) => {
+	const script = starts
+		.map(
+			(cwd) =>
+				`echo @@cwd\n( cd ${quoted(shellPath(cwd))} && for p in ${inputs.map(quoted).join(" ")}; do ${expression}; done )`,
+		)
+		.join("\n");
+	const result = run(script);
+	expect(result.error).toBeUndefined();
+	return result.stdout
+		.split("@@cwd\n")
+		.slice(1)
+		.map((part) => part.trim().split("\n"));
+};
+
+const resolveAll = (inputs: string[], starts?: string[]) =>
+	batch(
+		inputs,
+		'if r=$(__dokploy_resolve "$p"); then echo "$r"; else echo unresolved; fi',
+		starts,
+	);
+
+const verdictsAll = (inputs: string[], starts?: string[]) =>
+	batch(
+		inputs,
+		`if __dokploy_inside ${quoted(`${sh}/own`)} "$p"; then echo in; else echo out; fi`,
+		starts,
+	);
+
 const itWithLinks = (name: string, fn: () => void) =>
 	it(name, () => {
 		// Links need a privilege on some Windows hosts.
@@ -103,162 +155,136 @@ const itWithLinks = (name: string, fn: () => void) =>
 		fn();
 	});
 
-// What each input resolves to when the resolver is started in `cwd`.
-const resolve = (inputs: string[], cwd: string) => {
-	const body = inputs
-		.map(
-			(input) =>
-				`if r=$(__dokploy_resolve '${input}'); then echo "$r"; else echo unresolved; fi`,
-		)
-		.join("\n");
-	const result = run(body, cwd);
-	expect(result.error).toBeUndefined();
-	return result.stdout.trim().split("\n");
+const everywhere = (inputs: string[], expected: string[]) => {
+	const answers = resolveAll(inputs);
+	expect(answers).toHaveLength(2);
+	for (const answer of answers) {
+		expect(answer).toEqual(expected);
+	}
 };
-
-const verdicts = (inputs: string[], cwd: string) => {
-	const body = inputs
-		.map(
-			(input) =>
-				`if __dokploy_inside '${sh}/own' '${input}'; then echo in; else echo out; fi`,
-		)
-		.join("\n");
-	return run(body, cwd).stdout.trim().split("\n");
-};
-
-// Working directories to start from: far from the links, and deep inside the
-// compose's own directory (where a wrong reading would land inside it).
-const cwds = () => [tmp, `${tmp}/own/code/a/b`, `${tmp}/other/code`];
 
 describe("the readlink -f fallback of the path resolver", () => {
-	itWithLinks(
-		"follows a link to a missing target from the link's own directory",
-		() => {
-			for (const cwd of cwds()) {
-				expect(
-					resolve(
-						[
-							`${sh}/own/code/dangle_out`,
-							`${sh}/own/code/dangle_out/more/deeper`,
-							`${sh}/own/code/dangle_in`,
-						],
-						cwd,
-					),
-				).toEqual([
-					`${sh}/other/code/secret`,
-					`${sh}/other/code/secret/more/deeper`,
-					`${sh}/own/code/in_miss`,
-				]);
-			}
-		},
-	);
-
-	itWithLinks("follows a chain of links hop by hop", () => {
-		for (const cwd of cwds()) {
-			expect(
-				resolve([`${sh}/own/code/c1`, `${sh}/own/code/c1/tail`], cwd),
-			).toEqual([`${sh}/other/code/miss`, `${sh}/other/code/miss/tail`]);
-		}
+	itWithLinks("follows a link to a missing target from the link's own directory", () => {
+		everywhere(
+			[
+				`${sh}/own/code/dangle_out`,
+				`${sh}/own/code/dangle_out/more/deeper`,
+				`${sh}/own/code/dangle_in`,
+			],
+			[
+				`${sh}/other/code/secret`,
+				`${sh}/other/code/secret/more/deeper`,
+				`${sh}/own/code/in_miss`,
+			],
+		);
 	});
 
-	itWithLinks(
-		"follows a link to an existing directory, and a link then ..",
-		() => {
-			for (const cwd of cwds()) {
-				expect(
-					resolve(
-						[
-							`${sh}/own/code/rel_dir`,
-							`${sh}/own/code/rel_dir/file`,
-							`${sh}/own/code/rel_dir/../a`,
-							`${sh}/own/code/rel_dir/missing`,
-						],
-						cwd,
-					),
-				).toEqual([
-					`${sh}/own/code/real`,
-					`${sh}/own/code/real/file`,
-					`${sh}/own/code/a`,
-					`${sh}/own/code/real/missing`,
-				]);
-			}
-		},
-	);
+	itWithLinks("follows a chain of links hop by hop", () => {
+		everywhere(
+			[`${sh}/own/code/c1`, `${sh}/own/code/c1/tail`],
+			[`${sh}/other/code/miss`, `${sh}/other/code/miss/tail`],
+		);
+	});
+
+	itWithLinks("follows a link to an existing directory, and a link then ..", () => {
+		everywhere(
+			[
+				`${sh}/own/code/rel_dir`,
+				`${sh}/own/code/rel_dir/file`,
+				`${sh}/own/code/rel_dir/../a`,
+				`${sh}/own/code/rel_dir/missing`,
+			],
+			[
+				`${sh}/own/code/real`,
+				`${sh}/own/code/real/file`,
+				`${sh}/own/code/a`,
+				`${sh}/own/code/real/missing`,
+			],
+		);
+	});
 
 	itWithLinks("follows a link to an absolute path", () => {
-		if (process.platform === "win32") return; // an absolute link target is a Windows path there
-		for (const cwd of cwds()) {
-			expect(resolve([`${sh}/own/code/abs/x`], cwd)).toEqual([
-				`${sh}/other/code/abs_miss/x`,
-			]);
-		}
+		if (!posix) return;
+		everywhere(
+			[`${sh}/own/code/abs/x`],
+			[`${sh}/other/code/abs_miss/x`],
+		);
 	});
 
 	itWithLinks("reads a target that climbs from the link's directory", () => {
-		for (const cwd of cwds()) {
-			// Three levels above own/code/sub is the temp directory, not the compose's.
-			expect(resolve([`${sh}/own/code/sub/up`], cwd)).toEqual([
-				`${sh}/w/own/code/sub/m`,
-			]);
+		// Three levels above own/code/sub is the temp directory, not the compose's.
+		everywhere([`${sh}/own/code/sub/up`], [`${sh}/w/own/code/sub/m`]);
+	});
+
+	itWithLinks("fails on a link loop, a self link and a missing component before ..", () => {
+		// One directory: each failing hop costs a few processes on some hosts.
+		const [answer] = resolveAll(
+			[
+				`${sh}/own/code/loop1`,
+				`${sh}/own/code/self`,
+				`${sh}/own/code/dotdot`,
+				"relative/link",
+			],
+			[`${tmp}/own/code/a/b`],
+		);
+		expect(answer).toEqual(Array(4).fill("unresolved"));
+	});
+
+	itWithLinks("gives the same inside and outside verdicts from every directory", () => {
+		const cases: Array<[string, "in" | "out"]> = [
+			["dangle_out", "out"],
+			["dangle_out/x", "out"],
+			["dangle_in", "in"],
+			["c1", "out"],
+			["rel_dir/file", "in"],
+			["sub/up", "out"],
+			["not_there/at/all", "in"],
+			...(posix ? [["abs", "out"] as [string, "in" | "out"]] : []),
+		];
+		const answers = verdictsAll(
+			cases.map(([path]) => `${sh}/own/code/${path}`),
+			cwds().slice(1, 2),
+		);
+		for (const answer of answers) {
+			expect(answer).toEqual(cases.map(([, verdict]) => verdict));
 		}
 	});
 
-	itWithLinks(
-		"fails on a link loop, a self link and a missing component before ..",
-		() => {
-			// One directory: each failing hop costs a few processes on some hosts.
-			for (const cwd of cwds().slice(1, 2)) {
-				expect(
-					resolve(
-						[
-							`${sh}/own/code/loop1`,
-							`${sh}/own/code/loop1/x`,
-							`${sh}/own/code/self`,
-							`${sh}/own/code/dotdot`,
-							"relative/link",
-						],
-						cwd,
-					),
-				).toEqual(Array(5).fill("unresolved"));
-			}
-		},
-	);
-
-	itWithLinks(
-		"gives the same inside and outside verdicts from every directory",
-		() => {
-			const cases: Array<[string, "in" | "out"]> = [
-				["dangle_out", "out"],
-				["dangle_out/x", "out"],
-				["dangle_in", "in"],
-				["c1", "out"],
-				["rel_dir/file", "in"],
-				["loop1", "out"],
-				["sub/up", "out"],
-				["not_there/at/all", "in"],
-				...(process.platform === "win32"
-					? []
-					: [["abs", "out"] as [string, "in" | "out"]]),
-			];
-			// One start per call keeps this cheap on hosts where processes are slow.
-			for (const cwd of cwds().slice(0, 2)) {
-				expect(
-					verdicts(
-						cases.map(([path]) => `${sh}/own/code/${path}`),
-						cwd,
-					),
-				).toEqual(cases.map(([, verdict]) => verdict));
-			}
-		},
-	);
-
 	it("prints a path below the root without a doubled slash", () => {
 		if (!shellWorks) return;
-		const result = run(
-			"r=$(__dokploy_resolve '/definitely/not/there'); echo \"$r\"",
-		);
-		expect(result.stdout.trim()).toBe("/definitely/not/there");
+		const [[answer]] = resolveAll(["/definitely/not/there"], [tmp]) as [
+			string[],
+		];
+		expect(answer).toBe("/definitely/not/there");
 	});
+
+	it("never resolves a path that has a line break in it", () => {
+		if (!shellWorks) return;
+		const [answer] = resolveAll(
+			[`${sh}/own/code/dir\nx`, `${sh}/own/code/dir\n`, "/a\n/b"],
+			[tmp],
+		);
+		// Each input is printed on lines of its own only when it resolves.
+		expect(answer).toEqual(Array(3).fill("unresolved"));
+		const verdicts = verdictsAll([`${sh}/own/code/ok\nx`, `${sh}/own/ok`], [tmp]);
+		expect(verdicts[0]).toEqual(["out", "in"]);
+	});
+
+	(posix ? itWithLinks : it.skip)(
+		"does not resolve through a directory with a line break in its name",
+		() => {
+			const inputs = [
+				`${sh}/own/code/start`,
+				`${sh}/own/code/nl\n/l`,
+				`${sh}/own/code/nlt`,
+				`${sh}/own/code/dangle_in`,
+			];
+			const [answer] = resolveAll(inputs, [tmp]);
+			expect(answer).toEqual(["unresolved", "unresolved", "unresolved", `${sh}/own/code/in_miss`]);
+			const [verdict] = verdictsAll(inputs, [`${tmp}/own/code/a/b`]);
+			expect(verdict).toEqual(["out", "out", "out", "in"]);
+		},
+	);
 });
 
 // The same checks on a real busybox, where the working-directory reading of a
@@ -278,38 +304,54 @@ const busybox = (() => {
 
 describe.skipIf(!busybox)("on a real busybox (alpine:3)", () => {
 	const script = `${lines}
-mkdir -p /w/own/code/a/b /w/own/code/sub /w/other/code /w/c/d
+NL=$(printf '\\nx'); NL=\${NL%x}
+mkdir -p /w/own/code/a/b/c /w/own/code/sub /w/other/code /w/c/d /w/outside
 ln -s ../../other/code/secret /w/own/code/dangle_out
 ln -s c2 /w/own/code/c1; ln -s ../../other/code/miss /w/own/code/c2
 ln -s loop2 /w/own/code/loop1; ln -s loop1 /w/own/code/loop2
 ln -s ../../../w/own/code/sub/m /w/own/code/sub/up
 ln -s ../x/y/file /w/own/code/filelink
+ln -s ../ok_miss /w/own/code/in_dangle
+mkdir "/w/own/code/nl$NL"
+ln -s a/b/c /w/own/code/nl
+ln -s ../../../outside/x "/w/own/code/nl$NL/l"
+ln -s "nl$NL/l" /w/own/code/start
+ln -s "tail_target$NL" /w/own/code/nlt
 for cwd in / /w/own/code/a/b /w/c/d; do
   cd "$cwd"
-  for p in /w/own/code/dangle_out /w/own/code/dangle_out/more /w/own/code/c1 /w/own/code/sub/up /w/own/code/filelink /w/own/code/loop1; do
-    if r=$(__dokploy_resolve "$p"); then echo "$p => $r"; else echo "$p => unresolved"; fi
+  for p in /w/own/code/dangle_out /w/own/code/dangle_out/more /w/own/code/c1 /w/own/code/sub/up /w/own/code/filelink /w/own/code/loop1 /w/own/code/in_dangle /w/own/code/start /w/own/code/nlt "/w/own/code/nl$NL/l"; do
+    n=$(printf '%s' "$p" | tr '\\n' '~')
+    if r=$(__dokploy_resolve "$p"); then v=$r; else v=unresolved; fi
+    if __dokploy_inside /w/own "$p"; then s=in; else s=out; fi
+    echo "$n => $v => $s"
   done
 done`;
 
-	it("resolves a link from its own directory wherever it runs", () => {
+	it("resolves a link from its own directory wherever it runs, and refuses line breaks", () => {
 		const result = spawnSync(
 			"docker",
 			["run", "--rm", "-i", "alpine:3", "sh", "-s"],
-			{ input: script, encoding: "utf8", timeout: 120_000 },
+			{ input: script, encoding: "utf8", timeout: 150_000 },
 		);
 		const out = result.stdout.trim().split("\n");
-		expect(out).toHaveLength(18);
+		expect(out).toHaveLength(30);
 		const expected: Record<string, string> = {
-			"/w/own/code/dangle_out": "/w/other/code/secret",
-			"/w/own/code/dangle_out/more": "/w/other/code/secret/more",
-			"/w/own/code/c1": "/w/other/code/miss",
-			"/w/own/code/sub/up": "/w/w/own/code/sub/m",
-			"/w/own/code/filelink": "/w/own/x/y/file",
-			"/w/own/code/loop1": "unresolved",
+			"/w/own/code/dangle_out": "/w/other/code/secret => out",
+			"/w/own/code/dangle_out/more": "/w/other/code/secret/more => out",
+			"/w/own/code/c1": "/w/other/code/miss => out",
+			"/w/own/code/sub/up": "/w/w/own/code/sub/m => out",
+			"/w/own/code/filelink": "/w/own/x/y/file => in",
+			"/w/own/code/loop1": "unresolved => out",
+			"/w/own/code/in_dangle": "/w/own/ok_miss => in",
+			// A directory whose name ends in a line break, next to a link of the
+			// same name without it to a deeper directory.
+			"/w/own/code/start": "unresolved => out",
+			"/w/own/code/nlt": "unresolved => out",
+			"/w/own/code/nl~/l": "unresolved => out",
 		};
 		for (const line of out) {
-			const [path, value] = line.split(" => ") as [string, string];
-			expect(value, line).toBe(expected[path]);
+			const [path, ...rest] = line.split(" => ") as [string, ...string[]];
+			expect(rest.join(" => "), line).toBe(expected[path]);
 		}
 	});
 });
