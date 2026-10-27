@@ -5,30 +5,13 @@ import { getPathResolverLines } from "./path-containment";
 import { execAsyncRemote } from "./process/execAsync";
 
 /**
- * Where the paths of a compose's custom command really lead (T-7845).
+ * Resolves the paths of a compose's custom command on the host the compose
+ * deploys on (one command per deploy, every path quoted) and says whether each
+ * stays in the compose's own directory (T-7845). A path that cannot be
+ * resolved counts as `unresolved`.
  *
- * The own-directory rule of the custom command guard (T-7135) compares paths
- * lexically, so a link inside `<COMPOSE_PATH>/<appName>` that points at another
- * compose's directory (`code/link -> ../../other/code`), or a `composePath`
- * that goes through a linked directory, was not followed. These helpers
- * resolve every path on the host the compose deploys on (the links followed,
- * a part that does not exist left as it is) and compare the result with the
- * resolved own directory.
- *
- * A path is given as two readings of the same word:
- * - `raw`: joined to its base without being cleaned up, so `link/../x` is
- *   resolved the way the kernel does (the link first, then `..` in the
- *   directory it leads to);
- * - `normal`: the lexical form the rest of the check (and the files Dokploy
- *   reads itself) works with.
- * They must lead to the same place; `link/..` makes them differ, and the file
- * Dokploy would check is then not the one Docker reads.
- *
- * One shell command carries all the paths of a deploy. It prints one verdict
- * per path and never a resolved path, so nothing a path contains can break the
- * output. A host that cannot resolve (no `realpath -m` or `readlink -f`), a
- * failed command and a missing line all count as `unresolved`: the caller
- * refuses. Every path is quoted.
+ * A path is given as two readings: `raw` (as written, joined to its base) and
+ * `normal` (its lexical form); both have to lead to the same place.
  */
 export type PathReading = { raw: string; normal: string };
 
@@ -37,7 +20,7 @@ export type OwnDirectoryVerdict =
 	| "in"
 	/** Resolves somewhere else. */
 	| "out"
-	/** Inside, but not where its cleaned-up form leads (a link followed by `..`). */
+	/** Inside, but not where its lexical form leads. */
 	| "moved"
 	/** Could not be resolved. */
 	| "unresolved";
@@ -75,6 +58,11 @@ export const parseOwnDirectoryVerdicts = (
 	count: number,
 ): OwnDirectoryVerdict[] => {
 	const lines = stdout.split("\n").map((line) => line.trim());
+	// The first line is the own directory's: anything else in its place (a
+	// banner, a shifted answer) means the lines cannot be trusted.
+	if (lines[0] !== "own:ok" && lines[0] !== "own:unresolved") {
+		return Array.from({ length: count }, () => "unresolved" as const);
+	}
 	const verdicts: OwnDirectoryVerdict[] = [];
 	for (let i = 0; i < count; i++) {
 		const line = lines[i + 1] as OwnDirectoryVerdict | undefined;

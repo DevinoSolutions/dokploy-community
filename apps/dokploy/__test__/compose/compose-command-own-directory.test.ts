@@ -10,10 +10,8 @@ import {
 import { tmpdir } from "node:os";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The own-directory rule of the compose custom command guard (T-7135) compared
-// paths lexically, so a link inside `<COMPOSE_PATH>/<appName>` that points at
-// another compose's directory was not followed. The paths are resolved on the
-// deploy host now, with one command per deploy (T-7845). The cases run with
+// The own-directory check of the compose custom command paths resolves them on
+// the deploy host, with one command per deploy (T-7845). The cases run with
 // real links, a real shell as the "remote" host and the real filesystem as
 // "this host".
 
@@ -65,6 +63,7 @@ import {
 	getOwnDirectoryCheckCommand,
 	parseOwnDirectoryVerdicts,
 } from "@dokploy/server/utils/compose-own-directory";
+import { getPathResolverLines } from "@dokploy/server/utils/path-containment";
 
 const SPEC = "services:\n  web:\n    image: nginx\n";
 const OVERRIDE = 'services:\n  web:\n    environment:\n      DEBUG: "1"\n';
@@ -202,7 +201,7 @@ describe.each([
 	"the custom command paths on %s, with real links",
 	(_name, serverId) => {
 		itWithLinks(
-			"refuses an env file behind a link to the directory of another compose",
+			"refuses an env file whose resolved path is outside the own directory",
 			async () => {
 				dirLink(`${tmp}/compose/${OTHER}`, "elsewhere");
 				await expect(
@@ -269,19 +268,17 @@ describe.each([
 			},
 		);
 
-		// Windows resolves `..` before it looks at a link, so this host is only
-		// tested where the kernel does it the POSIX way.
+		// This host is only tested where the kernel resolves paths the POSIX way.
 		it.skipIf(!linksWork || (!serverId && process.platform === "win32"))(
-			"refuses a link followed by .. : the file Docker reads is not the one checked",
+			"refuses a path whose resolved form differs from its written form",
 			async () => {
-				// `hop/..` is `real/` for Docker, `code/` for a lexical reading.
 				dirLink(`${code()}/real/sub`, "hop");
 				await expect(
 					assertComposeVolumesBound(
 						withCommand("--env-file hop/../.env", serverId),
 					),
 				).rejects.toThrow(
-					/--env-file "hop\/\.\.\/\.env" goes through a symbolic link followed by "\.\."/,
+					/--env-file "hop\/\.\.\/\.env" does not resolve to the place it is written as/,
 				);
 			},
 		);
@@ -337,7 +334,7 @@ describe("a remote host", () => {
 	});
 
 	itWithShell("quotes a path with spaces and shell characters", () => {
-		// A directory that a careless quoting would split, expand or run.
+		// A directory name with spaces and shell characters.
 		const name = "it's a $(touch pwned) dir; x";
 		mkdirSync(`${tmp}/compose/${name}/code`, { recursive: true });
 		const odd = `${shellPath(tmp)}/compose/${name}`;
@@ -378,6 +375,22 @@ describe("a remote host", () => {
 		).rejects.toThrow(
 			/could not be resolved on the host this compose deploys on/,
 		);
+	});
+
+	it("refuses when the host prints a banner before the verdicts", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: "Welcome\nown:ok\nin\n",
+			stderr: "",
+		});
+		await expect(
+			assertCommandPathsResolveInOwnDirectory(
+				withCommand("--env-file real/.env", "srv-1"),
+			),
+		).rejects.toThrow(/could not be resolved/);
+		expect(parseOwnDirectoryVerdicts("Welcome\nown:ok\nin\n", 2)).toEqual([
+			"unresolved",
+			"unresolved",
+		]);
 	});
 
 	it("refuses when the host answers with a verdict for one path only", async () => {
@@ -458,6 +471,22 @@ describe("the shell that resolves the paths", () => {
 				])}`,
 			);
 			expect(lines.slice(0, 2)).toEqual(["own:unresolved", "unresolved"]);
+		},
+	);
+
+	itWithShell(
+		"does not loop on a relative path where only readlink is available",
+		() => {
+			// realpath is hidden, so the readlink -f fallback is the resolver.
+			const result = spawnSync(
+				"sh",
+				[
+					"-c",
+					`realpath() { return 1; }; ${getPathResolverLines("__dokploy_resolve() { return 1; }").join("\n")}\nif __dokploy_resolve relative/path; then echo resolved; else echo refused; fi`,
+				],
+				{ encoding: "utf8", timeout: 5000 },
+			);
+			expect(result.stdout.trim()).toBe("refused");
 		},
 	);
 

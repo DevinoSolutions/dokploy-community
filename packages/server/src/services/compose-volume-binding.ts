@@ -1684,13 +1684,9 @@ const resolveReadings = async (
 	return new Map(keys.map((key, index) => [key, verdicts[index]]));
 };
 
-// The links of the repository (T-7845). The check above is lexical, so
-// `code/link -> ../../<another compose>/code` or a `composePath` that goes
-// through a linked directory stayed "inside". The paths are resolved on the
-// host the compose deploys on, with one command for all of them, and compared
-// with the resolved own directory. A path that cannot be resolved, or a link
-// followed by `..` (which leads somewhere else than the written path does, so
-// not to the file Dokploy checks), is refused.
+// The paths of the command are checked against the resolved own directory on
+// the host the compose deploys on, with one command for all of them (T-7845). A
+// path that cannot be verified is refused.
 export const assertCommandPathsResolveInOwnDirectory = async (
 	compose: ComposeForVolumeCheck & Pick<ComposeNested, "command">,
 ) => {
@@ -1722,8 +1718,8 @@ export const assertCommandPathsResolveInOwnDirectory = async (
 			verdict === "out"
 				? `Compose command refused: the ${name} "${value}" leads outside this compose's own directory (${ownDirectory}) through a symbolic link, so it could read the files, env files or secrets of another compose. Use a path inside the compose's own code that does not go through a link out of it.`
 				: verdict === "moved"
-					? `Compose command refused: the ${name} "${value}" goes through a symbolic link followed by "..", so it does not lead where it is written to, and the file Docker reads cannot be checked. Write the path without "..".`
-					: `Compose command refused: the ${name} "${value}" could not be resolved on the host this compose deploys on, so it cannot be checked against the compose's own directory (${ownDirectory}). Deploy again once the host answers.`,
+					? `Compose command refused: the ${name} "${value}" does not resolve to the place it is written as, so it cannot be checked. Write the path in a direct form.`
+					: `Compose command refused: the ${name} "${value}" could not be resolved on the host this compose deploys on, so it cannot be checked against the compose's own directory (${ownDirectory}). Deploy again once the host answers and has realpath or readlink installed.`,
 		);
 	}
 };
@@ -1980,9 +1976,8 @@ export const assertComposeVolumesBound = async (rawCompose: ComposeNested) => {
 	const overrides = await Promise.all(
 		overrideFiles.map((path) => loadOverrideFile(compose, path)),
 	);
-	// The links of the repository are followed on the deploy host (T-7845),
-	// after the override files were read through their own guarded read (T-8413),
-	// and also when there is nothing else to check.
+	// The resolved check of the paths (T-7845), after the override files were
+	// read through their own guarded read (T-8413).
 	await assertCommandPathsResolveInOwnDirectory(compose);
 	await assertComposeSpecVolumesBound(compose, [spec as Spec, ...overrides], {
 		commandVolumes,
