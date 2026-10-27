@@ -9,6 +9,9 @@ import {
 } from "@dokploy/server/setup/traefik-setup";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const RENAME_RUNNING_ERROR =
+	"could not add service state for endpoint dokploy-traefik-previous to cluster on UpdateDNSNames: cannot create entry in table endpoint_table, already exists";
+
 const mocks = vi.hoisted(() => ({
 	getRemoteDocker: vi.fn(),
 	execAsync: vi.fn(),
@@ -62,6 +65,8 @@ const fakeDocker = (initial: FakeContainer[]) => {
 		},
 		rename: async ({ name }: { name: string }) => {
 			const c = find(ref);
+			// Docker refuses this for a container on a swarm overlay network.
+			if (c.running) throw new Error(RENAME_RUNNING_ERROR);
 			log.push(`rename ${c.id} -> ${name}`);
 			c.name = name;
 		},
@@ -182,13 +187,13 @@ describe("writeTraefikSetup", () => {
 		await expect(second).resolves.toBeUndefined();
 		expect(fake.log).not.toContain("rename old -> dokploy-traefik");
 		expect(fake.log).toEqual([
-			"rename old -> dokploy-traefik-previous",
 			"stop old",
+			"rename old -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove old",
-			"rename new -> dokploy-traefik-previous",
 			"stop new",
+			"rename new -> dokploy-traefik-previous",
 			"create new2",
 			"start new2",
 			"remove new",
@@ -227,8 +232,8 @@ describe("writeTraefikSetup", () => {
 		await expect(action).resolves.toBeUndefined();
 		await expect(startup).resolves.toBeUndefined();
 		expect(fake.log).toEqual([
-			"rename old -> dokploy-traefik-previous",
 			"stop old",
+			"rename old -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove old",
@@ -340,8 +345,8 @@ describe("writeTraefikSetup", () => {
 		await action;
 		await reload;
 		expect(fake.log).toEqual([
-			"rename old -> dokploy-traefik-previous",
 			"stop old",
+			"rename old -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove old",
@@ -455,8 +460,8 @@ describe("writeTraefikSetup", () => {
 		expect(fake.log).toEqual([
 			"rename stale -> dokploy-traefik",
 			"start stale",
-			"rename stale -> dokploy-traefik-previous",
 			"stop stale",
+			"rename stale -> dokploy-traefik-previous",
 			"create new",
 			"start new",
 			"remove stale",

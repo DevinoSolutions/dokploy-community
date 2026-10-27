@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**The Traefik update no longer fails on Docker engines that refuse to rename a container attached to the overlay network** (T-9412). Docker 25 to 29.6 refuse to rename a running container on a swarm overlay network ("could not add service state for endpoint ... already exists", moby/moby#42351), and Traefik is attached to `dokploy-network`, so Web Server → Traefik → Check Version, and the port and environment changes failed at the step that moves the running Traefik aside, and left the old Traefik running. Traefik is now stopped before it is renamed, which Docker allows, and it was stopped right after the rename before anyway, so the downtime is unchanged. If the rename still fails, the old Traefik is started again and the error says so; putting back a Traefik left behind by an interrupted update stops it first if it is running. Remote servers use the same code. Upgrade impact: none. No migration.
+
 **A root organization pin that matches no organization now says so** (T-8932). When `DOKPLOY_ROOT_ORGANIZATION_ID` names an organization that does not exist, the refusal of a host-level setting or of an instance-management action now says so and what to set, instead of the generic message. Who is allowed does not change. No migration.
 
 **A server setup that cannot start its SSH connection now lists what to check** (T-8331). An invalid SSH username or an unreadable private key now gets the same layout as the other connection errors, with the technical detail and what to check. No migration.
