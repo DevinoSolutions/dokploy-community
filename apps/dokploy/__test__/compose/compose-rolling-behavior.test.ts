@@ -1040,7 +1040,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			expect(result.stdout).toContain(
 				"the old container did not become healthy again",
 			);
-			expect(result.stdout).toContain("nothing was removed");
+			expect(result.stdout).toContain("Nothing was replaced");
 			// Nothing is stopped or removed, so whatever still serves stays.
 			expect(log.some((line) => /^docker (stop|rm)/.test(line))).toBe(false);
 			expect(containersOf(world, "web")).toHaveLength(2);
@@ -1067,6 +1067,67 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			expect(containersOf(world, "web")).toHaveLength(2);
 			expect(result.promoted).toBe("1");
 		});
+
+		it.each([
+			["the old container recovers", 0],
+			["the old container does not recover", 1],
+		])(
+			"the state during the recovery wait, and after it: %s",
+			{
+				timeout: 90_000,
+			},
+			(_label, waitRc) => {
+				// A new replica that is unhealthy, and the functions called directly with
+				// the recovery wait replaced by a probe of the state variables.
+				const world = createWorld(drainableWeb());
+				const newId = "web-new-9";
+				const base = join(world.state, "containers", newId);
+				mkdirSync(base);
+				for (const [name, value] of Object.entries({
+					service: "web",
+					hash: "H2",
+					image: "sha256:NEW-web",
+					running: "true",
+					created: "2026-10-15T10:09:00.000000000Z",
+					final_health: "unhealthy",
+					polls_left: "0",
+				})) {
+					writeFileSync(join(base, name), value);
+				}
+				const { definitions } = getRollingReplaceScript(baseOptions);
+				const script = [
+					definitions,
+					`dokploy_roll_wait_recovered() { echo "DURING active=$DOKPLOY_ROLL_ACTIVE promoting=[$DOKPLOY_ROLL_PROMOTING] promoted=$DOKPLOY_ROLL_PROMOTED"; return ${waitRc}; }`,
+					'dokploy_roll_fail() { echo "FAIL active=$DOKPLOY_ROLL_ACTIVE"; }',
+					`DR_WAS_PROMOTED=0; DR_MARKED=1; DR_EMPTY=$(mktemp); DOKPLOY_ROLL_SVC=web`,
+					`DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTING=${OLD}; DOKPLOY_ROLL_PROMOTED=1`,
+					`dokploy_roll_new_still_ok web ${newId} ${OLD}; echo "RC=$? AFTER active=$DOKPLOY_ROLL_ACTIVE promoting=[$DOKPLOY_ROLL_PROMOTING] promoted=$DOKPLOY_ROLL_PROMOTED"`,
+				].join("\n");
+				const result = spawnSync("sh", [writeScript(world, script)], {
+					encoding: "utf8",
+					env: envFor(world),
+					timeout: 60_000,
+				});
+				// During the wait a cancel would discard the new replica and keep the old one.
+				expect(result.stdout).toContain(
+					"DURING active=1 promoting=[] promoted=0",
+				);
+				expect(result.stdout).toContain("RC=1");
+				if (waitRc === 0) {
+					expect(result.stdout).toContain("FAIL active=1");
+					expect(result.stdout).toContain(
+						"AFTER active=1 promoting=[] promoted=0",
+					);
+				} else {
+					// Nothing is known to serve: nothing is removed, a cancel removes nothing.
+					expect(result.stdout).not.toContain("FAIL");
+					expect(result.stdout).toContain(
+						"AFTER active=0 promoting=[] promoted=1",
+					);
+					expect(result.stdout).toContain("Nothing was replaced");
+				}
+			},
+		);
 
 		it("the file that undoes the marker is prepared before the marker is written", () => {
 			const { definitions } = getRollingReplaceScript({
@@ -1668,6 +1729,40 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				expect(left[0]).toMatch(/^web-new-/);
 				expect(runningOf(world, "web")).toEqual(left);
 				expect(callsOf(world)).toMatch(/docker stop zz-old-web/);
+			});
+
+			it("a cancel while the old container is being put back in rotation keeps the old one and removes the new one", {
+				timeout: 90_000,
+			}, async () => {
+				// The new replica goes bad after the marker; the old container stays
+				// unhealthy for 30 polls after the undo copy: the script is waiting.
+				const world = createWorld(
+					drainableWeb(
+						{ recoverMode: "delay:30" },
+						{ flags: ["flip_new_on_cp"] },
+					),
+				);
+				const { pidFile, exited, signalGroup } = launch(
+					world,
+					scriptFor({ routeSettleSeconds: 1, healthTimeoutSeconds: 60 }),
+					10,
+				);
+				expect(
+					await waitUntil(
+						() =>
+							existsSync(pidFile) &&
+							(callsOf(world).match(/docker cp/g) ?? []).length >= 2,
+					),
+				).toBe(true);
+				await new Promise((resolve) => setTimeout(resolve, 1500));
+
+				signalGroup("TERM");
+				await exited;
+
+				// The container being restored survives; the bad replica is gone.
+				expect(containersOf(world, "web")).toEqual([OLD]);
+				expect(runningOf(world, "web")).toEqual([OLD]);
+				expect(callsOf(world)).not.toMatch(/docker stop zz-old-web/);
 			});
 
 			it("a cancel right after the marker is written still keeps the new replica", {

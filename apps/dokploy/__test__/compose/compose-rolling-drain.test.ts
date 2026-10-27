@@ -637,7 +637,6 @@ describe("the drain in the generated script", () => {
 			[
 				"dokploy_roll_unmark",
 				"dokploy_roll_wait_recovered",
-				"DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED",
 				'if [ "$DR_BACK" = "1" ]; then',
 				'dokploy_roll_fail "$1"',
 			],
@@ -653,7 +652,7 @@ describe("the drain in the generated script", () => {
 		const definitions = script();
 		const stillOk = definitions.indexOf("dokploy_roll_new_still_ok() {");
 		const fail = definitions.indexOf('dokploy_roll_fail "$1"', stillOk);
-		const kept = definitions.indexOf("nothing was removed", stillOk);
+		const kept = definitions.indexOf("Nothing was replaced", stillOk);
 		expect(fail).toBeGreaterThan(definitions.indexOf("DR_BACK=1;", stillOk));
 		expect(kept).toBeGreaterThan(fail);
 		// The never-recovers path removes and stops nothing.
@@ -666,6 +665,20 @@ describe("the drain in the generated script", () => {
 		);
 		// The recovery wait is interval + timeout + 5 s.
 		expect(definitions).toContain("b = i + t + 5");
+	});
+
+	it("the old container is marked as the survivor before the unmark and the recovery wait", () => {
+		inOrder(
+			script(),
+			[
+				"DR_BACK=1;",
+				'DOKPLOY_ROLL_ACTIVE=1; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED;',
+				"dokploy_roll_unmark",
+				"dokploy_roll_wait_recovered",
+				"DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTED=1;",
+			],
+			"dokploy_roll_new_still_ok() {",
+		);
 	});
 
 	it("reads the healthcheck test on its own, so no healthcheck and a failed inspect are told apart", () => {

@@ -992,6 +992,8 @@ export const getRollingReplaceScript = ({
 			if [ "$DR_NST" = "running healthy" ]; then return 0; fi;
 			dokploy_roll_log "$1: the new replica is $DR_NST, putting the old container back in rotation";
 			DR_BACK=1;
+			# The old container is being restored: a cancel from here on discards the new replica and keeps it.
+			DOKPLOY_ROLL_ACTIVE=1; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED;
 			if [ "$DR_MARKED" = "1" ]; then
 				if dokploy_roll_unmark "$3"; then
 					for DR_O in $3; do dokploy_roll_wait_recovered "$DR_O" || DR_BACK=0; done;
@@ -999,16 +1001,14 @@ export const getRollingReplaceScript = ({
 					DR_BACK=0;
 				fi;
 			fi;
-			DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_PROMOTED=$DR_WAS_PROMOTED;
 			DOKPLOY_ROLL_REASON="the new replica was $DR_NST after the old container was taken out of rotation";
 			if [ "$DR_BACK" = "1" ]; then
-				DOKPLOY_ROLL_ACTIVE=1;
 				dokploy_roll_fail "$1";
 				return 1;
 			fi;
 			# Neither container is known to serve: remove nothing, leave both for the next deploy to reconcile.
 			DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTED=1;
-			echo "Error: ❌ Rolling replace of $1 failed: $DOKPLOY_ROLL_REASON, and the old container did not become healthy again after the drain marker was removed. Both containers were left running and nothing was removed; the next deploy reconciles them.";
+			echo "Error: ❌ Rolling replace of $1 failed: $DOKPLOY_ROLL_REASON, and the old container did not become healthy again after the drain marker was removed. Nothing was replaced: both containers were left running and nothing was stopped or removed, and the next deploy reconciles them.";
 			return 1;
 		};
 		dokploy_roll_discard() {
