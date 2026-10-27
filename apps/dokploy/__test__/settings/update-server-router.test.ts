@@ -455,6 +455,16 @@ describe("settings.getUpdateRollback", () => {
 		await expect(caller.getUpdateRollback()).resolves.toBeNull();
 	});
 
+	it("is refused to an organization that doesn't own the instance", async () => {
+		state.isRoot = false;
+		mocks.readDokployRollbackPoint.mockResolvedValue(recordedPoint);
+
+		await expect(caller.getUpdateRollback()).rejects.toMatchObject({
+			code: "FORBIDDEN",
+		});
+		expect(mocks.readDokployRollbackPoint).not.toHaveBeenCalled();
+	});
+
 	it("passes the record date through", async () => {
 		const dated = { ...recordedPoint, recordedAt: "2026-10-27T10:00:00.000Z" };
 		mocks.readDokployRollbackPoint.mockResolvedValue(dated);

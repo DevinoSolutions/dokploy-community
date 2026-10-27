@@ -1068,10 +1068,11 @@ export const settingsRouter = createTRPCRouter({
 
 			return true;
 		}),
-	getUpdateRollback: adminProcedure.query(async () => {
+	getUpdateRollback: adminProcedure.query(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return null;
 		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		return await readDokployRollbackPoint(packageInfo.version);
 	}),
 	// The migrations installing a release applies, so the Update dialog can say

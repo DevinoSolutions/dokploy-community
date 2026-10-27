@@ -407,7 +407,7 @@ export const UpdateServer = ({
 							</p>
 						)}
 					{pinnedVersion && !pinnedTargetError && (
-						<UpdateMigrationNotice version={pinnedVersion} />
+						<UpdateMigrationNotice version={pinnedVersion} debounceMs={500} />
 					)}
 					{rollbackPoint && (
 						<div className="space-y-2">

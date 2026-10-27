@@ -30,7 +30,9 @@ vi.mock("@dokploy/server/utils/process/spawnAsync", () => ({
 }));
 
 const {
+	clearTargetMigrationJournalCache,
 	fetchTargetMigrationJournal,
+	getTargetMigrationJournal,
 	getUpdateMigrationDelta,
 	readLastAppliedMigration,
 	readRunningMigrationJournal,
@@ -105,6 +107,17 @@ describe("computeMigrationDelta", () => {
 		).toEqual({ applies: [], staysApplied: [] });
 	});
 
+	it("lists a migration the running image ships but the database hasn't applied", () => {
+		// A failed migration batch: the running journal has 0224, the table doesn't.
+		expect(
+			computeMigrationDelta({
+				running: TARGET,
+				target: TARGET,
+				appliedUpTo: 200,
+			}).applies,
+		).toEqual(["0224_deployment_pinned_commit"]);
+	});
+
 	it("applies what is newer than the database", () => {
 		expect(
 			computeMigrationDelta({
@@ -145,11 +158,12 @@ describe("parseMigrationJournal", () => {
 
 describe("fetchTargetMigrationJournal", () => {
 	const answer = (body: unknown, init: { ok?: boolean } = {}) =>
-		vi.fn(async (_url: string, _init?: RequestInit) => ({
-			ok: init.ok ?? true,
-			text: async () =>
-				typeof body === "string" ? body : JSON.stringify(body),
-		}));
+		vi.fn(
+			async (_url: string, _init?: RequestInit) =>
+				new Response(typeof body === "string" ? body : JSON.stringify(body), {
+					status: init.ok === false ? 404 : 200,
+				}),
+		);
 	const asFetch = (fn: ReturnType<typeof answer>) =>
 		fn as unknown as typeof fetch;
 
@@ -172,7 +186,7 @@ describe("fetchTargetMigrationJournal", () => {
 		expect(url).toBe(
 			"https://raw.githubusercontent.com/DevinoSolutions/dokploy-community/v0.30.8-community.35/apps/dokploy/drizzle/meta/_journal.json",
 		);
-		expect(init).toMatchObject({ method: "GET" });
+		expect(init).toMatchObject({ method: "GET", redirect: "error" });
 		expect(init?.signal).toBeInstanceOf(AbortSignal);
 	});
 
@@ -208,6 +222,62 @@ describe("fetchTargetMigrationJournal", () => {
 		await expect(
 			fetchTargetMigrationJournal("v0.30.8-community.35", fetchImpl),
 		).resolves.toBeNull();
+	});
+
+	it("stops reading a body that is past the cap, instead of holding it", async () => {
+		let pulled = 0;
+		// Never ends and says nothing about its size: only the cap stops it.
+		const endless = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulled++;
+				controller.enqueue(new Uint8Array(256 * 1024).fill(32));
+			},
+		});
+		const fetchImpl = vi.fn(
+			async () => new Response(endless),
+		) as unknown as typeof fetch;
+
+		await expect(
+			fetchTargetMigrationJournal("v0.30.8-community.35", fetchImpl),
+		).resolves.toBeNull();
+		// 1 MiB is four chunks; the reader may have a few more in flight.
+		expect(pulled).toBeLessThan(10);
+	});
+
+	it("refuses a body that declares more than the cap without reading it", async () => {
+		const body = new ReadableStream<Uint8Array>({
+			pull() {
+				throw new Error("must not be read");
+			},
+		});
+		const fetchImpl = vi.fn(
+			async () =>
+				new Response(body, {
+					headers: { "content-length": String(2 * 1024 * 1024) },
+				}),
+		) as unknown as typeof fetch;
+
+		await expect(
+			fetchTargetMigrationJournal("v0.30.8-community.35", fetchImpl),
+		).resolves.toBeNull();
+	});
+
+	it("reads a journal that arrives in several chunks", async () => {
+		const bytes = new TextEncoder().encode(JSON.stringify(journal(TARGET)));
+		const chunked = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(bytes.slice(0, 20));
+				controller.enqueue(bytes.slice(20));
+				controller.close();
+			},
+		});
+		const fetchImpl = vi.fn(
+			async () => new Response(chunked),
+		) as unknown as typeof fetch;
+
+		await expect(
+			fetchTargetMigrationJournal("v0.30.8-community.35", fetchImpl),
+		).resolves.toEqual(TARGET);
 	});
 
 	it.each([
@@ -264,6 +334,84 @@ describe("running side", () => {
 	it("gives null when the database can't be read", async () => {
 		mocks.execute.mockRejectedValue(new Error("relation does not exist"));
 		await expect(readLastAppliedMigration()).resolves.toBeNull();
+	});
+});
+
+describe("getTargetMigrationJournal cache", () => {
+	const TAG = "v0.30.8-community.35";
+	let clock: number;
+	const now = () => clock;
+
+	beforeEach(() => {
+		clock = 1_000_000;
+		clearTargetMigrationJournalCache();
+	});
+
+	it("asks GitHub once for a tag within five minutes", async () => {
+		const fetchJournal = vi.fn(async () => TARGET);
+
+		await getTargetMigrationJournal(TAG, { fetchJournal, now });
+		clock += 4 * 60_000;
+		await expect(
+			getTargetMigrationJournal(TAG, { fetchJournal, now }),
+		).resolves.toEqual(TARGET);
+
+		expect(fetchJournal).toHaveBeenCalledOnce();
+	});
+
+	it("asks again after five minutes", async () => {
+		const fetchJournal = vi.fn(async () => TARGET);
+
+		await getTargetMigrationJournal(TAG, { fetchJournal, now });
+		clock += 5 * 60_000 + 1;
+		await getTargetMigrationJournal(TAG, { fetchJournal, now });
+
+		expect(fetchJournal).toHaveBeenCalledTimes(2);
+	});
+
+	it("remembers a failure for 30 seconds only", async () => {
+		const fetchJournal = vi.fn(async () => null);
+
+		await getTargetMigrationJournal(TAG, { fetchJournal, now });
+		clock += 20_000;
+		await getTargetMigrationJournal(TAG, { fetchJournal, now });
+		expect(fetchJournal).toHaveBeenCalledOnce();
+
+		clock += 11_000;
+		await getTargetMigrationJournal(TAG, { fetchJournal, now });
+		expect(fetchJournal).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps at most 50 tags, oldest out first", async () => {
+		const fetchJournal = vi.fn(async () => TARGET);
+		for (let i = 1; i <= 51; i++) {
+			await getTargetMigrationJournal(`v0.30.8-community.${i}`, {
+				fetchJournal,
+				now,
+			});
+		}
+		expect(fetchJournal).toHaveBeenCalledTimes(51);
+
+		// The newest is still there, the oldest is gone.
+		await getTargetMigrationJournal("v0.30.8-community.51", {
+			fetchJournal,
+			now,
+		});
+		expect(fetchJournal).toHaveBeenCalledTimes(51);
+		await getTargetMigrationJournal("v0.30.8-community.1", {
+			fetchJournal,
+			now,
+		});
+		expect(fetchJournal).toHaveBeenCalledTimes(52);
+	});
+
+	it("doesn't ask, or cache, for what is not a release tag", async () => {
+		const fetchJournal = vi.fn(async () => TARGET);
+
+		await expect(
+			getTargetMigrationJournal("main", { fetchJournal, now }),
+		).resolves.toBeNull();
+		expect(fetchJournal).not.toHaveBeenCalled();
 	});
 });
 
@@ -450,9 +598,9 @@ describe("rollback record guard", () => {
 
 	describe("an update started while the previous one is still settling", () => {
 		it.each(["updating", "paused", "rollback_started"])(
-			"leaves no record while the service is %s",
+			"removes a point that can't be checked while the service is %s",
 			async (state) => {
-				write(point);
+				write({ version: "v0.30.8-community.33", digest: DIGEST });
 				spec(`${INSTALLED}@${OTHER_DIGEST}`, state);
 
 				await recordDokployRollbackPoint("v0.30.8-community.33", {
@@ -461,11 +609,56 @@ describe("rollback record guard", () => {
 				});
 
 				expect(existsSync(file)).toBe(false);
-				await expect(
-					readDokployRollbackPoint("v0.30.8-community.34", file),
-				).resolves.toBeNull();
 			},
 		);
+
+		it("keeps a point that names its installed image through a retry after a paused update", async () => {
+			write(point);
+			// A failed update leaves the service paused on the image it was given.
+			spec(`${INSTALLED}@${OTHER_DIGEST}`, "paused");
+
+			await recordDokployRollbackPoint("v0.30.8-community.33", {
+				file,
+				installedImage: INSTALLED,
+			});
+
+			expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(point);
+			spec(`${INSTALLED}@${OTHER_DIGEST}`);
+			await expect(
+				readDokployRollbackPoint("v0.30.8-community.34", file),
+			).resolves.toEqual(point);
+		});
+
+		it("keeps the point on a double submit of the same update", async () => {
+			spec(`${REPO}:v0.30.8-community.33@${DIGEST}`);
+			await recordDokployRollbackPoint("v0.30.8-community.33", {
+				file,
+				installedImage: INSTALLED,
+			});
+			const first = JSON.parse(readFileSync(file, "utf8"));
+
+			// The second submit finds the first one updating.
+			spec(`${INSTALLED}@${OTHER_DIGEST}`, "updating");
+			await recordDokployRollbackPoint("v0.30.8-community.33", {
+				file,
+				installedImage: INSTALLED,
+			});
+
+			expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(first);
+		});
+
+		it("hides a kept point once the service runs something else", async () => {
+			write(point);
+			spec(`${REPO}:v0.30.8-community.35@${OTHER_DIGEST}`, "updating");
+			await recordDokployRollbackPoint("v0.30.8-community.33", {
+				file,
+				installedImage: `${REPO}:v0.30.8-community.35`,
+			});
+
+			await expect(
+				readDokployRollbackPoint("v0.30.8-community.33", file),
+			).resolves.toBeNull();
+		});
 
 		it("replaces the record once the service has settled", async () => {
 			write(point);

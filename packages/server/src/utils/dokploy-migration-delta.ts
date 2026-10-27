@@ -56,10 +56,8 @@ export const computeMigrationDelta = ({
 		a.when - b.when;
 	return {
 		applies: target
-			.filter(
-				(entry) =>
-					!runningTags.has(entry.tag) &&
-					(!hasCutoff || entry.when > appliedUpTo),
+			.filter((entry) =>
+				hasCutoff ? entry.when > appliedUpTo : !runningTags.has(entry.tag),
 			)
 			.sort(byWhen)
 			.map((entry) => entry.tag),

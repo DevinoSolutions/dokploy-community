@@ -1,4 +1,5 @@
 import { Database, Loader2 } from "lucide-react";
+import { useEffect, useState } from "react";
 import { api } from "@/utils/api";
 
 const migrations = (count: number) =>
@@ -17,14 +18,35 @@ const MigrationList = ({ tags }: { tags: string[] }) => (
  * running version has and the ones the target ships. Informational only: it
  * never blocks the install, and a failed check says so.
  */
-export const UpdateMigrationNotice = ({ version }: { version: string }) => {
+export const UpdateMigrationNotice = ({
+	version,
+	debounceMs = 0,
+}: {
+	version: string;
+	/** Waits this long after `version` stops changing, for a typed tag. */
+	debounceMs?: number;
+}) => {
+	const [settledVersion, setSettledVersion] = useState(version);
+	useEffect(() => {
+		if (debounceMs <= 0) {
+			setSettledVersion(version);
+			return;
+		}
+		const timer = setTimeout(() => setSettledVersion(version), debounceMs);
+		return () => clearTimeout(timer);
+	}, [version, debounceMs]);
+
 	const { data, isLoading, isError } =
 		api.settings.getUpdateMigrationDelta.useQuery(
-			{ version },
-			{ retry: false, refetchOnWindowFocus: false },
+			{ version: settledVersion },
+			{
+				retry: false,
+				refetchOnWindowFocus: false,
+				staleTime: 5 * 60_000,
+			},
 		);
 
-	if (isLoading) {
+	if (isLoading || settledVersion !== version) {
 		return (
 			<p className="flex items-center gap-2 text-xs text-muted-foreground">
 				<Loader2 className="h-3 w-3 animate-spin" />
@@ -61,10 +83,6 @@ export const UpdateMigrationNotice = ({ version }: { version: string }) => {
 						{applies.length === 1 ? `: ${applies[0]}` : ":"}
 					</p>
 					{applies.length > 1 && <MigrationList tags={applies} />}
-					<p className="mt-1 text-yellow-600 dark:text-yellow-400">
-						Rolling back later only switches the image. It does not undo{" "}
-						{applies.length === 1 ? "this migration" : "these migrations"}.
-					</p>
 				</div>
 			)}
 			{staysApplied.length > 0 && (
@@ -75,11 +93,11 @@ export const UpdateMigrationNotice = ({ version }: { version: string }) => {
 						{staysApplied.length === 1 ? `: ${staysApplied[0]}` : ":"}
 					</p>
 					{staysApplied.length > 1 && <MigrationList tags={staysApplied} />}
-					<p className="mt-1 text-yellow-600 dark:text-yellow-400">
-						Rolling back only switches the image. It does not undo migrations.
-					</p>
 				</div>
 			)}
+			<p className="text-yellow-600 dark:text-yellow-400">
+				Rolling back only switches the image. It does not undo migrations.
+			</p>
 		</div>
 	);
 };

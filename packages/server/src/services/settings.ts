@@ -116,9 +116,10 @@ const inspectDokployService = async () => {
  * repo, the old point is removed so no rollback to a stale version is offered.
  * `installedImage` is the image the update is about to install. The old point
  * is kept when `installing` is the running version itself (a reinstall
- * replaces nothing). It is removed while an earlier update is still settling:
- * the service spec already names that update's image, so what is running, and
- * what the old point would roll back from, is unknown.
+ * replaces nothing). While an earlier update is still settling the service
+ * spec already names that update's image, so what is running is unknown: the
+ * old point is kept if it names the image it installed (the read checks it),
+ * and removed if it doesn't.
  */
 export const recordDokployRollbackPoint = async (
 	currentVersion: string,
@@ -136,7 +137,17 @@ export const recordDokployRollbackPoint = async (
 	try {
 		const { image, state } = await inspectDokployService();
 		if (!SETTLED_UPDATE_STATES.has(state)) {
-			await rm(file, { force: true });
+			// A point that names the image it installed is checked against the
+			// service when it is read, so a stale one is hidden there. Keep it: a
+			// retry after a paused update, or a second submit while the first is
+			// updating, would otherwise lose a valid point. One without that image
+			// can't be checked, so it goes.
+			const checkable = await readFile(file, "utf8")
+				.then((raw) => typeof JSON.parse(raw)?.installedImage === "string")
+				.catch(() => false);
+			if (!checkable) {
+				await rm(file, { force: true });
+			}
 			return;
 		}
 		const match = SERVICE_IMAGE_REGEX.exec(image);
