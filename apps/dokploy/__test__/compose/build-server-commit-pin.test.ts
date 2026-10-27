@@ -504,6 +504,7 @@ describe("the compose checks on the build server's own files (T-7960)", () => {
 				composeId: "c1",
 				serverId: "build-1",
 			}),
+			{ patches: [] },
 		);
 		// After the clone and the commit check, before the compose file and
 		// .env are written and before the configuration is resolved.
@@ -511,6 +512,24 @@ describe("the compose checks on the build server's own files (T-7960)", () => {
 		expect(before.some(isCommitRead)).toBe(true);
 		expect(before.some((c) => c.includes("echo write-compose;"))).toBe(false);
 		expect(before.some((c) => c.includes("config --format json"))).toBe(false);
+	});
+
+	it("checks and writes the compose file from the serving host's patch rows, not a second read (T-8260)", async () => {
+		const { writeDomainsToCompose } = await import(
+			"@dokploy/server/utils/docker/domain"
+		);
+		vi.mocked(writeDomainsToCompose).mockClear();
+		mocks.generateApplyPatchesCommand.mockResolvedValue("");
+		const checked = [{ patchId: "p1", enabled: true }];
+		const { run } = deploy({ patches: checked });
+		await expect(run).resolves.toBeDefined();
+
+		const [, guardOptions] =
+			mocks.assertComposeVolumesBound.mock.calls[0] ?? [];
+		expect(guardOptions.patches).toBe(checked);
+		const [, , writeOptions] =
+			vi.mocked(writeDomainsToCompose).mock.calls[0] ?? [];
+		expect(writeOptions?.patches).toBe(checked);
 	});
 
 	it("a refusal there builds and pushes nothing, and puts the previous release back", async () => {
@@ -536,6 +555,7 @@ describe("the compose checks on the build server's own files (T-7960)", () => {
 		expect(mocks.cloneGitRepository).not.toHaveBeenCalled();
 		expect(mocks.assertComposeVolumesBound).toHaveBeenCalledWith(
 			expect.objectContaining({ serverId: "build-1" }),
+			expect.anything(),
 		);
 	});
 });
