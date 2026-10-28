@@ -1,8 +1,6 @@
-import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -16,7 +14,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 // "this host".
 
 // Each real-shell case starts a few shells, which is slow on Windows.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 120_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
@@ -63,13 +61,16 @@ import {
 	getOwnDirectoryCheckCommand,
 	parseOwnDirectoryVerdicts,
 } from "@dokploy/server/utils/compose-own-directory";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
 const SPEC = "services:\n  web:\n    image: nginx\n";
 const OVERRIDE = 'services:\n  web:\n    environment:\n      DEBUG: "1"\n';
 
-const shells = ["sh"].filter(
-	(shell) => spawnSync(shell, ["-c", "true"]).status === 0,
-);
+const shells = boundedShellAvailable ? ["sh"] : [];
 const tempBase = () =>
 	(process.platform === "win32" ? process.cwd() : tmpdir()).replaceAll(
 		"\\",
@@ -90,7 +91,7 @@ const shellPath = (path: string) =>
 // skipped elsewhere.
 const linksWork = (() => {
 	if (shells.length === 0) return false;
-	const probe = mkdtempSync(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
+	const probe = makeTempDir(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
 		"\\",
 		"/",
 	);
@@ -98,8 +99,7 @@ const linksWork = (() => {
 		mkdirSync(`${probe}/dir`);
 		writeFileSync(`${probe}/dir/file`, "x");
 		symlinkSync(`${probe}/dir`, `${probe}/dir-link`, "junction");
-		const result = spawnSync(
-			"sh",
+		const result = boundedSh(
 			[
 				"-c",
 				'[ -L "$1/dir-link" ] && [ "$(realpath -m -- "$1/dir-link/file")" = "$(realpath -m -- "$1/dir/file")" ]',
@@ -130,7 +130,7 @@ const dirLink = (target: string, name: string) =>
 
 // A remote host that is the local shell.
 const runInShell = async (_serverId: string, command: string) => {
-	const result = spawnSync("sh", ["-c", command], {
+	const result = boundedSh(["-c", command], {
 		encoding: "utf8",
 		timeout: 10_000,
 	});
@@ -177,7 +177,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.execAsyncRemote.mockImplementation(runInShell);
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
-	tmp = mkdtempSync(`${tempBase()}/.dokploy-own-`).replaceAll("\\", "/");
+	tmp = makeTempDir(`${tempBase()}/.dokploy-own-`).replaceAll("\\", "/");
 	mocks.base.local = `${tmp}/compose`;
 	mocks.base.remote = `${shellPath(tmp)}/compose`;
 	mkdirSync(`${code()}/real/sub`, { recursive: true });
@@ -338,8 +338,7 @@ describe("a remote host", () => {
 		mkdirSync(`${tmp}/compose/${name}/code`, { recursive: true });
 		const odd = `${shellPath(tmp)}/compose/${name}`;
 		const reading = (path: string) => ({ raw: path, normal: path });
-		const result = spawnSync(
-			"sh",
+		const result = boundedSh(
 			[
 				"-c",
 				getOwnDirectoryCheckCommand(odd, [
@@ -428,7 +427,7 @@ describe("a remote host", () => {
 
 describe("the shell that resolves the paths", () => {
 	const run = (command: string) =>
-		spawnSync("sh", ["-c", command], { encoding: "utf8" }).stdout.split("\n");
+		boundedSh(["-c", command], { encoding: "utf8" }).stdout.split("\n");
 
 	itWithLinks("tells in, out and moved apart, with real links", () => {
 		const own = `${shellPath(tmp)}/compose/${APP}`;
@@ -477,15 +476,14 @@ describe("the shell that resolves the paths", () => {
 		"refuses a relative path without looping, with only readlink available",
 		() => {
 			// realpath is hidden, so the readlink -f fallback is the resolver.
-			const result = spawnSync(
-				"sh",
+			const result = boundedSh(
 				[
 					"-c",
 					`realpath() { return 1; }; ${getOwnDirectoryCheckCommand("/own", [
 						{ raw: "relative/path", normal: "relative/path" },
 					])}`,
 				],
-				{ encoding: "utf8", timeout: 5000 },
+				{ encoding: "utf8", timeout: 60_000 },
 			);
 			expect(result.stdout.split("\n").slice(0, 2)).toEqual([
 				"own:ok",

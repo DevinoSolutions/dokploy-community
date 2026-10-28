@@ -1,14 +1,12 @@
-import { spawnSync } from "node:child_process";
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { getPathResolverLines } from "@dokploy/server/utils/path-containment";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
 // Each case starts a shell, which is slow on Windows and under load.
 vi.setConfig({ testTimeout: 60_000 });
@@ -18,7 +16,7 @@ vi.setConfig({ testTimeout: 60_000 });
 // An input that is not an absolute path has to end there with the same failure
 // the resolver already reports, and absolute inputs resolve as before (T-9475).
 
-const shellWorks = spawnSync("sh", ["-c", "true"]).status === 0;
+const shellWorks = boundedShellAvailable;
 const itWithShell = it.skipIf(!shellWorks);
 
 const tempBase = () =>
@@ -44,7 +42,7 @@ const lines = getPathResolverLines("__dokploy_resolve() { return 1; }").join(
 const MINIMAL = "realpath() { return 1; }\n";
 
 const run = (script: string, minimal: boolean) =>
-	spawnSync("sh", ["-c", `${minimal ? MINIMAL : ""}${lines}\n${script}`], {
+	boundedSh(["-c", `${minimal ? MINIMAL : ""}${lines}\n${script}`], {
 		encoding: "utf8",
 		timeout: 30_000,
 	});
@@ -66,7 +64,7 @@ let tmp = "";
 let sh = "";
 let linksWork = false;
 beforeAll(() => {
-	tmp = mkdtempSync(`${tempBase()}/.dokploy-resolver-`).replaceAll("\\", "/");
+	tmp = makeTempDir(`${tempBase()}/.dokploy-resolver-`).replaceAll("\\", "/");
 	sh = shellPath(tmp);
 	mkdirSync(`${tmp}/own/code`, { recursive: true });
 	mkdirSync(`${tmp}/other/code`, { recursive: true });
@@ -137,8 +135,7 @@ describe.each([
 describe("the resolver with realpath -m", () => {
 	itWithShell("prints exactly what realpath -m prints", () => {
 		const inputs = [`${sh}/own/code/file`, `${sh}/own/code/../code/./file`];
-		const direct = spawnSync(
-			"sh",
+		const direct = boundedSh(
 			["-c", inputs.map((i) => `realpath -m -- '${i}'`).join("\n")],
 			{ encoding: "utf8" },
 		).stdout;
