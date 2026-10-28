@@ -123,4 +123,43 @@ describe("getDeploymentErrorMessage (build failure notification body)", () => {
 			}),
 		).resolves.toBe(FALLBACK);
 	});
+
+	it("reports a lost SSH connection instead of reading the log", async () => {
+		const error = new ExecError("SSH connection error: Keepalive timeout", {
+			command: SCRIPT,
+			serverId: "server-1",
+			originalError: new Error("Keepalive timeout"),
+		});
+
+		const message = await getDeploymentErrorMessage({
+			logPath: "/etc/dokploy/logs/web-abc/web-abc-2026.log",
+			serverId: "server-1",
+			fallback: FALLBACK,
+			error,
+		});
+
+		expect(message).toBe("SSH connection error: Keepalive timeout");
+		expect(mocks.execAsyncRemote).not.toHaveBeenCalled();
+	});
+
+	it("still reads the log when the command ran and failed on the server", async () => {
+		mocks.execAsyncRemote.mockResolvedValue({
+			stdout: "build failed
+",
+			stderr: "",
+		});
+
+		const message = await getDeploymentErrorMessage({
+			logPath: "/etc/dokploy/logs/web-abc/web-abc-2026.log",
+			serverId: "server-1",
+			fallback: FALLBACK,
+			error: new ExecError("Remote command failed with exit code 1", {
+				command: SCRIPT,
+				serverId: "server-1",
+				exitCode: 1,
+			}),
+		});
+
+		expect(message).toBe("build failed");
+	});
 });

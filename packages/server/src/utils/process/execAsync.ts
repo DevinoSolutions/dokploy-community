@@ -42,7 +42,7 @@ const execAsyncBase = util.promisify(exec);
 // A command can print nothing for as long as a build runs, and a link that goes
 // half-open then never closes the channel. The client pings, so ssh2 drops the
 // connection (an "error", then "close") about 40 seconds after the last reply.
-const SSH_KEEPALIVE = { keepaliveInterval: 10_000, keepaliveCountMax: 3 };
+export const SSH_KEEPALIVE = { keepaliveInterval: 10_000, keepaliveCountMax: 3 };
 
 // Node embeds the full command in error.message; it may carry secrets. A
 // command wrapped by `shSingleQuote` (execAsyncCancelable) appears there with
