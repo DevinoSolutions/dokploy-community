@@ -214,7 +214,7 @@ const COMPOSE_DOTENV_NAMES = new Set([
  * helpers, buildx) inherit them; with the names set here a `.env` cannot
  * supply them. v2.39.3 only copies `COMPOSE_*`.
  */
-const NEUTRALISED_CLI_ENV_NAMES = [
+export const NEUTRALISED_CLI_ENV_NAMES = [
 	"BASH_ENV",
 	"DOCKER_API_VERSION",
 	"DOCKER_CERT_PATH",

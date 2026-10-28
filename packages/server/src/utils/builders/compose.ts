@@ -16,6 +16,7 @@ import {
 	isComposeDotenvName,
 	isStackEnvName,
 	NEUTRALISED_CLI_ENV,
+	NEUTRALISED_CLI_ENV_NAMES,
 	singleQuote,
 } from "../docker/env-file";
 import {
@@ -27,6 +28,7 @@ import {
 } from "../docker/staging";
 import {
 	getEnvironmentVariablesObject,
+	parseEnvironmentKeyValuePair,
 	prepareEnvironmentVariables,
 	prepareEnvironmentVariablesForFile,
 } from "../docker/utils";
@@ -45,11 +47,17 @@ import {
 	STALL_SNAPSHOT_CLEANUP_COMMAND,
 } from "./compose-guardrails";
 import {
+	type ComposeVariableLookup,
+	createComposeVariableLookup,
+	UNKNOWN_VALUE,
+} from "./compose-interpolate";
+import {
 	describeRollingBlockers,
 	getRollingDrainWarnings,
 	getRollingNoticeCommand,
 	getRollingReplaceScript,
 	getRollingRestoreGuard,
+	interpolateRollingSpec,
 	planRollingServices,
 	type RollingSpec,
 	resolveComposeRolling,
@@ -493,17 +501,24 @@ const getRollingDeployPlan = async ({
 		return skipped("this deploy recreates the volumes.");
 	}
 
-	let spec: RollingSpec | null = null;
+	let rawSpec: RollingSpec | null = null;
 	try {
-		spec = (await addDomainToCompose(compose, compose.domains, {
+		rawSpec = (await addDomainToCompose(compose, compose.domains, {
 			patches,
 		})) as unknown as RollingSpec | null;
 	} catch {
-		spec = null;
+		rawSpec = null;
 	}
-	if (!spec?.services) {
+	if (!rawSpec?.services) {
 		return skipped("the compose file could not be read.");
 	}
+
+	// Judged on the values Compose will use (`deploy.replicas: ${N:-1}`); the
+	// compose file that is written is the raw one, untouched.
+	const interpolated = interpolateRollingSpec(rawSpec, settings.services, () =>
+		getComposeInterpolationLookup(compose),
+	);
+	const spec = interpolated.spec;
 
 	const plan = planRollingServices({
 		settings,
@@ -512,15 +527,27 @@ const getRollingDeployPlan = async ({
 		hasCustomCommand: false,
 		freshVolumes,
 	});
-	const notices = plan.fallbacks.map(
-		({ service, blockers }) =>
-			`Rolling replace: "${service}" is recreated normally this time. ${describeRollingBlockers(blockers)}`,
-	);
+	const notices = [
+		...interpolated.notices.map(({ message }) => message),
+		...plan.fallbacks.map(
+			({ service, blockers }) =>
+				`Rolling replace: "${service}" is recreated normally this time. ${describeRollingBlockers(blockers)}`,
+		),
+	];
 	if (plan.rolled.length === 0) return { ...off, notices };
 	if (plan.healthTimeoutSeconds !== settings.healthTimeoutSeconds) {
 		notices.push(
 			`Rolling replace: the health wait is raised from ${settings.healthTimeoutSeconds}s to ${plan.healthTimeoutSeconds}s to cover the healthchecks.`,
 		);
+	}
+
+	for (const service of plan.rolled) {
+		const count = plan.replicas[service] ?? 1;
+		if (count > 1) {
+			notices.push(
+				`Rolling replace: "${service}" runs ${count} replicas. ${count} new replicas start next to them, and the old ones are taken out of rotation and removed only once every new one is healthy.`,
+			);
+		}
 	}
 
 	// A rolled service whose healthcheck cannot honour the drain marker still
@@ -529,13 +556,14 @@ const getRollingDeployPlan = async ({
 		notices.push(`Rolling replace: ${warning.message}`);
 	}
 
-	const definitions = spec.services;
+	const definitions = spec.services ?? {};
 	const hasBuild = (service: string) =>
 		Boolean((definitions[service] as { build?: unknown } | null)?.build);
 	const script = getRollingReplaceScript({
 		appName: compose.appName,
 		invocation,
 		services: plan.rolled,
+		replicas: plan.replicas,
 		// A build server pulled the images before this script runs.
 		buildServices: remoteBuild ? [] : plan.rolled.filter(hasBuild),
 		pullServices:
@@ -986,6 +1014,89 @@ export const createCommand = (
 };
 
 /**
+ * The variables of the compose `.env` before they are resolved and quoted
+ * (`getCreateEnvFileCommand` writes them; the rolling replace reads them to
+ * interpolate the spec it judges).
+ */
+const getComposeEnvFileSource = (
+	compose: Pick<ComposeNested, "env" | "appName" | "randomize" | "suffix">,
+) => {
+	const { env, appName } = compose;
+	let envContent = `APP_NAME=${appName}\n`;
+	envContent += `COMPOSE_PROJECT_NAME=${appName}\n`;
+	envContent += env || "";
+	if (!envContent.includes("DOCKER_CONFIG")) {
+		envContent += "\nDOCKER_CONFIG=/root/.docker";
+	}
+
+	if (compose.randomize) {
+		envContent += `\nCOMPOSE_PREFIX=${compose.suffix}`;
+	}
+	return envContent;
+};
+
+/**
+ * The variables `docker compose` interpolates the compose file with on this
+ * deploy, as far as Dokploy can know them: the docker process runs under
+ * `env -i` with PATH, HOME (both unknown here) and the neutralised CLI
+ * settings (empty), which take precedence over the `.env` Dokploy writes. A
+ * `.env` value that holds `${` is expanded by compose's own dotenv parser, so
+ * it counts as unknown. Without `createEnvFile` compose reads whatever `.env`
+ * the repository has: every other name is unknown.
+ *
+ * Throws when the variables cannot be prepared (an unresolved vault reference,
+ * an invalid `${{...}}` reference): the caller keeps the raw spec.
+ */
+export const getComposeInterpolationLookup = (
+	compose: Pick<
+		ComposeNested,
+		"env" | "appName" | "randomize" | "suffix" | "createEnvFile"
+	> & {
+		environment: {
+			env: string | null;
+			project: { env: string | null };
+		};
+	},
+): ComposeVariableLookup => {
+	const values = new Map<string, string>();
+	const unknown = new Set<string>(["PATH", "HOME"]);
+	if (compose.createEnvFile) {
+		const pairs = prepareEnvironmentVariables(
+			getComposeEnvFileSource(compose),
+			compose.environment.project.env,
+			compose.environment.env,
+		);
+		for (const pair of pairs) {
+			const [name, value] = parseEnvironmentKeyValuePair(pair);
+			if (name === "COMPOSE_PROJECT_NAME") {
+				values.set(name, compose.appName);
+				continue;
+			}
+			if (!isComposeDotenvName(name)) continue;
+			if (value.includes("${")) {
+				unknown.add(name);
+				values.delete(name);
+				continue;
+			}
+			unknown.delete(name);
+			values.set(name, value);
+		}
+	}
+	for (const name of NEUTRALISED_CLI_ENV_NAMES) {
+		unknown.delete(name);
+		values.set(name, "");
+	}
+	// The docker process always has its own PATH and HOME, whatever the `.env` says.
+	unknown.add("PATH");
+	unknown.add("HOME");
+	values.delete("PATH");
+	values.delete("HOME");
+	const lookup = createComposeVariableLookup(values, unknown);
+	if (compose.createEnvFile) return lookup;
+	return (name) => (values.has(name) ? lookup(name) : UNKNOWN_VALUE);
+};
+
+/**
  * Shell snippet that writes the compose `.env`. The content (it holds the
  * service's secrets) is staged out of band, 0600, instead of being embedded in
  * the script: a large env counts toward the 128 KB limit on a single shell
@@ -998,19 +1109,10 @@ export const getCreateEnvFileCommand = async (
 		alsoRemove?: string[];
 	} = {},
 ) => {
-	const { env, appName } = compose;
+	const { appName } = compose;
 	const envFilePath = getComposeEnvFilePath(compose);
 
-	let envContent = `APP_NAME=${appName}\n`;
-	envContent += `COMPOSE_PROJECT_NAME=${appName}\n`;
-	envContent += env || "";
-	if (!envContent.includes("DOCKER_CONFIG")) {
-		envContent += "\nDOCKER_CONFIG=/root/.docker";
-	}
-
-	if (compose.randomize) {
-		envContent += `\nCOMPOSE_PREFIX=${compose.suffix}`;
-	}
+	const envContent = getComposeEnvFileSource(compose);
 
 	const prepare = (content: string) => {
 		const quoted = prepareEnvironmentVariablesForFile(
