@@ -325,11 +325,14 @@ export const checkDockerObjectsServices = async (
 		}
 	}
 
+	// The dashboard sends "" for a service on the Dokploy host (its serverId is
+	// null), and every docker command already runs "" on the local host.
+	const host = serverId || undefined;
 	return objects.map((object): ContainerServiceCheck => {
 		const services = servicesOf(object);
 		if (services.length === 0) return { outcome: "unowned" };
 		for (const service of services) {
-			if ((service.serverId ?? undefined) !== serverId)
+			if ((service.serverId || undefined) !== host)
 				return { outcome: "refused" };
 			if (!readable(service.serviceId)) return { outcome: "refused" };
 		}
