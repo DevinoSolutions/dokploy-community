@@ -1,10 +1,8 @@
-import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
@@ -85,6 +83,11 @@ import {
 	readComposeFile,
 	writeDomainsToCompose,
 } from "@dokploy/server/utils/docker/domain";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
 const SPEC = "services:\n  web:\n    image: nginx\n";
 
@@ -285,9 +288,7 @@ describe("the commands that read the compose file", () => {
 // Real links, real shell
 // ---------------------------------------------------------------------------
 
-const shells = ["sh"].filter(
-	(shell) => spawnSync(shell, ["-c", "true"]).status === 0,
-);
+const shells = boundedShellAvailable ? ["sh"] : [];
 const tempBase = () =>
 	(process.platform === "win32" ? process.cwd() : tmpdir()).replaceAll(
 		"\\",
@@ -299,7 +300,7 @@ const tempBase = () =>
 // where both work (Linux, macOS), and are skipped elsewhere.
 const linksWork = (() => {
 	if (shells.length === 0) return false;
-	const probe = mkdtempSync(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
+	const probe = makeTempDir(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
 		"\\",
 		"/",
 	);
@@ -308,8 +309,7 @@ const linksWork = (() => {
 		writeFileSync(`${probe}/dir/file`, "x");
 		symlinkSync(`${probe}/dir/file`, `${probe}/file-link`, "file");
 		symlinkSync(`${probe}/dir`, `${probe}/dir-link`, "junction");
-		const result = spawnSync(
-			"sh",
+		const result = boundedSh(
 			[
 				"-c",
 				'[ -L "$1/file-link" ] && [ -L "$1/dir-link" ] && [ "$(cd -P "$1/dir-link" && pwd -P)" = "$(cd -P "$1/dir" && pwd -P)" ]',
@@ -338,7 +338,7 @@ beforeEach(() => {
 	mocks.execAsyncRemote.mockResolvedValue({ stdout: "", stderr: "" });
 	mocks.writeFileRemote.mockResolvedValue(undefined);
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
-	tmp = mkdtempSync(`${tempBase()}/.dokploy-link-`).replaceAll("\\", "/");
+	tmp = makeTempDir(`${tempBase()}/.dokploy-link-`).replaceAll("\\", "/");
 	mocks.localBase.path = `${tmp}/compose`;
 	mkdirSync(`${code()}/deploy`, { recursive: true });
 	mkdirSync(outside(), { recursive: true });
@@ -361,13 +361,10 @@ const link = (target: string, name: string, type: "file" | "junction") => {
 };
 const isLink = (path: string) => lstatSync(path).isSymbolicLink();
 const run = (script: string) =>
-	spawnSync("sh", ["-c", `set -e\n${script}`], { encoding: "utf8" });
+	boundedSh(["-c", `set -e\n${script}`], { encoding: "utf8" });
 const staged = () =>
 	existsSync(app())
-		? (
-				spawnSync("sh", ["-c", `ls -A '${app()}'`], { encoding: "utf8" })
-					.stdout ?? ""
-			)
+		? (boundedSh(["-c", `ls -A '${app()}'`], { encoding: "utf8" }).stdout ?? "")
 				.split("\n")
 				.filter((name) => name.startsWith(".dokploy-"))
 		: [];
@@ -720,7 +717,7 @@ echo "HITS=$hits"
 	const runRace = (write: string, trials = TRIALS) => {
 		const file = `${tmp}/race.sh`;
 		writeFileSync(file, raceScript(write, trials));
-		return spawnSync("sh", [file], {
+		return boundedSh([file], {
 			encoding: "utf8",
 			env: raceEnv,
 			timeout: 120_000,
@@ -730,14 +727,13 @@ echo "HITS=$hits"
 	// `ln -sf` makes a copy, not a link, in Git Bash without developer mode.
 	const raceWorks = (() => {
 		if (!linksWork) return false;
-		const probe = mkdtempSync(`${tempBase()}/.dokploy-race-probe-`).replaceAll(
+		const probe = makeTempDir(`${tempBase()}/.dokploy-race-probe-`).replaceAll(
 			"\\",
 			"/",
 		);
 		try {
 			writeFileSync(`${probe}/a`, "x");
-			const result = spawnSync(
-				"sh",
+			const result = boundedSh(
 				["-c", 'ln -sf "$1/a" "$1/b" && [ -L "$1/b" ]', "sh", probe],
 				{ encoding: "utf8", env: raceEnv },
 			);
@@ -824,7 +820,7 @@ echo "HITS=$hits"
 					`echo "TEMPS=$(ls -A "$code" | grep -c '^\\.dokploy-put-')"`,
 				].join("\n"),
 			);
-			const result = spawnSync("sh", [file], {
+			const result = boundedSh([file], {
 				encoding: "utf8",
 				env: raceEnv,
 				timeout: 120_000,
@@ -953,7 +949,7 @@ describe("a whole deploy script with a link as the .env", () => {
 		);
 		const file = `${tmp}/deploy.sh`;
 		writeFileSync(file, `set -e\n${command}`);
-		return spawnSync("sh", [file], {
+		return boundedSh([file], {
 			encoding: "utf8",
 			env: { ...process.env, PATH: `${stubs}:${process.env.PATH}` },
 		});

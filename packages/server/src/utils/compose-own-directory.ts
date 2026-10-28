@@ -46,7 +46,7 @@ export const getOwnDirectoryCheckCommand = (
 		'if [ -n "$__dokploy_own" ]; then echo own:ok; else echo own:unresolved; fi',
 		// $1: the raw path, $2: its cleaned-up form. A path that is not absolute is
 		// not resolved (the readlink fallback of the resolver needs one).
-		`__dokploy_verdict() { if [ -z "$__dokploy_own" ]; then echo unresolved; return; fi; case "$1" in /*) ;; *) echo unresolved; return;; esac; case "$2" in /*) ;; *) echo unresolved; return;; esac; __dokploy_a=$(__dokploy_resolve "$1") && __dokploy_b=$(__dokploy_resolve "$2") || { echo unresolved; return; }; case "$__dokploy_a" in "$__dokploy_own"|"$__dokploy_own"/*) ;; *) echo out; return;; esac; if [ "$__dokploy_a" = "$__dokploy_b" ]; then echo in; else echo moved; fi; }`,
+		`__dokploy_verdict() { if [ -z "$__dokploy_own" ]; then echo unresolved; return; fi; case "$1$2" in *"$__dokploy_nl"*|*"$__dokploy_cr"*) echo unresolved; return;; esac; case "$1" in /*) ;; *) echo unresolved; return;; esac; case "$2" in /*) ;; *) echo unresolved; return;; esac; __dokploy_a=$(__dokploy_resolve "$1") && __dokploy_b=$(__dokploy_resolve "$2") || { echo unresolved; return; }; case "$__dokploy_a" in "$__dokploy_own"|"$__dokploy_own"/*) ;; *) echo out; return;; esac; if [ "$__dokploy_a" = "$__dokploy_b" ]; then echo in; else echo moved; fi; }`,
 		...readings.map(
 			(reading) =>
 				`__dokploy_verdict ${quote([reading.raw])} ${quote([reading.normal])}`,
@@ -117,6 +117,9 @@ const collapse = (path: string) => {
 	return `/${out.join("/")}`;
 };
 
+// A deploy path never has a line feed or a carriage return in it.
+const LINE_BREAK = /[\r\n]/;
+
 /** The same verdicts for a host that is this machine, without a shell. */
 export const checkReadingsInOwnDirectoryLocal = (
 	ownDirectory: string,
@@ -124,7 +127,9 @@ export const checkReadingsInOwnDirectoryLocal = (
 ): OwnDirectoryVerdict[] => {
 	const own = resolveLocal(ownDirectory);
 	return readings.map((reading) => {
-		if (own === null) return "unresolved";
+		if (own === null || LINE_BREAK.test(`${ownDirectory}${reading.raw}${reading.normal}`)) {
+			return "unresolved";
+		}
 		const a = resolveLocal(reading.raw);
 		const b = resolveLocal(reading.normal);
 		if (a === null || b === null) return "unresolved";
