@@ -252,6 +252,41 @@ describe("checkDockerObjectServices", () => {
 		}
 	}
 
+	// The dashboard sends serverId "" for a service on the Dokploy host (#487):
+	// that is the local host, not a server no service runs on.
+	for (const [who, member] of Object.entries(members)) {
+		it(`reads an empty serverId as the local host, for ${who}`, async () => {
+			mocks.member = member;
+			const batched = await checkDockerObjectsServices(
+				ctx,
+				objects.map((appNames) => ({ appNames })),
+				"",
+			);
+			for (const [index, appNames] of objects.entries()) {
+				expect({ appNames, check: normalized(batched[index]) }).toEqual({
+					appNames,
+					check: normalized(await reference(appNames, undefined)),
+				});
+				expect({
+					appNames,
+					check: normalized(
+						await checkDockerObjectServices(ctx, { appNames }, ""),
+					),
+				}).toEqual({
+					appNames,
+					check: normalized(await reference(appNames, undefined)),
+				});
+			}
+		});
+	}
+
+	it("lets an owner read a local service sent with an empty serverId", async () => {
+		mocks.member = members.owner;
+		expect(
+			await checkDockerObjectServices(ctx, { appNames: ["app-a"] }, ""),
+		).toEqual({ outcome: "readable", serviceIds: ["app-a"] });
+	});
+
 	it("covers every outcome in the matrix above", async () => {
 		mocks.member = members["member granted app-a and cmp-a"];
 		const outcomes = new Set<string>();

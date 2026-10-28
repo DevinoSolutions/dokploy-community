@@ -1,8 +1,10 @@
+import { getComposeInterpolationLookup } from "@dokploy/server/utils/builders/compose";
 import {
 	type ComposeRollingReplace,
 	getRollingDrainWarnings,
 	getRollingEligibility,
 	getStackPreflightWarnings,
+	interpolateRollingSpec,
 	type RollingBlocker,
 	type RollingSpec,
 	type StackPreflightWarning,
@@ -15,6 +17,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import { TRPCError } from "@trpc/server";
 import { findComposeById } from "./compose";
 
@@ -51,15 +54,28 @@ const loadRenderedSpec = async (composeId: string, type: "fetch" | "cache") => {
 		}
 	}
 	try {
-		const spec = (await addDomainToCompose(
+		const rawSpec = (await addDomainToCompose(
 			compose,
 			compose.domains,
 		)) as unknown as RollingSpec | null;
-		return { compose, spec };
+		if (!rawSpec?.services) return { compose, spec: rawSpec, notices: [] };
+		// Judged like a deploy judges it: on the values Compose will use.
+		const resolved = await withResolvedVaultRefs(compose).catch(() => null);
+		const { spec, notices } = interpolateRollingSpec(
+			rawSpec,
+			Object.keys(rawSpec.services),
+			() => {
+				if (!resolved)
+					throw new Error("a vault reference could not be resolved");
+				return getComposeInterpolationLookup(resolved);
+			},
+		);
+		return { compose, spec, notices };
 	} catch (error) {
 		return {
 			compose,
 			spec: null,
+			notices: [],
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
@@ -74,7 +90,7 @@ export const getComposeRollingReport = async (
 	{ type = "cache" }: { type?: "fetch" | "cache" } = {},
 ): Promise<ComposeRollingReport> => {
 	const loaded = await loadRenderedSpec(composeId, type);
-	const { compose, spec } = loaded;
+	const { compose, spec, notices } = loaded;
 	if (!spec?.services) {
 		return {
 			available: false,
@@ -91,10 +107,14 @@ export const getComposeRollingReport = async (
 			composeType: compose.composeType,
 			hasCustomCommand: Boolean(compose.command),
 		});
-		const warnings =
-			blockers.length === 0
+		const warnings = [
+			...notices
+				.filter((notice) => notice.service === name)
+				.map(({ message }) => message),
+			...(blockers.length === 0
 				? getRollingDrainWarnings(spec, [name]).map(({ message }) => message)
-				: [];
+				: []),
+		];
 		return { name, eligible: blockers.length === 0, blockers, warnings };
 	});
 	return {

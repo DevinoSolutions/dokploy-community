@@ -1,11 +1,5 @@
 import { spawnSync } from "node:child_process";
-import {
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, relative } from "node:path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -65,6 +59,11 @@ import {
 	COMPOSE_FILE_OUTSIDE_MESSAGE,
 	ComposeFileLinkError,
 } from "@dokploy/server/utils/compose-file-guard";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
 const SPEC = "services:\n  web:\n    image: nginx\n";
 const OVERRIDE = 'services:\n  web:\n    environment:\n      DEBUG: "1"\n';
@@ -72,9 +71,7 @@ const OUTSIDE_TEXT = "outside: untouched\n";
 // What an override file of the host would put in a message if it were read.
 const OUTSIDE_SECRET = "services:\n  web:\n    image: leaked-host-file\n";
 
-const shells = ["sh"].filter(
-	(shell) => spawnSync(shell, ["-c", "true"]).status === 0,
-);
+const shells = boundedShellAvailable ? ["sh"] : [];
 const tempBase = () =>
 	(process.platform === "win32" ? process.cwd() : tmpdir()).replaceAll(
 		"\\",
@@ -94,14 +91,15 @@ const shellPath = (path: string) =>
 // so the local read is tested on Linux and macOS only).
 const fifosWork = (() => {
 	if (shells.length === 0) return false;
-	const probe = mkdtempSync(`${tempBase()}/.dokploy-fifo-probe-`).replaceAll(
+	const probe = makeTempDir(`${tempBase()}/.dokploy-fifo-probe-`).replaceAll(
 		"\\",
 		"/",
 	);
 	try {
 		return (
 			spawnSync("mkfifo", [`${probe}/fifo`]).status === 0 &&
-			spawnSync("sh", ["-c", '[ -p "$1/fifo" ]', "sh", probe]).status === 0
+			boundedSh(["-c", '[ -p "$1/fifo" ]', "sh", probe], { encoding: "utf8" })
+				.status === 0
 		);
 	} catch {
 		return false;
@@ -117,7 +115,7 @@ const itWithFifos = (remote: boolean) =>
 // where both work (Linux, macOS), and are skipped elsewhere.
 const linksWork = (() => {
 	if (shells.length === 0) return false;
-	const probe = mkdtempSync(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
+	const probe = makeTempDir(`${tempBase()}/.dokploy-link-probe-`).replaceAll(
 		"\\",
 		"/",
 	);
@@ -126,8 +124,7 @@ const linksWork = (() => {
 		writeFileSync(`${probe}/dir/file`, "x");
 		symlinkSync(`${probe}/dir/file`, `${probe}/file-link`, "file");
 		symlinkSync(`${probe}/dir`, `${probe}/dir-link`, "junction");
-		const result = spawnSync(
-			"sh",
+		const result = boundedSh(
 			[
 				"-c",
 				'[ -L "$1/file-link" ] && [ -L "$1/dir-link" ] && [ "$(cd -P "$1/dir-link" && pwd -P)" = "$(cd -P "$1/dir" && pwd -P)" ]',
@@ -166,7 +163,7 @@ const link = (target: string, name: string, type: "file" | "junction") => {
 // A remote host that is the local shell.
 const runInShell = async (_serverId: string, command: string) => {
 	// A read that blocks (a FIFO) must fail the test, not hang it.
-	const result = spawnSync("sh", ["-c", command], {
+	const result = boundedSh(["-c", command], {
 		encoding: "utf8",
 		timeout: 10_000,
 	});
@@ -217,7 +214,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.execAsyncRemote.mockImplementation(runInShell);
 	if (tmp) rmSync(tmp, { recursive: true, force: true });
-	tmp = mkdtempSync(`${tempBase()}/.dokploy-override-`).replaceAll("\\", "/");
+	tmp = makeTempDir(`${tempBase()}/.dokploy-override-`).replaceAll("\\", "/");
 	mocks.base.local = `${tmp}/compose`;
 	mocks.base.remote = `${shellPath(tmp)}/compose`;
 	mkdirSync(`${code()}/deploy`, { recursive: true });
@@ -237,7 +234,9 @@ const refusal = async (
 		() => undefined,
 		(e: unknown) => e,
 	);
-	expect(error, String((error as Error)?.message)).toBeInstanceOf(ComposeFileLinkError);
+	expect(error, String((error as Error)?.message)).toBeInstanceOf(
+		ComposeFileLinkError,
+	);
 	// A clear refusal, and never what the file holds.
 	expect((error as Error).message).toContain(message);
 	expect((error as Error).message).not.toContain("leaked-host-file");
@@ -355,7 +354,7 @@ describe.each([
 	// The absolute form a command names: a POSIX path, also on Windows.
 	const posixPath = (path: string) => path.replace(/^[A-Za-z]:/, "");
 	const where = () => (serverId ? shellCode() : posixPath(code()));
-	
+
 	itWithLinks("refuses an override file that is a link out", async () => {
 		link(`${outside()}/override.yml`, "override.yml", "file");
 		await refusal(
@@ -381,7 +380,9 @@ describe.each([
 		mkdirSync(`${code()}/../files`, { recursive: true });
 		writeFileSync(`${code()}/../files/override.yml`, OVERRIDE);
 		await expect(
-			assertComposeVolumesBound(withOverride("../files/override.yml", serverId)),
+			assertComposeVolumesBound(
+				withOverride("../files/override.yml", serverId),
+			),
 		).resolves.toBeUndefined();
 		await expect(
 			assertComposeVolumesBound(
@@ -446,26 +447,34 @@ describe.each([
 		mkdirSync(`${code()}/../files`, { recursive: true });
 		writeFileSync(`${code()}/../files/override.yml`, OVERRIDE);
 		await expect(
-			assertComposeVolumesBound(withOverride("../files/override.yml", serverId)),
+			assertComposeVolumesBound(
+				withOverride("../files/override.yml", serverId),
+			),
 		).resolves.toBeUndefined();
 	});
 
-	itWithFifos(!!serverId)("refuses an override file that is a FIFO", async () => {
-		expect(spawnSync("mkfifo", [`${code()}/override.yml`]).status).toBe(0);
-		await refusal(
-			assertComposeVolumesBound(withOverride("override.yml", serverId)),
-			COMPOSE_FILE_NOT_REGULAR_MESSAGE,
-		);
-	});
+	itWithFifos(!!serverId)(
+		"refuses an override file that is a FIFO",
+		async () => {
+			expect(spawnSync("mkfifo", [`${code()}/override.yml`]).status).toBe(0);
+			await refusal(
+				assertComposeVolumesBound(withOverride("override.yml", serverId)),
+				COMPOSE_FILE_NOT_REGULAR_MESSAGE,
+			);
+		},
+	);
 
-	itWithFifos(!!serverId)("does not wait on a .env that is a FIFO", async () => {
-		expect(spawnSync("mkfifo", [`${code()}/.env`]).status).toBe(0);
-		// A .env that is not a regular file is not known, not read: the check
-		// goes on without blocking.
-		await expect(
-			assertComposeVolumesBound({ ...baseCompose, serverId }),
-		).resolves.toBeUndefined();
-	});
+	itWithFifos(!!serverId)(
+		"does not wait on a .env that is a FIFO",
+		async () => {
+			expect(spawnSync("mkfifo", [`${code()}/.env`]).status).toBe(0);
+			// A .env that is not a regular file is not known, not read: the check
+			// goes on without blocking.
+			await expect(
+				assertComposeVolumesBound({ ...baseCompose, serverId }),
+			).resolves.toBeUndefined();
+		},
+	);
 
 	itWithLinks(
 		"reads an override file, and a link to a file of the checkout",
