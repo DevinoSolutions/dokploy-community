@@ -527,10 +527,14 @@ export const deployApplication = async ({
 			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
+		try {
+			if (serverId) {
+				await execAsyncRemote(serverId, command);
+			} else {
+				await execAsync(command);
+			}
+		} catch (logError) {
+			console.error("Failed to write the deployment error log", logError);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
@@ -782,10 +786,14 @@ export const rebuildApplication = async ({
 			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
+		try {
+			if (serverId) {
+				await execAsyncRemote(serverId, command);
+			} else {
+				await execAsync(command);
+			}
+		} catch (logError) {
+			console.error("Failed to write the deployment error log", logError);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
@@ -1406,10 +1414,14 @@ export const rebuildPreviewApplication = async ({
 		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		// The log lives where the deployment was built; the row records it.
 		const serverId = deployment.buildServerId || deployment.serverId;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
+		try {
+			if (serverId) {
+				await execAsyncRemote(serverId, command);
+			} else {
+				await execAsync(command);
+			}
+		} catch (logError) {
+			console.error("Failed to write the deployment error log", logError);
 		}
 
 		// Never let a failing status comment hide the actual build error.
