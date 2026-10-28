@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -11,13 +10,14 @@ import {
 import { tmpdir } from "node:os";
 import { parse as parseDotenv } from "dotenv";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 // T-7138: the Environment of a stack is the whole environment of the docker
 // process, and compose reads the `COMPOSE_*` settings of a `.env` as if they
 // were in its environment. A variable that docker or compose reads as a setting
 // of its own must not be able to aim the CLI at another daemon, make it load a
 // host binary, or change what compose reads.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
@@ -247,7 +247,7 @@ describe("stack env: docker and compose settings", () => {
 });
 
 // Runs the generated script in a real shell, as the deploy does.
-const hasSh = spawnSync("sh", ["-c", "true"]).status === 0;
+const hasSh = boundedShellAvailable;
 const itWithSh = hasSh ? it : it.skip;
 
 const parseEnv0 = (raw: string) => {
@@ -275,7 +275,7 @@ describe("stack env in a real shell", () => {
 		return { bin, out };
 	};
 	const runScript = (script: string, bin: string) =>
-		spawnSync("sh", ["-c", script], {
+		boundedSh(["-c", script], {
 			encoding: "utf8",
 			env: {
 				...process.env,
@@ -549,7 +549,7 @@ describe("the env -i prefix sets the CLI's settings empty (T-7138)", () => {
 			);
 			chmodSync(`${dir}/docker`, 0o755);
 			const run = (prefix: string) => {
-				spawnSync("sh", ["-c", `cd ${dir} && ${prefix} ${dir}/docker`], {
+				boundedSh(["-c", `cd ${dir} && ${prefix} ${dir}/docker`], {
 					encoding: "utf8",
 				});
 				return readFileSync(`${tmp}/names.txt`, "utf8")

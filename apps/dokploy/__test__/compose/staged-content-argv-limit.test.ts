@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	lstatSync,
@@ -14,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 // A single argument to `sh -c` is capped at 128 KB (MAX_ARG_STRLEN) on Linux,
 // and the deploy scripts travel as exactly one such argument (ssh2 `exec`, or
@@ -25,7 +25,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 const MAX_ARG_STRLEN = 128 * 1024;
 
 // Spawning a real shell is slow when the whole suite runs in parallel.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsync: vi.fn(),
@@ -417,10 +417,10 @@ describe("file mounts (getCreateFilesCommand)", () => {
 });
 
 // Runs the generated snippets in a real shell, as the deploy script does.
-const hasSh = spawnSync("sh", ["-c", "true"]).status === 0;
+const hasSh = boundedShellAvailable;
 const itWithSh = hasSh ? it : it.skip;
 const run = (script: string) =>
-	spawnSync("sh", ["-c", `set -e\n${script}`], { encoding: "utf8" });
+	boundedSh(["-c", `set -e\n${script}`], { encoding: "utf8" });
 const stagedIn = (directory: string) =>
 	readdirSync(directory).filter((name) => name.startsWith(".dokploy-"));
 
@@ -745,11 +745,14 @@ describe("files staged for a script that stops early", () => {
 	// Windows shell (the hosts it is written for are Linux).
 	const run = (script: string) => {
 		const file = `${tmp}/script-${Math.random().toString(36).slice(2)}.sh`;
-		writeFileSync(file, `set -e
-${script}`);
-		return spawnSync("sh", [file], { encoding: "utf8" });
+		writeFileSync(
+			file,
+			`set -e
+${script}`,
+		);
+		return boundedSh([file], { encoding: "utf8" });
 	};
-	const hasShHere = spawnSync("sh", ["-c", "true"]).status === 0;
+	const hasShHere = boundedShellAvailable;
 	const itSh = hasShHere ? it : it.skip;
 	const stagedNames = (dir: string) =>
 		readdirSync(dir).filter((name) => name.startsWith(".dokploy-"));

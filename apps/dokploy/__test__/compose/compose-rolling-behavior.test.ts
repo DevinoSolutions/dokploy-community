@@ -1,4 +1,3 @@
-import { spawn, spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -21,6 +20,11 @@ import {
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
 import { afterAll, describe, expect, it } from "vitest";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	boundedShSpawn,
+} from "./helpers/bounded-shell";
 
 /**
  * The generated rolling replace functions, executed in a real shell against a
@@ -46,7 +50,10 @@ const stubSource = readFileSync(
 
 const hasSh = (() => {
 	try {
-		const result = spawnSync("sh", ["-c", "echo ok"], { encoding: "utf8" });
+		const result = boundedSh(["-c", "echo ok"], {
+			encoding: "utf8",
+			timeout: 30_000,
+		});
 		return result.status === 0 && result.stdout.trim() === "ok";
 	} catch {
 		return false;
@@ -56,8 +63,11 @@ const hasSh = (() => {
 // The cancel launcher needs setsid and /proc (see remote-build-cancel.ts).
 const hasSetsid =
 	process.platform !== "win32" &&
-	spawnSync("sh", ["-c", "command -v setsid && [ -d /proc/self ]"]).status ===
-		0;
+	boundedShellAvailable &&
+	boundedSh(["-c", "command -v setsid && [ -d /proc/self ]"], {
+		encoding: "utf8",
+		timeout: 30_000,
+	}).status === 0;
 
 afterAll(() => {
 	rmSync(root, { recursive: true, force: true });
@@ -212,11 +222,11 @@ const runRoll = (
 	options: Partial<RollingScriptOptions> = {},
 	extra: { before?: string } = {},
 ) => {
-	const result = spawnSync(
-		"sh",
-		[writeScript(world, scriptFor(options, extra))],
-		{ encoding: "utf8", env: envFor(world), timeout: 90_000 },
-	);
+	const result = boundedSh([writeScript(world, scriptFor(options, extra))], {
+		encoding: "utf8",
+		env: envFor(world),
+		timeout: 90_000,
+	});
 	return {
 		stdout: result.stdout,
 		stderr: result.stderr,
@@ -1099,11 +1109,11 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 					definitions,
 					`dokploy_roll_wait_recovered() { echo "DURING active=$DOKPLOY_ROLL_ACTIVE promoting=[$DOKPLOY_ROLL_PROMOTING] promoted=$DOKPLOY_ROLL_PROMOTED"; return ${waitRc}; }`,
 					'dokploy_roll_fail() { echo "FAIL active=$DOKPLOY_ROLL_ACTIVE"; }',
-					`DR_WAS_PROMOTED=0; DR_MARKED=1; DR_EMPTY=$(mktemp); DOKPLOY_ROLL_SVC=web`,
+					"DR_WAS_PROMOTED=0; DR_MARKED=1; DR_EMPTY=$(mktemp); DOKPLOY_ROLL_SVC=web",
 					`DOKPLOY_ROLL_ACTIVE=0; DOKPLOY_ROLL_PROMOTING=${OLD}; DOKPLOY_ROLL_PROMOTED=1`,
 					`dokploy_roll_new_still_ok web ${newId} ${OLD}; echo "RC=$? AFTER active=$DOKPLOY_ROLL_ACTIVE promoting=[$DOKPLOY_ROLL_PROMOTING] promoted=$DOKPLOY_ROLL_PROMOTED"`,
 				].join("\n");
-				const result = spawnSync("sh", [writeScript(world, script)], {
+				const result = boundedSh([writeScript(world, script)], {
 					encoding: "utf8",
 					env: envFor(world),
 					timeout: 60_000,
@@ -1394,18 +1404,21 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
   while [ "$i" -lt 160 ] && ! grep -q -- '--scale web=2 web' ${calls} 2>/dev/null; do sleep 0.25; i=$((i + 1)); done
   kill -${signal} $$
 ) >/dev/null 2>&1 &`;
-				const child = spawn(
-					"sh",
+				const child = boundedShSpawn(
 					[
 						writeScript(
 							world,
 							scriptFor({ healthTimeoutSeconds: 60 }, { before }),
 						),
 					],
-					{ env: envFor(world), stdio: ["ignore", "pipe", "pipe"] },
+					{
+						env: envFor(world),
+						stdio: ["ignore", "pipe", "pipe"],
+						seconds: 90,
+					},
 				);
 				let stdout = "";
-				child.stdout.on("data", (chunk) => {
+				child.stdout?.on("data", (chunk) => {
 					stdout += String(chunk);
 				});
 				const exit = await new Promise<number | null>((resolve) => {
@@ -1465,12 +1478,12 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			);
 			// The shape runStep gives the deploy script: a subshell, output to the log.
 			const command = `(sh ${script}) >> ${toShellPath(logFile)} 2>&1`;
-			const child = spawn(
-				"sh",
+			const child = boundedShSpawn(
 				["-c", wrapCancelableRemoteBuild(command, target)],
 				{
 					env: envFor(world),
 					stdio: "ignore",
+					seconds: 90,
 				},
 			);
 			const exited = new Promise<void>((resolve) => child.on("close", resolve));
@@ -1492,14 +1505,10 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 			expect(runningOf(world, "web")).toContain(OLD);
 			expect(containersOf(world, "web").length).toBe(2);
 
-			const kill = spawnSync(
-				"sh",
-				["-c", getKillRemoteBuildCommand(target, 20)],
-				{
-					encoding: "utf8",
-					timeout: 60_000,
-				},
-			);
+			const kill = boundedSh(["-c", getKillRemoteBuildCommand(target, 20)], {
+				encoding: "utf8",
+				timeout: 60_000,
+			});
 			expect(kill.stdout.trim()).toBe("KILLED");
 			await exited;
 
@@ -1530,22 +1539,24 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 					drainSeconds,
 				};
 				const script = writeScript(world, scriptBody);
-				const child = spawn(
-					"sh",
+				const child = boundedShSpawn(
 					[
 						writeScript(
 							world,
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore" },
+					{ env: envFor(world), stdio: "ignore", seconds: 90 },
 				);
 				const exited = new Promise<void>((resolve) =>
 					child.on("close", resolve),
 				);
 				const termGroup = () => {
 					const pgid = readFileSync(pidFile, "utf8").split(" ")[0];
-					spawnSync("sh", [writeScript(world, `kill -s TERM -- -${pgid}`)]);
+					boundedSh([writeScript(world, `kill -s TERM -- -${pgid}`)], {
+						encoding: "utf8",
+						timeout: 30_000,
+					});
 				};
 				return { pidFile, exited, termGroup };
 			};
@@ -1635,24 +1646,24 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 					drainSeconds,
 				};
 				const script = writeScript(world, scriptBody);
-				const child = spawn(
-					"sh",
+				const child = boundedShSpawn(
 					[
 						writeScript(
 							world,
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore" },
+					{ env: envFor(world), stdio: "ignore", seconds: 90 },
 				);
 				const exited = new Promise<number | null>((resolve) =>
 					child.on("close", resolve),
 				);
 				const signalGroup = (signal: string) => {
 					const pgid = readFileSync(pidFile, "utf8").split(" ")[0];
-					spawnSync("sh", [
-						writeScript(world, `kill -s ${signal} -- -${pgid}`),
-					]);
+					boundedSh([writeScript(world, `kill -s ${signal} -- -${pgid}`)], {
+						encoding: "utf8",
+						timeout: 30_000,
+					});
 				};
 				return { pidFile, target, exited, signalGroup };
 			};
@@ -1833,8 +1844,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 					await waitUntil(() => existsSync(pidFile) && existsSync(started)),
 				).toBe(true);
 
-				const kill = spawnSync(
-					"sh",
+				const kill = boundedSh(
 					[writeScript(world, getKillRemoteBuildCommand(target, 2))],
 					{ encoding: "utf8", timeout: 60_000 },
 				);
@@ -1861,8 +1871,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 						() => existsSync(stubborn.pidFile) && existsSync(started),
 					),
 				).toBe(true);
-				const hard = spawnSync(
-					"sh",
+				const hard = boundedSh(
 					[
 						writeScript(
 							world,
@@ -1878,8 +1887,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 
 				const polite = launch(world, "sleep 60\n", 10);
 				expect(await waitUntil(() => existsSync(polite.pidFile))).toBe(true);
-				const soft = spawnSync(
-					"sh",
+				const soft = boundedSh(
 					[
 						writeScript(
 							world,
@@ -1925,8 +1933,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				const pgid = readFileSync(pidFile, "utf8").split(" ")[0];
 
 				const startedAt = Date.now();
-				const kill = spawnSync(
-					"sh",
+				const kill = boundedSh(
 					[
 						writeScript(
 							world,
@@ -1943,9 +1950,10 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				expect(elapsed).toBeLessThan(15_000);
 				expect(containersOf(world, "web")).toEqual([OLD]);
 				expect(existsSync(`${pidFile}.done`)).toBe(false);
-				spawnSync("sh", [
-					writeScript(world, `kill -s KILL -- -${pgid} 2>/dev/null; true`),
-				]);
+				boundedSh(
+					[writeScript(world, `kill -s KILL -- -${pgid} 2>/dev/null; true`)],
+					{ encoding: "utf8", timeout: 30_000 },
+				);
 			});
 		},
 	);

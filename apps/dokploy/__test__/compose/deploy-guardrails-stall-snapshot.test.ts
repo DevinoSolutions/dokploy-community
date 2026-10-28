@@ -1,4 +1,4 @@
-import { type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
+import type { SpawnSyncReturns } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -17,6 +17,7 @@ import {
 } from "@dokploy/server/utils/builders/compose-guardrails";
 import { quote } from "shell-quote";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { boundedSh, boundedShSpawn } from "./helpers/bounded-shell";
 
 vi.mock("@dokploy/server/utils/docker/domain", () => ({
 	writeDomainsToCompose: vi.fn().mockResolvedValue(""),
@@ -215,7 +216,7 @@ const WAIT_TIMEOUT_STATUS = 97;
 const sh = (script: string, env: Record<string, string> = {}) => {
 	let result: SpawnSyncReturns<string>;
 	if (!script.includes("$STALL_TEST_OUT")) {
-		result = spawnSync("sh", [writeScript(script)], {
+		result = boundedSh([writeScript(script)], {
 			encoding: "utf8",
 			env: { ...process.env, ...env },
 			timeout: 120_000,
@@ -225,7 +226,7 @@ const sh = (script: string, env: Record<string, string> = {}) => {
 		const outer = writeScript(
 			`sh ${inner} >"$STALL_TEST_OUT"; rc=$?; cat "$STALL_TEST_OUT"; exit $rc`,
 		);
-		result = spawnSync("sh", [outer], {
+		result = boundedSh([outer], {
 			encoding: "utf8",
 			env: {
 				...process.env,
@@ -661,8 +662,7 @@ exit 1`,
 			for (const f of [parentFile, dirFile, wdFile, psPidFile]) {
 				rmSync(f, { force: true });
 			}
-			const child = spawn(
-				"sh",
+			const child = boundedShSpawn(
 				[
 					writeScript(
 						`echo $$ > ${toShellPath(parentFile)}; ${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
@@ -866,8 +866,7 @@ if kill -0 "$(cat ${toShellPath(wdFile)})" 2>/dev/null; then echo WATCHER-LEFT; 
 		for (const f of [parentFile, dirFile, wdFile, psArgsFile]) {
 			rmSync(f, { force: true });
 		}
-		const child = spawn(
-			"sh",
+		const child = boundedShSpawn(
 			[
 				writeScript(
 					`echo $$ > ${toShellPath(parentFile)}; ${getStallSnapshotStartScript(
@@ -1071,8 +1070,7 @@ dokploy_stall_cleanup`,
 			rmSync(f, { force: true });
 		}
 		rmSync(eventsPidFile, { force: true });
-		const child = spawn(
-			"sh",
+		const child = boundedShSpawn(
 			[
 				writeScript(
 					`echo $$ > ${toShellPath(parentFile)}; ${getDockerEventsStartScript("docker-compose", "my-app")}

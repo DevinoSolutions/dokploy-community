@@ -19,7 +19,7 @@ import {
 
 // Each case starts a shell, which is slow on Windows and under load: every
 // case runs its shell checks in one script, with room to spare.
-vi.setConfig({ testTimeout: 180_000 });
+vi.setConfig({ testTimeout: 180_000, hookTimeout: 60_000 });
 
 const shellWorks = boundedShellAvailable;
 const posix = process.platform !== "win32";

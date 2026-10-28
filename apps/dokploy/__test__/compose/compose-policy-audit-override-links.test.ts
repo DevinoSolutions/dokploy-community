@@ -10,7 +10,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 // text cannot reach the findings or the deployment log (T-8413).
 
 // Each real-shell case starts a few shells, which is slow on Windows.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),

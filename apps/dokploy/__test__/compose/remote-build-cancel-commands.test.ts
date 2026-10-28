@@ -2,7 +2,6 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
 	getKillRemoteBuildCommand,
 	getRemoteBuildCancelTarget,
@@ -11,6 +10,12 @@ import {
 	shSingleQuote,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	boundedShSpawn,
+} from "./helpers/bounded-shell";
 
 describe("pid file path", () => {
 	it("is one file per deployment under the build server's logs directory", () => {
@@ -33,8 +38,14 @@ describe("pid file path", () => {
 });
 
 describe("wrapCancelableRemoteBuild", () => {
-	const target = { pidFile: "/logs/.build-pids/dep1.pid", deploymentId: "dep1" };
-	const wrapped = wrapCancelableRemoteBuild("echo build; docker build .", target);
+	const target = {
+		pidFile: "/logs/.build-pids/dep1.pid",
+		deploymentId: "dep1",
+	};
+	const wrapped = wrapCancelableRemoteBuild(
+		"echo build; docker build .",
+		target,
+	);
 
 	it("starts the build in its own session and records the pid file", () => {
 		expect(wrapped).toContain("setsid");
@@ -89,10 +100,10 @@ describe("shell quoting of ids, paths and the command", () => {
 			"back\\slash",
 		];
 		for (const value of nasty) {
-			const result = spawnSync("sh", ["-c", `printf %s ${shSingleQuote(value)}`], {
+			if (!boundedShellAvailable) return; // no bounded sh (plain Windows): nothing to check
+			const result = boundedSh(["-c", `printf %s ${shSingleQuote(value)}`], {
 				encoding: "utf8",
 			});
-			if (result.error) return; // no sh (plain Windows): nothing to check
 			expect(result.stdout).toBe(value);
 		}
 	});
@@ -115,7 +126,10 @@ describe("shell quoting of ids, paths and the command", () => {
 });
 
 describe("getKillRemoteBuildCommand", () => {
-	const target = { pidFile: "/logs/.build-pids/dep1.pid", deploymentId: "dep1" };
+	const target = {
+		pidFile: "/logs/.build-pids/dep1.pid",
+		deploymentId: "dep1",
+	};
 	const script = getKillRemoteBuildCommand(target);
 
 	it("signals one process group, TERM first and KILL after a grace", () => {
@@ -162,8 +176,8 @@ describe("getKillRemoteBuildCommand", () => {
 	});
 
 	it("uses the grace it is given", () => {
-		expect(getKillRemoteBuildCommand(target, 3)).toContain('-lt 3 ]');
-		expect(getKillRemoteBuildCommand(target, 0)).toContain('-lt 1 ]');
+		expect(getKillRemoteBuildCommand(target, 3)).toContain("-lt 3 ]");
+		expect(getKillRemoteBuildCommand(target, 0)).toContain("-lt 1 ]");
 	});
 });
 
@@ -183,7 +197,11 @@ describe("parseKillResult", () => {
 // A real shell and real stub processes: only the targeted group may die.
 const hasSetsid =
 	process.platform !== "win32" &&
-	spawnSync("sh", ["-c", "command -v setsid && [ -d /proc/self ]"]).status === 0;
+	boundedShellAvailable &&
+	boundedSh(["-c", "command -v setsid && [ -d /proc/self ]"], {
+		encoding: "utf8",
+		timeout: 30_000,
+	}).status === 0;
 
 describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 	const dir = mkdtempSync(join(tmpdir(), "dokploy-cancel-"));
@@ -223,10 +241,14 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 			pidFile: join(dir, `${deploymentId}.pid`),
 			deploymentId,
 		};
-		const child = spawn("sh", ["-c", wrapCancelableRemoteBuild(command, target)], {
-			env: { ...process.env, SHELL: "/bin/sh" },
-			stdio: "ignore",
-		});
+		const child = boundedShSpawn(
+			["-c", wrapCancelableRemoteBuild(command, target)],
+			{
+				env: { ...process.env, SHELL: "/bin/sh" },
+				stdio: "ignore",
+				seconds: 60,
+			},
+		);
 		spawned.push(child);
 		const exited = new Promise<number | null>((resolve) =>
 			child.on("close", (code) => resolve(code)),
@@ -238,8 +260,9 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 	};
 
 	const kill = (target: { pidFile: string; deploymentId: string }) =>
-		spawnSync("sh", ["-c", getKillRemoteBuildCommand(target, 3)], {
+		boundedSh(["-c", getKillRemoteBuildCommand(target, 3)], {
 			encoding: "utf8",
+			timeout: 30_000,
 		}).stdout.trim();
 
 	it("kills the targeted deployment's whole group and only that one", async () => {
@@ -299,10 +322,13 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 		spawned.push(bystander);
 		const pidFile = join(dir, "reused.pid");
 		// A pid file from this boot whose start time cannot match the live process.
-		spawnSync("sh", [
-			"-c",
-			`printf '%s %s %s %s\\n' ${bystander.pid} 1 reused "$(cat /proc/sys/kernel/random/boot_id)" > ${shSingleQuote(pidFile)}`,
-		]);
+		boundedSh(
+			[
+				"-c",
+				`printf '%s %s %s %s\\n' ${bystander.pid} 1 reused "$(cat /proc/sys/kernel/random/boot_id)" > ${shSingleQuote(pidFile)}`,
+			],
+			{ encoding: "utf8", timeout: 30_000 },
+		);
 		expect(kill({ pidFile, deploymentId: "reused" })).toBe("GONE");
 		expect(() => process.kill(bystander.pid as number, 0)).not.toThrow();
 		expect(existsSync(pidFile)).toBe(false);
@@ -314,10 +340,13 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 		const pidFile = join(dir, "oldboot.pid");
 		// Same pid, and even the right start time, but a different boot id: after
 		// a reboot the pid belongs to something unrelated.
-		spawnSync("sh", [
-			"-c",
-			`s=$(sed "s/^.*) //" /proc/${bystander.pid}/stat | cut -d" " -f20); printf '%s %s %s %s\\n' ${bystander.pid} "$s" oldboot 00000000-0000-0000-0000-000000000000 > ${shSingleQuote(pidFile)}`,
-		]);
+		boundedSh(
+			[
+				"-c",
+				`s=$(sed "s/^.*) //" /proc/${bystander.pid}/stat | cut -d" " -f20); printf '%s %s %s %s\\n' ${bystander.pid} "$s" oldboot 00000000-0000-0000-0000-000000000000 > ${shSingleQuote(pidFile)}`,
+			],
+			{ encoding: "utf8", timeout: 30_000 },
+		);
 		expect(kill({ pidFile, deploymentId: "oldboot" })).toBe("GONE");
 		expect(() => process.kill(bystander.pid as number, 0)).not.toThrow();
 		expect(existsSync(pidFile)).toBe(false);
@@ -337,8 +366,10 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 				target,
 			),
 		].join("\n");
-		spawnSync("sh", ["-c", script], {
+		boundedSh(["-c", script], {
 			env: { ...process.env, SHELL: "/bin/sh" },
+			encoding: "utf8",
+			timeout: 30_000,
 		});
 		const mode = (name: string) =>
 			spawnSync("stat", ["-c", "%a", join(dir, name)], {
@@ -364,10 +395,15 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 		const mark = join(dir, "pwned");
 		const id = `x'; touch ${mark}; echo '`;
 		const target = { pidFile: join(dir, "hostile.pid"), deploymentId: id };
-		spawnSync("sh", ["-c", wrapCancelableRemoteBuild("true", target)], {
+		boundedSh(["-c", wrapCancelableRemoteBuild("true", target)], {
 			env: { ...process.env, SHELL: "/bin/sh" },
+			encoding: "utf8",
+			timeout: 30_000,
 		});
-		spawnSync("sh", ["-c", getKillRemoteBuildCommand(target, 1)]);
+		boundedSh(["-c", getKillRemoteBuildCommand(target, 1)], {
+			encoding: "utf8",
+			timeout: 30_000,
+		});
 		expect(existsSync(mark)).toBe(false);
 	});
 });

@@ -9,7 +9,7 @@ import {
 } from "./helpers/bounded-shell";
 
 // Each case starts a shell, which is slow on Windows and under load.
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 // The path resolver that deploy scripts carry (`getPathResolverLines`) has a
 // fallback for hosts with `readlink -f` and no `realpath -m` (minimal images).

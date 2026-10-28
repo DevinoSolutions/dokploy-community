@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdtempSync,
@@ -26,6 +25,7 @@ import {
 	hasRunningRemoteBuild,
 } from "@dokploy/server/utils/process/remote-build-registry";
 import { afterAll, describe, expect, it } from "vitest";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 /**
  * `execAsyncCancelable`: the release step of a build-server compose whose
@@ -35,8 +35,11 @@ import { afterAll, describe, expect, it } from "vitest";
 
 const hasSetsid =
 	process.platform !== "win32" &&
-	spawnSync("sh", ["-c", "command -v setsid && [ -d /proc/self ]"]).status ===
-		0;
+	boundedShellAvailable &&
+	boundedSh(["-c", "command -v setsid && [ -d /proc/self ]"], {
+		encoding: "utf8",
+		timeout: 30_000,
+	}).status === 0;
 
 const root = mkdtempSync(join(tmpdir(), "dokploy-local-cancel-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -140,13 +143,9 @@ describe("execAsyncCancelable", () => {
 			expect(await waitFor(() => existsSync(ready))).toBe(true);
 			expect(existsSync(target.pidFile)).toBe(true);
 
-			const kill = spawnSync(
-				"sh",
-				["-c", getKillRemoteBuildCommand(target, 10)],
-				{
-					encoding: "utf8",
-				},
-			);
+			const kill = boundedSh(["-c", getKillRemoteBuildCommand(target, 10)], {
+				encoding: "utf8",
+			});
 			expect(kill.stdout.trim()).toBe("KILLED");
 			const error = await pending;
 
@@ -176,7 +175,10 @@ describe("execAsyncCancelable", () => {
 
 			expect(error.message).toContain("cancelled by user");
 			// The command itself is left to the kill script.
-			spawnSync("sh", ["-c", getKillRemoteBuildCommand(target, 2)]);
+			boundedSh(["-c", getKillRemoteBuildCommand(target, 2)], {
+				encoding: "utf8",
+				timeout: 30_000,
+			});
 		},
 	);
 });
@@ -229,11 +231,9 @@ describe("the release done marker, for real", () => {
 			expect(await waitFor(() => existsSync(ready))).toBe(true);
 			expect(existsSync(target.pidFile)).toBe(true);
 
-			const kill = spawnSync(
-				"sh",
-				["-c", getKillRemoteBuildCommand(target, 15)],
-				{ encoding: "utf8" },
-			);
+			const kill = boundedSh(["-c", getKillRemoteBuildCommand(target, 15)], {
+				encoding: "utf8",
+			});
 			const error = await pending;
 
 			expect(kill.stdout.trim()).toBe("KILLED");
@@ -279,11 +279,9 @@ describe("the release done marker, for real", () => {
 			const pid = Number(readFileSync(helperPid, "utf8").trim());
 			expect(Number.isInteger(pid) && pid > 1).toBe(true);
 
-			const kill = spawnSync(
-				"sh",
-				["-c", getKillRemoteBuildCommand(target, 15)],
-				{ encoding: "utf8" },
-			);
+			const kill = boundedSh(["-c", getKillRemoteBuildCommand(target, 15)], {
+				encoding: "utf8",
+			});
 			await pending;
 
 			expect(kill.stdout.trim()).toBe("KILLED");
