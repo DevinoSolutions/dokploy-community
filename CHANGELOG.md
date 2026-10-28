@@ -2,6 +2,10 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+**The Logs, Terminal and container lists work again for services on the Dokploy host** (#487). Since v0.30.8-community.32, the container picker of an application's or a compose's Logs and Terminal, a compose's container list and its monitoring showed no containers when the service runs on the server Dokploy is installed on, for every role. The dashboard sends an empty server id for those services, and the ownership check behind those lists read it as another server. It now reads it as the Dokploy host, as the Logs and Terminal connections already did. Services on remote servers were not affected. No migration.
+
 ### New in v0.30.8-community.35
 
 Upgrade notes: no new database migrations since v0.30.8-community.34, so an image-only rollback to it keeps working; an instance on v0.30.8-community.33.2 or older also runs migration 0224, and one on v0.30.8-community.32.1 or older also runs 0220-0222 (all additive). A compose custom command that a deploy would refuse is now refused when it is saved (T-7607), so a stored command that deploys today can fail its next save until it is changed. A rolling replace now also takes services with `scale` or `deploy.replicas` from 1 to 10 and services with host port ranges (T-9197); a compose that does not turn rolling replace on is deployed exactly as before. This release includes everything in v0.30.8-community.34.
