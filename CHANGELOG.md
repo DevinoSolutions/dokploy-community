@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**qs 6.16.1** (T-9713). Raises the pinned minimum of the query-string parser qs from 6.16.0 to 6.16.1, which fixes an uncaught error in its comma array serializer (GHSA-6pq8-jhm2-2vcw). express, co-body and stripe now resolve the same single copy as body-parser. Upgrade impact: none to configure; query and form parsing behave as before. No migration.
+
 **better-auth 1.7.14** (T-9599). Moves better-auth and its official plugins (api-key, oauth-provider, passkey, scim, sso) from 1.7.7 to 1.7.14, together with the exact versions they pin: @better-auth/utils 0.5.1, better-call 1.4.4 and @better-fetch/fetch 1.3.3. The releases in between are bug fixes and hardening; sign-in, sessions, API keys, SSO, SCIM and the OAuth provider keep their routes and settings; the OAuth provider now reports unknown clients as invalid_client and PKCE failures as invalid_grant (HTTP 400), and OIDC SSO requires the discovered issuer to match the configured one exactly. Upgrade impact: no migration; sessions and API keys stay valid.
 
 **The deploy script's path check on minimal hosts now follows links the same way as on full hosts** (T-9540). On hosts that have `readlink -f` but no `realpath -m` (BusyBox images), the shell helper that deploy scripts use to resolve paths now follows each link from its own directory, the same way as on full hosts, hop by hop with a cap of 40, and fails on anything it cannot follow. Hosts with `realpath -m` behave as before. Upgrade impact: a path that went through such a link can now resolve to a different place, or be refused, on a minimal host; the generated deploy script text changes in that helper only. No migration.
