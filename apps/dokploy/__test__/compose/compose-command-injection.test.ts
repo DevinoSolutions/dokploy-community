@@ -1,10 +1,22 @@
 import { existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createCommand } from "@dokploy/server/utils/builders/compose";
 import { parse, quote } from "shell-quote";
 import { describe, expect, it } from "vitest";
-import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
+import {
+	boundedSh,
+	boundedShellAvailable,
+	makeTempDir,
+} from "./helpers/bounded-shell";
 
-const MARK = `/tmp/dokploy_compose_pwned_${process.pid}`;
+// A path node and sh read the same way: on Windows, `/tmp` of Git Bash is the
+// user's temp directory while node reads it as C:/tmp, so a `/tmp` marker
+// could never be seen. Forward slashes work in both.
+const MARK = join(
+	makeTempDir(join(tmpdir(), "dokploy-compose-inject-")),
+	"pwned",
+).replace(/\\/g, "/");
 
 const base = {
 	composeType: "docker-compose" as const,
@@ -16,11 +28,22 @@ const base = {
 
 // createCommand output is interpolated as `docker ${command}` at the deploy
 // sink; run `: ${command}` (docker -> no-op) and assert no injection fires.
-const runsSafely = (command: string) => {
+// A missing marker only means something when the shell ran to the end: a
+// launcher failure, a non-zero exit or the bound firing fails the check.
+const runsSafely = (command: string, timeout = 30_000) => {
 	if (existsSync(MARK)) rmSync(MARK);
-	boundedSh(["-c", `: ${command}`], { encoding: "utf8", stdio: "ignore" });
+	const result = boundedSh(["-c", `: ${command}`], {
+		encoding: "utf8",
+		stdio: "ignore",
+		timeout,
+	});
 	const fired = existsSync(MARK);
 	if (existsSync(MARK)) rmSync(MARK);
+	if (result.error || result.status !== 0 || result.signal !== null) {
+		throw new Error(
+			`The shell did not complete (status ${result.status}, signal ${result.signal}${result.error ? `, ${result.error.message}` : ""}): an absent marker proves nothing.`,
+		);
+	}
 	return !fired;
 };
 
@@ -35,6 +58,26 @@ const PAYLOADS = [
 ];
 
 describe("compose createCommand injection", () => {
+	// The check itself: it sees an injection that fires, and a shell that did
+	// not finish cannot pass as safe.
+	itWithShell("runsSafely detects a payload that runs", () => {
+		expect(runsSafely(`x; touch ${MARK}`)).toBe(false);
+		expect(runsSafely("x")).toBe(true);
+	});
+
+	itWithShell("runsSafely fails when the shell exits non-zero", () => {
+		expect(() => runsSafely("x; exit 3")).toThrow(/status 3/);
+	});
+
+	itWithShell(
+		"runsSafely fails when the shell is stopped by its bound",
+		() => {
+			// Sleeps past a 1 s bound; short enough that nothing outlives the test.
+			expect(() => runsSafely("x; sleep 5", 1000)).toThrow(/did not complete/);
+		},
+		30_000,
+	);
+
 	itWithShell("escapes composePath (docker-compose)", () => {
 		for (const p of PAYLOADS) {
 			const cmd = createCommand({

@@ -19,11 +19,12 @@ import {
 	getReleaseCancelKey,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
 	boundedSh,
 	boundedShellAvailable,
 	boundedShSpawn,
+	killDetachedGroups,
 } from "./helpers/bounded-shell";
 
 /**
@@ -72,6 +73,11 @@ const hasSetsid =
 afterAll(() => {
 	rmSync(root, { recursive: true, force: true });
 });
+
+// The release launcher runs the script in a session of its own, which the
+// bound on the spawned shell does not reach: whatever a test leaves of it dies
+// here (and once the bounded shell is gone, see `pidFile` in bounded-shell).
+afterEach(killDetachedGroups);
 
 interface ServiceConfig {
 	/** `docker compose config --hash` now. */
@@ -1484,6 +1490,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 					env: envFor(world),
 					stdio: "ignore",
 					seconds: 90,
+					pidFile,
 				},
 			);
 			const exited = new Promise<void>((resolve) => child.on("close", resolve));
@@ -1546,7 +1553,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore", seconds: 90 },
+					{ env: envFor(world), stdio: "ignore", seconds: 90, pidFile },
 				);
 				const exited = new Promise<void>((resolve) =>
 					child.on("close", resolve),
@@ -1653,7 +1660,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore", seconds: 90 },
+					{ env: envFor(world), stdio: "ignore", seconds: 90, pidFile },
 				);
 				const exited = new Promise<number | null>((resolve) =>
 					child.on("close", resolve),
