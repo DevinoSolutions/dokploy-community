@@ -35,6 +35,14 @@ import {
 	isBelowDokployPinFloor,
 	isInstalledDokployImage,
 } from "../utils/dokploy-update-target";
+import {
+	getUpdateAttemptOutcome,
+	isUpdateErrorCode,
+	type IUpdateAttempt,
+	UPDATE_ATTEMPT_STATUSES,
+	UPDATE_ERROR_MESSAGES,
+	type UpdateAttemptStatus,
+} from "../utils/dokploy-update-attempt";
 export interface IUpdateData {
 	latestVersion: string | null;
 	updateAvailable: boolean;
@@ -295,78 +303,19 @@ export const getUpdateData = async (
 	}
 };
 
-export type UpdateAttemptStatus =
-	| "pulling"
-	| "updating"
-	| "submitted"
-	| "failed";
-
-/** The last time an in-panel update was started, kept next to the rollback point. */
-export interface IUpdateAttempt {
-	/** Dokploy version that was running when the update started. */
-	fromVersion: string;
-	/** The release tag or digest asked for; for an unpinned update, the latest release it resolved to. */
-	target: string;
-	/** Whether the caller named the target (a tag or the rollback) or took the latest. */
-	pinned?: boolean;
-	/** The image the update installs. */
-	image: string;
-	startedAt: string;
-	finishedAt?: string;
-	status: UpdateAttemptStatus;
-	/** Short single-line reason, set when `status` is `failed`. */
-	error?: string;
-}
-
-const UPDATE_ATTEMPT_STATUSES: readonly string[] = [
-	"pulling",
-	"updating",
-	"submitted",
-	"failed",
-];
-const UPDATE_ATTEMPT_ERROR_MAX = 300;
-/** How long a submitted update may take before the running version is doubted. */
-export const UPDATE_ATTEMPT_SETTLE_MS = 5 * 60_000;
-
 export const getUpdateAttemptPath = () =>
 	join(paths().BASE_PATH, "dokploy-update-last-attempt.json");
 
-/** One line, secrets masked, capped: safe to store and show. */
-export const summarizeUpdateError = (error: unknown): string => {
-	const raw =
-		error instanceof Error
-			? error.message
-			: typeof error === "string"
-				? error
-				: "";
-	const text =
-		raw
-			.replace(/\s+/g, " ")
-			.replace(
-				/(password|passwd|token|secret|authorization|bearer)(\s*[=:]\s*|\s+)\S+/gi,
-				"$1=***",
-			)
-			.trim() || "The update command failed without a message";
-	return text.length > UPDATE_ATTEMPT_ERROR_MAX
-		? `${text.slice(0, UPDATE_ATTEMPT_ERROR_MAX - 1)}…`
-		: text;
-};
-
 /**
  * Writes the attempt atomically (tmp then rename, owner-only). Never throws:
- * losing the record must not stop an update. `error` is sanitised here.
+ * losing the record must not stop an update. Only the error code is stored;
+ * the message is derived from it when read, so no docker or registry text
+ * reaches the file.
  */
-export const writeDokployUpdateAttempt = async (
-	attempt: IUpdateAttempt,
-	file = getUpdateAttemptPath(),
-) => {
+const writeAttemptFile = async (attempt: IUpdateAttempt, file: string) => {
 	const tmp = `${file}.${randomUUID()}.tmp`;
 	try {
-		const { error, ...rest } = attempt;
-		const record: IUpdateAttempt = {
-			...rest,
-			...(error !== undefined && { error: summarizeUpdateError(error) }),
-		};
+		const { error: _derived, ...record } = attempt;
 		await mkdir(dirname(file), { recursive: true });
 		await writeFile(tmp, JSON.stringify(record), { mode: 0o600 });
 		await rename(tmp, file);
@@ -379,6 +328,33 @@ export const writeDokployUpdateAttempt = async (
 	}
 };
 
+/** Starts recording a new attempt, replacing the previous one. Never throws. */
+export const startDokployUpdateAttempt = (
+	attempt: IUpdateAttempt,
+	file = getUpdateAttemptPath(),
+) => writeAttemptFile(attempt, file);
+
+/**
+ * Moves the attempt `attemptId` on. The file is read again first and nothing
+ * is written when it holds another attempt (a newer one has started), so a
+ * stale job can't overwrite it. The read and the write are not atomic
+ * together: a newer attempt that starts in between can still be overwritten,
+ * which the refusal to start an update while another is in progress makes
+ * very unlikely. Never throws; returns whether the attempt was updated.
+ */
+export const transitionDokployUpdateAttempt = async (
+	attemptId: string,
+	patch: Partial<Omit<IUpdateAttempt, "attemptId" | "error">>,
+	file = getUpdateAttemptPath(),
+) => {
+	const current = await readDokployUpdateAttempt(file);
+	if (!current || current.attemptId !== attemptId) {
+		return false;
+	}
+	await writeAttemptFile({ ...current, ...patch }, file);
+	return true;
+};
+
 /** The recorded attempt, or null when there is none or the file is unusable. */
 export const readDokployUpdateAttempt = async (
 	file = getUpdateAttemptPath(),
@@ -388,34 +364,42 @@ export const readDokployUpdateAttempt = async (
 			Record<keyof IUpdateAttempt, unknown>
 		>;
 		const {
+			attemptId,
 			fromVersion,
 			target,
 			pinned,
+			expectedVersion,
 			image,
 			startedAt,
 			finishedAt,
 			status,
-			error,
+			errorCode,
 		} = raw ?? {};
 		if (
+			typeof attemptId !== "string" ||
 			typeof fromVersion !== "string" ||
 			typeof target !== "string" ||
 			typeof image !== "string" ||
 			typeof startedAt !== "string" ||
 			typeof status !== "string" ||
-			!UPDATE_ATTEMPT_STATUSES.includes(status)
+			!(UPDATE_ATTEMPT_STATUSES as readonly string[]).includes(status)
 		) {
 			return null;
 		}
 		return {
+			attemptId,
 			fromVersion,
 			target,
 			image,
 			startedAt,
 			status: status as UpdateAttemptStatus,
 			...(typeof pinned === "boolean" && { pinned }),
+			...(typeof expectedVersion === "string" && { expectedVersion }),
 			...(typeof finishedAt === "string" && { finishedAt }),
-			...(typeof error === "string" && { error }),
+			...(isUpdateErrorCode(errorCode) && {
+				errorCode,
+				error: UPDATE_ERROR_MESSAGES[errorCode],
+			}),
 		};
 	} catch {
 		return null;
@@ -423,42 +407,24 @@ export const readDokployUpdateAttempt = async (
 };
 
 /**
- * True when an update to a release tag was handed to Docker more than five
- * minutes ago, yet the server still runs another version: the swap did not
- * take, or Swarm rolled it back.
+ * The last attempt reconciled with the version this process runs (see
+ * `getUpdateAttemptOutcome`), or null when none is recorded. The stored file
+ * is left as it is.
  */
-export const isUpdateVersionMismatch = (
-	attempt: IUpdateAttempt,
-	runningVersion: string,
-	now = Date.now(),
-) => {
-	if (
-		attempt.status !== "submitted" ||
-		!DOKPLOY_RELEASE_TAG_REGEX.test(attempt.target) ||
-		!attempt.finishedAt
-	) {
-		return false;
-	}
-	const finished = Date.parse(attempt.finishedAt);
-	return (
-		!Number.isNaN(finished) &&
-		now - finished > UPDATE_ATTEMPT_SETTLE_MS &&
-		attempt.target !== runningVersion
-	);
-};
-
-/** The last attempt with the version check applied, or null when none is recorded. */
 export const getLastUpdateAttempt = async (
 	runningVersion: string,
 	file = getUpdateAttemptPath(),
+	now = Date.now(),
 ) => {
 	const attempt = await readDokployUpdateAttempt(file);
 	if (!attempt) {
 		return null;
 	}
+	const outcome = getUpdateAttemptOutcome(attempt, runningVersion, now);
 	return {
 		...attempt,
-		versionMismatch: isUpdateVersionMismatch(attempt, runningVersion),
+		outcome,
+		versionMismatch: outcome === "mismatch",
 	};
 };
 

@@ -50,15 +50,16 @@ import {
 	sendWebServerDockerCleanupNotifications,
 	setupGPUSupport,
 	spawnAsync,
+	startDokployUpdateAttempt,
 	startLogCleanup,
 	stopLogCleanup,
+	transitionDokployUpdateAttempt,
 	updateLetsEncryptEmail,
 	updateResponseCompression,
 	updateServerById,
 	updateServerTraefik,
 	updateWebServerSettings,
 	writeConfig,
-	writeDokployUpdateAttempt,
 	writeMainConfig,
 	writeTraefikConfigInPath,
 	writeTraefikSetup,
@@ -80,6 +81,10 @@ import {
 	scheduleDockerCleanup,
 	WEB_SERVER_CLEANUP_JOB,
 } from "@dokploy/server/utils/docker/cleanup-job";
+import {
+	classifyUpdateError,
+	type IUpdateAttempt,
+} from "@dokploy/server/utils/dokploy-update-attempt";
 import {
 	DOKPLOY_IMAGE_REPO,
 	DOKPLOY_MIN_PINNED_VERSION,
@@ -979,11 +984,23 @@ export const settingsRouter = createTRPCRouter({
 				});
 			}
 
+			// A second update would interleave its service update and rollback
+			// point with the one in flight.
+			const lastAttempt = await getLastUpdateAttempt(packageInfo.version);
+			if (lastAttempt?.outcome === "in_progress") {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: "An update is already in progress.",
+				});
+			}
+
 			// Without a target this installs the latest release, as before. A
 			// target (or the recorded rollback digest) only ever selects a tag or
 			// digest inside the fork repo.
 			let target = input?.target;
 			let pinned: DokployUpdateTarget | null = null;
+			// The version a rollback leaves running; its target is only a digest.
+			let expectedVersion: string | undefined;
 			if (input?.rollback) {
 				const point = await readDokployRollbackPoint(packageInfo.version);
 				if (!point) {
@@ -993,6 +1010,7 @@ export const settingsRouter = createTRPCRouter({
 					});
 				}
 				target = point.digest;
+				expectedVersion = point.version;
 			}
 			if (target !== undefined) {
 				pinned = parseDokployUpdateTarget(target);
@@ -1020,6 +1038,9 @@ export const settingsRouter = createTRPCRouter({
 							message:
 								"A digest is only accepted for the recorded rollback. Use a release tag.",
 						});
+					}
+					if (point && "version" in point) {
+						expectedVersion = point.version;
 					}
 				}
 			}
@@ -1055,19 +1076,24 @@ export const settingsRouter = createTRPCRouter({
 			await assertUpdateImageExists(image);
 
 			const installing = pinned ?? undefined;
-			const attempt = {
+			const attempt: IUpdateAttempt = {
+				attemptId: randomUUID(),
 				fromVersion: packageInfo.version,
 				// The release the server resolved, so an unpinned update is checked too.
 				target: pinned
 					? (pinned.tag ?? pinned.digest)
 					: (resolvedTag ?? "latest"),
 				pinned: !!pinned,
+				expectedVersion: pinned ? (pinned.tag ?? expectedVersion) : resolvedTag,
 				image,
 				startedAt: new Date().toISOString(),
+				status: "pulling",
 			};
+			// Recorded before the job starts, so a second request sees it at once.
+			await startDokployUpdateAttempt(attempt);
 			void runBackgroundJob("settings.updateServer background", async () => {
+				let phase: "pull" | "update" = "pull";
 				try {
-					await writeDokployUpdateAttempt({ ...attempt, status: "pulling" });
 					// The image is pulled first: if that fails, the running service and
 					// the rollback point of the last update are both kept.
 					await spawnAsync("docker", ["pull", image]);
@@ -1075,7 +1101,10 @@ export const settingsRouter = createTRPCRouter({
 						installing,
 						installedImage: image,
 					}).catch(() => undefined);
-					await writeDokployUpdateAttempt({ ...attempt, status: "updating" });
+					phase = "update";
+					await transitionDokployUpdateAttempt(attempt.attemptId, {
+						status: "updating",
+					});
 					await spawnAsync("docker", [
 						"service",
 						"update",
@@ -1084,17 +1113,17 @@ export const settingsRouter = createTRPCRouter({
 						image,
 						"dokploy",
 					]);
-					await writeDokployUpdateAttempt({
-						...attempt,
+					await transitionDokployUpdateAttempt(attempt.attemptId, {
 						status: "submitted",
 						finishedAt: new Date().toISOString(),
 					});
 				} catch (error) {
-					await writeDokployUpdateAttempt({
-						...attempt,
+					// Only the category is recorded; the raw docker output (which can
+					// carry credentials) reaches the server log through the rethrow.
+					await transitionDokployUpdateAttempt(attempt.attemptId, {
 						status: "failed",
 						finishedAt: new Date().toISOString(),
-						error: error instanceof Error ? error.message : String(error),
+						errorCode: classifyUpdateError(error, phase),
 					});
 					throw error;
 				}

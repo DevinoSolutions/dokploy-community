@@ -85,7 +85,10 @@ export const UpdateWebServer = ({
 	const [healthResult, setHealthResult] = useState<HealthResult | null>(null);
 
 	const utils = api.useUtils();
-	const { mutateAsync: updateServer } = api.settings.updateServer.useMutation();
+	// The recorded attempt changes when an update starts or is refused.
+	const { mutateAsync: updateServer } = api.settings.updateServer.useMutation({
+		onSettled: () => utils.settings.getLastUpdateAttempt.invalidate(),
+	});
 	const { refetch: checkHealth } =
 		api.settings.checkInfrastructureHealth.useQuery(undefined, {
 			enabled: false,
