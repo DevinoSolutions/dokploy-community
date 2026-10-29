@@ -5,12 +5,14 @@ const state = vi.hoisted(() => ({ isCloud: false, isRoot: true }));
 
 const mocks = vi.hoisted(() => ({
 	getDockerResourceType: vi.fn(),
+	getLastUpdateAttempt: vi.fn(),
 	getUpdateData: vi.fn(),
 	getUpdateMigrationDelta: vi.fn(),
 	readDokployRollbackPoint: vi.fn(),
 	recordDokployRollbackPoint: vi.fn(),
 	runBackgroundJob: vi.fn(),
 	spawnAsync: vi.fn(),
+	writeDokployUpdateAttempt: vi.fn(),
 	audit: vi.fn(async (_ctx: unknown, _event: unknown) => undefined),
 }));
 
@@ -20,12 +22,14 @@ vi.mock("@dokploy/server", () => ({
 	},
 	isRootOrganization: async () => state.isRoot,
 	getDockerResourceType: mocks.getDockerResourceType,
+	getLastUpdateAttempt: mocks.getLastUpdateAttempt,
 	getUpdateData: mocks.getUpdateData,
 	getUpdateMigrationDelta: mocks.getUpdateMigrationDelta,
 	readDokployRollbackPoint: mocks.readDokployRollbackPoint,
 	recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
 	runBackgroundJob: mocks.runBackgroundJob,
 	spawnAsync: mocks.spawnAsync,
+	writeDokployUpdateAttempt: mocks.writeDokployUpdateAttempt,
 }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({
@@ -112,6 +116,10 @@ beforeEach(() => {
 	mocks.recordDokployRollbackPoint.mockReset();
 	mocks.recordDokployRollbackPoint.mockResolvedValue(undefined);
 	mocks.readDokployRollbackPoint.mockResolvedValue(null);
+	mocks.writeDokployUpdateAttempt.mockReset();
+	mocks.writeDokployUpdateAttempt.mockResolvedValue(undefined);
+	mocks.getLastUpdateAttempt.mockReset();
+	mocks.getLastUpdateAttempt.mockResolvedValue(null);
 	mocks.getDockerResourceType.mockResolvedValue("service");
 	mocks.getUpdateData.mockResolvedValue({
 		latestVersion: "v0.30.9-community.1",
@@ -119,13 +127,25 @@ beforeEach(() => {
 	});
 });
 
+const attempts = () =>
+	mocks.writeDokployUpdateAttempt.mock.calls.map(([attempt]) => attempt);
+
 describe("settings.updateServer without a target", () => {
-	it("installs :<latestVersion> exactly as before, with no pull", async () => {
+	it("checks the image, pulls it and installs :<latestVersion>", async () => {
 		await expect(caller.updateServer()).resolves.toBe(true);
 
+		const image = `${REPO}:v0.30.9-community.1`;
 		expect(mocks.getUpdateData).toHaveBeenCalledWith(packageInfo.version);
+		expect(mocks.spawnAsync.mock.calls[0]).toEqual([
+			"docker",
+			["manifest", "inspect", image],
+			undefined,
+			{ timeout: 60_000 },
+		]);
 		expect(await spawned()).toEqual([
-			serviceUpdate(`${REPO}:v0.30.9-community.1`),
+			manifestInspect(image),
+			["docker", "pull", image],
+			serviceUpdate(image),
 		]);
 		expect(mocks.runBackgroundJob).toHaveBeenCalledWith(
 			"settings.updateServer background",
@@ -139,7 +159,7 @@ describe("settings.updateServer without a target", () => {
 		});
 	});
 
-	it("records the running image before the update", async () => {
+	it("records the running image after the pull and before the update", async () => {
 		await caller.updateServer();
 		await Promise.all(jobs);
 
@@ -150,9 +170,10 @@ describe("settings.updateServer without a target", () => {
 				installedImage: `${REPO}:v0.30.9-community.1`,
 			},
 		);
-		expect(
-			mocks.recordDokployRollbackPoint.mock.invocationCallOrder[0],
-		).toBeLessThan(mocks.spawnAsync.mock.invocationCallOrder[0]!);
+		const [, pull, update] = mocks.spawnAsync.mock.invocationCallOrder;
+		const [record] = mocks.recordDokployRollbackPoint.mock.invocationCallOrder;
+		expect(pull).toBeLessThan(record!);
+		expect(record).toBeLessThan(update!);
 	});
 
 	it("still runs the exact update when recording rejects", async () => {
@@ -160,24 +181,148 @@ describe("settings.updateServer without a target", () => {
 
 		await caller.updateServer();
 
+		const image = `${REPO}:v0.30.9-community.1`;
 		expect(await spawned()).toEqual([
-			serviceUpdate(`${REPO}:v0.30.9-community.1`),
+			manifestInspect(image),
+			["docker", "pull", image],
+			serviceUpdate(image),
 		]);
 		expect(failures).toEqual([]);
 	});
 
-	it("does nothing when no update is available", async () => {
+	it("refuses before queueing anything when the latest release can't be checked", async () => {
+		mocks.getUpdateData.mockResolvedValue({
+			latestVersion: null,
+			updateAvailable: false,
+			checkFailed: true,
+			reason: "GitHub answered 403",
+		});
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "SERVICE_UNAVAILABLE",
+			message: expect.stringContaining("Could not reach GitHub"),
+		});
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			message: expect.stringContaining("release tag as the target"),
+		});
+
+		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(mocks.writeDokployUpdateAttempt).not.toHaveBeenCalled();
+		expect(mocks.spawnAsync).not.toHaveBeenCalled();
+		expect(mocks.audit).not.toHaveBeenCalled();
+		error.mockRestore();
+	});
+
+	it("refuses with BAD_REQUEST when the server is already on the latest release", async () => {
 		mocks.getUpdateData.mockResolvedValue({
 			latestVersion: packageInfo.version,
 			updateAvailable: false,
 		});
 
-		await expect(caller.updateServer()).resolves.toBe(true);
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+			message: `Already on ${packageInfo.version}, the latest release.`,
+		});
 
 		expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
 		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(mocks.writeDokployUpdateAttempt).not.toHaveBeenCalled();
 		expect(mocks.spawnAsync).not.toHaveBeenCalled();
 		expect(mocks.audit).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["manifest unknown", `Image not found in ${REPO}.`],
+		['Get "https://ghcr.io/v2/": i/o timeout', "Could not reach ghcr.io"],
+	])(
+		"refuses before queueing anything when the image check says %j",
+		async (stderr, message) => {
+			mocks.spawnAsync.mockRejectedValueOnce(new Error(stderr));
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await expect(caller.updateServer()).rejects.toMatchObject({
+				code: "BAD_REQUEST",
+				message: expect.stringContaining(message),
+			});
+
+			expect(mocks.runBackgroundJob).not.toHaveBeenCalled();
+			expect(mocks.writeDokployUpdateAttempt).not.toHaveBeenCalled();
+			expect(mocks.audit).not.toHaveBeenCalled();
+			error.mockRestore();
+		},
+	);
+
+	it("records each step of the attempt, ending as submitted", async () => {
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		const image = `${REPO}:v0.30.9-community.1`;
+		expect(attempts().map((attempt) => attempt.status)).toEqual([
+			"pulling",
+			"updating",
+			"submitted",
+		]);
+		expect(attempts()[0]).toEqual({
+			fromVersion: packageInfo.version,
+			target: "latest",
+			image,
+			startedAt: expect.any(String),
+			status: "pulling",
+		});
+		expect(attempts()[2]).toMatchObject({
+			fromVersion: packageInfo.version,
+			target: "latest",
+			image,
+			status: "submitted",
+			finishedAt: expect.any(String),
+		});
+		expect(attempts()[2]).not.toHaveProperty("error");
+	});
+
+	it("records the attempt as failed, with the error, when the pull fails", async () => {
+		mocks.spawnAsync
+			.mockResolvedValueOnce(Buffer.from("{}"))
+			.mockRejectedValueOnce(new Error("toomanyrequests: rate limit"));
+
+		await expect(caller.updateServer()).resolves.toBe(true);
+
+		const image = `${REPO}:v0.30.9-community.1`;
+		expect(await spawned()).toEqual([
+			manifestInspect(image),
+			["docker", "pull", image],
+		]);
+		expect(failures).toEqual([new Error("toomanyrequests: rate limit")]);
+		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(attempts().map((attempt) => attempt.status)).toEqual([
+			"pulling",
+			"failed",
+		]);
+		expect(attempts()[1]).toMatchObject({
+			target: "latest",
+			image,
+			status: "failed",
+			finishedAt: expect.any(String),
+			error: "toomanyrequests: rate limit",
+		});
+	});
+
+	it("records the attempt as failed when the service update fails", async () => {
+		mocks.spawnAsync
+			.mockResolvedValueOnce(Buffer.from("{}"))
+			.mockResolvedValueOnce(Buffer.from(""))
+			.mockRejectedValueOnce(new Error("update out of sequence"));
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(attempts().map((attempt) => attempt.status)).toEqual([
+			"pulling",
+			"updating",
+			"failed",
+		]);
+		expect(attempts()[2]).toMatchObject({ error: "update out of sequence" });
 	});
 
 	it.each([[{}], [{ rollback: false }]])(
@@ -185,9 +330,12 @@ describe("settings.updateServer without a target", () => {
 		async (input) => {
 			await caller.updateServer(input);
 
+			const image = `${REPO}:v0.30.9-community.1`;
 			expect(mocks.readDokployRollbackPoint).not.toHaveBeenCalled();
 			expect(await spawned()).toEqual([
-				serviceUpdate(`${REPO}:v0.30.9-community.1`),
+				manifestInspect(image),
+				["docker", "pull", image],
+				serviceUpdate(image),
 			]);
 		},
 	);
@@ -288,6 +436,34 @@ describe("settings.updateServer with a pinned target", () => {
 		]);
 		expect(failures).toEqual([new Error("pull failed")]);
 		expect(mocks.recordDokployRollbackPoint).not.toHaveBeenCalled();
+		expect(attempts().map((attempt) => attempt.status)).toEqual([
+			"pulling",
+			"failed",
+		]);
+		expect(attempts()[1]).toMatchObject({
+			target: "v0.30.8-community.32.1",
+			image: `${REPO}:v0.30.8-community.32.1`,
+			error: "pull failed",
+		});
+	});
+
+	it("records a pinned attempt under its tag, and a rollback under its digest", async () => {
+		await caller.updateServer({ target: "v0.30.8-community.32.1" });
+		await Promise.all(jobs);
+		expect(attempts().at(-1)).toMatchObject({
+			target: "v0.30.8-community.32.1",
+			status: "submitted",
+		});
+
+		mocks.writeDokployUpdateAttempt.mockClear();
+		mocks.readDokployRollbackPoint.mockResolvedValue(recordedPoint);
+		await caller.updateServer({ rollback: true });
+		await Promise.all(jobs);
+		expect(attempts().at(-1)).toMatchObject({
+			target: DIGEST,
+			image: `${REPO}@${DIGEST}`,
+			status: "submitted",
+		});
 	});
 
 	it.each([
@@ -470,6 +646,50 @@ describe("settings.getUpdateRollback", () => {
 		mocks.readDokployRollbackPoint.mockResolvedValue(dated);
 
 		await expect(caller.getUpdateRollback()).resolves.toEqual(dated);
+	});
+});
+
+describe("settings.getLastUpdateAttempt", () => {
+	const attempt = {
+		fromVersion: "v0.30.8-community.36",
+		target: "v0.30.8-community.37",
+		image: `${REPO}:v0.30.8-community.37`,
+		startedAt: "2026-10-29T10:00:00.000Z",
+		finishedAt: "2026-10-29T10:01:00.000Z",
+		status: "submitted",
+		versionMismatch: true,
+	};
+
+	it("returns the recorded attempt with the version check", async () => {
+		mocks.getLastUpdateAttempt.mockResolvedValue(attempt);
+
+		await expect(caller.getLastUpdateAttempt()).resolves.toEqual(attempt);
+		expect(mocks.getLastUpdateAttempt).toHaveBeenCalledWith(
+			packageInfo.version,
+		);
+	});
+
+	it("returns null when nothing is recorded", async () => {
+		await expect(caller.getLastUpdateAttempt()).resolves.toBeNull();
+	});
+
+	it("is refused to a member and to an organization that doesn't own the instance", async () => {
+		await expect(
+			callerAs("member").getLastUpdateAttempt(),
+		).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+		state.isRoot = false;
+		await expect(caller.getLastUpdateAttempt()).rejects.toMatchObject({
+			code: "FORBIDDEN",
+		});
+		expect(mocks.getLastUpdateAttempt).not.toHaveBeenCalled();
+	});
+
+	it("does nothing on cloud", async () => {
+		state.isCloud = true;
+		mocks.getLastUpdateAttempt.mockResolvedValue(attempt);
+
+		await expect(caller.getLastUpdateAttempt()).resolves.toBeNull();
+		expect(mocks.getLastUpdateAttempt).not.toHaveBeenCalled();
 	});
 });
 

@@ -38,6 +38,14 @@ import {
 export interface IUpdateData {
 	latestVersion: string | null;
 	updateAvailable: boolean;
+	/**
+	 * Set when the check could not be completed (GitHub unreachable, rate
+	 * limited, an unusable release). `updateAvailable: false` without it means
+	 * the server is up to date.
+	 */
+	checkFailed?: boolean;
+	/** Short reason for `checkFailed`. */
+	reason?: string;
 }
 
 export const DEFAULT_UPDATE_DATA: IUpdateData = {
@@ -232,8 +240,16 @@ export const readDokployRollbackPoint = async (
 	}
 };
 
+const checkFailed = (reason: string): IUpdateData => ({
+	...DEFAULT_UPDATE_DATA,
+	checkFailed: true,
+	reason,
+});
+
 /** Returns latest version and whether an update is available by checking
- *  GitHub releases on the DevinoSolutions fork. */
+ *  GitHub releases on the DevinoSolutions fork. When the check can't be
+ *  completed the result says so (`checkFailed`) instead of looking like an
+ *  up-to-date server. */
 export const getUpdateData = async (
 	currentVersion: string,
 ): Promise<IUpdateData> => {
@@ -250,21 +266,21 @@ export const getUpdateData = async (
 		);
 
 		if (!response.ok) {
-			return DEFAULT_UPDATE_DATA;
+			return checkFailed(`GitHub answered ${response.status}`);
 		}
 
 		const release = (await response.json()) as { tag_name: string };
 		const latestVersion = release.tag_name;
 
 		if (!latestVersion) {
-			return DEFAULT_UPDATE_DATA;
+			return checkFailed("The latest release has no tag");
 		}
 
 		const cleanedCurrent = semver.clean(currentVersion);
 		const cleanedLatest = semver.clean(latestVersion);
 
 		if (!cleanedCurrent || !cleanedLatest) {
-			return DEFAULT_UPDATE_DATA;
+			return checkFailed("A version could not be parsed");
 		}
 
 		const updateAvailable = semver.gt(cleanedLatest, cleanedCurrent);
@@ -275,8 +291,164 @@ export const getUpdateData = async (
 		};
 	} catch (error) {
 		console.error("Error fetching update data:", error);
-		return DEFAULT_UPDATE_DATA;
+		return checkFailed("GitHub could not be reached");
 	}
+};
+
+export type UpdateAttemptStatus =
+	| "pulling"
+	| "updating"
+	| "submitted"
+	| "failed";
+
+/** The last time an in-panel update was started, kept next to the rollback point. */
+export interface IUpdateAttempt {
+	/** Dokploy version that was running when the update started. */
+	fromVersion: string;
+	/** The release tag or digest asked for, or `latest`. */
+	target: string;
+	/** The image the update installs. */
+	image: string;
+	startedAt: string;
+	finishedAt?: string;
+	status: UpdateAttemptStatus;
+	/** Short single-line reason, set when `status` is `failed`. */
+	error?: string;
+}
+
+const UPDATE_ATTEMPT_STATUSES: readonly string[] = [
+	"pulling",
+	"updating",
+	"submitted",
+	"failed",
+];
+const UPDATE_ATTEMPT_ERROR_MAX = 300;
+/** How long a submitted update may take before the running version is doubted. */
+export const UPDATE_ATTEMPT_SETTLE_MS = 5 * 60_000;
+
+export const getUpdateAttemptPath = () =>
+	join(paths().BASE_PATH, "dokploy-update-last-attempt.json");
+
+/** One line, secrets masked, capped: safe to store and show. */
+export const summarizeUpdateError = (error: unknown): string => {
+	const raw =
+		error instanceof Error
+			? error.message
+			: typeof error === "string"
+				? error
+				: "";
+	const text =
+		raw
+			.replace(/\s+/g, " ")
+			.replace(
+				/(password|passwd|token|secret|authorization|bearer)(\s*[=:]\s*|\s+)\S+/gi,
+				"$1=***",
+			)
+			.trim() || "The update command failed without a message";
+	return text.length > UPDATE_ATTEMPT_ERROR_MAX
+		? `${text.slice(0, UPDATE_ATTEMPT_ERROR_MAX - 1)}…`
+		: text;
+};
+
+/**
+ * Writes the attempt atomically (tmp then rename, owner-only). Never throws:
+ * losing the record must not stop an update. `error` is sanitised here.
+ */
+export const writeDokployUpdateAttempt = async (
+	attempt: IUpdateAttempt,
+	file = getUpdateAttemptPath(),
+) => {
+	const tmp = `${file}.${randomUUID()}.tmp`;
+	try {
+		const { error, ...rest } = attempt;
+		const record: IUpdateAttempt = {
+			...rest,
+			...(error !== undefined && { error: summarizeUpdateError(error) }),
+		};
+		await mkdir(dirname(file), { recursive: true });
+		await writeFile(tmp, JSON.stringify(record), { mode: 0o600 });
+		await rename(tmp, file);
+	} catch (error) {
+		console.error(
+			"Could not record the Dokploy update attempt:",
+			error instanceof Error ? error.message : String(error),
+		);
+		await rm(tmp, { force: true }).catch(() => undefined);
+	}
+};
+
+/** The recorded attempt, or null when there is none or the file is unusable. */
+export const readDokployUpdateAttempt = async (
+	file = getUpdateAttemptPath(),
+): Promise<IUpdateAttempt | null> => {
+	try {
+		const raw = JSON.parse(await readFile(file, "utf8")) as Partial<
+			Record<keyof IUpdateAttempt, unknown>
+		>;
+		const { fromVersion, target, image, startedAt, finishedAt, status, error } =
+			raw ?? {};
+		if (
+			typeof fromVersion !== "string" ||
+			typeof target !== "string" ||
+			typeof image !== "string" ||
+			typeof startedAt !== "string" ||
+			typeof status !== "string" ||
+			!UPDATE_ATTEMPT_STATUSES.includes(status)
+		) {
+			return null;
+		}
+		return {
+			fromVersion,
+			target,
+			image,
+			startedAt,
+			status: status as UpdateAttemptStatus,
+			...(typeof finishedAt === "string" && { finishedAt }),
+			...(typeof error === "string" && { error }),
+		};
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * True when an update to a release tag was handed to Docker more than five
+ * minutes ago, yet the server still runs another version: the swap did not
+ * take, or Swarm rolled it back.
+ */
+export const isUpdateVersionMismatch = (
+	attempt: IUpdateAttempt,
+	runningVersion: string,
+	now = Date.now(),
+) => {
+	if (
+		attempt.status !== "submitted" ||
+		!DOKPLOY_RELEASE_TAG_REGEX.test(attempt.target) ||
+		!attempt.finishedAt
+	) {
+		return false;
+	}
+	const finished = Date.parse(attempt.finishedAt);
+	return (
+		!Number.isNaN(finished) &&
+		now - finished > UPDATE_ATTEMPT_SETTLE_MS &&
+		attempt.target !== runningVersion
+	);
+};
+
+/** The last attempt with the version check applied, or null when none is recorded. */
+export const getLastUpdateAttempt = async (
+	runningVersion: string,
+	file = getUpdateAttemptPath(),
+) => {
+	const attempt = await readDokployUpdateAttempt(file);
+	if (!attempt) {
+		return null;
+	}
+	return {
+		...attempt,
+		versionMismatch: isUpdateVersionMismatch(attempt, runningVersion),
+	};
 };
 
 export interface IReleaseNotesSection {

@@ -605,6 +605,7 @@ exports[`MCP tool scope table > tool → scope snapshot 1`] = `
   "settings-getDokployVersion": "dokploy:read",
   "settings-getDomainRestrictionConfig": "dokploy:read",
   "settings-getIp": "dokploy:read",
+  "settings-getLastUpdateAttempt": "dokploy:read",
   "settings-getLogCleanupStatus": "dokploy:read",
   "settings-getOpenApiDocument": "dokploy:read",
   "settings-getReleaseNotes": "dokploy:read",
