@@ -377,7 +377,75 @@ export const parseRegistryResponses = (stdout: string) => {
 	return responses;
 };
 
+/** Tags asked for per page of a tag listing. */
+export const TAGS_PAGE_SIZE = 1000;
+
 export const getTagsListUrl = (base: string, repo: string) =>
-	`${base}/v2/${repo}/tags/list?n=1000`;
+	`${base}/v2/${repo}/tags/list?n=${TAGS_PAGE_SIZE}`;
+
+/** The valid tag names of a `tags/list` body; `null` when it is not one. */
+export const parseTagList = (body: string): string[] | null => {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return null;
+	}
+	if (!parsed || typeof parsed !== "object") return null;
+	const tags = (parsed as { tags?: unknown }).tags;
+	// registry:2 answers `"tags": null` for a repository whose tags are all gone.
+	if (tags === null || tags === undefined) return [];
+	if (!Array.isArray(tags)) return null;
+	return tags.filter(
+		(tag): tag is string => typeof tag === "string" && isValidTag(tag),
+	);
+};
+
+/**
+ * The next page of a tag listing, from its `Link` header (distribution v2:
+ * `Link: </v2/<repo>/tags/list?last=<tag>&n=<n>>; rel="next"`).
+ *
+ * - `null`: the header names no next page, the listing is complete;
+ * - `undefined`: it names one this code will not follow. The request carries
+ *   the registry credentials, so the next page must be on the very origin the
+ *   listing came from and be the same repository's tag listing.
+ */
+export const getNextTagsPageUrl = (
+	base: string,
+	repo: string,
+	link: string | undefined,
+): string | null | undefined => {
+	if (!link) return null;
+	let target: string | undefined;
+	for (const part of link.split(",")) {
+		const match = /^\s*<([^>]*)>\s*;(.*)$/.exec(part);
+		if (!match) continue;
+		const rel = /(?:^|;)\s*rel\s*=\s*"?([^";]*)"?/i.exec(
+			match[2] as string,
+		)?.[1];
+		if (rel?.trim().split(/\s+/).includes("next")) {
+			target = match[1] as string;
+			break;
+		}
+	}
+	if (target === undefined) return null;
+	let url: URL;
+	let origin: URL;
+	let path: string;
+	try {
+		origin = new URL(`${base}/`);
+		url = new URL(target, origin);
+		path = decodeURIComponent(url.pathname);
+	} catch {
+		return undefined;
+	}
+	if (url.origin !== origin.origin || url.username || url.password) {
+		return undefined;
+	}
+	if (path !== `/v2/${repo}/tags/list`) return undefined;
+	if (/[\s"\\]/.test(url.href)) return undefined;
+	url.hash = "";
+	return url.href;
+};
 export const getManifestUrl = (base: string, repo: string, reference: string) =>
 	`${base}/v2/${repo}/manifests/${reference}`;

@@ -11,11 +11,11 @@ import {
 	buildRegistryCurlConfig,
 	getManifestChildDigests,
 	getManifestUrl,
+	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
 	getTagsListUrl,
 	isValidDigest,
-	isValidTag,
 	mapDeploymentTagTimes,
 	NO_CURL_MARKER,
 	REGISTRY_CURL_COMMAND,
@@ -25,6 +25,7 @@ import {
 	parseRegistryEndpoint,
 	parseRegistryImageRef,
 	parseRegistryResponses,
+	parseTagList,
 	planRepoTags,
 	selectDigestsToDelete,
 	splitFileOutput,
@@ -33,6 +34,7 @@ import {
 	execAsync,
 	execAsyncRemote,
 	openRemoteInputSession,
+	type RemoteInputSession,
 } from "@dokploy/server/utils/process/execAsync";
 import { quote } from "shell-quote";
 import { createDeploymentLogWriter } from "./compose-build-server";
@@ -60,30 +62,54 @@ import { findRegistryByIdWithCredentials } from "./registry";
  * therefore the remote shell's argv, the environment, any file and any log,
  * never contain it.
  *
+ * Progress: manifest operations on a registry backed by object storage can
+ * take the better part of a second each, and one curl runs its requests one
+ * after the other. So requests go out in small batches, a few SSH sessions at
+ * a time, and a batch that runs out of time still counts what it answered;
+ * what it did not answer is "unknown", which never makes anything deletable.
+ * Each repository is resolved and pruned before the next one, oldest tags
+ * first, so a run that stops at the time budget has still removed what it got
+ * to, and the next deploy carries on from there.
+ *
  * Everything here is best effort and bounded. `pruneComposeBuildRegistry`
  * never throws; every failure (a 401, a 405 because deletes are disabled, a
- * registry without the v2 delete API, a network error, a missing curl, a
- * timeout) becomes one warning line in the deployment log.
+ * registry without the v2 delete API, a network error, a missing curl) becomes
+ * one warning line in the deployment log. Running out of time is not a
+ * failure: it gets a plain line saying what was done.
  */
 
 /** Wall-clock budget for one retention run. */
 const RETENTION_BUDGET_MS = 45_000;
-/** Longest a single curl invocation may take before its SSH session is dropped. */
+/**
+ * Longest a single curl invocation may take before its SSH session is
+ * dropped. Whatever it answered by then still counts.
+ */
 const BATCH_TIMEOUT_MS = 20_000;
+/**
+ * How long past the budget a step that is not a curl batch (the database, an
+ * SSH connect) may hang before the run is given up on.
+ */
+const BACKSTOP_GRACE_MS = 5_000;
 /** Longest the serving host may take to print the override files. */
 const READ_FILES_TIMEOUT_MS = 10_000;
 /** Service repositories handled per run. */
 const MAX_REPOS = 20;
-/** Repositories with more tags than this are skipped (avoids paginated listings). */
-const MAX_TAGS_PER_REPO = 500;
+/** Pages of one repository's tag listing followed per run. */
+const MAX_TAG_PAGES = 10;
 /** Manifests actually deleted per run; a larger backlog is worked off over several deploys. */
 const MAX_DELETIONS_PER_RUN = 50;
-/** Requests per curl invocation. */
-const BATCH_SIZE = 100;
+/** Requests per curl invocation (they run one after the other). */
+const BATCH_SIZE = 20;
+/** curl invocations, each over its own SSH session, running at once. */
+const MAX_CONCURRENT_BATCHES = 3;
+/** Old tags resolved before the next round of deletions. */
+const WAVE_SIZE = BATCH_SIZE * MAX_CONCURRENT_BATCHES;
 /** A "running" deployment older than this is a leftover, not a concurrent deploy. */
 const RUNNING_DEPLOYMENT_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 class RetentionAbort extends Error {}
+/** The time budget ran out: not a failure, the next deploy carries on. */
+class BudgetSpent extends RetentionAbort {}
 
 const LATEST_TAG = "latest";
 
@@ -119,16 +145,20 @@ export interface RegistryRetentionEntity extends ComposePathLike {
 const redact = (text: string, secret?: string | null) =>
 	secret ? text.split(secret).join("***") : text;
 
-const withTimeout = <T>(promise: Promise<T>, ms: number, label: string) => {
+const withTimeout = <T>(
+	promise: Promise<T>,
+	ms: number,
+	makeError: () => Error,
+) => {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const timeout = new Promise<never>((_, reject) => {
-		timer = setTimeout(
-			() => reject(new RetentionAbort(`${label} timed out`)),
-			ms,
-		);
+		timer = setTimeout(() => reject(makeError()), ms);
 	});
 	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 };
+
+const plural = (count: number, one: string, many: string) =>
+	`${count} ${count === 1 ? one : many}`;
 
 /**
  * Prunes old `dpl-` tags of `entity`'s service repositories in its build
@@ -140,11 +170,13 @@ export const pruneComposeBuildRegistry = async ({
 	deployment,
 	keep = BUILD_REGISTRY_KEEP_DPL_TAGS,
 	budgetMs = RETENTION_BUDGET_MS,
+	batchTimeoutMs = BATCH_TIMEOUT_MS,
 }: {
 	entity: RegistryRetentionEntity;
 	deployment: { logPath: string; deploymentId?: string };
 	keep?: number;
 	budgetMs?: number;
+	batchTimeoutMs?: number;
 }): Promise<void> => {
 	const { buildServerId, buildRegistryId } = entity;
 	if (!buildServerId || !buildRegistryId) return;
@@ -154,6 +186,28 @@ export const pruneComposeBuildRegistry = async ({
 	const log = createDeploymentLogWriter(entity.serverId ?? null, deployment.logPath);
 	let password: string | null | undefined;
 	let cancelled = false;
+	const activeSessions = new Set<RemoteInputSession>();
+	/** What this run has done so far; reported however it ends. */
+	const progress = {
+		/** Repositories with old tags this run got to. */
+		repos: 0,
+		/** Repositories at least one manifest was removed from. */
+		prunedRepos: new Set<string>(),
+		deleted: 0,
+		removedTags: 0,
+		gone: 0,
+		failed: 0,
+		/** DELETEs sent whose answer did not arrive in time. */
+		unconfirmed: 0,
+	};
+	const progressDetails = () =>
+		`${progress.failed ? `; ${progress.failed} failed` : ""}${
+			progress.gone ? `; ${progress.gone} already gone` : ""
+		}${
+			progress.unconfirmed
+				? `; ${progress.unconfirmed} not confirmed in time`
+				: ""
+		}`;
 	pruneInFlight.add(entity.composeId);
 	try {
 		const registry = await findRegistryByIdWithCredentials(buildRegistryId);
@@ -174,41 +228,70 @@ export const pruneComposeBuildRegistry = async ({
 		}
 
 		const deadline = Date.now() + budgetMs;
+		const outOfTime = () => cancelled || Date.now() >= deadline;
 		const assertTime = () => {
-			if (cancelled || Date.now() >= deadline) {
-				throw new RetentionAbort("the time budget for cleanup ran out");
+			if (outOfTime()) {
+				throw new BudgetSpent("the time budget for cleanup ran out");
 			}
 		};
 
-		/** One SSH session = one curl invocation on the build server. */
+		/**
+		 * One SSH session = one curl invocation on the build server. Running out
+		 * of time is not an error: the session is dropped and the responses that
+		 * arrived before that are returned; the rest are simply missing.
+		 */
 		const runBatch = async (requests: RegistryRequest[]) => {
-			assertTime();
 			let stdout = "";
-			const session = await openRemoteInputSession(
-				buildServerId,
-				REGISTRY_CURL_COMMAND,
-				{ onStdout: (text) => void (stdout += text) },
-			);
-			const timer = setTimeout(
-				() => session.abort(),
-				Math.max(1, Math.min(BATCH_TIMEOUT_MS, deadline - Date.now())),
-			);
+			let expired = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const expiry = new Promise<null>((resolve) => {
+				timer = setTimeout(
+					() => {
+						expired = true;
+						resolve(null);
+					},
+					Math.max(1, Math.min(batchTimeoutMs, deadline - Date.now())),
+				);
+			});
 			try {
-				try {
-					await session.write(
-						Buffer.from(
-							buildRegistryCurlConfig({
-								requests,
-								username: registry.username,
-								password: registry.password,
-							}),
-							"utf8",
-						),
+				const opening = openRemoteInputSession(
+					buildServerId,
+					REGISTRY_CURL_COMMAND,
+					{ onStdout: (text) => void (stdout += text) },
+				);
+				const session = await Promise.race([opening, expiry]);
+				if (!session) {
+					// Connecting took the whole slot; drop the session if it opens late.
+					opening.then(
+						(late) => late.abort(),
+						() => {},
 					);
-				} catch {
-					// The command may already be gone (no curl); `end` reports why.
+					return new Map<number, RegistryResponse>();
 				}
-				await session.end();
+				activeSessions.add(session);
+				void expiry.then(() => session.abort());
+				try {
+					try {
+						await session.write(
+							Buffer.from(
+								buildRegistryCurlConfig({
+									requests,
+									username: registry.username,
+									password: registry.password,
+								}),
+								"utf8",
+							),
+						);
+					} catch {
+						// The command may already be gone (no curl); `end` reports why.
+					}
+					await session.end();
+				} catch (error) {
+					// Dropped on purpose (out of time): keep what was answered.
+					if (!expired && !cancelled) throw error;
+				} finally {
+					activeSessions.delete(session);
+				}
 			} finally {
 				clearTimeout(timer);
 			}
@@ -216,6 +299,49 @@ export const pruneComposeBuildRegistry = async ({
 				throw new RetentionAbort("curl is not installed on the build server");
 			}
 			return parseRegistryResponses(stdout);
+		};
+
+		/**
+		 * Sends `requests` (ids unique within the call) in batches of
+		 * `BATCH_SIZE`, at most `MAX_CONCURRENT_BATCHES` at a time. A request
+		 * without a response was not answered in time. No batch starts once the
+		 * budget is spent; a batch that fails ends the scheduling, and its error
+		 * comes back next to whatever the other batches answered.
+		 */
+		const runBatches = async (requests: RegistryRequest[]) => {
+			const chunks: RegistryRequest[][] = [];
+			for (let start = 0; start < requests.length; start += BATCH_SIZE) {
+				chunks.push(requests.slice(start, start + BATCH_SIZE));
+			}
+			const responses = new Map<number, RegistryResponse>();
+			let error: unknown;
+			let failed = false;
+			let next = 0;
+			const worker = async () => {
+				while (next < chunks.length && !failed && !outOfTime()) {
+					const chunk = chunks[next++] as RegistryRequest[];
+					try {
+						for (const [id, response] of await runBatch(chunk)) {
+							responses.set(id, response);
+						}
+					} catch (caught) {
+						if (!failed) error = caught;
+						failed = true;
+					}
+				}
+			};
+			await Promise.all(
+				Array.from(
+					{ length: Math.min(MAX_CONCURRENT_BATCHES, chunks.length) },
+					worker,
+				),
+			);
+			return { responses, failed, error };
+		};
+		const runAll = async (requests: RegistryRequest[]) => {
+			const { responses, failed, error } = await runBatches(requests);
+			if (failed) throw error;
+			return responses;
 		};
 
 		/** Statuses that mean no further request can succeed. */
@@ -252,7 +378,7 @@ export const pruneComposeBuildRegistry = async ({
 					? execAsyncRemote(entity.serverId, readFiles)
 					: execAsync(readFiles),
 				READ_FILES_TIMEOUT_MS,
-				"reading the release overrides",
+				() => new RetentionAbort("reading the release overrides timed out"),
 			);
 			const protectedByRepo = new Map<string, Set<string>>();
 			for (const text of splitFileOutput(filesOutput)) {
@@ -290,7 +416,7 @@ export const pruneComposeBuildRegistry = async ({
 
 			// 3. Find the registry's API address from the build server.
 			const bases = getRegistryApiBases(endpoint);
-			const probe = await runBatch(
+			const probe = await runAll(
 				bases.map((base, id) => ({
 					id,
 					method: "GET" as const,
@@ -299,20 +425,22 @@ export const pruneComposeBuildRegistry = async ({
 			);
 			const reachable = bases.findIndex((_, id) => probe.get(id)?.status === 200);
 			if (reachable === -1) {
-				for (let id = 0; id < bases.length; id++) {
-					failIfSystemic(probe.get(id)?.status ?? 0, "checking the API");
+				assertTime();
+				for (const response of probe.values()) {
+					failIfSystemic(response.status, "checking the API");
 				}
 				throw new RetentionAbort(
-					"the registry did not answer the v2 API check as expected",
+					probe.size < bases.length
+						? "the registry did not answer the v2 API check in time"
+						: "the registry did not answer the v2 API check as expected",
 				);
 			}
 			const base = bases[reachable] as string;
 
-			// 4. List the tags of every service repository. The listing is asked
-			// for with its headers: a `Link` header means the registry paged or
-			// truncated it, and a partial listing cannot tell us what is kept.
+			// 4. The first page of every repository's tag listing, in one go. It is
+			// asked for with its headers: a `Link` header names the next page.
 			const repos = [...protectedByRepo.keys()];
-			const listings = await runBatch(
+			const firstPages = await runAll(
 				repos.map((repo, id) => ({
 					id,
 					method: "GET" as const,
@@ -320,53 +448,258 @@ export const pruneComposeBuildRegistry = async ({
 					includeHeaders: true,
 				})),
 			);
-			interface RepoWork {
+
+			/** Every tag of `repo`, or `null` when the listing cannot be trusted whole. */
+			const listTags = async (
+				repo: string,
+				first: RegistryResponse | undefined,
+			): Promise<string[] | null> => {
+				const tags: string[] = [];
+				const seen = new Set<string>([
+					new URL(getTagsListUrl(base, repo)).href,
+				]);
+				let response = first;
+				for (let page = 1; ; page++) {
+					if (!response) {
+						assertTime();
+						log.line(
+							`Build registry cleanup left ${repo} for the next deploy: its tag listing did not arrive in time.`,
+						);
+						return null;
+					}
+					failIfSystemic(response.status, "listing tags");
+					if (response.status === 404) return null;
+					if (response.status !== 200) {
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: listing tags returned HTTP ${response.status}.`,
+						);
+						return null;
+					}
+					const pageTags = parseTagList(response.body);
+					if (!pageTags) {
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: unreadable tag list.`,
+						);
+						return null;
+					}
+					tags.push(...pageTags);
+					const next = getNextTagsPageUrl(base, repo, response.headers.link);
+					if (next === null) return tags;
+					// A partial listing cannot tell what is kept.
+					if (next === undefined) {
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: the tag listing links to a next page that is not this repository's listing on this registry.`,
+						);
+						return null;
+					}
+					if (seen.has(next)) {
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: the tag listing is paged in a loop.`,
+						);
+						return null;
+					}
+					if (page >= MAX_TAG_PAGES) {
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: its tag listing has more than ${MAX_TAG_PAGES} pages (${tags.length} tags so far).`,
+						);
+						return null;
+					}
+					seen.add(next);
+					assertTime();
+					response = (
+						await runAll([
+							{ id: 0, method: "GET", url: next, includeHeaders: true },
+						])
+					).get(0);
+				}
+			};
+
+			/** Set once a concurrent deploy shows up or the deletion cap is hit. */
+			let stopped = false;
+
+			/** Resolves and prunes one repository. */
+			const pruneRepo = async ({
+				repo,
+				doomed,
+				resolve,
+				required,
+			}: {
 				repo: string;
+				/** Old tags, oldest first. */
 				doomed: string[];
 				/** Every tag that stays, plus the ones that must exist (see below). */
 				resolve: string[];
 				/** Tags an override file names; a 404 on one means the registry is not to be trusted. */
 				required: Set<string>;
-			}
-			const work: RepoWork[] = [];
-			for (const [id, repo] of repos.entries()) {
-				const response = listings.get(id);
-				const status = response?.status ?? 0;
-				failIfSystemic(status, "listing tags");
-				if (status === 404) continue;
-				if (status !== 200 || !response) {
-					log.line(
-						`Warning: ⚠️ Build registry cleanup skipped ${repo}: listing tags returned HTTP ${status}.`,
-					);
-					continue;
+			}) => {
+				// a. Every tag that stays, with GET: its digest, and its manifest
+				// body for the children of an image index. All of them, or nothing
+				// in this repository is deleted.
+				const kept = await runAll(
+					resolve.map((tag, id) => ({
+						id,
+						method: "GET" as const,
+						url: getManifestUrl(base, repo, tag),
+						manifest: true,
+						includeHeaders: true,
+					})),
+				);
+				const protectedDigests = new Set<string>();
+				let unanswered = 0;
+				for (const [id, tag] of resolve.entries()) {
+					const response = kept.get(id);
+					if (!response) {
+						unanswered += 1;
+						continue;
+					}
+					failIfSystemic(response.status, "reading manifests");
+					const digest = response.headers["docker-content-digest"];
+					if (response.status === 404) {
+						// `latest` may simply not exist when the listing did not have it.
+						// Any other kept tag, and every tag a release file names, was
+						// either listed or required: a 404 means the registry is
+						// inconsistent, and what it protects is unknown.
+						if (tag === LATEST_TAG && !required.has(tag)) continue;
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: could not read the kept tag ${tag} (HTTP 404).`,
+						);
+						return;
+					}
+					if (response.status !== 200 || !digest || !isValidDigest(digest)) {
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: could not read the kept tag ${tag} (HTTP ${response.status}).`,
+						);
+						return;
+					}
+					protectedDigests.add(digest);
+					for (const child of getManifestChildDigests(response.body)) {
+						protectedDigests.add(child);
+					}
 				}
-				if (response.headers.link) {
+				if (unanswered > 0) {
+					assertTime();
 					log.line(
-						`Warning: ⚠️ Build registry cleanup skipped ${repo}: the tag listing is paged or truncated.`,
+						`Build registry cleanup left ${repo} for the next deploy: ${plural(unanswered, "kept tag", "kept tags")} did not resolve in time.`,
 					);
-					continue;
+					return;
 				}
-				let tags: string[] = [];
-				try {
-					const parsed = JSON.parse(response.body) as { tags?: unknown };
-					tags = Array.isArray(parsed.tags)
-						? parsed.tags.filter(
-								(tag): tag is string =>
-									typeof tag === "string" && isValidTag(tag),
+
+				// b. Old tags, oldest first, a wave at a time: resolve with HEAD,
+				// delete what no kept tag needs, then the next wave. A doomed tag
+				// that no longer resolves (HEAD 404) is dangling: nothing to delete,
+				// nothing counted. One that did not answer is left alone.
+				const removed = new Set<string>();
+				for (let start = 0; start < doomed.length; start += WAVE_SIZE) {
+					if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
+						stopped = true;
+						return;
+					}
+					assertTime();
+					const wave = doomed.slice(start, start + WAVE_SIZE);
+					const heads = await runAll(
+						wave.map((tag, id) => ({
+							id,
+							method: "HEAD" as const,
+							url: getManifestUrl(base, repo, tag),
+							manifest: true,
+						})),
+					);
+					const doomedDigests = new Map<string, string>();
+					for (const [id, tag] of wave.entries()) {
+						const response = heads.get(id);
+						if (!response) continue;
+						failIfSystemic(response.status, "reading manifests");
+						const digest = response.headers["docker-content-digest"];
+						if (
+							response.status === 200 &&
+							digest &&
+							isValidDigest(digest) &&
+							!removed.has(digest)
+						) {
+							doomedDigests.set(tag, digest);
+						}
+					}
+					const deletions = selectDigestsToDelete({
+						doomedDigests,
+						protectedDigests,
+					}).deleteDigests.map((digest) => ({
+						digest,
+						tags: [...doomedDigests]
+							.filter(([, value]) => value === digest)
+							.map(([tag]) => tag),
+					}));
+
+					// c. Delete. Before every round look again for a deploy that
+					// started while this ran: its pushes are the one thing the checks
+					// above cannot see. Only manifests actually deleted count against
+					// the per-run cap.
+					let next = 0;
+					while (next < deletions.length) {
+						if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
+							stopped = true;
+							return;
+						}
+						assertTime();
+						if (
+							hasConcurrentDeployment(
+								await findAllDeploymentsByComposeId(entity.composeId),
+								deployment.deploymentId,
 							)
-						: [];
-				} catch {
-					log.line(
-						`Warning: ⚠️ Build registry cleanup skipped ${repo}: unreadable tag list.`,
-					);
-					continue;
+						) {
+							log.line(
+								"Build registry cleanup stopped: another deployment of this compose started.",
+							);
+							stopped = true;
+							return;
+						}
+						const round = deletions.slice(
+							next,
+							next +
+								Math.min(WAVE_SIZE, MAX_DELETIONS_PER_RUN - progress.deleted),
+						);
+						next += round.length;
+						const { responses, failed, error } = await runBatches(
+							round.map((entry, id) => ({
+								id,
+								method: "DELETE" as const,
+								url: getManifestUrl(base, repo, entry.digest),
+							})),
+						);
+						for (const [id, entry] of round.entries()) {
+							const response = responses.get(id);
+							if (!response) {
+								progress.unconfirmed += 1;
+								continue;
+							}
+							if (response.status === 202) {
+								progress.deleted += 1;
+								progress.removedTags += entry.tags.length;
+								progress.prunedRepos.add(repo);
+								removed.add(entry.digest);
+								continue;
+							}
+							if (response.status === 404) {
+								progress.gone += 1;
+								removed.add(entry.digest);
+								continue;
+							}
+							failIfSystemic(response.status, "deleting manifests");
+							progress.failed += 1;
+							log.line(
+								`Warning: ⚠️ Build registry cleanup: deleting ${repo}@${entry.digest.slice(0, 19)} returned HTTP ${response.status}.`,
+							);
+						}
+						if (failed) throw error;
+					}
 				}
-				if (tags.length > MAX_TAGS_PER_REPO) {
-					log.line(
-						`Warning: ⚠️ Build registry cleanup skipped ${repo}: more than ${MAX_TAGS_PER_REPO} tags.`,
-					);
-					continue;
-				}
+			};
+
+			// 5. One repository at a time: list, resolve, prune.
+			for (const [index, repo] of repos.entries()) {
+				if (stopped) break;
+				assertTime();
+				const tags = await listTags(repo, firstPages.get(index));
+				if (!tags) continue;
 				const required = protectedByRepo.get(repo) ?? new Set<string>();
 				const plan = planRepoTags({
 					tags,
@@ -374,188 +707,46 @@ export const pruneComposeBuildRegistry = async ({
 					tagTimes,
 					keep,
 				});
-				if (plan.doomedTags.length > 0) {
-					// Whatever the listing says, `latest` and every tag the release
-					// files name are resolved too, so their digests are protected even
-					// when the listing is stale or incomplete.
-					work.push({
-						repo,
-						doomed: plan.doomedTags,
-						resolve: [
-							...new Set([...plan.keptTags, ...required, LATEST_TAG]),
-						],
-						required,
-					});
-				}
-			}
-			if (work.length === 0) return;
-
-			// 5. Resolve digests: doomed tags with HEAD, every other tag with GET
-			// (its manifest body also names the children of an image index).
-			interface Resolve {
-				id: number;
-				repo: string;
-				tag: string;
-				doomed: boolean;
-			}
-			const resolves: Resolve[] = [];
-			for (const item of work) {
-				for (const tag of item.doomed) {
-					resolves.push({
-						id: resolves.length,
-						repo: item.repo,
-						tag,
-						doomed: true,
-					});
-				}
-				for (const tag of item.resolve) {
-					resolves.push({
-						id: resolves.length,
-						repo: item.repo,
-						tag,
-						doomed: false,
-					});
-				}
-			}
-			const resolved = new Map<number, RegistryResponse>();
-			for (let start = 0; start < resolves.length; start += BATCH_SIZE) {
-				const chunk = resolves.slice(start, start + BATCH_SIZE);
-				const responses = await runBatch(
-					chunk.map((entry) => ({
-						id: entry.id,
-						method: entry.doomed ? ("HEAD" as const) : ("GET" as const),
-						url: getManifestUrl(base, entry.repo, entry.tag),
-						manifest: true,
-						includeHeaders: !entry.doomed,
-					})),
-				);
-				for (const [id, response] of responses) resolved.set(id, response);
-			}
-
-			// 6. Per repository: a digest may go only if no tag that stays points
-			// at it (or at an index that contains it). A doomed tag that no longer
-			// resolves (HEAD 404) is dangling: nothing to delete, nothing counted.
-			const deletions: { repo: string; digest: string; tags: string[] }[] = [];
-			for (const item of work) {
-				const protectedDigests = new Set<string>();
-				const doomedDigests = new Map<string, string>();
-				let untrusted: string | null = null;
-				for (const entry of resolves.filter((r) => r.repo === item.repo)) {
-					const response = resolved.get(entry.id);
-					const digest = response?.headers["docker-content-digest"];
-					if (entry.doomed) {
-						failIfSystemic(response?.status ?? 0, "reading manifests");
-						if (response?.status === 200 && digest && isValidDigest(digest)) {
-							doomedDigests.set(entry.tag, digest);
-						}
-						continue;
-					}
-					failIfSystemic(response?.status ?? 0, "reading manifests");
-					if (response?.status === 404) {
-						// `latest` may simply not exist when the listing did not have it.
-						// Any other kept tag, and every tag a release file names, was
-						// either listed or required: a 404 means the registry is
-						// inconsistent, and what it protects is unknown.
-						if (entry.tag === LATEST_TAG && !item.required.has(entry.tag)) {
-							continue;
-						}
-						untrusted = `${entry.tag} (HTTP 404)`;
-						break;
-					}
-					if (response?.status !== 200 || !digest || !isValidDigest(digest)) {
-						untrusted = `${entry.tag} (HTTP ${response?.status ?? 0})`;
-						break;
-					}
-					protectedDigests.add(digest);
-					for (const child of getManifestChildDigests(response.body)) {
-						protectedDigests.add(child);
-					}
-				}
-				if (untrusted) {
-					log.line(
-						`Warning: ⚠️ Build registry cleanup skipped ${item.repo}: could not read the kept tag ${untrusted}.`,
-					);
-					continue;
-				}
-				const { deleteDigests } = selectDigestsToDelete({
-					doomedDigests,
-					protectedDigests,
+				if (plan.doomedTags.length === 0) continue;
+				progress.repos += 1;
+				// Whatever the listing says, `latest` and every tag the release
+				// files name are resolved too, so their digests are protected even
+				// when the listing is stale or incomplete.
+				await pruneRepo({
+					repo,
+					doomed: plan.doomedTags,
+					resolve: [...new Set([...plan.keptTags, ...required, LATEST_TAG])],
+					required,
 				});
-				for (const digest of deleteDigests) {
-					deletions.push({
-						repo: item.repo,
-						digest,
-						tags: [...doomedDigests]
-							.filter(([, value]) => value === digest)
-							.map(([tag]) => tag),
-					});
-				}
 			}
-			if (deletions.length === 0) return;
 
-			// 7. Delete the manifests, oldest first. Before every batch look again
-			// for a deploy that started while this ran: its pushes are the one thing
-			// the checks above cannot see. Only manifests actually deleted count
-			// against the per-run cap.
-			let deleted = 0;
-			let gone = 0;
-			let failed = 0;
-			let removedTags = 0;
-			let next = 0;
-			while (next < deletions.length && deleted < MAX_DELETIONS_PER_RUN) {
-				if (
-					hasConcurrentDeployment(
-						await findAllDeploymentsByComposeId(entity.composeId),
-						deployment.deploymentId,
-					)
-				) {
-					log.line(
-						"Build registry cleanup stopped: another deployment of this compose started.",
-					);
-					break;
-				}
-				const size = Math.min(BATCH_SIZE, MAX_DELETIONS_PER_RUN - deleted);
-				const chunk = deletions.slice(next, next + size);
-				next += chunk.length;
-				const responses = await runBatch(
-					chunk.map((entry, id) => ({
-						id,
-						method: "DELETE" as const,
-						url: getManifestUrl(base, entry.repo, entry.digest),
-					})),
-				);
-				for (const [id, entry] of chunk.entries()) {
-					const status = responses.get(id)?.status ?? 0;
-					if (status === 202) {
-						deleted += 1;
-						removedTags += entry.tags.length;
-						continue;
-					}
-					if (status === 404) {
-						gone += 1;
-						continue;
-					}
-					failIfSystemic(status, "deleting manifests");
-					failed += 1;
-					log.line(
-						`Warning: ⚠️ Build registry cleanup: deleting ${entry.repo}@${entry.digest.slice(0, 19)} returned HTTP ${status}.`,
-					);
-				}
-			}
-			if (deleted > 0 || failed > 0) {
+			if (progress.deleted > 0 || progress.failed > 0) {
 				log.line(
-					`Build registry cleanup: removed ${deleted} old image manifest${deleted === 1 ? "" : "s"} (${removedTags} dpl- tag${removedTags === 1 ? "" : "s"}) from ${work.length} repositor${work.length === 1 ? "y" : "ies"}, keeping the newest ${keep} per service${failed ? `; ${failed} failed` : ""}${gone ? `; ${gone} already gone` : ""}.`,
+					`Build registry cleanup: removed ${plural(progress.deleted, "old image manifest", "old image manifests")} (${plural(progress.removedTags, "dpl- tag", "dpl- tags")}) from ${plural(progress.repos, "repository", "repositories")}, keeping the newest ${keep} per service${progressDetails()}.`,
 				);
 			}
 		};
 
-		await withTimeout(run(), budgetMs, "build registry cleanup").catch(
-			(error) => {
-				cancelled = true;
-				throw error;
-			},
-		);
+		// The batches stop themselves at the deadline; this only catches a step
+		// that hangs past it (the database, an SSH connect).
+		await withTimeout(
+			run(),
+			budgetMs + BACKSTOP_GRACE_MS,
+			() => new BudgetSpent("the time budget for cleanup ran out"),
+		).catch((error) => {
+			cancelled = true;
+			for (const session of activeSessions) session.abort();
+			throw error;
+		});
 	} catch (error) {
+		if (error instanceof BudgetSpent) {
+			log.line(
+				progress.deleted > 0 || progress.failed > 0
+					? `Build registry cleanup stopped at the time budget: removed ${plural(progress.deleted, "old image manifest", "old image manifests")} (${plural(progress.removedTags, "dpl- tag", "dpl- tags")}) from ${plural(progress.prunedRepos.size, "repository", "repositories")}${progressDetails()}; the rest continues on the next deploy.`
+					: `Build registry cleanup stopped at the time budget before removing anything${progressDetails()}; it continues on the next deploy.`,
+			);
+			return;
+		}
 		const message = error instanceof Error ? error.message : String(error);
 		log.line(
 			`Warning: ⚠️ Build registry cleanup did not complete: ${redact(message, password)}`,

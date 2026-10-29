@@ -6,6 +6,7 @@ import {
 	buildRegistryCurlConfig,
 	curlConfigQuote,
 	getManifestChildDigests,
+	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
 	isLoopbackHost,
@@ -14,6 +15,7 @@ import {
 	parseRegistryEndpoint,
 	parseRegistryImageRef,
 	parseRegistryResponses,
+	parseTagList,
 	planRepoTags,
 	REGISTRY_CURL_COMMAND,
 	selectDigestsToDelete,
@@ -294,6 +296,69 @@ describe("registry addressing", () => {
 		// userinfo would move the real host: https://reg.example.com@evil.test
 		expect(parseRegistryEndpoint("reg.example.com@evil.test")).toBeNull();
 		expect(parseRegistryEndpoint("https://user:pw@reg.example.com")).toBeNull();
+	});
+});
+
+describe("tag listing pages", () => {
+	const base = "https://reg.example.com";
+	const repo = "acme/app";
+
+	it("follows a relative or absolute rel=next link on the same origin", () => {
+		expect(
+			getNextTagsPageUrl(
+				base,
+				repo,
+				'</v2/acme/app/tags/list?last=dpl-b&n=1000>; rel="next"',
+			),
+		).toBe("https://reg.example.com/v2/acme/app/tags/list?last=dpl-b&n=1000");
+		expect(
+			getNextTagsPageUrl(
+				base,
+				repo,
+				"<https://reg.example.com/v2/acme/app/tags/list?last=x>; rel=next",
+			),
+		).toBe("https://reg.example.com/v2/acme/app/tags/list?last=x");
+		// several links, the next one second
+		expect(
+			getNextTagsPageUrl(
+				base,
+				repo,
+				'</v2/acme/app/tags/list?n=10>; rel="first", </v2/acme/app/tags/list?last=y&n=10>; rel="next"',
+			),
+		).toBe("https://reg.example.com/v2/acme/app/tags/list?last=y&n=10");
+	});
+
+	it("reads no header, or one without rel=next, as the last page", () => {
+		expect(getNextTagsPageUrl(base, repo, undefined)).toBeNull();
+		expect(getNextTagsPageUrl(base, repo, "")).toBeNull();
+		expect(
+			getNextTagsPageUrl(base, repo, '</v2/acme/app/tags/list?n=10>; rel="prev"'),
+		).toBeNull();
+	});
+
+	it("refuses a next page the credentials must not go to", () => {
+		for (const link of [
+			'<https://evil.test/v2/acme/app/tags/list?last=x>; rel="next"',
+			'<http://reg.example.com/v2/acme/app/tags/list?last=x>; rel="next"',
+			'<https://reg.example.com:444/v2/acme/app/tags/list?last=x>; rel="next"',
+			'<//evil.test/v2/acme/app/tags/list>; rel="next"',
+			'<https://u:p@reg.example.com/v2/acme/app/tags/list>; rel="next"',
+			'</v2/acme/other/tags/list?last=x>; rel="next"',
+			'</v2/acme/app/manifests/latest>; rel="next"',
+			'</v2/acme/%E0%A4%A/tags/list>; rel="next"',
+		]) {
+			expect(getNextTagsPageUrl(base, repo, link)).toBeUndefined();
+		}
+	});
+
+	it("parses a tag list body", () => {
+		expect(parseTagList('{"name":"acme/app","tags":["latest","dpl-a","bad tag"]}')).toEqual([
+			"latest",
+			"dpl-a",
+		]);
+		expect(parseTagList('{"name":"acme/app","tags":null}')).toEqual([]);
+		expect(parseTagList("not json")).toBeNull();
+		expect(parseTagList('{"tags":"latest"}')).toBeNull();
 	});
 });
 

@@ -70,6 +70,10 @@ interface FakeRegistry {
 	staleListed?: string[];
 	/** per-digest DELETE status, overrides `deleteStatus` */
 	deleteStatusFor?: (digest: string) => number | undefined;
+	/** pages tag listings at this many tags (sorted, `last` + `Link`, like distribution v3) */
+	pageSize?: number;
+	/** replaces the `Link` header of a paged listing */
+	pageLink?: (next: string) => string;
 	requests: { method: string; url: string }[];
 }
 
@@ -79,10 +83,18 @@ const field = (block: string, key: string) => {
 	return match ? unquote(match[1] as string) : undefined;
 };
 
+const blocksOf = (config: string) => config.trim().split("\nnext\n");
+
 /** Reads the curl config the way curl would and answers like the registry. */
-const answer = (registry: FakeRegistry, config: string) => {
+const answer = (registry: FakeRegistry, config: string) =>
+	blocksOf(config)
+		.map((block) => answerBlock(registry, block))
+		.join("");
+
+/** One request of a curl config, answered; the text curl prints for it. */
+const answerBlock = (registry: FakeRegistry, block: string) => {
 	let out = "";
-	for (const block of config.trim().split("\nnext\n")) {
+	{
 		const id = Number(/@@DPL (\d+) /.exec(block)?.[1]);
 		const url = new URL(field(block, "url") as string);
 		const method = /^head$/m.test(block)
@@ -109,18 +121,30 @@ const answer = (registry: FakeRegistry, config: string) => {
 				const repo = registry.repos[tagsMatch[1] as string];
 				status = repo ? 200 : 404;
 				const hidden = new Set(registry.hideFromListing ?? []);
-				body = JSON.stringify({
-					name: tagsMatch[1],
-					tags: repo
-						? [
-								...Object.keys(repo).filter((tag) => !hidden.has(tag)),
-								...(registry.staleListed ?? []),
-							]
-						: null,
-				});
-				headers = `HTTP/1.1 200 OK\r\n${
-					registry.listingLink ? `Link: ${registry.listingLink}\r\n` : ""
-				}\r\n`;
+				let tags = repo
+					? [
+							...Object.keys(repo).filter((tag) => !hidden.has(tag)),
+							...(registry.staleListed ?? []),
+						]
+					: null;
+				let link = registry.listingLink;
+				if (tags && registry.pageSize) {
+					const last = url.searchParams.get("last");
+					const sorted = [...tags].sort();
+					const from = last === null ? 0 : sorted.findIndex((tag) => tag > last);
+					tags = from === -1 ? [] : sorted.slice(from, from + registry.pageSize);
+					const more = from !== -1 && from + registry.pageSize < sorted.length;
+					if (more) {
+						const next = `/v2/${tagsMatch[1]}/tags/list?last=${encodeURIComponent(
+							tags[tags.length - 1] as string,
+						)}&n=${registry.pageSize}`;
+						link = registry.pageLink
+							? registry.pageLink(next)
+							: `<${next}>; rel="next"`;
+					}
+				}
+				body = JSON.stringify({ name: tagsMatch[1], tags });
+				headers = `HTTP/1.1 200 OK\r\n${link ? `Link: ${link}\r\n` : ""}\r\n`;
 			} else if (manifestMatch) {
 				const repoName = manifestMatch[1] as string;
 				const reference = manifestMatch[2] as string;
@@ -180,6 +204,78 @@ const installRegistry = (registry: FakeRegistry) => {
 					);
 				},
 				abort: () => {},
+			};
+		},
+	);
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const slow = { active: 0, maxActive: 0, aborted: 0 };
+
+/**
+ * Like `installRegistry`, but every request takes `delayMs` and answers one
+ * after the other, as one serial curl does. A request `hangs` matches never
+ * answers: the curl behind it is stuck until its session is dropped, and
+ * nothing after it in the same session is answered either.
+ */
+const installSlowRegistry = (
+	registry: FakeRegistry,
+	{
+		delayMs,
+		hangs,
+	}: { delayMs: number; hangs?: (method: string, url: string) => boolean },
+) => {
+	mocks.openRemoteInputSession.mockImplementation(
+		async (
+			_serverId: string,
+			command: string,
+			options?: { onStdout?: (text: string) => void },
+		) => {
+			const record = { command, stdin: "" };
+			sessions.push(record);
+			let dropped = false;
+			let open = true;
+			const close = () => {
+				if (!open) return;
+				open = false;
+				slow.active -= 1;
+			};
+			slow.active += 1;
+			slow.maxActive = Math.max(slow.maxActive, slow.active);
+			let reject: (error: Error) => void = () => {};
+			const aborted = new Promise<never>((_, rejectAborted) => {
+				reject = rejectAborted;
+			});
+			aborted.catch(() => {});
+			return {
+				write: async (data: Buffer) => {
+					record.stdin += data.toString("utf8");
+				},
+				end: async () => {
+					const curl = (async () => {
+						for (const block of blocksOf(record.stdin)) {
+							const url = field(block, "url") as string;
+							const method = /^head$/m.test(block)
+								? "HEAD"
+								: (field(block, "request") ?? "GET");
+							if (hangs?.(method, url)) await new Promise(() => {});
+							await sleep(delayMs);
+							if (dropped) return;
+							options?.onStdout?.(answerBlock(registry, block));
+						}
+					})();
+					try {
+						await Promise.race([curl, aborted]);
+					} finally {
+						close();
+					}
+				},
+				abort: () => {
+					dropped = true;
+					slow.aborted += 1;
+					close();
+					reject(new Error("Remote command was aborted"));
+				},
 			};
 		},
 	);
@@ -275,6 +371,9 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	mocks.logLines.length = 0;
 	sessions.length = 0;
+	slow.active = 0;
+	slow.maxActive = 0;
+	slow.aborted = 0;
 	mocks.findRegistryByIdWithCredentials.mockResolvedValue({
 		registryId: "reg-1",
 		registryType: "selfHosted",
@@ -543,7 +642,82 @@ describe("pruneComposeBuildRegistry", () => {
 		expect(mocks.logLines.join("\n")).toContain("another deployment of this compose started");
 	});
 
-	it("skips a repository whose listing is paged or truncated (Link header)", async () => {
+	it("follows a paged tag listing through its Link headers", async () => {
+		// 9 tags (8 dpl- + latest), 3 per page: three pages
+		const registry = setup({
+			rows: eight,
+			current: [tagOf("c3")],
+			registryOverrides: { pageSize: 3 },
+		});
+		await run();
+		const listings = registry.requests.filter((r) => r.url.includes("/tags/list"));
+		expect(listings).toHaveLength(3);
+		expect(listings[1]?.url).toBe(
+			`http://${REGISTRY}/v2/${PREFIX}/my-app-web/tags/list?last=${tagOf("c3")}&n=3`,
+		);
+		expect(registry.deleted).toEqual([`${PREFIX}/my-app-web@${digest(1)}`]);
+		expect(mocks.logLines.join("\n")).not.toContain("Warning");
+	});
+
+	it("prunes a repository with more than 500 tags", async () => {
+		const many: Row[] = Array.from({ length: 620 }, (_, index) => ({
+			id: `t${String(index).padStart(3, "0")}`,
+			age: 10_000 - index,
+			digest: index + 1,
+		}));
+		const registry = setup({
+			rows: many,
+			current: [tagOf("t619")],
+			registryOverrides: { pageSize: 250 },
+		});
+		await run();
+		expect(registry.requests.filter((r) => r.url.includes("/tags/list"))).toHaveLength(3);
+		// the cap, oldest first
+		expect(registry.deleted).toHaveLength(50);
+		expect(registry.deleted[0]).toBe(`${PREFIX}/my-app-web@${digest(1)}`);
+		// only the waves it needed were resolved, not all 615 old tags
+		expect(registry.requests.filter((r) => r.method === "HEAD").length).toBeLessThanOrEqual(60);
+	});
+
+	it("skips a repository whose listing has more pages than it follows, and says so", async () => {
+		const many: Row[] = Array.from({ length: 25 }, (_, index) => ({
+			id: `t${String(index).padStart(2, "0")}`,
+			age: 1000 - index,
+			digest: index + 1,
+		}));
+		const registry = setup({
+			rows: many,
+			current: [tagOf("t24")],
+			registryOverrides: { pageSize: 2 },
+		});
+		await run();
+		expect(registry.deleted).toEqual([]);
+		expect(registry.requests.filter((r) => r.url.includes("/tags/list"))).toHaveLength(10);
+		expect(registry.requests.some((r) => r.method !== "GET")).toBe(false);
+		expect(mocks.logLines.join("\n")).toContain(
+			`skipped ${PREFIX}/my-app-web: its tag listing has more than 10 pages (20 tags so far)`,
+		);
+	});
+
+	it("never follows a Link to another host (the request would carry the credentials)", async () => {
+		const registry = setup({
+			rows: eight,
+			current: [tagOf("c3")],
+			registryOverrides: {
+				pageSize: 3,
+				pageLink: (next) => `<https://evil.test${next}>; rel="next"`,
+			},
+		});
+		await run();
+		expect(registry.deleted).toEqual([]);
+		expect(registry.requests.some((r) => r.url.includes("evil.test"))).toBe(false);
+		expect(sessions.some((s) => s.stdin.includes("evil.test"))).toBe(false);
+		expect(mocks.logLines.join("\n")).toContain(
+			"links to a next page that is not this repository's listing",
+		);
+	});
+
+	it("skips a repository whose listing links back to a page it already read", async () => {
 		const registry = setup({
 			rows: eight,
 			current: [tagOf("c3")],
@@ -554,7 +728,7 @@ describe("pruneComposeBuildRegistry", () => {
 		await run();
 		expect(registry.deleted).toEqual([]);
 		expect(registry.requests.some((r) => r.method !== "GET")).toBe(false);
-		expect(mocks.logLines.join("\n")).toContain("paged or truncated");
+		expect(mocks.logLines.join("\n")).toContain("paged in a loop");
 	});
 
 	it("protects a tag the release files name even when the listing omits it", async () => {
@@ -750,6 +924,131 @@ describe("pruneComposeBuildRegistry", () => {
 	});
 });
 
+/** `count` deployments, oldest first, one distinct digest each (1..count). */
+const series = (count: number): Row[] =>
+	Array.from({ length: count }, (_, index) => ({
+		id: `t${String(index).padStart(3, "0")}`,
+		age: 10_000 - index,
+		digest: index + 1,
+	}));
+
+/** `rows` in two service repositories: web (digests n) and api (digests 1000 + n). */
+const twoRepos = (rows: Row[]) => {
+	const newest = [...rows].sort((a, b) => a.age - b.age)[0] as Row;
+	const api = Object.fromEntries(
+		rows.map((row) => [tagOf(row.id), digest(1000 + row.digest)]),
+	);
+	const registry = setup({
+		rows,
+		current: [tagOf(newest.id)],
+		extraRepos: {
+			[`${PREFIX}/my-app-api`]: { ...api, latest: digest(1000 + newest.digest) },
+		},
+	});
+	mocks.execAsync.mockResolvedValue({
+		stdout: `@@DPL-FILE /f0\n${buildComposeOverrideYaml(
+			[
+				{ service: "web", image: ref("my-app-web", tagOf(newest.id)) },
+				{ service: "api", image: ref("my-app-api", tagOf(newest.id)) },
+			],
+			"docker-compose",
+		)}\n@@DPL-FILE /f1\n\n@@DPL-FILE /f2\n\n`,
+		stderr: "",
+	});
+	return registry;
+};
+
+describe("a slow registry", () => {
+	const lines = () => mocks.logLines.join("\n");
+
+	it("keeps what a batch answered before it ran out of time, and never deletes what did not answer", async () => {
+		// 45 deployments: 40 old tags, resolved in two batches of 20. The HEAD
+		// of t005 hangs: the first batch answers t000-t004 and is dropped, so
+		// t005-t019 are unknown; the second batch answers in full.
+		const rows = series(45);
+		const registry = setup({ rows, current: [tagOf("t044")] });
+		installSlowRegistry(registry, {
+			delayMs: 1,
+			hangs: (method, url) =>
+				method === "HEAD" && url.endsWith(`/manifests/${tagOf("t005")}`),
+		});
+		await run({ batchTimeoutMs: 300 });
+
+		const answered = [
+			...Array.from({ length: 5 }, (_, index) => index),
+			...Array.from({ length: 20 }, (_, index) => 20 + index),
+		];
+		expect([...registry.deleted].sort()).toEqual(
+			answered.map((index) => `${PREFIX}/my-app-web@${digest(index + 1)}`).sort(),
+		);
+		const repo = registry.repos[`${PREFIX}/my-app-web`] as Record<string, string>;
+		for (let index = 5; index < 20; index++) {
+			expect(repo[tagOf(rows[index]?.id as string)]).toBe(digest(index + 1));
+		}
+		expect(slow.aborted).toBe(1);
+		expect(lines()).toContain("removed 25 old image manifests (25 dpl- tags)");
+		expect(lines()).not.toContain("Warning");
+		expect(lines()).not.toContain("aborted");
+	});
+
+	it("leaves a repository alone when a kept tag does not resolve in time, and still prunes the next one", async () => {
+		const registry = twoRepos(eight);
+		installSlowRegistry(registry, {
+			delayMs: 1,
+			hangs: (method, url) =>
+				method === "GET" && url.endsWith(`/${PREFIX}/my-app-web/manifests/latest`),
+		});
+		await run({ batchTimeoutMs: 300 });
+		expect(registry.deleted).toEqual([`${PREFIX}/my-app-api@${digest(1001)}`]);
+		expect(registry.requests.some((r) => r.method === "HEAD" && r.url.includes("my-app-web"))).toBe(
+			false,
+		);
+		expect(lines()).toContain(
+			`Build registry cleanup left ${PREFIX}/my-app-web for the next deploy: `,
+		);
+		expect(lines()).toContain("did not resolve in time");
+		expect(lines()).not.toContain("Warning");
+	});
+
+	it("runs at most three curl sessions at once, twenty requests each", async () => {
+		const registry = setup({ rows: series(125), current: [tagOf("t124")] });
+		installSlowRegistry(registry, { delayMs: 2 });
+		await run();
+		expect(registry.deleted).toHaveLength(50);
+		expect(slow.maxActive).toBeGreaterThan(1);
+		expect(slow.maxActive).toBeLessThanOrEqual(3);
+		for (const session of sessions) {
+			expect(blocksOf(session.stdin).length).toBeLessThanOrEqual(20);
+		}
+	});
+
+	it("stops at the time budget with what it removed, and leaves the rest for the next deploy", async () => {
+		const registry = twoRepos(series(45));
+		const realNow = Date.now.bind(Date);
+		let clock: { mockRestore: () => void } | undefined;
+		// the budget runs out while the first round of deletions is on the wire
+		registry.deleteStatusFor = () => {
+			clock ??= vi
+				.spyOn(Date, "now")
+				.mockImplementation(() => realNow() + 3_600_000);
+			return undefined;
+		};
+		try {
+			await run();
+		} finally {
+			clock?.mockRestore();
+		}
+		// every web deletion already sent went through; api was not started
+		expect(registry.deleted).toHaveLength(40);
+		expect(registry.deleted.every((entry) => entry.includes("my-app-web@"))).toBe(true);
+		expect(registry.requests.some((r) => r.url.includes("my-app-api/manifests"))).toBe(false);
+		expect(lines()).toContain(
+			"Build registry cleanup stopped at the time budget: removed 40 old image manifests (40 dpl- tags) from 1 repository; the rest continues on the next deploy.",
+		);
+		expect(lines()).not.toContain("Warning");
+	});
+});
+
 describe("units without a build server", () => {
 	it("does no I/O at all", async () => {
 		await pruneComposeBuildRegistry({
@@ -872,11 +1171,14 @@ describe("failures never fail the deploy", () => {
 		expect(warned()).toContain("Registry not found");
 	});
 
-	it("gives up when the time budget is spent", async () => {
+	it("stops at a spent time budget without a warning", async () => {
 		const registry = setup({ rows: eight, current: [tagOf("c3")] });
 		await expect(run({ budgetMs: 0 })).resolves.toBeUndefined();
 		expect(registry.deleted).toEqual([]);
-		expect(warned()).toContain("Warning");
+		expect(warned()).toContain(
+			"Build registry cleanup stopped at the time budget before removing anything; it continues on the next deploy.",
+		);
+		expect(warned()).not.toContain("Warning");
 	});
 
 	it("skips ECR registries", async () => {
