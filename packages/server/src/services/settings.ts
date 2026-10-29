@@ -29,20 +29,20 @@ import {
 	type TraefikOptions,
 } from "../setup/traefik-setup";
 import {
+	getUpdateAttemptOutcome,
+	type IUpdateAttempt,
+	isUpdateErrorCode,
+	UPDATE_ATTEMPT_STATUSES,
+	UPDATE_ERROR_MESSAGES,
+	type UpdateAttemptStatus,
+} from "../utils/dokploy-update-attempt";
+import {
 	DOKPLOY_IMAGE_DIGEST_REGEX,
 	DOKPLOY_RELEASE_TAG_REGEX,
 	type DokployUpdateTarget,
 	isBelowDokployPinFloor,
 	isInstalledDokployImage,
 } from "../utils/dokploy-update-target";
-import {
-	getUpdateAttemptOutcome,
-	isUpdateErrorCode,
-	type IUpdateAttempt,
-	UPDATE_ATTEMPT_STATUSES,
-	UPDATE_ERROR_MESSAGES,
-	type UpdateAttemptStatus,
-} from "../utils/dokploy-update-attempt";
 export interface IUpdateData {
 	latestVersion: string | null;
 	updateAvailable: boolean;
