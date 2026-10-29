@@ -9,6 +9,7 @@ import {
 	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
+	isBodyTruncated,
 	isLoopbackHost,
 	mapDeploymentTagTimes,
 	parseOverrideImages,
@@ -18,6 +19,7 @@ import {
 	parseTagList,
 	planRepoTags,
 	REGISTRY_CURL_COMMAND,
+	type RegistryResponse,
 	selectDigestsToDelete,
 	splitFileOutput,
 } from "@dokploy/server/utils/builders/compose-registry-retention";
@@ -222,14 +224,38 @@ describe("getManifestChildDigests", () => {
 		expect(
 			getManifestChildDigests(
 				JSON.stringify({
-					manifests: [{ digest: digest(3) }, { digest: "bogus" }, {}],
+					manifests: [{ digest: digest(3) }, { digest: digest(4) }],
 				}),
 			),
-		).toEqual([digest(3)]);
+		).toEqual([digest(3), digest(4)]);
 		expect(
 			getManifestChildDigests(JSON.stringify({ layers: [], config: {} })),
 		).toEqual([]);
-		expect(getManifestChildDigests("not json")).toEqual([]);
+	});
+
+	it("answers null, never 'no children', for a body it cannot read whole", () => {
+		const index = JSON.stringify({
+			schemaVersion: 2,
+			mediaType: "application/vnd.oci.image.index.v1+json",
+			manifests: [{ digest: digest(3) }, { digest: digest(4) }],
+		});
+		// cut anywhere: inside the list, inside a digest, before the end
+		for (const cut of [10, index.indexOf(digest(4)) + 20, index.length - 1]) {
+			expect(getManifestChildDigests(index.slice(0, cut))).toBeNull();
+		}
+		expect(getManifestChildDigests("")).toBeNull();
+		expect(getManifestChildDigests("not json")).toBeNull();
+		expect(getManifestChildDigests("[]")).toBeNull();
+		expect(getManifestChildDigests('{"manifests":{}}')).toBeNull();
+		// an entry whose digest is unreadable protects something unknown
+		expect(
+			getManifestChildDigests(
+				JSON.stringify({ manifests: [{ digest: digest(3) }, { digest: "bogus" }] }),
+			),
+		).toBeNull();
+		expect(
+			getManifestChildDigests(JSON.stringify({ manifests: [{ digest: digest(3) }, {}] })),
+		).toBeNull();
 	});
 });
 
@@ -302,38 +328,57 @@ describe("registry addressing", () => {
 describe("tag listing pages", () => {
 	const base = "https://reg.example.com";
 	const repo = "acme/app";
+	const next = (link: string | undefined) => getNextTagsPageUrl(base, repo, link);
+	const nextUrl = (url: string) => ({ kind: "next", url });
 
 	it("follows a relative or absolute rel=next link on the same origin", () => {
-		expect(
-			getNextTagsPageUrl(
-				base,
-				repo,
-				'</v2/acme/app/tags/list?last=dpl-b&n=1000>; rel="next"',
-			),
-		).toBe("https://reg.example.com/v2/acme/app/tags/list?last=dpl-b&n=1000");
-		expect(
-			getNextTagsPageUrl(
-				base,
-				repo,
-				"<https://reg.example.com/v2/acme/app/tags/list?last=x>; rel=next",
-			),
-		).toBe("https://reg.example.com/v2/acme/app/tags/list?last=x");
+		expect(next('</v2/acme/app/tags/list?last=dpl-b&n=1000>; rel="next"')).toEqual(
+			nextUrl("https://reg.example.com/v2/acme/app/tags/list?last=dpl-b&n=1000"),
+		);
+		expect(next("<https://reg.example.com/v2/acme/app/tags/list?last=x>; rel=next")).toEqual(
+			nextUrl("https://reg.example.com/v2/acme/app/tags/list?last=x"),
+		);
 		// several links, the next one second
 		expect(
-			getNextTagsPageUrl(
-				base,
-				repo,
+			next(
 				'</v2/acme/app/tags/list?n=10>; rel="first", </v2/acme/app/tags/list?last=y&n=10>; rel="next"',
 			),
-		).toBe("https://reg.example.com/v2/acme/app/tags/list?last=y&n=10");
+		).toEqual(nextUrl("https://reg.example.com/v2/acme/app/tags/list?last=y&n=10"));
 	});
 
-	it("reads no header, or one without rel=next, as the last page", () => {
-		expect(getNextTagsPageUrl(base, repo, undefined)).toBeNull();
-		expect(getNextTagsPageUrl(base, repo, "")).toBeNull();
-		expect(
-			getNextTagsPageUrl(base, repo, '</v2/acme/app/tags/list?n=10>; rel="prev"'),
-		).toBeNull();
+	it("reads quoted parameters with commas, any rel case and several rel values", () => {
+		const url = "https://reg.example.com/v2/acme/app/tags/list?last=x";
+		for (const link of [
+			'</v2/acme/app/tags/list?last=x>; title="page, two"; rel="next"',
+			'</v2/acme/app/tags/list?last=x>; title="a \\"quoted, comma\\""; rel="next"',
+			'</v2/acme/app/tags/list?last=x>; REL="Next"',
+			'</v2/acme/app/tags/list?last=x>; rel="prefetch next"',
+			'</v2/acme/app/tags/list?n=1>; rel="first"; title="x, y", </v2/acme/app/tags/list?last=x>;rel=next',
+		]) {
+			expect(next(link)).toEqual(nextUrl(url));
+		}
+	});
+
+	it("only a response without a Link header is the last page", () => {
+		expect(next(undefined)).toEqual({ kind: "complete" });
+	});
+
+	it("fails closed on a Link header it cannot use", () => {
+		for (const [link, reason] of [
+			["", "names no next page"],
+			['</v2/acme/app/tags/list?n=10>; rel="prev"', "names no next page"],
+			['</v2/acme/app/tags/list?last=x>; rel="next"; title="unterminated', "cannot be parsed"],
+			['</v2/acme/app/tags/list?last=x; rel="next"', "cannot be parsed"],
+			['/v2/acme/app/tags/list?last=x; rel="next"', "cannot be parsed"],
+			[
+				'</v2/acme/app/tags/list?last=x>; rel="next", </v2/acme/app/tags/list?last=y>; rel="next"',
+				"more than one next page",
+			],
+		] as const) {
+			const result = next(link);
+			expect(result.kind).toBe("unusable");
+			expect(result.kind === "unusable" && result.reason).toContain(reason);
+		}
 	});
 
 	it("refuses a next page the credentials must not go to", () => {
@@ -347,7 +392,11 @@ describe("tag listing pages", () => {
 			'</v2/acme/app/manifests/latest>; rel="next"',
 			'</v2/acme/%E0%A4%A/tags/list>; rel="next"',
 		]) {
-			expect(getNextTagsPageUrl(base, repo, link)).toBeUndefined();
+			const result = next(link);
+			expect(result.kind).toBe("unusable");
+			expect(result.kind === "unusable" && result.reason).toContain(
+				"somewhere other than this repository's tag listing",
+			);
 		}
 	});
 
@@ -445,6 +494,82 @@ describe("curl config and command", () => {
 		expect(responses.get(2)?.headers["docker-content-digest"]).toBe(digest(2));
 		expect(responses.get(2)?.body).toBe('{"manifests":[]}');
 		expect(responses.get(3)?.status).toBe(0);
+	});
+
+	describe("output cut off by a dropped session", () => {
+		const index = JSON.stringify({
+			manifests: [{ digest: digest(7) }, { digest: digest(8) }],
+		});
+		// what curl prints for: GET kept-a, GET kept-b (an index), GET kept-c
+		const full = [
+			`HTTP/1.1 200 OK\r\nDocker-Content-Digest: ${digest(1)}\r\nContent-Length: 2\r\n\r\n{}`,
+			"@@DPL 0 200",
+			`HTTP/1.1 200 OK\r\nDocker-Content-Digest: ${digest(2)}\r\nContent-Length: ${index.length}\r\n\r\n${index}`,
+			"@@DPL 1 200",
+			`HTTP/1.1 200 OK\r\nDocker-Content-Digest: ${digest(3)}\r\n\r\n{}`,
+			"@@DPL 2 200",
+			"",
+		].join("\n");
+		const second = full.indexOf("HTTP/1.1", 1);
+		const cuts = {
+			"inside the headers": full.indexOf("Docker-Content", second) + 9,
+			"right after the headers": full.indexOf("\r\n\r\n", second) + 4,
+			"inside the index body": full.indexOf(digest(8), second) + 30,
+			"at the end of the body, before the marker": full.indexOf("\n@@DPL 1"),
+			"inside the marker": full.indexOf("@@DPL 1") + 7,
+			"before the marker's line end": full.indexOf("@@DPL 1 200") + 11,
+		};
+		for (const [where, cut] of Object.entries(cuts)) {
+			it(`${where}: the cut response has no entry, the one before is intact`, () => {
+				const responses = parseRegistryResponses(full.slice(0, cut), [0, 1, 2]);
+				expect([...responses.keys()]).toEqual([0]);
+				expect(responses.get(0)?.headers["docker-content-digest"]).toBe(digest(1));
+				expect(responses.get(0)?.body).toBe("{}");
+			});
+		}
+
+		it("reads everything once the marker is complete", () => {
+			const responses = parseRegistryResponses(full, [0, 1, 2]);
+			expect([...responses.keys()]).toEqual([0, 1, 2]);
+			expect(getManifestChildDigests(responses.get(1)?.body as string)).toEqual([
+				digest(7),
+				digest(8),
+			]);
+			expect(isBodyTruncated(responses.get(1) as RegistryResponse)).toBe(false);
+		});
+
+		it("a body curl cut off itself (max-time: marker and status still written) is caught", () => {
+			// curl stops the transfer mid-body and still writes `@@DPL 1 200`
+			const cutBody = index.slice(0, 40);
+			const out = full.replace(index, cutBody);
+			const responses = parseRegistryResponses(out, [0, 1, 2]);
+			const response = responses.get(1) as RegistryResponse;
+			expect(response.status).toBe(200);
+			expect(isBodyTruncated(response)).toBe(true);
+			// and without a Content-Length, the cut index is unreadable, never "no children"
+			expect(getManifestChildDigests(response.body)).toBeNull();
+		});
+
+		it("never attributes a response to another id", () => {
+			// a marker-shaped line inside a body, out of order: parsing stops there
+			const spoofed = [
+				`HTTP/1.1 200 OK\r\n\r\n{"a":"`,
+				"@@DPL 2 200",
+				`"}`,
+				"@@DPL 0 200",
+				"",
+			].join("\n");
+			expect([...parseRegistryResponses(spoofed, [0, 1, 2]).keys()]).toEqual([]);
+			// a marker for an id that was not asked for, or a repeated one, ends it too
+			const repeated = ["{}", "@@DPL 0 200", "{}", "@@DPL 0 200", "{}", "@@DPL 1 200", ""].join(
+				"\n",
+			);
+			expect([...parseRegistryResponses(repeated, [0, 1]).keys()]).toEqual([0]);
+			expect([...parseRegistryResponses(repeated).keys()]).toEqual([0]);
+			// a marker that does not start its own line is body text, not a marker
+			const inline = ['{"x":"@@DPL 0 200', '"}', "@@DPL 0 200", ""].join("\n");
+			expect(parseRegistryResponses(inline, [0]).get(0)?.body).toBe('{"x":"@@DPL 0 200\n"}');
+		});
 	});
 
 	it("reads the override files back by marker", () => {

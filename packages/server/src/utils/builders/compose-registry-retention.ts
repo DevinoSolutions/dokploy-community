@@ -238,22 +238,33 @@ export const selectDigestsToDelete = ({
 	return { deleteDigests, deleteTags, heldBack };
 };
 
-/** Child manifest digests of an index / manifest list; `[]` for a plain manifest. */
-export const getManifestChildDigests = (body: string): string[] => {
+/**
+ * Child manifest digests of an index / manifest list; `[]` for a plain
+ * manifest. `null` when the body is not a readable manifest at all (cut off,
+ * empty, not JSON): what it protects is then unknown, and a caller must not
+ * read that as "no children".
+ */
+export const getManifestChildDigests = (body: string): string[] | null => {
+	let parsed: unknown;
 	try {
-		const parsed = JSON.parse(body) as {
-			manifests?: { digest?: unknown }[];
-		};
-		if (!Array.isArray(parsed.manifests)) return [];
-		return parsed.manifests
-			.map((entry) => entry?.digest)
-			.filter(
-				(digest): digest is string =>
-					typeof digest === "string" && isValidDigest(digest),
-			);
+		parsed = JSON.parse(body);
 	} catch {
-		return [];
+		return null;
 	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return null;
+	}
+	const manifests = (parsed as { manifests?: unknown }).manifests;
+	if (manifests === undefined) return [];
+	if (!Array.isArray(manifests)) return null;
+	const children: string[] = [];
+	for (const entry of manifests) {
+		const digest = (entry as { digest?: unknown } | null)?.digest;
+		// An entry without a readable digest protects something unknown.
+		if (typeof digest !== "string" || !isValidDigest(digest)) return null;
+		children.push(digest);
+	}
+	return children;
 };
 
 // ---------------------------------------------------------------------------
@@ -342,16 +353,37 @@ export interface RegistryResponse {
 	body: string;
 }
 
-/** Reads the output of `REGISTRY_CURL_COMMAND` back into one response per request id. */
-export const parseRegistryResponses = (stdout: string) => {
+/**
+ * Reads the output of `REGISTRY_CURL_COMMAND` back into one response per
+ * request id.
+ *
+ * A response counts only once its complete marker line (written by curl after
+ * the response is done) has arrived, so output cut off anywhere inside a
+ * response, its headers, its body or its marker yields nothing for that id.
+ * curl runs the requests one after the other: with `expectedIds` (the request
+ * ids in config order) a marker for any other id than the next one expected
+ * ends the parse, so a response can never be attributed to the wrong request.
+ */
+export const parseRegistryResponses = (
+	stdout: string,
+	expectedIds?: readonly number[],
+) => {
 	const responses = new Map<number, RegistryResponse>();
-	const marker = new RegExp(`${RESPONSE_MARKER} (\\d+) (\\d{3})\\r?\\n`, "g");
+	// The write-out template starts with a newline of its own, so a marker
+	// always starts a line; the newline belongs to the marker, not the body.
+	const marker = new RegExp(`\\n${RESPONSE_MARKER} (\\d+) (\\d{3})\\r?\\n`, "g");
 	let cursor = 0;
+	let position = 0;
 	for (let match = marker.exec(stdout); match; match = marker.exec(stdout)) {
-		let segment = stdout.slice(cursor, match.index);
+		const id = Number(match[1]);
+		if (expectedIds) {
+			if (expectedIds[position] !== id) break;
+			position += 1;
+		} else if (responses.has(id)) {
+			break;
+		}
+		const segment = stdout.slice(cursor, match.index);
 		cursor = match.index + match[0].length;
-		// The write-out template starts with a newline of its own.
-		if (segment.endsWith("\n")) segment = segment.slice(0, -1);
 		let headers: Record<string, string> = {};
 		let body = segment;
 		if (/^HTTP\//.test(segment)) {
@@ -368,13 +400,24 @@ export const parseRegistryResponses = (stdout: string) => {
 				}
 			}
 		}
-		responses.set(Number(match[1]), {
+		responses.set(id, {
 			status: Number(match[2]),
 			headers,
 			body,
 		});
 	}
 	return responses;
+};
+
+/**
+ * Whether a body is shorter (or longer) than the `Content-Length` its headers
+ * announce. curl still writes its marker, with the status it got, when a
+ * transfer is cut off by `max-time`; this is how such a body is told apart.
+ */
+export const isBodyTruncated = (response: RegistryResponse) => {
+	const announced = response.headers["content-length"];
+	if (announced === undefined || !/^\d+$/.test(announced)) return false;
+	return Buffer.byteLength(response.body, "utf8") !== Number(announced);
 };
 
 /** Tags asked for per page of a tag listing. */
@@ -401,51 +444,144 @@ export const parseTagList = (body: string): string[] | null => {
 	);
 };
 
+export interface LinkValue {
+	target: string;
+	/** Parameter names lowercased; quoted values unquoted. */
+	params: Record<string, string>;
+}
+
 /**
- * The next page of a tag listing, from its `Link` header (distribution v2:
+ * Parses an RFC 8288 `Link` header: `<target>; name=value; name="quoted, with
+ * commas", <other>; ...`. `null` when it is not well formed; a header that
+ * cannot be read must never be mistaken for one without a next page.
+ */
+export const parseLinkHeader = (header: string): LinkValue[] | null => {
+	const links: LinkValue[] = [];
+	let at = 0;
+	const skipSpace = () => {
+		while (at < header.length && /[ \t]/.test(header[at] as string)) at += 1;
+	};
+	for (;;) {
+		skipSpace();
+		if (at >= header.length) break;
+		if (header[at] === ",") {
+			at += 1;
+			continue;
+		}
+		if (header[at] !== "<") return null;
+		const close = header.indexOf(">", at + 1);
+		if (close === -1) return null;
+		const link: LinkValue = { target: header.slice(at + 1, close), params: {} };
+		at = close + 1;
+		for (;;) {
+			skipSpace();
+			if (at >= header.length || header[at] === ",") break;
+			if (header[at] !== ";") return null;
+			at += 1;
+			skipSpace();
+			const name = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+/.exec(header.slice(at))?.[0];
+			if (!name) return null;
+			at += name.length;
+			skipSpace();
+			let value = "";
+			if (header[at] === "=") {
+				at += 1;
+				skipSpace();
+				if (header[at] === '"') {
+					at += 1;
+					let closed = false;
+					while (at < header.length) {
+						const char = header[at] as string;
+						if (char === "\\" && at + 1 < header.length) {
+							value += header[at + 1];
+							at += 2;
+							continue;
+						}
+						at += 1;
+						if (char === '"') {
+							closed = true;
+							break;
+						}
+						value += char;
+					}
+					if (!closed) return null;
+				} else {
+					const token = /^[^\s;,]*/.exec(header.slice(at))?.[0] ?? "";
+					value = token;
+					at += token.length;
+				}
+			}
+			// The first occurrence of a parameter wins (RFC 8288 section 3).
+			const key = name.toLowerCase();
+			if (!(key in link.params)) link.params[key] = value;
+		}
+		links.push(link);
+	}
+	return links;
+};
+
+export type NextTagsPage =
+	| { kind: "complete" }
+	| { kind: "next"; url: string }
+	| { kind: "unusable"; reason: string };
+
+/**
+ * The next page of a tag listing, from its `Link` header (distribution:
  * `Link: </v2/<repo>/tags/list?last=<tag>&n=<n>>; rel="next"`).
  *
- * - `null`: the header names no next page, the listing is complete;
- * - `undefined`: it names one this code will not follow. The request carries
- *   the registry credentials, so the next page must be on the very origin the
- *   listing came from and be the same repository's tag listing.
+ * Fails closed. Only a response without a `Link` header is the last page. A
+ * header that cannot be parsed, names no `next` page, or names one that is not
+ * this repository's tag listing on the very origin the listing came from (the
+ * request carries the registry credentials) is `unusable`: the listing may be
+ * partial, and a partial listing cannot tell which tags are kept.
  */
 export const getNextTagsPageUrl = (
 	base: string,
 	repo: string,
 	link: string | undefined,
-): string | null | undefined => {
-	if (!link) return null;
-	let target: string | undefined;
-	for (const part of link.split(",")) {
-		const match = /^\s*<([^>]*)>\s*;(.*)$/.exec(part);
-		if (!match) continue;
-		const rel = /(?:^|;)\s*rel\s*=\s*"?([^";]*)"?/i.exec(
-			match[2] as string,
-		)?.[1];
-		if (rel?.trim().split(/\s+/).includes("next")) {
-			target = match[1] as string;
-			break;
-		}
+): NextTagsPage => {
+	if (link === undefined) return { kind: "complete" };
+	const links = parseLinkHeader(link);
+	if (!links) {
+		return { kind: "unusable", reason: "its Link header cannot be parsed" };
 	}
-	if (target === undefined) return null;
+	const next = links.filter((value) =>
+		(value.params.rel ?? "")
+			.toLowerCase()
+			.split(/\s+/)
+			.includes("next"),
+	);
+	if (next.length !== 1) {
+		return {
+			kind: "unusable",
+			reason:
+				next.length === 0
+					? "its Link header names no next page"
+					: "its Link header names more than one next page",
+		};
+	}
+	const unusable = {
+		kind: "unusable",
+		reason:
+			"its Link header points the next page somewhere other than this repository's tag listing on this registry",
+	} as const;
 	let url: URL;
 	let origin: URL;
 	let path: string;
 	try {
 		origin = new URL(`${base}/`);
-		url = new URL(target, origin);
+		url = new URL((next[0] as LinkValue).target, origin);
 		path = decodeURIComponent(url.pathname);
 	} catch {
-		return undefined;
+		return unusable;
 	}
 	if (url.origin !== origin.origin || url.username || url.password) {
-		return undefined;
+		return unusable;
 	}
-	if (path !== `/v2/${repo}/tags/list`) return undefined;
-	if (/[\s"\\]/.test(url.href)) return undefined;
+	if (path !== `/v2/${repo}/tags/list`) return unusable;
+	if (/[\s"\\]/.test(url.href)) return unusable;
 	url.hash = "";
-	return url.href;
+	return { kind: "next", url: url.href };
 };
 export const getManifestUrl = (base: string, repo: string, reference: string) =>
 	`${base}/v2/${repo}/manifests/${reference}`;

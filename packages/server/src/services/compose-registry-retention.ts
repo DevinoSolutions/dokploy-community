@@ -15,6 +15,7 @@ import {
 	getReadFilesCommand,
 	getRegistryApiBases,
 	getTagsListUrl,
+	isBodyTruncated,
 	isValidDigest,
 	mapDeploymentTagTimes,
 	NO_CURL_MARKER,
@@ -96,7 +97,10 @@ const READ_FILES_TIMEOUT_MS = 10_000;
 const MAX_REPOS = 20;
 /** Pages of one repository's tag listing followed per run. */
 const MAX_TAG_PAGES = 10;
-/** Manifests actually deleted per run; a larger backlog is worked off over several deploys. */
+/**
+ * Manifest DELETEs per run: every one sent counts, unless the registry answers
+ * that it deleted nothing. A larger backlog is worked off over several deploys.
+ */
 const MAX_DELETIONS_PER_RUN = 50;
 /** Requests per curl invocation (they run one after the other). */
 const BATCH_SIZE = 20;
@@ -205,6 +209,12 @@ export const pruneComposeBuildRegistry = async ({
 		/** Repositories at least one manifest was removed from. */
 		prunedRepos: new Set<string>(),
 		deleted: 0,
+		/**
+		 * DELETEs counted against `MAX_DELETIONS_PER_RUN`: reserved before they
+		 * are sent, given back only when the registry answers that nothing was
+		 * deleted. One whose answer is lost stays counted: it may have deleted.
+		 */
+		allowanceUsed: 0,
 		removedTags: 0,
 		gone: 0,
 		failed: 0,
@@ -309,7 +319,10 @@ export const pruneComposeBuildRegistry = async ({
 			if (stdout.includes(NO_CURL_MARKER)) {
 				throw new RetentionAbort("curl is not installed on the build server");
 			}
-			return parseRegistryResponses(stdout);
+			return parseRegistryResponses(
+				stdout,
+				requests.map((request) => request.id),
+			);
 		};
 
 		/**
@@ -318,20 +331,35 @@ export const pruneComposeBuildRegistry = async ({
 		 * without a response was not answered in time. No batch starts once the
 		 * budget is spent; a batch that fails ends the scheduling, and its error
 		 * comes back next to whatever the other batches answered.
+		 *
+		 * `beforeBatch` runs immediately before each batch's session opens; when
+		 * it answers false no further batch starts (`halted`). `sent` holds the
+		 * ids of every request whose batch did start.
 		 */
-		const runBatches = async (requests: RegistryRequest[]) => {
+		const runBatches = async (
+			requests: RegistryRequest[],
+			beforeBatch?: () => Promise<boolean>,
+		) => {
 			const chunks: RegistryRequest[][] = [];
 			for (let start = 0; start < requests.length; start += BATCH_SIZE) {
 				chunks.push(requests.slice(start, start + BATCH_SIZE));
 			}
 			const responses = new Map<number, RegistryResponse>();
+			const sent = new Set<number>();
 			let error: unknown;
 			let failed = false;
+			let halted = false;
 			let next = 0;
 			const worker = async () => {
-				while (next < chunks.length && !failed && !outOfTime()) {
+				while (next < chunks.length && !failed && !halted && !outOfTime()) {
 					const chunk = chunks[next++] as RegistryRequest[];
 					try {
+						if (beforeBatch && !(await beforeBatch())) {
+							halted = true;
+							break;
+						}
+						if (failed || halted || outOfTime()) break;
+						for (const request of chunk) sent.add(request.id);
 						for (const [id, response] of await runBatch(chunk)) {
 							responses.set(id, response);
 						}
@@ -347,7 +375,7 @@ export const pruneComposeBuildRegistry = async ({
 					worker,
 				),
 			);
-			return { responses, failed, error };
+			return { responses, failed, error, sent, halted };
 		};
 		const runAll = async (requests: RegistryRequest[]) => {
 			const { responses, failed, error } = await runBatches(requests);
@@ -494,16 +522,17 @@ export const pruneComposeBuildRegistry = async ({
 						return null;
 					}
 					tags.push(...pageTags);
+					// Fail closed from here on: a listing that may be partial cannot
+					// tell which tags are kept, so the repository is skipped whole.
 					const next = getNextTagsPageUrl(base, repo, response.headers.link);
-					if (next === null) return tags;
-					// A partial listing cannot tell what is kept.
-					if (next === undefined) {
+					if (next.kind === "complete") return tags;
+					if (next.kind === "unusable") {
 						log.line(
-							`Warning: ⚠️ Build registry cleanup skipped ${repo}: the tag listing links to a next page that is not this repository's listing on this registry.`,
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: the tag listing may be incomplete, ${next.reason}.`,
 						);
 						return null;
 					}
-					if (seen.has(next)) {
+					if (seen.has(next.url)) {
 						log.line(
 							`Warning: ⚠️ Build registry cleanup skipped ${repo}: the tag listing is paged in a loop.`,
 						);
@@ -511,15 +540,15 @@ export const pruneComposeBuildRegistry = async ({
 					}
 					if (page >= MAX_TAG_PAGES) {
 						log.line(
-							`Warning: ⚠️ Build registry cleanup skipped ${repo}: its tag listing has more than ${MAX_TAG_PAGES} pages (${tags.length} tags so far).`,
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: its tag listing has more than ${MAX_TAG_PAGES} pages (${tags.length} tags so far); nothing is pruned from a partial listing.`,
 						);
 						return null;
 					}
-					seen.add(next);
+					seen.add(next.url);
 					assertTime();
 					response = (
 						await runAll([
-							{ id: 0, method: "GET", url: next, includeHeaders: true },
+							{ id: 0, method: "GET", url: next.url, includeHeaders: true },
 						])
 					).get(0);
 				}
@@ -582,10 +611,19 @@ export const pruneComposeBuildRegistry = async ({
 						);
 						return;
 					}
-					protectedDigests.add(digest);
-					for (const child of getManifestChildDigests(response.body)) {
-						protectedDigests.add(child);
+					// A body cut off in transfer (curl's max-time still writes the
+					// marker and the status) or one that is not a readable manifest
+					// tells nothing about the children of an index: unknown, so the
+					// repository waits for a run that reads it whole.
+					const children = isBodyTruncated(response)
+						? null
+						: getManifestChildDigests(response.body);
+					if (!children) {
+						unanswered += 1;
+						continue;
 					}
+					protectedDigests.add(digest);
+					for (const child of children) protectedDigests.add(child);
 				}
 				if (unanswered > 0) {
 					assertTime();
@@ -601,7 +639,7 @@ export const pruneComposeBuildRegistry = async ({
 				// nothing counted. One that did not answer is left alone.
 				const removed = new Set<string>();
 				for (let start = 0; start < doomed.length; start += WAVE_SIZE) {
-					if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
+					if (progress.allowanceUsed >= MAX_DELETIONS_PER_RUN) {
 						stopped = "cap";
 						return;
 					}
@@ -640,43 +678,51 @@ export const pruneComposeBuildRegistry = async ({
 							.map(([tag]) => tag),
 					}));
 
-					// c. Delete. Before every round look again for a deploy that
-					// started while this ran: its pushes are the one thing the checks
-					// above cannot see. Only manifests actually deleted count against
-					// the per-run cap.
+					// c. Delete. Every DELETE is counted against the per-run cap
+					// before it is sent; the registry answering that nothing was
+					// deleted (404, an error) gives it back, a lost answer does not.
+					// Immediately before each DELETE session opens, look again for a
+					// deploy of this compose that started while this ran: its pushes
+					// are the one thing the checks above cannot see.
 					let next = 0;
 					while (next < deletions.length) {
-						if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
+						const allowance = MAX_DELETIONS_PER_RUN - progress.allowanceUsed;
+						if (allowance <= 0) {
 							stopped = "cap";
 							return;
 						}
 						assertTime();
-						if (
-							hasConcurrentDeployment(
-								await findAllDeploymentsByComposeId(entity.composeId),
-								deployment.deploymentId,
-							)
-						) {
-							log.line(
-								"Build registry cleanup stopped: another deployment of this compose started.",
-							);
-							stopped = "deploy";
-							return;
-						}
 						const round = deletions.slice(
 							next,
-							next +
-								Math.min(WAVE_SIZE, MAX_DELETIONS_PER_RUN - progress.deleted),
+							next + Math.min(WAVE_SIZE, allowance),
 						);
 						next += round.length;
-						const { responses, failed, error } = await runBatches(
+						progress.allowanceUsed += round.length;
+						let deployStarted = false;
+						const { responses, failed, error, sent } = await runBatches(
 							round.map((entry, id) => ({
 								id,
 								method: "DELETE" as const,
 								url: getManifestUrl(base, repo, entry.digest),
 							})),
+							async () => {
+								if (
+									hasConcurrentDeployment(
+										await findAllDeploymentsByComposeId(entity.composeId),
+										deployment.deploymentId,
+									)
+								) {
+									deployStarted = true;
+									return false;
+								}
+								return true;
+							},
 						);
 						for (const [id, entry] of round.entries()) {
+							if (!sent.has(id)) {
+								progress.allowanceUsed -= 1;
+								continue;
+							}
 							const response = responses.get(id);
 							if (!response) {
 								progress.unconfirmed += 1;
@@ -690,17 +736,26 @@ export const pruneComposeBuildRegistry = async ({
 								continue;
 							}
 							if (response.status === 404) {
+								progress.allowanceUsed -= 1;
 								progress.gone += 1;
 								removed.add(entry.digest);
 								continue;
 							}
 							failIfSystemic(response.status, "deleting manifests");
+							progress.allowanceUsed -= 1;
 							progress.failed += 1;
 							log.line(
 								`Warning: ⚠️ Build registry cleanup: deleting ${repo}@${entry.digest.slice(0, 19)} returned HTTP ${response.status}.`,
 							);
 						}
 						if (failed) throw error;
+						if (deployStarted) {
+							log.line(
+								"Build registry cleanup stopped: another deployment of this compose started.",
+							);
+							stopped = "deploy";
+							return;
+						}
 					}
 				}
 			};
@@ -713,7 +768,7 @@ export const pruneComposeBuildRegistry = async ({
 			let position = 0;
 			for (; position < ordered.length && !stopped; position++) {
 				const repo = ordered[position] as string;
-				if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
+				if (progress.allowanceUsed >= MAX_DELETIONS_PER_RUN) {
 					stopped = "cap";
 					break;
 				}
