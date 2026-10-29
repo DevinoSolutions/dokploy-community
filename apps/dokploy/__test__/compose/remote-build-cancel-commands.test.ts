@@ -216,7 +216,14 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 				process.kill(-group, "SIGKILL");
 			} catch {}
 		}
-		for (const child of spawned.splice(0)) child.kill("SIGKILL");
+		for (const child of spawned.splice(0)) {
+			// The child is `timeout`, which leads its own process group and
+			// cannot pass SIGKILL on: kill the group so the shell goes too.
+			try {
+				if (child.pid) process.kill(-child.pid, "SIGKILL");
+			} catch {}
+			child.kill("SIGKILL");
+		}
 	});
 
 	const alive = (pgid: number) => {
