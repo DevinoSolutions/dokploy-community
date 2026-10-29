@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.36**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.37**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.36 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.37 \
   --with-registry-auth \
   dokploy
 ```
@@ -120,10 +120,11 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.36
+## What's new in v0.30.8-community.37
 
-- The Logs, Terminal and container lists work again for services on the Dokploy host; since v0.30.8-community.32 they showed no containers there.
-- Security updates: qs 6.16.1, systeminformation 5.33.16+ and @hono/node-server 2.1 for the deployments service, the schedules service and the MCP endpoint.
+- The build registry cleanup now makes progress on every deploy: it works in small batches, keeps what it has already deleted if it runs out of time, resumes at the repository it stopped on, and handles repositories with more than 500 tags. It stops instead of guessing when a reply is unclear or a deploy started meanwhile.
+- The Docker Compose stall snapshot no longer waits needlessly once its docker calls have finished, no longer reports a false "did not return" in the deploy log, and no longer leaves a stray `docker ps` behind.
+- Test-suite reliability fixes; no product changes.
 - No new database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
@@ -139,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.36
+export DOKPLOY_VERSION=v0.30.8-community.37
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -152,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.36      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.37      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -195,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.36` is the 36th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.37` is the 37th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
