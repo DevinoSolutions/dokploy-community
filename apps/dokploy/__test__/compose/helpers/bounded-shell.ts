@@ -137,29 +137,61 @@ const carries = (pid: string, entries: Set<string>) => {
 };
 
 /**
- * SIGKILLs every process that carries one of the tokens (all live ones by
- * default), checking each one's environment right before its signal, then
- * forgets the tokens. A few rounds, so a child forked while the first round ran
- * goes too. On a host without /proc it does nothing.
+ * Pids of processes (not this one) that carry one of `entries`, or null on a
+ * host without /proc. A killed process is a zombie with an empty environment
+ * until it is reaped, so it no longer counts.
  */
-export const killLaunched = (tokens: Iterable<string> = liveTokens) => {
+const taggedPids = (entries: Set<string>) => {
+	let names: string[];
+	try {
+		names = readdirSync("/proc");
+	} catch {
+		return null;
+	}
+	return names.filter(
+		(name) =>
+			/^\d+$/.test(name) &&
+			Number(name) !== process.pid &&
+			carries(name, entries),
+	);
+};
+
+/** Blocks for `ms` (the exit hook cannot wait asynchronously). */
+const pause = (ms: number) =>
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * SIGKILLs every process that carries one of the tokens (all live ones by
+ * default), checking each one's environment right before its signal, and
+ * searches again until none is left. A token is forgotten only then. Throws
+ * (failing the test) when tagged processes are still there after `seconds`;
+ * their tokens stay, for a later call. On a host without /proc it does nothing.
+ */
+export const killLaunched = (
+	tokens: Iterable<string> = liveTokens,
+	seconds = 5,
+) => {
 	const list = [...tokens];
+	if (list.length === 0) return;
 	const entries = new Set(list.map((t) => `${LAUNCH_TOKEN_ENV}=${t}`));
-	for (const token of list) liveTokens.delete(token);
-	if (entries.size === 0) return;
-	for (let round = 0; round < 10; round++) {
-		let pids: string[];
-		try {
-			pids = readdirSync("/proc").filter((name) => /^\d+$/.test(name));
-		} catch {
+	const deadline = Date.now() + seconds * 1000;
+	for (;;) {
+		const pids = taggedPids(entries);
+		if (pids === null || pids.length === 0) {
+			for (const token of list) liveTokens.delete(token);
 			return;
 		}
-		let found = 0;
+		if (Date.now() > deadline) {
+			throw new Error(
+				`${pids.length} process(es) of a test launch still run ${seconds} s after SIGKILL.`,
+			);
+		}
 		for (const pid of pids) {
-			if (Number(pid) === process.pid || !carries(pid, entries)) continue;
-			found++;
-			// Checked again just before the signal: the process may have ended,
-			// and its number gone to something else, since the search.
+			// Checked again just before the signal. What is left is accepted: the
+			// process would have to be reaped and its number reused (by a process
+			// of our own uid, unless root) in the microseconds between this check,
+			// which just matched the token, and kill(). Closing that would take a
+			// pidfd, which node does not have, or a cgroup per launch.
 			if (!carries(pid, entries)) continue;
 			try {
 				process.kill(Number(pid), "SIGKILL");
@@ -167,10 +199,16 @@ export const killLaunched = (tokens: Iterable<string> = liveTokens) => {
 				// Already gone.
 			}
 		}
-		if (found === 0) return;
+		pause(50);
 	}
 };
-process.once("exit", () => killLaunched());
+process.once("exit", () => {
+	try {
+		killLaunched();
+	} catch {
+		// Nothing more can be done while the process exits.
+	}
+});
 
 // $1 seconds, $2 the CPU cap, $3 the absolute `timeout`, $4 the shell, $5 the
 // launch token, $6 "reap" or "". The token goes on through `env`, so this shell
@@ -178,22 +216,29 @@ process.once("exit", () => killLaunched());
 // their environment). With "reap", the reaper waits until `timeout` (the pid
 // `exec` hands it, `$$`) is gone, capped at the bound plus 10 s, then kills what
 // still carries the token: the detached session, whatever the deadline or an
-// early return left. Each process is checked again right before its signal.
+// early return left. Each process is checked again right before its signal,
+// on a whole NUL-separated entry of its environment (`grep -F` alone would
+// also take OTHER_<var>=<token> or <var>=<token>-x), and the search repeats,
+// for up to 5 s, until nothing tagged is left. The race left between that
+// check and kill() is the one described in `killLaunched`.
 const TAGGING_WRAPPER = `n=$1; c=$2; t=$3; s=$4; k=$5; r=$6; shift 6
 if [ "$r" = reap ]; then
 	(
 		v="${LAUNCH_TOKEN_ENV}=$k"; i=0; m=$(( (n + 10) * 5 ))
 		while [ "$i" -lt "$m" ] && kill -0 "$$" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
 		j=0
-		while [ "$j" -lt 10 ]; do
-			# Not grep's status: it is 2 when any process ended mid-search.
+		while [ "$j" -lt 25 ]; do
+			# Candidates only (not grep's status: it is 2 when any process ended
+			# mid-search); each one is matched exactly below.
 			l=$(grep -lsF -- "$v" /proc/[0-9]*/environ 2>/dev/null)
-			[ -n "$l" ] || break
+			h=""
 			for f in $l; do
-				p=\${f#/proc/}; p=\${p%/environ}
-				grep -qsF -- "$v" "$f" && kill -s KILL "$p" 2>/dev/null
+				tr '\\000' '\\n' < "$f" 2>/dev/null | grep -qxF -- "$v" || continue
+				h=1; p=\${f#/proc/}; p=\${p%/environ}
+				kill -s KILL "$p" 2>/dev/null
 			done
-			j=$((j + 1))
+			[ -n "$h" ] || break
+			sleep 0.2; j=$((j + 1))
 		done
 	) </dev/null >/dev/null 2>&1 &
 fi

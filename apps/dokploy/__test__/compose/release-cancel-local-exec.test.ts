@@ -17,7 +17,6 @@ import {
 	getRemoteBuildCancelTarget,
 	parseKillResult,
 	RELEASE_DRAIN_SECONDS,
-	shSingleQuote,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
 import { execAsyncCancelable } from "@dokploy/server/utils/process/execAsync";
@@ -25,6 +24,7 @@ import {
 	abortRemoteBuild,
 	hasRunningRemoteBuild,
 } from "@dokploy/server/utils/process/remote-build-registry";
+import { quote } from "shell-quote";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	boundedSh,
@@ -62,6 +62,9 @@ afterEach(() => {
 	delete process.env[LAUNCH_TOKEN_ENV];
 	killLaunched();
 });
+
+/** A path as shell text (a temp directory may hold any character). */
+const q = (path: string) => quote([path]);
 
 const targetFor = (name: string) => ({
 	pidFile: join(root, `${name}.pid`),
@@ -102,7 +105,7 @@ describe("execAsyncCancelable", () => {
 		const marker = join(root, "refused.ran");
 
 		await expect(
-			execAsyncCancelable(`touch ${marker}`, target, {
+			execAsyncCancelable(`touch ${q(marker)}`, target, {
 				beforeExec: () => {
 					throw new Error("cancelled");
 				},
@@ -119,7 +122,10 @@ describe("execAsyncCancelable", () => {
 			const target = targetFor("ok");
 			const marker = join(root, "ok.ran");
 
-			const pending = execAsyncCancelable(`echo hi && touch ${marker}`, target);
+			const pending = execAsyncCancelable(
+				`echo hi && touch ${q(marker)}`,
+				target,
+			);
 			expect(hasRunningRemoteBuild(target.deploymentId)).toBe(true);
 			const result = await pending;
 
@@ -153,10 +159,10 @@ describe("execAsyncCancelable", () => {
 			// trap is installed.
 			writeFileSync(
 				script,
-				`trap 'touch ${trapped}; exit 130' TERM\ntouch ${ready}\nsleep 30 & wait $!\n`,
+				`trap ${q(`touch ${q(trapped)}; exit 130`)} TERM\ntouch ${q(ready)}\nsleep 30 & wait $!\n`,
 			);
 
-			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+			const pending = execAsyncCancelable(`sh ${q(script)}`, target).catch(
 				(e) => e,
 			);
 			expect(await waitFor(() => existsSync(ready))).toBe(true);
@@ -182,7 +188,7 @@ describe("execAsyncCancelable", () => {
 			const script = join(root, "abort.sh");
 			writeFileSync(script, "sleep 20\n");
 
-			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+			const pending = execAsyncCancelable(`sh ${q(script)}`, target).catch(
 				(e) => e,
 			);
 			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
@@ -218,7 +224,7 @@ describe("the release done marker, for real", () => {
 			writeFileSync(`${target.pidFile}.done`, "");
 
 			await execAsyncCancelable(
-				`if [ -e "$DOKPLOY_RELEASE_DONE" ]; then echo present > ${seen}; else echo absent > ${seen}; fi`,
+				`if [ -e "$DOKPLOY_RELEASE_DONE" ]; then echo present > ${q(seen)}; else echo absent > ${q(seen)}; fi`,
 				target,
 			);
 
@@ -239,12 +245,12 @@ describe("the release done marker, for real", () => {
 			// script without a cleanup (the pid file exists before it runs).
 			writeFileSync(
 				script,
-				`trap 'sleep 1; touch ${cleaned}; : > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM\ntouch ${ready}\nsleep 30 & wait $!\n`,
+				`trap ${q(`sleep 1; touch ${q(cleaned)}; : > "$DOKPLOY_RELEASE_DONE"; exit 130`)} TERM\ntouch ${q(ready)}\nsleep 30 & wait $!\n`,
 			);
 			// What a SIGKILLed earlier release leaves behind.
 			writeFileSync(`${target.pidFile}.done`, "");
 
-			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+			const pending = execAsyncCancelable(`sh ${q(script)}`, target).catch(
 				(e) => e,
 			);
 			expect(await waitFor(() => existsSync(ready))).toBe(true);
@@ -282,16 +288,18 @@ describe("the release done marker, for real", () => {
 				script,
 				[
 					`trap ': > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM`,
-					`sh -c 'trap "" TERM; echo $$ > ${helperPid}; sleep 60' &`,
-					// Bounded: gives up after 10 s instead of looping on.
-					`i=0; while [ ! -s ${shSingleQuote(helperPid)} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done`,
-					`touch ${ready}`,
+					`sh -c ${q(`trap "" TERM; echo $$ > ${q(helperPid)}; sleep 60`)} &`,
+					// Bounded: gives up after 10 s, and then fails (the ready file never
+					// comes, and the script says why) instead of going on.
+					`i=0; while [ ! -s ${q(helperPid)} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done`,
+					`[ -s ${q(helperPid)} ] || { echo 'the helper never wrote its pid' >&2; exit 97; }`,
+					`touch ${q(ready)}`,
 					"sleep 60 & wait $!",
 					"",
 				].join("\n"),
 			);
 
-			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+			const pending = execAsyncCancelable(`sh ${q(script)}`, target).catch(
 				(e) => e,
 			);
 			expect(await waitFor(() => existsSync(ready))).toBe(true);

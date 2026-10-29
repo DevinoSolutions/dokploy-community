@@ -12,6 +12,7 @@ import {
 	boundedShellAvailable,
 	boundedShSpawn,
 	killLaunched,
+	LAUNCH_TOKEN_ENV,
 	makeTempDir,
 } from "./helpers/bounded-shell";
 
@@ -116,6 +117,7 @@ const waitsPastDeadline = (marker: string) =>
 const returnsAtOnce = (marker: string) =>
 	`sleep 120 >/dev/null 2>&1 & echo $! > ${shSingleQuote(marker)}`;
 
+// Not on Windows: Git Bash has no setsid sessions, so there is nothing detached to clean up.
 describe.skipIf(!hasSetsid)("detached sessions under a bounded shell", () => {
 	it("tracked only, a descendant in the session outlives the deadline (the gap)", {
 		timeout: 30_000,
@@ -203,5 +205,48 @@ describe.skipIf(!hasSetsid)("detached sessions under a bounded shell", () => {
 		expect(isAlive(foreign)).toBe(true);
 		expect(isAlive(process.ppid)).toBe(true);
 		expect(isAlive(1)).toBe(true);
+	});
+
+	it("only a whole environment entry with the token counts, not one that contains it", {
+		timeout: 30_000,
+	}, async () => {
+		const go = join(root, "variants.go");
+		// Leaves a descendant behind and returns once the bystanders exist.
+		const run = launch(
+			"variants",
+			(marker) =>
+				`${returnsAtOnce(marker)}; i=0; while [ ! -e ${shSingleQuote(go)} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done`,
+			{ seconds: 60, leftovers: "kill" },
+		);
+		const pid = await run.descendant();
+		const entry = readFileSync(`/proc/${pid}/environ`, "latin1")
+			.split("\0")
+			.find((e) => e.startsWith(`${LAUNCH_TOKEN_ENV}=`));
+		expect(entry).toBeDefined();
+		const token = (entry as string).slice(LAUNCH_TOKEN_ENV.length + 1);
+		// Processes that hold the token, but not as the launch's own entry.
+		const variants = [
+			{ [`OTHER_${LAUNCH_TOKEN_ENV}`]: token },
+			{ [LAUNCH_TOKEN_ENV]: `${token}-suffix` },
+			{ [LAUNCH_TOKEN_ENV]: `prefix-${token}` },
+			{ NOTE: `${LAUNCH_TOKEN_ENV}=${token}` },
+		].map((extra) => {
+			const child = spawn("sleep", ["60"], {
+				env: { PATH: process.env.PATH, ...extra },
+				stdio: "ignore",
+			});
+			bystanders.push(child);
+			return child.pid as number;
+		});
+		expect(await waitUntil(() => variants.every(isAlive))).toBe(true);
+
+		writeFileSync(go, "");
+		expect(await run.exited).toBe(0);
+		// The reaper takes the descendant and leaves every variant alone...
+		expect(await waitUntil(() => !isAlive(pid))).toBe(true);
+		expect(variants.filter((p) => !isAlive(p))).toEqual([]);
+		// ...and so does the teardown from node.
+		killLaunched();
+		expect(variants.filter((p) => !isAlive(p))).toEqual([]);
 	});
 });

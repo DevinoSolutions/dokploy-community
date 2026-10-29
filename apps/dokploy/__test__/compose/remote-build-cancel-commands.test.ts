@@ -207,25 +207,16 @@ const hasSetsid =
 describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 	const dir = mkdtempSync(join(tmpdir(), "dokploy-cancel-"));
 	const spawned: Array<ReturnType<typeof spawn>> = [];
-	const groups: number[] = [];
 
 	afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 	afterEach(() => {
+		// Launches end by their token (their timeout, shells and the detached
+		// session all carry it), never by a recorded group number.
 		killLaunched();
-		for (const group of groups.splice(0)) {
-			try {
-				process.kill(-group, "SIGKILL");
-			} catch {}
-		}
-		for (const child of spawned.splice(0)) {
-			// The child is `timeout`, which leads its own process group and
-			// cannot pass SIGKILL on: kill the group so the shell goes too.
-			try {
-				if (child.pid) process.kill(-child.pid, "SIGKILL");
-			} catch {}
-			child.kill("SIGKILL");
-		}
+		// Processes started here directly: through their handle, which node
+		// never signals once it has seen them exit.
+		for (const child of spawned.splice(0)) child.kill("SIGKILL");
 	});
 
 	const alive = (pgid: number) => {
@@ -265,7 +256,6 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 		);
 		await wait(() => existsSync(target.pidFile));
 		const [pgid] = readFileSync(target.pidFile, "utf8").trim().split(" ");
-		groups.push(Number(pgid));
 		return { target, pgid: Number(pgid), exited };
 	};
 

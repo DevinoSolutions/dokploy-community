@@ -1947,8 +1947,6 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							existsSync(pidFile) && callsOf(world).includes("State.Health"),
 					),
 				).toBe(true);
-				const pgid = readFileSync(pidFile, "utf8").split(" ")[0];
-
 				const startedAt = Date.now();
 				const kill = boundedSh(
 					[
@@ -1967,10 +1965,8 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				expect(elapsed).toBeLessThan(15_000);
 				expect(containersOf(world, "web")).toEqual([OLD]);
 				expect(existsSync(`${pidFile}.done`)).toBe(false);
-				boundedSh(
-					[writeScript(world, `kill -s KILL -- -${pgid} 2>/dev/null; true`)],
-					{ encoding: "utf8", timeout: 30_000 },
-				);
+				// The helper still sleeping in the session is the launch's: the
+				// afterEach (killLaunched) ends it by its token.
 			});
 		},
 	);
