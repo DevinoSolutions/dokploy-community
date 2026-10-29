@@ -123,8 +123,8 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 ## What's new in v0.30.8-community.37
 
 - The build registry cleanup now makes progress on every deploy: it works in small batches, keeps what it has already deleted if it runs out of time, resumes at the repository it stopped on, and handles repositories with more than 500 tags. It stops instead of guessing when a reply is unclear or a deploy started meanwhile.
-- The Docker Compose stall snapshot no longer waits the full 20 seconds under load, no longer reports a false "did not return" in the deploy log, and no longer leaves a stray `docker ps` behind.
-- Test-suite fixes only for the shell launch tokens and one injection-test timeout.
+- The Docker Compose stall snapshot no longer waits needlessly once its docker calls have finished, no longer reports a false "did not return" in the deploy log, and no longer leaves a stray `docker ps` behind.
+- Test-suite reliability fixes; no product changes.
 - No new database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.

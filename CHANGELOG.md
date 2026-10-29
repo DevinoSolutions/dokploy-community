@@ -8,9 +8,9 @@ Upgrade notes: no new database migrations since v0.30.8-community.36, so an imag
 
 **Build registry prune makes progress on every deploy** (T-10203). Before, 13 of 18 sampled deploys aborted the prune with "Remote command was aborted" and deleted nothing, and repositories with more than 500 tags were skipped. The prune now sends 20 requests per batch, with at most 3 sessions resolving and DELETEs one session at a time, keeps the partial result when it runs out of time, goes repository by repository and resumes at the repository the last run stopped on. Tag lists are paginated (up to 10 pages of 1000, same host only). It stops instead of guessing when a reply is ambiguous: nested indexes, duplicate headers, truncated replies, or a deploy that started since the snapshot. Upgrade impact: none to configure. No migration.
 
-**Compose deploy guardrails stall watcher** (T-10196). Under load its helper missed the TERM signal, so every snapshot waited the full 20 seconds and the deploy log could wrongly say "did not return within 20s". It could also die under dash and BusyBox when its directory was already gone, leaving a `docker ps` running. The helpers now stop on a done marker and receive no signals; only the slow docker call is stopped, after an identity check. Upgrade impact: none; the guardrails stay opt-in and off by default. No migration.
+**Compose deploy guardrails stall watcher** (T-10196). Under load its helper could miss the TERM signal, so a snapshot whose docker calls had already finished still waited the full 20 seconds and the deploy log could wrongly say "did not return within 20s". A docker call that is genuinely slow is still cut off at 20 seconds, as before. It could also die under dash and BusyBox when its directory was already gone, leaving a `docker ps` running. The helpers now stop on a done marker and receive no signals; only the slow docker call is stopped, after an identity check. Upgrade impact: none; the guardrails stay opt-in and off by default. No migration.
 
-**Tests only** (T-10099). The bounded-shell launch tokens are matched exactly and kept until their processes are gone, and one injection test no longer times out. No change to the product. No migration.
+**Test-suite reliability fixes** (T-10099). Tests only; no change to the product. No migration.
 
 ### New in v0.30.8-community.36
 
