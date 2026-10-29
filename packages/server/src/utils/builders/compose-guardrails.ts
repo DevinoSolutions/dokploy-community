@@ -336,18 +336,26 @@ export const getStallSnapshotStartScript = (
 				trap 'DOKPLOY_STALL_STOP=1; : > "$DOKPLOY_STALL_DIR/stop" 2>/dev/null' TERM;
 				# SIGTERM, then SIGKILL after a short grace if the process ignores it. The
 				# process is a child of this subshell: it is waited for, so it is reaped too.
+				# The helper subshells forked here (the grace timer, the per-command killer)
+				# are put down with SIGKILL, never SIGTERM: a forked subshell starts with
+				# the TERM trap of this subshell and only drops it once it gets to run, and a
+				# TERM that lands before that (a loaded host) is caught and then forgotten.
+				# The helper would live on: the watcher would wait out the whole timeout of
+				# the killer on every snapshot, or the helper would later signal a pid that
+				# was already reaped. Each one is an unwaited child here, so its pid cannot
+				# have been reused when it is signalled.
 				dokploy_stall_reap() {
 					if [ -z "$1" ]; then return 0; fi;
 					kill -TERM "$1" 2>/dev/null || return 0;
 					( sleep ${STALL_SNAPSHOT_KILL_GRACE_SECONDS}; kill -KILL "$1" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
 					DOKPLOY_STALL_GRACE_PID=$!;
 					while kill -0 "$1" 2>/dev/null; do wait "$1" 2>/dev/null; done;
-					kill "$DOKPLOY_STALL_GRACE_PID" 2>/dev/null; wait "$DOKPLOY_STALL_GRACE_PID" 2>/dev/null;
+					kill -KILL "$DOKPLOY_STALL_GRACE_PID" 2>/dev/null; wait "$DOKPLOY_STALL_GRACE_PID" 2>/dev/null;
 					return 0;
 				};
 				dokploy_stall_finish() {
 					dokploy_stall_reap "$DOKPLOY_STALL_CMD_PID";
-					if [ -n "$DOKPLOY_STALL_KILLER_PID" ]; then kill "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null; fi;
+					if [ -n "$DOKPLOY_STALL_KILLER_PID" ]; then kill -KILL "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null; fi;
 					if [ -n "$DOKPLOY_STALL_SLEEP_PID" ]; then kill "$DOKPLOY_STALL_SLEEP_PID" 2>/dev/null; fi;
 					rm -rf "$DOKPLOY_STALL_DIR" 2>/dev/null;
 					exit 0;
@@ -391,7 +399,7 @@ export const getStallSnapshotStartScript = (
 					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
 					wait "$DOKPLOY_STALL_CMD_PID" 2>/dev/null; DOKPLOY_STALL_RC=$?;
 					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
-					kill "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null; wait "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null;
+					kill -KILL "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null; wait "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null;
 					DOKPLOY_STALL_CMD_PID=""; DOKPLOY_STALL_KILLER_PID="";
 					DOKPLOY_STALL_TIMED_OUT=0;
 					if [ "$DOKPLOY_STALL_RC" != "0" ] && [ $(( $(date +%s) - DOKPLOY_STALL_CMD_T0 )) -ge ${STALL_SNAPSHOT_COMMAND_TIMEOUT_SECONDS} ]; then DOKPLOY_STALL_TIMED_OUT=1; fi;
