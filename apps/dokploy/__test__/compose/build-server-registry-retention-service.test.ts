@@ -1046,6 +1046,41 @@ describe("a slow registry", () => {
 			"Build registry cleanup stopped at the time budget: removed 40 old image manifests (40 dpl- tags) from 1 repository; the rest continues on the next deploy.",
 		);
 		expect(lines()).not.toContain("Warning");
+
+		// The next deploy starts with api, where this one stopped, even though
+		// web has a new old tag (no deployment row: it ranks oldest) again.
+		registry.deleteStatusFor = undefined;
+		(registry.repos[`${PREFIX}/my-app-web`] as Record<string, string>)["dpl-gone-row"] =
+			digest(500);
+		registry.requests.length = 0;
+		mocks.logLines.length = 0;
+		await run();
+		const manifestRequests = registry.requests.filter((r) => r.url.includes("/manifests/"));
+		expect(manifestRequests[0]?.url).toContain("my-app-api/manifests/");
+		expect(registry.deleted).toHaveLength(81);
+		expect(registry.deleted).toContain(`${PREFIX}/my-app-web@${digest(500)}`);
+		expect(lines()).toContain("removed 41 old image manifests (41 dpl- tags) from 2 repositories");
+	});
+
+	it("starts the next run after the repository that used up the deletion cap", async () => {
+		// web has 60 old tags (more than the cap), api 40
+		const rows = series(65);
+		const registry = twoRepos(rows);
+		const api = registry.repos[`${PREFIX}/my-app-api`] as Record<string, string>;
+		for (const row of rows.slice(0, 20)) delete api[tagOf(row.id)];
+		await run({ entity: { ...entity, composeId: "cap-rotation" } });
+		expect(registry.deleted).toHaveLength(50);
+		expect(registry.deleted.every((entry) => entry.includes("my-app-web@"))).toBe(true);
+
+		registry.requests.length = 0;
+		await run({ entity: { ...entity, composeId: "cap-rotation" } });
+		const manifestRequests = registry.requests.filter((r) => r.url.includes("/manifests/"));
+		expect(manifestRequests[0]?.url).toContain("my-app-api/manifests/");
+		// api's 40, then web's last 10
+		expect(registry.deleted).toHaveLength(100);
+		expect(registry.deleted.slice(50, 90).every((entry) => entry.includes("my-app-api@"))).toBe(
+			true,
+		);
 	});
 });
 

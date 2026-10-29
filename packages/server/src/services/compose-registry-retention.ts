@@ -120,6 +120,15 @@ const LATEST_TAG = "latest";
  */
 const pruneInFlight = new Set<string>();
 
+/**
+ * compose -> the repository its next prune starts with. A run that stops early
+ * (the time budget, the deletion cap) records where; without this the
+ * repositories at the front would take every run's budget and the last ones
+ * would never be reached. In memory only: after a restart a run starts at the
+ * front again, which is merely less fair.
+ */
+const resumeFrom = new Map<string, string>();
+
 const hasConcurrentDeployment = (
 	deployments: {
 		deploymentId: string;
@@ -187,6 +196,8 @@ export const pruneComposeBuildRegistry = async ({
 	let password: string | null | undefined;
 	let cancelled = false;
 	const activeSessions = new Set<RemoteInputSession>();
+	/** The repository being worked on, for `resumeFrom` when the budget runs out. */
+	let currentRepo: string | null = null;
 	/** What this run has done so far; reported however it ends. */
 	const progress = {
 		/** Repositories with old tags this run got to. */
@@ -514,8 +525,8 @@ export const pruneComposeBuildRegistry = async ({
 				}
 			};
 
-			/** Set once a concurrent deploy shows up or the deletion cap is hit. */
-			let stopped = false;
+			/** Set once the deletion cap is hit or a concurrent deploy shows up. */
+			let stopped: "cap" | "deploy" | null = null;
 
 			/** Resolves and prunes one repository. */
 			const pruneRepo = async ({
@@ -591,7 +602,7 @@ export const pruneComposeBuildRegistry = async ({
 				const removed = new Set<string>();
 				for (let start = 0; start < doomed.length; start += WAVE_SIZE) {
 					if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
-						stopped = true;
+						stopped = "cap";
 						return;
 					}
 					assertTime();
@@ -636,7 +647,7 @@ export const pruneComposeBuildRegistry = async ({
 					let next = 0;
 					while (next < deletions.length) {
 						if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
-							stopped = true;
+							stopped = "cap";
 							return;
 						}
 						assertTime();
@@ -649,7 +660,7 @@ export const pruneComposeBuildRegistry = async ({
 							log.line(
 								"Build registry cleanup stopped: another deployment of this compose started.",
 							);
-							stopped = true;
+							stopped = "deploy";
 							return;
 						}
 						const round = deletions.slice(
@@ -694,11 +705,21 @@ export const pruneComposeBuildRegistry = async ({
 				}
 			};
 
-			// 5. One repository at a time: list, resolve, prune.
-			for (const [index, repo] of repos.entries()) {
-				if (stopped) break;
+			// 5. One repository at a time: list, resolve, prune. Start where the
+			// last run of this compose stopped.
+			const resumeAt = resumeFrom.get(entity.composeId);
+			const first = resumeAt ? Math.max(0, repos.indexOf(resumeAt)) : 0;
+			const ordered = [...repos.slice(first), ...repos.slice(0, first)];
+			let position = 0;
+			for (; position < ordered.length && !stopped; position++) {
+				const repo = ordered[position] as string;
+				if (progress.deleted >= MAX_DELETIONS_PER_RUN) {
+					stopped = "cap";
+					break;
+				}
+				currentRepo = repo;
 				assertTime();
-				const tags = await listTags(repo, firstPages.get(index));
+				const tags = await listTags(repo, firstPages.get(repos.indexOf(repo)));
 				if (!tags) continue;
 				const required = protectedByRepo.get(repo) ?? new Set<string>();
 				const plan = planRepoTags({
@@ -718,6 +739,19 @@ export const pruneComposeBuildRegistry = async ({
 					resolve: [...new Set([...plan.keptTags, ...required, LATEST_TAG])],
 					required,
 				});
+			}
+			currentRepo = null;
+			if (!stopped) {
+				resumeFrom.delete(entity.composeId);
+			} else {
+				// The cap ran out inside or right after a repository: the next run
+				// begins with the one after it, so one big backlog cannot starve
+				// the rest. A concurrent deploy: carry on where this one was.
+				const next =
+					stopped === "cap"
+						? ordered[position % ordered.length]
+						: ordered[position - 1];
+				if (next) resumeFrom.set(entity.composeId, next);
 			}
 
 			if (progress.deleted > 0 || progress.failed > 0) {
@@ -740,6 +774,7 @@ export const pruneComposeBuildRegistry = async ({
 		});
 	} catch (error) {
 		if (error instanceof BudgetSpent) {
+			if (currentRepo) resumeFrom.set(entity.composeId, currentRepo);
 			log.line(
 				progress.deleted > 0 || progress.failed > 0
 					? `Build registry cleanup stopped at the time budget: removed ${plural(progress.deleted, "old image manifest", "old image manifests")} (${plural(progress.removedTags, "dpl- tag", "dpl- tags")}) from ${plural(progress.prunedRepos.size, "repository", "repositories")}${progressDetails()}; the rest continues on the next deploy.`
