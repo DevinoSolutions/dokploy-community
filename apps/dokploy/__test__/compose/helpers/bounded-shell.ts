@@ -210,39 +210,47 @@ process.once("exit", () => {
 	}
 });
 
+// The reaper. $1 the launch token, $2 the pid of `timeout`, $3 the bound. It
+// waits until that process is gone, capped at the bound plus 10 s, then kills
+// what still carries the token: the detached session, whatever the deadline or
+// an early return left. Each process is checked again right before its signal,
+// on one whole NUL-separated entry of its environment (`grep -zxF`: a plain
+// `grep -F` would also take OTHER_<var>=<token> or <var>=<token>-x, and a
+// newline in another value would pass as an entry boundary without -z), and
+// the search repeats, for up to 5 s, until nothing tagged is left. A grep that
+// cannot match NUL-separated entries exactly makes it kill nothing at all. The
+// race left between the check and kill() is the one described in
+// `killLaunched`.
+const REAPER = `v="${LAUNCH_TOKEN_ENV}=$1"; w=$2; n=$3
+printf 'x=1\\000' | grep -qzxF x=1 || exit 0
+printf 'N=a\\nx=1\\000' | grep -qzxF x=1 && exit 0
+i=0; m=$(( (n + 10) * 5 ))
+while [ "$i" -lt "$m" ] && kill -0 "$w" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+j=0
+while [ "$j" -lt 25 ]; do
+	# Candidates only (not grep's status: it is 2 when any process ended
+	# mid-search); each one is matched exactly below.
+	l=$(grep -lsF -- "$v" /proc/[0-9]*/environ 2>/dev/null)
+	h=""
+	for f in $l; do
+		grep -qszxF -- "$v" "$f" || continue
+		h=1; p=\${f#/proc/}; p=\${p%/environ}
+		kill -s KILL "$p" 2>/dev/null
+	done
+	[ -n "$h" ] || break
+	sleep 0.2; j=$((j + 1))
+done`;
+
 // $1 seconds, $2 the CPU cap, $3 the absolute `timeout`, $4 the shell, $5 the
-// launch token, $6 "reap" or "". The token goes on through `env`, so this shell
-// and the reaper it forks do not carry it (it is an argument here, not part of
-// their environment). With "reap", the reaper waits until `timeout` (the pid
-// `exec` hands it, `$$`) is gone, capped at the bound plus 10 s, then kills what
-// still carries the token: the detached session, whatever the deadline or an
-// early return left. Each process is checked again right before its signal,
-// on a whole NUL-separated entry of its environment (`grep -F` alone would
-// also take OTHER_<var>=<token> or <var>=<token>-x), and the search repeats,
-// for up to 5 s, until nothing tagged is left. The race left between that
-// check and kill() is the one described in `killLaunched`.
+// launch token, $6 REAPER or "". This shell already carries the token (spawn
+// puts it in its environment, so a cleanup right after the spawn finds it);
+// the reaper is started without it (`env -u`), so it never matches itself.
+// `$$` is the pid that `exec` hands to `timeout`.
 const TAGGING_WRAPPER = `n=$1; c=$2; t=$3; s=$4; k=$5; r=$6; shift 6
-if [ "$r" = reap ]; then
-	(
-		v="${LAUNCH_TOKEN_ENV}=$k"; i=0; m=$(( (n + 10) * 5 ))
-		while [ "$i" -lt "$m" ] && kill -0 "$$" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
-		j=0
-		while [ "$j" -lt 25 ]; do
-			# Candidates only (not grep's status: it is 2 when any process ended
-			# mid-search); each one is matched exactly below.
-			l=$(grep -lsF -- "$v" /proc/[0-9]*/environ 2>/dev/null)
-			h=""
-			for f in $l; do
-				tr '\\000' '\\n' < "$f" 2>/dev/null | grep -qxF -- "$v" || continue
-				h=1; p=\${f#/proc/}; p=\${p%/environ}
-				kill -s KILL "$p" 2>/dev/null
-			done
-			[ -n "$h" ] || break
-			sleep 0.2; j=$((j + 1))
-		done
-	) </dev/null >/dev/null 2>&1 &
+if [ -n "$r" ]; then
+	env -u ${LAUNCH_TOKEN_ENV} sh -c "$r" sh "$k" "$$" "$n" </dev/null >/dev/null 2>&1 &
 fi
-exec env "${LAUNCH_TOKEN_ENV}=$k" "$t" -k 5 "$n" sh -c 'ulimit -t "$0" 2>/dev/null || true; s=$1; shift; exec "$s" "$@"' "$c" "$s" "$@"`;
+exec "$t" -k 5 "$n" sh -c 'ulimit -t "$0" 2>/dev/null || true; s=$1; shift; exec "$s" "$@"' "$c" "$s" "$@"`;
 
 /**
  * `spawn("sh", args, options)` with the same bound, for a shell the test talks
@@ -271,6 +279,7 @@ export const boundedShSpawn = (
 	if (!boundedShellAvailable) {
 		throw new Error("No `timeout` in sh: refusing to run a shell unbounded.");
 	}
+	const token = newLaunchToken();
 	return spawn(
 		"sh",
 		[
@@ -281,11 +290,15 @@ export const boundedShSpawn = (
 			String(bound),
 			timeoutPath,
 			"sh",
-			newLaunchToken(),
-			leftovers === "kill" ? "reap" : "",
+			token,
+			leftovers === "kill" ? REAPER : "",
 			...args,
 		],
-		options,
+		{
+			...options,
+			// Tagged from the first process on: spawn returns once it has exec'd.
+			env: { ...(options.env ?? process.env), [LAUNCH_TOKEN_ENV]: token },
+		},
 	);
 };
 

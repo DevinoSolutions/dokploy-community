@@ -230,6 +230,9 @@ describe.skipIf(!hasSetsid)("detached sessions under a bounded shell", () => {
 			{ [LAUNCH_TOKEN_ENV]: `${token}-suffix` },
 			{ [LAUNCH_TOKEN_ENV]: `prefix-${token}` },
 			{ NOTE: `${LAUNCH_TOKEN_ENV}=${token}` },
+			// A whole line with the exact entry, inside another value.
+			{ NOTE: `x\n${LAUNCH_TOKEN_ENV}=${token}\ny` },
+			{ NOTE: `x\n${LAUNCH_TOKEN_ENV}=${token}` },
 		].map((extra) => {
 			const child = spawn("sleep", ["60"], {
 				env: { PATH: process.env.PATH, ...extra },
@@ -248,5 +251,28 @@ describe.skipIf(!hasSetsid)("detached sessions under a bounded shell", () => {
 		// ...and so does the teardown from node.
 		killLaunched();
 		expect(variants.filter((p) => !isAlive(p))).toEqual([]);
+	});
+
+	it("a cleanup right after the spawn still ends the launch, and nothing of it starts later", {
+		timeout: 30_000,
+	}, async () => {
+		// The descendant only comes a second in: a cleanup that found nothing
+		// and forgot the token would let it run.
+		const run = launch(
+			"immediate",
+			(marker) => `sleep 1; ${waitsPastDeadline(marker)}`,
+			{ seconds: 60, leftovers: "track" },
+		);
+		killLaunched();
+		// The launcher itself carried the token, so the launch is gone at once.
+		expect(await run.exited).not.toBe(0);
+		await new Promise((resolve) => setTimeout(resolve, 2500));
+		const marker = join(root, "immediate.descendant");
+		if (existsSync(marker)) {
+			const pid = Number(readFileSync(marker, "utf8").trim());
+			expect(await waitUntil(() => !isAlive(pid))).toBe(true);
+		}
+		// Whatever reached the session in between is gone too.
+		killLaunched();
 	});
 });
