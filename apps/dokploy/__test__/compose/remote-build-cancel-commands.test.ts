@@ -15,7 +15,7 @@ import {
 	boundedSh,
 	boundedShellAvailable,
 	boundedShSpawn,
-	killDetachedGroups,
+	killLaunched,
 } from "./helpers/bounded-shell";
 
 describe("pid file path", () => {
@@ -212,7 +212,7 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 	afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 	afterEach(() => {
-		killDetachedGroups();
+		killLaunched();
 		for (const group of groups.splice(0)) {
 			try {
 				process.kill(-group, "SIGKILL");
@@ -256,7 +256,7 @@ describe.skipIf(!hasSetsid)("stub processes on a real shell", () => {
 				env: { ...process.env, SHELL: "/bin/sh" },
 				stdio: "ignore",
 				seconds: 60,
-				pidFile: target.pidFile,
+				leftovers: "kill",
 			},
 		);
 		spawned.push(child);

@@ -17,6 +17,8 @@ const MARK = join(
 	makeTempDir(join(tmpdir(), "dokploy-compose-inject-")),
 	"pwned",
 ).replace(/\\/g, "/");
+// The marker as shell text: a temp directory may contain a space.
+const Q_MARK = quote([MARK]);
 
 const base = {
 	composeType: "docker-compose" as const,
@@ -51,17 +53,17 @@ const runsSafely = (command: string, timeout = 30_000) => {
 const itWithShell = boundedShellAvailable ? it : it.skip;
 
 const PAYLOADS = [
-	`$(touch ${MARK})`,
-	`\`touch ${MARK}\``,
-	`x; touch ${MARK}`,
-	`x | touch ${MARK}`,
+	`$(touch ${Q_MARK})`,
+	`\`touch ${Q_MARK}\``,
+	`x; touch ${Q_MARK}`,
+	`x | touch ${Q_MARK}`,
 ];
 
 describe("compose createCommand injection", () => {
 	// The check itself: it sees an injection that fires, and a shell that did
 	// not finish cannot pass as safe.
 	itWithShell("runsSafely detects a payload that runs", () => {
-		expect(runsSafely(`x; touch ${MARK}`)).toBe(false);
+		expect(runsSafely(`x; touch ${Q_MARK}`)).toBe(false);
 		expect(runsSafely("x")).toBe(true);
 	});
 

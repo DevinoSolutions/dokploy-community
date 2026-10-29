@@ -6,7 +6,8 @@ import {
 	spawn,
 	spawnSync,
 } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 
 // The tests that run resolver or own-directory shell text start a real shell.
 // Node's spawn timeout only stops the direct child; on Windows the shell's own
@@ -99,81 +100,104 @@ export const boundedBash = (
 // The bound above ends what runs in `timeout`'s process group. A command that
 // starts its own session (`wrapCancelableRemoteBuild` runs the build under
 // `setsid`) leaves that group, so the deadline, or a wrapper that returns while
-// the session still has processes, would leave it running. The pid file the
-// session leader writes (`<pgid> <start time> ...`) names that group: a reaper
-// started next to `timeout` learns it while the shell runs and kills it once
-// `timeout` is gone, and the test process does the same from `afterEach` with
-// `killDetachedGroups`. A group is only taken when its leader is alive and has
-// the recorded start time, so a stale pid file never names another process.
+// the session still has processes, would leave it running.
+//
+// Such leftovers are found by a per-launch token, never by a recorded number:
+// the launch gets `DOKPLOY_TEST_LAUNCH=<random uuid>` in its environment, which
+// every process it starts inherits, setsid or not. A process is signalled only
+// when its own /proc/<pid>/environ holds that token, checked again right before
+// the signal (environ is readable only for our own uid, unless root). A pid
+// file, a reused pid or a foreign session leader carries no token, so none is
+// ever signalled. Nothing is polled while the shell runs, so a leader that
+// exits at once is not missed either: the search runs when it is needed.
 
-// Prints the group the pid file $1 names, when its leader is that process.
-const READ_GROUP =
-	'read -r g st _ < "$1" 2>/dev/null || exit 0; case "$g" in ""|*[!0-9]*|0|1) exit 0;; esac; s=$(sed "s/^.*) //" /proc/$g/stat 2>/dev/null | cut -d" " -f20); [ -n "$s" ] && [ "$s" = "$st" ] && printf %s "$g"';
+/** The variable that tags every process of a launch. */
+export const LAUNCH_TOKEN_ENV = "DOKPLOY_TEST_LAUNCH";
 
-// $5 the pid file, $6 READ_GROUP. `$$` is the pid that `exec` hands to
-// `timeout`; the reaper (outside `timeout`'s group, so the deadline does not
-// reach it) polls until that process is gone, capped at the bound plus 10 s,
-// then kills the group.
-const REAPING_WRAPPER = `n=$1; c=$2; t=$3; s=$4; p=$5; r=$6; shift 6
-(
-	g=""; i=0; m=$(( (n + 10) * 5 ))
-	while [ "$i" -lt "$m" ]; do
-		[ -n "$g" ] || g=$(sh -c "$r" sh "$p")
-		kill -0 "$$" 2>/dev/null || break
-		sleep 0.2; i=$((i + 1))
-	done
-	[ -n "$g" ] || g=$(sh -c "$r" sh "$p")
-	[ -z "$g" ] || kill -s KILL -- "-$g" 2>/dev/null
-) </dev/null >/dev/null 2>&1 &
-exec "$t" -k 5 "$n" sh -c 'ulimit -t "$0" 2>/dev/null || true; s=$1; shift; exec "$s" "$@"' "$c" "$s" "$@"`;
+/** Tokens of launches whose leftovers `killLaunched` still has to remove. */
+const liveTokens = new Set<string>();
 
-const detachedGroups = new Set<number>();
+/** A new launch token, remembered for `killLaunched`. */
+export const newLaunchToken = () => {
+	const token = randomUUID();
+	liveTokens.add(token);
+	return token;
+};
 
-/** The group a launcher's pid file names, or 0 (same checks as `READ_GROUP`). */
-const readDetachedGroup = (pidFile: string) => {
+/** Whether the process `pid` carries one of `entries` in its environment. */
+const carries = (pid: string, entries: Set<string>) => {
+	let environ: string;
 	try {
-		const [group, start] = readFileSync(pidFile, "utf8").trim().split(" ");
-		const pgid = Number(group);
-		if (!Number.isInteger(pgid) || pgid <= 1) return 0;
-		const stat = readFileSync(`/proc/${pgid}/stat`, "utf8");
-		const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-		return fields[19] === start ? pgid : 0;
+		environ = readFileSync(`/proc/${pid}/environ`, "latin1");
 	} catch {
-		return 0;
+		// Gone, or not ours: either way not signalled.
+		return false;
 	}
+	return environ.split("\0").some((entry) => entries.has(entry));
 };
 
 /**
- * Remembers the detached group named by `pidFile` once it appears (polled for
- * up to `seconds`), for `killDetachedGroups`.
+ * SIGKILLs every process that carries one of the tokens (all live ones by
+ * default), checking each one's environment right before its signal, then
+ * forgets the tokens. A few rounds, so a child forked while the first round ran
+ * goes too. On a host without /proc it does nothing.
  */
-export const trackDetachedGroup = (pidFile: string, seconds = 60) => {
-	const deadline = Date.now() + seconds * 1000;
-	const poll = setInterval(() => {
-		const pgid = readDetachedGroup(pidFile);
-		if (pgid) detachedGroups.add(pgid);
-		if (pgid || Date.now() > deadline) clearInterval(poll);
-	}, 50);
-	poll.unref();
-	return () => {
-		const pgid = readDetachedGroup(pidFile);
-		if (pgid) detachedGroups.add(pgid);
-		clearInterval(poll);
-	};
-};
-
-/** SIGKILLs every tracked detached group (for `afterEach`). */
-export const killDetachedGroups = () => {
-	for (const pgid of detachedGroups) {
+export const killLaunched = (tokens: Iterable<string> = liveTokens) => {
+	const list = [...tokens];
+	const entries = new Set(list.map((t) => `${LAUNCH_TOKEN_ENV}=${t}`));
+	for (const token of list) liveTokens.delete(token);
+	if (entries.size === 0) return;
+	for (let round = 0; round < 10; round++) {
+		let pids: string[];
 		try {
-			process.kill(-pgid, "SIGKILL");
+			pids = readdirSync("/proc").filter((name) => /^\d+$/.test(name));
 		} catch {
-			// Already gone.
+			return;
 		}
+		let found = 0;
+		for (const pid of pids) {
+			if (Number(pid) === process.pid || !carries(pid, entries)) continue;
+			found++;
+			// Checked again just before the signal: the process may have ended,
+			// and its number gone to something else, since the search.
+			if (!carries(pid, entries)) continue;
+			try {
+				process.kill(Number(pid), "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		}
+		if (found === 0) return;
 	}
-	detachedGroups.clear();
 };
-process.once("exit", killDetachedGroups);
+process.once("exit", () => killLaunched());
+
+// $1 seconds, $2 the CPU cap, $3 the absolute `timeout`, $4 the shell, $5 the
+// launch token, $6 "reap" or "". The token goes on through `env`, so this shell
+// and the reaper it forks do not carry it (it is an argument here, not part of
+// their environment). With "reap", the reaper waits until `timeout` (the pid
+// `exec` hands it, `$$`) is gone, capped at the bound plus 10 s, then kills what
+// still carries the token: the detached session, whatever the deadline or an
+// early return left. Each process is checked again right before its signal.
+const TAGGING_WRAPPER = `n=$1; c=$2; t=$3; s=$4; k=$5; r=$6; shift 6
+if [ "$r" = reap ]; then
+	(
+		v="${LAUNCH_TOKEN_ENV}=$k"; i=0; m=$(( (n + 10) * 5 ))
+		while [ "$i" -lt "$m" ] && kill -0 "$$" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+		j=0
+		while [ "$j" -lt 10 ]; do
+			# Not grep's status: it is 2 when any process ended mid-search.
+			l=$(grep -lsF -- "$v" /proc/[0-9]*/environ 2>/dev/null)
+			[ -n "$l" ] || break
+			for f in $l; do
+				p=\${f#/proc/}; p=\${p%/environ}
+				grep -qsF -- "$v" "$f" && kill -s KILL "$p" 2>/dev/null
+			done
+			j=$((j + 1))
+		done
+	) </dev/null >/dev/null 2>&1 &
+fi
+exec env "${LAUNCH_TOKEN_ENV}=$k" "$t" -k 5 "$n" sh -c 'ulimit -t "$0" 2>/dev/null || true; s=$1; shift; exec "$s" "$@"' "$c" "$s" "$@"`;
 
 /**
  * `spawn("sh", args, options)` with the same bound, for a shell the test talks
@@ -181,42 +205,43 @@ process.once("exit", killDetachedGroups);
  * child is the `timeout` process, which passes signals on to the shell and
  * exits with its status.
  *
- * `pidFile`: the shell starts a detached session (`wrapCancelableRemoteBuild`)
- * that writes this pid file. Its group is killed once `timeout` is gone (the
- * deadline, or a wrapper that returned early) and by `killDetachedGroups`. The
- * path must read the same in node and in sh (the setsid tests are Linux-only).
+ * `leftovers`, for a shell that starts a detached session
+ * (`wrapCancelableRemoteBuild`), which the bound does not reach:
+ * - "track": its processes carry a launch token, and `killLaunched` (from
+ *   `afterEach`) kills whatever of them is left;
+ * - "kill": the same, and also as soon as `timeout` is gone (the deadline, or
+ *   a wrapper that returned while its session still runs), with no help from
+ *   node. Only for Linux hosts (it searches /proc).
  */
 export const boundedShSpawn = (
 	args: string[],
 	{
 		seconds: limit,
-		pidFile,
+		leftovers,
 		...options
-	}: SpawnOptions & { seconds?: number; pidFile?: string } = {},
+	}: SpawnOptions & { seconds?: number; leftovers?: "track" | "kill" } = {},
 ): ChildProcess => {
 	const bound = limit ?? DEFAULT_SECONDS;
-	if (!pidFile) return spawn("sh", wrapperArgs("sh", bound, args), options);
+	if (!leftovers) return spawn("sh", wrapperArgs("sh", bound, args), options);
 	if (!boundedShellAvailable) {
 		throw new Error("No `timeout` in sh: refusing to run a shell unbounded.");
 	}
-	const child = spawn(
+	return spawn(
 		"sh",
 		[
 			"-c",
-			REAPING_WRAPPER,
+			TAGGING_WRAPPER,
 			"sh",
 			String(bound),
 			String(bound),
 			timeoutPath,
 			"sh",
-			pidFile,
-			READ_GROUP,
+			newLaunchToken(),
+			leftovers === "kill" ? "reap" : "",
 			...args,
 		],
 		options,
 	);
-	child.once("exit", trackDetachedGroup(pidFile, bound + 10));
-	return child;
 };
 
 /**

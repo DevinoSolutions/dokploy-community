@@ -24,7 +24,7 @@ import {
 	boundedSh,
 	boundedShellAvailable,
 	boundedShSpawn,
-	killDetachedGroups,
+	killLaunched,
 } from "./helpers/bounded-shell";
 
 /**
@@ -76,8 +76,8 @@ afterAll(() => {
 
 // The release launcher runs the script in a session of its own, which the
 // bound on the spawned shell does not reach: whatever a test leaves of it dies
-// here (and once the bounded shell is gone, see `pidFile` in bounded-shell).
-afterEach(killDetachedGroups);
+// here (and once the bounded shell is gone, see `leftovers` in bounded-shell).
+afterEach(() => killLaunched());
 
 interface ServiceConfig {
 	/** `docker compose config --hash` now. */
@@ -1490,7 +1490,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 					env: envFor(world),
 					stdio: "ignore",
 					seconds: 90,
-					pidFile,
+					leftovers: "kill",
 				},
 			);
 			const exited = new Promise<void>((resolve) => child.on("close", resolve));
@@ -1553,7 +1553,12 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore", seconds: 90, pidFile },
+					{
+						env: envFor(world),
+						stdio: "ignore",
+						seconds: 90,
+						leftovers: "kill",
+					},
 				);
 				const exited = new Promise<void>((resolve) =>
 					child.on("close", resolve),
@@ -1660,7 +1665,12 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore", seconds: 90, pidFile },
+					{
+						env: envFor(world),
+						stdio: "ignore",
+						seconds: 90,
+						leftovers: "kill",
+					},
 				);
 				const exited = new Promise<number | null>((resolve) =>
 					child.on("close", resolve),

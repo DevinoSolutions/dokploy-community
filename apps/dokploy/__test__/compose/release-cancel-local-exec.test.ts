@@ -17,6 +17,7 @@ import {
 	getRemoteBuildCancelTarget,
 	parseKillResult,
 	RELEASE_DRAIN_SECONDS,
+	shSingleQuote,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
 import { execAsyncCancelable } from "@dokploy/server/utils/process/execAsync";
@@ -24,12 +25,13 @@ import {
 	abortRemoteBuild,
 	hasRunningRemoteBuild,
 } from "@dokploy/server/utils/process/remote-build-registry";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	boundedSh,
 	boundedShellAvailable,
-	killDetachedGroups,
-	trackDetachedGroup,
+	killLaunched,
+	LAUNCH_TOKEN_ENV,
+	newLaunchToken,
 } from "./helpers/bounded-shell";
 
 /**
@@ -49,20 +51,17 @@ const hasSetsid =
 const root = mkdtempSync(join(tmpdir(), "dokploy-local-cancel-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-// The command runs in a session of its own, which no test bound reaches: a
-// test that fails before its kill leaves that group to this teardown.
-afterEach(killDetachedGroups);
-
-/** `execAsyncCancelable`, with the session it starts tracked for teardown. */
-const runTracked = (
-	command: string,
-	target: Parameters<typeof execAsyncCancelable>[1],
-) => {
-	const settle = trackDetachedGroup(target.pidFile, 30);
-	const pending = execAsyncCancelable(command, target);
-	pending.then(settle, settle);
-	return pending;
-};
+// The command runs in a session of its own, which no test bound reaches. Each
+// test tags what it starts (the token is inherited from this process's
+// environment), and whatever carries the tag afterwards is killed: a test that
+// fails before its kill leaves nothing running.
+beforeEach(() => {
+	process.env[LAUNCH_TOKEN_ENV] = newLaunchToken();
+});
+afterEach(() => {
+	delete process.env[LAUNCH_TOKEN_ENV];
+	killLaunched();
+});
 
 const targetFor = (name: string) => ({
 	pidFile: join(root, `${name}.pid`),
@@ -120,7 +119,7 @@ describe("execAsyncCancelable", () => {
 			const target = targetFor("ok");
 			const marker = join(root, "ok.ran");
 
-			const pending = runTracked(`echo hi && touch ${marker}`, target);
+			const pending = execAsyncCancelable(`echo hi && touch ${marker}`, target);
 			expect(hasRunningRemoteBuild(target.deploymentId)).toBe(true);
 			const result = await pending;
 
@@ -135,7 +134,7 @@ describe("execAsyncCancelable", () => {
 		async () => {
 			const target = targetFor("fails");
 
-			const error = await runTracked("exit 3", target).catch((e) => e);
+			const error = await execAsyncCancelable("exit 3", target).catch((e) => e);
 
 			expect(error).toMatchObject({ name: "ExecError", exitCode: 3 });
 			expect(hasRunningRemoteBuild(target.deploymentId)).toBe(false);
@@ -157,7 +156,9 @@ describe("execAsyncCancelable", () => {
 				`trap 'touch ${trapped}; exit 130' TERM\ntouch ${ready}\nsleep 30 & wait $!\n`,
 			);
 
-			const pending = runTracked(`sh ${script}`, target).catch((e) => e);
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
 			expect(await waitFor(() => existsSync(ready))).toBe(true);
 			expect(existsSync(target.pidFile)).toBe(true);
 
@@ -181,7 +182,9 @@ describe("execAsyncCancelable", () => {
 			const script = join(root, "abort.sh");
 			writeFileSync(script, "sleep 20\n");
 
-			const pending = runTracked(`sh ${script}`, target).catch((e) => e);
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
 			expect(await waitFor(() => existsSync(target.pidFile))).toBe(true);
 
 			expect(abortRemoteBuild(target.deploymentId, "cancelled by user")).toBe(
@@ -214,7 +217,7 @@ describe("the release done marker, for real", () => {
 			const seen = join(root, "stale-start.seen");
 			writeFileSync(`${target.pidFile}.done`, "");
 
-			await runTracked(
+			await execAsyncCancelable(
 				`if [ -e "$DOKPLOY_RELEASE_DONE" ]; then echo present > ${seen}; else echo absent > ${seen}; fi`,
 				target,
 			);
@@ -241,7 +244,9 @@ describe("the release done marker, for real", () => {
 			// What a SIGKILLed earlier release leaves behind.
 			writeFileSync(`${target.pidFile}.done`, "");
 
-			const pending = runTracked(`sh ${script}`, target).catch((e) => e);
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
 			expect(await waitFor(() => existsSync(ready))).toBe(true);
 			expect(existsSync(target.pidFile)).toBe(true);
 
@@ -279,14 +284,16 @@ describe("the release done marker, for real", () => {
 					`trap ': > "$DOKPLOY_RELEASE_DONE"; exit 130' TERM`,
 					`sh -c 'trap "" TERM; echo $$ > ${helperPid}; sleep 60' &`,
 					// Bounded: gives up after 10 s instead of looping on.
-					`i=0; while [ ! -s ${helperPid} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done`,
+					`i=0; while [ ! -s ${shSingleQuote(helperPid)} ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done`,
 					`touch ${ready}`,
 					"sleep 60 & wait $!",
 					"",
 				].join("\n"),
 			);
 
-			const pending = runTracked(`sh ${script}`, target).catch((e) => e);
+			const pending = execAsyncCancelable(`sh ${script}`, target).catch(
+				(e) => e,
+			);
 			expect(await waitFor(() => existsSync(ready))).toBe(true);
 			expect(existsSync(target.pidFile)).toBe(true);
 			const pid = Number(readFileSync(helperPid, "utf8").trim());
