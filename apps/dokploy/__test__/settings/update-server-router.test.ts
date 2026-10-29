@@ -266,14 +266,16 @@ describe("settings.updateServer without a target", () => {
 		]);
 		expect(attempts()[0]).toEqual({
 			fromVersion: packageInfo.version,
-			target: "latest",
+			target: "v0.30.9-community.1",
+			pinned: false,
 			image,
 			startedAt: expect.any(String),
 			status: "pulling",
 		});
 		expect(attempts()[2]).toMatchObject({
 			fromVersion: packageInfo.version,
-			target: "latest",
+			target: "v0.30.9-community.1",
+			pinned: false,
 			image,
 			status: "submitted",
 			finishedAt: expect.any(String),
@@ -300,7 +302,8 @@ describe("settings.updateServer without a target", () => {
 			"failed",
 		]);
 		expect(attempts()[1]).toMatchObject({
-			target: "latest",
+			target: "v0.30.9-community.1",
+			pinned: false,
 			image,
 			status: "failed",
 			finishedAt: expect.any(String),
@@ -442,6 +445,7 @@ describe("settings.updateServer with a pinned target", () => {
 		]);
 		expect(attempts()[1]).toMatchObject({
 			target: "v0.30.8-community.32.1",
+			pinned: true,
 			image: `${REPO}:v0.30.8-community.32.1`,
 			error: "pull failed",
 		});
@@ -452,6 +456,7 @@ describe("settings.updateServer with a pinned target", () => {
 		await Promise.all(jobs);
 		expect(attempts().at(-1)).toMatchObject({
 			target: "v0.30.8-community.32.1",
+			pinned: true,
 			status: "submitted",
 		});
 
@@ -461,6 +466,7 @@ describe("settings.updateServer with a pinned target", () => {
 		await Promise.all(jobs);
 		expect(attempts().at(-1)).toMatchObject({
 			target: DIGEST,
+			pinned: true,
 			image: `${REPO}@${DIGEST}`,
 			status: "submitted",
 		});

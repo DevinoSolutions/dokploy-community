@@ -1025,6 +1025,7 @@ export const settingsRouter = createTRPCRouter({
 			}
 
 			let image: string;
+			let resolvedTag: string | undefined;
 			if (pinned) {
 				image = dokployUpdateImage(pinned);
 			} else {
@@ -1048,6 +1049,7 @@ export const settingsRouter = createTRPCRouter({
 						message: `Already on ${packageInfo.version}, the latest release.`,
 					});
 				}
+				resolvedTag = data.latestVersion ?? undefined;
 				image = `${DOKPLOY_IMAGE_REPO}:${data.latestVersion}`;
 			}
 			await assertUpdateImageExists(image);
@@ -1055,7 +1057,11 @@ export const settingsRouter = createTRPCRouter({
 			const installing = pinned ?? undefined;
 			const attempt = {
 				fromVersion: packageInfo.version,
-				target: pinned ? (pinned.tag ?? pinned.digest) : "latest",
+				// The release the server resolved, so an unpinned update is checked too.
+				target: pinned
+					? (pinned.tag ?? pinned.digest)
+					: (resolvedTag ?? "latest"),
+				pinned: !!pinned,
 				image,
 				startedAt: new Date().toISOString(),
 			};

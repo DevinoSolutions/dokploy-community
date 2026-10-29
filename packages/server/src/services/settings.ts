@@ -305,8 +305,10 @@ export type UpdateAttemptStatus =
 export interface IUpdateAttempt {
 	/** Dokploy version that was running when the update started. */
 	fromVersion: string;
-	/** The release tag or digest asked for, or `latest`. */
+	/** The release tag or digest asked for; for an unpinned update, the latest release it resolved to. */
 	target: string;
+	/** Whether the caller named the target (a tag or the rollback) or took the latest. */
+	pinned?: boolean;
 	/** The image the update installs. */
 	image: string;
 	startedAt: string;
@@ -385,8 +387,16 @@ export const readDokployUpdateAttempt = async (
 		const raw = JSON.parse(await readFile(file, "utf8")) as Partial<
 			Record<keyof IUpdateAttempt, unknown>
 		>;
-		const { fromVersion, target, image, startedAt, finishedAt, status, error } =
-			raw ?? {};
+		const {
+			fromVersion,
+			target,
+			pinned,
+			image,
+			startedAt,
+			finishedAt,
+			status,
+			error,
+		} = raw ?? {};
 		if (
 			typeof fromVersion !== "string" ||
 			typeof target !== "string" ||
@@ -403,6 +413,7 @@ export const readDokployUpdateAttempt = async (
 			image,
 			startedAt,
 			status: status as UpdateAttemptStatus,
+			...(typeof pinned === "boolean" && { pinned }),
 			...(typeof finishedAt === "string" && { finishedAt }),
 			...(typeof error === "string" && { error }),
 		};

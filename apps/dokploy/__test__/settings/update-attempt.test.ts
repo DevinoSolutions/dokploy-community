@@ -59,6 +59,15 @@ describe("update attempt file", () => {
 		await expect(readDokployUpdateAttempt(file)).resolves.toEqual(attempt);
 	});
 
+	it.each([true, false])("keeps pinned: %s", async (pinned) => {
+		await writeDokployUpdateAttempt(
+			{ ...base, pinned, status: "pulling" },
+			file,
+		);
+
+		expect((await readDokployUpdateAttempt(file))?.pinned).toBe(pinned);
+	});
+
 	it("replaces the previous attempt and leaves no temp file", async () => {
 		await writeDokployUpdateAttempt({ ...base, status: "pulling" }, file);
 		await writeDokployUpdateAttempt({ ...base, status: "updating" }, file);
@@ -160,6 +169,15 @@ describe("update version mismatch", () => {
 		expect(
 			isUpdateVersionMismatch(submitted, "v0.30.8-community.36", NOW),
 		).toBe(true);
+	});
+
+	it("is true for an unpinned update whose resolved tag is not running", () => {
+		const unpinned = { ...submitted, pinned: false };
+
+		expect(isUpdateVersionMismatch(unpinned, "v0.30.8-community.36", NOW)).toBe(
+			true,
+		);
+		expect(isUpdateVersionMismatch(unpinned, base.target, NOW)).toBe(false);
 	});
 
 	it("is false when the server runs the target", () => {
