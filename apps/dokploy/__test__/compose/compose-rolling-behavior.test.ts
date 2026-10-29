@@ -19,11 +19,12 @@ import {
 	getReleaseCancelKey,
 	wrapCancelableRemoteBuild,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
 	boundedSh,
 	boundedShellAvailable,
 	boundedShSpawn,
+	killLaunched,
 } from "./helpers/bounded-shell";
 
 /**
@@ -72,6 +73,11 @@ const hasSetsid =
 afterAll(() => {
 	rmSync(root, { recursive: true, force: true });
 });
+
+// The release launcher runs the script in a session of its own, which the
+// bound on the spawned shell does not reach: whatever a test leaves of it dies
+// here (and once the bounded shell is gone, see `leftovers` in bounded-shell).
+afterEach(() => killLaunched());
 
 interface ServiceConfig {
 	/** `docker compose config --hash` now. */
@@ -1484,6 +1490,7 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 					env: envFor(world),
 					stdio: "ignore",
 					seconds: 90,
+					leftovers: "kill",
 				},
 			);
 			const exited = new Promise<void>((resolve) => child.on("close", resolve));
@@ -1546,7 +1553,12 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore", seconds: 90 },
+					{
+						env: envFor(world),
+						stdio: "ignore",
+						seconds: 90,
+						leftovers: "kill",
+					},
 				);
 				const exited = new Promise<void>((resolve) =>
 					child.on("close", resolve),
@@ -1653,7 +1665,12 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							wrapCancelableRemoteBuild(`sh ${script}`, target),
 						),
 					],
-					{ env: envFor(world), stdio: "ignore", seconds: 90 },
+					{
+						env: envFor(world),
+						stdio: "ignore",
+						seconds: 90,
+						leftovers: "kill",
+					},
 				);
 				const exited = new Promise<number | null>((resolve) =>
 					child.on("close", resolve),
@@ -1930,8 +1947,6 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 							existsSync(pidFile) && callsOf(world).includes("State.Health"),
 					),
 				).toBe(true);
-				const pgid = readFileSync(pidFile, "utf8").split(" ")[0];
-
 				const startedAt = Date.now();
 				const kill = boundedSh(
 					[
@@ -1950,10 +1965,8 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 				expect(elapsed).toBeLessThan(15_000);
 				expect(containersOf(world, "web")).toEqual([OLD]);
 				expect(existsSync(`${pidFile}.done`)).toBe(false);
-				boundedSh(
-					[writeScript(world, `kill -s KILL -- -${pgid} 2>/dev/null; true`)],
-					{ encoding: "utf8", timeout: 30_000 },
-				);
+				// The helper still sleeping in the session is the launch's: the
+				// afterEach (killLaunched) ends it by its token.
 			});
 		},
 	);

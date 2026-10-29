@@ -6,7 +6,8 @@ import {
 	spawn,
 	spawnSync,
 } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 
 // The tests that run resolver or own-directory shell text start a real shell.
 // Node's spawn timeout only stops the direct child; on Windows the shell's own
@@ -96,17 +97,249 @@ export const boundedBash = (
 		options,
 	);
 
+// The bound above ends what runs in `timeout`'s process group. A command that
+// starts its own session (`wrapCancelableRemoteBuild` runs the build under
+// `setsid`) leaves that group, so the deadline, or a wrapper that returns while
+// the session still has processes, would leave it running.
+//
+// Such leftovers are found by a per-launch token, never by a recorded number:
+// the launch gets `DOKPLOY_TEST_LAUNCH=<random uuid>` in its environment, which
+// every process it starts inherits, setsid or not. A process is signalled only
+// when its own /proc/<pid>/environ holds that token, checked again right before
+// the signal (environ is readable only for our own uid, unless root). A pid
+// file, a reused pid or a foreign session leader carries no token, so none is
+// ever signalled. Nothing is polled while the shell runs, so a leader that
+// exits at once is not missed either: the search runs when it is needed.
+
+/** The variable that tags every process of a launch. */
+export const LAUNCH_TOKEN_ENV = "DOKPLOY_TEST_LAUNCH";
+
+/** Tokens of launches whose leftovers `killLaunched` still has to remove. */
+const liveTokens = new Set<string>();
+
+/** A new launch token, remembered for `killLaunched`. */
+export const newLaunchToken = () => {
+	const token = randomUUID();
+	liveTokens.add(token);
+	return token;
+};
+
+/** Whether the process `pid` carries one of `entries` in its environment. */
+const carries = (pid: string, entries: Set<string>) => {
+	let environ: string;
+	try {
+		environ = readFileSync(`/proc/${pid}/environ`, "latin1");
+	} catch {
+		// Gone, or not ours: either way not signalled.
+		return false;
+	}
+	return environ.split("\0").some((entry) => entries.has(entry));
+};
+
+/**
+ * Pids of processes (not this one) that carry one of `entries`, or null on a
+ * host without /proc. A killed process is a zombie with an empty environment
+ * until it is reaped, so it no longer counts.
+ */
+const taggedPids = (entries: Set<string>) => {
+	let names: string[];
+	try {
+		names = readdirSync("/proc");
+	} catch {
+		return null;
+	}
+	return names.filter(
+		(name) =>
+			/^\d+$/.test(name) &&
+			Number(name) !== process.pid &&
+			carries(name, entries),
+	);
+};
+
+/** Blocks for `ms` (the exit hook cannot wait asynchronously). */
+const pause = (ms: number) =>
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * The loop of `killLaunched`, with the search, the signal and the pause passed
+ * in (so the rule below has a test of its own). Signals what each search finds
+ * and searches again, and calls it clean only after TWO searches in a row,
+ * `pauseMs` apart, found nothing: one empty search can miss a child that a
+ * tagged shell forked after the /proc listing and then exited before its own
+ * environment was read. Returns true once clean (or with no /proc at all), and
+ * throws when tagged processes are still found after `seconds`.
+ */
+export const sweepUntilClean = (
+	scan: () => string[] | null,
+	signal: (pid: string) => void,
+	{
+		seconds = 5,
+		pauseMs = 100,
+		wait = pause,
+	}: {
+		seconds?: number;
+		pauseMs?: number;
+		wait?: (ms: number) => unknown;
+	} = {},
+) => {
+	const deadline = Date.now() + seconds * 1000;
+	let empty = 0;
+	for (;;) {
+		const pids = scan();
+		if (pids === null) return true;
+		if (pids.length === 0) {
+			empty++;
+			if (empty >= 2) return true;
+			// The confirming search runs even when the deadline has just passed.
+			wait(pauseMs);
+			continue;
+		}
+		empty = 0;
+		if (Date.now() > deadline) {
+			throw new Error(
+				`${pids.length} process(es) of a test launch still run ${seconds} s after SIGKILL.`,
+			);
+		}
+		for (const pid of pids) signal(pid);
+		wait(50);
+	}
+};
+
+/**
+ * SIGKILLs every process that carries one of the tokens (all live ones by
+ * default), checking each one's environment right before its signal, until
+ * `sweepUntilClean` calls it clean. A token is forgotten only then. Throws
+ * (failing the test) when tagged processes are still there after `seconds`;
+ * their tokens stay, for a later call and for the exit sweep. On a host without
+ * /proc it does nothing.
+ */
+export const killLaunched = (
+	tokens: Iterable<string> = liveTokens,
+	seconds = 5,
+) => {
+	const list = [...tokens];
+	if (list.length === 0) return;
+	const entries = new Set(list.map((t) => `${LAUNCH_TOKEN_ENV}=${t}`));
+	sweepUntilClean(
+		() => taggedPids(entries),
+		(pid) => {
+			// Checked again just before the signal. What is left is accepted: the
+			// process would have to be reaped and its number reused (by a process
+			// of our own uid, unless root) in the microseconds between this check,
+			// which just matched the token, and kill(). Closing that would take a
+			// pidfd, which node does not have, or a cgroup per launch.
+			if (!carries(pid, entries)) return;
+			try {
+				process.kill(Number(pid), "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		},
+		{ seconds },
+	);
+	for (const token of list) liveTokens.delete(token);
+};
+process.once("exit", () => {
+	try {
+		killLaunched();
+	} catch {
+		// Nothing more can be done while the process exits.
+	}
+});
+
+// The reaper. $1 the launch token, $2 the pid of `timeout`, $3 the bound. It
+// waits until that process is gone, capped at the bound plus 10 s, then kills
+// what still carries the token: the detached session, whatever the deadline or
+// an early return left. Each process is checked again right before its signal,
+// on one whole NUL-separated entry of its environment (`grep -zxF`: a plain
+// `grep -F` would also take OTHER_<var>=<token> or <var>=<token>-x, and a
+// newline in another value would pass as an entry boundary without -z), and
+// the search repeats, for up to about 5 s, until two searches in a row, 0.1 s
+// apart, find nothing tagged (one can miss a child forked after the /proc
+// listing by a shell that then exited, as in `sweepUntilClean`). A grep that
+// cannot match NUL-separated entries exactly makes it kill nothing at all. The
+// race left between the check and kill() is the one described in
+// `killLaunched`.
+const REAPER = `v="${LAUNCH_TOKEN_ENV}=$1"; w=$2; n=$3
+printf 'x=1\\000' | grep -qzxF x=1 || exit 0
+printf 'N=a\\nx=1\\000' | grep -qzxF x=1 && exit 0
+i=0; m=$(( (n + 10) * 5 ))
+while [ "$i" -lt "$m" ] && kill -0 "$w" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
+j=0; e=0
+while [ "$j" -lt 50 ]; do
+	# Candidates only (not grep's status: it is 2 when any process ended
+	# mid-search); each one is matched exactly below.
+	l=$(grep -lsF -- "$v" /proc/[0-9]*/environ 2>/dev/null)
+	h=""
+	for f in $l; do
+		grep -qszxF -- "$v" "$f" || continue
+		h=1; p=\${f#/proc/}; p=\${p%/environ}
+		kill -s KILL "$p" 2>/dev/null
+	done
+	if [ -n "$h" ]; then e=0; else e=$((e + 1)); [ "$e" -ge 2 ] && break; fi
+	sleep 0.1; j=$((j + 1))
+done`;
+
+// $1 seconds, $2 the CPU cap, $3 the absolute `timeout`, $4 the shell, $5 the
+// launch token, $6 REAPER or "". This shell already carries the token (spawn
+// puts it in its environment, so a cleanup right after the spawn finds it);
+// the reaper is started without it (`env -u`), so it never matches itself.
+// `$$` is the pid that `exec` hands to `timeout`.
+const TAGGING_WRAPPER = `n=$1; c=$2; t=$3; s=$4; k=$5; r=$6; shift 6
+if [ -n "$r" ]; then
+	env -u ${LAUNCH_TOKEN_ENV} sh -c "$r" sh "$k" "$$" "$n" </dev/null >/dev/null 2>&1 &
+fi
+exec "$t" -k 5 "$n" sh -c 'ulimit -t "$0" 2>/dev/null || true; s=$1; shift; exec "$s" "$@"' "$c" "$s" "$@"`;
+
 /**
  * `spawn("sh", args, options)` with the same bound, for a shell the test talks
  * to while it runs. `seconds` is the bound (150 s by default); the returned
  * child is the `timeout` process, which passes signals on to the shell and
  * exits with its status.
+ *
+ * `leftovers`, for a shell that starts a detached session
+ * (`wrapCancelableRemoteBuild`), which the bound does not reach:
+ * - "track": its processes carry a launch token, and `killLaunched` (from
+ *   `afterEach`) kills whatever of them is left;
+ * - "kill": the same, and also as soon as `timeout` is gone (the deadline, or
+ *   a wrapper that returned while its session still runs), with no help from
+ *   node. Only for Linux hosts (it searches /proc).
  */
 export const boundedShSpawn = (
 	args: string[],
-	{ seconds: limit, ...options }: SpawnOptions & { seconds?: number } = {},
-): ChildProcess =>
-	spawn("sh", wrapperArgs("sh", limit ?? DEFAULT_SECONDS, args), options);
+	{
+		seconds: limit,
+		leftovers,
+		...options
+	}: SpawnOptions & { seconds?: number; leftovers?: "track" | "kill" } = {},
+): ChildProcess => {
+	const bound = limit ?? DEFAULT_SECONDS;
+	if (!leftovers) return spawn("sh", wrapperArgs("sh", bound, args), options);
+	if (!boundedShellAvailable) {
+		throw new Error("No `timeout` in sh: refusing to run a shell unbounded.");
+	}
+	const token = newLaunchToken();
+	return spawn(
+		"sh",
+		[
+			"-c",
+			TAGGING_WRAPPER,
+			"sh",
+			String(bound),
+			String(bound),
+			timeoutPath,
+			"sh",
+			token,
+			leftovers === "kill" ? REAPER : "",
+			...args,
+		],
+		{
+			...options,
+			// Tagged from the first process on: spawn returns once it has exec'd.
+			env: { ...(options.env ?? process.env), [LAUNCH_TOKEN_ENV]: token },
+		},
+	);
+};
 
 /**
  * A script piped to `sh -s` in a throwaway `--rm` container, bounded by the
