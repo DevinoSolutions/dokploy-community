@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -8,6 +7,7 @@ import {
 	FETCH_CLONE_TIMEOUT_SECONDS,
 } from "@dokploy/server/utils/docker/domain";
 import { describe, expect, it } from "vitest";
+import { boundedSh } from "./helpers/bounded-shell";
 
 // T-8239: a Fetch holds the compose's deploy lock while it clones, so the clone
 // is bounded on the host that runs it and the lock is given back after it has
@@ -15,21 +15,18 @@ import { describe, expect, it } from "vitest";
 
 /** Runs a command the way a host shell does; returns its status and output. */
 const run = (command: string, env?: NodeJS.ProcessEnv) => {
-	try {
-		const stdout = execFileSync("sh", ["-c", command], {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "pipe"],
-			env,
-		});
-		return { status: 0, stdout, stderr: "" };
-	} catch (error) {
-		const failed = error as { status: number; stdout: string; stderr: string };
-		return {
-			status: failed.status,
-			stdout: failed.stdout,
-			stderr: failed.stderr,
-		};
-	}
+	const result = boundedSh(["-c", command], {
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+		env,
+		timeout: 60_000,
+	});
+	// The stderr only of a failed run, as execFileSync reported it.
+	return {
+		status: result.status as number,
+		stdout: result.stdout,
+		stderr: result.status === 0 ? "" : result.stderr,
+	};
 };
 
 describe("boundFetchCommand", { timeout: 30_000 }, () => {

@@ -23,7 +23,7 @@ import {
 // it on every host, whichever tool resolves paths there (T-9558).
 
 // Each case starts a shell, which is slow on Windows and under load.
-vi.setConfig({ testTimeout: 180_000 });
+vi.setConfig({ testTimeout: 180_000, hookTimeout: 60_000 });
 
 const shellWorks = boundedShellAvailable;
 const posix = process.platform !== "win32";

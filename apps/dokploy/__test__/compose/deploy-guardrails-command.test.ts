@@ -1,4 +1,3 @@
-import { spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -18,6 +17,7 @@ import {
 } from "@dokploy/server/utils/builders/compose-guardrails";
 import { quote } from "shell-quote";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { boundedSh, boundedShSpawn } from "./helpers/bounded-shell";
 
 // Same isolation as build-compose-command.test.ts: we only care about the
 // docker invocation, not the compose-file I/O of writeDomainsToCompose.
@@ -434,7 +434,7 @@ const writeScript = (script: string) => {
 };
 
 const sh = (script: string, env: Record<string, string> = {}) =>
-	spawnSync("sh", [writeScript(script)], {
+	boundedSh([writeScript(script)], {
 		encoding: "utf8",
 		env: { ...process.env, ...env },
 		timeout: 60_000,
@@ -612,8 +612,7 @@ esac`,
 		const dirFile = join(dir, "events-dir.txt");
 		rmSync(dirFile, { force: true });
 		rmSync(pidFile, { force: true });
-		const child = spawn(
-			"sh",
+		const child = boundedShSpawn(
 			[
 				writeScript(
 					`echo $$ > ${toShellPath(parentFile)}; ${getDockerEventsStartScript("docker-compose", "my-app")}
@@ -670,8 +669,7 @@ sleep 20`,
 			"docker-compose",
 			"my-app",
 		).replace("command -v timeout", "command -v no-such-timeout");
-		const child = spawn(
-			"sh",
+		const child = boundedShSpawn(
 			[
 				writeScript(
 					`echo $$ > ${toShellPath(parentFile)}; ${script}

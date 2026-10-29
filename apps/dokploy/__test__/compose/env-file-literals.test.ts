@@ -3,6 +3,11 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getCreateEnvFileCommand } from "@dokploy/server/utils/builders/compose";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+	boundedBash,
+	boundedSh,
+	boundedShellAvailable,
+} from "./helpers/bounded-shell";
 
 // Regression coverage for https://github.com/Dokploy/dokploy/issues/4694 —
 // values must survive Docker Compose's own `.env` parsing, not just the copy
@@ -16,12 +21,14 @@ afterEach(() => {
 		execFileSync("docker", ["compose", "down", "--remove-orphans"], {
 			cwd: codePath,
 			stdio: "ignore",
+			timeout: 60_000,
 		});
 	} catch {
 		// Project may not have been created (e.g. an earlier assertion failed).
 	}
 	rmSync(projectPath, { force: true, recursive: true });
-});
+	// `docker compose down` alone may take its 60 s: past vitest's 10 s default.
+}, 90_000);
 
 const cases: Record<string, string> = {
 	PASSWORD: "pa$$word",
@@ -57,7 +64,7 @@ const inputEncoding: Record<string, string> = {
 
 const hasDocker = () => {
 	try {
-		execFileSync("docker", ["info"], { stdio: "ignore" });
+		execFileSync("docker", ["info"], { stdio: "ignore", timeout: 30_000 });
 		return true;
 	} catch {
 		return false;
@@ -67,7 +74,19 @@ const hasDocker = () => {
 // `bash` on Windows is usually the WSL launcher, which reads the Windows paths
 // in the generated command as relative POSIX paths and writes mangled-name
 // files into the repo. The command targets a POSIX host, so only run it there.
-describe.skipIf(process.platform === "win32" || !hasDocker())("getCreateEnvFileCommand", () => {
+/** Like execFileSync: the output, or a throw when the command fails. */
+const succeeded = (result: ReturnType<typeof boundedSh>) => {
+	if (result.status !== 0) {
+		throw new Error(
+			`exited with ${result.status ?? result.signal}: ${result.stderr}`,
+		);
+	}
+	return result.stdout;
+};
+
+describe.skipIf(
+	process.platform === "win32" || !boundedShellAvailable || !hasDocker(),
+)("getCreateEnvFileCommand", () => {
 	it("writes special environment values that Docker Compose reads back literally", async () => {
 		mkdirSync(codePath, { recursive: true });
 
@@ -85,7 +104,9 @@ describe.skipIf(process.platform === "win32" || !hasDocker())("getCreateEnvFileC
 			environment: { project: { env: "" }, env: "" },
 		} as Parameters<typeof getCreateEnvFileCommand>[0]);
 
-		execFileSync("bash", ["-c", command]);
+		succeeded(
+			boundedBash(["-c", command], { encoding: "utf8", timeout: 60_000 }),
+		);
 
 		const composeFile = `services:\n  test:\n    image: busybox\n    environment:\n${Object.keys(
 			cases,
@@ -96,10 +117,12 @@ describe.skipIf(process.platform === "win32" || !hasDocker())("getCreateEnvFileC
 
 		const dumpScript = `for k in ${Object.keys(cases).join(" ")}; do printf '%s\\0' "$k"; eval "printf '%s\\0' \\"\\$$k\\""; done`;
 
-		const out = execFileSync(
-			"docker",
-			["compose", "run", "--rm", "-T", "test", "sh", "-c", dumpScript],
-			{ cwd: codePath, encoding: "utf8" },
+		// The docker CLI runs inside the bounded shell; the script reaches it as $0.
+		const out = succeeded(
+			boundedSh(
+				["-c", 'exec docker compose run --rm -T test sh -c "$0"', dumpScript],
+				{ cwd: codePath, encoding: "utf8", timeout: 50_000 },
+			),
 		);
 
 		const parts = out.split("\0");

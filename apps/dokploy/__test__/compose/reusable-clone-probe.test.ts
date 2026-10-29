@@ -2,22 +2,22 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
 import {
 	getCloneCompleteCommand,
 	getReusableCloneProbeCommand,
 	REUSABLE_CLONE_ANSWER,
 } from "@dokploy/server/utils/builders/compose-remote-build";
+import { afterAll, describe, expect, it } from "vitest";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 // Runs the real probe and marker commands through `sh` against real git
 // repositories. Skipped where there is no sh or git (the CI runners have both).
 const available = (command: string, args: string[]) =>
 	spawnSync(command, args, { stdio: "ignore" }).status === 0;
-const hasShellAndGit =
-	available("sh", ["-c", "true"]) && available("git", ["--version"]);
+const hasShellAndGit = boundedShellAvailable && available("git", ["--version"]);
 
 const sh = (command: string) =>
-	spawnSync("sh", ["-c", command], { encoding: "utf8" });
+	boundedSh(["-c", command], { encoding: "utf8", timeout: 60_000 });
 const git = (cwd: string, ...args: string[]) => {
 	const result = spawnSync(
 		"git",

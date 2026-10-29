@@ -19,6 +19,7 @@ import {
 	TEMPLATE_FILE_MAX_BYTES,
 	TEMPLATE_LINK_REFUSED_MESSAGE,
 } from "@/server/utils/template-file-read";
+import { boundedBash } from "./helpers/bounded-shell";
 
 // The clone loadTemplateFromGit makes is of a repository that is not trusted:
 // template.toml is read only when it is a regular file reached without a
@@ -34,10 +35,9 @@ const toShellPath = (path: string) => {
 };
 
 const run = (root: string, rel: string, maxBytes?: number) => {
-	const result = spawnSync(
-		"bash",
+	const result = boundedBash(
 		["-c", buildGuardedTemplateReadCommand(toShellPath(root), rel, maxBytes)],
-		{ encoding: "utf8" },
+		{ encoding: "utf8", timeout: 60_000 },
 	);
 	return {
 		status: result.status,

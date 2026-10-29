@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -13,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { quote } from "shell-quote";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 // A stack's environment used to be exported on the docker line of the deploy
 // script (`env -i PATH=.. HOME=.. KEY='value' docker stack deploy ..`): it was
@@ -21,7 +21,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 // and sourced by the shell that runs docker, so no value is on any command line.
 const MAX_ARG_STRLEN = 128 * 1024;
 
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
@@ -197,7 +197,9 @@ describe("stack env file content", () => {
 
 describe("getCleanEnvPrefix", () => {
 	it("is the unchanged env -i prefix without a stack env", () => {
-		expect(getCleanEnvPrefix()).toBe('env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD= ');
+		expect(getCleanEnvPrefix()).toBe(
+			'env -i PATH="$PATH" HOME="$HOME" BASH_ENV= DOCKER_API_VERSION= DOCKER_CERT_PATH= DOCKER_CONFIG= DOCKER_CONTEXT= DOCKER_HOST= DOCKER_TLS= DOCKER_TLS_VERIFY= ENV= GCONV_PATH= LD_AUDIT= LD_LIBRARY_PATH= LD_PRELOAD= ',
+		);
 	});
 
 	it("loads the staged file and puts no value on the command line", () => {
@@ -508,7 +510,7 @@ describe("stack env on the build server", () => {
 });
 
 // Runs the generated snippets in a real shell, as the deploy script does.
-const hasSh = spawnSync("sh", ["-c", "true"]).status === 0;
+const hasSh = boundedShellAvailable;
 const itWithSh = hasSh ? it : it.skip;
 const stagedIn = (directory: string) =>
 	readdirSync(directory).filter((name) => name.startsWith(".dokploy-"));
@@ -540,7 +542,7 @@ describe("stack env in a real shell", () => {
 		return { bin, out };
 	};
 	const runScript = (script: string, bin: string) =>
-		spawnSync("sh", ["-c", script], {
+		boundedSh(["-c", script], {
 			encoding: "utf8",
 			env: {
 				...process.env,

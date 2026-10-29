@@ -1,10 +1,10 @@
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getBuildComposeCommand } from "@dokploy/server/utils/builders/compose";
 import { getRollingReplaceScript } from "@dokploy/server/utils/builders/compose-rolling";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { boundedSh } from "./helpers/bounded-shell";
 
 const domain = vi.hoisted(() => ({
 	writeDomainsToCompose: vi.fn().mockResolvedValue(""),
@@ -82,7 +82,7 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 const parses = (script: string) => {
 	const path = join(scratch, `s-${Math.random()}.sh`);
 	writeFileSync(path, script);
-	const result = spawnSync("sh", ["-n", toShellPath(path)], {
+	const result = boundedSh(["-n", toShellPath(path)], {
 		encoding: "utf8",
 	});
 	return result.status === 0 ? "ok" : `${result.stderr}`;

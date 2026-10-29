@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -14,6 +13,7 @@ import { tmpdir } from "node:os";
 import { quote } from "shell-quote";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 // A single argument to `sh -c` is capped at 128 KB (MAX_ARG_STRLEN) on Linux,
 // and the deploy scripts travel as exactly one such argument (ssh2 `exec`, or
@@ -447,11 +447,11 @@ describe("build-server handoff", () => {
 });
 
 // Runs the generated snippet in a real shell, as the deploy script does.
-const hasSh = spawnSync("sh", ["-c", "true"]).status === 0;
+const hasSh = boundedShellAvailable;
 const itWithSh = hasSh ? it : it.skip;
 describe("installing the staged compose with a real shell", () => {
 	const run = (script: string) =>
-		spawnSync("sh", ["-c", script], { encoding: "utf8" });
+		boundedSh(["-c", script], { encoding: "utf8" });
 
 	itWithSh(
 		"puts the compose in place byte for byte and removes the staged file",

@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -25,6 +24,7 @@ import {
 import { quote } from "shell-quote";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
+import { boundedBash, boundedShellAvailable } from "./helpers/bounded-shell";
 
 vi.mock("@dokploy/server/utils/docker/domain", () => ({
 	writeDomainsToCompose: vi.fn().mockResolvedValue(""),
@@ -351,7 +351,10 @@ describe("getTagAndPushCommand when an image vanished after the build", () => {
 		expect(command).toContain("did not produce image");
 	});
 
-	const bash = spawnSync("bash", ["-c", "true"]).status === 0;
+	const bash =
+		boundedShellAvailable &&
+		boundedBash(["-c", "true"], { encoding: "utf8", timeout: 30_000 })
+			.status === 0;
 
 	// Runs the real script against a fake `docker`: inspect fails until the
 	// compose build has run, so the script has to rebuild to get through.
@@ -382,9 +385,10 @@ describe("getTagAndPushCommand when an image vanished after the build", () => {
 				? (service) => getComposeBuildServiceCommand(compose, dir, service)
 				: undefined,
 		});
-		const result = spawnSync("bash", ["-c", script], {
+		const result = boundedBash(["-c", script], {
 			env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
 			encoding: "utf8",
+			timeout: 60_000,
 		});
 		const calls = existsSync(join(state, "calls"))
 			? readFileSync(join(state, "calls"), "utf8")

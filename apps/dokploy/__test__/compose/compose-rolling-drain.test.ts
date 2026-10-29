@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +11,7 @@ import {
 } from "@dokploy/server/utils/builders/compose-rolling";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse, stringify } from "yaml";
+import { boundedSh } from "./helpers/bounded-shell";
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
@@ -53,7 +53,10 @@ afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const hasSh = (() => {
 	try {
-		const result = spawnSync("sh", ["-c", "echo ok"], { encoding: "utf8" });
+		const result = boundedSh(["-c", "echo ok"], {
+			encoding: "utf8",
+			timeout: 30_000,
+		});
 		return result.status === 0 && result.stdout.trim() === "ok";
 	} catch {
 		return false;
@@ -64,7 +67,7 @@ const hasSh = (() => {
 const parses = (script: string) => {
 	const path = join(scratch, `s-${Math.random()}.sh`);
 	writeFileSync(path, script);
-	const result = spawnSync("sh", ["-n", toShellPath(path)], {
+	const result = boundedSh(["-n", toShellPath(path)], {
 		encoding: "utf8",
 	});
 	return result.status === 0 ? "ok" : `${result.stderr}`;
@@ -160,7 +163,7 @@ describe.skipIf(!hasSh)("the wrapped test, run by a real shell", () => {
 			Array.isArray(test) ? test : ["CMD-SHELL", test],
 		) as [string, string];
 		const command = wrapped[1].replaceAll(MARKER, toShellPath(markerFile));
-		const result = spawnSync("sh", ["-c", command], { encoding: "utf8" });
+		const result = boundedSh(["-c", command], { encoding: "utf8" });
 		return { status: result.status, ran: existsSync(sentinel) };
 	};
 	const touch = `touch ${toShellPath(sentinel)}`;
@@ -203,7 +206,7 @@ describe.skipIf(!hasSh)("the wrapped test, run by a real shell", () => {
 			MARKER,
 			toShellPath(join(scratch, "no-such-dir", "marker")),
 		);
-		expect(spawnSync("sh", ["-c", command]).status).toBe(0);
+		expect(boundedSh(["-c", command], { encoding: "utf8" }).status).toBe(0);
 	});
 });
 

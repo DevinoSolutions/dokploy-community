@@ -1,9 +1,4 @@
 import {
-	getBuildComposeCommand,
-	getRestoreAfterFailedBuildCommand,
-} from "@dokploy/server/utils/builders/compose";
-import { spawnSync } from "node:child_process";
-import {
 	existsSync,
 	mkdtempSync,
 	readFileSync,
@@ -12,8 +7,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+	getBuildComposeCommand,
+	getRestoreAfterFailedBuildCommand,
+} from "@dokploy/server/utils/builders/compose";
 import { quote } from "shell-quote";
 import { describe, expect, it, vi } from "vitest";
+import { boundedBash, boundedShellAvailable } from "./helpers/bounded-shell";
 
 /**
  * A compose with a build server promises its serving host never builds. The
@@ -185,11 +185,13 @@ describe("compose rollback on a unit with a build server", () => {
 			expect(up).not.toMatch(/ --build\b/);
 		}
 		for (const up of upInvocations(script)) expect(up).toContain("--no-build");
-		expect(restore).toContain("never builds images (build server devino-third)");
+		expect(restore).toContain(
+			"never builds images (build server devino-third)",
+		);
 	});
 
 	it("quotes a build server name so it cannot break out of the echo", async () => {
-		const evil = "x\"; touch /tmp/pwned; echo \"$(id) `id`";
+		const evil = 'x"; touch /tmp/pwned; echo "$(id) `id`';
 		const script = await getBuildComposeCommand(
 			{
 				...base,
@@ -221,7 +223,9 @@ describe("compose rollback on a unit with a build server", () => {
 		const ups = upInvocations(restore);
 		expect(ups.length).toBe(2);
 		for (const up of ups) expect(up).toContain("--no-build");
-		expect(restore).toContain("never builds images (build server devino-third)");
+		expect(restore).toContain(
+			"never builds images (build server devino-third)",
+		);
 	});
 
 	it("restores a compose without a build server (a cancel before its release step) with its own up, and no override file", async () => {
@@ -319,11 +323,12 @@ describe("compose rollback on a unit without a build server", () => {
  * Runs the generated restore tail under a real shell with a stub `docker`, so
  * the assertion is about what executes rather than about the text of the script.
  */
-// On Windows a bare `bash` is usually WSL, which cannot see the stub: prefer Git Bash.
-const GIT_BASH = "C:\\Program Files\\Git\\bin\\bash.exe";
-const BASH =
-	process.platform === "win32" && existsSync(GIT_BASH) ? GIT_BASH : "bash";
-const hasBash = spawnSync(BASH, ["-c", "true"]).status === 0;
+// Run through the bounded sh, whose `bash` is Git Bash on Windows (a bare
+// `bash` from node is usually WSL, which cannot see the stub).
+const hasBash =
+	boundedShellAvailable &&
+	boundedBash(["-c", "true"], { encoding: "utf8", timeout: 30_000 }).status ===
+		0;
 
 describe.skipIf(!hasBash)(
 	"restore script executed under bash with a stub docker",
@@ -348,7 +353,7 @@ describe.skipIf(!hasBash)(
 				writeFileSync(join(dir, "docker"), stub, { mode: 0o755 });
 				const tail = restoreTail(restore);
 				// Script goes over stdin: Windows argv quoting mangles the embedded quotes.
-				const result = spawnSync(BASH, ["-s"], {
+				const result = boundedBash(["-s"], {
 					input: `RESTORE_FILES_OK=1; OVERRIDE_RESTORED=${opts.override}; ${tail}\n`,
 					env: {
 						...process.env,
@@ -356,6 +361,7 @@ describe.skipIf(!hasBash)(
 						HOME: posixDir,
 					},
 					encoding: "utf8",
+					timeout: 60_000,
 				});
 				const logFile = join(dir, "calls.log");
 				const calls = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";

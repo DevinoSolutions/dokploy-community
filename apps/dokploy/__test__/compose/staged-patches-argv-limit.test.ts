@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -11,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 // A single argument to `sh -c` is capped at 128 KB (MAX_ARG_STRLEN) on Linux
 // and the deploy scripts travel as exactly one such argument, so patch
@@ -19,7 +19,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 const MAX_ARG_STRLEN = 128 * 1024;
 
 // Spawning a real shell is slow when the whole suite runs in parallel.
-vi.setConfig({ testTimeout: 30_000 });
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 60_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),
@@ -289,10 +289,10 @@ describe("generateApplyPatchesCommand", () => {
 });
 
 // Runs the generated script in a real shell, as the deploy does.
-const hasSh = spawnSync("sh", ["-c", "true"]).status === 0;
+const hasSh = boundedShellAvailable;
 const itWithSh = hasSh ? it : it.skip;
 const run = (script: string) =>
-	spawnSync("sh", ["-c", `set -e\n${script}`], { encoding: "utf8" });
+	boundedSh(["-c", `set -e\n${script}`], { encoding: "utf8" });
 const stagedIn = (directory: string) =>
 	readdirSync(directory).filter((name) => name.startsWith(".dokploy-"));
 

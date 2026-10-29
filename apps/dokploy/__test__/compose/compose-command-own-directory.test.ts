@@ -14,7 +14,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 // "this host".
 
 // Each real-shell case starts a few shells, which is slow on Windows.
-vi.setConfig({ testTimeout: 120_000 });
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 
 const mocks = vi.hoisted(() => ({
 	execAsyncRemote: vi.fn(),

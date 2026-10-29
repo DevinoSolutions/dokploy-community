@@ -1,8 +1,8 @@
-import { execSync } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { createCommand } from "@dokploy/server/utils/builders/compose";
 import { parse, quote } from "shell-quote";
 import { describe, expect, it } from "vitest";
+import { boundedSh, boundedShellAvailable } from "./helpers/bounded-shell";
 
 const MARK = `/tmp/dokploy_compose_pwned_${process.pid}`;
 
@@ -18,13 +18,14 @@ const base = {
 // sink; run `: ${command}` (docker -> no-op) and assert no injection fires.
 const runsSafely = (command: string) => {
 	if (existsSync(MARK)) rmSync(MARK);
-	try {
-		execSync(`: ${command}`, { shell: "/bin/sh", stdio: "ignore" });
-	} catch {}
+	boundedSh(["-c", `: ${command}`], { encoding: "utf8", stdio: "ignore" });
 	const fired = existsSync(MARK);
 	if (existsSync(MARK)) rmSync(MARK);
 	return !fired;
 };
+
+// The payloads run in a real (bounded) shell: skipped where there is no `timeout`.
+const itWithShell = boundedShellAvailable ? it : it.skip;
 
 const PAYLOADS = [
 	`$(touch ${MARK})`,
@@ -34,7 +35,7 @@ const PAYLOADS = [
 ];
 
 describe("compose createCommand injection", () => {
-	it("escapes composePath (docker-compose)", () => {
+	itWithShell("escapes composePath (docker-compose)", () => {
 		for (const p of PAYLOADS) {
 			const cmd = createCommand({
 				...base,
@@ -45,7 +46,7 @@ describe("compose createCommand injection", () => {
 		}
 	});
 
-	it("escapes composePath (stack deploy)", () => {
+	itWithShell("escapes composePath (stack deploy)", () => {
 		for (const p of PAYLOADS) {
 			const cmd = createCommand({
 				...base,
@@ -57,7 +58,7 @@ describe("compose createCommand injection", () => {
 		}
 	});
 
-	it("escapes appName", () => {
+	itWithShell("escapes appName", () => {
 		for (const p of PAYLOADS) {
 			const cmd = createCommand({
 				...base,
