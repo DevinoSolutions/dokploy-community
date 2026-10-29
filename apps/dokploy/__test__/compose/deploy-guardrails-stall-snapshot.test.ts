@@ -14,6 +14,8 @@ import { getBuildComposeCommand } from "@dokploy/server/utils/builders/compose";
 import {
 	getDockerEventsStartScript,
 	getStallSnapshotStartScript,
+	STALL_SNAPSHOT_COMMAND_TIMEOUT_SECONDS,
+	STALL_SNAPSHOT_POLL_INTERVAL_SECONDS,
 } from "@dokploy/server/utils/builders/compose-guardrails";
 import { quote } from "shell-quote";
 import {
@@ -31,6 +33,7 @@ import {
 	boundedShSpawn,
 	killLaunched,
 	LAUNCH_TOKEN_ENV,
+	launchedPids,
 	newLaunchToken,
 } from "./helpers/bounded-shell";
 
@@ -200,20 +203,50 @@ describe("stall snapshot script generation", () => {
 		expect(swarm).toContain(`docker stack ps ${quote(["app; rm -rf /"])} `);
 	});
 
-	it("puts the helper subshells it forks down with SIGKILL, which a fresh fork cannot swallow", () => {
-		// A subshell forked by the watcher starts with the watcher's TERM trap, and a
-		// TERM that lands before the fork has run is caught and lost (see the
-		// shared-CPU test below), so these are never sent a plain `kill`.
+	it("never signals a helper: the only signals stop the state command, after checking it is still that process", () => {
+		// A helper's pid may already be reaped and reused, so helpers end by
+		// themselves (done marker, stop file, deadline) and are waited for.
 		const script = getStallSnapshotStartScript(
 			"docker-compose",
 			"my-app",
 			stall,
 		);
-		expect(script).not.toMatch(/kill "\$DOKPLOY_STALL_(KILLER|GRACE)_PID"/);
-		expect(script).toContain('kill -KILL "$DOKPLOY_STALL_GRACE_PID"');
-		expect(
-			script.split('kill -KILL "$DOKPLOY_STALL_KILLER_PID"').length - 1,
-		).toBe(2);
+		// Every `kill` in the script: liveness checks (`kill -0`, which sends
+		// nothing), the shell asking its watcher to stop, and the one that stops
+		// the state command.
+		const code = script
+			.split("\n")
+			.filter((line) => !line.trim().startsWith("#"))
+			.join("\n");
+		const kills = (code.match(/\bkill\b[^;\n|&)]*/g) ?? []).map((k) =>
+			k.trim(),
+		);
+		expect(kills.length).toBeGreaterThan(5);
+		const signals = kills.filter((k) => !k.startsWith("kill -0 "));
+		expect(signals).toEqual([
+			'kill "$DOKPLOY_STALL_WD_PID" 2>/dev/null',
+			'kill -"$1" "$DOKPLOY_STALL_CMD_PID" 2>/dev/null',
+		]);
+		// That kill only runs once the command is known to still be running: same
+		// start time, this watcher as its parent, not a zombie.
+		expect(script).toMatch(
+			/dokploy_stall_signal_cmd\(\) \{\s*dokploy_stall_cmd_running \|\| return 1;\s*kill -"\$1" "\$DOKPLOY_STALL_CMD_PID"/,
+		);
+		expect(script).toContain(
+			'[ "$DOKPLOY_STALL_P_START" = "$DOKPLOY_STALL_CMD_START" ] && [ "$DOKPLOY_STALL_P_PPID" = "$DOKPLOY_STALL_WATCHER" ] && [ "$DOKPLOY_STALL_P_STATE" != "Z" ]',
+		);
+		// The killer looks for its done marker on every step, which the watcher
+		// writes once it has waited for the command, and the watcher waits for it.
+		expect(script).toMatch(
+			/while \[ ! -e "\$DOKPLOY_STALL_DONE" \] && [^\n]*do sleep "\$DOKPLOY_STALL_STEP";/,
+		);
+		expect(script).toMatch(
+			/: > "\$DOKPLOY_STALL_DIR\/cmd-done-\$DOKPLOY_STALL_N" 2>\/dev\/null;\s*wait "\$DOKPLOY_STALL_KILLER_PID" 2>\/dev\/null;/,
+		);
+		// And on the way out it waits for everything it started.
+		expect(script).toMatch(
+			/dokploy_stall_finish\(\) \{[^}]*while :; do wait; \[ "\$\?" -gt 128 \] \|\| break; done;/,
+		);
 	});
 });
 
@@ -244,9 +277,11 @@ const writeScript = (script: string) => {
 // A timed-out waitForSnapshots exits with this status and a message on stderr; sh()
 // throws that message so the test fails with it instead of a later, vaguer assertion.
 const WAIT_TIMEOUT_STATUS = 97;
-const sh = (script: string, env: Record<string, string> = {}) => {
+// `shell` runs the script (default `sh`); a script that does not poll its own
+// output then also gets the small wrapper, which starts that shell.
+const sh = (script: string, env: Record<string, string> = {}, shell = "sh") => {
 	let result: SpawnSyncReturns<string>;
-	if (!script.includes("$STALL_TEST_OUT")) {
+	if (!script.includes("$STALL_TEST_OUT") && shell === "sh") {
 		result = boundedSh([writeScript(script)], {
 			encoding: "utf8",
 			env: { ...process.env, ...env },
@@ -255,7 +290,7 @@ const sh = (script: string, env: Record<string, string> = {}) => {
 	} else {
 		const inner = writeScript(script);
 		const outer = writeScript(
-			`sh ${inner} >"$STALL_TEST_OUT"; rc=$?; cat "$STALL_TEST_OUT"; exit $rc`,
+			`${shell} ${inner} >"$STALL_TEST_OUT"; rc=$?; cat "$STALL_TEST_OUT"; exit $rc`,
 		);
 		result = boundedSh([outer], {
 			encoding: "utf8",
@@ -286,12 +321,37 @@ const hasSh = (() => {
 	}
 })();
 
-// Linux with util-linux `taskset` that may pin this shell (a cpuset can refuse).
-const hasTaskset =
-	hasSh &&
-	process.platform === "linux" &&
-	sh("command -v taskset >/dev/null 2>&1 && taskset -pc $$ >/dev/null 2>&1")
-		.status === 0;
+// The stress test pins a shell to one CPU with util-linux `taskset` (which a
+// cpuset can refuse) and bounds its busy loops with `timeout`. Why it does not
+// run, if it does not, is printed and is in its title.
+const stressSkipReason = (() => {
+	if (!hasSh) return "no usable sh";
+	if (process.platform !== "linux") return "Linux only";
+	if (sh("command -v timeout >/dev/null 2>&1").status !== 0)
+		return "no `timeout` to bound its busy loops";
+	if (
+		sh("command -v taskset >/dev/null 2>&1 && taskset -pc $$ >/dev/null 2>&1")
+			.status !== 0
+	)
+		return "no `taskset`, or it may not pin a shell here";
+	return "";
+})();
+if (stressSkipReason) {
+	console.warn(`Skipping the shared-CPU stress test: ${stressSkipReason}.`);
+}
+
+// The shells the stop protocol runs under, besides `sh` (dash on Debian and
+// Ubuntu): bash, the login shell of most remote servers, and BusyBox ash, the
+// shell of Alpine hosts. Each one only where it exists.
+const protocolShells = [
+	"sh",
+	...(hasSh && sh("command -v bash >/dev/null 2>&1").status === 0
+		? ["bash"]
+		: []),
+	...(hasSh && sh("busybox sh -c 'exit 0' >/dev/null 2>&1").status === 0
+		? ["busybox sh"]
+		: []),
+];
 
 const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -303,17 +363,30 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 	let eventsPidFile = "";
 
 	// Every shell a test starts carries a launch token (inherited from this
-	// process's environment by `sh`, set per launch by `boundedShSpawn`), and
-	// whatever still carries one after the test is killed: the `sleep 60` of a
-	// deploy shell the test SIGKILLed, a watcher or state command a failed test
-	// left, the busy loops of the shared-CPU test. Only after the test, so it
-	// never does the cleanup a test is checking.
+	// process's environment by `sh`, set per launch by `boundedShSpawn`). After
+	// each test nothing that carries one may still run: not a watcher, nor its
+	// killer, state command or naps. That is asserted first (polled for up to
+	// 15 s: a stub state command's own `sleep 1`, or the events watchdog's nap,
+	// can end a moment after the process that started it), then whatever is
+	// left is killed, so a failing test leaves nothing behind either. Only after
+	// the test, so it never does the cleanup a test is checking.
+	let launchToken = "";
 	beforeEach(() => {
-		process.env[LAUNCH_TOKEN_ENV] = newLaunchToken();
+		launchToken = newLaunchToken();
+		process.env[LAUNCH_TOKEN_ENV] = launchToken;
 	});
-	afterEach(() => {
+	afterEach(async () => {
 		delete process.env[LAUNCH_TOKEN_ENV];
-		killLaunched();
+		try {
+			let left = launchedPids();
+			for (let i = 0; i < 150 && left && left.length > 0; i++) {
+				await sleepMs(100);
+				left = launchedPids();
+			}
+			expect(left ?? [], "processes of this test still running").toEqual([]);
+		} finally {
+			killLaunched();
+		}
 	});
 
 	const writeBin = (name: string, body: string) => {
@@ -380,6 +453,14 @@ esac`,
 	// up) only apply to stored settings, so a script test can use 1 s steps.
 	const fast = { afterSeconds: 1, everySeconds: 1, maxSnapshots: 3 };
 
+	// The state command timeout the killer applies, changed for one test (the
+	// message still names the real 20 s).
+	const withCmdTimeout = (script: string, seconds: number) => {
+		const knob = `DOKPLOY_STALL_CMD_TIMEOUT=${STALL_SNAPSHOT_COMMAND_TIMEOUT_SECONDS};`;
+		expect(script).toContain(knob);
+		return script.replace(knob, `DOKPLOY_STALL_CMD_TIMEOUT=${seconds};`);
+	};
+
 	// Waits (up to 40 s) until snapshot block `n` has been printed, instead of a fixed
 	// sleep that races a loaded runner (the watcher writes the block file and cats it a
 	// moment later). Polls the script's captured stdout, see sh().
@@ -404,18 +485,34 @@ esac`,
 	}, async () => {
 		installDocker({ upSleep: 0 });
 		rmSync(psArgsFile, { force: true });
-		// After the third block the watcher, which is capped, naps until it is told
-		// to stop. The pause gives an uncapped one (1 s interval) room for a fourth
-		// state command; checking that the watcher is still there shows the cap, not
-		// its exit, is what ended the snapshots. A slow host can only shorten what
-		// the pause proves, never fail it.
+		// The cap, observed rather than timed: a watcher that has taken all its
+		// snapshots naps for the poll interval (2 s) until it is told to stop,
+		// while one still taking them naps at most the 1 s interval. A `sleep`
+		// on the PATH that notes a 2 s nap so shows the watcher reached that idle
+		// loop, after which it never asks docker again; the test waits for that
+		// (up to 40 s) instead of a fixed pause, then checks it made exactly three
+		// state calls and is still alive, so the cap, not its exit, ended them.
+		const idleFile = join(dir, "idle-nap");
+		rmSync(idleFile, { force: true });
+		const realSleep = sh("command -v sleep").stdout.trim();
+		expect(realSleep).not.toBe("");
+		writeBin(
+			"sleep",
+			`[ "$1" = ${STALL_SNAPSHOT_POLL_INTERVAL_SECONDS} ] && echo nap >> ${toShellPath(idleFile)}\nexec ${quote([realSleep])} "$@"`,
+		);
 		const script = `${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
 ${waitForSnapshots(3)}
-sleep 3;
-if kill -0 "$DOKPLOY_STALL_WD_PID" 2>/dev/null; then echo WATCHER-IDLE; fi
+idle_until=$(( $(date +%s) + 40 )); while [ "$(date +%s)" -lt "$idle_until" ] && [ ! -s ${toShellPath(idleFile)} ]; do sleep 0.25; done;
+if [ -s ${toShellPath(idleFile)} ]; then echo WATCHER-IDLE; fi
+if kill -0 "$DOKPLOY_STALL_WD_PID" 2>/dev/null; then echo WATCHER-ALIVE; fi
 dokploy_stall_cleanup;
 echo UP-DONE`;
-		const result = sh(script, env());
+		let result: SpawnSyncReturns<string>;
+		try {
+			result = sh(script, env());
+		} finally {
+			rmSync(join(binDir, "sleep"), { force: true });
+		}
 		expect(result.status).toBe(0);
 		expect(countBlocks(result.stdout)).toBe(3);
 		for (const n of [1, 2, 3]) {
@@ -430,6 +527,7 @@ echo UP-DONE`;
 		}
 		expect(result.stdout).not.toContain("Stall snapshot 4/");
 		expect(result.stdout).toContain("WATCHER-IDLE");
+		expect(result.stdout).toContain("WATCHER-ALIVE");
 		expect(
 			readFileSync(psArgsFile, "utf8").split("----\n").filter(Boolean),
 		).toHaveLength(3);
@@ -450,15 +548,48 @@ echo UP-DONE`;
 		]);
 	});
 
-	// What made the test above flaky on a loaded host. The watcher forks a killer
-	// for each state command and puts it down as soon as the command returns. A
-	// fork starts with the watcher's TERM trap, so a TERM that lands before the
-	// fork has run is caught and lost: the killer then ran its full 20 s, and the
-	// watcher waited for it on every snapshot (3 snapshots at a 1 s interval took
-	// 44 to 64 s instead of 3 to 4). One CPU shared with busy loops makes that
-	// landing order the common case.
-	it.skipIf(!hasTaskset)(
-		"keeps its interval on a CPU it has to share with busy processes",
+	// The stop protocol, under each shell it runs under: every killer leaves on
+	// its done marker, unsignalled, and nothing the watcher started outlives it.
+	// The command timeout is raised to 600 s, so a killer that did not honour
+	// its marker would hold the watcher for ten minutes on the first snapshot
+	// and the three never come. Once the shell has seen the watcher exit, no
+	// process of the launch may be left at all: checked at once, not polled.
+	it.each(protocolShells)(
+		"each killer leaves on its done marker, and nothing outlives the watcher (%s)",
+		{ timeout: 90_000 },
+		async (shell) => {
+			installDocker({ upSleep: 0 });
+			rmSync(psArgsFile, { force: true });
+			const script = withCmdTimeout(
+				getStallSnapshotStartScript("docker-compose", "my-app", fast),
+				600,
+			);
+			const result = sh(
+				`${script}
+${waitForSnapshots(3)}
+w=$DOKPLOY_STALL_WD_PID;
+dokploy_stall_cleanup;
+gone_until=$(( $(date +%s) + 20 ));
+while [ "$(date +%s)" -lt "$gone_until" ] && kill -0 "$w" 2>/dev/null; do sleep 0.25; done;
+if kill -0 "$w" 2>/dev/null; then echo WATCHER-LEFT; else echo WATCHER-GONE; fi`,
+				env(),
+				shell,
+			);
+			expect(result.status).toBe(0);
+			expect(countBlocks(result.stdout)).toBe(3);
+			expect(result.stdout).toContain("WATCHER-GONE");
+			expect(result.stdout).not.toContain("did not return within");
+			expect(launchedPids([launchToken]) ?? []).toEqual([]);
+		},
+	);
+
+	// A stress run, apart from the checks above: the watcher pinned to one CPU it
+	// shares with three busy loops, where the old killer, stopped with a TERM
+	// right after it was forked, lost that TERM and held every snapshot for the
+	// whole 20 s command timeout (3 snapshots at a 1 s interval took 44 to 64 s
+	// instead of 3 to 4). The bound is generous, under one command timeout.
+	it.skipIf(stressSkipReason !== "")(
+		`keeps its interval on a CPU it has to share with busy processes${stressSkipReason ? ` (skipped: ${stressSkipReason})` : ""}`,
 		{ timeout: 90_000 },
 		async () => {
 			installDocker({ upSleep: 0 });
@@ -467,6 +598,7 @@ echo UP-DONE`;
 				`cpu=$(sed -n 's/^Cpus_allowed_list:[[:space:]]*\\([0-9]*\\).*/\\1/p' /proc/self/status)
 taskset -pc "$cpu" $$ >/dev/null 2>&1 || { echo NOT-PINNED; exit 0; }
 B=""; for b in 1 2 3; do timeout 60 sh -c 'while :; do :; done' </dev/null >/dev/null 2>&1 & B="$B $!"; done
+sleep 0.5; n=0; for b in $B; do kill -0 "$b" 2>/dev/null && n=$((n + 1)); done; echo "BUSY-STARTED $n";
 T0=$(date +%s);
 ${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
 ${waitForSnapshots(3)}
@@ -476,11 +608,11 @@ dokploy_stall_cleanup`,
 				env(),
 			);
 			expect(result.stdout).not.toContain("NOT-PINNED");
+			expect(result.stdout).toContain("BUSY-STARTED 3");
 			expect(result.status).toBe(0);
 			expect(countBlocks(result.stdout)).toBe(3);
 			const took = /SNAPSHOTS-TOOK (\d+)/.exec(result.stdout);
-			// About 3 s; one lost TERM alone adds the 20 s command timeout.
-			expect(Number(took?.[1])).toBeLessThanOrEqual(15);
+			expect(Number(took?.[1])).toBeLessThan(20);
 		},
 	);
 
@@ -652,9 +784,10 @@ dokploy_stall_cleanup`,
 		expect(failing.stdout + failing.stderr).not.toContain("SECRET-STDERR");
 
 		installDocker({ upSleep: 0, psHang: true });
-		const script = getStallSnapshotStartScript("docker-compose", "my-app", one)
-			.replace("-lt 20 ]", "-lt 2 ]")
-			.replace("-ge 20 ]", "-ge 2 ]");
+		const script = withCmdTimeout(
+			getStallSnapshotStartScript("docker-compose", "my-app", one),
+			2,
+		);
 		rmSync(psPidFile, { force: true });
 		const hanging = sh(
 			`${script}
@@ -774,13 +907,15 @@ exit 1`,
 						`echo $$ > ${toShellPath(parentFile)}; ${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
 echo "$DOKPLOY_STALL_DIR" > ${toShellPath(dirFile)}
 echo "$DOKPLOY_STALL_WD_PID" > ${toShellPath(wdFile)}
-sleep 60`,
+exec sleep 60`,
 					),
 				],
-				// The test SIGKILLs this shell, which leaves its `sleep 60` running
-				// with nothing to end it: tagged, the afterEach kills it. "track",
-				// not "kill": a reaper would kill the watcher as soon as the shell is
-				// gone, which is the cleanup this test checks the watcher does itself.
+				// The shell ends in `exec sleep 60`, so the SIGKILL the test sends it
+				// leaves no sleep of its own behind: whatever of the launch still runs
+				// afterwards is the watcher's, which the afterEach requires to be gone.
+				// Tagged ("track"), so a failing test leaves nothing either. Not "kill":
+				// a reaper would kill the watcher as soon as the shell is gone, which is
+				// the cleanup this test checks the watcher does itself.
 				{
 					env: { ...process.env, ...env() },
 					stdio: "ignore",
@@ -820,13 +955,14 @@ sleep 60`,
 	}, async () => {
 		installDocker({ upSleep: 0, psHang: "ignore-term" });
 		rmSync(psPidFile, { force: true });
-		const script = getStallSnapshotStartScript("docker-compose", "my-app", {
-			afterSeconds: 1,
-			everySeconds: 30,
-			maxSnapshots: 1,
-		})
-			.replace("-lt 20 ]", "-lt 2 ]")
-			.replace("-ge 20 ]", "-ge 2 ]");
+		const script = withCmdTimeout(
+			getStallSnapshotStartScript("docker-compose", "my-app", {
+				afterSeconds: 1,
+				everySeconds: 30,
+				maxSnapshots: 1,
+			}),
+			2,
+		);
 		// Timeout 2 s + grace 2 s after the command starts at ~1 s. Instead of a fixed
 		// sleep, wait for the state command to start, then poll (up to 40 s) for it to
 		// be reaped, so a loaded runner only makes the test slower, not wrong. Cleanup
@@ -1002,7 +1138,7 @@ if kill -0 "$w" 2>/dev/null; then echo WATCHER-LEFT; else echo WATCHER-GONE; fi`
 					)}
 echo "$DOKPLOY_STALL_DIR" > ${toShellPath(dirFile)}
 echo "$DOKPLOY_STALL_WD_PID" > ${toShellPath(wdFile)}
-sleep 60`,
+exec sleep 60`,
 				),
 			],
 			// Tagged for the afterEach, as in the SIGKILL test above ("track": no reaper).
@@ -1212,7 +1348,7 @@ ${getStallSnapshotStartScript("docker-compose", "my-app", fast)}
 echo "$DOKPLOY_STALL_DIR" > ${toShellPath(stallDirFile)}
 echo "$DOKPLOY_STALL_WD_PID" > ${toShellPath(stallWdFile)}
 echo "$DOKPLOY_EVENTS_DIR" > ${toShellPath(eventsDirFile)}
-sleep 60`,
+exec sleep 60`,
 				),
 			],
 			// Tagged for the afterEach, as in the SIGKILL test above ("track": no reaper).
