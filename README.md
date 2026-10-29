@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.35**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.36**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.35 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.36 \
   --with-registry-auth \
   dokploy
 ```
@@ -120,12 +120,10 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.35
+## What's new in v0.30.8-community.36
 
-- A Compose rolling replace now also rolls services with 1 to 10 replicas and host port ranges, judged on their resolved variables, so a scaled web service redeploys without a gap.
-- A compose custom command that a deploy would refuse is refused when it is saved, its path checks resolve symbolic links, and the deploy script's path check behaves the same on minimal hosts.
-- The Update dialog lists the database migrations an update applies and offers the rollback only while it still fits; new update rollback and off-canary hotfix runbooks are in the docs.
-- Saving the Traefik env, ports or dashboard waits for the result, and a Traefik update no longer fails on a stale isolated-compose network or on engines that refuse the overlay rename. better-auth 1.7.14.
+- The Logs, Terminal and container lists work again for services on the Dokploy host; since v0.30.8-community.32 they showed no containers there.
+- Security updates: qs 6.16.1, systeminformation 5.33.16+ and @hono/node-server 2.1 for the deployments service, the schedules service and the MCP endpoint.
 - No new database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
@@ -141,7 +139,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.35
+export DOKPLOY_VERSION=v0.30.8-community.36
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -154,7 +152,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.35      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.36      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -197,7 +195,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.35` is the 35th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.36` is the 36th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 

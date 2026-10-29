@@ -2,7 +2,9 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
-### Unreleased
+### New in v0.30.8-community.36
+
+Upgrade notes: no new database migrations since v0.30.8-community.35, so an image-only rollback to it keeps working; an instance on v0.30.8-community.33.2 or older also runs migration 0224, and one on v0.30.8-community.32.1 or older also runs 0220-0222 (all additive). Nothing to configure. This release includes everything in v0.30.8-community.35.
 
 **systeminformation 5.33.16+ and @hono/node-server 2.1.3+** (T-10021). Raises the minimum of systeminformation, which the OpenTelemetry host metrics inside the deployments service's Inngest client and the shadcn CLI pull in, from 5.31.7 to 5.33.16, which fixes a Windows command injection in `services()` (GHSA-3f7j-7jwc-fxfj), a symlink path traversal in Linux `networkStats()` (GHSA-4vjg-vx72-qq4g) and a prototype pollution in `networkStats()` through the interface name (GHSA-7648-jmwf-vw7j). Moves the Hono Node.js adapter of the deployments service (apps/api) and the schedules service (apps/schedules) from 1.19 to 2.1, the first line that fixes the second decoding of request paths in `serveStatic` (GHSA-rmxm-3fg6-px4f), and lifts the copies inside the MCP SDK and Prisma's dev server to the same version; the dashboard's MCP endpoint (`/api/mcp`) runs its HTTP transport through that SDK copy, so it moves to 2.1 as well. Dokploy calls neither of these functions with outside input and does not use `serveStatic`; v2 keeps the `serve()` API and needs Node.js 20 or later, and the images run Node.js 24. Upgrade impact: none to configure; both services and the MCP endpoint start and answer as before. No migration.
 
