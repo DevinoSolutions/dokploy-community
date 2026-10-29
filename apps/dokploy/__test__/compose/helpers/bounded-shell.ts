@@ -161,11 +161,57 @@ const pause = (ms: number) =>
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
+ * The loop of `killLaunched`, with the search, the signal and the pause passed
+ * in (so the rule below has a test of its own). Signals what each search finds
+ * and searches again, and calls it clean only after TWO searches in a row,
+ * `pauseMs` apart, found nothing: one empty search can miss a child that a
+ * tagged shell forked after the /proc listing and then exited before its own
+ * environment was read. Returns true once clean (or with no /proc at all), and
+ * throws when tagged processes are still found after `seconds`.
+ */
+export const sweepUntilClean = (
+	scan: () => string[] | null,
+	signal: (pid: string) => void,
+	{
+		seconds = 5,
+		pauseMs = 100,
+		wait = pause,
+	}: {
+		seconds?: number;
+		pauseMs?: number;
+		wait?: (ms: number) => unknown;
+	} = {},
+) => {
+	const deadline = Date.now() + seconds * 1000;
+	let empty = 0;
+	for (;;) {
+		const pids = scan();
+		if (pids === null) return true;
+		if (pids.length === 0) {
+			empty++;
+			if (empty >= 2) return true;
+			// The confirming search runs even when the deadline has just passed.
+			wait(pauseMs);
+			continue;
+		}
+		empty = 0;
+		if (Date.now() > deadline) {
+			throw new Error(
+				`${pids.length} process(es) of a test launch still run ${seconds} s after SIGKILL.`,
+			);
+		}
+		for (const pid of pids) signal(pid);
+		wait(50);
+	}
+};
+
+/**
  * SIGKILLs every process that carries one of the tokens (all live ones by
- * default), checking each one's environment right before its signal, and
- * searches again until none is left. A token is forgotten only then. Throws
+ * default), checking each one's environment right before its signal, until
+ * `sweepUntilClean` calls it clean. A token is forgotten only then. Throws
  * (failing the test) when tagged processes are still there after `seconds`;
- * their tokens stay, for a later call. On a host without /proc it does nothing.
+ * their tokens stay, for a later call and for the exit sweep. On a host without
+ * /proc it does nothing.
  */
 export const killLaunched = (
 	tokens: Iterable<string> = liveTokens,
@@ -174,33 +220,24 @@ export const killLaunched = (
 	const list = [...tokens];
 	if (list.length === 0) return;
 	const entries = new Set(list.map((t) => `${LAUNCH_TOKEN_ENV}=${t}`));
-	const deadline = Date.now() + seconds * 1000;
-	for (;;) {
-		const pids = taggedPids(entries);
-		if (pids === null || pids.length === 0) {
-			for (const token of list) liveTokens.delete(token);
-			return;
-		}
-		if (Date.now() > deadline) {
-			throw new Error(
-				`${pids.length} process(es) of a test launch still run ${seconds} s after SIGKILL.`,
-			);
-		}
-		for (const pid of pids) {
+	sweepUntilClean(
+		() => taggedPids(entries),
+		(pid) => {
 			// Checked again just before the signal. What is left is accepted: the
 			// process would have to be reaped and its number reused (by a process
 			// of our own uid, unless root) in the microseconds between this check,
 			// which just matched the token, and kill(). Closing that would take a
 			// pidfd, which node does not have, or a cgroup per launch.
-			if (!carries(pid, entries)) continue;
+			if (!carries(pid, entries)) return;
 			try {
 				process.kill(Number(pid), "SIGKILL");
 			} catch {
 				// Already gone.
 			}
-		}
-		pause(50);
-	}
+		},
+		{ seconds },
+	);
+	for (const token of list) liveTokens.delete(token);
 };
 process.once("exit", () => {
 	try {
@@ -217,7 +254,9 @@ process.once("exit", () => {
 // on one whole NUL-separated entry of its environment (`grep -zxF`: a plain
 // `grep -F` would also take OTHER_<var>=<token> or <var>=<token>-x, and a
 // newline in another value would pass as an entry boundary without -z), and
-// the search repeats, for up to 5 s, until nothing tagged is left. A grep that
+// the search repeats, for up to about 5 s, until two searches in a row, 0.1 s
+// apart, find nothing tagged (one can miss a child forked after the /proc
+// listing by a shell that then exited, as in `sweepUntilClean`). A grep that
 // cannot match NUL-separated entries exactly makes it kill nothing at all. The
 // race left between the check and kill() is the one described in
 // `killLaunched`.
@@ -226,8 +265,8 @@ printf 'x=1\\000' | grep -qzxF x=1 || exit 0
 printf 'N=a\\nx=1\\000' | grep -qzxF x=1 && exit 0
 i=0; m=$(( (n + 10) * 5 ))
 while [ "$i" -lt "$m" ] && kill -0 "$w" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
-j=0
-while [ "$j" -lt 25 ]; do
+j=0; e=0
+while [ "$j" -lt 50 ]; do
 	# Candidates only (not grep's status: it is 2 when any process ended
 	# mid-search); each one is matched exactly below.
 	l=$(grep -lsF -- "$v" /proc/[0-9]*/environ 2>/dev/null)
@@ -237,8 +276,8 @@ while [ "$j" -lt 25 ]; do
 		h=1; p=\${f#/proc/}; p=\${p%/environ}
 		kill -s KILL "$p" 2>/dev/null
 	done
-	[ -n "$h" ] || break
-	sleep 0.2; j=$((j + 1))
+	if [ -n "$h" ]; then e=0; else e=$((e + 1)); [ "$e" -ge 2 ] && break; fi
+	sleep 0.1; j=$((j + 1))
 done`;
 
 // $1 seconds, $2 the CPU cap, $3 the absolute `timeout`, $4 the shell, $5 the

@@ -14,6 +14,7 @@ import {
 	killLaunched,
 	LAUNCH_TOKEN_ENV,
 	makeTempDir,
+	sweepUntilClean,
 } from "./helpers/bounded-shell";
 
 /**
@@ -116,6 +117,73 @@ const waitsPastDeadline = (marker: string) =>
 // The session leader returns at once, its descendant stays behind.
 const returnsAtOnce = (marker: string) =>
 	`sleep 120 >/dev/null 2>&1 & echo $! > ${shSingleQuote(marker)}`;
+
+// The rule that decides when a launch is clean, on scripted searches (a real
+// race between a fork and the /proc listing cannot be forced reliably).
+describe("sweepUntilClean", () => {
+	const scripted = (results: string[][]) => {
+		const scans: number[] = [];
+		const signalled: string[] = [];
+		let n = 0;
+		const scan = () => {
+			scans.push(n);
+			return results[Math.min(n++, results.length - 1)] as string[];
+		};
+		return {
+			scan,
+			scans,
+			signalled,
+			signal: (pid: string) => signalled.push(pid),
+		};
+	};
+	const noWait = { wait: () => undefined };
+
+	it("one empty search followed by a non-empty one does not call it clean", () => {
+		const run = scripted([[], ["4242"], [], []]);
+		expect(sweepUntilClean(run.scan, run.signal, noWait)).toBe(true);
+		// Clean only after the last two searches, and the process found by the
+		// second one was signalled first.
+		expect(run.scans).toHaveLength(4);
+		expect(run.signalled).toEqual(["4242"]);
+	});
+
+	it("needs two empty searches in a row", () => {
+		const run = scripted([["1"], [], ["2"], [], ["3"], [], []]);
+		expect(sweepUntilClean(run.scan, run.signal, noWait)).toBe(true);
+		expect(run.scans).toHaveLength(7);
+		expect(run.signalled).toEqual(["1", "2", "3"]);
+	});
+
+	it("pauses between the two empty searches", () => {
+		const run = scripted([[], []]);
+		const waits: number[] = [];
+		sweepUntilClean(run.scan, run.signal, {
+			pauseMs: 100,
+			wait: (ms) => waits.push(ms),
+		});
+		expect(waits).toEqual([100]);
+	});
+
+	it("throws, without calling it clean, when tagged processes outlast the bound", () => {
+		const run = scripted([[], ["7"]]);
+		expect(() =>
+			sweepUntilClean(run.scan, run.signal, {
+				seconds: 0.05,
+				wait: () => undefined,
+			}),
+		).toThrow(/still run/);
+	});
+
+	it("has nothing to do on a host without /proc", () => {
+		expect(
+			sweepUntilClean(
+				() => null,
+				() => undefined,
+				noWait,
+			),
+		).toBe(true);
+	});
+});
 
 // Not on Windows: Git Bash has no setsid sessions, so there is nothing detached to clean up.
 describe.skipIf(!hasSetsid)("detached sessions under a bounded shell", () => {
