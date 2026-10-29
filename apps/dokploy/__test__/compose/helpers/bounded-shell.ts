@@ -156,6 +156,14 @@ const taggedPids = (entries: Set<string>) => {
 	);
 };
 
+/**
+ * Pids of the processes that still carry one of the tokens (all live ones by
+ * default), for a test that asserts its launch left nothing behind before
+ * `killLaunched` sweeps; null on a host without /proc.
+ */
+export const launchedPids = (tokens: Iterable<string> = liveTokens) =>
+	taggedPids(new Set([...tokens].map((t) => `${LAUNCH_TOKEN_ENV}=${t}`)));
+
 /** Blocks for `ms` (the exit hook cannot wait asynchronously). */
 const pause = (ms: number) =>
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
