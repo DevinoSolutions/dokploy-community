@@ -325,38 +325,44 @@ export const UpdateServer = ({
 				)}
 
 				{/* The check could not be completed */}
-				{hasCheckedUpdate && !isUpdateAvailable && !isPending && checkFailed && (
-					<div className="mb-8">
-						<div className="flex items-start gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-4">
-							<AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
-							<div className="text-sm text-yellow-600 dark:text-yellow-400">
-								Could not check for updates, so it is not known whether this
-								server is up to date. Try again in a moment, or install a
-								specific version below.
+				{hasCheckedUpdate &&
+					!isUpdateAvailable &&
+					!isPending &&
+					checkFailed && (
+						<div className="mb-8">
+							<div className="flex items-start gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-4">
+								<AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+								<div className="text-sm text-yellow-600 dark:text-yellow-400">
+									Could not check for updates, so it is not known whether this
+									server is up to date. Try again in a moment, or install a
+									specific version below.
+								</div>
 							</div>
 						</div>
-					</div>
-				)}
+					)}
 
 				{/* Up to date state */}
-				{hasCheckedUpdate && !isUpdateAvailable && !isPending && !checkFailed && (
-					<div className="mb-8">
-						<div className="flex flex-col items-center gap-6 mb-6">
-							<div className="rounded-full p-4 bg-emerald-400/40">
-								<Sparkles className="h-8 w-8 text-emerald-400" />
-							</div>
-							<div className="text-center space-y-2">
-								<h3 className="text-lg font-medium">
-									You are using the latest version
-								</h3>
-								<p className="text text-muted-foreground">
-									Your server is up to date with all the latest features and
-									security improvements.
-								</p>
+				{hasCheckedUpdate &&
+					!isUpdateAvailable &&
+					!isPending &&
+					!checkFailed && (
+						<div className="mb-8">
+							<div className="flex flex-col items-center gap-6 mb-6">
+								<div className="rounded-full p-4 bg-emerald-400/40">
+									<Sparkles className="h-8 w-8 text-emerald-400" />
+								</div>
+								<div className="text-center space-y-2">
+									<h3 className="text-lg font-medium">
+										You are using the latest version
+									</h3>
+									<p className="text text-muted-foreground">
+										Your server is up to date with all the latest features and
+										security improvements.
+									</p>
+								</div>
 							</div>
 						</div>
-					</div>
-				)}
+					)}
 
 				{hasCheckedUpdate && isPending && (
 					<div className="mb-8">

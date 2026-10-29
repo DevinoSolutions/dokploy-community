@@ -35,8 +35,8 @@ export const UpdateLastAttempt = ({ enabled }: { enabled: boolean }) => {
 				<AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
 				<span>
 					Last update: {route} was submitted {ago(attempt.finishedAt)}, but the
-					server is not running it. Check the Dokploy server logs (docker service
-					ps dokploy).
+					server is not running it. Check the Dokploy server logs (docker
+					service ps dokploy).
 				</span>
 			</p>
 		);

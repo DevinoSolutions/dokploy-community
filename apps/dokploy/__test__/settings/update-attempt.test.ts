@@ -64,9 +64,7 @@ describe("update attempt file", () => {
 		await writeDokployUpdateAttempt({ ...base, status: "updating" }, file);
 
 		expect((await readDokployUpdateAttempt(file))?.status).toBe("updating");
-		expect(readdirSync(dir)).toEqual([
-			"dokploy-update-last-attempt.json",
-		]);
+		expect(readdirSync(dir)).toEqual(["dokploy-update-last-attempt.json"]);
 	});
 
 	it.skipIf(process.platform === "win32")("is owner-only", async () => {
@@ -202,18 +200,18 @@ describe("update version mismatch", () => {
 		},
 	);
 
-	it.each([
-		"latest",
-		`sha256:${"ab12".repeat(16)}`,
-	])("is false for the target %s, which is not a release tag", (target) => {
-		expect(
-			isUpdateVersionMismatch(
-				{ ...submitted, target },
-				"v0.30.8-community.36",
-				NOW,
-			),
-		).toBe(false);
-	});
+	it.each(["latest", `sha256:${"ab12".repeat(16)}`])(
+		"is false for the target %s, which is not a release tag",
+		(target) => {
+			expect(
+				isUpdateVersionMismatch(
+					{ ...submitted, target },
+					"v0.30.8-community.36",
+					NOW,
+				),
+			).toBe(false);
+		},
+	);
 
 	it("is false without a usable finish time", () => {
 		expect(
@@ -305,9 +303,10 @@ describe("getUpdateData", () => {
 	it("flags the check as failed when GitHub can't be reached", async () => {
 		fetchMock.mockRejectedValue(new Error("getaddrinfo ENOTFOUND"));
 
-		await expect(getUpdateData("v0.30.8-community.36")).resolves.toMatchObject(
-			{ updateAvailable: false, checkFailed: true },
-		);
+		await expect(getUpdateData("v0.30.8-community.36")).resolves.toMatchObject({
+			updateAvailable: false,
+			checkFailed: true,
+		});
 	});
 
 	it("flags the check as failed when the running version can't be parsed", async () => {
