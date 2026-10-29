@@ -238,13 +238,49 @@ export const selectDigestsToDelete = ({
 	return { deleteDigests, deleteTags, heldBack };
 };
 
+/** Media types of a single-platform image manifest: one that has no children. */
+export const IMAGE_MANIFEST_MEDIA_TYPES: readonly string[] = [
+	"application/vnd.docker.distribution.manifest.v2+json",
+	"application/vnd.oci.image.manifest.v1+json",
+];
+
+/**
+ * Why the children of this index cannot all be protected from its body alone,
+ * or `null` when they can. Only one level is read: a child that is itself an
+ * index (or a manifest list), or whose media type is missing or unknown, may
+ * reference further manifests that nothing here would protect. Fail closed:
+ * the caller skips the repository rather than fetch deeper.
+ */
+export const getNestedIndexReason = (body: string): string | null => {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return null;
+	}
+	const manifests = (parsed as { manifests?: unknown } | null)?.manifests;
+	if (!Array.isArray(manifests)) return null;
+	for (const entry of manifests) {
+		const mediaType = (entry as { mediaType?: unknown } | null)?.mediaType;
+		if (typeof mediaType !== "string" || !mediaType) {
+			return "a child has no media type";
+		}
+		if (!IMAGE_MANIFEST_MEDIA_TYPES.includes(mediaType)) {
+			return `a child is ${mediaType}`;
+		}
+	}
+	return null;
+};
+
 /**
  * Child manifest digests of an index / manifest list; `[]` for a plain
  * manifest. `null` when the body is not a readable manifest at all (cut off,
- * empty, not JSON): what it protects is then unknown, and a caller must not
- * read that as "no children".
+ * empty, not JSON) or names a child that may have children of its own (see
+ * `getNestedIndexReason`): what it protects is then unknown, and a caller must
+ * not read that as "no children".
  */
 export const getManifestChildDigests = (body: string): string[] | null => {
+	if (getNestedIndexReason(body)) return null;
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(body);
@@ -349,9 +385,30 @@ export const REGISTRY_CURL_COMMAND = `command -v curl >/dev/null 2>&1 || { echo 
 export interface RegistryResponse {
 	/** 0 when curl could not connect at all. */
 	status: number;
+	/** Header names lowercased; a repeated header keeps its first value (see `repeatedHeaders`). */
 	headers: Record<string, string>;
+	/** Lowercased names of the headers that appeared more than once. */
+	repeatedHeaders: string[];
 	body: string;
 }
+
+/**
+ * Whether any of `names` appeared more than once in `response`. The logic that
+ * reads a header (`Link`, `Docker-Content-Digest`, `Content-Length`,
+ * `Content-Type`) never picks one of several values: a repeated one makes the
+ * response ambiguous, and an ambiguous response is treated as unresolved.
+ */
+export const hasRepeatedHeader = (
+	response: RegistryResponse,
+	names: readonly string[],
+) => names.some((name) => response.repeatedHeaders.includes(name));
+
+/** Headers whose value the retention logic relies on. */
+export const RELIED_ON_HEADERS = [
+	"docker-content-digest",
+	"content-length",
+	"content-type",
+] as const;
 
 /**
  * Reads the output of `REGISTRY_CURL_COMMAND` back into one response per
@@ -387,25 +444,29 @@ export const parseRegistryResponses = (
 		}
 		const segment = stdout.slice(cursor, match.index);
 		cursor = match.index + match[0].length;
-		let headers: Record<string, string> = {};
+		// No prototype: a header name is never mistaken for an inherited key.
+		const headers: Record<string, string> = Object.create(null);
+		const repeated = new Set<string>();
 		let body = segment;
 		if (/^HTTP\//.test(segment)) {
 			const split = /\r?\n\r?\n/.exec(segment);
 			const head = split ? segment.slice(0, split.index) : segment;
 			body = split ? segment.slice(split.index + split[0].length) : "";
-			headers = {};
 			for (const line of head.split(/\r?\n/).slice(1)) {
 				const colon = line.indexOf(":");
-				if (colon > 0) {
-					headers[line.slice(0, colon).trim().toLowerCase()] = line
-						.slice(colon + 1)
-						.trim();
+				if (colon <= 0) continue;
+				const name = line.slice(0, colon).trim().toLowerCase();
+				if (name in headers) {
+					repeated.add(name);
+					continue;
 				}
+				headers[name] = line.slice(colon + 1).trim();
 			}
 		}
 		responses.set(id, {
 			status: Number(match[2]),
 			headers,
+			repeatedHeaders: [...repeated],
 			body,
 		});
 	}

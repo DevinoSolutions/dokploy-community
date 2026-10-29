@@ -33,6 +33,9 @@ import { pruneComposeBuildRegistry } from "@dokploy/server/services/compose-regi
 
 const PASSWORD = 'S3cr3t"pa$$\\word';
 const digest = (n: number) => `sha256:${n.toString(16).padStart(64, "0")}`;
+const OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json";
+/** An index entry for a single-platform image manifest. */
+const img = (n: number) => ({ mediaType: OCI_MANIFEST, digest: digest(n) });
 const REGISTRY = "localhost:5000";
 const PREFIX = "acme";
 
@@ -81,6 +84,8 @@ interface FakeRegistry {
 	cutBodyOf?: Record<string, number>;
 	/** send `Content-Length` (of the whole body) on manifest GETs */
 	announceLength?: boolean;
+	/** manifest GET/HEAD of these tags carries a second `Docker-Content-Digest` */
+	duplicateDigestFor?: Record<string, string>;
 	requests: { method: string; url: string }[];
 }
 
@@ -169,7 +174,10 @@ const answerBlock = (registry: FakeRegistry, block: string) => {
 					status = 500;
 				} else if (repo[reference]) {
 					const whole = registry.bodies[repo[reference] as string] ?? "{}";
+					const second = registry.duplicateDigestFor?.[reference];
 					headers = `HTTP/1.1 200 OK\r\nDocker-Content-Digest: ${repo[reference]}\r\n${
+						second ? `Docker-Content-Digest: ${second}\r\n` : ""
+					}${
 						registry.announceLength && method !== "HEAD"
 							? `Content-Length: ${Buffer.byteLength(whole)}\r\n`
 							: ""
@@ -223,7 +231,14 @@ const installRegistry = (registry: FakeRegistry) => {
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const slow = { active: 0, maxActive: 0, aborted: 0 };
+const slow = {
+	active: 0,
+	maxActive: 0,
+	aborted: 0,
+	/** DELETE sessions open right now, and the most sessions of any kind open alongside one */
+	deleting: 0,
+	maxAlongsideDelete: 0,
+};
 
 /**
  * Like `installRegistry`, but every request takes `delayMs` and answers one
@@ -248,13 +263,18 @@ const installSlowRegistry = (
 			sessions.push(record);
 			let dropped = false;
 			let open = true;
+			let deleting = false;
 			const close = () => {
 				if (!open) return;
 				open = false;
 				slow.active -= 1;
+				if (deleting) slow.deleting -= 1;
 			};
 			slow.active += 1;
 			slow.maxActive = Math.max(slow.maxActive, slow.active);
+			if (slow.deleting > 0) {
+				slow.maxAlongsideDelete = Math.max(slow.maxAlongsideDelete, slow.active);
+			}
 			let reject: (error: Error) => void = () => {};
 			const aborted = new Promise<never>((_, rejectAborted) => {
 				reject = rejectAborted;
@@ -263,6 +283,11 @@ const installSlowRegistry = (
 			return {
 				write: async (data: Buffer) => {
 					record.stdin += data.toString("utf8");
+					if (!deleting && /request = "DELETE"/.test(record.stdin)) {
+						deleting = true;
+						slow.deleting += 1;
+						slow.maxAlongsideDelete = Math.max(slow.maxAlongsideDelete, slow.active);
+					}
 				},
 				end: async () => {
 					const curl = (async () => {
@@ -387,6 +412,8 @@ beforeEach(() => {
 	slow.active = 0;
 	slow.maxActive = 0;
 	slow.aborted = 0;
+	slow.deleting = 0;
+	slow.maxAlongsideDelete = 0;
 	mocks.findRegistryByIdWithCredentials.mockResolvedValue({
 		registryId: "reg-1",
 		registryType: "selfHosted",
@@ -492,7 +519,7 @@ describe("pruneComposeBuildRegistry", () => {
 		const registry = setup({
 			rows,
 			current: [tagOf("c3")],
-			bodies: { [digest(6)]: JSON.stringify({ manifests: [{ digest: digest(7) }] }) },
+			bodies: { [digest(6)]: JSON.stringify({ manifests: [img(7)] }) },
 		});
 		await run();
 		expect(registry.deleted).toEqual([`${PREFIX}/my-app-web@${digest(1)}`]);
@@ -781,6 +808,18 @@ describe("pruneComposeBuildRegistry", () => {
 				"its Link header names no next page",
 			],
 			[
+				"two Link headers naming different next pages",
+				(next: string) =>
+					`<${next}>; rel="next"\r\nLink: </v2/${PREFIX}/my-app-web/tags/list?last=${tagOf("a1")}&n=6>; rel="next"`,
+				"the response has more than one Link header",
+			],
+			[
+				"two Link headers, only one of them naming a next page",
+				(next: string) =>
+					`<${next}>; rel="next"\r\nLink: </v2/${PREFIX}/my-app-web/tags/list?n=6>; rel="first"`,
+				"the response has more than one Link header",
+			],
+			[
 				"a next page on another host",
 				(next: string) => `<https://evil.test${next}>; rel="next"`,
 				"its Link header points the next page somewhere other than this repository's tag listing on this registry",
@@ -950,6 +989,120 @@ describe("pruneComposeBuildRegistry", () => {
 		// newest) all go
 		expect(registry.deleted).toHaveLength(26);
 		expect(registry.deleted).not.toContain(`${PREFIX}/my-app-web@${digest(999)}`);
+	});
+
+	describe("a deploy that started during the prune and already finished", () => {
+		const quick = () => ({
+			deploymentId: "quick",
+			createdAt: new Date().toISOString(),
+			status: "done",
+		});
+
+		it("stops the prune before its first DELETE", async () => {
+			// it shows up after the check before the listing: done, not running,
+			// but created after the protection snapshot was read
+			const registry = setup({ rows: eight, current: [tagOf("c3")] });
+			const done = await mocks.findAllDeploymentsByComposeId();
+			mocks.findAllDeploymentsByComposeId
+				.mockResolvedValueOnce(done)
+				.mockImplementation(async () => [...done, quick()]);
+			await run();
+			expect(registry.deleted).toEqual([]);
+			expect(registry.requests.some((r) => r.method === "DELETE")).toBe(false);
+			expect(mocks.logLines.join("\n")).toContain(
+				"Build registry cleanup stopped: another deployment of this compose started.",
+			);
+		});
+
+		it("defers the prune when it is already there at the first check", async () => {
+			const registry = setup({ rows: eight, current: [tagOf("c3")] });
+			const done = await mocks.findAllDeploymentsByComposeId();
+			mocks.findAllDeploymentsByComposeId.mockImplementation(async () => [...done, quick()]);
+			await run();
+			expect(registry.requests).toEqual([]);
+			expect(mocks.logLines.join("\n")).toContain(
+				"deferred: another deployment of this compose is running or has just started",
+			);
+		});
+
+		it("a deploy that finished before the prune began does not stop it", async () => {
+			const registry = setup({ rows: eight, current: [tagOf("c3")] });
+			const done = await mocks.findAllDeploymentsByComposeId();
+			mocks.findAllDeploymentsByComposeId.mockImplementation(async () => [
+				...done,
+				{
+					deploymentId: "earlier",
+					createdAt: new Date(Date.now() - 60_000).toISOString(),
+					status: "done",
+				},
+			]);
+			await run();
+			expect(registry.deleted).toEqual([`${PREFIX}/my-app-web@${digest(1)}`]);
+		});
+	});
+
+	describe("a kept index whose children may be indexes themselves", () => {
+		// c3 / latest (digest 6) are an index of x5's image (5) and of child 7;
+		// child 7 is itself an index of digest 8, which is the old b2's. Only
+		// reading index 7 would protect 8: the repository is skipped instead.
+		for (const [what, child] of [
+			["an OCI index", { mediaType: "application/vnd.oci.image.index.v1+json", digest: digest(7) }],
+			[
+				"a Docker manifest list",
+				{
+					mediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
+					digest: digest(7),
+				},
+			],
+			["no media type", { digest: digest(7) }],
+			["an unknown media type", { mediaType: "application/x-unknown", digest: digest(7) }],
+		] as const) {
+			it(`skips the repository when a child has ${what}`, async () => {
+				const registry = setup({
+					rows: eight.map((row) => (row.id === "b2" ? { ...row, digest: 8 } : row)),
+					current: [tagOf("c3")],
+					bodies: {
+						[digest(6)]: JSON.stringify({ manifests: [img(5), child] }),
+						[digest(7)]: JSON.stringify({ manifests: [img(8)] }),
+					},
+				});
+				await run();
+				expect(registry.deleted).toEqual([]);
+				expect(registry.requests.some((r) => r.method === "DELETE")).toBe(false);
+				expect(registry.repos[`${PREFIX}/my-app-web`]?.[tagOf("b2")]).toBe(digest(8));
+				expect(mocks.logLines.join("\n")).toContain(
+					`Warning: ⚠️ Build registry cleanup skipped ${PREFIX}/my-app-web: the kept tag ${tagOf("c3")} is an index whose children may be indexes themselves`,
+				);
+			});
+		}
+	});
+
+	describe("a repeated header the logic relies on", () => {
+		it("a kept tag answering with two digests counts as unresolved", async () => {
+			const registry = setup({
+				rows: eight,
+				current: [tagOf("c3")],
+				registryOverrides: { duplicateDigestFor: { [tagOf("c3")]: digest(1) } },
+			});
+			await run();
+			expect(registry.deleted).toEqual([]);
+			expect(mocks.logLines.join("\n")).toContain(
+				`Build registry cleanup left ${PREFIX}/my-app-web for the next deploy: 1 kept tag did not resolve in time or came back cut off or ambiguous.`,
+			);
+		});
+
+		it("an old tag answering with two digests is never deleted", async () => {
+			// q9 (digest 1) is doomed and answers its HEAD with the header twice;
+			// b2 (digest 7) is doomed too and answers normally
+			const registry = setup({
+				rows: eight.map((row) => (row.id === "b2" ? { ...row, digest: 7 } : row)),
+				current: [tagOf("c3")],
+				registryOverrides: { duplicateDigestFor: { [tagOf("q9")]: digest(1) } },
+			});
+			await run();
+			expect(registry.deleted).toEqual([`${PREFIX}/my-app-web@${digest(7)}`]);
+			expect(registry.repos[`${PREFIX}/my-app-web`]?.[tagOf("q9")]).toBe(digest(1));
+		});
 	});
 
 	it("checks for a concurrent deploy before every DELETE session", async () => {
@@ -1228,6 +1381,18 @@ describe("a slow registry", () => {
 		expect(lines()).not.toContain("Warning");
 	});
 
+	it("never runs a DELETE session alongside any other session", async () => {
+		const registry = setup({ rows: series(125), current: [tagOf("t124")] });
+		installSlowRegistry(registry, { delayMs: 2 });
+		await run();
+		expect(registry.deleted).toHaveLength(50);
+		// resolving still uses three sessions at once...
+		expect(slow.maxActive).toBe(3);
+		// ...deleting only ever one: 50 deletions in three sessions, one by one
+		expect(sessions.filter((s) => /request = "DELETE"/.test(s.stdin))).toHaveLength(3);
+		expect(slow.maxAlongsideDelete).toBe(1);
+	});
+
 	it("runs at most three curl sessions at once, twenty requests each", async () => {
 		const registry = setup({ rows: series(125), current: [tagOf("t124")] });
 		installSlowRegistry(registry, { delayMs: 2 });
@@ -1250,7 +1415,7 @@ describe("a slow registry", () => {
 				bodies: {
 					[digest(6)]: JSON.stringify({
 						schemaVersion: 2,
-						manifests: [{ digest: digest(7) }, { digest: digest(8) }],
+						manifests: [img(7), img(8)],
 					}),
 				},
 			});
@@ -1261,7 +1426,7 @@ describe("a slow registry", () => {
 			expect(registry.requests.some((r) => r.method === "DELETE")).toBe(false);
 			expect(registry.repos[`${PREFIX}/my-app-web`]?.[tagOf("b2")]).toBe(digest(7));
 			expect(lines()).toContain(
-				`Build registry cleanup left ${PREFIX}/my-app-web for the next deploy: 2 kept tags did not resolve in time.`,
+				`Build registry cleanup left ${PREFIX}/my-app-web for the next deploy: 2 kept tags did not resolve in time or came back cut off or ambiguous.`,
 			);
 			expect(lines()).not.toContain("Warning");
 		};

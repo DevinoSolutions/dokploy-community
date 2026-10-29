@@ -10,16 +10,19 @@ import {
 	BUILD_REGISTRY_KEEP_DPL_TAGS,
 	buildRegistryCurlConfig,
 	getManifestChildDigests,
+	getNestedIndexReason,
 	getManifestUrl,
 	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
 	getTagsListUrl,
+	hasRepeatedHeader,
 	isBodyTruncated,
 	isValidDigest,
 	mapDeploymentTagTimes,
 	NO_CURL_MARKER,
 	REGISTRY_CURL_COMMAND,
+	RELIED_ON_HEADERS,
 	type RegistryRequest,
 	type RegistryResponse,
 	parseOverrideImages,
@@ -104,8 +107,20 @@ const MAX_TAG_PAGES = 10;
 const MAX_DELETIONS_PER_RUN = 50;
 /** Requests per curl invocation (they run one after the other). */
 const BATCH_SIZE = 20;
-/** curl invocations, each over its own SSH session, running at once. */
+/**
+ * curl invocations, each over its own SSH session, running at once while
+ * resolving. DELETE sessions always run one at a time, each right after its
+ * own concurrent-deploy check, so a deploy that starts mid-prune can race at
+ * most one session (`BATCH_SIZE` deletes).
+ */
 const MAX_CONCURRENT_BATCHES = 3;
+/**
+ * A deployment of the compose created this long before the prune began, or
+ * later, counts as started during the prune. Covers clock differences between
+ * the process that wrote the row and this one; erring early only stops a
+ * prune that could have gone on.
+ */
+const STARTED_SINCE_SLACK_MS = 5_000;
 /** Old tags resolved before the next round of deletions. */
 const WAVE_SIZE = BATCH_SIZE * MAX_CONCURRENT_BATCHES;
 /** A "running" deployment older than this is a leftover, not a concurrent deploy. */
@@ -133,6 +148,13 @@ const pruneInFlight = new Set<string>();
  */
 const resumeFrom = new Map<string, string>();
 
+/**
+ * Whether another deployment of the compose may push while this prune runs:
+ * one that is running, or, with `since`, one created at or after `since`
+ * whatever its status. A deploy that started and already finished during the
+ * prune may have pushed an unchanged service under a digest the protection
+ * snapshot did not know was in use. A row whose time cannot be read counts.
+ */
 const hasConcurrentDeployment = (
 	deployments: {
 		deploymentId: string;
@@ -140,14 +162,18 @@ const hasConcurrentDeployment = (
 		status: string | null;
 	}[],
 	currentDeploymentId?: string,
+	since?: number,
 ) => {
 	const now = Date.now();
-	return deployments.some(
-		(candidate) =>
-			candidate.deploymentId !== currentDeploymentId &&
+	return deployments.some((candidate) => {
+		if (candidate.deploymentId === currentDeploymentId) return false;
+		const created = Date.parse(candidate.createdAt);
+		if (since !== undefined && !(created < since)) return true;
+		return (
 			candidate.status === "running" &&
-			now - Date.parse(candidate.createdAt) < RUNNING_DEPLOYMENT_WINDOW_MS,
-	);
+			now - created < RUNNING_DEPLOYMENT_WINDOW_MS
+		);
+	});
 };
 
 export interface RegistryRetentionEntity extends ComposePathLike {
@@ -333,8 +359,9 @@ export const pruneComposeBuildRegistry = async ({
 		 * comes back next to whatever the other batches answered.
 		 *
 		 * `beforeBatch` runs immediately before each batch's session opens; when
-		 * it answers false no further batch starts (`halted`). `sent` holds the
-		 * ids of every request whose batch did start.
+		 * it answers false no further batch starts (`halted`). Guarded batches
+		 * run one at a time, so no other session is ever in flight past a check.
+		 * `sent` holds the ids of every request whose batch did start.
 		 */
 		const runBatches = async (
 			requests: RegistryRequest[],
@@ -371,7 +398,12 @@ export const pruneComposeBuildRegistry = async ({
 			};
 			await Promise.all(
 				Array.from(
-					{ length: Math.min(MAX_CONCURRENT_BATCHES, chunks.length) },
+					{
+						length: Math.min(
+							beforeBatch ? 1 : MAX_CONCURRENT_BATCHES,
+							chunks.length,
+						),
+					},
 					worker,
 				),
 			);
@@ -404,6 +436,11 @@ export const pruneComposeBuildRegistry = async ({
 
 		const run = async () => {
 			// 1. What the current release and the rollback snapshots reference.
+			// Everything below protects what existed when this snapshot was read.
+			// Any deployment of the compose created from then on (running or
+			// already finished) may have pushed something the snapshot does not
+			// know is in use: deletes stop as soon as one shows up.
+			const snapshotAt = Date.now() - STARTED_SINCE_SLACK_MS;
 			const overridePath = getComposeBuildOverridePath(entity);
 			const backupDir = getComposeBackupDir(entity);
 			const files = [
@@ -445,9 +482,11 @@ export const pruneComposeBuildRegistry = async ({
 			// of this compose (its tags may not be referenced by any file yet, and
 			// an unchanged service pushed now shares a digest we might delete).
 			const deployments = await findAllDeploymentsByComposeId(entity.composeId);
-			if (hasConcurrentDeployment(deployments, deployment.deploymentId)) {
+			if (
+				hasConcurrentDeployment(deployments, deployment.deploymentId, snapshotAt)
+			) {
 				log.line(
-					"Build registry cleanup deferred: another deployment of this compose is running.",
+					"Build registry cleanup deferred: another deployment of this compose is running or has just started.",
 				);
 				return;
 			}
@@ -524,7 +563,18 @@ export const pruneComposeBuildRegistry = async ({
 					tags.push(...pageTags);
 					// Fail closed from here on: a listing that may be partial cannot
 					// tell which tags are kept, so the repository is skipped whole.
-					const next = getNextTagsPageUrl(base, repo, response.headers.link);
+					const next = hasRepeatedHeader(response, ["link"])
+						? ({
+								kind: "unusable",
+								reason: "the response has more than one Link header",
+							} as const)
+						: hasRepeatedHeader(response, RELIED_ON_HEADERS)
+							? ({
+									kind: "unusable",
+									reason:
+										"the response repeats its Content-Length or Content-Type header",
+								} as const)
+							: getNextTagsPageUrl(base, repo, response.headers.link);
 					if (next.kind === "complete") return tags;
 					if (next.kind === "unusable") {
 						log.line(
@@ -593,6 +643,12 @@ export const pruneComposeBuildRegistry = async ({
 						continue;
 					}
 					failIfSystemic(response.status, "reading manifests");
+					// Two digests, lengths or types for one response: which one is
+					// true is unknown.
+					if (hasRepeatedHeader(response, RELIED_ON_HEADERS)) {
+						unanswered += 1;
+						continue;
+					}
 					const digest = response.headers["docker-content-digest"];
 					if (response.status === 404) {
 						// `latest` may simply not exist when the listing did not have it.
@@ -615,9 +671,20 @@ export const pruneComposeBuildRegistry = async ({
 					// marker and the status) or one that is not a readable manifest
 					// tells nothing about the children of an index: unknown, so the
 					// repository waits for a run that reads it whole.
-					const children = isBodyTruncated(response)
-						? null
-						: getManifestChildDigests(response.body);
+					if (isBodyTruncated(response)) {
+						unanswered += 1;
+						continue;
+					}
+					// Only one level of an index is read. A child that may be an
+					// index itself could protect manifests nothing here sees.
+					const nested = getNestedIndexReason(response.body);
+					if (nested) {
+						log.line(
+							`Warning: ⚠️ Build registry cleanup skipped ${repo}: the kept tag ${tag} is an index whose children may be indexes themselves (${nested}); nested indexes are not pruned.`,
+						);
+						return;
+					}
+					const children = getManifestChildDigests(response.body);
 					if (!children) {
 						unanswered += 1;
 						continue;
@@ -628,7 +695,7 @@ export const pruneComposeBuildRegistry = async ({
 				if (unanswered > 0) {
 					assertTime();
 					log.line(
-						`Build registry cleanup left ${repo} for the next deploy: ${plural(unanswered, "kept tag", "kept tags")} did not resolve in time.`,
+						`Build registry cleanup left ${repo} for the next deploy: ${plural(unanswered, "kept tag", "kept tags")} did not resolve in time or came back cut off or ambiguous.`,
 					);
 					return;
 				}
@@ -658,6 +725,8 @@ export const pruneComposeBuildRegistry = async ({
 						const response = heads.get(id);
 						if (!response) continue;
 						failIfSystemic(response.status, "reading manifests");
+						// No answer, or an ambiguous one: left alone, never deletable.
+						if (hasRepeatedHeader(response, RELIED_ON_HEADERS)) continue;
 						const digest = response.headers["docker-content-digest"];
 						if (
 							response.status === 200 &&
@@ -710,6 +779,7 @@ export const pruneComposeBuildRegistry = async ({
 									hasConcurrentDeployment(
 										await findAllDeploymentsByComposeId(entity.composeId),
 										deployment.deploymentId,
+										snapshotAt,
 									)
 								) {
 									deployStarted = true;

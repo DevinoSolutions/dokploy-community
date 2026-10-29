@@ -6,9 +6,11 @@ import {
 	buildRegistryCurlConfig,
 	curlConfigQuote,
 	getManifestChildDigests,
+	getNestedIndexReason,
 	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
+	hasRepeatedHeader,
 	isBodyTruncated,
 	isLoopbackHost,
 	mapDeploymentTagTimes,
@@ -19,6 +21,7 @@ import {
 	parseTagList,
 	planRepoTags,
 	REGISTRY_CURL_COMMAND,
+	RELIED_ON_HEADERS,
 	type RegistryResponse,
 	selectDigestsToDelete,
 	splitFileOutput,
@@ -34,6 +37,9 @@ import { describe, expect, it } from "vitest";
  */
 
 const digest = (n: number) => `sha256:${n.toString(16).padStart(64, "0")}`;
+const OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json";
+/** An index entry for a single-platform image manifest. */
+const img = (n: number) => ({ mediaType: OCI_MANIFEST, digest: digest(n) });
 
 describe("planRepoTags", () => {
 	const now = Date.parse("2026-10-07T12:00:00Z");
@@ -224,7 +230,7 @@ describe("getManifestChildDigests", () => {
 		expect(
 			getManifestChildDigests(
 				JSON.stringify({
-					manifests: [{ digest: digest(3) }, { digest: digest(4) }],
+					manifests: [img(3), img(4)],
 				}),
 			),
 		).toEqual([digest(3), digest(4)]);
@@ -233,11 +239,50 @@ describe("getManifestChildDigests", () => {
 		).toEqual([]);
 	});
 
+	it("refuses an index whose children may be indexes themselves", () => {
+		const index = (child: Record<string, unknown>) =>
+			JSON.stringify({ manifests: [img(3), child] });
+		for (const [child, reason] of [
+			[
+				{ mediaType: "application/vnd.oci.image.index.v1+json", digest: digest(4) },
+				"a child is application/vnd.oci.image.index.v1+json",
+			],
+			[
+				{
+					mediaType: "application/vnd.docker.distribution.manifest.list.v2+json",
+					digest: digest(4),
+				},
+				"a child is application/vnd.docker.distribution.manifest.list.v2+json",
+			],
+			[{ digest: digest(4) }, "a child has no media type"],
+			[{ mediaType: "", digest: digest(4) }, "a child has no media type"],
+			[{ mediaType: "text/plain", digest: digest(4) }, "a child is text/plain"],
+		] as const) {
+			expect(getNestedIndexReason(index(child))).toBe(reason);
+			expect(getManifestChildDigests(index(child))).toBeNull();
+		}
+		// both single-platform manifest types are leaves
+		const leaves = JSON.stringify({
+			manifests: [
+				img(3),
+				{
+					mediaType: "application/vnd.docker.distribution.manifest.v2+json",
+					digest: digest(4),
+				},
+			],
+		});
+		expect(getNestedIndexReason(leaves)).toBeNull();
+		expect(getManifestChildDigests(leaves)).toEqual([digest(3), digest(4)]);
+		// a plain manifest, or a body it cannot read, names no nested child
+		expect(getNestedIndexReason(JSON.stringify({ layers: [] }))).toBeNull();
+		expect(getNestedIndexReason("{")).toBeNull();
+	});
+
 	it("answers null, never 'no children', for a body it cannot read whole", () => {
 		const index = JSON.stringify({
 			schemaVersion: 2,
 			mediaType: "application/vnd.oci.image.index.v1+json",
-			manifests: [{ digest: digest(3) }, { digest: digest(4) }],
+			manifests: [img(3), img(4)],
 		});
 		// cut anywhere: inside the list, inside a digest, before the end
 		for (const cut of [10, index.indexOf(digest(4)) + 20, index.length - 1]) {
@@ -250,11 +295,11 @@ describe("getManifestChildDigests", () => {
 		// an entry whose digest is unreadable protects something unknown
 		expect(
 			getManifestChildDigests(
-				JSON.stringify({ manifests: [{ digest: digest(3) }, { digest: "bogus" }] }),
+				JSON.stringify({ manifests: [img(3), { mediaType: OCI_MANIFEST, digest: "bogus" }] }),
 			),
 		).toBeNull();
 		expect(
-			getManifestChildDigests(JSON.stringify({ manifests: [{ digest: digest(3) }, {}] })),
+			getManifestChildDigests(JSON.stringify({ manifests: [img(3), { mediaType: OCI_MANIFEST }] })),
 		).toBeNull();
 	});
 });
@@ -498,7 +543,7 @@ describe("curl config and command", () => {
 
 	describe("output cut off by a dropped session", () => {
 		const index = JSON.stringify({
-			manifests: [{ digest: digest(7) }, { digest: digest(8) }],
+			manifests: [img(7), img(8)],
 		});
 		// what curl prints for: GET kept-a, GET kept-b (an index), GET kept-c
 		const full = [
@@ -567,6 +612,41 @@ describe("curl config and command", () => {
 			expect([...parseRegistryResponses(repeated, [0, 1]).keys()]).toEqual([0]);
 			expect([...parseRegistryResponses(repeated).keys()]).toEqual([0]);
 			// a marker that does not start its own line is body text, not a marker
+			// (checked below)
+		});
+
+		it("records a repeated header instead of letting the last one win", () => {
+			const out = [
+				'HTTP/1.1 200 OK\r\nLink: </v2/a/tags/list?last=x>; rel="next"\r\nlink: </v2/a/tags/list?last=y>; rel="next"\r\n\r\n{"tags":[]}',
+				"@@DPL 0 200",
+				`HTTP/1.1 200 OK\r\nDocker-Content-Digest: ${digest(1)}\r\nDocker-Content-Digest: ${digest(2)}\r\nContent-Length: 2\r\nContent-Length: 3\r\nContent-Type: a\r\nContent-Type: b\r\n\r\n{}`,
+				"@@DPL 1 200",
+				`HTTP/1.1 200 OK\r\nDocker-Content-Digest: ${digest(3)}\r\nconstructor: x\r\n__proto__: y\r\n\r\n{}`,
+				"@@DPL 2 200",
+				"",
+			].join("\n");
+			const responses = parseRegistryResponses(out, [0, 1, 2]);
+			const listing = responses.get(0) as RegistryResponse;
+			const manifest = responses.get(1) as RegistryResponse;
+			const plain = responses.get(2) as RegistryResponse;
+			expect(listing.repeatedHeaders).toEqual(["link"]);
+			expect(hasRepeatedHeader(listing, ["link"])).toBe(true);
+			expect(hasRepeatedHeader(listing, RELIED_ON_HEADERS)).toBe(false);
+			expect(manifest.repeatedHeaders.sort()).toEqual([
+				"content-length",
+				"content-type",
+				"docker-content-digest",
+			]);
+			for (const name of RELIED_ON_HEADERS) {
+				expect(hasRepeatedHeader(manifest, [name])).toBe(true);
+			}
+			// names that are object keys elsewhere are plain headers here
+			expect(plain.repeatedHeaders).toEqual([]);
+			expect(plain.headers.constructor).toBe("x");
+			expect(plain.headers["docker-content-digest"]).toBe(digest(3));
+		});
+
+		it("does not read a marker inside a line as a marker", () => {
 			const inline = ['{"x":"@@DPL 0 200', '"}', "@@DPL 0 200", ""].join("\n");
 			expect(parseRegistryResponses(inline, [0]).get(0)?.body).toBe('{"x":"@@DPL 0 200\n"}');
 		});
