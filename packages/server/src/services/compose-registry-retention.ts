@@ -483,7 +483,11 @@ export const pruneComposeBuildRegistry = async ({
 			// an unchanged service pushed now shares a digest we might delete).
 			const deployments = await findAllDeploymentsByComposeId(entity.composeId);
 			if (
-				hasConcurrentDeployment(deployments, deployment.deploymentId, snapshotAt)
+				hasConcurrentDeployment(
+					deployments,
+					deployment.deploymentId,
+					snapshotAt,
+				)
 			) {
 				log.line(
 					"Build registry cleanup deferred: another deployment of this compose is running or has just started.",
