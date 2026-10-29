@@ -371,7 +371,10 @@ export const parseRegistryResponses = (
 	const responses = new Map<number, RegistryResponse>();
 	// The write-out template starts with a newline of its own, so a marker
 	// always starts a line; the newline belongs to the marker, not the body.
-	const marker = new RegExp(`\\n${RESPONSE_MARKER} (\\d+) (\\d{3})\\r?\\n`, "g");
+	const marker = new RegExp(
+		`\\n${RESPONSE_MARKER} (\\d+) (\\d{3})\\r?\\n`,
+		"g",
+	);
 	let cursor = 0;
 	let position = 0;
 	for (let match = marker.exec(stdout); match; match = marker.exec(stdout)) {
@@ -546,10 +549,7 @@ export const getNextTagsPageUrl = (
 		return { kind: "unusable", reason: "its Link header cannot be parsed" };
 	}
 	const next = links.filter((value) =>
-		(value.params.rel ?? "")
-			.toLowerCase()
-			.split(/\s+/)
-			.includes("next"),
+		(value.params.rel ?? "").toLowerCase().split(/\s+/).includes("next"),
 	);
 	if (next.length !== 1) {
 		return {

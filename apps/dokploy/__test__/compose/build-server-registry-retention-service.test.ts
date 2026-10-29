@@ -783,7 +783,7 @@ describe("pruneComposeBuildRegistry", () => {
 			[
 				"a next page on another host",
 				(next: string) => `<https://evil.test${next}>; rel="next"`,
-				"somewhere other than this repository's tag listing",
+				"its Link header points the next page somewhere other than this repository's tag listing on this registry",
 			],
 		] as const) {
 			it(`skips the repository on ${what}, deleting nothing`, async () => {
