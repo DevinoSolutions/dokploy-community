@@ -293,7 +293,7 @@ describe.skipIf(!hasSetsid)("detached sessions under a bounded shell", () => {
 		expect(entry).toBeDefined();
 		const token = (entry as string).slice(LAUNCH_TOKEN_ENV.length + 1);
 		// Processes that hold the token, but not as the launch's own entry.
-		const variants = [
+		const extras: Record<string, string>[] = [
 			{ [`OTHER_${LAUNCH_TOKEN_ENV}`]: token },
 			{ [LAUNCH_TOKEN_ENV]: `${token}-suffix` },
 			{ [LAUNCH_TOKEN_ENV]: `prefix-${token}` },
@@ -301,9 +301,15 @@ describe.skipIf(!hasSetsid)("detached sessions under a bounded shell", () => {
 			// A whole line with the exact entry, inside another value.
 			{ NOTE: `x\n${LAUNCH_TOKEN_ENV}=${token}\ny` },
 			{ NOTE: `x\n${LAUNCH_TOKEN_ENV}=${token}` },
-		].map((extra) => {
+		];
+		const variants = extras.map((extra) => {
 			const child = spawn("sleep", ["60"], {
-				env: { PATH: process.env.PATH, ...extra },
+				// Only PATH and the variant, on purpose: the app's ProcessEnv type
+				// requires NODE_ENV, which these bystanders do not need.
+				env: {
+					PATH: process.env.PATH,
+					...extra,
+				} as unknown as NodeJS.ProcessEnv,
 				stdio: "ignore",
 			});
 			bystanders.push(child);
