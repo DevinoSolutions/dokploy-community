@@ -1975,3 +1975,261 @@ describe.skipIf(!hasSh)("rolling replace executed in a real shell", () => {
 		});
 	});
 });
+
+describe.skipIf(!hasSh)(
+	"rolling replace of a service with several replicas",
+	() => {
+		const OLD_A = "zz-old-web-1";
+		const OLD_B = "zz-old-web-2";
+		const N2: Partial<RollingScriptOptions> = {
+			replicas: { web: 2 },
+			drainSeconds: 0,
+			routeSettleSeconds: 1,
+		};
+
+		/** `web` runs two old containers that honour the marker; deploy.replicas is 2. */
+		const twoOldWeb = (extra: Partial<WorldSeed> = {}): WorldSeed =>
+			changedWeb({
+				...extra,
+				containers: [
+					{
+						id: OLD_A,
+						service: "web",
+						hash: "H1",
+						image: "sha256:OLD-web",
+						healthTest: DRAIN_TEST,
+					},
+					{
+						id: OLD_B,
+						service: "web",
+						hash: "H1",
+						image: "sha256:OLD-web",
+						healthTest: DRAIN_TEST,
+					},
+					{ id: "aa-api", service: "api", hash: "A1", image: "sha256:NEW-api" },
+				],
+			});
+
+		const withReplicas = (world: World, count: number) => {
+			writeFileSync(join(world.state, "cfg", "replicas.web"), String(count));
+			return world;
+		};
+
+		const copiedTo = (world: World, id: string) => {
+			const path = join(world.state, `cp.${id}.content`);
+			return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+		};
+
+		/** Containers of the release the compose already describes (nothing to roll). */
+		const sameRelease = (containers: ContainerSeed[]): WorldSeed => ({
+			services: ["web"],
+			config: { web: { hash: "H1", newImage: "sha256:OLD-web" } },
+			imageIds: { "registry/web:1": "sha256:OLD-web" },
+			containers,
+		});
+
+		const seed = (
+			id: string,
+			minute: number,
+			health = "healthy",
+		): ContainerSeed => ({
+			id,
+			service: "web",
+			hash: "H1",
+			image: "sha256:OLD-web",
+			health,
+			created: `2026-10-15T09:0${minute}:00.000000000Z`,
+		});
+
+		it("starts two new replicas next to the two old ones, waits for both, takes both old ones out and removes them", {
+			timeout: 90_000,
+		}, () => {
+			const world = withReplicas(createWorld(twoOldWeb()), 2);
+			const result = runRoll(world, N2);
+			const log = calls(world);
+
+			expect(result.rc).toBe(0);
+			expect(result.promoted).toBe("1");
+			expect(violations(world)).toBe("");
+
+			// Four containers during the overlap: two old plus two new.
+			const scaleUp = indexOfCall(log, "--scale web=4 web");
+			expect(scaleUp).toBeGreaterThan(-1);
+			expect(result.stdout).toContain("starting 2 new replicas");
+			expect(result.stdout).toContain(
+				"waiting up to 20s for the 2 new replicas to be healthy",
+			);
+
+			// Both new replicas are judged before either old one is marked.
+			const newIds = containersOf(world, "web");
+			expect(newIds).toHaveLength(2);
+			expect(newIds.every((id) => id.startsWith("web-new-"))).toBe(true);
+			const firstCopy = indexOfCall(log, "docker cp", scaleUp);
+			expect(firstCopy).toBeGreaterThan(scaleUp);
+			for (const id of newIds) {
+				const judged = log.findIndex(
+					(line, index) =>
+						index > scaleUp &&
+						line.includes("State.Health.Status") &&
+						line.endsWith(` ${id}`),
+				);
+				expect(judged).toBeGreaterThan(scaleUp);
+				expect(judged).toBeLessThan(firstCopy);
+			}
+
+			// Both old ones got the marker, and only then were they stopped.
+			expect(copiedTo(world, OLD_A)).toBe("drain\n");
+			expect(copiedTo(world, OLD_B)).toBe("drain\n");
+			const lastCopy = log.reduce(
+				(at, line, index) => (line.startsWith("docker cp") ? index : at),
+				-1,
+			);
+			const stop = indexOfCall(log, "docker stop");
+			expect(stop).toBeGreaterThan(lastCopy);
+			expect(log[stop]).toContain(OLD_A);
+			expect(log[stop]).toContain(OLD_B);
+			// One settle for both.
+			expect(
+				result.stdout.split("waiting 1s for Traefik to drop it").length - 1,
+			).toBe(1);
+
+			// The final up keeps the two new replicas.
+			expect(
+				indexOfCall(
+					log,
+					"up -d --no-recreate --no-build --remove-orphans web api",
+				),
+			).toBeGreaterThan(stop);
+			expect(runningOf(world, "web").sort()).toEqual([...newIds].sort());
+		});
+
+		it("one new replica unhealthy: every new replica is removed, both old ones are untouched", {
+			timeout: 90_000,
+		}, () => {
+			const world = withReplicas(createWorld(twoOldWeb()), 2);
+			writeFileSync(join(world.state, "cfg", "newhealth.web.2"), "unhealthy");
+			const result = runRoll(world, N2);
+			const log = calls(world);
+
+			expect(result.rc).not.toBe(0);
+			expect(result.promoted).toBe("0");
+			expect(result.stdout).toContain("Rolling replace of web failed");
+			expect(result.stdout).toContain("reported unhealthy");
+			expect(containersOf(world, "web").sort()).toEqual([OLD_A, OLD_B]);
+			expect(runningOf(world, "web").sort()).toEqual([OLD_A, OLD_B]);
+			// Never marked, never stopped.
+			expect(log.some((line) => line.startsWith("docker cp"))).toBe(false);
+			expect(log.some((line) => line.startsWith("docker stop"))).toBe(false);
+			expect(copiedTo(world, OLD_A)).toBeUndefined();
+		});
+
+		it("a new replica that never gets healthy runs into the one shared deadline: all new removed", {
+			timeout: 90_000,
+		}, () => {
+			const world = withReplicas(createWorld(twoOldWeb()), 2);
+			writeFileSync(join(world.state, "cfg", "newhealth.web.1"), "never");
+			const started = Date.now();
+			const result = runRoll(world, { ...N2, healthTimeoutSeconds: 3 });
+			expect(result.rc).not.toBe(0);
+			expect(result.stdout).toContain("was not healthy within 3s");
+			expect(containersOf(world, "web").sort()).toEqual([OLD_A, OLD_B]);
+			expect(Date.now() - started).toBeLessThan(30_000);
+		});
+
+		it("a new replica that goes bad after the marker: both old ones are put back in rotation, all new removed", {
+			timeout: 90_000,
+		}, () => {
+			const world = withReplicas(
+				createWorld(twoOldWeb({ flags: ["flip_new_on_cp"] })),
+				2,
+			);
+			const result = runRoll(world, N2);
+			const log = calls(world);
+
+			expect(result.rc).not.toBe(0);
+			expect(result.stdout).toContain(
+				"putting the old container back in rotation",
+			);
+			// The marker was emptied in both old containers.
+			expect(copiedTo(world, OLD_A)).toBe("");
+			expect(copiedTo(world, OLD_B)).toBe("");
+			expect(log.some((line) => line.startsWith("docker stop"))).toBe(false);
+			expect(containersOf(world, "web").sort()).toEqual([OLD_A, OLD_B]);
+			expect(runningOf(world, "web").sort()).toEqual([OLD_A, OLD_B]);
+		});
+
+		it("replicas raised from 1 to 2: two new replicas next to the one old container", {
+			timeout: 90_000,
+		}, () => {
+			const world = withReplicas(createWorld(drainableWeb()), 2);
+			const result = runRoll(world, N2);
+			const log = calls(world);
+			expect(result.rc).toBe(0);
+			expect(indexOfCall(log, "--scale web=3 web")).toBeGreaterThan(-1);
+			const left = containersOf(world, "web");
+			expect(left).toHaveLength(2);
+			expect(left.every((id) => id.startsWith("web-new-"))).toBe(true);
+		});
+
+		it("reconcile with 3 containers and N=2 keeps the newest two and removes the oldest", {
+			timeout: 90_000,
+		}, () => {
+			const world = withReplicas(
+				createWorld(
+					sameRelease([
+						seed("c-oldest", 0),
+						seed("c-middle", 1),
+						seed("c-newest", 2),
+					]),
+				),
+				2,
+			);
+			const result = runRoll(world, N2);
+			expect(result.rc).toBe(0);
+			expect(result.stdout).toContain("found 3 containers for 2 replicas");
+			expect(result.stdout).toContain(
+				"unchanged (config hash and image id match)",
+			);
+			expect(containersOf(world, "web").sort()).toEqual([
+				"c-middle",
+				"c-newest",
+			]);
+			expect(calls(world)).toContain("docker stop c-oldest");
+		});
+
+		it("reconcile with N=2 keeps a healthy container over a newer unhealthy one", {
+			timeout: 90_000,
+		}, () => {
+			const world = withReplicas(
+				createWorld(
+					sameRelease([
+						seed("c-oldest", 0),
+						seed("c-middle", 1),
+						seed("c-newest", 2, "unhealthy"),
+					]),
+				),
+				2,
+			);
+			const result = runRoll(world, N2);
+			expect(result.rc).toBe(0);
+			expect(containersOf(world, "web").sort()).toEqual([
+				"c-middle",
+				"c-oldest",
+			]);
+		});
+
+		it("with N=1 two containers are still reduced to one, as before", {
+			timeout: 90_000,
+		}, () => {
+			const world = createWorld(
+				sameRelease([seed("c-oldest", 0), seed("c-newest", 2)]),
+			);
+			const result = runRoll(world, { drainSeconds: 0 });
+			expect(result.rc).toBe(0);
+			expect(result.stdout).toContain(
+				"found 2 containers (an interrupted rollout?), keeping the newest healthy one",
+			);
+			expect(containersOf(world, "web")).toEqual(["c-newest"]);
+		});
+	},
+);

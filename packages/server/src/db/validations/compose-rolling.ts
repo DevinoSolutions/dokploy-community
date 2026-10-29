@@ -12,6 +12,8 @@ export const ROLLING_DRAIN_DEFAULT_SECONDS = 5;
 export const ROLLING_DRAIN_MIN_SECONDS = 0;
 export const ROLLING_DRAIN_MAX_SECONDS = 120;
 export const ROLLING_MAX_SERVICES = 50;
+/** Most replicas (`scale` / `deploy.replicas`) a rolled service may run. */
+export const ROLLING_MAX_REPLICAS = 10;
 
 /**
  * A compose service name: the characters the Compose spec allows. Anything

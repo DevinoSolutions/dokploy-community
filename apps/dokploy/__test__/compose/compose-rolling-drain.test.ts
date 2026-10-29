@@ -559,7 +559,7 @@ describe("the drain in the generated script", () => {
 		inOrder(
 			script(),
 			[
-				'dokploy_roll_wait_healthy "$DR_NEW"',
+				"dokploy_roll_wait_healthy $DR_NEW;",
 				'dokploy_roll_take_out "$1" "$DR_OLD"',
 				"waiting 5s before the old container is stopped",
 				"dokploy_roll_remove $DR_OLD",
@@ -645,9 +645,9 @@ describe("the drain in the generated script", () => {
 			],
 			"dokploy_roll_new_still_ok() {",
 		);
-		// The unhealthy wait gives up as soon as the new replica is not healthy.
+		// The unhealthy wait gives up as soon as a new replica is not healthy.
 		expect(script()).toContain(
-			'if [ "$(dokploy_roll_new_state "$3")" != "running healthy" ]; then return 2; fi;',
+			'if dokploy_roll_new_bad_state "$3" >/dev/null; then return 2; fi;',
 		);
 	});
 

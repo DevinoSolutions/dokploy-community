@@ -15,11 +15,11 @@ See also the [home page](https://dokploy-community.devino.ca/), the [FAQ](https:
 For each selected service:
 
 1. The new image is built or pulled first. Nothing running is touched.
-2. A second replica of the service starts from the new release.
-3. Dokploy waits until the new replica is healthy, up to the health timeout.
-4. After the drain delay, the old container is stopped and removed by id.
+2. New replicas start from the new release next to the old ones: one for a single-container service, N for a service with `deploy.replicas: N`.
+3. Dokploy waits until every new replica is healthy, up to the health timeout.
+4. The old containers are taken out of rotation and, after the drain delay, stopped and removed by id.
 
-If the new replica never becomes healthy, it is removed and the old container, which was never touched, keeps serving. The deployment is marked as an error and the usual failure notification is sent. Services you did not select are deployed as before. A selected service whose configuration and image did not change is left running.
+If a new replica never becomes healthy, all new replicas are removed and the old containers, which were never touched, keep serving. The deployment is marked as an error and the usual failure notification is sent. Services you did not select are deployed as before. A selected service whose configuration and image did not change is left running.
 
 ## Turn it on
 
@@ -36,11 +36,13 @@ It applies to `docker-compose` type services without a custom command, and not t
 
 A service is refused when it:
 
-- sets `container_name`, or publishes a host port (`expose` and Traefik-only access are fine);
-- uses `network_mode` host, `service:` or `container:`, a static IP or MAC address, or a `scale` or `deploy.replicas` other than 1;
+- sets `container_name`, or publishes a fixed host port (`expose` and Traefik-only access are fine). A host port range such as `"54000-54003:3000"` is fine when it holds at least 2 x replicas ports, because old and new replicas run side by side;
+- uses `network_mode` host, `service:` or `container:`, a static IP or MAC address, or a `scale` or `deploy.replicas` that is not a whole number from 1 to 10;
 - is referenced by another service through `network_mode`, `pid`, `ipc` or `volumes_from`;
 - has no healthcheck in the compose file, or has it disabled. A healthcheck that only exists in the image is not visible to Dokploy;
 - looks like a datastore such as Postgres, MySQL, MongoDB or Redis, or has a healthcheck that cannot settle within 900 seconds.
+
+Variables such as `deploy.replicas: ${WEB_REPLICAS:-1}` are resolved first, with the variables Dokploy writes to the deploy's `.env`; the deployed compose file is not changed. When a value cannot be known (an unset `:?` variable, a vault reference that cannot be resolved, no **Create env file**), the service is judged on the file as written and the deploy log says so.
 
 Eligibility is checked when you save and again at every deploy. If a selected service stops being eligible, it is recreated the normal way with a note in the deploy log, and the deploy is not failed for that.
 
@@ -56,7 +58,7 @@ Container-to-container traffic by service name can reach both replicas during th
 
 ## Cancel and failure behavior
 
-Cancelling a rolling deploy removes the replica that was not promoted yet and leaves the old container serving. If the old container cannot be removed after the new one is healthy, the service reports a failure, the new replica keeps serving, and the next deploy reconciles the leftover. When several services are selected, services already replaced stay on the new release; there is no automatic revert of those.
+Cancelling a rolling deploy removes the replicas that were not promoted yet and leaves the old containers serving. If the old container cannot be removed after the new one is healthy, the service reports a failure, the new replica keeps serving, and the next deploy reconciles the leftover. When several services are selected, services already replaced stay on the new release; there is no automatic revert of those.
 
 ## Add a Traefik retry yourself
 
@@ -80,8 +82,9 @@ Rolling replace does not apply to Compose stacks of type `stack`. For those, put
 ## Limits
 
 - Stateful services, previews, stacks, custom commands and fresh-volumes deploys are out of scope.
-- A deploy killed with `kill -9` can leave two containers until the next deploy reconciles them.
-- Eligibility is read from the compose file before variable interpolation, `extends`, `include` and profiles. A problem that only appears after rendering makes the second replica fail to start, and the old container keeps serving.
+- A deploy killed with `kill -9` can leave extra containers until the next deploy reconciles them.
+- At most 10 replicas per rolled service, and during the overlap it runs twice that many.
+- Eligibility is read from the compose file after variable interpolation but before `extends`, `include` and profiles. A problem that only appears after those makes the new replicas fail to start, and the old containers keep serving.
 
 ## Source
 
