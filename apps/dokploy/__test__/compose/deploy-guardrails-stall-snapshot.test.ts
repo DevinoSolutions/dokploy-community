@@ -227,21 +227,27 @@ describe("stall snapshot script generation", () => {
 			'kill "$DOKPLOY_STALL_WD_PID" 2>/dev/null',
 			'kill -"$1" "$DOKPLOY_STALL_CMD_PID" 2>/dev/null',
 		]);
-		// That kill only runs once the command is known to still be running: same
-		// start time, this watcher as its parent, not a zombie.
+		// That kill only runs once the command is known to still be running: the
+		// start time recorded while this watcher was its parent, and not a zombie.
 		expect(script).toMatch(
 			/dokploy_stall_signal_cmd\(\) \{\s*dokploy_stall_cmd_running \|\| return 1;\s*kill -"\$1" "\$DOKPLOY_STALL_CMD_PID"/,
 		);
 		expect(script).toContain(
-			'[ "$DOKPLOY_STALL_P_START" = "$DOKPLOY_STALL_CMD_START" ] && [ "$DOKPLOY_STALL_P_PPID" = "$DOKPLOY_STALL_WATCHER" ] && [ "$DOKPLOY_STALL_P_STATE" != "Z" ]',
+			'[ "$DOKPLOY_STALL_P_START" = "$DOKPLOY_STALL_CMD_START" ] && [ "$DOKPLOY_STALL_P_STATE" != "Z" ]',
 		);
+		expect(script).toContain(
+			'dokploy_stall_proc "$DOKPLOY_STALL_CMD_PID" && [ "$DOKPLOY_STALL_P_PPID" = "$DOKPLOY_STALL_WATCHER" ]; then DOKPLOY_STALL_CMD_START=$DOKPLOY_STALL_P_START;',
+		);
+		// A failed redirection on the colon built-in ends a dash or BusyBox shell,
+		// and the directory can be gone when the watcher writes into it.
+		expect(script).not.toMatch(/(^|[;\s]): >/m);
 		// The killer looks for its done marker on every step, which the watcher
 		// writes once it has waited for the command, and the watcher waits for it.
 		expect(script).toMatch(
 			/while \[ ! -e "\$DOKPLOY_STALL_DONE" \] && [^\n]*do sleep "\$DOKPLOY_STALL_STEP";/,
 		);
 		expect(script).toMatch(
-			/: > "\$DOKPLOY_STALL_DIR\/cmd-done-\$DOKPLOY_STALL_N" 2>\/dev\/null;\s*wait "\$DOKPLOY_STALL_KILLER_PID" 2>\/dev\/null;/,
+			/true > "\$DOKPLOY_STALL_DIR\/cmd-done-\$DOKPLOY_STALL_N" 2>\/dev\/null;\s*wait "\$DOKPLOY_STALL_KILLER_PID" 2>\/dev\/null;/,
 		);
 		// And on the way out it waits for everything it started.
 		expect(script).toMatch(
@@ -387,7 +393,9 @@ describe.skipIf(!hasSh)("executed in a real shell", () => {
 		} finally {
 			killLaunched();
 		}
-	});
+		// Above the 15 s of polling, so the hook never times out before its sweep:
+		// a timed-out hook skips it and the next tests see these processes too.
+	}, 30_000);
 
 	const writeBin = (name: string, body: string) => {
 		const path = join(binDir, name);
@@ -1245,6 +1253,49 @@ if kill -0 "$PSPID" 2>/dev/null; then echo STILL-ALIVE; else echo REAPED; fi`,
 		expect(result.stdout).not.toContain("STILL-ALIVE");
 		expect(countBlocks(result.stdout)).toBe(0);
 	});
+
+	// The shell's cleanup removes the directory right after it signals the
+	// watcher, so the watcher's TERM handler can find it gone. Creating the stop
+	// file there with the colon built-in then ended a dash or BusyBox watcher on
+	// the spot, leaving its state command to init. Here the directory is removed
+	// first, every time. The state command ignores TERM and notes its parent
+	// every 0.2 s until the killer's SIGKILL after the grace: a dead watcher shows
+	// up as another parent for all of those 2 s.
+	it.skipIf(!existsSync("/proc/self/stat"))(
+		"keeps going when it is told to stop after its directory is gone, and still puts down its state command",
+		{ timeout: 60_000 },
+		async () => {
+			const ppidsFile = join(dir, "cmd.ppids");
+			rmSync(ppidsFile, { force: true });
+			rmSync(psPidFile, { force: true });
+			installDocker({
+				upSleep: 0,
+				psBody: `trap '' TERM; echo $$ > ${toShellPath(psPidFile)}; while :; do read -r l < /proc/$$/stat; l=\${l##*) }; set -- $l; echo "$2" >> ${toShellPath(ppidsFile)}; sleep 0.2; done`,
+			});
+			const result = sh(
+				`${getStallSnapshotStartScript("docker-compose", "my-app", {
+					afterSeconds: 1,
+					everySeconds: 30,
+					maxSnapshots: 1,
+				})}
+i=0; while [ "$i" -lt 100 ] && [ ! -s ${toShellPath(psPidFile)} ]; do sleep 0.2; i=$((i + 1)); done;
+PSPID=$(cat ${toShellPath(psPidFile)}); w=$DOKPLOY_STALL_WD_PID; echo "WATCHER $w";
+rm -rf "$DOKPLOY_STALL_DIR"; kill -TERM "$w";
+gone_until=$(( $(date +%s) + 30 ));
+while [ "$(date +%s)" -lt "$gone_until" ] && { kill -0 "$PSPID" 2>/dev/null || kill -0 "$w" 2>/dev/null; }; do sleep 0.25; done;
+if kill -0 "$PSPID" 2>/dev/null; then echo CMD-LEFT; else echo CMD-GONE; fi
+if kill -0 "$w" 2>/dev/null; then echo WATCHER-LEFT; else echo WATCHER-GONE; fi`,
+				env(),
+			);
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain("CMD-GONE");
+			expect(result.stdout).toContain("WATCHER-GONE");
+			const watcher = /WATCHER (\d+)/.exec(result.stdout)?.[1];
+			const parents = readFileSync(ppidsFile, "utf8").trim().split("\n");
+			expect(parents.length).toBeGreaterThan(0);
+			expect(new Set(parents)).toEqual(new Set([watcher]));
+		},
+	);
 
 	it("never runs snapshots back to back when the state command is slower than the interval", {
 		timeout: 60_000,
