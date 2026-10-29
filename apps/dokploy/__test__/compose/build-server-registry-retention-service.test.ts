@@ -1481,11 +1481,14 @@ describe("a slow registry", () => {
 		const registry = twoRepos(series(45));
 		const realNow = Date.now.bind(Date);
 		let clock: { mockRestore: () => void } | undefined;
-		// the budget runs out while the first round of deletions is on the wire
-		registry.deleteStatusFor = () => {
-			clock ??= vi
-				.spyOn(Date, "now")
-				.mockImplementation(() => realNow() + 3_600_000);
+		// the budget runs out while web's last DELETE session (digests 21-40;
+		// DELETE sessions go one at a time) is on the wire
+		registry.deleteStatusFor = (reference) => {
+			if (reference === digest(40)) {
+				clock ??= vi
+					.spyOn(Date, "now")
+					.mockImplementation(() => realNow() + 3_600_000);
+			}
 			return undefined;
 		};
 		try {
