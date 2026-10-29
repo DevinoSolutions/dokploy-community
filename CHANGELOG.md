@@ -4,6 +4,8 @@ Release notes for Dokploy Community Edition, newest first. The same notes, with 
 
 ### Unreleased
 
+**qs 6.16.1** (T-9713). Raises the pinned minimum of the query-string parser qs from 6.16.0 to 6.16.1, which fixes an uncaught error in its comma array serializer (GHSA-6pq8-jhm2-2vcw). express, co-body and stripe now resolve the same single copy as body-parser. Upgrade impact: none to configure; query and form parsing behave as before. No migration.
+
 **The Logs, Terminal and container lists work again for services on the Dokploy host** (#487). Since v0.30.8-community.32, the container picker of an application's or a compose's Logs and Terminal, a compose's container list and its monitoring showed no containers when the service runs on the server Dokploy is installed on, for every role. The dashboard sends an empty server id for those services, and the ownership check behind those lists read it as another server. It now reads it as the Dokploy host, as the Logs and Terminal connections already did. Services on remote servers were not affected. No migration.
 
 ### New in v0.30.8-community.35
