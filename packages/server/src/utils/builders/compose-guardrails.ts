@@ -258,7 +258,7 @@ export const STALL_SNAPSHOT_KILL_GRACE_SECONDS = 2;
  * after a short grace, when it times out, when the deploy shell is gone and
  * when the watcher is told to stop. Those are the only signals the watcher
  * sends, and only to that command after checking it is still the process that
- * started (start time and parent from /proc). The per-command killer is never
+ * started (its start time in /proc). The per-command killer is never
  * signalled: it polls for a done marker, a stop file and its deadline in short
  * steps and leaves by itself, and the watcher waits for it and for its naps,
  * so nothing it started outlives it. The watcher's own TERM handler only
@@ -338,7 +338,11 @@ export const getStallSnapshotStartScript = (
 				DOKPLOY_STALL_CMD_TIMEOUT=${STALL_SNAPSHOT_COMMAND_TIMEOUT_SECONDS};
 				# TERM only raises a flag and drops a stop file. The main flow checks the flag
 				# after every wait, and the per-command killer checks the file on every step.
-				trap 'DOKPLOY_STALL_STOP=1; : > "$DOKPLOY_STALL_DIR/stop" 2>/dev/null' TERM;
+				# Files are created by redirecting true, never the colon built-in: a redirection
+				# that fails on a special built-in such as the colon ends a dash or BusyBox
+				# shell, and the cleanup of the deploy shell removes this directory right after
+				# it signals the watcher.
+				trap 'DOKPLOY_STALL_STOP=1; true > "$DOKPLOY_STALL_DIR/stop" 2>/dev/null' TERM;
 				# No helper this watcher starts is ever signalled to make it stop: its pid may
 				# already be reaped (bash reaps background children as they exit, dash whenever
 				# it waits) and handed to an unrelated process. The killer and the naps end by
@@ -348,12 +352,13 @@ export const getStallSnapshotStartScript = (
 				if sleep 0.2 2>/dev/null; then DOKPLOY_STALL_STEP=0.2; DOKPLOY_STALL_STEPS=5; else DOKPLOY_STALL_STEP=1; DOKPLOY_STALL_STEPS=1; fi;
 				DOKPLOY_STALL_HAS_PROC=""; [ -r /proc/self/stat ] && DOKPLOY_STALL_HAS_PROC=1;
 				# The only signals sent stop a state command (TERM, then KILL after a grace),
-				# and only the process the killer saw start: the killer reads its start time
-				# and parent (this watcher) from /proc when it starts, and checks both again
-				# right before each signal, which is skipped once the command has exited (gone,
-				# or a zombie). Left open: the pid being reaped and handed out again in the
-				# instant between that check and kill(). Without /proc the check is the done
-				# marker alone, which the watcher writes only once it has waited for the command.
+				# and only the process the killer saw start: the killer records its start time
+				# from /proc when it starts (only while its parent is this watcher, so the pid
+				# is really the command), and right before each signal checks the pid still has
+				# that start time and has not exited (gone, or a zombie). Left open: the pid
+				# being reaped and handed out again in the instant between that check and
+				# kill(). Without /proc the check is the done marker alone, which the watcher
+				# writes only once it has waited for the command.
 				dokploy_stall_proc() {
 					DOKPLOY_STALL_P_STATE=""; DOKPLOY_STALL_P_PPID=""; DOKPLOY_STALL_P_START="";
 					[ -r "/proc/$1/stat" ] || return 1;
@@ -369,7 +374,7 @@ export const getStallSnapshotStartScript = (
 						return;
 					fi;
 					[ -n "$DOKPLOY_STALL_CMD_START" ] && dokploy_stall_proc "$DOKPLOY_STALL_CMD_PID" || return 1;
-					[ "$DOKPLOY_STALL_P_START" = "$DOKPLOY_STALL_CMD_START" ] && [ "$DOKPLOY_STALL_P_PPID" = "$DOKPLOY_STALL_WATCHER" ] && [ "$DOKPLOY_STALL_P_STATE" != "Z" ] && [ "$DOKPLOY_STALL_P_STATE" != "X" ];
+					[ "$DOKPLOY_STALL_P_START" = "$DOKPLOY_STALL_CMD_START" ] && [ "$DOKPLOY_STALL_P_STATE" != "Z" ] && [ "$DOKPLOY_STALL_P_STATE" != "X" ];
 				};
 				dokploy_stall_signal_cmd() {
 					dokploy_stall_cmd_running || return 1;
@@ -380,7 +385,7 @@ export const getStallSnapshotStartScript = (
 				# the command, and a nap lasts at most a poll interval. A TERM that lands
 				# meanwhile only interrupts the wait, which is then resumed.
 				dokploy_stall_finish() {
-					: > "$DOKPLOY_STALL_DIR/stop" 2>/dev/null;
+					true > "$DOKPLOY_STALL_DIR/stop" 2>/dev/null;
 					while :; do wait; [ "$?" -gt 128 ] || break; done;
 					rm -rf "$DOKPLOY_STALL_DIR" 2>/dev/null;
 					exit 0;
@@ -420,7 +425,7 @@ export const getStallSnapshotStartScript = (
 						while [ ! -e "$DOKPLOY_STALL_DONE" ] && [ "$DOKPLOY_STALL_I" -lt "$DOKPLOY_STALL_LIMIT" ] && kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null && [ -d "$DOKPLOY_STALL_DIR" ] && [ ! -e "$DOKPLOY_STALL_DIR/stop" ]; do sleep "$DOKPLOY_STALL_STEP"; DOKPLOY_STALL_I=$(( DOKPLOY_STALL_I + 1 )); done;
 						[ -e "$DOKPLOY_STALL_DONE" ] && exit 0;
 						dokploy_stall_signal_cmd TERM || exit 0;
-						if [ "$DOKPLOY_STALL_I" -ge "$DOKPLOY_STALL_LIMIT" ]; then : > "$DOKPLOY_STALL_DIR/cmd-timeout-$DOKPLOY_STALL_N" 2>/dev/null; fi;
+						if [ "$DOKPLOY_STALL_I" -ge "$DOKPLOY_STALL_LIMIT" ]; then true > "$DOKPLOY_STALL_DIR/cmd-timeout-$DOKPLOY_STALL_N" 2>/dev/null; fi;
 						DOKPLOY_STALL_G=0; DOKPLOY_STALL_GRACE=$(( ${STALL_SNAPSHOT_KILL_GRACE_SECONDS} * DOKPLOY_STALL_STEPS ));
 						while [ "$DOKPLOY_STALL_G" -lt "$DOKPLOY_STALL_GRACE" ] && [ ! -e "$DOKPLOY_STALL_DONE" ] && dokploy_stall_cmd_running; do sleep "$DOKPLOY_STALL_STEP"; DOKPLOY_STALL_G=$(( DOKPLOY_STALL_G + 1 )); done;
 						[ -e "$DOKPLOY_STALL_DONE" ] || dokploy_stall_signal_cmd KILL;
@@ -431,7 +436,7 @@ export const getStallSnapshotStartScript = (
 					wait "$DOKPLOY_STALL_CMD_PID" 2>/dev/null; DOKPLOY_STALL_RC=$?;
 					# A TERM that interrupted the wait leaves the command to its killer.
 					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
-					: > "$DOKPLOY_STALL_DIR/cmd-done-$DOKPLOY_STALL_N" 2>/dev/null;
+					true > "$DOKPLOY_STALL_DIR/cmd-done-$DOKPLOY_STALL_N" 2>/dev/null;
 					wait "$DOKPLOY_STALL_KILLER_PID" 2>/dev/null;
 					if [ "$DOKPLOY_STALL_STOP" = "1" ]; then dokploy_stall_finish; fi;
 					DOKPLOY_STALL_CMD_PID=""; DOKPLOY_STALL_KILLER_PID="";
@@ -478,7 +483,7 @@ export const getStallSnapshotStartScript = (
 					# Lifetime bound passed with the shell still alive: leave a marker (the shell
 					# removes the dir) so the shell never signals this pid after it may have been
 					# reused.
-					: > "$DOKPLOY_STALL_DIR/done" 2>/dev/null;
+					true > "$DOKPLOY_STALL_DIR/done" 2>/dev/null;
 					rm -f "$DOKPLOY_STALL_DIR/ps" "$DOKPLOY_STALL_DIR/block" "$DOKPLOY_STALL_DIR/shell.pid" 2>/dev/null;
 					kill -0 "$DOKPLOY_STALL_SHELL_PID" 2>/dev/null || rm -rf "$DOKPLOY_STALL_DIR" 2>/dev/null;
 				else
