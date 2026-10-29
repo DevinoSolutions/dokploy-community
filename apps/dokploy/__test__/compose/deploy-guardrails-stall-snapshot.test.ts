@@ -900,7 +900,14 @@ echo SHELL-DONE`,
 		// The state command was started, then put down by the watcher itself
 		// (the shell had not asked for anything yet).
 		expect(sh(`kill -0 ${psPid} 2>/dev/null`).status).not.toBe(0);
-		expect(sh(`kill -0 ${wd} 2>/dev/null`).status).not.toBe(0);
+		// The watcher exits right after it removed the directory, which a loaded
+		// host can delay past the shell's own exit: polled, not checked once.
+		let watcherGone = false;
+		for (let i = 0; i < 100 && !watcherGone; i++) {
+			watcherGone = sh(`kill -0 ${wd} 2>/dev/null`).status !== 0;
+			if (!watcherGone) await sleepMs(100);
+		}
+		expect(watcherGone).toBe(true);
 		expect(sh(`test -d ${quote([stallDir])}`).status).not.toBe(0);
 	});
 
@@ -956,8 +963,9 @@ if [ -d "$DOKPLOY_STALL_DIR" ] && [ ! -e "$DOKPLOY_STALL_DIR/done" ]; then echo 
 T0=$(date +%s);
 dokploy_stall_cleanup;
 echo "CLEANUP-TOOK $(( $(date +%s) - T0 ))"
-sleep 3;
-if kill -0 "$(cat ${toShellPath(wdFile)})" 2>/dev/null; then echo WATCHER-LEFT; else echo WATCHER-GONE; fi`,
+w=$(cat ${toShellPath(wdFile)}); gone_until=$(( $(date +%s) + 20 ));
+while [ "$(date +%s)" -lt "$gone_until" ] && kill -0 "$w" 2>/dev/null; do sleep 0.25; done;
+if kill -0 "$w" 2>/dev/null; then echo WATCHER-LEFT; else echo WATCHER-GONE; fi`,
 			env(),
 		);
 		expect(result.status).toBe(0);
@@ -1023,7 +1031,14 @@ sleep 60`,
 				gone = sh(`test -d ${quote([stallDir])}`).status !== 0;
 			}
 			expect(gone).toBe(true);
-			expect(sh(`kill -0 ${wd} 2>/dev/null`).status).not.toBe(0);
+			// The watcher removes the directory and then exits: on a loaded host the
+			// exit can come a moment after the directory is gone, so it is polled too.
+			let watcherGone = false;
+			for (let i = 0; i < 100 && !watcherGone; i++) {
+				watcherGone = sh(`kill -0 ${wd} 2>/dev/null`).status !== 0;
+				if (!watcherGone) await sleepMs(100);
+			}
+			expect(watcherGone).toBe(true);
 		} finally {
 			child.kill();
 		}
