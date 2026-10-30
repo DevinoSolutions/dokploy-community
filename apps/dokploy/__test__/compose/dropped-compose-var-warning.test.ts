@@ -71,9 +71,7 @@ describe("variables left out of the .env (T-10377)", () => {
 
 	it("caps a long list", () => {
 		const names = Array.from({ length: 25 }, (_, i) => `COMPOSE_X${i}`);
-		expect(getDroppedDotenvNotice(names)).toContain(
-			"and 5 more were left out",
-		);
+		expect(getDroppedDotenvNotice(names)).toContain("and 5 more were left out");
 	});
 
 	it("finds the dropped names from the Environment, sorted, without values", () => {
