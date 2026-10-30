@@ -665,18 +665,13 @@ export const getBuildComposeCommand = async (
 		await removeStagedFiles(compose.serverId, staged);
 		throw error;
 	}
-	// Stacks keep the docker-environment notice for names the .env notice does
-	// not already cover; every compose with Create env file also gets the .env
-	// notice, unless the build server logged it (T-10377).
-	const droppedDotenvNames = getDroppedDotenvNames(compose);
-	const stackNames = getIgnoredEnvNames(compose).filter(
-		(name) => !droppedDotenvNames.includes(name),
-	);
-	const droppedDotenvLine = remoteBuild
-		? ""
-		: getDroppedDotenvNotice(droppedDotenvNames);
+	// A stack says why a name is missing from its docker environment (what
+	// `docker stack deploy` interpolates from) and, with Create env file, why
+	// it is missing from the .env: the two reasons differ. The .env notice is
+	// left to the build server when there is one (T-10377).
+	const droppedDotenvLine = remoteBuild ? "" : getDroppedDotenvLogLine(compose);
 	const ignoredEnvNotice =
-		getIgnoredEnvNotice(stackNames) +
+		getIgnoredEnvNotice(getIgnoredEnvNames(compose)) +
 		(droppedDotenvLine ? ` echo ${quote([droppedDotenvLine])};` : "");
 	const rollingLogLine = rolling.script
 		? `\nRolling replace: ${rolling.rolled.join(", ")} 🔁`
@@ -1193,29 +1188,31 @@ ${getInstallStagedFileCommand({
 
 const getPairName = (pair: string) => pair.slice(0, pair.indexOf("="));
 
-// Added by getComposeEnvFileSource; not the user's unless their Environment has them.
-const DOKPLOY_ENV_NAMES = new Set(["DOCKER_CONFIG", "COMPOSE_PREFIX"]);
+// Added by getComposeEnvFileSource; the user's only if their Environment has a key of the same name.
+const DOKPLOY_ENV_NAMES = new Set([
+	"COMPOSE_PREFIX",
+	"COMPOSE_PROJECT_NAME",
+	"DOCKER_CONFIG",
+]);
 
 /**
  * Names of the variables the `.env` writer sees (the Environment plus the ones
  * Dokploy adds), or none when they cannot be prepared: these feed log lines,
- * and a log line must never fail a deploy. Dokploy's own project name is not
- * the user's.
+ * and a log line must never fail a deploy. The names Dokploy adds on its own
+ * are left out; a user's variable of the same name is kept.
  */
 const getEnvFileNames = (compose: ComposeNested) => {
-	const userEnv = compose.env ?? "";
 	try {
-		return prepareEnvironmentVariables(
-			getComposeEnvFileSource(compose),
-			compose.environment.project.env,
-			compose.environment.env,
-		)
-			.map(getPairName)
-			.filter(
-				(name) =>
-					name !== "COMPOSE_PROJECT_NAME" &&
-					!(DOKPLOY_ENV_NAMES.has(name) && !userEnv.includes(name)),
-			);
+		const names = (content: string) =>
+			prepareEnvironmentVariables(
+				content,
+				compose.environment.project.env,
+				compose.environment.env,
+			).map(getPairName);
+		const userNames = new Set(names(compose.env ?? ""));
+		return names(getComposeEnvFileSource(compose)).filter(
+			(name) => !DOKPLOY_ENV_NAMES.has(name) || userNames.has(name),
+		);
 	} catch {
 		return [];
 	}

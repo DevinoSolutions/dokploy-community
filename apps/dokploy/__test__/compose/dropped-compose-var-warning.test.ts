@@ -61,7 +61,10 @@ describe("variables left out of the .env (T-10377)", () => {
 	it("gives names that are not COMPOSE_* their own reason", () => {
 		const text = getDroppedDotenvNotice(["GOMAXPROCS"]);
 		expect(text).toContain("GOMAXPROCS was left out of .env");
-		expect(text).toContain("docker, compose or the shell read these names");
+		expect(text).toContain("docker, compose or the shell read this name");
+		expect(getDroppedDotenvNotice(["HOME", "TERM"])).toContain(
+			"read these names",
+		);
 		expect(text).not.toContain("COMPOSE_* names");
 		const both = getDroppedDotenvNotice(["COMPOSE_FILE", "HOME"]);
 		expect(both).toContain("COMPOSE_* names");
@@ -92,13 +95,45 @@ describe("variables left out of the .env (T-10377)", () => {
 		).toEqual([]);
 	});
 
-	it("does not report Dokploy's own project name, and reads APP_NAME like the writer", () => {
+	it("reads APP_NAME like the writer instead of falling into the catch", () => {
 		expect(
 			getDroppedDotenvNames({
 				...baseCompose,
-				env: "COMPOSE_PROJECT_NAME=other\nURL=${{APP_NAME}}.example.com",
+				env: "COMPOSE_FILE=/x\nURL=${{APP_NAME}}.example.com",
 			}),
-		).toEqual([]);
+		).toEqual(["COMPOSE_FILE"]);
+	});
+
+	it("reports a COMPOSE_PROJECT_NAME the Environment sets, not Dokploy's own", () => {
+		expect(getDroppedDotenvNames({ ...baseCompose, env: "A=1" })).toEqual([]);
+		expect(
+			getDroppedDotenvNames({
+				...baseCompose,
+				env: "COMPOSE_PROJECT_NAME=other",
+			}),
+		).toEqual(["COMPOSE_PROJECT_NAME"]);
+	});
+
+	it("tells Dokploy's COMPOSE_PREFIX from a user's by key, not by text", async () => {
+		const stack = {
+			...baseCompose,
+			composeType: "stack",
+			createEnvFile: false,
+			randomize: true,
+			suffix: "abc",
+		} as typeof baseCompose;
+		const own = await getBuildComposeCommand({ ...stack, env: "A=1" });
+		expect(own).not.toContain("Not passed to docker");
+		const text = await getBuildComposeCommand({
+			...stack,
+			env: "COMPOSE_PREFIX_OLD=1",
+		});
+		expect(text).toContain("settings: COMPOSE_PREFIX_OLD'");
+		const set = await getBuildComposeCommand({
+			...stack,
+			env: "COMPOSE_PREFIX=mine",
+		});
+		expect(set).toContain("settings: COMPOSE_PREFIX'");
 	});
 
 	it("never throws: an Environment that cannot be prepared yields no names", () => {
@@ -155,7 +190,7 @@ describe("variables left out of the .env (T-10377)", () => {
 		expect(command).not.toContain("hunter2");
 	});
 
-	it("logs a stack's .env drops once, apart from its docker line", async () => {
+	it("logs a stack's .env drops once, with its docker line's different reason", async () => {
 		const command = await getBuildComposeCommand({
 			...baseCompose,
 			composeType: "stack",
@@ -164,9 +199,21 @@ describe("variables left out of the .env (T-10377)", () => {
 		expect(count(command)).toBe(1);
 		expect(command).toContain("COMPOSE_FILE was left out of .env");
 		expect(command).toContain(
-			"Not passed to docker, because docker and compose read them as their own settings: DOCKER_HOST",
+			"Not passed to docker, because docker and compose read them as their own settings: COMPOSE_FILE, DOCKER_HOST",
 		);
-		expect(command).not.toContain("settings: COMPOSE_FILE");
+	});
+
+	it("leaves the line to the build server when there is one", async () => {
+		const env = "COMPOSE_ENV_FILE=x";
+		const remoteBuild = { images: [], servingHostLabel: "x" } as never;
+		const withBuild = await getBuildComposeCommand(
+			{ ...baseCompose, env, buildServerId: "b1" } as never,
+			{ remoteBuild },
+		);
+		expect(count(withBuild)).toBe(0);
+		expect(count(await getBuildComposeCommand({ ...baseCompose, env }))).toBe(
+			1,
+		);
 	});
 
 	it("does not report what Dokploy adds to a stack's Environment", async () => {
@@ -195,11 +242,11 @@ describe("variables left out of the .env (T-10377)", () => {
 		expect(off).not.toContain("left out of .env");
 	});
 
-	it("does not fail the deploy script when the Environment cannot be prepared for the log", async () => {
+	it("still names the drop when the Environment refers to APP_NAME", async () => {
 		const command = await getBuildComposeCommand({
 			...baseCompose,
-			env: "URL=${{APP_NAME}}.example.com",
+			env: "COMPOSE_FILE=/x\nURL=${{APP_NAME}}.example.com",
 		});
-		expect(command).not.toContain("left out of .env");
+		expect(count(command)).toBe(1);
 	});
 });

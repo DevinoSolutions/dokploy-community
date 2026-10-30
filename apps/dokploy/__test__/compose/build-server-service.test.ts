@@ -392,7 +392,7 @@ describe("prepareComposeBuildServerDeploy", () => {
 					),
 				)
 				.join("");
-		const build = (env: string) => {
+		const build = (env: string, createEnvFile = true) => {
 			mocks.execAsyncRemote.mockImplementation(
 				async (_serverId: string, command: string) => ({
 					stdout: command.includes("config --format json")
@@ -402,7 +402,7 @@ describe("prepareComposeBuildServerDeploy", () => {
 				}),
 			);
 			return prepareComposeBuildServerDeploy({
-				entity: { ...compose, serverId: "serve-1", createEnvFile: true, env },
+				entity: { ...compose, serverId: "serve-1", createEnvFile, env },
 				deployment: { logPath: "/tmp/log", deploymentId: "dep1" },
 				runStep: vi.fn().mockResolvedValue(undefined),
 			});
@@ -419,6 +419,22 @@ describe("prepareComposeBuildServerDeploy", () => {
 		it("writes no such line when nothing is dropped", async () => {
 			await build("COMPOSE_PROFILES=web\nA=1");
 			expect(loggedText()).not.toContain("left out of .env");
+		});
+
+		it("writes no such line with Create env file off", async () => {
+			await build("COMPOSE_ENV_FILE=x", false);
+			expect(loggedText()).not.toContain("left out of .env");
+		});
+
+		it("is logged once per deploy: the serving host's script leaves it to the build server", async () => {
+			const env = "COMPOSE_ENV_FILE=x";
+			const remoteBuild = await build(env);
+			expect(loggedText().match(/left out of .env/g)).toHaveLength(1);
+			const script = await getBuildComposeCommand(
+				{ ...compose, serverId: "serve-1", createEnvFile: true, env },
+				{ deploymentId: "dep1", remoteBuild },
+			);
+			expect(script).not.toContain("left out of .env");
 		});
 	});
 

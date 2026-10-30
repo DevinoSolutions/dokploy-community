@@ -282,7 +282,7 @@ export const getDroppedDotenvNotice = (names: string[]) => {
 	].flatMap((group, index) => {
 		if (group.length === 0) return [];
 		const subject = `${formatNameList(group)} ${group.length === 1 ? "was" : "were"} left out of .env`;
-		// Dokploy's own COMPOSE_PREFIX is not one a user sets.
+		// COMPOSE_PREFIX is Dokploy's own, not a setting a user picks.
 		const allowed = [...COMPOSE_DOTENV_NAMES]
 			.filter((name) => name !== "COMPOSE_PREFIX")
 			.sort()
@@ -290,7 +290,7 @@ export const getDroppedDotenvNotice = (names: string[]) => {
 		return [
 			index === 0
 				? `${subject}: COMPOSE_* names other than ${allowed} steer the compose CLI, so Dokploy does not write them.`
-				: `${subject}: docker, compose or the shell read these names as their own settings, so Dokploy does not write them.`,
+				: `${subject}: docker, compose or the shell read ${group.length === 1 ? "this name" : "these names"} as their own settings, so Dokploy does not write ${group.length === 1 ? "it" : "them"}.`,
 		];
 	});
 	if (clauses.length === 0) return "";
