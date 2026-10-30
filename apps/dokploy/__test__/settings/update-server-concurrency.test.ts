@@ -1,0 +1,282 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * Two update requests that overlap, through the real router and the real
+ * attempt file: only the Docker, GitHub and background-job edges are mocked,
+ * so the concurrency guard itself is what decides.
+ */
+
+const state = vi.hoisted(() => ({ file: "" }));
+
+const mocks = vi.hoisted(() => ({
+	getDockerResourceType: vi.fn(),
+	getUpdateData: vi.fn(),
+	readDokployRollbackPoint: vi.fn(),
+	recordDokployRollbackPoint: vi.fn(),
+	runBackgroundJob: vi.fn(),
+	spawnAsync: vi.fn(),
+	audit: vi.fn(async (_ctx: unknown, _event: unknown) => undefined),
+}));
+
+vi.mock("@dokploy/server/db", () => ({
+	db: { query: {} },
+}));
+
+vi.mock("@dokploy/server", async () => {
+	const real = await import("@dokploy/server/services/settings");
+	return {
+		IS_CLOUD: false,
+		isRootOrganization: async () => true,
+		getDockerResourceType: mocks.getDockerResourceType,
+		getUpdateData: mocks.getUpdateData,
+		readDokployRollbackPoint: mocks.readDokployRollbackPoint,
+		recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
+		runBackgroundJob: mocks.runBackgroundJob,
+		spawnAsync: mocks.spawnAsync,
+		// The real guard, pointed at a temp file.
+		getLastUpdateAttempt: (...args: [string]) =>
+			real.getLastUpdateAttempt(args[0], state.file),
+		claimDokployUpdateAttempt: (
+			...args: Parameters<typeof real.claimDokployUpdateAttempt>
+		) =>
+			real.claimDokployUpdateAttempt(args[0], {
+				...args[1],
+				file: state.file,
+			}),
+		transitionDokployUpdateAttempt: (
+			...args: Parameters<typeof real.transitionDokployUpdateAttempt>
+		) => real.transitionDokployUpdateAttempt(args[0], args[1], state.file),
+	};
+});
+
+vi.mock("@dokploy/server/lib/auth", () => ({
+	validateRequest: vi.fn(),
+}));
+
+vi.mock("@/server/api/utils/audit", () => ({
+	audit: mocks.audit,
+}));
+
+vi.mock("@/server/queues/queueSetup", () => ({
+	cleanAllDeploymentQueue: vi.fn(),
+}));
+
+vi.mock("@/server/utils/backup", () => ({
+	removeJob: vi.fn(),
+	schedule: vi.fn(),
+}));
+
+const { settingsRouter } = await import("@/server/api/routers/settings");
+const { readDokployUpdateAttempt } = await import(
+	"@dokploy/server/services/settings"
+);
+
+const caller = settingsRouter.createCaller({
+	session: { activeOrganizationId: "org-a" },
+	user: { id: "user-1", email: "admin@example.com", role: "owner" },
+} as Parameters<typeof settingsRouter.createCaller>[0]);
+
+const LATEST = "v0.30.9-community.1";
+
+const deferred = () => {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
+};
+
+let dir: string;
+let jobs: Promise<unknown>[];
+let failures: unknown[];
+let spawns: string[][];
+
+const serviceUpdates = () =>
+	spawns.filter(([, subcommand, action]) => {
+		return subcommand === "service" && action === "update";
+	});
+
+beforeEach(() => {
+	dir = mkdtempSync(join(tmpdir(), "update-concurrency-"));
+	state.file = join(dir, "dokploy-update-last-attempt.json");
+	jobs = [];
+	failures = [];
+	spawns = [];
+	vi.clearAllMocks();
+	mocks.runBackgroundJob.mockImplementation(
+		(_label: string, job: () => unknown) => {
+			const run = Promise.resolve()
+				.then(job)
+				.catch((error) => {
+					failures.push(error);
+				});
+			jobs.push(run);
+			return run;
+		},
+	);
+	mocks.spawnAsync.mockReset();
+	mocks.spawnAsync.mockImplementation(
+		async (command: string, args: string[]) => {
+			spawns.push([command, ...args]);
+			return Buffer.from("");
+		},
+	);
+	mocks.recordDokployRollbackPoint.mockReset();
+	mocks.recordDokployRollbackPoint.mockResolvedValue(undefined);
+	mocks.readDokployRollbackPoint.mockResolvedValue(null);
+	mocks.getDockerResourceType.mockResolvedValue("service");
+	mocks.getUpdateData.mockReset();
+	mocks.getUpdateData.mockResolvedValue({
+		latestVersion: LATEST,
+		updateAvailable: true,
+	});
+});
+
+afterEach(() => {
+	vi.useRealTimers();
+	rmSync(dir, { recursive: true, force: true });
+});
+
+describe("two overlapping updateServer requests", () => {
+	it.each([
+		["the GitHub call", "github"],
+		["the docker manifest inspect", "manifest"],
+	] as const)(
+		"run one service update when both are held at %s",
+		async (_name, where) => {
+			const gate = deferred();
+			if (where === "github") {
+				mocks.getUpdateData.mockImplementation(async () => {
+					await gate.promise;
+					return { latestVersion: LATEST, updateAvailable: true };
+				});
+			} else {
+				mocks.spawnAsync.mockImplementation(
+					async (command: string, args: string[]) => {
+						spawns.push([command, ...args]);
+						if (args[0] === "manifest") {
+							await gate.promise;
+						}
+						return Buffer.from("");
+					},
+				);
+			}
+			const request = () =>
+				caller.updateServer(
+					where === "manifest" ? { target: "v0.30.8-community.32" } : undefined,
+				);
+
+			// Both pass the early read, then stall in the slow call.
+			const first = request();
+			const second = request();
+			await vi.waitFor(() =>
+				expect(
+					where === "github"
+						? mocks.getUpdateData.mock.calls.length
+						: spawns.filter(([, subcommand]) => subcommand === "manifest")
+								.length,
+				).toBe(2),
+			);
+			gate.resolve();
+			const results = await Promise.allSettled([first, second]);
+			await Promise.all(jobs);
+
+			expect(
+				results.filter((result) => result.status === "fulfilled"),
+			).toHaveLength(1);
+			const refused = results.find((result) => result.status === "rejected");
+			expect((refused as PromiseRejectedResult).reason).toMatchObject({
+				code: "CONFLICT",
+			});
+			expect(serviceUpdates()).toHaveLength(1);
+			expect(
+				spawns.filter(([, subcommand]) => subcommand === "pull"),
+			).toHaveLength(1);
+			expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledOnce();
+			expect(mocks.audit).toHaveBeenCalledOnce();
+			expect(failures).toEqual([]);
+			expect(await readDokployUpdateAttempt(state.file)).toMatchObject({
+				status: "submitted",
+			});
+		},
+	);
+
+	it("refuse the second one outright once the first has been claimed", async () => {
+		const pull = deferred();
+		mocks.spawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				spawns.push([command, ...args]);
+				if (args[0] === "pull") {
+					await pull.promise;
+				}
+				return Buffer.from("");
+			},
+		);
+
+		await expect(caller.updateServer()).resolves.toBe(true);
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+		pull.resolve();
+		await Promise.all(jobs);
+
+		expect(serviceUpdates()).toHaveLength(1);
+	});
+});
+
+describe("a pull that outlasts the 15 minute cutoff", () => {
+	it("lets a new update start, and the old job then stops before the swap", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(new Date("2026-10-29T12:00:00.000Z"));
+		const slowPull = deferred();
+		let pulls = 0;
+		mocks.spawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				spawns.push([command, ...args]);
+				if (args[0] === "pull" && ++pulls === 1) {
+					await slowPull.promise;
+				}
+				return Buffer.from("");
+			},
+		);
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await caller.updateServer();
+		await vi.waitFor(() => expect(pulls).toBe(1));
+		const first = await readDokployUpdateAttempt(state.file);
+		expect(first?.status).toBe("pulling");
+
+		// Still inside the window: refused.
+		vi.setSystemTime(new Date("2026-10-29T12:14:59.000Z"));
+		await expect(caller.updateServer()).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+
+		// Past it, the first attempt reads interrupted and a second may start.
+		vi.setSystemTime(new Date("2026-10-29T12:15:00.000Z"));
+		await expect(caller.updateServer()).resolves.toBe(true);
+		const second = await readDokployUpdateAttempt(state.file);
+		expect(second?.attemptId).not.toBe(first?.attemptId);
+		await jobs[1];
+		expect(serviceUpdates()).toHaveLength(1);
+
+		// The first pull finally ends: its attempt is no longer the record.
+		slowPull.resolve();
+		await jobs[0];
+
+		expect(serviceUpdates()).toHaveLength(1);
+		expect(mocks.recordDokployRollbackPoint).toHaveBeenCalledOnce();
+		expect(await readDokployUpdateAttempt(state.file)).toMatchObject({
+			attemptId: second?.attemptId,
+			status: "submitted",
+		});
+		expect(failures).toEqual([]);
+		expect(error).toHaveBeenCalledWith(
+			expect.stringContaining(`attempt ${first?.attemptId} was replaced`),
+		);
+		error.mockRestore();
+	});
+});

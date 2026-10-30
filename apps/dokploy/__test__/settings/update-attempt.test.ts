@@ -4,6 +4,7 @@ import {
 	readFileSync,
 	rmSync,
 	statSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,10 +25,10 @@ vi.mock("@dokploy/server/db", () => ({
 }));
 
 const {
+	claimDokployUpdateAttempt,
 	getLastUpdateAttempt,
 	getUpdateData,
 	readDokployUpdateAttempt,
-	startDokployUpdateAttempt,
 	transitionDokployUpdateAttempt,
 } = await import("@dokploy/server/services/settings");
 
@@ -37,6 +38,11 @@ const minutesAgo = (minutes: number) =>
 
 const OLD = "v0.30.8-community.36";
 const NEW = "v0.30.8-community.37";
+
+// Claims over whatever is recorded; the fixtures below are old enough that
+// nothing they replace is still in progress.
+const start = (attempt: IUpdateAttempt, file: string) =>
+	claimDokployUpdateAttempt(attempt, { runningVersion: OLD, file });
 
 const base: IUpdateAttempt = {
 	attemptId: "attempt-1",
@@ -68,27 +74,27 @@ describe("update attempt file", () => {
 			status: "submitted" as const,
 			finishedAt: minutesAgo(29),
 		};
-		await startDokployUpdateAttempt(attempt, file);
+		await start(attempt, file);
 
 		await expect(readDokployUpdateAttempt(file)).resolves.toEqual(attempt);
 	});
 
 	it.each([true, false])("keeps pinned: %s", async (pinned) => {
-		await startDokployUpdateAttempt({ ...base, pinned }, file);
+		await start({ ...base, pinned }, file);
 
 		expect((await readDokployUpdateAttempt(file))?.pinned).toBe(pinned);
 	});
 
 	it("replaces the previous attempt and leaves no temp file", async () => {
-		await startDokployUpdateAttempt(base, file);
-		await startDokployUpdateAttempt({ ...base, attemptId: "attempt-2" }, file);
+		await start(base, file);
+		await start({ ...base, attemptId: "attempt-2" }, file);
 
 		expect((await readDokployUpdateAttempt(file))?.attemptId).toBe("attempt-2");
 		expect(readdirSync(dir)).toEqual(["dokploy-update-last-attempt.json"]);
 	});
 
 	it.skipIf(process.platform === "win32")("is owner-only", async () => {
-		await startDokployUpdateAttempt(base, file);
+		await start(base, file);
 
 		expect(statSync(file).mode & 0o777).toBe(0o600);
 	});
@@ -98,9 +104,10 @@ describe("update attempt file", () => {
 		writeFileSync(blocked, "");
 		const error = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		await expect(
-			startDokployUpdateAttempt(base, join(blocked, "attempt.json")),
-		).resolves.toBeUndefined();
+		await expect(start(base, join(blocked, "attempt.json"))).resolves.toEqual({
+			claimed: true,
+			recorded: false,
+		});
 
 		error.mockRestore();
 	});
@@ -159,7 +166,7 @@ describe("update attempt file", () => {
 
 		it.each(leaks)("never reaches the file or the query: %s", async (raw) => {
 			for (const phase of ["pull", "update"] as const) {
-				await startDokployUpdateAttempt(base, file);
+				await start(base, file);
 				await transitionDokployUpdateAttempt(
 					base.attemptId,
 					{
@@ -182,7 +189,7 @@ describe("update attempt file", () => {
 		});
 
 		it("stores only the code, and the query shows its fixed message", async () => {
-			await startDokployUpdateAttempt(base, file);
+			await start(base, file);
 			await transitionDokployUpdateAttempt(
 				base.attemptId,
 				{
@@ -224,7 +231,7 @@ describe("update attempt file", () => {
 
 	describe("transitions", () => {
 		it("moves the attempt it belongs to", async () => {
-			await startDokployUpdateAttempt(base, file);
+			await start(base, file);
 
 			await expect(
 				transitionDokployUpdateAttempt(
@@ -238,8 +245,8 @@ describe("update attempt file", () => {
 
 		it("does not let a stale job overwrite a newer attempt", async () => {
 			// A starts, then B replaces the record while A's job is still running.
-			await startDokployUpdateAttempt(base, file);
-			await startDokployUpdateAttempt(
+			await start(base, file);
+			await start(
 				{ ...base, attemptId: "attempt-b", target: "v0.30.8-community.38" },
 				file,
 			);
@@ -272,14 +279,178 @@ describe("update attempt file", () => {
 		});
 	});
 
+	describe("claims", () => {
+		const fresh = (attemptId: string, patch: Partial<IUpdateAttempt> = {}) => ({
+			...base,
+			attemptId,
+			startedAt: new Date(NOW).toISOString(),
+			...patch,
+		});
+		const claim = (
+			attempt: IUpdateAttempt,
+			options: { running?: string; force?: boolean; now?: number } = {},
+		) =>
+			claimDokployUpdateAttempt(attempt, {
+				runningVersion: options.running ?? OLD,
+				force: options.force,
+				now: options.now ?? NOW,
+				file,
+			});
+
+		it("claims when nothing is recorded, and leaves no lock behind", async () => {
+			await expect(claim(fresh("a"))).resolves.toEqual({
+				claimed: true,
+				recorded: true,
+			});
+
+			expect(readdirSync(dir)).toEqual(["dokploy-update-last-attempt.json"]);
+		});
+
+		it("refuses while the recorded attempt is in progress, and keeps it", async () => {
+			await claim(fresh("a"));
+
+			await expect(claim(fresh("b"))).resolves.toEqual({
+				claimed: false,
+				reason: "in_progress",
+			});
+			expect((await readDokployUpdateAttempt(file))?.attemptId).toBe("a");
+		});
+
+		it.each([
+			["failed", { status: "failed" as const }],
+			["submitted", { status: "submitted" as const }],
+			["interrupted (15 minutes old)", { startedAt: minutesAgo(15) }],
+		])("claims over an attempt that is %s", async (_name, patch) => {
+			await claim(fresh("a", patch));
+
+			await expect(claim(fresh("b"))).resolves.toMatchObject({ claimed: true });
+			expect((await readDokployUpdateAttempt(file))?.attemptId).toBe("b");
+		});
+
+		it("claims over an applied attempt: the swap is confirmed", async () => {
+			await claim(fresh("a", { status: "updating" }));
+
+			await expect(claim(fresh("b"), { running: NEW })).resolves.toMatchObject({
+				claimed: true,
+			});
+		});
+
+		it("claims over an in-progress attempt only when forced", async () => {
+			await claim(fresh("a"));
+
+			await expect(claim(fresh("b"), { force: true })).resolves.toMatchObject({
+				claimed: true,
+			});
+			expect((await readDokployUpdateAttempt(file))?.attemptId).toBe("b");
+		});
+
+		it("lets exactly one of many truly overlapping claims win", async () => {
+			// All eight are started before any of them has finished.
+			const results = await Promise.all(
+				Array.from({ length: 8 }, (_, i) => claim(fresh(`attempt-${i}`))),
+			);
+
+			expect(results.filter((result) => result.claimed)).toHaveLength(1);
+			expect(
+				results.filter(
+					(result) => !result.claimed && result.reason === "in_progress",
+				),
+			).toHaveLength(7);
+			const winner = results.findIndex((result) => result.claimed);
+			expect((await readDokployUpdateAttempt(file))?.attemptId).toBe(
+				`attempt-${winner}`,
+			);
+		});
+
+		it("lets exactly one claim win across two copies of the module (two containers)", async () => {
+			// Each copy has its own in-process queue, so only the lock file
+			// stands between them, as it does between two containers.
+			vi.resetModules();
+			const other = await import("@dokploy/server/services/settings");
+			expect(other.claimDokployUpdateAttempt).not.toBe(
+				claimDokployUpdateAttempt,
+			);
+
+			for (let round = 0; round < 10; round++) {
+				const roundFile = join(dir, `round-${round}.json`);
+				const results = await Promise.all(
+					[claimDokployUpdateAttempt, other.claimDokployUpdateAttempt].flatMap(
+						(claimIt, copy) =>
+							[0, 1, 2].map((i) =>
+								claimIt(fresh(`c${copy}-${i}`), {
+									runningVersion: OLD,
+									now: NOW,
+									file: roundFile,
+								}),
+							),
+					),
+				);
+
+				expect(results.filter((result) => result.claimed)).toHaveLength(1);
+			}
+		});
+
+		it("reports busy while another process holds a fresh lock, writing nothing", async () => {
+			writeFileSync(`${file}.lock`, "");
+
+			await expect(claim(fresh("a"))).resolves.toEqual({
+				claimed: false,
+				reason: "busy",
+			});
+			await expect(readDokployUpdateAttempt(file)).resolves.toBeNull();
+		});
+
+		it("takes over a lock left by a crashed holder", async () => {
+			writeFileSync(`${file}.lock`, "");
+			const old = new Date(Date.now() - 60_000);
+			utimesSync(`${file}.lock`, old, old);
+
+			await expect(claim(fresh("a"))).resolves.toMatchObject({ claimed: true });
+			expect(readdirSync(dir)).toEqual(["dokploy-update-last-attempt.json"]);
+		});
+
+		it("goes on unrecorded when the file can't be written", async () => {
+			const blocked = join(dir, "blocker");
+			writeFileSync(blocked, "");
+			const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await expect(
+				claimDokployUpdateAttempt(fresh("a"), {
+					runningVersion: OLD,
+					file: join(blocked, "attempt.json"),
+				}),
+			).resolves.toEqual({ claimed: true, recorded: false });
+
+			error.mockRestore();
+		});
+
+		it("takes the record from a pull that outlasted the cutoff: the old job loses it", async () => {
+			// A's pull is still running 15 minutes in, so A reads interrupted.
+			await claim(fresh("a"));
+			const later = NOW + UPDATE_ATTEMPT_STALE_MS;
+
+			await expect(
+				claim(fresh("b", { startedAt: new Date(later).toISOString() }), {
+					now: later,
+				}),
+			).resolves.toMatchObject({ claimed: true });
+
+			// A's job, back from its pull, finds the record is no longer its own.
+			await expect(
+				transitionDokployUpdateAttempt("a", { status: "updating" }, file),
+			).resolves.toBe(false);
+			expect(await readDokployUpdateAttempt(file)).toMatchObject({
+				attemptId: "b",
+				status: "pulling",
+			});
+		});
+	});
+
 	describe("a process started by the swap", () => {
 		// The job that wrote `updating` died with the old container; the new
 		// process only has the file and its own version.
 		const persistUpdating = (patch: Partial<IUpdateAttempt> = {}) =>
-			startDokployUpdateAttempt(
-				{ ...base, status: "updating", ...patch },
-				file,
-			);
+			start({ ...base, status: "updating", ...patch }, file);
 
 		it("reports applied when it runs the expected version", async () => {
 			await persistUpdating({ startedAt: minutesAgo(1) });
@@ -332,6 +503,75 @@ describe("getUpdateAttemptOutcome", () => {
 			);
 		},
 	);
+
+	describe("a reinstall of the running version", () => {
+		// The version string is the same before and after, so it proves nothing.
+		const reinstall = (patch: Partial<IUpdateAttempt>) => ({
+			fromVersion: NEW,
+			expectedVersion: NEW,
+			target: NEW,
+			...patch,
+		});
+
+		it("is not applied while the job is still updating, and keeps blocking", () => {
+			expect(
+				outcome(
+					reinstall({ status: "updating", startedAt: minutesAgo(1) }),
+					NEW,
+				),
+			).toBe("in_progress");
+		});
+
+		it("reads interrupted, never applied, once the cutoff passes without a submit", () => {
+			expect(
+				outcome(
+					reinstall({ status: "updating", startedAt: minutesAgo(16) }),
+					NEW,
+				),
+			).toBe("interrupted");
+		});
+
+		it("is applied once the job itself reports submitted", () => {
+			expect(
+				outcome(
+					reinstall({ status: "submitted", finishedAt: minutesAgo(1) }),
+					NEW,
+				),
+			).toBe("applied");
+		});
+
+		it("still counts an update to another version as applied while updating", () => {
+			expect(
+				outcome({ status: "updating", startedAt: minutesAgo(1) }, NEW),
+			).toBe("applied");
+		});
+
+		it("reaches the router guard as in_progress through getLastUpdateAttempt", async () => {
+			const dir = mkdtempSync(join(tmpdir(), "update-attempt-"));
+			const file = join(dir, "dokploy-update-last-attempt.json");
+			await start(
+				{
+					...base,
+					...reinstall({ status: "updating", startedAt: minutesAgo(1) }),
+				},
+				file,
+			);
+
+			await expect(getLastUpdateAttempt(NEW, file, NOW)).resolves.toMatchObject(
+				{
+					outcome: "in_progress",
+				},
+			);
+			// And a second update is refused while it is.
+			await expect(
+				claimDokployUpdateAttempt(
+					{ ...base, attemptId: "second" },
+					{ runningVersion: NEW, now: NOW, file },
+				),
+			).resolves.toEqual({ claimed: false, reason: "in_progress" });
+			rmSync(dir, { recursive: true, force: true });
+		});
+	});
 
 	it("does not call a pulling attempt applied: the swap has not started", () => {
 		expect(outcome({ status: "pulling", startedAt: minutesAgo(1) }, NEW)).toBe(
@@ -451,7 +691,23 @@ describe("classifyUpdateError", () => {
 			"pull",
 			"registry_unauthorized",
 		],
+		[
+			"pull access denied for ghcr.io/x/y, repository does not exist or may require authorization",
+			"pull",
+			"registry_unauthorized",
+		],
 		["toomanyrequests: rate limit", "pull", "registry_rate_limited"],
+		[
+			'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock: Get "http://%2Fvar%2Frun%2Fdocker.sock/v1.47/images/json": dial unix /var/run/docker.sock: connect: permission denied',
+			"pull",
+			"docker_unavailable",
+		],
+		[
+			"Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+			"pull",
+			"docker_unavailable",
+		],
+		["mkdir /root/.docker: permission denied", "pull", "pull_failed"],
 		["context deadline exceeded", "pull", "timeout"],
 		["dial tcp: lookup ghcr.io: no such host", "pull", "registry_unreachable"],
 		["something odd", "pull", "pull_failed"],

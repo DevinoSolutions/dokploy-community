@@ -20,6 +20,8 @@ export const UPDATE_ERROR_MESSAGES = {
 	registry_unauthorized: "The registry refused access to the image.",
 	registry_rate_limited:
 		"The registry is rate limiting pulls. Try again later.",
+	docker_unavailable:
+		"Docker could not be reached from the Dokploy server. See the Dokploy server logs for details.",
 	registry_unreachable: "The registry could not be reached.",
 	timeout: "The operation timed out.",
 	pull_failed:
@@ -45,13 +47,17 @@ export const classifyUpdateError = (
 		return "service_update_failed";
 	}
 	const text = error instanceof Error ? error.message : String(error ?? "");
+	// The local socket first: its "permission denied" is not a registry refusal.
+	if (/docker daemon|docker\.sock/i.test(text)) {
+		return "docker_unavailable";
+	}
 	if (
 		/manifest unknown|no such manifest|manifest for .* not found/i.test(text)
 	) {
 		return "manifest_not_found";
 	}
 	if (
-		/unauthorized|denied|authentication required|requires authentication|\b40[13]\b/i.test(
+		/unauthorized|pull access denied|denied: |requested access to the resource is denied|authentication required|requires authentication|\b40[13]\b/i.test(
 			text,
 		)
 	) {
@@ -151,8 +157,16 @@ export const getUpdateAttemptOutcome = (
 		return "failed";
 	}
 	const expected = expectedUpdateVersion(attempt);
+	// A reinstall of the running version leaves the version string unchanged,
+	// so for it the version proves nothing while the job is still `updating`:
+	// the old container would read "applied" before the swap, and stay so if
+	// Swarm rolled back. Only the job's own `submitted` (written once Docker
+	// returned) counts. A reinstall whose job dies in the swap therefore reads
+	// in progress, then interrupted, rather than a false success.
+	const reinstall = expected !== undefined && expected === attempt.fromVersion;
 	if (
-		(attempt.status === "updating" || attempt.status === "submitted") &&
+		(attempt.status === "submitted" ||
+			(attempt.status === "updating" && !reinstall)) &&
 		expected === runningVersion
 	) {
 		return "applied";

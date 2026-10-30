@@ -7,6 +7,7 @@ import {
 	checkPortInUse,
 	checkPostgresHealth,
 	checkTraefikHealth,
+	claimDokployUpdateAttempt,
 	cleanupAll,
 	cleanupBuilders,
 	cleanupContainers,
@@ -50,7 +51,6 @@ import {
 	sendWebServerDockerCleanupNotifications,
 	setupGPUSupport,
 	spawnAsync,
-	startDokployUpdateAttempt,
 	startLogCleanup,
 	stopLogCleanup,
 	transitionDokployUpdateAttempt,
@@ -248,6 +248,11 @@ const apiUpdateDokployServer = z
 			})
 			.optional(),
 		rollback: z.boolean().optional(),
+		// Starts even though the last attempt still reads in progress, for an
+		// update that died with its host. An API/MCP override: the dialog does
+		// not send it. A job of the replaced attempt that has not begun its swap
+		// stops; one already swapping can not be recalled.
+		force: z.boolean().optional(),
 	})
 	.refine((input) => !(input.target !== undefined && input.rollback), {
 		message: "Pass either a target or rollback, not both",
@@ -985,9 +990,11 @@ export const settingsRouter = createTRPCRouter({
 			}
 
 			// A second update would interleave its service update and rollback
-			// point with the one in flight.
+			// point with the one in flight. This early read only spares the
+			// GitHub and registry calls below; the claim further down is the
+			// atomic check.
 			const lastAttempt = await getLastUpdateAttempt(packageInfo.version);
-			if (lastAttempt?.outcome === "in_progress") {
+			if (!input?.force && lastAttempt?.outcome === "in_progress") {
 				throw new TRPCError({
 					code: "CONFLICT",
 					message: "An update is already in progress.",
@@ -1089,22 +1096,52 @@ export const settingsRouter = createTRPCRouter({
 				startedAt: new Date().toISOString(),
 				status: "pulling",
 			};
-			// Recorded before the job starts, so a second request sees it at once.
-			await startDokployUpdateAttempt(attempt);
+			// The check and the write are one step under a lock: of two requests
+			// that got this far together (the GitHub and registry calls above take
+			// seconds), only one claims, and the other never reaches the job.
+			const claim = await claimDokployUpdateAttempt(attempt, {
+				runningVersion: packageInfo.version,
+				force: input?.force,
+			});
+			if (!claim.claimed) {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message:
+						claim.reason === "busy"
+							? "Another update is being started. Try again in a moment."
+							: "An update is already in progress.",
+				});
+			}
+			// When the record could not be written there is nothing to own, and
+			// the update goes on as it did before the record existed.
+			const recorded = claim.recorded;
 			void runBackgroundJob("settings.updateServer background", async () => {
 				let phase: "pull" | "update" = "pull";
 				try {
 					// The image is pulled first: if that fails, the running service and
 					// the rollback point of the last update are both kept.
 					await spawnAsync("docker", ["pull", image]);
+					// Still this job's attempt? A pull that outlasted the 15 minute
+					// cutoff may have been replaced by a newer attempt (or a forced
+					// one). Stop here, before the rollback point and the swap: the
+					// newer one owns both.
+					const owned = await transitionDokployUpdateAttempt(
+						attempt.attemptId,
+						{
+							status: "updating",
+						},
+					);
+					if (!owned && recorded) {
+						console.error(
+							`settings.updateServer: attempt ${attempt.attemptId} was replaced by a newer one; not updating the service.`,
+						);
+						return;
+					}
+					phase = "update";
 					await recordDokployRollbackPoint(packageInfo.version, {
 						installing,
 						installedImage: image,
 					}).catch(() => undefined);
-					phase = "update";
-					await transitionDokployUpdateAttempt(attempt.attemptId, {
-						status: "updating",
-					});
 					await spawnAsync("docker", [
 						"service",
 						"update",

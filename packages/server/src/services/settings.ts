@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	open,
+	readFile,
+	rename,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -308,9 +317,9 @@ export const getUpdateAttemptPath = () =>
 
 /**
  * Writes the attempt atomically (tmp then rename, owner-only). Never throws:
- * losing the record must not stop an update. Only the error code is stored;
- * the message is derived from it when read, so no docker or registry text
- * reaches the file.
+ * losing the record must not stop an update; returns whether it was written.
+ * Only the error code is stored; the message is derived from it when read, so
+ * no docker or registry text reaches the file.
  */
 const writeAttemptFile = async (attempt: IUpdateAttempt, file: string) => {
 	const tmp = `${file}.${randomUUID()}.tmp`;
@@ -319,41 +328,165 @@ const writeAttemptFile = async (attempt: IUpdateAttempt, file: string) => {
 		await mkdir(dirname(file), { recursive: true });
 		await writeFile(tmp, JSON.stringify(record), { mode: 0o600 });
 		await rename(tmp, file);
+		return true;
 	} catch (error) {
 		console.error(
 			"Could not record the Dokploy update attempt:",
 			error instanceof Error ? error.message : String(error),
 		);
 		await rm(tmp, { force: true }).catch(() => undefined);
+		return false;
 	}
 };
 
-/** Starts recording a new attempt, replacing the previous one. Never throws. */
-export const startDokployUpdateAttempt = (
+// The attempt file is read, judged and rewritten by a claim or a transition.
+// Two requests (or the old and the new container during a swap) must not
+// interleave those steps, so they run one at a time in this process
+// (`attemptQueue`) and, across processes, under an exclusive lock file.
+let attemptQueue: Promise<unknown> = Promise.resolve();
+
+const serialized = <T>(fn: () => Promise<T>): Promise<T> => {
+	const run = attemptQueue.then(fn);
+	attemptQueue = run.catch(() => undefined);
+	return run;
+};
+
+// The lock is held for a file read and write only, so a holder that is older
+// than this died with its container.
+const ATTEMPT_LOCK_STALE_MS = 30_000;
+const ATTEMPT_LOCK_RETRY_MS = 25;
+// 80 tries 25 ms apart: about two seconds, counted rather than timed.
+const ATTEMPT_LOCK_TRIES = 80;
+
+type AttemptLock = { release: () => Promise<void> } | "busy" | "unavailable";
+
+/**
+ * Takes `<file>.lock` with an exclusive create (`wx`). "unavailable" means the
+ * lock could not be used at all (an unwritable directory): the caller goes on
+ * without it, like the record itself. A stale lock is removed; two processes
+ * taking over the same stale lock at the same instant is possible but needs a
+ * crashed holder, and the in-process queue plus the status check still apply.
+ */
+const acquireAttemptLock = async (file: string): Promise<AttemptLock> => {
+	const lockFile = `${file}.lock`;
+	try {
+		await mkdir(dirname(file), { recursive: true });
+	} catch {
+		return "unavailable";
+	}
+	for (let attempt = 0; attempt < ATTEMPT_LOCK_TRIES; attempt++) {
+		try {
+			const handle = await open(lockFile, "wx", 0o600);
+			await handle.close();
+			return {
+				release: () => rm(lockFile, { force: true }).catch(() => undefined),
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				return "unavailable";
+			}
+		}
+		const age = await stat(lockFile).then(
+			(info) => Date.now() - info.mtimeMs,
+			() => 0,
+		);
+		if (age > ATTEMPT_LOCK_STALE_MS) {
+			await rm(lockFile, { force: true }).catch(() => undefined);
+			continue;
+		}
+		await sleep(ATTEMPT_LOCK_RETRY_MS);
+	}
+	return "busy";
+};
+
+/**
+ * Runs `fn` alone on the attempt file. When the lock stays taken, `onBusy`
+ * decides the result; without it `fn` runs anyway (a transition must not be
+ * lost to a slow neighbour).
+ */
+const withAttemptLock = <T>(
+	file: string,
+	fn: () => Promise<T>,
+	onBusy?: () => T,
+) =>
+	serialized(async () => {
+		const lock = await acquireAttemptLock(file);
+		if (lock === "busy" && onBusy) {
+			return onBusy();
+		}
+		try {
+			return await fn();
+		} finally {
+			if (typeof lock === "object") {
+				await lock.release();
+			}
+		}
+	});
+
+export type UpdateAttemptClaim =
+	| {
+			claimed: true;
+			/** False when the record could not be written; ownership is then unknown. */
+			recorded: boolean;
+	  }
+	| { claimed: false; reason: "in_progress" | "busy" };
+
+/**
+ * Starts recording a new attempt, replacing the previous one, but only when
+ * none is in progress (or `force` is set). The check and the write happen
+ * together under the lock, so of two overlapping requests, in this process or
+ * in two containers, exactly one claims. Never throws.
+ */
+export const claimDokployUpdateAttempt = (
 	attempt: IUpdateAttempt,
-	file = getUpdateAttemptPath(),
-) => writeAttemptFile(attempt, file);
+	{
+		runningVersion,
+		force = false,
+		now = Date.now(),
+		file = getUpdateAttemptPath(),
+	}: {
+		runningVersion: string;
+		force?: boolean;
+		now?: number;
+		file?: string;
+	},
+) =>
+	withAttemptLock<UpdateAttemptClaim>(
+		file,
+		async () => {
+			const last = await readDokployUpdateAttempt(file);
+			if (
+				!force &&
+				last &&
+				getUpdateAttemptOutcome(last, runningVersion, now) === "in_progress"
+			) {
+				return { claimed: false, reason: "in_progress" };
+			}
+			return { claimed: true, recorded: await writeAttemptFile(attempt, file) };
+		},
+		() => ({ claimed: false, reason: "busy" }),
+	);
 
 /**
  * Moves the attempt `attemptId` on. The file is read again first and nothing
- * is written when it holds another attempt (a newer one has started), so a
- * stale job can't overwrite it. The read and the write are not atomic
- * together: a newer attempt that starts in between can still be overwritten,
- * which the refusal to start an update while another is in progress makes
- * very unlikely. Never throws; returns whether the attempt was updated.
+ * is written when it holds another attempt (a newer one has claimed it), so a
+ * stale job can't overwrite it. Read and write run under the same lock as a
+ * claim. Never throws; returns whether the attempt is still this job's, which
+ * the caller must check before going on.
  */
-export const transitionDokployUpdateAttempt = async (
+export const transitionDokployUpdateAttempt = (
 	attemptId: string,
 	patch: Partial<Omit<IUpdateAttempt, "attemptId" | "error">>,
 	file = getUpdateAttemptPath(),
-) => {
-	const current = await readDokployUpdateAttempt(file);
-	if (!current || current.attemptId !== attemptId) {
-		return false;
-	}
-	await writeAttemptFile({ ...current, ...patch }, file);
-	return true;
-};
+) =>
+	withAttemptLock(file, async () => {
+		const current = await readDokployUpdateAttempt(file);
+		if (!current || current.attemptId !== attemptId) {
+			return false;
+		}
+		await writeAttemptFile({ ...current, ...patch }, file);
+		return true;
+	});
 
 /** The recorded attempt, or null when there is none or the file is unusable. */
 export const readDokployUpdateAttempt = async (
