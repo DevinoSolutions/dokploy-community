@@ -6,6 +6,7 @@ import {
 	parseDokployUpdateTarget,
 } from "@dokploy/server/utils/dokploy-update-target";
 import {
+	AlertTriangle,
 	Bug,
 	Download,
 	HardDriveDownload,
@@ -37,6 +38,7 @@ import {
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
 import { ToggleAutoCheckUpdates } from "./toggle-auto-check-updates";
+import { UpdateLastAttempt } from "./update-last-attempt";
 import { UpdateMigrationNotice } from "./update-migration-notice";
 import { UpdateWebServer } from "./update-webserver";
 
@@ -57,6 +59,7 @@ export const UpdateServer = ({
 	const [isUpdateAvailable, setIsUpdateAvailable] = useState(
 		!!updateData?.updateAvailable,
 	);
+	const [checkFailed, setCheckFailed] = useState(false);
 	const { mutateAsync: getUpdateData, isPending } =
 		api.settings.getUpdateData.useMutation();
 	const { data: dokployVersion } = api.settings.getDokployVersion.useQuery();
@@ -78,11 +81,16 @@ export const UpdateServer = ({
 		try {
 			const updateData = await getUpdateData();
 			const versionToUpdate = updateData.latestVersion || "";
+			setCheckFailed(!!updateData.checkFailed);
 			setHasCheckedUpdate(true);
 			setIsUpdateAvailable(updateData.updateAvailable);
 			setLatestVersion(versionToUpdate);
 
-			if (updateData.updateAvailable) {
+			if (updateData.checkFailed) {
+				toast.error("Could not check for updates.", {
+					description: "GitHub could not be reached. Try again in a moment.",
+				});
+			} else if (updateData.updateAvailable) {
 				toast.success(versionToUpdate, {
 					description: "New version available!",
 				});
@@ -92,6 +100,7 @@ export const UpdateServer = ({
 		} catch (error) {
 			console.error("Error checking for updates:", error);
 			setHasCheckedUpdate(true);
+			setCheckFailed(true);
 			setIsUpdateAvailable(false);
 			toast.error(
 				"An error occurred while checking for updates, please try again.",
@@ -315,25 +324,45 @@ export const UpdateServer = ({
 					</div>
 				)}
 
-				{/* Up to date state */}
-				{hasCheckedUpdate && !isUpdateAvailable && !isPending && (
-					<div className="mb-8">
-						<div className="flex flex-col items-center gap-6 mb-6">
-							<div className="rounded-full p-4 bg-emerald-400/40">
-								<Sparkles className="h-8 w-8 text-emerald-400" />
-							</div>
-							<div className="text-center space-y-2">
-								<h3 className="text-lg font-medium">
-									You are using the latest version
-								</h3>
-								<p className="text text-muted-foreground">
-									Your server is up to date with all the latest features and
-									security improvements.
-								</p>
+				{/* The check could not be completed */}
+				{hasCheckedUpdate &&
+					!isUpdateAvailable &&
+					!isPending &&
+					checkFailed && (
+						<div className="mb-8">
+							<div className="flex items-start gap-2 rounded-lg bg-yellow-500/10 border border-yellow-500/30 p-4">
+								<AlertTriangle className="h-5 w-5 shrink-0 text-yellow-500" />
+								<div className="text-sm text-yellow-600 dark:text-yellow-400">
+									Could not check for updates, so it is not known whether this
+									server is up to date. Try again in a moment, or install a
+									specific version below.
+								</div>
 							</div>
 						</div>
-					</div>
-				)}
+					)}
+
+				{/* Up to date state */}
+				{hasCheckedUpdate &&
+					!isUpdateAvailable &&
+					!isPending &&
+					!checkFailed && (
+						<div className="mb-8">
+							<div className="flex flex-col items-center gap-6 mb-6">
+								<div className="rounded-full p-4 bg-emerald-400/40">
+									<Sparkles className="h-8 w-8 text-emerald-400" />
+								</div>
+								<div className="text-center space-y-2">
+									<h3 className="text-lg font-medium">
+										You are using the latest version
+									</h3>
+									<p className="text text-muted-foreground">
+										Your server is up to date with all the latest features and
+										security improvements.
+									</p>
+								</div>
+							</div>
+						</div>
+					)}
 
 				{hasCheckedUpdate && isPending && (
 					<div className="mb-8">
@@ -431,6 +460,10 @@ export const UpdateServer = ({
 							<UpdateMigrationNotice version={rollbackPoint.version} />
 						</div>
 					)}
+				</div>
+
+				<div className="mb-4">
+					<UpdateLastAttempt enabled={!!isOpen} />
 				</div>
 
 				<div className="flex items-center justify-between pt-2">

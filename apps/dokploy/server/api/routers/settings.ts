@@ -7,6 +7,7 @@ import {
 	checkPortInUse,
 	checkPostgresHealth,
 	checkTraefikHealth,
+	claimDokployUpdateAttempt,
 	cleanupAll,
 	cleanupBuilders,
 	cleanupContainers,
@@ -20,6 +21,7 @@ import {
 	getDockerDiskUsage,
 	getDockerResourceType,
 	getDokployImageTag,
+	getLastUpdateAttempt,
 	getLogCleanupStatus,
 	getReleaseNotes,
 	getTraefikOverview,
@@ -51,6 +53,7 @@ import {
 	spawnAsync,
 	startLogCleanup,
 	stopLogCleanup,
+	transitionDokployUpdateAttempt,
 	updateLetsEncryptEmail,
 	updateResponseCompression,
 	updateServerById,
@@ -78,6 +81,10 @@ import {
 	scheduleDockerCleanup,
 	WEB_SERVER_CLEANUP_JOB,
 } from "@dokploy/server/utils/docker/cleanup-job";
+import {
+	classifyUpdateError,
+	type IUpdateAttempt,
+} from "@dokploy/server/utils/dokploy-update-attempt";
 import {
 	DOKPLOY_IMAGE_REPO,
 	DOKPLOY_MIN_PINNED_VERSION,
@@ -212,6 +219,24 @@ const assertTraefikAccess = async (
 
 const MANIFEST_INSPECT_TIMEOUT_MS = 60_000;
 
+// Refuses before anything is queued when the registry doesn't have the image.
+const assertUpdateImageExists = async (image: string) => {
+	try {
+		await spawnAsync("docker", ["manifest", "inspect", image], undefined, {
+			timeout: MANIFEST_INSPECT_TIMEOUT_MS,
+		});
+	} catch (error) {
+		const reason = error instanceof Error ? error.message.trim() : "";
+		console.error("settings.updateServer manifest inspect failed:", reason);
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: /manifest unknown|no such manifest|not found/i.test(reason)
+				? `Image not found in ${DOKPLOY_IMAGE_REPO}.`
+				: "Could not reach ghcr.io to check the image; try again.",
+		});
+	}
+};
+
 // No input keeps the plain "install the latest release" update.
 const apiUpdateDokployServer = z
 	.object({
@@ -223,6 +248,11 @@ const apiUpdateDokployServer = z
 			})
 			.optional(),
 		rollback: z.boolean().optional(),
+		// Starts even though the last attempt still reads in progress, for an
+		// update that died with its host. An API/MCP override: the dialog does
+		// not send it. A job of the replaced attempt that has not begun its swap
+		// stops; one already swapping can not be recalled.
+		force: z.boolean().optional(),
 	})
 	.refine((input) => !(input.target !== undefined && input.rollback), {
 		message: "Pass either a target or rollback, not both",
@@ -959,11 +989,25 @@ export const settingsRouter = createTRPCRouter({
 				});
 			}
 
+			// A second update would interleave its service update and rollback
+			// point with the one in flight. This early read only spares the
+			// GitHub and registry calls below; the claim further down is the
+			// atomic check.
+			const lastAttempt = await getLastUpdateAttempt(packageInfo.version);
+			if (!input?.force && lastAttempt?.outcome === "in_progress") {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: "An update is already in progress.",
+				});
+			}
+
 			// Without a target this installs the latest release, as before. A
 			// target (or the recorded rollback digest) only ever selects a tag or
 			// digest inside the fork repo.
 			let target = input?.target;
 			let pinned: DokployUpdateTarget | null = null;
+			// The version a rollback leaves running; its target is only a digest.
+			let expectedVersion: string | undefined;
 			if (input?.rollback) {
 				const point = await readDokployRollbackPoint(packageInfo.version);
 				if (!point) {
@@ -973,6 +1017,7 @@ export const settingsRouter = createTRPCRouter({
 					});
 				}
 				target = point.digest;
+				expectedVersion = point.version;
 			}
 			if (target !== undefined) {
 				pinned = parseDokployUpdateTarget(target);
@@ -1001,61 +1046,124 @@ export const settingsRouter = createTRPCRouter({
 								"A digest is only accepted for the recorded rollback. Use a release tag.",
 						});
 					}
+					if (point && "version" in point) {
+						expectedVersion = point.version;
+					}
 				}
 			}
 
 			let image: string;
+			let resolvedTag: string | undefined;
 			if (pinned) {
 				image = dokployUpdateImage(pinned);
-				try {
-					await spawnAsync(
-						"docker",
-						["manifest", "inspect", image],
-						undefined,
-						{
-							timeout: MANIFEST_INSPECT_TIMEOUT_MS,
-						},
-					);
-				} catch (error) {
-					const reason = error instanceof Error ? error.message.trim() : "";
-					console.error(
-						"settings.updateServer manifest inspect failed:",
-						reason,
-					);
-					throw new TRPCError({
-						code: "BAD_REQUEST",
-						message: /manifest unknown|no such manifest|not found/i.test(reason)
-							? `Image not found in ${DOKPLOY_IMAGE_REPO}.`
-							: "Could not reach ghcr.io to check the image; try again.",
-					});
-				}
 			} else {
 				const data = await getUpdateData(packageInfo.version);
-				if (!data.updateAvailable) {
-					return true;
+				if (data.checkFailed) {
+					// An answer we couldn't get is not "up to date": say so, so the
+					// caller doesn't take a no-op for a started update.
+					console.error(
+						"settings.updateServer latest release check failed:",
+						data.reason,
+					);
+					throw new TRPCError({
+						code: "SERVICE_UNAVAILABLE",
+						message:
+							"Could not reach GitHub to find the latest release. Try again, or pass a release tag as the target.",
+					});
 				}
+				if (!data.updateAvailable) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: `Already on ${packageInfo.version}, the latest release.`,
+					});
+				}
+				resolvedTag = data.latestVersion ?? undefined;
 				image = `${DOKPLOY_IMAGE_REPO}:${data.latestVersion}`;
 			}
+			await assertUpdateImageExists(image);
 
 			const installing = pinned ?? undefined;
+			const attempt: IUpdateAttempt = {
+				attemptId: randomUUID(),
+				fromVersion: packageInfo.version,
+				// The release the server resolved, so an unpinned update is checked too.
+				target: pinned
+					? (pinned.tag ?? pinned.digest)
+					: (resolvedTag ?? "latest"),
+				pinned: !!pinned,
+				expectedVersion: pinned ? (pinned.tag ?? expectedVersion) : resolvedTag,
+				image,
+				startedAt: new Date().toISOString(),
+				status: "pulling",
+			};
+			// The check and the write are one step under a lock: of two requests
+			// that got this far together (the GitHub and registry calls above take
+			// seconds), only one claims, and the other never reaches the job.
+			const claim = await claimDokployUpdateAttempt(attempt, {
+				runningVersion: packageInfo.version,
+				force: input?.force,
+			});
+			if (!claim.claimed) {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message:
+						claim.reason === "busy"
+							? "Another update is being started. Try again in a moment."
+							: "An update is already in progress.",
+				});
+			}
+			// When the record could not be written there is nothing to own, and
+			// the update goes on as it did before the record existed.
+			const recorded = claim.recorded;
 			void runBackgroundJob("settings.updateServer background", async () => {
-				// A pinned image is pulled first: if that fails, the running service
-				// and the rollback point of the last update are both kept.
-				if (installing) {
+				let phase: "pull" | "update" = "pull";
+				try {
+					// The image is pulled first: if that fails, the running service and
+					// the rollback point of the last update are both kept.
 					await spawnAsync("docker", ["pull", image]);
+					// Still this job's attempt? A pull that outlasted the 15 minute
+					// cutoff may have been replaced by a newer attempt (or a forced
+					// one). Stop here, before the rollback point and the swap: the
+					// newer one owns both.
+					const owned = await transitionDokployUpdateAttempt(
+						attempt.attemptId,
+						{
+							status: "updating",
+						},
+					);
+					if (!owned && recorded) {
+						console.error(
+							`settings.updateServer: attempt ${attempt.attemptId} was replaced by a newer one; not updating the service.`,
+						);
+						return;
+					}
+					phase = "update";
+					await recordDokployRollbackPoint(packageInfo.version, {
+						installing,
+						installedImage: image,
+					}).catch(() => undefined);
+					await spawnAsync("docker", [
+						"service",
+						"update",
+						"--force",
+						"--image",
+						image,
+						"dokploy",
+					]);
+					await transitionDokployUpdateAttempt(attempt.attemptId, {
+						status: "submitted",
+						finishedAt: new Date().toISOString(),
+					});
+				} catch (error) {
+					// Only the category is recorded; the raw docker output (which can
+					// carry credentials) reaches the server log through the rethrow.
+					await transitionDokployUpdateAttempt(attempt.attemptId, {
+						status: "failed",
+						finishedAt: new Date().toISOString(),
+						errorCode: classifyUpdateError(error, phase),
+					});
+					throw error;
 				}
-				await recordDokployRollbackPoint(packageInfo.version, {
-					installing,
-					installedImage: image,
-				}).catch(() => undefined);
-				await spawnAsync("docker", [
-					"service",
-					"update",
-					"--force",
-					"--image",
-					image,
-					"dokploy",
-				]);
 			});
 			await audit(ctx, {
 				action: "update",
@@ -1074,6 +1182,15 @@ export const settingsRouter = createTRPCRouter({
 		}
 		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
 		return await readDokployRollbackPoint(packageInfo.version);
+	}),
+	// The last in-panel update and how it ended, so a failed or unapplied one
+	// is visible instead of looking like a success.
+	getLastUpdateAttempt: adminProcedure.query(async ({ ctx }) => {
+		if (IS_CLOUD) {
+			return null;
+		}
+		await assertLocalHostAccess(undefined, ctx.session?.activeOrganizationId);
+		return await getLastUpdateAttempt(packageInfo.version);
 	}),
 	// The migrations installing a release applies, so the Update dialog can say
 	// so before it starts. Same guards as updateServer; a target that can't be

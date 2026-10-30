@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+	mkdir,
+	open,
+	readFile,
+	rename,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { dirname, join, posix } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
 	execAsync,
 	execAsyncRemote,
@@ -29,6 +38,14 @@ import {
 	type TraefikOptions,
 } from "../setup/traefik-setup";
 import {
+	getUpdateAttemptOutcome,
+	type IUpdateAttempt,
+	isUpdateErrorCode,
+	UPDATE_ATTEMPT_STATUSES,
+	UPDATE_ERROR_MESSAGES,
+	type UpdateAttemptStatus,
+} from "../utils/dokploy-update-attempt";
+import {
 	DOKPLOY_IMAGE_DIGEST_REGEX,
 	DOKPLOY_RELEASE_TAG_REGEX,
 	type DokployUpdateTarget,
@@ -38,6 +55,14 @@ import {
 export interface IUpdateData {
 	latestVersion: string | null;
 	updateAvailable: boolean;
+	/**
+	 * Set when the check could not be completed (GitHub unreachable, rate
+	 * limited, an unusable release). `updateAvailable: false` without it means
+	 * the server is up to date.
+	 */
+	checkFailed?: boolean;
+	/** Short reason for `checkFailed`. */
+	reason?: string;
 }
 
 export const DEFAULT_UPDATE_DATA: IUpdateData = {
@@ -232,8 +257,16 @@ export const readDokployRollbackPoint = async (
 	}
 };
 
+const checkFailed = (reason: string): IUpdateData => ({
+	...DEFAULT_UPDATE_DATA,
+	checkFailed: true,
+	reason,
+});
+
 /** Returns latest version and whether an update is available by checking
- *  GitHub releases on the DevinoSolutions fork. */
+ *  GitHub releases on the DevinoSolutions fork. When the check can't be
+ *  completed the result says so (`checkFailed`) instead of looking like an
+ *  up-to-date server. */
 export const getUpdateData = async (
 	currentVersion: string,
 ): Promise<IUpdateData> => {
@@ -250,21 +283,21 @@ export const getUpdateData = async (
 		);
 
 		if (!response.ok) {
-			return DEFAULT_UPDATE_DATA;
+			return checkFailed(`GitHub answered ${response.status}`);
 		}
 
 		const release = (await response.json()) as { tag_name: string };
 		const latestVersion = release.tag_name;
 
 		if (!latestVersion) {
-			return DEFAULT_UPDATE_DATA;
+			return checkFailed("The latest release has no tag");
 		}
 
 		const cleanedCurrent = semver.clean(currentVersion);
 		const cleanedLatest = semver.clean(latestVersion);
 
 		if (!cleanedCurrent || !cleanedLatest) {
-			return DEFAULT_UPDATE_DATA;
+			return checkFailed("A version could not be parsed");
 		}
 
 		const updateAvailable = semver.gt(cleanedLatest, cleanedCurrent);
@@ -275,8 +308,257 @@ export const getUpdateData = async (
 		};
 	} catch (error) {
 		console.error("Error fetching update data:", error);
-		return DEFAULT_UPDATE_DATA;
+		return checkFailed("GitHub could not be reached");
 	}
+};
+
+export const getUpdateAttemptPath = () =>
+	join(paths().BASE_PATH, "dokploy-update-last-attempt.json");
+
+/**
+ * Writes the attempt atomically (tmp then rename, owner-only). Never throws:
+ * losing the record must not stop an update; returns whether it was written.
+ * Only the error code is stored; the message is derived from it when read, so
+ * no docker or registry text reaches the file.
+ */
+const writeAttemptFile = async (attempt: IUpdateAttempt, file: string) => {
+	const tmp = `${file}.${randomUUID()}.tmp`;
+	try {
+		const { error: _derived, ...record } = attempt;
+		await mkdir(dirname(file), { recursive: true });
+		await writeFile(tmp, JSON.stringify(record), { mode: 0o600 });
+		await rename(tmp, file);
+		return true;
+	} catch (error) {
+		console.error(
+			"Could not record the Dokploy update attempt:",
+			error instanceof Error ? error.message : String(error),
+		);
+		await rm(tmp, { force: true }).catch(() => undefined);
+		return false;
+	}
+};
+
+// The attempt file is read, judged and rewritten by a claim or a transition.
+// Two requests (or the old and the new container during a swap) must not
+// interleave those steps, so they run one at a time in this process
+// (`attemptQueue`) and, across processes, under an exclusive lock file.
+let attemptQueue: Promise<unknown> = Promise.resolve();
+
+const serialized = <T>(fn: () => Promise<T>): Promise<T> => {
+	const run = attemptQueue.then(fn);
+	attemptQueue = run.catch(() => undefined);
+	return run;
+};
+
+// The lock is held for a file read and write only, so a holder that is older
+// than this died with its container.
+const ATTEMPT_LOCK_STALE_MS = 30_000;
+const ATTEMPT_LOCK_RETRY_MS = 25;
+// 80 tries 25 ms apart: about two seconds, counted rather than timed.
+const ATTEMPT_LOCK_TRIES = 80;
+
+type AttemptLock = { release: () => Promise<void> } | "busy" | "unavailable";
+
+/**
+ * Takes `<file>.lock` with an exclusive create (`wx`). "unavailable" means the
+ * lock could not be used at all (an unwritable directory): the caller goes on
+ * without it, like the record itself. A stale lock is removed; two processes
+ * taking over the same stale lock at the same instant is possible but needs a
+ * crashed holder, and the in-process queue plus the status check still apply.
+ */
+const acquireAttemptLock = async (file: string): Promise<AttemptLock> => {
+	const lockFile = `${file}.lock`;
+	try {
+		await mkdir(dirname(file), { recursive: true });
+	} catch {
+		return "unavailable";
+	}
+	for (let attempt = 0; attempt < ATTEMPT_LOCK_TRIES; attempt++) {
+		try {
+			const handle = await open(lockFile, "wx", 0o600);
+			await handle.close();
+			return {
+				release: () => rm(lockFile, { force: true }).catch(() => undefined),
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				return "unavailable";
+			}
+		}
+		const age = await stat(lockFile).then(
+			(info) => Date.now() - info.mtimeMs,
+			() => 0,
+		);
+		if (age > ATTEMPT_LOCK_STALE_MS) {
+			await rm(lockFile, { force: true }).catch(() => undefined);
+			continue;
+		}
+		await sleep(ATTEMPT_LOCK_RETRY_MS);
+	}
+	return "busy";
+};
+
+/**
+ * Runs `fn` alone on the attempt file. When the lock stays taken, `onBusy`
+ * decides the result; without it `fn` runs anyway (a transition must not be
+ * lost to a slow neighbour).
+ */
+const withAttemptLock = <T>(
+	file: string,
+	fn: () => Promise<T>,
+	onBusy?: () => T,
+) =>
+	serialized(async () => {
+		const lock = await acquireAttemptLock(file);
+		if (lock === "busy" && onBusy) {
+			return onBusy();
+		}
+		try {
+			return await fn();
+		} finally {
+			if (typeof lock === "object") {
+				await lock.release();
+			}
+		}
+	});
+
+export type UpdateAttemptClaim =
+	| {
+			claimed: true;
+			/** False when the record could not be written; ownership is then unknown. */
+			recorded: boolean;
+	  }
+	| { claimed: false; reason: "in_progress" | "busy" };
+
+/**
+ * Starts recording a new attempt, replacing the previous one, but only when
+ * none is in progress (or `force` is set). The check and the write happen
+ * together under the lock, so of two overlapping requests, in this process or
+ * in two containers, exactly one claims. Never throws.
+ */
+export const claimDokployUpdateAttempt = (
+	attempt: IUpdateAttempt,
+	{
+		runningVersion,
+		force = false,
+		now = Date.now(),
+		file = getUpdateAttemptPath(),
+	}: {
+		runningVersion: string;
+		force?: boolean;
+		now?: number;
+		file?: string;
+	},
+) =>
+	withAttemptLock<UpdateAttemptClaim>(
+		file,
+		async () => {
+			const last = await readDokployUpdateAttempt(file);
+			if (
+				!force &&
+				last &&
+				getUpdateAttemptOutcome(last, runningVersion, now) === "in_progress"
+			) {
+				return { claimed: false, reason: "in_progress" };
+			}
+			return { claimed: true, recorded: await writeAttemptFile(attempt, file) };
+		},
+		() => ({ claimed: false, reason: "busy" }),
+	);
+
+/**
+ * Moves the attempt `attemptId` on. The file is read again first and nothing
+ * is written when it holds another attempt (a newer one has claimed it), so a
+ * stale job can't overwrite it. Read and write run under the same lock as a
+ * claim. Never throws; returns whether the attempt is still this job's, which
+ * the caller must check before going on.
+ */
+export const transitionDokployUpdateAttempt = (
+	attemptId: string,
+	patch: Partial<Omit<IUpdateAttempt, "attemptId" | "error">>,
+	file = getUpdateAttemptPath(),
+) =>
+	withAttemptLock(file, async () => {
+		const current = await readDokployUpdateAttempt(file);
+		if (!current || current.attemptId !== attemptId) {
+			return false;
+		}
+		await writeAttemptFile({ ...current, ...patch }, file);
+		return true;
+	});
+
+/** The recorded attempt, or null when there is none or the file is unusable. */
+export const readDokployUpdateAttempt = async (
+	file = getUpdateAttemptPath(),
+): Promise<IUpdateAttempt | null> => {
+	try {
+		const raw = JSON.parse(await readFile(file, "utf8")) as Partial<
+			Record<keyof IUpdateAttempt, unknown>
+		>;
+		const {
+			attemptId,
+			fromVersion,
+			target,
+			pinned,
+			expectedVersion,
+			image,
+			startedAt,
+			finishedAt,
+			status,
+			errorCode,
+		} = raw ?? {};
+		if (
+			typeof attemptId !== "string" ||
+			typeof fromVersion !== "string" ||
+			typeof target !== "string" ||
+			typeof image !== "string" ||
+			typeof startedAt !== "string" ||
+			typeof status !== "string" ||
+			!(UPDATE_ATTEMPT_STATUSES as readonly string[]).includes(status)
+		) {
+			return null;
+		}
+		return {
+			attemptId,
+			fromVersion,
+			target,
+			image,
+			startedAt,
+			status: status as UpdateAttemptStatus,
+			...(typeof pinned === "boolean" && { pinned }),
+			...(typeof expectedVersion === "string" && { expectedVersion }),
+			...(typeof finishedAt === "string" && { finishedAt }),
+			...(isUpdateErrorCode(errorCode) && {
+				errorCode,
+				error: UPDATE_ERROR_MESSAGES[errorCode],
+			}),
+		};
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * The last attempt reconciled with the version this process runs (see
+ * `getUpdateAttemptOutcome`), or null when none is recorded. The stored file
+ * is left as it is.
+ */
+export const getLastUpdateAttempt = async (
+	runningVersion: string,
+	file = getUpdateAttemptPath(),
+	now = Date.now(),
+) => {
+	const attempt = await readDokployUpdateAttempt(file);
+	if (!attempt) {
+		return null;
+	}
+	const outcome = getUpdateAttemptOutcome(attempt, runningVersion, now);
+	return {
+		...attempt,
+		outcome,
+		versionMismatch: outcome === "mismatch",
+	};
 };
 
 export interface IReleaseNotesSection {
