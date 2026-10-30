@@ -99,6 +99,14 @@ export interface IUpdateAttempt {
 	expectedVersion?: string;
 	/** The image the update installs. */
 	image: string;
+	/**
+	 * `sha256:<hex>` of the image the job pulled, written with `updating`. A
+	 * same-tag reinstall is told from the old container by it. Absent when the
+	 * digest could not be read.
+	 */
+	imageDigest?: string;
+	/** Id of the process whose job wrote `updating`; see `runsPulledImage`. */
+	updatingBy?: string;
 	startedAt: string;
 	finishedAt?: string;
 	status: UpdateAttemptStatus;
@@ -115,6 +123,53 @@ export const UPDATE_ATTEMPT_SETTLE_MS = 5 * 60_000;
  * container that runs the job, so the record can stay at `updating` for good.
  */
 export const UPDATE_ATTEMPT_STALE_MS = 15 * 60_000;
+
+/** What the reading process can say about the image it runs from. */
+export interface RunningImage {
+	/** `sha256:<hex>` of the image of the service's running task. */
+	digest?: string;
+	/** Random id of the reading process, shared by every copy of the code in it. */
+	processId?: string;
+}
+
+/**
+ * True when this process runs the image the attempt pulled and is not the
+ * process that began the update (which runs the same digest when the same
+ * image is reinstalled): the swapped-in container. Process ids stand in for
+ * clocks. The proof is any other process on that digest, not a later one: with
+ * the default stop-first service that is the swapped-in or restarted
+ * container, and with start-first the new task reads applied while the old one
+ * still reads in progress. A job that wrote `updating` and then died before `docker service
+ * update` was sent also reads as applied once the old spec restarts; that is
+ * acceptable, the result being a fresh process on the same digest, which is
+ * what a reinstall is. A record without the id keeps the old reading.
+ */
+const runsPulledImage = (attempt: IUpdateAttempt, running?: RunningImage) =>
+	!!attempt.imageDigest &&
+	!!attempt.updatingBy &&
+	running?.digest === attempt.imageDigest &&
+	running.processId !== undefined &&
+	running.processId !== attempt.updatingBy;
+
+/**
+ * Whether judging the attempt needs the running image: a reinstall whose job
+ * pulled an image and wrote `updating` (with its digest and process id). Only
+ * then is the image read.
+ */
+export const needsRunningImage = (
+	attempt: IUpdateAttempt,
+	runningVersion: string,
+) => {
+	const expected = expectedUpdateVersion(attempt);
+	return (
+		attempt.status === "updating" &&
+		!!attempt.imageDigest &&
+		!!attempt.updatingBy &&
+		expected !== undefined &&
+		expected === attempt.fromVersion &&
+		expected === runningVersion
+	);
+};
 
 export type UpdateAttemptOutcome =
 	| "in_progress"
@@ -152,6 +207,7 @@ export const getUpdateAttemptOutcome = (
 	attempt: IUpdateAttempt,
 	runningVersion: string,
 	now = Date.now(),
+	running?: RunningImage,
 ): UpdateAttemptOutcome => {
 	if (attempt.status === "failed") {
 		return "failed";
@@ -160,13 +216,17 @@ export const getUpdateAttemptOutcome = (
 	// A reinstall of the running version leaves the version string unchanged,
 	// so for it the version proves nothing while the job is still `updating`:
 	// the old container would read "applied" before the swap, and stay so if
-	// Swarm rolled back. Only the job's own `submitted` (written once Docker
-	// returned) counts. A reinstall whose job dies in the swap therefore reads
-	// in progress, then interrupted, rather than a false success.
+	// Swarm rolled back. The job's own `submitted` (written once Docker
+	// returned) counts, but with stop-first the job dies in the swap and never
+	// writes it. So the image decides: a process that runs the digest the job
+	// pulled and is not the job's own process is the swapped-in one. Without
+	// that proof a reinstall reads in progress, then interrupted, rather than a
+	// false success.
 	const reinstall = expected !== undefined && expected === attempt.fromVersion;
 	if (
 		(attempt.status === "submitted" ||
-			(attempt.status === "updating" && !reinstall)) &&
+			(attempt.status === "updating" &&
+				(!reinstall || runsPulledImage(attempt, running)))) &&
 		expected === runningVersion
 	) {
 		return "applied";

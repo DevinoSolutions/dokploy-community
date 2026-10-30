@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import packageInfo from "../../package.json";
 
 /**
  * Two update requests that overlap, through the real router and the real
@@ -9,12 +10,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * so the concurrency guard itself is what decides.
  */
 
-const state = vi.hoisted(() => ({ file: "" }));
+const state = vi.hoisted(() => ({
+	file: "",
+	// What the process running the guard reads about its own image.
+	readRunning: undefined as
+		| undefined
+		| (() => Promise<{ digest?: string; processId?: string } | undefined>),
+}));
 
 const mocks = vi.hoisted(() => ({
 	getDockerResourceType: vi.fn(),
 	getUpdateData: vi.fn(),
 	readDokployRollbackPoint: vi.fn(),
+	readPulledImageDigest: vi.fn(),
 	recordDokployRollbackPoint: vi.fn(),
 	runBackgroundJob: vi.fn(),
 	spawnAsync: vi.fn(),
@@ -30,21 +38,29 @@ vi.mock("@dokploy/server", async () => {
 	return {
 		IS_CLOUD: false,
 		isRootOrganization: async () => true,
+		UPDATE_PROCESS_ID: real.UPDATE_PROCESS_ID,
 		getDockerResourceType: mocks.getDockerResourceType,
 		getUpdateData: mocks.getUpdateData,
 		readDokployRollbackPoint: mocks.readDokployRollbackPoint,
+		readPulledImageDigest: mocks.readPulledImageDigest,
 		recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
 		runBackgroundJob: mocks.runBackgroundJob,
 		spawnAsync: mocks.spawnAsync,
 		// The real guard, pointed at a temp file.
 		getLastUpdateAttempt: (...args: [string]) =>
-			real.getLastUpdateAttempt(args[0], state.file),
+			real.getLastUpdateAttempt(
+				args[0],
+				state.file,
+				undefined,
+				state.readRunning,
+			),
 		claimDokployUpdateAttempt: (
 			...args: Parameters<typeof real.claimDokployUpdateAttempt>
 		) =>
 			real.claimDokployUpdateAttempt(args[0], {
 				...args[1],
 				file: state.file,
+				readRunning: state.readRunning,
 			}),
 		transitionDokployUpdateAttempt: (
 			...args: Parameters<typeof real.transitionDokployUpdateAttempt>
@@ -70,7 +86,7 @@ vi.mock("@/server/utils/backup", () => ({
 }));
 
 const { settingsRouter } = await import("@/server/api/routers/settings");
-const { readDokployUpdateAttempt } = await import(
+const { readDokployUpdateAttempt, UPDATE_PROCESS_ID } = await import(
 	"@dokploy/server/services/settings"
 );
 
@@ -102,6 +118,7 @@ const serviceUpdates = () =>
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "update-concurrency-"));
 	state.file = join(dir, "dokploy-update-last-attempt.json");
+	state.readRunning = undefined;
 	jobs = [];
 	failures = [];
 	spawns = [];
@@ -124,6 +141,8 @@ beforeEach(() => {
 			return Buffer.from("");
 		},
 	);
+	mocks.readPulledImageDigest.mockReset();
+	mocks.readPulledImageDigest.mockResolvedValue(undefined);
 	mocks.recordDokployRollbackPoint.mockReset();
 	mocks.recordDokployRollbackPoint.mockResolvedValue(undefined);
 	mocks.readDokployRollbackPoint.mockResolvedValue(null);
@@ -275,8 +294,68 @@ describe("a pull that outlasts the 15 minute cutoff", () => {
 		});
 		expect(failures).toEqual([]);
 		expect(error).toHaveBeenCalledWith(
-			expect.stringContaining(`attempt ${first?.attemptId} was replaced`),
+			expect.stringContaining(`attempt ${first?.attemptId} is no longer`),
 		);
 		error.mockRestore();
+	});
+});
+
+describe("a reinstall of the running version", () => {
+	// With stop-first the job dies in the swap and never writes `submitted`,
+	// so the swapped-in container has to settle the record by its image.
+	const DIGEST = `sha256:${"cd34".repeat(16)}`;
+
+	it("blocks a new update until the swapped-in container runs the pulled image", async () => {
+		const swap = deferred();
+		mocks.readPulledImageDigest.mockResolvedValue(DIGEST);
+		mocks.spawnAsync.mockImplementation(
+			async (command: string, args: string[]) => {
+				spawns.push([command, ...args]);
+				if (args[0] === "service") {
+					// The old container is stopped here and the job never returns.
+					await swap.promise;
+				}
+				return Buffer.from("");
+			},
+		);
+		const reinstall = () =>
+			caller.updateServer({ target: packageInfo.version });
+
+		await expect(reinstall()).resolves.toBe(true);
+		await vi.waitFor(() => expect(serviceUpdates()).toHaveLength(1));
+		expect(await readDokployUpdateAttempt(state.file)).toMatchObject({
+			status: "updating",
+			imageDigest: DIGEST,
+			updatingBy: UPDATE_PROCESS_ID,
+		});
+
+		// The old container still runs the image: same digest, same process.
+		state.readRunning = async () => ({
+			digest: DIGEST,
+			processId: UPDATE_PROCESS_ID,
+		});
+		await expect(reinstall()).rejects.toMatchObject({ code: "CONFLICT" });
+
+		// A different image is running: not this attempt's.
+		state.readRunning = async () => ({
+			digest: `sha256:${"ef56".repeat(16)}`,
+			processId: "swapped-in",
+		});
+		await expect(reinstall()).rejects.toMatchObject({ code: "CONFLICT" });
+
+		// The digest can't be read: as before, the attempt stays in progress.
+		state.readRunning = async () => undefined;
+		await expect(reinstall()).rejects.toMatchObject({ code: "CONFLICT" });
+
+		// The swapped-in container: the pulled image, another process.
+		state.readRunning = async () => ({
+			digest: DIGEST,
+			processId: "swapped-in",
+		});
+		await expect(reinstall()).resolves.toBe(true);
+
+		swap.resolve();
+		await Promise.all(jobs);
+		expect(failures).toEqual([]);
 	});
 });
