@@ -122,8 +122,8 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 ## What's new in v0.30.8-community.38
 
-- Update Server now reports a failed check or an already-current server instead of silently doing nothing, and every attempt is recorded and shown in the Web Server update dialog.
-- Reinstalling the tag you already run is judged by the running image, so it no longer blocks updates for 15 minutes.
+- Update Server now reports a failed check or an already-current server instead of silently doing nothing, and the last update attempt is recorded and shown in the Web Server update dialog.
+- Reinstalling the tag you already run is reported as applied once the server runs the image the update pulled.
 - The deployment log now warns, by name only and never by value, when variables were left out of a compose `.env`.
 - No new database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
