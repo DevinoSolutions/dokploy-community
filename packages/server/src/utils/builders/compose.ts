@@ -664,13 +664,18 @@ export const getBuildComposeCommand = async (
 		await removeStagedFiles(compose.serverId, staged);
 		throw error;
 	}
-	// A stack keeps its docker-environment line; names the `.env` leaves out are
-	// told in their own words, for a compose as well (T-10377).
-	const droppedDotenvLine = getDroppedDotenvLogLine(compose);
+	// Stacks keep the docker-environment notice for names the .env did not
+	// already report; every compose with Create env file also gets the .env
+	// notice, unless the build server logged it (T-10377).
+	const droppedDotenvNames = getDroppedDotenvNames(compose);
+	const stackNames = getIgnoredEnvNames(compose).filter(
+		(name) => !droppedDotenvNames.includes(name),
+	);
+	const droppedDotenvLine = remoteBuild
+		? ""
+		: getDroppedDotenvNotice(droppedDotenvNames);
 	const ignoredEnvNotice =
-		(compose.composeType === "stack"
-			? getIgnoredEnvNotice(getIgnoredEnvNames(compose))
-			: "") +
+		getIgnoredEnvNotice(stackNames) +
 		(droppedDotenvLine ? ` echo ${quote([droppedDotenvLine])};` : "");
 	const rollingLogLine = rolling.script
 		? `\nRolling replace: ${rolling.rolled.join(", ")} 🔁`
@@ -1352,4 +1357,62 @@ export const withCleanEnvironment = (
 		.join(" && ");
 
 export const getCleanEnvPrefix = (stackEnvFile?: string) =>
-	`env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;
+	`env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;/**
+ * Names of the variables the `.env` writer sees (the Environment plus the ones
+ * Dokploy adds), or none when they cannot be prepared: these feed log lines,
+ * and a log line must never fail a deploy. Dokploy's own project name is not
+ * the user's.
+ */
+const getEnvFileNames = (compose: ComposeNested) => {
+	try {
+		return prepareEnvironmentVariables(
+			getComposeEnvFileSource(compose),
+			compose.environment.project.env,
+			compose.environment.env,
+		)
+			.map(getPairName)
+			.filter((name) => name !== "COMPOSE_PROJECT_NAME");
+	} catch {
+		return [];
+	}
+};
+
+/**
+ * Names in the Environment that a stack keeps out of the environment of its
+ * docker process because docker would read them as its own settings. Sorted,
+ * empty for a compose. Only names, never values.
+ */
+export const getIgnoredEnvNames = (compose: ComposeNested) => {
+	if (compose.composeType !== "stack") return [];
+	return [
+		...new Set(
+			getEnvFileNames(compose).filter(
+				(name) => ENV_VARIABLE_NAME.test(name) && !isStackEnvName(name),
+			),
+		),
+	].sort();
+};
+
+/**
+ * Names in the Environment that `getCreateEnvFileCommand` leaves out of the
+ * `.env` because compose or the shell would read them as their own settings.
+ * Sorted, empty without `createEnvFile`. Only names, never values.
+ */
+export const getDroppedDotenvNames = (compose: ComposeNested) => {
+	if (!compose.createEnvFile) return [];
+	return [
+		...new Set(getEnvFileNames(compose).filter((n) => !isComposeDotenvName(n))),
+	].sort();
+};
+
+/** The deploy log text for the names `getCreateEnvFileCommand` left out, or "". */
+export const getDroppedDotenvLogLine = (compose: ComposeNested) =>
+	getDroppedDotenvNotice(getDroppedDotenvNames(compose));
+
+/** The deploy log line for `getIgnoredEnvNames`, or "" when there are none. */
+const getIgnoredEnvNotice = (names: string[]) => {
+	if (names.length === 0) return "";
+	return ` echo ${quote([`Warning: ⚠️ Not passed to docker, because docker and compose read them as their own settings: ${formatNameList(names)}`])};`;
+};
+
+

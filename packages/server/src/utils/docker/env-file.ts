@@ -259,23 +259,42 @@ export const isComposeDotenvName = (name: string) => {
 	return isStackEnvName(name);
 };
 
-const MAX_LISTED_DROPPED_NAMES = 20;
+const MAX_LISTED_NAMES = 20;
+
+/** Names for a log line: the first 20, then "and N more". */
+export const formatNameList = (names: string[]) => {
+	const listed = names.slice(0, MAX_LISTED_NAMES).join(", ");
+	return names.length > MAX_LISTED_NAMES
+		? `${listed} and ${names.length - MAX_LISTED_NAMES} more`
+		: listed;
+};
 
 /**
  * The deploy log line for the variables `isComposeDotenvName` kept out of the
  * `.env` Dokploy writes, or "" when there are none. Without it a compose that
  * reads `${COMPOSE_ENV_FILE:-.env.compose}` quietly gets the default (T-10377).
- * Names only, never values.
+ * Names only, never values. `Warning: ⚠️` is what the log view styles.
  */
 export const getDroppedDotenvNotice = (names: string[]) => {
-	if (names.length === 0) return "";
-	const listed = names.slice(0, MAX_LISTED_DROPPED_NAMES).join(", ");
-	const more =
-		names.length > MAX_LISTED_DROPPED_NAMES
-			? ` and ${names.length - MAX_LISTED_DROPPED_NAMES} more`
-			: "";
-	const allowed = [...COMPOSE_DOTENV_NAMES].sort().join(", ");
-	return `${listed}${more} ${names.length === 1 ? "was" : "were"} left out of .env: COMPOSE_* names other than ${allowed} steer the compose CLI, so Dokploy does not write them. Rename the variable to use it in the compose file.`;
+	const clauses = [
+		names.filter((name) => name.startsWith("COMPOSE_")),
+		names.filter((name) => !name.startsWith("COMPOSE_")),
+	].flatMap((group, index) => {
+		if (group.length === 0) return [];
+		const subject = `${formatNameList(group)} ${group.length === 1 ? "was" : "were"} left out of .env`;
+		// Dokploy's own COMPOSE_PREFIX is not one a user sets.
+		const allowed = [...COMPOSE_DOTENV_NAMES]
+			.filter((name) => name !== "COMPOSE_PREFIX")
+			.sort()
+			.join(", ");
+		return [
+			index === 0
+				? `${subject}: COMPOSE_* names other than ${allowed} steer the compose CLI, so Dokploy does not write them.`
+				: `${subject}: docker, compose or the shell read these names as their own settings, so Dokploy does not write them.`,
+		];
+	});
+	if (clauses.length === 0) return "";
+	return `Warning: ⚠️ ${clauses.join(" ")} Rename the variable to use it in the compose file.`;
 };
 
 /** One `KEY='value'` per line, in the order given. Names are the caller's to vet. */

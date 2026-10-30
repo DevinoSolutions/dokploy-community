@@ -77,6 +77,7 @@ import {
 	createDeploymentLogWriter,
 	prepareComposeBuildServerDeploy as prepareWithPinnedInputs,
 } from "@dokploy/server/services/compose-build-server";
+import { getBuildComposeCommand } from "@dokploy/server/utils/builders/compose";
 import { ExecError } from "@dokploy/server/utils/process/ExecError";
 
 // The deploy path reads the serving host's commit right after the fetch and
