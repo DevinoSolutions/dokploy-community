@@ -171,6 +171,18 @@ describe("variables left out of the .env (T-10377)", () => {
 		expect(command).not.toContain("settings: COMPOSE_FILE");
 	});
 
+	it("does not report what Dokploy adds to a stack's Environment", async () => {
+		const command = await getBuildComposeCommand({
+			...baseCompose,
+			composeType: "stack",
+			randomize: true,
+			suffix: "abc",
+			createEnvFile: false,
+			env: "A=1",
+		});
+		expect(command).not.toContain("Not passed to docker");
+	});
+
 	it("adds no line when nothing is dropped or the .env is not written", async () => {
 		const kept = await getBuildComposeCommand({
 			...baseCompose,
