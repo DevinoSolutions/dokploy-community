@@ -139,10 +139,11 @@ export interface RunningImage {
  * clocks. The proof is any other process on that digest, not a later one: with
  * the default stop-first service that is the swapped-in or restarted
  * container, and with start-first the new task reads applied while the old one
- * still reads in progress. A job that wrote `updating` and then died before `docker service
- * update` was sent also reads as applied once the old spec restarts; that is
- * acceptable, the result being a fresh process on the same digest, which is
- * what a reinstall is. A record without the id keeps the old reading.
+ * still reads in progress. A job that wrote `updating` and then died before
+ * `docker service update` was sent also reads as applied once the old spec
+ * restarts; that is acceptable, the result being a fresh process on the same
+ * digest, which is what a reinstall is. A record without the id keeps the old
+ * reading.
  */
 const runsPulledImage = (attempt: IUpdateAttempt, running?: RunningImage) =>
 	!!attempt.imageDigest &&
