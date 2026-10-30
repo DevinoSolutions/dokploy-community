@@ -195,7 +195,7 @@ describe("stack env: docker and compose settings", () => {
 		).toBe("KEEP='1'\n");
 	});
 
-	it("lists the names it leaves out, sorted, for a stack and a compose with a .env only", () => {
+	it("lists the names a stack leaves out of its docker environment, sorted, and none for a compose", () => {
 		const env = "DOCKER_HOST=a\nCOMPOSE_FILE=b\nOK=1";
 		expect(getIgnoredEnvNames({ ...baseStack, env })).toEqual([
 			"COMPOSE_FILE",
@@ -208,7 +208,7 @@ describe("stack env: docker and compose settings", () => {
 				createEnvFile: true,
 				env,
 			}),
-		).toEqual(["COMPOSE_FILE"]);
+		).toEqual([]);
 		expect(
 			getIgnoredEnvNames({
 				...baseStack,
@@ -439,7 +439,7 @@ describe("compose .env: COMPOSE_* settings", () => {
 			{ ...dockerCompose, env: "COMPOSE_FILE=/x\nCOMPOSE_PROFILES=web\nA=1" },
 			{ deploymentId: "dep-1" },
 		);
-		expect(command).toContain("read them as their own settings: COMPOSE_FILE'");
+		expect(command).toContain("COMPOSE_FILE was left out of .env");
 	});
 
 	it("writes no .env, and warns of nothing, with Create env file off", async () => {
@@ -452,6 +452,7 @@ describe("compose .env: COMPOSE_* settings", () => {
 			{ deploymentId: "dep-1" },
 		);
 		expect(command).not.toContain("Not passed to docker");
+		expect(command).not.toContain("left out of .env");
 		// Only the compose file is staged: Dokploy writes no .env.
 		expect(
 			mocks.writeFileRemote.mock.calls.filter((call) =>

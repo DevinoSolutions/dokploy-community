@@ -77,6 +77,7 @@ import {
 	createDeploymentLogWriter,
 	prepareComposeBuildServerDeploy as prepareWithPinnedInputs,
 } from "@dokploy/server/services/compose-build-server";
+import { getBuildComposeCommand } from "@dokploy/server/utils/builders/compose";
 import { ExecError } from "@dokploy/server/utils/process/ExecError";
 
 // The deploy path reads the serving host's commit right after the fetch and
@@ -377,6 +378,64 @@ describe("prepareComposeBuildServerDeploy", () => {
 		);
 		expect(stagedContent).toBe("SECRET=hunter2");
 		expect(commands.some((c) => c.includes("/srv/data"))).toBe(false);
+	});
+
+	describe("COMPOSE_* variables left out of the .env (T-10377)", () => {
+		// What the serving host's deployment log received, decoded.
+		const loggedText = () =>
+			callsOn("serve-1")
+				.map((call) => call[1] as string)
+				.filter((command) => command.includes("base64 -d >>"))
+				.map((command) =>
+					Buffer.from(command.match(/echo "([^"]+)"/)![1]!, "base64").toString(
+						"utf8",
+					),
+				)
+				.join("");
+		const build = (env: string, createEnvFile = true) => {
+			mocks.execAsyncRemote.mockImplementation(
+				async (_serverId: string, command: string) => ({
+					stdout: command.includes("config --format json")
+						? configJson({ web: { build: { context: "." } } })
+						: "",
+					stderr: "",
+				}),
+			);
+			return prepareComposeBuildServerDeploy({
+				entity: { ...compose, serverId: "serve-1", createEnvFile, env },
+				deployment: { logPath: "/tmp/log", deploymentId: "dep1" },
+				runStep: vi.fn().mockResolvedValue(undefined),
+			});
+		};
+
+		it("names the dropped variable in the deployment log, never its value", async () => {
+			await build("COMPOSE_ENV_FILE=hunter2\nCOMPOSE_PROFILES=web\nA=1");
+			const text = loggedText();
+			expect(text).toContain("COMPOSE_ENV_FILE was left out of .env");
+			expect(text).not.toContain("COMPOSE_PROFILES was");
+			expect(text).not.toContain("hunter2");
+		});
+
+		it("writes no such line when nothing is dropped", async () => {
+			await build("COMPOSE_PROFILES=web\nA=1");
+			expect(loggedText()).not.toContain("left out of .env");
+		});
+
+		it("writes no such line with Create env file off", async () => {
+			await build("COMPOSE_ENV_FILE=x", false);
+			expect(loggedText()).not.toContain("left out of .env");
+		});
+
+		it("is logged once per deploy: the serving host's script leaves it to the build server", async () => {
+			const env = "COMPOSE_ENV_FILE=x";
+			const remoteBuild = await build(env);
+			expect(loggedText().match(/left out of .env/g)).toHaveLength(1);
+			const script = await getBuildComposeCommand(
+				{ ...compose, serverId: "serve-1", createEnvFile: true, env },
+				{ deploymentId: "dep1", remoteBuild },
+			);
+			expect(script).not.toContain("left out of .env");
+		});
 	});
 
 	describe("reuseClone (rebuild)", () => {
