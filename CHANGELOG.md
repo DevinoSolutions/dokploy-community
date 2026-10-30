@@ -2,6 +2,16 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.38
+
+Upgrade notes: no new database migrations since v0.30.8-community.37, so an image-only rollback to it keeps working. Nothing to configure. This release includes everything in v0.30.8-community.37.
+
+**Update Server failures and no-op updates are visible, and each attempt is recorded** (T-10526). Before, calling Update Server without a release tag could return success while nothing happened, for example when the check for the latest release failed or the server was already on it. Now a failed check reports an error asking you to try again or pass a release tag, and "already on the latest release" is reported as such. The image is pulled on both the pinned and unpinned paths before the swap, and a second update is refused while one is still in progress. The Web Server update dialog shows the last attempt (versions, result, how long ago, a short reason for a failure) and whether it was applied, interrupted or ended on a different version than expected. Raw registry and docker output is not stored in the record. No migration.
+
+**Reinstalling the same tag is judged by the running image** (T-11067). Before, reinstalling the tag you already run was reported as not applied and blocked further updates for 15 minutes. It now counts as applied once the running image matches the one that was pulled. Concurrent update attempts are also guarded more strictly, and an attempt that cannot be recorded safely stops before the swap. No migration.
+
+**Deployment log names `.env` variables left out of a compose `.env`** (T-10377). Dokploy leaves some variables out of the `.env` it writes for a compose, such as certain COMPOSE_* names and names docker or compose read as their own settings (HOME, PATH, GIT_*). It did this silently. The deployment log now has one warning line naming the left-out variables, never their values, with the reason and the fix (rename the variable). The generated `.env` itself is unchanged, and the check never fails a deploy. No migration.
+
 ### New in v0.30.8-community.37
 
 Upgrade notes: no new database migrations since v0.30.8-community.36, so an image-only rollback to it keeps working; an instance on v0.30.8-community.35 or older follows the notes of the releases in between. Nothing to configure. This release includes everything in v0.30.8-community.36.
