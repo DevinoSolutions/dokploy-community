@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
 	getUpdateData: vi.fn(),
 	getUpdateMigrationDelta: vi.fn(),
 	readDokployRollbackPoint: vi.fn(),
+	readPulledImageDigest: vi.fn(),
 	recordDokployRollbackPoint: vi.fn(),
 	runBackgroundJob: vi.fn(),
 	spawnAsync: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock("@dokploy/server", () => ({
 	getUpdateData: mocks.getUpdateData,
 	getUpdateMigrationDelta: mocks.getUpdateMigrationDelta,
 	readDokployRollbackPoint: mocks.readDokployRollbackPoint,
+	readPulledImageDigest: mocks.readPulledImageDigest,
 	recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
 	runBackgroundJob: mocks.runBackgroundJob,
 	spawnAsync: mocks.spawnAsync,
@@ -118,6 +120,8 @@ beforeEach(() => {
 	mocks.recordDokployRollbackPoint.mockReset();
 	mocks.recordDokployRollbackPoint.mockResolvedValue(undefined);
 	mocks.readDokployRollbackPoint.mockResolvedValue(null);
+	mocks.readPulledImageDigest.mockReset();
+	mocks.readPulledImageDigest.mockResolvedValue(undefined);
 	mocks.claimDokployUpdateAttempt.mockReset();
 	mocks.claimDokployUpdateAttempt.mockResolvedValue({
 		claimed: true,
@@ -171,6 +175,7 @@ describe("settings.updateServer without a target", () => {
 			action: "update",
 			resourceType: "settings",
 			resourceName: "dokploy-version",
+			metadata: { force: false },
 		});
 	});
 
@@ -417,6 +422,54 @@ describe("settings.updateServer without a target", () => {
 		);
 	});
 
+	it("records the override in the audit metadata", async () => {
+		mocks.getLastUpdateAttempt.mockResolvedValue({ outcome: "in_progress" });
+
+		await caller.updateServer({ force: true });
+		await caller.updateServer({ force: true, target: "v0.30.9-community.1" });
+
+		expect(mocks.audit.mock.calls.map(([, event]) => event)).toEqual([
+			expect.objectContaining({ metadata: { force: true } }),
+			expect.objectContaining({
+				metadata: {
+					target: "v0.30.9-community.1",
+					rollback: false,
+					force: true,
+				},
+			}),
+		]);
+	});
+
+	it("records the pulled image digest with the move to updating", async () => {
+		mocks.readPulledImageDigest.mockResolvedValue(DIGEST);
+
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		const image = `${REPO}:v0.30.9-community.1`;
+		expect(mocks.readPulledImageDigest).toHaveBeenCalledWith(image);
+		expect(mocks.transitionDokployUpdateAttempt).toHaveBeenCalledWith(
+			expect.any(String),
+			{ status: "updating", imageDigest: DIGEST },
+		);
+		const [pull] = mocks.spawnAsync.mock.invocationCallOrder.slice(1);
+		const [read] = mocks.readPulledImageDigest.mock.invocationCallOrder;
+		const [updating] = mocks.transitionDokployUpdateAttempt.mock
+			.invocationCallOrder as [number];
+		expect(pull).toBeLessThan(read!);
+		expect(read).toBeLessThan(updating);
+	});
+
+	it("moves to updating without a digest when it can't be read", async () => {
+		await caller.updateServer();
+		await Promise.all(jobs);
+
+		expect(mocks.transitionDokployUpdateAttempt).toHaveBeenCalledWith(
+			expect.any(String),
+			{ status: "updating" },
+		);
+	});
+
 	it("starts over an in-progress attempt only when forced", async () => {
 		mocks.getLastUpdateAttempt.mockResolvedValue({ outcome: "in_progress" });
 
@@ -553,7 +606,7 @@ describe("settings.updateServer with a pinned target", () => {
 			action: "update",
 			resourceType: "settings",
 			resourceName: "dokploy-version",
-			metadata: { target, rollback: false },
+			metadata: { target, rollback: false, force: false },
 		});
 	});
 
@@ -781,7 +834,7 @@ describe("settings.updateServer rollback", () => {
 		);
 		expect(mocks.audit.mock.calls[0]![1]).toMatchObject({
 			resourceName: "dokploy-version",
-			metadata: { target: DIGEST, rollback: true },
+			metadata: { target: DIGEST, rollback: true, force: false },
 		});
 	});
 

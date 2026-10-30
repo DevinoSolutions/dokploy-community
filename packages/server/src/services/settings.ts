@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync } from "node:fs";
+import { readdirSync, type Stats } from "node:fs";
 import {
 	mkdir,
 	open,
@@ -41,12 +41,15 @@ import {
 	getUpdateAttemptOutcome,
 	type IUpdateAttempt,
 	isUpdateErrorCode,
+	needsRunningImage,
+	type RunningImage,
 	UPDATE_ATTEMPT_STATUSES,
 	UPDATE_ERROR_MESSAGES,
 	type UpdateAttemptStatus,
 } from "../utils/dokploy-update-attempt";
 import {
 	DOKPLOY_IMAGE_DIGEST_REGEX,
+	DOKPLOY_IMAGE_REPO,
 	DOKPLOY_RELEASE_TAG_REGEX,
 	type DokployUpdateTarget,
 	isBelowDokployPinFloor,
@@ -315,6 +318,110 @@ export const getUpdateData = async (
 export const getUpdateAttemptPath = () =>
 	join(paths().BASE_PATH, "dokploy-update-last-attempt.json");
 
+const IMAGE_READ_TIMEOUT_MS = 10_000;
+
+/**
+ * The `sha256:<hex>` the pulled `image` has in the fork repo, or undefined when
+ * it can't be read (or is ambiguous). Never throws: without the digest a
+ * same-tag reinstall is simply not proven by it.
+ */
+export const readPulledImageDigest = async (image: string) => {
+	try {
+		const stdout = await spawnAsync(
+			"docker",
+			[
+				"image",
+				"inspect",
+				"--format",
+				"{{range .RepoDigests}}{{println .}}{{end}}",
+				image,
+			],
+			undefined,
+			{ timeout: IMAGE_READ_TIMEOUT_MS },
+		);
+		const prefix = `${DOKPLOY_IMAGE_REPO}@`;
+		const digests = new Set(
+			stdout
+				.toString()
+				.split("\n")
+				.map((line) => line.trim())
+				.filter((line) => line.startsWith(prefix))
+				.map((line) => line.slice(prefix.length)),
+		);
+		const [digest] = [...digests];
+		return digests.size === 1 &&
+			digest &&
+			DOKPLOY_IMAGE_DIGEST_REGEX.test(digest)
+			? digest
+			: undefined;
+	} catch {
+		return undefined;
+	}
+};
+
+/**
+ * The image digest the `dokploy` service's running task has, and when this
+ * process started. Read from `docker service ps`, so it is the swapped-in
+ * task's digest when the new container asks. The digest is left out unless
+ * the running tasks agree on exactly one. Never throws.
+ */
+export const readRunningDokployImage = async (): Promise<RunningImage> => {
+	const since = Date.now() - process.uptime() * 1000;
+	try {
+		const stdout = await spawnAsync(
+			"docker",
+			[
+				"service",
+				"ps",
+				"dokploy",
+				"--no-trunc",
+				"--filter",
+				"desired-state=running",
+				"--format",
+				"{{.Image}} {{.CurrentState}}",
+			],
+			undefined,
+			{ timeout: IMAGE_READ_TIMEOUT_MS },
+		);
+		const digests = new Set<string>();
+		for (const line of stdout.toString().split("\n")) {
+			const [image = "", ...state] = line.trim().split(" ");
+			if (state[0] !== "Running") {
+				continue;
+			}
+			digests.add(image.split("@")[1] ?? "");
+		}
+		const [digest] = [...digests];
+		return {
+			since,
+			...(digests.size === 1 &&
+				digest &&
+				DOKPLOY_IMAGE_DIGEST_REGEX.test(digest) && { digest }),
+		};
+	} catch {
+		return { since };
+	}
+};
+
+/**
+ * `getUpdateAttemptOutcome`, with the running image read first when (and only
+ * when) the attempt is a reinstall that it alone can settle.
+ */
+const judgeUpdateAttempt = async (
+	attempt: IUpdateAttempt,
+	runningVersion: string,
+	now: number,
+	readRunning: () => Promise<RunningImage | undefined>,
+) =>
+	getUpdateAttemptOutcome(
+		attempt,
+		runningVersion,
+		now,
+		needsRunningImage(attempt, runningVersion)
+			? await readRunning().catch(() => undefined)
+			: undefined,
+	);
+
 /**
  * Writes the attempt atomically (tmp then rename, owner-only). Never throws:
  * losing the record must not stop an update; returns whether it was written.
@@ -354,64 +461,125 @@ const serialized = <T>(fn: () => Promise<T>): Promise<T> => {
 // The lock is held for a file read and write only, so a holder that is older
 // than this died with its container.
 const ATTEMPT_LOCK_STALE_MS = 30_000;
-const ATTEMPT_LOCK_RETRY_MS = 25;
-// 80 tries 25 ms apart: about two seconds, counted rather than timed.
-const ATTEMPT_LOCK_TRIES = 80;
+
+interface AttemptLockWait {
+	tries: number;
+	retryMs: number;
+}
+
+// A claim waits about two seconds (80 tries 25 ms apart, counted rather than
+// timed) and then reports busy. A transition may not go on without the lock,
+// so it outwaits a holder that would be taken over as stale.
+const CLAIM_LOCK_WAIT: AttemptLockWait = { tries: 80, retryMs: 25 };
+const TRANSITION_LOCK_WAIT: AttemptLockWait = {
+	tries: Math.ceil((ATTEMPT_LOCK_STALE_MS + 5_000) / 25),
+	retryMs: 25,
+};
 
 type AttemptLock = { release: () => Promise<void> } | "busy" | "unavailable";
 
 /**
+ * Removes the lock that `seen` showed as stale, and returns whether it did.
+ * Several processes can see the same stale lock; the right to remove it is an
+ * exclusive marker named for that very lock (inode and mtime). The holder of
+ * the marker looks at the lock again and removes it only if it is still that
+ * lock, so a lock another process took in the meantime (a new inode, a new
+ * mtime) is never removed. A marker left by a crashed taker is stale itself
+ * after the same time and is cleared the same way (a crash during those few
+ * milliseconds plus two takers at once is the one case left).
+ */
+const removeStaleLock = async (lockFile: string, seen: Stats) => {
+	const marker = `${lockFile}.takeover-${seen.ino}-${seen.mtimeMs}`;
+	try {
+		await (await open(marker, "wx", 0o600)).close();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+			const age = await stat(marker).then(
+				(info) => Date.now() - info.mtimeMs,
+				() => 0,
+			);
+			if (age > ATTEMPT_LOCK_STALE_MS) {
+				await rm(marker, { force: true }).catch(() => undefined);
+			}
+		}
+		return false;
+	}
+	try {
+		const now = await stat(lockFile).catch(() => null);
+		if (now && now.ino === seen.ino && now.mtimeMs === seen.mtimeMs) {
+			await rm(lockFile, { force: true });
+			return true;
+		}
+		return false;
+	} catch {
+		return false;
+	} finally {
+		await rm(marker, { force: true }).catch(() => undefined);
+	}
+};
+
+/**
  * Takes `<file>.lock` with an exclusive create (`wx`). "unavailable" means the
  * lock could not be used at all (an unwritable directory): the caller goes on
- * without it, like the record itself. A stale lock is removed; two processes
- * taking over the same stale lock at the same instant is possible but needs a
- * crashed holder, and the in-process queue plus the status check still apply.
+ * without it, like the record itself. A lock older than 30 s is taken over
+ * through `removeStaleLock`. The lock holds its owner's token, and only that
+ * owner removes it, so a holder that was taken over as stale (it was slow, not
+ * dead) does not delete the lock that replaced its own.
  */
-const acquireAttemptLock = async (file: string): Promise<AttemptLock> => {
+const acquireAttemptLock = async (
+	file: string,
+	{ tries, retryMs }: AttemptLockWait,
+): Promise<AttemptLock> => {
 	const lockFile = `${file}.lock`;
 	try {
 		await mkdir(dirname(file), { recursive: true });
 	} catch {
 		return "unavailable";
 	}
-	for (let attempt = 0; attempt < ATTEMPT_LOCK_TRIES; attempt++) {
+	const token = randomUUID();
+	for (let attempt = 0; attempt < tries; attempt++) {
 		try {
 			const handle = await open(lockFile, "wx", 0o600);
-			await handle.close();
+			await handle.writeFile(token).finally(() => handle.close());
 			return {
-				release: () => rm(lockFile, { force: true }).catch(() => undefined),
+				release: async () => {
+					const held = await readFile(lockFile, "utf8").catch(() => null);
+					if (held === token) {
+						await rm(lockFile, { force: true }).catch(() => undefined);
+					}
+				},
 			};
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
 				return "unavailable";
 			}
 		}
-		const age = await stat(lockFile).then(
-			(info) => Date.now() - info.mtimeMs,
-			() => 0,
-		);
-		if (age > ATTEMPT_LOCK_STALE_MS) {
-			await rm(lockFile, { force: true }).catch(() => undefined);
+		const seen = await stat(lockFile).catch(() => null);
+		if (
+			seen &&
+			Date.now() - seen.mtimeMs > ATTEMPT_LOCK_STALE_MS &&
+			(await removeStaleLock(lockFile, seen))
+		) {
 			continue;
 		}
-		await sleep(ATTEMPT_LOCK_RETRY_MS);
+		await sleep(retryMs);
 	}
 	return "busy";
 };
 
 /**
- * Runs `fn` alone on the attempt file. When the lock stays taken, `onBusy`
- * decides the result; without it `fn` runs anyway (a transition must not be
- * lost to a slow neighbour).
+ * Runs `fn` alone on the attempt file. `fn` never runs while the lock is
+ * taken by someone else: when it stays taken, `onBusy` decides the result.
  */
 const withAttemptLock = <T>(
 	file: string,
 	fn: () => Promise<T>,
-	onBusy?: () => T,
+	onBusy: () => T,
+	wait: AttemptLockWait,
 ) =>
 	serialized(async () => {
-		const lock = await acquireAttemptLock(file);
-		if (lock === "busy" && onBusy) {
+		const lock = await acquireAttemptLock(file, wait);
+		if (lock === "busy") {
 			return onBusy();
 		}
 		try {
@@ -444,11 +612,16 @@ export const claimDokployUpdateAttempt = (
 		force = false,
 		now = Date.now(),
 		file = getUpdateAttemptPath(),
+		readRunning = readRunningDokployImage,
+		lockWait,
 	}: {
 		runningVersion: string;
 		force?: boolean;
 		now?: number;
 		file?: string;
+		/** Reads the image this process runs from; see `judgeUpdateAttempt`. */
+		readRunning?: () => Promise<RunningImage | undefined>;
+		lockWait?: Partial<AttemptLockWait>;
 	},
 ) =>
 	withAttemptLock<UpdateAttemptClaim>(
@@ -458,35 +631,50 @@ export const claimDokployUpdateAttempt = (
 			if (
 				!force &&
 				last &&
-				getUpdateAttemptOutcome(last, runningVersion, now) === "in_progress"
+				(await judgeUpdateAttempt(last, runningVersion, now, readRunning)) ===
+					"in_progress"
 			) {
 				return { claimed: false, reason: "in_progress" };
 			}
 			return { claimed: true, recorded: await writeAttemptFile(attempt, file) };
 		},
 		() => ({ claimed: false, reason: "busy" }),
+		{ ...CLAIM_LOCK_WAIT, ...lockWait },
 	);
 
 /**
  * Moves the attempt `attemptId` on. The file is read again first and nothing
  * is written when it holds another attempt (a newer one has claimed it), so a
  * stale job can't overwrite it. Read and write run under the same lock as a
- * claim. Never throws; returns whether the attempt is still this job's, which
+ * claim, and never without it: a lock that stays taken for longer than a stale
+ * one would be (30 s) leaves the record as it is and answers false. Never
+ * throws; returns whether the attempt was still this job's and moved, which
  * the caller must check before going on.
  */
 export const transitionDokployUpdateAttempt = (
 	attemptId: string,
 	patch: Partial<Omit<IUpdateAttempt, "attemptId" | "error">>,
 	file = getUpdateAttemptPath(),
+	lockWait?: Partial<AttemptLockWait>,
 ) =>
-	withAttemptLock(file, async () => {
-		const current = await readDokployUpdateAttempt(file);
-		if (!current || current.attemptId !== attemptId) {
+	withAttemptLock<boolean>(
+		file,
+		async () => {
+			const current = await readDokployUpdateAttempt(file);
+			if (!current || current.attemptId !== attemptId) {
+				return false;
+			}
+			await writeAttemptFile({ ...current, ...patch }, file);
+			return true;
+		},
+		() => {
+			console.error(
+				`Could not lock the Dokploy update attempt ${attemptId}; its record was not updated.`,
+			);
 			return false;
-		}
-		await writeAttemptFile({ ...current, ...patch }, file);
-		return true;
-	});
+		},
+		{ ...TRANSITION_LOCK_WAIT, ...lockWait },
+	);
 
 /** The recorded attempt, or null when there is none or the file is unusable. */
 export const readDokployUpdateAttempt = async (
@@ -503,6 +691,7 @@ export const readDokployUpdateAttempt = async (
 			pinned,
 			expectedVersion,
 			image,
+			imageDigest,
 			startedAt,
 			finishedAt,
 			status,
@@ -528,6 +717,8 @@ export const readDokployUpdateAttempt = async (
 			status: status as UpdateAttemptStatus,
 			...(typeof pinned === "boolean" && { pinned }),
 			...(typeof expectedVersion === "string" && { expectedVersion }),
+			...(typeof imageDigest === "string" &&
+				DOKPLOY_IMAGE_DIGEST_REGEX.test(imageDigest) && { imageDigest }),
 			...(typeof finishedAt === "string" && { finishedAt }),
 			...(isUpdateErrorCode(errorCode) && {
 				errorCode,
@@ -548,12 +739,20 @@ export const getLastUpdateAttempt = async (
 	runningVersion: string,
 	file = getUpdateAttemptPath(),
 	now = Date.now(),
+	readRunning: () => Promise<
+		RunningImage | undefined
+	> = readRunningDokployImage,
 ) => {
 	const attempt = await readDokployUpdateAttempt(file);
 	if (!attempt) {
 		return null;
 	}
-	const outcome = getUpdateAttemptOutcome(attempt, runningVersion, now);
+	const outcome = await judgeUpdateAttempt(
+		attempt,
+		runningVersion,
+		now,
+		readRunning,
+	);
 	return {
 		...attempt,
 		outcome,

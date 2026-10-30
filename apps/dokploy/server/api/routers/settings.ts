@@ -44,6 +44,7 @@ import {
 	readMonitoringConfig,
 	readMonitoringStats,
 	readPorts,
+	readPulledImageDigest,
 	recordDokployRollbackPoint,
 	recreateDirectory,
 	reloadDockerResource,
@@ -1125,10 +1126,14 @@ export const settingsRouter = createTRPCRouter({
 					// cutoff may have been replaced by a newer attempt (or a forced
 					// one). Stop here, before the rollback point and the swap: the
 					// newer one owns both.
+					// The digest is recorded with it: the container that replaces this
+					// one tells a same-tag reinstall from it.
+					const imageDigest = await readPulledImageDigest(image);
 					const owned = await transitionDokployUpdateAttempt(
 						attempt.attemptId,
 						{
 							status: "updating",
+							...(imageDigest && { imageDigest }),
 						},
 					);
 					if (!owned && recorded) {
@@ -1169,9 +1174,14 @@ export const settingsRouter = createTRPCRouter({
 				action: "update",
 				resourceType: "settings",
 				resourceName: "dokploy-version",
-				...(target !== undefined && {
-					metadata: { target, rollback: !!input?.rollback },
-				}),
+				metadata: {
+					...(target !== undefined && {
+						target,
+						rollback: !!input?.rollback,
+					}),
+					// The override of the in-progress guard, so it shows afterwards.
+					force: !!input?.force,
+				},
 			});
 
 			return true;

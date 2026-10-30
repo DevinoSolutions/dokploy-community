@@ -99,6 +99,12 @@ export interface IUpdateAttempt {
 	expectedVersion?: string;
 	/** The image the update installs. */
 	image: string;
+	/**
+	 * `sha256:<hex>` of the image the job pulled, written with `updating`. A
+	 * same-tag reinstall is told from the old container by it. Absent when the
+	 * digest could not be read.
+	 */
+	imageDigest?: string;
 	startedAt: string;
 	finishedAt?: string;
 	status: UpdateAttemptStatus;
@@ -115,6 +121,48 @@ export const UPDATE_ATTEMPT_SETTLE_MS = 5 * 60_000;
  * container that runs the job, so the record can stay at `updating` for good.
  */
 export const UPDATE_ATTEMPT_STALE_MS = 15 * 60_000;
+
+/** What the reading process can say about the image it runs from. */
+export interface RunningImage {
+	/** `sha256:<hex>` of the image of the service's running task. */
+	digest?: string;
+	/** Epoch ms at which this process started. */
+	since?: number;
+}
+
+/**
+ * True when this process runs the image the attempt pulled and was started
+ * after the attempt: the swapped-in container, not the one that began the
+ * update (which runs the same digest when the same image is reinstalled).
+ */
+const runsPulledImage = (attempt: IUpdateAttempt, running?: RunningImage) => {
+	const started = Date.parse(attempt.startedAt);
+	return (
+		!!attempt.imageDigest &&
+		running?.digest === attempt.imageDigest &&
+		running.since !== undefined &&
+		!Number.isNaN(started) &&
+		running.since >= started
+	);
+};
+
+/**
+ * Whether judging the attempt needs the running image: a reinstall whose job
+ * pulled an image and wrote `updating`. Only then is the image read.
+ */
+export const needsRunningImage = (
+	attempt: IUpdateAttempt,
+	runningVersion: string,
+) => {
+	const expected = expectedUpdateVersion(attempt);
+	return (
+		attempt.status === "updating" &&
+		!!attempt.imageDigest &&
+		expected !== undefined &&
+		expected === attempt.fromVersion &&
+		expected === runningVersion
+	);
+};
 
 export type UpdateAttemptOutcome =
 	| "in_progress"
@@ -152,6 +200,7 @@ export const getUpdateAttemptOutcome = (
 	attempt: IUpdateAttempt,
 	runningVersion: string,
 	now = Date.now(),
+	running?: RunningImage,
 ): UpdateAttemptOutcome => {
 	if (attempt.status === "failed") {
 		return "failed";
@@ -160,13 +209,17 @@ export const getUpdateAttemptOutcome = (
 	// A reinstall of the running version leaves the version string unchanged,
 	// so for it the version proves nothing while the job is still `updating`:
 	// the old container would read "applied" before the swap, and stay so if
-	// Swarm rolled back. Only the job's own `submitted` (written once Docker
-	// returned) counts. A reinstall whose job dies in the swap therefore reads
-	// in progress, then interrupted, rather than a false success.
+	// Swarm rolled back. The job's own `submitted` (written once Docker
+	// returned) counts, but with stop-first the job dies in the swap and never
+	// writes it. So the image decides: the process that runs the digest the job
+	// pulled, and started after the attempt did, is the swapped-in one. Without
+	// that proof a reinstall reads in progress, then interrupted, rather than a
+	// false success.
 	const reinstall = expected !== undefined && expected === attempt.fromVersion;
 	if (
 		(attempt.status === "submitted" ||
-			(attempt.status === "updating" && !reinstall)) &&
+			(attempt.status === "updating" &&
+				(!reinstall || runsPulledImage(attempt, running)))) &&
 		expected === runningVersion
 	) {
 		return "applied";
