@@ -128,7 +128,7 @@ export const UPDATE_ATTEMPT_STALE_MS = 15 * 60_000;
 export interface RunningImage {
 	/** `sha256:<hex>` of the image of the service's running task. */
 	digest?: string;
-	/** Random id of the reading process, fixed at its start. */
+	/** Random id of the reading process, shared by every copy of the code in it. */
 	processId?: string;
 }
 
@@ -136,7 +136,10 @@ export interface RunningImage {
  * True when this process runs the image the attempt pulled and is not the
  * process that began the update (which runs the same digest when the same
  * image is reinstalled): the swapped-in container. Process ids stand in for
- * clocks. A job that wrote `updating` and then died before `docker service
+ * clocks. The proof is any other process on that digest, not a later one: with
+ * the default stop-first service that is the swapped-in or restarted
+ * container, and with start-first the new task reads applied while the old one
+ * still reads in progress. A job that wrote `updating` and then died before `docker service
  * update` was sent also reads as applied once the old spec restarts; that is
  * acceptable, the result being a fresh process on the same digest, which is
  * what a reinstall is. A record without the id keeps the old reading.

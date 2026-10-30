@@ -446,20 +446,20 @@ describe("update attempt file", () => {
 			return `${lockFile()}.takeover-${ino}-${mtimeMs}`;
 		};
 		// A reinstall whose job died in the swap: only the image can settle it.
-		const reinstalling = () =>
-			start(
-				{
-					...base,
-					fromVersion: NEW,
-					expectedVersion: NEW,
-					target: NEW,
-					status: "updating",
-					imageDigest: DIGEST,
-					updatingBy: JOB,
-					startedAt: minutesAgo(1),
-				},
-				file,
-			);
+		const reinstallRecord = (patch: Partial<IUpdateAttempt> = {}) => ({
+			...base,
+			fromVersion: NEW,
+			expectedVersion: NEW,
+			target: NEW,
+			status: "updating" as const,
+			imageDigest: DIGEST,
+			updatingBy: JOB,
+			startedAt: minutesAgo(1),
+			...patch,
+		});
+		const reinstalling = () => start(reinstallRecord(), file);
+		const record = (attempt: IUpdateAttempt) =>
+			writeFileSync(file, JSON.stringify(attempt));
 
 		it("claims when nothing is recorded, and leaves no lock behind", async () => {
 			await expect(claim(fresh("a"))).resolves.toEqual({
@@ -693,12 +693,83 @@ describe("update attempt file", () => {
 				.spyOn(proto, "writeFile")
 				.mockRejectedValueOnce(new Error("ENOSPC: no space left on device"));
 
-			await expect(claim(fresh("a"))).resolves.toMatchObject({ claimed: true });
+			try {
+				await expect(claim(fresh("a"))).resolves.toMatchObject({
+					claimed: true,
+				});
 
-			expect(write).toHaveBeenCalledOnce();
-			expect(existsSync(lockFile())).toBe(false);
-			write.mockRestore();
-			rmSync(probe, { force: true });
+				expect(write).toHaveBeenCalledOnce();
+				expect(existsSync(lockFile())).toBe(false);
+			} finally {
+				write.mockRestore();
+				rmSync(probe, { force: true });
+			}
+		});
+
+		describe("a record that changes between the early read and the locked one", () => {
+			it("is judged under the lock, with the image read for the earlier record", async () => {
+				// Another job took the reinstall over meanwhile: this process is
+				// not it, so the proof holds.
+				await reinstalling();
+				await expect(
+					claim(fresh("b"), {
+						running: NEW,
+						readRunning: async () => {
+							record(reinstallRecord({ updatingBy: "another-job" }));
+							return { digest: DIGEST, processId: SWAPPED };
+						},
+					}),
+				).resolves.toMatchObject({ claimed: true });
+
+				// Or it is this very process: the same reading, now in progress.
+				await reinstalling();
+				await expect(
+					claim(fresh("c"), {
+						running: NEW,
+						readRunning: async () => {
+							record(reinstallRecord({ updatingBy: SWAPPED }));
+							return { digest: DIGEST, processId: SWAPPED };
+						},
+					}),
+				).resolves.toEqual({ claimed: false, reason: "in_progress" });
+			});
+
+			it("is not held up by the image when the new record no longer needs it", async () => {
+				await reinstalling();
+
+				await expect(
+					claim(fresh("b"), {
+						running: NEW,
+						readRunning: async () => {
+							record(reinstallRecord({ status: "failed" }));
+							return { digest: OTHER_DIGEST, processId: JOB };
+						},
+					}),
+				).resolves.toMatchObject({ claimed: true });
+			});
+
+			it("stays in progress when it newly needs an image that was not read", async () => {
+				await start(fresh("a"), file);
+				const readRunning = vi.fn(async () => ({
+					digest: DIGEST,
+					processId: SWAPPED,
+				}));
+				// Held up on a foreign lock; meanwhile the record becomes a reinstall.
+				writeFileSync(lockFile(), "");
+				setTimeout(() => {
+					record(reinstallRecord());
+					rmSync(lockFile(), { force: true });
+				}, 50);
+
+				await expect(
+					claim(fresh("b"), {
+						running: NEW,
+						readRunning,
+						lockWait: { tries: 400, retryMs: 5 },
+					}),
+				).resolves.toEqual({ claimed: false, reason: "in_progress" });
+				expect(readRunning).not.toHaveBeenCalled();
+			});
 		});
 
 		it("claims over a reinstall only once the swapped-in container has proven it", async () => {
@@ -1210,7 +1281,7 @@ describe("reading images from docker", () => {
 		const task = (digest: string | null, state: string) =>
 			`${REPO}:${NEW}${digest ? `@${digest}` : ""} ${state}`;
 
-		it("reads the digest of the running task, and when this process started", async () => {
+		it("reads the digest of the running task, and this process's id", async () => {
 			prints(task(DIGEST, "Running 3 minutes ago"));
 
 			const running = await readRunningDokployImage();
@@ -1261,6 +1332,17 @@ describe("reading images from docker", () => {
 
 			expect(running.digest).toBeUndefined();
 			expect(running.processId).toBe(UPDATE_PROCESS_ID);
+		});
+
+		it("shares one process id between copies of the module", async () => {
+			vi.resetModules();
+			const other = await import("@dokploy/server/services/settings");
+
+			expect(other.readRunningDokployImage).not.toBe(readRunningDokployImage);
+			expect(other.UPDATE_PROCESS_ID).toBe(UPDATE_PROCESS_ID);
+			expect((await other.readRunningDokployImage()).processId).toBe(
+				UPDATE_PROCESS_ID,
+			);
 		});
 
 		it("leaves the digest out when docker fails", async () => {

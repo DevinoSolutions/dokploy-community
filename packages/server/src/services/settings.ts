@@ -360,11 +360,21 @@ export const readPulledImageDigest = async (image: string) => {
 	}
 };
 
+// A process loads this module more than once (the server bundle and the Next
+// chunks), so the id lives in a slot on globalThis that every copy shares.
+const PROCESS_ID_SLOT = Symbol.for("dokploy.updateProcessId");
+const processSlots = globalThis as unknown as Record<
+	symbol,
+	string | undefined
+>;
+
 /**
- * Names this process for as long as it lives. The job records it with
- * `updating`; the container that replaces the process has another one.
+ * Names this process for as long as it lives, whichever copy of the module
+ * asks. The job records it with `updating`; the container that replaces the
+ * process has another one.
  */
-export const UPDATE_PROCESS_ID = randomUUID();
+export const UPDATE_PROCESS_ID = (processSlots[PROCESS_ID_SLOT] ??=
+	randomUUID());
 
 /**
  * The image digest the `dokploy` service's running task has, and the id of
@@ -640,7 +650,10 @@ export const claimDokployUpdateAttempt = async (
 		force?: boolean;
 		now?: number;
 		file?: string;
-		/** Reads the image this process runs from; see `judgeUpdateAttempt`. */
+		/**
+		 * Reads the image this process runs from, before the lock is taken and
+		 * only for a record that `needsRunningImage`.
+		 */
 		readRunning?: () => Promise<RunningImage | undefined>;
 		lockWait?: Partial<AttemptLockWait>;
 	},
