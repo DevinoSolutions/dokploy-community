@@ -8,6 +8,7 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,6 +24,21 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const docker = vi.hoisted(() => ({ spawnAsync: vi.fn() }));
+// When set, the lock's waits run on it instead of on real time.
+const sleeping = vi.hoisted(() => ({
+	impl: undefined as undefined | ((ms: number) => Promise<void>),
+}));
+
+vi.mock("node:timers/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:timers/promises")>();
+	return {
+		...actual,
+		setTimeout: (...args: Parameters<typeof actual.setTimeout>) =>
+			sleeping.impl
+				? sleeping.impl(args[0] as number)
+				: actual.setTimeout(...args),
+	};
+});
 
 vi.mock("@dokploy/server/db", () => ({
 	db: { query: {} },
@@ -40,6 +56,7 @@ const {
 	readPulledImageDigest,
 	readRunningDokployImage,
 	transitionDokployUpdateAttempt,
+	UPDATE_PROCESS_ID,
 } = await import("@dokploy/server/services/settings");
 
 const NOW = Date.parse("2026-10-29T12:00:00.000Z");
@@ -49,6 +66,9 @@ const minutesAgo = (minutes: number) =>
 const OLD = "v0.30.8-community.36";
 const NEW = "v0.30.8-community.37";
 const DIGEST = `sha256:${"cd34".repeat(16)}`;
+// The process whose job wrote `updating`, and the one that replaced it.
+const JOB = "job-process";
+const SWAPPED = "swapped-in-process";
 const OTHER_DIGEST = `sha256:${"ef56".repeat(16)}`;
 
 // A lock wait of a few milliseconds, so a taken lock reports busy at once.
@@ -332,6 +352,36 @@ describe("update attempt file", () => {
 			expect((await readDokployUpdateAttempt(file))?.status).toBe("updating");
 		});
 
+		it("outwaits a held lock that turns stale, with the default wait", async () => {
+			await start(base, file);
+			// A fresh lock whose holder is gone. Its waits advance a fake clock, so
+			// the 30 s until it is stale pass at once.
+			writeFileSync(`${file}.lock`, "");
+			vi.useFakeTimers({ toFake: ["Date"] });
+			let waited = 0;
+			sleeping.impl = async (ms) => {
+				waited += ms;
+				vi.advanceTimersByTime(ms);
+			};
+			try {
+				await expect(
+					transitionDokployUpdateAttempt(
+						base.attemptId,
+						{ status: "updating" },
+						file,
+					),
+				).resolves.toBe(true);
+			} finally {
+				sleeping.impl = undefined;
+				vi.useRealTimers();
+			}
+
+			expect(waited).toBeGreaterThanOrEqual(30_000);
+			expect(waited).toBeLessThan(35_000);
+			expect((await readDokployUpdateAttempt(file))?.status).toBe("updating");
+			expect(readdirSync(dir)).toEqual(["dokploy-update-last-attempt.json"]);
+		});
+
 		it("takes a lock left by a crashed holder before it writes", async () => {
 			await start(base, file);
 			writeFileSync(`${file}.lock`, "");
@@ -373,7 +423,7 @@ describe("update attempt file", () => {
 				running?: string;
 				force?: boolean;
 				now?: number;
-				readRunning?: () => Promise<{ digest?: string; since?: number }>;
+				readRunning?: () => Promise<{ digest?: string; processId?: string }>;
 				lockWait?: { tries?: number; retryMs?: number };
 			} = {},
 		) =>
@@ -405,6 +455,7 @@ describe("update attempt file", () => {
 					target: NEW,
 					status: "updating",
 					imageDigest: DIGEST,
+					updatingBy: JOB,
 					startedAt: minutesAgo(1),
 				},
 				file,
@@ -591,40 +642,84 @@ describe("update attempt file", () => {
 			});
 		});
 
-		it("leaves a lock that replaced its own alone when it releases", async () => {
-			// A reinstall waiting on the image is judged under the lock, which is
-			// where a slow holder that was taken over as stale would still be.
+		it("reads the running image before it takes the lock", async () => {
 			await reinstalling();
+			let lockedWhileReading: boolean | undefined;
 
 			await claim(fresh("b"), {
 				running: NEW,
 				readRunning: async () => {
-					writeFileSync(lockFile(), "someone-elses-token");
-					return { digest: OTHER_DIGEST, since: NOW };
+					lockedWhileReading = existsSync(lockFile());
+					return { digest: DIGEST, processId: SWAPPED };
 				},
 			});
+
+			expect(lockedWhileReading).toBe(false);
+			expect((await readDokployUpdateAttempt(file))?.attemptId).toBe("b");
+		});
+
+		it("does not read the image when forced, or when the record needs none", async () => {
+			const readRunning = vi.fn(async () => ({ digest: DIGEST }));
+			await reinstalling();
+			await claim(fresh("b"), { running: NEW, force: true, readRunning });
+			await claim(fresh("c"), { running: NEW, readRunning });
+
+			expect(readRunning).not.toHaveBeenCalled();
+		});
+
+		it("leaves a lock that replaced its own alone when it releases", async () => {
+			// `toJSON` runs while the record is written, under the lock: where a
+			// slow holder that was taken over as stale would still be.
+			const takenOver = {
+				...fresh("b"),
+				toJSON: () => {
+					writeFileSync(lockFile(), "someone-elses-token");
+					return { ...fresh("b") };
+				},
+			};
+
+			await expect(claim(takenOver)).resolves.toMatchObject({ claimed: true });
 
 			expect(readFileSync(lockFile(), "utf8")).toBe("someone-elses-token");
 		});
 
+		it("goes on without a lock, and leaves none behind, when the token can't be written", async () => {
+			const probe = join(dir, "probe");
+			writeFileSync(probe, "");
+			const handle = await open(probe, "r+");
+			const proto = Object.getPrototypeOf(handle);
+			await handle.close();
+			const write = vi
+				.spyOn(proto, "writeFile")
+				.mockRejectedValueOnce(new Error("ENOSPC: no space left on device"));
+
+			await expect(claim(fresh("a"))).resolves.toMatchObject({ claimed: true });
+
+			expect(write).toHaveBeenCalledOnce();
+			expect(existsSync(lockFile())).toBe(false);
+			write.mockRestore();
+			rmSync(probe, { force: true });
+		});
+
 		it("claims over a reinstall only once the swapped-in container has proven it", async () => {
 			await reinstalling();
-			const running = (digest: string, since: number) => async () => ({
+			const running = (digest: string, processId: string) => async () => ({
 				digest,
-				since,
+				processId,
 			});
 
-			// The old container, or another image: still in progress.
+			// The old container (same image, same process), or another image: still
+			// in progress.
 			await expect(
 				claim(fresh("b"), {
 					running: NEW,
-					readRunning: running(DIGEST, NOW - 5 * 60_000),
+					readRunning: running(DIGEST, JOB),
 				}),
 			).resolves.toEqual({ claimed: false, reason: "in_progress" });
 			await expect(
 				claim(fresh("b"), {
 					running: NEW,
-					readRunning: running(OTHER_DIGEST, NOW),
+					readRunning: running(OTHER_DIGEST, SWAPPED),
 				}),
 			).resolves.toEqual({ claimed: false, reason: "in_progress" });
 			// The image can't be read: as before this check.
@@ -640,7 +735,7 @@ describe("update attempt file", () => {
 			await expect(
 				claim(fresh("b"), {
 					running: NEW,
-					readRunning: running(DIGEST, NOW - 1_000),
+					readRunning: running(DIGEST, SWAPPED),
 				}),
 			).resolves.toMatchObject({ claimed: true });
 			expect((await readDokployUpdateAttempt(file))?.attemptId).toBe("b");
@@ -716,11 +811,12 @@ describe("update attempt file", () => {
 					expectedVersion: NEW,
 					target: NEW,
 					imageDigest: DIGEST,
+					updatingBy: JOB,
 					startedAt: minutesAgo(1),
 					...patch,
 				});
 			const readLast = (
-				running: { digest?: string; since?: number } | Error,
+				running: { digest?: string; processId?: string } | Error,
 				at = NOW,
 			) =>
 				getLastUpdateAttempt(NEW, file, at, async () => {
@@ -730,11 +826,11 @@ describe("update attempt file", () => {
 					return running;
 				});
 
-			it("reports applied when it runs the pulled image and started after the attempt", async () => {
+			it("reports applied when it runs the pulled image in another process", async () => {
 				await persistReinstall();
 
 				await expect(
-					readLast({ digest: DIGEST, since: NOW - 10_000 }),
+					readLast({ digest: DIGEST, processId: SWAPPED }),
 				).resolves.toMatchObject({ status: "updating", outcome: "applied" });
 			});
 
@@ -742,18 +838,18 @@ describe("update attempt file", () => {
 				await persistReinstall({ startedAt: minutesAgo(40) });
 
 				await expect(
-					readLast({ digest: DIGEST, since: NOW - 10_000 }),
+					readLast({ digest: DIGEST, processId: SWAPPED }),
 				).resolves.toMatchObject({ outcome: "applied" });
 			});
 
 			it.each([
 				[
-					"the old container (same image, started before)",
-					{ digest: DIGEST, since: NOW - 5 * 60_000 },
+					"the job's own process (same image, same process)",
+					{ digest: DIGEST, processId: JOB },
 				],
-				["another image", { digest: OTHER_DIGEST, since: NOW }],
-				["no digest", { since: NOW }],
-				["no start time", { digest: DIGEST }],
+				["another image", { digest: OTHER_DIGEST, processId: SWAPPED }],
+				["no digest", { processId: SWAPPED }],
+				["no process id", { digest: DIGEST }],
 			])("does not call it applied for %s", async (_name, running) => {
 				await persistReinstall();
 
@@ -773,18 +869,30 @@ describe("update attempt file", () => {
 				).resolves.toMatchObject({ outcome: "in_progress" });
 			});
 
-			it("keeps the old reading when the job recorded no digest", async () => {
-				await persistReinstall({ imageDigest: undefined });
-				const readRunning = vi.fn(async () => ({ digest: DIGEST, since: NOW }));
+			it.each([
+				["digest", { imageDigest: undefined }],
+				["process id", { updatingBy: undefined }],
+			])(
+				"keeps the old reading when the job recorded no %s",
+				async (_name, patch) => {
+					await persistReinstall(patch);
+					const readRunning = vi.fn(async () => ({
+						digest: DIGEST,
+						processId: SWAPPED,
+					}));
 
-				await expect(
-					getLastUpdateAttempt(NEW, file, NOW, readRunning),
-				).resolves.toMatchObject({ outcome: "in_progress" });
-				expect(readRunning).not.toHaveBeenCalled();
-			});
+					await expect(
+						getLastUpdateAttempt(NEW, file, NOW, readRunning),
+					).resolves.toMatchObject({ outcome: "in_progress" });
+					expect(readRunning).not.toHaveBeenCalled();
+				},
+			);
 
 			it("does not read the image for any other attempt", async () => {
-				const readRunning = vi.fn(async () => ({ digest: DIGEST, since: NOW }));
+				const readRunning = vi.fn(async () => ({
+					digest: DIGEST,
+					processId: SWAPPED,
+				}));
 				await persistUpdating({ startedAt: minutesAgo(1) });
 
 				await getLastUpdateAttempt(NEW, file, NOW, readRunning);
@@ -874,10 +982,11 @@ describe("getUpdateAttemptOutcome", () => {
 				status: "updating",
 				startedAt: minutesAgo(1),
 				imageDigest: DIGEST,
+				updatingBy: JOB,
 			});
 			const judged = (
 				patch: Partial<IUpdateAttempt>,
-				running: { digest?: string; since?: number } | undefined,
+				running: { digest?: string; processId?: string } | undefined,
 				runningVersion = NEW,
 			) =>
 				getUpdateAttemptOutcome(
@@ -886,9 +995,9 @@ describe("getUpdateAttemptOutcome", () => {
 					NOW,
 					running,
 				);
-			const swapped = { digest: DIGEST, since: NOW - 10_000 };
+			const swapped = { digest: DIGEST, processId: SWAPPED };
 
-			it("is applied: the pulled image, started after the attempt", () => {
+			it("is applied: the pulled image, in another process than the job's", () => {
 				expect(judged({}, swapped)).toBe("applied");
 			});
 
@@ -897,13 +1006,10 @@ describe("getUpdateAttemptOutcome", () => {
 			});
 
 			it.each([
-				[
-					"a process older than the attempt",
-					{ digest: DIGEST, since: NOW - 60 * 60_000 },
-				],
-				["another digest", { digest: OTHER_DIGEST, since: NOW }],
-				["no digest", { since: NOW }],
-				["no start time", { digest: DIGEST }],
+				["the job's own process", { digest: DIGEST, processId: JOB }],
+				["another digest", { digest: OTHER_DIGEST, processId: SWAPPED }],
+				["no digest", { processId: SWAPPED }],
+				["no process id", { digest: DIGEST }],
 				["nothing known", undefined],
 			])("is not applied for %s", (_name, running) => {
 				expect(judged({}, running)).toBe("in_progress");
@@ -912,8 +1018,9 @@ describe("getUpdateAttemptOutcome", () => {
 				);
 			});
 
-			it("is not applied when the job recorded no digest", () => {
+			it("is not applied when the job recorded no digest or process id", () => {
 				expect(judged({ imageDigest: undefined }, swapped)).toBe("in_progress");
+				expect(judged({ updatingBy: undefined }, swapped)).toBe("in_progress");
 			});
 
 			it("is not applied while the old version still runs", () => {
@@ -926,6 +1033,7 @@ describe("getUpdateAttemptOutcome", () => {
 
 				expect(needs({})).toBe(true);
 				expect(needs({ imageDigest: undefined })).toBe(false);
+				expect(needs({ updatingBy: undefined })).toBe(false);
 				expect(needs({ status: "pulling" })).toBe(false);
 				expect(needs({ status: "submitted" })).toBe(false);
 				expect(needs({ status: "failed" })).toBe(false);
@@ -1104,13 +1212,11 @@ describe("reading images from docker", () => {
 
 		it("reads the digest of the running task, and when this process started", async () => {
 			prints(task(DIGEST, "Running 3 minutes ago"));
-			const before = Date.now();
 
 			const running = await readRunningDokployImage();
 
 			expect(running.digest).toBe(DIGEST);
-			expect(running.since).toBeLessThanOrEqual(before);
-			expect(running.since).toBeGreaterThan(before - 24 * 3_600_000);
+			expect(running.processId).toBe(UPDATE_PROCESS_ID);
 			expect(docker.spawnAsync).toHaveBeenCalledWith(
 				"docker",
 				[
@@ -1154,7 +1260,7 @@ describe("reading images from docker", () => {
 			const running = await readRunningDokployImage();
 
 			expect(running.digest).toBeUndefined();
-			expect(running.since).toEqual(expect.any(Number));
+			expect(running.processId).toBe(UPDATE_PROCESS_ID);
 		});
 
 		it("leaves the digest out when docker fails", async () => {
@@ -1163,7 +1269,7 @@ describe("reading images from docker", () => {
 			const running = await readRunningDokployImage();
 
 			expect(running.digest).toBeUndefined();
-			expect(running.since).toEqual(expect.any(Number));
+			expect(running.processId).toBe(UPDATE_PROCESS_ID);
 		});
 	});
 });

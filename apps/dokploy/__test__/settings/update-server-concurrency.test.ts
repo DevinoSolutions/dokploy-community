@@ -15,7 +15,7 @@ const state = vi.hoisted(() => ({
 	// What the process running the guard reads about its own image.
 	readRunning: undefined as
 		| undefined
-		| (() => Promise<{ digest?: string; since?: number } | undefined>),
+		| (() => Promise<{ digest?: string; processId?: string } | undefined>),
 }));
 
 const mocks = vi.hoisted(() => ({
@@ -38,6 +38,7 @@ vi.mock("@dokploy/server", async () => {
 	return {
 		IS_CLOUD: false,
 		isRootOrganization: async () => true,
+		UPDATE_PROCESS_ID: real.UPDATE_PROCESS_ID,
 		getDockerResourceType: mocks.getDockerResourceType,
 		getUpdateData: mocks.getUpdateData,
 		readDokployRollbackPoint: mocks.readDokployRollbackPoint,
@@ -85,7 +86,7 @@ vi.mock("@/server/utils/backup", () => ({
 }));
 
 const { settingsRouter } = await import("@/server/api/routers/settings");
-const { readDokployUpdateAttempt } = await import(
+const { readDokployUpdateAttempt, UPDATE_PROCESS_ID } = await import(
 	"@dokploy/server/services/settings"
 );
 
@@ -293,7 +294,7 @@ describe("a pull that outlasts the 15 minute cutoff", () => {
 		});
 		expect(failures).toEqual([]);
 		expect(error).toHaveBeenCalledWith(
-			expect.stringContaining(`attempt ${first?.attemptId} was replaced`),
+			expect.stringContaining(`attempt ${first?.attemptId} is no longer`),
 		);
 		error.mockRestore();
 	});
@@ -325,16 +326,20 @@ describe("a reinstall of the running version", () => {
 		expect(await readDokployUpdateAttempt(state.file)).toMatchObject({
 			status: "updating",
 			imageDigest: DIGEST,
+			updatingBy: UPDATE_PROCESS_ID,
 		});
 
-		// The old container still runs the image (same digest, started before).
-		state.readRunning = async () => ({ digest: DIGEST, since: 0 });
+		// The old container still runs the image: same digest, same process.
+		state.readRunning = async () => ({
+			digest: DIGEST,
+			processId: UPDATE_PROCESS_ID,
+		});
 		await expect(reinstall()).rejects.toMatchObject({ code: "CONFLICT" });
 
 		// A different image is running: not this attempt's.
 		state.readRunning = async () => ({
 			digest: `sha256:${"ef56".repeat(16)}`,
-			since: Date.now() + 60_000,
+			processId: "swapped-in",
 		});
 		await expect(reinstall()).rejects.toMatchObject({ code: "CONFLICT" });
 
@@ -342,10 +347,10 @@ describe("a reinstall of the running version", () => {
 		state.readRunning = async () => undefined;
 		await expect(reinstall()).rejects.toMatchObject({ code: "CONFLICT" });
 
-		// The swapped-in container: the pulled image, started after the attempt.
+		// The swapped-in container: the pulled image, another process.
 		state.readRunning = async () => ({
 			digest: DIGEST,
-			since: Date.now() + 60_000,
+			processId: "swapped-in",
 		});
 		await expect(reinstall()).resolves.toBe(true);
 

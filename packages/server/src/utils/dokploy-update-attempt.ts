@@ -105,6 +105,8 @@ export interface IUpdateAttempt {
 	 * digest could not be read.
 	 */
 	imageDigest?: string;
+	/** Id of the process whose job wrote `updating`; see `runsPulledImage`. */
+	updatingBy?: string;
 	startedAt: string;
 	finishedAt?: string;
 	status: UpdateAttemptStatus;
@@ -126,29 +128,30 @@ export const UPDATE_ATTEMPT_STALE_MS = 15 * 60_000;
 export interface RunningImage {
 	/** `sha256:<hex>` of the image of the service's running task. */
 	digest?: string;
-	/** Epoch ms at which this process started. */
-	since?: number;
+	/** Random id of the reading process, fixed at its start. */
+	processId?: string;
 }
 
 /**
- * True when this process runs the image the attempt pulled and was started
- * after the attempt: the swapped-in container, not the one that began the
- * update (which runs the same digest when the same image is reinstalled).
+ * True when this process runs the image the attempt pulled and is not the
+ * process that began the update (which runs the same digest when the same
+ * image is reinstalled): the swapped-in container. Process ids stand in for
+ * clocks. A job that wrote `updating` and then died before `docker service
+ * update` was sent also reads as applied once the old spec restarts; that is
+ * acceptable, the result being a fresh process on the same digest, which is
+ * what a reinstall is. A record without the id keeps the old reading.
  */
-const runsPulledImage = (attempt: IUpdateAttempt, running?: RunningImage) => {
-	const started = Date.parse(attempt.startedAt);
-	return (
-		!!attempt.imageDigest &&
-		running?.digest === attempt.imageDigest &&
-		running.since !== undefined &&
-		!Number.isNaN(started) &&
-		running.since >= started
-	);
-};
+const runsPulledImage = (attempt: IUpdateAttempt, running?: RunningImage) =>
+	!!attempt.imageDigest &&
+	!!attempt.updatingBy &&
+	running?.digest === attempt.imageDigest &&
+	running.processId !== undefined &&
+	running.processId !== attempt.updatingBy;
 
 /**
  * Whether judging the attempt needs the running image: a reinstall whose job
- * pulled an image and wrote `updating`. Only then is the image read.
+ * pulled an image and wrote `updating` (with its digest and process id). Only
+ * then is the image read.
  */
 export const needsRunningImage = (
 	attempt: IUpdateAttempt,
@@ -158,6 +161,7 @@ export const needsRunningImage = (
 	return (
 		attempt.status === "updating" &&
 		!!attempt.imageDigest &&
+		!!attempt.updatingBy &&
 		expected !== undefined &&
 		expected === attempt.fromVersion &&
 		expected === runningVersion
@@ -211,8 +215,8 @@ export const getUpdateAttemptOutcome = (
 	// the old container would read "applied" before the swap, and stay so if
 	// Swarm rolled back. The job's own `submitted` (written once Docker
 	// returned) counts, but with stop-first the job dies in the swap and never
-	// writes it. So the image decides: the process that runs the digest the job
-	// pulled, and started after the attempt did, is the swapped-in one. Without
+	// writes it. So the image decides: a process that runs the digest the job
+	// pulled and is not the job's own process is the swapped-in one. Without
 	// that proof a reinstall reads in progress, then interrupted, rather than a
 	// false success.
 	const reinstall = expected !== undefined && expected === attempt.fromVersion;

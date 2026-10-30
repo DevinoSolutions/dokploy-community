@@ -55,6 +55,7 @@ import {
 	startLogCleanup,
 	stopLogCleanup,
 	transitionDokployUpdateAttempt,
+	UPDATE_PROCESS_ID,
 	updateLetsEncryptEmail,
 	updateResponseCompression,
 	updateServerById,
@@ -1125,20 +1126,22 @@ export const settingsRouter = createTRPCRouter({
 					// Still this job's attempt? A pull that outlasted the 15 minute
 					// cutoff may have been replaced by a newer attempt (or a forced
 					// one). Stop here, before the rollback point and the swap: the
-					// newer one owns both.
-					// The digest is recorded with it: the container that replaces this
-					// one tells a same-tag reinstall from it.
+					// newer one owns both. The move also fails, with the same effect,
+					// when the record stays locked.
+					// The digest and this process's id go with it: the container that
+					// replaces this one tells a same-tag reinstall from it by them.
 					const imageDigest = await readPulledImageDigest(image);
 					const owned = await transitionDokployUpdateAttempt(
 						attempt.attemptId,
 						{
 							status: "updating",
+							updatingBy: UPDATE_PROCESS_ID,
 							...(imageDigest && { imageDigest }),
 						},
 					);
 					if (!owned && recorded) {
 						console.error(
-							`settings.updateServer: attempt ${attempt.attemptId} was replaced by a newer one; not updating the service.`,
+							`settings.updateServer: attempt ${attempt.attemptId} is no longer this job's record (replaced by a newer attempt, or the record stayed locked); not updating the service.`,
 						);
 						return;
 					}

@@ -29,6 +29,7 @@ vi.mock("@dokploy/server", () => ({
 	getUpdateMigrationDelta: mocks.getUpdateMigrationDelta,
 	readDokployRollbackPoint: mocks.readDokployRollbackPoint,
 	readPulledImageDigest: mocks.readPulledImageDigest,
+	UPDATE_PROCESS_ID: "job-process",
 	recordDokployRollbackPoint: mocks.recordDokployRollbackPoint,
 	runBackgroundJob: mocks.runBackgroundJob,
 	spawnAsync: mocks.spawnAsync,
@@ -450,7 +451,7 @@ describe("settings.updateServer without a target", () => {
 		expect(mocks.readPulledImageDigest).toHaveBeenCalledWith(image);
 		expect(mocks.transitionDokployUpdateAttempt).toHaveBeenCalledWith(
 			expect.any(String),
-			{ status: "updating", imageDigest: DIGEST },
+			{ status: "updating", updatingBy: "job-process", imageDigest: DIGEST },
 		);
 		const [pull] = mocks.spawnAsync.mock.invocationCallOrder.slice(1);
 		const [read] = mocks.readPulledImageDigest.mock.invocationCallOrder;
@@ -466,7 +467,7 @@ describe("settings.updateServer without a target", () => {
 
 		expect(mocks.transitionDokployUpdateAttempt).toHaveBeenCalledWith(
 			expect.any(String),
-			{ status: "updating" },
+			{ status: "updating", updatingBy: "job-process" },
 		);
 	});
 

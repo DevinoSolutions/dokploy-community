@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync, type Stats } from "node:fs";
 import {
+	type FileHandle,
 	mkdir,
 	open,
 	readFile,
@@ -360,13 +361,21 @@ export const readPulledImageDigest = async (image: string) => {
 };
 
 /**
- * The image digest the `dokploy` service's running task has, and when this
- * process started. Read from `docker service ps`, so it is the swapped-in
- * task's digest when the new container asks. The digest is left out unless
- * the running tasks agree on exactly one. Never throws.
+ * Names this process for as long as it lives. The job records it with
+ * `updating`; the container that replaces the process has another one.
+ */
+export const UPDATE_PROCESS_ID = randomUUID();
+
+/**
+ * The image digest the `dokploy` service's running task has, and the id of
+ * this process. Read from `docker service ps`, so it is the swapped-in task's
+ * digest when the new container asks. The digest is left out unless the
+ * running tasks agree on exactly one. A new task stays `Starting` until its
+ * first health check passes and must not be accepted as running before then:
+ * it may never become healthy. Never throws.
  */
 export const readRunningDokployImage = async (): Promise<RunningImage> => {
-	const since = Date.now() - process.uptime() * 1000;
+	const processId = UPDATE_PROCESS_ID;
 	try {
 		const stdout = await spawnAsync(
 			"docker",
@@ -393,13 +402,13 @@ export const readRunningDokployImage = async (): Promise<RunningImage> => {
 		}
 		const [digest] = [...digests];
 		return {
-			since,
+			processId,
 			...(digests.size === 1 &&
 				digest &&
 				DOKPLOY_IMAGE_DIGEST_REGEX.test(digest) && { digest }),
 		};
 	} catch {
-		return { since };
+		return { processId };
 	}
 };
 
@@ -458,8 +467,9 @@ const serialized = <T>(fn: () => Promise<T>): Promise<T> => {
 	return run;
 };
 
-// The lock is held for a file read and write only, so a holder that is older
-// than this died with its container.
+// The lock is held for a file read and write only (the image a claim needs is
+// read before it is taken), so a holder that is older than this died with its
+// container.
 const ATTEMPT_LOCK_STALE_MS = 30_000;
 
 interface AttemptLockWait {
@@ -538,9 +548,24 @@ const acquireAttemptLock = async (
 	}
 	const token = randomUUID();
 	for (let attempt = 0; attempt < tries; attempt++) {
+		let handle: FileHandle | undefined;
 		try {
-			const handle = await open(lockFile, "wx", 0o600);
-			await handle.writeFile(token).finally(() => handle.close());
+			handle = await open(lockFile, "wx", 0o600);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+				return "unavailable";
+			}
+		}
+		if (handle) {
+			try {
+				await handle.writeFile(token);
+			} catch {
+				// A lock without an owner would keep everyone out until it is stale.
+				await rm(lockFile, { force: true }).catch(() => undefined);
+				return "unavailable";
+			} finally {
+				await handle.close().catch(() => undefined);
+			}
 			return {
 				release: async () => {
 					const held = await readFile(lockFile, "utf8").catch(() => null);
@@ -549,10 +574,6 @@ const acquireAttemptLock = async (
 					}
 				},
 			};
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-				return "unavailable";
-			}
 		}
 		const seen = await stat(lockFile).catch(() => null);
 		if (
@@ -605,7 +626,7 @@ export type UpdateAttemptClaim =
  * together under the lock, so of two overlapping requests, in this process or
  * in two containers, exactly one claims. Never throws.
  */
-export const claimDokployUpdateAttempt = (
+export const claimDokployUpdateAttempt = async (
 	attempt: IUpdateAttempt,
 	{
 		runningVersion,
@@ -623,15 +644,23 @@ export const claimDokployUpdateAttempt = (
 		readRunning?: () => Promise<RunningImage | undefined>;
 		lockWait?: Partial<AttemptLockWait>;
 	},
-) =>
-	withAttemptLock<UpdateAttemptClaim>(
+) => {
+	// The docker call can take seconds, so it is made before the lock is taken
+	// and only its result is judged under it. A record that changes in between
+	// and then needs the image goes unproven (in progress), the safe reading.
+	const early = force ? null : await readDokployUpdateAttempt(file);
+	const running =
+		early && needsRunningImage(early, runningVersion)
+			? await readRunning().catch(() => undefined)
+			: undefined;
+	return withAttemptLock<UpdateAttemptClaim>(
 		file,
 		async () => {
 			const last = await readDokployUpdateAttempt(file);
 			if (
 				!force &&
 				last &&
-				(await judgeUpdateAttempt(last, runningVersion, now, readRunning)) ===
+				getUpdateAttemptOutcome(last, runningVersion, now, running) ===
 					"in_progress"
 			) {
 				return { claimed: false, reason: "in_progress" };
@@ -641,6 +670,7 @@ export const claimDokployUpdateAttempt = (
 		() => ({ claimed: false, reason: "busy" }),
 		{ ...CLAIM_LOCK_WAIT, ...lockWait },
 	);
+};
 
 /**
  * Moves the attempt `attemptId` on. The file is read again first and nothing
@@ -692,6 +722,7 @@ export const readDokployUpdateAttempt = async (
 			expectedVersion,
 			image,
 			imageDigest,
+			updatingBy,
 			startedAt,
 			finishedAt,
 			status,
@@ -719,6 +750,9 @@ export const readDokployUpdateAttempt = async (
 			...(typeof expectedVersion === "string" && { expectedVersion }),
 			...(typeof imageDigest === "string" &&
 				DOKPLOY_IMAGE_DIGEST_REGEX.test(imageDigest) && { imageDigest }),
+			...(typeof updatingBy === "string" &&
+				updatingBy.length > 0 &&
+				updatingBy.length <= 100 && { updatingBy }),
 			...(typeof finishedAt === "string" && { finishedAt }),
 			...(isUpdateErrorCode(errorCode) && {
 				errorCode,
