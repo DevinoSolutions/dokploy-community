@@ -3,6 +3,7 @@ import { paths } from "@dokploy/server/constants";
 import type { Patch } from "@dokploy/server/services/patch";
 import type { InferResultType } from "@dokploy/server/types/with";
 import boxen from "boxen";
+import { parse } from "dotenv";
 import { quote } from "shell-quote";
 import {
 	ATOMIC_PUT_FUNCTION,
@@ -1203,16 +1204,16 @@ const DOKPLOY_ENV_NAMES = new Set([
  */
 const getEnvFileNames = (compose: ComposeNested) => {
 	try {
-		const names = (content: string) =>
-			prepareEnvironmentVariables(
-				content,
-				compose.environment.project.env,
-				compose.environment.env,
-			).map(getPairName);
-		const userNames = new Set(names(compose.env ?? ""));
-		return names(getComposeEnvFileSource(compose)).filter(
-			(name) => !DOKPLOY_ENV_NAMES.has(name) || userNames.has(name),
-		);
+		// The user's keys are read as the writer reads them, but not resolved:
+		// a `${{APP_NAME}}` only resolves against the source with Dokploy's own.
+		const userNames = new Set(Object.keys(parse(compose.env ?? "")));
+		return prepareEnvironmentVariables(
+			getComposeEnvFileSource(compose),
+			compose.environment.project.env,
+			compose.environment.env,
+		)
+			.map(getPairName)
+			.filter((name) => !DOKPLOY_ENV_NAMES.has(name) || userNames.has(name));
 	} catch {
 		return [];
 	}
