@@ -709,7 +709,9 @@ describe("update attempt file", () => {
 		describe("a record that changes between the early read and the locked one", () => {
 			it("is judged under the lock, with the image read for the earlier record", async () => {
 				// Another job took the reinstall over meanwhile: this process is
-				// not it, so the proof holds.
+				// not it, so the proof holds. This case only pins that a takeover
+				// keeps the proof; the untouched record would claim as well. The
+				// second half below is the one that tells the locked re-read apart.
 				await reinstalling();
 				await expect(
 					claim(fresh("b"), {
@@ -749,7 +751,9 @@ describe("update attempt file", () => {
 			});
 
 			it("stays in progress when it newly needs an image that was not read", async () => {
-				await start(fresh("a"), file);
+				// A claimable early record, so only the locked re-read of the
+				// reinstall can make the outcome in progress.
+				await start(fresh("a", { status: "failed" }), file);
 				const readRunning = vi.fn(async () => ({
 					digest: DIGEST,
 					processId: SWAPPED,

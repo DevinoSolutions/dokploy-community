@@ -1236,8 +1236,10 @@ export const getIgnoredEnvNames = (compose: ComposeNested) => {
 };
 
 /**
- * Names in the Environment that `getCreateEnvFileCommand` leaves out of the
- * `.env` because compose or the shell would read them as their own settings.
+ * Names in the Environment whose values `getCreateEnvFileCommand` leaves out of
+ * the `.env` because compose or the shell would read them as their own
+ * settings. A name Dokploy writes itself (COMPOSE_PROJECT_NAME) is listed when
+ * the user set it: the user's value is dropped and Dokploy's replaces it.
  * Sorted, empty without `createEnvFile`. Only names, never values.
  */
 export const getDroppedDotenvNames = (compose: ComposeNested) => {
