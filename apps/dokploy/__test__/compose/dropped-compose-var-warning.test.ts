@@ -154,7 +154,7 @@ describe("variables left out of the .env (T-10377)", () => {
 		).toEqual([]);
 	});
 
-	it("lists exactly the names the written .env lacks", async () => {
+	it("lists exactly the names whose values the written .env lacks", async () => {
 		const env =
 			"COMPOSE_FILE=/x\nCOMPOSE_PROFILES=web\nGOMAXPROCS=4\nHOME=/h\nOK=1\nDOCKER_HOST=h";
 		await getBuildComposeCommand({ ...baseCompose, env });
