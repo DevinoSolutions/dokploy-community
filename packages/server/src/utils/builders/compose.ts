@@ -13,6 +13,7 @@ import {
 import { addDomainToCompose, writeDomainsToCompose } from "../docker/domain";
 import {
 	ENV_VARIABLE_NAME,
+	getDroppedDotenvNotice,
 	isComposeDotenvName,
 	isStackEnvName,
 	NEUTRALISED_CLI_ENV,
@@ -663,7 +664,14 @@ export const getBuildComposeCommand = async (
 		await removeStagedFiles(compose.serverId, staged);
 		throw error;
 	}
-	const ignoredEnvNotice = getIgnoredEnvNotice(getIgnoredEnvNames(compose));
+	// A stack keeps its docker-environment line; names the `.env` leaves out are
+	// told in their own words, for a compose as well (T-10377).
+	const droppedDotenvLine = getDroppedDotenvLogLine(compose);
+	const ignoredEnvNotice =
+		(compose.composeType === "stack"
+			? getIgnoredEnvNotice(getIgnoredEnvNames(compose))
+			: "") +
+		(droppedDotenvLine ? ` echo ${quote([droppedDotenvLine])};` : "");
 	const rollingLogLine = rolling.script
 		? `\nRolling replace: ${rolling.rolled.join(", ")} 🔁`
 		: "";
@@ -1204,6 +1212,27 @@ export const getIgnoredEnvNames = (compose: ComposeNested) => {
 		),
 	].sort();
 };
+
+/**
+ * Names in the Environment that `getCreateEnvFileCommand` leaves out of the
+ * `.env` because compose would read them as its own settings. Sorted, empty
+ * without `createEnvFile`. Only names, never values.
+ */
+export const getDroppedDotenvNames = (compose: ComposeNested) => {
+	if (!compose.createEnvFile) return [];
+	const names = prepareEnvironmentVariables(
+		compose.env,
+		compose.environment.project.env,
+		compose.environment.env,
+	).map(getPairName);
+	return [
+		...new Set(names.filter((name) => !isComposeDotenvName(name))),
+	].sort();
+};
+
+/** The deploy log text for the names `getCreateEnvFileCommand` left out, or "". */
+export const getDroppedDotenvLogLine = (compose: ComposeNested) =>
+	getDroppedDotenvNotice(getDroppedDotenvNames(compose));
 
 const MAX_LISTED_IGNORED_NAMES = 20;
 

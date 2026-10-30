@@ -439,7 +439,7 @@ describe("compose .env: COMPOSE_* settings", () => {
 			{ ...dockerCompose, env: "COMPOSE_FILE=/x\nCOMPOSE_PROFILES=web\nA=1" },
 			{ deploymentId: "dep-1" },
 		);
-		expect(command).toContain("read them as their own settings: COMPOSE_FILE'");
+		expect(command).toContain("COMPOSE_FILE was left out of .env");
 	});
 
 	it("writes no .env, and warns of nothing, with Create env file off", async () => {

@@ -259,6 +259,25 @@ export const isComposeDotenvName = (name: string) => {
 	return isStackEnvName(name);
 };
 
+const MAX_LISTED_DROPPED_NAMES = 20;
+
+/**
+ * The deploy log line for the variables `isComposeDotenvName` kept out of the
+ * `.env` Dokploy writes, or "" when there are none. Without it a compose that
+ * reads `${COMPOSE_ENV_FILE:-.env.compose}` quietly gets the default (T-10377).
+ * Names only, never values.
+ */
+export const getDroppedDotenvNotice = (names: string[]) => {
+	if (names.length === 0) return "";
+	const listed = names.slice(0, MAX_LISTED_DROPPED_NAMES).join(", ");
+	const more =
+		names.length > MAX_LISTED_DROPPED_NAMES
+			? ` and ${names.length - MAX_LISTED_DROPPED_NAMES} more`
+			: "";
+	const allowed = [...COMPOSE_DOTENV_NAMES].sort().join(", ");
+	return `${listed}${more} ${names.length === 1 ? "was" : "were"} left out of .env: COMPOSE_* names other than ${allowed} steer the compose CLI, so Dokploy does not write them. Rename the variable to use it in the compose file.`;
+};
+
 /** One `KEY='value'` per line, in the order given. Names are the caller's to vet. */
 export const buildEnvFileContent = (entries: Iterable<[string, string]>) => {
 	let content = "";

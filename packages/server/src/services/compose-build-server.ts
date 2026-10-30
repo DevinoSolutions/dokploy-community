@@ -5,6 +5,7 @@ import {
 	type ComposeNested,
 	getComposeBuildOverridePath,
 	getCreateEnvFileCommand,
+	getDroppedDotenvLogLine,
 	getRestoreAfterFailedBuildCommand,
 	type RemoteBuildDeployInfo,
 	stageStackEnvFile,
@@ -571,6 +572,10 @@ const buildImagesOnBuildServer = async (
 		const envCommand = buildEntity.createEnvFile
 			? await getCreateEnvFileCommand(buildEntity, stageOptions)
 			: "";
+		// The build can fail before the serving host's script says so, and this
+		// is where a `${COMPOSE_ENV_FILE:-...}` that reads its default shows up.
+		const droppedDotenvLine = getDroppedDotenvLogLine(buildEntity);
+		if (droppedDotenvLine) log.line(droppedDotenvLine);
 		await run(`set -e;${writeCompose}${envCommand}`);
 
 		// File mounts live in `<compose>/files` on the serving host, where
