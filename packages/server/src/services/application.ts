@@ -73,6 +73,7 @@ import {
 	runRemoteBuildScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
+import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import { type Domain, getDomainHost } from "./domain";
 import { getIssueComment } from "./github";
 import { generateApplyPatchesCommand } from "./patch";
@@ -241,6 +242,10 @@ const settleCancelledApplicationDeploy = async (
 	await updateApplicationStatus(applicationId, settledStatus);
 	return new DeploymentCancelledError(undefined, { settledStatus });
 };
+
+/** What the progress lines of the build step call it (T-11843). */
+const APPLICATION_BUILD_STEP_LABEL = "The build and push";
+
 export const deployApplication = async ({
 	applicationId,
 	titleLog = "Manual deployment",
@@ -346,11 +351,17 @@ export const deployApplication = async ({
 		// <<< build-policy hook 2/4
 
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (serverId) {
-			await runRemoteBuildScript(serverId, commandWithLog, deployment);
-		} else {
-			await execAsync(commandWithLog);
-		}
+		await withDeployLogHeartbeat(
+			{ serverId, logPath: deployment.logPath },
+			APPLICATION_BUILD_STEP_LABEL,
+			async () => {
+				if (serverId) {
+					await runRemoteBuildScript(serverId, commandWithLog, deployment);
+				} else {
+					await execAsync(commandWithLog);
+				}
+			},
+		);
 		await assertBuildNotCancelled(deployment);
 
 		// >>> build-policy hook 3/4: gate on required checks, then pin the deploy
@@ -581,11 +592,17 @@ export const rebuildApplication = async ({
 		});
 		// <<< build-policy hook 2/4
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (serverId) {
-			await runRemoteBuildScript(serverId, commandWithLog, deployment);
-		} else {
-			await execAsync(commandWithLog);
-		}
+		await withDeployLogHeartbeat(
+			{ serverId, logPath: deployment.logPath },
+			APPLICATION_BUILD_STEP_LABEL,
+			async () => {
+				if (serverId) {
+					await runRemoteBuildScript(serverId, commandWithLog, deployment);
+				} else {
+					await execAsync(commandWithLog);
+				}
+			},
+		);
 		await assertBuildNotCancelled(deployment);
 
 		// >>> build-policy hook 3/4 (rebuild)
@@ -1005,11 +1022,17 @@ export const deployPreviewApplication = async ({
 		// <<< build-policy hook 2/4 (preview)
 
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (buildServerId) {
-			await execAsyncRemote(buildServerId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
+		await withDeployLogHeartbeat(
+			{ serverId: buildServerId, logPath: deployment.logPath },
+			APPLICATION_BUILD_STEP_LABEL,
+			async () => {
+				if (buildServerId) {
+					await execAsyncRemote(buildServerId, commandWithLog);
+				} else {
+					await execAsync(commandWithLog);
+				}
+			},
+		);
 		// >>> build-policy hook 3/4 (preview): pin to the digest just published.
 		// Identity when not enforcing.
 		const deployTarget = await prepareBuildPolicyDeploy({
@@ -1263,11 +1286,17 @@ export const rebuildPreviewApplication = async ({
 		});
 		// <<< build-policy hook 2/4 (preview rebuild)
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (buildServerId) {
-			await execAsyncRemote(buildServerId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
+		await withDeployLogHeartbeat(
+			{ serverId: buildServerId, logPath: deployment.logPath },
+			APPLICATION_BUILD_STEP_LABEL,
+			async () => {
+				if (buildServerId) {
+					await execAsyncRemote(buildServerId, commandWithLog);
+				} else {
+					await execAsync(commandWithLog);
+				}
+			},
+		);
 		// >>> build-policy hook 3/4 (preview rebuild)
 		const deployTarget = await prepareBuildPolicyDeploy({
 			application,
