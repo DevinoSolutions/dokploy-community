@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.40
+
+Upgrade notes: no new database migrations since v0.30.8-community.39, so an image-only rollback to it keeps working. Nothing to configure. This release includes everything in v0.30.8-community.39.
+
+**Deploys are no longer falsely failed by the "no log output" limit during a long silent build, push or release step** (T-11843). Docker prints nothing when there is no terminal while it pushes or pulls one large layer, which on a registry backed by object storage (for example Backblaze B2) can take over 20 minutes, so the deployment log stayed quiet and the idle limit (20 minutes by default) failed a deploy that was still working. Now Dokploy writes a "... is still running (N min so far, no output yet)" line to the deployment log every 5 minutes during long build, push and release steps. This covers composes with and without a build server, rebuilds, and application builds, previews included. On applications the marks start only after a per-deployment "the build of <id> starts here" line, so a hung git clone or image pull is still caught by the idle limit. The marks stop once the step ends or the deployment is no longer running, and a marked step is still bounded by the wall limit (90 minutes by default). No migration.
+
+**A vault secret that cannot be resolved now shows why the deployment failed** (T-11775). When a deployment failed because a vault secret reference could not be resolved (for example a missing field), the deployment's error message stayed empty. It now shows the reason, redacted and with no secret values. This covers application, compose, preview and pinned-image deploys. No migration.
+
 ### New in v0.30.8-community.39
 
 Upgrade notes: no new database migrations since v0.30.8-community.38, so an image-only rollback to it keeps working. Nothing to configure. This release includes everything in v0.30.8-community.38.
