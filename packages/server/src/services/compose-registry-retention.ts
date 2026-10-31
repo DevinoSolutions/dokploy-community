@@ -624,9 +624,9 @@ export const pruneComposeBuildRegistry = async ({
 			// Its DELETEs were sent, not confirmed: the job's answers and the
 			// registry itself say what became of them. While it still runs nothing
 			// new is planned (the lock would refuse a second job anyway).
-			const earlier = pendingJobs.get(buildRegistryId);
+			const earlier = pendingJobs.get(jobKey);
 			if (earlier && Date.now() - earlier.startedAt > PENDING_JOB_TTL_MS) {
-				pendingJobs.delete(buildRegistryId);
+				pendingJobs.delete(jobKey);
 			} else if (earlier) {
 				const { stdout } = await runSession(
 					buildRegistryJobStatusCommand({ key: jobKey }),
@@ -656,7 +656,7 @@ export const pruneComposeBuildRegistry = async ({
 					);
 					return;
 				}
-				pendingJobs.delete(buildRegistryId);
+				pendingJobs.delete(jobKey);
 				const answers = status.token === earlier.token ? status.responses : null;
 				const heads = await runAll(
 					earlier.entries.map((entry, id) => ({
@@ -1097,9 +1097,14 @@ export const pruneComposeBuildRegistry = async ({
 							id,
 							digest: entry.digest,
 							deleteUrl: getManifestUrl(base, entry.repo, entry.digest),
-							guardUrls: entry.guardTags.map((tag) =>
-								getManifestUrl(base, entry.repo, tag),
-							),
+							guards: entry.guardTags.map((tag) => ({
+								url: getManifestUrl(base, entry.repo, tag),
+								// Planning tolerated a missing `latest` unless a release file
+								// names it; every other tag must exist.
+								optional:
+									tag === LATEST_TAG &&
+									!protectedByRepo.get(entry.repo)?.has(LATEST_TAG),
+							})),
 						}),
 					),
 					username: registry.username,
@@ -1142,7 +1147,7 @@ export const pruneComposeBuildRegistry = async ({
 			// Otherwise the job may have started even when its answer was lost on
 			// the way: the next run asks, and the registry has the last word about
 			// what is gone.
-			pendingJobs.set(buildRegistryId, {
+			pendingJobs.set(jobKey, {
 				composeId: entity.composeId,
 				token,
 				startedAt: Date.now(),

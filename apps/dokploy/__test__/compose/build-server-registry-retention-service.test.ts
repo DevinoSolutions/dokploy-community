@@ -233,19 +233,26 @@ const finishJob = (registry: FakeRegistry) => {
 		id: number;
 		digest: string;
 		count: number;
-		guard: string;
+		guards: { optional: boolean; block: string }[];
 		del: string;
 	}[] = [];
-	let section = "g";
+	let section = "";
 	for (const line of job.config.replace(/\r/g, "").split("\n")) {
 		const entry = /^# @@DPL-ENTRY (\d+) (\S+) (\d+)$/.exec(line);
+		const guard = /^# @@DPL-GUARD ([01])$/.exec(line);
 		if (entry) {
 			entries.push({
 				id: Number(entry[1]),
 				digest: entry[2] as string,
 				count: Number(entry[3]),
-				guard: "",
+				guards: [],
 				del: "",
+			});
+			section = "";
+		} else if (guard) {
+			(entries[entries.length - 1] as (typeof entries)[number]).guards.push({
+				optional: guard[1] === "1",
+				block: "",
 			});
 			section = "g";
 		} else if (line === "# @@DPL-DELETE") {
@@ -255,19 +262,26 @@ const finishJob = (registry: FakeRegistry) => {
 		} else if (entries.length > 0) {
 			const current = entries[entries.length - 1] as (typeof entries)[number];
 			if (section === "d") current.del += `${line}\n`;
-			else current.guard += `${line}\n`;
+			else if (section === "g") {
+				const last = current.guards[current.guards.length - 1];
+				if (last) last.block += `${line}\n`;
+			}
 		}
 	}
-	// What the job does: re-read the guard tags before each DELETE, and skip
-	// it when one of them is or contains the digest or could not be read.
+	// What the job does: read every guard tag before the DELETE (fail closed):
+	// it must answer 200 with a digest header that is not the target, or 404 if
+	// optional; anything else skips the DELETE.
 	let output = `@@DPL-JOB ${job.token}\n`;
 	for (const entry of entries) {
-		const guarded = blocksOf(entry.guard).map((block) => answerBlock(registry, block));
-		const readable = guarded.filter((text) => /\n@@DPL \d+ (200|404)\n/.test(text));
-		if (
-			readable.length !== entry.count ||
-			guarded.some((text) => text.includes(entry.digest))
-		) {
+		const clean =
+			entry.guards.length === entry.count &&
+			entry.guards.every((guard) => {
+				const text = answerBlock(registry, guard.block);
+				if (text.includes(entry.digest)) return false;
+				if (guard.optional && /\n@@DPL \d+ 404\n/.test(text)) return true;
+				return /\n@@DPL \d+ 200\n/.test(text) && /docker-content-digest: sha256:/i.test(text);
+			});
+		if (!clean) {
 			output += `\n@@DPL ${entry.id} 000\n`;
 			continue;
 		}
@@ -1872,6 +1886,9 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		expect(job.stdin.match(/# @@DPL-ENTRY \d+ sha256:[a-f0-9]{64} 2\n/g)).toHaveLength(25);
 		expect(job.stdin).toContain("/manifests/latest");
 		expect(job.stdin).toContain(`/manifests/${tagOf("t029")}`);
+		// only `latest` may be missing (no release file names it); the release tag may not
+		expect(job.stdin.match(/# @@DPL-GUARD 1\n/g)).toHaveLength(25);
+		expect(job.stdin.match(/# @@DPL-GUARD 0\n/g)).toHaveLength(25);
 		// reads keep their short limit
 		for (const session of sessions) {
 			if (session === job) continue;

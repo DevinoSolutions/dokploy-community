@@ -674,6 +674,7 @@ export const MAX_GUARD_TAGS = 8;
 /** Last line of the config a delete job reads: proof that stdin arrived whole. */
 export const DELETE_JOB_END_MARKER = "# @@DPL-END";
 const ENTRY_MARKER = "# @@DPL-ENTRY";
+const GUARD_SECTION_MARKER = "# @@DPL-GUARD";
 const DELETE_SECTION_MARKER = "# @@DPL-DELETE";
 
 /** Printed once the job has read its whole config. */
@@ -702,16 +703,21 @@ export interface DeleteJobEntry {
 	deleteUrl: string;
 	/**
 	 * Manifest URLs of tags that must not resolve to (or contain) `digest` any
-	 * more: `latest` and the tags the release files name. At least one.
+	 * more: `latest` and the tags the release files name. At least one. The
+	 * DELETE is only sent when every one of them answers 200 with exactly one
+	 * well-formed `Docker-Content-Digest`, differing from `digest`, and was read
+	 * whole; a 404 counts only for a guard marked `optional` (a tag the planning
+	 * itself tolerated missing: `latest` when no release file names it).
 	 */
-	guardUrls: string[];
+	guards: { url: string; optional?: boolean }[];
 }
 
 /**
- * The config a delete job reads from stdin. Per entry: GETs of the guard tags
- * (the job reads them first and skips the DELETE if any of them now is, or
- * contains, the digest, or could not be read), then the DELETE with a long
- * `max-time`. A config that does not end in the end marker is never run.
+ * The config a delete job reads from stdin. Per entry: one GET per guard tag
+ * (each its own curl, so a cut-off transfer shows in curl's exit status), then
+ * the DELETE with a long `max-time`. The job fails closed: anything but a
+ * clean answer from every guard skips the DELETE. A config that does not end
+ * in the end marker is never run.
  */
 export const buildRegistryDeleteJobConfig = ({
 	entries,
@@ -727,22 +733,31 @@ export const buildRegistryDeleteJobConfig = ({
 		if (!isValidDigest(entry.digest) || !Number.isInteger(entry.id)) {
 			throw new Error("Invalid delete job entry");
 		}
-		if (entry.guardUrls.length === 0) {
+		if (entry.guards.length === 0) {
 			throw new Error("A delete job entry needs at least one guard URL");
 		}
 		parts.push(
-			`${ENTRY_MARKER} ${entry.id} ${entry.digest} ${entry.guardUrls.length}\n`,
-			buildRegistryCurlConfig({
-				requests: entry.guardUrls.map((url, id) => ({
-					id,
-					method: "GET" as const,
-					url,
-					manifest: true,
-					includeHeaders: true,
-				})),
-				username,
-				password,
-			}),
+			`${ENTRY_MARKER} ${entry.id} ${entry.digest} ${entry.guards.length}\n`,
+		);
+		for (const guard of entry.guards) {
+			parts.push(
+				`${GUARD_SECTION_MARKER} ${guard.optional ? 1 : 0}\n`,
+				buildRegistryCurlConfig({
+					requests: [
+						{
+							id: 0,
+							method: "GET" as const,
+							url: guard.url,
+							manifest: true,
+							includeHeaders: true,
+						},
+					],
+					username,
+					password,
+				}),
+			);
+		}
+		parts.push(
 			`${DELETE_SECTION_MARKER}\n`,
 			buildRegistryCurlConfig({
 				requests: [{ id: entry.id, method: "DELETE" as const, url: entry.deleteUrl }],
@@ -805,12 +820,15 @@ export const buildRegistryPruneStopCommand = ({
  * with its starter, so the kernel releases it when the last process holding it
  * is gone), reads the curl config from the stdin it inherited (the credentials
  * never touch a file, an argument or the environment) and goes through the
- * entries strictly one after the other. Before each entry it stops if the
+ * entries strictly one after the other. Before each DELETE it stops if the
  * wall-clock deadline has passed or a deploy touched the stop marker since the
- * job began, then re-reads the guard tags and skips the DELETE if one of them
- * now is or contains the digest, or could not be read. A skipped entry is
- * reported with status 000. A config that does not end in the end marker was
- * cut off on the way and is never run.
+ * job began. It sends the DELETE only if every guard tag, read by a curl of
+ * its own that exited cleanly, answered 200 with exactly one well-formed
+ * `Docker-Content-Digest` and neither that header nor the body contains the
+ * digest; a guard marked optional may instead answer 404. Anything else, a
+ * 404, a missing header, a cut-off transfer, a refused connection, skips the
+ * DELETE: it is reported with status 000. A config that does not end in the
+ * end marker was cut off on the way and is never run.
  *
  * Single quotes are not allowed in here: it is embedded in a single-quoted
  * string.
@@ -823,16 +841,28 @@ const JOB_BODY = [
 	`[ "$last" = "${DELETE_JOB_END_MARKER}" ] || exit 1`,
 	': > "$Y"',
 	"end=$(( $(date +%s) + D ))",
-	'mode=""',
-	"flush() {",
-	'  [ -n "$mode" ] || return 0',
-	'  mode=""',
+	"mode=; open=0",
+	"guard() {",
+	'  o=$(printf "%s" "$1" | curl --config - 2>/dev/null) || return 1',
+	'  case "$o" in *"$digest"*) return 1 ;; esac',
+	'  if [ "$2" = 1 ] && [ "$(printf "%s\\n" "$o" | grep -Ec "^@@DPL [0-9]+ 404$")" = 1 ]; then return 0; fi',
+	'  [ "$(printf "%s\\n" "$o" | grep -Ec "^@@DPL [0-9]+ 200$")" = 1 ] || return 1',
+	'  [ "$(printf "%s\\n" "$o" | grep -Eic "^docker-content-digest: sha256:[a-f0-9]{64}.?$")" = 1 ] || return 1',
+	'  [ "$(printf "%s\\n" "$o" | grep -Eic "^docker-content-digest:")" = 1 ] || return 1',
+	"}",
+	"endsec() {",
+	'  if [ "$mode" = g ]; then',
+	"    seen=$((seen+1))",
+	'    if [ "$ok" = 1 ]; then guard "$gblk" "$gopt" || ok=0; fi',
+	"  fi",
+	"  mode=",
+	"}",
+	"finish() {",
+	'  [ "$open" = 1 ] || return 0',
+	"  open=0",
 	'  [ "$(date +%s)" -lt "$end" ] || return 1',
-	'  if [ -n "$(find "$S" -newer "$Y" 2>/dev/null)" ]; then return 1; fi',
-	'  out=$(printf "%s\\n" "$gblk" | curl --config - 2>/dev/null)',
-	'  n=$(printf "%s\\n" "$out" | grep -Ec "^@@DPL [0-9]+ (200|404)$")',
-	'  case "$out" in *"$digest"*) n=-1 ;; esac',
-	'  if [ "$n" = "$gn" ]; then',
+	'  [ -z "$(find "$S" -newer "$Y" 2>/dev/null)" ] || return 1',
+	'  if [ "$ok" = 1 ] && [ "$seen" = "$gn" ] && [ "$gn" -gt 0 ] && [ -n "$dblk" ]; then',
 	'    printf "%s" "$dblk" | curl --config - 2>/dev/null',
 	"  else",
 	'    printf "\\n@@DPL %s 000\\n" "$id"',
@@ -844,14 +874,18 @@ const JOB_BODY = [
 	'  printf "%s\\n" "$cfg" | while IFS= read -r line; do',
 	'    case "$line" in',
 	`      "${ENTRY_MARKER} "*)`,
-	"        flush || break",
+	"        endsec; finish || break",
 	"        set -- $line",
-	"        id=$3; digest=$4; gn=$5; gblk=; dblk=; mode=g ;;",
-	`      "${DELETE_SECTION_MARKER}") mode=d ;;`,
-	`      "${DELETE_JOB_END_MARKER}") flush; break ;;`,
+	"        id=$3; digest=$4; gn=$5; ok=1; seen=0; gblk=; dblk=; mode=e; open=1 ;;",
+	`      "${GUARD_SECTION_MARKER} "*)`,
+	"        endsec",
+	"        set -- $line",
+	"        gopt=$3; gblk=; mode=g ;;",
+	`      "${DELETE_SECTION_MARKER}") endsec; dblk=; mode=d ;;`,
+	`      "${DELETE_JOB_END_MARKER}") endsec; finish; break ;;`,
 	"      *)",
 	'        if [ "$mode" = d ]; then dblk="$dblk$line',
-	'"; else gblk="$gblk$line',
+	'"; elif [ "$mode" = g ]; then gblk="$gblk$line',
 	'"; fi ;;',
 	"    esac",
 	"  done",
@@ -891,6 +925,8 @@ export const buildRegistryDeleteJobCommand = ({
 		`( exec 9>>"$LK" ) 2>/dev/null || { echo ${JOB_FAILED_MARKER}; exit 0; }`,
 		'exec 9>>"$LK"',
 		`flock -n 9 || { echo ${JOB_BUSY_MARKER}; exit 0; }`,
+		// Keeps the lock file young for a tmp cleaner that ages files out.
+		'touch "$LK" 2>/dev/null',
 		'rm -f "$Y"',
 		"exec 3<&0",
 		`JOB='${JOB_BODY}'`,

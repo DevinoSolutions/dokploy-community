@@ -785,9 +785,9 @@ describe("the detached delete job: config, commands and output", () => {
 		id: n - 1,
 		digest: dg(n),
 		deleteUrl: `http://localhost:5000/v2/a/manifests/${dg(n)}`,
-		guardUrls: [
-			"http://localhost:5000/v2/a/manifests/latest",
-			"http://localhost:5000/v2/a/manifests/dpl-cur",
+		guards: [
+			{ url: "http://localhost:5000/v2/a/manifests/latest", optional: true },
+			{ url: "http://localhost:5000/v2/a/manifests/dpl-cur" },
 		],
 	}));
 
@@ -801,11 +801,15 @@ describe("the detached delete job: config, commands and output", () => {
 		expect(config).toContain(`# @@DPL-ENTRY 0 ${dg(1)} 2\n`);
 		expect(config.match(/request = "DELETE"/g)).toHaveLength(2);
 		expect(config.match(/max-time = 240/g)).toHaveLength(2);
-		// the guard reads keep the short limit and ask for headers and body
+		// one curl config per guard (the optional one is flagged), short limit,
+		// headers and body asked for
+		expect(config.match(/# @@DPL-GUARD 1\n/g)).toHaveLength(2);
+		expect(config.match(/# @@DPL-GUARD 0\n/g)).toHaveLength(2);
 		expect(config.match(/max-time = 20\n/g)).toHaveLength(4);
+		expect(config.match(/^include$/gm)).toHaveLength(4);
 		expect(config.trimEnd().endsWith("# @@DPL-END")).toBe(true);
 		expect(config).toContain("hunter2");
-		expect(() => buildRegistryDeleteJobConfig({ entries: [{ ...(entries[0] as object), guardUrls: [] } as never] })).toThrow();
+		expect(() => buildRegistryDeleteJobConfig({ entries: [{ ...(entries[0] as object), guards: [] } as never] })).toThrow();
 		expect(() => buildRegistryDeleteJobConfig({ entries: [{ ...(entries[0] as object), digest: "x" } as never] })).toThrow();
 		// a read config keeps the short limit
 		expect(
@@ -911,7 +915,15 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 
 	/** A registry stand-in: `latest` resolves to `state.latest`; every DELETE takes `delayMs`. */
 	const startRegistry = async (delayMs: number, onDelete?: (digest: string) => void) => {
-		const state = { latest: dg(9999), active: 0, maxActive: 0, deleted: [] as string[], gets: 0 };
+		const state = {
+			latest: dg(9999),
+			/** how `latest` answers: ok, 404, no digest header, a body cut off mid-transfer, or a repeated header */
+			latestMode: "ok" as "ok" | "404" | "noheader" | "truncated" | "twoheaders" | "badheader",
+			active: 0,
+			maxActive: 0,
+			deleted: [] as string[],
+			gets: 0,
+		};
 		const server = createServer((req, res) => {
 			const expected = `Basic ${Buffer.from(`ci:${password}`).toString("base64")}`;
 			if (req.headers.authorization !== expected) {
@@ -920,8 +932,29 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 			}
 			if (req.method === "GET" && req.url?.endsWith("/manifests/latest")) {
 				state.gets += 1;
-				res.writeHead(200, { "Docker-Content-Digest": state.latest });
-				res.end("{}");
+				if (state.latestMode === "404") {
+					res.writeHead(404).end();
+				} else if (state.latestMode === "noheader") {
+					res.writeHead(200).end("{}");
+				} else if (state.latestMode === "badheader") {
+					res.writeHead(200, { "Docker-Content-Digest": "sha256:xyz" }).end("{}");
+				} else if (state.latestMode === "twoheaders") {
+					res.writeHead(200, [
+						["Docker-Content-Digest", state.latest],
+						["Docker-Content-Digest", state.latest],
+					]);
+					res.end("{}");
+				} else if (state.latestMode === "truncated") {
+					res.writeHead(200, {
+						"Docker-Content-Digest": state.latest,
+						"Content-Length": "100",
+					});
+					res.write("{}");
+					setTimeout(() => res.destroy(), 20);
+				} else {
+					res.writeHead(200, { "Docker-Content-Digest": state.latest });
+					res.end("{}");
+				}
 				return;
 			}
 			state.active += 1;
@@ -936,12 +969,12 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 		});
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-		const entries = (count: number) =>
+		const entries = (count: number, optionalLatest = false) =>
 			Array.from({ length: count }, (_, id) => ({
 				id,
 				digest: dg(id + 1),
 				deleteUrl: `${base}/v2/a/manifests/${dg(id + 1)}`,
-				guardUrls: [`${base}/v2/a/manifests/latest`],
+				guards: [{ url: `${base}/v2/a/manifests/latest`, optional: optionalLatest }],
 			}));
 		return { state, server, base, entries };
 	};
@@ -1085,7 +1118,10 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 			const config = buildRegistryDeleteJobConfig({
 				entries: registry.entries(2).map((entry) => ({
 					...entry,
-					guardUrls: [`${registry.base}/v2/a/manifests/latest`, "http://127.0.0.1:1/x"],
+					guards: [
+						{ url: `${registry.base}/v2/a/manifests/latest` },
+						{ url: "http://127.0.0.1:1/x" },
+					],
 				})),
 				username: "ci",
 				password,
@@ -1093,6 +1129,91 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 			await runCommand(start("aaaaaaaaaaaaaaaa"), config);
 			const result = await settle(status, [0, 1]);
 			expect(statusesOf(result)).toEqual([0, 0]);
+			expect(registry.state.deleted).toEqual([]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	for (const [what, mode] of [
+		["a 404", "404"],
+		["a 200 without a Docker-Content-Digest header", "noheader"],
+		["a 200 with a malformed digest", "badheader"],
+		["a 200 with two digest headers", "twoheaders"],
+		["a 200 whose body was cut off", "truncated"],
+	] as const) {
+		it(`fails closed: ${what} from a guard sends no DELETE`, async () => {
+			const { dir, start, status } = setup();
+			const registry = await startRegistry(20);
+			registry.state.latestMode = mode;
+			try {
+				const config = buildRegistryDeleteJobConfig({
+					entries: registry.entries(2),
+					username: "ci",
+					password,
+				});
+				await runCommand(start("aaaaaaaaaaaaaaaa"), config);
+				const result = await settle(status, [0, 1]);
+				expect(statusesOf(result)).toEqual([0, 0]);
+				expect(registry.state.deleted).toEqual([]);
+				expect(registry.state.gets).toBeGreaterThan(0);
+			} finally {
+				registry.server.close();
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
+	it("sends the DELETE after a clean 200, and after a 404 only for a guard marked optional", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(20);
+		try {
+			await runCommand(
+				start("aaaaaaaaaaaaaaaa"),
+				buildRegistryDeleteJobConfig({ entries: registry.entries(2), username: "ci", password }),
+			);
+			expect(statusesOf(await settle(status, [0, 1]))).toEqual([202, 202]);
+
+			registry.state.latestMode = "404";
+			registry.state.deleted.length = 0;
+			await runCommand(
+				start("bbbbbbbbbbbbbbbb"),
+				buildRegistryDeleteJobConfig({ entries: registry.entries(2), username: "ci", password }),
+			);
+			expect(statusesOf(await settle(status, [0, 1]))).toEqual([0, 0]);
+			expect(registry.state.deleted).toEqual([]);
+
+			await runCommand(
+				start("cccccccccccccccc"),
+				buildRegistryDeleteJobConfig({
+					entries: registry.entries(2, true),
+					username: "ci",
+					password,
+				}),
+			);
+			expect(statusesOf(await settle(status, [0, 1]))).toEqual([202, 202]);
+			expect(registry.state.deleted).toEqual([dg(1), dg(2)]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("an optional guard still skips the DELETE on any other failure", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(20);
+		registry.state.latestMode = "noheader";
+		try {
+			await runCommand(
+				start("aaaaaaaaaaaaaaaa"),
+				buildRegistryDeleteJobConfig({
+					entries: registry.entries(1, true),
+					username: "ci",
+					password,
+				}),
+			);
+			expect(statusesOf(await settle(status, [0]))).toEqual([0]);
 			expect(registry.state.deleted).toEqual([]);
 		} finally {
 			registry.server.close();
@@ -1232,7 +1353,7 @@ describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh,
 		try {
 			const curl = spawnSync("sh", ["-c", "command -v curl"]).stdout.toString().trim();
 			symlinkSync(curl, join(bin, "curl"));
-			const out = await runCommand(start("aaaaaaaaaaaaaaaa"), "", { PATH: bin });
+			const out = await runCommand(start("aaaaaaaaaaaaaaaa"), "", { ...process.env, PATH: bin });
 			expect(parseRegistryJobOutput(out).kind).toBe("noflock");
 			expect(readdirSync(dir)).toEqual([]);
 		} finally {
