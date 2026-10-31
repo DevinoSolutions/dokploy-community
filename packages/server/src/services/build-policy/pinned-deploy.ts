@@ -16,6 +16,7 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "../deployment";
+import { recordVaultFailureReason } from "../deployment-error-message";
 import { findAllRegistryByOrganizationId } from "../registry";
 import { registryForAuth } from "./apply";
 import { recordBuildPolicyAudit } from "./audit";
@@ -155,6 +156,7 @@ export const deployPinnedApplicationImage = async ({
 		const message = error instanceof Error ? error.message : String(error);
 		await log(`\n❌ [build-policy] ${message}\n`).catch(() => {});
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");
 		await sendBuildErrorNotifications({
 			projectName: application.environment.project.name,

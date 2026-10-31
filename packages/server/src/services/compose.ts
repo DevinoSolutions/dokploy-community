@@ -82,6 +82,7 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
+import { recordVaultFailureReason } from "./deployment-error-message";
 import {
 	appendLogLine,
 	assertDeploymentNotCancelled,
@@ -961,6 +962,7 @@ export const deployCompose = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		// The deployment itself always records the failure; the *service* is only
 		// marked broken when the previous release could not be brought back.
 		const rollbackSucceeded = await didRollbackSucceed(
@@ -1260,6 +1262,7 @@ export const rebuildCompose = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		// A rebuild the pin refused touched nothing: the compose keeps the status
 		// of the release that is still serving (the queue puts back the exact
 		// status it had before the job).
