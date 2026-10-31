@@ -69,8 +69,10 @@ import { assertComposeVolumesBound } from "./compose-volume-binding";
 import {
 	assertDeploymentNotCancelled,
 	isDeploymentCancelledError,
+	isDeploymentStillRunning,
 	toCancelledErrorIfCancelled,
 } from "./deployment-cancel";
+import { withDeployHeartbeat } from "./deployment-heartbeat";
 import { generateApplyPatchesCommand, type Patch } from "./patch";
 import { findRegistryByIdWithCredentials } from "./registry";
 import { findServerById } from "./server";
@@ -421,6 +423,17 @@ const buildImagesOnBuildServer = async (
 		await checkpoint();
 		return execOnBuildServer(command, log.push);
 	};
+	// The build and the push can print nothing for longer than the watchdog's
+	// idle limit (one large layer to a slow registry, a quiet build step), so
+	// while they run Dokploy writes a progress line now and then (T-11843).
+	const runLong = async (command: string, label: string) => {
+		await checkpoint();
+		return withDeployHeartbeat(() => execOnBuildServer(command, log.push), {
+			label,
+			write: (line) => log.line(line),
+			isActive: () => isDeploymentStillRunning(deployment.deploymentId),
+		});
+	};
 	// A failed login explains itself nowhere else: nothing has run that would
 	// have written it to the log.
 	const login = async (
@@ -644,8 +657,9 @@ const buildImagesOnBuildServer = async (
 			return { images: [] };
 		}
 
-		await run(
+		await runLong(
 			getComposeBuildCommand(buildEntity, codePath, projectPath, stackEnvFile),
+			"The image build on the build server",
 		);
 
 		const tag = getBuiltImageTag(
@@ -674,7 +688,7 @@ const buildImagesOnBuildServer = async (
 		// build server logs in to the registry's own docker config (the push uses
 		// it), so it cannot replace another registry's login on that host.
 		const configDir = await login(buildServerId, true, cancelable);
-		await run(
+		await runLong(
 			getTagAndPushCommand({
 				// A prune job still deleting from this registry stops before its next
 				// DELETE: this push may re-create a manifest it was told to delete.
@@ -693,6 +707,7 @@ const buildImagesOnBuildServer = async (
 						stackEnvFile,
 					),
 			}),
+			"The image push to the registry",
 		);
 		// The serving host pulls the images it was just told about, and its stack
 		// deploy sends the default config's login to the swarm

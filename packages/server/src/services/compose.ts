@@ -82,7 +82,6 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
-import { recordVaultFailureReason } from "./deployment-error-message";
 import {
 	appendLogLine,
 	assertDeploymentNotCancelled,
@@ -91,10 +90,13 @@ import {
 	DeploymentCancelledError,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
+	isDeploymentStillRunning,
 	markDeploymentDoneUnlessCancelled,
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
+import { recordVaultFailureReason } from "./deployment-error-message";
+import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import {
 	findPatchesByEntityId,
 	generateApplyPatchesCommand,
@@ -104,6 +106,10 @@ import { validUniqueServerAppName } from "./project";
 import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
 export type Compose = typeof compose.$inferSelect;
+
+/** What the progress lines of the release step call it (T-11843). */
+const COMPOSE_RELEASE_STEP_LABEL =
+	"The compose release step (pull, build and start)";
 
 /** How long after a deploy returns its registry prune starts. */
 export const REGISTRY_PRUNE_START_DELAY_MS = 3_000;
@@ -606,15 +612,27 @@ export const runComposeBuild = async (
 		patches: appliedPatches,
 	});
 	if (!tearsDown) await checkpoint();
-	if (deployment.deploymentId && isReleaseCancelable(command, cancellable)) {
-		await runReleaseScript({
-			serverId,
-			command: `(${command}) >> ${deployment.logPath} 2>&1`,
-			deploymentId: deployment.deploymentId,
-		});
-	} else {
-		await runStep(command);
-	}
+	// The pull and the `up` (or, without a build server, the build) can print
+	// nothing for longer than the watchdog's idle limit: mark progress meanwhile.
+	await withDeployLogHeartbeat(
+		{ serverId, logPath: deployment.logPath },
+		COMPOSE_RELEASE_STEP_LABEL,
+		async () => {
+			if (
+				deployment.deploymentId &&
+				isReleaseCancelable(command, cancellable)
+			) {
+				await runReleaseScript({
+					serverId,
+					command: `(${command}) >> ${deployment.logPath} 2>&1`,
+					deploymentId: deployment.deploymentId,
+				});
+			} else {
+				await runStep(command);
+			}
+		},
+		{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
+	);
 
 	// What a later rebuild must still find (T-7960), recorded only once this
 	// release is running. A deploy that was refused, cancelled or failed puts
@@ -1185,17 +1203,24 @@ export const rebuildCompose = async ({
 		});
 		if (!tearsDown) await checkpoint();
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		if (isReleaseCancelable(command)) {
-			await runReleaseScript({
-				serverId: compose.serverId,
-				command: commandWithLog,
-				deploymentId: deployment.deploymentId,
-			});
-		} else if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, commandWithLog);
-		} else {
-			await execAsync(commandWithLog);
-		}
+		await withDeployLogHeartbeat(
+			{ serverId: compose.serverId, logPath: deployment.logPath },
+			COMPOSE_RELEASE_STEP_LABEL,
+			async () => {
+				if (isReleaseCancelable(command)) {
+					await runReleaseScript({
+						serverId: compose.serverId,
+						command: commandWithLog,
+						deploymentId: deployment.deploymentId,
+					});
+				} else if (compose.serverId) {
+					await execAsyncRemote(compose.serverId, commandWithLog);
+				} else {
+					await execAsync(commandWithLog);
+				}
+			},
+			{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
+		);
 
 		// Carries the record of the deploy forward on this row (T-7960), once the
 		// release is running, like a deploy (see runComposeBuild). The values are

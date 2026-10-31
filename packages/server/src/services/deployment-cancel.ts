@@ -107,6 +107,31 @@ export const toCancelledErrorIfCancelled = async (
 };
 
 /**
+ * False once the deployment row is no longer `running` (the watchdog failed
+ * it, it was cancelled, it ended). A failed lookup counts as still running:
+ * the progress marks use this to know when to stop (T-11843), and a mark that
+ * is written too many times does less harm than one that is missing.
+ */
+export const isDeploymentStillRunning = async (
+	deploymentId: string | undefined,
+): Promise<boolean> => {
+	if (!deploymentId) return true;
+	try {
+		const row = await db.query.deployments.findFirst({
+			where: eq(deployments.deploymentId, deploymentId),
+			columns: { status: true },
+		});
+		return !row || row.status === "running";
+	} catch (error) {
+		console.warn(
+			`Could not read the status of deployment ${deploymentId}:`,
+			error instanceof Error ? error.message : error,
+		);
+		return true;
+	}
+};
+
+/**
  * True once the deployment has been marked cancelled. A failed lookup counts
  * as "not cancelled": the check runs inside the deploy flow (including its
  * failure path), where it must never replace the real error or fail a deploy
