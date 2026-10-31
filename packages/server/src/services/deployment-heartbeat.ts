@@ -29,12 +29,13 @@ import { quote } from "shell-quote";
  *   its build, rolling drain). The fetch is its own step and is not marked.
  *   A rebuild has no fetch: its release command is marked as a whole.
  * - Application (deploy, rebuild, previews): only what follows the line
- *   `BUILD_START_MARKER`, which the script logs when the build starts, so it
- *   is the build and the push to the registry, if any. The marks start once
- *   Dokploy has seen that line in the log, at most one interval after it. The
- *   clone, the patches and the pull of a docker-source image come before it
- *   in the same script and stay under the idle limit, so a clone or pull that
- *   hangs is still failed after about `idleMinutes`, not after the wall limit.
+ *   `getBuildStartLine(deploymentId)`, which the script logs when the build
+ *   starts, so it is the build and the push to the registry, if any. The first
+ *   mark is written by the tick that sees that line in the log, so at most one
+ *   interval after it. The clone, the patches and the pull of a docker-source
+ *   image come before it in the same script and stay under the idle limit, so
+ *   a clone or pull that hangs is still failed after about `idleMinutes`, not
+ *   after the wall limit.
  *   The required-checks wait of the build policy runs in Dokploy, not in the
  *   script, and is not marked either.
  *
@@ -47,9 +48,9 @@ import { quote } from "shell-quote";
  * misses), which fails the step; it is not the mark that detects it.
  *
  * A mark is not written once the deployment is no longer `running` (for
- * example after the watchdog failed it), and the step's end waits a few
- * seconds for a mark that is being written, so none lands after the closing
- * lines of the step.
+ * example after the watchdog failed it), and the step's end waits up to a few
+ * seconds for a mark that is being written. A remote append that is slower than
+ * that can still land after the closing lines of the step.
  */
 
 /**
@@ -64,12 +65,20 @@ export const DEPLOY_HEARTBEAT_SETTLE_MS = 5_000;
 
 /**
  * The line an application's deploy script logs where its build starts: the
- * marks of an application begin once this line is in the log.
+ * marks of an application begin once this exact line is in the log. It names
+ * the deployment, so a log shared by two deployments of one app (the log name
+ * has a one-second resolution) or text printed by a git server cannot stand in
+ * for it.
  */
-export const BUILD_START_MARKER = "--- Dokploy: the build starts here ---";
-/** The shell command that logs `BUILD_START_MARKER`. */
-export const getBuildStartCommand = () =>
-	`echo ${quote([BUILD_START_MARKER])};`;
+export const getBuildStartLine = (deploymentId: string) =>
+	`--- Dokploy: the build of ${deploymentId} starts here ---`;
+/**
+ * The shell command that logs `getBuildStartLine`. The empty line before it
+ * ends a partial line that is still open (git's progress output ends in a
+ * carriage return, not a line feed), so the marker is a line of its own.
+ */
+export const getBuildStartCommand = (deploymentId: string) =>
+	`echo;echo ${quote([getBuildStartLine(deploymentId)])};`;
 
 export const getDeployHeartbeatLine = (label: string, elapsedMs: number) =>
 	`⏳ ${label} is still running (${Math.max(1, Math.round(elapsedMs / 60_000))} min so far, no output yet)`;
@@ -156,10 +165,10 @@ export const withDeployHeartbeat = async <T>(
 	const mark = async (tickAt: number) => {
 		if (markedFrom === null) {
 			if (!ready || !(await attempt(ready, false)) || stopped) return;
-			// The line that proved the start is at most one interval old: the first
-			// mark follows one interval later.
+			// The tick that sees the point writes the first mark right away, so the
+			// log is never silent for more than one interval after that point. The
+			// point itself is at most one interval old.
 			markedFrom = tickAt;
-			return;
 		}
 		if (isActive && !(await attempt(isActive, true))) {
 			stopped = true;
@@ -213,25 +222,17 @@ export const appendDeployLogLine = async (
 ) => {
 	if (!logPath || logPath === ".") return;
 	if (serverId) {
-		const encoded = Buffer.from(
-			`${line}
-`,
-			"utf8",
-		).toString("base64");
+		const encoded = Buffer.from(`${line}\n`, "utf8").toString("base64");
 		await execAsyncRemote(
 			serverId,
 			`echo "${encoded}" | base64 -d >> ${quote([logPath])}`,
 		);
 		return;
 	}
-	await appendFile(
-		logPath,
-		`${line}
-`,
-	);
+	await appendFile(logPath, `${line}\n`);
 };
 
-/** True when the deployment log, on its host, holds `text` on some line. */
+/** True when the deployment log, on its host, has a line that is exactly `text`. */
 export const deployLogHasLine = async (
 	{ serverId, logPath }: DeployLogTarget,
 	text: string,
@@ -239,7 +240,7 @@ export const deployLogHasLine = async (
 	if (!logPath || logPath === ".") return false;
 	// `grep -c` prints 0 and exits 1 when nothing matches; a log that cannot be
 	// read prints nothing. Both mean "not there yet".
-	const command = `grep -cF -- ${quote([text])} ${quote([logPath])} || true`;
+	const command = `grep -cxF -- ${quote([text])} ${quote([logPath])} || true`;
 	const { stdout } = serverId
 		? await execAsyncRemote(serverId, command)
 		: await execAsync(command);
@@ -248,7 +249,7 @@ export const deployLogHasLine = async (
 
 export interface DeployLogHeartbeatOptions {
 	/**
-	 * Marks only once the log holds this line (`BUILD_START_MARKER` for an
+	 * Marks only once the log holds this line (`getBuildStartLine` for an
 	 * application), so the commands that come before it in the same script stay
 	 * under the idle limit.
 	 */

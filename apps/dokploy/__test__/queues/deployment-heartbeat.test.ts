@@ -20,11 +20,11 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 
 import {
 	appendDeployLogLine,
-	BUILD_START_MARKER,
 	DEPLOY_HEARTBEAT_INTERVAL_MS,
 	DEPLOY_HEARTBEAT_SETTLE_MS,
 	deployLogHasLine,
 	getBuildStartCommand,
+	getBuildStartLine,
 	getDeployHeartbeatLine,
 	withDeployHeartbeat,
 	withDeployLogHeartbeat,
@@ -151,7 +151,7 @@ describe("withDeployHeartbeat", () => {
 });
 
 describe("a step that is only marked from a point on (T-11843)", () => {
-	it("writes nothing while the point has not been reached, then marks every interval", async () => {
+	it("writes nothing while the point has not been reached, then marks from the tick that sees it", async () => {
 		const write = vi.fn();
 		let reached = false;
 		const ready = vi.fn(async () => reached);
@@ -167,17 +167,18 @@ describe("a step that is only marked from a point on (T-11843)", () => {
 		expect(ready).toHaveBeenCalledTimes(4);
 
 		reached = true;
-		// The tick that sees the point only starts counting: the line that marks
-		// the point is at most one interval old.
-		await vi.advanceTimersByTimeAsync(5 * MIN);
-		expect(write).not.toHaveBeenCalled();
+		// The tick that sees the point writes the first mark itself: the log is
+		// silent for at most one interval after the point, not two.
 		await vi.advanceTimersByTimeAsync(5 * MIN);
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(write).toHaveBeenLastCalledWith(
-			getDeployHeartbeatLine("The build", 5 * MIN),
+			getDeployHeartbeatLine("The build", 0),
 		);
 		await vi.advanceTimersByTimeAsync(5 * MIN);
 		expect(write).toHaveBeenCalledTimes(2);
+		expect(write).toHaveBeenLastCalledWith(
+			getDeployHeartbeatLine("The build", 5 * MIN),
+		);
 		// Once seen, the point is not looked for again.
 		expect(ready).toHaveBeenCalledTimes(5);
 
@@ -295,7 +296,7 @@ describe("deployLogHasLine", () => {
 		await expect(
 			deployLogHasLine(
 				{ serverId: "build-1", logPath: "/logs/dep.log" },
-				BUILD_START_MARKER,
+				getBuildStartLine("dep-1"),
 			),
 		).resolves.toBe(true);
 		const [serverId, command] = mocks.execAsyncRemote.mock.calls[0] as [
@@ -303,15 +304,17 @@ describe("deployLogHasLine", () => {
 			string,
 		];
 		expect(serverId).toBe("build-1");
-		expect(command).toContain("grep -cF");
+		// The whole line, as a fixed string.
+		expect(command).toContain("grep -cxF --");
 		expect(command).toContain("/logs/dep.log");
+		expect(command.replaceAll("\\", "")).toContain(getBuildStartLine("dep-1"));
 		expect(mocks.execAsync).not.toHaveBeenCalled();
 
 		mocks.execAsyncRemote.mockResolvedValueOnce({ stdout: "0\n", stderr: "" });
 		await expect(
 			deployLogHasLine(
 				{ serverId: "build-1", logPath: "/logs/dep.log" },
-				BUILD_START_MARKER,
+				getBuildStartLine("dep-1"),
 			),
 		).resolves.toBe(false);
 	});
@@ -332,11 +335,18 @@ describe("deployLogHasLine", () => {
 		).resolves.toBe(false);
 	});
 
-	it("is the line the deploy script echoes where the build starts", () => {
-		expect(getBuildStartCommand()).toMatch(/^echo .*;$/);
-		expect(getBuildStartCommand().replaceAll("\\", "")).toContain(
-			BUILD_START_MARKER,
+	it("is the line the deploy script echoes where the build starts, on a line of its own", () => {
+		const command = getBuildStartCommand("dep-1");
+		// An empty line first, so a git progress line that was left open (it ends
+		// in a carriage return) cannot swallow the marker, then the marker.
+		expect(command).toBe(
+			"echo;echo '--- Dokploy: the build of dep-1 starts here ---';",
 		);
+	});
+
+	it("names the deployment, so another deployment's line is a different line", () => {
+		expect(getBuildStartLine("dep-1")).toContain("dep-1");
+		expect(getBuildStartLine("dep-1")).not.toBe(getBuildStartLine("dep-2"));
 	});
 });
 
@@ -400,7 +410,7 @@ describe("withDeployLogHeartbeat", () => {
 		let started = false;
 		mocks.execAsyncRemote.mockImplementation(
 			async (_server: string, command: string) =>
-				command.includes("grep -cF")
+				command.includes("grep -cxF")
 					? { stdout: started ? "1\n" : "0\n", stderr: "" }
 					: { stdout: "", stderr: "" },
 		);
@@ -408,7 +418,7 @@ describe("withDeployLogHeartbeat", () => {
 			{ serverId: "build-1", logPath: "/logs/dep.log" },
 			"The build",
 			() => new Promise<void>((resolve) => setTimeout(resolve, 40 * MIN)),
-			{ startsAfterLogLine: BUILD_START_MARKER },
+			{ startsAfterLogLine: getBuildStartLine("dep-1") },
 		);
 		const appends = () =>
 			mocks.execAsyncRemote.mock.calls.filter(([, command]) =>

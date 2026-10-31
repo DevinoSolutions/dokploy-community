@@ -173,7 +173,7 @@ describe("GitLab application previews", () => {
 			expect(githubService.updateIssueComment).not.toHaveBeenCalled();
 			expect(execProcess.execAsync).toHaveBeenCalledWith(
 				expect.stringContaining(
-					`clone-gitlab;${getBuildStartCommand()}build-application;`,
+					`clone-gitlab;${getBuildStartCommand("deployment-id")}build-application;`,
 				),
 			);
 			expect(deploymentService.updateDeploymentStatus).toHaveBeenCalledWith(

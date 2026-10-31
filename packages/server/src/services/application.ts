@@ -75,8 +75,8 @@ import {
 } from "./deployment-cancel";
 import { recordVaultFailureReason } from "./deployment-error-message";
 import {
-	BUILD_START_MARKER,
 	getBuildStartCommand,
+	getBuildStartLine,
 	withDeployLogHeartbeat,
 } from "./deployment-heartbeat";
 import { type Domain, getDomainHost } from "./domain";
@@ -256,8 +256,9 @@ const APPLICATION_BUILD_STEP_LABEL =
  * Marks progress in the log while the build of the deploy script runs (T-11843).
  * The script is one command: the clone, the patches and the pull of a
  * docker-source image come first and keep the watchdog's idle limit. The marks
- * begin once the script has logged `BUILD_START_MARKER`, which every deploy
- * script gets right before its build (`getBuildStartCommand`).
+ * begin once the script has logged the line of this deployment's build start
+ * (`getBuildStartLine`), which every deploy script gets right before its build
+ * (`getBuildStartCommand`).
  */
 const withBuildHeartbeat = <T>(
 	target: { serverId: string | null | undefined; logPath: string },
@@ -265,7 +266,7 @@ const withBuildHeartbeat = <T>(
 	work: () => Promise<T>,
 ) =>
 	withDeployLogHeartbeat(target, APPLICATION_BUILD_STEP_LABEL, work, {
-		startsAfterLogLine: BUILD_START_MARKER,
+		startsAfterLogLine: getBuildStartLine(deploymentId),
 		isRunning: () => isDeploymentStillRunning(deploymentId),
 	});
 
@@ -361,7 +362,7 @@ export const deployApplication = async ({
 		// <<< build-policy hook 2a/4
 
 		// Everything before this line keeps the watchdog's idle limit (T-11843).
-		command += getBuildStartCommand();
+		command += getBuildStartCommand(deployment.deploymentId);
 		command += await getBuildCommand(application, serverId, {
 			deploymentId: deployment.deploymentId,
 			onStaged: (paths) => stagedBuildFiles.push(...paths),
@@ -607,7 +608,7 @@ export const rebuildApplication = async ({
 		// <<< build-policy hook 2a/4 (rebuild)
 		// Check case for docker only
 		// Everything before this line keeps the watchdog's idle limit (T-11843).
-		command += getBuildStartCommand();
+		command += getBuildStartCommand(deployment.deploymentId);
 		command += await getBuildCommand(application, serverId, {
 			deploymentId: deployment.deploymentId,
 			onStaged: (paths) => stagedBuildFiles.push(...paths),
@@ -1028,7 +1029,7 @@ export const deployPreviewApplication = async ({
 		// <<< build-policy hook 2a/4 (preview)
 
 		// Everything before this line keeps the watchdog's idle limit (T-11843).
-		command += getBuildStartCommand();
+		command += getBuildStartCommand(deployment.deploymentId);
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {
@@ -1297,7 +1298,7 @@ export const rebuildPreviewApplication = async ({
 		});
 		// <<< build-policy hook 2a/4 (preview rebuild)
 		// Everything before this line keeps the watchdog's idle limit (T-11843).
-		command += getBuildStartCommand();
+		command += getBuildStartCommand(deployment.deploymentId);
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {

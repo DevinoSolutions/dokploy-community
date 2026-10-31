@@ -2,7 +2,7 @@ import * as adminService from "@dokploy/server/services/admin";
 import * as applicationService from "@dokploy/server/services/application";
 import { deployApplication } from "@dokploy/server/services/application";
 import * as deploymentService from "@dokploy/server/services/deployment";
-import { BUILD_START_MARKER } from "@dokploy/server/services/deployment-heartbeat";
+import { getBuildStartLine } from "@dokploy/server/services/deployment-heartbeat";
 import { resolveDeploymentLogHost } from "@dokploy/server/services/deployment-log-host";
 import * as builders from "@dokploy/server/utils/builders";
 import * as hooks from "@dokploy/server/utils/docker/hooks";
@@ -11,7 +11,15 @@ import * as notifications from "@dokploy/server/utils/notifications/build-error"
 import * as successNotifications from "@dokploy/server/utils/notifications/build-success";
 import * as execProcess from "@dokploy/server/utils/process/execAsync";
 import * as gitProvider from "@dokploy/server/utils/providers/git";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type Mock,
+	vi,
+} from "vitest";
 import {
 	createDeploymentWatchdog,
 	type WatchdogDeps,
@@ -23,7 +31,7 @@ import type { InMemoryJob } from "../../server/queues/in-memory-queue";
  * its clone.
  *
  * The deploy script is one command: the clone comes first, then the line
- * `BUILD_START_MARKER`, then the build and the push. This runs the real deploy
+ * of the build start (`getBuildStartLine`), then the build and the push. This runs the real deploy
  * flow and the real watchdog on one fake clock, against a host that behaves
  * like the shell script does (it appends to a log file), and checks both sides:
  * a push that is silent for 25 minutes is not failed, and a clone that goes
@@ -147,6 +155,8 @@ const MIN = 60_000;
 const START = Date.parse("2026-10-31T11:13:36.000Z");
 const BUILD_SERVER = "build-server-id";
 const APP_SERVER = "app-server-id";
+const DEPLOYMENT_ID = "deployment-id";
+const BUILD_START_LINE = getBuildStartLine(DEPLOYMENT_ID);
 const LOG_PATH = "/etc/dokploy/logs/test-app/test-app.log";
 
 const application = {
@@ -176,7 +186,7 @@ const application = {
 };
 
 const row = {
-	deploymentId: "deployment-id",
+	deploymentId: DEPLOYMENT_ID,
 	title: "Deploy",
 	logPath: LOG_PATH,
 	pid: null,
@@ -221,8 +231,9 @@ const makeHost = () => {
 			content += text;
 			host.lastWrite = Date.now();
 		},
-		has(text: string) {
-			return content.includes(text);
+		/** `grep -x`: a line of the log that is exactly `text`. */
+		hasLine(text: string) {
+			return content.split("\n").includes(text);
 		},
 		content: () => content,
 	};
@@ -246,7 +257,7 @@ const sweepEveryMinute = async (
 describe("an application deploy on a build server (T-11843)", () => {
 	let host: ReturnType<typeof makeHost>;
 	let killScript: (reason: Error) => void;
-	let stop: ReturnType<typeof vi.fn>;
+	let stop: Mock<WatchdogDeps["stop"]>;
 	let status: string;
 
 	/**
@@ -262,10 +273,10 @@ describe("an application deploy on a build server (T-11843)", () => {
 			serverId: string,
 			command: string,
 		) => {
-			if (command.includes("grep -cF")) {
+			if (command.includes("grep -cxF")) {
 				host.greps.push(serverId);
 				return {
-					stdout: host.has(BUILD_START_MARKER) ? "1\n" : "0\n",
+					stdout: host.hasLine(BUILD_START_LINE) ? "1\n" : "0\n",
 					stderr: "",
 				};
 			}
@@ -318,7 +329,7 @@ describe("an application deploy on a build server (T-11843)", () => {
 			"http://localhost:3000",
 		);
 		vi.mocked(deploymentService.createDeployment).mockResolvedValue({
-			deploymentId: "deployment-id",
+			deploymentId: DEPLOYMENT_ID,
 			logPath: LOG_PATH,
 			serverId: APP_SERVER,
 			buildServerId: BUILD_SERVER,
@@ -356,7 +367,7 @@ describe("an application deploy on a build server (T-11843)", () => {
 			stderr: "",
 		} as any);
 
-		stop = vi.fn(async () => {
+		stop = vi.fn<WatchdogDeps["stop"]>(async () => {
 			status = "error";
 			killScript?.(new Error("the watchdog stopped the process"));
 			return {
@@ -428,7 +439,7 @@ describe("an application deploy on a build server (T-11843)", () => {
 		// Only the shell's view of the script counts, not how it is quoted.
 		const script = (host.scripts[0] as string).replaceAll("\\", "");
 		const clone = script.indexOf("git clone");
-		const marker = script.indexOf(BUILD_START_MARKER);
+		const marker = script.indexOf(BUILD_START_LINE);
 		const build = script.indexOf("echo build;");
 		expect(clone).toBeGreaterThan(-1);
 		expect(marker).toBeGreaterThan(clone);
@@ -443,7 +454,7 @@ describe("an application deploy on a build server (T-11843)", () => {
 			host.append("Cloned\n");
 			// The script's own echo, then the build and a push with nothing printed
 			// for 25 minutes.
-			host.append(`${BUILD_START_MARKER}\n`);
+			host.append(`\n${BUILD_START_LINE}\n`);
 			host.append("#1 [web 1/2] RUN npm run build\n");
 			await sleep(3 * MIN);
 			host.append("The push refers to repository [reg.example.com/acme/app]\n");
@@ -500,23 +511,47 @@ describe("an application deploy on a build server (T-11843)", () => {
 		expect(builders.mechanizeDockerContainer).not.toHaveBeenCalled();
 	});
 
+	it("does not take another deployment's line, or git output that quotes the line, for its own", async () => {
+		installHost(async () => {
+			// Two deployments of one app in the same second share a log file.
+			host.append(`\n${getBuildStartLine("other-deployment-id")}\n`);
+			// A git server can print what it likes after "remote: ".
+			host.append(`remote: ${BUILD_START_LINE}\n`);
+			await sleep(10 * 60 * MIN);
+		});
+		const { watchdog } = makeWatchdog();
+
+		const deploy = deployApplication(args).catch((error) => error);
+		let failedAtMinute = -1;
+		for (let minute = 1; minute <= 40 && failedAtMinute < 0; minute++) {
+			await vi.advanceTimersByTimeAsync(MIN);
+			await watchdog.sweep();
+			if (stop.mock.calls.length > 0) failedAtMinute = minute;
+		}
+		await deploy;
+
+		// No mark was written, so the hung clone is failed at the idle limit.
+		expect(marksOf(host)).toEqual([]);
+		expect(failedAtMinute).toBeGreaterThanOrEqual(20);
+		expect(failedAtMinute).toBeLessThanOrEqual(22);
+	});
+
 	it("writes no more marks once the deployment is no longer running", async () => {
 		installHost(async () => {
-			host.append(`${BUILD_START_MARKER}
-`);
+			host.append(`\n${BUILD_START_LINE}\n`);
 			// A step that goes on after the watchdog failed the deployment.
 			await sleep(60 * MIN);
 		});
 
 		const deploy = deployApplication(args).catch((error) => error);
 		await vi.advanceTimersByTimeAsync(12 * MIN);
-		// The tick of minute 5 saw the line of the build start, the one of minute
-		// 10 marked.
-		expect(marksOf(host)).toHaveLength(1);
+		// The tick of minute 5 saw the line of the build start and marked at once,
+		// the one of minute 10 marked again.
+		expect(marksOf(host)).toHaveLength(2);
 		status = "error";
 		await vi.advanceTimersByTimeAsync(50 * MIN);
 		await deploy;
 
-		expect(marksOf(host)).toHaveLength(1);
+		expect(marksOf(host)).toHaveLength(2);
 	});
 });
