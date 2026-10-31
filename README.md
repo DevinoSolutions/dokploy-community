@@ -122,7 +122,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 ## What's new in v0.30.8-community.40
 
-- Deploys are no longer failed by the 20-minute no-output limit during a long silent step. Dokploy now writes a "still running" line to the deployment log every 5 minutes while a build, push or release step runs.
+- Deploys are no longer failed by the no-output limit (20 minutes by default) during a long silent build, push or release step. Dokploy now writes a "still running" line to the deployment log every 5 minutes while such a step runs; on applications a hung git clone or image pull is still caught.
 - When a deployment fails because a vault secret reference cannot be resolved, the deployment's error message now shows the reason, with no secret values.
 - No new database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
