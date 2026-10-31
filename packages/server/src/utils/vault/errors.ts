@@ -1,8 +1,10 @@
 /**
  * A `${{vault.*}}` reference that could not be resolved: the provider is
  * missing or not assigned, or it could not return the secret. The message
- * names the provider and the secret, never a secret value, so it is safe to
- * show on the deployment (see `recordVaultFailureReason`).
+ * names the provider and the reference; when the provider's own client failed,
+ * it also carries that error's text. None of it is a secret value from the
+ * vault, but that client text can echo a URL with credentials, so the copy on
+ * the deployment is run through `redactSecrets` (see `recordVaultFailureReason`).
  */
 export class VaultResolutionError extends Error {
 	constructor(message: string, options?: { cause?: unknown }) {
