@@ -310,6 +310,16 @@ describe("getTagAndPushCommand", () => {
 		expect(command).not.toMatch(/volume/i);
 		expect(command).not.toMatch(/system prune/);
 	});
+	it("runs a before-push step first, and nothing extra without one", () => {
+		expect(command.startsWith("set -e;")).toBe(true);
+		const withStep = getTagAndPushCommand({
+			images,
+			registryLabel: "reg.example.com",
+			beforePush: "touch /tmp/x.stop >/dev/null 2>&1 || true;",
+		});
+		expect(withStep.startsWith("touch /tmp/x.stop >/dev/null 2>&1 || true;")).toBe(true);
+		expect(withStep.indexOf("touch /tmp/x.stop")).toBeLessThan(withStep.indexOf("docker push"));
+	});
 });
 
 describe("getTagAndPushCommand when an image vanished after the build", () => {

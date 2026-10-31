@@ -98,7 +98,9 @@ interface FakeRegistry {
 	/** the job's result file is gone (build server rebooted, /tmp cleaned) */
 	jobResultLost?: boolean;
 	/** the last delete job that was started */
-	job?: { token: string; blocks: string[]; running: boolean; result: string };
+	job?: { token: string; config: string; running: boolean; result: string };
+	/** the build server has no flock */
+	noFlock?: boolean;
 	/** called for every request the registry receives, before it answers */
 	onRequest?: (method: string, url: string) => void;
 	requests: { method: string; url: string }[];
@@ -227,9 +229,51 @@ const finishJob = (registry: FakeRegistry) => {
 	const job = registry.job;
 	if (!job?.running) return;
 	job.running = false;
-	job.result = `@@DPL-JOB ${job.token}\n${job.blocks
-		.map((block) => answerBlock(registry, block))
-		.join("")}`;
+	const entries: {
+		id: number;
+		digest: string;
+		count: number;
+		guard: string;
+		del: string;
+	}[] = [];
+	let section = "g";
+	for (const line of job.config.replace(/\r/g, "").split("\n")) {
+		const entry = /^# @@DPL-ENTRY (\d+) (\S+) (\d+)$/.exec(line);
+		if (entry) {
+			entries.push({
+				id: Number(entry[1]),
+				digest: entry[2] as string,
+				count: Number(entry[3]),
+				guard: "",
+				del: "",
+			});
+			section = "g";
+		} else if (line === "# @@DPL-DELETE") {
+			section = "d";
+		} else if (line === "# @@DPL-END") {
+			break;
+		} else if (entries.length > 0) {
+			const current = entries[entries.length - 1] as (typeof entries)[number];
+			if (section === "d") current.del += `${line}\n`;
+			else current.guard += `${line}\n`;
+		}
+	}
+	// What the job does: re-read the guard tags before each DELETE, and skip
+	// it when one of them is or contains the digest or could not be read.
+	let output = `@@DPL-JOB ${job.token}\n`;
+	for (const entry of entries) {
+		const guarded = blocksOf(entry.guard).map((block) => answerBlock(registry, block));
+		const readable = guarded.filter((text) => /\n@@DPL \d+ (200|404)\n/.test(text));
+		if (
+			readable.length !== entry.count ||
+			guarded.some((text) => text.includes(entry.digest))
+		) {
+			output += `\n@@DPL ${entry.id} 000\n`;
+			continue;
+		}
+		output += answerBlock(registry, entry.del);
+	}
+	job.result = output;
 };
 
 /**
@@ -246,6 +290,7 @@ const jobReply = (
 	const isStatus = command.includes("@@DPL-IDLE") && !isStart;
 	if (!isStart && !isStatus) return null;
 	if (registry.noCurl) return "@@DPL-NOCURL\n";
+	if (registry.noFlock) return "@@DPL-NOFLOCK\n";
 	const running = registry.jobBusy || registry.job?.running;
 	if (isStatus) {
 		if (running) return "@@DPL-BUSY\n";
@@ -255,13 +300,8 @@ const jobReply = (
 	const end = "# @@DPL-END";
 	// A config that does not end in the marker was cut off: the job never runs it.
 	if (!stdin.trimEnd().endsWith(end)) return "@@DPL-LATE\n";
-	const token = /sh "\$L" "\$R" ([a-f0-9]+)/.exec(command)?.[1] as string;
-	registry.job = {
-		token,
-		blocks: blocksOf(stdin.trimEnd().slice(0, -end.length)),
-		running: true,
-		result: "",
-	};
+	const token = /sh "\$R" "\$S" "\$Y" ([a-f0-9]+) \d+/.exec(command)?.[1] as string;
+	registry.job = { token, config: stdin, running: true, result: "" };
 	if (!registry.jobDeferred) finishJob(registry);
 	return registry.jobSilent ? "" : "@@DPL-STARTED\n";
 };
@@ -1822,12 +1862,16 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		const job = jobs[0] as { command: string; stdin: string };
 		// the config is only run by the job once it ends in the marker
 		expect(job.stdin.trimEnd().endsWith("# @@DPL-END")).toBe(true);
-		const blocks = blocksOf(job.stdin.replace("# @@DPL-END", ""));
-		expect(blocks).toHaveLength(25);
-		for (const block of blocks) {
-			expect(block).toContain('request = "DELETE"');
-			expect(block).toContain("max-time = 240");
-		}
+		const blocks = blocksOf(job.stdin.replace("# @@DPL-END", "")).flatMap((text) =>
+			text.split("# @@DPL-DELETE\n"),
+		);
+		const deletes = blocks.filter((block) => block.includes('request = "DELETE"'));
+		expect(deletes).toHaveLength(25);
+		for (const block of deletes) expect(block).toContain("max-time = 240");
+		// every DELETE is preceded by a re-read of latest and of the release tag
+		expect(job.stdin.match(/# @@DPL-ENTRY \d+ sha256:[a-f0-9]{64} 2\n/g)).toHaveLength(25);
+		expect(job.stdin).toContain("/manifests/latest");
+		expect(job.stdin).toContain(`/manifests/${tagOf("t029")}`);
 		// reads keep their short limit
 		for (const session of sessions) {
 			if (session === job) continue;
@@ -1878,9 +1922,7 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		// another compose on the same registry: the lock refuses its job
 		mocks.logLines.length = 0;
 		await run({ entity: { ...entity, composeId: "c2" } });
-		expect(lines()).toContain(
-			"a deletion job is still running on the build server for this registry",
-		);
+		expect(lines()).toContain("still running on the build server (25 old image manifests sent)");
 		expect(registry.job?.token).toBe(first);
 		expect(registry.deleted).toEqual([]);
 
@@ -1905,7 +1947,7 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		mocks.logLines.length = 0;
 		await run();
 		expect(lines()).toContain(
-			"0 of 1 old image manifest confirmed gone, 1 still present (retried below)",
+			"0 of 1 old image manifest confirmed gone, 1 still present (planned again if still deletable)",
 		);
 		expect(lines()).toContain("HTTP 500 x1");
 		expect(lines()).not.toContain("Warning");
@@ -1923,7 +1965,7 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		registry.deleteStatus = undefined;
 		mocks.logLines.length = 0;
 		await run();
-		expect(lines()).toContain("no answer x1");
+		expect(lines()).toContain("not sent or no answer x1");
 		expect(lines()).not.toContain("Warning");
 	});
 
@@ -2038,5 +2080,74 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		// nothing but shared tags is left, and they are not asked about again
 		expect(tagHeads()).toHaveLength(0);
 		expect(registry.deleted).toHaveLength(16);
+	});
+
+	it("does not delete a manifest a deploy re-pushed after the job was planned (a revert with a full cache)", async () => {
+		const registry = setup({
+			rows: series(30),
+			current: [tagOf("t029")],
+			registryOverrides: { jobDeferred: true },
+		});
+		await run();
+		expect(registry.job?.running).toBe(true);
+		// a deploy now reverts to an old build: latest and a new dpl- tag point at
+		// digest 3 again (byte-identical manifest), before the job sends its DELETE
+		const repo = registry.repos[`${PREFIX}/my-app-web`] as Record<string, string>;
+		repo.latest = digest(3);
+		repo[tagOf("revert")] = digest(3);
+		finishJob(registry);
+		expect(registry.deleted).toHaveLength(24);
+		expect(registry.deleted).not.toContain(`${PREFIX}/my-app-web@${digest(3)}`);
+		expect(repo[tagOf("revert")]).toBe(digest(3));
+		expect(repo.latest).toBe(digest(3));
+
+		mocks.logLines.length = 0;
+		registry.jobDeferred = false;
+		await run();
+		expect(lines()).toContain(
+			"24 of 25 old image manifests confirmed gone, 1 still present (planned again if still deletable)",
+		);
+		expect(lines()).toContain("not sent or no answer x1");
+		expect(repo[tagOf("revert")]).toBe(digest(3));
+	});
+
+	it("deletes nothing when the tags it re-reads before a DELETE cannot be read", async () => {
+		const registry = setup({
+			rows: series(30),
+			current: [tagOf("t029")],
+			registryOverrides: { jobDeferred: true },
+		});
+		await run();
+		registry.brokenTags = ["latest"];
+		finishJob(registry);
+		expect(registry.deleted).toEqual([]);
+	});
+
+	it("skips the cleanup with a clear line when the build server has no flock, and does not try again for a while", async () => {
+		const registry = setup({
+			rows: eight,
+			current: [tagOf("c3")],
+			registryOverrides: { noFlock: true },
+		});
+		await run();
+		expect(lines()).toContain("the build server has no flock");
+		expect(lines()).not.toContain("Warning");
+		expect(registry.job).toBeUndefined();
+		expect(registry.deleted).toEqual([]);
+
+		mocks.logLines.length = 0;
+		registry.requests.length = 0;
+		await run();
+		expect(lines()).toContain("the build server has no flock");
+		expect(registry.requests).toEqual([]);
+	});
+
+	it("another compose's deploy reports the outcome of a finished job", async () => {
+		const registry = setup({ rows: series(30), current: [tagOf("t029")] });
+		await run();
+		expect(registry.deleted).toHaveLength(25);
+		mocks.logLines.length = 0;
+		await run({ entity: { ...entity, composeId: "c2" } });
+		expect(lines()).toContain("25 of 25 old image manifests confirmed gone");
 	});
 });

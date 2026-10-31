@@ -1,15 +1,23 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildComposeOverrideYaml } from "@dokploy/server/utils/builders/compose-remote-build";
 import {
 	buildRegistryCurlConfig,
 	buildRegistryDeleteJobCommand,
 	buildRegistryDeleteJobConfig,
 	buildRegistryJobStatusCommand,
+	buildRegistryPruneStopCommand,
 	curlConfigQuote,
 	getManifestChildDigests,
 	getNestedIndexReason,
@@ -17,6 +25,7 @@ import {
 	getReadFilesCommand,
 	getRegistryApiBases,
 	getRegistryJobKey,
+	getRegistryLockKey,
 	hasRepeatedHeader,
 	isBodyTruncated,
 	isLoopbackHost,
@@ -34,6 +43,7 @@ import {
 	selectDigestsToDelete,
 	splitFileOutput,
 } from "@dokploy/server/utils/builders/compose-registry-retention";
+import { buildComposeOverrideYaml } from "@dokploy/server/utils/builders/compose-remote-build";
 import { quote } from "shell-quote";
 import { describe, expect, it } from "vitest";
 
@@ -770,23 +780,39 @@ describe.skipIf(!hasCurl)("against real curl", () => {
 describe("the detached delete job: config, commands and output", () => {
 	const key = getRegistryJobKey("registry-1");
 	const token = "0123456789abcdef";
-	const requests = [
-		{ id: 0, method: "DELETE" as const, url: "http://localhost:5000/v2/a/manifests/sha256:aa" },
-		{ id: 1, method: "DELETE" as const, url: "http://localhost:5000/v2/a/manifests/sha256:bb" },
-	];
+	const dg = (n: number) => `sha256:${n.toString(16).padStart(64, "0")}`;
+	const entries = [1, 2].map((n) => ({
+		id: n - 1,
+		digest: dg(n),
+		deleteUrl: `http://localhost:5000/v2/a/manifests/${dg(n)}`,
+		guardUrls: [
+			"http://localhost:5000/v2/a/manifests/latest",
+			"http://localhost:5000/v2/a/manifests/dpl-cur",
+		],
+	}));
 
-	it("config: DELETEs get the long max-time, the end marker closes it, the password is only in here", () => {
+	it("config: per entry the guard GETs, then the DELETE with the long max-time, closed by the end marker", () => {
 		const config = buildRegistryDeleteJobConfig({
-			requests,
+			entries,
 			username: "ci",
 			password: "hunter2",
 		});
+		expect(config.match(/# @@DPL-ENTRY /g)).toHaveLength(2);
+		expect(config).toContain(`# @@DPL-ENTRY 0 ${dg(1)} 2\n`);
+		expect(config.match(/request = "DELETE"/g)).toHaveLength(2);
 		expect(config.match(/max-time = 240/g)).toHaveLength(2);
-		expect(config).not.toContain("max-time = 20\n");
+		// the guard reads keep the short limit and ask for headers and body
+		expect(config.match(/max-time = 20\n/g)).toHaveLength(4);
 		expect(config.trimEnd().endsWith("# @@DPL-END")).toBe(true);
 		expect(config).toContain("hunter2");
+		expect(() => buildRegistryDeleteJobConfig({ entries: [{ ...(entries[0] as object), guardUrls: [] } as never] })).toThrow();
+		expect(() => buildRegistryDeleteJobConfig({ entries: [{ ...(entries[0] as object), digest: "x" } as never] })).toThrow();
 		// a read config keeps the short limit
-		expect(buildRegistryCurlConfig({ requests })).toContain("max-time = 20\n");
+		expect(
+			buildRegistryCurlConfig({
+				requests: [{ id: 0, method: "GET", url: "http://localhost:5000/v2/" }],
+			}),
+		).toContain("max-time = 20\n");
 	});
 
 	it("commands carry no secret and only accept a hashed key, a hex token and a plain directory", () => {
@@ -796,23 +822,39 @@ describe("the detached delete job: config, commands and output", () => {
 			expect(command).not.toContain("hunter2");
 			expect(command).toContain(`dokploy-registry-prune-${key}.lock`);
 			expect(command).toContain(`dokploy-registry-prune-${key}.result`);
+			expect(command).toContain("flock -n 9");
 		}
+		// no mkdir/pid/stale-lock takeover: the kernel owns the lock
+		expect(start).not.toMatch(/rmdir|mkdir|kill -0|-mmin/);
+		expect(start).toContain("@@DPL-NOFLOCK");
 		// the registry id itself never reaches a path
 		expect(key).toMatch(/^[a-f0-9]{16}$/);
 		expect(key).not.toContain("registry-1");
 		expect(getRegistryJobKey("registry-2")).not.toBe(key);
+		// rows that name one endpoint share the files
+		expect(getRegistryLockKey({ registryUrl: "https://localhost:5000" }, "a")).toBe(
+			getRegistryLockKey({ registryUrl: "http://localhost:5000/" }, "b"),
+		);
+		expect(getRegistryLockKey({ registryUrl: "" }, "a")).toBe(getRegistryJobKey("a"));
 		expect(() => buildRegistryDeleteJobCommand({ key: "../x", token })).toThrow();
 		expect(() => buildRegistryDeleteJobCommand({ key, token: "a;b" })).toThrow();
 		expect(() => buildRegistryDeleteJobCommand({ key, token, dir: "/tmp/$(x)" })).toThrow();
+		expect(() => buildRegistryDeleteJobCommand({ key, token, maxSeconds: 0 })).toThrow();
 		expect(() => buildRegistryJobStatusCommand({ key, dir: "relative" })).toThrow();
 		// the job body sits in single quotes: nothing in it may close them
 		const body = /JOB='([\s\S]*?)'\n/.exec(start)?.[1] ?? "";
 		expect(body.length).toBeGreaterThan(50);
 		expect(body).not.toContain("'");
+		// a deploy's stop marker is a plain touch of the registry's own file
+		expect(buildRegistryPruneStopCommand({ key })).toBe(
+			`touch /tmp/dokploy-registry-prune-${key}.stop >/dev/null 2>&1 || true;`,
+		);
 	});
 
 	it("parses what the commands print", () => {
 		expect(parseRegistryJobOutput("@@DPL-NOCURL\n").kind).toBe("nocurl");
+		expect(parseRegistryJobOutput("@@DPL-NOFLOCK\n").kind).toBe("noflock");
+		expect(parseRegistryJobOutput("@@DPL-FAILED\n").kind).toBe("failed");
 		expect(parseRegistryJobOutput("@@DPL-BUSY\n").kind).toBe("busy");
 		expect(parseRegistryJobOutput("@@DPL-STARTED\n").kind).toBe("started");
 		expect(parseRegistryJobOutput("@@DPL-LATE\n").kind).toBe("late");
@@ -823,17 +865,18 @@ describe("the detached delete job: config, commands and output", () => {
 			token: null,
 			responses: new Map(),
 		});
+		// 000 is a DELETE the job skipped on purpose
 		const idle = parseRegistryJobOutput(
-			`@@DPL-IDLE\n@@DPL-JOB ${token}\n\n@@DPL 0 202\n\n@@DPL 1 500\n`,
-			[0, 1],
+			`@@DPL-IDLE\n@@DPL-JOB ${token}\n\n@@DPL 0 202\n\n@@DPL 1 000\n\n@@DPL 2 500\n`,
+			[0, 1, 2],
 		);
 		if (idle.kind !== "idle") throw new Error("expected idle");
 		expect(idle.token).toBe(token);
 		expect([...idle.responses].map(([id, response]) => [id, response.status])).toEqual([
 			[0, 202],
-			[1, 500],
+			[1, 0],
+			[2, 500],
 		]);
-		// a result cut off in the middle yields the answers that arrived
 		const cut = parseRegistryJobOutput(
 			`@@DPL-IDLE\n@@DPL-JOB ${token}\n\n@@DPL 0 202\n\n@@DPL 1 5`,
 			[0, 1],
@@ -843,112 +886,358 @@ describe("the detached delete job: config, commands and output", () => {
 	});
 });
 
-// The job itself, run by a real sh against real curl and a registry-shaped
-// server: its lock, its detaching, the serial DELETEs and its result file.
-const hasSh = process.platform !== "win32" && spawnSync("sh", ["-c", "true"]).status === 0;
+// The job itself, run by a real sh against real curl and flock and a
+// registry-shaped server: its lock, its detaching, its serial DELETEs, the
+// re-check before each one, its stop conditions and its result file.
+const hasSh = process.platform === "linux" && spawnSync("sh", ["-c", "true"]).status === 0;
+const hasFlock = hasSh && spawnSync("sh", ["-c", "command -v flock"]).status === 0;
 
-describe.skipIf(!hasCurl || !hasSh)("the detached delete job against real sh and curl", () => {
-	const runCommand = (command: string, input?: string) =>
+describe.skipIf(!hasCurl || !hasFlock)("the detached delete job against real sh, flock and curl", () => {
+	const password = 'wi"ld\\pass';
+	const dg = (n: number) => `sha256:${n.toString(16).padStart(64, "0")}`;
+	const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+	const runCommand = (command: string, input?: string, env?: NodeJS.ProcessEnv) =>
 		new Promise<string>((resolve, reject) => {
-			const child = spawn("sh", ["-c", command]);
+			const child = spawn("/bin/sh", ["-c", command], { env: env ?? process.env });
 			const chunks: Buffer[] = [];
 			child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
 			child.on("error", reject);
+			// a starter that finds the lock held exits without reading its input
+			child.stdin.on("error", () => {});
 			child.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
 			child.stdin.end(input ?? "");
 		});
 
-	it("runs its DELETEs one at a time after the starting command has returned, under a lock", async () => {
-		const password = 'wi"ld\\pass';
-		const dir = mkdtempSync(join(tmpdir(), "dpl-job-"));
-		let active = 0;
-		let maxActive = 0;
-		const deleted: string[] = [];
+	/** A registry stand-in: `latest` resolves to `state.latest`; every DELETE takes `delayMs`. */
+	const startRegistry = async (delayMs: number, onDelete?: (digest: string) => void) => {
+		const state = { latest: dg(9999), active: 0, maxActive: 0, deleted: [] as string[], gets: 0 };
 		const server = createServer((req, res) => {
 			const expected = `Basic ${Buffer.from(`ci:${password}`).toString("base64")}`;
 			if (req.headers.authorization !== expected) {
 				res.writeHead(401).end();
 				return;
 			}
-			active += 1;
-			maxActive = Math.max(maxActive, active);
+			if (req.method === "GET" && req.url?.endsWith("/manifests/latest")) {
+				state.gets += 1;
+				res.writeHead(200, { "Docker-Content-Digest": state.latest });
+				res.end("{}");
+				return;
+			}
+			state.active += 1;
+			state.maxActive = Math.max(state.maxActive, state.active);
+			const digest = (req.url ?? "").split("/manifests/")[1] as string;
 			setTimeout(() => {
-				active -= 1;
-				deleted.push(`${req.method} ${req.url}`);
+				state.active -= 1;
+				state.deleted.push(digest);
+				onDelete?.(digest);
 				res.writeHead(202).end();
-			}, 120);
+			}, delayMs);
 		});
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+		const entries = (count: number) =>
+			Array.from({ length: count }, (_, id) => ({
+				id,
+				digest: dg(id + 1),
+				deleteUrl: `${base}/v2/a/manifests/${dg(id + 1)}`,
+				guardUrls: [`${base}/v2/a/manifests/latest`],
+			}));
+		return { state, server, base, entries };
+	};
+
+	const setup = () => {
+		const dir = mkdtempSync(join(tmpdir(), "dpl-job-"));
+		const key = getRegistryJobKey(`registry-${dir}`);
+		const files = (suffix: string) => join(dir, `dokploy-registry-prune-${key}.${suffix}`);
+		const start = (token: string, extra: { maxSeconds?: number } = {}) =>
+			buildRegistryDeleteJobCommand({ key, token, dir, ...extra });
+		const status = buildRegistryJobStatusCommand({ key, dir });
+		return { dir, key, files, start, status };
+	};
+
+	/** Waits for the job to let go of the lock and returns what it left. */
+	const settle = async (status: string, ids: number[]) => {
+		let result = parseRegistryJobOutput(await runCommand(status), ids);
+		for (let tries = 0; tries < 100 && result.kind === "busy"; tries++) {
+			await sleep(100);
+			result = parseRegistryJobOutput(await runCommand(status), ids);
+		}
+		if (result.kind !== "idle") throw new Error(`job did not finish: ${result.kind}`);
+		return result;
+	};
+	const statusesOf = (result: { responses: Map<number, RegistryResponse> }) =>
+		[...result.responses.values()].map((response) => response.status);
+
+	it("runs its DELETEs one at a time after the starting command has returned, under a lock", async () => {
+		const { dir, start, status, files } = setup();
+		const registry = await startRegistry(120);
 		try {
-			const key = getRegistryJobKey("registry-1");
 			const config = buildRegistryDeleteJobConfig({
-				requests: [0, 1, 2].map((id) => ({
-					id,
-					method: "DELETE" as const,
-					url: `${base}/v2/a/manifests/sha256:${id}`,
+				entries: registry.entries(3),
+				username: "ci",
+				password,
+			});
+			const started = Date.now();
+			const out = await runCommand(start("aaaaaaaaaaaaaaaa"), config);
+			expect(parseRegistryJobOutput(out).kind).toBe("started");
+			// the command is back while the job (3 x 120 ms) is still going
+			expect(Date.now() - started).toBeLessThan(330);
+
+			// a second start finds the lock held and sends nothing
+			const second = await runCommand(start("bbbbbbbbbbbbbbbb"), config);
+			expect(parseRegistryJobOutput(second).kind).toBe("busy");
+			expect(parseRegistryJobOutput(await runCommand(status)).kind).toBe("busy");
+
+			const result = await settle(status, [0, 1, 2]);
+			expect(result.token).toBe("aaaaaaaaaaaaaaaa");
+			expect(statusesOf(result)).toEqual([202, 202, 202]);
+			expect(registry.state.maxActive).toBe(1);
+			expect(registry.state.deleted).toEqual([1, 2, 3].map(dg));
+			// private files; the lock file is never removed by anyone
+			expect(statSync(files("lock")).mode & 0o777).toBe(0o600);
+			expect(statSync(files("result")).mode & 0o777).toBe(0o600);
+
+			// the lock is free again
+			const third = await runCommand(start("cccccccccccccccc"), config);
+			expect(parseRegistryJobOutput(third).kind).toBe("started");
+			await settle(status, [0, 1, 2]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("200 simultaneous starts run at most one job", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(1500);
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(2),
+				username: "ci",
+				password,
+			});
+			const outputs = await Promise.all(
+				Array.from({ length: 200 }, (_, index) =>
+					runCommand(start(`${index.toString(16).padStart(16, "0")}`), config),
+				),
+			);
+			const kinds = outputs.map((output) => parseRegistryJobOutput(output).kind);
+			expect(kinds.filter((kind) => kind === "started" || kind === "late")).toHaveLength(1);
+			expect(kinds.filter((kind) => kind === "busy")).toHaveLength(199);
+			const result = await settle(status, [0, 1]);
+			expect(statusesOf(result)).toEqual([202, 202]);
+			// two DELETEs reached the registry in all, never two at once
+			expect(registry.state.deleted).toHaveLength(2);
+			expect(registry.state.maxActive).toBe(1);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("skips a DELETE whose digest latest now points at (a revert re-pushed it before the job began)", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(20);
+		registry.state.latest = dg(2);
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(3),
+				username: "ci",
+				password,
+			});
+			await runCommand(start("aaaaaaaaaaaaaaaa"), config);
+			const result = await settle(status, [0, 1, 2]);
+			expect(statusesOf(result)).toEqual([202, 0, 202]);
+			expect(registry.state.deleted).toEqual([dg(1), dg(3)]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("re-reads latest before every DELETE: a push in the middle of the job saves the rest", async () => {
+		const { dir, start, status } = setup();
+		// the first DELETE is still on the wire when a deploy re-pushes digest 3
+		const registry = await startRegistry(100, (digest) => {
+			if (digest === dg(1)) registry.state.latest = dg(3);
+		});
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(4),
+				username: "ci",
+				password,
+			});
+			await runCommand(start("aaaaaaaaaaaaaaaa"), config);
+			const result = await settle(status, [0, 1, 2, 3]);
+			expect(registry.state.deleted).toEqual([dg(1), dg(2), dg(4)]);
+			expect(statusesOf(result)).toEqual([202, 202, 0, 202]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("deletes nothing when the guard tags cannot be read", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(20);
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(2).map((entry) => ({
+					...entry,
+					guardUrls: [`${registry.base}/v2/a/manifests/latest`, "http://127.0.0.1:1/x"],
 				})),
 				username: "ci",
 				password,
 			});
-			const first = "aaaaaaaaaaaaaaaa";
-			const started = Date.now();
-			const out = await runCommand(buildRegistryDeleteJobCommand({ key, token: first, dir }), config);
-			expect(parseRegistryJobOutput(out).kind).toBe("started");
-			// the command is back while the job (3 x 120 ms) is still going
-			expect(Date.now() - started).toBeLessThan(340);
-
-			// a second start finds the lock held and sends nothing
-			const second = await runCommand(
-				buildRegistryDeleteJobCommand({ key, token: "bbbbbbbbbbbbbbbb", dir }),
-				config,
-			);
-			expect(parseRegistryJobOutput(second).kind).toBe("busy");
-			const during = await runCommand(buildRegistryJobStatusCommand({ key, dir }));
-			expect(parseRegistryJobOutput(during).kind).toBe("busy");
-
-			// the job finishes, releases the lock and leaves its answers
-			let status = parseRegistryJobOutput(during, [0, 1, 2]);
-			for (let tries = 0; tries < 60 && status.kind === "busy"; tries++) {
-				await new Promise((resolve) => setTimeout(resolve, 100));
-				status = parseRegistryJobOutput(
-					await runCommand(buildRegistryJobStatusCommand({ key, dir })),
-					[0, 1, 2],
-				);
-			}
-			if (status.kind !== "idle") throw new Error(`job did not finish: ${status.kind}`);
-			expect(status.token).toBe(first);
-			expect([...status.responses.values()].map((response) => response.status)).toEqual([
-				202, 202, 202,
-			]);
-			expect(maxActive).toBe(1);
-			expect(deleted).toEqual([0, 1, 2].map((id) => `DELETE /v2/a/manifests/sha256:${id}`));
-
-			// the lock is free again
-			const third = await runCommand(
-				buildRegistryDeleteJobCommand({ key, token: "cccccccccccccccc", dir }),
-				config,
-			);
-			expect(parseRegistryJobOutput(third).kind).toBe("started");
+			await runCommand(start("aaaaaaaaaaaaaaaa"), config);
+			const result = await settle(status, [0, 1]);
+			expect(statusesOf(result)).toEqual([0, 0]);
+			expect(registry.state.deleted).toEqual([]);
 		} finally {
-			server.close();
-			// let the last job finish before its directory goes
-			await new Promise((resolve) => setTimeout(resolve, 600));
+			registry.server.close();
 			rmSync(dir, { recursive: true, force: true });
 		}
-	}, 20_000);
+	}, 30_000);
 
-	it("does not take a stale lock of a dead job for a running one", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "dpl-job-"));
+	it("stops before its next DELETE when a deploy touches the stop marker", async () => {
+		const { dir, start, status, files } = setup();
+		const registry = await startRegistry(150, (digest) => {
+			// the deploy's push begins while the first DELETE is on the wire
+			if (digest === dg(1)) writeFileSync(files("stop"), "");
+		});
 		try {
-			const key = getRegistryJobKey("registry-2");
-			// a lock whose pid is long gone (the build server was restarted)
-			mkdirSync(join(dir, `dokploy-registry-prune-${key}.lock`));
-			writeFileSync(join(dir, `dokploy-registry-prune-${key}.lock`, "pid"), "2999999\n");
-			const status = await runCommand(buildRegistryJobStatusCommand({ key, dir }));
-			expect(parseRegistryJobOutput(status).kind).toBe("idle");
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(4),
+				username: "ci",
+				password,
+			});
+			await runCommand(start("aaaaaaaaaaaaaaaa"), config);
+			const result = await settle(status, [0, 1, 2, 3]);
+			expect(statusesOf(result)).toEqual([202]);
+			expect(registry.state.deleted).toEqual([dg(1)]);
+
+			// a marker from before the job does not stop a new one
+			await runCommand(start("bbbbbbbbbbbbbbbb"), config);
+			const again = await settle(status, [0, 1, 2, 3]);
+			expect(again.token).toBe("bbbbbbbbbbbbbbbb");
+			expect(registry.state.deleted.length).toBeGreaterThan(1);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("stops sending at the wall-clock deadline", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(1300);
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(5),
+				username: "ci",
+				password,
+			});
+			await runCommand(start("aaaaaaaaaaaaaaaa", { maxSeconds: 1 }), config);
+			const result = await settle(status, [0, 1, 2, 3, 4]);
+			expect(statusesOf(result)).toEqual([202]);
+			expect(registry.state.deleted).toEqual([dg(1)]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("never runs a config that was cut off before the end marker", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(20);
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(2),
+				username: "ci",
+				password,
+			});
+			const out = await runCommand(
+				start("aaaaaaaaaaaaaaaa"),
+				config.slice(0, config.indexOf("# @@DPL-END")),
+			);
+			expect(parseRegistryJobOutput(out).kind).toBe("late");
+			await sleep(300);
+			expect(registry.state.deleted).toEqual([]);
+			expect(parseRegistryJobOutput(await runCommand(status)).kind).toBe("idle");
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("keeps the password out of every argv and environment while the job runs", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(900);
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(2),
+				username: "ci",
+				password,
+			});
+			await runCommand(start("aaaaaaaaaaaaaaaa"), config);
+			const leaks: string[] = [];
+			for (const pid of readdirSync("/proc").filter((name) => /^\d+$/.test(name))) {
+				for (const file of ["cmdline", "environ"]) {
+					try {
+						if (readFileSync(`/proc/${pid}/${file}`, "utf8").includes(password)) {
+							leaks.push(`${pid}/${file}`);
+						}
+					} catch {
+						// gone, or not ours
+					}
+				}
+			}
+			expect(leaks).toEqual([]);
+			await settle(status, [0, 1]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("lets go of the lock when the job is killed, with no stale-lock timer", async () => {
+		const { dir, start, status } = setup();
+		const registry = await startRegistry(800);
+		try {
+			const config = buildRegistryDeleteJobConfig({
+				entries: registry.entries(3),
+				username: "ci",
+				password,
+			});
+			const token = "feedfeedfeedfeed";
+			await runCommand(start(token), config);
+			expect(parseRegistryJobOutput(await runCommand(status)).kind).toBe("busy");
+			spawnSync("pkill", ["-9", "-f", token]);
+			// whatever curl was in flight finishes, then the kernel has released it
+			const result = await settle(status, [0, 1, 2]);
+			expect(result.kind).toBe("idle");
+			expect(parseRegistryJobOutput(await runCommand(start("abababababababab"), config)).kind).toBe(
+				"started",
+			);
+			await settle(status, [0, 1, 2]);
+		} finally {
+			registry.server.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	it("does nothing and says so when the build server has no flock", async () => {
+		const { dir, start } = setup();
+		const bin = mkdtempSync(join(tmpdir(), "dpl-bin-"));
+		try {
+			const curl = spawnSync("sh", ["-c", "command -v curl"]).stdout.toString().trim();
+			symlinkSync(curl, join(bin, "curl"));
+			const out = await runCommand(start("aaaaaaaaaaaaaaaa"), "", { PATH: bin });
+			expect(parseRegistryJobOutput(out).kind).toBe("noflock");
+			expect(readdirSync(dir)).toEqual([]);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
+			rmSync(bin, { recursive: true, force: true });
 		}
 	});
 });

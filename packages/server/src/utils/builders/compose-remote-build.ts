@@ -226,6 +226,7 @@ export const getTagAndPushCommand = ({
 	registryLabel,
 	configDir,
 	rebuildService,
+	beforePush,
 }: {
 	images: ComposePushedImage[];
 	registryLabel: string;
@@ -239,8 +240,11 @@ export const getTagAndPushCommand = ({
 	 * failing the deploy.
 	 */
 	rebuildService?: (service: string) => string;
+	/** Shell that runs first, before anything is pushed (it must not fail). */
+	beforePush?: string;
 }) => {
 	const lines: string[] = [
+		...(beforePush ? [beforePush] : []),
 		"set -e;",
 		// Defined once for the whole script: every push below retries through it.
 		getDockerPushRetryFunction(),

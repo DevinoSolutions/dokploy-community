@@ -13,23 +13,22 @@ import {
 	buildRegistryDeleteJobCommand,
 	buildRegistryDeleteJobConfig,
 	buildRegistryJobStatusCommand,
+	DELETE_JOB_DEADLINE_SECONDS,
+	type DeleteJobEntry,
 	getManifestChildDigests,
 	getManifestUrl,
 	getNestedIndexReason,
 	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
-	getRegistryJobKey,
+	getRegistryLockKey,
 	getTagsListUrl,
 	hasRepeatedHeader,
 	isBodyTruncated,
 	isValidDigest,
+	MAX_GUARD_TAGS,
 	mapDeploymentTagTimes,
 	NO_CURL_MARKER,
-	REGISTRY_CURL_COMMAND,
-	RELIED_ON_HEADERS,
-	type RegistryRequest,
-	type RegistryResponse,
 	parseOverrideImages,
 	parseRegistryEndpoint,
 	parseRegistryImageRef,
@@ -37,6 +36,10 @@ import {
 	parseRegistryResponses,
 	parseTagList,
 	planRepoTags,
+	REGISTRY_CURL_COMMAND,
+	RELIED_ON_HEADERS,
+	type RegistryRequest,
+	type RegistryResponse,
 	selectDigestsToDelete,
 	splitFileOutput,
 } from "@dokploy/server/utils/builders/compose-registry-retention";
@@ -83,11 +86,20 @@ import { findRegistryByIdWithCredentials } from "./registry";
  * nothing here waits for a DELETE. The run decides what to delete and then
  * hands the whole list to ONE detached job on the build server (see
  * `buildRegistryDeleteJobCommand`): it runs the DELETEs strictly one after the
- * other with a long timeout, holds a per-registry lock so a second deploy can
- * never start a second chain, and leaves its answers in a result file. The
- * run only reports that the job was started. The *next* run asks whether the
- * job is done, reads its answers, and confirms the outcome against the
- * registry (HEAD of each digest) before it says "gone".
+ * other with a long timeout, holds a per-registry `flock` (released by the
+ * kernel whenever the job ends, however it ends) so a second deploy can never
+ * start a second chain, and leaves its answers in a result file. The run only
+ * reports that the job was started. The *next* run asks whether the job is
+ * done, reads its answers, and confirms the outcome against the registry
+ * (HEAD of each digest) before it says "gone".
+ *
+ * A deploy of the compose that begins while the job runs is guarded in three
+ * ways, because the check in this run only sees deploys that began before the
+ * job started: the job ends at a wall-clock deadline; before each DELETE it
+ * re-reads `latest` and the tags the release files name and skips the DELETE
+ * if one of them now is, or contains, the digest; and a build-server deploy
+ * touches a stop marker right before it pushes, which makes the job stop
+ * before its next DELETE.
  *
  * Fairness: one job per run, filled from the service repositories in turn
  * (one wave of old tags each), and the next run starts where this one left
@@ -154,6 +166,8 @@ const WAVE_SIZE = BATCH_SIZE * MAX_CONCURRENT_BATCHES;
 const RUNNING_DEPLOYMENT_WINDOW_MS = 2 * 60 * 60 * 1000;
 /** A job record older than this is forgotten even if nobody asked about it. */
 const PENDING_JOB_TTL_MS = 6 * 60 * 60 * 1000;
+/** A build server found without `flock` is not tried again for this long. */
+const NO_FLOCK_RECHECK_MS = 60 * 60 * 1000;
 /** A tag found dangling is looked at again after this long. */
 const DANGLING_RECHECK_MS = 6 * 60 * 60 * 1000;
 /** Repositories remembered at most (oldest forgotten first). */
@@ -177,6 +191,8 @@ interface DeleteEntry {
 	digest: string;
 	/** The old tags that point at `digest`. */
 	tags: string[];
+	/** Tags the job re-reads right before the DELETE: `latest` and the release files' tags. */
+	guardTags: string[];
 }
 
 /** The delete job a registry was last handed, until a later run has settled it. */
@@ -194,6 +210,9 @@ interface PendingJob {
  * DELETE of a digest that is already gone is harmless.
  */
 const pendingJobs = new Map<string, PendingJob>();
+
+/** build server -> when it was found to have no `flock`. */
+const noFlockSince = new Map<string, number>();
 
 /**
  * What earlier runs learned about a repository's old tags, so the waves of
@@ -237,6 +256,7 @@ const rotation = new Map<string, string>();
 /** Forgets everything the retention remembers between runs. For tests. */
 export const resetRegistryRetentionState = () => {
 	pendingJobs.clear();
+	noFlockSince.clear();
 	repoMemory.clear();
 	rotation.clear();
 	pruneInFlight.clear();
@@ -300,7 +320,9 @@ const describeStatuses = (statuses: Iterable<number>) => {
 	return [...counts]
 		.sort((a, b) => b[1] - a[1] || a[0] - b[0])
 		.map(([status, count]) =>
-			status === 0 ? `no answer x${count}` : `HTTP ${status} x${count}`,
+			status === 0
+				? `not sent or no answer x${count}`
+				: `HTTP ${status} x${count}`,
 		)
 		.join(", ");
 };
@@ -360,7 +382,15 @@ export const pruneComposeBuildRegistry = async ({
 				throw new BudgetSpent("the time budget for cleanup ran out");
 			}
 		};
-		const jobKey = getRegistryJobKey(buildRegistryId);
+		const jobKey = getRegistryLockKey(registry, buildRegistryId);
+		const lockedOut = noFlockSince.get(buildServerId);
+		if (lockedOut !== undefined && Date.now() - lockedOut < NO_FLOCK_RECHECK_MS) {
+			log.line(
+				"Build registry cleanup skipped: the build server has no flock, which the cleanup needs to make sure only one deletion job runs at a time.",
+			);
+			return;
+		}
+		noFlockSince.delete(buildServerId);
 
 		/**
 		 * One SSH session running `command`, fed `input` on stdin. Running out of
@@ -374,6 +404,7 @@ export const pruneComposeBuildRegistry = async ({
 		) => {
 			let stdout = "";
 			let expired = false;
+			let opened = false;
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const expiry = new Promise<null>((resolve) => {
 				timer = setTimeout(
@@ -395,8 +426,9 @@ export const pruneComposeBuildRegistry = async ({
 						(late) => late.abort(),
 						() => {},
 					);
-					return { stdout, expired: true };
+					return { stdout, expired: true, opened };
 				}
+				opened = true;
 				activeSessions.add(session);
 				void expiry.then(() => session.abort());
 				try {
@@ -417,7 +449,7 @@ export const pruneComposeBuildRegistry = async ({
 			} finally {
 				clearTimeout(timer);
 			}
-			return { stdout, expired };
+			return { stdout, expired, opened };
 		};
 
 		/** One curl invocation of reads: the responses that arrived in time. */
@@ -595,7 +627,7 @@ export const pruneComposeBuildRegistry = async ({
 			const earlier = pendingJobs.get(buildRegistryId);
 			if (earlier && Date.now() - earlier.startedAt > PENDING_JOB_TTL_MS) {
 				pendingJobs.delete(buildRegistryId);
-			} else if (earlier && earlier.composeId === entity.composeId) {
+			} else if (earlier) {
 				const { stdout } = await runSession(
 					buildRegistryJobStatusCommand({ key: jobKey }),
 					null,
@@ -607,6 +639,13 @@ export const pruneComposeBuildRegistry = async ({
 				);
 				if (status.kind === "nocurl") {
 					throw new RetentionAbort("curl is not installed on the build server");
+				}
+				if (status.kind === "noflock") {
+					noFlockSince.set(buildServerId, Date.now());
+					log.line(
+						"Build registry cleanup skipped: the build server has no flock, which the cleanup needs to make sure only one deletion job runs at a time.",
+					);
+					return;
 				}
 				if (status.kind !== "idle") {
 					assertTime();
@@ -648,7 +687,7 @@ export const pruneComposeBuildRegistry = async ({
 					Math.round((Date.now() - earlier.startedAt) / 60_000),
 				);
 				log.line(
-					`Build registry cleanup: the background deletion job from an earlier deploy (started ${minutes} min ago) has finished: ${gone} of ${plural(earlier.entries.length, "old image manifest", "old image manifests")} confirmed gone${present ? `, ${present} still present (retried below)` : ""}${unknown ? `, ${unknown} not confirmed` : ""}${answers && answers.size > 0 ? `; the job's DELETE answers: ${describeStatuses([...answers.values()].map((answer) => answer.status))}` : ""}.`,
+					`Build registry cleanup: the background deletion job from an earlier deploy (started ${minutes} min ago) has finished: ${gone} of ${plural(earlier.entries.length, "old image manifest", "old image manifests")} confirmed gone${present ? `, ${present} still present (planned again if still deletable)` : ""}${unknown ? `, ${unknown} not confirmed` : ""}${answers && answers.size > 0 ? `; the job's DELETE answers: ${describeStatuses([...answers.values()].map((answer) => answer.status))}` : ""}.`,
 				);
 				if (answers) {
 					for (const answer of answers.values()) {
@@ -946,6 +985,10 @@ export const pruneComposeBuildRegistry = async ({
 						tags: [...doomedDigests]
 							.filter(([, value]) => value === digest)
 							.map(([tag]) => tag),
+						guardTags: [...new Set([LATEST_TAG, ...required])].slice(
+							0,
+							MAX_GUARD_TAGS,
+						),
 					}));
 					let added = 0;
 					for (const entry of deletions) {
@@ -965,6 +1008,8 @@ export const pruneComposeBuildRegistry = async ({
 			const reposInRun = new Set<string>();
 			let position = 0;
 			let interrupted = false;
+			/** The job filled up before this repository got anything into it. */
+			let starved = false;
 			try {
 				for (; position < ordered.length && !full; position++) {
 					const repo = ordered[position] as string;
@@ -991,6 +1036,7 @@ export const pruneComposeBuildRegistry = async ({
 						required,
 					});
 					if (queue.length > before) reposInRun.add(repo);
+					else if (full) starved = true;
 				}
 			} catch (error) {
 				if (!(error instanceof BudgetSpent) || cancelled) throw error;
@@ -1004,9 +1050,10 @@ export const pruneComposeBuildRegistry = async ({
 				const next = position === 0 ? 1 : position;
 				rotation.set(entity.composeId, ordered[next % ordered.length] as string);
 			} else if (full) {
+				// A repository that got nothing in is the next one to start with.
 				rotation.set(
 					entity.composeId,
-					ordered[position % ordered.length] as string,
+					ordered[(starved ? position - 1 : position) % ordered.length] as string,
 				);
 			} else {
 				rotation.delete(entity.composeId);
@@ -1025,9 +1072,13 @@ export const pruneComposeBuildRegistry = async ({
 			if (Date.now() >= deadline) {
 				throw new BudgetSpent("the time budget for cleanup ran out");
 			}
+			const latestDeployments = await findAllDeploymentsByComposeId(
+				entity.composeId,
+			);
+			if (cancelled) return;
 			if (
 				hasConcurrentDeployment(
-					await findAllDeploymentsByComposeId(entity.composeId),
+					latestDeployments,
 					deployment.deploymentId,
 					snapshotAt,
 				)
@@ -1038,14 +1089,19 @@ export const pruneComposeBuildRegistry = async ({
 				return;
 			}
 			const token = randomBytes(8).toString("hex");
-			const { stdout } = await runSession(
+			const { stdout, opened } = await runSession(
 				buildRegistryDeleteJobCommand({ key: jobKey, token }),
 				buildRegistryDeleteJobConfig({
-					requests: queue.map((entry, id) => ({
-						id,
-						method: "DELETE" as const,
-						url: getManifestUrl(base, entry.repo, entry.digest),
-					})),
+					entries: queue.map(
+						(entry, id): DeleteJobEntry => ({
+							id,
+							digest: entry.digest,
+							deleteUrl: getManifestUrl(base, entry.repo, entry.digest),
+							guardUrls: entry.guardTags.map((tag) =>
+								getManifestUrl(base, entry.repo, tag),
+							),
+						}),
+					),
 					username: registry.username,
 					password: registry.password,
 				}),
@@ -1060,15 +1116,32 @@ export const pruneComposeBuildRegistry = async ({
 			if (started.kind === "nocurl") {
 				throw new RetentionAbort("curl is not installed on the build server");
 			}
+			if (started.kind === "noflock") {
+				noFlockSince.set(buildServerId, Date.now());
+				log.line(
+					"Build registry cleanup skipped: the build server has no flock, which the cleanup needs to make sure only one deletion job runs at a time.",
+				);
+				return;
+			}
 			if (started.kind === "busy") {
 				log.line(
 					`Build registry cleanup: a deletion job is still running on the build server for this registry, so ${what} wait for the next deploy.`,
 				);
 				return;
 			}
-			// Whatever else came back, the job may have started (the answer can be
-			// lost on the way): the next run asks, and the registry has the last
-			// word about what is gone.
+			if (started.kind === "failed" || (started.kind === "unknown" && !opened)) {
+				log.line(
+					`Build registry cleanup: ${
+						started.kind === "failed"
+							? "the build server could not open the lock file of the deletion job"
+							: "the build server could not be reached in time to start the deletion job"
+					}, so ${what} wait for the next deploy.`,
+				);
+				return;
+			}
+			// Otherwise the job may have started even when its answer was lost on
+			// the way: the next run asks, and the registry has the last word about
+			// what is gone.
 			pendingJobs.set(buildRegistryId, {
 				composeId: entity.composeId,
 				token,
@@ -1080,7 +1153,7 @@ export const pruneComposeBuildRegistry = async ({
 					started.kind === "started"
 						? "started a background job on the build server"
 						: "sent a background job to the build server (it did not confirm in time that it started)"
-				} that deletes ${what} one at a time, keeping the newest ${keep} per service${
+				} that deletes ${what} one at a time (for at most ${Math.round(DELETE_JOB_DEADLINE_SECONDS / 60)} min; before each one it re-reads latest and the release tags, and a new deploy's push stops it), keeping the newest ${keep} per service${
 					interrupted
 						? "; it stopped reading at the time budget and the rest continues on the next deploy"
 						: ""
