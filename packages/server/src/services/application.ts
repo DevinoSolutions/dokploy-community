@@ -60,6 +60,7 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
+import { recordVaultFailureReason } from "./deployment-error-message";
 import {
 	appendLogLine,
 	assertBuildNotCancelled,
@@ -473,6 +474,7 @@ export const deployApplication = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");
 
 		const errorMessage = await getDeploymentErrorMessage({
@@ -703,6 +705,7 @@ export const rebuildApplication = async ({
 			await execAsync(command);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");
 		throw error;
 	}
@@ -1065,6 +1068,7 @@ export const deployPreviewApplication = async ({
 			});
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",
 		});
@@ -1319,6 +1323,7 @@ export const rebuildPreviewApplication = async ({
 			});
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",
 		});

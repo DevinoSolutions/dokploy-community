@@ -37,6 +37,7 @@ import {
 	removeDeploymentsByPreviewDeploymentId,
 	updateDeploymentStatus,
 } from "./deployment";
+import { recordVaultFailureReason } from "./deployment-error-message";
 import { createDomain } from "./domain";
 import { getIssueComment } from "./github";
 import {
@@ -892,6 +893,7 @@ const executeComposePreview = async ({
 			);
 		}
 		await updateDeploymentStatus(deployment.deploymentId, "error");
+		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updatePreviewDeployment(previewDeploymentId, {
 			previewStatus: "error",
 		});

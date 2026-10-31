@@ -14,7 +14,9 @@ vi.mock("@dokploy/server/db", () => ({
 
 import { prepareEnvironmentVariables } from "@dokploy/server/utils/docker/utils";
 import {
+	getVaultResolutionMessage,
 	resolveVaultReferences,
+	VaultResolutionError,
 	withResolvedVaultRefs,
 } from "@dokploy/server/utils/vault";
 import { azureClient } from "@dokploy/server/utils/vault/azure";
@@ -888,5 +890,66 @@ describe("phase client", () => {
 		);
 
 		expect(result).toBe("DB_PASSWORD=s3cret");
+	});
+});
+
+describe("vault resolution failures (T-11775)", () => {
+	const hashicorp = {
+		name: "prov",
+		providerType: "hashicorp",
+		config: {
+			providerType: "hashicorp",
+			url: "https://vault.example.com",
+			token: "hvs.token",
+			mount: "secret",
+		},
+		assignments: assignedEverywhere,
+	};
+	const missingField = 'HashiCorp Vault: field "NOPE" not found in secret "app"';
+
+	it("raises a VaultResolutionError with the provider's own message", async () => {
+		findMany.mockResolvedValue([hashicorp]);
+		mockFetch.mockResolvedValue(
+			jsonResponse({ data: { data: { OTHER: "v" } } }),
+		);
+
+		const error = await resolveVaultReferences(
+			"APP_FOO=${{vault.prov.app:NOPE}}",
+			scope,
+		).catch((caught) => caught);
+
+		expect(error).toBeInstanceOf(VaultResolutionError);
+		expect(error.message).toBe(missingField);
+		expect(error.message).not.toContain("hvs.token");
+		expect(getVaultResolutionMessage(error)).toBe(missingField);
+	});
+
+	it.each([
+		["an unknown provider", [], "FOO=${{vault.nope.SECRET}}"],
+		[
+			"a provider assigned to another project",
+			[{ ...hashicorp, assignments: [{ projectId: "x", environmentIds: [] }] }],
+			"FOO=${{vault.prov.app:A}}",
+		],
+	])("raises a VaultResolutionError for %s", async (_what, providers, env) => {
+		findMany.mockResolvedValue(providers);
+
+		const error = await resolveVaultReferences(env, scope).catch(
+			(caught) => caught,
+		);
+
+		expect(error).toBeInstanceOf(VaultResolutionError);
+		expect(getVaultResolutionMessage(error)).toBe(error.message);
+	});
+
+	it("finds the failure behind a wrapper, and ignores other errors", () => {
+		const inner = new VaultResolutionError("Secret x not found");
+
+		expect(
+			getVaultResolutionMessage(new Error("wrapped", { cause: inner })),
+		).toBe("Secret x not found");
+		expect(getVaultResolutionMessage(new Error("boom"))).toBeNull();
+		expect(getVaultResolutionMessage("boom")).toBeNull();
+		expect(getVaultResolutionMessage(undefined)).toBeNull();
 	});
 });
