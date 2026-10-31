@@ -1,4 +1,4 @@
-import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * T-11843: the watchdog killed compose deploys that build on a build server.
@@ -36,6 +36,16 @@ const mocks = vi.hoisted(() => ({
 	generateApplyPatchesCommand: vi.fn(),
 }));
 
+// The progress marks stop once the deployment row is no longer `running`.
+vi.mock("@dokploy/server/db", () => ({
+	db: {
+		query: {
+			deployments: {
+				findFirst: vi.fn().mockResolvedValue({ status: "running" }),
+			},
+		},
+	},
+}));
 vi.mock("node:fs/promises", async (importOriginal) => ({
 	...(await importOriginal<typeof import("node:fs/promises")>()),
 	appendFile: mocks.appendFile,
@@ -196,7 +206,11 @@ describe("a build-server compose whose push is silent for longer than the idle l
 		});
 
 		mocks.execAsyncRemote.mockImplementation(
-			async (_serverId: string, command: string, onData?: (d: string) => void) => {
+			async (
+				_serverId: string,
+				command: string,
+				onData?: (d: string) => void,
+			) => {
 				if (command.includes("config --format json")) {
 					return {
 						stdout: JSON.stringify({
@@ -214,7 +228,9 @@ describe("a build-server compose whose push is silent for longer than the idle l
 				if (command.includes("docker push")) {
 					// One large layer to a slow registry: nothing is printed until it is
 					// through.
-					onData?.("The push refers to repository [reg.example.com/acme/snap-web]\n");
+					onData?.(
+						"The push refers to repository [reg.example.com/acme/snap-web]\n",
+					);
 					await sleep(SILENT_PUSH_MIN * MIN);
 					onData?.("dpl-dep-1: digest: sha256:abc size: 1234\n");
 					return { stdout: "", stderr: "" };
@@ -245,7 +261,10 @@ describe("a build-server compose whose push is silent for longer than the idle l
 			readStatus: async () => "running",
 			listRunning: async () => [row],
 			latestDeploys: async () => [],
-			resolveService: async () => ({ applicationId: null, composeId: "comp-1" }),
+			resolveService: async () => ({
+				applicationId: null,
+				composeId: "comp-1",
+			}),
 			// The real probe: the age of the log file.
 			readLogIdleMs: async () => {
 				const idle = Date.now() - lastLogWrite;

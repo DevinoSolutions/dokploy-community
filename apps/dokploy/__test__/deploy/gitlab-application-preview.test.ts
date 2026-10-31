@@ -1,3 +1,4 @@
+import { getBuildStartCommand } from "@dokploy/server/services/deployment-heartbeat";
 import * as builders from "@dokploy/server/utils/builders";
 import * as execProcess from "@dokploy/server/utils/process/execAsync";
 import * as githubProvider from "@dokploy/server/utils/providers/github";
@@ -171,7 +172,9 @@ describe("GitLab application previews", () => {
 			expect(githubService.issueCommentExists).not.toHaveBeenCalled();
 			expect(githubService.updateIssueComment).not.toHaveBeenCalled();
 			expect(execProcess.execAsync).toHaveBeenCalledWith(
-				expect.stringContaining("clone-gitlab;build-application;"),
+				expect.stringContaining(
+					`clone-gitlab;${getBuildStartCommand()}build-application;`,
+				),
 			);
 			expect(deploymentService.updateDeploymentStatus).toHaveBeenCalledWith(
 				"deployment-id",

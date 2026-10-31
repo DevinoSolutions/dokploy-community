@@ -69,6 +69,7 @@ import { assertComposeVolumesBound } from "./compose-volume-binding";
 import {
 	assertDeploymentNotCancelled,
 	isDeploymentCancelledError,
+	isDeploymentStillRunning,
 	toCancelledErrorIfCancelled,
 } from "./deployment-cancel";
 import { withDeployHeartbeat } from "./deployment-heartbeat";
@@ -430,6 +431,7 @@ const buildImagesOnBuildServer = async (
 		return withDeployHeartbeat(() => execOnBuildServer(command, log.push), {
 			label,
 			write: (line) => log.line(line),
+			isActive: () => isDeploymentStillRunning(deployment.deploymentId),
 		});
 	};
 	// A failed login explains itself nowhere else: nothing has run that would

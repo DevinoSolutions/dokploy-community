@@ -14,6 +14,11 @@ import {
 import { sendBuildErrorNotifications } from "@dokploy/server/utils/notifications/build-error";
 import { sendBuildSuccessNotifications } from "@dokploy/server/utils/notifications/build-success";
 import {
+	getPreviewSourceMismatchMessage,
+	PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
+	resolvePreviewDockerImage,
+} from "@dokploy/server/utils/preview-image";
+import {
 	ExecError,
 	execAsync,
 	execAsyncRemote,
@@ -29,11 +34,6 @@ import { cloneGiteaRepository } from "@dokploy/server/utils/providers/gitea";
 import { cloneGithubRepository } from "@dokploy/server/utils/providers/github";
 import { cloneGitlabRepository } from "@dokploy/server/utils/providers/gitlab";
 import { buildPreviewHeadRef } from "@dokploy/server/utils/providers/head-ref";
-import {
-	getPreviewSourceMismatchMessage,
-	PREVIEW_IMAGE_TEMPLATE_REQUIRED_MESSAGE,
-	resolvePreviewDockerImage,
-} from "@dokploy/server/utils/preview-image";
 import { createTraefikConfig } from "@dokploy/server/utils/traefik/application";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
@@ -60,7 +60,6 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
-import { recordVaultFailureReason } from "./deployment-error-message";
 import {
 	appendLogLine,
 	assertBuildNotCancelled,
@@ -69,11 +68,17 @@ import {
 	DeploymentCancelledError,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
+	isDeploymentStillRunning,
 	markDeploymentDoneUnlessCancelled,
 	runRemoteBuildScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
-import { withDeployLogHeartbeat } from "./deployment-heartbeat";
+import { recordVaultFailureReason } from "./deployment-error-message";
+import {
+	BUILD_START_MARKER,
+	getBuildStartCommand,
+	withDeployLogHeartbeat,
+} from "./deployment-heartbeat";
 import { type Domain, getDomainHost } from "./domain";
 import { getIssueComment } from "./github";
 import { generateApplyPatchesCommand } from "./patch";
@@ -244,7 +249,25 @@ const settleCancelledApplicationDeploy = async (
 };
 
 /** What the progress lines of the build step call it (T-11843). */
-const APPLICATION_BUILD_STEP_LABEL = "The build and push";
+const APPLICATION_BUILD_STEP_LABEL =
+	"The build (and the registry push, if any)";
+
+/**
+ * Marks progress in the log while the build of the deploy script runs (T-11843).
+ * The script is one command: the clone, the patches and the pull of a
+ * docker-source image come first and keep the watchdog's idle limit. The marks
+ * begin once the script has logged `BUILD_START_MARKER`, which every deploy
+ * script gets right before its build (`getBuildStartCommand`).
+ */
+const withBuildHeartbeat = <T>(
+	target: { serverId: string | null | undefined; logPath: string },
+	deploymentId: string,
+	work: () => Promise<T>,
+) =>
+	withDeployLogHeartbeat(target, APPLICATION_BUILD_STEP_LABEL, work, {
+		startsAfterLogLine: BUILD_START_MARKER,
+		isRunning: () => isDeploymentStillRunning(deploymentId),
+	});
 
 export const deployApplication = async ({
 	applicationId,
@@ -337,6 +360,8 @@ export const deployApplication = async ({
 		});
 		// <<< build-policy hook 2a/4
 
+		// Everything before this line keeps the watchdog's idle limit (T-11843).
+		command += getBuildStartCommand();
 		command += await getBuildCommand(application, serverId, {
 			deploymentId: deployment.deploymentId,
 			onStaged: (paths) => stagedBuildFiles.push(...paths),
@@ -351,9 +376,9 @@ export const deployApplication = async ({
 		// <<< build-policy hook 2/4
 
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		await withDeployLogHeartbeat(
+		await withBuildHeartbeat(
 			{ serverId, logPath: deployment.logPath },
-			APPLICATION_BUILD_STEP_LABEL,
+			deployment.deploymentId,
 			async () => {
 				if (serverId) {
 					await runRemoteBuildScript(serverId, commandWithLog, deployment);
@@ -581,6 +606,8 @@ export const rebuildApplication = async ({
 		});
 		// <<< build-policy hook 2a/4 (rebuild)
 		// Check case for docker only
+		// Everything before this line keeps the watchdog's idle limit (T-11843).
+		command += getBuildStartCommand();
 		command += await getBuildCommand(application, serverId, {
 			deploymentId: deployment.deploymentId,
 			onStaged: (paths) => stagedBuildFiles.push(...paths),
@@ -592,9 +619,9 @@ export const rebuildApplication = async ({
 		});
 		// <<< build-policy hook 2/4
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		await withDeployLogHeartbeat(
+		await withBuildHeartbeat(
 			{ serverId, logPath: deployment.logPath },
-			APPLICATION_BUILD_STEP_LABEL,
+			deployment.deploymentId,
 			async () => {
 				if (serverId) {
 					await runRemoteBuildScript(serverId, commandWithLog, deployment);
@@ -1000,6 +1027,8 @@ export const deployPreviewApplication = async ({
 		});
 		// <<< build-policy hook 2a/4 (preview)
 
+		// Everything before this line keeps the watchdog's idle limit (T-11843).
+		command += getBuildStartCommand();
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {
@@ -1022,9 +1051,9 @@ export const deployPreviewApplication = async ({
 		// <<< build-policy hook 2/4 (preview)
 
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		await withDeployLogHeartbeat(
+		await withBuildHeartbeat(
 			{ serverId: buildServerId, logPath: deployment.logPath },
-			APPLICATION_BUILD_STEP_LABEL,
+			deployment.deploymentId,
 			async () => {
 				if (buildServerId) {
 					await execAsyncRemote(buildServerId, commandWithLog);
@@ -1267,6 +1296,8 @@ export const rebuildPreviewApplication = async ({
 			appName: previewDeployment.appName,
 		});
 		// <<< build-policy hook 2a/4 (preview rebuild)
+		// Everything before this line keeps the watchdog's idle limit (T-11843).
+		command += getBuildStartCommand();
 		// A pulled image needs no build, and must not be re-tagged and pushed to
 		// the application's registry either.
 		if (!isDockerPreview) {
@@ -1286,9 +1317,9 @@ export const rebuildPreviewApplication = async ({
 		});
 		// <<< build-policy hook 2/4 (preview rebuild)
 		const commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;
-		await withDeployLogHeartbeat(
+		await withBuildHeartbeat(
 			{ serverId: buildServerId, logPath: deployment.logPath },
-			APPLICATION_BUILD_STEP_LABEL,
+			deployment.deploymentId,
 			async () => {
 				if (buildServerId) {
 					await execAsyncRemote(buildServerId, commandWithLog);

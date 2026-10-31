@@ -82,7 +82,6 @@ import {
 	updateDeployment,
 	updateDeploymentStatus,
 } from "./deployment";
-import { recordVaultFailureReason } from "./deployment-error-message";
 import {
 	appendLogLine,
 	assertDeploymentNotCancelled,
@@ -91,10 +90,12 @@ import {
 	DeploymentCancelledError,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
+	isDeploymentStillRunning,
 	markDeploymentDoneUnlessCancelled,
 	runReleaseScript,
 	statusAfterCancelledDeploy,
 } from "./deployment-cancel";
+import { recordVaultFailureReason } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import {
 	findPatchesByEntityId,
@@ -107,7 +108,8 @@ import { assertDeployReferencesInOrganization } from "./service-reference-scope"
 export type Compose = typeof compose.$inferSelect;
 
 /** What the progress lines of the release step call it (T-11843). */
-const COMPOSE_RELEASE_STEP_LABEL = "The compose release step (pull, build and start)";
+const COMPOSE_RELEASE_STEP_LABEL =
+	"The compose release step (pull, build and start)";
 
 /** How long after a deploy returns its registry prune starts. */
 export const REGISTRY_PRUNE_START_DELAY_MS = 3_000;
@@ -616,7 +618,10 @@ export const runComposeBuild = async (
 		{ serverId, logPath: deployment.logPath },
 		COMPOSE_RELEASE_STEP_LABEL,
 		async () => {
-			if (deployment.deploymentId && isReleaseCancelable(command, cancellable)) {
+			if (
+				deployment.deploymentId &&
+				isReleaseCancelable(command, cancellable)
+			) {
 				await runReleaseScript({
 					serverId,
 					command: `(${command}) >> ${deployment.logPath} 2>&1`,
@@ -626,6 +631,7 @@ export const runComposeBuild = async (
 				await runStep(command);
 			}
 		},
+		{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
 	);
 
 	// What a later rebuild must still find (T-7960), recorded only once this
@@ -1213,6 +1219,7 @@ export const rebuildCompose = async ({
 					await execAsync(commandWithLog);
 				}
 			},
+			{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
 		);
 
 		// Carries the record of the deploy forward on this row (T-7960), once the
