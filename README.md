@@ -124,6 +124,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 - The build registry cleanup now sends its deletions as one serial job on the build server, so a slow delete on a registry with many tags no longer overlaps the next ones. It re-checks `latest` and the release tags before each delete, stops when a compose deploy is about to push, and works through the repositories in turn.
 - Test and comment follow-ups for the v0.30.8-community.38 changes; no behavior change.
+- Security update: follow-redirects 1.16.2 (GHSA-mrwp-f3q8-3g9p).
 - No new database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
