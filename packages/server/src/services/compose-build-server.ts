@@ -11,6 +11,10 @@ import {
 	stageStackEnvFile,
 } from "@dokploy/server/utils/builders/compose";
 import {
+	buildRegistryPruneStopCommand,
+	getRegistryLockKey,
+} from "@dokploy/server/utils/builders/compose-registry-retention";
+import {
 	buildComposeOverrideYaml,
 	type ComposePushedImage,
 	getBuiltImageRepoName,
@@ -672,6 +676,11 @@ const buildImagesOnBuildServer = async (
 		const configDir = await login(buildServerId, true, cancelable);
 		await run(
 			getTagAndPushCommand({
+				// A prune job still deleting from this registry stops before its next
+				// DELETE: this push may re-create a manifest it was told to delete.
+				beforePush: buildRegistryPruneStopCommand({
+					key: getRegistryLockKey(registry, buildRegistryId),
+				}),
 				images: [...byLocalImage.values()],
 				registryLabel: registry.registryUrl || registry.registryName,
 				configDir,
