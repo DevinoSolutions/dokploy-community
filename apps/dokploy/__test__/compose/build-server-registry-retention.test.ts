@@ -1,15 +1,22 @@
 import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildComposeOverrideYaml } from "@dokploy/server/utils/builders/compose-remote-build";
 import {
 	buildRegistryCurlConfig,
+	buildRegistryDeleteJobCommand,
+	buildRegistryDeleteJobConfig,
+	buildRegistryJobStatusCommand,
 	curlConfigQuote,
 	getManifestChildDigests,
 	getNestedIndexReason,
 	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
+	getRegistryJobKey,
 	hasRepeatedHeader,
 	isBodyTruncated,
 	isLoopbackHost,
@@ -17,6 +24,7 @@ import {
 	parseOverrideImages,
 	parseRegistryEndpoint,
 	parseRegistryImageRef,
+	parseRegistryJobOutput,
 	parseRegistryResponses,
 	parseTagList,
 	planRepoTags,
@@ -755,6 +763,192 @@ describe.skipIf(!hasCurl)("against real curl", () => {
 			expect(result.stdout.toString()).not.toContain(password);
 		} finally {
 			server.close();
+		}
+	});
+});
+
+describe("the detached delete job: config, commands and output", () => {
+	const key = getRegistryJobKey("registry-1");
+	const token = "0123456789abcdef";
+	const requests = [
+		{ id: 0, method: "DELETE" as const, url: "http://localhost:5000/v2/a/manifests/sha256:aa" },
+		{ id: 1, method: "DELETE" as const, url: "http://localhost:5000/v2/a/manifests/sha256:bb" },
+	];
+
+	it("config: DELETEs get the long max-time, the end marker closes it, the password is only in here", () => {
+		const config = buildRegistryDeleteJobConfig({
+			requests,
+			username: "ci",
+			password: "hunter2",
+		});
+		expect(config.match(/max-time = 240/g)).toHaveLength(2);
+		expect(config).not.toContain("max-time = 20\n");
+		expect(config.trimEnd().endsWith("# @@DPL-END")).toBe(true);
+		expect(config).toContain("hunter2");
+		// a read config keeps the short limit
+		expect(buildRegistryCurlConfig({ requests })).toContain("max-time = 20\n");
+	});
+
+	it("commands carry no secret and only accept a hashed key, a hex token and a plain directory", () => {
+		const start = buildRegistryDeleteJobCommand({ key, token });
+		const status = buildRegistryJobStatusCommand({ key });
+		for (const command of [start, status]) {
+			expect(command).not.toContain("hunter2");
+			expect(command).toContain(`dokploy-registry-prune-${key}.lock`);
+			expect(command).toContain(`dokploy-registry-prune-${key}.result`);
+		}
+		// the registry id itself never reaches a path
+		expect(key).toMatch(/^[a-f0-9]{16}$/);
+		expect(key).not.toContain("registry-1");
+		expect(getRegistryJobKey("registry-2")).not.toBe(key);
+		expect(() => buildRegistryDeleteJobCommand({ key: "../x", token })).toThrow();
+		expect(() => buildRegistryDeleteJobCommand({ key, token: "a;b" })).toThrow();
+		expect(() => buildRegistryDeleteJobCommand({ key, token, dir: "/tmp/$(x)" })).toThrow();
+		expect(() => buildRegistryJobStatusCommand({ key, dir: "relative" })).toThrow();
+		// the job body sits in single quotes: nothing in it may close them
+		const body = /JOB='([\s\S]*?)'\n/.exec(start)?.[1] ?? "";
+		expect(body.length).toBeGreaterThan(50);
+		expect(body).not.toContain("'");
+	});
+
+	it("parses what the commands print", () => {
+		expect(parseRegistryJobOutput("@@DPL-NOCURL\n").kind).toBe("nocurl");
+		expect(parseRegistryJobOutput("@@DPL-BUSY\n").kind).toBe("busy");
+		expect(parseRegistryJobOutput("@@DPL-STARTED\n").kind).toBe("started");
+		expect(parseRegistryJobOutput("@@DPL-LATE\n").kind).toBe("late");
+		expect(parseRegistryJobOutput("").kind).toBe("unknown");
+		expect(parseRegistryJobOutput("garbage").kind).toBe("unknown");
+		expect(parseRegistryJobOutput("@@DPL-IDLE\n")).toEqual({
+			kind: "idle",
+			token: null,
+			responses: new Map(),
+		});
+		const idle = parseRegistryJobOutput(
+			`@@DPL-IDLE\n@@DPL-JOB ${token}\n\n@@DPL 0 202\n\n@@DPL 1 500\n`,
+			[0, 1],
+		);
+		if (idle.kind !== "idle") throw new Error("expected idle");
+		expect(idle.token).toBe(token);
+		expect([...idle.responses].map(([id, response]) => [id, response.status])).toEqual([
+			[0, 202],
+			[1, 500],
+		]);
+		// a result cut off in the middle yields the answers that arrived
+		const cut = parseRegistryJobOutput(
+			`@@DPL-IDLE\n@@DPL-JOB ${token}\n\n@@DPL 0 202\n\n@@DPL 1 5`,
+			[0, 1],
+		);
+		if (cut.kind !== "idle") throw new Error("expected idle");
+		expect(cut.responses.size).toBe(1);
+	});
+});
+
+// The job itself, run by a real sh against real curl and a registry-shaped
+// server: its lock, its detaching, the serial DELETEs and its result file.
+const hasSh = process.platform !== "win32" && spawnSync("sh", ["-c", "true"]).status === 0;
+
+describe.skipIf(!hasCurl || !hasSh)("the detached delete job against real sh and curl", () => {
+	const runCommand = (command: string, input?: string) =>
+		new Promise<string>((resolve, reject) => {
+			const child = spawn("sh", ["-c", command]);
+			const chunks: Buffer[] = [];
+			child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+			child.on("error", reject);
+			child.on("close", () => resolve(Buffer.concat(chunks).toString("utf8")));
+			child.stdin.end(input ?? "");
+		});
+
+	it("runs its DELETEs one at a time after the starting command has returned, under a lock", async () => {
+		const password = 'wi"ld\\pass';
+		const dir = mkdtempSync(join(tmpdir(), "dpl-job-"));
+		let active = 0;
+		let maxActive = 0;
+		const deleted: string[] = [];
+		const server = createServer((req, res) => {
+			const expected = `Basic ${Buffer.from(`ci:${password}`).toString("base64")}`;
+			if (req.headers.authorization !== expected) {
+				res.writeHead(401).end();
+				return;
+			}
+			active += 1;
+			maxActive = Math.max(maxActive, active);
+			setTimeout(() => {
+				active -= 1;
+				deleted.push(`${req.method} ${req.url}`);
+				res.writeHead(202).end();
+			}, 120);
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+		try {
+			const key = getRegistryJobKey("registry-1");
+			const config = buildRegistryDeleteJobConfig({
+				requests: [0, 1, 2].map((id) => ({
+					id,
+					method: "DELETE" as const,
+					url: `${base}/v2/a/manifests/sha256:${id}`,
+				})),
+				username: "ci",
+				password,
+			});
+			const first = "aaaaaaaaaaaaaaaa";
+			const started = Date.now();
+			const out = await runCommand(buildRegistryDeleteJobCommand({ key, token: first, dir }), config);
+			expect(parseRegistryJobOutput(out).kind).toBe("started");
+			// the command is back while the job (3 x 120 ms) is still going
+			expect(Date.now() - started).toBeLessThan(340);
+
+			// a second start finds the lock held and sends nothing
+			const second = await runCommand(
+				buildRegistryDeleteJobCommand({ key, token: "bbbbbbbbbbbbbbbb", dir }),
+				config,
+			);
+			expect(parseRegistryJobOutput(second).kind).toBe("busy");
+			const during = await runCommand(buildRegistryJobStatusCommand({ key, dir }));
+			expect(parseRegistryJobOutput(during).kind).toBe("busy");
+
+			// the job finishes, releases the lock and leaves its answers
+			let status = parseRegistryJobOutput(during, [0, 1, 2]);
+			for (let tries = 0; tries < 60 && status.kind === "busy"; tries++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				status = parseRegistryJobOutput(
+					await runCommand(buildRegistryJobStatusCommand({ key, dir })),
+					[0, 1, 2],
+				);
+			}
+			if (status.kind !== "idle") throw new Error(`job did not finish: ${status.kind}`);
+			expect(status.token).toBe(first);
+			expect([...status.responses.values()].map((response) => response.status)).toEqual([
+				202, 202, 202,
+			]);
+			expect(maxActive).toBe(1);
+			expect(deleted).toEqual([0, 1, 2].map((id) => `DELETE /v2/a/manifests/sha256:${id}`));
+
+			// the lock is free again
+			const third = await runCommand(
+				buildRegistryDeleteJobCommand({ key, token: "cccccccccccccccc", dir }),
+				config,
+			);
+			expect(parseRegistryJobOutput(third).kind).toBe("started");
+		} finally {
+			server.close();
+			// let the last job finish before its directory goes
+			await new Promise((resolve) => setTimeout(resolve, 600));
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 20_000);
+
+	it("does not take a stale lock of a dead job for a running one", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "dpl-job-"));
+		try {
+			const key = getRegistryJobKey("registry-2");
+			// a lock whose pid is long gone (the build server was restarted)
+			mkdirSync(join(dir, `dokploy-registry-prune-${key}.lock`));
+			writeFileSync(join(dir, `dokploy-registry-prune-${key}.lock`, "pid"), "2999999\n");
+			const status = await runCommand(buildRegistryJobStatusCommand({ key, dir }));
+			expect(parseRegistryJobOutput(status).kind).toBe("idle");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

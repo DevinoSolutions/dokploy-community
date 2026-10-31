@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import {
 	type ComposePathLike,
@@ -9,12 +10,16 @@ import {
 import {
 	BUILD_REGISTRY_KEEP_DPL_TAGS,
 	buildRegistryCurlConfig,
+	buildRegistryDeleteJobCommand,
+	buildRegistryDeleteJobConfig,
+	buildRegistryJobStatusCommand,
 	getManifestChildDigests,
 	getManifestUrl,
 	getNestedIndexReason,
 	getNextTagsPageUrl,
 	getReadFilesCommand,
 	getRegistryApiBases,
+	getRegistryJobKey,
 	getTagsListUrl,
 	hasRepeatedHeader,
 	isBodyTruncated,
@@ -28,6 +33,7 @@ import {
 	parseOverrideImages,
 	parseRegistryEndpoint,
 	parseRegistryImageRef,
+	parseRegistryJobOutput,
 	parseRegistryResponses,
 	parseTagList,
 	planRepoTags,
@@ -66,14 +72,26 @@ import { findRegistryByIdWithCredentials } from "./registry";
  * therefore the remote shell's argv, the environment, any file and any log,
  * never contain it.
  *
- * Progress: manifest operations on a registry backed by object storage can
- * take the better part of a second each, and one curl runs its requests one
- * after the other. So requests go out in small batches, a few SSH sessions at
- * a time, and a batch that runs out of time still counts what it answered;
- * what it did not answer is "unknown", which never makes anything deletable.
- * Each repository is resolved and pruned before the next one, oldest tags
- * first, so a run that stops at the time budget has still removed what it got
- * to, and the next deploy carries on from there.
+ * Reading versus deleting. Reads (tag listings, GET/HEAD of manifests) are
+ * fast and go out in small batches, a few SSH sessions at a time, with a short
+ * timeout; what a batch did not answer is "unknown", which never makes
+ * anything deletable. A manifest DELETE is a different animal: on a registry
+ * backed by object storage it takes time proportional to the repository's tag
+ * count (15 to 70 s at ~220 tags), far longer than the budget of a deploy, and
+ * a DELETE the client gives up on keeps running on the registry while the
+ * next request starts on top of it, which makes the storage answer 503. So
+ * nothing here waits for a DELETE. The run decides what to delete and then
+ * hands the whole list to ONE detached job on the build server (see
+ * `buildRegistryDeleteJobCommand`): it runs the DELETEs strictly one after the
+ * other with a long timeout, holds a per-registry lock so a second deploy can
+ * never start a second chain, and leaves its answers in a result file. The
+ * run only reports that the job was started. The *next* run asks whether the
+ * job is done, reads its answers, and confirms the outcome against the
+ * registry (HEAD of each digest) before it says "gone".
+ *
+ * Fairness: one job per run, filled from the service repositories in turn
+ * (one wave of old tags each), and the next run starts where this one left
+ * off, so one repository with a big backlog cannot starve the others.
  *
  * Everything here is best effort and bounded. `pruneComposeBuildRegistry`
  * never throws; every failure (a 401, a 405 because deletes are disabled, a
@@ -85,7 +103,7 @@ import { findRegistryByIdWithCredentials } from "./registry";
 /** Wall-clock budget for one retention run. */
 const RETENTION_BUDGET_MS = 45_000;
 /**
- * Longest a single curl invocation may take before its SSH session is
+ * Longest a single read curl invocation may take before its SSH session is
  * dropped. Whatever it answered by then still counts.
  */
 const BATCH_TIMEOUT_MS = 20_000;
@@ -101,19 +119,28 @@ const MAX_REPOS = 20;
 /** Pages of one repository's tag listing followed per run. */
 const MAX_TAG_PAGES = 10;
 /**
- * Manifest DELETEs per run: every one sent counts, unless the registry answers
- * that it deleted nothing. A larger backlog is worked off over several deploys.
+ * Manifest DELETEs handed to one job (one job per run). A larger backlog is
+ * worked off over several deploys.
  */
 const MAX_DELETIONS_PER_RUN = 50;
+/**
+ * Estimated serial running time one job may have: a DELETE costs about
+ * `ESTIMATED_DELETE_BASE_MS + ESTIMATED_DELETE_MS_PER_TAG * tags in its
+ * repository`. The job has no deploy guard once it runs, so its length is
+ * bounded.
+ */
+const DELETE_JOB_TARGET_MS = 10 * 60_000;
+const ESTIMATED_DELETE_BASE_MS = 1_300;
+const ESTIMATED_DELETE_MS_PER_TAG = 80;
 /** Requests per curl invocation (they run one after the other). */
 const BATCH_SIZE = 20;
-/**
- * curl invocations, each over its own SSH session, running at once while
- * resolving. DELETE sessions always run one at a time, each right after its
- * own concurrent-deploy check, so a deploy that starts mid-prune can race at
- * most one session (`BATCH_SIZE` deletes).
- */
+/** Read curl invocations, each over its own SSH session, running at once. */
 const MAX_CONCURRENT_BATCHES = 3;
+/**
+ * Time kept free at the end of the budget for starting the job: reading stops
+ * this long before the budget does.
+ */
+const JOB_START_RESERVE_MS = 3_000;
 /**
  * A deployment of the compose created this long before the prune began, or
  * later, counts as started during the prune. Covers clock differences between
@@ -121,10 +148,16 @@ const MAX_CONCURRENT_BATCHES = 3;
  * prune that could have gone on.
  */
 const STARTED_SINCE_SLACK_MS = 5_000;
-/** Old tags resolved before the next round of deletions. */
+/** Old tags resolved before the next decision. */
 const WAVE_SIZE = BATCH_SIZE * MAX_CONCURRENT_BATCHES;
 /** A "running" deployment older than this is a leftover, not a concurrent deploy. */
 const RUNNING_DEPLOYMENT_WINDOW_MS = 2 * 60 * 60 * 1000;
+/** A job record older than this is forgotten even if nobody asked about it. */
+const PENDING_JOB_TTL_MS = 6 * 60 * 60 * 1000;
+/** A tag found dangling is looked at again after this long. */
+const DANGLING_RECHECK_MS = 6 * 60 * 60 * 1000;
+/** Repositories remembered at most (oldest forgotten first). */
+const MAX_REMEMBERED_REPOS = 500;
 
 class RetentionAbort extends Error {}
 /** The time budget ran out: not a failure, the next deploy carries on. */
@@ -139,14 +172,75 @@ const LATEST_TAG = "latest";
  */
 const pruneInFlight = new Set<string>();
 
+interface DeleteEntry {
+	repo: string;
+	digest: string;
+	/** The old tags that point at `digest`. */
+	tags: string[];
+}
+
+/** The delete job a registry was last handed, until a later run has settled it. */
+interface PendingJob {
+	composeId: string;
+	token: string;
+	startedAt: number;
+	entries: DeleteEntry[];
+}
+
 /**
- * compose -> the repository its next prune starts with. A run that stops early
- * (the time budget, the deletion cap) records where; without this the
- * repositories at the front would take every run's budget and the last ones
- * would never be reached. In memory only: after a restart a run starts at the
- * front again, which is merely less fair.
+ * registry -> the job its last run started. At most one: the build server's
+ * lock lets only one job per registry live. In memory only: after a restart
+ * the next run simply finds the lock free or held and plans again, and a
+ * DELETE of a digest that is already gone is harmless.
  */
-const resumeFrom = new Map<string, string>();
+const pendingJobs = new Map<string, PendingJob>();
+
+/**
+ * What earlier runs learned about a repository's old tags, so the waves of
+ * HEADs do not spend themselves on the same tags every run.
+ */
+interface RepoMemory {
+	/** Tags whose manifest is gone (HEAD 404): nothing to delete, ever; tag -> when seen. */
+	dangling: Map<string, number>;
+	/** Tags whose digest a kept tag also uses; tag -> that digest. */
+	shared: Map<string, string>;
+}
+const repoMemory = new Map<string, RepoMemory>();
+
+const getRepoMemory = (registryId: string, repo: string) => {
+	const key = `${registryId}\n${repo}`;
+	let memory = repoMemory.get(key);
+	if (memory) {
+		// Most recently used last.
+		repoMemory.delete(key);
+	} else {
+		memory = { dangling: new Map(), shared: new Map() };
+		if (repoMemory.size >= MAX_REMEMBERED_REPOS) {
+			const oldest = repoMemory.keys().next().value;
+			if (oldest !== undefined) repoMemory.delete(oldest);
+		}
+	}
+	repoMemory.set(key, memory);
+	return memory;
+};
+
+/**
+ * compose -> the repository its next prune starts with. The runs take the
+ * repositories in turn: a run that fills its job, or runs out of time, hands
+ * over to the repository after (or at) the one it stopped in. Without this
+ * the repositories at the front would take every run's budget and the last
+ * ones would never be reached. In memory only: after a restart a run starts at
+ * the front again, which is merely less fair.
+ */
+const rotation = new Map<string, string>();
+
+/** Forgets everything the retention remembers between runs. For tests. */
+export const resetRegistryRetentionState = () => {
+	pendingJobs.clear();
+	repoMemory.clear();
+	rotation.clear();
+	pruneInFlight.clear();
+};
 
 /**
  * Whether another deployment of the compose may push while this prune runs:
@@ -199,6 +293,18 @@ const withTimeout = <T>(
 const plural = (count: number, one: string, many: string) =>
 	`${count} ${count === 1 ? one : many}`;
 
+/** "HTTP 202 x3, HTTP 500 x1" for the answers of a job, most frequent first. */
+const describeStatuses = (statuses: Iterable<number>) => {
+	const counts = new Map<number, number>();
+	for (const status of statuses) counts.set(status, (counts.get(status) ?? 0) + 1);
+	return [...counts]
+		.sort((a, b) => b[1] - a[1] || a[0] - b[0])
+		.map(([status, count]) =>
+			status === 0 ? `no answer x${count}` : `HTTP ${status} x${count}`,
+		)
+		.join(", ");
+};
+
 /**
  * Prunes old `dpl-` tags of `entity`'s service repositories in its build
  * registry. A no-op (no I/O at all) for a compose without a build server, so
@@ -226,35 +332,6 @@ export const pruneComposeBuildRegistry = async ({
 	let password: string | null | undefined;
 	let cancelled = false;
 	const activeSessions = new Set<RemoteInputSession>();
-	/** The repository being worked on, for `resumeFrom` when the budget runs out. */
-	let currentRepo: string | null = null;
-	/** What this run has done so far; reported however it ends. */
-	const progress = {
-		/** Repositories with old tags this run got to. */
-		repos: 0,
-		/** Repositories at least one manifest was removed from. */
-		prunedRepos: new Set<string>(),
-		deleted: 0,
-		/**
-		 * DELETEs counted against `MAX_DELETIONS_PER_RUN`: reserved before they
-		 * are sent, given back only when the registry answers that nothing was
-		 * deleted. One whose answer is lost stays counted: it may have deleted.
-		 */
-		allowanceUsed: 0,
-		removedTags: 0,
-		gone: 0,
-		failed: 0,
-		/** DELETEs sent whose answer did not arrive in time. */
-		unconfirmed: 0,
-	};
-	const progressDetails = () =>
-		`${progress.failed ? `; ${progress.failed} failed` : ""}${
-			progress.gone ? `; ${progress.gone} already gone` : ""
-		}${
-			progress.unconfirmed
-				? `; ${progress.unconfirmed} not confirmed in time`
-				: ""
-		}`;
 	pruneInFlight.add(entity.composeId);
 	try {
 		const registry = await findRegistryByIdWithCredentials(buildRegistryId);
@@ -275,19 +352,26 @@ export const pruneComposeBuildRegistry = async ({
 		}
 
 		const deadline = Date.now() + budgetMs;
-		const outOfTime = () => cancelled || Date.now() >= deadline;
+		/** Reading stops here, so there is time left to start the job. */
+		const readDeadline = deadline - Math.min(JOB_START_RESERVE_MS, budgetMs / 2);
+		const outOfTime = () => cancelled || Date.now() >= readDeadline;
 		const assertTime = () => {
 			if (outOfTime()) {
 				throw new BudgetSpent("the time budget for cleanup ran out");
 			}
 		};
+		const jobKey = getRegistryJobKey(buildRegistryId);
 
 		/**
-		 * One SSH session = one curl invocation on the build server. Running out
-		 * of time is not an error: the session is dropped and the responses that
-		 * arrived before that are returned; the rest are simply missing.
+		 * One SSH session running `command`, fed `input` on stdin. Running out of
+		 * time is not an error: the session is dropped and the output that
+		 * arrived before that is returned.
 		 */
-		const runBatch = async (requests: RegistryRequest[]) => {
+		const runSession = async (
+			command: string,
+			input: string | null,
+			until: number,
+		) => {
 			let stdout = "";
 			let expired = false;
 			let timer: ReturnType<typeof setTimeout> | undefined;
@@ -297,15 +381,13 @@ export const pruneComposeBuildRegistry = async ({
 						expired = true;
 						resolve(null);
 					},
-					Math.max(1, Math.min(batchTimeoutMs, deadline - Date.now())),
+					Math.max(1, Math.min(batchTimeoutMs, until - Date.now())),
 				);
 			});
 			try {
-				const opening = openRemoteInputSession(
-					buildServerId,
-					REGISTRY_CURL_COMMAND,
-					{ onStdout: (text) => void (stdout += text) },
-				);
+				const opening = openRemoteInputSession(buildServerId, command, {
+					onStdout: (text) => void (stdout += text),
+				});
 				const session = await Promise.race([opening, expiry]);
 				if (!session) {
 					// Connecting took the whole slot; drop the session if it opens late.
@@ -313,22 +395,15 @@ export const pruneComposeBuildRegistry = async ({
 						(late) => late.abort(),
 						() => {},
 					);
-					return new Map<number, RegistryResponse>();
+					return { stdout, expired: true };
 				}
 				activeSessions.add(session);
 				void expiry.then(() => session.abort());
 				try {
 					try {
-						await session.write(
-							Buffer.from(
-								buildRegistryCurlConfig({
-									requests,
-									username: registry.username,
-									password: registry.password,
-								}),
-								"utf8",
-							),
-						);
+						if (input !== null) {
+							await session.write(Buffer.from(input, "utf8"));
+						}
 					} catch {
 						// The command may already be gone (no curl); `end` reports why.
 					}
@@ -342,6 +417,21 @@ export const pruneComposeBuildRegistry = async ({
 			} finally {
 				clearTimeout(timer);
 			}
+			return { stdout, expired };
+		};
+
+		/** One curl invocation of reads: the responses that arrived in time. */
+		const runBatch = async (requests: RegistryRequest[]) => {
+			const input = buildRegistryCurlConfig({
+				requests,
+				username: registry.username,
+				password: registry.password,
+			});
+			const { stdout } = await runSession(
+				REGISTRY_CURL_COMMAND,
+				input,
+				readDeadline,
+			);
 			if (stdout.includes(NO_CURL_MARKER)) {
 				throw new RetentionAbort("curl is not installed on the build server");
 			}
@@ -357,36 +447,20 @@ export const pruneComposeBuildRegistry = async ({
 		 * without a response was not answered in time. No batch starts once the
 		 * budget is spent; a batch that fails ends the scheduling, and its error
 		 * comes back next to whatever the other batches answered.
-		 *
-		 * `beforeBatch` runs immediately before each batch's session opens; when
-		 * it answers false no further batch starts (`halted`). Guarded batches
-		 * run one at a time, so no other session is ever in flight past a check.
-		 * `sent` holds the ids of every request whose batch did start.
 		 */
-		const runBatches = async (
-			requests: RegistryRequest[],
-			beforeBatch?: () => Promise<boolean>,
-		) => {
+		const runBatches = async (requests: RegistryRequest[]) => {
 			const chunks: RegistryRequest[][] = [];
 			for (let start = 0; start < requests.length; start += BATCH_SIZE) {
 				chunks.push(requests.slice(start, start + BATCH_SIZE));
 			}
 			const responses = new Map<number, RegistryResponse>();
-			const sent = new Set<number>();
 			let error: unknown;
 			let failed = false;
-			let halted = false;
 			let next = 0;
 			const worker = async () => {
-				while (next < chunks.length && !failed && !halted && !outOfTime()) {
+				while (next < chunks.length && !failed && !outOfTime()) {
 					const chunk = chunks[next++] as RegistryRequest[];
 					try {
-						if (beforeBatch && !(await beforeBatch())) {
-							halted = true;
-							break;
-						}
-						if (failed || halted || outOfTime()) break;
-						for (const request of chunk) sent.add(request.id);
 						for (const [id, response] of await runBatch(chunk)) {
 							responses.set(id, response);
 						}
@@ -398,16 +472,11 @@ export const pruneComposeBuildRegistry = async ({
 			};
 			await Promise.all(
 				Array.from(
-					{
-						length: Math.min(
-							beforeBatch ? 1 : MAX_CONCURRENT_BATCHES,
-							chunks.length,
-						),
-					},
+					{ length: Math.min(MAX_CONCURRENT_BATCHES, chunks.length) },
 					worker,
 				),
 			);
-			return { responses, failed, error, sent, halted };
+			return { responses, failed, error };
 		};
 		const runAll = async (requests: RegistryRequest[]) => {
 			const { responses, failed, error } = await runBatches(requests);
@@ -439,7 +508,7 @@ export const pruneComposeBuildRegistry = async ({
 			// Everything below protects what existed when this snapshot was read.
 			// Any deployment of the compose created from then on (running or
 			// already finished) may have pushed something the snapshot does not
-			// know is in use: deletes stop as soon as one shows up.
+			// know is in use: the job is not started as soon as one shows up.
 			const snapshotAt = Date.now() - STARTED_SINCE_SLACK_MS;
 			const overridePath = getComposeBuildOverridePath(entity);
 			const backupDir = getComposeBackupDir(entity);
@@ -519,7 +588,80 @@ export const pruneComposeBuildRegistry = async ({
 			}
 			const base = bases[reachable] as string;
 
-			// 4. The first page of every repository's tag listing, in one go. It is
+			// 4. What happened to the job an earlier run of this compose started.
+			// Its DELETEs were sent, not confirmed: the job's answers and the
+			// registry itself say what became of them. While it still runs nothing
+			// new is planned (the lock would refuse a second job anyway).
+			const earlier = pendingJobs.get(buildRegistryId);
+			if (earlier && Date.now() - earlier.startedAt > PENDING_JOB_TTL_MS) {
+				pendingJobs.delete(buildRegistryId);
+			} else if (earlier && earlier.composeId === entity.composeId) {
+				const { stdout } = await runSession(
+					buildRegistryJobStatusCommand({ key: jobKey }),
+					null,
+					readDeadline,
+				);
+				const status = parseRegistryJobOutput(
+					stdout,
+					earlier.entries.map((_, id) => id),
+				);
+				if (status.kind === "nocurl") {
+					throw new RetentionAbort("curl is not installed on the build server");
+				}
+				if (status.kind !== "idle") {
+					assertTime();
+					log.line(
+						status.kind === "busy"
+							? `Build registry cleanup: the background deletion job from an earlier deploy is still running on the build server (${plural(earlier.entries.length, "old image manifest", "old image manifests")} sent); nothing new is started until it is done.`
+							: "Build registry cleanup: could not tell whether the background deletion job from an earlier deploy has finished; it is checked again on the next deploy.",
+					);
+					return;
+				}
+				pendingJobs.delete(buildRegistryId);
+				const answers = status.token === earlier.token ? status.responses : null;
+				const heads = await runAll(
+					earlier.entries.map((entry, id) => ({
+						id,
+						method: "HEAD" as const,
+						url: getManifestUrl(base, entry.repo, entry.digest),
+						manifest: true,
+					})),
+				);
+				let gone = 0;
+				let present = 0;
+				let unknown = 0;
+				for (const [id, entry] of earlier.entries.entries()) {
+					const response = heads.get(id);
+					if (response?.status === 404) {
+						gone += 1;
+						// A tag that is still listed for a manifest that is gone is dangling.
+						const memory = getRepoMemory(buildRegistryId, entry.repo);
+						for (const tag of entry.tags) memory.dangling.set(tag, Date.now());
+					} else if (response?.status === 200) {
+						present += 1;
+					} else {
+						unknown += 1;
+					}
+				}
+				const minutes = Math.max(
+					1,
+					Math.round((Date.now() - earlier.startedAt) / 60_000),
+				);
+				log.line(
+					`Build registry cleanup: the background deletion job from an earlier deploy (started ${minutes} min ago) has finished: ${gone} of ${plural(earlier.entries.length, "old image manifest", "old image manifests")} confirmed gone${present ? `, ${present} still present (retried below)` : ""}${unknown ? `, ${unknown} not confirmed` : ""}${answers && answers.size > 0 ? `; the job's DELETE answers: ${describeStatuses([...answers.values()].map((answer) => answer.status))}` : ""}.`,
+				);
+				if (answers) {
+					for (const answer of answers.values()) {
+						// A DELETE that timed out (status 0) says nothing about the
+						// registry being unreachable; only a refusal ends the run.
+						if (answer.status !== 0) {
+							failIfSystemic(answer.status, "deleting manifests");
+						}
+					}
+				}
+			}
+
+			// 5. The first page of every repository's tag listing, in one go. It is
 			// asked for with its headers: a `Link` header names the next page.
 			const repos = [...protectedByRepo.keys()];
 			const firstPages = await runAll(
@@ -608,17 +750,46 @@ export const pruneComposeBuildRegistry = async ({
 				}
 			};
 
-			/** Set once the deletion cap is hit or a concurrent deploy shows up. */
-			let stopped: "cap" | "deploy" | null = null;
+			// The job being filled: what this run decided to delete.
+			const queue: DeleteEntry[] = [];
+			const queuedKeys = new Set<string>();
+			let queuedMs = 0;
+			let full = false;
+			/** Adds `entry` unless the job has no room for it. */
+			const tryQueue = (entry: DeleteEntry, listedTags: number) => {
+				const cost =
+					ESTIMATED_DELETE_BASE_MS + ESTIMATED_DELETE_MS_PER_TAG * listedTags;
+				if (
+					queue.length >= MAX_DELETIONS_PER_RUN ||
+					(queue.length > 0 && queuedMs + cost > DELETE_JOB_TARGET_MS)
+				) {
+					full = true;
+					return false;
+				}
+				queue.push(entry);
+				queuedKeys.add(`${entry.repo}@${entry.digest}`);
+				queuedMs += cost;
+				if (queue.length >= MAX_DELETIONS_PER_RUN || queuedMs >= DELETE_JOB_TARGET_MS) {
+					full = true;
+				}
+				return true;
+			};
 
-			/** Resolves and prunes one repository. */
-			const pruneRepo = async ({
+			/**
+			 * Resolves one repository's old tags, a wave at a time, until a wave
+			 * yields something to delete (the other repositories get their turn),
+			 * and queues those digests.
+			 */
+			const gatherRepo = async ({
 				repo,
+				listed,
 				doomed,
 				resolve,
 				required,
 			}: {
 				repo: string;
+				/** Every tag the listing named. */
+				listed: string[];
 				/** Old tags, oldest first. */
 				doomed: string[];
 				/** Every tag that stays, plus the ones that must exist (see below). */
@@ -704,18 +875,35 @@ export const pruneComposeBuildRegistry = async ({
 					return;
 				}
 
-				// b. Old tags, oldest first, a wave at a time: resolve with HEAD,
-				// delete what no kept tag needs, then the next wave. A doomed tag
-				// that no longer resolves (HEAD 404) is dangling: nothing to delete,
-				// nothing counted. One that did not answer is left alone.
-				const removed = new Set<string>();
-				for (let start = 0; start < doomed.length; start += WAVE_SIZE) {
-					if (progress.allowanceUsed >= MAX_DELETIONS_PER_RUN) {
-						stopped = "cap";
-						return;
+				// b. Old tags, oldest first, a wave at a time: resolve with HEAD and
+				// pick what no kept tag needs. Tags earlier runs found out about are
+				// not asked again: a dangling one (HEAD 404, the manifest is gone,
+				// only the tag name is left and registry:2 cannot remove it) has
+				// nothing to delete, and one that shares its digest with a kept tag
+				// stays protected for as long as that digest is. Left in, they take
+				// the front of every wave for ever. One that did not answer is left
+				// alone, and is asked again next time.
+				const memory = getRepoMemory(buildRegistryId, repo);
+				const listedSet = new Set(listed);
+				for (const tag of memory.dangling.keys()) {
+					if (!listedSet.has(tag)) memory.dangling.delete(tag);
+				}
+				for (const tag of memory.shared.keys()) {
+					if (!listedSet.has(tag)) memory.shared.delete(tag);
+				}
+				const now = Date.now();
+				const candidates = doomed.filter((tag) => {
+					const seen = memory.dangling.get(tag);
+					if (seen !== undefined && now - seen < DANGLING_RECHECK_MS) {
+						return false;
 					}
+					const sharedWith = memory.shared.get(tag);
+					return !(sharedWith && protectedDigests.has(sharedWith));
+				});
+				for (let start = 0; start < candidates.length; start += WAVE_SIZE) {
+					if (full) return;
 					assertTime();
-					const wave = doomed.slice(start, start + WAVE_SIZE);
+					const wave = candidates.slice(start, start + WAVE_SIZE);
 					const heads = await runAll(
 						wave.map((tag, id) => ({
 							id,
@@ -731,13 +919,21 @@ export const pruneComposeBuildRegistry = async ({
 						failIfSystemic(response.status, "reading manifests");
 						// No answer, or an ambiguous one: left alone, never deletable.
 						if (hasRepeatedHeader(response, RELIED_ON_HEADERS)) continue;
+						if (response.status === 404) {
+							memory.dangling.set(tag, Date.now());
+							memory.shared.delete(tag);
+							continue;
+						}
 						const digest = response.headers["docker-content-digest"];
-						if (
-							response.status === 200 &&
-							digest &&
-							isValidDigest(digest) &&
-							!removed.has(digest)
-						) {
+						if (response.status !== 200 || !digest || !isValidDigest(digest)) {
+							continue;
+						}
+						if (protectedDigests.has(digest)) {
+							memory.shared.set(tag, digest);
+							continue;
+						}
+						memory.shared.delete(tag);
+						if (!queuedKeys.has(`${repo}@${digest}`)) {
 							doomedDigests.set(tag, digest);
 						}
 					}
@@ -745,149 +941,151 @@ export const pruneComposeBuildRegistry = async ({
 						doomedDigests,
 						protectedDigests,
 					}).deleteDigests.map((digest) => ({
+						repo,
 						digest,
 						tags: [...doomedDigests]
 							.filter(([, value]) => value === digest)
 							.map(([tag]) => tag),
 					}));
-
-					// c. Delete. Every DELETE is counted against the per-run cap
-					// before it is sent; the registry answering that nothing was
-					// deleted (404, an error) gives it back, a lost answer does not.
-					// Immediately before each DELETE session opens, look again for a
-					// deploy of this compose that started while this ran: its pushes
-					// are the one thing the checks above cannot see.
-					let next = 0;
-					while (next < deletions.length) {
-						const allowance = MAX_DELETIONS_PER_RUN - progress.allowanceUsed;
-						if (allowance <= 0) {
-							stopped = "cap";
-							return;
-						}
-						assertTime();
-						const round = deletions.slice(
-							next,
-							next + Math.min(WAVE_SIZE, allowance),
-						);
-						next += round.length;
-						progress.allowanceUsed += round.length;
-						let deployStarted = false;
-						const { responses, failed, error, sent } = await runBatches(
-							round.map((entry, id) => ({
-								id,
-								method: "DELETE" as const,
-								url: getManifestUrl(base, repo, entry.digest),
-							})),
-							async () => {
-								if (
-									hasConcurrentDeployment(
-										await findAllDeploymentsByComposeId(entity.composeId),
-										deployment.deploymentId,
-										snapshotAt,
-									)
-								) {
-									deployStarted = true;
-									return false;
-								}
-								return true;
-							},
-						);
-						for (const [id, entry] of round.entries()) {
-							if (!sent.has(id)) {
-								progress.allowanceUsed -= 1;
-								continue;
-							}
-							const response = responses.get(id);
-							if (!response) {
-								progress.unconfirmed += 1;
-								continue;
-							}
-							if (response.status === 202) {
-								progress.deleted += 1;
-								progress.removedTags += entry.tags.length;
-								progress.prunedRepos.add(repo);
-								removed.add(entry.digest);
-								continue;
-							}
-							if (response.status === 404) {
-								progress.allowanceUsed -= 1;
-								progress.gone += 1;
-								removed.add(entry.digest);
-								continue;
-							}
-							failIfSystemic(response.status, "deleting manifests");
-							progress.allowanceUsed -= 1;
-							progress.failed += 1;
-							log.line(
-								`Warning: ⚠️ Build registry cleanup: deleting ${repo}@${entry.digest.slice(0, 19)} returned HTTP ${response.status}.`,
-							);
-						}
-						if (failed) throw error;
-						if (deployStarted) {
-							log.line(
-								"Build registry cleanup stopped: another deployment of this compose started.",
-							);
-							stopped = "deploy";
-							return;
-						}
+					let added = 0;
+					for (const entry of deletions) {
+						if (!tryQueue(entry, listed.length)) break;
+						added += 1;
 					}
+					// One wave's worth per repository per run: the others have a turn.
+					if (added > 0 || full) return;
 				}
 			};
 
-			// 5. One repository at a time: list, resolve, prune. Start where the
-			// last run of this compose stopped.
-			const resumeAt = resumeFrom.get(entity.composeId);
+			// 6. The repositories in turn, starting where the last run stopped:
+			// list, resolve, queue. Nothing is deleted here.
+			const resumeAt = rotation.get(entity.composeId);
 			const first = resumeAt ? Math.max(0, repos.indexOf(resumeAt)) : 0;
 			const ordered = [...repos.slice(first), ...repos.slice(0, first)];
+			const reposInRun = new Set<string>();
 			let position = 0;
-			for (; position < ordered.length && !stopped; position++) {
-				const repo = ordered[position] as string;
-				if (progress.allowanceUsed >= MAX_DELETIONS_PER_RUN) {
-					stopped = "cap";
-					break;
+			let interrupted = false;
+			try {
+				for (; position < ordered.length && !full; position++) {
+					const repo = ordered[position] as string;
+					assertTime();
+					const tags = await listTags(repo, firstPages.get(repos.indexOf(repo)));
+					if (!tags) continue;
+					const required = protectedByRepo.get(repo) ?? new Set<string>();
+					const plan = planRepoTags({
+						tags,
+						protectedTags: required,
+						tagTimes,
+						keep,
+					});
+					if (plan.doomedTags.length === 0) continue;
+					const before = queue.length;
+					// Whatever the listing says, `latest` and every tag the release
+					// files name are resolved too, so their digests are protected even
+					// when the listing is stale or incomplete.
+					await gatherRepo({
+						repo,
+						listed: tags,
+						doomed: plan.doomedTags,
+						resolve: [...new Set([...plan.keptTags, ...required, LATEST_TAG])],
+						required,
+					});
+					if (queue.length > before) reposInRun.add(repo);
 				}
-				currentRepo = repo;
-				assertTime();
-				const tags = await listTags(repo, firstPages.get(repos.indexOf(repo)));
-				if (!tags) continue;
-				const required = protectedByRepo.get(repo) ?? new Set<string>();
-				const plan = planRepoTags({
-					tags,
-					protectedTags: required,
-					tagTimes,
-					keep,
-				});
-				if (plan.doomedTags.length === 0) continue;
-				progress.repos += 1;
-				// Whatever the listing says, `latest` and every tag the release
-				// files name are resolved too, so their digests are protected even
-				// when the listing is stale or incomplete.
-				await pruneRepo({
-					repo,
-					doomed: plan.doomedTags,
-					resolve: [...new Set([...plan.keptTags, ...required, LATEST_TAG])],
-					required,
-				});
+			} catch (error) {
+				if (!(error instanceof BudgetSpent) || cancelled) throw error;
+				interrupted = true;
 			}
-			currentRepo = null;
-			if (!stopped) {
-				resumeFrom.delete(entity.composeId);
+			// The next run takes the repositories in turn: after the one that
+			// filled the job; at the one the time ran out in, unless that was the
+			// first (it alone used up the budget, so the next one must not start
+			// with it again); from the front after a complete pass.
+			if (interrupted) {
+				const next = position === 0 ? 1 : position;
+				rotation.set(entity.composeId, ordered[next % ordered.length] as string);
+			} else if (full) {
+				rotation.set(
+					entity.composeId,
+					ordered[position % ordered.length] as string,
+				);
 			} else {
-				// The cap ran out inside or right after a repository: the next run
-				// begins with the one after it, so one big backlog cannot starve
-				// the rest. A concurrent deploy: carry on where this one was.
-				const next =
-					stopped === "cap"
-						? ordered[position % ordered.length]
-						: ordered[position - 1];
-				if (next) resumeFrom.set(entity.composeId, next);
+				rotation.delete(entity.composeId);
 			}
 
-			if (progress.deleted > 0 || progress.failed > 0) {
-				log.line(
-					`Build registry cleanup: removed ${plural(progress.deleted, "old image manifest", "old image manifests")} (${plural(progress.removedTags, "dpl- tag", "dpl- tags")}) from ${plural(progress.repos, "repository", "repositories")}, keeping the newest ${keep} per service${progressDetails()}.`,
-				);
+			if (queue.length === 0) {
+				if (interrupted) throw new BudgetSpent("the time budget for cleanup ran out");
+				return;
 			}
+
+			// 7. Hand the list to one detached job. The registry's lock decides
+			// whether it may start; the deploy guard is looked at once more right
+			// before, since a deploy that began during this run pushes things the
+			// checks above could not see.
+			if (cancelled) return;
+			if (Date.now() >= deadline) {
+				throw new BudgetSpent("the time budget for cleanup ran out");
+			}
+			if (
+				hasConcurrentDeployment(
+					await findAllDeploymentsByComposeId(entity.composeId),
+					deployment.deploymentId,
+					snapshotAt,
+				)
+			) {
+				log.line(
+					"Build registry cleanup stopped: another deployment of this compose started.",
+				);
+				return;
+			}
+			const token = randomBytes(8).toString("hex");
+			const { stdout } = await runSession(
+				buildRegistryDeleteJobCommand({ key: jobKey, token }),
+				buildRegistryDeleteJobConfig({
+					requests: queue.map((entry, id) => ({
+						id,
+						method: "DELETE" as const,
+						url: getManifestUrl(base, entry.repo, entry.digest),
+					})),
+					username: registry.username,
+					password: registry.password,
+				}),
+				deadline,
+			);
+			const started = parseRegistryJobOutput(stdout);
+			const what = `${plural(queue.length, "old image manifest", "old image manifests")} (${plural(
+				queue.reduce((sum, entry) => sum + entry.tags.length, 0),
+				"dpl- tag",
+				"dpl- tags",
+			)}) from ${plural(reposInRun.size, "repository", "repositories")}`;
+			if (started.kind === "nocurl") {
+				throw new RetentionAbort("curl is not installed on the build server");
+			}
+			if (started.kind === "busy") {
+				log.line(
+					`Build registry cleanup: a deletion job is still running on the build server for this registry, so ${what} wait for the next deploy.`,
+				);
+				return;
+			}
+			// Whatever else came back, the job may have started (the answer can be
+			// lost on the way): the next run asks, and the registry has the last
+			// word about what is gone.
+			pendingJobs.set(buildRegistryId, {
+				composeId: entity.composeId,
+				token,
+				startedAt: Date.now(),
+				entries: queue,
+			});
+			log.line(
+				`Build registry cleanup: ${
+					started.kind === "started"
+						? "started a background job on the build server"
+						: "sent a background job to the build server (it did not confirm in time that it started)"
+				} that deletes ${what} one at a time, keeping the newest ${keep} per service${
+					interrupted
+						? "; it stopped reading at the time budget and the rest continues on the next deploy"
+						: ""
+				}. Deletions are sent, not yet confirmed: the next deploy checks them.`,
+			);
 		};
 
 		// The batches stop themselves at the deadline; this only catches a step
@@ -903,11 +1101,8 @@ export const pruneComposeBuildRegistry = async ({
 		});
 	} catch (error) {
 		if (error instanceof BudgetSpent) {
-			if (currentRepo) resumeFrom.set(entity.composeId, currentRepo);
 			log.line(
-				progress.deleted > 0 || progress.failed > 0
-					? `Build registry cleanup stopped at the time budget: removed ${plural(progress.deleted, "old image manifest", "old image manifests")} (${plural(progress.removedTags, "dpl- tag", "dpl- tags")}) from ${plural(progress.prunedRepos.size, "repository", "repositories")}${progressDetails()}; the rest continues on the next deploy.`
-					: `Build registry cleanup stopped at the time budget before removing anything${progressDetails()}; it continues on the next deploy.`,
+				"Build registry cleanup stopped at the time budget before starting a deletion job; it continues on the next deploy.",
 			);
 			return;
 		}

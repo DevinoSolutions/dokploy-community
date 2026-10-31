@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parse } from "yaml";
 import { getBuiltImageTag } from "./compose-remote-build";
 
@@ -646,3 +647,215 @@ export const getNextTagsPageUrl = (
 };
 export const getManifestUrl = (base: string, repo: string, reference: string) =>
 	`${base}/v2/${repo}/manifests/${reference}`;
+
+// ---------------------------------------------------------------------------
+// The detached delete job on the build server
+// ---------------------------------------------------------------------------
+
+/**
+ * `max-time` of a manifest DELETE, in seconds. On an object-storage backed
+ * registry a DELETE takes time proportional to the repository's tag count (15
+ * to 70 s at ~220 tags, minutes at 500+), so it is never given up on at the
+ * 20 s a GET/HEAD gets: abandoning a DELETE does not stop it, it only lets the
+ * next request overlap it, and overlapping DELETEs make the storage answer
+ * 503 SlowDown and leave tags that point at a deleted manifest.
+ */
+export const DELETE_REQUEST_MAX_TIME_SECONDS = 240;
+
+/** Last line of the config a delete job reads: proof that stdin arrived whole. */
+export const DELETE_JOB_END_MARKER = "# @@DPL-END";
+
+/** Printed once the job has read its whole config. */
+export const JOB_STARTED_MARKER = "@@DPL-STARTED";
+/** The job was started but its input had not arrived within the wait. */
+export const JOB_LATE_MARKER = "@@DPL-LATE";
+/** Another job holds the registry's lock. */
+export const JOB_BUSY_MARKER = "@@DPL-BUSY";
+/** No job is running (status command). */
+export const JOB_IDLE_MARKER = "@@DPL-IDLE";
+/** First line of a job's result file, followed by the token of the job. */
+export const JOB_RESULT_MARKER = "@@DPL-JOB";
+
+/**
+ * A lock older than this is a leftover (a killed build server, a reused pid),
+ * not a running job. The longest a job can run is 50 DELETEs of
+ * `DELETE_REQUEST_MAX_TIME_SECONDS` each (200 minutes), and it ends well
+ * before that unless the registry is broken.
+ */
+export const JOB_LOCK_STALE_MINUTES = 270;
+
+/** Directory the lock and the result file of a job live in. */
+export const DEFAULT_JOB_DIR = "/tmp";
+
+/** The config a delete job reads from stdin: DELETEs with a long `max-time`. */
+export const buildRegistryDeleteJobConfig = ({
+	requests,
+	username,
+	password,
+}: {
+	requests: RegistryRequest[];
+	username?: string | null;
+	password?: string | null;
+}) =>
+	`${buildRegistryCurlConfig({
+		requests,
+		username,
+		password,
+		timeoutSeconds: DELETE_REQUEST_MAX_TIME_SECONDS,
+	})}${DELETE_JOB_END_MARKER}\n`;
+
+/** Names a registry's lock and result file; the id itself never reaches a path. */
+export const getRegistryJobKey = (registryId: string) =>
+	createHash("sha256").update(registryId).digest("hex").slice(0, 16);
+
+const jobPaths = (key: string, dir: string) => {
+	if (!/^[a-f0-9]{16}$/.test(key) || !/^\/[A-Za-z0-9._/-]*$/.test(dir)) {
+		throw new Error("Invalid registry job key or directory");
+	}
+	const base = `${dir.replace(/\/+$/, "")}/dokploy-registry-prune-${key}`;
+	return { lock: `${base}.lock`, result: `${base}.result` };
+};
+
+/**
+ * Shell function: succeeds while a job holds the registry's lock. A lock is
+ * held when its directory exists, is not stale, and its pid is alive (or not
+ * written yet, in the instants after `mkdir`).
+ */
+const BUSY_FUNCTION = `busy() { [ -d "$L" ] || return 1; [ -z "$(find "$L" -maxdepth 0 -mmin +${JOB_LOCK_STALE_MINUTES} 2>/dev/null)" ] || return 1; P=$(cat "$L/pid" 2>/dev/null); [ -z "$P" ] || kill -0 "$P" 2>/dev/null; }`;
+
+/**
+ * The job: runs detached on the build server, holds the registry's lock for as
+ * long as it lives, reads the curl config from the stdin it inherited (the
+ * credentials never touch a file, an argument or the environment) and runs
+ * its requests strictly one after the other. A config that does not end in the
+ * end marker was cut off on the way and is never run.
+ *
+ * Single quotes are not allowed in here: it is embedded in a single-quoted
+ * string.
+ */
+const JOB_BODY = [
+	"umask 077",
+	"L=$1; R=$2; T=$3",
+	'echo $$ > "$L/pid"',
+	'cleanup() { rm -f "$L/pid" "$L/ready"; rmdir "$L" 2>/dev/null; }',
+	"trap cleanup EXIT",
+	'trap "exit 1" HUP INT TERM',
+	"cfg=$(cat)",
+	'last=$(printf "%s\\n" "$cfg" | tail -n 1)',
+	`[ "$last" = "${DELETE_JOB_END_MARKER}" ] || exit 1`,
+	': > "$L/ready"',
+	`{ echo "${JOB_RESULT_MARKER} $T"; printf "%s\\n" "$cfg" | curl --config - 2>/dev/null; } > "$R"`,
+].join("\n");
+
+/**
+ * Starts a delete job unless one holds the registry's lock. Prints
+ * `@@DPL-STARTED` once the job has read its whole config, `@@DPL-BUSY` when
+ * the lock is held, `@@DPL-LATE` when the job was started but its input had
+ * not arrived within the wait, and `NO_CURL_MARKER` without curl. Its exit
+ * status is always 0. Carries no secret.
+ */
+export const buildRegistryDeleteJobCommand = ({
+	key,
+	token,
+	dir = DEFAULT_JOB_DIR,
+}: {
+	key: string;
+	token: string;
+	dir?: string;
+}) => {
+	if (!/^[a-f0-9]{8,64}$/.test(token)) throw new Error("Invalid job token");
+	const { lock, result } = jobPaths(key, dir);
+	return [
+		`command -v curl >/dev/null 2>&1 || { echo ${NO_CURL_MARKER}; exit 0; }`,
+		`L=${lock}; R=${result}`,
+		"umask 077",
+		BUSY_FUNCTION,
+		`if busy; then echo ${JOB_BUSY_MARKER}; exit 0; fi`,
+		'rm -f "$L/pid" "$L/ready" 2>/dev/null; rmdir "$L" 2>/dev/null',
+		`mkdir "$L" 2>/dev/null || { echo ${JOB_BUSY_MARKER}; exit 0; }`,
+		'echo $$ > "$L/pid"',
+		"exec 3<&0",
+		`JOB='${JOB_BODY}'`,
+		"if command -v setsid >/dev/null 2>&1; then",
+		`  setsid sh -c "$JOB" sh "$L" "$R" ${token} 0<&3 3<&- >/dev/null 2>&1 &`,
+		"else",
+		`  nohup sh -c "$JOB" sh "$L" "$R" ${token} 0<&3 3<&- >/dev/null 2>&1 &`,
+		"fi",
+		"i=0",
+		'while [ ! -e "$L/ready" ] && [ "$i" -lt 75 ]; do sleep 0.2 2>/dev/null || sleep 1; i=$((i+1)); done',
+		`if [ -e "$L/ready" ]; then echo ${JOB_STARTED_MARKER}; else echo ${JOB_LATE_MARKER}; fi`,
+		"exit 0",
+	].join("\n");
+};
+
+/**
+ * Reports whether a job is running (`@@DPL-BUSY`) or not (`@@DPL-IDLE`,
+ * followed by the result file of the last job, if there is one). Starts and
+ * changes nothing.
+ */
+export const buildRegistryJobStatusCommand = ({
+	key,
+	dir = DEFAULT_JOB_DIR,
+}: {
+	key: string;
+	dir?: string;
+}) => {
+	const { lock, result } = jobPaths(key, dir);
+	return [
+		`L=${lock}; R=${result}`,
+		BUSY_FUNCTION,
+		`if busy; then echo ${JOB_BUSY_MARKER}; exit 0; fi`,
+		`echo ${JOB_IDLE_MARKER}`,
+		'cat "$R" 2>/dev/null',
+		"exit 0",
+	].join("\n");
+};
+
+export type RegistryJobOutput =
+	| { kind: "nocurl" }
+	| { kind: "busy" }
+	| { kind: "started" }
+	| { kind: "late" }
+	| {
+			kind: "idle";
+			/** Token of the job the result file belongs to; `null` without a result. */
+			token: string | null;
+			responses: Map<number, RegistryResponse>;
+	  }
+	| { kind: "unknown" };
+
+/**
+ * Reads what a job command printed. Anything that is not one of the markers,
+ * including no output at all, is `unknown`.
+ */
+export const parseRegistryJobOutput = (
+	stdout: string,
+	expectedIds?: readonly number[],
+): RegistryJobOutput => {
+	if (stdout.includes(NO_CURL_MARKER)) return { kind: "nocurl" };
+	const first = stdout
+		.split(/\r?\n/)
+		.find((line) => line.startsWith("@@DPL-"))
+		?.trim();
+	if (first === JOB_BUSY_MARKER) return { kind: "busy" };
+	if (first === JOB_STARTED_MARKER) return { kind: "started" };
+	if (first === JOB_LATE_MARKER) return { kind: "late" };
+	if (first === JOB_IDLE_MARKER) {
+		const after = stdout.slice(
+			stdout.indexOf(JOB_IDLE_MARKER) + JOB_IDLE_MARKER.length,
+		);
+		const header = new RegExp(
+			`^\\r?\\n${JOB_RESULT_MARKER} ([a-f0-9]+)\\r?\\n`,
+		).exec(after);
+		if (!header) return { kind: "idle", token: null, responses: new Map() };
+		// The header line is not part of any response; the newline curl opens its
+		// first marker with is still there.
+		const rest = after.slice(header[0].length);
+		return {
+			kind: "idle",
+			token: header[1] as string,
+			responses: parseRegistryResponses(rest, expectedIds),
+		};
+	}
+	return { kind: "unknown" };
+};
