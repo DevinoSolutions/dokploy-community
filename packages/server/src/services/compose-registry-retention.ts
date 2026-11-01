@@ -172,6 +172,8 @@ const NO_FLOCK_RECHECK_MS = 60 * 60 * 1000;
 const DANGLING_RECHECK_MS = 6 * 60 * 60 * 1000;
 /** Repositories remembered at most (oldest forgotten first). */
 const MAX_REMEMBERED_REPOS = 500;
+/** Job records kept at most, all registries and composes together (oldest forgotten first). */
+const MAX_PENDING_JOBS = 500;
 
 class RetentionAbort extends Error {}
 /** The time budget ran out: not a failure, the next deploy carries on. */
@@ -195,7 +197,7 @@ interface DeleteEntry {
 	guardTags: string[];
 }
 
-/** The delete job a registry was last handed, until a later run has settled it. */
+/** The delete job a compose last handed to a registry, until a later run has settled it. */
 interface PendingJob {
 	composeId: string;
 	token: string;
@@ -204,12 +206,59 @@ interface PendingJob {
 }
 
 /**
- * registry -> the job its last run started. At most one: the build server's
- * lock lets only one job per registry live. In memory only: after a restart
- * the next run simply finds the lock free or held and plans again, and a
- * DELETE of a digest that is already gone is harmless.
+ * registry -> compose -> the job that compose last started on it. The build
+ * server's lock lets only one job per registry live, but the composes sharing
+ * a registry each keep their own record: a compose confirms and acts on its
+ * own job only, and another compose's job never replaces it. The record with
+ * the latest start is the one that holds (or last held) the lock. In memory
+ * only: after a restart the next run simply finds the lock free or held and
+ * plans again, and a DELETE of a digest that is already gone is harmless.
  */
-const pendingJobs = new Map<string, PendingJob>();
+const pendingJobs = new Map<string, Map<string, PendingJob>>();
+
+const getPendingJob = (jobKey: string, composeId: string) =>
+	pendingJobs.get(jobKey)?.get(composeId);
+
+const dropPendingJob = (jobKey: string, composeId: string) => {
+	const jobs = pendingJobs.get(jobKey);
+	if (!jobs) return;
+	jobs.delete(composeId);
+	if (jobs.size === 0) pendingJobs.delete(jobKey);
+};
+
+/** The job on a registry that started last: the one holding its lock, or the last that did. */
+const getLatestPendingJob = (jobKey: string) => {
+	let latest: PendingJob | undefined;
+	for (const job of pendingJobs.get(jobKey)?.values() ?? []) {
+		if (!latest || job.startedAt >= latest.startedAt) latest = job;
+	}
+	return latest;
+};
+
+const setPendingJob = (jobKey: string, job: PendingJob) => {
+	const now = Date.now();
+	const all: { jobKey: string; job: PendingJob }[] = [];
+	for (const [key, jobs] of pendingJobs) {
+		for (const kept of jobs.values()) {
+			if (now - kept.startedAt > PENDING_JOB_TTL_MS) {
+				dropPendingJob(key, kept.composeId);
+			} else if (!(key === jobKey && kept.composeId === job.composeId)) {
+				all.push({ jobKey: key, job: kept });
+			}
+		}
+	}
+	// Room for the new record: the oldest starts are forgotten first.
+	all.sort((a, b) => a.job.startedAt - b.job.startedAt);
+	for (const old of all.slice(0, Math.max(0, all.length + 1 - MAX_PENDING_JOBS))) {
+		dropPendingJob(old.jobKey, old.job.composeId);
+	}
+	let jobs = pendingJobs.get(jobKey);
+	if (!jobs) {
+		jobs = new Map();
+		pendingJobs.set(jobKey, jobs);
+	}
+	jobs.set(job.composeId, job);
+};
 
 /** build server -> when it was found to have no `flock`. */
 const noFlockSince = new Map<string, number>();
@@ -624,9 +673,11 @@ export const pruneComposeBuildRegistry = async ({
 			// Its DELETEs were sent, not confirmed: the job's answers and the
 			// registry itself say what became of them. While it still runs nothing
 			// new is planned (the lock would refuse a second job anyway).
-			const earlier = pendingJobs.get(jobKey);
+			// Only this compose's own record counts: another compose's job on the
+			// same registry is neither confirmed nor acted on from here.
+			const earlier = getPendingJob(jobKey, entity.composeId);
 			if (earlier && Date.now() - earlier.startedAt > PENDING_JOB_TTL_MS) {
-				pendingJobs.delete(jobKey);
+				dropPendingJob(jobKey, entity.composeId);
 			} else if (earlier) {
 				const { stdout } = await runSession(
 					buildRegistryJobStatusCommand({ key: jobKey }),
@@ -649,14 +700,22 @@ export const pruneComposeBuildRegistry = async ({
 				}
 				if (status.kind !== "idle") {
 					assertTime();
+					// The lock holder is the job that started last. When that is
+					// another compose's, this compose's own job is over (its result
+					// is checked once the lock is free) and the count is not ours
+					// to report.
+					const holder = getLatestPendingJob(jobKey);
+					const ownHoldsLock = !holder || holder.composeId === entity.composeId;
 					log.line(
 						status.kind === "busy"
-							? `Build registry cleanup: the background deletion job from an earlier deploy is still running on the build server (${plural(earlier.entries.length, "old image manifest", "old image manifests")} sent); nothing new is started until it is done.`
+							? ownHoldsLock
+								? `Build registry cleanup: the background deletion job from an earlier deploy is still running on the build server (${plural(earlier.entries.length, "old image manifest", "old image manifests")} sent); nothing new is started until it is done.`
+								: "Build registry cleanup: a deletion job from another deploy on this registry is still running on the build server; nothing new is started until it is done."
 							: "Build registry cleanup: could not tell whether the background deletion job from an earlier deploy has finished; it is checked again on the next deploy.",
 					);
 					return;
 				}
-				pendingJobs.delete(jobKey);
+				dropPendingJob(jobKey, entity.composeId);
 				const answers = status.token === earlier.token ? status.responses : null;
 				const heads = await runAll(
 					earlier.entries.map((entry, id) => ({
@@ -1147,7 +1206,7 @@ export const pruneComposeBuildRegistry = async ({
 			// Otherwise the job may have started even when its answer was lost on
 			// the way: the next run asks, and the registry has the last word about
 			// what is gone.
-			pendingJobs.set(jobKey, {
+			setPendingJob(jobKey, {
 				composeId: entity.composeId,
 				token,
 				startedAt: Date.now(),
