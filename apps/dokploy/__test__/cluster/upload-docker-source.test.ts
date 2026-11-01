@@ -1,3 +1,4 @@
+import { quote } from "shell-quote";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -136,8 +137,10 @@ describe("uploadImageRemoteCommand for docker-source applications", () => {
 
 		expect(script).not.toContain(ROLLBACK_SKIP_LINE);
 		expect(script).toContain("Enabled Rollback Registry");
-		expect(script).toContain("docker tag nginx:1.27");
-		expect(script).toContain("docker push");
+		expect(script).toContain(
+			`docker tag ${quote(["nginx:1.27"])} ${quote(["registry.example.com/acme/my-app:v1"])}`,
+		);
+		expect(script).toContain(" push ");
 	});
 });
 
@@ -151,7 +154,7 @@ describe("uploadImageRemoteCommand for other sources", () => {
 		expect(script).not.toContain(SKIP_LINE);
 		expect(script).toContain("Enabled Registry Swarm");
 		expect(script).toContain(
-			"docker tag my-app:latest registry.example.com/acme/my-app:latest",
+			`docker tag ${quote(["my-app:latest"])} ${quote(["registry.example.com/acme/my-app:latest"])}`,
 		);
 		expect(script).toContain("docker push");
 		expect(mocks.runDockerLogin).toHaveBeenCalledTimes(1);
