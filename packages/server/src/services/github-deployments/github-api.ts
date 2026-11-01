@@ -74,23 +74,30 @@ export const rateLimitRetryAt = (
 	return null;
 };
 
-/**
- * `GET /repos/{owner}/{repo}/deployments?environment=&per_page=5` with
- * If-None-Match. A 304 does not count against the rate limit.
- */
-export const listDeployments = async (
+/** Deployments asked for per page. */
+export const DEPLOYMENTS_PER_PAGE = 30;
+/** Pages walked per poll (30 x 5 = 150 deployments), so one poll stays cheap. */
+export const MAX_DEPLOYMENT_PAGES = 5;
+
+type PageResult =
+	| { kind: "ok"; deployments: GithubDeployment[]; etag: string | null }
+	| Exclude<ListResult, { kind: "ok" }>;
+
+const fetchDeploymentsPage = async (
 	deps: { fetch: FetchLike; now: () => number },
 	args: {
 		token: string;
 		owner: string;
 		repo: string;
 		environment: string;
+		page: number;
 		etag?: string | null;
 	},
-): Promise<ListResult> => {
+): Promise<PageResult> => {
 	const url =
 		`${GITHUB_API}/repos/${encodeURIComponent(args.owner)}/${encodeURIComponent(args.repo)}` +
-		`/deployments?environment=${encodeURIComponent(args.environment)}&per_page=5`;
+		`/deployments?environment=${encodeURIComponent(args.environment)}` +
+		`&per_page=${DEPLOYMENTS_PER_PAGE}&page=${args.page}`;
 	let response: Awaited<ReturnType<FetchLike>>;
 	try {
 		response = await deps.fetch(url, {
@@ -133,7 +140,55 @@ export const listDeployments = async (
 	return { kind: "ok", deployments, etag: response.headers.get("etag") };
 };
 
-export type DeploymentState = "in_progress" | "success" | "failure" | "error";
+/**
+ * `GET /repos/{owner}/{repo}/deployments?environment=&per_page=30`, newest
+ * first, with If-None-Match on the first page (a 304 does not count against
+ * the rate limit). When `lastSeen` is given the walk continues to older pages
+ * until a page reaches a deployment already handled (id <= lastSeen) or
+ * MAX_DEPLOYMENT_PAGES is hit, so a burst of deployments is not cut off.
+ * Without `lastSeen` (the first poll, which only baselines) one page is read.
+ */
+export const listDeployments = async (
+	deps: { fetch: FetchLike; now: () => number },
+	args: {
+		token: string;
+		owner: string;
+		repo: string;
+		environment: string;
+		etag?: string | null;
+		lastSeen?: number | null;
+		maxPages?: number;
+	},
+): Promise<ListResult> => {
+	const maxPages = Math.max(1, args.maxPages ?? MAX_DEPLOYMENT_PAGES);
+	const all: GithubDeployment[] = [];
+	let firstEtag: string | null = null;
+	for (let page = 1; page <= maxPages; page += 1) {
+		const result = await fetchDeploymentsPage(deps, {
+			...args,
+			page,
+			etag: page === 1 ? args.etag : null,
+		});
+		if (result.kind !== "ok") return result;
+		if (page === 1) firstEtag = result.etag;
+		all.push(...result.deployments);
+		const reachedHandled =
+			args.lastSeen == null ||
+			result.deployments.some((d) => d.id <= (args.lastSeen as number));
+		if (reachedHandled || result.deployments.length < DEPLOYMENTS_PER_PAGE) {
+			break;
+		}
+	}
+	return { kind: "ok", deployments: all, etag: firstEtag };
+};
+
+export type DeploymentState =
+	| "in_progress"
+	| "success"
+	| "failure"
+	| "error"
+	/** A deployment that a newer one replaced; GitHub shows it as inactive. */
+	| "inactive";
 
 /** GitHub caps a status description at 140 characters. */
 export const clampDescription = (text: string) =>

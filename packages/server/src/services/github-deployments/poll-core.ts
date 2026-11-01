@@ -1,6 +1,8 @@
+import { redactSecrets } from "../../utils/process/redactSecrets";
 import type { FetchLike } from "./device-flow";
 import {
 	createDeploymentStatus,
+	type DeploymentState,
 	type GithubDeployment,
 	listDeployments,
 } from "./github-api";
@@ -21,6 +23,11 @@ export const INFLIGHT_ROW_GRACE_MS = 10 * 60 * 1000;
 export const WATCH_ERROR_BACKOFF_MS = 5 * 60 * 1000;
 /** Attempts to start one deployment before it is answered with a failure. */
 export const MAX_START_ATTEMPTS = 3;
+/** Attempts to post one status before it is given up (a watch must not wedge on it). */
+export const MAX_STATUS_ATTEMPTS = 5;
+/** First wait after a status the API refused; doubles each attempt up to the cap. */
+export const STATUS_RETRY_BASE_MS = 30_000;
+export const STATUS_RETRY_MAX_MS = 5 * 60 * 1000;
 
 export interface WatchRow {
 	watchId: string;
@@ -36,13 +43,15 @@ export interface WatchRow {
 	etag: string | null;
 	inflightDeploymentId: number | null;
 	inflightStartedAt: Date | null;
+	/** Opt in to sending this Dokploy's dashboard link to GitHub as `log_url`. Off by default. */
+	postLogUrl: boolean;
 }
 
 export type DeployPayload = Extract<ParsedPayload, { kind: "deploy" }>;
 
 export type StartOutcome =
 	| { kind: "started"; logUrl?: string }
-	/** A concurrent poll already took this deployment. */
+	/** A concurrent poll already took this deployment, or the watch changed under it. */
 	| { kind: "stale" }
 	/** A rule said no (service gone, wrong source, image from elsewhere). */
 	| { kind: "rejected"; reason: string };
@@ -50,7 +59,7 @@ export type StartOutcome =
 export type InflightState =
 	| { state: "running" }
 	| { state: "done"; logUrl?: string }
-	| { state: "error"; logUrl?: string; detail?: string }
+	| { state: "error"; logUrl?: string }
 	| { state: "cancelled"; logUrl?: string }
 	/** No Dokploy deployment row for this GitHub deployment (yet). */
 	| { state: "missing" };
@@ -73,10 +82,12 @@ export interface PollDeps {
 	/** Epoch ms until which this key (connection or watch) must not be called. */
 	blockedUntil: (key: string) => number | undefined;
 	block: (key: string, until: number) => void;
+	/** `lastSeenDeploymentId` only ever moves forward (see patchGithubWatch). */
 	patchWatch: (watchId: string, patch: WatchPatch) => Promise<void>;
 	/**
 	 * Atomically: advance lastSeen to `deployment.id`, record it as in flight,
-	 * and enqueue the Dokploy deploy. Throws when it could not be done.
+	 * write the image on the service and enqueue the Dokploy deploy. Throws when
+	 * it could not be done, leaving nothing behind.
 	 */
 	startDeploy: (
 		watch: WatchRow,
@@ -88,6 +99,7 @@ export interface PollDeps {
 }
 
 const startAttempts = new Map<string, number>();
+const statusAttempts = new Map<string, number>();
 
 const connectionKey = (connectionId: string) => `connection:${connectionId}`;
 const watchKey = (watchId: string) => `watch:${watchId}`;
@@ -105,44 +117,179 @@ export const maxDeploymentId = (deployments: GithubDeployment[]): number =>
 const short = (text: string, limit = 140) =>
 	text.length <= limit ? text : `${text.slice(0, limit - 3)}...`;
 
-/** Report the end of a Dokploy deployment to GitHub; true when GitHub has it (or never will). */
-const reportEnd = async (
+const DATABASE_ERROR =
+	/failed query|\bparams:|\b(?:insert into|update|delete from)\s+"/i;
+
+/**
+ * A short, safe account of an error for `lastError`, the server log and the
+ * dashboard: no stack, one line, no secrets, and never a database statement
+ * with its parameters (a Drizzle error carries the query and its values).
+ * Nothing built from it is ever sent to GitHub.
+ */
+export const describeError = (error: unknown, limit = 160): string => {
+	const raw =
+		error instanceof Error
+			? error.message
+			: typeof error === "string"
+				? error
+				: "";
+	if (DATABASE_ERROR.test(raw)) return "A database error occurred";
+	const line = redactSecrets(raw.split("\n")[0] ?? "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return line ? short(line, limit) : "An unexpected error occurred";
+};
+
+/**
+ * What GitHub is told. Fixed text only: nothing from an error, a deployment
+ * log, a payload or a database ever reaches GitHub, because the statuses of a
+ * deployment are readable by everyone who can see the repository.
+ */
+export const STATUS_TEXT = {
+	accepted: "Dokploy accepted the deployment",
+	done: "Deployed by Dokploy",
+	failed: "Dokploy deployment failed; see the Dokploy dashboard",
+	cancelled: "The Dokploy deployment was cancelled",
+	timeout: "Dokploy did not finish this deployment in time",
+	lost: "Dokploy has no record of this deployment",
+	rejected: "Dokploy rejected this deployment; see the Dokploy dashboard",
+	unreadable: "Dokploy could not read the payload of this deployment",
+	notQueued:
+		"Dokploy could not queue this deployment; see the Dokploy dashboard",
+	superseded:
+		"Superseded by a newer deployment; Dokploy deployed the newest only",
+	serviceGone:
+		"The Dokploy service was removed before this deployment finished",
+} as const;
+
+const statusRetryDelay = (attempts: number) =>
+	Math.min(
+		STATUS_RETRY_MAX_MS,
+		STATUS_RETRY_BASE_MS * 2 ** Math.max(0, attempts - 1),
+	);
+
+const statusProblem = (status: number) =>
+	status > 0
+		? `GitHub did not accept the deployment status (HTTP ${status}).`
+		: "GitHub could not be reached to report the deployment status.";
+
+type Settled =
+	| { settled: true; problem?: string }
+	/** Not posted yet: retried on a later tick (rate limit, back-off, revoked token). */
+	| { settled: false };
+
+/**
+ * Post one deployment status, with bounded retries.
+ *
+ * - posted, or GitHub says nobody can use it (404/410/422): settled.
+ * - rate limited: the connection is paused until GitHub allows more; not settled.
+ * - 401: the token is dead. The connection is marked revoked and the status is
+ *   posted after the user connects again; not settled.
+ * - anything else (a 403 that is not a rate limit, a 5xx, no answer): the watch
+ *   backs off (30s, 60s, ... capped at 5 min) and after MAX_STATUS_ATTEMPTS the
+ *   status is given up, so the watch is not stuck on it; `problem` says so.
+ */
+const postStatus = async (
 	deps: PollDeps,
 	watch: WatchRow,
 	token: string,
-	inflight:
-		| Exclude<InflightState, { state: "running" } | { state: "missing" }>
-		| { state: "timeout" }
-		| { state: "lost" },
-): Promise<boolean> => {
-	const id = watch.inflightDeploymentId as number;
-	const text = {
-		done: "Deployed by Dokploy",
-		error: "The Dokploy deployment failed",
-		cancelled: "The Dokploy deployment was cancelled",
-		timeout: "Dokploy did not finish this deployment in time",
-		lost: "Dokploy has no record of this deployment",
-	} as const;
-	const detail =
-		"detail" in inflight && inflight.detail ? `: ${inflight.detail}` : "";
+	deploymentId: number,
+	state: DeploymentState,
+	description: string,
+	logUrl?: string,
+): Promise<Settled> => {
 	const result = await createDeploymentStatus(deps, {
 		token,
 		owner: watch.owner,
 		repo: watch.repo,
-		deploymentId: id,
-		state: inflight.state === "done" ? "success" : "failure",
-		description: short(`${text[inflight.state]}${detail}`),
-		logUrl: "logUrl" in inflight ? inflight.logUrl : undefined,
+		deploymentId,
+		state,
+		description,
+		// Opt in per watch: the dashboard link is internal.
+		logUrl: watch.postLogUrl ? logUrl : undefined,
 	});
-	if (result.ok) return true;
+	const key = `${watch.watchId}:${deploymentId}:${state}`;
+	if (result.ok) {
+		statusAttempts.delete(key);
+		return { settled: true };
+	}
 	if (result.rateLimitedUntil) {
 		deps.block(connectionKey(watch.connectionId), result.rateLimitedUntil);
-		return false;
+		return { settled: false };
+	}
+	if (result.status === 401) {
+		await deps.markRevoked(watch.connectionId);
+		return { settled: false };
 	}
 	// The deployment was deleted or is not ours to write to: nobody is waiting.
-	return (
-		result.status === 404 || result.status === 410 || result.status === 422
+	if (result.status === 404 || result.status === 410 || result.status === 422) {
+		statusAttempts.delete(key);
+		return { settled: true };
+	}
+	const attempts = (statusAttempts.get(key) ?? 0) + 1;
+	if (attempts >= MAX_STATUS_ATTEMPTS) {
+		statusAttempts.delete(key);
+		return { settled: true, problem: statusProblem(result.status) };
+	}
+	statusAttempts.set(key, attempts);
+	deps.block(watchKey(watch.watchId), deps.now() + statusRetryDelay(attempts));
+	return { settled: false };
+};
+
+type EndState =
+	| Exclude<InflightState, { state: "running" } | { state: "missing" }>
+	| { state: "timeout" }
+	| { state: "lost" };
+
+/** Report the end of a Dokploy deployment to GitHub. */
+const reportEnd = async (
+	deps: PollDeps,
+	watch: WatchRow,
+	token: string,
+	inflight: EndState,
+): Promise<Settled> => {
+	const text = {
+		done: STATUS_TEXT.done,
+		error: STATUS_TEXT.failed,
+		cancelled: STATUS_TEXT.cancelled,
+		timeout: STATUS_TEXT.timeout,
+		lost: STATUS_TEXT.lost,
+	} as const;
+	return postStatus(
+		deps,
+		watch,
+		token,
+		watch.inflightDeploymentId as number,
+		inflight.state === "done" ? "success" : "failure",
+		text[inflight.state],
+		"logUrl" in inflight ? inflight.logUrl : undefined,
 	);
+};
+
+/**
+ * The service of a watch was deleted. If a deployment was in flight, GitHub is
+ * told once that it ended (a workflow may be waiting on it). Best effort: the
+ * caller deletes the watch either way.
+ */
+export const reportServiceGone = async (
+	watch: WatchRow,
+	deps: PollDeps,
+): Promise<void> => {
+	if (watch.inflightDeploymentId === null) return;
+	try {
+		const token = await deps.loadToken(watch.connectionId);
+		if (!token) return;
+		await createDeploymentStatus(deps, {
+			token,
+			owner: watch.owner,
+			repo: watch.repo,
+			deploymentId: watch.inflightDeploymentId,
+			state: "failure",
+			description: STATUS_TEXT.serviceGone,
+		});
+	} catch {
+		// The watch is going away regardless.
+	}
 };
 
 /** One tick for one watch. Never throws: a tick must not stop the others. */
@@ -153,12 +300,10 @@ export const pollWatch = async (
 	try {
 		await pollWatchInner(watch, deps);
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		deps.log(
-			`github deployments: watch ${watch.watchId} failed: ${short(message, 200)}`,
-		);
+		const message = describeError(error);
+		deps.log(`github deployments: watch ${watch.watchId} failed: ${message}`);
 		await deps
-			.patchWatch(watch.watchId, { lastError: short(message, 300) })
+			.patchWatch(watch.watchId, { lastError: message })
 			.catch(() => {});
 		deps.block(watchKey(watch.watchId), deps.now() + WATCH_ERROR_BACKOFF_MS);
 	}
@@ -190,7 +335,7 @@ const pollWatchInner = async (
 		const state = await deps.inspectInflight(watch);
 		const startedAt = watch.inflightStartedAt?.getTime() ?? now;
 		const age = now - startedAt;
-		let end: Parameters<typeof reportEnd>[3] | null = null;
+		let end: EndState | null = null;
 		if (state.state === "running") {
 			if (age > INFLIGHT_TIMEOUT_MS) end = { state: "timeout" };
 		} else if (state.state === "missing") {
@@ -199,11 +344,12 @@ const pollWatchInner = async (
 			end = state;
 		}
 		if (!end) return;
-		if (await reportEnd(deps, watch, token, end)) {
+		const reported = await reportEnd(deps, watch, token, end);
+		if (reported.settled) {
 			await deps.patchWatch(watch.watchId, {
 				inflightDeploymentId: null,
 				inflightStartedAt: null,
-				lastError: null,
+				lastError: reported.problem ?? null,
 			});
 		}
 		return;
@@ -216,6 +362,7 @@ const pollWatchInner = async (
 		repo: watch.repo,
 		environment: watch.environment,
 		etag: watch.etag,
+		lastSeen: watch.lastSeenDeploymentId,
 	});
 	switch (listed.kind) {
 		case "not-modified":
@@ -264,84 +411,120 @@ const pollWatchInner = async (
 		return;
 	}
 
-	// 4. New ones, oldest first. One starts a deploy; the rest wait for it to end.
+	// 4. New ones, oldest first. Only the NEWEST valid deployment for this
+	// service is deployed; every older valid one is answered as superseded so
+	// no workflow waits on it. Deployments of other services are left alone.
 	const fresh = selectNewDeployments(
 		listed.deployments,
 		watch.lastSeenDeploymentId,
 	);
+	const parsedById = new Map(
+		fresh.map((d) => [
+			d.id,
+			parseDeploymentPayload(d.payload, watch.serviceId),
+		]),
+	);
+	let targetId: number | undefined;
+	for (const d of fresh) {
+		if (parsedById.get(d.id)?.kind === "deploy") targetId = d.id;
+	}
+	/** What the dashboard keeps showing from this pass, if anything. */
+	let problem: string | null = null;
+	/** Where the stored cursor stands in this pass (startDeploy checks it against the locked row). */
+	let cursor = watch.lastSeenDeploymentId;
+	const advance = async (deploymentId: number) => {
+		await deps.patchWatch(watch.watchId, {
+			lastSeenDeploymentId: deploymentId,
+		});
+		cursor = Math.max(cursor ?? 0, deploymentId);
+	};
+
 	for (const deployment of fresh) {
-		const parsed = parseDeploymentPayload(deployment.payload, watch.serviceId);
-		if (parsed.kind === "ignore") {
-			await deps.patchWatch(watch.watchId, {
-				lastSeenDeploymentId: deployment.id,
-			});
+		const parsed = parsedById.get(deployment.id);
+		if (!parsed || parsed.kind === "ignore") {
+			await advance(deployment.id);
 			continue;
 		}
 		if (parsed.kind === "invalid") {
-			if (
-				!(await answerFailure(deps, watch, token, deployment.id, parsed.reason))
-			)
-				return;
-			await deps.patchWatch(watch.watchId, {
-				lastSeenDeploymentId: deployment.id,
-			});
+			const answered = await postStatus(
+				deps,
+				watch,
+				token,
+				deployment.id,
+				"failure",
+				STATUS_TEXT.unreadable,
+			);
+			if (!answered.settled) return;
+			problem = `Deployment #${deployment.id}: ${short(parsed.reason, 200)}`;
+			await advance(deployment.id);
+			continue;
+		}
+		if (deployment.id !== targetId) {
+			const answered = await postStatus(
+				deps,
+				watch,
+				token,
+				deployment.id,
+				"inactive",
+				STATUS_TEXT.superseded,
+			);
+			if (!answered.settled) return;
+			await advance(deployment.id);
 			continue;
 		}
 
 		const attemptKey = `${watch.watchId}:${deployment.id}`;
 		let outcome: StartOutcome;
 		try {
-			outcome = await deps.startDeploy(watch, deployment, parsed);
+			outcome = await deps.startDeploy(
+				{ ...watch, lastSeenDeploymentId: cursor },
+				deployment,
+				parsed,
+			);
 		} catch (error) {
 			const attempts = (startAttempts.get(attemptKey) ?? 0) + 1;
 			startAttempts.set(attemptKey, attempts);
 			if (attempts < MAX_START_ATTEMPTS) throw error;
 			startAttempts.delete(attemptKey);
-			const message = error instanceof Error ? error.message : String(error);
-			const answered = await answerFailure(
+			const answered = await postStatus(
 				deps,
 				watch,
 				token,
 				deployment.id,
-				`Dokploy could not queue the deploy: ${short(message, 90)}`,
+				"failure",
+				STATUS_TEXT.notQueued,
 			);
-			if (!answered) return;
-			await deps.patchWatch(watch.watchId, {
-				lastSeenDeploymentId: deployment.id,
-			});
+			if (!answered.settled) return;
+			problem = `Deployment #${deployment.id} could not be queued: ${describeError(error, 120)}`;
+			await advance(deployment.id);
 			continue;
 		}
 		startAttempts.delete(attemptKey);
 		if (outcome.kind === "stale") return;
 		if (outcome.kind === "rejected") {
-			if (
-				!(await answerFailure(
-					deps,
-					watch,
-					token,
-					deployment.id,
-					outcome.reason,
-				))
-			)
-				return;
-			await deps.patchWatch(watch.watchId, {
-				lastSeenDeploymentId: deployment.id,
-			});
+			const answered = await postStatus(
+				deps,
+				watch,
+				token,
+				deployment.id,
+				"failure",
+				STATUS_TEXT.rejected,
+			);
+			if (!answered.settled) return;
+			problem = `Deployment #${deployment.id} was rejected: ${short(outcome.reason, 200)}`;
+			await advance(deployment.id);
 			continue;
 		}
 		// Started: lastSeen and in-flight were saved with the enqueue. Best effort from here.
-		const posted = await createDeploymentStatus(deps, {
+		await postStatus(
+			deps,
+			watch,
 			token,
-			owner: watch.owner,
-			repo: watch.repo,
-			deploymentId: deployment.id,
-			state: "in_progress",
-			description: "Dokploy accepted the deployment",
-			logUrl: outcome.logUrl,
-		});
-		if (posted.ok === false && posted.rateLimitedUntil) {
-			deps.block(connectionKey(watch.connectionId), posted.rateLimitedUntil);
-		}
+			deployment.id,
+			"in_progress",
+			STATUS_TEXT.accepted,
+			outcome.logUrl,
+		);
 		await deps.patchWatch(watch.watchId, {
 			lastCheckedAt: new Date(now),
 			lastError: null,
@@ -354,32 +537,12 @@ const pollWatchInner = async (
 	await deps.patchWatch(watch.watchId, {
 		etag: listed.etag,
 		lastCheckedAt: new Date(now),
-		lastError: null,
+		lastError: problem,
 	});
-};
-
-const answerFailure = async (
-	deps: PollDeps,
-	watch: WatchRow,
-	token: string,
-	deploymentId: number,
-	reason: string,
-): Promise<boolean> => {
-	const result = await createDeploymentStatus(deps, {
-		token,
-		owner: watch.owner,
-		repo: watch.repo,
-		deploymentId,
-		state: "failure",
-		description: short(reason),
-	});
-	if (!result.ok && result.rateLimitedUntil) {
-		// Not answered yet: keep the deployment unhandled so the next tick retries.
-		deps.block(connectionKey(watch.connectionId), result.rateLimitedUntil);
-		return false;
-	}
-	return true;
 };
 
 /** Test hook: forget attempt counters. */
-export const resetPollState = () => startAttempts.clear();
+export const resetPollState = () => {
+	startAttempts.clear();
+	statusAttempts.clear();
+};

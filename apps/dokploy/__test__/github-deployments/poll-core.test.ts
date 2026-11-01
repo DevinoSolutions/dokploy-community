@@ -1,12 +1,16 @@
 import {
+	describeError,
 	INFLIGHT_ROW_GRACE_MS,
 	INFLIGHT_TIMEOUT_MS,
 	type InflightState,
 	MAX_START_ATTEMPTS,
+	MAX_STATUS_ATTEMPTS,
 	maxDeploymentId,
 	type PollDeps,
 	pollWatch,
+	reportServiceGone,
 	resetPollState,
+	STATUS_TEXT,
 	type StartOutcome,
 	selectNewDeployments,
 	type WatchPatch,
@@ -37,6 +41,7 @@ const baseWatch = (overrides: Partial<WatchRow> = {}): WatchRow => ({
 	etag: 'W/"old"',
 	inflightDeploymentId: null,
 	inflightStartedAt: null,
+	postLogUrl: false,
 	...overrides,
 });
 
@@ -132,7 +137,7 @@ describe("polling a watch", () => {
 		});
 	});
 
-	it("starts the oldest new deployment for this service, posts in_progress, keeps the ETag unsaved", async () => {
+	it("deploys only the NEWEST new deployment for this service and answers the older ones as inactive", async () => {
 		const h = harness([
 			{
 				json: [dep(13), dep(12), dep(11), dep(10)],
@@ -141,17 +146,82 @@ describe("polling a watch", () => {
 			{ status: 201, json: {} },
 		]);
 		await pollWatch(baseWatch(), h.deps);
-		// One deployment at a time, in id order: 11 now, 12 and 13 after it ends.
-		expect(h.started).toEqual([11]);
+		// Only 13 runs; 11 and 12 are superseded and answered, oldest first, so
+		// no workflow waits on them.
+		expect(h.started).toEqual([13]);
 		const posted = statuses(h.calls);
-		expect(posted).toHaveLength(1);
-		expect(posted[0]).toMatchObject({
-			url: "11/statuses",
+		expect(posted.map((p) => [p.url, p.state])).toEqual([
+			["11/statuses", "inactive"],
+			["12/statuses", "inactive"],
+			["13/statuses", "in_progress"],
+		]);
+		expect(posted[0]?.description).toBe(STATUS_TEXT.superseded);
+		// The dashboard link is opt-in per watch: not sent by default.
+		expect(posted.some((p) => "log_url" in p)).toBe(false);
+		expect(
+			h.patches.map((p) => p.lastSeenDeploymentId).filter(Boolean),
+		).toEqual([11, 12]);
+		// The deployment is in flight: a 304 next time must not hide anything.
+		expect(h.patches.some((p) => "etag" in p)).toBe(false);
+	});
+
+	it("sends the Dokploy link as log_url only when the watch opted in", async () => {
+		const h = harness([{ json: [dep(11)] }, { status: 201, json: {} }]);
+		await pollWatch(baseWatch({ postLogUrl: true }), h.deps);
+		expect(statuses(h.calls)[0]).toMatchObject({
 			state: "in_progress",
 			log_url: "https://dokploy.example/svc1",
 		});
-		// The list changed but 12 and 13 are unhandled: a 304 next time would lose them.
-		expect(h.patches.some((p) => "etag" in p)).toBe(false);
+	});
+
+	it("passes startDeploy a watch whose cursor already includes the superseded ones", async () => {
+		const seen: Array<number | null> = [];
+		const h = harness(
+			[{ json: [dep(12), dep(11)] }, { status: 201, json: {} }],
+			{
+				startDeploy: async (watch) => {
+					seen.push(watch.lastSeenDeploymentId);
+					return { kind: "started" };
+				},
+			},
+		);
+		await pollWatch(baseWatch(), h.deps);
+		expect(seen).toEqual([11]);
+	});
+
+	it("answers an older invalid deployment with a failure and still deploys the newest valid one", async () => {
+		const h = harness([
+			{ json: [dep(12), dep(11, "svc1", "ghcr.io/o/r:latest")] },
+			{ status: 201, json: {} },
+		]);
+		await pollWatch(baseWatch(), h.deps);
+		expect(h.started).toEqual([12]);
+		expect(
+			statuses(h.calls).map((p) => [p.url, p.state, p.description]),
+		).toEqual([
+			["11/statuses", "failure", STATUS_TEXT.unreadable],
+			["12/statuses", "in_progress", STATUS_TEXT.accepted],
+		]);
+	});
+
+	it("does not answer a superseded deployment of another service", async () => {
+		const h = harness([
+			{ json: [dep(13), dep(12, "other"), dep(11)] },
+			{ status: 201, json: {} },
+		]);
+		await pollWatch(baseWatch(), h.deps);
+		expect(statuses(h.calls).map((p) => p.url)).toEqual([
+			"11/statuses",
+			"13/statuses",
+		]);
+	});
+
+	it("stops where it is when GitHub does not take a superseded answer yet", async () => {
+		const h = harness([{ json: [dep(12), dep(11)] }, { status: 500 }]);
+		await pollWatch(baseWatch(), h.deps);
+		expect(h.started).toEqual([]);
+		expect(h.patches.some((p) => p.lastSeenDeploymentId)).toBe(false);
+		expect(h.blocks.get("watch:w1")).toBeGreaterThan(NOW);
 	});
 
 	it("skips deployments that name another service, silently, and saves the ETag", async () => {
@@ -183,7 +253,9 @@ describe("polling a watch", () => {
 		const posted = statuses(h.calls);
 		expect(posted).toHaveLength(1);
 		expect(posted[0]).toMatchObject({ url: "11/statuses", state: "failure" });
-		expect(posted[0].description).toContain("pinned by digest");
+		// GitHub gets fixed text; the reason stays on the dashboard.
+		expect(posted[0].description).toBe(STATUS_TEXT.unreadable);
+		expect(h.patches.at(-1)?.lastError).toContain("pinned by digest");
 		expect(h.patches.some((p) => p.lastSeenDeploymentId === 11)).toBe(true);
 	});
 
@@ -198,7 +270,13 @@ describe("polling a watch", () => {
 		expect(statuses(h.calls)[0]).toMatchObject({
 			state: "failure",
 			url: "11/statuses",
+			description: STATUS_TEXT.rejected,
 		});
+		// The rule's reason (it names the image the service runs) stays inside Dokploy.
+		expect(JSON.stringify(h.calls.map((c) => c.body))).not.toContain(
+			"this application runs",
+		);
+		expect(h.patches.at(-1)?.lastError).toContain("this application runs");
 	});
 
 	it("a stale claim (another poll took it) posts nothing and leaves the ETag alone", async () => {
@@ -228,8 +306,27 @@ describe("polling a watch", () => {
 		expect(statuses(last.calls)[0]).toMatchObject({
 			state: "failure",
 			url: "11/statuses",
+			description: STATUS_TEXT.notQueued,
 		});
 		expect(last.patches.some((p) => p.lastSeenDeploymentId === 11)).toBe(true);
+	});
+
+	it("never sends the text of a start error to GitHub, and keeps database parameters out of lastError", async () => {
+		const secret = "postgres-param-gho_abc123";
+		const startDeploy = vi.fn(async () => {
+			throw new Error(
+				`Failed query: update "application" set "dockerImage" = $1 params: ${secret}`,
+			);
+		});
+		for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
+			const h = harness([{ json: [dep(11)] }, { status: 201, json: {} }], {
+				startDeploy,
+			});
+			await pollWatch(baseWatch(), h.deps);
+			expect(JSON.stringify(h.patches)).not.toContain(secret);
+			expect(JSON.stringify(h.calls.map((c) => c.body))).not.toContain(secret);
+			expect(JSON.stringify(h.patches)).not.toContain("Failed query");
+		}
 	});
 
 	it("does not poll a disabled watch, or one without a usable token", async () => {
@@ -284,6 +381,64 @@ describe("back-off and errors", () => {
 	});
 });
 
+describe("describeError", () => {
+	it("keeps one short line and never a database statement or parameters", () => {
+		expect(describeError(new Error("line one\nline two"))).toBe("line one");
+		expect(
+			describeError(
+				new Error('Failed query: insert into "x" values ($1) params: gho_zzz'),
+			),
+		).toBe("A database error occurred");
+		expect(
+			describeError(new Error("x".repeat(500))).length,
+		).toBeLessThanOrEqual(160);
+		expect(describeError(undefined)).toBe("An unexpected error occurred");
+	});
+});
+
+describe("a service deleted while a deployment is in flight", () => {
+	it("posts one final failure before the watch is dropped", async () => {
+		const h = harness([{ status: 201, json: {} }]);
+		await reportServiceGone(
+			baseWatch({ inflightDeploymentId: 11, inflightStartedAt: new Date(NOW) }),
+			h.deps,
+		);
+		expect(statuses(h.calls)).toEqual([
+			{
+				url: "11/statuses",
+				state: "failure",
+				description: STATUS_TEXT.serviceGone,
+			},
+		]);
+	});
+
+	it("posts nothing when nothing was in flight, or when there is no token", async () => {
+		const idle = harness([{ status: 201, json: {} }]);
+		await reportServiceGone(baseWatch(), idle.deps);
+		expect(idle.calls).toHaveLength(0);
+
+		const noToken = harness([{ status: 201, json: {} }], { token: null });
+		await reportServiceGone(
+			baseWatch({ inflightDeploymentId: 11, inflightStartedAt: new Date(NOW) }),
+			noToken.deps,
+		);
+		expect(noToken.calls).toHaveLength(0);
+	});
+
+	it("is best effort: a GitHub failure does not throw", async () => {
+		const h = harness([new Error("socket")]);
+		await expect(
+			reportServiceGone(
+				baseWatch({
+					inflightDeploymentId: 11,
+					inflightStartedAt: new Date(NOW),
+				}),
+				h.deps,
+			),
+		).resolves.toBeUndefined();
+	});
+});
+
 describe("reporting the end of a Dokploy deployment", () => {
 	const inflightWatch = (ageMs = 1000) =>
 		baseWatch({
@@ -291,13 +446,26 @@ describe("reporting the end of a Dokploy deployment", () => {
 			inflightStartedAt: new Date(NOW - ageMs),
 		});
 
-	it("posts success with the log link when the Dokploy deployment is done, then clears it", async () => {
+	it("posts success without a link by default, with the log link when the watch opted in, then clears it", async () => {
+		const plain = harness([{ status: 201, json: {} }], {
+			inflight: { state: "done", logUrl: "https://dokploy.example/logs" },
+		});
+		await pollWatch(inflightWatch(), plain.deps);
+		expect(statuses(plain.calls)[0]).toMatchObject({
+			url: "11/statuses",
+			state: "success",
+			description: STATUS_TEXT.done,
+		});
+		expect(statuses(plain.calls)[0]).not.toHaveProperty("log_url");
+
 		const h = harness([{ status: 201, json: {} }], {
 			inflight: { state: "done", logUrl: "https://dokploy.example/logs" },
 		});
-		await pollWatch(inflightWatch(), h.deps);
+		await pollWatch(
+			{ ...inflightWatch(), postLogUrl: true } as WatchRow,
+			h.deps,
+		);
 		expect(statuses(h.calls)[0]).toMatchObject({
-			url: "11/statuses",
 			state: "success",
 			log_url: "https://dokploy.example/logs",
 		});
@@ -351,12 +519,92 @@ describe("reporting the end of a Dokploy deployment", () => {
 		expect(statuses(late.calls)[0]).toMatchObject({ state: "failure" });
 	});
 
-	it("keeps the deployment in flight when GitHub could not take the status", async () => {
+	it("keeps the deployment in flight and backs off when GitHub could not take the status", async () => {
 		const h = harness([{ status: 500, json: {} }], {
 			inflight: { state: "done" },
 		});
 		await pollWatch(inflightWatch(), h.deps);
 		expect(h.patches).toEqual([]);
+		expect(h.blocks.get("watch:w1")).toBe(NOW + 30_000);
+	});
+
+	it.each([403, 500, 502])(
+		"gives up on a status GitHub keeps refusing (%i) after the attempt limit, clearing the deployment and recording why",
+		async (status) => {
+			const h = harness([{ status, json: {} }], {
+				inflight: { state: "error" },
+			});
+			const delays: number[] = [];
+			for (let attempt = 1; attempt <= MAX_STATUS_ATTEMPTS; attempt += 1) {
+				h.blocks.clear();
+				await pollWatch(inflightWatch(), h.deps);
+				const until = h.blocks.get("watch:w1");
+				if (until) delays.push(until - NOW);
+			}
+			expect(h.calls.filter((c) => c.method === "POST")).toHaveLength(
+				MAX_STATUS_ATTEMPTS,
+			);
+			// Exponential back-off until the last attempt, which settles.
+			expect(delays).toEqual([30_000, 60_000, 120_000, 240_000]);
+			expect(h.patches).toHaveLength(1);
+			expect(h.patches[0]).toMatchObject({
+				inflightDeploymentId: null,
+				inflightStartedAt: null,
+			});
+			expect(h.patches[0]?.lastError).toContain(`HTTP ${status}`);
+		},
+	);
+
+	it("a refused status that later succeeds resets the count", async () => {
+		const h = harness(
+			[{ status: 500 }, { status: 500 }, { status: 201, json: {} }],
+			{ inflight: { state: "done" } },
+		);
+		for (let i = 0; i < 3; i += 1) {
+			h.blocks.clear();
+			await pollWatch(inflightWatch(), h.deps);
+		}
+		expect(h.patches).toHaveLength(1);
+		expect(h.patches[0]).toMatchObject({
+			inflightDeploymentId: null,
+			lastError: null,
+		});
+	});
+
+	it("on 401 marks the connection revoked and keeps the deployment to report after reconnecting", async () => {
+		const h = harness([{ status: 401, json: {} }], {
+			inflight: { state: "done" },
+		});
+		await pollWatch(inflightWatch(), h.deps);
+		expect(h.revoked).toEqual(["c1"]);
+		expect(h.patches).toEqual([]);
+	});
+
+	it("a rate limited status pauses the connection and is not counted as a failed attempt", async () => {
+		const h = harness([{ status: 429, headers: { "retry-after": "30" } }], {
+			inflight: { state: "done" },
+		});
+		await pollWatch(inflightWatch(), h.deps);
+		expect(h.blocks.get("connection:c1")).toBe(NOW + 30_000);
+		expect(h.patches).toEqual([]);
+	});
+
+	it("posts the same fixed text whatever the Dokploy error was", async () => {
+		const h = harness([{ status: 201, json: {} }], {
+			// A stray detail from an old caller must not be forwarded.
+			inflight: {
+				state: "error",
+				detail: "ECONNREFUSED 10.0.0.7:5432 password=hunter2",
+			} as unknown as InflightState,
+		});
+		await pollWatch(inflightWatch(), h.deps);
+		const body = h.calls.find((c) => c.method === "POST")?.body ?? "";
+		expect(body).not.toContain("hunter2");
+		expect(body).not.toContain("10.0.0.7");
+		expect(JSON.parse(body)).toEqual({
+			state: "failure",
+			description: STATUS_TEXT.failed,
+		});
 	});
 
 	it("gives up on a deployment GitHub no longer has", async () => {

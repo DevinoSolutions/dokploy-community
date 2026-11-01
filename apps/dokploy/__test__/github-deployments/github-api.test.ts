@@ -17,7 +17,7 @@ const args = {
 };
 
 describe("listDeployments", () => {
-	it("asks for 5 deployments of the environment and sends If-None-Match", async () => {
+	it("asks for a page of deployments of the environment and sends If-None-Match", async () => {
 		const { fetch, calls } = scriptedFetch([{ status: 304 }]);
 		const result = await listDeployments(
 			{ fetch, now: () => NOW },
@@ -25,7 +25,7 @@ describe("listDeployments", () => {
 		);
 		expect(result).toEqual({ kind: "not-modified" });
 		expect(calls[0]?.url).toBe(
-			"https://api.github.com/repos/DevinoSolutions/sendly/deployments?environment=production&per_page=5",
+			"https://api.github.com/repos/DevinoSolutions/sendly/deployments?environment=production&per_page=30&page=1",
 		);
 		expect(calls[0]?.headers["If-None-Match"]).toBe('W/"abc"');
 		expect(calls[0]?.headers.Authorization).toBe("Bearer gho_secret");
@@ -43,6 +43,58 @@ describe("listDeployments", () => {
 		expect(result).toMatchObject({ kind: "ok", etag: 'W/"new"' });
 		if (result.kind === "ok")
 			expect(result.deployments.map((d) => d.id)).toEqual([7, 9]);
+	});
+
+	it("walks older pages until it reaches a deployment already handled", async () => {
+		const page = (from: number) =>
+			Array.from({ length: 30 }, (_, i) => ({ id: from - i }));
+		const { fetch, calls } = scriptedFetch([
+			{ json: page(100), headers: { etag: 'W/"p1"' } },
+			{ json: page(70) },
+			{ json: [{ id: 40 }, { id: 39 }, { id: 38 }] },
+		]);
+		const result = await listDeployments(
+			{ fetch, now: () => NOW },
+			{ ...args, etag: 'W/"old"', lastSeen: 39 },
+		);
+		expect(calls.map((c) => c.url.split("&").slice(-1)[0])).toEqual([
+			"page=1",
+			"page=2",
+			"page=3",
+		]);
+		// The ETag guards page 1 only.
+		expect(calls[0]?.headers["If-None-Match"]).toBe('W/"old"');
+		expect(calls[1]?.headers["If-None-Match"]).toBeUndefined();
+		expect(result).toMatchObject({ kind: "ok", etag: 'W/"p1"' });
+		if (result.kind === "ok") expect(result.deployments).toHaveLength(63);
+	});
+
+	it("stops at the page cap, and reads one page when there is no cursor yet", async () => {
+		const full = Array.from({ length: 30 }, (_, i) => ({ id: 1000 - i }));
+		const capped = scriptedFetch([{ json: full }]);
+		await listDeployments(
+			{ fetch: capped.fetch, now: () => NOW },
+			{ ...args, lastSeen: 1, maxPages: 2 },
+		);
+		expect(capped.calls).toHaveLength(2);
+
+		const baseline = scriptedFetch([{ json: full }]);
+		await listDeployments(
+			{ fetch: baseline.fetch, now: () => NOW },
+			{ ...args, lastSeen: null },
+		);
+		expect(baseline.calls).toHaveLength(1);
+	});
+
+	it("returns the error of a later page instead of a partial list", async () => {
+		const full = Array.from({ length: 30 }, (_, i) => ({ id: 100 - i }));
+		const { fetch } = scriptedFetch([{ json: full }, { status: 502 }]);
+		expect(
+			await listDeployments(
+				{ fetch, now: () => NOW },
+				{ ...args, lastSeen: 1 },
+			),
+		).toEqual({ kind: "error", status: 502 });
 	});
 
 	it("url-encodes the environment name", async () => {
