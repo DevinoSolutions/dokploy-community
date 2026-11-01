@@ -183,6 +183,13 @@ void app
 					"./queues/deployment-control"
 				);
 				startDeploymentWatchdog();
+				// Services that follow GitHub Deployments (T-12166): one poll every
+				// 20s, started after the restore so a restart never replays a deploy
+				// it already queued.
+				const { startGithubDeploymentsPoller } = await import(
+					"./queues/github-deployments-poller"
+				);
+				startGithubDeploymentsPoller();
 			}
 		} catch (e) {
 			console.error("Main Server Error", e);

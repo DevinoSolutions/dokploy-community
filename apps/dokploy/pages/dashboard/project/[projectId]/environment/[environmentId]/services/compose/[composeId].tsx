@@ -50,6 +50,7 @@ import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely
 import { AssignComposeNetworks } from "@/components/dashboard/networks/assign-compose-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
 import { ComposePolicyAuditExclusion } from "@/components/dashboard/shared/compose-policy-audit-exclusion";
+import { GithubDeploymentsWatch } from "@/components/dashboard/shared/github-deployments-watch";
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -592,6 +593,7 @@ const Service = (
 												<ShowComposeBuildServer composeId={composeId} />
 												<DeployGuardrailsCompose composeId={composeId} />
 												<RollingReplaceCompose composeId={composeId} />
+												<GithubDeploymentsWatch id={composeId} type="compose" />
 												<WatchdogExclusion id={composeId} type="compose" />
 												<ComposePolicyAuditExclusion composeId={composeId} />
 											</div>

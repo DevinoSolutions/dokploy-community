@@ -102,6 +102,7 @@ import {
 	generateApplyPatchesCommand,
 	type Patch,
 } from "./patch";
+import { loginGhcrForCompose } from "./github-deployments/registry-auth";
 import { validUniqueServerAppName } from "./project";
 import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
@@ -911,6 +912,9 @@ export const deployCompose = async ({
 			type: "compose" as const,
 		};
 
+		// T-12166: a stack that follows GitHub Deployments pulls private ghcr.io
+		// images with the connected GitHub login.
+		await loginGhcrForCompose(compose.composeId, compose.serverId);
 		await runComposeBuild(entity, deployment, { freshVolumes });
 		await phases.note(
 			`Deployment finished (total ${phases.elapsed(deployStartedAt)})`,

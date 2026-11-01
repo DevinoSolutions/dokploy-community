@@ -1,5 +1,6 @@
 import { db } from "@dokploy/server/db";
 import { applications, domains } from "@dokploy/server/db/schema";
+import { ghcrAuthConfigForApplication } from "@dokploy/server/services/github-deployments/registry-auth";
 import { resolveServiceNetworks } from "@dokploy/server/services/network";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import { assertVolumeMountsBound } from "@dokploy/server/services/volume-binding";
@@ -386,6 +387,16 @@ export const getAuthConfig = async (application: ApplicationNested) => {
 			username: r.username,
 			serveraddress: r.registryUrl,
 		};
+	}
+
+	// A service that follows GitHub Deployments (T-12166) pulls a private
+	// ghcr.io image with the GitHub login it is connected through. The token is
+	// read here, at pull time, and is never stored on the application.
+	if (sourceType === "docker" && application.applicationId) {
+		return await ghcrAuthConfigForApplication(
+			application.applicationId,
+			application.dockerImage,
+		);
 	}
 
 	return undefined;

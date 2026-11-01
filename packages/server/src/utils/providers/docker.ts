@@ -1,3 +1,4 @@
+import { loginGhcrForApplication } from "@dokploy/server/services/github-deployments/registry-auth";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import { quote } from "shell-quote";
 import { getECRAuthToken } from "../aws/ecr";
@@ -68,6 +69,14 @@ echo ${quote([`Pulling ${dockerImage}`])};
 		} else if (username && password) {
 			await runDockerLogin(
 				{ registryType: "cloud", registryUrl, username, password },
+				serverId,
+			);
+		} else {
+			// T-12166: a service that follows GitHub Deployments pulls a private
+			// ghcr.io image with the GitHub login it is connected through.
+			await loginGhcrForApplication(
+				application.applicationId,
+				dockerImage,
 				serverId,
 			);
 		}
