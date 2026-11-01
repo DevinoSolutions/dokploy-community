@@ -38,21 +38,25 @@ digest.
  poll .../deployments/123/statuses
         |                                                                every 20s, per watch:
         |                                <---------------------------    GET /repos/o/r/deployments
-        |                                                                    ?environment=production&per_page=5
+        |                                                                    ?environment=production&per_page=30 (older pages
+        |                                                                    until a handled id, max 5 pages)
         |                                                                    If-None-Match: <etag>
         |                                --------------------------->    200 (new) or 304 (free)
-        |                                                                for each id > lastSeen, ascending:
+        |                                                                ids > lastSeen, ascending:
         |                                                                  payload names this service?
         |                                                                  image pinned by digest?
+        |                                                                  older valid ones: status inactive
+        |                                                                  the NEWEST valid one only:
         |                                                                  same repository as the service runs?
         |                                                                transaction:
         |                                                                  lastSeen = 123, inflight = 123,
-        |                                                                  set image, enqueue the deploy
+        |                                                                  set image
+        |                                                                after the commit: enqueue the deploy
         |                                <---------------------------    POST .../deployments/123/statuses
-        |                                   state: in_progress             (log_url -> Dokploy deployment page)
+        |                                   state: in_progress             (fixed text; log_url only if opted in)
         |                                                                normal Dokploy deploy runs
         |                                <---------------------------    POST .../deployments/123/statuses
- sees success / failure                    state: success | failure        (description: short result)
+ sees success / failure                    state: success | failure        (description: fixed text)
 ```
 
 Three parts, each independent:
@@ -115,6 +119,7 @@ error 54023).
 | `owner`, `repo`         | the repository to follow                                      |
 | `environment`           | GitHub environment name, default `production`                 |
 | `enabled`               | switch                                                        |
+| `postLogUrl`            | opt in to sending the Dokploy link to GitHub as `log_url`; default off |
 | `lastSeenDeploymentId`  | highest GitHub deployment id handled                          |
 | `etag`                  | ETag of the last fully handled list response                  |
 | `inflightDeploymentId`, `inflightStartedAt` | the deployment being deployed now         |
@@ -129,8 +134,15 @@ passes `__test__/db/migration-idempotency.test.ts`. PR #576 (T-12149) already
 uses 0225; if the merge order differs, renumber (the file name, the journal entry
 and the snapshot).
 
-Changing the repository, environment or account resets the cursor (`lastSeen`,
-`etag`, in flight) so the next poll starts fresh.
+Changing the repository, environment or account, or turning a disabled watch
+back on, resets the cursor (`lastSeen`, `etag`, in flight): the next poll
+baselines at the then-newest deployment, so what piled up in the meantime never
+runs. `lastSeen` only ever moves forward (every write is `WHERE lastSeen IS NULL
+OR lastSeen < id`); only that reset sets it back.
+
+The column `postLogUrl` is part of migration 0226 (the PR is unmerged, so the
+migration is edited in place; an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` makes
+it safe on a database that already ran an earlier 0226).
 
 ## 3. The poller
 
@@ -155,68 +167,119 @@ Per enabled watch, every 20 seconds:
    - still running or waiting in the queue -> wait;
    - running for more than 90 minutes -> `failure` ("did not finish in time");
    - no row and not in the queue for 10 minutes -> `failure` ("no record").
-   The status carries `log_url` (the service's Deployments tab) and a short
-   `description`. Nothing new is taken until this one ends, so deploys of one
-   service never overlap and arrive in order.
-3. **List**: `GET /repos/{owner}/{repo}/deployments?environment=<env>&per_page=5`
-   with `If-None-Match: <etag>`. A `304` costs no rate limit.
+   The status carries a fixed `description` (see "What GitHub is told") and,
+   only when the watch opted in with `postLogUrl`, `log_url` (the service's
+   Deployments tab). Nothing new is taken until this one ends, so deploys of one
+   service never overlap.
+   A refused status is retried with back-off (30 s, 60 s, 2 min, 4 min); after 5
+   attempts it is given up, the deployment is cleared and `lastError` says GitHub
+   did not accept it. A rate limit pauses the connection and is not an attempt.
+   A `401` marks the connection `revoked` and keeps the deployment, so the end is
+   reported after the user reconnects.
+3. **List**: `GET /repos/{owner}/{repo}/deployments?environment=<env>&per_page=30`
+   with `If-None-Match: <etag>` on the first page. A `304` costs no rate limit.
+   When there is a cursor the walk continues to older pages until a page reaches
+   an id already handled, at most 5 pages (150 deployments), so a burst is not
+   cut off at five.
 4. **First poll** (no `lastSeen`): remember the highest id and the ETag, deploy
    nothing. Deployments that existed before the watch was enabled never run.
-5. **New deployments**: ids above `lastSeen`, ascending. For each:
+5. **New deployments**: ids above `lastSeen`. Only the **newest valid**
+   deployment for this service is deployed; the others are answered so no
+   workflow waits on them. In ascending order:
    - payload has no `dokploy` key, or names another `serviceId`: skip silently
      (another watch, or a human). `lastSeen` moves past it.
    - names this service but the image is not `<repository>@sha256:<64 hex>`:
-     answer `failure` ("must be pinned by digest") so the workflow stops waiting,
-     and move past it.
-   - otherwise **start**: one database transaction takes a row lock on the watch,
-     checks nothing else took this id, sets `lastSeen = id` and the in-flight
-     marker, writes the image into the service and enqueues the deploy; then POST
-     status `in_progress`. Only one deployment is started per tick.
+     answer `failure` and move past it.
+   - names this service with a valid image but a newer valid one exists: answer
+     `inactive` ("Superseded by a newer deployment") and move past it.
+   - the newest valid one: **start** it. One database transaction takes a row
+     lock on the watch and checks the row still matches what the tick decided on
+     (owner, repo, environment, connection and `lastSeen`, and nothing in flight),
+     sets `lastSeen = id` and the in-flight marker and writes the image into the
+     service. After the commit the deploy is enqueued; then POST `in_progress`.
+     Deployments newer than the one started wait for it to end.
+   Every answer goes through the bounded status posting of step 2; one that
+   cannot be posted yet stops the pass where it is and is retried on a later tick.
 6. **ETag** is saved only after every new deployment in a response was handled
    (answered or skipped). While a started deployment leaves others waiting, the
    stored ETag stays old so the next list returns `200`, not a `304` that would
    hide them.
 
+### What GitHub is told
+
+The statuses of a deployment are readable by everyone who can see the repository,
+so they carry **fixed text only**: "Dokploy accepted the deployment", "Deployed by
+Dokploy", "Dokploy deployment failed; see the Dokploy dashboard", "Dokploy
+rejected this deployment; see the Dokploy dashboard", "Superseded by a newer
+deployment", and a few like them (`STATUS_TEXT` in `poll-core.ts`). Never an error
+message, a deployment log line, a database error or an image name from the
+service. `log_url` (the Dokploy dashboard link, an internal address) is sent only
+for a watch with `postLogUrl` on, which is off by default.
+
+What went wrong stays in Dokploy: the watch's `lastError` keeps a short, one-line,
+secret-redacted account (`describeError`: a database error becomes "A database
+error occurred", never the statement or its parameters).
+
 ### How the deploy runs
 
 It is the normal Dokploy deploy, not a special path.
 
-- **Application** (Docker source): `updateApplication({ dockerImage })` with the
-  digest reference, then a regular `deploy` job on the deployment queue. Same as
-  `application.deploy` with a `dockerImage`, and as the `dokploy-deploy` action's
-  `deploy.sh` does. The job title is `GHA GitHub deployment #<id>` (the `GHA `
+- **Application** (Docker source): `dockerImage` is set to the digest reference
+  in the same transaction as the claim, then a regular `deploy` job goes on the
+  deployment queue. (The queue's `pinnedImage` was not used: it deploys through
+  the build-policy path, which does not persist `dockerImage`, waits for required
+  checks and takes registry credentials from the organization's registries, and it
+  does not exist for compose.) The job title is `GHA GitHub deployment #<id>` (the `GHA `
   prefix is what Dokploy already reads as "built by GitHub Actions").
 - **Compose** (file stored in Dokploy): the digest on the single
   `image: <repository>@sha256:...` line is replaced and nothing else changes
   (`pinComposeImage`, the rule of `deploy.sh`'s `render`: exactly one pinned line
-  for that repository, the old reference occurring exactly once), then a regular
-  `deploy` job.
+  for that repository, the old reference occurring exactly once), written in the
+  same transaction, then a regular `deploy` job.
 - **Build origin** (PR #576, T-12149): the job also carries `buildOrigin:
   "github-actions"` and `buildRunUrl` (from `payload.dokploy.runUrl` when it is a
   valid `https://github.com/<o>/<r>/actions/runs/<id>` link). Until #576 is
   merged the queue ignores those two fields (`TODO(T-12149)` in the poller), and
   the `GHA ` title already lets Dokploy infer the origin.
-- **Private GHCR images**: `getAuthConfig` (application) and a `docker login
-  ghcr.io --password-stdin` before `compose up` (compose) use the watch's
-  connection: username = the GitHub login, password = the token, read at pull
-  time. The token is not stored on the service and never put in argv or a log
-  (`runDockerLogin` feeds it on stdin and redacts failures). The compose login
-  persists in the host's Docker config like any `docker login`.
+- **Private GHCR images**: the watch's connection supplies the login (username =
+  the GitHub login, password = the token), read at pull time, for images under
+  `ghcr.io/<watched owner>/` only. An application's swarm service is created with
+  that auth config (`getAuthConfig`); its host pull and a compose's `up` use a
+  `docker login ghcr.io --password-stdin` into **a Docker config directory of the
+  watch's own**, `<base>/docker-config/ghcr-<watchId>`, and only that service's
+  `docker --config <dir> pull` / the `DOCKER_CONFIG=<dir>` of that deploy's docker
+  commands (compose, and the rolling replace's pull and up) read it. The host's
+  default Docker config is never written, so no other organization or service on
+  that host can reuse the token, and nothing outlives the watch. The directory is
+  deleted when the connection is removed, the watch is removed or turned off, or
+  its service is deleted (on this host and on every server of the organization,
+  best effort). The token is not stored on the service and never put in argv or a
+  log (`runDockerLogin` feeds it on stdin and redacts failures). Docker has no
+  per-repository credentials: a compose stack that also runs another ghcr.io image
+  of the same owner pulls it with the same login, and a stack with no image of the
+  watched owner gets no login at all.
 
 ### Idempotency
 
-The cursor claim (`lastSeenDeploymentId` plus the in-flight marker) is taken in a
-transaction under a row lock, and the image write and the enqueue run inside that
-transaction's scope, in that order: if either throws, the claim rolls back. (The
-image write and the queue are not part of the database transaction themselves;
-repeating them is harmless because both are idempotent for one digest.) A restart reads `lastSeen` and starts after it, so a
-deployment is never deployed twice by a restart. If enqueue or the image write
-throws, the transaction rolls back and the next tick retries (three attempts, then
-a `failure` status and the deployment is skipped, so a poison deployment cannot
-loop). The one window left is a crash between the journaled enqueue and the
-commit: the queue journal replays the job and the poller starts the same
-deployment again, which deploys the same digest a second time. That is a repeat,
-not a wrong deploy.
+The cursor claim (`lastSeenDeploymentId` plus the in-flight marker) and the image
+write are **one database transaction** under a row lock, so a failure or a failed
+commit leaves neither a moved cursor nor the new digest behind. The deploy is
+enqueued **after** the commit, so a job can never start against an image that is
+not committed yet. If the enqueue throws, a second transaction restores the image
+(or compose file), the cursor and clears the in-flight mark (each only if it still
+holds what the first one wrote) and the next tick retries; three attempts, then a
+`failure` status and the deployment is skipped, so a poison deployment cannot
+loop. A restart reads `lastSeen` and starts after it, so a deployment is never
+deployed twice by a restart. The one window left is a crash between the commit and
+the enqueue: the deployment is in flight with no job, it is reported to GitHub as
+lost after 10 minutes and the new image stays on the service for its next deploy.
+
+### Shutdown
+
+`startGithubDeploymentsPoller()` returns a stop handle. `server.ts` keeps it and
+registers it first on `SIGTERM` (`process.prependListener`), ahead of the queue's
+own shutdown handler: no new tick starts, and a tick in progress stops before its
+next watch, so nothing is enqueued into a queue that is draining.
 
 ### Rate limits
 
@@ -229,8 +292,9 @@ not a wrong deploy.
   recorded on the watch, retried after 5 minutes.
 - `401`: the connection is marked `revoked`, polling for it stops, the UI says
   "Reconnect".
-- A failed status POST is retried on the next tick while the deployment is in
-  flight; a `404`/`410`/`422` (deployment deleted) clears it.
+- A failed status POST backs the watch off (30 s doubling to 5 min) and is given
+  up after 5 attempts; a `404`/`410`/`422` (deployment deleted) clears it at once.
+  A `401` revokes the connection. See step 2.
 
 ## 4. API and MCP
 
@@ -243,14 +307,19 @@ descriptions from `.meta({ openapi: { description } })`.
 | `githubDeployment-startConnect` | admin | begin the device flow: `flowId`, `userCode`, `verificationUri` |
 | `githubDeployment-completeConnect` | admin | poll it: `pending`, `connected`, `expired`, `denied`, `failed` |
 | `githubDeployment-disconnect` | admin | delete the connection and its token |
-| `githubDeployment-watches` | read | every watch of the organization |
+| `githubDeployment-watches` | read | the watches of the organization (a member only sees the services they have access to) |
 | `githubDeployment-watchOne` | read | one service's watch |
 | `githubDeployment-watchSet` | admin | create / change / disable a watch |
 | `githubDeployment-watchRemove` | admin | stop following |
 
-Connect and disconnect use the existing `gitProviders` permissions; setting a
-watch needs `service.create` on the service and `gitProviders.read`. Connections
-and watches are checked against the caller's organization.
+Connect and disconnect use the existing `gitProviders` permissions. Setting or
+removing a watch needs `gitProviders.create` (read access to git providers is not
+enough: a watch lets a repository drive a deploy with that GitHub account's
+token), `deployment.create` and `service.create` on the service. The `watches`
+list is filtered by the member's `accessedServices` like the other service lists.
+Connections and watches are checked against the caller's organization.
+Disconnecting also deletes the docker login of every watch that used the
+connection.
 
 ## Security model
 
@@ -278,6 +347,10 @@ and watches are checked against the caller's organization.
   from a job with `environment: production` has passed that gate; one created
   from a job without it has not. The workflow in the next section uses the
   environment on purpose.
+- **The login serves one owner.** The token is offered only for images under
+  `ghcr.io/<watched owner>/`, never for any other ghcr.io image a service runs,
+  and only through the watch's own Docker config directory (see "How the deploy
+  runs").
 - **Token handling.** Encrypted at rest; never returned by tRPC or MCP, never in
   a log line, argv, status or URL (tests assert it). Read only by the poller, the
   GHCR pull and the `docker login` helper. Disconnect deletes it.
@@ -291,13 +364,15 @@ and watches are checked against the caller's organization.
 
 | situation | result |
 | --------- | ------ |
-| Dokploy offline when the deployment is created | picked up when it is back, if it is still among the newest 5 of that environment; the workflow's wait times out meanwhile |
-| more than 5 deployments in 20 s | the older ones fall outside `per_page=5` and are never seen; one watch per service, so unlikely |
+| Dokploy offline when the deployment is created | picked up when it is back, if it is still among the newest 150 of that environment (5 pages of 30); the workflow's wait times out meanwhile |
+| several deployments waiting | only the newest valid one for the service is deployed; the older ones get `inactive`, so no workflow hangs |
+| more than 150 deployments since the last poll | the oldest beyond 150 are not seen and not answered |
+| GitHub keeps refusing a status | backs off, gives up after 5 attempts, clears the deployment and records it in `lastError` |
 | Dokploy restarts mid-deploy | the queue journal resumes the job; `inflight` survives, so the end is still reported |
 | GitHub unreachable | the tick records an error and retries; nothing is lost |
 | token revoked or expired | `401`: connection `revoked`, UI asks to reconnect, watches pause |
 | repository renamed, deleted, or account lost access | `404`: error shown on the watch, retried every 5 minutes |
-| service deleted | its watch is removed on the next tick |
+| service deleted | a deployment in flight is answered `failure`, then the watch and its docker login are removed on the next tick |
 | payload for another service | ignored, no status |
 | unpinned / foreign image for this service | `failure` status with the reason |
 | deploy fails or is cancelled in Dokploy | `failure` status with the log link |

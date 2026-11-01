@@ -8,16 +8,19 @@ import {
 	findGithubWatch,
 	IS_CLOUD,
 	listGithubConnections,
+	listGithubWatchesForConnection,
+	listGithubWatchesForOrganization,
 	presentGithubWatch,
 	progressGithubConnect,
+	removeGhcrWatchConfigDirs,
 	upsertGithubConnection,
 	upsertGithubWatch,
 } from "@dokploy/server";
-import { db } from "@dokploy/server/db";
-import { githubDeploymentWatch } from "@dokploy/server/db/schema";
-import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
+import {
+	checkServicePermissionAndAccess,
+	findMemberByUserId,
+} from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
-import { eq } from "drizzle-orm";
 import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
@@ -151,8 +154,19 @@ export const githubDeploymentRouter = createTRPCRouter({
 				resourceId: connection.connectionId,
 				resourceName: `GitHub Deployments: ${connection.githubLogin}`,
 			});
+			// The watches go with the connection (cascade), and so does the GitHub
+			// token's login on the hosts: read them first, delete their docker
+			// config dirs after.
+			const watches = await listGithubWatchesForConnection(
+				input.connectionId,
+				ctx.session.activeOrganizationId,
+			);
 			await deleteGithubConnection(
 				input.connectionId,
+				ctx.session.activeOrganizationId,
+			);
+			await removeGhcrWatchConfigDirs(
+				watches.map((watch) => watch.watchId),
 				ctx.session.activeOrganizationId,
 			);
 			return true;
@@ -164,19 +178,22 @@ export const githubDeploymentRouter = createTRPCRouter({
 				method: "GET",
 				path: "/githubDeployment.watches",
 				description:
-					"List every service of this organization that follows GitHub Deployments: serviceType (application or compose), serviceId, connectionId, owner, repo, environment, enabled, the last GitHub deployment id handled, the one in flight, when it was last checked and the last error.",
+					"List the services of this organization that follow GitHub Deployments (a member only sees the services they were given access to): serviceType (application or compose), serviceId, connectionId, owner, repo, environment, enabled, postLogUrl, the last GitHub deployment id handled, the one in flight, when it was last checked and the last error.",
 			},
 		})
 		.query(async ({ ctx }) => {
-			const rows = await db
-				.select()
-				.from(githubDeploymentWatch)
-				.where(
-					eq(
-						githubDeploymentWatch.organizationId,
-						ctx.session.activeOrganizationId,
-					),
-				);
+			const organizationId = ctx.session.activeOrganizationId;
+			// Same scoping as the other service lists: owners and admins see the
+			// organization, a member only the services in their accessedServices.
+			const accessedServices =
+				ctx.user.role !== "owner" && ctx.user.role !== "admin"
+					? (await findMemberByUserId(ctx.user.id, organizationId))
+							.accessedServices
+					: null;
+			const rows = await listGithubWatchesForOrganization(
+				organizationId,
+				accessedServices,
+			);
 			return rows.map(presentGithubWatch);
 		}),
 
@@ -186,7 +203,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 				method: "GET",
 				path: "/githubDeployment.watchOne",
 				description:
-					"Read the 'Deploy from GitHub Deployments' settings of one application or compose stack, or null when it has none: connectionId, owner, repo, environment, enabled and the poller's progress (last deployment id handled, in flight, last check, last error).",
+					"Read the 'Deploy from GitHub Deployments' settings of one application or compose stack, or null when it has none: connectionId, owner, repo, environment, enabled, postLogUrl and the poller's progress (last deployment id handled, in flight, last check, last error).",
 			},
 		})
 		.input(apiGithubDeploymentWatchOne)
@@ -201,13 +218,13 @@ export const githubDeploymentRouter = createTRPCRouter({
 			return presentGithubWatch(watch);
 		}),
 
-	watchSet: withPermission("gitProviders", "read")
+	watchSet: withPermission("gitProviders", "create")
 		.meta({
 			openapi: {
 				method: "POST",
 				path: "/githubDeployment.watchSet",
 				description:
-					'Make an application or compose stack follow GitHub Deployments, or change/disable it. Dokploy then polls owner/repo for deployments of the given environment (default production) and deploys the ones whose payload is {"dokploy":{"serviceId":"<this service>","image":"<repository>@sha256:<64 hex>"}}. The image must be pinned by digest and be a new digest of the repository the service already runs. Existing deployments are never replayed: only ones created after this is set. Changing the repository, environment or connection resets that starting point.',
+					'Make an application or compose stack follow GitHub Deployments, or change/disable it. Dokploy then polls owner/repo for deployments of the given environment (default production) and deploys the ones whose payload is {"dokploy":{"serviceId":"<this service>","image":"<repository>@sha256:<64 hex>"}}. The image must be pinned by digest and be a new digest of the repository the service already runs. Existing deployments are never replayed: only ones created after this is set. Changing the repository, environment or connection, or turning a disabled watch back on, resets that starting point. When several deployments are waiting only the newest is deployed; the older ones are answered as inactive. Statuses sent to GitHub carry fixed text only; set postLogUrl to also send the Dokploy dashboard link as log_url (off by default). Needs the gitProviders and deployment create permissions plus create access to the service.',
 			},
 		})
 		.input(apiGithubDeploymentWatchSet)
@@ -215,6 +232,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 			assertSelfHosted();
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
 				service: ["create"],
+				deployment: ["create"],
 			});
 			const organizationId = ctx.session.activeOrganizationId;
 			// The service has to exist, be of the stated type and be this organization's.
@@ -242,6 +260,10 @@ export const githubDeploymentRouter = createTRPCRouter({
 				});
 			}
 			const watch = await upsertGithubWatch({ ...input, organizationId });
+			// A watch that is off has no use for a login on any host.
+			if (!watch.enabled) {
+				await removeGhcrWatchConfigDirs([watch.watchId], organizationId);
+			}
 			await audit(ctx, {
 				action: "update",
 				resourceType: input.serviceType,
@@ -251,7 +273,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 			return presentGithubWatch(watch);
 		}),
 
-	watchRemove: withPermission("gitProviders", "read")
+	watchRemove: withPermission("gitProviders", "create")
 		.meta({
 			openapi: {
 				method: "POST",
@@ -264,12 +286,14 @@ export const githubDeploymentRouter = createTRPCRouter({
 		.mutation(async ({ ctx, input }) => {
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
 				service: ["create"],
+				deployment: ["create"],
 			});
 			const watch = await findGithubWatch(input.serviceType, input.serviceId);
 			if (!watch || watch.organizationId !== ctx.session.activeOrganizationId) {
 				return true;
 			}
 			await deleteGithubWatch(input.serviceType, input.serviceId);
+			await removeGhcrWatchConfigDirs([watch.watchId], watch.organizationId);
 			await audit(ctx, {
 				action: "update",
 				resourceType: input.serviceType,

@@ -189,7 +189,11 @@ void app
 				const { startGithubDeploymentsPoller } = await import(
 					"./queues/github-deployments-poller"
 				);
-				startGithubDeploymentsPoller();
+				const stopGithubDeploymentsPoller = startGithubDeploymentsPoller();
+				// First in line on SIGTERM, ahead of the queue's own handler (see
+				// registerShutdownHandler): no tick may enqueue a deploy into a queue
+				// that is draining.
+				process.prependListener("SIGTERM", stopGithubDeploymentsPoller);
 			}
 		} catch (e) {
 			console.error("Main Server Error", e);

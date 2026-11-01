@@ -56,6 +56,7 @@ export const GithubDeploymentsWatch = ({ id, type }: Props) => {
 	const [repository, setRepository] = useState("");
 	const [environment, setEnvironment] = useState("production");
 	const [enabled, setEnabled] = useState(true);
+	const [postLogUrl, setPostLogUrl] = useState(false);
 
 	useEffect(() => {
 		if (watch) {
@@ -63,6 +64,7 @@ export const GithubDeploymentsWatch = ({ id, type }: Props) => {
 			setRepository(`${watch.owner}/${watch.repo}`);
 			setEnvironment(watch.environment);
 			setEnabled(watch.enabled);
+			setPostLogUrl(watch.postLogUrl);
 		}
 	}, [watch]);
 
@@ -82,6 +84,7 @@ export const GithubDeploymentsWatch = ({ id, type }: Props) => {
 				repo: parsed[2] as string,
 				environment: environment.trim(),
 				enabled,
+				postLogUrl,
 			});
 			await utils.githubDeployment.watchOne.invalidate();
 			toast.success(
@@ -176,6 +179,17 @@ export const GithubDeploymentsWatch = ({ id, type }: Props) => {
 						<div className="flex flex-row items-center gap-2">
 							<Switch checked={enabled} onCheckedChange={setEnabled} />
 							<Label>Enabled</Label>
+						</div>
+						<div className="flex flex-col gap-1">
+							<div className="flex flex-row items-center gap-2">
+								<Switch checked={postLogUrl} onCheckedChange={setPostLogUrl} />
+								<Label>Send the Dokploy link to GitHub</Label>
+							</div>
+							<span className="text-xs text-muted-foreground">
+								Off by default. GitHub shows the deployment statuses to everyone
+								who can see the repository, so the link to this Dokploy is only
+								sent when you turn this on. Statuses never carry error details.
+							</span>
 						</div>
 						{watch && (
 							<div className="text-xs text-muted-foreground flex flex-col gap-1">
