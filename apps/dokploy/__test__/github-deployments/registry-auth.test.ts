@@ -1,4 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
 	loadGhcrCredentials: vi.fn(),
@@ -24,6 +38,7 @@ vi.mock("@dokploy/server/db", () => ({
 
 import {
 	composeHasImageOfOwner,
+	getGhcrConfigSeedCommand,
 	getGhcrWatchConfigDir,
 	getGhcrWatchConfigDirRemovalCommand,
 	ghcrAuthConfigForApplication,
@@ -256,5 +271,117 @@ describe("the config dir is removed with the watch or the connection", () => {
 		).resolves.toBeUndefined();
 		expect(mocks.execAsyncRemote).toHaveBeenCalledTimes(2);
 		error.mockRestore();
+	});
+});
+
+describe("the watch's config dir keeps the host's other logins", () => {
+	it("seeds the dir before the ghcr login, on the same host", async () => {
+		await loginGhcrForCompose("c1", null, COMPOSE);
+		await loginGhcrForCompose("c1", "server-9", COMPOSE);
+		const dir = (host: boolean) => getGhcrWatchConfigDir("w_1-Abc", host);
+		expect(mocks.execAsync.mock.calls[0]?.[0]).toBe(
+			getGhcrConfigSeedCommand(dir(false)),
+		);
+		expect(mocks.execAsyncRemote.mock.calls[0]).toEqual([
+			"server-9",
+			getGhcrConfigSeedCommand(dir(true)),
+		]);
+		expect(mocks.execAsync.mock.invocationCallOrder[0]).toBeLessThan(
+			mocks.runDockerLogin.mock.invocationCallOrder[0] as number,
+		);
+	});
+
+	it("a seed that fails does not fail the deploy: the login still runs", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		mocks.execAsync.mockRejectedValueOnce(new Error("no shell"));
+		const dir = await loginGhcrForApplication("app1", IMAGE, null);
+		expect(dir).toBeDefined();
+		expect(mocks.runDockerLogin).toHaveBeenCalledTimes(1);
+		warn.mockRestore();
+	});
+
+	describe.skipIf(process.platform === "win32")("in a real shell", () => {
+		const root = mkdtempSync(join(tmpdir(), "ghcr-seed-"));
+		afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+		const run = (home: string, dir: string) =>
+			execFileSync(
+				"timeout",
+				["-k", "5", "20", "sh", "-c", getGhcrConfigSeedCommand(dir)],
+				{
+					env: { ...process.env, HOME: home },
+					timeout: 30_000,
+				},
+			);
+
+		it("copies the default config (a pre-existing login stays available), links cli-plugins and leaves the default config untouched", () => {
+			const home = join(root, "home1");
+			const docker = join(home, ".docker");
+			mkdirSync(join(docker, "cli-plugins"), { recursive: true });
+			const original = JSON.stringify({
+				auths: {
+					"registry.example.com": { auth: "dXNlcjpwdw==" },
+					"https://index.docker.io/v1/": { auth: "aHViOnB3" },
+				},
+				credsStore: "desktop",
+				credHelpers: { "ghcr.io": "pass" },
+			});
+			writeFileSync(join(docker, "config.json"), original);
+			const dir = join(root, "docker-config", "ghcr-w1");
+
+			run(home, dir);
+
+			const seeded = JSON.parse(readFileSync(join(dir, "config.json"), "utf8"));
+			// The deploy still sees the build-server / Docker Hub / private registry logins.
+			expect(Object.keys(seeded.auths)).toEqual([
+				"registry.example.com",
+				"https://index.docker.io/v1/",
+			]);
+			// A credential helper would take the ghcr token into the host's shared
+			// store: both keys are inert in the copy.
+			expect(seeded.credsStore).toBeUndefined();
+			expect(seeded.credHelpers).toBeUndefined();
+			expect(seeded["x-dokploy-ignored-credsStore"]).toBe("desktop");
+			// Plugins (docker compose) are still found.
+			expect(lstatSync(join(dir, "cli-plugins")).isSymbolicLink()).toBe(true);
+			expect(readlinkSync(join(dir, "cli-plugins"))).toBe(
+				join(docker, "cli-plugins"),
+			);
+			// The default config was only read.
+			expect(readFileSync(join(docker, "config.json"), "utf8")).toBe(original);
+			expect(existsSync(join(docker, "config.json.seed"))).toBe(false);
+			// Private: the copy holds other registries' credentials.
+			expect(statSync(join(dir, "config.json")).mode & 0o777).toBe(0o600);
+			expect(statSync(dir).mode & 0o777).toBe(0o700);
+		});
+
+		it("re-seeding replaces a stale copy, and a host without a default config gets an empty dir", () => {
+			const home = join(root, "home2");
+			mkdirSync(join(home, ".docker"), { recursive: true });
+			const dir = join(root, "docker-config", "ghcr-w2");
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(
+				join(dir, "config.json"),
+				JSON.stringify({ auths: { "old.example.com": {} } }),
+			);
+			writeFileSync(
+				join(home, ".docker", "config.json"),
+				JSON.stringify({ auths: { "new.example.com": {} } }),
+			);
+			run(home, dir);
+			expect(
+				Object.keys(
+					JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).auths,
+				),
+			).toEqual(["new.example.com"]);
+
+			const bare = join(root, "home3");
+			mkdirSync(bare, { recursive: true });
+			const bareDir = join(root, "docker-config", "ghcr-w3");
+			run(bare, bareDir);
+			expect(existsSync(bareDir)).toBe(true);
+			expect(existsSync(join(bareDir, "config.json"))).toBe(false);
+			expect(existsSync(join(bareDir, "cli-plugins"))).toBe(false);
+		});
 	});
 });

@@ -1,3 +1,4 @@
+import { apiGithubDeploymentWatchSet } from "@dokploy/server/db/schema";
 import {
 	clampDescription,
 	createDeploymentStatus,
@@ -268,5 +269,52 @@ describe("fetchTokenOwner", () => {
 			userId: "123",
 			scopes: "read:packages,repo_deployment",
 		});
+	});
+});
+
+describe("owner and repository names that would walk out of /repos", () => {
+	it.each([".", ".."])("%s is refused by the schema", (name) => {
+		const base = {
+			serviceType: "application" as const,
+			serviceId: "a",
+			connectionId: "c",
+			owner: "o",
+			repo: "r",
+		};
+		expect(apiGithubDeploymentWatchSet.safeParse(base).success).toBe(true);
+		expect(
+			apiGithubDeploymentWatchSet.safeParse({ ...base, owner: name }).success,
+		).toBe(false);
+		expect(
+			apiGithubDeploymentWatchSet.safeParse({ ...base, repo: name }).success,
+		).toBe(false);
+		// Dotted names that are real GitHub names stay valid.
+		expect(
+			apiGithubDeploymentWatchSet.safeParse({ ...base, repo: "a.b" }).success,
+		).toBe(true);
+	});
+
+	it("never reaches GitHub, even if a row already holds one", async () => {
+		const { fetch, calls } = scriptedFetch([{ status: 200, json: [] }]);
+		expect(
+			await listDeployments(
+				{ fetch, now: () => NOW },
+				{ ...args, owner: "..", repo: "x" },
+			),
+		).toEqual({ kind: "not-found" });
+		expect(
+			await createDeploymentStatus(
+				{ fetch, now: () => NOW },
+				{
+					token: "gho_secret",
+					owner: "o",
+					repo: ".",
+					deploymentId: 1,
+					state: "failure",
+					description: "x",
+				},
+			),
+		).toEqual({ ok: false, status: 404 });
+		expect(calls).toHaveLength(0);
 	});
 });

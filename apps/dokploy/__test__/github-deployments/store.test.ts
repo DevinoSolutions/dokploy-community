@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
 	selectQueue: [] as unknown[][],
 	selectCalls: 0,
 	upsertSet: null as Record<string, unknown> | null,
+	/** What `update ... returning` answers (the rows a compare-and-set touched). */
+	updateReturns: [{ watchId: "w1" }] as unknown[],
 	updates: [] as Array<{ values: Record<string, unknown>; cond: unknown }>,
 }));
 
@@ -30,8 +32,11 @@ vi.mock("@dokploy/server/db", () => ({
 		}),
 		update: () => ({
 			set: (values: Record<string, unknown>) => ({
-				where: async (cond: unknown) => {
+				where: (cond: unknown) => {
 					mocks.updates.push({ values, cond });
+					return Object.assign(Promise.resolve(), {
+						returning: async () => mocks.updateReturns,
+					});
 				},
 			}),
 		}),
@@ -84,6 +89,7 @@ beforeEach(() => {
 	mocks.selectCalls = 0;
 	mocks.upsertSet = null;
 	mocks.updates = [];
+	mocks.updateReturns = [{ watchId: "w1" }];
 });
 
 describe("the cursor of a watch", () => {
@@ -152,6 +158,43 @@ describe("the cursor of a watch", () => {
 			etag: 'W/"n"',
 		});
 		expect(mocks.updates[1]?.values).toEqual({ lastSeenDeploymentId: 130 });
+	});
+
+	it("ifCursor makes the whole patch one compare-and-set on the cursor the poll read", async () => {
+		const written = await patchGithubWatch(
+			"w1",
+			{ lastSeenDeploymentId: 130, etag: 'W/"n"', lastError: null },
+			{ ifCursor: 120 },
+		);
+		expect(written).toBe(true);
+		expect(mocks.updates).toHaveLength(1);
+		expect(mocks.updates[0]?.values).toEqual({
+			lastSeenDeploymentId: 130,
+			etag: 'W/"n"',
+			lastError: null,
+		});
+		const query = dialect.sqlToQuery(mocks.updates[0]?.cond as never);
+		expect(query.sql).toMatch(/"lastSeenDeploymentId" = \$/);
+		expect(query.params).toEqual(expect.arrayContaining(["w1", 120, 130]));
+	});
+
+	it("ifCursor null means 'not baselined yet': a watch that was reset to null accepts it, one that moved does not", async () => {
+		await patchGithubWatch(
+			"w1",
+			{ lastSeenDeploymentId: 5 },
+			{ ifCursor: null },
+		);
+		const query = dialect.sqlToQuery(mocks.updates[0]?.cond as never);
+		expect(query.sql).toMatch(/"lastSeenDeploymentId" is null/);
+		// The stale tick holds ifCursor 120 but the row was reset to null: no row matches.
+		mocks.updateReturns = [];
+		expect(
+			await patchGithubWatch(
+				"w1",
+				{ lastSeenDeploymentId: 130, etag: 'W/"old"' },
+				{ ifCursor: 120 },
+			),
+		).toBe(false);
 	});
 
 	it("a patch without a cursor does not touch it", async () => {

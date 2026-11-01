@@ -138,7 +138,11 @@ Changing the repository, environment or account, or turning a disabled watch
 back on, resets the cursor (`lastSeen`, `etag`, in flight): the next poll
 baselines at the then-newest deployment, so what piled up in the meantime never
 runs. `lastSeen` only ever moves forward (every write is `WHERE lastSeen IS NULL
-OR lastSeen < id`); only that reset sets it back.
+OR lastSeen < id`); only that reset sets it back. The poll's own writes are also
+compare-and-set on the cursor the tick started from (`ifCursor`): a tick that read
+the watch before it was disabled and enabled again cannot write its stale cursor,
+ETag or progress over the reset, and stops its pass. Owner and repository names
+may not be `.` or `..` (they would walk out of `/repos/` in the API URL).
 
 The column `postLogUrl` is part of migration 0226 (the PR is unmerged, so the
 migration is edited in place; an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` makes
@@ -248,9 +252,18 @@ It is the normal Dokploy deploy, not a special path.
   `docker login ghcr.io --password-stdin` into **a Docker config directory of the
   watch's own**, `<base>/docker-config/ghcr-<watchId>`, and only that service's
   `docker --config <dir> pull` / the `DOCKER_CONFIG=<dir>` of that deploy's docker
-  commands (compose, and the rolling replace's pull and up) read it. The host's
-  default Docker config is never written, so no other organization or service on
-  that host can reuse the token, and nothing outlives the watch. The directory is
+  commands (compose, and the rolling replace's pull and up) read it. Because
+  that directory replaces the default config for the deploy, it is **seeded from
+  `$HOME/.docker` before each login**: `config.json` is copied under `umask 077`
+  and `cli-plugins` is linked, so the build-server registry login, Docker Hub and
+  other private-registry logins and `docker compose` itself keep working, and the
+  ghcr.io login is then added to the copy. The default config is only read, never
+  written, so no other organization or service on that host can reuse the token,
+  and nothing outlives the watch. A credential helper cannot be isolated (with one,
+  `docker login` would give the ghcr token to the host's shared store), so
+  `credsStore` / `credHelpers` are renamed to inert keys in the copy: logins a host
+  keeps in a helper are not visible to a watched deploy. Hosts set up by Dokploy
+  have none. The directory is
   deleted when the connection is removed, the watch is removed or turned off, or
   its service is deleted (on this host and on every server of the organization,
   best effort). The token is not stored on the service and never put in argv or a
@@ -366,7 +379,8 @@ connection.
 | --------- | ------ |
 | Dokploy offline when the deployment is created | picked up when it is back, if it is still among the newest 150 of that environment (5 pages of 30); the workflow's wait times out meanwhile |
 | several deployments waiting | only the newest valid one for the service is deployed; the older ones get `inactive`, so no workflow hangs |
-| more than 150 deployments since the last poll | the oldest beyond 150 are not seen and not answered |
+| more than 150 deployments since the last poll, or a deployment with a lower id that becomes visible only after the cursor passed it | never seen, so never answered: its workflow waits until its own timeout. Known residual of the page cap and of an id-ordered cursor |
+| a manual Deploy while a GitHub-started job still waits | the queue folds it into that job and the job takes the manual title; the end is then found as the first deployment of the service after the claim (or the service's waiting job), so GitHub still gets the result |
 | GitHub keeps refusing a status | backs off, gives up after 5 attempts, clears the deployment and records it in `lastError` |
 | Dokploy restarts mid-deploy | the queue journal resumes the job; `inflight` survives, so the end is still reported |
 | GitHub unreachable | the tick records an error and retries; nothing is lost |

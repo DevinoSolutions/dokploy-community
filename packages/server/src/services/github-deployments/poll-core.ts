@@ -82,8 +82,16 @@ export interface PollDeps {
 	/** Epoch ms until which this key (connection or watch) must not be called. */
 	blockedUntil: (key: string) => number | undefined;
 	block: (key: string, until: number) => void;
-	/** `lastSeenDeploymentId` only ever moves forward (see patchGithubWatch). */
-	patchWatch: (watchId: string, patch: WatchPatch) => Promise<void>;
+	/**
+	 * `lastSeenDeploymentId` only ever moves forward. With `ifCursor` the patch is
+	 * a compare-and-set on the cursor the poll started from (see patchGithubWatch);
+	 * it resolves to false when the cursor had changed and nothing was written.
+	 */
+	patchWatch: (
+		watchId: string,
+		patch: WatchPatch,
+		options?: { ifCursor?: number | null },
+	) => Promise<unknown>;
 	/**
 	 * Atomically: advance lastSeen to `deployment.id`, record it as in flight,
 	 * write the image on the service and enqueue the Dokploy deploy. Throws when
@@ -366,10 +374,11 @@ const pollWatchInner = async (
 	});
 	switch (listed.kind) {
 		case "not-modified":
-			await deps.patchWatch(watch.watchId, {
-				lastCheckedAt: new Date(now),
-				lastError: null,
-			});
+			await deps.patchWatch(
+				watch.watchId,
+				{ lastCheckedAt: new Date(now), lastError: null },
+				{ ifCursor: watch.lastSeenDeploymentId },
+			);
 			return;
 		case "rate-limited":
 			deps.block(connectionKey(watch.connectionId), listed.retryAt);
@@ -402,12 +411,16 @@ const pollWatchInner = async (
 
 	// 3. First poll: remember where the history ends. Old deployments never run.
 	if (watch.lastSeenDeploymentId === null) {
-		await deps.patchWatch(watch.watchId, {
-			lastSeenDeploymentId: maxDeploymentId(listed.deployments),
-			etag: listed.etag,
-			lastCheckedAt: new Date(now),
-			lastError: null,
-		});
+		await deps.patchWatch(
+			watch.watchId,
+			{
+				lastSeenDeploymentId: maxDeploymentId(listed.deployments),
+				etag: listed.etag,
+				lastCheckedAt: new Date(now),
+				lastError: null,
+			},
+			{ ifCursor: null },
+		);
 		return;
 	}
 
@@ -432,17 +445,26 @@ const pollWatchInner = async (
 	let problem: string | null = null;
 	/** Where the stored cursor stands in this pass (startDeploy checks it against the locked row). */
 	let cursor = watch.lastSeenDeploymentId;
-	const advance = async (deploymentId: number) => {
-		await deps.patchWatch(watch.watchId, {
-			lastSeenDeploymentId: deploymentId,
-		});
+	/**
+	 * Compare-and-set on the cursor this pass started from: false means the
+	 * watch was reset (disabled and enabled again, or repointed) since the poll
+	 * read it, and this pass must write nothing more.
+	 */
+	const advance = async (deploymentId: number): Promise<boolean> => {
+		const written = await deps.patchWatch(
+			watch.watchId,
+			{ lastSeenDeploymentId: deploymentId },
+			{ ifCursor: cursor },
+		);
+		if (written === false) return false;
 		cursor = Math.max(cursor ?? 0, deploymentId);
+		return true;
 	};
 
 	for (const deployment of fresh) {
 		const parsed = parsedById.get(deployment.id);
 		if (!parsed || parsed.kind === "ignore") {
-			await advance(deployment.id);
+			if (!(await advance(deployment.id))) return;
 			continue;
 		}
 		if (parsed.kind === "invalid") {
@@ -456,7 +478,7 @@ const pollWatchInner = async (
 			);
 			if (!answered.settled) return;
 			problem = `Deployment #${deployment.id}: ${short(parsed.reason, 200)}`;
-			await advance(deployment.id);
+			if (!(await advance(deployment.id))) return;
 			continue;
 		}
 		if (deployment.id !== targetId) {
@@ -469,7 +491,7 @@ const pollWatchInner = async (
 				STATUS_TEXT.superseded,
 			);
 			if (!answered.settled) return;
-			await advance(deployment.id);
+			if (!(await advance(deployment.id))) return;
 			continue;
 		}
 
@@ -496,7 +518,7 @@ const pollWatchInner = async (
 			);
 			if (!answered.settled) return;
 			problem = `Deployment #${deployment.id} could not be queued: ${describeError(error, 120)}`;
-			await advance(deployment.id);
+			if (!(await advance(deployment.id))) return;
 			continue;
 		}
 		startAttempts.delete(attemptKey);
@@ -512,7 +534,7 @@ const pollWatchInner = async (
 			);
 			if (!answered.settled) return;
 			problem = `Deployment #${deployment.id} was rejected: ${short(outcome.reason, 200)}`;
-			await advance(deployment.id);
+			if (!(await advance(deployment.id))) return;
 			continue;
 		}
 		// Started: lastSeen and in-flight were saved with the enqueue. Best effort from here.
@@ -534,11 +556,11 @@ const pollWatchInner = async (
 	}
 
 	// Everything new was answered or skipped: this response is fully handled.
-	await deps.patchWatch(watch.watchId, {
-		etag: listed.etag,
-		lastCheckedAt: new Date(now),
-		lastError: problem,
-	});
+	await deps.patchWatch(
+		watch.watchId,
+		{ etag: listed.etag, lastCheckedAt: new Date(now), lastError: problem },
+		{ ifCursor: cursor },
+	);
 };
 
 /** Test hook: forget attempt counters. */

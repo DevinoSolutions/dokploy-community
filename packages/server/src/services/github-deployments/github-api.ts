@@ -83,6 +83,9 @@ type PageResult =
 	| { kind: "ok"; deployments: GithubDeployment[]; etag: string | null }
 	| Exclude<ListResult, { kind: "ok" }>;
 
+/** "." and ".." would walk out of /repos/{owner}/{repo}; they are never a GitHub name. */
+const isDotSegment = (name: string) => /^\.{1,2}$/.test(name);
+
 const fetchDeploymentsPage = async (
 	deps: { fetch: FetchLike; now: () => number },
 	args: {
@@ -94,6 +97,9 @@ const fetchDeploymentsPage = async (
 		etag?: string | null;
 	},
 ): Promise<PageResult> => {
+	if (isDotSegment(args.owner) || isDotSegment(args.repo)) {
+		return { kind: "not-found" };
+	}
 	const url =
 		`${GITHUB_API}/repos/${encodeURIComponent(args.owner)}/${encodeURIComponent(args.repo)}` +
 		`/deployments?environment=${encodeURIComponent(args.environment)}` +
@@ -211,6 +217,9 @@ export const createDeploymentStatus = async (
 		logUrl?: string;
 	},
 ): Promise<StatusResult> => {
+	if (isDotSegment(args.owner) || isDotSegment(args.repo)) {
+		return { ok: false, status: 404 };
+	}
 	const url = `${GITHUB_API}/repos/${encodeURIComponent(args.owner)}/${encodeURIComponent(args.repo)}/deployments/${args.deploymentId}/statuses`;
 	let response: Awaited<ReturnType<FetchLike>>;
 	try {

@@ -272,9 +272,17 @@ export const deleteGithubWatch = async (
 };
 
 /**
- * Update a watch. `lastSeenDeploymentId` only ever moves forward (a late or
- * repeated write from a slow tick cannot rewind the cursor and replay a
- * deployment); the cursor is reset only by `upsertGithubWatch`.
+ * Update a watch.
+ *
+ * `lastSeenDeploymentId` only ever moves forward (a late or repeated write from
+ * a slow tick cannot rewind the cursor and replay a deployment); the cursor is
+ * reset only by `upsertGithubWatch`.
+ *
+ * `ifCursor` makes the whole patch a compare-and-set: it is applied only while
+ * the stored cursor still equals the cursor the poll started from (`null` = not
+ * baselined yet). A tick that read the watch before it was disabled and enabled
+ * again (which resets the cursor to null) therefore cannot write its stale
+ * cursor, ETag or progress over the reset. Returns whether anything was written.
  */
 export const patchGithubWatch = async (
 	watchId: string,
@@ -282,8 +290,35 @@ export const patchGithubWatch = async (
 		Partial<typeof githubDeploymentWatch.$inferInsert>,
 		"lastSeenDeploymentId"
 	> & { lastSeenDeploymentId?: number },
-) => {
+	options: { ifCursor?: number | null } = {},
+): Promise<boolean> => {
 	const { lastSeenDeploymentId, ...rest } = patch;
+	const cursor = githubDeploymentWatch.lastSeenDeploymentId;
+	const forward =
+		lastSeenDeploymentId === undefined
+			? undefined
+			: or(isNull(cursor), lt(cursor, lastSeenDeploymentId));
+	if (options.ifCursor !== undefined) {
+		const set = {
+			...rest,
+			...(lastSeenDeploymentId === undefined ? {} : { lastSeenDeploymentId }),
+		};
+		if (Object.keys(set).length === 0) return true;
+		const written = await db
+			.update(githubDeploymentWatch)
+			.set(set)
+			.where(
+				and(
+					eq(githubDeploymentWatch.watchId, watchId),
+					options.ifCursor === null
+						? isNull(cursor)
+						: eq(cursor, options.ifCursor),
+					forward,
+				),
+			)
+			.returning({ watchId: githubDeploymentWatch.watchId });
+		return written.length > 0;
+	}
 	if (Object.keys(rest).length > 0) {
 		await db
 			.update(githubDeploymentWatch)
@@ -294,19 +329,9 @@ export const patchGithubWatch = async (
 		await db
 			.update(githubDeploymentWatch)
 			.set({ lastSeenDeploymentId })
-			.where(
-				and(
-					eq(githubDeploymentWatch.watchId, watchId),
-					or(
-						isNull(githubDeploymentWatch.lastSeenDeploymentId),
-						lt(
-							githubDeploymentWatch.lastSeenDeploymentId,
-							lastSeenDeploymentId,
-						),
-					),
-				),
-			);
+			.where(and(eq(githubDeploymentWatch.watchId, watchId), forward));
 	}
+	return true;
 };
 
 /**

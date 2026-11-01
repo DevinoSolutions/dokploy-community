@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
 	getDokployUrl: vi.fn(),
 	selectFields: [] as unknown[],
 	selectRows: [] as unknown[],
+	/** Answers for consecutive selects; when empty, `selectRows` answers. */
+	selectQueue: [] as unknown[][],
 	appFindFirst: vi.fn(),
 	composeFindFirst: vi.fn(),
 	listEnabledGithubWatches: vi.fn(),
@@ -73,7 +75,10 @@ vi.mock("@dokploy/server/db", () => {
 				return {
 					from: () => ({
 						where: () => ({
-							orderBy: () => ({ limit: async () => mocks.selectRows }),
+							orderBy: () => ({
+								limit: async () =>
+									mocks.selectQueue.shift() ?? mocks.selectRows,
+							}),
 						}),
 					}),
 				};
@@ -188,6 +193,7 @@ beforeEach(() => {
 	mocks.failCommitOfTx = 0;
 	mocks.selectFields = [];
 	mocks.selectRows = [];
+	mocks.selectQueue = [];
 	mocks.lockedRow = lockedFor(watchRow());
 	mocks.queueAdd.mockResolvedValue({ id: "job-1" });
 	mocks.getJobs.mockResolvedValue([]);
@@ -417,6 +423,27 @@ describe("inspectInflight", () => {
 			mocks.selectRows = [{ status }];
 			expect((await deps().inspectInflight(inflight())).state).toBe(expected);
 		}
+	});
+
+	it("finds the deployment of a job a manual Deploy was folded into (its title was replaced)", async () => {
+		// No row under the GitHub title; the first row after the claim is the merged job's.
+		mocks.selectQueue = [[], [{ status: "done" }]];
+		expect((await deps().inspectInflight(inflight())).state).toBe("done");
+		mocks.selectQueue = [[], [{ status: "error" }]];
+		expect((await deps().inspectInflight(inflight())).state).toBe("error");
+	});
+
+	it("is running while a folded job still waits under another title", async () => {
+		mocks.selectRows = [];
+		mocks.getJobs.mockResolvedValue([
+			{ data: { titleLog: "Manual deployment", applicationId: "app-1" } },
+		]);
+		expect((await deps().inspectInflight(inflight())).state).toBe("running");
+		// A job of another service does not count.
+		mocks.getJobs.mockResolvedValue([
+			{ data: { titleLog: "Manual deployment", applicationId: "app-2" } },
+		]);
+		expect((await deps().inspectInflight(inflight())).state).toBe("missing");
 	});
 
 	it("is running while the job still waits in the queue, and missing when it does not", async () => {

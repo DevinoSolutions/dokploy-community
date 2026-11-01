@@ -157,11 +157,53 @@ export const ghcrAuthConfigForApplication = async (
 	};
 };
 
+/**
+ * The watch's config dir REPLACES the host's default one for that service's pull
+ * and up, so on its own it would hide every other login of the host (a build
+ * server registry, Docker Hub, a private registry) and the CLI plugins. This
+ * shell seeds the dir from `$HOME/.docker` first: `config.json` is copied under
+ * umask 077 and `cli-plugins` is linked. The default config is only READ.
+ * The ghcr.io login is then added to the copy by `docker --config <dir> login`.
+ *
+ * A credential helper cannot be isolated: with `credsStore` / `credHelpers` in
+ * the copy, `docker login` would hand the ghcr token to the host's shared
+ * store. Both keys are renamed in the copy (still valid JSON, ignored by
+ * Docker), so the ghcr login stays in the file and the logins the host keeps in
+ * a helper are not visible to this deploy. Hosts set up by Dokploy have none.
+ */
+export const getGhcrConfigSeedCommand = (configDir: string) => {
+	const dir = shEscape(configDir);
+	return [
+		"umask 077",
+		`mkdir -p ${dir}`,
+		`if [ -f "$HOME/.docker/config.json" ]; then sed -e 's/"credsStore"/"x-dokploy-ignored-credsStore"/' -e 's/"credHelpers"/"x-dokploy-ignored-credHelpers"/' "$HOME/.docker/config.json" > ${dir}/config.json.seed && mv -f ${dir}/config.json.seed ${dir}/config.json; fi`,
+		`if [ -d "$HOME/.docker/cli-plugins" ]; then ln -sfn "$HOME/.docker/cli-plugins" ${dir}/cli-plugins; fi`,
+	].join("; ");
+};
+
+const seedConfigDir = async (
+	configDir: string,
+	serverId: string | null | undefined,
+) => {
+	const command = getGhcrConfigSeedCommand(configDir);
+	try {
+		if (serverId) await execAsyncRemote(serverId, command);
+		else await execAsync(command);
+	} catch (error) {
+		// The login below still works on an empty dir; only other registries are lost.
+		console.warn(
+			"GitHub deployments: could not copy the default docker config:",
+			error instanceof Error ? error.message : "unknown error",
+		);
+	}
+};
+
 const login = async (
 	credentials: NonNullable<Awaited<ReturnType<typeof loadGhcrCredentials>>>,
 	serverId: string | null | undefined,
 ): Promise<string | undefined> => {
 	const configDir = getGhcrWatchConfigDir(credentials.watchId, !!serverId);
+	await seedConfigDir(configDir, serverId);
 	try {
 		await runDockerLogin(
 			{

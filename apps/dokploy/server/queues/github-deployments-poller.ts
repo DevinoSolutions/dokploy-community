@@ -31,7 +31,7 @@ import {
 	type WatchRow,
 } from "@dokploy/server/services/github-deployments";
 import { runBackgroundJob } from "@dokploy/server/utils/process/background";
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gte } from "drizzle-orm";
 import type { DeploymentJob } from "./queue-types";
 import { myQueue } from "./queueSetup";
 
@@ -285,20 +285,48 @@ const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
 		watch.serviceType === "application"
 			? eq(deployments.applicationId, watch.serviceId)
 			: eq(deployments.composeId, watch.serviceId);
-	const [row] = await db
-		.select({ status: deployments.status })
+	const statusOf = {
+		status: deployments.status,
+	};
+	const [titled] = await db
+		.select(statusOf)
 		.from(deployments)
 		.where(and(owner, eq(deployments.title, title)))
 		.orderBy(desc(deployments.createdAt))
 		.limit(1);
+	let row = titled;
+	if (!row && watch.inflightStartedAt) {
+		// A manual Deploy that arrived while this job was still waiting is folded
+		// into it (coalesceWaiting) and the merged job carries the manual title.
+		// It deploys the image this watch already wrote, so the first deployment
+		// row of the service created after the claim is this deployment.
+		[row] = await db
+			.select(statusOf)
+			.from(deployments)
+			.where(
+				and(
+					owner,
+					gte(deployments.createdAt, watch.inflightStartedAt.toISOString()),
+				),
+			)
+			.orderBy(asc(deployments.createdAt))
+			.limit(1);
+	}
 	// Only built for a watch that opted in to sending it to GitHub.
 	const logUrl = watch.postLogUrl
 		? await serviceLink(watch).catch(() => undefined)
 		: undefined;
 	if (!row) {
-		// Still waiting in the queue behind other deploys of the service?
+		// Still waiting in the queue? Under its own title, or merged into another
+		// waiting deploy of the service.
 		const queued = await myQueue.getJobs(["waiting", "active"]);
-		return queued.some((job) => job.data.titleLog === title)
+		const serviceKey =
+			watch.serviceType === "application" ? "applicationId" : "composeId";
+		return queued.some(
+			(job) =>
+				job.data.titleLog === title ||
+				(job.data as Record<string, unknown>)[serviceKey] === watch.serviceId,
+		)
 			? { state: "running" }
 			: { state: "missing" };
 	}
@@ -325,7 +353,8 @@ export const createGithubDeploymentsPollDeps = (): PollDeps => ({
 	block: (key, until) => {
 		blocks.set(key, until);
 	},
-	patchWatch: (watchId, patch) => patchGithubWatch(watchId, patch),
+	patchWatch: (watchId, patch, options) =>
+		patchGithubWatch(watchId, patch, options),
 	startDeploy,
 	inspectInflight,
 	log: (message) => console.warn(message),

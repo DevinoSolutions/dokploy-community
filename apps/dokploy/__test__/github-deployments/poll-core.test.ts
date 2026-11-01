@@ -62,10 +62,13 @@ const harness = (
 		startDeploy?: PollDeps["startDeploy"];
 		inflight?: InflightState;
 		token?: string | null;
+		/** The cursor was reset elsewhere: every compare-and-set patch is refused. */
+		cursorMoved?: boolean;
 	} = {},
 ) => {
 	const { fetch, calls } = scriptedFetch(fetchReplies);
 	const patches: WatchPatch[] = [];
+	const patchOptions: Array<{ ifCursor?: number | null } | undefined> = [];
 	const blocks = new Map<string, number>();
 	const revoked: string[] = [];
 	const started: number[] = [];
@@ -81,8 +84,13 @@ const harness = (
 		block: (key, until) => {
 			blocks.set(key, until);
 		},
-		patchWatch: async (_id, patch) => {
+		patchWatch: async (_id, patch, patchOption) => {
 			patches.push(patch);
+			patchOptions.push(patchOption);
+			if (options.cursorMoved && patchOption?.ifCursor !== undefined) {
+				patches.pop();
+				return false;
+			}
 		},
 		startDeploy:
 			options.startDeploy ??
@@ -93,7 +101,7 @@ const harness = (
 		inspectInflight: async () => options.inflight ?? { state: "running" },
 		log: () => {},
 	};
-	return { deps, calls, patches, blocks, revoked, started };
+	return { deps, calls, patches, patchOptions, blocks, revoked, started };
 };
 
 beforeEach(() => resetPollState());
@@ -378,6 +386,47 @@ describe("back-off and errors", () => {
 			throw new Error("boom");
 		};
 		await expect(pollWatch(baseWatch(), h.deps)).resolves.toBeUndefined();
+	});
+});
+
+describe("writes are conditional on the cursor the poll started from", () => {
+	it("a 304 and the baseline are compare-and-set on the cursor they read", async () => {
+		const notModified = harness([{ status: 304 }]);
+		await pollWatch(baseWatch({ lastSeenDeploymentId: 10 }), notModified.deps);
+		expect(notModified.patchOptions).toEqual([{ ifCursor: 10 }]);
+
+		const baseline = harness([{ json: [dep(8), dep(9)] }]);
+		await pollWatch(
+			baseWatch({ lastSeenDeploymentId: null, etag: null }),
+			baseline.deps,
+		);
+		expect(baseline.patchOptions).toEqual([{ ifCursor: null }]);
+	});
+
+	it("each advance names the cursor the previous one left, and so does the final patch", async () => {
+		const h = harness([{ json: [dep(12, "other"), dep(11, "other")] }]);
+		await pollWatch(baseWatch({ lastSeenDeploymentId: 10 }), h.deps);
+		expect(h.patchOptions).toEqual([
+			{ ifCursor: 10 },
+			{ ifCursor: 11 },
+			{ ifCursor: 12 },
+		]);
+	});
+
+	it("stops writing, deploying and answering once the cursor was reset under it", async () => {
+		// A tick read the watch, then the watch was disabled and enabled again
+		// (cursor reset to null): nothing it still holds may land.
+		const h = harness(
+			[{ json: [dep(12), dep(11)] }, { status: 201, json: {} }],
+			{
+				cursorMoved: true,
+			},
+		);
+		await pollWatch(baseWatch({ lastSeenDeploymentId: 10 }), h.deps);
+		expect(h.patches).toEqual([]);
+		expect(h.started).toEqual([]);
+		// 11 was superseded and answered before its advance was refused; nothing after.
+		expect(statuses(h.calls).map((p) => p.url)).toEqual(["11/statuses"]);
 	});
 });
 

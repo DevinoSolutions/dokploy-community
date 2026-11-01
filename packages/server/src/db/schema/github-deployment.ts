@@ -143,17 +143,21 @@ export const githubDeploymentWatchRelations = relations(
 );
 
 const GITHUB_NAME = /^[A-Za-z0-9._-]{1,100}$/;
+/** "." and ".." match GITHUB_NAME, and encodeURIComponent leaves dots alone: /repos/../x would walk out of /repos. */
+const isDotSegment = (name: string) => /^\.{1,2}$/.test(name);
 
 export const apiGithubOwnerRepo = z.object({
 	owner: z
 		.string()
 		.trim()
 		.regex(GITHUB_NAME, "Not a valid GitHub owner")
+		.refine((name) => !isDotSegment(name), "Not a valid GitHub owner")
 		.describe("GitHub user or organization that owns the repository."),
 	repo: z
 		.string()
 		.trim()
 		.regex(GITHUB_NAME, "Not a valid GitHub repository name")
+		.refine((name) => !isDotSegment(name), "Not a valid GitHub repository name")
 		.describe("GitHub repository name, without the owner."),
 });
 
