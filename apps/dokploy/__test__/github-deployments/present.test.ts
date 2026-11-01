@@ -51,6 +51,7 @@ describe("what the API and MCP may show of a connection", () => {
 			repo: "r",
 			environment: "production",
 			enabled: true,
+			postLogUrl: false,
 			lastSeenDeploymentId: 5,
 			etag: 'W/"x"',
 			inflightDeploymentId: null,
@@ -62,5 +63,6 @@ describe("what the API and MCP may show of a connection", () => {
 		expect(shown).not.toHaveProperty("etag");
 		expect(shown).not.toHaveProperty("organizationId");
 		expect(shown.lastSeenDeploymentId).toBe(5);
+		expect(shown.postLogUrl).toBe(false);
 	});
 });

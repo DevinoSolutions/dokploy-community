@@ -4,7 +4,7 @@ import {
 	githubDeploymentConnection,
 	githubDeploymentWatch,
 } from "@dokploy/server/db/schema/github-deployment";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or } from "drizzle-orm";
 
 /**
  * Database access for the GitHub Deployments pull flow.
@@ -37,6 +37,7 @@ export const presentGithubWatch = (row: GithubWatchRecord) => ({
 	repo: row.repo,
 	environment: row.environment,
 	enabled: row.enabled,
+	postLogUrl: row.postLogUrl,
 	lastSeenDeploymentId: row.lastSeenDeploymentId,
 	inflightDeploymentId: row.inflightDeploymentId,
 	lastCheckedAt: row.lastCheckedAt,
@@ -154,6 +155,43 @@ export const findGithubWatch = async (
 	return row ?? null;
 };
 
+/**
+ * The watches of an organization. A member who is not an owner or admin only
+ * sees the services in their `accessedServices` (pass `null` for no limit).
+ */
+export const listGithubWatchesForOrganization = async (
+	organizationId: string,
+	accessedServices: string[] | null,
+) => {
+	if (accessedServices !== null && accessedServices.length === 0) return [];
+	return db
+		.select()
+		.from(githubDeploymentWatch)
+		.where(
+			and(
+				eq(githubDeploymentWatch.organizationId, organizationId),
+				accessedServices === null
+					? undefined
+					: inArray(githubDeploymentWatch.serviceId, accessedServices),
+			),
+		);
+};
+
+/** Watches that use one connection (read before the connection is deleted). */
+export const listGithubWatchesForConnection = async (
+	connectionId: string,
+	organizationId: string,
+) =>
+	db
+		.select()
+		.from(githubDeploymentWatch)
+		.where(
+			and(
+				eq(githubDeploymentWatch.connectionId, connectionId),
+				eq(githubDeploymentWatch.organizationId, organizationId),
+			),
+		);
+
 export const listEnabledGithubWatches = async () =>
 	db
 		.select()
@@ -162,8 +200,9 @@ export const listEnabledGithubWatches = async () =>
 
 /**
  * Create or change the watch of a service. Pointing it at another repository,
- * environment or account forgets the cursor, so the next poll baselines again
- * and old deployments never run.
+ * environment or account, or turning a disabled watch back on, forgets the
+ * cursor, so the next poll baselines again at the then-newest deployment and
+ * the backlog that piled up meanwhile never runs.
  */
 export const upsertGithubWatch = async (input: {
 	organizationId: string;
@@ -174,6 +213,7 @@ export const upsertGithubWatch = async (input: {
 	repo: string;
 	environment: string;
 	enabled: boolean;
+	postLogUrl?: boolean;
 }) => {
 	const existing = await findGithubWatch(input.serviceType, input.serviceId);
 	const moved =
@@ -181,7 +221,8 @@ export const upsertGithubWatch = async (input: {
 		existing.owner !== input.owner ||
 		existing.repo !== input.repo ||
 		existing.environment !== input.environment ||
-		existing.connectionId !== input.connectionId;
+		existing.connectionId !== input.connectionId ||
+		(!existing.enabled && input.enabled);
 	const cursorReset = moved
 		? {
 				lastSeenDeploymentId: null,
@@ -204,6 +245,9 @@ export const upsertGithubWatch = async (input: {
 				repo: input.repo,
 				environment: input.environment,
 				enabled: input.enabled,
+				...(input.postLogUrl === undefined
+					? {}
+					: { postLogUrl: input.postLogUrl }),
 				lastError: null,
 				...cursorReset,
 			},
@@ -227,19 +271,49 @@ export const deleteGithubWatch = async (
 		);
 };
 
+/**
+ * Update a watch. `lastSeenDeploymentId` only ever moves forward (a late or
+ * repeated write from a slow tick cannot rewind the cursor and replay a
+ * deployment); the cursor is reset only by `upsertGithubWatch`.
+ */
 export const patchGithubWatch = async (
 	watchId: string,
-	patch: Partial<typeof githubDeploymentWatch.$inferInsert>,
+	patch: Omit<
+		Partial<typeof githubDeploymentWatch.$inferInsert>,
+		"lastSeenDeploymentId"
+	> & { lastSeenDeploymentId?: number },
 ) => {
-	await db
-		.update(githubDeploymentWatch)
-		.set(patch)
-		.where(eq(githubDeploymentWatch.watchId, watchId));
+	const { lastSeenDeploymentId, ...rest } = patch;
+	if (Object.keys(rest).length > 0) {
+		await db
+			.update(githubDeploymentWatch)
+			.set(rest)
+			.where(eq(githubDeploymentWatch.watchId, watchId));
+	}
+	if (lastSeenDeploymentId !== undefined) {
+		await db
+			.update(githubDeploymentWatch)
+			.set({ lastSeenDeploymentId })
+			.where(
+				and(
+					eq(githubDeploymentWatch.watchId, watchId),
+					or(
+						isNull(githubDeploymentWatch.lastSeenDeploymentId),
+						lt(
+							githubDeploymentWatch.lastSeenDeploymentId,
+							lastSeenDeploymentId,
+						),
+					),
+				),
+			);
+	}
 };
 
 /**
  * The ghcr.io login for a service that follows GitHub Deployments, or null.
  * Used at pull time only; the token is never stored on the service itself.
+ * `watchId` names the watch's own Docker config dir and `owner` is the GitHub
+ * account whose images the login may be used for.
  */
 export const loadGhcrCredentials = async (
 	serviceType: GithubWatchServiceType,
@@ -257,6 +331,8 @@ export const loadGhcrCredentials = async (
 		.where(eq(githubDeploymentConnection.connectionId, watch.connectionId));
 	if (!row || row.status !== "active" || !row.accessToken) return null;
 	return {
+		watchId: watch.watchId,
+		owner: watch.owner,
 		registryUrl: "ghcr.io",
 		username: row.githubLogin,
 		password: row.accessToken,

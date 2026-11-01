@@ -96,6 +96,12 @@ export const githubDeploymentWatch = pgTable(
 		repo: text("repo").notNull(),
 		environment: text("environment").notNull().default("production"),
 		enabled: boolean("enabled").notNull().default(true),
+		/**
+		 * Opt in to sending the Dokploy dashboard link to GitHub as the status
+		 * `log_url`. Off by default: the link is internal and every status is
+		 * readable by whoever can see the repository.
+		 */
+		postLogUrl: boolean("postLogUrl").notNull().default(false),
 		/** Highest GitHub deployment id handled. Null until the first poll baselines it. */
 		lastSeenDeploymentId: bigint("lastSeenDeploymentId", { mode: "number" }),
 		/** ETag of the last list response that was fully handled. */
@@ -187,4 +193,10 @@ export const apiGithubDeploymentWatchSet = z.object({
 	repo: apiGithubOwnerRepo.shape.repo,
 	environment: apiGithubDeploymentEnvironment.default("production"),
 	enabled: z.boolean().default(true),
+	postLogUrl: z
+		.boolean()
+		.default(false)
+		.describe(
+			"Send the Dokploy dashboard link to GitHub as the deployment status log_url. Off by default: the link is internal.",
+		),
 });

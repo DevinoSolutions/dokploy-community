@@ -97,12 +97,12 @@ import {
 } from "./deployment-cancel";
 import { recordVaultFailureReason } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
+import { loginGhcrForCompose } from "./github-deployments/registry-auth";
 import {
 	findPatchesByEntityId,
 	generateApplyPatchesCommand,
 	type Patch,
 } from "./patch";
-import { loginGhcrForCompose } from "./github-deployments/registry-auth";
 import { validUniqueServerAppName } from "./project";
 import { assertDeployReferencesInOrganization } from "./service-reference-scope";
 
@@ -468,9 +468,16 @@ export const runComposeBuild = async (
 		applyPatches?: boolean;
 		/** False for compose previews, which cannot be cancelled (see prepare). */
 		cancellable?: boolean;
+		/** Docker config dir with this deploy's own registry login (T-12166). */
+		dockerConfigDir?: string;
 	} = {},
 ) => {
-	const { freshVolumes = false, applyPatches = true, cancellable } = options;
+	const {
+		freshVolumes = false,
+		applyPatches = true,
+		cancellable,
+		dockerConfigDir,
+	} = options;
 	const serverId = entity.serverId;
 	const phases = createComposePhaseLogger(entity, deployment.logPath);
 	const checkpoint = createCancelCheckpoint(entity, deployment, {
@@ -611,6 +618,7 @@ export const runComposeBuild = async (
 		freshVolumes,
 		remoteBuild,
 		patches: appliedPatches,
+		dockerConfigDir,
 	});
 	if (!tearsDown) await checkpoint();
 	// The pull and the `up` (or, without a build server, the build) can print
@@ -913,9 +921,18 @@ export const deployCompose = async ({
 		};
 
 		// T-12166: a stack that follows GitHub Deployments pulls private ghcr.io
-		// images with the connected GitHub login.
-		await loginGhcrForCompose(compose.composeId, compose.serverId);
-		await runComposeBuild(entity, deployment, { freshVolumes });
+		// images of the watched owner with the connected GitHub login. The login
+		// lives in a docker config dir of the watch and only this deploy's docker
+		// commands use it; the host's default config is never touched.
+		const dockerConfigDir = await loginGhcrForCompose(
+			compose.composeId,
+			compose.serverId,
+			compose.composeFile,
+		);
+		await runComposeBuild(entity, deployment, {
+			freshVolumes,
+			dockerConfigDir,
+		});
 		await phases.note(
 			`Deployment finished (total ${phases.elapsed(deployStartedAt)})`,
 		);
@@ -1204,6 +1221,11 @@ export const rebuildCompose = async ({
 			freshVolumes,
 			remoteBuild,
 			patches: appliedPatches,
+			dockerConfigDir: await loginGhcrForCompose(
+				compose.composeId,
+				compose.serverId,
+				compose.composeFile,
+			),
 		});
 		if (!tearsDown) await checkpoint();
 		commandWithLog = `(${command}) >> ${deployment.logPath} 2>&1`;

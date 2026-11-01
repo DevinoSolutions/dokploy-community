@@ -73,8 +73,10 @@ echo ${quote([`Pulling ${dockerImage}`])};
 			);
 		} else {
 			// T-12166: a service that follows GitHub Deployments pulls a private
-			// ghcr.io image with the GitHub login it is connected through.
-			await loginGhcrForApplication(
+			// ghcr.io image of the watched owner with the GitHub login it is
+			// connected through. The login goes to a docker config dir of the
+			// watch, never to the host's default one, and only this pull uses it.
+			configDir = await loginGhcrForApplication(
 				application.applicationId,
 				dockerImage,
 				serverId,

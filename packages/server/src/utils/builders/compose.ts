@@ -16,9 +16,9 @@ import {
 	ENV_VARIABLE_NAME,
 	formatNameList,
 	getDroppedDotenvNotice,
+	getNeutralisedCliEnv,
 	isComposeDotenvName,
 	isStackEnvName,
-	NEUTRALISED_CLI_ENV,
 	NEUTRALISED_CLI_ENV_NAMES,
 	singleQuote,
 } from "../docker/env-file";
@@ -247,6 +247,13 @@ export interface BuildComposeCommandOptions {
 	 * command stages is rendered from them, not from a second read (T-8260).
 	 */
 	patches?: Patch[];
+	/**
+	 * A docker config dir Dokploy created for this deploy's registry login
+	 * (a service that follows GitHub Deployments, T-12166). Only the docker
+	 * commands of this deploy run with `DOCKER_CONFIG` pointing at it; the host's
+	 * default config is never used for that login.
+	 */
+	dockerConfigDir?: string;
 }
 
 /** One service whose image was built on the build server and pushed. */
@@ -477,12 +484,14 @@ const getRollingDeployPlan = async ({
 	remoteBuild,
 	invocation,
 	patches,
+	dockerConfigDir,
 }: {
 	compose: ComposeNested;
 	freshVolumes: boolean;
 	remoteBuild: boolean;
 	invocation: string;
 	patches?: Patch[];
+	dockerConfigDir?: string;
 }): Promise<RollingDeployPlan> => {
 	const off: RollingDeployPlan = { script: null, rolled: [], notices: [] };
 	const settings = resolveComposeRolling(compose.rollingReplace);
@@ -577,6 +586,7 @@ const getRollingDeployPlan = async ({
 		pullAlways: Boolean(compose.pullImagesOnDeploy),
 		healthTimeoutSeconds: plan.healthTimeoutSeconds,
 		drainSeconds: settings.drainSeconds,
+		dockerConfigDir,
 	});
 	return { script, rolled: plan.rolled, notices };
 };
@@ -585,7 +595,13 @@ export const getBuildComposeCommand = async (
 	rawCompose: ComposeNested,
 	options: BuildComposeCommandOptions = {},
 ) => {
-	const { deploymentId, freshVolumes = false, remoteBuild, patches } = options;
+	const {
+		deploymentId,
+		freshVolumes = false,
+		remoteBuild,
+		patches,
+		dockerConfigDir,
+	} = options;
 	const compose = await withResolvedVaultRefs(rawCompose);
 	const { COMPOSE_PATH } = paths(!!compose.serverId);
 	const { sourceType, appName, mounts, composeType, domains } = compose;
@@ -631,6 +647,7 @@ export const getBuildComposeCommand = async (
 			remoteOptions,
 		),
 		patches,
+		dockerConfigDir,
 	});
 
 	// The stack env, the env file and the compose are staged on the host before
@@ -767,7 +784,7 @@ Compose Type: ${composeType} ✅${rollingLogLine}`;
 		echo ${quote([`Pulling images on ${remoteBuild.servingHostLabel} (${refs.length} built on the build server)`])};${pullPhaseStart}
 		if [ "$PULL_OK" = "1" ]; then { ${pulls}; } 2>&1 || PULL_OK=0; fi${pullPhaseEnd}`;
 	}
-	const cleanEnvPrefix = getCleanEnvPrefix(stackEnvFile);
+	const cleanEnvPrefix = getCleanEnvPrefix(stackEnvFile, dockerConfigDir);
 	// The rolling replace is one shell function that takes the place of the
 	// docker line; without it this is the single docker line it always was.
 	const upCommand = rolling.script
@@ -1358,10 +1375,12 @@ export const withCleanEnvironment = (
 ) =>
 	(chained ? command.split("&&").map((segment) => segment.trim()) : [command])
 		.map(
-			(segment, index) =>
-				`${prefix} ${index === 0 ? "docker " : ""}${segment}`,
+			(segment, index) => `${prefix} ${index === 0 ? "docker " : ""}${segment}`,
 		)
 		.join(" && ");
 
-export const getCleanEnvPrefix = (stackEnvFile?: string) =>
-	`env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;
+export const getCleanEnvPrefix = (
+	stackEnvFile?: string,
+	dockerConfigDir?: string,
+) =>
+	`env -i PATH="$PATH" HOME="$HOME" ${getNeutralisedCliEnv(dockerConfigDir)} ${stackEnvFile ? getStackEnvLoader(stackEnvFile) : ""}`;

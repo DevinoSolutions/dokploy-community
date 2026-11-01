@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS "github_deployment_watch" (
 	"repo" text NOT NULL,
 	"environment" text DEFAULT 'production' NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
+	"postLogUrl" boolean DEFAULT false NOT NULL,
 	"lastSeenDeploymentId" bigint,
 	"etag" text,
 	"inflightDeploymentId" bigint,
@@ -34,6 +35,8 @@ CREATE TABLE IF NOT EXISTS "github_deployment_watch" (
 	"lastError" text,
 	"createdAt" timestamp DEFAULT now() NOT NULL
 );
+--> statement-breakpoint
+ALTER TABLE "github_deployment_watch" ADD COLUMN IF NOT EXISTS "postLogUrl" boolean DEFAULT false NOT NULL;
 --> statement-breakpoint
 DO $$ BEGIN
 	ALTER TABLE "github_deployment_connection" ADD CONSTRAINT "github_deployment_connection_org_user_unique" UNIQUE("organizationId","githubUserId");

@@ -5,7 +5,7 @@ import {
 	ROLLING_HEALTH_TIMEOUT_MAX_SECONDS,
 	ROLLING_MAX_REPLICAS,
 } from "../../db/validations/compose-rolling";
-import { NEUTRALISED_CLI_ENV } from "../docker/env-file";
+import { getNeutralisedCliEnv } from "../docker/env-file";
 import {
 	type ComposeVariableLookup,
 	interpolateComposeValue,
@@ -927,6 +927,8 @@ export interface RollingScriptOptions {
 	/** Wait after the old container reports unhealthy, for Traefik to reload its routes. */
 	routeSettleSeconds?: number;
 	pollIntervalSeconds?: number;
+	/** Docker config dir of this deploy's own registry login; see getBuildComposeCommand. */
+	dockerConfigDir?: string;
 }
 
 export interface RollingScript {
@@ -989,7 +991,9 @@ export const getRollingReplaceScript = ({
 	drainSeconds,
 	routeSettleSeconds = ROLLING_ROUTE_SETTLE_SECONDS,
 	pollIntervalSeconds = ROLLING_POLL_INTERVAL_SECONDS,
+	dockerConfigDir,
 }: RollingScriptOptions): RollingScript => {
+	const cliEnv = getNeutralisedCliEnv(dockerConfigDir);
 	const timeout = Math.trunc(healthTimeoutSeconds);
 	const drain = Math.trunc(drainSeconds);
 	const routeSettle = Math.trunc(routeSettleSeconds);
@@ -1052,8 +1056,8 @@ export const getRollingReplaceScript = ({
 		DOKPLOY_ROLL_SVC=""; DOKPLOY_ROLL_BEFORE=""; DOKPLOY_ROLL_PROMOTING=""; DOKPLOY_ROLL_REASON=""; DR_EMPTY="";
 		dokploy_roll_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Rolling replace: $*"; };
 		dokploy_roll_sleep() { sleep "$1" & wait $!; };
-		dokploy_roll_compose() { env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} docker ${invocation} "$@"; };
-		dokploy_roll_compose_shielded() { if command -v setsid >/dev/null 2>&1; then ( exec setsid env -i PATH="$PATH" HOME="$HOME" ${NEUTRALISED_CLI_ENV} docker ${invocation} "$@" ); else dokploy_roll_compose "$@"; fi; };
+		dokploy_roll_compose() { env -i PATH="$PATH" HOME="$HOME" ${cliEnv} docker ${invocation} "$@"; };
+		dokploy_roll_compose_shielded() { if command -v setsid >/dev/null 2>&1; then ( exec setsid env -i PATH="$PATH" HOME="$HOME" ${cliEnv} docker ${invocation} "$@" ); else dokploy_roll_compose "$@"; fi; };
 		dokploy_roll_ids() { docker ps -aq --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
 		dokploy_roll_running_ids() { docker ps -q --no-trunc --filter ${projectFilter} --filter "label=com.docker.compose.service=$1" --filter "label=com.docker.compose.oneoff=False"; };
 		dokploy_roll_replicas() {
