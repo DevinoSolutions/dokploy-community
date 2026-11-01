@@ -10,6 +10,7 @@ import {
 	runDockerLogin,
 } from "@dokploy/server/utils/process/dockerLogin";
 import { buildDockerPushWithRetry } from "@dokploy/server/utils/process/dockerPush";
+import { buildRemoteDocker } from "@dokploy/server/utils/providers/docker";
 import { quote } from "shell-quote";
 import { getECRAuthToken } from "../aws/ecr";
 import type { ApplicationNested } from "../builders";
@@ -34,7 +35,7 @@ export const uploadImageRemoteCommand = async (
 
 	// A docker-source application deploys the image reference it was given
 	// (getImageName returns dockerImage itself), so a copy re-pushed to the
-	// linked registry is never used. The registry only authenticates the pull.
+	// linked registry is never used. The deploy registry only authenticates the pull.
 	// With an @digest reference the registry tag keeps the digest and
 	// `docker tag` refuses it.
 	const isDockerSource = application.sourceType === "docker";
@@ -96,6 +97,11 @@ export const uploadImageRemoteCommand = async (
 		);
 		const rollbackRegistryTag = getRegistryTag(r, rollback?.image || "");
 		if (rollbackRegistryTag) {
+			if (isDockerSource) {
+				// A rebuild has no pull of its own and the local copy may be pruned.
+				// The rollback tag is <appName>:vN, so a digest reference is fine.
+				commands.push(await buildRemoteDocker(application, serverId));
+			}
 			commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
 			commands.push(
 				await getRegistryCommands(
