@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.41
+
+Upgrade notes: no new database migrations since v0.30.8-community.40, so an image-only rollback to it keeps working. Nothing to configure. This release includes everything in v0.30.8-community.40.
+
+**A docker-source application with a linked registry no longer fails its deploy with "refusing to create a tag with a digest reference"** (T-12201). An application whose source is a Docker image and that has a registry linked for pull authentication tried to tag and push that image again to the registry after pulling it. When the image was referenced by digest (for example an image built elsewhere and deployed by its sha256 digest), the tag carried the digest, Docker refused it and the deploy failed with "Error tagging image". The service always pulls the image reference it was given, so the extra copy was never used. Dokploy now skips that re-push for docker-source applications and writes one line to the deployment log saying so. The linked registry is still used to log in for the pull, and the rollback registry push is unchanged. No migration.
+
+**The build registry cleanup now keeps its deletion-job records per compose** (T-12015). When several composes shared one registry, the record of a running deletion job was kept once per registry, so a job started by one compose replaced another compose's record. A compose could then report another compose's count as its own ("33 sent ... still running" right after it planned 29), check the wrong manifests after a job ended, and update its dangling-tag memory from the wrong entries. Records are now kept per registry and per compose, and a compose only confirms and acts on its own. When another compose's job holds the lock, the deploy logs that a deletion job from another deploy on this registry is still running and starts nothing new, with no count. The job map is bounded to 500 records, oldest first, on top of the existing 6 hour expiry. The lock, the 10 minute cap and the delete guards are unchanged. No migration.
+
 ### New in v0.30.8-community.40
 
 Upgrade notes: no new database migrations since v0.30.8-community.39, so an image-only rollback to it keeps working. Nothing to configure. This release includes everything in v0.30.8-community.39.
