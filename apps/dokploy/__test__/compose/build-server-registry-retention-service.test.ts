@@ -2233,12 +2233,16 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		expect(registry.requests).toEqual([]);
 	});
 
-	it("another compose's deploy reports the outcome of a finished job", async () => {
+	it("another compose's deploy does not report the outcome of a job that is not its own", async () => {
 		const registry = setup({ rows: series(30), current: [tagOf("t029")] });
 		await run();
 		expect(registry.deleted).toHaveLength(25);
 		mocks.logLines.length = 0;
 		await run({ entity: { ...entity, composeId: "c2" } });
+		expect(lines()).not.toContain("confirmed gone");
+		// the compose that started the job still gets it confirmed
+		mocks.logLines.length = 0;
+		await run();
 		expect(lines()).toContain("25 of 25 old image manifests confirmed gone");
 	});
 });
