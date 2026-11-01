@@ -10,6 +10,7 @@ import {
 	runDockerLogin,
 } from "@dokploy/server/utils/process/dockerLogin";
 import { buildDockerPushWithRetry } from "@dokploy/server/utils/process/dockerPush";
+import { buildRemoteDocker } from "@dokploy/server/utils/providers/docker";
 import { quote } from "shell-quote";
 import { getECRAuthToken } from "../aws/ecr";
 import type { ApplicationNested } from "../builders";
@@ -91,29 +92,26 @@ export const uploadImageRemoteCommand = async (
 			deploymentId: deploymentId,
 		});
 
-		if (isDockerSource) {
-			// The image is only pulled by the service itself, so it may not be on
-			// this host and `docker tag` would fail with "No such image".
-			commands.push(
-				`echo "🔄 [Rollback Registry] docker-source application: the image is not built here, nothing to re-push"`,
-			);
-		} else {
-			const r = await findRegistryByIdWithCredentials(
-				rollbackRegistry.registryId,
-			);
-			const rollbackRegistryTag = getRegistryTag(r, rollback?.image || "");
-			if (rollbackRegistryTag) {
-				commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
-				commands.push(
-					await getRegistryCommands(
-						r,
-						imageName,
-						rollbackRegistryTag,
-						serverId,
-						true,
-					),
-				);
+		const r = await findRegistryByIdWithCredentials(
+			rollbackRegistry.registryId,
+		);
+		const rollbackRegistryTag = getRegistryTag(r, rollback?.image || "");
+		if (rollbackRegistryTag) {
+			if (isDockerSource) {
+				// A rebuild has no pull of its own and the local copy may be pruned.
+				// The rollback tag is <appName>:vN, so a digest reference is fine.
+				commands.push(await buildRemoteDocker(application, serverId));
 			}
+			commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
+			commands.push(
+				await getRegistryCommands(
+					r,
+					imageName,
+					rollbackRegistryTag,
+					serverId,
+					true,
+				),
+			);
 		}
 	}
 	try {

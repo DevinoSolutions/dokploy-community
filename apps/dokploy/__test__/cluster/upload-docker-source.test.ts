@@ -18,10 +18,14 @@ const mocks = vi.hoisted(() => ({
 	findRegistryByIdWithCredentials: vi.fn(),
 	findAllDeploymentsByApplicationId: vi.fn(),
 	createRollback: vi.fn(),
+	buildRemoteDocker: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/utils/process/dockerLogin", () => ({
 	runDockerLogin: mocks.runDockerLogin,
+}));
+vi.mock("@dokploy/server/utils/providers/docker", () => ({
+	buildRemoteDocker: mocks.buildRemoteDocker,
 }));
 vi.mock("@dokploy/server/services/registry", () => ({
 	findRegistryByIdWithCredentials: mocks.findRegistryByIdWithCredentials,
@@ -72,6 +76,7 @@ beforeEach(() => {
 		{ deploymentId: "dep-1" },
 	]);
 	mocks.createRollback.mockResolvedValue({ image: "my-app:v1" });
+	mocks.buildRemoteDocker.mockResolvedValue("echo PULL_MARKER");
 });
 
 describe("uploadImageRemoteCommand for docker-source applications", () => {
@@ -106,35 +111,49 @@ describe("uploadImageRemoteCommand for docker-source applications", () => {
 		expect(mocks.runDockerLogin).not.toHaveBeenCalled();
 	});
 
-	it("skips the rollback push, so nothing is tagged before it is pulled", async () => {
-		for (const dockerImage of [DIGEST_IMAGE, "nginx:1.27"]) {
-			vi.clearAllMocks();
-			mocks.findAllDeploymentsByApplicationId.mockResolvedValue([
-				{ deploymentId: "dep-1" },
-			]);
-			mocks.createRollback.mockResolvedValue({ image: "my-app:v1" });
+	it("pulls, then pushes the rollback image for a digest reference", async () => {
+		const script = await uploadImageRemoteCommand(
+			asApplication({
+				sourceType: "docker",
+				registry: null,
+				rollbackRegistry: { registryId: "reg-1" },
+				rollbackActive: true,
+			}),
+			null,
+		);
 
-			const script = await uploadImageRemoteCommand(
-				asApplication({
-					sourceType: "docker",
-					registry: null,
-					dockerImage,
-					rollbackRegistry: { registryId: "reg-1" },
-					rollbackActive: true,
-				}),
-				null,
-			);
+		expect(mocks.buildRemoteDocker).toHaveBeenCalledTimes(1);
+		expect(script).toContain("Enabled Rollback Registry");
+		expect(script.indexOf("PULL_MARKER")).toBeGreaterThan(-1);
+		expect(script.indexOf("PULL_MARKER")).toBeLessThan(
+			script.indexOf("docker tag"),
+		);
+		expect(script).toContain(
+			`docker tag ${quote([DIGEST_IMAGE])} ${quote(["registry.example.com/acme/my-app:v1"])}`,
+		);
+		expect(script).toContain("dokploy_push_retry");
+	});
 
-			expect(script).toContain(
-				"[Rollback Registry] docker-source application",
-			);
-			expect(script).not.toContain("Enabled Rollback Registry");
-			expect(script).not.toContain("docker tag");
-			expect(script).not.toContain("docker push");
-			expect(mocks.createRollback).toHaveBeenCalledTimes(1);
-			expect(mocks.findRegistryByIdWithCredentials).not.toHaveBeenCalled();
-			expect(mocks.runDockerLogin).not.toHaveBeenCalled();
-		}
+	it("pulls, then pushes the rollback image for a tag reference", async () => {
+		const script = await uploadImageRemoteCommand(
+			asApplication({
+				sourceType: "docker",
+				registry: null,
+				dockerImage: "nginx:1.27",
+				rollbackRegistry: { registryId: "reg-1" },
+				rollbackActive: true,
+			}),
+			null,
+		);
+
+		expect(mocks.buildRemoteDocker).toHaveBeenCalledTimes(1);
+		expect(script.indexOf("PULL_MARKER")).toBeLessThan(
+			script.indexOf("docker tag"),
+		);
+		expect(script).toContain(
+			`docker tag ${quote(["nginx:1.27"])} ${quote(["registry.example.com/acme/my-app:v1"])}`,
+		);
+		expect(script).toContain("dokploy_push_retry");
 	});
 });
 
@@ -152,5 +171,6 @@ describe("uploadImageRemoteCommand for other sources", () => {
 		);
 		expect(script).toContain("docker push");
 		expect(mocks.runDockerLogin).toHaveBeenCalledTimes(1);
+		expect(mocks.buildRemoteDocker).not.toHaveBeenCalled();
 	});
 });
