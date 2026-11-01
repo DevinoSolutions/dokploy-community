@@ -102,41 +102,39 @@ describe("uploadImageRemoteCommand for docker-source applications", () => {
 		expect(script).toContain(SKIP_LINE);
 		expect(script).not.toContain("docker tag");
 		expect(script).not.toContain("docker push");
+		expect(mocks.findRegistryByIdWithCredentials).not.toHaveBeenCalled();
 		expect(mocks.runDockerLogin).not.toHaveBeenCalled();
 	});
 
-	it("still pushes the rollback image for a digest reference", async () => {
-		const script = await uploadImageRemoteCommand(
-			asApplication({
-				sourceType: "docker",
-				registry: null,
-				rollbackRegistry: { registryId: "reg-1" },
-				rollbackActive: true,
-			}),
-			null,
-		);
+	it("skips the rollback push, so nothing is tagged before it is pulled", async () => {
+		for (const dockerImage of [DIGEST_IMAGE, "nginx:1.27"]) {
+			vi.clearAllMocks();
+			mocks.findAllDeploymentsByApplicationId.mockResolvedValue([
+				{ deploymentId: "dep-1" },
+			]);
+			mocks.createRollback.mockResolvedValue({ image: "my-app:v1" });
 
-		expect(script).toContain("Enabled Rollback Registry");
-		expect(script).toContain(" push ");
-	});
+			const script = await uploadImageRemoteCommand(
+				asApplication({
+					sourceType: "docker",
+					registry: null,
+					dockerImage,
+					rollbackRegistry: { registryId: "reg-1" },
+					rollbackActive: true,
+				}),
+				null,
+			);
 
-	it("still pushes the rollback image for a tag reference", async () => {
-		const script = await uploadImageRemoteCommand(
-			asApplication({
-				sourceType: "docker",
-				registry: null,
-				dockerImage: "nginx:1.27",
-				rollbackRegistry: { registryId: "reg-1" },
-				rollbackActive: true,
-			}),
-			null,
-		);
-
-		expect(script).toContain("Enabled Rollback Registry");
-		expect(script).toContain(
-			`docker tag ${quote(["nginx:1.27"])} ${quote(["registry.example.com/acme/my-app:v1"])}`,
-		);
-		expect(script).toContain(" push ");
+			expect(script).toContain(
+				"[Rollback Registry] docker-source application",
+			);
+			expect(script).not.toContain("Enabled Rollback Registry");
+			expect(script).not.toContain("docker tag");
+			expect(script).not.toContain("docker push");
+			expect(mocks.createRollback).toHaveBeenCalledTimes(1);
+			expect(mocks.findRegistryByIdWithCredentials).not.toHaveBeenCalled();
+			expect(mocks.runDockerLogin).not.toHaveBeenCalled();
+		}
 	});
 });
 

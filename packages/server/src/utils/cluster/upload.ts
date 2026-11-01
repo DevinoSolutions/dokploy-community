@@ -34,7 +34,7 @@ export const uploadImageRemoteCommand = async (
 
 	// A docker-source application deploys the image reference it was given
 	// (getImageName returns dockerImage itself), so a copy re-pushed to the
-	// linked registry is never used. The registry only authenticates the pull.
+	// linked registry is never used. The deploy registry only authenticates the pull.
 	// With an @digest reference the registry tag keeps the digest and
 	// `docker tag` refuses it.
 	const isDockerSource = application.sourceType === "docker";
@@ -91,21 +91,29 @@ export const uploadImageRemoteCommand = async (
 			deploymentId: deploymentId,
 		});
 
-		const r = await findRegistryByIdWithCredentials(
-			rollbackRegistry.registryId,
-		);
-		const rollbackRegistryTag = getRegistryTag(r, rollback?.image || "");
-		if (rollbackRegistryTag) {
-			commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
+		if (isDockerSource) {
+			// The image is only pulled by the service itself, so it may not be on
+			// this host and `docker tag` would fail with "No such image".
 			commands.push(
-				await getRegistryCommands(
-					r,
-					imageName,
-					rollbackRegistryTag,
-					serverId,
-					true,
-				),
+				`echo "🔄 [Rollback Registry] docker-source application: the image is not built here, nothing to re-push"`,
 			);
+		} else {
+			const r = await findRegistryByIdWithCredentials(
+				rollbackRegistry.registryId,
+			);
+			const rollbackRegistryTag = getRegistryTag(r, rollback?.image || "");
+			if (rollbackRegistryTag) {
+				commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
+				commands.push(
+					await getRegistryCommands(
+						r,
+						imageName,
+						rollbackRegistryTag,
+						serverId,
+						true,
+					),
+				);
+			}
 		}
 	}
 	try {
