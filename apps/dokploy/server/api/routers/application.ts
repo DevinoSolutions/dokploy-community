@@ -4,7 +4,6 @@ import {
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
 	assertServiceReferencesInOrganization,
-	buildOriginJobFields,
 	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	createApplication,
@@ -26,7 +25,6 @@ import {
 	// build-policy hook: narrows a thrown support error to a 400.
 	isBuildPolicyError,
 	mechanizeDockerContainer,
-	pickServiceBuildOrigin,
 	readConfig,
 	readRemoteConfig,
 	removeDeployments,
@@ -48,6 +46,10 @@ import {
 	writeConfig,
 	writeConfigRemote,
 } from "@dokploy/server";
+import {
+	buildOriginJobFields,
+	pickServiceBuildOrigin,
+} from "@dokploy/server/services/build-origin-shared";
 import { db } from "@dokploy/server/db";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
@@ -395,7 +397,7 @@ export const applicationRouter = createTRPCRouter({
 				hasGitProviderAccess,
 				unauthorizedProvider,
 				// Where the image was built, from the latest done deployment (T-12149).
-				...pickServiceBuildOrigin(application.deployments, {
+				...pickServiceBuildOrigin(application.deployments ?? [], {
 					kind: "application",
 					sourceType: application.sourceType,
 				}),

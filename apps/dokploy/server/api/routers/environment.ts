@@ -1,5 +1,4 @@
 import {
-	attachBuildOriginsToEnvironment,
 	createEnvironment,
 	deleteEnvironment,
 	duplicateEnvironment,
@@ -11,6 +10,7 @@ import {
 	updateEnvironmentById,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import { attachBuildOriginsToEnvironment } from "@dokploy/server/services/build-origin";
 import {
 	addNewEnvironment,
 	checkEnvironmentAccess,

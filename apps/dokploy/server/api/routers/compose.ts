@@ -7,7 +7,6 @@ import {
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
 	assertServiceReferencesInOrganization,
-	buildOriginJobFields,
 	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	cloneBitbucketRepository,
@@ -16,7 +15,6 @@ import {
 	cloneGithubRepository,
 	cloneGitlabRepository,
 	cloneGitRepository,
-	composeFileHasBuildSection,
 	createCommand,
 	createCompose,
 	createComposeByTemplate,
@@ -43,7 +41,6 @@ import {
 	isBuildPolicyError,
 	loadServices,
 	paths,
-	pickServiceBuildOrigin,
 	processTemplate,
 	randomizeComposeFile,
 	randomizeIsolatedDeploymentComposeFile,
@@ -58,6 +55,11 @@ import {
 	updateCompose,
 	updateDeploymentStatus,
 } from "@dokploy/server";
+import {
+	buildOriginJobFields,
+	composeFileHasBuildSection,
+	pickServiceBuildOrigin,
+} from "@dokploy/server/services/build-origin-shared";
 import { db } from "@dokploy/server/db";
 import {
 	assertComposeRollingSettings,
@@ -296,7 +298,7 @@ export const composeRouter = createTRPCRouter({
 				hasGitProviderAccess,
 				unauthorizedProvider,
 				// Where the image was built, from the latest done deployment (T-12149).
-				...pickServiceBuildOrigin(compose.deployments, {
+				...pickServiceBuildOrigin(compose.deployments ?? [], {
 					kind: "compose",
 					sourceType: compose.sourceType,
 					hasBuildSection: composeFileHasBuildSection(compose.composeFile),

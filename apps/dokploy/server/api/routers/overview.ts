@@ -1,11 +1,13 @@
 import {
-	BUILD_ORIGIN_DESCRIPTION,
-	BUILD_ORIGINS,
-	BUILD_RUN_URL_DESCRIPTION,
 	getAllBackupsForOrganization,
 	getAllDomainsForOrganization,
 	getAllServicesForOrganization,
 } from "@dokploy/server";
+import {
+	BUILD_ORIGIN_DESCRIPTION,
+	BUILD_ORIGINS,
+	BUILD_RUN_URL_DESCRIPTION,
+} from "@dokploy/server/services/build-origin-shared";
 import {
 	findMemberByUserId,
 	hasPermission,

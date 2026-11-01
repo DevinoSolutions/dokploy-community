@@ -9,6 +9,11 @@ import {
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
+import {
+	BUILD_ORIGIN_DESCRIPTION,
+	BUILD_ORIGINS,
+	BUILD_RUN_URL_DESCRIPTION,
+} from "../../services/build-origin-shared";
 import { applications } from "./application";
 import { backups } from "./backups";
 import { compose } from "./compose";
@@ -96,6 +101,16 @@ export const deployments = pgTable("deployment", {
 	pinnedCommit: text("pinnedCommit"),
 	pinnedBuildServerId: text("pinnedBuildServerId"),
 	pinnedPatchDigest: text("pinnedPatchDigest"),
+	/**
+	 * Fork columns (T-12149). Where the image this deployment shipped was built:
+	 * 'dokploy' | 'github-actions' | 'external' (see services/build-origin-shared.ts),
+	 * and the GitHub Actions run link when the caller sent a valid one. Null on
+	 * rows written before the columns existed; readers infer those. Kept here and
+	 * not on the application/compose tables, which sit at the Postgres 100-argument
+	 * cap for Drizzle eager loads.
+	 */
+	buildOrigin: text("buildOrigin"),
+	buildRunUrl: text("buildRunUrl"),
 });
 
 export const deploymentsRelations = relations(deployments, ({ one }) => ({
