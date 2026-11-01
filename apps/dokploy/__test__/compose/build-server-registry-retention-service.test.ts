@@ -1939,7 +1939,9 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		// another compose on the same registry: the lock refuses its job
 		mocks.logLines.length = 0;
 		await run({ entity: { ...entity, composeId: "c2" } });
-		expect(lines()).toContain("still running on the build server (25 old image manifests sent)");
+		expect(lines()).toContain("a deletion job is still running on the build server for this registry");
+		// the 25 sent are c1's, not c2's: c2 reports no count
+		expect(lines()).not.toContain("sent)");
 		expect(registry.job?.token).toBe(first);
 		expect(registry.deleted).toEqual([]);
 
@@ -1949,6 +1951,78 @@ describe("deletes go out as one detached, serial job (T-10203)", () => {
 		await run();
 		expect(registry.deleted).toHaveLength(25);
 		expect(lines()).toContain("25 of 25 old image manifests confirmed gone");
+	});
+
+	describe("two composes on one registry keep their own jobs (T-12015)", () => {
+		const other = { ...entity, composeId: "c2" };
+		const startBoth = async () => {
+			const registry = setup({
+				rows: series(100),
+				current: [tagOf("t099")],
+				registryOverrides: { jobDeferred: true },
+			});
+			// c1 starts a job (50 of the 95 old manifests) and it finishes
+			await run();
+			const tokenA = registry.job?.token;
+			finishJob(registry);
+			expect(registry.deleted).toHaveLength(50);
+			// c2 starts the next job (the other 45) on the same registry
+			await run({ entity: other });
+			expect(registry.job?.token).not.toBe(tokenA);
+			expect(registry.job?.running).toBe(true);
+			expect(deleteSessions()).toHaveLength(2);
+			return registry;
+		};
+
+		it("c1 is told another deploy's job holds the lock, with no count", async () => {
+			const registry = await startBoth();
+			mocks.logLines.length = 0;
+			registry.requests.length = 0;
+			await run();
+			expect(lines()).toContain(
+				"a deletion job from another deploy on this registry is still running on the build server; nothing new is started until it is done.",
+			);
+			expect(lines()).not.toContain("sent)");
+			expect(lines()).not.toMatch(/\d+ old image manifests? sent/);
+			expect(deleteSessions()).toHaveLength(2);
+			// nothing was planned or checked: only the API check went out
+			expect(registry.requests.every((r) => r.url.endsWith("/v2/"))).toBe(true);
+		});
+
+		it("c2 still reports its own count while its job holds the lock", async () => {
+			await startBoth();
+			mocks.logLines.length = 0;
+			await run({ entity: other });
+			expect(lines()).toContain("still running on the build server (45 old image manifests sent)");
+			expect(lines()).not.toContain("another deploy");
+		});
+
+		it("c2 starting its job does not overwrite c1's record: each confirms its own", async () => {
+			const registry = await startBoth();
+			finishJob(registry);
+
+			// c1: the lock is free, the result file is c2's, the registry says what is gone
+			mocks.logLines.length = 0;
+			const before = registry.requests.length;
+			await run();
+			expect(lines()).toContain("50 of 50 old image manifests confirmed gone");
+			expect(lines()).not.toContain("45 of 45");
+			// the file's answers belong to c2's job, so c1 does not quote them
+			expect(lines()).not.toContain("DELETE answers");
+			expect(lines()).not.toContain("Warning");
+			// c1 checked its own 50 digests only
+			const heads = registry.requests
+				.slice(before)
+				.filter((r) => r.method === "HEAD" && r.url.includes("/manifests/sha256:"));
+			expect(heads).toHaveLength(50);
+
+			// c2 still has its record: it confirms its own 45 and reads its answers
+			mocks.logLines.length = 0;
+			await run({ entity: other });
+			expect(lines()).toContain("45 of 45 old image manifests confirmed gone");
+			expect(lines()).toContain("DELETE answers");
+			expect(lines()).not.toContain("50 of 50");
+		});
 	});
 
 	it("reports the job's answers and what is still there", async () => {
