@@ -35,7 +35,8 @@ export const uploadImageRemoteCommand = async (
 	// A docker-source application deploys the image reference it was given
 	// (getImageName returns dockerImage itself), so a copy re-pushed to the
 	// linked registry is never used. The registry only authenticates the pull.
-	// With an @digest reference `docker tag` cannot even run.
+	// With an @digest reference the registry tag keeps the digest and
+	// `docker tag` refuses it.
 	const isDockerSource = application.sourceType === "docker";
 
 	const commands: string[] = [];
@@ -94,12 +95,7 @@ export const uploadImageRemoteCommand = async (
 			rollbackRegistry.registryId,
 		);
 		const rollbackRegistryTag = getRegistryTag(r, rollback?.image || "");
-		if (imageName.includes("@")) {
-			// `docker tag` refuses a digest reference, so there is nothing to push.
-			commands.push(
-				`echo "🔄 [Rollback Registry] skipped: the image is a digest reference (@sha256:...) and cannot be re-tagged, nothing to push"`,
-			);
-		} else if (rollbackRegistryTag) {
+		if (rollbackRegistryTag) {
 			commands.push(`echo "🔄 [Enabled Rollback Registry]"`);
 			commands.push(
 				await getRegistryCommands(

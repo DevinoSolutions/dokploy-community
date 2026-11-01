@@ -12,7 +12,6 @@ const DIGEST_IMAGE =
 	"localhost:5000/registry.devino.ca/caly-mcp@sha256:36ff0000000000000000000000000000000000000000000000000000000036ff";
 const SKIP_LINE =
 	"docker-source application: the service pulls its own image reference, nothing to re-push";
-const ROLLBACK_SKIP_LINE = "[Rollback Registry] skipped";
 
 const mocks = vi.hoisted(() => ({
 	runDockerLogin: vi.fn(),
@@ -106,7 +105,7 @@ describe("uploadImageRemoteCommand for docker-source applications", () => {
 		expect(mocks.runDockerLogin).not.toHaveBeenCalled();
 	});
 
-	it("skips the rollback push for a digest reference", async () => {
+	it("still pushes the rollback image for a digest reference", async () => {
 		const script = await uploadImageRemoteCommand(
 			asApplication({
 				sourceType: "docker",
@@ -117,10 +116,8 @@ describe("uploadImageRemoteCommand for docker-source applications", () => {
 			null,
 		);
 
-		expect(script).toContain(ROLLBACK_SKIP_LINE);
-		expect(script).not.toContain("docker tag");
-		expect(script).not.toContain("docker push");
-		expect(script).not.toContain("Enabled Rollback Registry");
+		expect(script).toContain("Enabled Rollback Registry");
+		expect(script).toContain(" push ");
 	});
 
 	it("still pushes the rollback image for a tag reference", async () => {
@@ -135,7 +132,6 @@ describe("uploadImageRemoteCommand for docker-source applications", () => {
 			null,
 		);
 
-		expect(script).not.toContain(ROLLBACK_SKIP_LINE);
 		expect(script).toContain("Enabled Rollback Registry");
 		expect(script).toContain(
 			`docker tag ${quote(["nginx:1.27"])} ${quote(["registry.example.com/acme/my-app:v1"])}`,
