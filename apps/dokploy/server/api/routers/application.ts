@@ -4,6 +4,7 @@ import {
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
 	assertServiceReferencesInOrganization,
+	buildOriginJobFields,
 	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	createApplication,
@@ -25,6 +26,7 @@ import {
 	// build-policy hook: narrows a thrown support error to a 400.
 	isBuildPolicyError,
 	mechanizeDockerContainer,
+	pickServiceBuildOrigin,
 	readConfig,
 	readRemoteConfig,
 	removeDeployments,
@@ -335,6 +337,14 @@ export const applicationRouter = createTRPCRouter({
 		}),
 
 	one: protectedProcedure
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/application.one",
+				description:
+					"Read one application. Also returns buildOrigin and buildRunUrl for the service as a whole (the latest deployment with status done, else the latest of any status), and every entry of deployments carries its own buildOrigin and buildRunUrl. buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+			},
+		})
 		.input(apiReadApplication)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.applicationId, "read");
@@ -384,6 +394,11 @@ export const applicationRouter = createTRPCRouter({
 				...shapeServiceRead(application, input.includeEnv),
 				hasGitProviderAccess,
 				unauthorizedProvider,
+				// Where the image was built, from the latest done deployment (T-12149).
+				...pickServiceBuildOrigin(application.deployments, {
+					kind: "application",
+					sourceType: application.sourceType,
+				}),
 			};
 		}),
 
@@ -571,6 +586,7 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 				serverId: application.serverId ?? undefined,
+				...buildOriginJobFields(input),
 			};
 
 			if (IS_CLOUD && application.serverId) {
@@ -1187,6 +1203,7 @@ export const applicationRouter = createTRPCRouter({
 				applicationType: "application",
 				server: !!application.serverId,
 				serverId: application.serverId ?? undefined,
+				...buildOriginJobFields(input),
 			};
 			if (IS_CLOUD && application.serverId) {
 				deploy(jobData).catch((error) => {

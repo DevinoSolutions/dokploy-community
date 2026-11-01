@@ -1569,6 +1569,13 @@
       "when": 1792895563500,
       "tag": "0224_deployment_pinned_commit",
       "breakpoints": true
+    },
+    {
+      "idx": 225,
+      "version": "7",
+      "when": 1793531134213,
+      "tag": "0225_deployment_build_origin",
+      "breakpoints": true
     }
   ]
 }

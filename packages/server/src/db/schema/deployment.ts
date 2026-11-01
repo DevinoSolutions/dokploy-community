@@ -232,6 +232,24 @@ export const apiCreateDeploymentVolumeBackup = schema
 		volumeBackupId: z.string().min(1),
 	});
 
+/**
+ * Optional inputs of the deploy/redeploy procedures that say where the image was
+ * built. Both are claims by the caller, not verified by Dokploy. The URL is
+ * validated (and dropped when it is not a GitHub Actions run link) by
+ * normalizeBuildRunUrl, so a bad link never fails a deploy.
+ */
+export const apiBuildOriginInput = {
+	buildOrigin: z
+		.enum(BUILD_ORIGINS)
+		.optional()
+		.describe(BUILD_ORIGIN_DESCRIPTION),
+	buildRunUrl: z
+		.string()
+		.max(300)
+		.optional()
+		.describe(BUILD_RUN_URL_DESCRIPTION),
+};
+
 export const apiFindAllByApplication = z.object({
 	applicationId: z.string().min(1),
 });

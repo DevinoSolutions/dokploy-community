@@ -12,6 +12,7 @@ export * from "./services/application";
 export * from "./services/backup";
 export * from "./services/backup-policy";
 export * from "./services/bitbucket";
+export * from "./services/build-origin";
 // Fork module. See services/build-policy/README.md.
 export * from "./services/build-policy";
 export * from "./services/certificate";

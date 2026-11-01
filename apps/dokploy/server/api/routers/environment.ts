@@ -1,4 +1,5 @@
 import {
+	attachBuildOriginsToEnvironment,
 	createEnvironment,
 	deleteEnvironment,
 	duplicateEnvironment,
@@ -78,6 +79,14 @@ export const environmentRouter = createTRPCRouter({
 		}),
 
 	one: protectedProcedure
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/environment.one",
+				description:
+					"Read one environment with its services. Each application and compose also carries buildOrigin and buildRunUrl, computed from its latest deployment with status done (else the latest of any status). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+			},
+		})
 		.input(apiFindOneEnvironment)
 		.query(async ({ input, ctx }) => {
 			const environment = await findEnvironmentById(input.environmentId);
@@ -113,10 +122,10 @@ export const environmentRouter = createTRPCRouter({
 					accessedServices,
 				);
 
-				return filteredEnvironment;
+				return attachBuildOriginsToEnvironment(filteredEnvironment);
 			}
 
-			return environment;
+			return attachBuildOriginsToEnvironment(environment);
 		}),
 
 	byProjectId: protectedProcedure

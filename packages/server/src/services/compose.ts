@@ -64,6 +64,11 @@ import { quote } from "shell-quote";
 import type { z } from "zod";
 import { encodeBase64 } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
+import {
+	composeFileHasBuildSection,
+	inferBuildOriginFromSource,
+	resolveDeploymentBuildOrigin,
+} from "./build-origin-shared";
 // Fork module: build-policy required checks for compose units.
 // See services/build-policy/README.md.
 import { waitForComposeRequiredChecks } from "./build-policy/compose-checks";
@@ -885,22 +890,39 @@ export const deployCompose = async ({
 	titleLog = "Manual deployment",
 	descriptionLog = "",
 	freshVolumes = false,
+	buildOrigin,
+	buildRunUrl,
 }: {
 	composeId: string;
 	titleLog: string;
 	descriptionLog: string;
 	freshVolumes?: boolean;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
 }) => {
 	const compose = await findComposeById(composeId);
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${
 		compose.environment.projectId
 	}/environment/${compose.environmentId}/services/compose/${compose.composeId}?tab=deployments`;
-	const deployment = await createDeploymentCompose({
-		composeId: composeId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeploymentCompose(
+		{
+			composeId: composeId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		resolveDeploymentBuildOrigin({
+			requestedOrigin: buildOrigin,
+			requestedRunUrl: buildRunUrl,
+			title: titleLog,
+			inferred: inferBuildOriginFromSource({
+				kind: "compose",
+				sourceType: compose.sourceType,
+				hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+			}),
+		}),
+	);
 
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
@@ -1028,19 +1050,36 @@ export const rebuildCompose = async ({
 	titleLog = "Rebuild deployment",
 	descriptionLog = "",
 	freshVolumes = false,
+	buildOrigin,
+	buildRunUrl,
 }: {
 	composeId: string;
 	titleLog: string;
 	descriptionLog: string;
 	freshVolumes?: boolean;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
 }) => {
 	const compose = await findComposeById(composeId);
 
-	const deployment = await createDeploymentCompose({
-		composeId: composeId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	const deployment = await createDeploymentCompose(
+		{
+			composeId: composeId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		resolveDeploymentBuildOrigin({
+			requestedOrigin: buildOrigin,
+			requestedRunUrl: buildRunUrl,
+			title: titleLog,
+			inferred: inferBuildOriginFromSource({
+				kind: "compose",
+				sourceType: compose.sourceType,
+				hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+			}),
+		}),
+	);
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
 	const checkpoint = createCancelCheckpoint(compose, deployment, {

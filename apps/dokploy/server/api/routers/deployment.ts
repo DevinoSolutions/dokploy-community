@@ -118,6 +118,14 @@ const deploymentCancelAuditTarget = (deployment: {
 
 export const deploymentRouter = createTRPCRouter({
 	all: protectedProcedure
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/deployment.all",
+				description:
+					"List the deployments of an application. Each deployment has buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+			},
+		})
 		.input(apiFindAllByApplication)
 		.query(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
@@ -127,6 +135,14 @@ export const deploymentRouter = createTRPCRouter({
 		}),
 
 	allByCompose: protectedProcedure
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/deployment.allByCompose",
+				description:
+					"List the deployments of a compose. Each deployment has buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+			},
+		})
 		.input(apiFindAllByCompose)
 		.query(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
@@ -404,6 +420,14 @@ export const deploymentRouter = createTRPCRouter({
 		}),
 
 	allByType: protectedProcedure
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/deployment.allByType",
+				description:
+					"List the deployments of an application, compose, server, schedule, preview deployment or backup. Application and compose deployments have buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+			},
+		})
 		.input(apiFindAllByType)
 		.query(async ({ input, ctx }) => {
 			const target = await resolveDeploymentAllByTypeAuthTarget(input);

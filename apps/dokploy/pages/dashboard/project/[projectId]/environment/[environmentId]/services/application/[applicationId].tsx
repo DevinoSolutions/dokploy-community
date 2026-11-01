@@ -44,6 +44,7 @@ import { TransferService } from "@/components/dashboard/shared/transfer-service"
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
+import { BuildOriginBadge } from "@/components/shared/build-origin-badge";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -173,6 +174,11 @@ const Service = (
 									>
 										{data?.server?.name || "Dokploy Server"}
 									</Badge>
+									<BuildOriginBadge
+										buildOrigin={data?.buildOrigin}
+										buildRunUrl={data?.buildRunUrl}
+										linkToRun
+									/>
 									{data?.server?.serverStatus === "inactive" && (
 										<TooltipProvider delayDuration={0}>
 											<Tooltip>

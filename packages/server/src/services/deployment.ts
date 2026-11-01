@@ -38,6 +38,11 @@ import {
 	updateApplicationStatus,
 } from "./application";
 import { findBackupById } from "./backup";
+import {
+	type BuildOrigin,
+	isBuildOrigin,
+	normalizeBuildRunUrl,
+} from "./build-origin-shared";
 import { type Compose, findComposeById, updateCompose } from "./compose";
 import { resolveDeploymentLogHost } from "./deployment-log-host";
 import {
@@ -178,6 +183,20 @@ export const findDeploymentByApplicationId = async (applicationId: string) => {
 	return deployment;
 };
 
+/** The two columns for an insert; a value that is not a build origin is not stored. */
+const buildOriginColumns = (
+	options?: { buildOrigin?: string | null; buildRunUrl?: string | null } | null,
+) =>
+	isBuildOrigin(options?.buildOrigin)
+		? {
+				buildOrigin: options.buildOrigin,
+				buildRunUrl:
+					options.buildOrigin === "github-actions"
+						? normalizeBuildRunUrl(options.buildRunUrl)
+						: null,
+			}
+		: {};
+
 export const createDeployment = async (
 	deployment: Omit<
 		z.infer<typeof apiCreateDeployment>,
@@ -187,10 +206,16 @@ export const createDeployment = async (
 	// has to be created on THAT host, because that is where the build script
 	// appends to it. Omitted everywhere else, so upstream behaviour is unchanged.
 	// See packages/server/src/services/build-policy/README.md
-	options?: { buildServerId?: string | null },
+	options?: {
+		buildServerId?: string | null;
+		/** Where the image was built (T-12149); see build-origin-shared.ts. Null/omitted = not recorded. */
+		buildOrigin?: BuildOrigin | null;
+		buildRunUrl?: string | null;
+	},
 ) => {
 	const application = await findApplicationById(deployment.applicationId);
 	await removeLastTenDeployments(deployment.applicationId, "application");
+	const origin = buildOriginColumns(options);
 	try {
 		const buildServerId = options?.buildServerId ?? application.buildServerId;
 		const serverId = buildServerId || application.serverId;
@@ -228,6 +253,7 @@ export const createDeployment = async (
 				description: deployment.description || "",
 				startedAt: new Date().toISOString(),
 				...(buildServerId && { buildServerId }),
+				...origin,
 			})
 			.returning();
 		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
@@ -250,6 +276,7 @@ export const createDeployment = async (
 				errorMessage: `An error have occurred: ${error instanceof Error ? error.message : error}`,
 				startedAt: new Date().toISOString(),
 				finishedAt: new Date().toISOString(),
+				...origin,
 			})
 			.returning();
 		await updateApplicationStatus(application.applicationId, "error");
@@ -360,9 +387,12 @@ export const createDeploymentCompose = async (
 		z.infer<typeof apiCreateDeploymentCompose>,
 		"deploymentId" | "createdAt" | "status" | "logPath"
 	>,
+	// Where the image was built (T-12149); see build-origin-shared.ts.
+	options?: { buildOrigin?: BuildOrigin | null; buildRunUrl?: string | null },
 ) => {
 	const compose = await findComposeById(deployment.composeId);
 	await removeLastTenDeployments(deployment.composeId, "compose");
+	const origin = buildOriginColumns(options);
 	try {
 		const { LOGS_PATH } = paths(!!compose.serverId);
 		const formattedDateTime = format(new Date(), "yyyy-MM-dd:HH:mm:ss");
@@ -395,6 +425,7 @@ echo "Initializing deployment\n" >> ${logFilePath};
 				status: "running",
 				logPath: logFilePath,
 				startedAt: new Date().toISOString(),
+				...origin,
 			})
 			.returning();
 		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
@@ -417,6 +448,7 @@ echo "Initializing deployment\n" >> ${logFilePath};
 				errorMessage: `An error have occurred: ${error instanceof Error ? error.message : error}`,
 				startedAt: new Date().toISOString(),
 				finishedAt: new Date().toISOString(),
+				...origin,
 			})
 			.returning();
 		await updateCompose(compose.composeId, {

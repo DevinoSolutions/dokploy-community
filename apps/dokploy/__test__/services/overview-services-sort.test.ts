@@ -17,6 +17,8 @@ const makeService = (overrides: Partial<OverviewService>): OverviewService => ({
 	environmentId: "environment",
 	environmentName: "Environment",
 	lastDeployAt: null,
+	buildOrigin: null,
+	buildRunUrl: null,
 	...overrides,
 });
 

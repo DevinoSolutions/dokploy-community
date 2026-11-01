@@ -27,7 +27,7 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 import { backups } from "./backups";
 import { bitbucket } from "./bitbucket";
-import { deployments } from "./deployment";
+import { apiBuildOriginInput, deployments } from "./deployment";
 import { domains } from "./domain";
 import { environments } from "./environment";
 import { gitea } from "./gitea";
@@ -368,6 +368,7 @@ export const apiDeployCompose = z.object({
 	description: z.string().optional(),
 	freshVolumes: z.boolean().optional(),
 	priority: deployPriorityInput,
+	...apiBuildOriginInput,
 });
 
 export const apiRedeployCompose = z.object({
@@ -376,6 +377,7 @@ export const apiRedeployCompose = z.object({
 	description: z.string().optional(),
 	freshVolumes: z.boolean().optional(),
 	priority: deployPriorityInput,
+	...apiBuildOriginInput,
 });
 
 export const apiDeleteCompose = z.object({

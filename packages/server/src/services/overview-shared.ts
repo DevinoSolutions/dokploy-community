@@ -1,3 +1,5 @@
+import type { BuildOrigin } from "./build-origin-shared";
+
 // No db/schema imports here — client components import this file directly, and dockerode/ssh2 (child_process) would break the browser bundle.
 
 export type OverviewServiceType =
@@ -25,6 +27,13 @@ export interface OverviewService {
 	environmentId: string;
 	environmentName: string;
 	lastDeployAt: string | null;
+	/**
+	 * Where the image was built (applications and composes only, null for databases): 'dokploy', 'github-actions'
+	 * or 'external' (a prebuilt image). The value of the latest deployment with status done, else the latest of any.
+	 */
+	buildOrigin: BuildOrigin | null;
+	/** The GitHub Actions run that built it, when buildOrigin is 'github-actions' and the run is known. */
+	buildRunUrl: string | null;
 }
 
 export type OverviewSortBy =

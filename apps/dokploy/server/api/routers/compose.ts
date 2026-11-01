@@ -7,6 +7,7 @@ import {
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
 	assertServiceReferencesInOrganization,
+	buildOriginJobFields,
 	cancelBuildServerDeploymentsForService,
 	clearOldDeployments,
 	cloneBitbucketRepository,
@@ -15,6 +16,7 @@ import {
 	cloneGithubRepository,
 	cloneGitlabRepository,
 	cloneGitRepository,
+	composeFileHasBuildSection,
 	createCommand,
 	createCompose,
 	createComposeByTemplate,
@@ -41,6 +43,7 @@ import {
 	isBuildPolicyError,
 	loadServices,
 	paths,
+	pickServiceBuildOrigin,
 	processTemplate,
 	randomizeComposeFile,
 	randomizeIsolatedDeploymentComposeFile,
@@ -234,6 +237,14 @@ export const composeRouter = createTRPCRouter({
 		}),
 
 	one: protectedProcedure
+		.meta({
+			openapi: {
+				method: "GET",
+				path: "/compose.one",
+				description:
+					"Read one compose. Also returns buildOrigin and buildRunUrl for the service as a whole (the latest deployment with status done, else the latest of any status), and every entry of deployments carries its own buildOrigin and buildRunUrl. buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+			},
+		})
 		.input(apiReadCompose)
 		.query(async ({ input, ctx }) => {
 			await checkServiceAccess(ctx, input.composeId, "read");
@@ -284,6 +295,12 @@ export const composeRouter = createTRPCRouter({
 				...shapeServiceRead(compose, input.includeEnv),
 				hasGitProviderAccess,
 				unauthorizedProvider,
+				// Where the image was built, from the latest done deployment (T-12149).
+				...pickServiceBuildOrigin(compose.deployments, {
+					kind: "compose",
+					sourceType: compose.sourceType,
+					hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+				}),
 			};
 		}),
 
@@ -940,6 +957,7 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
 				freshVolumes: input.freshVolumes,
+				...buildOriginJobFields(input),
 			};
 
 			if (IS_CLOUD && compose.serverId) {
@@ -1034,6 +1052,7 @@ export const composeRouter = createTRPCRouter({
 				server: !!compose.serverId,
 				serverId: compose.serverId ?? undefined,
 				freshVolumes: input.freshVolumes,
+				...buildOriginJobFields(input),
 			};
 			if (IS_CLOUD && compose.serverId) {
 				deploy(jobData).catch((error) => {
