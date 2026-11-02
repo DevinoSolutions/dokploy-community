@@ -122,9 +122,9 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 ## What's new in v0.30.8-community.44
 
-- Services built by GitHub Actions show a rollback line ("Rolled back to <sha> after run #N failed its checks"), a Deployments tab that says the workflow triggers deploys, a "Redeploy current version" button, and Rebuild, Clean Cache and Autodeploy under Advanced.
+- Services built by GitHub Actions show a rollback line ("Rolled back to <sha> after run #N failed its checks"), a Deployments tab that says the workflow triggers deploys, a "Redeploy current version" button, and no Rebuild, Clean Cache or Autodeploy, which Dokploy does not use for these services (the image and source settings stay under Advanced).
 - Nixpacks builds now write to a per-build temporary directory that is removed on every exit path, and each build sweeps nixpacks directories older than 24 hours, so killed builds no longer fill `/tmp` on the build server.
-- Clean Docker Builder, Clean all, Clean Docker prune and Prune build cache refuse while builds run on that server, and builder and system prunes now remove only what has been unused for 7 days instead of everything. The API `cleanDockerPrune` without `all: true` now removes only dangling images.
+- Clean Docker Builder, Clean Docker prune and Prune build cache refuse while builds run on that server, Clean all skips its image, builder and system prunes then, and builder and system prunes now remove only what has been unused for 7 days instead of everything. The API `cleanDockerPrune` without `all: true` now removes only dangling images.
 - No database migrations; an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
