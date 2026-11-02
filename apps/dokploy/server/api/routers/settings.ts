@@ -507,7 +507,7 @@ export const settingsRouter = createTRPCRouter({
 				},
 				audit,
 			);
-			await cleanupSystem(input?.serverId);
+			await cleanupSystem(input?.serverId, { all });
 			await cleanupBuilders(input?.serverId, { all });
 			return true;
 		}),
@@ -523,13 +523,18 @@ export const settingsRouter = createTRPCRouter({
 				ctx.session?.activeOrganizationId,
 			);
 			const force = input?.force ?? false;
+			const all = input?.all ?? false;
 			const guard = await checkBuilderPrune({
 				serverId: input?.serverId,
 				force,
 			});
-			// `system prune` prunes the build cache too: when builds run on the
-			// host, both are left out and the rest of the cleanup still runs.
-			const skipped = guard.allowed ? [] : (["builders", "system"] as const);
+			// `system prune` prunes the build cache too, and `image prune --all` can
+			// remove layers a running build still uses: when builds run on the host
+			// (or they cannot be counted), all three are left out and the rest of
+			// the cleanup still runs.
+			const skipped = guard.allowed
+				? []
+				: (["images", "builders", "system"] as const);
 			await auditBuilderPrune(
 				ctx,
 				{
@@ -537,8 +542,9 @@ export const settingsRouter = createTRPCRouter({
 					serverId: input?.serverId,
 					hostName: guard.hostName,
 					force,
-					all: false,
+					all,
 					activeBuilds: guard.activeBuilds,
+					checkFailed: guard.checkFailed,
 					skipped: [...skipped],
 				},
 				audit,
@@ -546,13 +552,17 @@ export const settingsRouter = createTRPCRouter({
 			// Execute cleanup in background and return immediately to avoid gateway timeouts
 			void runBackgroundJob(
 				"settings.cleanAll background",
-				() => cleanupAll(input?.serverId, { skip: [...skipped] }),
+				() => cleanupAll(input?.serverId, { skip: [...skipped], all }),
 				{ serverId: input?.serverId ?? null },
 			);
 			return {
 				status: "scheduled",
 				message: skipped.length
-					? `Docker cleanup has been initiated in the background. The builder cache and system prune were skipped: ${guard.activeBuilds} build(s) run on ${guard.hostName}. Retry when the server is idle.`
+					? `Docker cleanup has been initiated in the background. The image, builder cache and system prunes were skipped: ${
+							guard.checkFailed
+								? `could not check the builds running on ${guard.hostName}`
+								: `${guard.activeBuilds} build(s) run on ${guard.hostName}`
+						}. Retry when the server is idle.`
 					: "Docker cleanup has been initiated in the background",
 				skipped: [...skipped],
 			};

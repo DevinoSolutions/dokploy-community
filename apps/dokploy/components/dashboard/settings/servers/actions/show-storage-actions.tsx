@@ -165,7 +165,7 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 								});
 						}}
 					>
-						<span>Clean Docker Builder & System</span>
+						<span>Clean Docker Builder cache</span>
 					</DropdownMenuItem>
 					<p className="px-2 pb-1.5 text-xs text-muted-foreground">
 						Blocked while builds run on this server.
@@ -208,7 +208,7 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 						<span>Clean all</span>
 					</DropdownMenuItem>
 					<p className="px-2 pb-1.5 text-xs text-muted-foreground">
-						Skips the builder cache while builds run on this server.
+						Skips the image and builder cleanup while builds run on this server.
 					</p>
 				</DropdownMenuGroup>
 			</DropdownMenuContent>

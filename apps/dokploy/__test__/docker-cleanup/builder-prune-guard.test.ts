@@ -29,6 +29,8 @@ import {
 	builderPruneCommand,
 	cleanupAll,
 	cleanupBuilders,
+	cleanupSystem,
+	systemPruneCommand,
 } from "@dokploy/server/utils/docker/utils";
 import {
 	execAsync,
@@ -137,7 +139,15 @@ describe("the builder prune guard", () => {
 				{ serverId: "srv-1", force: false },
 				{ countActive, resolveHostName: async () => "devino-third", warn },
 			),
-		).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+		).rejects.toMatchObject({
+			code: "PRECONDITION_FAILED",
+			message: expect.stringContaining("could not check the builds running"),
+		});
+		const unforced = await checkBuilderPrune(
+			{ serverId: "srv-1", force: false },
+			{ countActive, resolveHostName: async () => "devino-third", warn },
+		);
+		expect(unforced).toMatchObject({ allowed: false, checkFailed: true });
 		const forced = await checkBuilderPrune(
 			{ serverId: "srv-1", force: true },
 			{ countActive, resolveHostName: async () => "devino-third", warn },
@@ -199,14 +209,54 @@ describe("the builder prune command", () => {
 		expect(remote).toContain("docker builder prune --all --force");
 	});
 
-	it("leaves the builder and system prunes out of cleanupAll when skipped", async () => {
-		await cleanupAll("srv-1", { skip: ["builders", "system"] });
+	it("limits the system prune by age by default, which also limits its build cache", () => {
+		const command = systemPruneCommand();
+		expect(command).toContain(
+			"docker system prune --force --filter until=168h",
+		);
+		expect(command).not.toContain("--all");
+	});
+
+	it("keeps system prune --all only when asked for", () => {
+		const command = systemPruneCommand({ all: true });
+		expect(command).toContain("docker system prune --all --force");
+		expect(command).not.toContain("until=");
+	});
+
+	it("sends the aged system prune from cleanupSystem", async () => {
+		await cleanupSystem();
+		await cleanupSystem("srv-1", { all: true });
+		const local = vi.mocked(execAsync).mock.calls[0]?.[0] as string;
+		const remote = vi.mocked(execAsyncRemote).mock.calls[0]?.[1] as string;
+		expect(local).toContain("docker system prune --force --filter until=168h");
+		expect(remote).toContain("docker system prune --all --force");
+	});
+
+	it("leaves the image, builder and system prunes out of cleanupAll when skipped", async () => {
+		await cleanupAll("srv-1", { skip: ["images", "builders", "system"] });
 		const ran = vi
 			.mocked(execAsyncRemote)
 			.mock.calls.map(
 				(call) => (call[1] as string).match(/docker [a-z]+ prune/)?.[0],
 			);
-		expect(ran).toEqual(["docker container prune", "docker image prune"]);
+		expect(ran).toEqual(["docker container prune"]);
+	});
+
+	it("runs the aged system prune inside cleanupAll, and --all only when asked", async () => {
+		await cleanupAll();
+		await cleanupAll("srv-1", { all: true });
+		const system = (command: string) => command.includes("docker system prune");
+		const local = vi
+			.mocked(execAsync)
+			.mock.calls.map((call) => call[0] as string)
+			.find(system);
+		const remote = vi
+			.mocked(execAsyncRemote)
+			.mock.calls.map((call) => call[1] as string)
+			.find(system);
+		expect(local).toContain("--force --filter until=168h");
+		expect(local).not.toContain("--all");
+		expect(remote).toContain("docker system prune --all --force");
 	});
 
 	it("runs the aged builder prune inside cleanupAll", async () => {

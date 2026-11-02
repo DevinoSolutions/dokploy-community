@@ -22,10 +22,12 @@ export const builderPruneInput = z.object({
 	all: z.boolean().default(false),
 });
 
-/** Input of `settings.cleanAll`, which never prunes the whole cache. */
+/** Input of `settings.cleanAll`. */
 export const cleanAllInput = z.object({
 	serverId: z.string().optional(),
 	force: z.boolean().default(false),
+	/** Prune the whole unused build cache instead of entries unused for a week. */
+	all: z.boolean().default(false),
 });
 
 export type BuilderPruneGuardDecision = {
@@ -69,13 +71,18 @@ const defaultResolveHostName = async (serverId: string | undefined) => {
 export type BuilderPruneGuardResult = BuilderPruneGuardDecision & {
 	activeBuilds: number;
 	hostName: string;
+	/** The build count could not be read; the server counts as busy. */
+	checkFailed: boolean;
 };
+
+export const builderPruneCheckFailedMessage = (hostName: string) =>
+	`Builder cache cleanup is blocked: could not check the builds running on ${hostName}. Retry when the server is idle.`;
 
 /**
  * Counts the builds on the host and decides. Builds on a host are the
  * `running` deployments and the queued deploy jobs of every service that deploys
  * to it or builds on it (see countActiveDeploymentsOnHost). A check that fails
- * counts as busy, never as idle.
+ * counts as busy, never as idle: the result is blocked and `checkFailed`.
  */
 export const checkBuilderPrune = async (
 	{ serverId, force }: { serverId?: string; force: boolean },
@@ -91,18 +98,26 @@ export const checkBuilderPrune = async (
 		activeBuilds = await countActive(serverId);
 	} catch (error) {
 		if (!force) {
-			throw new TRPCError({
-				code: "PRECONDITION_FAILED",
-				message: `Builder cache cleanup is blocked: could not check the builds running on ${hostName}. Retry when the server is idle.`,
-				cause: error,
-			});
+			return {
+				allowed: false,
+				forced: false,
+				activeBuilds: 0,
+				hostName,
+				checkFailed: true,
+			};
 		}
 		warn(
 			`[builder-prune] forced on ${hostName} without a build check: ${
 				error instanceof Error ? error.message : String(error)
 			}`,
 		);
-		return { allowed: true, forced: true, activeBuilds: 0, hostName };
+		return {
+			allowed: true,
+			forced: true,
+			activeBuilds: 0,
+			hostName,
+			checkFailed: true,
+		};
 	}
 
 	const decision = decideBuilderPrune({ activeBuilds, force });
@@ -111,7 +126,7 @@ export const checkBuilderPrune = async (
 			`[builder-prune] forced on ${hostName}: ${activeBuilds} build(s) active`,
 		);
 	}
-	return { ...decision, activeBuilds, hostName };
+	return { ...decision, activeBuilds, hostName, checkFailed: false };
 };
 
 /** Like `checkBuilderPrune`, but a blocked prune throws PRECONDITION_FAILED. */
@@ -123,7 +138,9 @@ export const assertBuilderPruneAllowed = async (
 	if (!result.allowed) {
 		throw new TRPCError({
 			code: "PRECONDITION_FAILED",
-			message: builderPruneBlockedMessage(result.activeBuilds, result.hostName),
+			message: result.checkFailed
+				? builderPruneCheckFailedMessage(result.hostName)
+				: builderPruneBlockedMessage(result.activeBuilds, result.hostName),
 		});
 	}
 	return result;

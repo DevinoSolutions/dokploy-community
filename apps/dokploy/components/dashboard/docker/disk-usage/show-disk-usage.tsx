@@ -321,7 +321,7 @@ export const ShowDiskUsage = ({ serverId }: Props) => {
 								<div className="flex flex-col items-end gap-1">
 									<DialogAction
 										title="Prune build cache"
-										description="This will remove build cache entries older than 7 days that are not currently in use. This action cannot be undone."
+										description="This will remove build cache entries that have been unused for 7 days. This action cannot be undone."
 										onClick={handlePrune}
 										disabled={isPruning}
 									>

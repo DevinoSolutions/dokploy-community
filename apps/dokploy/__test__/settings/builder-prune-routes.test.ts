@@ -138,6 +138,24 @@ describe("settings.cleanDockerPrune", () => {
 		const caller = createCaller(ownerCtx);
 		await caller.settings.cleanDockerPrune({ serverId: "srv-1" });
 		expect(mocks.order).toEqual(["cleanupSystem", "cleanupBuilders"]);
+		expect(cleanupSystem).toHaveBeenCalledWith("srv-1", { all: false });
+		expect(cleanupBuilders).toHaveBeenCalledWith("srv-1", { all: false });
+	});
+
+	it("passes all to both prunes and records it in the audit row", async () => {
+		const caller = createCaller(ownerCtx);
+		await caller.settings.cleanDockerPrune({ serverId: "srv-1", all: true });
+		expect(cleanupSystem).toHaveBeenCalledWith("srv-1", { all: true });
+		expect(cleanupBuilders).toHaveBeenCalledWith("srv-1", { all: true });
+		expect(mocks.audit).toHaveBeenCalledWith(
+			ownerCtx,
+			expect.objectContaining({
+				metadata: expect.objectContaining({
+					operation: "settings.cleanDockerPrune",
+					all: true,
+				}),
+			}),
+		);
 	});
 });
 
@@ -149,29 +167,58 @@ describe("settings.cleanAll", () => {
 		const result = await caller.settings.cleanAll({ serverId: "srv-1" });
 		await flush();
 		expect(result.skipped).toEqual([]);
-		expect(cleanupAll).toHaveBeenCalledWith("srv-1", { skip: [] });
+		expect(cleanupAll).toHaveBeenCalledWith("srv-1", { skip: [], all: false });
 	});
 
-	it("skips the builder and system steps with a note instead of failing", async () => {
+	it("passes all through to the cleanup and the audit row", async () => {
+		const caller = createCaller(ownerCtx);
+		await caller.settings.cleanAll({ serverId: "srv-1", all: true });
+		await flush();
+		expect(cleanupAll).toHaveBeenCalledWith("srv-1", { skip: [], all: true });
+		expect(mocks.audit).toHaveBeenCalledWith(
+			ownerCtx,
+			expect.objectContaining({
+				metadata: expect.objectContaining({ all: true }),
+			}),
+		);
+	});
+
+	it("skips the image, builder and system steps with a note instead of failing", async () => {
 		busy();
 		const caller = createCaller(ownerCtx);
 		const result = await caller.settings.cleanAll({ serverId: "srv-1" });
 		await flush();
 		expect(result.status).toBe("scheduled");
-		expect(result.skipped).toEqual(["builders", "system"]);
+		expect(result.skipped).toEqual(["images", "builders", "system"]);
 		expect(result.message).toContain("2 build(s) run on devino-third");
 		expect(cleanupAll).toHaveBeenCalledWith("srv-1", {
-			skip: ["builders", "system"],
+			skip: ["images", "builders", "system"],
+			all: false,
 		});
 		expect(mocks.audit).toHaveBeenCalledWith(
 			ownerCtx,
 			expect.objectContaining({
 				metadata: expect.objectContaining({
 					operation: "settings.cleanAll",
-					skipped: ["builders", "system"],
+					skipped: ["images", "builders", "system"],
 				}),
 			}),
 		);
+	});
+
+	it("treats a failed build check as busy: skips those steps, runs the rest", async () => {
+		vi.mocked(countActiveDeploymentsOnHost).mockRejectedValue(
+			new Error("db down"),
+		);
+		const caller = createCaller(ownerCtx);
+		const result = await caller.settings.cleanAll({ serverId: "srv-1" });
+		await flush();
+		expect(result.skipped).toEqual(["images", "builders", "system"]);
+		expect(result.message).toContain("could not check the builds running");
+		expect(cleanupAll).toHaveBeenCalledWith("srv-1", {
+			skip: ["images", "builders", "system"],
+			all: false,
+		});
 	});
 
 	it("runs everything when forced", async () => {
@@ -179,7 +226,7 @@ describe("settings.cleanAll", () => {
 		const caller = createCaller(ownerCtx);
 		await caller.settings.cleanAll({ serverId: "srv-1", force: true });
 		await flush();
-		expect(cleanupAll).toHaveBeenCalledWith("srv-1", { skip: [] });
+		expect(cleanupAll).toHaveBeenCalledWith("srv-1", { skip: [], all: false });
 	});
 });
 
