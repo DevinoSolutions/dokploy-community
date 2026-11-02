@@ -392,7 +392,70 @@ export type ServiceBuildDescription = ResolvedBuildOrigin &
 	GithubActionsRunDetails & {
 		/** When the deployment the value was read from finished (else was created); null for none. */
 		buildDeployedAt: string | null;
+		/**
+		 * True when the newest finished deployment is the action's rollback deploy: the workflow's checks failed and
+		 * the earlier image runs again. The commit and time above are then the rollback's.
+		 */
+		buildRolledBack: boolean;
+		/** When rolled back: the run the action rolled back after, from the failed deployment's row else the rollback's title. */
+		buildRollbackRunId: string | null;
+		/** When rolled back: how that run failed, `checks` (it deployed, then failed its checks) or `deploy` (the deploy itself failed). */
+		buildRollbackFailure: "checks" | "deploy" | null;
 	};
+
+export const NO_ROLLBACK_DETAILS = {
+	buildRolledBack: false,
+	buildRollbackRunId: null,
+	buildRollbackFailure: null,
+} as const;
+
+/**
+ * The run the action rolled back after. The action also rolls back when a deploy is refused or fails in Dokploy,
+ * so the failed deployment is the newest GitHub Actions row created before the rollback, whatever its status; the
+ * previous healthy run is not the one: a row that built the commit the rollback restores is skipped, and so is
+ * any row without the "GHA " marker (a manual redeploy). Without such a row (a refused deploy leaves none) only the
+ * rollback's own title can name the run, and the failure is a deploy failure. A rollback title that names no
+ * commit cannot rule the healthy run out, so it is blamed when it is the only candidate.
+ */
+const describeRollbackCause = (
+	deployments: readonly BuildOriginDeploymentRow[],
+	rollback: BuildOriginDeploymentRow,
+): Pick<
+	ServiceBuildDescription,
+	"buildRollbackRunId" | "buildRollbackFailure"
+> => {
+	const restored = parseGithubActionsTitle(rollback.title).buildCommitSha;
+	const buildsRestoredCommit = (row: BuildOriginDeploymentRow) => {
+		const sha = parseGithubActionsTitle(row.title).buildCommitSha;
+		return Boolean(
+			restored && sha && (sha.startsWith(restored) || restored.startsWith(sha)),
+		);
+	};
+	const failed = deployments
+		.filter(
+			(row) =>
+				row !== rollback &&
+				!buildsRestoredCommit(row) &&
+				isServiceDeployment(row) &&
+				!isGithubActionsRollbackTitle(row.title) &&
+				(isBuildOrigin(row.buildOrigin)
+					? row.buildOrigin === "github-actions"
+					: hasGithubActionsTitleMarker(row.title)) &&
+				createdAtMs(row) < createdAtMs(rollback),
+		)
+		.sort((a, b) => createdAtMs(b) - createdAtMs(a))[0];
+	const fromRow = failed
+		? describeGithubActionsRun({
+				title: failed.title,
+				buildRunUrl: failed.buildRunUrl,
+			}).buildRunId
+		: null;
+	return {
+		buildRollbackRunId:
+			fromRow ?? parseGithubActionsTitle(rollback.title).buildRunId,
+		buildRollbackFailure: failed?.status === "done" ? "checks" : "deploy",
+	};
+};
 
 /**
  * `pickServiceBuildOrigin` plus the run details and the deploy time of the deployment it was read from, for
@@ -408,12 +471,22 @@ export const describeServiceBuild = (
 			...resolved,
 			...NO_GITHUB_ACTIONS_RUN_DETAILS,
 			buildDeployedAt: null,
+			...NO_ROLLBACK_DETAILS,
 		};
 	}
 	const built = describeGithubActionsRun({
 		title: row.title,
 		buildRunUrl: resolved.buildRunUrl,
 	});
+	// What runs now is the action's rollback deploy (also when a service has nothing but rollbacks).
+	const rolledBack =
+		serving && isGithubActionsRollbackTitle(serving.title) ? serving : null;
+	const rollbackDetails = rolledBack
+		? {
+				buildRolledBack: true,
+				...describeRollbackCause(deployments, rolledBack),
+			}
+		: NO_ROLLBACK_DETAILS;
 	// The newest finished deployment is the action's rollback: that is what runs now, so the commit and the
 	// time are the rollback's. The run link and the repository stay those of the build row.
 	if (
@@ -428,23 +501,64 @@ export const describeServiceBuild = (
 			buildCommitSha: rollback.buildCommitSha,
 			buildEnvironment: rollback.buildEnvironment ?? built.buildEnvironment,
 			buildDeployedAt: serving.finishedAt ?? serving.createdAt ?? null,
+			...rollbackDetails,
 		};
 	}
 	return {
 		...resolved,
 		...built,
 		buildDeployedAt: row.finishedAt ?? row.createdAt ?? null,
+		...rollbackDetails,
 	};
 };
 
 /**
+ * The one plain line the "Deployed from GitHub Actions" panel shows after the action's rollback deploy. The commit
+ * part is left out when the rollback title names none, the run part says "the latest run" when the id is unknown,
+ * and the reason is "failed its checks" for a run that deployed, else "failed to deploy".
+ */
+export const describeGithubActionsRollback = (input: {
+	buildCommitSha?: string | null;
+	buildRollbackRunId?: string | null;
+	buildRollbackFailure?: "checks" | "deploy" | null;
+}): string => {
+	const sha = input.buildCommitSha?.trim().slice(0, 7);
+	const runId = input.buildRollbackRunId?.trim();
+	const reason =
+		input.buildRollbackFailure === "deploy"
+			? "failed to deploy"
+			: "failed its checks";
+	return `Rolled back${sha ? ` to ${sha}` : ""} after ${
+		runId ? `run #${runId}` : "the latest run"
+	} ${reason}. The run has the details.`;
+};
+
+/** The source types whose `branch` is the branch Dokploy deploys from. */
+const GIT_PROVIDER_SOURCE_TYPES: readonly string[] = [
+	"github",
+	"gitlab",
+	"bitbucket",
+	"gitea",
+	"git",
+];
+
+/**
  * What "push to ..." names in the hint under the deploy button: the branch the service was set up with, else
- * the repository (`owner/repo`). An environment name is never a branch, so it is not used. Null when neither is known.
+ * the repository (`owner/repo`). An environment name is never a branch, so it is not used. The branch counts only
+ * while the source is a git provider: a docker-source service can still carry the branch of an earlier git setup,
+ * and that must not win over the repository. Null when neither is known.
  */
 export const githubActionsPushTarget = (input: {
 	branch?: string | null;
+	sourceType?: string | null;
 	buildRepository?: string | null;
-}) => input.branch?.trim() || input.buildRepository?.trim() || null;
+}) => {
+	const branch =
+		input.sourceType && GIT_PROVIDER_SOURCE_TYPES.includes(input.sourceType)
+			? input.branch?.trim()
+			: null;
+	return branch || input.buildRepository?.trim() || null;
+};
 
 /** The commit page of a GitHub repository, or null when the repository or the sha is unknown. */
 export const githubCommitUrl = (
@@ -504,7 +618,10 @@ export const describeImageReference = (
 	};
 };
 
-/** The `image:` values of a compose file, in order, without duplicates. A line scan, not a YAML parse. */
+/**
+ * The `image:` values of a compose file, in order, without duplicates. A line scan, not a YAML parse. An image
+ * written with a variable (`${TAG}`, `$TAG`) is left out: the panel would show the placeholder, not what runs.
+ */
 export const extractComposeImages = (
 	composeFile: string | null | undefined,
 ): string[] => {
@@ -514,7 +631,9 @@ export const extractComposeImages = (
 		/^[ \t]+image[ \t]*:[ \t]*["']?([^\s"'#]+)/gm,
 	)) {
 		const image = match[1];
-		if (image && !images.includes(image)) images.push(image);
+		if (image && !image.includes("$") && !images.includes(image)) {
+			images.push(image);
+		}
 	}
 	return images;
 };
@@ -532,6 +651,32 @@ export const isGithubActionsDeployment = (
 		? row.buildOrigin === "github-actions"
 		: serviceBuildOrigin === "github-actions" &&
 			hasGithubActionsTitleMarker(row.title);
+
+/**
+ * The marker line an application's deploy script logs where its build starts (`getBuildStartLine` in
+ * deployment-heartbeat.ts, which names the deployment so the watchdog can tell deployments apart). It is stored
+ * with the deployment's internal id; the log dialog renders it with `renderBuildStartMarker` so the id is not shown.
+ */
+export const BUILD_START_MARKER_PATTERN =
+	/^\s*--- Dokploy: the build of \S+ starts here ---\s*$/;
+
+export const GITHUB_ACTIONS_BUILD_START_LABEL = "Dokploy: pull and start";
+export const BUILD_START_LABEL = "--- Dokploy: the build starts here ---";
+
+/**
+ * What the log dialog shows for one log line. The build start marker loses the internal deployment id: it reads
+ * "Dokploy: pull and start" for a deployment built in GitHub Actions (Dokploy only pulls and starts the image)
+ * and "--- Dokploy: the build starts here ---" for any other. Every other line is returned as it is.
+ */
+export const renderBuildStartMarker = (
+	message: string,
+	githubActions: boolean,
+): string =>
+	BUILD_START_MARKER_PATTERN.test(message)
+		? githubActions
+			? GITHUB_ACTIONS_BUILD_START_LABEL
+			: BUILD_START_LABEL
+		: message;
 
 export const BUILD_ORIGIN_LABELS: Record<
 	BuildOrigin,

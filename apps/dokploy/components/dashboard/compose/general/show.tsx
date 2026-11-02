@@ -12,7 +12,7 @@ import {
 	CardTitle,
 } from "@/components/ui/card";
 import { api } from "@/utils/api";
-import { ComposeActions, ComposeRebuildAction } from "./actions";
+import { ComposeActions } from "./actions";
 import { ShowProviderFormCompose } from "./generic/show";
 
 interface Props {
@@ -40,6 +40,9 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 					buildEnvironment={data?.buildEnvironment}
 					buildRunId={data?.buildRunId}
 					buildDeployedAt={data?.buildDeployedAt}
+					buildRolledBack={data?.buildRolledBack}
+					buildRollbackRunId={data?.buildRollbackRunId}
+					buildRollbackFailure={data?.buildRollbackFailure}
 				/>
 			)}
 			<Card className="bg-background">
@@ -62,10 +65,7 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 				</CardContent>
 			</Card>
 			{isGithubActions ? (
-				<GithubActionsAdvanced description="The compose file, where it comes from, and other source settings.">
-					<div className="flex flex-wrap items-center gap-3">
-						<ComposeRebuildAction composeId={composeId} />
-					</div>
+				<GithubActionsAdvanced description="The compose file and where it comes from. Rebuild and autodeploy are hidden because GitHub Actions builds this service.">
 					<ShowProviderFormCompose composeId={composeId} />
 				</GithubActionsAdvanced>
 			) : (

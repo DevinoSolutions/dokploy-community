@@ -112,6 +112,9 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 					buildEnvironment={data?.buildEnvironment}
 					buildRunId={data?.buildRunId}
 					buildDeployedAt={data?.buildDeployedAt}
+					buildRolledBack={data?.buildRolledBack}
+					buildRollbackRunId={data?.buildRollbackRunId}
+					buildRollbackFailure={data?.buildRollbackFailure}
 				/>
 			)}
 			<Card className="bg-background">
@@ -131,7 +134,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 								<DialogAction
 									title={
 										isGithubActions
-											? "Redeploy current image"
+											? "Redeploy current version"
 											: "Deploy Application"
 									}
 									description={
@@ -147,7 +150,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 											.then(() => {
 												toast.success(
 													isGithubActions
-														? "Redeploying the current image"
+														? "Redeploying the current version"
 														: "Application deployed successfully",
 												);
 												refetch();
@@ -170,7 +173,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 												<div className="flex items-center">
 													<Rocket className="size-4 mr-1" />
 													{isGithubActions
-														? "Redeploy current image"
+														? "Redeploy current version"
 														: "Deploy"}
 												</div>
 											</TooltipTrigger>
@@ -190,6 +193,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 									<GithubActionsRedeployHint
 										target={githubActionsPushTarget({
 											branch: data?.branch,
+											sourceType: data?.sourceType,
 											buildRepository: data?.buildRepository,
 										})}
 									/>
@@ -331,7 +335,8 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 							Open Terminal
 						</Button>
 					</DockerTerminalModal>
-					{canUpdateService && (
+					{/* GitHub Actions starts every deploy and Dokploy builds and caches nothing here (T-12502). */}
+					{canUpdateService && !isGithubActions && (
 						<div className="flex flex-row items-center gap-2 justify-between rounded-md px-4 py-2 border col-span-2 md:col-span-1">
 							<span className="text-sm font-medium">Autodeploy</span>
 							<Switch
@@ -355,7 +360,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 						</div>
 					)}
 
-					{canUpdateService && (
+					{canUpdateService && !isGithubActions && (
 						<div className="flex flex-row items-center gap-2 justify-between rounded-md px-4 py-2 border col-span-2 md:col-span-1">
 							<span className="text-sm font-medium">Clean Cache</span>
 							<Switch
@@ -381,14 +386,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 				</CardContent>
 			</Card>
 			{isGithubActions ? (
-				<GithubActionsAdvanced description="The image, where it comes from, and other source settings. Build settings are hidden because GitHub Actions builds this service.">
-					{rebuildAction && (
-						<TooltipProvider delayDuration={0}>
-							<div className="flex flex-wrap items-center gap-3">
-								{rebuildAction}
-							</div>
-						</TooltipProvider>
-					)}
+				<GithubActionsAdvanced description="The image and where it comes from. Build, cache and autodeploy settings are hidden because GitHub Actions builds this service.">
 					<ShowProviderForm applicationId={applicationId} />
 				</GithubActionsAdvanced>
 			) : (

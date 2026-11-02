@@ -6,6 +6,7 @@ import {
 } from "@dokploy/server/services/build-origin-shared";
 import { ExternalLink, Hammer, Package } from "lucide-react";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
+import { OpensInNewTab } from "@/components/shared/opens-in-new-tab";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -69,6 +70,7 @@ export const BuildOriginBadge = ({
 								onClick={(e) => e.stopPropagation()}
 							>
 								{content}
+								<OpensInNewTab />
 							</a>
 						</Badge>
 					) : (
@@ -117,6 +119,7 @@ export const GithubActionsDeploymentMark = ({
 							className="font-mono hover:underline"
 						>
 							{shortSha}
+							<OpensInNewTab />
 						</a>
 					) : (
 						<span className="font-mono">{shortSha}</span>
@@ -134,6 +137,7 @@ export const GithubActionsDeploymentMark = ({
 				>
 					{runLabel}
 					<ExternalLink className="size-3" />
+					<OpensInNewTab />
 				</a>
 			) : (
 				buildRunId && (
@@ -167,6 +171,7 @@ export const GithubActionsLogBanner = ({
 					<a href={runUrl} target="_blank" rel="noopener noreferrer">
 						Open run on GitHub
 						<ExternalLink className="size-3.5" />
+						<OpensInNewTab />
 					</a>
 				</Button>
 			) : (

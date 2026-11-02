@@ -72,11 +72,11 @@ export const ComposeActions = ({ composeId }: Props) => {
 					>
 						<DialogAction
 							title={
-								isGithubActions ? "Redeploy current image" : "Deploy Compose"
+								isGithubActions ? "Redeploy current version" : "Deploy Compose"
 							}
 							description={
 								isGithubActions
-									? "Dokploy will pull the current image again and restart this compose. Nothing is built."
+									? "Dokploy will pull the current images again and restart this compose. Nothing is built."
 									: "Are you sure you want to deploy this compose?"
 							}
 							type="default"
@@ -87,7 +87,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 									.then(() => {
 										toast.success(
 											isGithubActions
-												? "Redeploying the current image"
+												? "Redeploying the current version"
 												: "Compose deployed successfully",
 										);
 										refetch();
@@ -109,14 +109,14 @@ export const ComposeActions = ({ composeId }: Props) => {
 									<TooltipTrigger asChild>
 										<div className="flex items-center">
 											<Rocket className="size-4 mr-1" />
-											{isGithubActions ? "Redeploy current image" : "Deploy"}
+											{isGithubActions ? "Redeploy current version" : "Deploy"}
 										</div>
 									</TooltipTrigger>
 									<TooltipPrimitive.Portal>
 										<TooltipContent sideOffset={5} className="z-60">
 											<p>
 												{isGithubActions
-													? "Pulls the current image again and restarts the compose"
+													? "Pulls the current images again and restarts the compose"
 													: "Downloads the source code and performs a complete build"}
 											</p>
 										</TooltipContent>
@@ -128,6 +128,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 							<GithubActionsRedeployHint
 								target={githubActionsPushTarget({
 									branch: data?.branch,
+									sourceType: data?.sourceType,
 									buildRepository: data?.buildRepository,
 								})}
 							/>
@@ -313,7 +314,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 					Open Terminal
 				</Button>
 			</DockerTerminalModal>
-			{canUpdateService && (
+			{canUpdateService && !isGithubActions && (
 				<div className="flex flex-row items-center gap-2 rounded-md px-4 py-2 border">
 					<span className="text-sm font-medium">Autodeploy</span>
 					<Switch
@@ -340,7 +341,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 	);
 };
 
-/** The Rebuild action of a compose, also shown under "Advanced" for a service that GitHub Actions builds. */
+/** The Rebuild action of a compose. Dokploy builds nothing for a service that GitHub Actions builds, so it is not shown there. */
 export const ComposeRebuildAction = ({ composeId }: Props) => {
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const canDeploy = permissions?.deployment.create ?? false;

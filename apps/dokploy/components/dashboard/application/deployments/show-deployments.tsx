@@ -151,6 +151,13 @@ export const ShowDeployments = ({
 			: type === "compose"
 				? composeService?.buildOrigin
 				: null;
+	// Built in GitHub Actions: the workflow starts every deployment and drives the rollbacks, and Dokploy builds
+	// nothing, so the webhook URL, Kill Build and the rollback settings have no use here (T-12502).
+	const isGithubActionsService = serviceBuildOrigin === "github-actions";
+	// For a service, wait for its origin before showing the webhook box, so it does not flash up and vanish.
+	const serviceOriginKnown =
+		(type !== "application" && type !== "compose") ||
+		serviceBuildOrigin !== undefined;
 	const snapvisorProjectName =
 		type === "application"
 			? application?.snapvisorProjectName
@@ -264,13 +271,12 @@ export const ShowDeployments = ({
 					{(type === "application" || type === "compose") && (
 						<ClearDeployments id={id} type={type} />
 					)}
-					{(type === "application" || type === "compose") && (
-						<KillBuild id={id} type={type} />
-					)}
+					{(type === "application" || type === "compose") &&
+						!isGithubActionsService && <KillBuild id={id} type={type} />}
 					{(type === "application" || type === "compose") && (
 						<CancelQueues id={id} type={type} />
 					)}
-					{type === "application" && (
+					{type === "application" && !isGithubActionsService && (
 						<ShowRollbackSettings applicationId={id}>
 							<Button variant="outline">
 								Configure Rollbacks <Settings className="size-4" />
@@ -328,7 +334,12 @@ export const ShowDeployments = ({
 						</div>
 					</AlertBlock>
 				)}
-				{refreshToken && (
+				{isGithubActionsService && (
+					<p className="text-sm text-muted-foreground">
+						Deployments are triggered by your GitHub Actions workflow.
+					</p>
+				)}
+				{refreshToken && serviceOriginKnown && !isGithubActionsService && (
 					<div className="flex flex-col gap-2 text-sm">
 						<span>
 							To redeploy automatically, add this webhook URL to your Git

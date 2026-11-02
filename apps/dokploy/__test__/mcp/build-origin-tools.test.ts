@@ -82,4 +82,15 @@ describe("MCP tools for the build origin", () => {
 			expect(description).toContain(field);
 		}
 	});
+
+	// T-12502: the service-level reads also say whether the action's rollback deploy is what runs now.
+	it.each(["application-one", "compose-one"])(
+		"%s lists buildRolledBack",
+		(name) => {
+			expect(byName.get(name)?.description ?? "").toContain("buildRolledBack");
+			expect(byName.get(name)?.description ?? "").toContain(
+				"buildRollbackRunId",
+			);
+		},
+	);
 });

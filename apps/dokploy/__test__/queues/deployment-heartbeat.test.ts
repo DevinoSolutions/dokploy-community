@@ -19,6 +19,10 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 }));
 
 import {
+	BUILD_START_MARKER_PATTERN,
+	renderBuildStartMarker,
+} from "@dokploy/server/services/build-origin-shared";
+import {
 	appendDeployLogLine,
 	DEPLOY_HEARTBEAT_INTERVAL_MS,
 	DEPLOY_HEARTBEAT_SETTLE_MS,
@@ -395,6 +399,20 @@ describe("deployLogHasLine", () => {
 	it("names the deployment, so another deployment's line is a different line", () => {
 		expect(getBuildStartLine("dep-1")).toContain("dep-1");
 		expect(getBuildStartLine("dep-1")).not.toBe(getBuildStartLine("dep-2"));
+	});
+
+	// T-12502: the log dialog shows the stored line without the internal id, so it has to recognise it.
+	it("is a line the log dialog recognises and renders without the deployment id", () => {
+		for (const id of [
+			"dep-1",
+			"k3Xz_9-AbCdEfGhIjKlM",
+			"2f6c1e0a-77aa-4d1b-9c55-0a1b2c3d4e5f",
+		]) {
+			const line = getBuildStartLine(id);
+			expect(BUILD_START_MARKER_PATTERN.test(line)).toBe(true);
+			expect(renderBuildStartMarker(line, false)).not.toContain(id);
+			expect(renderBuildStartMarker(line, true)).not.toContain(id);
+		}
 	});
 });
 

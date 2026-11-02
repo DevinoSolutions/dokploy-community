@@ -1,15 +1,17 @@
 import {
+	describeGithubActionsRollback,
 	describeImageReference,
 	githubCommitUrl,
 	githubRepositoryUrl,
 	normalizeBuildRunUrl,
 } from "@dokploy/server/services/build-origin-shared";
 import copy from "copy-to-clipboard";
-import { ChevronDown, Copy, ExternalLink } from "lucide-react";
+import { ChevronDown, Copy, ExternalLink, Undo2 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
 import { DateTooltip } from "@/components/shared/date-tooltip";
+import { OpensInNewTab } from "@/components/shared/opens-in-new-tab";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -33,6 +35,10 @@ export interface GithubActionsServiceInfo {
 	buildEnvironment?: string | null;
 	buildRunId?: string | null;
 	buildDeployedAt?: string | null;
+	/** True when the action's rollback deploy is what runs now (T-12502). */
+	buildRolledBack?: boolean | null;
+	buildRollbackRunId?: string | null;
+	buildRollbackFailure?: "checks" | "deploy" | null;
 }
 
 /** The hint under the deploy button of a service that GitHub Actions builds. */
@@ -62,6 +68,7 @@ const ExternalLinkText = ({
 	>
 		{children}
 		<ExternalLink className="size-3" />
+		<OpensInNewTab />
 	</a>
 );
 
@@ -118,6 +125,9 @@ export const GithubActionsPanel = ({
 	buildEnvironment,
 	buildRunId,
 	buildDeployedAt,
+	buildRolledBack,
+	buildRollbackRunId,
+	buildRollbackFailure,
 }: PanelProps) => {
 	const runUrl = normalizeBuildRunUrl(buildRunUrl);
 	const repositoryUrl = githubRepositoryUrl(buildRepository);
@@ -185,6 +195,18 @@ export const GithubActionsPanel = ({
 						</Row>
 					)}
 				</dl>
+				{buildRolledBack && (
+					<p className="flex items-start gap-2 rounded border bg-muted/50 px-3 py-2 text-sm">
+						<Undo2 className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+						<span>
+							{describeGithubActionsRollback({
+								buildCommitSha,
+								buildRollbackRunId,
+								buildRollbackFailure,
+							})}
+						</span>
+					</p>
+				)}
 				<div className="flex flex-col gap-1 text-sm text-muted-foreground">
 					<p>This image is updated by your workflow on every deploy.</p>
 					{!knowsTheRun && (

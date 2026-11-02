@@ -1,5 +1,6 @@
 import {
 	type BuildOriginDeploymentRow,
+	describeGithubActionsRollback,
 	describeGithubActionsRun,
 	describeImageReference,
 	describeServiceBuild,
@@ -7,6 +8,7 @@ import {
 	githubActionsPushTarget,
 	githubCommitUrl,
 	parseGithubActionsTitle,
+	renderBuildStartMarker,
 	withGithubActionsRunDetails,
 } from "@dokploy/server/services/build-origin";
 import { describe, expect, test } from "vitest";
@@ -273,6 +275,9 @@ describe("describeServiceBuild", () => {
 			buildEnvironment: "production",
 			buildRunId: "41376332164",
 			buildDeployedAt: "2026-11-02T10:02:00.000Z",
+			buildRolledBack: false,
+			buildRollbackRunId: null,
+			buildRollbackFailure: null,
 		});
 	});
 
@@ -319,6 +324,7 @@ describe("describeServiceBuild", () => {
 			expect(out.buildRunUrl).toBe(RUN);
 			expect(out.buildRepository).toBe("DevinoSolutions/caly-mcp");
 			expect(out.buildRunId).toBe("41376332164");
+			expect(out.buildRolledBack).toBe(true);
 		});
 
 		test("has no commit when the rollback title names none", () => {
@@ -334,6 +340,7 @@ describe("describeServiceBuild", () => {
 			expect(out.buildDeployedAt).toBe("2026-11-02T12:01:00.000Z");
 			// 'rollback' is not an environment; the build row's is kept.
 			expect(out.buildEnvironment).toBe("production");
+			expect(out.buildRolledBack).toBe(true);
 		});
 
 		test("ignores a rollback that has not finished", () => {
@@ -343,6 +350,7 @@ describe("describeServiceBuild", () => {
 			);
 			expect(out.buildCommitSha).toBe("b4f509d2");
 			expect(out.buildDeployedAt).toBe("2026-11-02T10:02:00.000Z");
+			expect(out.buildRolledBack).toBe(false);
 		});
 
 		test("a deploy after the rollback takes over again", () => {
@@ -357,6 +365,121 @@ describe("describeServiceBuild", () => {
 			const out = describeServiceBuild([A, B, rollback(), C], app);
 			expect(out.buildCommitSha).toBe("33333333");
 			expect(out.buildDeployedAt).toBe("2026-11-02T13:02:00.000Z");
+			expect(out.buildRolledBack).toBe(false);
+		});
+
+		test("a failed rollback deploy does not count as rolled back", () => {
+			const out = describeServiceBuild(
+				[A, B, rollback({ status: "error" })],
+				app,
+			);
+			expect(out.buildCommitSha).toBe("b4f509d2");
+			expect(out.buildRolledBack).toBe(false);
+		});
+
+		test("a deploy that never rolled back is not flagged", () => {
+			expect(describeServiceBuild([A, B], app).buildRolledBack).toBe(false);
+		});
+
+		describe("which run the rollback line blames", () => {
+			const failedB = (overrides: Partial<BuildOriginDeploymentRow> = {}) =>
+				row({
+					title: TITLE,
+					status: "error",
+					createdAt: "2026-11-02T10:00:00.000Z",
+					finishedAt: "2026-11-02T10:01:00.000Z",
+					buildOrigin: "github-actions",
+					buildRunUrl: RUN,
+					...overrides,
+				});
+
+			test("blames the run that deployed and then failed its checks", () => {
+				const out = describeServiceBuild([A, B, rollback()], app);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("checks");
+			});
+
+			test("blames the run whose deploy errored, not the healthy run before it", () => {
+				const out = describeServiceBuild([A, failedB(), rollback()], app);
+				expect(out.buildRolledBack).toBe(true);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("deploy");
+				// The commit is the rollback's and the run link stays the newest done build row's.
+				expect(out.buildCommitSha).toBe("11111111");
+				expect(out.buildRunId).toBe("1");
+			});
+
+			test("blames a cancelled deploy the same way", () => {
+				const out = describeServiceBuild(
+					[A, failedB({ status: "cancelled" }), rollback()],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("deploy");
+			});
+
+			test("names no run when the refused deploy left no row and the rollback title has none", () => {
+				const out = describeServiceBuild([A, rollback()], app);
+				expect(out.buildRolledBack).toBe(true);
+				expect(out.buildRollbackRunId).toBeNull();
+				expect(out.buildRollbackFailure).toBe("deploy");
+			});
+
+			test("reads the run from the rollback title when no failed row exists", () => {
+				const out = describeServiceBuild(
+					[
+						A,
+						rollback({
+							title: "GHA rollback production to 11111111 [run 77.1]",
+						}),
+					],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("77");
+				expect(out.buildRollbackFailure).toBe("deploy");
+			});
+
+			test("the failed deployment's row wins over the rollback title", () => {
+				const out = describeServiceBuild(
+					[
+						A,
+						failedB(),
+						rollback({ title: "GHA rollback production to 11111111 [run 77]" }),
+					],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+			});
+
+			test("a rollback title that names no commit blames the newest earlier GitHub Actions run", () => {
+				const out = describeServiceBuild(
+					[
+						A,
+						B,
+						rollback({ title: "GHA rollback: redeploy the last good image" }),
+					],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("checks");
+			});
+
+			test("a row created after the rollback is not blamed", () => {
+				const later = row({
+					title: "GHA production 33333333 [run 9]",
+					status: "error",
+					createdAt: "2026-11-02T13:00:00.000Z",
+					buildOrigin: "github-actions",
+				});
+				const out = describeServiceBuild([A, B, rollback(), later], app);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+			});
+
+			test("has no cause when nothing was rolled back", () => {
+				const out = describeServiceBuild([A, B], app);
+				expect(out.buildRollbackRunId).toBeNull();
+				expect(out.buildRollbackFailure).toBeNull();
+			});
 		});
 
 		test("a service with only a rollback describes that rollback", () => {
@@ -364,6 +487,7 @@ describe("describeServiceBuild", () => {
 			expect(out.buildOrigin).toBe("github-actions");
 			expect(out.buildCommitSha).toBe("11111111");
 			expect(out.buildDeployedAt).toBe("2026-11-02T12:01:00.000Z");
+			expect(out.buildRolledBack).toBe(true);
 		});
 	});
 
@@ -382,6 +506,9 @@ describe("describeServiceBuild", () => {
 			buildEnvironment: null,
 			buildRunId: null,
 			buildDeployedAt: null,
+			buildRolledBack: false,
+			buildRollbackRunId: null,
+			buildRollbackFailure: null,
 		};
 		expect(
 			describeServiceBuild([row({ title: "Manual deployment" })], app),
@@ -409,26 +536,147 @@ describe("describeServiceBuild", () => {
 	});
 });
 
+describe("describeGithubActionsRollback", () => {
+	test("names the commit and the run", () => {
+		expect(
+			describeGithubActionsRollback({
+				buildCommitSha: "11111111",
+				buildRollbackRunId: "41376332164",
+				buildRollbackFailure: "checks",
+			}),
+		).toBe(
+			"Rolled back to 1111111 after run #41376332164 failed its checks. The run has the details.",
+		);
+	});
+
+	test("leaves out the commit when the rollback title names none", () => {
+		expect(
+			describeGithubActionsRollback({
+				buildCommitSha: null,
+				buildRollbackRunId: "7",
+				buildRollbackFailure: "checks",
+			}),
+		).toBe(
+			"Rolled back after run #7 failed its checks. The run has the details.",
+		);
+	});
+
+	test("says the deploy failed when it never reached its checks", () => {
+		expect(
+			describeGithubActionsRollback({
+				buildCommitSha: "11111111",
+				buildRollbackRunId: "41376332164",
+				buildRollbackFailure: "deploy",
+			}),
+		).toBe(
+			"Rolled back to 1111111 after run #41376332164 failed to deploy. The run has the details.",
+		);
+		expect(
+			describeGithubActionsRollback({
+				buildCommitSha: null,
+				buildRollbackRunId: null,
+				buildRollbackFailure: "deploy",
+			}),
+		).toBe(
+			"Rolled back after the latest run failed to deploy. The run has the details.",
+		);
+	});
+
+	test("does not invent a run number", () => {
+		expect(describeGithubActionsRollback({ buildCommitSha: "abcdef12" })).toBe(
+			"Rolled back to abcdef1 after the latest run failed its checks. The run has the details.",
+		);
+	});
+});
+
+describe("renderBuildStartMarker", () => {
+	const STORED = "--- Dokploy: the build of dep-8f3a2c starts here ---";
+
+	test("reads 'Dokploy: pull and start' for a deployment built in GitHub Actions", () => {
+		expect(renderBuildStartMarker(STORED, true)).toBe(
+			"Dokploy: pull and start",
+		);
+	});
+
+	test("keeps a marker without the internal id for any other deployment", () => {
+		const out = renderBuildStartMarker(STORED, false);
+		expect(out).toBe("--- Dokploy: the build starts here ---");
+		expect(out).not.toContain("dep-8f3a2c");
+	});
+
+	test("still reads a stored log with leading or trailing whitespace", () => {
+		expect(renderBuildStartMarker(`  ${STORED}  `, true)).toBe(
+			"Dokploy: pull and start",
+		);
+	});
+
+	test.each([
+		"Cloning repository",
+		"--- Dokploy: the build of  starts here ---",
+		"echo '--- Dokploy: the build of dep-1 starts here ---'",
+		"--- Dokploy: the build of dep-1 starts here --- and more",
+	])("leaves other lines alone: %s", (line) => {
+		expect(renderBuildStartMarker(line, true)).toBe(line);
+		expect(renderBuildStartMarker(line, false)).toBe(line);
+	});
+});
+
 describe("githubActionsPushTarget", () => {
 	test("prefers the branch the service was set up with", () => {
 		expect(
 			githubActionsPushTarget({
 				branch: " main ",
+				sourceType: "github",
 				buildRepository: "DevinoSolutions/caly-mcp",
 			}),
 		).toBe("main");
+	});
+
+	test.each(["github", "gitlab", "bitbucket", "gitea", "git"])(
+		"uses the branch of a %s source",
+		(sourceType) => {
+			expect(
+				githubActionsPushTarget({
+					branch: "release",
+					sourceType,
+					buildRepository: "o/r",
+				}),
+			).toBe("release");
+		},
+	);
+
+	// T-12502: a docker-source service keeps the branch of an earlier git setup; it must not win.
+	test.each(["docker", "drop", "raw", null, undefined])(
+		"ignores a leftover branch when the source is %s",
+		(sourceType) => {
+			expect(
+				githubActionsPushTarget({
+					branch: "main",
+					sourceType,
+					buildRepository: "DevinoSolutions/caly-mcp",
+				}),
+			).toBe("DevinoSolutions/caly-mcp");
+		},
+	);
+
+	test("is null for a leftover branch when the repository is unknown", () => {
+		expect(
+			githubActionsPushTarget({ branch: "main", sourceType: "docker" }),
+		).toBeNull();
 	});
 
 	test("falls back to the repository, never to an environment", () => {
 		expect(
 			githubActionsPushTarget({
 				branch: null,
+				sourceType: "github",
 				buildRepository: "DevinoSolutions/caly-mcp",
 			}),
 		).toBe("DevinoSolutions/caly-mcp");
 		expect(
 			githubActionsPushTarget({
 				branch: "  ",
+				sourceType: "github",
 				buildRepository: "DevinoSolutions/caly-mcp",
 			}),
 		).toBe("DevinoSolutions/caly-mcp");
@@ -516,6 +764,22 @@ describe("extractComposeImages", () => {
 			"ghcr.io/o/web@sha256:abc",
 			"ghcr.io/o/worker:1",
 		]);
+	});
+
+	// T-12502: the panel would show the placeholder, not what runs.
+	test("leaves out an image written with a variable", () => {
+		const file = [
+			"services:",
+			"  web:",
+			"    image: ghcr.io/o/web:${TAG}",
+			"  api:",
+			"    image: $API_IMAGE",
+			'    image: "${REGISTRY:-ghcr.io}/o/api:1"',
+			"  worker:",
+			"    image: ghcr.io/o/worker:1",
+			"",
+		].join("\n");
+		expect(extractComposeImages(file)).toEqual(["ghcr.io/o/worker:1"]);
 	});
 
 	test("is empty for no compose file or no image", () => {
