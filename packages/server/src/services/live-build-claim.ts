@@ -171,7 +171,10 @@ export const requestLiveBuildDeploy = async (
 	await assertLiveBuildReference(reference);
 	const marked = await db
 		.update(deployments)
-		.set({ deployQueuedAt: new Date().toISOString() })
+		.set({
+			deployQueuedAt: new Date().toISOString(),
+			buildRunStatus: "deploy_queued",
+		})
 		.where(
 			and(
 				openRegisteredRow(reference.deploymentId),
@@ -191,7 +194,8 @@ export const requestLiveBuildDeploy = async (
 export const withdrawLiveBuildDeploy = async (deploymentId: string) => {
 	await db
 		.update(deployments)
-		.set({ deployQueuedAt: null })
+		// The poller reads the real state again on its next pass and corrects the guess.
+		.set({ deployQueuedAt: null, buildRunStatus: "in_progress" })
 		.where(openRegisteredRow(deploymentId));
 };
 

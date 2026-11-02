@@ -256,6 +256,7 @@ describe("requestLiveBuildDeploy (the mark a deploy call sets before it queues)"
 		await expect(requestLiveBuildDeploy(ref)).resolves.toBeUndefined();
 		expect(mocks.set.mock.calls[0]?.[0]).toEqual({
 			deployQueuedAt: expect.any(String),
+			buildRunStatus: "deploy_queued",
 		});
 	});
 
@@ -281,7 +282,10 @@ describe("requestLiveBuildDeploy (the mark a deploy call sets before it queues)"
 
 	it("withdraws the mark and ends a row whose deploy was removed", async () => {
 		await withdrawLiveBuildDeploy("dep-1");
-		expect(mocks.set.mock.calls[0]?.[0]).toEqual({ deployQueuedAt: null });
+		expect(mocks.set.mock.calls[0]?.[0]).toEqual({
+			deployQueuedAt: null,
+			buildRunStatus: "in_progress",
+		});
 		mocks.returned.push([{ deploymentId: "dep-1" }]);
 		expect(await endQueuedLiveBuild("dep-1", "cancelled", "gone")).toBe(true);
 		expect(mocks.set.mock.calls[1]?.[0]).toMatchObject({

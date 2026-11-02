@@ -251,6 +251,8 @@ describe.skipIf(!ready)("H1: a deploy that waits in Dokploy's queue", () => {
 			errorMessage: null,
 		});
 		expect(row?.deployQueuedAt).toBeTruthy();
+		// deploy.sh's gates ignore a row in this state.
+		expect(row?.buildRunStatus).toBe("deploy_queued");
 
 		// The queue job starts at last and takes the row over.
 		const claimed = await claimModule.claimLiveGithubBuild(
@@ -264,6 +266,7 @@ describe.skipIf(!ready)("H1: a deploy that waits in Dokploy's queue", () => {
 		expect(row).toMatchObject({
 			status: "running",
 			externalBuildOnly: false,
+			// Out of deploy_queued: the next run's gate sees a normal running deployment.
 			buildRunStatus: "completed",
 			title: "GHA production abcdef01 [run 42]",
 		});
@@ -329,6 +332,10 @@ describe.skipIf(!ready)("H1: a deploy that waits in Dokploy's queue", () => {
 		const { deploymentId } = await register();
 		await claimModule.requestLiveBuildDeploy(reference(deploymentId));
 		await claimModule.withdrawLiveBuildDeploy(deploymentId);
+		expect((await rowsOfService())[0]).toMatchObject({
+			deployQueuedAt: null,
+			buildRunStatus: "in_progress",
+		});
 		const clock = { now: START + MINUTE };
 		await pollerAt(clock).poll();
 		expect((await rowsOfService())[0]?.status).toBe("error");

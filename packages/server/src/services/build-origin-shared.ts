@@ -88,11 +88,14 @@ export const canonicalBuildRunUrl = (value: unknown): string | null => {
 /**
  * The state of the GitHub Actions run behind a live row (T-12686), as the `buildRunStatus` column stores it.
  * `completed` is also what the deploy call sets when it takes the row over: from then on Dokploy's own deploy
- * runs, and nothing follows the run for that row any more.
+ * runs, and nothing follows the run for that row any more. `deploy_queued` is what the deploy call sets when it
+ * accepts the row, until the queue job takes it over: the deploy waits in Dokploy's queue and the workflow's gates
+ * ignore the row meanwhile.
  */
 export const BUILD_RUN_STATUSES = [
 	"queued",
 	"in_progress",
+	"deploy_queued",
 	"completed",
 ] as const;
 export type BuildRunStatus = (typeof BUILD_RUN_STATUSES)[number];
