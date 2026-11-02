@@ -245,7 +245,7 @@ export const composeRouter = createTRPCRouter({
 				method: "GET",
 				path: "/compose.one",
 				description:
-					"Read one compose. Also returns buildOrigin and buildRunUrl for the service as a whole (the latest deployment with status done, else the latest of any status), and every entry of deployments carries its own buildOrigin and buildRunUrl. buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known. For GitHub Actions services also buildRepository (owner/repo), buildCommitSha, buildEnvironment, buildRunId and buildDeployedAt, each null when not known.",
+					"Read one compose. Also returns buildOrigin and buildRunUrl for the service as a whole (the latest deployment with status done, else the latest of any status), and every entry of deployments carries its own buildOrigin and buildRunUrl. buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known. For GitHub Actions services also buildRepository (owner/repo), buildCommitSha, buildEnvironment, buildRunId and buildDeployedAt, each null when not known, and buildRolledBack (true when the GitHub Actions rollback deploy is what runs now: the workflow checks failed and the earlier image runs again; buildCommitSha and buildDeployedAt are then the rollback's).",
 			},
 		})
 		.input(apiReadCompose)

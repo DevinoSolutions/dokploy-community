@@ -1,11 +1,12 @@
 import {
+	describeGithubActionsRollback,
 	describeImageReference,
 	githubCommitUrl,
 	githubRepositoryUrl,
 	normalizeBuildRunUrl,
 } from "@dokploy/server/services/build-origin-shared";
 import copy from "copy-to-clipboard";
-import { ChevronDown, Copy, ExternalLink } from "lucide-react";
+import { ChevronDown, Copy, ExternalLink, Undo2 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
@@ -33,6 +34,8 @@ export interface GithubActionsServiceInfo {
 	buildEnvironment?: string | null;
 	buildRunId?: string | null;
 	buildDeployedAt?: string | null;
+	/** True when the action's rollback deploy is what runs now (T-12502). */
+	buildRolledBack?: boolean | null;
 }
 
 /** The hint under the deploy button of a service that GitHub Actions builds. */
@@ -118,6 +121,7 @@ export const GithubActionsPanel = ({
 	buildEnvironment,
 	buildRunId,
 	buildDeployedAt,
+	buildRolledBack,
 }: PanelProps) => {
 	const runUrl = normalizeBuildRunUrl(buildRunUrl);
 	const repositoryUrl = githubRepositoryUrl(buildRepository);
@@ -185,6 +189,14 @@ export const GithubActionsPanel = ({
 						</Row>
 					)}
 				</dl>
+				{buildRolledBack && (
+					<p className="flex items-start gap-2 rounded border bg-muted/50 px-3 py-2 text-sm">
+						<Undo2 className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+						<span>
+							{describeGithubActionsRollback({ buildCommitSha, buildRunId })}
+						</span>
+					</p>
+				)}
 				<div className="flex flex-col gap-1 text-sm text-muted-foreground">
 					<p>This image is updated by your workflow on every deploy.</p>
 					{!knowsTheRun && (

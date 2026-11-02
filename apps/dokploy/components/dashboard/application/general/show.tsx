@@ -112,6 +112,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 					buildEnvironment={data?.buildEnvironment}
 					buildRunId={data?.buildRunId}
 					buildDeployedAt={data?.buildDeployedAt}
+					buildRolledBack={data?.buildRolledBack}
 				/>
 			)}
 			<Card className="bg-background">

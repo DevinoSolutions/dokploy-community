@@ -392,6 +392,11 @@ export type ServiceBuildDescription = ResolvedBuildOrigin &
 	GithubActionsRunDetails & {
 		/** When the deployment the value was read from finished (else was created); null for none. */
 		buildDeployedAt: string | null;
+		/**
+		 * True when the newest finished deployment is the action's rollback deploy: the workflow's checks failed and
+		 * the earlier image runs again. The commit and time above are then the rollback's.
+		 */
+		buildRolledBack: boolean;
 	};
 
 /**
@@ -408,12 +413,17 @@ export const describeServiceBuild = (
 			...resolved,
 			...NO_GITHUB_ACTIONS_RUN_DETAILS,
 			buildDeployedAt: null,
+			buildRolledBack: false,
 		};
 	}
 	const built = describeGithubActionsRun({
 		title: row.title,
 		buildRunUrl: resolved.buildRunUrl,
 	});
+	// What runs now is the action's rollback deploy (also when a service has nothing but rollbacks).
+	const buildRolledBack = Boolean(
+		serving && isGithubActionsRollbackTitle(serving.title),
+	);
 	// The newest finished deployment is the action's rollback: that is what runs now, so the commit and the
 	// time are the rollback's. The run link and the repository stay those of the build row.
 	if (
@@ -428,13 +438,30 @@ export const describeServiceBuild = (
 			buildCommitSha: rollback.buildCommitSha,
 			buildEnvironment: rollback.buildEnvironment ?? built.buildEnvironment,
 			buildDeployedAt: serving.finishedAt ?? serving.createdAt ?? null,
+			buildRolledBack,
 		};
 	}
 	return {
 		...resolved,
 		...built,
 		buildDeployedAt: row.finishedAt ?? row.createdAt ?? null,
+		buildRolledBack,
 	};
+};
+
+/**
+ * The one plain line the "Deployed from GitHub Actions" panel shows after the action's rollback deploy. The commit
+ * part is left out when the rollback title names none, and the run part says "the latest run" when the id is unknown.
+ */
+export const describeGithubActionsRollback = (input: {
+	buildCommitSha?: string | null;
+	buildRunId?: string | null;
+}): string => {
+	const sha = input.buildCommitSha?.trim().slice(0, 7);
+	const runId = input.buildRunId?.trim();
+	return `Rolled back${sha ? ` to ${sha}` : ""} after ${
+		runId ? `run #${runId}` : "the latest run"
+	} failed its checks. The run has the details.`;
 };
 
 /**
