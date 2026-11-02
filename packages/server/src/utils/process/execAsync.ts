@@ -44,7 +44,10 @@ const execAsyncBase = util.promisify(exec);
 // connection (an "error", then "close") about 40 seconds after the last reply.
 // Shared with the remote Docker API client (servers/remote-docker.ts), whose
 // ssh2 connection would otherwise hang on a host that died mid-update.
-export const SSH_KEEPALIVE = { keepaliveInterval: 10_000, keepaliveCountMax: 3 };
+export const SSH_KEEPALIVE = {
+	keepaliveInterval: 10_000,
+	keepaliveCountMax: 3,
+};
 
 // Node embeds the full command in error.message; it may carry secrets. A
 // command wrapped by `shSingleQuote` (execAsyncCancelable) appears there with

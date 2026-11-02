@@ -91,7 +91,11 @@ export const getDeploymentErrorMessage = async ({
 	error?: unknown;
 }): Promise<string> => {
 	// No exit code: the SSH connection failed, so the host can't serve the log.
-	if (error instanceof ExecError && error.serverId && error.exitCode === undefined) {
+	if (
+		error instanceof ExecError &&
+		error.serverId &&
+		error.exitCode === undefined
+	) {
 		return error.message;
 	}
 

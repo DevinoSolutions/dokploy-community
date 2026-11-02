@@ -64,11 +64,7 @@ describe("writeDeploymentErrorLog", () => {
 	});
 
 	it("writes the error text and the closing line on the local host", async () => {
-		await writeDeploymentErrorLog(
-			deployment,
-			null,
-			new Error("clone failed"),
-		);
+		await writeDeploymentErrorLog(deployment, null, new Error("clone failed"));
 
 		expect(execAsyncRemote).not.toHaveBeenCalled();
 		const command = vi.mocked(execAsync).mock.calls[0]![0];
@@ -96,7 +92,10 @@ describe("writeDeploymentErrorLog", () => {
 		await writeDeploymentErrorLog(
 			deployment,
 			null,
-			new ExecError("Command failed", { command: "docker build .", exitCode: 1 }),
+			new ExecError("Command failed", {
+				command: "docker build .",
+				exitCode: 1,
+			}),
 			"echo extra-line;",
 		);
 

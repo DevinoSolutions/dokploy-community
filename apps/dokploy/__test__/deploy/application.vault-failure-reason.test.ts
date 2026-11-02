@@ -95,7 +95,9 @@ vi.mock("@dokploy/server/services/deployment", () => ({
 	getDeploymentErrorMessage: vi.fn(),
 	writeDeploymentErrorLog: async (...args: unknown[]) =>
 		(
-			await import("@/__test__/deploy/fixtures/actual-write-deployment-error-log")
+			await import(
+				"@/__test__/deploy/fixtures/actual-write-deployment-error-log"
+			)
 		).actualWriteDeploymentErrorLog(...(args as [any, any, any, any?])),
 }));
 
