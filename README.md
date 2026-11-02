@@ -124,7 +124,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 ## What's new in v0.30.8-community.45
 
 - A GitHub Actions build can now show up in Dokploy while it runs. A workflow that registers its build gets a deployment row from the start, marked GitHub Actions, with an "Open run" link and the live step, in the Deployments tab, the Deployments page and the home list. The deploy that follows continues that row, however long it waits in the queue. This needs the updated shared build workflow, which is released separately, and only step transitions are written to the log, not the full GitHub job logs.
-- Ported upstream fixes: untagged GitHub Container Registry events are answered with 200 and skipped instead of deploying, a server that dies during a deploy no longer leaves the deployment `running` and the build error notification names the lost SSH connection, and the remote Docker client shares the SSH keepalive.
+- Ported upstream fixes: untagged GitHub Container Registry events are skipped instead of deploying (answered with 200), a server that dies during a deploy no longer leaves the deployment stuck as running, and the build error notification names the lost SSH connection, and the remote Docker client shares the SSH keepalive.
 - One additive database migration (0227); an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
