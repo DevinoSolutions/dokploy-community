@@ -71,9 +71,9 @@ import {
 	CANCELLED_THEN_FAILED_NOTE,
 	CANCELLED_TOO_LATE_NOTE,
 	DeploymentCancelledError,
+	getDeploymentWallLimitMinutes,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
-	getDeploymentWallLimitMinutes,
 	isDeploymentStillRunning,
 	markDeploymentDoneUnlessCancelled,
 	runRemoteBuildScript,
@@ -87,6 +87,7 @@ import {
 } from "./deployment-heartbeat";
 import { type Domain, getDomainHost } from "./domain";
 import { getIssueComment } from "./github";
+import { claimLiveGithubBuild } from "./live-build-claim";
 import { generateApplyPatchesCommand } from "./patch";
 import {
 	ensurePreviewComment,
@@ -283,6 +284,7 @@ export const deployApplication = async ({
 	descriptionLog = "",
 	buildOrigin,
 	buildRunUrl,
+	deploymentId,
 }: {
 	applicationId: string;
 	titleLog: string;
@@ -290,6 +292,8 @@ export const deployApplication = async ({
 	/** Where the caller says the image was built (T-12149); inferred when omitted. */
 	buildOrigin?: string | null;
 	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const application = await findApplicationById(applicationId);
 	// >>> build-policy hook 1/4: enforced remote builds. Runs before
@@ -320,26 +324,40 @@ export const deployApplication = async ({
 	};
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
-	const deployment = await createDeployment(
-		{
-			applicationId: applicationId,
-			title: titleLog,
-			description: descriptionLog,
-		},
-		// build-policy hook: create the log on the host that will build.
-		{
-			buildServerId: buildPolicy.buildServerId,
-			...resolveDeploymentBuildOrigin({
-				requestedOrigin: buildOrigin,
-				requestedRunUrl: buildRunUrl,
-				title: titleLog,
-				inferred: inferBuildOriginFromSource({
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
 					kind: "application",
-					sourceType: application.sourceType,
+					serviceId: applicationId,
+					logHost: serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeployment(
+			{
+				applicationId: applicationId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			// build-policy hook: create the log on the host that will build.
+			{
+				buildServerId: buildPolicy.buildServerId,
+				...resolveDeploymentBuildOrigin({
+					requestedOrigin: buildOrigin,
+					requestedRunUrl: buildRunUrl,
+					title: titleLog,
+					inferred: inferBuildOriginFromSource({
+						kind: "application",
+						sourceType: application.sourceType,
+					}),
 				}),
-			}),
-		},
-	);
+			},
+		));
 
 	const stagedBuildFiles: string[] = [];
 	try {
@@ -567,6 +585,7 @@ export const rebuildApplication = async ({
 	descriptionLog = "",
 	buildOrigin,
 	buildRunUrl,
+	deploymentId,
 }: {
 	applicationId: string;
 	titleLog: string;
@@ -574,6 +593,8 @@ export const rebuildApplication = async ({
 	/** Where the caller says the image was built (T-12149); inferred when omitted. */
 	buildOrigin?: string | null;
 	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const application = await findApplicationById(applicationId);
 	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
@@ -596,26 +617,40 @@ export const rebuildApplication = async ({
 	// <<< build-policy hook 1/4
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 
-	const deployment = await createDeployment(
-		{
-			applicationId: applicationId,
-			title: titleLog,
-			description: descriptionLog,
-		},
-		// build-policy hook: create the log on the host that will build.
-		{
-			buildServerId: buildPolicy.buildServerId,
-			...resolveDeploymentBuildOrigin({
-				requestedOrigin: buildOrigin,
-				requestedRunUrl: buildRunUrl,
-				title: titleLog,
-				inferred: inferBuildOriginFromSource({
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
 					kind: "application",
-					sourceType: application.sourceType,
+					serviceId: applicationId,
+					logHost: serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeployment(
+			{
+				applicationId: applicationId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			// build-policy hook: create the log on the host that will build.
+			{
+				buildServerId: buildPolicy.buildServerId,
+				...resolveDeploymentBuildOrigin({
+					requestedOrigin: buildOrigin,
+					requestedRunUrl: buildRunUrl,
+					title: titleLog,
+					inferred: inferBuildOriginFromSource({
+						kind: "application",
+						sourceType: application.sourceType,
+					}),
 				}),
-			}),
-		},
-	);
+			},
+		));
 
 	const stagedBuildFiles: string[] = [];
 	try {

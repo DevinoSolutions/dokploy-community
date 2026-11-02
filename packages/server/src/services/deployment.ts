@@ -835,7 +835,7 @@ const logHostForRemoval = async (row: LogHostRow) => {
 // must not fail (or block) the deployment that triggered the cleanup.
 // A compose also keeps its latest row that recorded a rebuild pin (T-7960),
 // however old: rows without a record must not push it out of the window.
-const removeLastTenDeployments = async (
+export const removeLastTenDeployments = async (
 	id: string,
 	type:
 		| "application"

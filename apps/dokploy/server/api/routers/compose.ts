@@ -3,6 +3,7 @@ import {
 	addDomainToCompose,
 	assertCanUseServiceGitProviders,
 	assertComposeBuildSettings,
+	assertLiveBuildReference,
 	assertDeployReferencesInOrganization,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
@@ -949,6 +950,13 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
+			if (input.deploymentId) {
+				await assertLiveBuildReference({
+					deploymentId: input.deploymentId,
+					kind: "compose",
+					serviceId: input.composeId,
+				});
+			}
 			const compose = await findComposeById(input.composeId);
 
 			const jobData: DeploymentJob = {
@@ -1045,6 +1053,13 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
+			if (input.deploymentId) {
+				await assertLiveBuildReference({
+					deploymentId: input.deploymentId,
+					kind: "compose",
+					serviceId: input.composeId,
+				});
+			}
 			const compose = await findComposeById(input.composeId);
 			const jobData: DeploymentJob = {
 				composeId: input.composeId,

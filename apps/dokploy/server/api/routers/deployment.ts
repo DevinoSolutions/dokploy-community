@@ -14,10 +14,12 @@ import {
 	findApplicationById,
 	findComposeById,
 	findDeploymentById,
+	finishExternalBuild,
 	getAccessibleServerIds,
 	getScheduleRunLaunch,
 	IS_CLOUD,
 	isMissingProcessError,
+	registerExternalBuild,
 	removeDeployment,
 	resolveServicePath,
 	revertScheduleRunCancel,
@@ -54,6 +56,8 @@ import {
 	apiFindAllByCompose,
 	apiFindAllByServer,
 	apiFindAllByType,
+	apiFinishExternalBuild,
+	apiRegisterExternalBuild,
 	deployments,
 	server,
 } from "@/server/db/schema";
@@ -177,9 +181,86 @@ export const deploymentRouter = createTRPCRouter({
 			if (accessedServices !== null && accessedServices.length === 0) {
 				return [];
 			}
-			return findAllDeploymentsCentralized(orgId, accessedServices);
+			return withGithubActionsRunDetails(
+				await findAllDeploymentsCentralized(orgId, accessedServices),
+			);
 		},
 	),
+
+	registerExternalBuild: protectedProcedure
+		.meta({
+			openapi: {
+				method: "POST",
+				path: "/deployment.registerExternalBuild",
+				description:
+					"Tell Dokploy that a GitHub Actions run is building the image of an application or compose, before the build ends. Dokploy creates a deployment with status running, marks it as built by GitHub Actions with a link to the run, and follows the run: the Deployments tab shows the step that runs now and the log gets one line per step. Call it once at the start of the build job. The same service and run link return the deployment created before. Send the returned deploymentId to application.deploy / compose.deploy (or redeploy) after the build: the deploy then continues this deployment instead of creating a second one. A build that fails before any deploy call should be ended with deployment.finishExternalBuild. Rows nothing takes over end as error after 6 hours.",
+			},
+		})
+		.input(apiRegisterExternalBuild)
+		.mutation(async ({ input, ctx }) => {
+			const serviceId = input.applicationId ?? input.composeId;
+			if (!serviceId) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Send either applicationId or composeId.",
+				});
+			}
+			await checkServicePermissionAndAccess(ctx, serviceId, {
+				deployment: ["create"],
+			});
+			const registered = await registerExternalBuild(input);
+			if (registered.created) {
+				await audit(ctx, {
+					action: "deploy",
+					resourceType: input.applicationId ? "application" : "compose",
+					resourceId: serviceId,
+					metadata: {
+						type: "registerExternalBuild",
+						deploymentId: registered.deploymentId,
+						buildRunUrl: input.buildRunUrl,
+					},
+				});
+			}
+			return registered;
+		}),
+
+	finishExternalBuild: protectedProcedure
+		.meta({
+			openapi: {
+				method: "POST",
+				path: "/deployment.finishExternalBuild",
+				description:
+					"End a deployment created by deployment.registerExternalBuild whose build failed or was cancelled before any deploy call. conclusion failure ends it as error, cancelled and skipped end it as cancelled. The message and the run link are added to the deployment log. Changes nothing (updated: false) when a deploy already took the deployment over or it already ended.",
+			},
+		})
+		.input(apiFinishExternalBuild)
+		.mutation(async ({ input, ctx }) => {
+			const deployment = await findDeploymentById(input.deploymentId);
+			const serviceId = deployment.applicationId ?? deployment.composeId;
+			if (!serviceId) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						"This deployment does not belong to an application or compose.",
+				});
+			}
+			await checkServicePermissionAndAccess(ctx, serviceId, {
+				deployment: ["create"],
+			});
+			const result = await finishExternalBuild(deployment, {
+				conclusion: input.conclusion,
+				message: input.message,
+			});
+			if (result.updated) {
+				await audit(ctx, {
+					action: "cancel",
+					resourceType: "deployment",
+					resourceId: deployment.deploymentId,
+					...deploymentAuditTarget(deployment),
+				});
+			}
+			return { deploymentId: deployment.deploymentId, ...result };
+		}),
 
 	queueList: withPermission("deployment", "read").query(async ({ ctx }) => {
 		const orgId = ctx.session.activeOrganizationId;

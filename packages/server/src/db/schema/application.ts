@@ -26,7 +26,11 @@ import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { bitbucket } from "./bitbucket";
-import { apiBuildOriginInput, deployments } from "./deployment";
+import {
+	apiBuildOriginInput,
+	apiLiveBuildInput,
+	deployments,
+} from "./deployment";
 import { domains } from "./domain";
 import { environments } from "./environment";
 import { gitea } from "./gitea";
@@ -481,6 +485,7 @@ export const apiDeployApplication = createSchema
 		dockerImage: z.string().optional(),
 		priority: deployPriorityInput,
 		...apiBuildOriginInput,
+		...apiLiveBuildInput,
 	});
 
 export const apiRedeployApplication = createSchema
@@ -493,6 +498,7 @@ export const apiRedeployApplication = createSchema
 		description: z.string().optional(),
 		priority: deployPriorityInput,
 		...apiBuildOriginInput,
+		...apiLiveBuildInput,
 	});
 
 export const apiReloadApplication = createSchema

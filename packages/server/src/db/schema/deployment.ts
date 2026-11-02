@@ -111,6 +111,29 @@ export const deployments = pgTable("deployment", {
 	 */
 	buildOrigin: text("buildOrigin"),
 	buildRunUrl: text("buildRunUrl"),
+	/**
+	 * Fork columns (T-12686). A row registered while GitHub Actions still builds
+	 * the image (deployment.registerExternalBuild) carries the run it follows: the
+	 * run id, the repository (`owner/name`), the commit, the run state (`queued` |
+	 * `in_progress` | `completed`) and a short label of the step that runs now
+	 * ("build · Build image (3/7)"). `completed` also means the deploy call took
+	 * the row over, so nothing polls GitHub for it any more. All null on every
+	 * other row.
+	 */
+	buildRunId: text("buildRunId"),
+	buildRepository: text("buildRepository"),
+	buildCommitSha: text("buildCommitSha"),
+	buildRunStatus: text("buildRunStatus"),
+	buildRunStep: text("buildRunStep"),
+	/**
+	 * Fork column (T-12686). True from deployment.registerExternalBuild until a deploy
+	 * job takes the row over (then false). A row that is still true never deployed
+	 * anything to Dokploy, so it only shows in the Deployments lists: every derivation
+	 * of "the last deployment" (baseline image, last deployed, build origin of the
+	 * service) ignores it, and so do the watchdog and the restart sweep. A row closed
+	 * by finishExternalBuild or by the poller keeps it true.
+	 */
+	externalBuildOnly: boolean("externalBuildOnly").notNull().default(false),
 });
 
 export const deploymentsRelations = relations(deployments, ({ one }) => ({
@@ -264,6 +287,82 @@ export const apiBuildOriginInput = {
 		.optional()
 		.describe(BUILD_RUN_URL_DESCRIPTION),
 };
+
+/**
+ * Optional input of the deploy/redeploy procedures: the deployment that
+ * deployment.registerExternalBuild created while GitHub Actions built the image.
+ * The deploy then continues that row (same log, same deployment id) instead of
+ * creating a second one. Ignored, never an error, when the row is not a running
+ * GitHub Actions row of the same service that still waits for its deploy.
+ */
+export const apiLiveBuildInput = {
+	deploymentId: z
+		.string()
+		.max(100)
+		.optional()
+		.describe(
+			"The deploymentId returned by deployment.registerExternalBuild for this GitHub Actions run. The deploy continues that deployment (same log) instead of creating a new one. Ignored when it does not belong to this service or is no longer waiting for its deploy.",
+		),
+};
+
+/**
+ * The workflow tells Dokploy that a GitHub Actions run is building an image for a service, before the build ends
+ * (T-12686). Exactly one of applicationId / composeId.
+ */
+export const apiRegisterExternalBuild = z
+	.object({
+		applicationId: z.string().min(1).optional(),
+		composeId: z.string().min(1).optional(),
+		buildOrigin: z
+			.literal("github-actions")
+			.describe("Only 'github-actions' is supported."),
+		buildRunUrl: z
+			.string()
+			.min(1)
+			.max(300)
+			.describe(
+				"Link to the GitHub Actions run: https://github.com/<owner>/<repo>/actions/runs/<id>, with /attempts/<n> for a re-run. The same link for the same service returns the deployment it created before.",
+			),
+		buildRunId: z
+			.string()
+			.regex(/^[0-9]{1,20}$/)
+			.describe("The run id (GITHUB_RUN_ID). Must be the one in buildRunUrl."),
+		buildRepository: z
+			.string()
+			.min(3)
+			.max(140)
+			.describe(
+				"owner/name (GITHUB_REPOSITORY). Must be the one in buildRunUrl.",
+			),
+		buildCommitSha: z
+			.string()
+			.regex(/^[0-9a-fA-F]{7,40}$/)
+			.describe("The commit the image is built from."),
+		title: z.string().min(1).max(300),
+		description: z.string().max(1000).optional(),
+	})
+	.refine(
+		(input) => Boolean(input.applicationId) !== Boolean(input.composeId),
+		{
+			message: "Send either applicationId or composeId.",
+		},
+	);
+
+export const apiFinishExternalBuild = z.object({
+	deploymentId: z.string().min(1),
+	conclusion: z
+		.enum(["failure", "cancelled", "skipped"])
+		.describe(
+			"How the run ended before it deployed. failure = the deployment ends as error, cancelled and skipped = it ends as cancelled.",
+		),
+	message: z
+		.string()
+		.max(1000)
+		.optional()
+		.describe(
+			"Why it ended, added to the deployment log and its error message.",
+		),
+});
 
 export const apiFindAllByApplication = z.object({
 	applicationId: z.string().min(1),

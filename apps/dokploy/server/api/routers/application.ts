@@ -1,5 +1,6 @@
 import {
 	assertCanUseServiceGitProviders,
+	assertLiveBuildReference,
 	assertNetworkIdsAttachableToResource,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
@@ -580,6 +581,13 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
+			if (input.deploymentId) {
+				await assertLiveBuildReference({
+					deploymentId: input.deploymentId,
+					kind: "application",
+					serviceId: input.applicationId,
+				});
+			}
 			const application = await findApplicationById(input.applicationId);
 			const jobData: DeploymentJob = {
 				applicationId: input.applicationId,
@@ -1188,6 +1196,13 @@ export const applicationRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
+			if (input.deploymentId) {
+				await assertLiveBuildReference({
+					deploymentId: input.deploymentId,
+					kind: "application",
+					serviceId: input.applicationId,
+				});
+			}
 			const application = await findApplicationById(input.applicationId);
 			// Allow overriding the Docker image/tag at deploy time for
 			// Docker-source applications. This mirrors the manual "save Docker

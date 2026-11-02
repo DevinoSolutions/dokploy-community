@@ -107,6 +107,7 @@ export const processDeploymentJob = async (
 					descriptionLog,
 					buildOrigin: job.data.buildOrigin,
 					buildRunUrl: job.data.buildRunUrl,
+					deploymentId: job.data.deploymentId,
 				});
 			} else if (job.data.type === "deploy") {
 				await deployApplication({
@@ -115,6 +116,7 @@ export const processDeploymentJob = async (
 					descriptionLog,
 					buildOrigin: job.data.buildOrigin,
 					buildRunUrl: job.data.buildRunUrl,
+					deploymentId: job.data.deploymentId,
 				});
 			}
 		} else if (job.data.applicationType === "compose") {
@@ -129,6 +131,7 @@ export const processDeploymentJob = async (
 					freshVolumes: job.data.freshVolumes,
 					buildOrigin: job.data.buildOrigin,
 					buildRunUrl: job.data.buildRunUrl,
+					deploymentId: job.data.deploymentId,
 				});
 			} else if (job.data.type === "redeploy") {
 				await rebuildCompose({
@@ -138,6 +141,7 @@ export const processDeploymentJob = async (
 					freshVolumes: job.data.freshVolumes,
 					buildOrigin: job.data.buildOrigin,
 					buildRunUrl: job.data.buildRunUrl,
+					deploymentId: job.data.deploymentId,
 				});
 			}
 		} else if (job.data.applicationType === "application-preview") {

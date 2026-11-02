@@ -92,9 +92,9 @@ import {
 	CANCELLED_THEN_FAILED_NOTE,
 	CANCELLED_TOO_LATE_NOTE,
 	DeploymentCancelledError,
+	getDeploymentWallLimitMinutes,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
-	getDeploymentWallLimitMinutes,
 	isDeploymentStillRunning,
 	markDeploymentDoneUnlessCancelled,
 	runReleaseScript,
@@ -102,6 +102,7 @@ import {
 } from "./deployment-cancel";
 import { recordVaultFailureReason } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
+import { claimLiveGithubBuild } from "./live-build-claim";
 import {
 	findPatchesByEntityId,
 	generateApplyPatchesCommand,
@@ -896,6 +897,7 @@ export const deployCompose = async ({
 	freshVolumes = false,
 	buildOrigin,
 	buildRunUrl,
+	deploymentId,
 }: {
 	composeId: string;
 	titleLog: string;
@@ -904,29 +906,45 @@ export const deployCompose = async ({
 	/** Where the caller says the image was built (T-12149); inferred when omitted. */
 	buildOrigin?: string | null;
 	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const compose = await findComposeById(composeId);
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${
 		compose.environment.projectId
 	}/environment/${compose.environmentId}/services/compose/${compose.composeId}?tab=deployments`;
-	const deployment = await createDeploymentCompose(
-		{
-			composeId: composeId,
-			title: titleLog,
-			description: descriptionLog,
-		},
-		resolveDeploymentBuildOrigin({
-			requestedOrigin: buildOrigin,
-			requestedRunUrl: buildRunUrl,
-			title: titleLog,
-			inferred: inferBuildOriginFromSource({
-				kind: "compose",
-				sourceType: compose.sourceType,
-				hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
+					kind: "compose",
+					serviceId: composeId,
+					logHost: compose.serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeploymentCompose(
+			{
+				composeId: composeId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			resolveDeploymentBuildOrigin({
+				requestedOrigin: buildOrigin,
+				requestedRunUrl: buildRunUrl,
+				title: titleLog,
+				inferred: inferBuildOriginFromSource({
+					kind: "compose",
+					sourceType: compose.sourceType,
+					hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+				}),
 			}),
-		}),
-	);
+		));
 
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
@@ -1049,6 +1067,7 @@ export const rebuildCompose = async ({
 	freshVolumes = false,
 	buildOrigin,
 	buildRunUrl,
+	deploymentId,
 }: {
 	composeId: string;
 	titleLog: string;
@@ -1057,26 +1076,42 @@ export const rebuildCompose = async ({
 	/** Where the caller says the image was built (T-12149); inferred when omitted. */
 	buildOrigin?: string | null;
 	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const compose = await findComposeById(composeId);
 
-	const deployment = await createDeploymentCompose(
-		{
-			composeId: composeId,
-			title: titleLog,
-			description: descriptionLog,
-		},
-		resolveDeploymentBuildOrigin({
-			requestedOrigin: buildOrigin,
-			requestedRunUrl: buildRunUrl,
-			title: titleLog,
-			inferred: inferBuildOriginFromSource({
-				kind: "compose",
-				sourceType: compose.sourceType,
-				hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
+					kind: "compose",
+					serviceId: composeId,
+					logHost: compose.serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeploymentCompose(
+			{
+				composeId: composeId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			resolveDeploymentBuildOrigin({
+				requestedOrigin: buildOrigin,
+				requestedRunUrl: buildRunUrl,
+				title: titleLog,
+				inferred: inferBuildOriginFromSource({
+					kind: "compose",
+					sourceType: compose.sourceType,
+					hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+				}),
 			}),
-		}),
-	);
+		));
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
 	const checkpoint = createCancelCheckpoint(compose, deployment, {
