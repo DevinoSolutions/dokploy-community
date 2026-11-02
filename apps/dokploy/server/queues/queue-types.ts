@@ -12,6 +12,15 @@ type PriorityFields = {
 	priorityBy?: string;
 };
 
+/**
+ * Where the caller says the image was built (T-12149), carried to the deployment
+ * row. Both are optional; the deploy flow infers the origin when absent.
+ */
+type BuildOriginFields = {
+	buildOrigin?: "dokploy" | "github-actions" | "external";
+	buildRunUrl?: string;
+};
+
 type DeployJob =
 	| {
 			applicationId: string;
@@ -21,6 +30,8 @@ type DeployJob =
 			type: "deploy" | "redeploy";
 			applicationType: "application";
 			serverId?: string;
+			buildOrigin?: BuildOriginFields["buildOrigin"];
+			buildRunUrl?: BuildOriginFields["buildRunUrl"];
 			/**
 			 * build-policy hook: an image supplied in the deploy-hook body. When
 			 * present the job deploys it by digest and does not build.
@@ -37,6 +48,8 @@ type DeployJob =
 			applicationType: "compose";
 			serverId?: string;
 			freshVolumes?: boolean;
+			buildOrigin?: BuildOriginFields["buildOrigin"];
+			buildRunUrl?: BuildOriginFields["buildRunUrl"];
 	  }
 	| {
 			applicationId: string;

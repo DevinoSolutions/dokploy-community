@@ -1,3 +1,4 @@
+import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
 import copy from "copy-to-clipboard";
 import {
 	ChevronDown,
@@ -16,6 +17,7 @@ import {
 import React, { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AlertBlock } from "@/components/shared/alert-block";
+import { GithubActionsDeploymentMark } from "@/components/shared/build-origin-badge";
 import { DateTooltip } from "@/components/shared/date-tooltip";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -142,6 +144,13 @@ export const ShowDeployments = ({
 		{ composeId: id },
 		{ enabled: !!id && type === "compose" },
 	);
+	// Service-level origin, to tell old "GHA " rows (no stored origin) from a git service's.
+	const serviceBuildOrigin =
+		type === "application"
+			? application?.buildOrigin
+			: type === "compose"
+				? composeService?.buildOrigin
+				: null;
 	const snapvisorProjectName =
 		type === "application"
 			? application?.snapvisorProjectName
@@ -529,6 +538,14 @@ export const ShowDeployments = ({
 									<div className="flex w-full flex-col items-start gap-2 sm:w-auto sm:max-w-[300px] sm:items-end sm:justify-start">
 										<div className="text-sm capitalize text-muted-foreground flex flex-wrap items-center gap-2">
 											<DateTooltip date={deployment.createdAt} />
+											{isGithubActionsDeployment(
+												deployment,
+												serviceBuildOrigin,
+											) && (
+												<GithubActionsDeploymentMark
+													buildRunUrl={deployment.buildRunUrl}
+												/>
+											)}
 											{deployment.startedAt && deployment.finishedAt && (
 												<Badge
 													variant="outline"
@@ -698,6 +715,12 @@ export const ShowDeployments = ({
 					logPath={activeLog?.logPath || ""}
 					errorMessage={activeLog?.errorMessage || ""}
 					unavailableMessage={needsLogHost ? logHost?.unavailable : undefined}
+					githubActions={
+						activeLog &&
+						isGithubActionsDeployment(activeLog, serviceBuildOrigin)
+							? { runUrl: activeLog.buildRunUrl ?? null }
+							: undefined
+					}
 				/>
 			</CardContent>
 		</Card>

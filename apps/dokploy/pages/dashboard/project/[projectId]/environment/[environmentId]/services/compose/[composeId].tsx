@@ -53,6 +53,10 @@ import { ComposePolicyAuditExclusion } from "@/components/dashboard/shared/compo
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
+import {
+	BuildOriginBadge,
+	GithubActionsBuildsNote,
+} from "@/components/shared/build-origin-badge";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -266,6 +270,11 @@ const Service = (
 										>
 											{data?.server?.name || "Dokploy Server"}
 										</Badge>
+										<BuildOriginBadge
+											buildOrigin={data?.buildOrigin}
+											buildRunUrl={data?.buildRunUrl}
+											linkToRun
+										/>
 										{data?.server?.serverStatus === "inactive" && (
 											<TooltipProvider>
 												<Tooltip>
@@ -409,6 +418,9 @@ const Service = (
 									<TabsContent value="general">
 										<div className="flex flex-col gap-4 pt-2.5">
 											<ShowGeneralCompose composeId={composeId} />
+											{data?.buildOrigin === "github-actions" && (
+												<GithubActionsBuildsNote buildRunUrl={data.buildRunUrl} />
+											)}
 										</div>
 									</TabsContent>
 									{permissions?.envVars.read && (
@@ -589,7 +601,9 @@ const Service = (
 													currentServerId={data?.serverId}
 												/>
 												<PullImagesCompose composeId={composeId} />
-												<ShowComposeBuildServer composeId={composeId} />
+												{data?.buildOrigin !== "github-actions" && (
+													<ShowComposeBuildServer composeId={composeId} />
+												)}
 												<DeployGuardrailsCompose composeId={composeId} />
 												<RollingReplaceCompose composeId={composeId} />
 												<WatchdogExclusion id={composeId} type="compose" />

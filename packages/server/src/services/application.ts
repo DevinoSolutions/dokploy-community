@@ -43,6 +43,10 @@ import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
 import { removeStagedFiles } from "../utils/docker/staging";
 import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
+import {
+	inferBuildOriginFromSource,
+	resolveDeploymentBuildOrigin,
+} from "./build-origin-shared";
 // Fork module: enforced remote builds. See services/build-policy/README.md.
 import {
 	type BuildPolicyPlan,
@@ -274,10 +278,15 @@ export const deployApplication = async ({
 	applicationId,
 	titleLog = "Manual deployment",
 	descriptionLog = "",
+	buildOrigin,
+	buildRunUrl,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
 }) => {
 	const application = await findApplicationById(applicationId);
 	// >>> build-policy hook 1/4: enforced remote builds. Runs before
@@ -315,7 +324,18 @@ export const deployApplication = async ({
 			description: descriptionLog,
 		},
 		// build-policy hook: create the log on the host that will build.
-		{ buildServerId: buildPolicy.buildServerId },
+		{
+			buildServerId: buildPolicy.buildServerId,
+			...resolveDeploymentBuildOrigin({
+				requestedOrigin: buildOrigin,
+				requestedRunUrl: buildRunUrl,
+				title: titleLog,
+				inferred: inferBuildOriginFromSource({
+					kind: "application",
+					sourceType: application.sourceType,
+				}),
+			}),
+		},
 	);
 
 	const stagedBuildFiles: string[] = [];
@@ -554,10 +574,15 @@ export const rebuildApplication = async ({
 	applicationId,
 	titleLog = "Rebuild deployment",
 	descriptionLog = "",
+	buildOrigin,
+	buildRunUrl,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
 }) => {
 	const application = await findApplicationById(applicationId);
 	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
@@ -587,7 +612,18 @@ export const rebuildApplication = async ({
 			description: descriptionLog,
 		},
 		// build-policy hook: create the log on the host that will build.
-		{ buildServerId: buildPolicy.buildServerId },
+		{
+			buildServerId: buildPolicy.buildServerId,
+			...resolveDeploymentBuildOrigin({
+				requestedOrigin: buildOrigin,
+				requestedRunUrl: buildRunUrl,
+				title: titleLog,
+				inferred: inferBuildOriginFromSource({
+					kind: "application",
+					sourceType: application.sourceType,
+				}),
+			}),
+		},
 	);
 
 	const stagedBuildFiles: string[] = [];

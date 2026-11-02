@@ -20,6 +20,7 @@ import {
 } from "@dokploy/server/db/schema";
 import { and, desc, eq, inArray, isNull, max, or } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { type BuildOrigin, getBuildOriginsByService } from "./build-origin";
 import type {
 	OverviewBackup,
 	OverviewDomain,
@@ -100,6 +101,8 @@ async function getServicesOfType(
 		icon: "icon" in row ? (row.icon as string | null) : null,
 		type: config.type,
 		lastDeployAt: null,
+		buildOrigin: null,
+		buildRunUrl: null,
 	}));
 }
 
@@ -226,9 +229,32 @@ async function attachLastDeployAt(
 	});
 }
 
+// Only application/compose are built from or pulled as an image, so the others keep null.
+async function attachBuildOrigin(
+	services: OverviewService[],
+): Promise<OverviewService[]> {
+	const origins = await getBuildOriginsByService({
+		applicationIds: services
+			.filter((s) => s.type === "application")
+			.map((s) => s.id),
+		composeIds: services.filter((s) => s.type === "compose").map((s) => s.id),
+	});
+	return services.map((service) => {
+		const origin = origins.get(service.id);
+		if (
+			!origin ||
+			(service.type !== "application" && service.type !== "compose")
+		) {
+			return service;
+		}
+		return { ...service, ...origin };
+	});
+}
+
 export const getAllServicesForOrganization = async (
 	orgId: string,
 	accessedServices: string[] | null,
+	filter: { buildOrigin?: BuildOrigin } = {},
 ): Promise<OverviewService[]> => {
 	if (accessedServices !== null && accessedServices.length === 0) {
 		return [];
@@ -240,7 +266,11 @@ export const getAllServicesForOrganization = async (
 		),
 	);
 
-	return attachLastDeployAt(results.flat());
+	const withDeploys = await attachLastDeployAt(results.flat());
+	const withOrigin = await attachBuildOrigin(withDeploys);
+	return filter.buildOrigin
+		? withOrigin.filter((service) => service.buildOrigin === filter.buildOrigin)
+		: withOrigin;
 };
 
 type Owner = {

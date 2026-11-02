@@ -54,6 +54,7 @@ import {
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
 import { AlertBlock } from "@/components/shared/alert-block";
+import { BuildOriginBadge } from "@/components/shared/build-origin-badge";
 import { DateTooltip } from "@/components/shared/date-tooltip";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { FocusShortcutInput } from "@/components/shared/focus-shortcut-input";
@@ -136,6 +137,9 @@ export type Services = {
 	status?: "idle" | "running" | "done" | "error";
 	lastDeployDate?: Date | null;
 	icon?: string | null;
+	/** Applications and composes only: where the image was built (T-12149). */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
 };
 
 type Environment = Awaited<ReturnType<typeof findEnvironmentById>>;
@@ -175,6 +179,9 @@ export const extractServicesFromEnvironment = (
 				serverName: item?.server?.name || null,
 				lastDeployDate,
 				icon: item.icon || null,
+				buildOrigin: (item as { buildOrigin?: string }).buildOrigin ?? null,
+				buildRunUrl:
+					(item as { buildRunUrl?: string | null }).buildRunUrl ?? null,
 			};
 		}) || [];
 
@@ -266,6 +273,9 @@ export const extractServicesFromEnvironment = (
 				serverName: item?.server?.name || null,
 				lastDeployDate,
 				icon: item.icon || null,
+				buildOrigin: (item as { buildOrigin?: string }).buildOrigin ?? null,
+				buildRunUrl:
+					(item as { buildRunUrl?: string | null }).buildRunUrl ?? null,
 			};
 		}) || [];
 
@@ -1763,6 +1773,14 @@ const EnvironmentPage = (
 																						{service.serverName}
 																					</span>
 																				</div>
+																			)}
+																			{(service.type === "application" ||
+																				service.type === "compose") && (
+																				<BuildOriginBadge
+																					buildOrigin={service.buildOrigin}
+																					buildRunUrl={service.buildRunUrl}
+																					className="mb-1"
+																				/>
 																			)}
 																			<DateTooltip date={service.createdAt}>
 																				Created
