@@ -19,6 +19,12 @@ type PriorityFields = {
 type BuildOriginFields = {
 	buildOrigin?: "dokploy" | "github-actions" | "external";
 	buildRunUrl?: string;
+	/**
+	 * The live GitHub Actions row (deployment.registerExternalBuild) this deploy
+	 * continues instead of creating a second row (T-12686). Checked when the job
+	 * runs; ignored when it no longer fits.
+	 */
+	deploymentId?: string;
 };
 
 type DeployJob =
@@ -32,6 +38,7 @@ type DeployJob =
 			serverId?: string;
 			buildOrigin?: BuildOriginFields["buildOrigin"];
 			buildRunUrl?: BuildOriginFields["buildRunUrl"];
+			deploymentId?: BuildOriginFields["deploymentId"];
 			/**
 			 * build-policy hook: an image supplied in the deploy-hook body. When
 			 * present the job deploys it by digest and does not build.
@@ -50,6 +57,7 @@ type DeployJob =
 			freshVolumes?: boolean;
 			buildOrigin?: BuildOriginFields["buildOrigin"];
 			buildRunUrl?: BuildOriginFields["buildRunUrl"];
+			deploymentId?: BuildOriginFields["deploymentId"];
 	  }
 	| {
 			applicationId: string;

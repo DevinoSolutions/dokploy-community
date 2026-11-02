@@ -55,6 +55,109 @@ export const normalizeBuildRunUrl = (value: unknown): string | null => {
 };
 
 /**
+ * The parts of a (normalised) GitHub Actions run link: the repository (`owner/repo`), the run id and the run
+ * attempt when the link names one. Null for anything `normalizeBuildRunUrl` would drop.
+ */
+export const parseBuildRunUrl = (
+	value: unknown,
+): { repository: string; runId: string; attempt: string | null } | null => {
+	const url = normalizeBuildRunUrl(value);
+	if (!url) return null;
+	const match =
+		/^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)(?:\/attempts\/(\d+))?/.exec(
+			url,
+		);
+	return match?.[1] && match[2]
+		? { repository: match[1], runId: match[2], attempt: match[3] ?? null }
+		: null;
+};
+
+/**
+ * The run link a live row is stored and compared under: the run, plus its attempt when the link has one. A link to
+ * one job of the run (`/job/<id>`) is the run itself, so the two never become two rows. Null for an invalid link.
+ */
+export const canonicalBuildRunUrl = (value: unknown): string | null => {
+	const parts = parseBuildRunUrl(value);
+	return parts
+		? `https://github.com/${parts.repository}/actions/runs/${parts.runId}${
+				parts.attempt ? `/attempts/${parts.attempt}` : ""
+			}`
+		: null;
+};
+
+/**
+ * The state of the GitHub Actions run behind a live row (T-12686), as the `buildRunStatus` column stores it.
+ * `completed` is also what the deploy call sets when it takes the row over: from then on Dokploy's own deploy
+ * runs, and nothing follows the run for that row any more. `deploy_queued` is what the deploy call sets when it
+ * accepts the row, until the queue job takes it over: the deploy waits in Dokploy's queue and the workflow's gates
+ * ignore the row meanwhile.
+ */
+export const BUILD_RUN_STATUSES = [
+	"queued",
+	"in_progress",
+	"deploy_queued",
+	"completed",
+] as const;
+export type BuildRunStatus = (typeof BUILD_RUN_STATUSES)[number];
+
+/** The states in which a row still waits for GitHub: Dokploy has nothing running for it. */
+export const LIVE_BUILD_RUN_STATUSES = ["queued", "in_progress"] as const;
+
+/**
+ * A deployment row that exists while GitHub Actions still builds the image: registered by the workflow, not yet
+ * taken over by a deploy call. Nothing runs on Dokploy for it, so the watchdog and the restart sweep leave it alone.
+ */
+export const isLiveGithubBuild = (row: {
+	status?: string | null;
+	buildOrigin?: string | null;
+	buildRunStatus?: string | null;
+}) =>
+	row.status === "running" &&
+	row.buildOrigin === "github-actions" &&
+	// `deploy_queued`: the run is over or not, a deploy was accepted and waits in Dokploy's queue.
+	([...LIVE_BUILD_RUN_STATUSES, "deploy_queued"] as readonly string[]).includes(
+		row.buildRunStatus ?? "",
+	);
+
+/**
+ * What a live row says about itself: "Building on GitHub Actions · build · Build image (3/7)". Null for any row
+ * that is not waiting for its run. The step is the label the run poller keeps on the row.
+ */
+export const describeLiveGithubBuild = (row: {
+	status?: string | null;
+	buildOrigin?: string | null;
+	buildRunStatus?: string | null;
+	buildRunStep?: string | null;
+	externalBuildOnly?: boolean | null;
+	deployQueuedAt?: string | null;
+}): string | null => {
+	// The workflow's deploy call was accepted and waits in Dokploy's queue for a free slot.
+	if (
+		row.externalBuildOnly &&
+		row.deployQueuedAt &&
+		row.status === "running" &&
+		row.buildOrigin === "github-actions"
+	) {
+		return "GitHub Actions build finished · deploy waiting in the Dokploy queue";
+	}
+	// The run is over and the workflow's deploy call has not arrived yet.
+	if (
+		row.externalBuildOnly &&
+		row.status === "running" &&
+		row.buildOrigin === "github-actions" &&
+		row.buildRunStatus === "completed"
+	) {
+		return "GitHub Actions run finished · waiting for the deploy";
+	}
+	if (!isLiveGithubBuild(row)) return null;
+	const step = row.buildRunStep?.trim();
+	if (step) return `Building on GitHub Actions · ${step}`;
+	return row.buildRunStatus === "queued"
+		? "Waiting for GitHub Actions to start"
+		: "Building on GitHub Actions";
+};
+
+/**
  * The deployment title the dokploy-deploy action sends starts with "GHA " ("GHA <env> <sha8>: <subject> [run N.A]",
  * and "GHA rollback <env> to <prev>" for its rollback deploy). Used only when the caller sent no buildOrigin.
  */
@@ -93,13 +196,22 @@ export const composeFileHasBuildSection = (
 export const buildOriginJobFields = (input: {
 	buildOrigin?: string | null;
 	buildRunUrl?: string | null;
-}): { buildOrigin?: BuildOrigin; buildRunUrl?: string } => {
+	deploymentId?: string | null;
+}): {
+	buildOrigin?: BuildOrigin;
+	buildRunUrl?: string;
+	deploymentId?: string;
+} => {
 	const buildRunUrl = normalizeBuildRunUrl(input.buildRunUrl);
+	const deploymentId = input.deploymentId?.trim();
 	return {
 		...(isBuildOrigin(input.buildOrigin)
 			? { buildOrigin: input.buildOrigin }
 			: {}),
 		...(buildRunUrl ? { buildRunUrl } : {}),
+		// The live row (registerExternalBuild) this deploy continues; the job checks it
+		// still fits before using it (claimLiveGithubBuild).
+		...(deploymentId ? { deploymentId } : {}),
 	};
 };
 
@@ -175,6 +287,11 @@ export type BuildOriginDeploymentRow = {
 	finishedAt?: string | null;
 	buildOrigin: string | null;
 	buildRunUrl: string | null;
+	buildRepository?: string | null;
+	buildCommitSha?: string | null;
+	buildRunId?: string | null;
+	/** True for a row registered while GitHub builds that no deploy took over (T-12686). */
+	externalBuildOnly?: boolean | null;
 	scheduleId?: string | null;
 	backupId?: string | null;
 	volumeBackupId?: string | null;
@@ -188,6 +305,8 @@ const createdAtMs = (row: { createdAt: string }) => {
 
 /** A row that is a deployment of the service itself (not a schedule/backup/preview run). */
 const isServiceDeployment = (row: BuildOriginDeploymentRow) =>
+	// A row that only follows a GitHub build deployed nothing to Dokploy: it says nothing about what runs.
+	!row.externalBuildOnly &&
 	!row.scheduleId &&
 	!row.backupId &&
 	!row.volumeBackupId &&
@@ -355,15 +474,20 @@ const RUN_URL_PARTS =
 export const describeGithubActionsRun = (input: {
 	title?: string | null;
 	buildRunUrl?: string | null;
+	/** What a row registered while GitHub still builds stored (T-12686); it wins over the link and the title. */
+	buildRepository?: string | null;
+	buildCommitSha?: string | null;
+	buildRunId?: string | null;
 }): GithubActionsRunDetails => {
 	const fromTitle = parseGithubActionsTitle(input.title);
 	const runUrl = normalizeBuildRunUrl(input.buildRunUrl);
 	const parts = runUrl ? RUN_URL_PARTS.exec(runUrl) : null;
 	return {
-		buildRepository: parts?.[1] ?? null,
-		buildCommitSha: fromTitle.buildCommitSha,
+		buildRepository: input.buildRepository || parts?.[1] || null,
+		buildCommitSha:
+			input.buildCommitSha?.toLowerCase() || fromTitle.buildCommitSha,
 		buildEnvironment: fromTitle.buildEnvironment,
-		buildRunId: parts?.[2] ?? fromTitle.buildRunId,
+		buildRunId: input.buildRunId || parts?.[2] || fromTitle.buildRunId,
 	};
 };
 
@@ -377,6 +501,9 @@ export const withGithubActionsRunDetails = <
 		title?: string | null;
 		buildOrigin?: string | null;
 		buildRunUrl?: string | null;
+		buildRepository?: string | null;
+		buildCommitSha?: string | null;
+		buildRunId?: string | null;
 	},
 >(
 	rows: readonly T[],
@@ -477,6 +604,9 @@ export const describeServiceBuild = (
 	const built = describeGithubActionsRun({
 		title: row.title,
 		buildRunUrl: resolved.buildRunUrl,
+		buildRepository: row.buildRepository,
+		buildCommitSha: row.buildCommitSha,
+		buildRunId: row.buildRunId,
 	});
 	// What runs now is the action's rollback deploy (also when a service has nothing but rollbacks).
 	const rolledBack =

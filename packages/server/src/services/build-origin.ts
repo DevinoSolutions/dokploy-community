@@ -1,6 +1,6 @@
 import { db } from "@dokploy/server/db";
 import { applications, compose, deployments } from "@dokploy/server/db/schema";
-import { and, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
 	type BuildOriginDeploymentRow,
 	COMPOSE_BUILD_SECTION_SQL_PATTERN,
@@ -124,6 +124,7 @@ export const getBuildOriginsByService = async (input: {
 							: undefined,
 					),
 					// Only runs of the service itself, as in pickServiceBuildOrigin.
+					eq(deployments.externalBuildOnly, false),
 					isNull(deployments.scheduleId),
 					isNull(deployments.backupId),
 					isNull(deployments.volumeBackupId),

@@ -4,9 +4,10 @@ import {
 	deployments,
 	schedules,
 } from "@dokploy/server/db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../../db/index";
 import { markInterruptedFromJournal } from "../../services/deployment-queue-journal";
+import { notWaitingForGithubRun } from "../../services/live-build-claim";
 
 export const initCancelDeployments = async () => {
 	try {
@@ -26,7 +27,8 @@ export const initCancelDeployments = async () => {
 			})
 			.from(deployments)
 			.leftJoin(schedules, eq(deployments.scheduleId, schedules.scheduleId))
-			.where(eq(deployments.status, "running"));
+			// A row that waits for its GitHub Actions run survives a restart: nothing of it ran here.
+			.where(and(eq(deployments.status, "running"), notWaitingForGithubRun));
 
 		const deploymentIdsToCancel = runningDeployments
 			.filter(

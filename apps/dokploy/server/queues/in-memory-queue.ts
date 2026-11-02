@@ -255,6 +255,11 @@ export interface InMemoryQueueOptions {
 	now?: () => number;
 	/** Durable record of the queue; see `QueueJournal`. */
 	journal?: QueueJournal;
+	/**
+	 * Told which payloads left the queue WITHOUT running: removed while waiting, dropped as a duplicate, or replaced
+	 * by a newer deploy. A job that finishes or is released is not reported. Must not throw.
+	 */
+	onWaitingDropped?: (data: DeploymentJob[]) => void;
 }
 
 export class InMemoryQueue {
@@ -271,8 +276,10 @@ export class InMemoryQueue {
 	private readonly resolveConcurrency: InMemoryQueueOptions["resolveConcurrency"];
 	private readonly now: () => number;
 	private readonly journal?: QueueJournal;
+	private readonly onWaitingDropped?: (data: DeploymentJob[]) => void;
 
 	constructor(options: InMemoryQueueOptions) {
+		this.onWaitingDropped = options.onWaitingDropped;
 		this.resolveConcurrency = options.resolveConcurrency;
 		this.now = options.now ?? (() => Date.now());
 		this.journal = options.journal;
@@ -565,7 +572,7 @@ export class InMemoryQueue {
 			const removed = partition.waiting.filter((job) => job.id === id);
 			if (removed.length === 0) continue;
 			partition.waiting = partition.waiting.filter((job) => job.id !== id);
-			this.settle(removed);
+			this.discard(removed);
 			break;
 		}
 		return Promise.resolve();
@@ -582,7 +589,7 @@ export class InMemoryQueue {
 			const removed = partition.waiting.filter((job) => job.id === id);
 			if (removed.length === 0) continue;
 			partition.waiting = partition.waiting.filter((job) => job.id !== id);
-			this.settle(removed);
+			this.discard(removed);
 			return true;
 		}
 		return false;
@@ -706,7 +713,7 @@ export class InMemoryQueue {
 				return !match;
 			});
 		}
-		this.settle(dropped);
+		this.discard(dropped);
 		return dropped.length;
 	}
 
@@ -751,7 +758,7 @@ export class InMemoryQueue {
 			}
 			keptJobs.push(...survivors);
 		}
-		this.settle(dropped);
+		this.discard(dropped);
 		return {
 			kept: keptJobs.map((job) => this.summarize(job)),
 			removed: dropped.map((job) => this.summarize(job)),
@@ -803,15 +810,33 @@ export class InMemoryQueue {
 			return typeof title === "string" ? [title] : [];
 		};
 		const titles = dropped.flatMap(titleOf);
+		// A waiting deploy may carry a registered GitHub Actions deployment (T-12686). A plain deploy (a UI redeploy, a
+		// registry webhook) that merges over it must not cancel that row: the merged job keeps the id, so the row is
+		// still taken over when it runs. Only a payload whose id the merged job does not carry is lost.
+		const registeredId = (data: DeploymentJob) =>
+			(data as { deploymentId?: string }).deploymentId;
+		const keptId =
+			registeredId(incoming) ??
+			(target ? registeredId(target.data) : undefined) ??
+			dropped.map((job) => registeredId(job.data)).find(Boolean);
+		const merged =
+			keptId && !registeredId(incoming)
+				? ({ ...incoming, deploymentId: keptId } as DeploymentJob)
+				: incoming;
+		const lost = (data: DeploymentJob) =>
+			Boolean(registeredId(data)) && registeredId(data) !== keptId;
 		this.settle(dropped);
+		this.reportDropped(dropped.map((job) => job.data).filter(lost));
 		if (target) {
 			titles.unshift(...titleOf(target));
-			target.data = incoming;
+			// The payload that is replaced will never run.
+			this.reportDropped([target.data].filter(lost));
+			target.data = merged;
 			const journal = this.journal;
 			if (journal?.updated) {
 				const { journalId } = target;
 				const update = journal.updated.bind(journal);
-				this.notify(() => update(journalId, incoming));
+				this.notify(() => update(journalId, merged));
 			}
 		}
 		return {
@@ -828,8 +853,23 @@ export class InMemoryQueue {
 			dropped.push(...partition.waiting);
 			partition.waiting = [];
 		}
-		this.settle(dropped);
+		this.discard(dropped);
 		return dropped.length;
+	}
+
+	/** A waiting job that will never run: settle it and tell the owner of the queue what it carried. */
+	private discard(jobs: InternalJob[]) {
+		this.settle(jobs);
+		this.reportDropped(jobs.map((job) => job.data));
+	}
+
+	private reportDropped(data: DeploymentJob[]) {
+		if (data.length === 0 || !this.onWaitingDropped) return;
+		try {
+			this.onWaitingDropped(data);
+		} catch {
+			// A hook of the owner must never affect the queue.
+		}
 	}
 
 	/** Tell the journal these jobs are gone (finished, failed or cancelled). */

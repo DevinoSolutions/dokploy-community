@@ -29,13 +29,13 @@ import {
 	findDomainsByComposeId,
 	findEnvironmentById,
 	findProjectById,
+	GithubHostError,
+	GitUrlRefusedError,
 	getAccessibleServerIds,
 	getComposeBuildOverridePath,
 	getComposeContainer,
 	getContainerLogs,
 	getWebServerSettings,
-	GithubHostError,
-	GitUrlRefusedError,
 	IS_CLOUD,
 	// build-policy hook: narrows a thrown support error to a 400.
 	isBuildPolicyError,
@@ -49,11 +49,13 @@ import {
 	removeDeploymentsByComposeId,
 	removeDomainById,
 	removeUptimelyServiceRows,
+	requestLiveBuildDeploy,
 	scanServiceForTransfer,
 	startCompose,
 	stopCompose,
 	updateCompose,
 	updateDeploymentStatus,
+	withdrawLiveBuildDeploy,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
 import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
@@ -102,13 +104,6 @@ import { z } from "zod";
 import { slugify } from "@/lib/slug";
 import { resolveHostIpForOrg } from "@/server/api/utils/local-host-access";
 import {
-	assertSafeTemplateGitUrl,
-	buildGuardedTemplateReadCommand,
-	getTemplateReadRefusal,
-	TEMPLATE_CLONE_ENV,
-	TemplateFileRefusedError,
-} from "@/server/utils/template-file-read";
-import {
 	apiCreateCompose,
 	apiDeleteCompose,
 	apiDeployCompose,
@@ -133,6 +128,13 @@ import {
 } from "@/server/queues/queueSetup";
 import { applyTemplateToCompose } from "@/server/utils/apply-template";
 import { cancelDeployment, deploy } from "@/server/utils/deploy";
+import {
+	assertSafeTemplateGitUrl,
+	buildGuardedTemplateReadCommand,
+	getTemplateReadRefusal,
+	TEMPLATE_CLONE_ENV,
+	TemplateFileRefusedError,
+} from "@/server/utils/template-file-read";
 import {
 	runTransferWithDowntime,
 	validateTransferTargetServer,
@@ -949,94 +951,111 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
-			const compose = await findComposeById(input.composeId);
-
-			const jobData: DeploymentJob = {
-				composeId: input.composeId,
-				titleLog: input.title || "Manual deployment",
-				type: "deploy",
-				applicationType: "compose",
-				descriptionLog: input.description || "",
-				server: !!compose.serverId,
-				serverId: compose.serverId ?? undefined,
-				freshVolumes: input.freshVolumes,
-				...buildOriginJobFields(input),
-			};
-
-			if (IS_CLOUD && compose.serverId) {
-				deploy(jobData).catch((error) => {
-					console.error("Background deployment failed:", error);
+			if (input.deploymentId) {
+				await requestLiveBuildDeploy({
+					deploymentId: input.deploymentId,
+					kind: "compose",
+					serviceId: input.composeId,
 				});
+			}
+			try {
+				const compose = await findComposeById(input.composeId);
+
+				const jobData: DeploymentJob = {
+					composeId: input.composeId,
+					titleLog: input.title || "Manual deployment",
+					type: "deploy",
+					applicationType: "compose",
+					descriptionLog: input.description || "",
+					server: !!compose.serverId,
+					serverId: compose.serverId ?? undefined,
+					freshVolumes: input.freshVolumes,
+					...buildOriginJobFields(input),
+				};
+
+				if (IS_CLOUD && compose.serverId) {
+					deploy(jobData).catch((error) => {
+						console.error("Background deployment failed:", error);
+					});
+					await audit(ctx, {
+						action: "deploy",
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+					});
+					if (!input.priority) return true;
+					// Cloud runs the deploy straight away: there is no queue to go ahead
+					// in, and the caller is told so rather than left to assume.
+					return {
+						success: true,
+						message: "Deployment started",
+						composeId: compose.composeId,
+						priority: await recordPriorityUse(ctx, {
+							resourceType: "compose",
+							resourceId: input.composeId,
+							resourceName: compose.name,
+							via: "deploy",
+							outcome: undefined,
+						}),
+					};
+				}
+				const addJob = () =>
+					myQueue.add(
+						"deployments",
+						{
+							...jobData,
+							...(input.priority
+								? { priority: true, priorityBy: ctx.user.id }
+								: {}),
+						},
+						{
+							removeOnComplete: true,
+							removeOnFail: true,
+						},
+					);
+				// A priority request wants to jump the queue, so it is never folded into
+				// a waiting job (which would keep that job's place). Everything else
+				// coalesces and queues as one step per compose, so a second click cannot
+				// slip in between the two and leave a duplicate. A waiting deploy that
+				// took this one over means there is nothing to enqueue.
+				const queued = input.priority
+					? await addJob()
+					: await serializeManualDeploy(
+							`compose:${input.composeId}`,
+							async () =>
+								(await coalesceManualComposeDeploy(compose, jobData, ctx))
+									.merged
+									? undefined
+									: addJob(),
+						);
 				await audit(ctx, {
 					action: "deploy",
 					resourceType: "compose",
 					resourceId: input.composeId,
 					resourceName: compose.name,
 				});
-				if (!input.priority) return true;
-				// Cloud runs the deploy straight away: there is no queue to go ahead
-				// in, and the caller is told so rather than left to assume.
+				const priority = input.priority
+					? await recordPriorityUse(ctx, {
+							resourceType: "compose",
+							resourceId: input.composeId,
+							resourceName: compose.name,
+							via: "deploy",
+							jobId: queued?.id,
+							outcome: queued?.priority,
+						})
+					: undefined;
 				return {
 					success: true,
-					message: "Deployment started",
+					message: "Deployment queued",
 					composeId: compose.composeId,
-					priority: await recordPriorityUse(ctx, {
-						resourceType: "compose",
-						resourceId: input.composeId,
-						resourceName: compose.name,
-						via: "deploy",
-						outcome: undefined,
-					}),
+					...(priority ? { priority } : {}),
 				};
+			} catch (error) {
+				// The deploy was never queued: the run poller owns the row again.
+				if (input.deploymentId)
+					await withdrawLiveBuildDeploy(input.deploymentId);
+				throw error;
 			}
-			const addJob = () =>
-				myQueue.add(
-					"deployments",
-					{
-						...jobData,
-						...(input.priority
-							? { priority: true, priorityBy: ctx.user.id }
-							: {}),
-					},
-					{
-						removeOnComplete: true,
-						removeOnFail: true,
-					},
-				);
-			// A priority request wants to jump the queue, so it is never folded into
-			// a waiting job (which would keep that job's place). Everything else
-			// coalesces and queues as one step per compose, so a second click cannot
-			// slip in between the two and leave a duplicate. A waiting deploy that
-			// took this one over means there is nothing to enqueue.
-			const queued = input.priority
-				? await addJob()
-				: await serializeManualDeploy(`compose:${input.composeId}`, async () =>
-						(await coalesceManualComposeDeploy(compose, jobData, ctx)).merged
-							? undefined
-							: addJob(),
-					);
-			await audit(ctx, {
-				action: "deploy",
-				resourceType: "compose",
-				resourceId: input.composeId,
-				resourceName: compose.name,
-			});
-			const priority = input.priority
-				? await recordPriorityUse(ctx, {
-						resourceType: "compose",
-						resourceId: input.composeId,
-						resourceName: compose.name,
-						via: "deploy",
-						jobId: queued?.id,
-						outcome: queued?.priority,
-					})
-				: undefined;
-			return {
-				success: true,
-				message: "Deployment queued",
-				composeId: compose.composeId,
-				...(priority ? { priority } : {}),
-			};
 		}),
 	redeploy: protectedProcedure
 		.input(apiRedeployCompose)
@@ -1045,92 +1064,109 @@ export const composeRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
-			const compose = await findComposeById(input.composeId);
-			const jobData: DeploymentJob = {
-				composeId: input.composeId,
-				titleLog: input.title || "Rebuild deployment",
-				type: "redeploy",
-				applicationType: "compose",
-				descriptionLog: input.description || "",
-				server: !!compose.serverId,
-				serverId: compose.serverId ?? undefined,
-				freshVolumes: input.freshVolumes,
-				...buildOriginJobFields(input),
-			};
-			if (IS_CLOUD && compose.serverId) {
-				deploy(jobData).catch((error) => {
-					console.error("Background deployment failed:", error);
+			if (input.deploymentId) {
+				await requestLiveBuildDeploy({
+					deploymentId: input.deploymentId,
+					kind: "compose",
+					serviceId: input.composeId,
 				});
+			}
+			try {
+				const compose = await findComposeById(input.composeId);
+				const jobData: DeploymentJob = {
+					composeId: input.composeId,
+					titleLog: input.title || "Rebuild deployment",
+					type: "redeploy",
+					applicationType: "compose",
+					descriptionLog: input.description || "",
+					server: !!compose.serverId,
+					serverId: compose.serverId ?? undefined,
+					freshVolumes: input.freshVolumes,
+					...buildOriginJobFields(input),
+				};
+				if (IS_CLOUD && compose.serverId) {
+					deploy(jobData).catch((error) => {
+						console.error("Background deployment failed:", error);
+					});
+					await audit(ctx, {
+						action: "deploy",
+						resourceType: "compose",
+						resourceId: input.composeId,
+						resourceName: compose.name,
+					});
+					if (!input.priority) return true;
+					// Cloud runs the deploy straight away: there is no queue to go ahead
+					// in, and the caller is told so rather than left to assume.
+					return {
+						success: true,
+						message: "Redeployment started",
+						composeId: compose.composeId,
+						priority: await recordPriorityUse(ctx, {
+							resourceType: "compose",
+							resourceId: input.composeId,
+							resourceName: compose.name,
+							via: "redeploy",
+							outcome: undefined,
+						}),
+					};
+				}
+				const addJob = () =>
+					myQueue.add(
+						"deployments",
+						{
+							...jobData,
+							...(input.priority
+								? { priority: true, priorityBy: ctx.user.id }
+								: {}),
+						},
+						{
+							removeOnComplete: true,
+							removeOnFail: true,
+						},
+					);
+				// A priority request wants to jump the queue, so it is never folded into
+				// a waiting job (which would keep that job's place). Everything else
+				// coalesces and queues as one step per compose, so a second click cannot
+				// slip in between the two and leave a duplicate. A waiting deploy that
+				// took this one over means there is nothing to enqueue.
+				const queued = input.priority
+					? await addJob()
+					: await serializeManualDeploy(
+							`compose:${input.composeId}`,
+							async () =>
+								(await coalesceManualComposeDeploy(compose, jobData, ctx))
+									.merged
+									? undefined
+									: addJob(),
+						);
 				await audit(ctx, {
 					action: "deploy",
 					resourceType: "compose",
 					resourceId: input.composeId,
 					resourceName: compose.name,
 				});
-				if (!input.priority) return true;
-				// Cloud runs the deploy straight away: there is no queue to go ahead
-				// in, and the caller is told so rather than left to assume.
+				const priority = input.priority
+					? await recordPriorityUse(ctx, {
+							resourceType: "compose",
+							resourceId: input.composeId,
+							resourceName: compose.name,
+							via: "redeploy",
+							jobId: queued?.id,
+							outcome: queued?.priority,
+						})
+					: undefined;
 				return {
 					success: true,
-					message: "Redeployment started",
+					message: "Redeployment queued",
 					composeId: compose.composeId,
-					priority: await recordPriorityUse(ctx, {
-						resourceType: "compose",
-						resourceId: input.composeId,
-						resourceName: compose.name,
-						via: "redeploy",
-						outcome: undefined,
-					}),
+					...(priority ? { priority } : {}),
 				};
+			} catch (error) {
+				// The deploy was never queued: the run poller owns the row again.
+				if (input.deploymentId)
+					await withdrawLiveBuildDeploy(input.deploymentId);
+				throw error;
 			}
-			const addJob = () =>
-				myQueue.add(
-					"deployments",
-					{
-						...jobData,
-						...(input.priority
-							? { priority: true, priorityBy: ctx.user.id }
-							: {}),
-					},
-					{
-						removeOnComplete: true,
-						removeOnFail: true,
-					},
-				);
-			// A priority request wants to jump the queue, so it is never folded into
-			// a waiting job (which would keep that job's place). Everything else
-			// coalesces and queues as one step per compose, so a second click cannot
-			// slip in between the two and leave a duplicate. A waiting deploy that
-			// took this one over means there is nothing to enqueue.
-			const queued = input.priority
-				? await addJob()
-				: await serializeManualDeploy(`compose:${input.composeId}`, async () =>
-						(await coalesceManualComposeDeploy(compose, jobData, ctx)).merged
-							? undefined
-							: addJob(),
-					);
-			await audit(ctx, {
-				action: "deploy",
-				resourceType: "compose",
-				resourceId: input.composeId,
-				resourceName: compose.name,
-			});
-			const priority = input.priority
-				? await recordPriorityUse(ctx, {
-						resourceType: "compose",
-						resourceId: input.composeId,
-						resourceName: compose.name,
-						via: "redeploy",
-						jobId: queued?.id,
-						outcome: queued?.priority,
-					})
-				: undefined;
-			return {
-				success: true,
-				message: "Redeployment queued",
-				composeId: compose.composeId,
-				...(priority ? { priority } : {}),
-			};
 		}),
 	stop: protectedProcedure
 		.input(apiFindCompose)

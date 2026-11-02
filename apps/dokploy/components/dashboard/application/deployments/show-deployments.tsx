@@ -1,4 +1,7 @@
-import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
+import {
+	isGithubActionsDeployment,
+	isLiveGithubBuild,
+} from "@dokploy/server/services/build-origin-shared";
 import copy from "copy-to-clipboard";
 import {
 	ChevronDown,
@@ -17,7 +20,11 @@ import {
 import React, { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AlertBlock } from "@/components/shared/alert-block";
-import { GithubActionsDeploymentMark } from "@/components/shared/build-origin-badge";
+import {
+	DokployDeploymentMark,
+	GithubActionsDeploymentMark,
+	LiveGithubBuildStatus,
+} from "@/components/shared/build-origin-badge";
 import { DateTooltip } from "@/components/shared/date-tooltip";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -91,6 +98,13 @@ export const ShowDeployments = ({
 		);
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
+
+	// The open log follows its row: a live GitHub Actions row changes under the dialog (live, then handed over).
+	const openLog = activeLog
+		? (deployments?.find(
+				(deployment) => deployment.deploymentId === activeLog.deploymentId,
+			) ?? activeLog)
+		: null;
 
 	// Who cancelled a deployment: only asked for once one is listed as
 	// cancelled, and re-read only while a recent cancellation has no entry yet,
@@ -242,9 +256,11 @@ export const ShowDeployments = ({
 		const mostRecentDeployment = deployments[0];
 
 		if (
-			!mostRecentDeployment ||
-			mostRecentDeployment.status !== "running" ||
-			!mostRecentDeployment.startedAt
+			mostRecentDeployment?.status !== "running" ||
+			!mostRecentDeployment.startedAt ||
+			// Waiting for GitHub is not a stuck Dokploy build.
+			mostRecentDeployment.externalBuildOnly ||
+			isLiveGithubBuild(mostRecentDeployment)
 		) {
 			return null;
 		}
@@ -524,6 +540,7 @@ export const ShowDeployments = ({
 														</button>
 													);
 												})()}
+											<LiveGithubBuildStatus row={deployment} />
 											{cancelledBy && (
 												<span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
 													{describeCancelledBy(cancelledBy)}
@@ -552,13 +569,17 @@ export const ShowDeployments = ({
 											{isGithubActionsDeployment(
 												deployment,
 												serviceBuildOrigin,
-											) && (
+											) ? (
 												<GithubActionsDeploymentMark
 													buildRunUrl={deployment.buildRunUrl}
 													buildRepository={deployment.buildRepository}
 													buildCommitSha={deployment.buildCommitSha}
 													buildRunId={deployment.buildRunId}
 												/>
+											) : (
+												(type === "application" || type === "compose") && (
+													<DokployDeploymentMark />
+												)
 											)}
 											{deployment.startedAt && deployment.finishedAt && (
 												<Badge
@@ -727,12 +748,14 @@ export const ShowDeployments = ({
 					)}
 					onClose={() => setActiveLog(null)}
 					logPath={activeLog?.logPath || ""}
-					errorMessage={activeLog?.errorMessage || ""}
+					errorMessage={openLog?.errorMessage || ""}
 					unavailableMessage={needsLogHost ? logHost?.unavailable : undefined}
 					githubActions={
-						activeLog &&
-						isGithubActionsDeployment(activeLog, serviceBuildOrigin)
-							? { runUrl: activeLog.buildRunUrl ?? null }
+						openLog && isGithubActionsDeployment(openLog, serviceBuildOrigin)
+							? {
+									runUrl: openLog.buildRunUrl ?? null,
+									live: isLiveGithubBuild(openLog),
+								}
 							: undefined
 					}
 				/>

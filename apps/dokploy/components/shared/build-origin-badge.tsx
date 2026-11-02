@@ -1,10 +1,11 @@
 import {
 	BUILD_ORIGIN_LABELS,
+	describeLiveGithubBuild,
 	githubCommitUrl,
 	isBuildOrigin,
 	normalizeBuildRunUrl,
 } from "@dokploy/server/services/build-origin-shared";
-import { ExternalLink, Hammer, Package } from "lucide-react";
+import { ExternalLink, Hammer, Loader2, Package } from "lucide-react";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
 import { OpensInNewTab } from "@/components/shared/opens-in-new-tab";
 import { Badge } from "@/components/ui/badge";
@@ -88,8 +89,55 @@ export const BuildOriginBadge = ({
 };
 
 /**
- * A Deployments tab row built in GitHub Actions: the GitHub mark, the commit (linked when the repository is
- * known) and the run link. The duration sits next to it in the row itself.
+ * The mark of a deployment Dokploy built or deployed on its own: quiet, so the GitHub rows next to it stand out
+ * without a row having no mark at all.
+ */
+export const DokployDeploymentMark = () => (
+	<span className="flex items-center gap-1 text-[10px] normal-case text-muted-foreground">
+		<Hammer className="size-3" />
+		Dokploy
+	</span>
+);
+
+/**
+ * What a row that still waits for its GitHub Actions run shows: a spinner and the step that runs now. Renders
+ * nothing for any other row.
+ */
+export const LiveGithubBuildStatus = ({
+	row,
+	className,
+}: {
+	row: {
+		status?: string | null;
+		buildOrigin?: string | null;
+		buildRunStatus?: string | null;
+		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
+	};
+	className?: string;
+}) => {
+	const label = describeLiveGithubBuild(row);
+	if (!label) return null;
+	return (
+		<span
+			role="status"
+			className={cn(
+				"flex items-center gap-1.5 text-xs normal-case text-muted-foreground",
+				className,
+			)}
+		>
+			<Loader2 className="size-3 shrink-0 animate-spin" />
+			<span className="min-w-0 truncate" title={label}>
+				{label}
+			</span>
+		</span>
+	);
+};
+
+/**
+ * A Deployments row built in GitHub Actions: the GitHub mark with its name, the commit (linked when the
+ * repository is known) and "Open run". The duration sits next to it in the row itself.
  */
 export const GithubActionsDeploymentMark = ({
 	buildRunUrl,
@@ -105,44 +153,40 @@ export const GithubActionsDeploymentMark = ({
 	const runUrl = normalizeBuildRunUrl(buildRunUrl);
 	const commitUrl = githubCommitUrl(buildRepository, buildCommitSha);
 	const shortSha = buildCommitSha?.slice(0, 7) ?? null;
-	const runLabel = buildRunId ? `Run #${buildRunId}` : "Open run";
 	return (
 		<span className="flex flex-wrap items-center gap-2 normal-case">
 			<Badge variant="outline" className="gap-1 text-[10px]">
 				<GithubIcon />
-				{shortSha ? (
-					commitUrl ? (
-						<a
-							href={commitUrl}
-							target="_blank"
-							rel="noopener noreferrer"
-							className="font-mono hover:underline"
-						>
-							{shortSha}
-							<OpensInNewTab />
-						</a>
-					) : (
-						<span className="font-mono">{shortSha}</span>
-					)
-				) : (
-					"GitHub Actions"
-				)}
+				GitHub Actions
 			</Badge>
-			{runUrl ? (
+			{shortSha &&
+				(commitUrl ? (
+					<a
+						href={commitUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+						className="font-mono text-xs text-muted-foreground hover:underline"
+					>
+						{shortSha}
+						<OpensInNewTab />
+					</a>
+				) : (
+					<span className="font-mono text-xs text-muted-foreground">
+						{shortSha}
+					</span>
+				))}
+			{runUrl && (
 				<a
 					href={runUrl}
 					target="_blank"
 					rel="noopener noreferrer"
+					title={buildRunId ? `Run #${buildRunId}` : undefined}
 					className="flex items-center gap-1 text-xs text-primary hover:underline"
 				>
-					{runLabel}
+					Open run
 					<ExternalLink className="size-3" />
 					<OpensInNewTab />
 				</a>
-			) : (
-				buildRunId && (
-					<span className="text-xs text-muted-foreground">{runLabel}</span>
-				)
 			)}
 		</span>
 	);
@@ -154,16 +198,21 @@ export const GithubActionsDeploymentMark = ({
  */
 export const GithubActionsLogBanner = ({
 	buildRunUrl,
+	live = false,
 }: {
 	buildRunUrl?: string | null;
+	/** True while the run still builds: the steps stream into the log below. */
+	live?: boolean;
 }) => {
 	const runUrl = normalizeBuildRunUrl(buildRunUrl);
 	return (
 		<div className="flex flex-wrap items-center justify-between gap-3 rounded border bg-muted/50 px-4 py-3">
 			<div className="flex items-center gap-2 text-sm">
-				<GithubIcon />
+				{live ? <Loader2 className="size-4 animate-spin" /> : <GithubIcon />}
 				<span>
-					Built and deployed by GitHub Actions. The build log is on GitHub.
+					{live
+						? "GitHub Actions is building this now. Its steps appear below; the full build log is on GitHub."
+						: "Built and deployed by GitHub Actions. The build log is on GitHub."}
 				</span>
 			</div>
 			{runUrl ? (

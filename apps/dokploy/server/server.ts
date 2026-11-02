@@ -183,6 +183,10 @@ void app
 					"./queues/deployment-control"
 				);
 				startDeploymentWatchdog();
+				// Follows the GitHub Actions runs behind the live deployment rows
+				// (deployment.registerExternalBuild): one loop, one cheap query when none.
+				const { startGithubRunPoller } = await import("@dokploy/server");
+				startGithubRunPoller();
 			}
 		} catch (e) {
 			console.error("Main Server Error", e);
