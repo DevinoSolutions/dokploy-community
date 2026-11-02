@@ -117,6 +117,7 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 - **Opt-in rolling replace for Compose services** (off by default): the new replica must pass its healthcheck before the old container is stopped, so a redeploy of a selected service does not leave a window with no backend
 - **Docker Compose auto-rollback**, native AWS ECR registries, pre/post-deploy command hooks, and `DOKPLOY_*` environment variables plus the git commit hash and message as build args
 - **Project icons and export**, bulk invitations, and 30-day login sessions (configurable with `DOKPLOY_SESSION_DAYS`)
+- **Live GitHub Actions deployments**: a workflow can register its build with `deployment.registerExternalBuild` before it starts, so the Deployments tab, the Deployments page and the home list show the run while GitHub builds it: a GitHub mark, the step that runs now, the commit and an "Open run" link. The later deploy call (with the returned `deploymentId`) continues the same deployment and log, and a build that fails before deploying ends it with `deployment.finishExternalBuild`. Every deployment row is marked GitHub Actions or Dokploy.
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
