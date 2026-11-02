@@ -531,7 +531,10 @@ export const describeImageReference = (
 	};
 };
 
-/** The `image:` values of a compose file, in order, without duplicates. A line scan, not a YAML parse. */
+/**
+ * The `image:` values of a compose file, in order, without duplicates. A line scan, not a YAML parse. An image
+ * written with a variable (`${TAG}`, `$TAG`) is left out: the panel would show the placeholder, not what runs.
+ */
 export const extractComposeImages = (
 	composeFile: string | null | undefined,
 ): string[] => {
@@ -541,7 +544,9 @@ export const extractComposeImages = (
 		/^[ \t]+image[ \t]*:[ \t]*["']?([^\s"'#]+)/gm,
 	)) {
 		const image = match[1];
-		if (image && !images.includes(image)) images.push(image);
+		if (image && !image.includes("$") && !images.includes(image)) {
+			images.push(image);
+		}
 	}
 	return images;
 };

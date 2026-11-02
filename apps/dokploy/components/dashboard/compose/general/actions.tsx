@@ -72,11 +72,11 @@ export const ComposeActions = ({ composeId }: Props) => {
 					>
 						<DialogAction
 							title={
-								isGithubActions ? "Redeploy current image" : "Deploy Compose"
+								isGithubActions ? "Redeploy current version" : "Deploy Compose"
 							}
 							description={
 								isGithubActions
-									? "Dokploy will pull the current image again and restart this compose. Nothing is built."
+									? "Dokploy will pull the current images again and restart this compose. Nothing is built."
 									: "Are you sure you want to deploy this compose?"
 							}
 							type="default"
@@ -87,7 +87,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 									.then(() => {
 										toast.success(
 											isGithubActions
-												? "Redeploying the current image"
+												? "Redeploying the current version"
 												: "Compose deployed successfully",
 										);
 										refetch();
@@ -109,14 +109,14 @@ export const ComposeActions = ({ composeId }: Props) => {
 									<TooltipTrigger asChild>
 										<div className="flex items-center">
 											<Rocket className="size-4 mr-1" />
-											{isGithubActions ? "Redeploy current image" : "Deploy"}
+											{isGithubActions ? "Redeploy current version" : "Deploy"}
 										</div>
 									</TooltipTrigger>
 									<TooltipPrimitive.Portal>
 										<TooltipContent sideOffset={5} className="z-60">
 											<p>
 												{isGithubActions
-													? "Pulls the current image again and restarts the compose"
+													? "Pulls the current images again and restarts the compose"
 													: "Downloads the source code and performs a complete build"}
 											</p>
 										</TooltipContent>

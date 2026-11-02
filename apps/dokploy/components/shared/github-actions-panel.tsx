@@ -11,6 +11,7 @@ import { type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
 import { DateTooltip } from "@/components/shared/date-tooltip";
+import { OpensInNewTab } from "@/components/shared/opens-in-new-tab";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -65,6 +66,7 @@ const ExternalLinkText = ({
 	>
 		{children}
 		<ExternalLink className="size-3" />
+		<OpensInNewTab />
 	</a>
 );
 

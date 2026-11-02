@@ -602,6 +602,22 @@ describe("extractComposeImages", () => {
 		]);
 	});
 
+	// T-12502: the panel would show the placeholder, not what runs.
+	test("leaves out an image written with a variable", () => {
+		const file = [
+			"services:",
+			"  web:",
+			"    image: ghcr.io/o/web:${TAG}",
+			"  api:",
+			"    image: $API_IMAGE",
+			'    image: "${REGISTRY:-ghcr.io}/o/api:1"',
+			"  worker:",
+			"    image: ghcr.io/o/worker:1",
+			"",
+		].join("\n");
+		expect(extractComposeImages(file)).toEqual(["ghcr.io/o/worker:1"]);
+	});
+
 	test("is empty for no compose file or no image", () => {
 		expect(extractComposeImages(null)).toEqual([]);
 		expect(extractComposeImages("services:\n  web:\n    build: .\n")).toEqual(
