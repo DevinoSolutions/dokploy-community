@@ -5,6 +5,7 @@ import {
 	computeServiceBuildOrigins,
 	hasGithubActionsTitleMarker,
 	inferBuildOriginFromSource,
+	isGithubActionsDeployment,
 	isGithubActionsRollbackTitle,
 	normalizeBuildRunUrl,
 	pickServiceBuildOrigin,
@@ -557,5 +558,32 @@ describe("computeServiceBuildOrigins", () => {
 		expect(origins.get("app-img")?.buildOrigin).toBe("external");
 		expect(origins.get("cmp-raw")?.buildOrigin).toBe("github-actions");
 		expect(origins.get("cmp-build")?.buildOrigin).toBe("dokploy");
+	});
+});
+
+describe("isGithubActionsDeployment", () => {
+	test("a row with a stored origin says so itself", () => {
+		expect(
+			isGithubActionsDeployment({ buildOrigin: "github-actions", title: "x" }),
+		).toBe(true);
+		expect(
+			isGithubActionsDeployment(
+				{ buildOrigin: "dokploy", title: "GHA production x" },
+				"github-actions",
+			),
+		).toBe(false);
+	});
+
+	test("an old row counts only with the GHA title on a GitHub Actions service", () => {
+		const old = { buildOrigin: null, title: "GHA production x [run 1.1]" };
+		expect(isGithubActionsDeployment(old, "github-actions")).toBe(true);
+		expect(isGithubActionsDeployment(old, "dokploy")).toBe(false);
+		expect(isGithubActionsDeployment(old)).toBe(false);
+		expect(
+			isGithubActionsDeployment(
+				{ buildOrigin: null, title: "Manual deployment" },
+				"github-actions",
+			),
+		).toBe(false);
 	});
 });

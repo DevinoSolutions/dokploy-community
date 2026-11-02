@@ -2,6 +2,7 @@ import copy from "copy-to-clipboard";
 import { Check, Copy, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AnalyzeLogs } from "@/components/dashboard/docker/logs/analyze-logs";
+import { GithubActionsLogBanner } from "@/components/shared/build-origin-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -23,6 +24,8 @@ interface Props {
 	errorMessage?: string;
 	// Set when the log no longer exists on any server: shown in place of the log.
 	unavailableMessage?: string;
+	// Set when the deployment was built in GitHub Actions: Dokploy has no build output, so the log gets a link.
+	githubActions?: { runUrl: string | null };
 }
 export const ShowDeployment = ({
 	logPath,
@@ -31,6 +34,7 @@ export const ShowDeployment = ({
 	serverId,
 	errorMessage,
 	unavailableMessage,
+	githubActions,
 }: Props) => {
 	const [data, setData] = useState("");
 	const [showExtraLogs, setShowExtraLogs] = useState(false);
@@ -191,6 +195,9 @@ export const ShowDeployment = ({
 					</DialogDescription>
 				</DialogHeader>
 
+				{githubActions && (
+					<GithubActionsLogBanner buildRunUrl={githubActions.runUrl} />
+				)}
 				<div
 					ref={scrollRef}
 					onScroll={handleScroll}

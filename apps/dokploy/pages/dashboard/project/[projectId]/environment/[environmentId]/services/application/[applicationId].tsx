@@ -440,7 +440,9 @@ const Service = (
 													id={applicationId}
 													type="application"
 												/>
-												<ShowBuildServer applicationId={applicationId} />
+												{data?.buildOrigin !== "github-actions" && (
+													<ShowBuildServer applicationId={applicationId} />
+												)}
 												{/* build-policy */}
 												<ShowRequiredChecks applicationId={applicationId} />
 												<WatchdogExclusion id={applicationId} type="application" />

@@ -231,6 +231,20 @@ export const pickServiceBuildOrigin = (
 	});
 };
 
+/**
+ * Whether one deployment row was built in GitHub Actions, for the Deployments tab. A row with a stored origin
+ * says so itself. A row from before the column existed counts only when its service is GitHub Actions built
+ * (so a git-source service with an old "GHA " title is not) and its title carries the action's marker.
+ */
+export const isGithubActionsDeployment = (
+	row: { buildOrigin?: string | null; title?: string | null },
+	serviceBuildOrigin?: string | null,
+) =>
+	isBuildOrigin(row.buildOrigin)
+		? row.buildOrigin === "github-actions"
+		: serviceBuildOrigin === "github-actions" &&
+			hasGithubActionsTitleMarker(row.title);
+
 export const BUILD_ORIGIN_LABELS: Record<
 	BuildOrigin,
 	{ label: string; description: string }
