@@ -1,4 +1,5 @@
 import { renderBuildStartMarker } from "@dokploy/server/services/build-origin-shared";
+import { GITHUB_LOG_PREFIX } from "@dokploy/server/services/github-run-progress";
 import copy from "copy-to-clipboard";
 import { Check, Copy, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -26,7 +27,8 @@ interface Props {
 	// Set when the log no longer exists on any server: shown in place of the log.
 	unavailableMessage?: string;
 	// Set when the deployment was built in GitHub Actions: Dokploy has no build output, so the log gets a link.
-	githubActions?: { runUrl: string | null };
+	// `live`: the run still builds, and its steps stream into this log.
+	githubActions?: { runUrl: string | null; live?: boolean };
 }
 export const ShowDeployment = ({
 	logPath,
@@ -90,6 +92,8 @@ export const ShowDeployment = ({
 	}, [logPath, open, unavailableMessage]);
 
 	const isGithubActions = Boolean(githubActions);
+	// A log that carries the run's steps already has Dokploy's own part marked inside it.
+	const hasGithubSection = data.includes(GITHUB_LOG_PREFIX);
 
 	useEffect(() => {
 		// The line that marks where the build starts names the deployment; the dialog shows it without the id.
@@ -204,10 +208,15 @@ export const ShowDeployment = ({
 
 				{githubActions && (
 					<>
-						<GithubActionsLogBanner buildRunUrl={githubActions.runUrl} />
-						<p className="text-sm font-medium text-muted-foreground">
-							Dokploy: pull and start
-						</p>
+						<GithubActionsLogBanner
+							buildRunUrl={githubActions.runUrl}
+							live={githubActions.live}
+						/>
+						{!githubActions.live && !hasGithubSection && (
+							<p className="text-sm font-medium text-muted-foreground">
+								Dokploy: pull and start
+							</p>
+						)}
 					</>
 				)}
 				<div
