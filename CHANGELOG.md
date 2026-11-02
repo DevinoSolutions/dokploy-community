@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.43
+
+Upgrade notes: one new additive database migration (0226) changes the column default of the stuck-deployment watchdog wall limit from 90 to 180 minutes, so an image-only rollback to v0.30.8-community.42 keeps working. Stored values do not change: an instance that kept 90 keeps 90. Nothing to configure. This release includes everything in v0.30.8-community.42.
+
+**The stuck-deployment watchdog now names its wall limit when it fires, and the default wall limit is 180 minutes instead of 90** (T-12495, #583). Healthy builds on a saturated build server were stopped at 91 minutes while Dokploy's own progress marks kept printing, and nothing said a wall limit existed. When the wall limit fires, the closing log line, the failure message, the notification and the audit trail entry now name the limit, how far past it the deployment ran, and where to change it. Each progress mark in the log also shows the wall limit when one applies. Migration 0226 only changes the column default; stored values stay as they are.
+
+**GitHub Actions-built services now get a native experience** (T-12424, #582). A "Deployed from GitHub Actions" panel on the General tab shows the repository, a link to the run, the commit, and the deployed image short name and digest. The service carries a single "GitHub Actions" provenance pill, and deployment rows and the log dialog point to the GitHub run ("Open run on GitHub"). The deploy button reads "Redeploy current image" with a hint to push to deploy new code, and after a rollback Commit and Last deployed show the rolled-back commit. No migration.
+
 ### New in v0.30.8-community.42
 
 Upgrade notes: one new additive database migration (0225) adds two nullable text columns to the deployment table, so an image-only rollback to v0.30.8-community.41 keeps working (the extra columns are ignored). Nothing to configure. This release includes everything in v0.30.8-community.41.
