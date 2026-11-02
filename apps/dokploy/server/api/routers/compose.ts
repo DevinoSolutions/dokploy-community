@@ -60,7 +60,7 @@ import { getBuildOriginsByService } from "@dokploy/server/services/build-origin"
 import {
 	buildOriginJobFields,
 	composeFileHasBuildSection,
-	pickServiceBuildOrigin,
+	describeServiceBuild,
 } from "@dokploy/server/services/build-origin-shared";
 import {
 	assertComposeRollingSettings,
@@ -245,7 +245,7 @@ export const composeRouter = createTRPCRouter({
 				method: "GET",
 				path: "/compose.one",
 				description:
-					"Read one compose. Also returns buildOrigin and buildRunUrl for the service as a whole (the latest deployment with status done, else the latest of any status), and every entry of deployments carries its own buildOrigin and buildRunUrl. buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+					"Read one compose. Also returns buildOrigin and buildRunUrl for the service as a whole (the latest deployment with status done, else the latest of any status), and every entry of deployments carries its own buildOrigin and buildRunUrl. buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known. For GitHub Actions services also buildRepository (owner/repo), buildCommitSha, buildEnvironment, buildRunId and buildDeployedAt, each null when not known.",
 			},
 		})
 		.input(apiReadCompose)
@@ -299,7 +299,7 @@ export const composeRouter = createTRPCRouter({
 				hasGitProviderAccess,
 				unauthorizedProvider,
 				// Where the image was built, from the latest done deployment (T-12149).
-				...pickServiceBuildOrigin(compose.deployments ?? [], {
+				...describeServiceBuild(compose.deployments ?? [], {
 					kind: "compose",
 					sourceType: compose.sourceType,
 					hasBuildSection: composeFileHasBuildSection(compose.composeFile),

@@ -544,6 +544,9 @@ export const ShowDeployments = ({
 											) && (
 												<GithubActionsDeploymentMark
 													buildRunUrl={deployment.buildRunUrl}
+													buildRepository={deployment.buildRepository}
+													buildCommitSha={deployment.buildCommitSha}
+													buildRunId={deployment.buildRunId}
 												/>
 											)}
 											{deployment.startedAt && deployment.finishedAt && (

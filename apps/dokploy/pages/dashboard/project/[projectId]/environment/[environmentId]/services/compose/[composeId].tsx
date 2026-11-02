@@ -53,10 +53,7 @@ import { ComposePolicyAuditExclusion } from "@/components/dashboard/shared/compo
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
-import {
-	BuildOriginBadge,
-	GithubActionsBuildsNote,
-} from "@/components/shared/build-origin-badge";
+import { BuildOriginBadge } from "@/components/shared/build-origin-badge";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -418,9 +415,6 @@ const Service = (
 									<TabsContent value="general">
 										<div className="flex flex-col gap-4 pt-2.5">
 											<ShowGeneralCompose composeId={composeId} />
-											{data?.buildOrigin === "github-actions" && (
-												<GithubActionsBuildsNote buildRunUrl={data.buildRunUrl} />
-											)}
 										</div>
 									</TabsContent>
 									{permissions?.envVars.read && (
