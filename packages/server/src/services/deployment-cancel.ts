@@ -2,6 +2,7 @@ import { appendFile } from "node:fs/promises";
 import { IS_CLOUD } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { applications, compose, deployments } from "@dokploy/server/db/schema";
+import { notWaitingForGithubRun } from "@dokploy/server/services/live-build-claim";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { resolveComposeRolling } from "@dokploy/server/utils/builders/compose-rolling";
 import {
@@ -14,14 +15,14 @@ import {
 	type RemoteBuildKillResult,
 } from "@dokploy/server/utils/builders/remote-build-cancel";
 import {
+	isWatchdogExcluded,
+	resolveWatchdogConfig,
+} from "@dokploy/server/utils/deployments/watchdog-config";
+import {
 	execAsync,
 	execAsyncCancelable,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
-import {
-	isWatchdogExcluded,
-	resolveWatchdogConfig,
-} from "@dokploy/server/utils/deployments/watchdog-config";
 import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import {
 	abortRemoteBuild,
@@ -866,6 +867,8 @@ const cancelRollingReleases = async (
 		where: and(
 			eq(deployments.composeId, composeId),
 			eq(deployments.status, "running"),
+			// Service-level stops target the build Dokploy runs, never a row that waits for GitHub.
+			notWaitingForGithubRun,
 		),
 		columns: { deploymentId: true, logPath: true },
 	});
@@ -936,6 +939,7 @@ export const cancelBuildServerDeploymentsForService = async (
 			where: and(
 				eq(deployments.applicationId, service.applicationId),
 				eq(deployments.status, "running"),
+				notWaitingForGithubRun,
 			),
 			columns: { deploymentId: true, logPath: true, buildServerId: true },
 		});
@@ -975,6 +979,7 @@ export const cancelBuildServerDeploymentsForService = async (
 		where: and(
 			eq(deployments.composeId, service.composeId),
 			eq(deployments.status, "running"),
+			notWaitingForGithubRun,
 		),
 		columns: { deploymentId: true, logPath: true },
 	});
@@ -1019,9 +1024,36 @@ export const cancelBuildServerDeploymentById = async (
 			buildServerId: true,
 			applicationId: true,
 			composeId: true,
+			externalBuildOnly: true,
 		},
 	});
 	if (!row) return null;
+
+	// A row registered while GitHub builds runs nothing on Dokploy, so the user's cancel only closes the row (the
+	// build on GitHub keeps going). Only this explicit cancel does it: the automatic stops skip these rows.
+	if (row.externalBuildOnly) {
+		const [claimed] = await db
+			.update(deployments)
+			.set({
+				status: "cancelled",
+				finishedAt: new Date().toISOString(),
+				errorMessage:
+					"Cancelled by user. The GitHub Actions run itself is not stopped.",
+				buildRunStatus: "completed",
+				buildRunStep: null,
+			})
+			.where(
+				and(
+					eq(deployments.deploymentId, row.deploymentId),
+					eq(deployments.status, "running"),
+					eq(deployments.externalBuildOnly, true),
+				),
+			)
+			.returning({ deploymentId: deployments.deploymentId });
+		return claimed
+			? { status: "cancelled", result: "NONE", genericStopNeeded: false }
+			: { status: "not-running" };
+	}
 
 	if (row.applicationId && row.buildServerId) {
 		return cancelBuildServerDeployment({

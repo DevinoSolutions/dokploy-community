@@ -112,6 +112,8 @@ export const LiveGithubBuildStatus = ({
 		buildOrigin?: string | null;
 		buildRunStatus?: string | null;
 		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
 	};
 	className?: string;
 }) => {

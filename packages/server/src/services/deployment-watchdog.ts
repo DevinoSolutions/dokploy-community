@@ -32,6 +32,8 @@ export interface WatchdogDeployment {
 	composeId: string | null;
 	previewDeploymentId: string | null;
 	startedAt: string | null;
+	/** When the queue job took over a row registered while GitHub built (null on every other row). */
+	deployStartedAt?: string | null;
 	createdAt: string;
 }
 
@@ -46,6 +48,7 @@ const WATCHDOG_COLUMNS = {
 	composeId: true,
 	previewDeploymentId: true,
 	startedAt: true,
+	deployStartedAt: true,
 	createdAt: true,
 } as const;
 
@@ -102,6 +105,7 @@ export const listLatestDeploysOf = async (service: {
 			status: true,
 			createdAt: true,
 			startedAt: true,
+			deployStartedAt: true,
 			finishedAt: true,
 		},
 		orderBy: desc(deployments.createdAt),

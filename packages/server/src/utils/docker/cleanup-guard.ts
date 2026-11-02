@@ -2,6 +2,7 @@ import { and, eq, gte, inArray } from "drizzle-orm";
 import { db } from "../../db/index";
 import { applications, compose, deployments } from "../../db/schema";
 import { listQueueJobs } from "../../services/deployment-queue-journal";
+import { notWaitingForGithubRun } from "../../services/live-build-claim";
 
 /**
  * Keeps the nightly Docker cleanup away from hosts that are deploying.
@@ -75,6 +76,8 @@ export const countActiveDeploymentsOnHost = async (
 		where: and(
 			eq(deployments.status, "running"),
 			gte(deployments.createdAt, cutoff),
+			// A row that waits for its GitHub Actions run runs nothing on any host.
+			notWaitingForGithubRun,
 		),
 		columns: { serverId: true, buildServerId: true },
 		with: {

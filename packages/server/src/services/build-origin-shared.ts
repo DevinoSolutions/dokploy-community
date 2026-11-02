@@ -125,7 +125,17 @@ export const describeLiveGithubBuild = (row: {
 	buildRunStatus?: string | null;
 	buildRunStep?: string | null;
 	externalBuildOnly?: boolean | null;
+	deployQueuedAt?: string | null;
 }): string | null => {
+	// The workflow's deploy call was accepted and waits in Dokploy's queue for a free slot.
+	if (
+		row.externalBuildOnly &&
+		row.deployQueuedAt &&
+		row.status === "running" &&
+		row.buildOrigin === "github-actions"
+	) {
+		return "GitHub Actions build finished · deploy waiting in the Dokploy queue";
+	}
 	// The run is over and the workflow's deploy call has not arrived yet.
 	if (
 		row.externalBuildOnly &&

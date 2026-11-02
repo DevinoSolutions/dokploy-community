@@ -3,6 +3,7 @@ import {
 	DEPLOY_TAKEOVER_GRACE_MS,
 	type LiveRunRow,
 	MAX_LIVE_ROW_AGE_MS,
+	MAX_READS_PER_PASS,
 	POLL_INTERVAL_MS,
 	type PollerDeps,
 	RUN_UNREADABLE_LINE,
@@ -435,5 +436,57 @@ describe("robustness", () => {
 		release();
 		await first;
 		expect(fetchRun).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("a deploy that waits in Dokploy's queue", () => {
+	it("is never read, ended or counted down while it waits, even after a failed run and 6 hours", async () => {
+		rows = [row({ deployQueuedAt: new Date(START).toISOString() })];
+		const poller = makePoller();
+		clock = START + 7 * 60 * 60_000;
+		await poller.poll();
+		expect(fetchRun).not.toHaveBeenCalled();
+		expect(endRow).not.toHaveBeenCalled();
+		expect(poller.followedCount()).toBe(1);
+	});
+
+	it("is ended only by the 24 hour backstop, when the queued deploy never ran", async () => {
+		rows = [row({ deployQueuedAt: new Date(START).toISOString() })];
+		const poller = makePoller();
+		clock = START + 25 * 60 * 60_000;
+		await poller.poll();
+		expect(endRow).toHaveBeenCalledWith("dep-1", {
+			status: "error",
+			deployQueued: true,
+			errorMessage: expect.stringContaining("never started within 24 hours"),
+		});
+	});
+});
+
+describe("many live rows", () => {
+	it("reads at most 25 runs per pass and serves the rows read longest ago first, so none starves", async () => {
+		rows = Array.from({ length: 30 }, (_, i) =>
+			row({
+				deploymentId: `dep-${i}`,
+				buildRunId: String(100 + i),
+				createdAt: new Date(START + i).toISOString(),
+				startedAt: new Date(START + i).toISOString(),
+			}),
+		);
+		fetchRun.mockResolvedValue(ok(building));
+		const poller = makePoller();
+		await poller.poll();
+		expect(fetchRun).toHaveBeenCalledTimes(MAX_READS_PER_PASS);
+		const first = new Set(fetchRun.mock.calls.map(([r]) => r.deploymentId));
+		expect(first.has("dep-29")).toBe(false);
+
+		fetchRun.mockClear();
+		clock += POLL_INTERVAL_MS;
+		await poller.poll();
+		// The five rows never read come first; the rest follow within the budget.
+		const second = fetchRun.mock.calls.map(([r]) => r.deploymentId);
+		expect(second.slice(0, 5).sort()).toEqual(
+			["dep-25", "dep-26", "dep-27", "dep-28", "dep-29"].sort(),
+		);
 	});
 });

@@ -1,7 +1,7 @@
 import { db } from "@dokploy/server/db";
 import { deployments } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 
 // Kept apart from external-build.ts: the deploy flows (application.ts, compose.ts) import this, and external-build.ts
 // imports them, so a shared file would be an import cycle.
@@ -26,6 +26,12 @@ export type LiveBuildClaim = {
 	/** The host the deploy writes its log on: build server, else the serving host (null: the Dokploy host). */
 	logHost: string | null;
 };
+
+/** Who a deploy names: the registered deployment and the service the deploy is for. */
+export type LiveBuildReference = Pick<
+	LiveBuildClaim,
+	"deploymentId" | "kind" | "serviceId"
+>;
 
 type ClaimableRow = {
 	status: string | null;
@@ -55,12 +61,23 @@ export const canContinueLiveBuild = (
 		claim.serviceId &&
 	(row.buildServerId || row.serverId || null) === (claim.logHost || null);
 
+/** A registered row nothing took over and that is still open: the only state a deploy request or a poller may end. */
+const openRegisteredRow = (deploymentId: string) =>
+	and(
+		eq(deployments.deploymentId, deploymentId),
+		eq(deployments.status, "running"),
+		eq(deployments.buildOrigin, "github-actions"),
+		eq(deployments.externalBuildOnly, true),
+	);
+
 /**
  * Takes over the registered row of the deploy that is about to run: `externalBuildOnly` becomes false and the run
  * state `completed`, so the poller, the watchdog exemption and the derivations all treat it as a deploy row from
- * here. The row keeps its title (the workflow sends the same one); a description the deploy brings is appended.
- * The update is one statement guarded by the row's state, so two deploys can never both take the same row; the
- * loser gets null and creates its own. Returns the row (same log path, same deployment id, same start time) or null.
+ * here; `deployStartedAt` records when the deploy began (the watchdog counts from it). The row keeps its title (the
+ * workflow sends the same one); a description the deploy brings is appended. The update is one statement guarded by
+ * the row's state, so two deploys can never both take the same row; the loser gets null and creates its own. A row
+ * the deploy asked for (`deployQueuedAt`) is taken over however long the deploy waited in the queue. Returns the
+ * row (same log path, same deployment id, same start time) or null.
  */
 export const claimLiveGithubBuild = async (
 	claim: LiveBuildClaim,
@@ -69,7 +86,26 @@ export const claimLiveGithubBuild = async (
 	const row = await db.query.deployments.findFirst({
 		where: eq(deployments.deploymentId, claim.deploymentId),
 	});
-	if (!row || !canContinueLiveBuild(row, claim)) return null;
+	if (!row) return null;
+	if (!canContinueLiveBuild(row, claim)) {
+		// A row this deploy accepted but cannot continue (its log is on another host) would stay open until the
+		// backstop: nothing else will ever take it over, so it ends here and the deploy writes a row of its own.
+		if (
+			row.deployQueuedAt &&
+			row.status === "running" &&
+			row.buildOrigin === "github-actions" &&
+			row.externalBuildOnly &&
+			(claim.kind === "application" ? row.applicationId : row.composeId) ===
+				claim.serviceId
+		) {
+			await endQueuedLiveBuild(
+				claim.deploymentId,
+				"error",
+				"The deploy wrote its log on another host than the one this deployment was registered on, so it created its own deployment.",
+			);
+		}
+		return null;
+	}
 	const extra = details.description?.trim();
 	const description =
 		extra && extra !== row.description
@@ -81,14 +117,12 @@ export const claimLiveGithubBuild = async (
 			externalBuildOnly: false,
 			buildRunStatus: "completed",
 			buildRunStep: null,
+			deployStartedAt: new Date().toISOString(),
 			...(description ? { description } : {}),
 		})
 		.where(
 			and(
-				eq(deployments.deploymentId, claim.deploymentId),
-				eq(deployments.status, "running"),
-				eq(deployments.buildOrigin, "github-actions"),
-				eq(deployments.externalBuildOnly, true),
+				openRegisteredRow(claim.deploymentId),
 				eq(serviceColumn(claim.kind), claim.serviceId),
 			),
 		)
@@ -98,11 +132,10 @@ export const claimLiveGithubBuild = async (
 
 /**
  * A deploy that names a deployment it cannot continue is refused when it is asked for, not when it runs: an id that
- * does not exist, or one of another service, is a mistake of the caller (400). An id of this service whose row ended
- * or was taken over meanwhile is not: the deploy ignores it and writes its own row (see `claimLiveGithubBuild`).
+ * does not exist, or one of another service, is a mistake of the caller (400).
  */
 export const assertLiveBuildReference = async (
-	reference: Pick<LiveBuildClaim, "deploymentId" | "kind" | "serviceId">,
+	reference: LiveBuildReference,
 ): Promise<void> => {
 	const row = await db.query.deployments.findFirst({
 		where: eq(deployments.deploymentId, reference.deploymentId),
@@ -123,3 +156,74 @@ export const assertLiveBuildReference = async (
 		});
 	}
 };
+
+/**
+ * Accepts a deploy for a registered row, before the deploy is queued (T-12686): the id is checked (400 for an id that
+ * does not exist or belongs to another service), then the row is marked as having a deploy on the way
+ * (`deployQueuedAt`) in one guarded UPDATE. From then on the run poller leaves the row alone, however long the
+ * deploy waits in Dokploy's queue, and the queue job takes it over when it starts. A row that is no longer open (it
+ * ended, or a deploy already took it over) is refused with 409 CONFLICT, so the caller retries without the id and
+ * follows the row the deploy creates. Call `withdrawLiveBuildDeploy` when queueing fails afterwards.
+ */
+export const requestLiveBuildDeploy = async (
+	reference: LiveBuildReference,
+): Promise<void> => {
+	await assertLiveBuildReference(reference);
+	const marked = await db
+		.update(deployments)
+		.set({ deployQueuedAt: new Date().toISOString() })
+		.where(
+			and(
+				openRegisteredRow(reference.deploymentId),
+				eq(serviceColumn(reference.kind), reference.serviceId),
+			),
+		)
+		.returning({ deploymentId: deployments.deploymentId });
+	if (marked.length === 0) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message: `deploymentId ${reference.deploymentId} can no longer be continued: it ended or a deploy already took it over. Retry without deploymentId; the deploy creates its own deployment.`,
+		});
+	}
+};
+
+/** Undoes `requestLiveBuildDeploy` when the deploy could not be queued, so the run poller owns the row again. */
+export const withdrawLiveBuildDeploy = async (deploymentId: string) => {
+	await db
+		.update(deployments)
+		.set({ deployQueuedAt: null })
+		.where(openRegisteredRow(deploymentId));
+};
+
+/**
+ * Ends a row whose deploy was accepted but will not take it over: the queued job was removed or replaced before it
+ * ran, or it ran on another host. Only an open registered row that has a deploy on the way is touched. True when a
+ * row was ended.
+ */
+export const endQueuedLiveBuild = async (
+	deploymentId: string,
+	status: "cancelled" | "error",
+	message: string,
+): Promise<boolean> => {
+	const ended = await db
+		.update(deployments)
+		.set({
+			status,
+			finishedAt: new Date().toISOString(),
+			errorMessage: message,
+			buildRunStatus: "completed",
+			buildRunStep: null,
+		})
+		.where(
+			and(
+				openRegisteredRow(deploymentId),
+				isNotNull(deployments.deployQueuedAt),
+			),
+		)
+		.returning({ deploymentId: deployments.deploymentId });
+	return ended.length > 0;
+};
+
+/** What to tell the row when its queued deploy leaves the queue without running. */
+export const QUEUED_DEPLOY_REMOVED_MESSAGE =
+	"The deploy that was waiting for this GitHub Actions build was removed from the queue before it ran.";

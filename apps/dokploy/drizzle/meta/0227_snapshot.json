@@ -4412,9 +4412,44 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "deployQueuedAt": {
+          "name": "deployQueuedAt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deployStartedAt": {
+          "name": "deployStartedAt",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "deployment_external_build_run_unique": {
+          "name": "deployment_external_build_run_unique",
+          "columns": [
+            {
+              "expression": "coalesce(\"applicationId\", \"composeId\")",
+              "isExpression": true,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "buildRunUrl",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"deployment\".\"externalBuildOnly\" = true",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "deployment_applicationId_application_applicationId_fk": {
           "name": "deployment_applicationId_application_applicationId_fk",

@@ -3,9 +3,9 @@ import {
 	canonicalBuildRunUrl,
 	describeGithubActionsRun,
 	describeLiveGithubBuild,
+	describeServiceBuild,
 	isGithubActionsDeployment,
 	isLiveGithubBuild,
-	describeServiceBuild,
 	parseBuildRunUrl,
 	pickServiceBuildOrigin,
 	withGithubActionsRunDetails,
@@ -98,6 +98,27 @@ describe("describeLiveGithubBuild", () => {
 		// A deploy took the row over: it is a deploy row now.
 		expect(
 			describeLiveGithubBuild({ ...live, buildRunStatus: "completed" }),
+		).toBeNull();
+	});
+
+	it("says the deploy waits in the queue once a deploy call was accepted, whatever the run did", () => {
+		expect(
+			describeLiveGithubBuild({
+				...live,
+				externalBuildOnly: true,
+				deployQueuedAt: "2026-11-02T10:30:00.000Z",
+			}),
+		).toBe(
+			"GitHub Actions build finished · deploy waiting in the Dokploy queue",
+		);
+		// A deploy that took the row over is a deploy row: nothing more to say.
+		expect(
+			describeLiveGithubBuild({
+				...live,
+				buildRunStatus: "completed",
+				externalBuildOnly: false,
+				deployQueuedAt: "2026-11-02T10:30:00.000Z",
+			}),
 		).toBeNull();
 	});
 

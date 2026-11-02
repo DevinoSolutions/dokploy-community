@@ -1,5 +1,7 @@
 import {
+	endQueuedLiveBuild,
 	IS_CLOUD,
+	QUEUED_DEPLOY_REMOVED_MESSAGE,
 	updateApplicationStatus,
 	updateCompose,
 	updatePreviewDeployment,
@@ -119,11 +121,31 @@ const idOf = (value: unknown): string | null =>
 	typeof value === "string" && value.length > 0 ? value : null;
 
 /**
+ * A queued deploy that carried a registered GitHub Actions deployment (T-12686) and will never run must not leave that
+ * row open: the run poller leaves rows with a deploy on the way alone, so this is what ends it.
+ */
+const closeLiveRowOfJob = (data: Record<string, unknown>) => {
+	const deploymentId = idOf(data.deploymentId);
+	if (!deploymentId) return;
+	endQueuedLiveBuild(
+		deploymentId,
+		"cancelled",
+		QUEUED_DEPLOY_REMOVED_MESSAGE,
+	).catch((error) => {
+		console.error(
+			`Deployment queue: could not close the registered deployment ${deploymentId} of a removed job`,
+			error instanceof Error ? error.message : error,
+		);
+	});
+};
+
+/**
  * A dropped job must not leave its service showing "running". Works from
  * whatever ids the payload carries, so a job dropped for an unreadable payload
  * is still handled.
  */
 const failDroppedJob = async (payload: Record<string, unknown>) => {
+	closeLiveRowOfJob(payload);
 	const previewDeploymentId = idOf(payload.previewDeploymentId);
 	const composeId = idOf(payload.composeId);
 	const applicationId = idOf(payload.applicationId);
@@ -145,6 +167,10 @@ const createInMemoryQueue = (): DeploymentQueue => {
 	const queue = new InMemoryQueue({
 		resolveConcurrency: resolveBuildsConcurrency,
 		journal: durable.journal,
+		onWaitingDropped: (jobs) => {
+			for (const data of jobs)
+				closeLiveRowOfJob(data as Record<string, unknown>);
+		},
 	});
 	// Held until the boot replay is done (or 30s pass), so a webhook arriving
 	// first cannot start ahead of the same job restored from the journal.

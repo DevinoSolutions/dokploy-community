@@ -1,6 +1,5 @@
 import {
 	assertCanUseServiceGitProviders,
-	assertLiveBuildReference,
 	assertNetworkIdsAttachableToResource,
 	// build-policy hook: required-checks support check at the API boundary.
 	assertRequiredChecksSupportedForUpdate,
@@ -35,6 +34,7 @@ import {
 	removeService,
 	removeTraefikConfig,
 	removeUptimelyServiceRows,
+	requestLiveBuildDeploy,
 	scanServiceForTransfer,
 	startService,
 	startServiceRemote,
@@ -44,6 +44,7 @@ import {
 	updateApplication,
 	updateApplicationStatus,
 	updateDeploymentStatus,
+	withdrawLiveBuildDeploy,
 	writeConfig,
 	writeConfigRemote,
 } from "@dokploy/server";
@@ -81,23 +82,23 @@ import {
 import { audit } from "@/server/api/utils/audit";
 import { auditCancel } from "@/server/api/utils/cancel-audit";
 import {
-	assertCanPrioritize,
-	recordPriorityUse,
-} from "@/server/api/utils/deploy-priority";
-import {
 	assertAppNameReadable,
 	assertServerReachable,
 } from "@/server/api/utils/container-service-access";
+import {
+	assertCanPrioritize,
+	recordPriorityUse,
+} from "@/server/api/utils/deploy-priority";
 import { cancelRunningDeploymentLocally } from "@/server/api/utils/local-cancel";
 import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
-import {
-	readServiceWatchdogExclusion,
-	writeServiceWatchdogExclusion,
-} from "@/server/api/utils/watchdog-exclusion";
 import { coalesceManualApplicationDeploy } from "@/server/api/utils/manual-application-coalesce";
 import { serializeManualDeploy } from "@/server/api/utils/manual-deploy-lock";
 import { getRailpackVersions } from "@/server/api/utils/railpack-versions";
 import { assertServerInOrganization } from "@/server/api/utils/server-org-scope";
+import {
+	readServiceWatchdogExclusion,
+	writeServiceWatchdogExclusion,
+} from "@/server/api/utils/watchdog-exclusion";
 import {
 	apiCreateApplication,
 	apiDeployApplication,
@@ -582,99 +583,111 @@ export const applicationRouter = createTRPCRouter({
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
 			if (input.deploymentId) {
-				await assertLiveBuildReference({
+				await requestLiveBuildDeploy({
 					deploymentId: input.deploymentId,
 					kind: "application",
 					serviceId: input.applicationId,
 				});
 			}
-			const application = await findApplicationById(input.applicationId);
-			const jobData: DeploymentJob = {
-				applicationId: input.applicationId,
-				titleLog: input.title || "Rebuild deployment",
-				descriptionLog: input.description || "",
-				type: "redeploy",
-				applicationType: "application",
-				server: !!application.serverId,
-				serverId: application.serverId ?? undefined,
-				...buildOriginJobFields(input),
-			};
+			try {
+				const application = await findApplicationById(input.applicationId);
+				const jobData: DeploymentJob = {
+					applicationId: input.applicationId,
+					titleLog: input.title || "Rebuild deployment",
+					descriptionLog: input.description || "",
+					type: "redeploy",
+					applicationType: "application",
+					server: !!application.serverId,
+					serverId: application.serverId ?? undefined,
+					...buildOriginJobFields(input),
+				};
 
-			if (IS_CLOUD && application.serverId) {
-				deploy(jobData).catch((error) => {
-					console.error("Background deployment failed:", error);
-				});
+				if (IS_CLOUD && application.serverId) {
+					deploy(jobData).catch((error) => {
+						console.error("Background deployment failed:", error);
+					});
+					await audit(ctx, {
+						action: "rebuild",
+						resourceType: "application",
+						resourceId: application.applicationId,
+						resourceName: application.appName,
+					});
+					if (!input.priority) return true;
+					// Cloud runs the deploy straight away: there is no queue to go ahead
+					// in, and the caller is told so rather than left to assume.
+					return {
+						success: true,
+						message: "Redeployment started",
+						applicationId: application.applicationId,
+						priority: await recordPriorityUse(ctx, {
+							resourceType: "application",
+							resourceId: application.applicationId,
+							resourceName: application.appName,
+							via: "redeploy",
+							outcome: undefined,
+						}),
+					};
+				}
+				const addJob = () =>
+					myQueue.add(
+						"deployments",
+						{
+							...jobData,
+							...(input.priority
+								? { priority: true, priorityBy: ctx.user.id }
+								: {}),
+						},
+						{
+							removeOnComplete: true,
+							removeOnFail: true,
+						},
+					);
+				// A priority request wants to jump the queue, so it is never folded into
+				// a waiting job. Everything else coalesces and queues as one step per
+				// application (see the compose router). A waiting deploy that took this
+				// one over means there is nothing to enqueue.
+				const queued = input.priority
+					? await addJob()
+					: await serializeManualDeploy(
+							`application:${input.applicationId}`,
+							async () =>
+								(
+									await coalesceManualApplicationDeploy(
+										application,
+										jobData,
+										ctx,
+									)
+								).merged
+									? undefined
+									: addJob(),
+						);
 				await audit(ctx, {
 					action: "rebuild",
 					resourceType: "application",
 					resourceId: application.applicationId,
 					resourceName: application.appName,
 				});
-				if (!input.priority) return true;
-				// Cloud runs the deploy straight away: there is no queue to go ahead
-				// in, and the caller is told so rather than left to assume.
+				if (!input.priority) return;
+				const priority = await recordPriorityUse(ctx, {
+					resourceType: "application",
+					resourceId: application.applicationId,
+					resourceName: application.appName,
+					via: "redeploy",
+					jobId: queued?.id,
+					outcome: queued?.priority,
+				});
 				return {
 					success: true,
-					message: "Redeployment started",
+					message: "Redeployment queued",
 					applicationId: application.applicationId,
-					priority: await recordPriorityUse(ctx, {
-						resourceType: "application",
-						resourceId: application.applicationId,
-						resourceName: application.appName,
-						via: "redeploy",
-						outcome: undefined,
-					}),
+					priority,
 				};
+			} catch (error) {
+				// The deploy was never queued: the run poller owns the row again.
+				if (input.deploymentId)
+					await withdrawLiveBuildDeploy(input.deploymentId);
+				throw error;
 			}
-			const addJob = () =>
-				myQueue.add(
-					"deployments",
-					{
-						...jobData,
-						...(input.priority
-							? { priority: true, priorityBy: ctx.user.id }
-							: {}),
-					},
-					{
-						removeOnComplete: true,
-						removeOnFail: true,
-					},
-				);
-			// A priority request wants to jump the queue, so it is never folded into
-			// a waiting job. Everything else coalesces and queues as one step per
-			// application (see the compose router). A waiting deploy that took this
-			// one over means there is nothing to enqueue.
-			const queued = input.priority
-				? await addJob()
-				: await serializeManualDeploy(
-						`application:${input.applicationId}`,
-						async () =>
-							(await coalesceManualApplicationDeploy(application, jobData, ctx))
-								.merged
-								? undefined
-								: addJob(),
-					);
-			await audit(ctx, {
-				action: "rebuild",
-				resourceType: "application",
-				resourceId: application.applicationId,
-				resourceName: application.appName,
-			});
-			if (!input.priority) return;
-			const priority = await recordPriorityUse(ctx, {
-				resourceType: "application",
-				resourceId: application.applicationId,
-				resourceName: application.appName,
-				via: "redeploy",
-				jobId: queued?.id,
-				outcome: queued?.priority,
-			});
-			return {
-				success: true,
-				message: "Redeployment queued",
-				applicationId: application.applicationId,
-				priority,
-			};
 		}),
 	saveEnvironment: protectedProcedure
 		.input(apiSaveEnvironmentVariables)
@@ -1197,107 +1210,119 @@ export const applicationRouter = createTRPCRouter({
 			});
 			if (input.priority) await assertCanPrioritize(ctx);
 			if (input.deploymentId) {
-				await assertLiveBuildReference({
+				await requestLiveBuildDeploy({
 					deploymentId: input.deploymentId,
 					kind: "application",
 					serviceId: input.applicationId,
 				});
 			}
-			const application = await findApplicationById(input.applicationId);
-			// Allow overriding the Docker image/tag at deploy time for
-			// Docker-source applications. This mirrors the manual "save Docker
-			// provider then deploy" workaround as a single call so external
-			// pipelines can push a specific tag to deploy.
-			if (input.dockerImage?.trim() && application.sourceType === "docker") {
-				await updateApplication(input.applicationId, {
-					dockerImage: input.dockerImage.trim(),
-				});
-			}
-			const jobData: DeploymentJob = {
-				applicationId: input.applicationId,
-				titleLog: input.title || "Manual deployment",
-				descriptionLog: input.description || "",
-				type: "deploy",
-				applicationType: "application",
-				server: !!application.serverId,
-				serverId: application.serverId ?? undefined,
-				...buildOriginJobFields(input),
-			};
-			if (IS_CLOUD && application.serverId) {
-				deploy(jobData).catch((error) => {
-					console.error("Background deployment failed:", error);
-				});
+			try {
+				const application = await findApplicationById(input.applicationId);
+				// Allow overriding the Docker image/tag at deploy time for
+				// Docker-source applications. This mirrors the manual "save Docker
+				// provider then deploy" workaround as a single call so external
+				// pipelines can push a specific tag to deploy.
+				if (input.dockerImage?.trim() && application.sourceType === "docker") {
+					await updateApplication(input.applicationId, {
+						dockerImage: input.dockerImage.trim(),
+					});
+				}
+				const jobData: DeploymentJob = {
+					applicationId: input.applicationId,
+					titleLog: input.title || "Manual deployment",
+					descriptionLog: input.description || "",
+					type: "deploy",
+					applicationType: "application",
+					server: !!application.serverId,
+					serverId: application.serverId ?? undefined,
+					...buildOriginJobFields(input),
+				};
+				if (IS_CLOUD && application.serverId) {
+					deploy(jobData).catch((error) => {
+						console.error("Background deployment failed:", error);
+					});
+					await audit(ctx, {
+						action: "deploy",
+						resourceType: "application",
+						resourceId: application.applicationId,
+						resourceName: application.appName,
+					});
+					if (!input.priority) return true;
+					// Cloud runs the deploy straight away: there is no queue to go ahead
+					// in, and the caller is told so rather than left to assume.
+					return {
+						success: true,
+						message: "Deployment started",
+						applicationId: application.applicationId,
+						priority: await recordPriorityUse(ctx, {
+							resourceType: "application",
+							resourceId: application.applicationId,
+							resourceName: application.appName,
+							via: "deploy",
+							outcome: undefined,
+						}),
+					};
+				}
+				const addJob = () =>
+					myQueue.add(
+						"deployments",
+						{
+							...jobData,
+							...(input.priority
+								? { priority: true, priorityBy: ctx.user.id }
+								: {}),
+						},
+						{
+							removeOnComplete: true,
+							removeOnFail: true,
+						},
+					);
+				// A priority request wants to jump the queue, so it is never folded into
+				// a waiting job. Everything else coalesces and queues as one step per
+				// application (see the compose router). A waiting deploy that took this
+				// one over means there is nothing to enqueue.
+				const queued = input.priority
+					? await addJob()
+					: await serializeManualDeploy(
+							`application:${input.applicationId}`,
+							async () =>
+								(
+									await coalesceManualApplicationDeploy(
+										application,
+										jobData,
+										ctx,
+									)
+								).merged
+									? undefined
+									: addJob(),
+						);
 				await audit(ctx, {
 					action: "deploy",
 					resourceType: "application",
 					resourceId: application.applicationId,
 					resourceName: application.appName,
 				});
-				if (!input.priority) return true;
-				// Cloud runs the deploy straight away: there is no queue to go ahead
-				// in, and the caller is told so rather than left to assume.
+				if (!input.priority) return;
+				const priority = await recordPriorityUse(ctx, {
+					resourceType: "application",
+					resourceId: application.applicationId,
+					resourceName: application.appName,
+					via: "deploy",
+					jobId: queued?.id,
+					outcome: queued?.priority,
+				});
 				return {
 					success: true,
-					message: "Deployment started",
+					message: "Deployment queued",
 					applicationId: application.applicationId,
-					priority: await recordPriorityUse(ctx, {
-						resourceType: "application",
-						resourceId: application.applicationId,
-						resourceName: application.appName,
-						via: "deploy",
-						outcome: undefined,
-					}),
+					priority,
 				};
+			} catch (error) {
+				// The deploy was never queued: the run poller owns the row again.
+				if (input.deploymentId)
+					await withdrawLiveBuildDeploy(input.deploymentId);
+				throw error;
 			}
-			const addJob = () =>
-				myQueue.add(
-					"deployments",
-					{
-						...jobData,
-						...(input.priority
-							? { priority: true, priorityBy: ctx.user.id }
-							: {}),
-					},
-					{
-						removeOnComplete: true,
-						removeOnFail: true,
-					},
-				);
-			// A priority request wants to jump the queue, so it is never folded into
-			// a waiting job. Everything else coalesces and queues as one step per
-			// application (see the compose router). A waiting deploy that took this
-			// one over means there is nothing to enqueue.
-			const queued = input.priority
-				? await addJob()
-				: await serializeManualDeploy(
-						`application:${input.applicationId}`,
-						async () =>
-							(await coalesceManualApplicationDeploy(application, jobData, ctx))
-								.merged
-								? undefined
-								: addJob(),
-					);
-			await audit(ctx, {
-				action: "deploy",
-				resourceType: "application",
-				resourceId: application.applicationId,
-				resourceName: application.appName,
-			});
-			if (!input.priority) return;
-			const priority = await recordPriorityUse(ctx, {
-				resourceType: "application",
-				resourceId: application.applicationId,
-				resourceName: application.appName,
-				via: "deploy",
-				jobId: queued?.id,
-				outcome: queued?.priority,
-			});
-			return {
-				success: true,
-				message: "Deployment queued",
-				applicationId: application.applicationId,
-				priority,
-			};
 		}),
 
 	cleanQueues: protectedProcedure
@@ -1395,9 +1420,7 @@ export const applicationRouter = createTRPCRouter({
 		}),
 
 	setWatchdogExclusion: protectedProcedure
-		.input(
-			apiFindOneApplication.extend({ excluded: z.boolean() }),
-		)
+		.input(apiFindOneApplication.extend({ excluded: z.boolean() }))
 		.mutation(async ({ input, ctx }) => {
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				service: ["create"],

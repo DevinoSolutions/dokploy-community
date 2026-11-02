@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { paths } from "@dokploy/server/constants";
+import { IS_CLOUD, paths } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { deployments } from "@dokploy/server/db/schema";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
@@ -221,7 +221,7 @@ const createLog: RegisterDeps["createLog"] = async (target, header) => {
 		const encoded = Buffer.from(header, "utf8").toString("base64");
 		await execAsyncRemote(
 			serverId,
-			`mkdir -p '${path.join(LOGS_PATH, target.appName)}'; echo "${encoded}" | base64 -d >> '${logFilePath.replace(/'/g, `'\\''`)}'`,
+			`mkdir -p '${path.join(LOGS_PATH, target.appName).replace(/'/g, `'\\''`)}'; echo "${encoded}" | base64 -d >> '${logFilePath.replace(/'/g, `'\\''`)}'`,
 		);
 	} else {
 		await mkdir(path.join(LOGS_PATH, target.appName), { recursive: true });
@@ -233,7 +233,7 @@ const createLog: RegisterDeps["createLog"] = async (target, header) => {
 const serviceColumn = (kind: ExternalBuildTarget["kind"]) =>
 	kind === "application" ? deployments.applicationId : deployments.composeId;
 
-const defaultRegisterDeps: RegisterDeps = {
+export const defaultRegisterDeps: RegisterDeps = {
 	loadTarget,
 	findExisting: async (target, buildRunUrl) => {
 		// A registered row is found whatever became of it (the unique index says one run of one service is one
@@ -299,6 +299,12 @@ export const registerExternalBuild = async (
 	input: RegisterExternalBuildInput,
 	deps: RegisterDeps = defaultRegisterDeps,
 ): Promise<{ deploymentId: string; created: boolean }> => {
+	// The run poller (and its 6 hour backstop) does not run on Dokploy Cloud, so a row registered there would never end.
+	if (IS_CLOUD) {
+		throw badRequest(
+			"Live GitHub Actions deployments are not available on Dokploy Cloud.",
+		);
+	}
 	const registration = validateRegistration(input);
 	const target = await deps.loadTarget(input);
 	if (target.dokployBuilds) {

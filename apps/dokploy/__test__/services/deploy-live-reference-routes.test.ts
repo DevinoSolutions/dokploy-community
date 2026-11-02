@@ -12,7 +12,8 @@ const mocks = vi.hoisted(() => ({
 	findComposeById: vi.fn(),
 	checkPermission: vi.fn(),
 	checkServicePermissionAndAccess: vi.fn(),
-	assertLiveBuildReference: vi.fn(),
+	requestLiveBuildDeploy: vi.fn(),
+	withdrawLiveBuildDeploy: vi.fn(),
 	audit: vi.fn(),
 	add: vi.fn(),
 }));
@@ -26,7 +27,8 @@ vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
 	findApplicationById: mocks.findApplicationById,
 	findComposeById: mocks.findComposeById,
-	assertLiveBuildReference: mocks.assertLiveBuildReference,
+	requestLiveBuildDeploy: mocks.requestLiveBuildDeploy,
+	withdrawLiveBuildDeploy: mocks.withdrawLiveBuildDeploy,
 	buildPolicyDeployGate: async () => ({ deploy: true, coalesced: 0 }),
 }));
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
@@ -64,7 +66,8 @@ beforeEach(() => {
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	mocks.checkPermission.mockResolvedValue(undefined);
 	mocks.checkServicePermissionAndAccess.mockResolvedValue(undefined);
-	mocks.assertLiveBuildReference.mockResolvedValue(undefined);
+	mocks.requestLiveBuildDeploy.mockResolvedValue(undefined);
+	mocks.withdrawLiveBuildDeploy.mockResolvedValue(undefined);
 	mocks.findApplicationById.mockResolvedValue({
 		applicationId: "a1",
 		appName: "app-1",
@@ -91,20 +94,23 @@ describe("application deploys that name a registered deployment", () => {
 				buildOrigin: "github-actions",
 				buildRunUrl: "https://github.com/acme/web/actions/runs/42",
 			});
-			expect(mocks.assertLiveBuildReference).toHaveBeenCalledWith({
+			expect(mocks.requestLiveBuildDeploy).toHaveBeenCalledWith({
 				deploymentId: "dep-1",
 				kind: "application",
 				serviceId: "a1",
 			});
 			const queued = mocks.add.mock.calls.at(-1)?.[1];
-			expect(queued).toMatchObject({ applicationId: "a1", deploymentId: "dep-1" });
+			expect(queued).toMatchObject({
+				applicationId: "a1",
+				deploymentId: "dep-1",
+			});
 		},
 	);
 
 	it.each(["deploy", "redeploy"] as const)(
 		"%s refuses a wrong id with the 400 and queues nothing",
 		async (method) => {
-			mocks.assertLiveBuildReference.mockRejectedValue(refused);
+			mocks.requestLiveBuildDeploy.mockRejectedValue(refused);
 			await expect(
 				applicationCaller[method]({
 					applicationId: "a1",
@@ -119,7 +125,7 @@ describe("application deploys that name a registered deployment", () => {
 		"%s without an id does not look anything up",
 		async (method) => {
 			await applicationCaller[method]({ applicationId: "a1" });
-			expect(mocks.assertLiveBuildReference).not.toHaveBeenCalled();
+			expect(mocks.requestLiveBuildDeploy).not.toHaveBeenCalled();
 			expect(mocks.add.mock.calls.at(-1)?.[1]).not.toHaveProperty(
 				"deploymentId",
 				expect.anything(),
@@ -136,7 +142,7 @@ describe("compose deploys that name a registered deployment", () => {
 				composeId: "c1",
 				deploymentId: "dep-1",
 			});
-			expect(mocks.assertLiveBuildReference).toHaveBeenCalledWith({
+			expect(mocks.requestLiveBuildDeploy).toHaveBeenCalledWith({
 				deploymentId: "dep-1",
 				kind: "compose",
 				serviceId: "c1",
@@ -149,11 +155,69 @@ describe("compose deploys that name a registered deployment", () => {
 	it.each(["deploy", "redeploy"] as const)(
 		"%s refuses a wrong id with the 400 and queues nothing",
 		async (method) => {
-			mocks.assertLiveBuildReference.mockRejectedValue(refused);
+			mocks.requestLiveBuildDeploy.mockRejectedValue(refused);
 			await expect(
 				composeCaller[method]({ composeId: "c1", deploymentId: "dep-9" }),
 			).rejects.toMatchObject({ code: "BAD_REQUEST" });
 			expect(mocks.add).not.toHaveBeenCalled();
+		},
+	);
+});
+
+describe("a registered row that can no longer be continued, and a deploy that cannot be queued", () => {
+	const conflict = new TRPCError({
+		code: "CONFLICT",
+		message: "can no longer be continued",
+	});
+
+	it.each(["deploy", "redeploy"] as const)(
+		"application.%s answers the 409 of the row and queues nothing, so the caller retries without the id",
+		async (method) => {
+			mocks.requestLiveBuildDeploy.mockRejectedValue(conflict);
+			await expect(
+				applicationCaller[method]({
+					applicationId: "a1",
+					deploymentId: "dep-1",
+				}),
+			).rejects.toMatchObject({ code: "CONFLICT" });
+			expect(mocks.add).not.toHaveBeenCalled();
+			expect(mocks.withdrawLiveBuildDeploy).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["deploy", "redeploy"] as const)(
+		"compose.%s answers the 409 of the row and queues nothing",
+		async (method) => {
+			mocks.requestLiveBuildDeploy.mockRejectedValue(conflict);
+			await expect(
+				composeCaller[method]({ composeId: "c1", deploymentId: "dep-1" }),
+			).rejects.toMatchObject({ code: "CONFLICT" });
+			expect(mocks.add).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["deploy", "redeploy"] as const)(
+		"application.%s withdraws the mark when the job could not be queued",
+		async (method) => {
+			mocks.add.mockRejectedValue(new Error("queue down"));
+			await expect(
+				applicationCaller[method]({
+					applicationId: "a1",
+					deploymentId: "dep-1",
+				}),
+			).rejects.toThrow("queue down");
+			expect(mocks.withdrawLiveBuildDeploy).toHaveBeenCalledWith("dep-1");
+		},
+	);
+
+	it.each(["deploy", "redeploy"] as const)(
+		"compose.%s withdraws the mark when the job could not be queued",
+		async (method) => {
+			mocks.add.mockRejectedValue(new Error("queue down"));
+			await expect(
+				composeCaller[method]({ composeId: "c1", deploymentId: "dep-1" }),
+			).rejects.toThrow("queue down");
+			expect(mocks.withdrawLiveBuildDeploy).toHaveBeenCalledWith("dep-1");
 		},
 	);
 });

@@ -30,6 +30,9 @@ vi.mock("@dokploy/server/db", () => ({
 
 const {
 	assertLiveBuildReference,
+	endQueuedLiveBuild,
+	requestLiveBuildDeploy,
+	withdrawLiveBuildDeploy,
 	canContinueLiveBuild,
 	claimLiveGithubBuild,
 	notWaitingForGithubRun,
@@ -143,6 +146,7 @@ describe("claimLiveGithubBuild", () => {
 			externalBuildOnly: false,
 			buildRunStatus: "completed",
 			buildRunStep: null,
+			deployStartedAt: expect.any(String),
 			description: "d",
 		});
 		// The registered title stays: the update never writes one.
@@ -166,6 +170,7 @@ describe("claimLiveGithubBuild", () => {
 			externalBuildOnly: false,
 			buildRunStatus: "completed",
 			buildRunStep: null,
+			deployStartedAt: expect.any(String),
 		});
 	});
 
@@ -232,6 +237,59 @@ describe("assertLiveBuildReference", () => {
 		await expect(
 			assertLiveBuildReference({ ...ref, kind: "compose", serviceId: "c1" }),
 		).resolves.toBeUndefined();
+	});
+});
+
+describe("requestLiveBuildDeploy (the mark a deploy call sets before it queues)", () => {
+	const ref = {
+		deploymentId: "dep-1",
+		kind: "application" as const,
+		serviceId: "app-1",
+	};
+
+	it("marks an open registered row of this service", async () => {
+		mocks.findFirst.mockResolvedValue({
+			applicationId: "app-1",
+			composeId: null,
+		});
+		mocks.returned.push([{ deploymentId: "dep-1" }]);
+		await expect(requestLiveBuildDeploy(ref)).resolves.toBeUndefined();
+		expect(mocks.set.mock.calls[0]?.[0]).toEqual({
+			deployQueuedAt: expect.any(String),
+		});
+	});
+
+	it("keeps the 400 for an unknown id and does not write", async () => {
+		mocks.findFirst.mockResolvedValue(undefined);
+		await expect(requestLiveBuildDeploy(ref)).rejects.toMatchObject({
+			code: "BAD_REQUEST",
+		});
+		expect(mocks.set).not.toHaveBeenCalled();
+	});
+
+	it("answers 409 when the row can no longer be continued", async () => {
+		mocks.findFirst.mockResolvedValue({
+			applicationId: "app-1",
+			composeId: null,
+		});
+		mocks.returned.push([]);
+		await expect(requestLiveBuildDeploy(ref)).rejects.toMatchObject({
+			code: "CONFLICT",
+			message: expect.stringContaining("Retry without deploymentId"),
+		});
+	});
+
+	it("withdraws the mark and ends a row whose deploy was removed", async () => {
+		await withdrawLiveBuildDeploy("dep-1");
+		expect(mocks.set.mock.calls[0]?.[0]).toEqual({ deployQueuedAt: null });
+		mocks.returned.push([{ deploymentId: "dep-1" }]);
+		expect(await endQueuedLiveBuild("dep-1", "cancelled", "gone")).toBe(true);
+		expect(mocks.set.mock.calls[1]?.[0]).toMatchObject({
+			status: "cancelled",
+			errorMessage: "gone",
+			buildRunStatus: "completed",
+		});
+		expect(await endQueuedLiveBuild("dep-1", "cancelled", "gone")).toBe(false);
 	});
 });
 

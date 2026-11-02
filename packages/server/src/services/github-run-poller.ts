@@ -18,6 +18,8 @@ import {
  * - A row is polled every 15 s with an installation token of a GitHub provider that covers its repository, every 60 s
  *   without one (public repositories only). A run Dokploy cannot read is retried every 5 minutes and said so once in
  *   the log. The rate-limit headers are respected: a 403/429 backs the row off until the limit resets.
+ * - A row whose deploy was accepted (the router marked `deployQueuedAt`) is never ended or counted down here: the
+ *   deploy waits in Dokploy's queue (30 to 60 minutes in production) and its job takes the row over when it starts.
  * - A deploy call that takes the row over (`buildRunStatus` becomes `completed`) ends the polling for it; every write
  *   here is guarded by the row still waiting for GitHub, so the deploy always wins.
  * - A run that completed with failure or cancel and was not taken over ends the row (error / cancelled).
@@ -34,8 +36,16 @@ export const MAX_BACKOFF_MS = 15 * 60_000;
 export const MAX_LIVE_ROW_AGE_MS = 6 * 60 * 60_000;
 /** After a run that succeeded, how long the workflow's deploy call has to take the row over. */
 export const DEPLOY_TAKEOVER_GRACE_MS = 10 * 60_000;
-/** Rows handled in one pass, so a pass cannot run past the next tick for ever. */
-const MAX_ROWS_PER_PASS = 25;
+/**
+ * GitHub reads in one pass, so a pass cannot run past the next tick for ever. Rows are served oldest-read first, so
+ * with more live rows than this every row is still read, a little later, and none starves.
+ */
+export const MAX_READS_PER_PASS = 25;
+/**
+ * A row whose deploy was accepted (`deployQueuedAt`) is the queue's: the poller leaves it alone while the deploy
+ * waits, however long. This only closes one whose deploy never ran (a lost queue job).
+ */
+export const DEPLOY_QUEUED_BACKSTOP_MS = 24 * 60 * 60_000;
 
 export const RUN_UNREADABLE_LINE = `${GITHUB_LOG_PREFIX} Dokploy cannot read this run, so the steps are not shown here. Connect GitHub in Settings to see them, or open the run.`;
 
@@ -56,6 +66,8 @@ export type LiveRunRow = {
 	buildRunStep: string | null;
 	startedAt: string | null;
 	createdAt: string;
+	/** Set once a deploy call accepted the row; the deploy is queued and the row is the queue's. */
+	deployQueuedAt?: string | null;
 };
 
 export type RunFetchResult =
@@ -94,7 +106,12 @@ export interface PollerDeps {
 	/** Ends the row; false when it was taken over or already ended. */
 	endRow: (
 		deploymentId: string,
-		outcome: { status: "error" | "cancelled"; errorMessage: string },
+		outcome: {
+			status: "error" | "cancelled";
+			errorMessage: string;
+			/** Ends a row whose deploy was accepted but never ran (only the backstop sets this). */
+			deployQueued?: boolean;
+		},
 	) => Promise<boolean>;
 }
 
@@ -106,6 +123,8 @@ type RowState = {
 	lastStep: string | null;
 	/** When the run was seen finished (the start of the takeover grace); null while it runs. */
 	finishedAt: number | null;
+	/** When GitHub was last read for this row (0: never), to serve the rows read longest ago first. */
+	lastReadAt: number;
 };
 
 const conclusionOfRun = (
@@ -156,6 +175,7 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 			lastStatus: row.buildRunStatus,
 			lastStep: row.buildRunStep,
 			finishedAt: null,
+			lastReadAt: 0,
 		};
 		states.set(row.deploymentId, fresh);
 		return fresh;
@@ -181,7 +201,7 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 	const endBecause = async (
 		row: LiveRunRow,
 		state: RowState,
-		outcome: { status: "error" | "cancelled"; errorMessage: string },
+		outcome: Parameters<PollerDeps["endRow"]>[1],
 		lines: readonly string[],
 	) => {
 		const ended = await deps.endRow(row.deploymentId, outcome);
@@ -190,9 +210,25 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 		if (ended) await writeLines(row, state, lines);
 	};
 
-	const pollRow = async (row: LiveRunRow, now: number) => {
+	const pollRow = async (
+		row: LiveRunRow,
+		now: number,
+		budget: { reads: number },
+	) => {
 		const state = stateOf(row);
 		const startedAt = timeOf(row.startedAt) ?? timeOf(row.createdAt) ?? now;
+		if (row.deployQueuedAt) {
+			const queuedAt = timeOf(row.deployQueuedAt) ?? startedAt;
+			if (now - queuedAt <= DEPLOY_QUEUED_BACKSTOP_MS) return;
+			const message = `GitHub Actions run #${row.buildRunId}: the deploy that was queued for this deployment never started within 24 hours.`;
+			await endBecause(
+				row,
+				state,
+				{ status: "error", errorMessage: message, deployQueued: true },
+				[`${GITHUB_LOG_PREFIX} ${message}`, ...openRunLine(row)],
+			);
+			return;
+		}
 		if (now - startedAt > MAX_LIVE_ROW_AGE_MS) {
 			const message = `GitHub Actions run #${row.buildRunId} finished without deploying: no deploy took over this deployment within 6 hours.`;
 			await endBecause(row, state, { status: "error", errorMessage: message }, [
@@ -215,6 +251,9 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 			return;
 		}
 		if (now < state.nextPollAt) return;
+		if (budget.reads <= 0) return;
+		budget.reads--;
+		state.lastReadAt = now;
 
 		const result = await deps.fetchRun(row);
 		if (result.kind === "backoff") {
@@ -312,9 +351,16 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 					if (!ids.has(id)) states.delete(id);
 				}
 				const now = deps.now();
-				for (const row of rows.slice(0, MAX_ROWS_PER_PASS)) {
+				const budget = { reads: MAX_READS_PER_PASS };
+				// Oldest read first: a row waiting out a backoff or its grace costs no read and cannot hold others back.
+				const ordered = [...rows].sort(
+					(a, b) =>
+						(states.get(a.deploymentId)?.lastReadAt ?? 0) -
+						(states.get(b.deploymentId)?.lastReadAt ?? 0),
+				);
+				for (const row of ordered) {
 					try {
-						await pollRow(row, now);
+						await pollRow(row, now, budget);
 					} catch (error) {
 						console.error(
 							`GitHub run poller: could not follow ${row.deploymentId}`,

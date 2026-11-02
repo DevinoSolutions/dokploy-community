@@ -11,6 +11,7 @@ import { quote } from "shell-quote";
 import { updateApplicationStatus } from "./application";
 import { updateCompose } from "./compose";
 import { resolveDeploymentLogHost } from "./deployment-log-host";
+import { notWaitingForGithubRun } from "./live-build-claim";
 import { updatePreviewDeployment } from "./preview-deployment";
 
 /**
@@ -123,6 +124,8 @@ const runningDeploymentsOf = (payload: QueueJobPayload) => {
 
 	return and(
 		eq(deployments.status, "running"),
+		// A row registered while GitHub builds belongs to no job of this process; a taken-over row does.
+		notWaitingForGithubRun,
 		owner,
 		isNull(deployments.scheduleId),
 		isNull(deployments.backupId),

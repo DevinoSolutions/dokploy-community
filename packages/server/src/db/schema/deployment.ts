@@ -1,10 +1,11 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
 	type AnyPgColumn,
 	boolean,
 	pgEnum,
 	pgTable,
 	text,
+	uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
@@ -29,112 +30,134 @@ export const deploymentStatus = pgEnum("deploymentStatus", [
 	"cancelled",
 ]);
 
-export const deployments = pgTable("deployment", {
-	deploymentId: text("deploymentId")
-		.notNull()
-		.primaryKey()
-		.$defaultFn(() => nanoid()),
-	title: text("title").notNull(),
-	description: text("description"),
-	status: deploymentStatus("status").default("running"),
-	logPath: text("logPath").notNull(),
-	pid: text("pid"),
-	applicationId: text("applicationId").references(
-		() => applications.applicationId,
-		{ onDelete: "cascade" },
-	),
-	composeId: text("composeId").references(() => compose.composeId, {
-		onDelete: "cascade",
-	}),
-	serverId: text("serverId").references(() => server.serverId, {
-		onDelete: "cascade",
-	}),
-	isPreviewDeployment: boolean("isPreviewDeployment").default(false),
-	previewDeploymentId: text("previewDeploymentId").references(
-		(): AnyPgColumn => previewDeployments.previewDeploymentId,
-		{ onDelete: "cascade" },
-	),
-	createdAt: text("createdAt")
-		.notNull()
-		.$defaultFn(() => new Date().toISOString()),
-	startedAt: text("startedAt"),
-	// Parse with new Date(): the finish time of a cancelled schedule run carries a
-	// "+00:00" offset as a token (see utils/schedules/run-status.ts), so it must
-	// not be compared or sorted as a string.
-	finishedAt: text("finishedAt"),
-	errorMessage: text("errorMessage"),
-	scheduleId: text("scheduleId").references(
-		(): AnyPgColumn => schedules.scheduleId,
-		{ onDelete: "cascade" },
-	),
-	backupId: text("backupId").references((): AnyPgColumn => backups.backupId, {
-		onDelete: "cascade",
-	}),
-	rollbackId: text("rollbackId").references(
-		(): AnyPgColumn => rollbacks.rollbackId,
-		{ onDelete: "cascade" },
-	),
-	volumeBackupId: text("volumeBackupId").references(
-		(): AnyPgColumn => volumeBackups.volumeBackupId,
-		{ onDelete: "cascade" },
-	),
-	buildServerId: text("buildServerId").references(() => server.serverId, {
-		onDelete: "cascade",
-	}),
-	/**
-	 * Fork columns (build-policy). The image this deployment actually shipped:
-	 * the `<repository>:<sha>` tag that was pushed and the digest the swarm
-	 * service was pinned to. Null on a local build. Together they are what a
-	 * rollback redeploys with no build.
-	 */
-	imageTag: text("imageTag"),
-	imageDigest: text("imageDigest"),
-	/**
-	 * Fork columns (T-7960). What a build-server compose deploy whose release
-	 * is running built: the commit its fresh clone checked out on the serving host
-	 * (read before anything else touched the checkout), the build server, and a
-	 * digest of the enabled patch rows it applied. A rebuild builds the code
-	 * already on disk, so it refuses unless all three still match (see
-	 * `assertRebuildCommitMatchesDeploy`). A rebuild that passed carries them
-	 * forward. Null everywhere else.
-	 */
-	pinnedCommit: text("pinnedCommit"),
-	pinnedBuildServerId: text("pinnedBuildServerId"),
-	pinnedPatchDigest: text("pinnedPatchDigest"),
-	/**
-	 * Fork columns (T-12149). Where the image this deployment shipped was built:
-	 * 'dokploy' | 'github-actions' | 'external' (see services/build-origin-shared.ts),
-	 * and the GitHub Actions run link when the caller sent a valid one. Null on
-	 * rows written before the columns existed; readers infer those. Kept here and
-	 * not on the application/compose tables, which sit at the Postgres 100-argument
-	 * cap for Drizzle eager loads.
-	 */
-	buildOrigin: text("buildOrigin"),
-	buildRunUrl: text("buildRunUrl"),
-	/**
-	 * Fork columns (T-12686). A row registered while GitHub Actions still builds
-	 * the image (deployment.registerExternalBuild) carries the run it follows: the
-	 * run id, the repository (`owner/name`), the commit, the run state (`queued` |
-	 * `in_progress` | `completed`) and a short label of the step that runs now
-	 * ("build · Build image (3/7)"). `completed` also means the deploy call took
-	 * the row over, so nothing polls GitHub for it any more. All null on every
-	 * other row.
-	 */
-	buildRunId: text("buildRunId"),
-	buildRepository: text("buildRepository"),
-	buildCommitSha: text("buildCommitSha"),
-	buildRunStatus: text("buildRunStatus"),
-	buildRunStep: text("buildRunStep"),
-	/**
-	 * Fork column (T-12686). True from deployment.registerExternalBuild until a deploy
-	 * job takes the row over (then false). A row that is still true never deployed
-	 * anything to Dokploy, so it only shows in the Deployments lists: every derivation
-	 * of "the last deployment" (baseline image, last deployed, build origin of the
-	 * service) ignores it, and so do the watchdog and the restart sweep. A row closed
-	 * by finishExternalBuild or by the poller keeps it true.
-	 */
-	externalBuildOnly: boolean("externalBuildOnly").notNull().default(false),
-});
+export const deployments = pgTable(
+	"deployment",
+	{
+		deploymentId: text("deploymentId")
+			.notNull()
+			.primaryKey()
+			.$defaultFn(() => nanoid()),
+		title: text("title").notNull(),
+		description: text("description"),
+		status: deploymentStatus("status").default("running"),
+		logPath: text("logPath").notNull(),
+		pid: text("pid"),
+		applicationId: text("applicationId").references(
+			() => applications.applicationId,
+			{ onDelete: "cascade" },
+		),
+		composeId: text("composeId").references(() => compose.composeId, {
+			onDelete: "cascade",
+		}),
+		serverId: text("serverId").references(() => server.serverId, {
+			onDelete: "cascade",
+		}),
+		isPreviewDeployment: boolean("isPreviewDeployment").default(false),
+		previewDeploymentId: text("previewDeploymentId").references(
+			(): AnyPgColumn => previewDeployments.previewDeploymentId,
+			{ onDelete: "cascade" },
+		),
+		createdAt: text("createdAt")
+			.notNull()
+			.$defaultFn(() => new Date().toISOString()),
+		startedAt: text("startedAt"),
+		// Parse with new Date(): the finish time of a cancelled schedule run carries a
+		// "+00:00" offset as a token (see utils/schedules/run-status.ts), so it must
+		// not be compared or sorted as a string.
+		finishedAt: text("finishedAt"),
+		errorMessage: text("errorMessage"),
+		scheduleId: text("scheduleId").references(
+			(): AnyPgColumn => schedules.scheduleId,
+			{ onDelete: "cascade" },
+		),
+		backupId: text("backupId").references((): AnyPgColumn => backups.backupId, {
+			onDelete: "cascade",
+		}),
+		rollbackId: text("rollbackId").references(
+			(): AnyPgColumn => rollbacks.rollbackId,
+			{ onDelete: "cascade" },
+		),
+		volumeBackupId: text("volumeBackupId").references(
+			(): AnyPgColumn => volumeBackups.volumeBackupId,
+			{ onDelete: "cascade" },
+		),
+		buildServerId: text("buildServerId").references(() => server.serverId, {
+			onDelete: "cascade",
+		}),
+		/**
+		 * Fork columns (build-policy). The image this deployment actually shipped:
+		 * the `<repository>:<sha>` tag that was pushed and the digest the swarm
+		 * service was pinned to. Null on a local build. Together they are what a
+		 * rollback redeploys with no build.
+		 */
+		imageTag: text("imageTag"),
+		imageDigest: text("imageDigest"),
+		/**
+		 * Fork columns (T-7960). What a build-server compose deploy whose release
+		 * is running built: the commit its fresh clone checked out on the serving host
+		 * (read before anything else touched the checkout), the build server, and a
+		 * digest of the enabled patch rows it applied. A rebuild builds the code
+		 * already on disk, so it refuses unless all three still match (see
+		 * `assertRebuildCommitMatchesDeploy`). A rebuild that passed carries them
+		 * forward. Null everywhere else.
+		 */
+		pinnedCommit: text("pinnedCommit"),
+		pinnedBuildServerId: text("pinnedBuildServerId"),
+		pinnedPatchDigest: text("pinnedPatchDigest"),
+		/**
+		 * Fork columns (T-12149). Where the image this deployment shipped was built:
+		 * 'dokploy' | 'github-actions' | 'external' (see services/build-origin-shared.ts),
+		 * and the GitHub Actions run link when the caller sent a valid one. Null on
+		 * rows written before the columns existed; readers infer those. Kept here and
+		 * not on the application/compose tables, which sit at the Postgres 100-argument
+		 * cap for Drizzle eager loads.
+		 */
+		buildOrigin: text("buildOrigin"),
+		buildRunUrl: text("buildRunUrl"),
+		/**
+		 * Fork columns (T-12686). A row registered while GitHub Actions still builds
+		 * the image (deployment.registerExternalBuild) carries the run it follows: the
+		 * run id, the repository (`owner/name`), the commit, the run state (`queued` |
+		 * `in_progress` | `completed`) and a short label of the step that runs now
+		 * ("build · Build image (3/7)"). `completed` also means the deploy call took
+		 * the row over, so nothing polls GitHub for it any more. All null on every
+		 * other row.
+		 */
+		buildRunId: text("buildRunId"),
+		buildRepository: text("buildRepository"),
+		buildCommitSha: text("buildCommitSha"),
+		buildRunStatus: text("buildRunStatus"),
+		buildRunStep: text("buildRunStep"),
+		/**
+		 * Fork column (T-12686). True from deployment.registerExternalBuild until a deploy
+		 * job takes the row over (then false). A row that is still true never deployed
+		 * anything to Dokploy, so it only shows in the Deployments lists: every derivation
+		 * of "the last deployment" (baseline image, last deployed, build origin of the
+		 * service) ignores it, and so do the watchdog and the restart sweep. A row closed
+		 * by finishExternalBuild or by the poller keeps it true.
+		 */
+		externalBuildOnly: boolean("externalBuildOnly").notNull().default(false),
+		/**
+		 * Fork columns (T-12686). `deployQueuedAt`: when application/compose deploy or
+		 * redeploy accepted this row's id (the deploy waits in Dokploy's queue, which can take
+		 * far longer than the workflow waits). A row with it set is never ended by the run
+		 * poller. `deployStartedAt`: when the queue job took the row over; the watchdog
+		 * matches the job and counts its wall limit from it, not from the GitHub build.
+		 */
+		deployQueuedAt: text("deployQueuedAt"),
+		deployStartedAt: text("deployStartedAt"),
+	},
+	(table) => [
+		// One run of one service is one registered row, however many matrix legs
+		// register at once. Registered rows only: a rollback deploy shares its run link.
+		uniqueIndex("deployment_external_build_run_unique")
+			.on(
+				sql`coalesce(${table.applicationId}, ${table.composeId})`,
+				table.buildRunUrl,
+			)
+			.where(sql`${table.externalBuildOnly} = true`),
+	],
+);
 
 export const deploymentsRelations = relations(deployments, ({ one }) => ({
 	application: one(applications, {

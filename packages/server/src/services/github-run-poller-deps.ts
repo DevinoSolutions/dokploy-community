@@ -18,7 +18,7 @@ import {
 	getGithubToken,
 	haveGithubRequirements,
 } from "@dokploy/server/utils/providers/github";
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull } from "drizzle-orm";
 import { quote } from "shell-quote";
 import {
 	LIVE_BUILD_RUN_STATUSES,
@@ -66,6 +66,7 @@ const listLiveRows = async (): Promise<LiveRunRow[]> => {
 			buildRunStep: deployments.buildRunStep,
 			startedAt: deployments.startedAt,
 			createdAt: deployments.createdAt,
+			deployQueuedAt: deployments.deployQueuedAt,
 		})
 		.from(deployments)
 		.where(liveRowFilter)
@@ -133,6 +134,18 @@ const providersOf = async (organizationId: string): Promise<ProviderRow[]> => {
 				return false;
 			}
 		});
+};
+
+// Installation tokens live an hour: one per provider is kept for 50 minutes instead of one per row per poll.
+const TOKEN_CACHE_MS = 50 * 60_000;
+const tokenCache = new Map<string, { token: string; mintedAt: number }>();
+
+const tokenOf = async (provider: ProviderRow, now: number) => {
+	const cached = tokenCache.get(provider.githubId);
+	if (cached && now - cached.mintedAt < TOKEN_CACHE_MS) return cached.token;
+	const token = await getGithubToken(authGithub(provider));
+	tokenCache.set(provider.githubId, { token, mintedAt: now });
+	return token;
 };
 
 // The provider that last read a repository, tried first next time.
@@ -234,33 +247,34 @@ const fetchRun = async (row: LiveRunRow): Promise<RunFetchResult> => {
 		organizationCache.set(row.deploymentId, { organizationId, at: now });
 	}
 
-	const tokens: Array<{ id: string | null; token: string | null }> = [];
-	if (organizationId) {
-		const providers = await providersOf(organizationId);
-		const first = workingProvider.get(row.buildRepository);
-		providers.sort(
-			(a, b) => Number(b.githubId === first) - Number(a.githubId === first),
-		);
-		for (const provider of providers) {
+	const providers = organizationId ? await providersOf(organizationId) : [];
+	const first = workingProvider.get(row.buildRepository);
+	providers.sort(
+		(a, b) => Number(b.githubId === first) - Number(a.githubId === first),
+	);
+	// Tokens are minted one at a time, only when the previous one could not read the run; a public repository is
+	// read without any token at the end.
+	const attempts: Array<ProviderRow | null> = [...providers, null];
+
+	for (const provider of attempts) {
+		const id = provider ? provider.githubId : null;
+		let token: string | null = null;
+		if (provider) {
 			try {
-				tokens.push({
-					id: provider.githubId,
-					token: await getGithubToken(authGithub(provider)),
-				});
+				token = await tokenOf(provider, now);
 			} catch (error) {
+				tokenCache.delete(provider.githubId);
 				console.error(
 					`GitHub run poller: no installation token from provider ${provider.githubId}`,
 					error instanceof Error ? error.message : error,
 				);
+				continue;
 			}
 		}
-	}
-	// A public repository can be read without any token.
-	tokens.push({ id: null, token: null });
-
-	for (const { id, token } of tokens) {
 		const jobs = await getJson(jobsUrl(row), token);
 		if (!jobs.ok) {
+			// A rejected token may have expired early: mint a new one next time.
+			if (provider && jobs.status === 401) tokenCache.delete(provider.githubId);
 			if (isRateLimited(jobs)) return backoffOf(jobs, now);
 			// 401 / 403 / 404: this token cannot see the repository; the next one may. 5xx: later.
 			if (jobs.status >= 500) return { kind: "backoff", retryAfterMs: 60_000 };
@@ -326,6 +340,8 @@ const stillWaiting = and(
 	eq(deployments.status, "running"),
 	eq(deployments.buildOrigin, "github-actions"),
 	eq(deployments.externalBuildOnly, true),
+	// A row whose deploy was accepted is the queue's; only the backstop below may end it.
+	isNull(deployments.deployQueuedAt),
 );
 // Progress is only written while the run is: a finished run stays finished.
 const runStillGoing = and(
@@ -338,7 +354,19 @@ export const createDefaultGithubRunPollerDeps = (): PollerDeps => ({
 	listLiveRows,
 	fetchRun,
 	readLog,
-	appendLines: (row, lines) => appendGithubLines(row, lines),
+	appendLines: async (row, lines) => {
+		// A deploy may have taken the row over since the pass listed it: its log is Dokploy's from then on.
+		const [open] = await db
+			.select({ deploymentId: deployments.deploymentId })
+			.from(deployments)
+			.where(
+				and(
+					eq(deployments.deploymentId, row.deploymentId),
+					eq(deployments.externalBuildOnly, true),
+				),
+			);
+		if (open) await appendGithubLines(row, lines);
+	},
 	setProgress: async (deploymentId, progress) => {
 		const changed = await db
 			.update(deployments)
@@ -368,7 +396,18 @@ export const createDefaultGithubRunPollerDeps = (): PollerDeps => ({
 				buildRunStatus: "completed",
 				buildRunStep: null,
 			})
-			.where(and(eq(deployments.deploymentId, deploymentId), stillWaiting))
+			.where(
+				and(
+					eq(deployments.deploymentId, deploymentId),
+					outcome.deployQueued
+						? and(
+								eq(deployments.status, "running"),
+								eq(deployments.buildOrigin, "github-actions"),
+								eq(deployments.externalBuildOnly, true),
+							)
+						: stillWaiting,
+				),
+			)
 			.returning({ deploymentId: deployments.deploymentId });
 		return changed.length > 0;
 	},
