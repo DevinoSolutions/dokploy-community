@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### New in v0.30.8-community.42
+
+Upgrade notes: one new additive database migration (0225) adds two nullable text columns to the deployment table, so an image-only rollback to v0.30.8-community.41 keeps working (the extra columns are ignored). Nothing to configure. This release includes everything in v0.30.8-community.41.
+
+**Services built and deployed by GitHub Actions now show a GitHub Actions badge, link each deployment to its Actions run, and hide Dokploy's build panels; buildOrigin and buildRunUrl are exposed in the API and MCP** (T-12149, #576). Migration 0225 adds two nullable columns to the deployment table, with no default and guarded so a re-run is a no-op.
+
+**Docker-source applications no longer try to re-tag or push their image to the rollback registry** (T-12204, #580). Follow-up to the v0.30.8-community.41 fix. For an application whose source is a Docker image, the rollback registry step tagged the image without pulling it first, so it failed with "No such image" unless the image happened to be cached on the host. That push is now skipped with a log line, like the deploy and build registries, and the rollback record is still created. A comment on the deploy registry was corrected, since that registry only authenticates the pull. No migration.
+
 ### New in v0.30.8-community.41
 
 Upgrade notes: no new database migrations since v0.30.8-community.40, so an image-only rollback to it keeps working. Nothing to configure. This release includes everything in v0.30.8-community.40.
