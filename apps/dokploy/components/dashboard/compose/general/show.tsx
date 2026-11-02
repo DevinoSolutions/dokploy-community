@@ -41,6 +41,8 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 					buildRunId={data?.buildRunId}
 					buildDeployedAt={data?.buildDeployedAt}
 					buildRolledBack={data?.buildRolledBack}
+					buildRollbackRunId={data?.buildRollbackRunId}
+					buildRollbackFailure={data?.buildRollbackFailure}
 				/>
 			)}
 			<Card className="bg-background">

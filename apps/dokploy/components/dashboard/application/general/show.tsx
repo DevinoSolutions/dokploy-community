@@ -113,6 +113,8 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 					buildRunId={data?.buildRunId}
 					buildDeployedAt={data?.buildDeployedAt}
 					buildRolledBack={data?.buildRolledBack}
+					buildRollbackRunId={data?.buildRollbackRunId}
+					buildRollbackFailure={data?.buildRollbackFailure}
 				/>
 			)}
 			<Card className="bg-background">
@@ -132,7 +134,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 								<DialogAction
 									title={
 										isGithubActions
-											? "Redeploy current image"
+											? "Redeploy current version"
 											: "Deploy Application"
 									}
 									description={
@@ -148,7 +150,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 											.then(() => {
 												toast.success(
 													isGithubActions
-														? "Redeploying the current image"
+														? "Redeploying the current version"
 														: "Application deployed successfully",
 												);
 												refetch();
@@ -171,7 +173,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 												<div className="flex items-center">
 													<Rocket className="size-4 mr-1" />
 													{isGithubActions
-														? "Redeploy current image"
+														? "Redeploy current version"
 														: "Deploy"}
 												</div>
 											</TooltipTrigger>

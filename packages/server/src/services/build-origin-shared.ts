@@ -397,7 +397,65 @@ export type ServiceBuildDescription = ResolvedBuildOrigin &
 		 * the earlier image runs again. The commit and time above are then the rollback's.
 		 */
 		buildRolledBack: boolean;
+		/** When rolled back: the run the action rolled back after, from the failed deployment's row else the rollback's title. */
+		buildRollbackRunId: string | null;
+		/** When rolled back: how that run failed, `checks` (it deployed, then failed its checks) or `deploy` (the deploy itself failed). */
+		buildRollbackFailure: "checks" | "deploy" | null;
 	};
+
+export const NO_ROLLBACK_DETAILS = {
+	buildRolledBack: false,
+	buildRollbackRunId: null,
+	buildRollbackFailure: null,
+} as const;
+
+/**
+ * The run the action rolled back after. The action also rolls back when a deploy is refused or fails in Dokploy,
+ * so the failed deployment is the newest GitHub Actions row created before the rollback, whatever its status; the
+ * previous healthy run is not the one: a row that built the commit the rollback restores is skipped, and so is
+ * any row without the "GHA " marker (a manual redeploy). Without such a row (a refused deploy leaves none) only the
+ * rollback's own title can name the run, and the failure is a deploy failure. A rollback title that names no
+ * commit cannot rule the healthy run out, so it is blamed when it is the only candidate.
+ */
+const describeRollbackCause = (
+	deployments: readonly BuildOriginDeploymentRow[],
+	rollback: BuildOriginDeploymentRow,
+): Pick<
+	ServiceBuildDescription,
+	"buildRollbackRunId" | "buildRollbackFailure"
+> => {
+	const restored = parseGithubActionsTitle(rollback.title).buildCommitSha;
+	const buildsRestoredCommit = (row: BuildOriginDeploymentRow) => {
+		const sha = parseGithubActionsTitle(row.title).buildCommitSha;
+		return Boolean(
+			restored && sha && (sha.startsWith(restored) || restored.startsWith(sha)),
+		);
+	};
+	const failed = deployments
+		.filter(
+			(row) =>
+				row !== rollback &&
+				!buildsRestoredCommit(row) &&
+				isServiceDeployment(row) &&
+				!isGithubActionsRollbackTitle(row.title) &&
+				(isBuildOrigin(row.buildOrigin)
+					? row.buildOrigin === "github-actions"
+					: hasGithubActionsTitleMarker(row.title)) &&
+				createdAtMs(row) < createdAtMs(rollback),
+		)
+		.sort((a, b) => createdAtMs(b) - createdAtMs(a))[0];
+	const fromRow = failed
+		? describeGithubActionsRun({
+				title: failed.title,
+				buildRunUrl: failed.buildRunUrl,
+			}).buildRunId
+		: null;
+	return {
+		buildRollbackRunId:
+			fromRow ?? parseGithubActionsTitle(rollback.title).buildRunId,
+		buildRollbackFailure: failed?.status === "done" ? "checks" : "deploy",
+	};
+};
 
 /**
  * `pickServiceBuildOrigin` plus the run details and the deploy time of the deployment it was read from, for
@@ -413,7 +471,7 @@ export const describeServiceBuild = (
 			...resolved,
 			...NO_GITHUB_ACTIONS_RUN_DETAILS,
 			buildDeployedAt: null,
-			buildRolledBack: false,
+			...NO_ROLLBACK_DETAILS,
 		};
 	}
 	const built = describeGithubActionsRun({
@@ -421,9 +479,14 @@ export const describeServiceBuild = (
 		buildRunUrl: resolved.buildRunUrl,
 	});
 	// What runs now is the action's rollback deploy (also when a service has nothing but rollbacks).
-	const buildRolledBack = Boolean(
-		serving && isGithubActionsRollbackTitle(serving.title),
-	);
+	const rolledBack =
+		serving && isGithubActionsRollbackTitle(serving.title) ? serving : null;
+	const rollbackDetails = rolledBack
+		? {
+				buildRolledBack: true,
+				...describeRollbackCause(deployments, rolledBack),
+			}
+		: NO_ROLLBACK_DETAILS;
 	// The newest finished deployment is the action's rollback: that is what runs now, so the commit and the
 	// time are the rollback's. The run link and the repository stay those of the build row.
 	if (
@@ -438,30 +501,36 @@ export const describeServiceBuild = (
 			buildCommitSha: rollback.buildCommitSha,
 			buildEnvironment: rollback.buildEnvironment ?? built.buildEnvironment,
 			buildDeployedAt: serving.finishedAt ?? serving.createdAt ?? null,
-			buildRolledBack,
+			...rollbackDetails,
 		};
 	}
 	return {
 		...resolved,
 		...built,
 		buildDeployedAt: row.finishedAt ?? row.createdAt ?? null,
-		buildRolledBack,
+		...rollbackDetails,
 	};
 };
 
 /**
  * The one plain line the "Deployed from GitHub Actions" panel shows after the action's rollback deploy. The commit
- * part is left out when the rollback title names none, and the run part says "the latest run" when the id is unknown.
+ * part is left out when the rollback title names none, the run part says "the latest run" when the id is unknown,
+ * and the reason is "failed its checks" for a run that deployed, else "failed to deploy".
  */
 export const describeGithubActionsRollback = (input: {
 	buildCommitSha?: string | null;
-	buildRunId?: string | null;
+	buildRollbackRunId?: string | null;
+	buildRollbackFailure?: "checks" | "deploy" | null;
 }): string => {
 	const sha = input.buildCommitSha?.trim().slice(0, 7);
-	const runId = input.buildRunId?.trim();
+	const runId = input.buildRollbackRunId?.trim();
+	const reason =
+		input.buildRollbackFailure === "deploy"
+			? "failed to deploy"
+			: "failed its checks";
 	return `Rolled back${sha ? ` to ${sha}` : ""} after ${
 		runId ? `run #${runId}` : "the latest run"
-	} failed its checks. The run has the details.`;
+	} ${reason}. The run has the details.`;
 };
 
 /** The source types whose `branch` is the branch Dokploy deploys from. */

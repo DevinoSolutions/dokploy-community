@@ -276,6 +276,8 @@ describe("describeServiceBuild", () => {
 			buildRunId: "41376332164",
 			buildDeployedAt: "2026-11-02T10:02:00.000Z",
 			buildRolledBack: false,
+			buildRollbackRunId: null,
+			buildRollbackFailure: null,
 		});
 	});
 
@@ -379,6 +381,107 @@ describe("describeServiceBuild", () => {
 			expect(describeServiceBuild([A, B], app).buildRolledBack).toBe(false);
 		});
 
+		describe("which run the rollback line blames", () => {
+			const failedB = (overrides: Partial<BuildOriginDeploymentRow> = {}) =>
+				row({
+					title: TITLE,
+					status: "error",
+					createdAt: "2026-11-02T10:00:00.000Z",
+					finishedAt: "2026-11-02T10:01:00.000Z",
+					buildOrigin: "github-actions",
+					buildRunUrl: RUN,
+					...overrides,
+				});
+
+			test("blames the run that deployed and then failed its checks", () => {
+				const out = describeServiceBuild([A, B, rollback()], app);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("checks");
+			});
+
+			test("blames the run whose deploy errored, not the healthy run before it", () => {
+				const out = describeServiceBuild([A, failedB(), rollback()], app);
+				expect(out.buildRolledBack).toBe(true);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("deploy");
+				// The commit is the rollback's and the run link stays the newest done build row's.
+				expect(out.buildCommitSha).toBe("11111111");
+				expect(out.buildRunId).toBe("1");
+			});
+
+			test("blames a cancelled deploy the same way", () => {
+				const out = describeServiceBuild(
+					[A, failedB({ status: "cancelled" }), rollback()],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("deploy");
+			});
+
+			test("names no run when the refused deploy left no row and the rollback title has none", () => {
+				const out = describeServiceBuild([A, rollback()], app);
+				expect(out.buildRolledBack).toBe(true);
+				expect(out.buildRollbackRunId).toBeNull();
+				expect(out.buildRollbackFailure).toBe("deploy");
+			});
+
+			test("reads the run from the rollback title when no failed row exists", () => {
+				const out = describeServiceBuild(
+					[
+						A,
+						rollback({
+							title: "GHA rollback production to 11111111 [run 77.1]",
+						}),
+					],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("77");
+				expect(out.buildRollbackFailure).toBe("deploy");
+			});
+
+			test("the failed deployment's row wins over the rollback title", () => {
+				const out = describeServiceBuild(
+					[
+						A,
+						failedB(),
+						rollback({ title: "GHA rollback production to 11111111 [run 77]" }),
+					],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+			});
+
+			test("a rollback title that names no commit blames the newest earlier GitHub Actions run", () => {
+				const out = describeServiceBuild(
+					[
+						A,
+						B,
+						rollback({ title: "GHA rollback: redeploy the last good image" }),
+					],
+					app,
+				);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+				expect(out.buildRollbackFailure).toBe("checks");
+			});
+
+			test("a row created after the rollback is not blamed", () => {
+				const later = row({
+					title: "GHA production 33333333 [run 9]",
+					status: "error",
+					createdAt: "2026-11-02T13:00:00.000Z",
+					buildOrigin: "github-actions",
+				});
+				const out = describeServiceBuild([A, B, rollback(), later], app);
+				expect(out.buildRollbackRunId).toBe("41376332164");
+			});
+
+			test("has no cause when nothing was rolled back", () => {
+				const out = describeServiceBuild([A, B], app);
+				expect(out.buildRollbackRunId).toBeNull();
+				expect(out.buildRollbackFailure).toBeNull();
+			});
+		});
+
 		test("a service with only a rollback describes that rollback", () => {
 			const out = describeServiceBuild([rollback()], app);
 			expect(out.buildOrigin).toBe("github-actions");
@@ -404,6 +507,8 @@ describe("describeServiceBuild", () => {
 			buildRunId: null,
 			buildDeployedAt: null,
 			buildRolledBack: false,
+			buildRollbackRunId: null,
+			buildRollbackFailure: null,
 		};
 		expect(
 			describeServiceBuild([row({ title: "Manual deployment" })], app),
@@ -436,7 +541,8 @@ describe("describeGithubActionsRollback", () => {
 		expect(
 			describeGithubActionsRollback({
 				buildCommitSha: "11111111",
-				buildRunId: "41376332164",
+				buildRollbackRunId: "41376332164",
+				buildRollbackFailure: "checks",
 			}),
 		).toBe(
 			"Rolled back to 1111111 after run #41376332164 failed its checks. The run has the details.",
@@ -447,10 +553,32 @@ describe("describeGithubActionsRollback", () => {
 		expect(
 			describeGithubActionsRollback({
 				buildCommitSha: null,
-				buildRunId: "7",
+				buildRollbackRunId: "7",
+				buildRollbackFailure: "checks",
 			}),
 		).toBe(
 			"Rolled back after run #7 failed its checks. The run has the details.",
+		);
+	});
+
+	test("says the deploy failed when it never reached its checks", () => {
+		expect(
+			describeGithubActionsRollback({
+				buildCommitSha: "11111111",
+				buildRollbackRunId: "41376332164",
+				buildRollbackFailure: "deploy",
+			}),
+		).toBe(
+			"Rolled back to 1111111 after run #41376332164 failed to deploy. The run has the details.",
+		);
+		expect(
+			describeGithubActionsRollback({
+				buildCommitSha: null,
+				buildRollbackRunId: null,
+				buildRollbackFailure: "deploy",
+			}),
+		).toBe(
+			"Rolled back after the latest run failed to deploy. The run has the details.",
 		);
 	});
 

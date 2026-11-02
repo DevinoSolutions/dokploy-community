@@ -88,6 +88,9 @@ describe("MCP tools for the build origin", () => {
 		"%s lists buildRolledBack",
 		(name) => {
 			expect(byName.get(name)?.description ?? "").toContain("buildRolledBack");
+			expect(byName.get(name)?.description ?? "").toContain(
+				"buildRollbackRunId",
+			);
 		},
 	);
 });

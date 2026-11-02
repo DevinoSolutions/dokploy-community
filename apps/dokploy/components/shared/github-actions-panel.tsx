@@ -37,6 +37,8 @@ export interface GithubActionsServiceInfo {
 	buildDeployedAt?: string | null;
 	/** True when the action's rollback deploy is what runs now (T-12502). */
 	buildRolledBack?: boolean | null;
+	buildRollbackRunId?: string | null;
+	buildRollbackFailure?: "checks" | "deploy" | null;
 }
 
 /** The hint under the deploy button of a service that GitHub Actions builds. */
@@ -124,6 +126,8 @@ export const GithubActionsPanel = ({
 	buildRunId,
 	buildDeployedAt,
 	buildRolledBack,
+	buildRollbackRunId,
+	buildRollbackFailure,
 }: PanelProps) => {
 	const runUrl = normalizeBuildRunUrl(buildRunUrl);
 	const repositoryUrl = githubRepositoryUrl(buildRepository);
@@ -195,7 +199,11 @@ export const GithubActionsPanel = ({
 					<p className="flex items-start gap-2 rounded border bg-muted/50 px-3 py-2 text-sm">
 						<Undo2 className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
 						<span>
-							{describeGithubActionsRollback({ buildCommitSha, buildRunId })}
+							{describeGithubActionsRollback({
+								buildCommitSha,
+								buildRollbackRunId,
+								buildRollbackFailure,
+							})}
 						</span>
 					</p>
 				)}
