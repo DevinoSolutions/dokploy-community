@@ -8,6 +8,7 @@ import {
 	githubActionsPushTarget,
 	githubCommitUrl,
 	parseGithubActionsTitle,
+	renderBuildStartMarker,
 	withGithubActionsRunDetails,
 } from "@dokploy/server/services/build-origin";
 import { describe, expect, test } from "vitest";
@@ -457,6 +458,38 @@ describe("describeGithubActionsRollback", () => {
 		expect(describeGithubActionsRollback({ buildCommitSha: "abcdef12" })).toBe(
 			"Rolled back to abcdef1 after the latest run failed its checks. The run has the details.",
 		);
+	});
+});
+
+describe("renderBuildStartMarker", () => {
+	const STORED = "--- Dokploy: the build of dep-8f3a2c starts here ---";
+
+	test("reads 'Dokploy: pull and start' for a deployment built in GitHub Actions", () => {
+		expect(renderBuildStartMarker(STORED, true)).toBe(
+			"Dokploy: pull and start",
+		);
+	});
+
+	test("keeps a marker without the internal id for any other deployment", () => {
+		const out = renderBuildStartMarker(STORED, false);
+		expect(out).toBe("--- Dokploy: the build starts here ---");
+		expect(out).not.toContain("dep-8f3a2c");
+	});
+
+	test("still reads a stored log with leading or trailing whitespace", () => {
+		expect(renderBuildStartMarker(`  ${STORED}  `, true)).toBe(
+			"Dokploy: pull and start",
+		);
+	});
+
+	test.each([
+		"Cloning repository",
+		"--- Dokploy: the build of  starts here ---",
+		"echo '--- Dokploy: the build of dep-1 starts here ---'",
+		"--- Dokploy: the build of dep-1 starts here --- and more",
+	])("leaves other lines alone: %s", (line) => {
+		expect(renderBuildStartMarker(line, true)).toBe(line);
+		expect(renderBuildStartMarker(line, false)).toBe(line);
 	});
 });
 

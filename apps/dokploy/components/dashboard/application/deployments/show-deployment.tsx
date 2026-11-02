@@ -1,3 +1,4 @@
+import { renderBuildStartMarker } from "@dokploy/server/services/build-origin-shared";
 import copy from "copy-to-clipboard";
 import { Check, Copy, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -88,8 +89,14 @@ export const ShowDeployment = ({
 		};
 	}, [logPath, open, unavailableMessage]);
 
+	const isGithubActions = Boolean(githubActions);
+
 	useEffect(() => {
-		const logs = parseLogs(data);
+		// The line that marks where the build starts names the deployment; the dialog shows it without the id.
+		const logs = parseLogs(data).map((log) => ({
+			...log,
+			message: renderBuildStartMarker(log.message, isGithubActions),
+		}));
 		let filteredLogsResult = logs;
 		if (serverId) {
 			let hideSubsequentLogs = false;
@@ -107,7 +114,7 @@ export const ShowDeployment = ({
 		}
 
 		setFilteredLogs(filteredLogsResult);
-	}, [data, showExtraLogs]);
+	}, [data, showExtraLogs, isGithubActions]);
 
 	useEffect(() => {
 		scrollToBottom();

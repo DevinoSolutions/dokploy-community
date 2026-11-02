@@ -560,6 +560,32 @@ export const isGithubActionsDeployment = (
 		: serviceBuildOrigin === "github-actions" &&
 			hasGithubActionsTitleMarker(row.title);
 
+/**
+ * The marker line an application's deploy script logs where its build starts (`getBuildStartLine` in
+ * deployment-heartbeat.ts, which names the deployment so the watchdog can tell deployments apart). It is stored
+ * with the deployment's internal id; the log dialog renders it with `renderBuildStartMarker` so the id is not shown.
+ */
+export const BUILD_START_MARKER_PATTERN =
+	/^\s*--- Dokploy: the build of \S+ starts here ---\s*$/;
+
+export const GITHUB_ACTIONS_BUILD_START_LABEL = "Dokploy: pull and start";
+export const BUILD_START_LABEL = "--- Dokploy: the build starts here ---";
+
+/**
+ * What the log dialog shows for one log line. The build start marker loses the internal deployment id: it reads
+ * "Dokploy: pull and start" for a deployment built in GitHub Actions (Dokploy only pulls and starts the image)
+ * and "--- Dokploy: the build starts here ---" for any other. Every other line is returned as it is.
+ */
+export const renderBuildStartMarker = (
+	message: string,
+	githubActions: boolean,
+): string =>
+	BUILD_START_MARKER_PATTERN.test(message)
+		? githubActions
+			? GITHUB_ACTIONS_BUILD_START_LABEL
+			: BUILD_START_LABEL
+		: message;
+
 export const BUILD_ORIGIN_LABELS: Record<
 	BuildOrigin,
 	{ label: string; description: string }
