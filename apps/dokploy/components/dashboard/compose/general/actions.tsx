@@ -313,7 +313,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 					Open Terminal
 				</Button>
 			</DockerTerminalModal>
-			{canUpdateService && (
+			{canUpdateService && !isGithubActions && (
 				<div className="flex flex-row items-center gap-2 rounded-md px-4 py-2 border">
 					<span className="text-sm font-medium">Autodeploy</span>
 					<Switch
@@ -340,7 +340,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 	);
 };
 
-/** The Rebuild action of a compose, also shown under "Advanced" for a service that GitHub Actions builds. */
+/** The Rebuild action of a compose. Dokploy builds nothing for a service that GitHub Actions builds, so it is not shown there. */
 export const ComposeRebuildAction = ({ composeId }: Props) => {
 	const { data: permissions } = api.user.getPermissions.useQuery();
 	const canDeploy = permissions?.deployment.create ?? false;
