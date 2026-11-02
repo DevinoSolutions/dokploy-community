@@ -4,6 +4,7 @@ import {
 	describeImageReference,
 	describeServiceBuild,
 	extractComposeImages,
+	githubActionsPushTarget,
 	githubCommitUrl,
 	parseGithubActionsTitle,
 	withGithubActionsRunDetails,
@@ -77,13 +78,47 @@ describe("parseGithubActionsTitle", () => {
 		});
 	});
 
-	test("a rollback names the environment and no commit", () => {
+	test("a rollback names the environment and the commit it goes back to", () => {
 		expect(
-			parseGithubActionsTitle("GHA rollback production to a1b2c3d4 [run 7]"),
+			parseGithubActionsTitle("GHA rollback production to A1B2C3D4 [run 7]"),
 		).toEqual({
 			buildEnvironment: "production",
-			buildCommitSha: null,
+			buildCommitSha: "a1b2c3d4",
 			buildRunId: "7",
+		});
+	});
+
+	test("a rollback without a named commit has none", () => {
+		expect(parseGithubActionsTitle("GHA rollback production")).toEqual({
+			buildEnvironment: "production",
+			buildCommitSha: null,
+			buildRunId: null,
+		});
+	});
+
+	test("a rollback title without an environment does not read 'rollback' or 'to' as one", () => {
+		expect(
+			parseGithubActionsTitle("GHA rollback: redeploy the last good image"),
+		).toEqual({
+			buildEnvironment: null,
+			buildCommitSha: null,
+			buildRunId: null,
+		});
+		expect(parseGithubActionsTitle("GHA rollback to a1b2c3d4")).toEqual({
+			buildEnvironment: null,
+			buildCommitSha: "a1b2c3d4",
+			buildRunId: null,
+		});
+	});
+
+	test("a title that only looks like a rollback is read as a deploy", () => {
+		// Same case rules as isGithubActionsRollbackTitle: lower-case "rollback" after "GHA " only.
+		expect(
+			parseGithubActionsTitle("GHA Rollback production to a1b2c3d4"),
+		).toEqual({
+			buildEnvironment: "Rollback",
+			buildCommitSha: null,
+			buildRunId: null,
 		});
 	});
 
@@ -249,25 +284,87 @@ describe("describeServiceBuild", () => {
 		expect(out.buildDeployedAt).toBe("2026-11-02T10:00:00.000Z");
 	});
 
-	test("skips the action's rollback deploy for the details", () => {
-		const out = describeServiceBuild(
-			[
-				row({
-					title: TITLE,
-					createdAt: "2026-11-02T10:00:00.000Z",
-					buildOrigin: "github-actions",
-					buildRunUrl: RUN,
-				}),
-				row({
-					title: "GHA rollback production to 11111111",
-					createdAt: "2026-11-02T12:00:00.000Z",
-					buildOrigin: "github-actions",
-				}),
-			],
-			app,
-		);
-		expect(out.buildCommitSha).toBe("b4f509d2");
-		expect(out.buildRunUrl).toBe(RUN);
+	describe("after the action's rollback deploy", () => {
+		// A deployed and ran, B deployed and finished "done" but failed its health check, then the action
+		// deployed "GHA rollback production to A": A is what runs now.
+		const A = row({
+			title: "GHA production 11111111 [run 1]",
+			createdAt: "2026-11-02T09:00:00.000Z",
+			finishedAt: "2026-11-02T09:02:00.000Z",
+			buildOrigin: "github-actions",
+			buildRunUrl: "https://github.com/DevinoSolutions/caly-mcp/actions/runs/1",
+		});
+		const B = row({
+			title: TITLE,
+			createdAt: "2026-11-02T10:00:00.000Z",
+			finishedAt: "2026-11-02T10:02:00.000Z",
+			buildOrigin: "github-actions",
+			buildRunUrl: RUN,
+		});
+		const rollback = (overrides: Partial<BuildOriginDeploymentRow> = {}) =>
+			row({
+				title: "GHA rollback production to 11111111",
+				createdAt: "2026-11-02T12:00:00.000Z",
+				finishedAt: "2026-11-02T12:01:00.000Z",
+				buildOrigin: "github-actions",
+				...overrides,
+			});
+
+		test("shows the rolled-back commit and time, and keeps the build row's run link", () => {
+			const out = describeServiceBuild([A, B, rollback()], app);
+			expect(out.buildOrigin).toBe("github-actions");
+			expect(out.buildCommitSha).toBe("11111111");
+			expect(out.buildDeployedAt).toBe("2026-11-02T12:01:00.000Z");
+			expect(out.buildEnvironment).toBe("production");
+			expect(out.buildRunUrl).toBe(RUN);
+			expect(out.buildRepository).toBe("DevinoSolutions/caly-mcp");
+			expect(out.buildRunId).toBe("41376332164");
+		});
+
+		test("has no commit when the rollback title names none", () => {
+			const out = describeServiceBuild(
+				[
+					A,
+					B,
+					rollback({ title: "GHA rollback: redeploy the last good image" }),
+				],
+				app,
+			);
+			expect(out.buildCommitSha).toBeNull();
+			expect(out.buildDeployedAt).toBe("2026-11-02T12:01:00.000Z");
+			// 'rollback' is not an environment; the build row's is kept.
+			expect(out.buildEnvironment).toBe("production");
+		});
+
+		test("ignores a rollback that has not finished", () => {
+			const out = describeServiceBuild(
+				[A, B, rollback({ status: "running", finishedAt: null })],
+				app,
+			);
+			expect(out.buildCommitSha).toBe("b4f509d2");
+			expect(out.buildDeployedAt).toBe("2026-11-02T10:02:00.000Z");
+		});
+
+		test("a deploy after the rollback takes over again", () => {
+			const C = row({
+				title: "GHA production 33333333 [run 3]",
+				createdAt: "2026-11-02T13:00:00.000Z",
+				finishedAt: "2026-11-02T13:02:00.000Z",
+				buildOrigin: "github-actions",
+				buildRunUrl:
+					"https://github.com/DevinoSolutions/caly-mcp/actions/runs/3",
+			});
+			const out = describeServiceBuild([A, B, rollback(), C], app);
+			expect(out.buildCommitSha).toBe("33333333");
+			expect(out.buildDeployedAt).toBe("2026-11-02T13:02:00.000Z");
+		});
+
+		test("a service with only a rollback describes that rollback", () => {
+			const out = describeServiceBuild([rollback()], app);
+			expect(out.buildOrigin).toBe("github-actions");
+			expect(out.buildCommitSha).toBe("11111111");
+			expect(out.buildDeployedAt).toBe("2026-11-02T12:01:00.000Z");
+		});
 	});
 
 	test("reads an older row that has only the title", () => {
@@ -309,6 +406,39 @@ describe("describeServiceBuild", () => {
 			{ kind: "compose", sourceType: "raw", hasBuildSection: false },
 		);
 		expect(out.buildRepository).toBe("DevinoSolutions/caly-mcp");
+	});
+});
+
+describe("githubActionsPushTarget", () => {
+	test("prefers the branch the service was set up with", () => {
+		expect(
+			githubActionsPushTarget({
+				branch: " main ",
+				buildRepository: "DevinoSolutions/caly-mcp",
+			}),
+		).toBe("main");
+	});
+
+	test("falls back to the repository, never to an environment", () => {
+		expect(
+			githubActionsPushTarget({
+				branch: null,
+				buildRepository: "DevinoSolutions/caly-mcp",
+			}),
+		).toBe("DevinoSolutions/caly-mcp");
+		expect(
+			githubActionsPushTarget({
+				branch: "  ",
+				buildRepository: "DevinoSolutions/caly-mcp",
+			}),
+		).toBe("DevinoSolutions/caly-mcp");
+	});
+
+	test("is null when nothing is known", () => {
+		expect(githubActionsPushTarget({})).toBeNull();
+		expect(
+			githubActionsPushTarget({ branch: "", buildRepository: null }),
+		).toBeNull();
 	});
 });
 

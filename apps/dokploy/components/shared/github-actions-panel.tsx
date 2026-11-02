@@ -35,15 +35,6 @@ export interface GithubActionsServiceInfo {
 	buildDeployedAt?: string | null;
 }
 
-/**
- * Where a push has to go to ship a new version. The branch the service was set up with wins; the environment
- * word of the deployment title is the fallback. Nothing known: no name, so the sentence never guesses one.
- */
-export const githubActionsPushTarget = (input: {
-	branch?: string | null;
-	buildEnvironment?: string | null;
-}) => input.branch?.trim() || input.buildEnvironment?.trim() || null;
-
 /** The hint under the deploy button of a service that GitHub Actions builds. */
 export const GithubActionsRedeployHint = ({
 	target,
@@ -51,8 +42,8 @@ export const GithubActionsRedeployHint = ({
 	target?: string | null;
 }) => (
 	<p className="text-sm text-muted-foreground">
-		To ship a new version, push to {target || "GitHub"}. GitHub Actions builds
-		and deploys it.
+		To ship a new version, push to {target || "your repository"}. GitHub Actions
+		builds and deploys it.
 	</p>
 );
 

@@ -1,3 +1,4 @@
+import { githubActionsPushTarget } from "@dokploy/server/services/build-origin-shared";
 import {
 	Ban,
 	CheckCircle2,
@@ -16,7 +17,6 @@ import {
 	GithubActionsAdvanced,
 	GithubActionsPanel,
 	GithubActionsRedeployHint,
-	githubActionsPushTarget,
 } from "@/components/shared/github-actions-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -190,7 +190,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 									<GithubActionsRedeployHint
 										target={githubActionsPushTarget({
 											branch: data?.branch,
-											buildEnvironment: data?.buildEnvironment,
+											buildRepository: data?.buildRepository,
 										})}
 									/>
 								)}

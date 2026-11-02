@@ -209,15 +209,25 @@ export const pickServiceBuildOrigin = (
 const pickServiceBuild = (
 	deployments: readonly BuildOriginDeploymentRow[],
 	source: BuildOriginSource,
-): { resolved: ResolvedBuildOrigin; row: BuildOriginDeploymentRow | null } => {
+): {
+	resolved: ResolvedBuildOrigin;
+	row: BuildOriginDeploymentRow | null;
+	/** The newest finished deployment of any kind, a rollback included: what runs now. Null when none finished. */
+	serving: BuildOriginDeploymentRow | null;
+} => {
 	const inferred = inferBuildOriginFromSource(source);
 	if (inferred === "dokploy") {
 		return {
 			resolved: { buildOrigin: "dokploy", buildRunUrl: null },
 			row: null,
+			serving: null,
 		};
 	}
 	const ofService = deployments.filter(isServiceDeployment);
+	const serving =
+		[...ofService]
+			.sort((a, b) => createdAtMs(b) - createdAtMs(a))
+			.find((row) => row.status === "done") ?? null;
 	const notRollback = ofService.filter(
 		(row) => !isGithubActionsRollbackTitle(row.title),
 	);
@@ -229,6 +239,7 @@ const pickServiceBuild = (
 		return {
 			resolved: { buildOrigin: inferred, buildRunUrl: null },
 			row: null,
+			serving: null,
 		};
 	}
 	if (isBuildOrigin(chosen.buildOrigin)) {
@@ -241,6 +252,7 @@ const pickServiceBuild = (
 						: null,
 			},
 			row: chosen,
+			serving,
 		};
 	}
 	return {
@@ -250,6 +262,7 @@ const pickServiceBuild = (
 			inferred,
 		}),
 		row: chosen,
+		serving,
 	};
 };
 
@@ -275,9 +288,6 @@ export const NO_GITHUB_ACTIONS_RUN_DETAILS: GithubActionsRunDetails = {
 	buildRunId: null,
 };
 
-export const GITHUB_ACTIONS_RUN_DETAILS_DESCRIPTION =
-	"For GitHub Actions deployments: buildRepository (owner/repo), buildCommitSha, buildEnvironment (the environment the workflow deployed to) and buildRunId, each null when not known.";
-
 const TITLE_TOKEN = "[A-Za-z0-9][A-Za-z0-9._/-]{0,99}";
 const COMMIT_SHA = /^[0-9a-f]{7,40}$/i;
 // "GHA <env> <sha>[: subject] [run N.A]"; the environment is missing only in a title that is just a sha.
@@ -285,7 +295,11 @@ const TITLE_DEPLOY = new RegExp(
 	`^GHA\\s+(${TITLE_TOKEN})(?:\\s+([0-9a-f]{7,40})(?![0-9A-Za-z]))?`,
 	"i",
 );
-const TITLE_ROLLBACK = new RegExp(`^GHA\\s+rollback\\s+(${TITLE_TOKEN})`, "i");
+// "GHA rollback <env> to <sha>"; "GHA rollback: redeploy ..." (Sendly) names neither. Case-sensitive, as
+// `isGithubActionsRollbackTitle` is, so the two always agree on what a rollback title is.
+const TITLE_ROLLBACK = new RegExp(
+	`^GHA\\s+rollback\\b(?:\\s+(?!to\\s)(${TITLE_TOKEN}))?(?:\\s+to\\s+([0-9a-fA-F]{7,40})(?![0-9A-Za-z]))?`,
+);
 const TITLE_RUN = /\[run\s+(\d{1,20})(?:\.\d{1,6})?\]/i;
 
 /** The environment, commit and run id the dokploy-deploy action puts in the deployment title. */
@@ -306,8 +320,12 @@ export const parseGithubActionsTitle = (
 	const buildRunId = TITLE_RUN.exec(title)?.[1] ?? null;
 	const rollback = TITLE_ROLLBACK.exec(title);
 	if (rollback) {
-		// A rollback names the environment; the commit after "to" is the previous deploy, not what was built.
-		return { ...none, buildEnvironment: rollback[1] ?? null, buildRunId };
+		// A rollback re-deploys the earlier commit named after "to"; none is named in some titles.
+		return {
+			buildCommitSha: rollback[2] ? rollback[2].toLowerCase() : null,
+			buildEnvironment: rollback[1] ?? null,
+			buildRunId,
+		};
 	}
 	const deploy = TITLE_DEPLOY.exec(title);
 	if (!deploy) return { ...none, buildRunId };
@@ -384,7 +402,7 @@ export const describeServiceBuild = (
 	deployments: readonly BuildOriginDeploymentRow[],
 	source: BuildOriginSource,
 ): ServiceBuildDescription => {
-	const { resolved, row } = pickServiceBuild(deployments, source);
+	const { resolved, row, serving } = pickServiceBuild(deployments, source);
 	if (resolved.buildOrigin !== "github-actions" || !row) {
 		return {
 			...resolved,
@@ -392,15 +410,41 @@ export const describeServiceBuild = (
 			buildDeployedAt: null,
 		};
 	}
+	const built = describeGithubActionsRun({
+		title: row.title,
+		buildRunUrl: resolved.buildRunUrl,
+	});
+	// The newest finished deployment is the action's rollback: that is what runs now, so the commit and the
+	// time are the rollback's. The run link and the repository stay those of the build row.
+	if (
+		serving &&
+		serving !== row &&
+		isGithubActionsRollbackTitle(serving.title)
+	) {
+		const rollback = parseGithubActionsTitle(serving.title);
+		return {
+			...resolved,
+			...built,
+			buildCommitSha: rollback.buildCommitSha,
+			buildEnvironment: rollback.buildEnvironment ?? built.buildEnvironment,
+			buildDeployedAt: serving.finishedAt ?? serving.createdAt ?? null,
+		};
+	}
 	return {
 		...resolved,
-		...describeGithubActionsRun({
-			title: row.title,
-			buildRunUrl: resolved.buildRunUrl,
-		}),
+		...built,
 		buildDeployedAt: row.finishedAt ?? row.createdAt ?? null,
 	};
 };
+
+/**
+ * What "push to ..." names in the hint under the deploy button: the branch the service was set up with, else
+ * the repository (`owner/repo`). An environment name is never a branch, so it is not used. Null when neither is known.
+ */
+export const githubActionsPushTarget = (input: {
+	branch?: string | null;
+	buildRepository?: string | null;
+}) => input.branch?.trim() || input.buildRepository?.trim() || null;
 
 /** The commit page of a GitHub repository, or null when the repository or the sha is unknown. */
 export const githubCommitUrl = (

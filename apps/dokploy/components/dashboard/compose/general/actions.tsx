@@ -1,3 +1,4 @@
+import { githubActionsPushTarget } from "@dokploy/server/services/build-origin-shared";
 import {
 	Ban,
 	CheckCircle2,
@@ -11,10 +12,7 @@ import { useRouter } from "next/router";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { toast } from "sonner";
 import { DialogAction } from "@/components/shared/dialog-action";
-import {
-	GithubActionsRedeployHint,
-	githubActionsPushTarget,
-} from "@/components/shared/github-actions-panel";
+import { GithubActionsRedeployHint } from "@/components/shared/github-actions-panel";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -130,7 +128,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 							<GithubActionsRedeployHint
 								target={githubActionsPushTarget({
 									branch: data?.branch,
-									buildEnvironment: data?.buildEnvironment,
+									buildRepository: data?.buildRepository,
 								})}
 							/>
 						)}
