@@ -1,3 +1,4 @@
+import { githubActionsPushTarget } from "@dokploy/server/services/build-origin-shared";
 import {
 	Ban,
 	CheckCircle2,
@@ -11,6 +12,7 @@ import { useRouter } from "next/router";
 import { Tooltip as TooltipPrimitive } from "radix-ui";
 import { toast } from "sonner";
 import { DialogAction } from "@/components/shared/dialog-action";
+import { GithubActionsRedeployHint } from "@/components/shared/github-actions-panel";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -38,7 +40,6 @@ export const ComposeActions = ({ composeId }: Props) => {
 	);
 	const { mutateAsync: update } = api.compose.update.useMutation();
 	const { mutateAsync: deploy } = api.compose.deploy.useMutation();
-	const { mutateAsync: redeploy } = api.compose.redeploy.useMutation();
 	const { mutateAsync: start, isPending: isStarting } =
 		api.compose.start.useMutation();
 	const { mutateAsync: stop, isPending: isStopping } =
@@ -46,6 +47,9 @@ export const ComposeActions = ({ composeId }: Props) => {
 
 	const { mutateAsync: loadTemplate, isPending: isLoadingTemplate } =
 		api.compose.loadTemplateFromGit.useMutation();
+
+	// Built in GitHub Actions: Dokploy only pulls and starts the image (T-12424).
+	const isGithubActions = data?.buildOrigin === "github-actions";
 
 	const isGitSource = [
 		"github",
@@ -59,48 +63,76 @@ export const ComposeActions = ({ composeId }: Props) => {
 		<div className="flex flex-row gap-4 w-full flex-wrap ">
 			<TooltipProvider delayDuration={0} disableHoverableContent={false}>
 				{canDeploy && (
-					<DialogAction
-						title="Deploy Compose"
-						description="Are you sure you want to deploy this compose?"
-						type="default"
-						onClick={async () => {
-							await deploy({
-								composeId: composeId,
-							})
-								.then(() => {
-									toast.success("Compose deployed successfully");
-									refetch();
-									router.push(
-										`/dashboard/project/${data?.environment.projectId}/environment/${data?.environmentId}/services/compose/${composeId}?tab=deployments`,
-									);
-								})
-								.catch(() => {
-									toast.error("Error deploying compose");
-								});
-						}}
+					<div
+						className={
+							isGithubActions
+								? "flex basis-full flex-col items-start gap-2"
+								: "contents"
+						}
 					>
-						<Button
-							variant="default"
-							isLoading={data?.composeStatus === "running"}
-							className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+						<DialogAction
+							title={
+								isGithubActions ? "Redeploy current image" : "Deploy Compose"
+							}
+							description={
+								isGithubActions
+									? "Dokploy will pull the current image again and restart this compose. Nothing is built."
+									: "Are you sure you want to deploy this compose?"
+							}
+							type="default"
+							onClick={async () => {
+								await deploy({
+									composeId: composeId,
+								})
+									.then(() => {
+										toast.success(
+											isGithubActions
+												? "Redeploying the current image"
+												: "Compose deployed successfully",
+										);
+										refetch();
+										router.push(
+											`/dashboard/project/${data?.environment.projectId}/environment/${data?.environmentId}/services/compose/${composeId}?tab=deployments`,
+										);
+									})
+									.catch(() => {
+										toast.error("Error deploying compose");
+									});
+							}}
 						>
-							<Tooltip>
-								<TooltipTrigger asChild>
-									<div className="flex items-center">
-										<Rocket className="size-4 mr-1" />
-										Deploy
-									</div>
-								</TooltipTrigger>
-								<TooltipPrimitive.Portal>
-									<TooltipContent sideOffset={5} className="z-60">
-										<p>
-											Downloads the source code and performs a complete build
-										</p>
-									</TooltipContent>
-								</TooltipPrimitive.Portal>
-							</Tooltip>
-						</Button>
-					</DialogAction>
+							<Button
+								variant="default"
+								isLoading={data?.composeStatus === "running"}
+								className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+							>
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<div className="flex items-center">
+											<Rocket className="size-4 mr-1" />
+											{isGithubActions ? "Redeploy current image" : "Deploy"}
+										</div>
+									</TooltipTrigger>
+									<TooltipPrimitive.Portal>
+										<TooltipContent sideOffset={5} className="z-60">
+											<p>
+												{isGithubActions
+													? "Pulls the current image again and restarts the compose"
+													: "Downloads the source code and performs a complete build"}
+											</p>
+										</TooltipContent>
+									</TooltipPrimitive.Portal>
+								</Tooltip>
+							</Button>
+						</DialogAction>
+						{isGithubActions && (
+							<GithubActionsRedeployHint
+								target={githubActionsPushTarget({
+									branch: data?.branch,
+									buildRepository: data?.buildRepository,
+								})}
+							/>
+						)}
+					</div>
 				)}
 				{canDeploy && data?.composeType === "docker-compose" && (
 					<DialogAction
@@ -147,47 +179,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 						</Button>
 					</DialogAction>
 				)}
-				{canDeploy && (
-					<DialogAction
-						title="Rebuild Compose"
-						description="Are you sure you want to rebuild this compose?"
-						type="default"
-						onClick={async () => {
-							await redeploy({
-								composeId: composeId,
-							})
-								.then(() => {
-									toast.success("Compose rebuilt successfully");
-									refetch();
-								})
-								.catch(() => {
-									toast.error("Error rebuilding compose");
-								});
-						}}
-					>
-						<Button
-							variant="secondary"
-							isLoading={data?.composeStatus === "running"}
-							className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
-						>
-							<Tooltip>
-								<TooltipTrigger asChild>
-									<div className="flex items-center">
-										<RefreshCcw className="size-4 mr-1" />
-										Rebuild
-									</div>
-								</TooltipTrigger>
-								<TooltipPrimitive.Portal>
-									<TooltipContent sideOffset={5} className="z-60">
-										<p>
-											Rebuilds the compose without downloading the source code
-										</p>
-									</TooltipContent>
-								</TooltipPrimitive.Portal>
-							</Tooltip>
-						</Button>
-					</DialogAction>
-				)}
+				{!isGithubActions && <ComposeRebuildAction composeId={composeId} />}
 				{isGitSource && canDeploy && (
 					<DialogAction
 						title="Load Template"
@@ -345,5 +337,58 @@ export const ComposeActions = ({ composeId }: Props) => {
 				</div>
 			)}
 		</div>
+	);
+};
+
+/** The Rebuild action of a compose, also shown under "Advanced" for a service that GitHub Actions builds. */
+export const ComposeRebuildAction = ({ composeId }: Props) => {
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const canDeploy = permissions?.deployment.create ?? false;
+	const { data, refetch } = api.compose.one.useQuery(
+		{ composeId },
+		{ enabled: !!composeId },
+	);
+	const { mutateAsync: redeploy } = api.compose.redeploy.useMutation();
+	if (!canDeploy) return null;
+	return (
+		<TooltipProvider delayDuration={0} disableHoverableContent={false}>
+			<DialogAction
+				title="Rebuild Compose"
+				description="Are you sure you want to rebuild this compose?"
+				type="default"
+				onClick={async () => {
+					await redeploy({
+						composeId: composeId,
+					})
+						.then(() => {
+							toast.success("Compose rebuilt successfully");
+							refetch();
+						})
+						.catch(() => {
+							toast.error("Error rebuilding compose");
+						});
+				}}
+			>
+				<Button
+					variant="secondary"
+					isLoading={data?.composeStatus === "running"}
+					className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+				>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<div className="flex items-center">
+								<RefreshCcw className="size-4 mr-1" />
+								Rebuild
+							</div>
+						</TooltipTrigger>
+						<TooltipPrimitive.Portal>
+							<TooltipContent sideOffset={5} className="z-60">
+								<p>Rebuilds the compose without downloading the source code</p>
+							</TooltipContent>
+						</TooltipPrimitive.Portal>
+					</Tooltip>
+				</Button>
+			</DialogAction>
+		</TooltipProvider>
 	);
 };

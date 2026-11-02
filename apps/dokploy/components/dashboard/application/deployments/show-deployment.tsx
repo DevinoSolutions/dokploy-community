@@ -196,7 +196,12 @@ export const ShowDeployment = ({
 				</DialogHeader>
 
 				{githubActions && (
-					<GithubActionsLogBanner buildRunUrl={githubActions.runUrl} />
+					<>
+						<GithubActionsLogBanner buildRunUrl={githubActions.runUrl} />
+						<p className="text-sm font-medium text-muted-foreground">
+							Dokploy: pull and start
+						</p>
+					</>
 				)}
 				<div
 					ref={scrollRef}

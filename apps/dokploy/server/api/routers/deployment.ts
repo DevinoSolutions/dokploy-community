@@ -25,6 +25,7 @@ import {
 	updateDeploymentStatus,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import { withGithubActionsRunDetails } from "@dokploy/server/services/build-origin-shared";
 import { assertDeploymentAccess } from "@dokploy/server/services/deployment-access";
 import {
 	LOG_UNAVAILABLE_MESSAGE,
@@ -123,7 +124,7 @@ export const deploymentRouter = createTRPCRouter({
 				method: "GET",
 				path: "/deployment.all",
 				description:
-					"List the deployments of an application. Each deployment has buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+					"List the deployments of an application. Each deployment has buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known. For GitHub Actions deployments also buildRepository (owner/repo), buildCommitSha, buildEnvironment and buildRunId, each null when not known.",
 			},
 		})
 		.input(apiFindAllByApplication)
@@ -131,7 +132,9 @@ export const deploymentRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.applicationId, {
 				deployment: ["read"],
 			});
-			return await findAllDeploymentsByApplicationId(input.applicationId);
+			return withGithubActionsRunDetails(
+				await findAllDeploymentsByApplicationId(input.applicationId),
+			);
 		}),
 
 	allByCompose: protectedProcedure
@@ -140,7 +143,7 @@ export const deploymentRouter = createTRPCRouter({
 				method: "GET",
 				path: "/deployment.allByCompose",
 				description:
-					"List the deployments of a compose. Each deployment has buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+					"List the deployments of a compose. Each deployment has buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known. For GitHub Actions deployments also buildRepository (owner/repo), buildCommitSha, buildEnvironment and buildRunId, each null when not known.",
 			},
 		})
 		.input(apiFindAllByCompose)
@@ -148,7 +151,9 @@ export const deploymentRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				deployment: ["read"],
 			});
-			return await findAllDeploymentsByComposeId(input.composeId);
+			return withGithubActionsRunDetails(
+				await findAllDeploymentsByComposeId(input.composeId),
+			);
 		}),
 	allByServer: withPermission("deployment", "read")
 		.input(apiFindAllByServer)
@@ -425,7 +430,7 @@ export const deploymentRouter = createTRPCRouter({
 				method: "GET",
 				path: "/deployment.allByType",
 				description:
-					"List the deployments of an application, compose, server, schedule, preview deployment or backup. Application and compose deployments have buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known.",
+					"List the deployments of an application, compose, server, schedule, preview deployment or backup. Application and compose deployments have buildOrigin and buildRunUrl (null on deployments recorded before this was tracked). buildOrigin: where the image was built ('dokploy' = Dokploy built it from source, 'github-actions' = built in GitHub Actions and deployed by digest, 'external' = a prebuilt image Dokploy only pulls). buildRunUrl: the GitHub Actions run that built it, when known. For GitHub Actions deployments also buildRepository (owner/repo), buildCommitSha, buildEnvironment and buildRunId, each null when not known.",
 			},
 		})
 		.input(apiFindAllByType)
@@ -480,7 +485,7 @@ export const deploymentRouter = createTRPCRouter({
 					rollback: true,
 				},
 			});
-			return deploymentsList;
+			return withGithubActionsRunDetails(deploymentsList);
 		}),
 	killProcess: protectedProcedure
 		.input(

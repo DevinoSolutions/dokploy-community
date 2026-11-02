@@ -63,4 +63,23 @@ describe("MCP tools for the build origin", () => {
 		expect(description).toContain("'github-actions'");
 		expect(description).toContain("'external'");
 	});
+
+	// T-12424: the repository, commit, environment and run id are read from the run link and the title.
+	it.each([
+		"application-one",
+		"compose-one",
+		"deployment-all",
+		"deployment-allByCompose",
+		"deployment-allByType",
+	])("%s lists the GitHub Actions run details", (name) => {
+		const description = byName.get(name)?.description ?? "";
+		for (const field of [
+			"buildRepository",
+			"buildCommitSha",
+			"buildEnvironment",
+			"buildRunId",
+		]) {
+			expect(description).toContain(field);
+		}
+	});
 });

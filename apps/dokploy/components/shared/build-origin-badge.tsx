@@ -1,17 +1,13 @@
 import {
 	BUILD_ORIGIN_LABELS,
+	githubCommitUrl,
 	isBuildOrigin,
 	normalizeBuildRunUrl,
 } from "@dokploy/server/services/build-origin-shared";
 import { ExternalLink, Hammer, Package } from "lucide-react";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
 import { Badge } from "@/components/ui/badge";
-import {
-	Card,
-	CardDescription,
-	CardHeader,
-	CardTitle,
-} from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import {
 	Tooltip,
 	TooltipContent,
@@ -82,14 +78,7 @@ export const BuildOriginBadge = ({
 					)}
 				</TooltipTrigger>
 				<TooltipContent className="z-999 max-w-[320px]">
-					<div className="flex flex-col gap-1">
-						<span>{description}</span>
-						{buildOrigin === "github-actions" && (
-							<span className="break-all text-muted-foreground">
-								{runUrl ? `Run: ${runUrl}` : "The run link was not recorded."}
-							</span>
-						)}
-					</div>
+					<span>{description}</span>
 				</TooltipContent>
 			</Tooltip>
 		</TooltipProvider>
@@ -97,38 +86,67 @@ export const BuildOriginBadge = ({
 };
 
 /**
- * A Deployments tab row built in GitHub Actions: the mark and, when the run link was recorded, "View run".
+ * A Deployments tab row built in GitHub Actions: the GitHub mark, the commit (linked when the repository is
+ * known) and the run link. The duration sits next to it in the row itself.
  */
 export const GithubActionsDeploymentMark = ({
 	buildRunUrl,
+	buildRepository,
+	buildCommitSha,
+	buildRunId,
 }: {
 	buildRunUrl?: string | null;
+	buildRepository?: string | null;
+	buildCommitSha?: string | null;
+	buildRunId?: string | null;
 }) => {
 	const runUrl = normalizeBuildRunUrl(buildRunUrl);
+	const commitUrl = githubCommitUrl(buildRepository, buildCommitSha);
+	const shortSha = buildCommitSha?.slice(0, 7) ?? null;
+	const runLabel = buildRunId ? `Run #${buildRunId}` : "Open run";
 	return (
 		<span className="flex flex-wrap items-center gap-2 normal-case">
-			<Badge variant="outline" className="text-[10px] gap-1">
+			<Badge variant="outline" className="gap-1 text-[10px]">
 				<GithubIcon />
-				Built on GitHub Actions
+				{shortSha ? (
+					commitUrl ? (
+						<a
+							href={commitUrl}
+							target="_blank"
+							rel="noopener noreferrer"
+							className="font-mono hover:underline"
+						>
+							{shortSha}
+						</a>
+					) : (
+						<span className="font-mono">{shortSha}</span>
+					)
+				) : (
+					"GitHub Actions"
+				)}
 			</Badge>
-			{runUrl && (
+			{runUrl ? (
 				<a
 					href={runUrl}
 					target="_blank"
 					rel="noopener noreferrer"
 					className="flex items-center gap-1 text-xs text-primary hover:underline"
 				>
-					View run
+					{runLabel}
 					<ExternalLink className="size-3" />
 				</a>
+			) : (
+				buildRunId && (
+					<span className="text-xs text-muted-foreground">{runLabel}</span>
+				)
 			)}
 		</span>
 	);
 };
 
 /**
- * Shown above the log of a deployment built in GitHub Actions: Dokploy only pulls and starts the image, so the
- * build output is on GitHub.
+ * Shown above the log of a deployment built in GitHub Actions. The build output is on GitHub, so the way there is
+ * the primary action; the log below it is only Dokploy's own pull and start.
  */
 export const GithubActionsLogBanner = ({
 	buildRunUrl,
@@ -137,61 +155,25 @@ export const GithubActionsLogBanner = ({
 }) => {
 	const runUrl = normalizeBuildRunUrl(buildRunUrl);
 	return (
-		<div className="flex flex-wrap items-center gap-2 rounded border bg-muted/50 px-3 py-2 text-sm">
-			<GithubIcon />
-			<span>Build logs live on GitHub Actions.</span>
+		<div className="flex flex-wrap items-center justify-between gap-3 rounded border bg-muted/50 px-4 py-3">
+			<div className="flex items-center gap-2 text-sm">
+				<GithubIcon />
+				<span>
+					Built and deployed by GitHub Actions. The build log is on GitHub.
+				</span>
+			</div>
 			{runUrl ? (
-				<a
-					href={runUrl}
-					target="_blank"
-					rel="noopener noreferrer"
-					className="flex items-center gap-1 text-primary hover:underline"
-				>
-					Open run
-					<ExternalLink className="size-3" />
-				</a>
+				<Button asChild size="sm">
+					<a href={runUrl} target="_blank" rel="noopener noreferrer">
+						Open run on GitHub
+						<ExternalLink className="size-3.5" />
+					</a>
+				</Button>
 			) : (
-				<span className="text-muted-foreground">
+				<span className="text-sm text-muted-foreground">
 					The run link was not recorded.
 				</span>
 			)}
 		</div>
-	);
-};
-
-/** Replaces the build settings of a service that GitHub Actions builds. The settings stay in the database. */
-export const GithubActionsBuildsNote = ({
-	buildRunUrl,
-}: {
-	buildRunUrl?: string | null;
-}) => {
-	const runUrl = normalizeBuildRunUrl(buildRunUrl);
-	return (
-		<Card className="bg-background">
-			<CardHeader>
-				<CardTitle className="flex items-center gap-2 text-xl">
-					<GithubIcon />
-					Builds run in GitHub Actions
-				</CardTitle>
-				<CardDescription>
-					Dokploy only pulls and starts the image, so the build settings do not
-					apply. They are kept and show again if the service is built here.
-					{runUrl && (
-						<>
-							{" "}
-							<a
-								href={runUrl}
-								target="_blank"
-								rel="noopener noreferrer"
-								className="text-primary hover:underline"
-							>
-								Open the latest run
-							</a>
-							.
-						</>
-					)}
-				</CardDescription>
-			</CardHeader>
-		</Card>
 	);
 };
