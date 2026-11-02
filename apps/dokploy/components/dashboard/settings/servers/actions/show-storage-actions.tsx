@@ -11,6 +11,16 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { api } from "@/utils/api";
 
+/** Builds are running on the server: show the server's own explanation as-is. */
+const toastCleanupError = (fallback: string, error: unknown) => {
+	const data = (error as { data?: { code?: string } } | null)?.data;
+	if (data?.code === "PRECONDITION_FAILED" && error instanceof Error) {
+		toast.error(error.message);
+		return;
+	}
+	toast.error(fallback);
+};
+
 interface Props {
 	serverId?: string;
 }
@@ -150,13 +160,16 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 								.then(async () => {
 									toast.success("Cleaned Docker Builder");
 								})
-								.catch(() => {
-									toast.error("Error cleaning Docker Builder");
+								.catch((error) => {
+									toastCleanupError("Error cleaning Docker Builder", error);
 								});
 						}}
 					>
-						<span>Clean Docker Builder & System</span>
+						<span>Clean Docker Builder cache</span>
 					</DropdownMenuItem>
+					<p className="px-2 pb-1.5 text-xs text-muted-foreground">
+						Blocked while builds run on this server.
+					</p>
 					{!serverId && (
 						<DropdownMenuItem
 							className="w-full cursor-pointer"
@@ -180,16 +193,23 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 							await cleanAll({
 								serverId: serverId,
 							})
-								.then(async () => {
+								.then(async (result) => {
+									if (result?.skipped?.length) {
+										toast.warning(result.message);
+										return;
+									}
 									toast.success("Cleaning in progress... Please wait");
 								})
-								.catch(() => {
-									toast.error("Error cleaning all");
+								.catch((error) => {
+									toastCleanupError("Error cleaning all", error);
 								});
 						}}
 					>
 						<span>Clean all</span>
 					</DropdownMenuItem>
+					<p className="px-2 pb-1.5 text-xs text-muted-foreground">
+						Skips the image and builder cleanup while builds run on this server.
+					</p>
 				</DropdownMenuGroup>
 			</DropdownMenuContent>
 		</DropdownMenu>

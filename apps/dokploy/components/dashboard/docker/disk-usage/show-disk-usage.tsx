@@ -176,6 +176,12 @@ export const ShowDiskUsage = ({ serverId }: Props) => {
 				utils.dockerDiskUsage.getDiskUsage.invalidate(),
 			]);
 		} catch (error) {
+			const data = (error as { data?: { code?: string } } | null)?.data;
+			if (data?.code === "PRECONDITION_FAILED" && error instanceof Error) {
+				// Builds are running: show the server's explanation as-is.
+				toast.error(error.message);
+				return;
+			}
 			toast.error("Error pruning build cache", {
 				description: error instanceof Error ? error.message : "Unknown error",
 			});
@@ -312,17 +318,22 @@ export const ShowDiskUsage = ({ serverId }: Props) => {
 										server.
 									</CardDescription>
 								</div>
-								<DialogAction
-									title="Prune build cache"
-									description="This will remove all build cache entries that are not currently in use. This action cannot be undone."
-									onClick={handlePrune}
-									disabled={isPruning}
-								>
-									<Button variant="outline" size="sm" disabled={isPruning}>
-										<Trash2 className="size-4 mr-1" />
-										Prune build cache
-									</Button>
-								</DialogAction>
+								<div className="flex flex-col items-end gap-1">
+									<DialogAction
+										title="Prune build cache"
+										description="This will remove build cache entries that have been unused for 7 days. This action cannot be undone."
+										onClick={handlePrune}
+										disabled={isPruning}
+									>
+										<Button variant="outline" size="sm" disabled={isPruning}>
+											<Trash2 className="size-4 mr-1" />
+											Prune build cache
+										</Button>
+									</DialogAction>
+									<p className="text-xs text-muted-foreground">
+										Blocked while builds run on this server.
+									</p>
+								</div>
 							</div>
 						</CardHeader>
 						<CardContent className="space-y-4 py-8 border-t">

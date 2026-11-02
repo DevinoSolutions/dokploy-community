@@ -5,6 +5,11 @@ import {
 } from "@dokploy/server";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import {
+	assertBuilderPruneAllowed,
+	auditBuilderPrune,
+	builderPruneInput,
+} from "@/server/api/utils/builder-prune";
 import { assertServerReachable } from "@/server/api/utils/container-service-access";
 import { assertLocalHostAccess } from "@/server/api/utils/local-host-access";
 import { adminProcedure, createTRPCRouter, withPermission } from "../trpc";
@@ -48,23 +53,30 @@ export const dockerDiskUsageRouter = createTRPCRouter({
 		}),
 
 	pruneBuildCache: adminProcedure
-		.input(
-			z.object({
-				serverId: z.string().optional(),
-			}),
-		)
+		.input(builderPruneInput)
 		.mutation(async ({ input, ctx }) => {
 			await assertLocalHostAccess(
 				input.serverId,
 				ctx.session?.activeOrganizationId,
 			);
 			await assertServerReachable(ctx, input.serverId);
-			await cleanupBuilders(input.serverId);
-			await audit(ctx, {
-				action: "delete",
-				resourceType: "docker",
-				resourceId: "build-cache",
-				resourceName: "Docker build cache",
+			const { hostName, activeBuilds } = await assertBuilderPruneAllowed({
+				serverId: input.serverId,
+				force: input.force,
 			});
+			// Before the prune: it can run for hours and the request may never return.
+			await auditBuilderPrune(
+				ctx,
+				{
+					operation: "dockerDiskUsage.pruneBuildCache",
+					serverId: input.serverId,
+					hostName,
+					force: input.force,
+					all: input.all,
+					activeBuilds,
+				},
+				audit,
+			);
+			await cleanupBuilders(input.serverId, { all: input.all });
 		}),
 });
