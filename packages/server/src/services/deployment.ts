@@ -28,10 +28,11 @@ import {
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
+import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import { resolveVolumeBackupHost } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
@@ -1192,7 +1193,43 @@ export const writeDeploymentErrorLog = async (
 		}
 	} catch (logError) {
 		console.error("Failed to write the deployment error log", logError);
-		await updateDeployment(deployment.deploymentId, { errorMessage: message });
+		await recordUnwrittenErrorLog(deployment.deploymentId, message);
+	}
+};
+
+/**
+ * Keeps the reason on the deployment row when the log could not be written.
+ * Never throws (it must not mask the deploy error the caller rethrows), leaves
+ * a job the watchdog released alone, and does not replace a message that is
+ * already there (a cancel warning or the watchdog's).
+ */
+const recordUnwrittenErrorLog = async (
+	deploymentId: string,
+	message: string,
+) => {
+	if (
+		skipWriteOfReleasedJob(
+			`the error message of deployment ${deploymentId}`,
+			deploymentId,
+		)
+	) {
+		return;
+	}
+	try {
+		await db
+			.update(deployments)
+			.set({ errorMessage: redactSecrets(message) })
+			.where(
+				and(
+					eq(deployments.deploymentId, deploymentId),
+					isNull(deployments.errorMessage),
+				),
+			);
+	} catch (writeError) {
+		console.error(
+			"Could not record the error log failure on the deployment",
+			writeError,
+		);
 	}
 };
 

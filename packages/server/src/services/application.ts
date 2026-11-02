@@ -517,8 +517,7 @@ export const deployApplication = async ({
 			deployment.buildServerId &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			cancelNote = `echo "
-${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
@@ -761,8 +760,7 @@ export const rebuildApplication = async ({
 			deployment.buildServerId &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			cancelNote = `echo "
-${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
 		await updateDeploymentStatus(deployment.deploymentId, "error");

@@ -988,8 +988,7 @@ export const deployCompose = async ({
 			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			extraLog += `echo "
-${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			extraLog += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		extraLog += phases.failedCommand(deployStartedAt);
 		await writeDeploymentErrorLog(
@@ -1310,8 +1309,7 @@ export const rebuildCompose = async ({
 			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			extraLog += `echo "
-${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			extraLog += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
 		extraLog += phases.failedCommand(deployStartedAt);
 		await writeDeploymentErrorLog(

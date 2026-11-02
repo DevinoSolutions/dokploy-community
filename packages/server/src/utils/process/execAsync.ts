@@ -42,6 +42,8 @@ const execAsyncBase = util.promisify(exec);
 // A command can print nothing for as long as a build runs, and a link that goes
 // half-open then never closes the channel. The client pings, so ssh2 drops the
 // connection (an "error", then "close") about 40 seconds after the last reply.
+// Shared with the remote Docker API client (servers/remote-docker.ts), whose
+// ssh2 connection would otherwise hang on a host that died mid-update.
 export const SSH_KEEPALIVE = { keepaliveInterval: 10_000, keepaliveCountMax: 3 };
 
 // Node embeds the full command in error.message; it may carry secrets. A
@@ -861,6 +863,7 @@ export const writeFileRemote = async (
 				username: server.username,
 				privateKey: server.sshKey?.privateKey,
 				timeout: 99999,
+				...SSH_KEEPALIVE,
 			});
 	});
 };

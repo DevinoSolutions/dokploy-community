@@ -144,8 +144,7 @@ describe("getDeploymentErrorMessage (build failure notification body)", () => {
 
 	it("still reads the log when the command ran and failed on the server", async () => {
 		mocks.execAsyncRemote.mockResolvedValue({
-			stdout: "build failed
-",
+			stdout: "build failed\n",
 			stderr: "",
 		});
 

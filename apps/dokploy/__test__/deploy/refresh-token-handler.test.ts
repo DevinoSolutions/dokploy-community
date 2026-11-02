@@ -30,12 +30,17 @@ vi.mock("@dokploy/server", () => ({
 	IS_CLOUD: false,
 	shouldDeploy: vi.fn(() => true),
 	getBitbucketHeaders: vi.fn(() => ({})),
+	normalizeChangedFilesFromCommits: vi.fn(() => []),
+	// The build-policy hooks of this fork: no image in the body, gate open.
+	resolveDeployHookImage: vi.fn(async () => ({ ok: true })),
+	buildPolicyDeployGate: vi.fn(async () => ({ deploy: true })),
 }));
 
 vi.mock("@/server/queues/queueSetup", () => ({
 	myQueue: {
 		add: mocks.queueAdd,
 	},
+	coalesceQueuedApplicationDeploys: vi.fn(),
 }));
 
 vi.mock("@/server/utils/deploy", () => ({
@@ -45,6 +50,17 @@ vi.mock("@/server/utils/deploy", () => ({
 import handler from "@/pages/api/deploy/[refreshToken]";
 
 const IMAGE = "ghcr.io/dokploy/app";
+
+const baseApplication = {
+	applicationId: "application-id",
+	name: "App",
+	appName: "app-abc",
+	environmentId: "env-1",
+	environment: { project: { organizationId: "org-1" } },
+	sourceType: "docker",
+	autoDeploy: true,
+	serverId: null,
+};
 
 const createResponse = () => {
 	const res = {
@@ -101,11 +117,8 @@ describe("Deploy webhook for docker applications", () => {
 		vi.clearAllMocks();
 		mocks.queueAdd.mockResolvedValue({ id: "job-id" });
 		mocks.applicationsFindFirst.mockResolvedValue({
-			applicationId: "application-id",
-			sourceType: "docker",
+			...baseApplication,
 			dockerImage: `${IMAGE}:latest`,
-			autoDeploy: true,
-			serverId: null,
 		});
 	});
 
@@ -160,11 +173,8 @@ describe("Deploy webhook for docker applications", () => {
 
 	it("deploys Docker Hub webhooks for the configured tag", async () => {
 		mocks.applicationsFindFirst.mockResolvedValue({
-			applicationId: "application-id",
-			sourceType: "docker",
+			...baseApplication,
 			dockerImage: "dokploy/app:latest",
-			autoDeploy: true,
-			serverId: null,
 		});
 		const res = createResponse();
 
