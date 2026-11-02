@@ -93,7 +93,7 @@ export const getDeployHeartbeatLine = (
 	elapsedMs: number,
 	wallLimitMinutes?: number | null,
 ) =>
-	`⏳ ${label} is still running (${Math.max(1, Math.round(elapsedMs / 60_000))} min so far, no output yet${wallLimitMinutes ? `; wall limit ${wallLimitMinutes} min` : ""})`;
+	`⏳ ${label} is still running (${Math.max(1, Math.round(elapsedMs / 60_000))} min so far, no output yet${wallLimitMinutes != null ? `; wall limit ${wallLimitMinutes} min` : ""})`;
 
 export interface DeployHeartbeatOptions {
 	/** What is running, as the log line names it. */
