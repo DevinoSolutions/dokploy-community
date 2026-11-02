@@ -20,16 +20,19 @@ import {
 	APP_NAME_REGEX,
 	isPlainAppName,
 } from "@dokploy/server/db/schema/utils";
+import { encodeBase64 } from "@dokploy/server/utils/docker/utils";
 import { removeDirectoryIfExistsContent } from "@dokploy/server/utils/filesystem/directory";
 import {
+	ExecError,
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
+import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import { resolveVolumeBackupHost } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
@@ -78,12 +81,24 @@ export const getDeploymentErrorMessage = async ({
 	serverId,
 	fallback,
 	maxLines = 50,
+	error,
 }: {
 	logPath: string;
 	serverId: string | null;
 	fallback: string;
 	maxLines?: number;
+	/** The failure being reported; lets an SSH connection error speak for itself. */
+	error?: unknown;
 }): Promise<string> => {
+	// No exit code: the SSH connection failed, so the host can't serve the log.
+	if (
+		error instanceof ExecError &&
+		error.serverId &&
+		error.exitCode === undefined
+	) {
+		return error.message;
+	}
+
 	try {
 		if (!logPath || logPath === ".") return fallback;
 
@@ -1150,6 +1165,76 @@ export const updateDeploymentStatus = async (
 		.returning();
 
 	return application;
+};
+
+/**
+ * Appends the failure to the deployment log on the host that holds it. When
+ * that host cannot be reached (a server that died mid-build), the write fails
+ * and the reason is stored on the deployment row instead, so the caller can
+ * still mark the deployment `error` and never leaves it `running`.
+ * `extraCommand` is shell run between the error text and the closing line.
+ */
+export const writeDeploymentErrorLog = async (
+	deployment: Pick<Deployment, "deploymentId" | "logPath">,
+	serverId: string | null | undefined,
+	error: unknown,
+	extraCommand = "",
+) => {
+	const message = error instanceof Error ? error.message : String(error);
+	let command = "";
+	// Only log details for non-ExecError errors
+	if (!(error instanceof ExecError)) {
+		command += `echo "${encodeBase64(message)}" | base64 -d >> "${deployment.logPath}";`;
+	}
+
+	command += extraCommand;
+	command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
+	try {
+		if (serverId) {
+			await execAsyncRemote(serverId, command);
+		} else {
+			await execAsync(command);
+		}
+	} catch (logError) {
+		console.error("Failed to write the deployment error log", logError);
+		await recordUnwrittenErrorLog(deployment.deploymentId, message);
+	}
+};
+
+/**
+ * Keeps the reason on the deployment row when the log could not be written.
+ * Never throws (it must not mask the deploy error the caller rethrows), leaves
+ * a job the watchdog released alone, and does not replace a message that is
+ * already there (a cancel warning or the watchdog's).
+ */
+const recordUnwrittenErrorLog = async (
+	deploymentId: string,
+	message: string,
+) => {
+	if (
+		skipWriteOfReleasedJob(
+			`the error message of deployment ${deploymentId}`,
+			deploymentId,
+		)
+	) {
+		return;
+	}
+	try {
+		await db
+			.update(deployments)
+			.set({ errorMessage: redactSecrets(message) })
+			.where(
+				and(
+					eq(deployments.deploymentId, deploymentId),
+					isNull(deployments.errorMessage),
+				),
+			);
+	} catch (writeError) {
+		console.error(
+			"Could not record the error log failure on the deployment",
+			writeError,
+		);
+	}
 };
 
 export const createServerDeployment = async (

@@ -2,6 +2,14 @@
 
 Release notes for Dokploy Community Edition, newest first. The same notes, with the full credited change lists, are on [GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases).
 
+### Unreleased
+
+Upstream fixes ported from Dokploy canary (T-12687). No database migrations.
+
+**Untagged GitHub Container Registry events no longer trigger a deploy** (upstream #5682). GitHub sends a `registry_package` event for every manifest of a push, including the untagged per-platform manifests and attestations. The docker deploy webhook now answers those with 200 and skips them instead of deploying, so a GitHub Actions image push causes one deploy, for its tag.
+
+**A server that dies during a deploy no longer leaves the deployment `running`** (upstream #5803). The remote Docker client now uses the same SSH keepalive as remote commands and remote file writes, so a host that goes silent during the service update is detected instead of hanging the deploy. Writing the failure to the deployment log is now one function that cannot fail the error path: if the server cannot be reached, the reason is stored on the deployment instead, and the build error notification states the lost SSH connection instead of the generic "Error building".
+
 ### New in v0.30.8-community.44
 
 Upgrade notes: no database migrations in this release; an image-only rollback to v0.30.8-community.43 keeps working. API behaviour change: `settings.cleanDockerPrune` called without `all: true` now removes only dangling images, and the builder and system prunes default to unused for 7 days instead of `--all`. This release includes everything in v0.30.8-community.43.

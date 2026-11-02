@@ -44,7 +44,6 @@ import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import { sendBuildErrorNotifications } from "@dokploy/server/utils/notifications/build-error";
 import { sendBuildSuccessNotifications } from "@dokploy/server/utils/notifications/build-success";
 import {
-	ExecError,
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
@@ -62,7 +61,6 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
-import { encodeBase64 } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
 import {
 	composeFileHasBuildSection,
@@ -86,6 +84,7 @@ import {
 	getDeploymentErrorMessage,
 	updateDeployment,
 	updateDeploymentStatus,
+	writeDeploymentErrorLog,
 } from "./deployment";
 import {
 	appendLogLine,
@@ -982,30 +981,22 @@ export const deployCompose = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let extraLog = "";
 		if (
 			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			extraLog += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += phases.failedCommand(deployStartedAt);
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		extraLog += phases.failedCommand(deployStartedAt);
+		await writeDeploymentErrorLog(
+			deployment,
+			compose.serverId,
+			error,
+			extraLog,
+		);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		// The deployment itself always records the failure; the *service* is only
@@ -1022,6 +1013,7 @@ export const deployCompose = async ({
 			logPath: deployment.logPath,
 			serverId: compose.serverId,
 			fallback: "Error building, check the logs for details.",
+			error,
 		});
 
 		await sendBuildErrorNotifications({
@@ -1310,30 +1302,22 @@ export const rebuildCompose = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let extraLog = "";
 		if (
 			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			extraLog += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += phases.failedCommand(deployStartedAt);
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		extraLog += phases.failedCommand(deployStartedAt);
+		await writeDeploymentErrorLog(
+			deployment,
+			compose.serverId,
+			error,
+			extraLog,
+		);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		// A rebuild the pin refused touched nothing: the compose keeps the status

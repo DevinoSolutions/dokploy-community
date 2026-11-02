@@ -63,6 +63,7 @@ import {
 	getDeploymentErrorMessage,
 	updateDeployment,
 	updateDeploymentStatus,
+	writeDeploymentErrorLog,
 } from "./deployment";
 import {
 	appendLogLine,
@@ -509,29 +510,16 @@ export const deployApplication = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let cancelNote = "";
 		if (
 			deployment.buildServerId &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");
@@ -540,6 +528,7 @@ export const deployApplication = async ({
 			logPath: deployment.logPath,
 			serverId,
 			fallback: "Error building, check the logs for details.",
+			error,
 		});
 
 		await sendBuildErrorNotifications({
@@ -764,29 +753,16 @@ export const rebuildApplication = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let cancelNote = "";
 		if (
 			deployment.buildServerId &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");
@@ -1394,23 +1370,9 @@ export const rebuildPreviewApplication = async ({
 		});
 	} catch (error) {
 		void removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		// The log lives where the deployment was built; the row records it.
 		const serverId = deployment.buildServerId || deployment.serverId;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await writeDeploymentErrorLog(deployment, serverId, error);
 
 		// Never let a failing status comment hide the actual build error.
 		if (!referenceRefusal) {
