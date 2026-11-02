@@ -220,7 +220,7 @@ describe("markDeploymentFailedByWatchdog", () => {
 
 		const outcome = await markDeploymentFailedByWatchdog(
 			"dep-1",
-			"Watchdog: exceeded 90 min",
+			"Deployment watchdog: stopped after 91 min, over the wall limit of 90 min",
 			{ claimedCancel: false },
 		);
 
@@ -228,7 +228,8 @@ describe("markDeploymentFailedByWatchdog", () => {
 		expect(mocks.updateRows).toHaveLength(1);
 		expect(mocks.updateRows[0]?.set).toMatchObject({
 			status: "error",
-			errorMessage: "Watchdog: exceeded 90 min",
+			errorMessage:
+				"Deployment watchdog: stopped after 91 min, over the wall limit of 90 min",
 			finishedAt: expect.any(String),
 		});
 	});

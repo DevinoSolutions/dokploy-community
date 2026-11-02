@@ -1576,6 +1576,13 @@
       "when": 1793531134213,
       "tag": "0225_deployment_build_origin",
       "breakpoints": true
+    },
+    {
+      "idx": 226,
+      "version": "7",
+      "when": 1793604405783,
+      "tag": "0226_watchdog_max_minutes_default",
+      "breakpoints": true
     }
   ]
 }

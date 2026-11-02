@@ -159,7 +159,8 @@ export const DeploymentWatchdog = () => {
 					Fails a deployment that has stopped making progress and frees its
 					queue slot, so a few hung builds cannot block every deploy. A
 					deployment is stopped when its log has had no new output for the idle
-					limit, or when it has run for longer than the wall time limit. It is
+					limit, or when it has run for longer than the wall time limit, whether
+					or not it is still printing progress. It is
 					marked failed, the deployment-failed notification is sent, and the
 					stop is recorded in the cancel trail as the system.
 				</CardDescription>
@@ -204,7 +205,10 @@ export const DeploymentWatchdog = () => {
 								className="w-32"
 							/>
 							<p className="text-xs text-muted-foreground">
-								Total run time. Default {DEFAULT_WATCHDOG_MAX_MINUTES}, minimum{" "}
+								A hard limit on total run time, independent of progress: a
+								deployment is stopped when it passes it, even while it keeps
+								printing output. Raise it if your builds are expected to run
+								long. Default {DEFAULT_WATCHDOG_MAX_MINUTES}, minimum{" "}
 								{MIN_WATCHDOG_MAX_MINUTES}.
 							</p>
 						</div>

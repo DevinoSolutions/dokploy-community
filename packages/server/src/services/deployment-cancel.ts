@@ -1,6 +1,8 @@
 import { appendFile } from "node:fs/promises";
+import { IS_CLOUD } from "@dokploy/server/constants";
 import { db } from "@dokploy/server/db";
 import { applications, compose, deployments } from "@dokploy/server/db/schema";
+import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import { resolveComposeRolling } from "@dokploy/server/utils/builders/compose-rolling";
 import {
 	getKillRemoteBuildCommand,
@@ -16,6 +18,10 @@ import {
 	execAsyncCancelable,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
+import {
+	isWatchdogExcluded,
+	resolveWatchdogConfig,
+} from "@dokploy/server/utils/deployments/watchdog-config";
 import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
 import {
 	abortRemoteBuild,
@@ -128,6 +134,38 @@ export const isDeploymentStillRunning = async (
 			error instanceof Error ? error.message : error,
 		);
 		return true;
+	}
+};
+
+/**
+ * The watchdog's wall limit that applies to this deployment, in minutes, or
+ * null when none does (cloud, watchdog off, service excluded, a failed read).
+ * The progress marks name it (T-12495), so a log that keeps showing progress
+ * still says the deployment can be stopped at that limit. One call reads the
+ * settings once; the marks call it once per step, not per tick.
+ */
+export const getDeploymentWallLimitMinutes = async (
+	deploymentId: string | undefined,
+): Promise<number | null> => {
+	if (!deploymentId || IS_CLOUD) return null;
+	try {
+		const [row, settings] = await Promise.all([
+			db.query.deployments.findFirst({
+				where: eq(deployments.deploymentId, deploymentId),
+				columns: { applicationId: true, composeId: true },
+			}),
+			getWebServerSettings(),
+		]);
+		const config = resolveWatchdogConfig(settings);
+		if (!config.enabled) return null;
+		if (row && isWatchdogExcluded(config.exclusions, row)) return null;
+		return config.maxMinutes;
+	} catch (error) {
+		console.warn(
+			`Could not read the watchdog limit for deployment ${deploymentId}:`,
+			error instanceof Error ? error.message : error,
+		);
+		return null;
 	}
 };
 

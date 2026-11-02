@@ -69,6 +69,7 @@ import { assertComposeVolumesBound } from "./compose-volume-binding";
 import {
 	assertDeploymentNotCancelled,
 	isDeploymentCancelledError,
+	getDeploymentWallLimitMinutes,
 	isDeploymentStillRunning,
 	toCancelledErrorIfCancelled,
 } from "./deployment-cancel";
@@ -432,6 +433,8 @@ const buildImagesOnBuildServer = async (
 			label,
 			write: (line) => log.line(line),
 			isActive: () => isDeploymentStillRunning(deployment.deploymentId),
+			wallLimitMinutes: () =>
+				getDeploymentWallLimitMinutes(deployment.deploymentId),
 		});
 	};
 	// A failed login explains itself nowhere else: nothing has run that would

@@ -95,6 +95,7 @@ import {
 	DeploymentCancelledError,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
+	getDeploymentWallLimitMinutes,
 	isDeploymentStillRunning,
 	markDeploymentDoneUnlessCancelled,
 	runReleaseScript,
@@ -636,7 +637,11 @@ export const runComposeBuild = async (
 				await runStep(command);
 			}
 		},
-		{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
+		{
+			isRunning: () => isDeploymentStillRunning(deployment.deploymentId),
+			wallLimitMinutes: () =>
+				getDeploymentWallLimitMinutes(deployment.deploymentId),
+		},
 	);
 
 	// What a later rebuild must still find (T-7960), recorded only once this
@@ -1258,7 +1263,11 @@ export const rebuildCompose = async ({
 					await execAsync(commandWithLog);
 				}
 			},
-			{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
+			{
+				isRunning: () => isDeploymentStillRunning(deployment.deploymentId),
+				wallLimitMinutes: () =>
+					getDeploymentWallLimitMinutes(deployment.deploymentId),
+			},
 		);
 
 		// Carries the record of the deploy forward on this row (T-7960), once the
