@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.43**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.44**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.43 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.44 \
   --with-registry-auth \
   dokploy
 ```
@@ -120,11 +120,12 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.43
+## What's new in v0.30.8-community.44
 
-- The stuck-deployment watchdog now names its wall limit in the log, failure message, notification and audit trail when it stops a deployment, and the default wall limit is 180 minutes instead of 90. Stored values are unchanged.
-- Services built and deployed by GitHub Actions get a "Deployed from GitHub Actions" panel with the repository, run link, commit and deployed image, a single GitHub Actions pill, deployment rows that point to the GitHub run, and a "Redeploy current image" button.
-- One additive database migration (0226, changes the watchdog wall limit column default); an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- Services built by GitHub Actions show a rollback line ("Rolled back to <sha> after run #N failed its checks"), a Deployments tab that says the workflow triggers deploys, a "Redeploy current version" button, and no Rebuild, Clean Cache or Autodeploy, which Dokploy does not use for these services (the image and source settings stay under Advanced).
+- Nixpacks builds now write to a per-build temporary directory that is removed on every exit path, and each build sweeps nixpacks directories older than 24 hours, so killed builds no longer fill `/tmp` on the build server.
+- Clean Docker Builder, Clean Docker prune and Prune build cache refuse while builds run on that server, Clean all skips its image, builder and system prunes then, and builder and system prunes now remove only what has been unused for 7 days instead of everything. The API `cleanDockerPrune` without `all: true` now removes only dangling images.
+- No database migrations; an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -139,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.43
+export DOKPLOY_VERSION=v0.30.8-community.44
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -152,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.43      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.44      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -195,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.43` is the 43rd fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.44` is the 44th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
