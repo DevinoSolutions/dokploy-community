@@ -114,7 +114,8 @@ export const isLiveGithubBuild = (row: {
 }) =>
 	row.status === "running" &&
 	row.buildOrigin === "github-actions" &&
-	(LIVE_BUILD_RUN_STATUSES as readonly string[]).includes(
+	// `deploy_queued`: the run is over or not, a deploy was accepted and waits in Dokploy's queue.
+	([...LIVE_BUILD_RUN_STATUSES, "deploy_queued"] as readonly string[]).includes(
 		row.buildRunStatus ?? "",
 	);
 

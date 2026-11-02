@@ -6,7 +6,7 @@ import { deployments } from "@dokploy/server/db/schema";
 import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
-import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { findApplicationById } from "./application";
 import {
 	canonicalBuildRunUrl,
@@ -355,6 +355,8 @@ type FinishableDeployment = {
 	buildOrigin: string | null;
 	buildRunUrl: string | null;
 	buildRunId: string | null;
+	status?: string | null;
+	deployQueuedAt?: string | null;
 };
 
 /**
@@ -371,6 +373,15 @@ export const finishExternalBuild = async (
 }> => {
 	if (deployment.buildOrigin !== "github-actions") {
 		throw badRequest("This deployment was not built by GitHub Actions.");
+	}
+	// A deploy was accepted for this row and waits in Dokploy's queue: it is the queue's now, and a build that
+	// finished (or failed) is not a reason to close it. The caller deploys, or lets the queue end it.
+	if (deployment.deployQueuedAt && deployment.status === "running") {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message:
+				"A deploy was already requested for this deployment and waits in the Dokploy queue, so it cannot be finished. It ends when that deploy runs or is removed from the queue.",
+		});
 	}
 	const outcome = externalBuildOutcome(
 		input.conclusion,
@@ -393,6 +404,7 @@ export const finishExternalBuild = async (
 				eq(deployments.buildOrigin, "github-actions"),
 				// Only a row no deploy took over; a row it closes keeps externalBuildOnly.
 				eq(deployments.externalBuildOnly, true),
+				isNull(deployments.deployQueuedAt),
 			),
 		)
 		.returning({ deploymentId: deployments.deploymentId });

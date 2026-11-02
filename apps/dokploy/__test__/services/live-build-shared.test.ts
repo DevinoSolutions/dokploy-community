@@ -55,6 +55,12 @@ describe("isLiveGithubBuild", () => {
 		expect(isLiveGithubBuild({ ...live, buildRunStatus: "queued" })).toBe(true);
 	});
 
+	it("counts a row whose deploy waits in the queue as live, for the log banner and the stuck alert", () => {
+		expect(
+			isLiveGithubBuild({ ...live, buildRunStatus: "deploy_queued" }),
+		).toBe(true);
+	});
+
 	it.each([
 		["a row a deploy took over", { buildRunStatus: "completed" }],
 		["a row with no run state", { buildRunStatus: null }],

@@ -81,6 +81,51 @@ describe("waiting deploys that carry a registered deployment", () => {
 		expect(dropped.flat()).toEqual(["dep-old"]);
 	});
 
+	it("keeps the registered deployment on the merged job when a plain deploy coalesces over it, and reports nothing", async () => {
+		const { queue, dropped } = await busyQueue();
+		await queue.add(job("A", "dep-1", { titleLog: "GHA deploy" }));
+		// A UI redeploy or a registry webhook: no deploymentId of its own.
+		const outcome = queue.coalesceWaiting(
+			job("A", undefined, { titleLog: "Manual deployment" }),
+			isApp("A"),
+		);
+		expect(outcome.merged).not.toBeNull();
+		expect(dropped).toEqual([]);
+		const waiting = (await queue.getJobs(["waiting"])).map(
+			(w) => w.data as { deploymentId?: string; titleLog?: string },
+		);
+		expect(waiting).toEqual([
+			expect.objectContaining({
+				deploymentId: "dep-1",
+				titleLog: "Manual deployment",
+			}),
+		]);
+	});
+
+	it("keeps the id of a dropped twin when the merge target has none, and reports only the ids that are lost", async () => {
+		const { queue, dropped } = await busyQueue();
+		await queue.add(job("A"));
+		await queue.add(job("A", "dep-1"));
+		await queue.add(job("A", "dep-2"));
+		queue.coalesceWaiting(job("A"), isApp("A"));
+		const waiting = (await queue.getJobs(["waiting"])).map(
+			(w) => (w.data as { deploymentId?: string }).deploymentId,
+		);
+		expect(waiting).toEqual(["dep-1"]);
+		expect(dropped.flat()).toEqual(["dep-2"]);
+	});
+
+	it("cancels the old row, and only it, when the incoming deploy carries a different registered deployment", async () => {
+		const { queue, dropped } = await busyQueue();
+		await queue.add(job("A", "dep-old"));
+		queue.coalesceWaiting(job("A", "dep-new"), isApp("A"));
+		expect(dropped).toEqual([["dep-old"]]);
+		const waiting = (await queue.getJobs(["waiting"])).map(
+			(w) => (w.data as { deploymentId?: string }).deploymentId,
+		);
+		expect(waiting).toEqual(["dep-new"]);
+	});
+
 	it("does not report a retry that carries the same registered deployment", async () => {
 		const { queue, dropped } = await busyQueue();
 		await queue.add(job("A", "dep-1"));

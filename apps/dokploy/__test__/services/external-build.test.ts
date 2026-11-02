@@ -302,6 +302,19 @@ describe("finishExternalBuild", () => {
 		...overrides,
 	});
 
+	it("refuses with 409 to close a row whose deploy waits in the queue, and writes nothing", async () => {
+		await expect(
+			finishExternalBuild(
+				deployment({
+					status: "running",
+					deployQueuedAt: "2026-11-02T10:30:00.000Z",
+				}),
+				{ conclusion: "failure", message: "tests are red" },
+			),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(mocks.update).toHaveLength(0);
+	});
+
 	it("ends a waiting row as error and writes the reason and the link to its log", async () => {
 		mocks.returnQueue.push([{ deploymentId: "dep-1" }]);
 		const result = await finishExternalBuild(deployment(), {

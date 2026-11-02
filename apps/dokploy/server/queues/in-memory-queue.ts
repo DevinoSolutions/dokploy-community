@@ -810,23 +810,33 @@ export class InMemoryQueue {
 			return typeof title === "string" ? [title] : [];
 		};
 		const titles = dropped.flatMap(titleOf);
-		// A twin that carries the incoming deploy's own registered deployment id is not lost: the incoming job does.
+		// A waiting deploy may carry a registered GitHub Actions deployment (T-12686). A plain deploy (a UI redeploy, a
+		// registry webhook) that merges over it must not cancel that row: the merged job keeps the id, so the row is
+		// still taken over when it runs. Only a payload whose id the merged job does not carry is lost.
 		const registeredId = (data: DeploymentJob) =>
 			(data as { deploymentId?: string }).deploymentId;
-		const carried = (data: DeploymentJob) =>
-			!registeredId(incoming) || registeredId(data) !== registeredId(incoming);
+		const keptId =
+			registeredId(incoming) ??
+			(target ? registeredId(target.data) : undefined) ??
+			dropped.map((job) => registeredId(job.data)).find(Boolean);
+		const merged =
+			keptId && !registeredId(incoming)
+				? ({ ...incoming, deploymentId: keptId } as DeploymentJob)
+				: incoming;
+		const lost = (data: DeploymentJob) =>
+			Boolean(registeredId(data)) && registeredId(data) !== keptId;
 		this.settle(dropped);
-		this.reportDropped(dropped.map((job) => job.data).filter(carried));
+		this.reportDropped(dropped.map((job) => job.data).filter(lost));
 		if (target) {
 			titles.unshift(...titleOf(target));
 			// The payload that is replaced will never run.
-			this.reportDropped([target.data].filter(carried));
-			target.data = incoming;
+			this.reportDropped([target.data].filter(lost));
+			target.data = merged;
 			const journal = this.journal;
 			if (journal?.updated) {
 				const { journalId } = target;
 				const update = journal.updated.bind(journal);
-				this.notify(() => update(journalId, incoming));
+				this.notify(() => update(journalId, merged));
 			}
 		}
 		return {
