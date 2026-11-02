@@ -19,7 +19,9 @@ import { quote } from "shell-quote";
  * While such a step runs, Dokploy itself writes one line to the deployment log
  * every few minutes. That is the proof the watchdog reads (the log's
  * modification time). The marks end with the step, and the wall limit
- * (`maxMinutes`, 90 by default) still bounds the step itself.
+ * (`maxMinutes`, 180 by default) still bounds the whole deployment, marks or
+ * not. Each mark names that limit when one applies, so a log that keeps
+ * showing progress still says it can be stopped.
  *
  * What is marked, and so no longer found by the idle limit while it runs:
  * - Compose, built on a build server: the image build and the image push, and
@@ -80,8 +82,18 @@ export const getBuildStartLine = (deploymentId: string) =>
 export const getBuildStartCommand = (deploymentId: string) =>
 	`echo;echo ${quote([getBuildStartLine(deploymentId)])};`;
 
-export const getDeployHeartbeatLine = (label: string, elapsedMs: number) =>
-	`⏳ ${label} is still running (${Math.max(1, Math.round(elapsedMs / 60_000))} min so far, no output yet)`;
+/**
+ * `wallLimitMinutes` is the watchdog's wall limit when one applies to this
+ * deployment. The limit counts the whole deployment, whatever the marks show:
+ * naming it here is what lets a reader of the log know a long step can still be
+ * stopped while it keeps marking progress.
+ */
+export const getDeployHeartbeatLine = (
+	label: string,
+	elapsedMs: number,
+	wallLimitMinutes?: number | null,
+) =>
+	`⏳ ${label} is still running (${Math.max(1, Math.round(elapsedMs / 60_000))} min so far, no output yet${wallLimitMinutes ? `; wall limit ${wallLimitMinutes} min` : ""})`;
 
 export interface DeployHeartbeatOptions {
 	/** What is running, as the log line names it. */
@@ -100,6 +112,13 @@ export interface DeployHeartbeatOptions {
 	 * "still running".
 	 */
 	isActive?: () => boolean | Promise<boolean>;
+	/**
+	 * The wall limit of the watchdog for this deployment, in minutes, or null
+	 * when none applies (watchdog off, service excluded). Read once, at the first
+	 * mark, and kept for the rest of the step: not a lookup per tick. A read that
+	 * fails counts as "no limit to name".
+	 */
+	wallLimitMinutes?: () => number | null | Promise<number | null>;
 	intervalMs?: number;
 	maxMs?: number;
 	/** How long the end of the step waits for a mark that is being written. */
@@ -135,6 +154,20 @@ const attempt = async (
 	}
 };
 
+const attemptLimit = async (
+	read: () => number | null | Promise<number | null>,
+): Promise<number | null> => {
+	try {
+		return (await read()) ?? null;
+	} catch (error) {
+		console.error(
+			"Could not read the watchdog limit for a progress mark",
+			error instanceof Error ? error.message : error,
+		);
+		return null;
+	}
+};
+
 /**
  * Runs `work`; until it settles, writes a progress line every `intervalMs`.
  * Never changes the outcome of `work`: a failed write is only reported to the
@@ -149,6 +182,7 @@ export const withDeployHeartbeat = async <T>(
 		write,
 		ready,
 		isActive,
+		wallLimitMinutes,
 		intervalMs = DEPLOY_HEARTBEAT_INTERVAL_MS,
 		maxMs = DEPLOY_HEARTBEAT_MAX_MS,
 		settleMs = DEPLOY_HEARTBEAT_SETTLE_MS,
@@ -156,6 +190,7 @@ export const withDeployHeartbeat = async <T>(
 	}: DeployHeartbeatOptions,
 ): Promise<T> => {
 	const startedAt = now();
+	let wallLimit: number | null | undefined;
 	// When the marks count from: the start of the step, or, for a step that is
 	// only marked from a point on, the interval that saw that point.
 	let markedFrom: number | null = ready ? null : startedAt;
@@ -176,7 +211,13 @@ export const withDeployHeartbeat = async <T>(
 			return;
 		}
 		if (stopped) return;
-		await write(getDeployHeartbeatLine(label, tickAt - markedFrom));
+		if (wallLimit === undefined) {
+			wallLimit = wallLimitMinutes
+				? await attemptLimit(wallLimitMinutes)
+				: null;
+			if (stopped) return;
+		}
+		await write(getDeployHeartbeatLine(label, tickAt - markedFrom, wallLimit));
 	};
 
 	const timer = setInterval(() => {
@@ -256,6 +297,8 @@ export interface DeployLogHeartbeatOptions {
 	startsAfterLogLine?: string;
 	/** False once the deployment is no longer running: the marks stop then. */
 	isRunning?: () => boolean | Promise<boolean>;
+	/** See `DeployHeartbeatOptions.wallLimitMinutes`. */
+	wallLimitMinutes?: () => number | null | Promise<number | null>;
 }
 
 /** `withDeployHeartbeat` for a step whose output goes to a deployment log. */
@@ -263,7 +306,11 @@ export const withDeployLogHeartbeat = <T>(
 	target: DeployLogTarget,
 	label: string,
 	work: () => Promise<T>,
-	{ startsAfterLogLine, isRunning }: DeployLogHeartbeatOptions = {},
+	{
+		startsAfterLogLine,
+		isRunning,
+		wallLimitMinutes,
+	}: DeployLogHeartbeatOptions = {},
 ): Promise<T> =>
 	withDeployHeartbeat(work, {
 		label,
@@ -272,4 +319,5 @@ export const withDeployLogHeartbeat = <T>(
 			? () => deployLogHasLine(target, startsAfterLogLine)
 			: undefined,
 		isActive: isRunning,
+		wallLimitMinutes,
 	});

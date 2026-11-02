@@ -72,6 +72,7 @@ import {
 	DeploymentCancelledError,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
+	getDeploymentWallLimitMinutes,
 	isDeploymentStillRunning,
 	markDeploymentDoneUnlessCancelled,
 	runRemoteBuildScript,
@@ -272,6 +273,7 @@ const withBuildHeartbeat = <T>(
 	withDeployLogHeartbeat(target, APPLICATION_BUILD_STEP_LABEL, work, {
 		startsAfterLogLine: getBuildStartLine(deploymentId),
 		isRunning: () => isDeploymentStillRunning(deploymentId),
+		wallLimitMinutes: () => getDeploymentWallLimitMinutes(deploymentId),
 	});
 
 export const deployApplication = async ({

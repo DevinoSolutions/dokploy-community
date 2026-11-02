@@ -248,9 +248,11 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 	) => {
 		const { row, trigger } = stopped;
 		const reason = watchdogTriggerLine(trigger);
+		// The wall line is two sentences and ends in a full stop already.
+		const reasonText = reason.replace(/\.$/, "");
 		const outcome = await deps.markFailed(
 			row.deploymentId,
-			`${reason}. The deployment was stopped and marked failed by the watchdog.`,
+			`${reasonText}. The deployment was stopped and marked failed by the watchdog.`,
 			{ claimedCancel: stopped.stop.claimedCancelled },
 		);
 		if (outcome === "unchanged") {
@@ -284,10 +286,17 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 		const flipped = outcome === "flipped";
 		// A deploy flow that failed on its own after the stop already told people.
 		if (flipped) {
-			await deps.notify(row, stopped.host, context, `${reason}; marked failed`);
+			await deps.notify(
+				row,
+				stopped.host,
+				context,
+				`${reasonText}; marked failed`,
+			);
 		}
 		await audit(row, context, {
 			reason: trigger.kind,
+			// The same words as the log: which limit fired, and by how much.
+			message: reason,
 			thresholdMinutes: trigger.minutes,
 			observedMinutes: trigger.observedMinutes,
 			stop: stopped.stop.method,

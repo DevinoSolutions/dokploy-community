@@ -18,7 +18,7 @@ export const DEFAULT_WATCHDOG_IDLE_MINUTES = 20;
  * replica to be healthy, so a shorter idle limit would fail a healthy deploy.
  */
 export const MIN_WATCHDOG_IDLE_MINUTES = 15;
-export const DEFAULT_WATCHDOG_MAX_MINUTES = 90;
+export const DEFAULT_WATCHDOG_MAX_MINUTES = 180;
 export const MIN_WATCHDOG_MAX_MINUTES = 15;
 /** Upper bounds only keep a typo (an extra zero) from disabling the check. */
 export const MAX_WATCHDOG_IDLE_MINUTES = 24 * 60;
@@ -193,11 +193,20 @@ export const evaluateWatchdog = (
 	return null;
 };
 
-/** The line written to the deployment log when the watchdog steps in. */
+/** Where the limits are set, as the wall-limit message names it. */
+export const WATCHDOG_SETTINGS_LOCATION =
+	"Settings > Deployments > Stuck Deployment Watchdog";
+
+/**
+ * The line written to the deployment log when the watchdog steps in. The wall
+ * line names the limit and where to change it: a deploy that is still printing
+ * progress (the heartbeat marks) is stopped by it all the same, and the idle
+ * wording would hide that.
+ */
 export const watchdogTriggerLine = (trigger: WatchdogTrigger): string =>
 	trigger.kind === "idle"
 		? `Watchdog: no log output for ${trigger.minutes} min`
-		: `Watchdog: exceeded ${trigger.minutes} min`;
+		: `Deployment watchdog: stopped after ${trigger.observedMinutes} min, over the wall limit of ${trigger.minutes} min (${WATCHDOG_SETTINGS_LOCATION}). The wall limit applies even while a deploy keeps printing progress; raise it if long builds are expected.`;
 
 /** The line written once the deployment has been marked failed. */
 export const WATCHDOG_FAILED_LINE = "Watchdog: marked failed";

@@ -78,6 +78,54 @@ describe("withDeployHeartbeat", () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
+	it("names the wall limit in every mark, and reads it once for the whole step", async () => {
+		const write = vi.fn();
+		const wallLimitMinutes = vi.fn().mockResolvedValue(180);
+		const step = withDeployHeartbeat(
+			() => new Promise<void>((resolve) => setTimeout(resolve, 20 * MIN)),
+			{ label: "The push", write, wallLimitMinutes },
+		);
+
+		await vi.advanceTimersByTimeAsync(15 * MIN);
+		expect(write).toHaveBeenCalledTimes(3);
+		expect(write.mock.calls[0]?.[0]).toBe(
+			"⏳ The push is still running (5 min so far, no output yet; wall limit 180 min)",
+		);
+		expect(write.mock.calls[2]?.[0]).toBe(
+			"⏳ The push is still running (15 min so far, no output yet; wall limit 180 min)",
+		);
+		// Not a lookup per tick.
+		expect(wallLimitMinutes).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(5 * MIN);
+		await step;
+	});
+
+	it("keeps the plain mark when no wall limit applies or it cannot be read", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const plain = "⏳ The push is still running (5 min so far, no output yet)";
+		for (const wallLimitMinutes of [
+			() => null,
+			async () => null,
+			async () => {
+				throw new Error("settings unreachable");
+			},
+		]) {
+			const write = vi.fn();
+			const step = withDeployHeartbeat(
+				() => new Promise<void>((resolve) => setTimeout(resolve, 6 * MIN)),
+				{ label: "The push", write, wallLimitMinutes },
+			);
+
+			await vi.advanceTimersByTimeAsync(6 * MIN);
+			await step;
+			expect(write).toHaveBeenCalledTimes(1);
+			expect(write).toHaveBeenCalledWith(plain);
+		}
+		expect(getDeployHeartbeatLine("The push", 5 * MIN)).toBe(plain);
+		expect(getDeployHeartbeatLine("The push", 5 * MIN, null)).toBe(plain);
+	});
+
 	it("hands back the failure of the step and stops marking", async () => {
 		const write = vi.fn();
 		const boom = new Error("push failed");
