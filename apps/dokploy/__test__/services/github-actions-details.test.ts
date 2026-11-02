@@ -498,21 +498,57 @@ describe("githubActionsPushTarget", () => {
 		expect(
 			githubActionsPushTarget({
 				branch: " main ",
+				sourceType: "github",
 				buildRepository: "DevinoSolutions/caly-mcp",
 			}),
 		).toBe("main");
+	});
+
+	test.each(["github", "gitlab", "bitbucket", "gitea", "git"])(
+		"uses the branch of a %s source",
+		(sourceType) => {
+			expect(
+				githubActionsPushTarget({
+					branch: "release",
+					sourceType,
+					buildRepository: "o/r",
+				}),
+			).toBe("release");
+		},
+	);
+
+	// T-12502: a docker-source service keeps the branch of an earlier git setup; it must not win.
+	test.each(["docker", "drop", "raw", null, undefined])(
+		"ignores a leftover branch when the source is %s",
+		(sourceType) => {
+			expect(
+				githubActionsPushTarget({
+					branch: "main",
+					sourceType,
+					buildRepository: "DevinoSolutions/caly-mcp",
+				}),
+			).toBe("DevinoSolutions/caly-mcp");
+		},
+	);
+
+	test("is null for a leftover branch when the repository is unknown", () => {
+		expect(
+			githubActionsPushTarget({ branch: "main", sourceType: "docker" }),
+		).toBeNull();
 	});
 
 	test("falls back to the repository, never to an environment", () => {
 		expect(
 			githubActionsPushTarget({
 				branch: null,
+				sourceType: "github",
 				buildRepository: "DevinoSolutions/caly-mcp",
 			}),
 		).toBe("DevinoSolutions/caly-mcp");
 		expect(
 			githubActionsPushTarget({
 				branch: "  ",
+				sourceType: "github",
 				buildRepository: "DevinoSolutions/caly-mcp",
 			}),
 		).toBe("DevinoSolutions/caly-mcp");

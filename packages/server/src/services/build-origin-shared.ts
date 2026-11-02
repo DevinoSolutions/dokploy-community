@@ -464,14 +464,32 @@ export const describeGithubActionsRollback = (input: {
 	} failed its checks. The run has the details.`;
 };
 
+/** The source types whose `branch` is the branch Dokploy deploys from. */
+const GIT_PROVIDER_SOURCE_TYPES: readonly string[] = [
+	"github",
+	"gitlab",
+	"bitbucket",
+	"gitea",
+	"git",
+];
+
 /**
  * What "push to ..." names in the hint under the deploy button: the branch the service was set up with, else
- * the repository (`owner/repo`). An environment name is never a branch, so it is not used. Null when neither is known.
+ * the repository (`owner/repo`). An environment name is never a branch, so it is not used. The branch counts only
+ * while the source is a git provider: a docker-source service can still carry the branch of an earlier git setup,
+ * and that must not win over the repository. Null when neither is known.
  */
 export const githubActionsPushTarget = (input: {
 	branch?: string | null;
+	sourceType?: string | null;
 	buildRepository?: string | null;
-}) => input.branch?.trim() || input.buildRepository?.trim() || null;
+}) => {
+	const branch =
+		input.sourceType && GIT_PROVIDER_SOURCE_TYPES.includes(input.sourceType)
+			? input.branch?.trim()
+			: null;
+	return branch || input.buildRepository?.trim() || null;
+};
 
 /** The commit page of a GitHub repository, or null when the repository or the sha is unknown. */
 export const githubCommitUrl = (

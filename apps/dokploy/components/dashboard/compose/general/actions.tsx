@@ -128,6 +128,7 @@ export const ComposeActions = ({ composeId }: Props) => {
 							<GithubActionsRedeployHint
 								target={githubActionsPushTarget({
 									branch: data?.branch,
+									sourceType: data?.sourceType,
 									buildRepository: data?.buildRepository,
 								})}
 							/>

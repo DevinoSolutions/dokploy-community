@@ -191,6 +191,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 									<GithubActionsRedeployHint
 										target={githubActionsPushTarget({
 											branch: data?.branch,
+											sourceType: data?.sourceType,
 											buildRepository: data?.buildRepository,
 										})}
 									/>
