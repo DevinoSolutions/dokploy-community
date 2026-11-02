@@ -5,6 +5,7 @@ import {
 	computeServiceBuildOrigins,
 	hasGithubActionsTitleMarker,
 	inferBuildOriginFromSource,
+	isGithubActionsRollbackTitle,
 	normalizeBuildRunUrl,
 	pickServiceBuildOrigin,
 	resolveDeploymentBuildOrigin,
@@ -153,6 +154,21 @@ describe("hasGithubActionsTitleMarker", () => {
 	});
 });
 
+describe("isGithubActionsRollbackTitle", () => {
+	test("matches only the action's rollback deploy title", () => {
+		expect(
+			isGithubActionsRollbackTitle(
+				"GHA rollback production to 0f9e8d7c [run 122.1]",
+			),
+		).toBe(true);
+		expect(
+			isGithubActionsRollbackTitle("GHA production 1a2b3c4d: rollback login"),
+		).toBe(false);
+		expect(isGithubActionsRollbackTitle("Rollback")).toBe(false);
+		expect(isGithubActionsRollbackTitle(null)).toBe(false);
+	});
+});
+
 describe("resolveDeploymentBuildOrigin", () => {
 	test("a build Dokploy runs is 'dokploy', whatever the title says", () => {
 		expect(
@@ -191,13 +207,30 @@ describe("resolveDeploymentBuildOrigin", () => {
 		).toEqual({ buildOrigin: "github-actions", buildRunUrl: RUN });
 	});
 
-	test("an explicit origin wins over inference", () => {
+	test("a build Dokploy runs cannot be claimed as GitHub Actions or a prebuilt image", () => {
+		expect(
+			resolveDeploymentBuildOrigin({
+				requestedOrigin: "github-actions",
+				requestedRunUrl: RUN,
+				title: "GHA production abc [run 1.1]",
+				inferred: "dokploy",
+			}),
+		).toEqual({ buildOrigin: "dokploy", buildRunUrl: null });
+		expect(
+			resolveDeploymentBuildOrigin({
+				requestedOrigin: "external",
+				inferred: "dokploy",
+			}),
+		).toEqual({ buildOrigin: "dokploy", buildRunUrl: null });
+	});
+
+	test("an explicit origin wins over inference for a pulled image", () => {
 		expect(
 			resolveDeploymentBuildOrigin({
 				requestedOrigin: "github-actions",
 				requestedRunUrl: RUN,
 				title: "Manual deployment",
-				inferred: "dokploy",
+				inferred: "external",
 			}),
 		).toEqual({ buildOrigin: "github-actions", buildRunUrl: RUN });
 		expect(
@@ -337,6 +370,86 @@ describe("pickServiceBuildOrigin", () => {
 			pickServiceBuildOrigin([row({ title: "GHA production x" })], {
 				kind: "application",
 				sourceType: "github",
+			}),
+		).toEqual({ buildOrigin: "dokploy", buildRunUrl: null });
+	});
+
+	test("skips the action's rollback deploy: the run link stays the one that built the image", () => {
+		expect(
+			pickServiceBuildOrigin(
+				[
+					row({
+						title: "GHA rollback production to 0f9e8d7c",
+						createdAt: "2026-10-31T12:00:00.000Z",
+						buildOrigin: "github-actions",
+					}),
+					row({
+						title: "GHA production 0f9e8d7c: ship it [run 5.1]",
+						createdAt: "2026-10-31T11:00:00.000Z",
+						buildOrigin: "github-actions",
+						buildRunUrl: RUN,
+					}),
+				],
+				app,
+			),
+		).toEqual({ buildOrigin: "github-actions", buildRunUrl: RUN });
+	});
+
+	test("a rollback title does not turn a prebuilt image into GitHub Actions when other deploys exist", () => {
+		expect(
+			pickServiceBuildOrigin(
+				[
+					row({
+						title: "GHA rollback production to 0f9e8d7c",
+						createdAt: "2026-10-31T12:00:00.000Z",
+					}),
+					row({
+						title: "Manual deployment",
+						createdAt: "2026-10-31T11:00:00.000Z",
+					}),
+				],
+				app,
+			),
+		).toEqual({ buildOrigin: "external", buildRunUrl: null });
+	});
+
+	test("uses the rollback deploy when it is the only one", () => {
+		expect(
+			pickServiceBuildOrigin(
+				[row({ title: "GHA rollback production to 0f9e8d7c" })],
+				app,
+			),
+		).toEqual({ buildOrigin: "github-actions", buildRunUrl: null });
+	});
+
+	test("a git-source application is 'dokploy' even with GitHub Actions rows and titles", () => {
+		const github = { kind: "application", sourceType: "github" } as const;
+		expect(
+			pickServiceBuildOrigin(
+				[
+					row({
+						title: "GHA production abc [run 1.1]",
+						buildOrigin: "github-actions",
+						buildRunUrl: RUN,
+					}),
+				],
+				github,
+			),
+		).toEqual({ buildOrigin: "dokploy", buildRunUrl: null });
+		expect(
+			pickServiceBuildOrigin(
+				[row({ title: "GHA production abc [run 1.1]" })],
+				github,
+			),
+		).toEqual({ buildOrigin: "dokploy", buildRunUrl: null });
+	});
+
+	test("a raw compose with a build section is 'dokploy' even with a GHA title", () => {
+		expect(
+			pickServiceBuildOrigin([row({ title: "GHA production abc [run 1.1]" })], {
+				kind: "compose",
+				sourceType: "raw",
+				hasBuildSection: true,
 			}),
 		).toEqual({ buildOrigin: "dokploy", buildRunUrl: null });
 	});

@@ -64,6 +64,15 @@ export const hasGithubActionsTitleMarker = (title: string | null | undefined) =>
 	typeof title === "string" && GITHUB_ACTIONS_TITLE_MARKER.test(title);
 
 /**
+ * The action's rollback deploy ("GHA rollback <env> to <prev>") re-deploys an image an earlier run built. It
+ * says nothing new about how the running image was built, so the service-level value skips it and the run
+ * link stays the one of the run that built the image.
+ */
+export const isGithubActionsRollbackTitle = (
+	title: string | null | undefined,
+) => typeof title === "string" && /^GHA\s+rollback\b/.test(title);
+
+/**
  * A line-based test for a `build:` key under a compose service. A regex rather than a YAML parse so the same
  * test can run in SQL (`COMPOSE_BUILD_SECTION_SQL_PATTERN`) over a list of composes without reading their files.
  */
@@ -127,10 +136,11 @@ export type ResolvedBuildOrigin = {
 /**
  * The origin recorded on a deployment.
  *
- * 1. A buildOrigin the caller sent wins.
- * 2. Otherwise a build Dokploy itself runs is 'dokploy'.
- * 3. Otherwise ('external' by inference) the legacy "GHA " title marker, or a valid GitHub Actions run link,
- *    makes it 'github-actions'.
+ * 1. A build Dokploy itself runs (a git-type source, a compose with `build:`) is always 'dokploy': a caller
+ *    cannot claim another origin for it, and a "GHA " title does not count there.
+ * 2. Otherwise ('external' by inference: a docker-source application, a raw compose without `build:`) the
+ *    buildOrigin the caller sent wins.
+ * 3. Otherwise the "GHA " title marker, or a valid GitHub Actions run link, makes it 'github-actions'.
  *
  * The run link is kept only for 'github-actions', and only when it is a valid run URL.
  */
@@ -142,10 +152,10 @@ export const resolveDeploymentBuildOrigin = (input: {
 }): ResolvedBuildOrigin => {
 	const runUrl = normalizeBuildRunUrl(input.requestedRunUrl);
 	let buildOrigin: BuildOrigin;
-	if (isBuildOrigin(input.requestedOrigin)) {
-		buildOrigin = input.requestedOrigin;
-	} else if (input.inferred === "dokploy") {
+	if (input.inferred === "dokploy") {
 		buildOrigin = "dokploy";
+	} else if (isBuildOrigin(input.requestedOrigin)) {
+		buildOrigin = input.requestedOrigin;
 	} else if (hasGithubActionsTitleMarker(input.title) || runUrl) {
 		buildOrigin = "github-actions";
 	} else {
@@ -184,7 +194,9 @@ const isServiceDeployment = (row: BuildOriginDeploymentRow) =>
 
 /**
  * The service-level value: the buildOrigin of the latest deployment with status done, else of the latest of any
- * status. A row written before the column existed has no buildOrigin, so it gets the same inference a new deploy
+ * status. A service Dokploy builds itself is always 'dokploy', whatever its old rows say (its source may have
+ * changed since). The action's rollback deploys are skipped (see `isGithubActionsRollbackTitle`) unless they are
+ * all there is. A row written before the column existed has no buildOrigin, so it gets the same inference a new deploy
  * would (source type, then the "GHA " title marker); a service that was never deployed gets the source inference.
  */
 export const pickServiceBuildOrigin = (
@@ -192,9 +204,15 @@ export const pickServiceBuildOrigin = (
 	source: BuildOriginSource,
 ): ResolvedBuildOrigin => {
 	const inferred = inferBuildOriginFromSource(source);
-	const rows = deployments
-		.filter(isServiceDeployment)
-		.sort((a, b) => createdAtMs(b) - createdAtMs(a));
+	if (inferred === "dokploy")
+		return { buildOrigin: "dokploy", buildRunUrl: null };
+	const ofService = deployments.filter(isServiceDeployment);
+	const notRollback = ofService.filter(
+		(row) => !isGithubActionsRollbackTitle(row.title),
+	);
+	const rows = (notRollback.length > 0 ? notRollback : ofService).sort(
+		(a, b) => createdAtMs(b) - createdAtMs(a),
+	);
 	const chosen = rows.find((row) => row.status === "done") ?? rows[0];
 	if (!chosen) return { buildOrigin: inferred, buildRunUrl: null };
 	if (isBuildOrigin(chosen.buildOrigin)) {
@@ -222,8 +240,9 @@ export const BUILD_ORIGIN_LABELS: Record<
 		description: "Dokploy builds this service from source.",
 	},
 	"github-actions": {
-		label: "Built in GitHub Actions",
-		description: "The image is built in GitHub Actions and deployed by digest.",
+		label: "GitHub Actions",
+		description:
+			"Built and deployed by GitHub Actions; Dokploy does not build this service.",
 	},
 	external: {
 		label: "Prebuilt image",

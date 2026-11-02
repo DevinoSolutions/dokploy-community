@@ -55,12 +55,13 @@ import {
 	updateCompose,
 	updateDeploymentStatus,
 } from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
 import {
 	buildOriginJobFields,
 	composeFileHasBuildSection,
 	pickServiceBuildOrigin,
 } from "@dokploy/server/services/build-origin-shared";
-import { db } from "@dokploy/server/db";
 import {
 	assertComposeRollingSettings,
 	getComposeRollingReport,
@@ -1987,8 +1988,17 @@ export const composeRouter = createTRPCRouter({
 					.where(where),
 			]);
 
+			// Where each hit was built (T-12149), from its own deployments.
+			const origins = await getBuildOriginsByService({
+				applicationIds: [],
+				composeIds: items.map((item) => item.composeId),
+			});
 			return {
-				items,
+				items: items.map((item) => ({
+					...item,
+					buildOrigin: origins.get(item.composeId)?.buildOrigin ?? null,
+					buildRunUrl: origins.get(item.composeId)?.buildRunUrl ?? null,
+				})),
 				total: countResult[0]?.count ?? 0,
 			};
 		}),

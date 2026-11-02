@@ -46,11 +46,12 @@ import {
 	writeConfig,
 	writeConfigRemote,
 } from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
 import {
 	buildOriginJobFields,
 	pickServiceBuildOrigin,
 } from "@dokploy/server/services/build-origin-shared";
-import { db } from "@dokploy/server/db";
 import { canEditDeployGitSource } from "@dokploy/server/services/git-provider";
 import {
 	addNewService,
@@ -1811,8 +1812,17 @@ export const applicationRouter = createTRPCRouter({
 					.where(where),
 			]);
 
+			// Where each hit was built (T-12149), from its own deployments.
+			const origins = await getBuildOriginsByService({
+				applicationIds: items.map((item) => item.applicationId),
+				composeIds: [],
+			});
 			return {
-				items,
+				items: items.map((item) => ({
+					...item,
+					buildOrigin: origins.get(item.applicationId)?.buildOrigin ?? null,
+					buildRunUrl: origins.get(item.applicationId)?.buildRunUrl ?? null,
+				})),
 				total: countResult[0]?.count ?? 0,
 			};
 		}),
