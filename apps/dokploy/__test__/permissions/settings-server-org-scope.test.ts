@@ -27,6 +27,8 @@ vi.mock("@dokploy/server", async (importOriginal) => {
 		cleanupBuilders: vi.fn(async () => {}),
 		cleanupSystem: vi.fn(async () => {}),
 		cleanupAll: vi.fn(async () => {}),
+		// The prune guard: no build runs on the host.
+		countActiveDeploymentsOnHost: vi.fn(async () => 0),
 	};
 });
 
@@ -99,7 +101,8 @@ describe("settings destructive mutations are organization-scoped", () => {
 			await expect(
 				caller.settings[procedure]({ serverId: "srv-1" }),
 			).resolves.not.toThrow();
-			expect(cleanup).toHaveBeenCalledWith("srv-1");
+			expect(cleanup).toHaveBeenCalledTimes(1);
+			expect(vi.mocked(cleanup).mock.calls[0]?.[0]).toBe("srv-1");
 		});
 	}
 

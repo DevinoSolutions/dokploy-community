@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
 	getBuildCache: vi.fn(),
 	getDockerDiskUsage: vi.fn(),
 	cleanupBuilders: vi.fn(),
+	// The prune guard: no build runs on the host.
+	countActiveDeploymentsOnHost: vi.fn(async () => 0),
+	findServerById: vi.fn(async () => ({ name: "server-own" })),
 }));
 
 vi.mock("@dokploy/server", () => ({
@@ -23,6 +26,8 @@ vi.mock("@dokploy/server", () => ({
 	getBuildCache: mocks.getBuildCache,
 	getDockerDiskUsage: mocks.getDockerDiskUsage,
 	cleanupBuilders: mocks.cleanupBuilders,
+	countActiveDeploymentsOnHost: mocks.countActiveDeploymentsOnHost,
+	findServerById: mocks.findServerById,
 }));
 
 vi.mock("@dokploy/server/lib/auth", () => ({
@@ -122,7 +127,8 @@ describe("the local host's disk usage and build cache belong to the organization
 		"%s lets the organization that owns the instance through",
 		async (_name, run, effect) => {
 			expect(await settle(run(callerIn(ROOT)))).toBeNull();
-			expect(effect()).toHaveBeenCalledWith(undefined);
+			expect(effect()).toHaveBeenCalledTimes(1);
+			expect(effect().mock.calls[0]?.[0]).toBeUndefined();
 		},
 	);
 
@@ -131,7 +137,8 @@ describe("the local host's disk usage and build cache belong to the organization
 		async (_name, run, effect) => {
 			expect(await settle(run(callerIn(OTHER), "server-own"))).toBeNull();
 			expect(mocks.isRootOrganization).not.toHaveBeenCalled();
-			expect(effect()).toHaveBeenCalledWith("server-own");
+			expect(effect()).toHaveBeenCalledTimes(1);
+			expect(effect().mock.calls[0]?.[0]).toBe("server-own");
 		},
 	);
 
@@ -152,7 +159,8 @@ describe("the local host's disk usage and build cache belong to the organization
 
 			expect(await settle(run(callerIn(OTHER)))).toBeNull();
 			expect(mocks.isRootOrganization).not.toHaveBeenCalled();
-			expect(effect()).toHaveBeenCalledWith(undefined);
+			expect(effect()).toHaveBeenCalledTimes(1);
+			expect(effect().mock.calls[0]?.[0]).toBeUndefined();
 		},
 	);
 });

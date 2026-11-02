@@ -217,11 +217,33 @@ ${command}
 echo "Execution completed."
 `;
 
+/**
+ * A routine builder prune removes build cache older than this. A `--all` prune
+ * walks the whole BuildKit store in one write transaction; on a large store
+ * that blocks every `docker build` on the host until it finishes (2026-11-02:
+ * hours, on a 340 MB cache database).
+ */
+export const BUILDER_PRUNE_MAX_AGE = "168h";
+
+export type BuilderPruneOptions = {
+	/** Prune the entire unused cache, not just entries older than a week. */
+	all?: boolean;
+};
+
+export const builderPruneCommand = ({
+	all = false,
+}: BuilderPruneOptions = {}) =>
+	dockerIdleExec(
+		all
+			? "docker builder prune --all --force"
+			: `docker builder prune --force --filter until=${BUILDER_PRUNE_MAX_AGE}`,
+	);
+
 const cleanupCommands = {
 	containers: dockerIdleExec("docker container prune --force"),
 	images: dockerIdleExec("docker image prune --all --force"),
 	volumes: dockerIdleExec("docker volume prune --all --force"),
-	builders: dockerIdleExec("docker builder prune --all --force"),
+	builders: builderPruneCommand(),
 	system: dockerIdleExec("docker system prune --all --force"),
 };
 
@@ -273,9 +295,12 @@ export const cleanupVolumes = async (serverId?: string) => {
 	}
 };
 
-export const cleanupBuilders = async (serverId?: string) => {
+export const cleanupBuilders = async (
+	serverId?: string,
+	options: BuilderPruneOptions = {},
+) => {
 	try {
-		const command = cleanupCommands.builders;
+		const command = builderPruneCommand(options);
 
 		if (serverId) {
 			await execAsyncRemote(serverId, command);
@@ -316,6 +341,11 @@ const excludedCleanupAllCommands: (keyof typeof cleanupCommands)[] = [
 
 export type CleanupAllOptions = {
 	/**
+	 * Prunes to leave out. `builders` and `system` both walk the BuildKit store,
+	 * so a caller that found builds running on the host skips them together.
+	 */
+	skip?: Array<keyof typeof cleanupCommands>;
+	/**
 	 * Asked before every prune after the first. When it answers true (or throws)
 	 * the remaining prunes are skipped: `image prune --all` and `system prune
 	 * --all` delete any tagged image no container uses, so a deploy that started
@@ -327,14 +357,16 @@ export type CleanupAllOptions = {
 /** `aborted` is true when `shouldAbort` stopped the run before every prune ran. */
 export const cleanupAll = async (
 	serverId?: string,
-	{ shouldAbort }: CleanupAllOptions = {},
+	{ shouldAbort, skip = [] }: CleanupAllOptions = {},
 ): Promise<{ aborted: boolean }> => {
 	let first = true;
 	for (const [key, command] of Object.entries(cleanupCommands) as [
 		keyof typeof cleanupCommands,
 		string,
 	][]) {
-		if (excludedCleanupAllCommands.includes(key)) continue;
+		if (excludedCleanupAllCommands.includes(key) || skip.includes(key)) {
+			continue;
+		}
 
 		if (shouldAbort && !first) {
 			let abort = true;
