@@ -13,12 +13,15 @@ import { describe, expect, it } from "vitest";
 
 const MINUTE = 60_000;
 const NOW = Date.parse("2026-11-03T12:00:00Z");
-const TRUST = { branch: "main", repository: "acme/shop" };
+const TRUST = { branch: "main", repository: "acme/shop", repositoryId: 123 };
 
 let nextId = 1;
 const id = () => nextId++;
 
-/** A check run of an app that is not GitHub Actions (CircleCI, a bot): it has no workflow run. */
+/**
+ * A check run of an app that is not GitHub Actions (CircleCI, SonarCloud, Vercel). GitHub
+ * gives every check run a check suite, so it has one, but no workflow run belongs to it.
+ */
 const check = (
 	name: string,
 	status: "queued" | "in_progress" | "completed",
@@ -34,7 +37,7 @@ const check = (
 	appSlug: "ci-app",
 	appId: 999,
 	runId: null,
-	checkSuiteId: null,
+	checkSuiteId: 900_000 + nextId,
 	...extra,
 });
 const pass = (name: string, extra: Partial<GateCheck> = {}) =>
@@ -80,6 +83,7 @@ const workflowRun = (
 		event: "push",
 		headBranch: "main",
 		headRepository: "acme/shop",
+		headRepositoryId: 123,
 		checkSuiteId: runId + 50_000,
 		...extra,
 	};
@@ -405,7 +409,11 @@ describe("the latest attempt decides", () => {
 			runAttempt: 2,
 		});
 		const decision = evaluateDeployGate(
-			input({ expected: required("build"), workflowRuns: [a1, a2], checks: [] }),
+			input({
+				expected: required("build"),
+				workflowRuns: [a1, a2],
+				checks: [],
+			}),
 		);
 		expect(decision.state).toBe("waiting");
 	});
@@ -438,7 +446,7 @@ describe("results that do not count (a result must not be spoofable)", () => {
 	it("a run from another branch or another repository does not count", () => {
 		for (const other of [
 			{ headBranch: "dev" },
-			{ headRepository: "evil/shop" },
+			{ headRepository: "evil/shop", headRepositoryId: 999 },
 			{ event: "pull_request" },
 			{ event: "schedule" },
 		]) {
@@ -494,7 +502,9 @@ describe("results that do not count (a result must not be spoofable)", () => {
 			runId: 424242,
 		});
 		const decision = waiting(
-			evaluateDeployGate(input({ expected: required("build"), checks: [stray] })),
+			evaluateDeployGate(
+				input({ expected: required("build"), checks: [stray] }),
+			),
 		);
 		expect(decision.pendingNames).toEqual(["build"]);
 		// ... and one with no run at all claiming to be Actions is not either.
@@ -502,8 +512,9 @@ describe("results that do not count (a result must not be spoofable)", () => {
 			appSlug: "github-actions",
 		});
 		expect(
-			evaluateDeployGate(input({ expected: required("build"), checks: [noRun] }))
-				.state,
+			evaluateDeployGate(
+				input({ expected: required("build"), checks: [noRun] }),
+			).state,
 		).toBe("waiting");
 	});
 
@@ -557,9 +568,7 @@ describe("results that do not count (a result must not be spoofable)", () => {
 		const other = pass("build", { appId: 777 });
 		const asStatus = statusOf("build", "success");
 		expect(
-			evaluateDeployGate(
-				input({ expected, checks: [other, asStatus] }),
-			).state,
+			evaluateDeployGate(input({ expected, checks: [other, asStatus] })).state,
 		).toBe("waiting");
 		const right = pass("build", { appId: 15368 });
 		expect(
@@ -585,6 +594,203 @@ describe("results that do not count (a result must not be spoofable)", () => {
 			"ci/x",
 			"test",
 		]);
+	});
+});
+
+describe("check runs of apps other than GitHub Actions (they have a check suite but no workflow run)", () => {
+	it("fallback: Actions lint passes but a CircleCI check fails, so it blocks", () => {
+		const ci = workflowRun("CI", "completed", "success");
+		const decision = blocked(
+			evaluateDeployGate(
+				input({
+					workflowRuns: [ci],
+					checks: [
+						job(ci, "lint", "completed", "success"),
+						fail("circleci / test", {
+							appSlug: "circleci-checks",
+							appId: 18001,
+						}),
+					],
+				}),
+			),
+		);
+		expect(decision.failedNames).toEqual(["circleci / test"]);
+	});
+
+	it("fallback: waits for another app's check that is still running", () => {
+		const ci = workflowRun("CI", "completed", "success");
+		const decision = waiting(
+			evaluateDeployGate(
+				input({
+					workflowRuns: [ci],
+					checks: [
+						job(ci, "lint", "completed", "success"),
+						running("SonarCloud Code Analysis", { appSlug: "sonarqubecloud" }),
+					],
+				}),
+			),
+		);
+		expect(decision.pendingNames).toEqual(["SonarCloud Code Analysis"]);
+	});
+
+	it("a required check from another app resolves", () => {
+		const base = {
+			expected: required("Vercel", "lint"),
+			workflowRuns: [workflowRun("CI", "completed", "success")],
+		};
+		const ci = base.workflowRuns[0] as GateWorkflowRun;
+		expect(
+			evaluateDeployGate(
+				input({
+					...base,
+					checks: [
+						job(ci, "lint", "completed", "success"),
+						pass("Vercel", { appSlug: "vercel" }),
+					],
+				}),
+			),
+		).toEqual({ state: "deploy" });
+		// Until it reports it is waited for, and at the timeout it never reported.
+		const missing = input({
+			...base,
+			checks: [job(ci, "lint", "completed", "success")],
+		});
+		expect(evaluateDeployGate(missing).state).toBe("waiting");
+		expect(
+			blocked(evaluateDeployGate({ ...missing, startedAt: NOW - 61 * MINUTE }))
+				.reason,
+		).toBe("Check Vercel never reported");
+	});
+
+	it("outside the expected set, another app's failing check blocks", () => {
+		const decision = blocked(
+			evaluateDeployGate(
+				input({
+					expected: required("build"),
+					checks: [
+						pass("build"),
+						fail("codecov/patch", { appSlug: "codecov" }),
+					],
+				}),
+			),
+		);
+		expect(decision.failedNames).toEqual(["codecov/patch"]);
+	});
+
+	it("the latest attempt per app and name decides; the same name in two apps is two results", () => {
+		const first = fail("test", {
+			appSlug: "circleci-checks",
+			startedAt: "2026-11-03T11:00:00Z",
+		});
+		const rerun = pass("test", {
+			appSlug: "circleci-checks",
+			startedAt: "2026-11-03T11:10:00Z",
+		});
+		expect(
+			evaluateDeployGate(
+				input({ expected: required("test"), checks: [first, rerun] }),
+			),
+		).toEqual({ state: "deploy" });
+		// Another app's passing "test" does not hide the failing one.
+		expect(
+			evaluateDeployGate(
+				input({
+					expected: required("test"),
+					checks: [first, pass("test", { appSlug: "other-app" })],
+				}),
+			).state,
+		).toBe("blocked");
+	});
+
+	it("their names are learned from the last green commit", () => {
+		const ci = workflowRun("CI", "completed", "success");
+		const names = greenCheckRunNames({
+			checks: [
+				job(ci, "lint", "completed", "success"),
+				pass("Vercel", { appSlug: "vercel" }),
+			],
+			workflowRuns: [ci],
+			trust: TRUST,
+			excludedRunIds: [],
+			isExcluded: () => false,
+		});
+		expect(names).toEqual(["Vercel", "lint"]);
+		expect(
+			greenCheckRunNames({
+				checks: [pass("lint"), fail("Vercel", { appSlug: "vercel" })],
+				workflowRuns: [],
+				trust: TRUST,
+				excludedRunIds: [],
+				isExcluded: () => false,
+			}),
+		).toBeNull();
+	});
+
+	it("an Actions check run is still tied to its run: a stray one is not another app's", () => {
+		const stray = check("build", "completed", "success", {
+			appSlug: "github-actions",
+			runId: null,
+			checkSuiteId: 123_456,
+		});
+		expect(
+			evaluateDeployGate(
+				input({ expected: required("build"), checks: [stray] }),
+			).state,
+		).toBe("waiting");
+	});
+});
+
+describe("where a run must come from", () => {
+	it("compares the head repository id with the connection's, so a rename changes nothing", () => {
+		const renamed = workflowRun("CI", "completed", "success", {
+			headRepository: "acme/old-name",
+		});
+		expect(
+			evaluateDeployGate(
+				input({
+					expected: required("build"),
+					workflowRuns: [renamed],
+					checks: [job(renamed, "build", "completed", "success")],
+				}),
+			),
+		).toEqual({ state: "deploy" });
+	});
+
+	it("a fork with the same name but another id does not count", () => {
+		const fork = workflowRun("CI", "completed", "success", {
+			headRepositoryId: 999,
+		});
+		expect(
+			evaluateDeployGate(
+				input({
+					expected: required("build"),
+					workflowRuns: [fork],
+					checks: [job(fork, "build", "completed", "success")],
+				}),
+			).state,
+		).toBe("waiting");
+	});
+
+	it("falls back to the name when the id is absent on either side", () => {
+		const noId = workflowRun("CI", "completed", "success", {
+			headRepositoryId: null,
+		});
+		const ctx = (trust: DeployGateInput["trust"]) =>
+			evaluateDeployGate(
+				input({
+					trust,
+					expected: required("build"),
+					workflowRuns: [noId],
+					checks: [job(noId, "build", "completed", "success")],
+				}),
+			);
+		expect(ctx(TRUST)).toEqual({ state: "deploy" });
+		expect(ctx({ branch: "main", repository: "acme/shop" })).toEqual({
+			state: "deploy",
+		});
+		expect(
+			ctx({ branch: "main", repository: "evil/shop", repositoryId: 123 }).state,
+		).toBe("waiting");
 	});
 });
 
@@ -706,8 +912,9 @@ describe("the fallback: no expected set", () => {
 		);
 		expect(decision.pendingNames).toEqual(["test"]);
 		expect(
-			blocked(evaluateDeployGate(input({ checks: [pass("build"), fail("test")] })))
-				.failedNames,
+			blocked(
+				evaluateDeployGate(input({ checks: [pass("build"), fail("test")] })),
+			).failedNames,
 		).toEqual(["test"]);
 	});
 
@@ -721,7 +928,9 @@ describe("the fallback: no expected set", () => {
 		).toEqual({ state: "deploy" });
 		expect(
 			blocked(
-				evaluateDeployGate(input({ checks: [statusOf("ci/travis", "failure")] })),
+				evaluateDeployGate(
+					input({ checks: [statusOf("ci/travis", "failure")] }),
+				),
 			).failedNames,
 		).toEqual(["ci/travis"]);
 	});
@@ -756,7 +965,10 @@ describe("the fallback: no expected set", () => {
 	it("an expected set with no usable names is the fallback", () => {
 		expect(
 			evaluateDeployGate(
-				input({ expected: required("dokploy/deploy"), checks: [pass("build")] }),
+				input({
+					expected: required("dokploy/deploy"),
+					checks: [pass("build")],
+				}),
 			),
 		).toEqual({ state: "deploy" });
 	});
@@ -832,7 +1044,10 @@ describe("what the gate never waits for", () => {
 				input({
 					expected: required("test"),
 					workflowRuns: [release, counted],
-					checks: [pass("test"), job(counted, "build-and-push", "completed", "failure")],
+					checks: [
+						pass("test"),
+						job(counted, "build-and-push", "completed", "failure"),
+					],
 					excludedRunIds: [777],
 				}),
 			).state,
@@ -928,9 +1143,14 @@ describe("workflows mode", () => {
 			).toEqual({ state: "deploy" });
 		}
 		// A name entry does not match a file, and a file entry does not match a name.
-		for (const wanted of ["ci", ".github/other.yml", "Continuous Integration.yml"]) {
+		for (const wanted of [
+			"ci",
+			".github/other.yml",
+			"Continuous Integration.yml",
+		]) {
 			expect(
-				evaluateDeployGate(wf({ workflows: [wanted], workflowRuns: [run] })).state,
+				evaluateDeployGate(wf({ workflows: [wanted], workflowRuns: [run] }))
+					.state,
 				wanted,
 			).toBe("waiting");
 		}
@@ -938,10 +1158,13 @@ describe("workflows mode", () => {
 			path: ".github/workflows/other.yaml",
 		});
 		expect(
-			evaluateDeployGate(wf({ workflows: ["ci.yml"], workflowRuns: [named] })).state,
+			evaluateDeployGate(wf({ workflows: ["ci.yml"], workflowRuns: [named] }))
+				.state,
 		).toBe("waiting");
 		expect(
-			evaluateDeployGate(wf({ workflows: ["other.yaml"], workflowRuns: [named] })),
+			evaluateDeployGate(
+				wf({ workflows: ["other.yaml"], workflowRuns: [named] }),
+			),
 		).toEqual({ state: "deploy" });
 	});
 
@@ -976,7 +1199,9 @@ describe("workflows mode", () => {
 			id: 10,
 			runAttempt: 2,
 		});
-		const decision = blocked(evaluateDeployGate(wf({ workflowRuns: [failed] })));
+		const decision = blocked(
+			evaluateDeployGate(wf({ workflowRuns: [failed] })),
+		);
 		expect(decision.reason).toBe("Workflow CI failed");
 		expect(evaluateDeployGate(wf({ workflowRuns: [rerun] }))).toEqual({
 			state: "deploy",
@@ -1007,7 +1232,8 @@ describe("workflows mode", () => {
 		);
 		const real = workflowRun("CI", "completed", "failure", { id: 1 });
 		expect(
-			evaluateDeployGate(wf({ workflowRuns: [real, { ...fork, id: 2 }] })).state,
+			evaluateDeployGate(wf({ workflowRuns: [real, { ...fork, id: 2 }] }))
+				.state,
 		).toBe("blocked");
 	});
 
@@ -1055,9 +1281,9 @@ describe("workflows mode", () => {
 	});
 
 	it("an empty list blocks with a reason; check runs are not looked at", () => {
-		expect(
-			blocked(evaluateDeployGate(wf({ workflows: [] }))).reason,
-		).toBe("No workflow is chosen for the gate");
+		expect(blocked(evaluateDeployGate(wf({ workflows: [] }))).reason).toBe(
+			"No workflow is chosen for the gate",
+		);
 		expect(
 			evaluateDeployGate(
 				wf({
@@ -1110,9 +1336,9 @@ describe("greenCheckRunNames (the last green commit)", () => {
 	});
 
 	it("commit statuses are not part of the set, and a commit with only statuses is not green", () => {
-		expect(green({ checks: [pass("a"), statusOf("ci/x", "failure")] })).toEqual([
-			"a",
-		]);
+		expect(green({ checks: [pass("a"), statusOf("ci/x", "failure")] })).toEqual(
+			["a"],
+		);
 		expect(green({ checks: [statusOf("ci/x", "success")] })).toBeNull();
 	});
 

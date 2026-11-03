@@ -191,18 +191,22 @@ describe.skipIf(!ready)("migration 0230", () => {
 			"gateStartedAt",
 			"gateState",
 			"gateTimeoutMinutes",
+			"gateVersion",
 			"gateWorkflows",
 		]);
 	});
 });
 
 const outcome = (
-	overrides: Partial<Parameters<typeof gate.dbDeployGateStore.recordGateOutcome>[2]> = {},
+	overrides: Partial<
+		Parameters<typeof gate.dbDeployGateStore.recordGateOutcome>[2]
+	> = {},
 ) => ({
 	gateState: "waiting" as const,
 	gateReason: "Waiting for test",
 	checkedAt: new Date("2026-11-03T11:00:00Z"),
 	previousCheckedAt: null,
+	gateVersion: 0,
 	gateStart: "keep" as const,
 	connection: "keep" as const,
 	hasRelease: false,
@@ -283,7 +287,9 @@ describe.skipIf(!ready)("the store the gate writes through", () => {
 		const [release] = await base.listReleases(connection.ghaConnectionId);
 		expect(release).toMatchObject({ gateState: "overridden" });
 		// And it did not block the connection or move its start either.
-		expect(await base.findGhaConnectionById(connection.ghaConnectionId)).toMatchObject({
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
 			state: "waiting",
 			gateBlocked: false,
 			gateStartedAt: null,
@@ -305,7 +311,11 @@ describe.skipIf(!ready)("the store the gate writes through", () => {
 			await gate.dbDeployGateStore.recordGateOutcome(
 				connection.ghaConnectionId,
 				releaseId,
-				outcome({ gateState: "passed", gateReason: null, previousCheckedAt: null }),
+				outcome({
+					gateState: "passed",
+					gateReason: null,
+					previousCheckedAt: null,
+				}),
 			),
 		).toBe(false);
 		const [release] = await base.listReleases(connection.ghaConnectionId);
@@ -386,9 +396,9 @@ describe.skipIf(!ready)("the store the gate writes through", () => {
 				hasRelease: false,
 			}),
 		);
-		expect((await base.findGhaConnectionById(connection.ghaConnectionId))?.state).toBe(
-			"waiting",
-		);
+		expect(
+			(await base.findGhaConnectionById(connection.ghaConnectionId))?.state,
+		).toBe("waiting");
 	});
 
 	it("never touches a block the gate did not set", async () => {
@@ -404,7 +414,9 @@ describe.skipIf(!ready)("the store the gate writes through", () => {
 			releaseId,
 			outcome({ gateState: "blocked", connection: "block" }),
 		);
-		expect(await base.findGhaConnectionById(connection.ghaConnectionId)).toMatchObject({
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
 			state: "blocked",
 			stateDetail: "Digest not in the registry",
 			gateBlocked: false,
@@ -418,9 +430,9 @@ describe.skipIf(!ready)("the store the gate writes through", () => {
 				connection: "unblock",
 			}),
 		);
-		expect((await base.findGhaConnectionById(connection.ghaConnectionId))?.state).toBe(
-			"blocked",
-		);
+		expect(
+			(await base.findGhaConnectionById(connection.ghaConnectionId))?.state,
+		).toBe("blocked");
 	});
 
 	it("clearGateStart clears the start", async () => {
@@ -468,7 +480,9 @@ describe.skipIf(!ready)("updateGateSettings", () => {
 			gateWorkflows: ["CI"],
 			gateTimeoutMinutes: 60,
 		});
-		expect(await base.findGhaConnectionById(connection.ghaConnectionId)).toMatchObject({
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
 			gateMode: "workflows",
 			gateWorkflows: ["CI"],
 			gateStartedAt: null,
@@ -490,7 +504,9 @@ describe.skipIf(!ready)("updateGateSettings", () => {
 		await gate.updateGateSettings(connection.ghaConnectionId, {
 			gateMode: "image",
 		});
-		expect(await base.findGhaConnectionById(connection.ghaConnectionId)).toMatchObject({
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
 			state: "blocked",
 			stateDetail: "Check test failed",
 		});
@@ -499,11 +515,15 @@ describe.skipIf(!ready)("updateGateSettings", () => {
 	it("does not null a release that was told to Deploy anyway", async () => {
 		const connection = await connect();
 		await accept(connection.ghaConnectionId, SHA_A, 100, "2026-11-03 10:00:00");
-		await gate.overrideGate(connection.ghaConnectionId, await releaseIdOf(100), {
-			by: "amin@devino.ca",
-			at: "2026-11-03T11:00:00.000Z",
-			reason: null,
-		});
+		await gate.overrideGate(
+			connection.ghaConnectionId,
+			await releaseIdOf(100),
+			{
+				by: "amin@devino.ca",
+				at: "2026-11-03T11:00:00.000Z",
+				reason: null,
+			},
+		);
 		await gate.updateGateSettings(connection.ghaConnectionId, {
 			gateMode: "workflows",
 			gateWorkflows: ["CI"],
@@ -551,7 +571,9 @@ describe.skipIf(!ready)("updateGateSettings", () => {
 			gateTimeoutMinutes: 120,
 		});
 		expect(result?.restarted).toBe(true);
-		expect(await base.findGhaConnectionById(connection.ghaConnectionId)).toMatchObject({
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
 			gateTimeoutMinutes: 120,
 			gateStartedAt: null,
 			state: "waiting",
@@ -572,7 +594,9 @@ describe.skipIf(!ready)("updateGateSettings", () => {
 			gateTimeoutMinutes: 30,
 		});
 		expect(result?.restarted).toBe(false);
-		expect(await base.findGhaConnectionById(connection.ghaConnectionId)).toMatchObject({
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
 			gateTimeoutMinutes: 30,
 			state: "blocked",
 			gateBlocked: true,
@@ -599,6 +623,78 @@ describe.skipIf(!ready)("updateGateSettings", () => {
 		expect(
 			await gate.updateGateSettings("nope", { gateMode: "image" }),
 		).toBeNull();
+	});
+});
+
+describe.skipIf(!ready)("gateVersion", () => {
+	const versionOf = async (id: string) =>
+		(await base.findGhaConnectionById(id))?.gateVersion;
+
+	it("an evaluation that read an older version writes nothing", async () => {
+		const connection = await connect();
+		await accept(connection.ghaConnectionId, SHA_A, 100, "2026-11-03 10:00:00");
+		const releaseId = await releaseIdOf(100);
+		// A settings change after the evaluation read the connection.
+		await gate.updateGateSettings(connection.ghaConnectionId, {
+			gateTimeoutMinutes: 30,
+		});
+		expect(await versionOf(connection.ghaConnectionId)).toBe(1);
+		const wrote = await gate.dbDeployGateStore.recordGateOutcome(
+			connection.ghaConnectionId,
+			releaseId,
+			outcome({
+				gateState: "blocked",
+				gateReason: "Check test failed",
+				connection: "block",
+				gateStart: "mark",
+				gateVersion: 0,
+			}),
+		);
+		expect(wrote).toBe(false);
+		const [release] = await base.listReleases(connection.ghaConnectionId);
+		expect(release?.gateState).toBeNull();
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
+			state: "waiting",
+			gateBlocked: false,
+			gateStartedAt: null,
+		});
+		// The next evaluation reads the new version and writes.
+		expect(
+			await gate.dbDeployGateStore.recordGateOutcome(
+				connection.ghaConnectionId,
+				releaseId,
+				outcome({ gateVersion: 1 }),
+			),
+		).toBe(true);
+	});
+
+	it("every settings change bumps it, even one that restarts nothing", async () => {
+		const connection = await connect();
+		expect(await versionOf(connection.ghaConnectionId)).toBe(0);
+		await gate.updateGateSettings(connection.ghaConnectionId, {
+			gateTimeoutMinutes: 30,
+		});
+		await gate.updateGateSettings(connection.ghaConnectionId, {
+			gateTimeoutMinutes: 45,
+		});
+		expect(await versionOf(connection.ghaConnectionId)).toBe(2);
+	});
+
+	it("Deploy anyway bumps it", async () => {
+		const connection = await connect();
+		await accept(connection.ghaConnectionId, SHA_A, 100, "2026-11-03 10:00:00");
+		await gate.overrideGate(
+			connection.ghaConnectionId,
+			await releaseIdOf(100),
+			{
+				by: "amin@devino.ca",
+				at: "2026-11-03T11:00:00.000Z",
+				reason: null,
+			},
+		);
+		expect(await versionOf(connection.ghaConnectionId)).toBe(1);
 	});
 });
 
@@ -633,7 +729,9 @@ describe.skipIf(!ready)("overrideGate (deploy anyway)", () => {
 			gateOverride: override,
 		});
 		expect(older?.gateState).toBeNull();
-		expect(await base.findGhaConnectionById(connection.ghaConnectionId)).toMatchObject({
+		expect(
+			await base.findGhaConnectionById(connection.ghaConnectionId),
+		).toMatchObject({
 			gateStartedAt: null,
 			state: "waiting",
 			gateBlocked: false,
@@ -666,9 +764,9 @@ describe.skipIf(!ready)("overrideGate (deploy anyway)", () => {
 			await releaseIdOf(100),
 			override,
 		);
-		expect((await base.findGhaConnectionById(connection.ghaConnectionId))?.state).toBe(
-			"blocked",
-		);
+		expect(
+			(await base.findGhaConnectionById(connection.ghaConnectionId))?.state,
+		).toBe("blocked");
 	});
 
 	it("says none when no release is waiting", async () => {

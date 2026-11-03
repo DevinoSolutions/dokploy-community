@@ -21,8 +21,8 @@ import {
 	connectGhaService,
 	createGhaConnection,
 	deleteGhaConnection,
-	findGhaConnection,
 	findGatedRelease,
+	findGhaConnection,
 	gateChangeWeakens,
 	getBranchHead,
 	getEnvironmentPolicy,
@@ -468,8 +468,12 @@ export const ghaConnectionRouter = createTRPCRouter({
 					},
 				);
 				const gated = await findGatedRelease(row.ghaConnectionId);
+				// An accepted release not yet looked at is just as much in flight.
 				const busy =
-					gated?.gateState === "waiting" || gated?.gateState === "blocked";
+					gated != null &&
+					(gated.gateState === null ||
+						gated.gateState === "waiting" ||
+						gated.gateState === "blocked");
 				if (weakens || busy) {
 					throw new TRPCError({
 						code: "FORBIDDEN",

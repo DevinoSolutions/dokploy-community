@@ -6,10 +6,7 @@ import {
 	ghaRelease,
 } from "@dokploy/server/db/schema";
 import { and, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import {
-	type GateSettings,
-	gateChangeRestarts,
-} from "./deploy-gate-settings";
+import { type GateSettings, gateChangeRestarts } from "./deploy-gate-settings";
 import type { DeployGateStore } from "./deploy-gate-step";
 import { reduceConnection } from "./state-machine";
 
@@ -113,6 +110,14 @@ export const dbDeployGateStore: DeployGateStore = {
 
 	recordGateOutcome: async (ghaConnectionId, releaseId, outcome) =>
 		db.transaction(async (tx) => {
+			// The connection first, as every writer does: a settings change or a Deploy
+			// anyway that came in after this evaluation read its inputs wins.
+			const [owner] = await tx
+				.select({ gateVersion: ghaConnection.gateVersion })
+				.from(ghaConnection)
+				.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId))
+				.for("update");
+			if (!owner || owner.gateVersion !== outcome.gateVersion) return false;
 			// Only a release that is still waiting to go out, was not overridden by a
 			// Deploy anyway that came in meanwhile, and was not evaluated by someone
 			// else since it was read.
@@ -143,7 +148,8 @@ export const dbDeployGateStore: DeployGateStore = {
 				await tx
 					.update(ghaConnection)
 					.set({
-						gateStartedAt: outcome.gateStart === "mark" ? outcome.checkedAt : null,
+						gateStartedAt:
+							outcome.gateStart === "mark" ? outcome.checkedAt : null,
 					})
 					.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId));
 			}
@@ -200,13 +206,15 @@ export const updateGateSettings = async (
 		const after: GateSettings = {
 			gateMode: change.gateMode ?? before.gateMode,
 			gateWorkflows: change.gateWorkflows ?? before.gateWorkflows,
-			gateTimeoutMinutes: change.gateTimeoutMinutes ?? before.gateTimeoutMinutes,
+			gateTimeoutMinutes:
+				change.gateTimeoutMinutes ?? before.gateTimeoutMinutes,
 		};
 		const restarts = gateChangeRestarts(before, after);
 		await tx
 			.update(ghaConnection)
 			.set({
 				...after,
+				gateVersion: sql`${ghaConnection.gateVersion} + 1`,
 				...(restarts.timer ? { gateStartedAt: null } : {}),
 			})
 			.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId));
@@ -273,6 +281,12 @@ export const overrideGate = async (
 	override: GhaGateOverride,
 ): Promise<OverrideResult> =>
 	db.transaction(async (tx) => {
+		// The connection first (the order every writer locks in).
+		await tx
+			.select({ id: ghaConnection.ghaConnectionId })
+			.from(ghaConnection)
+			.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId))
+			.for("update");
 		const [newest] = await tx
 			.select()
 			.from(ghaRelease)
@@ -308,12 +322,20 @@ export const overrideGate = async (
 			.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId));
 		await tx
 			.update(ghaConnection)
-			.set({ gateStartedAt: null, lastActivityAt: new Date() })
+			.set({
+				gateStartedAt: null,
+				lastActivityAt: new Date(),
+				gateVersion: sql`${ghaConnection.gateVersion} + 1`,
+			})
 			.where(eq(ghaConnection.ghaConnectionId, ghaConnectionId));
 		await unblockGateInTransaction(
 			tx,
 			ghaConnectionId,
 			(connection?.deployedSha ?? null) !== null,
 		);
-		return { kind: "ok", releaseId: newest.releaseId, sha: newest.sha } as const;
+		return {
+			kind: "ok",
+			releaseId: newest.releaseId,
+			sha: newest.sha,
+		} as const;
 	});

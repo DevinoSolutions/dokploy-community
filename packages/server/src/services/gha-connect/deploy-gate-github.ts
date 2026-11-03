@@ -80,7 +80,8 @@ export const entriesFromProtection = (json: unknown): RequiredCheckEntry[] => {
 	}
 	if (Array.isArray(required.contexts)) {
 		for (const context of required.contexts) {
-			if (typeof context === "string") entries.push({ name: context, appId: null });
+			if (typeof context === "string")
+				entries.push({ name: context, appId: null });
 		}
 	}
 	return entries;
@@ -241,8 +242,9 @@ const mapStatus = (json: unknown): GateCheck | null => {
 };
 
 /**
- * The latest check runs (`filter=latest`: the newest run of each name) and
- * commit statuses of a commit. A token that cannot read statuses still gets the
+ * Every check run (`filter=all`: the gate picks the latest attempt of each
+ * workflow and name, or of each app and name, itself) and the latest commit
+ * status of each context of a commit. A token that cannot read statuses still gets the
  * check runs; any other failure of either read is a failure of the whole.
  */
 export const loadCommitChecks = async (
@@ -261,7 +263,7 @@ export const loadCommitChecks = async (
 			const result = await apiGet(
 				deps,
 				token,
-				`${base}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`,
+				`${base}/commits/${sha}/check-runs?filter=all&per_page=100&page=${page}`,
 				(json) => {
 					const o = asObject(json);
 					if (!o || !Array.isArray(o.check_runs)) return null;
@@ -332,6 +334,7 @@ const mapWorkflowRun = (json: unknown): GateWorkflowRun | null => {
 		event: str(o.event) ?? "",
 		headBranch: str(o.head_branch),
 		headRepository: str(asObject(o.head_repository)?.full_name),
+		headRepositoryId: int(asObject(o.head_repository)?.id),
 		checkSuiteId: int(o.check_suite_id),
 	};
 };
@@ -387,6 +390,8 @@ export const releaseWorkflowRunIds = (
 
 export interface ExpectedSetInput {
 	branch: string;
+	/** The connection's repository id: runs must come from it. */
+	repositoryId?: number | null;
 	/** The release commit: not a candidate for "last green". */
 	sha: string;
 	/** The release workflow file, `.github/workflows/dokploy.yml`. */
@@ -420,6 +425,7 @@ export const loadExpectedCheckSet = async (
 	const trust = {
 		branch: input.branch,
 		repository: `${ref.owner}/${ref.repo}`,
+		repositoryId: input.repositoryId ?? null,
 	};
 	const requiredRead = await loadRequiredChecks(deps, token, ref, input.branch);
 	if (requiredRead.kind === "failed") {
@@ -469,7 +475,10 @@ export const loadExpectedCheckSet = async (
 			if (runs.failure.kind === "not-found") continue;
 			return { ...runs, stage: "history" };
 		}
-		const excludedRunIds = releaseWorkflowRunIds(runs.value, input.workflowPath);
+		const excludedRunIds = releaseWorkflowRunIds(
+			runs.value,
+			input.workflowPath,
+		);
 		const names = greenCheckRunNames({
 			checks: checks.value,
 			workflowRuns: runs.value,

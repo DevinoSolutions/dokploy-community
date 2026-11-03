@@ -30,7 +30,9 @@ export const gateChangeWeakens = (
 	) {
 		return true;
 	}
-	if (before.gateWorkflows.some((name) => !after.gateWorkflows.includes(name))) {
+	if (
+		before.gateWorkflows.some((name) => !after.gateWorkflows.includes(name))
+	) {
 		return true;
 	}
 	return after.gateTimeoutMinutes > before.gateTimeoutMinutes;

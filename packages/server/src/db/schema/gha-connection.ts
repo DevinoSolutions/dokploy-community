@@ -142,6 +142,8 @@ export const ghaConnection = pgTable(
 		/** How long a check or workflow may take to report before the release is blocked. */
 		gateTimeoutMinutes: integer("gateTimeoutMinutes").notNull().default(60),
 		gateStartedAt: timestamp("gateStartedAt"),
+		/** Bumped on every settings change and Deploy anyway; an evaluation that read an older value writes nothing. */
+		gateVersion: integer("gateVersion").notNull().default(0),
 		/** True while the connection is Blocked by the deploy gate (and not by something else). */
 		gateBlocked: boolean("gateBlocked").notNull().default(false),
 		state: text("state")

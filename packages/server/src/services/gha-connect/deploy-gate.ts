@@ -65,14 +65,18 @@ export interface GateWorkflowRun {
 	headBranch: string | null;
 	/** `owner/name` of the repository the run's commit was pushed to. */
 	headRepository: string | null;
+	/** Its immutable id: a rename changes the name, not this. */
+	headRepositoryId: number | null;
 	checkSuiteId: number | null;
 }
 
 /** The branch and repository a run must come from to count. */
 export interface GateTrust {
 	branch: string;
-	/** `owner/name`. */
+	/** `owner/name`: compared only when a run or the connection has no id. */
 	repository: string;
+	/** The connection's repository id; compared with the run's head repository id when both are known. */
+	repositoryId?: number | null;
 }
 
 export type ExpectedCheckSet = GhaGateExpected;
@@ -119,8 +123,7 @@ export const createDefaultExclusion =
 	}): GateExclusion =>
 	(check) => {
 		const runs = new Set(excludedRunIds ?? []);
-		if (check.name.toLowerCase().startsWith(DOKPLOY_STATUS_PREFIX))
-			return true;
+		if (check.name.toLowerCase().startsWith(DOKPLOY_STATUS_PREFIX)) return true;
 		if (appSlug && check.appSlug === appSlug) return true;
 		return check.runId !== null && runs.has(check.runId);
 	};
@@ -195,11 +198,17 @@ export const verdictOf = (item: {
 			: "running";
 };
 
+/** The run's commit lives in the connection's repository (by id when both are known, else by name). */
+const fromTrustedRepository = (run: GateWorkflowRun, trust: GateTrust) =>
+	trust.repositoryId != null && run.headRepositoryId !== null
+		? run.headRepositoryId === trust.repositoryId
+		: run.headRepository !== null &&
+			run.headRepository.toLowerCase() === trust.repository.toLowerCase();
+
 const isTrustedRun = (run: GateWorkflowRun, trust: GateTrust) =>
 	TRUSTED_RUN_EVENTS.includes(run.event) &&
 	run.headBranch === trust.branch &&
-	run.headRepository !== null &&
-	run.headRepository.toLowerCase() === trust.repository.toLowerCase();
+	fromTrustedRepository(run, trust);
 
 const workflowKey = (run: GateWorkflowRun) => run.path || run.name;
 
@@ -242,8 +251,9 @@ export interface ResolveInput {
 /**
  * The results of a commit that count (see the header): one per workflow and
  * check name for the latest run of each workflow, one per app and name for
- * check runs of other apps, and one per context for the commit statuses of a
- * name that no check run reports.
+ * check runs of other apps (every check run has a check suite, but only an
+ * Actions suite has a workflow run), and one per context for the commit
+ * statuses of a name that no check run reports.
  */
 export const resolveChecks = (input: ResolveInput): ResolvedCheck[] => {
 	const latestRuns = latestTrustedRuns(
@@ -265,7 +275,9 @@ export const resolveChecks = (input: ResolveInput): ResolvedCheck[] => {
 		let key: string;
 		if (check.kind === "status") {
 			key = `status::${check.name}`;
-		} else if (check.runId !== null || check.checkSuiteId !== null) {
+		} else if (check.appSlug === "github-actions" || check.runId !== null) {
+			// A check run of GitHub Actions belongs to a workflow run, which has to count.
+			// Other apps (CircleCI, SonarCloud, Vercel) have check suites too, but no run.
 			const run =
 				(check.runId !== null ? runById.get(check.runId) : undefined) ??
 				(check.checkSuiteId !== null
@@ -275,8 +287,6 @@ export const resolveChecks = (input: ResolveInput): ResolvedCheck[] => {
 			// (fork pull request, another branch, an old run of the workflow) is not a result.
 			if (!run || !latestIds.has(run.id)) continue;
 			key = `wf:${workflowKey(run)}::${check.name}`;
-		} else if (check.appSlug === "github-actions") {
-			continue;
 		} else {
 			key = `app:${check.appSlug ?? check.appId ?? ""}::${check.name}`;
 		}
@@ -285,7 +295,9 @@ export const resolveChecks = (input: ResolveInput): ResolvedCheck[] => {
 	}
 
 	const checkRunNames = new Set(
-		[...latest.values()].filter((c) => c.kind === "check-run").map((c) => c.name),
+		[...latest.values()]
+			.filter((c) => c.kind === "check-run")
+			.map((c) => c.name),
 	);
 	const resolved: ResolvedCheck[] = [];
 	for (const check of latest.values()) {
@@ -307,9 +319,7 @@ export const resolveChecks = (input: ResolveInput): ResolvedCheck[] => {
  * failed or is still running. Null otherwise. Used to learn what "all checks"
  * means from the last good commit of a branch.
  */
-export const greenCheckRunNames = (
-	input: ResolveInput,
-): string[] | null => {
+export const greenCheckRunNames = (input: ResolveInput): string[] | null => {
 	const resolved = resolveChecks({
 		...input,
 		checks: input.checks.filter((c) => c.kind === "check-run"),
@@ -355,7 +365,10 @@ const decide = (groups: Group[], clock: Clock): GateDecision => {
 		return {
 			state: "blocked",
 			reason: failed
-				.map((g) => `${checkWord(g.failed, label(g.noun))} ${list(g.failed)} failed`)
+				.map(
+					(g) =>
+						`${checkWord(g.failed, label(g.noun))} ${list(g.failed)} failed`,
+				)
 				.join("; "),
 			failedNames: unique(failed.flatMap((g) => g.failed)),
 			neverReported: [],
@@ -431,7 +444,8 @@ const worst = (verdicts: Verdict[]): Verdict =>
 const asLike = (name: string, verdict: Verdict): CheckRunLike => ({
 	name,
 	status: verdict === "running" ? "in_progress" : "completed",
-	conclusion: verdict === "failed" ? "failure" : verdict === "passed" ? "success" : null,
+	conclusion:
+		verdict === "failed" ? "failure" : verdict === "passed" ? "success" : null,
 });
 
 /** Wait for `names` (each judged by the worst of its results), via build-policy's rule. */
@@ -560,7 +574,9 @@ const evaluateChecks = (input: DeployGateInput, clock: Clock): GateDecision => {
 			pendingNames: [],
 		};
 	}
-	const pendingOf = (items: Array<{ name: string; verdict: Verdict; since: number | null }>) =>
+	const pendingOf = (
+		items: Array<{ name: string; verdict: Verdict; since: number | null }>,
+	) =>
 		items
 			.filter((i) => i.verdict === "running")
 			.map((i) => ({ name: i.name, since: i.since }));
@@ -611,7 +627,10 @@ const evaluateWorkflows = (
 		(name) =>
 			runs
 				.filter((run) => runMatches(run, name))
-				.map((run) => ({ verdict: verdictOf(run), since: time(run.startedAt) })),
+				.map((run) => ({
+					verdict: verdictOf(run),
+					since: time(run.startedAt),
+				})),
 		"workflow",
 	);
 	return decide([group], clock);

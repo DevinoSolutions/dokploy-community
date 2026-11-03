@@ -33,6 +33,12 @@ import {
  * passing re-run, a mode change or Deploy anyway. A newer release supersedes a
  * waiting one: the poll then calls `store.clearGateStart`.
  *
+ * A passing gate says nothing about the rest of the connection: a connection
+ * that is Blocked for a reason that is not the gate's (a refused release, a lost
+ * token) still gets `{ state: "deploy" }` here, because the gate neither sets
+ * nor lifts such a block. PR 4 must consult the connection state before
+ * `startDeploy`.
+ *
  * Everything it touches is injected: GitHub reads (`GateGithub`) and the
  * database (`DeployGateStore`), so the order and the persistence are tested
  * without either.
@@ -46,6 +52,10 @@ export interface GateConnection {
 	gateBlocked: boolean;
 	/** `owner/name` of the repository: runs must come from it to count. */
 	repoFullName: string;
+	/** Its immutable id (a rename changes the name, not this). */
+	repoId: number;
+	/** Bumped on every settings change and Deploy anyway: an evaluation that read an older one is discarded. */
+	gateVersion: number;
 	trackedBranch: string;
 	/** The release workflow file, `.github/workflows/dokploy.yml`. */
 	workflowPath: string;
@@ -74,6 +84,8 @@ export interface GateOutcome {
 	checkedAt: Date;
 	/** What `gateCheckedAt` was when the release was read: the write happens only if it still is. */
 	previousCheckedAt: Date | null;
+	/** The connection's `gateVersion` when it was read: the write happens only if it still is. */
+	gateVersion: number;
 	/** Saved with the release the first time the expected set is learned. */
 	gateExpected?: ExpectedCheckSet;
 	/** The start of the wait: set now, cleared, or left. */
@@ -210,6 +222,7 @@ export const runDeployGate = async ({
 				branch: connection.trackedBranch,
 				sha: release.sha,
 				workflowPath: connection.workflowPath,
+				repositoryId: connection.repoId,
 				appSlug,
 				isExcluded,
 			});
@@ -249,6 +262,7 @@ export const runDeployGate = async ({
 			trust: {
 				branch: connection.trackedBranch,
 				repository: connection.repoFullName,
+				repositoryId: connection.repoId,
 			},
 			appSlug,
 			isExcluded:
@@ -269,6 +283,7 @@ export const runDeployGate = async ({
 			gateReason: decision.state === "deploy" ? null : decision.reason,
 			checkedAt: new Date(nowMs),
 			previousCheckedAt: release.gateCheckedAt,
+			gateVersion: connection.gateVersion,
 			...(learned ? { gateExpected: learned } : {}),
 			gateStart:
 				decision.state === "deploy"

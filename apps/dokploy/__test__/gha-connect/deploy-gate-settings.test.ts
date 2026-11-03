@@ -22,18 +22,18 @@ describe("gateChangeWeakens", () => {
 		expect(gateChangeWeakens(checks, { ...checks, gateMode: "image" })).toBe(
 			true,
 		);
-		expect(gateChangeWeakens(workflows, { ...workflows, gateMode: "image" })).toBe(
-			true,
-		);
+		expect(
+			gateChangeWeakens(workflows, { ...workflows, gateMode: "image" }),
+		).toBe(true);
 	});
 
 	it("swapping one kind of gate for the other is not assumed stronger", () => {
-		expect(gateChangeWeakens(checks, { ...checks, gateMode: "workflows" })).toBe(
-			true,
-		);
-		expect(gateChangeWeakens(workflows, { ...workflows, gateMode: "checks" })).toBe(
-			true,
-		);
+		expect(
+			gateChangeWeakens(checks, { ...checks, gateMode: "workflows" }),
+		).toBe(true);
+		expect(
+			gateChangeWeakens(workflows, { ...workflows, gateMode: "checks" }),
+		).toBe(true);
 	});
 
 	it("removing a workflow weakens it, adding one does not", () => {
@@ -56,12 +56,12 @@ describe("gateChangeWeakens", () => {
 	});
 
 	it("waiting longer weakens it, a shorter wait does not", () => {
-		expect(gateChangeWeakens(checks, { ...checks, gateTimeoutMinutes: 61 })).toBe(
-			true,
-		);
-		expect(gateChangeWeakens(checks, { ...checks, gateTimeoutMinutes: 30 })).toBe(
-			false,
-		);
+		expect(
+			gateChangeWeakens(checks, { ...checks, gateTimeoutMinutes: 61 }),
+		).toBe(true);
+		expect(
+			gateChangeWeakens(checks, { ...checks, gateTimeoutMinutes: 30 }),
+		).toBe(false);
 	});
 
 	it("turning the gate on, or no change, does not", () => {
@@ -73,7 +73,10 @@ describe("gateChangeWeakens", () => {
 
 describe("gateChangeRestarts", () => {
 	it("a mode or workflow change restarts everything", () => {
-		expect(gateChangeRestarts(checks, image)).toEqual({ full: true, timer: true });
+		expect(gateChangeRestarts(checks, image)).toEqual({
+			full: true,
+			timer: true,
+		});
 		expect(
 			gateChangeRestarts(workflows, { ...workflows, gateWorkflows: ["CI"] }),
 		).toEqual({ full: true, timer: true });

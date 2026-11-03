@@ -3,6 +3,7 @@
 -- 0229 (T-13719): renumber if the order changes.
 ALTER TABLE "gha_connection" ADD COLUMN IF NOT EXISTS "gateWorkflows" text[] DEFAULT '{}' NOT NULL;--> statement-breakpoint
 ALTER TABLE "gha_connection" ADD COLUMN IF NOT EXISTS "gateTimeoutMinutes" integer DEFAULT 60 NOT NULL;--> statement-breakpoint
+ALTER TABLE "gha_connection" ADD COLUMN IF NOT EXISTS "gateVersion" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
 ALTER TABLE "gha_connection" ADD COLUMN IF NOT EXISTS "gateBlocked" boolean DEFAULT false NOT NULL;--> statement-breakpoint
 ALTER TABLE "gha_release" ADD COLUMN IF NOT EXISTS "gateState" text;--> statement-breakpoint
 ALTER TABLE "gha_release" ADD COLUMN IF NOT EXISTS "gateReason" text;--> statement-breakpoint

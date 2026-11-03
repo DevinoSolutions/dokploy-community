@@ -1,13 +1,13 @@
 import type { ApiDeps } from "@dokploy/server/services/gha-connect/actions-api";
 import {
 	createGateGithub,
+	entriesFromProtection,
+	entriesFromRules,
 	loadCommitChecks,
 	loadExpectedCheckSet,
 	loadRecentCommits,
 	loadRequiredChecks,
 	loadWorkflowRuns,
-	entriesFromProtection,
-	entriesFromRules,
 	releaseWorkflowRunIds,
 } from "@dokploy/server/services/gha-connect/deploy-gate-github";
 import { describe, expect, it } from "vitest";
@@ -176,25 +176,31 @@ describe("required checks of the branch", () => {
 			},
 			"rate-limited",
 		],
-	])("%s on either source is a failure, never 'no required checks'", async (_label, reply, kind) => {
-		for (const failing of ["/branches/main", "/rules/branches/main"]) {
-			const other = failing === "/branches/main" ? "/rules/branches/main" : "/branches/main";
-			const routes: Array<[string, Reply]> =
-				failing === "/rules/branches/main"
-					? [
-							["/rules/branches/main", reply],
-							["/branches/main", { json: {} }],
-						]
-					: [
-							["/rules/branches/main", { json: [] }],
-							["/branches/main", reply],
-						];
-			const { apiDeps } = deps(routes);
-			const read = await loadRequiredChecks(apiDeps, TOKEN, REF, "main");
-			expect(read.kind, `${failing} (other ${other})`).toBe("failed");
-			if (read.kind === "failed") expect(read.failure.kind).toBe(kind);
-		}
-	});
+	])(
+		"%s on either source is a failure, never 'no required checks'",
+		async (_label, reply, kind) => {
+			for (const failing of ["/branches/main", "/rules/branches/main"]) {
+				const other =
+					failing === "/branches/main"
+						? "/rules/branches/main"
+						: "/branches/main";
+				const routes: Array<[string, Reply]> =
+					failing === "/rules/branches/main"
+						? [
+								["/rules/branches/main", reply],
+								["/branches/main", { json: {} }],
+							]
+						: [
+								["/rules/branches/main", { json: [] }],
+								["/branches/main", reply],
+							];
+				const { apiDeps } = deps(routes);
+				const read = await loadRequiredChecks(apiDeps, TOKEN, REF, "main");
+				expect(read.kind, `${failing} (other ${other})`).toBe("failed");
+				if (read.kind === "failed") expect(read.failure.kind).toBe(kind);
+			}
+		},
+	);
 
 	it("a network error is a failure too", async () => {
 		const apiDeps: ApiDeps = {
@@ -388,7 +394,7 @@ describe("workflow runs of a commit", () => {
 								run_started_at: "2026-11-03T11:00:00Z",
 								event: "pull_request",
 								head_branch: "feature",
-								head_repository: { full_name: "evil/shop" },
+								head_repository: { full_name: "evil/shop", id: 4242 },
 								check_suite_id: 77,
 							},
 						],
@@ -412,6 +418,7 @@ describe("workflow runs of a commit", () => {
 					event: "pull_request",
 					headBranch: "feature",
 					headRepository: "evil/shop",
+					headRepositoryId: 4242,
 					checkSuiteId: 77,
 				},
 			],
@@ -433,6 +440,7 @@ describe("workflow runs of a commit", () => {
 						event: "push",
 						headBranch: "main",
 						headRepository: "acme/shop",
+						headRepositoryId: 123,
 						checkSuiteId: null,
 					},
 					{
@@ -446,6 +454,7 @@ describe("workflow runs of a commit", () => {
 						event: "push",
 						headBranch: "main",
 						headRepository: "acme/shop",
+						headRepositoryId: 123,
 						checkSuiteId: null,
 					},
 				],
@@ -492,8 +501,12 @@ describe("the expected check set", () => {
 				`/commits/${PREV}/check-runs`,
 				{
 					json: checkRuns(
-						checkRun(1, "build", "completed", "success", { details_url: RUN_URL(5001) }),
-						checkRun(2, "test", "completed", "failure", { details_url: RUN_URL(5001) }),
+						checkRun(1, "build", "completed", "success", {
+							details_url: RUN_URL(5001),
+						}),
+						checkRun(2, "test", "completed", "failure", {
+							details_url: RUN_URL(5001),
+						}),
 					),
 				},
 			],
@@ -501,8 +514,12 @@ describe("the expected check set", () => {
 				`/commits/${OLDER}/check-runs`,
 				{
 					json: checkRuns(
-						checkRun(3, "build", "completed", "success", { details_url: RUN_URL(5000) }),
-						checkRun(4, "test", "completed", "success", { details_url: RUN_URL(5000) }),
+						checkRun(3, "build", "completed", "success", {
+							details_url: RUN_URL(5000),
+						}),
+						checkRun(4, "test", "completed", "success", {
+							details_url: RUN_URL(5000),
+						}),
 						// The release workflow of that commit: its jobs are not part of "all checks".
 						checkRun(5, "publish", "completed", "success", {
 							details_url:
@@ -651,7 +668,10 @@ describe("the expected set when branch protection cannot be read", () => {
 					json: {
 						protection: {
 							required_status_checks: {
-								checks: [{ context: "build", app_id: 15368 }, { context: "lint" }],
+								checks: [
+									{ context: "build", app_id: 15368 },
+									{ context: "lint" },
+								],
 							},
 						},
 					},
@@ -677,7 +697,9 @@ describe("the expected set when branch protection cannot be read", () => {
 				`/commits/${PREV}/check-runs`,
 				{
 					json: checkRuns(
-						checkRun(1, "publish", "completed", "success", { details_url: RUN_URL(4242) }),
+						checkRun(1, "publish", "completed", "success", {
+							details_url: RUN_URL(4242),
+						}),
 					),
 				},
 			],
@@ -699,7 +721,9 @@ describe("the expected set when branch protection cannot be read", () => {
 				`/commits/${PREV}/check-runs`,
 				{
 					json: checkRuns(
-						checkRun(1, "build", "completed", "success", { details_url: RUN_URL(6000) }),
+						checkRun(1, "build", "completed", "success", {
+							details_url: RUN_URL(6000),
+						}),
 					),
 				},
 			],

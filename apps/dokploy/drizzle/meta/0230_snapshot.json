@@ -1,5 +1,5 @@
 {
-  "id": "76e4dc5b-f5bf-42a1-bc63-13943a006317",
+  "id": "076cfa43-2d3f-4fc9-a94b-ace9f8074c43",
   "prevId": "2b7dc88a-e5ba-4862-b86b-3f609fb989ec",
   "version": "7",
   "dialect": "postgresql",
@@ -5806,6 +5806,13 @@
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false
+        },
+        "gateVersion": {
+          "name": "gateVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "gateBlocked": {
           "name": "gateBlocked",

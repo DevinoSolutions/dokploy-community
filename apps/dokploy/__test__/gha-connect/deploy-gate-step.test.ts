@@ -26,6 +26,8 @@ const connection = (
 	state: "waiting",
 	gateBlocked: false,
 	repoFullName: "acme/shop",
+	repoId: 123,
+	gateVersion: 0,
 	trackedBranch: "main",
 	workflowPath: WORKFLOW,
 	gateMode: "checks",
@@ -48,7 +50,7 @@ const release = (overrides: Partial<GateRelease> = {}): GateRelease => ({
 });
 
 let nextId = 1;
-/** A check run of an app that is not GitHub Actions: it needs no workflow run to count. */
+/** A check run of an app that is not GitHub Actions: it has a check suite, but no workflow run. */
 const check = (
 	name: string,
 	status: string,
@@ -64,7 +66,7 @@ const check = (
 	appSlug: "ci-app",
 	appId: 999,
 	runId: null,
-	checkSuiteId: null,
+	checkSuiteId: 900_000 + nextId,
 	...extra,
 });
 
@@ -80,6 +82,7 @@ const run = (overrides: Partial<GateWorkflowRun> = {}): GateWorkflowRun => ({
 	event: "push",
 	headBranch: "main",
 	headRepository: "acme/shop",
+	headRepositoryId: 123,
 	checkSuiteId: 50_777,
 	...overrides,
 });
@@ -165,12 +168,16 @@ describe("runDeployGate", () => {
 		});
 		const store = fakeStore();
 		const decision = await runGate({ github, store });
-		expect(decision).toMatchObject({ state: "waiting", pendingNames: ["test"] });
+		expect(decision).toMatchObject({
+			state: "waiting",
+			pendingNames: ["test"],
+		});
 		expect(store.recordGateOutcome).toHaveBeenCalledWith("gc-1", "rel-1", {
 			gateState: "waiting",
 			gateReason: "Waiting for test",
 			checkedAt: new Date(NOW),
 			previousCheckedAt: null,
+			gateVersion: 0,
 			gateExpected: { source: "required", names: ["build", "test"] },
 			gateStart: "mark",
 			connection: "keep",
@@ -183,6 +190,24 @@ describe("runDeployGate", () => {
 		const store = fakeStore();
 		await runGate({ release: { gateCheckedAt: seen }, store });
 		expect(outcomeOf(store).previousCheckedAt).toEqual(seen);
+	});
+
+	it("hands the gateVersion it read to the store, so a settings change in between discards the write", async () => {
+		const store = fakeStore();
+		await runGate({ connection: { gateVersion: 7 }, store });
+		expect(outcomeOf(store).gateVersion).toBe(7);
+	});
+
+	it("passes the repository id to the expected-set read and compares run repositories by it", async () => {
+		const github = fakeGithub({
+			loadWorkflowRuns: vi.fn(async () =>
+				ok<GateWorkflowRun[]>([run({ headRepositoryId: 999 })]),
+			),
+		});
+		await runGate({ github });
+		expect(github.loadExpectedCheckSet).toHaveBeenCalledWith(
+			expect.objectContaining({ repositoryId: 123 }),
+		);
 	});
 
 	it("a later evaluation keeps the start it has", async () => {
@@ -347,7 +372,10 @@ describe("runDeployGate", () => {
 			),
 		});
 		const decision = await runGate({ github, store: fakeStore(false) });
-		expect(decision).toMatchObject({ state: "waiting", reason: "Checking again" });
+		expect(decision).toMatchObject({
+			state: "waiting",
+			reason: "Checking again",
+		});
 	});
 
 	it("learns the expected set once and reuses the saved one", async () => {
@@ -403,7 +431,13 @@ describe("runDeployGate", () => {
 			conclusion: "success",
 			checkSuiteId: 50_005,
 		});
-		const fork = { ...ci, id: 6, event: "pull_request", headRepository: "evil/shop" };
+		const fork = {
+			...ci,
+			id: 6,
+			event: "pull_request",
+			headRepository: "evil/shop",
+			headRepositoryId: 999,
+		};
 		const github = fakeGithub({
 			loadWorkflowRuns: vi.fn(async () => ok([releaseRun, fork])),
 		});
@@ -431,7 +465,9 @@ describe("runDeployGate", () => {
 			loadCommitChecks: vi.fn(async () =>
 				ok([
 					check("test", "completed", "success"),
-					check("Deploy", "in_progress", null, { appSlug: "dokploy-community" }),
+					check("Deploy", "in_progress", null, {
+						appSlug: "dokploy-community",
+					}),
 				]),
 			),
 		});
