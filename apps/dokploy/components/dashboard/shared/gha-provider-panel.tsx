@@ -16,7 +16,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/utils/api";
+import { api, type RouterOutputs } from "@/utils/api";
 import { GhaDeployGate } from "./gha-deploy-gate";
 import { GATE_OPTIONS, type GateMode } from "./gha-deploy-gate-model";
 import {
@@ -115,9 +115,7 @@ export const GhaProviderPanel = ({ id, type, defaults }: Props) => {
 
 /* ------------------------------------------------------------------ connected */
 
-type Connection = NonNullable<
-	ReturnType<typeof api.ghaConnection.one.useQuery>["data"]
->;
+type Connection = NonNullable<RouterOutputs["ghaConnection"]["one"]>;
 
 const ConnectedView = ({
 	id,

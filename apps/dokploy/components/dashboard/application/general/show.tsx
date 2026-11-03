@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
 import { DockerTerminalModal } from "../../settings/web-server/docker-terminal-modal";
-import { redeployCopy } from "../shared/gha-provider-model";
+import { redeployCopy } from "../../shared/gha-provider-model";
 
 interface Props {
 	applicationId: string;
