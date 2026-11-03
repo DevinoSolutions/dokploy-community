@@ -120,17 +120,38 @@ export const isLiveGithubBuild = (row: {
 	);
 
 /**
- * What a live row says about itself: "Building on GitHub Actions · build · Build image (3/7)". Null for any row
- * that is not waiting for its run. The step is the label the run poller keeps on the row.
+ * The step the poller stores when it cannot read the run (a private repository with no GitHub connection that
+ * covers it). The row then says what is known, that the run builds, and that Dokploy cannot show its steps.
  */
-export const describeLiveGithubBuild = (row: {
-	status?: string | null;
-	buildOrigin?: string | null;
-	buildRunStatus?: string | null;
-	buildRunStep?: string | null;
-	externalBuildOnly?: boolean | null;
-	deployQueuedAt?: string | null;
-}): string | null => {
+export const GITHUB_RUN_STEP_UNREADABLE = "steps not readable";
+
+/** How long a run may build before its row says so: a registered build normally ends well within this. */
+export const GITHUB_RUN_LONG_AFTER_MS = 60 * 60_000;
+
+const WAITING_JOB_SUFFIX = " · waiting to start";
+
+/**
+ * What a live row says about itself, by phase. Null for any row that is not waiting for its run.
+ *
+ * A row is registered by the build job of the run (deployment.registerExternalBuild), so a job runs from the start:
+ * "Building on GitHub Actions" is true even before the poller has read the first step. The poller's step label says
+ * more: "build · Build image (3/7)" while a job runs; "<job> · waiting to start" when no job runs and one waits
+ * (the deploy job, once the build is done, or any job waiting for a runner); and the unreadable marker when Dokploy
+ * has no access to the run's steps. `now` (epoch ms) adds how long the run builds once that is long.
+ */
+export const describeLiveGithubBuild = (
+	row: {
+		status?: string | null;
+		buildOrigin?: string | null;
+		buildRunStatus?: string | null;
+		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
+		startedAt?: string | null;
+		createdAt?: string | null;
+	},
+	now?: number,
+): string | null => {
 	// The workflow's deploy call was accepted and waits in Dokploy's queue for a free slot.
 	if (
 		row.externalBuildOnly &&
@@ -151,10 +172,33 @@ export const describeLiveGithubBuild = (row: {
 	}
 	if (!isLiveGithubBuild(row)) return null;
 	const step = row.buildRunStep?.trim();
-	if (step) return `Building on GitHub Actions · ${step}`;
-	return row.buildRunStatus === "queued"
-		? "Waiting for GitHub Actions to start"
-		: "Building on GitHub Actions";
+	let label: string;
+	if (step === GITHUB_RUN_STEP_UNREADABLE) {
+		label = "Building on GitHub Actions · Dokploy cannot read the steps";
+	} else if (step?.endsWith(WAITING_JOB_SUFFIX)) {
+		const job = step.slice(0, -WAITING_JOB_SUFFIX.length);
+		label = /deploy/i.test(job)
+			? "Image built · waiting for the deploy job to start"
+			: `Queued on GitHub Actions · ${job} has not started yet`;
+	} else if (step) {
+		label = `Building on GitHub Actions · ${step}`;
+	} else {
+		label =
+			row.buildRunStatus === "queued"
+				? "Building on GitHub Actions · starting"
+				: "Building on GitHub Actions";
+	}
+	if (now !== undefined) {
+		const started = Date.parse(row.startedAt ?? row.createdAt ?? "");
+		if (!Number.isNaN(started) && now - started > GITHUB_RUN_LONG_AFTER_MS) {
+			const elapsed = describeDeploymentDuration(
+				new Date(started).toISOString(),
+				new Date(now).toISOString(),
+			);
+			if (elapsed) label += ` · running for ${elapsed}, check the run`;
+		}
+	}
+	return label;
 };
 
 /**
@@ -548,15 +592,20 @@ export type GithubActionsRunTone =
  * GitHub's own conclusion is not stored, so "Failed" means the row ended in error (the run, or the deploy that
  * followed it, failed) and "Deployed" means Dokploy pulled the image and started it.
  */
-export const describeGithubActionsRunState = (row: {
-	status?: string | null;
-	buildOrigin?: string | null;
-	buildRunStatus?: string | null;
-	buildRunStep?: string | null;
-	externalBuildOnly?: boolean | null;
-	deployQueuedAt?: string | null;
-}): { label: string; tone: GithubActionsRunTone; detail: string | null } => {
-	const detail = describeLiveGithubBuild(row);
+export const describeGithubActionsRunState = (
+	row: {
+		status?: string | null;
+		buildOrigin?: string | null;
+		buildRunStatus?: string | null;
+		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
+		startedAt?: string | null;
+		createdAt?: string | null;
+	},
+	now?: number,
+): { label: string; tone: GithubActionsRunTone; detail: string | null } => {
+	const detail = describeLiveGithubBuild(row, now);
 	if (detail) return { label: "In progress", tone: "running", detail };
 	switch (row.status) {
 		case "done":

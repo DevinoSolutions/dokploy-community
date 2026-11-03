@@ -93,10 +93,12 @@ export const LiveGithubBuildStatus = ({
 		buildRunStep?: string | null;
 		externalBuildOnly?: boolean | null;
 		deployQueuedAt?: string | null;
+		startedAt?: string | null;
+		createdAt?: string | null;
 	};
 	className?: string;
 }) => {
-	const label = describeLiveGithubBuild(row);
+	const label = describeLiveGithubBuild(row, Date.now());
 	if (!label) return null;
 	return (
 		<span

@@ -229,7 +229,20 @@ const RunDialogBody = ({
 	const commitUrl = githubCommitUrl(run.buildRepository, run.buildCommitSha);
 	const shortSha = run.buildCommitSha?.slice(0, 7) ?? null;
 	const { subject, attempt } = describeGithubActionsTitle(row?.title);
-	const state = row ? describeGithubActionsRunState(row) : null;
+	const state = row ? describeGithubActionsRunState(row, Date.now()) : null;
+	// From the service pill the modal describes what runs now. A newer run that is still going has a phase worth
+	// seeing there, so it gets its own line and its own link to GitHub.
+	const newerLive = !given
+		? deployments?.find(
+				(d) =>
+					d.deploymentId !== row?.deploymentId &&
+					describeGithubActionsRunState(d, Date.now()).detail !== null,
+			)
+		: undefined;
+	const newerLiveDetail = newerLive
+		? describeGithubActionsRunState(newerLive, Date.now()).detail
+		: null;
+	const newerLiveUrl = normalizeBuildRunUrl(newerLive?.buildRunUrl);
 	const duration = describeDeploymentDuration(row?.startedAt, row?.finishedAt);
 	const branch = isServing
 		? githubActionsBranch({ branch: svc?.branch, sourceType: svc?.sourceType })
@@ -320,6 +333,23 @@ const RunDialogBody = ({
 								aria-hidden="true"
 							/>
 							{state.detail}
+						</p>
+					)}
+					{newerLiveDetail && (
+						<p
+							role="status"
+							className="flex flex-wrap items-center gap-2 rounded border bg-muted/50 px-3 py-2 text-sm"
+						>
+							<Loader2
+								className="size-4 shrink-0 animate-spin"
+								aria-hidden="true"
+							/>
+							<span className="min-w-0 break-words">
+								A newer run is in progress: {newerLiveDetail}
+							</span>
+							{newerLiveUrl && (
+								<ExternalLinkText href={newerLiveUrl}>Open it</ExternalLinkText>
+							)}
 						</p>
 					)}
 					<section className="flex flex-col gap-3">
