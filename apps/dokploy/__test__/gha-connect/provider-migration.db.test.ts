@@ -129,11 +129,9 @@ describe("migration 0232 bookkeeping", () => {
 			"github-actions",
 		);
 		const previous = JSON.parse(
-			readFileSync(resolve(drizzleDir, "meta/0230_snapshot.json"), "utf8"),
+			readFileSync(resolve(drizzleDir, "meta/0231_snapshot.json"), "utf8"),
 		);
-		// 0231 (the acceptance PR) sits between them once it lands; until then 0232 chains on 0231's id, which
-		// is not in this tree, so only the shape is pinned here.
-		expect(snapshot.prevId).not.toBe(snapshot.id);
+		expect(snapshot.prevId).toBe(previous.id);
 		expect(snapshot.id).not.toBe(previous.id);
 	});
 
