@@ -23,6 +23,8 @@ import {
 	upsertGithubWatch,
 	visibleGithubConnections,
 } from "@dokploy/server";
+import { GITHUB_DEVICE_SCOPE_PRIVATE } from "@dokploy/server/db/schema";
+import { findGhaConnection } from "@dokploy/server/services/gha-connect";
 import {
 	checkServicePermissionAndAccess,
 	findMemberByUserId,
@@ -33,6 +35,7 @@ import { audit } from "@/server/api/utils/audit";
 import {
 	apiGithubDeploymentCompleteConnect,
 	apiGithubDeploymentDisconnect,
+	apiGithubDeploymentStartConnect,
 	apiGithubDeploymentToggleShare,
 	apiGithubDeploymentWatchOne,
 	apiGithubDeploymentWatchSet,
@@ -71,6 +74,24 @@ const viewerOf = (ctx: { user: { id: string; role: string } }) => ({
  * admin, or (use only) by anyone when its owner shared it. See
  * packages/server/src/services/github-deployments/connection-access.ts.
  */
+/**
+ * A service that follows GitHub Actions releases (ghaConnection) owns its
+ * watch: the connection poll keeps the cursor, so editing or removing the watch
+ * here would break it. Disconnect through ghaConnection first.
+ */
+const assertNotGhaConnected = async (
+	serviceType: "application" | "compose",
+	serviceId: string,
+) => {
+	if (await findGhaConnection(serviceType, serviceId)) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message:
+				"This service follows GitHub Actions releases (ghaConnection). Disconnect it there first.",
+		});
+	}
+};
+
 const requireConnectionToUse = async (
 	ctx: Parameters<typeof viewerOf>[0] & {
 		session: { activeOrganizationId: string };
@@ -160,15 +181,22 @@ export const githubDeploymentRouter = createTRPCRouter({
 				method: "POST",
 				path: "/githubDeployment.startConnect",
 				description:
-					"Start connecting a GitHub account with the OAuth device flow (scopes repo_deployment and read:packages). Returns flowId, userCode, verificationUri, intervalSeconds and expiresInSeconds: the user opens verificationUri, types userCode and approves; then call githubDeployment-completeConnect with the flowId every intervalSeconds until it reports 'connected'. No client secret is involved and the device code never leaves the server.",
+					"Start connecting a GitHub account with the OAuth device flow (scopes repo_deployment and public_repo, or repo with repositoryAccess private for private repositories). Returns flowId, userCode, verificationUri, intervalSeconds and expiresInSeconds: the user opens verificationUri, types userCode and approves; then call githubDeployment-completeConnect with the flowId every intervalSeconds until it reports 'connected'. No client secret is involved and the device code never leaves the server.",
 			},
 		})
-		.mutation(async ({ ctx }) => {
+		.input(apiGithubDeploymentStartConnect.optional())
+		.mutation(async ({ ctx, input }) => {
 			assertSelfHosted();
-			const started = await beginGithubConnect(deps(), {
-				organizationId: ctx.session.activeOrganizationId,
-				userId: ctx.user.id,
-			});
+			const started = await beginGithubConnect(
+				deps(),
+				{
+					organizationId: ctx.session.activeOrganizationId,
+					userId: ctx.user.id,
+				},
+				input?.repositoryAccess === "private"
+					? { scope: GITHUB_DEVICE_SCOPE_PRIVATE }
+					: {},
+			);
 			if (!started.ok) {
 				throw new TRPCError({ code: "BAD_GATEWAY", message: started.message });
 			}
@@ -330,6 +358,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 				deployment: ["create"],
 			});
 			const organizationId = ctx.session.activeOrganizationId;
+			await assertNotGhaConnected(input.serviceType, input.serviceId);
 			// The service has to exist, be of the stated type and be this organization's.
 			const service =
 				input.serviceType === "application"
@@ -398,6 +427,7 @@ export const githubDeploymentRouter = createTRPCRouter({
 				service: ["create"],
 				deployment: ["create"],
 			});
+			await assertNotGhaConnected(input.serviceType, input.serviceId);
 			const watch = await findGithubWatch(input.serviceType, input.serviceId);
 			if (!watch || watch.organizationId !== ctx.session.activeOrganizationId) {
 				return true;
