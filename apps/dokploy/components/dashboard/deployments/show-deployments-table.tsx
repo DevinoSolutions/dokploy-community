@@ -190,6 +190,8 @@ export function ShowDeploymentsTable() {
 					info.projectName.toLowerCase().includes(q) ||
 					info.environmentName.toLowerCase().includes(q) ||
 					(d.title?.toLowerCase().includes(q) ?? false) ||
+					(displayDeploymentTitle(d.title)?.toLowerCase().includes(q) ??
+						false) ||
 					serverName.toLowerCase().includes(q) ||
 					buildServerName.toLowerCase().includes(q)
 				);
@@ -388,7 +390,8 @@ export function ShowDeploymentsTable() {
 				},
 			},
 			{
-				accessorKey: "title",
+				id: "title",
+				accessorFn: (r: DeploymentRow) => displayDeploymentTitle(r.title),
 				header: ({
 					column,
 				}: {

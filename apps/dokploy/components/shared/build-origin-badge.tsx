@@ -73,9 +73,11 @@ export const BuildOriginBadge = ({
  * one (same height, padding and font), with the Dokploy mark; it is not clickable (T-13877).
  */
 export const DokployDeploymentMark = () => (
-	<span className="flex items-center gap-2 normal-case">
+	<span className="flex items-center normal-case">
 		<Badge variant="outline" className="gap-1 text-[10px]">
-			<Logo className="size-3" />
+			<span aria-hidden="true" className="contents">
+				<Logo className="size-3" />
+			</span>
 			Dokploy
 		</Badge>
 	</span>
