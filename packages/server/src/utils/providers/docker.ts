@@ -1,3 +1,7 @@
+import {
+	getGhcrConfigDirRemovalCommandForPath,
+	loginGhcrForApplication,
+} from "@dokploy/server/services/github-deployments/registry-auth";
 import { findRegistryByIdWithCredentials } from "@dokploy/server/services/registry";
 import { quote } from "shell-quote";
 import { getECRAuthToken } from "../aws/ecr";
@@ -27,6 +31,9 @@ echo ${quote([`Pulling ${dockerImage}`])};
 		// registry on the same URL cannot replace the login before the pull. The
 		// service itself is created with the registry's authconfig, not this login.
 		let configDir: string | undefined;
+		// Set only for the GitHub Deployments login: its dir holds a GitHub token
+		// and is deleted as soon as the pull has ended (it has no other use).
+		let removeConfigDir = "";
 
 		// Handle ECR authentication
 		if (registry?.registryType === "awsEcr") {
@@ -70,13 +77,27 @@ echo ${quote([`Pulling ${dockerImage}`])};
 				{ registryType: "cloud", registryUrl, username, password },
 				serverId,
 			);
+		} else {
+			// T-12166: a service that follows GitHub Deployments pulls a private
+			// ghcr.io image of the watched owner with the GitHub login it is
+			// connected through. The login goes to a docker config dir of the
+			// watch, never to the host's default one, and only this pull uses it.
+			configDir = await loginGhcrForApplication(
+				application.applicationId,
+				dockerImage,
+				serverId,
+			);
+			const removal = getGhcrConfigDirRemovalCommandForPath(configDir);
+			if (removal) removeConfigDir = `${removal};`;
 		}
 
 		command += `
 ${dockerWithConfig(configDir)} pull ${quote([dockerImage])} 2>&1 || {
   echo "❌ Pulling image failed";
+  ${removeConfigDir}
   exit 1;
 }
+${removeConfigDir}
 
 echo "✅ Pulling image completed.";
 `;

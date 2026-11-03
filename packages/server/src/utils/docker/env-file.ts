@@ -235,6 +235,20 @@ export const NEUTRALISED_CLI_ENV = NEUTRALISED_CLI_ENV_NAMES.map(
 	(name) => `${name}=`,
 ).join(" ");
 
+/**
+ * `NEUTRALISED_CLI_ENV` with DOCKER_CONFIG pointing at a directory Dokploy
+ * itself created (never a user's value), for the one deploy that needs its own
+ * registry login. Without a directory it is `NEUTRALISED_CLI_ENV`.
+ */
+export const getNeutralisedCliEnv = (dockerConfigDir?: string) =>
+	dockerConfigDir
+		? NEUTRALISED_CLI_ENV_NAMES.map((name) =>
+				name === "DOCKER_CONFIG"
+					? `DOCKER_CONFIG=${quote([dockerConfigDir])}`
+					: `${name}=`,
+			).join(" ")
+		: NEUTRALISED_CLI_ENV;
+
 const NEUTRALISED_CLI_ENV_SET = new Set(NEUTRALISED_CLI_ENV_NAMES);
 
 /**

@@ -25,6 +25,7 @@ import { dodomainRouter } from "./routers/dodomain";
 import { domainRouter } from "./routers/domain";
 import { environmentRouter } from "./routers/environment";
 import { gitProviderRouter } from "./routers/git-provider";
+import { githubDeploymentRouter } from "./routers/github-deployment";
 import { giteaRouter } from "./routers/gitea";
 import { githubRouter } from "./routers/github";
 import { gitlabRouter } from "./routers/gitlab";
@@ -125,6 +126,7 @@ export const appRouter = createTRPCRouter({
 	dodomain: dodomainRouter,
 	user: userRouter,
 	vaultProvider: vaultProviderRouter,
+	githubDeployment: githubDeploymentRouter,
 	ai: aiRouter,
 	organization: organizationRouter,
 	licenseKey: licenseKeyRouter,

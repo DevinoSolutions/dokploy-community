@@ -1,0 +1,505 @@
+import {
+	findApplicationById,
+	findComposeById,
+	getDokployUrl,
+	IS_CLOUD,
+} from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import {
+	applications,
+	compose,
+	deployments,
+	githubDeploymentWatch,
+} from "@dokploy/server/db/schema";
+import { buildOriginJobFields } from "@dokploy/server/services/build-origin-shared";
+import {
+	createGithubFetch,
+	decideApplicationImage,
+	deleteGithubWatch,
+	describeError,
+	GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS,
+	type GithubDeployment,
+	type InflightState,
+	listEnabledGithubWatches,
+	loadConnectionToken,
+	markGithubConnectionRevoked,
+	type PollDeps,
+	patchGithubWatch,
+	pinComposeImage,
+	pollWatch,
+	removeGhcrWatchConfigDirs,
+	reportServiceGone,
+	type StartOutcome,
+	type WatchRow,
+} from "@dokploy/server/services/github-deployments";
+import { runBackgroundJob } from "@dokploy/server/utils/process/background";
+import { and, asc, desc, eq, gte, like } from "drizzle-orm";
+import type { DeploymentJob } from "./queue-types";
+import { myQueue } from "./queueSetup";
+
+/**
+ * The real database, queue and GitHub behind the "Deploy from GitHub
+ * Deployments" poller. The rules live in
+ * packages/server/src/services/github-deployments/poll-core.ts; this file only
+ * wires them to this process. See docs/design/github-deployments-pull.md.
+ */
+
+/**
+ * The end of the Dokploy deployment title a GitHub deployment starts. It is the
+ * handle the poller finds that deployment by, whatever the rest of the title
+ * says, so it must stay unique per GitHub deployment id.
+ */
+export const githubDeploymentHandle = (githubDeploymentId: number) =>
+	`[deployment #${githubDeploymentId}]`;
+
+/** An environment as one word of a title (the title parser reads one token after "GHA "). */
+const titleToken = (value: string | undefined): string | null => {
+	const token = (value ?? "")
+		.trim()
+		.replace(/[^A-Za-z0-9._/-]+/g, "-")
+		.replace(/^[^A-Za-z0-9]+/, "")
+		.slice(0, 100);
+	return token || null;
+};
+
+/**
+ * Title of the Dokploy deployment a GitHub deployment starts, in the shape the
+ * dokploy-deploy action uses ("GHA <environment> <sha8> ..."), so the GitHub
+ * Actions pill and the run modal read the environment and the commit from it
+ * (parseGithubActionsTitle). Ends with the handle.
+ */
+export const githubDeploymentTitle = (
+	watch: Pick<WatchRow, "environment">,
+	deployment: Pick<GithubDeployment, "id" | "sha" | "environment">,
+) => {
+	const sha = /^[0-9a-f]{7,40}$/i.test(deployment.sha ?? "")
+		? (deployment.sha as string).slice(0, 8).toLowerCase()
+		: null;
+	const environment =
+		titleToken(deployment.environment) ?? titleToken(watch.environment);
+	return [
+		"GHA",
+		...(environment ? [environment] : []),
+		...(sha ? [sha] : []),
+		githubDeploymentHandle(deployment.id),
+	].join(" ");
+};
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+const serviceLink = async (watch: WatchRow): Promise<string> => {
+	const base = await getDokployUrl();
+	if (watch.serviceType === "application") {
+		const app = await findApplicationById(watch.serviceId);
+		return `${base}/dashboard/project/${app.environment.projectId}/environment/${app.environmentId}/services/application/${app.applicationId}?tab=deployments`;
+	}
+	const stack = await findComposeById(watch.serviceId);
+	return `${base}/dashboard/project/${stack.environment.projectId}/environment/${stack.environmentId}/services/compose/${stack.composeId}?tab=deployments`;
+};
+
+/**
+ * Move the cursor, record the deployment as in flight, write the new image on
+ * the service and enqueue the Dokploy deploy, so that none of it is left behind
+ * if any step fails.
+ *
+ * Everything in the database is one transaction (the watch row is locked first,
+ * so two polls cannot both start the same deployment). The job is enqueued
+ * after the commit, so it can never run against an image that is not committed
+ * yet; if the enqueue fails, a second transaction puts the image, the cursor
+ * and the in-flight mark back (each only if it still holds what this call
+ * wrote) and the deployment is tried again on the next tick.
+ *
+ * Crash window: a process that dies between the commit and the enqueue leaves
+ * the deployment in flight with no job; it is reported to GitHub as lost after
+ * INFLIGHT_ROW_GRACE_MS and the new image stays on the service for its next
+ * deploy. A crash before the commit changes nothing.
+ */
+const startDeploy = async (
+	watch: WatchRow,
+	deployment: GithubDeployment,
+	payload: Parameters<PollDeps["startDeploy"]>[2],
+): Promise<StartOutcome> => {
+	const prepared = await db.transaction(async (tx: Tx) => {
+		const [row] = await tx
+			.select()
+			.from(githubDeploymentWatch)
+			.where(eq(githubDeploymentWatch.watchId, watch.watchId))
+			.for("update");
+		// The tick decided on a snapshot of the watch. If the watch was
+		// repointed, turned off and on, or advanced since, that decision no
+		// longer applies.
+		if (
+			!row?.enabled ||
+			row.inflightDeploymentId !== null ||
+			row.owner !== watch.owner ||
+			row.repo !== watch.repo ||
+			row.environment !== watch.environment ||
+			row.connectionId !== watch.connectionId ||
+			row.lastSeenDeploymentId === null ||
+			row.lastSeenDeploymentId >= deployment.id ||
+			row.lastSeenDeploymentId !== watch.lastSeenDeploymentId
+		) {
+			return { kind: "stale" } as const;
+		}
+
+		const title = githubDeploymentTitle(watch, deployment);
+		const description = `${watch.owner}/${watch.repo} (${watch.environment}) ${payload.digest.slice(0, 19)}${payload.buildRunUrl ? ` ${payload.buildRunUrl}` : ""}`;
+		// What the queue carries to the deployment row: where the image was built
+		// (a valid run link only, as for the deploy API).
+		const origin = buildOriginJobFields({
+			buildOrigin: "github-actions",
+			buildRunUrl: payload.buildRunUrl,
+		});
+
+		if (watch.serviceType === "application") {
+			const app = await findApplicationById(watch.serviceId).catch(() => null);
+			if (!app) {
+				return {
+					kind: "rejected",
+					reason: "The application no longer exists.",
+				} as const;
+			}
+			if (app.environment.project.organizationId !== watch.organizationId) {
+				return {
+					kind: "rejected",
+					reason: "The application belongs to another organization.",
+				} as const;
+			}
+			const decision = decideApplicationImage(app, payload, watch.owner);
+			if (!decision.ok)
+				return { kind: "rejected", reason: decision.reason } as const;
+			const job: DeploymentJob = {
+				applicationId: app.applicationId,
+				titleLog: title,
+				descriptionLog: description,
+				type: "deploy",
+				applicationType: "application",
+				server: !!app.serverId,
+				serverId: app.serverId ?? undefined,
+				...origin,
+			};
+			await tx
+				.update(githubDeploymentWatch)
+				.set(claim(deployment.id))
+				.where(eq(githubDeploymentWatch.watchId, watch.watchId));
+			await tx
+				.update(applications)
+				.set({ dockerImage: decision.dockerImage })
+				.where(eq(applications.applicationId, app.applicationId));
+			return {
+				kind: "prepared",
+				job,
+				undo: async (tx2: Tx) => {
+					await tx2
+						.update(applications)
+						.set({ dockerImage: app.dockerImage })
+						.where(
+							and(
+								eq(applications.applicationId, app.applicationId),
+								eq(applications.dockerImage, decision.dockerImage),
+							),
+						);
+				},
+			} as const;
+		}
+
+		const stack = await findComposeById(watch.serviceId).catch(() => null);
+		if (!stack) {
+			return {
+				kind: "rejected",
+				reason: "The compose stack no longer exists.",
+			} as const;
+		}
+		if (stack.environment.project.organizationId !== watch.organizationId) {
+			return {
+				kind: "rejected",
+				reason: "The compose stack belongs to another organization.",
+			} as const;
+		}
+		if (stack.sourceType !== "raw") {
+			return {
+				kind: "rejected",
+				reason:
+					"Only compose stacks whose file is stored in Dokploy can follow GitHub deployments.",
+			} as const;
+		}
+		const pinned = pinComposeImage(
+			stack.composeFile,
+			payload.repository,
+			payload.digest,
+		);
+		if (!pinned.ok) return { kind: "rejected", reason: pinned.reason } as const;
+		const job: DeploymentJob = {
+			composeId: stack.composeId,
+			titleLog: title,
+			descriptionLog: description,
+			type: "deploy",
+			applicationType: "compose",
+			server: !!stack.serverId,
+			serverId: stack.serverId ?? undefined,
+			...origin,
+		};
+		await tx
+			.update(githubDeploymentWatch)
+			.set(claim(deployment.id))
+			.where(eq(githubDeploymentWatch.watchId, watch.watchId));
+		if (pinned.changed) {
+			await tx
+				.update(compose)
+				.set({ composeFile: pinned.composeFile })
+				.where(eq(compose.composeId, stack.composeId));
+		}
+		return {
+			kind: "prepared",
+			job,
+			undo: async (tx2: Tx) => {
+				if (!pinned.changed) return;
+				await tx2
+					.update(compose)
+					.set({ composeFile: stack.composeFile })
+					.where(
+						and(
+							eq(compose.composeId, stack.composeId),
+							eq(compose.composeFile, pinned.composeFile),
+						),
+					);
+			},
+		} as const;
+	});
+	if (prepared.kind !== "prepared") return prepared;
+
+	try {
+		await myQueue.add("deployments", prepared.job, {
+			removeOnComplete: true,
+			removeOnFail: true,
+		});
+	} catch (error) {
+		// Nothing is running for this deployment: put back what the commit wrote.
+		await db
+			.transaction(async (tx: Tx) => {
+				await tx
+					.update(githubDeploymentWatch)
+					.set({
+						lastSeenDeploymentId: watch.lastSeenDeploymentId,
+						inflightDeploymentId: null,
+						inflightStartedAt: null,
+					})
+					.where(
+						and(
+							eq(githubDeploymentWatch.watchId, watch.watchId),
+							eq(githubDeploymentWatch.inflightDeploymentId, deployment.id),
+						),
+					);
+				await prepared.undo(tx);
+			})
+			.catch((undoError) =>
+				console.warn(
+					`github deployments: could not undo watch ${watch.watchId}: ${describeError(undoError)}`,
+				),
+			);
+		throw error;
+	}
+	return {
+		kind: "started",
+		logUrl: watch.postLogUrl
+			? await serviceLink(watch).catch(() => undefined)
+			: undefined,
+	};
+};
+
+const claim = (githubDeploymentId: number) => ({
+	lastSeenDeploymentId: githubDeploymentId,
+	inflightDeploymentId: githubDeploymentId,
+	inflightStartedAt: new Date(),
+	lastError: null,
+});
+
+/** Where the Dokploy deployment started for a GitHub deployment stands. */
+const inspectInflight = async (watch: WatchRow): Promise<InflightState> => {
+	const id = watch.inflightDeploymentId;
+	if (id === null) return { state: "missing" };
+	const handle = githubDeploymentHandle(id);
+	const owner =
+		watch.serviceType === "application"
+			? eq(deployments.applicationId, watch.serviceId)
+			: eq(deployments.composeId, watch.serviceId);
+	const statusOf = {
+		status: deployments.status,
+	};
+	const [titled] = await db
+		.select(statusOf)
+		.from(deployments)
+		.where(and(owner, like(deployments.title, `GHA %${handle}`)))
+		.orderBy(desc(deployments.createdAt))
+		.limit(1);
+	let row = titled;
+	if (!row && watch.inflightStartedAt) {
+		// A manual Deploy that arrived while this job was still waiting is folded
+		// into it (coalesceWaiting) and the merged job carries the manual title.
+		// It deploys the image this watch already wrote, so the first deployment
+		// row of the service created after the claim is this deployment.
+		[row] = await db
+			.select(statusOf)
+			.from(deployments)
+			.where(
+				and(
+					owner,
+					gte(deployments.createdAt, watch.inflightStartedAt.toISOString()),
+				),
+			)
+			.orderBy(asc(deployments.createdAt))
+			.limit(1);
+	}
+	// Only built for a watch that opted in to sending it to GitHub.
+	const logUrl = watch.postLogUrl
+		? await serviceLink(watch).catch(() => undefined)
+		: undefined;
+	if (!row) {
+		// Still waiting in the queue? Under its own title, or merged into another
+		// waiting deploy of the service.
+		const queued = await myQueue.getJobs(["waiting", "active"]);
+		const serviceKey =
+			watch.serviceType === "application" ? "applicationId" : "composeId";
+		return queued.some(
+			(job) =>
+				(typeof job.data.titleLog === "string" &&
+					job.data.titleLog.startsWith("GHA ") &&
+					job.data.titleLog.endsWith(handle)) ||
+				(job.data as Record<string, unknown>)[serviceKey] === watch.serviceId,
+		)
+			? { state: "running" }
+			: { state: "missing" };
+	}
+	switch (row.status) {
+		case "done":
+			return { state: "done", logUrl };
+		case "error":
+			return { state: "error", logUrl };
+		case "cancelled":
+			return { state: "cancelled", logUrl };
+		default:
+			return { state: "running" };
+	}
+};
+
+const blocks = new Map<string, number>();
+
+export const createGithubDeploymentsPollDeps = (): PollDeps => ({
+	// Cut off after 15 s: a hung GitHub must not stall the tick for every watch.
+	fetch: createGithubFetch(),
+	now: () => Date.now(),
+	loadToken: loadConnectionToken,
+	markRevoked: markGithubConnectionRevoked,
+	blockedUntil: (key) => blocks.get(key),
+	block: (key, until) => {
+		blocks.set(key, until);
+	},
+	patchWatch: (watchId, patch, options) =>
+		patchGithubWatch(watchId, patch, options),
+	startDeploy,
+	inspectInflight,
+	log: (message) => console.warn(message),
+});
+
+const serviceExists = async (watch: WatchRow): Promise<boolean> => {
+	if (watch.serviceType === "application") {
+		const row = await db.query.applications.findFirst({
+			where: eq(applications.applicationId, watch.serviceId),
+			columns: { applicationId: true },
+		});
+		return !!row;
+	}
+	const row = await db.query.compose.findFirst({
+		where: eq(compose.composeId, watch.serviceId),
+		columns: { composeId: true },
+	});
+	return !!row;
+};
+
+/**
+ * One pass over every enabled watch. `shouldStop` is checked between watches so
+ * a shutdown does not start new deployments while the queue drains.
+ */
+export const runGithubDeploymentsTick = async (
+	deps: PollDeps = createGithubDeploymentsPollDeps(),
+	shouldStop: () => boolean = () => false,
+): Promise<void> => {
+	const watches = await listEnabledGithubWatches();
+	for (const record of watches) {
+		if (shouldStop()) return;
+		// One watch failing (a database error, a service lookup) must not end the
+		// tick for the watches after it.
+		try {
+			await pollOneWatch(record, deps);
+		} catch (error) {
+			deps.log(
+				`github deployments: watch ${record.watchId} failed this tick: ${describeError(error)}`,
+			);
+		}
+	}
+};
+
+const pollOneWatch = async (
+	record: Awaited<ReturnType<typeof listEnabledGithubWatches>>[number],
+	deps: PollDeps,
+): Promise<void> => {
+	const watch: WatchRow = {
+		watchId: record.watchId,
+		organizationId: record.organizationId,
+		serviceType: record.serviceType,
+		serviceId: record.serviceId,
+		connectionId: record.connectionId,
+		owner: record.owner,
+		repo: record.repo,
+		environment: record.environment,
+		enabled: record.enabled,
+		lastSeenDeploymentId: record.lastSeenDeploymentId,
+		etag: record.etag,
+		inflightDeploymentId: record.inflightDeploymentId,
+		inflightStartedAt: record.inflightStartedAt,
+		postLogUrl: record.postLogUrl,
+	};
+	// The service was deleted: the watch has nothing left to deploy. A
+	// workflow may still be waiting on a deployment that was in flight, so
+	// GitHub is told it failed before the watch (and its login) go away.
+	if (!(await serviceExists(watch))) {
+		await reportServiceGone(watch, deps);
+		await deleteGithubWatch(watch.serviceType, watch.serviceId);
+		await removeGhcrWatchConfigDirs(
+			[watch.watchId],
+			watch.organizationId,
+		).catch(() => {});
+		return;
+	}
+	await pollWatch(watch, deps);
+};
+
+/**
+ * Starts the poll (every 20 seconds). Self-hosted only: cloud does not run this
+ * queue. One tick at a time; a slow tick is skipped over, never stacked.
+ * Returns a function that stops it: no new tick starts and a running one stops
+ * before its next watch. server.ts calls it on SIGTERM, before the queue drains.
+ */
+export const startGithubDeploymentsPoller = (
+	deps: PollDeps = createGithubDeploymentsPollDeps(),
+	intervalMs: number = GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS,
+): (() => void) => {
+	if (IS_CLOUD) return () => {};
+	let running = false;
+	let stopped = false;
+	const timer = setInterval(() => {
+		if (running || stopped) return;
+		running = true;
+		void runBackgroundJob("github-deployments-poll", () =>
+			runGithubDeploymentsTick(deps, () => stopped),
+		).finally(() => {
+			running = false;
+		});
+	}, intervalMs);
+	// A tick must never keep the process alive on shutdown.
+	timer.unref?.();
+	return () => {
+		stopped = true;
+		clearInterval(timer);
+	};
+};

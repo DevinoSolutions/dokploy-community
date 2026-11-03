@@ -187,6 +187,17 @@ void app
 				// (deployment.registerExternalBuild): one loop, one cheap query when none.
 				const { startGithubRunPoller } = await import("@dokploy/server");
 				startGithubRunPoller();
+				// Services that follow GitHub Deployments (T-12166): one poll every
+				// 20s, started after the restore so a restart never replays a deploy
+				// it already queued.
+				const { startGithubDeploymentsPoller } = await import(
+					"./queues/github-deployments-poller"
+				);
+				const stopGithubDeploymentsPoller = startGithubDeploymentsPoller();
+				// First in line on SIGTERM, ahead of the queue's own handler (see
+				// registerShutdownHandler): no tick may enqueue a deploy into a queue
+				// that is draining.
+				process.prependListener("SIGTERM", stopGithubDeploymentsPoller);
 			}
 		} catch (e) {
 			console.error("Main Server Error", e);

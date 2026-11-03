@@ -41,6 +41,7 @@ import { ContainerPaidMonitoring } from "@/components/dashboard/monitoring/paid/
 import { UptimelyServicePanel } from "@/components/dashboard/monitoring/uptimely/uptimely-service-panel";
 import { AssignNetworks } from "@/components/dashboard/networks/assign-networks";
 import { TransferService } from "@/components/dashboard/shared/transfer-service";
+import { GithubDeploymentsWatch } from "@/components/dashboard/shared/github-deployments-watch";
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
@@ -435,6 +436,10 @@ const Service = (
 											<div className="flex flex-col gap-4 pt-2.5">
 												<AddCommand applicationId={applicationId} />
 												<DeployHooks applicationId={applicationId} />
+												<GithubDeploymentsWatch
+													id={applicationId}
+													type="application"
+												/>
 												<ShowClusterSettings
 													id={applicationId}
 													type="application"

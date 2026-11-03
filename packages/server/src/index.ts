@@ -45,6 +45,7 @@ export * from "./services/external-build";
 export * from "./services/git-provider";
 export * from "./services/gitea";
 export * from "./services/github";
+export * from "./services/github-deployments";
 export * from "./services/github-run-poller";
 export * from "./services/github-run-poller-deps";
 export * from "./services/github-run-progress";
