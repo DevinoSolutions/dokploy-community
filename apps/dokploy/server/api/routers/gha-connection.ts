@@ -22,6 +22,8 @@ import {
 	createGhaConnection,
 	deleteGhaConnection,
 	findGhaConnection,
+	findGatedRelease,
+	gateChangeWeakens,
 	getBranchHead,
 	getEnvironmentPolicy,
 	getRepositoryByName,
@@ -412,11 +414,12 @@ export const ghaConnectionRouter = createTRPCRouter({
 				method: "POST",
 				path: "/ghaConnection.update",
 				description:
-					"Change when a release of a service that follows GitHub Actions is deployed (the deploy gate). gateMode image deploys as soon as the image is accepted; checks waits until every check on the commit passes (the required checks of the branch, else the checks of the last green commit, else whatever the commit reports); workflows waits until the workflows named in gateWorkflows pass (by workflow name or file name without .yml, 1 to 20). gateTimeoutMinutes (5 to 720, default 60) is how long a check or workflow may take to report before the release is blocked. Changing the mode or the workflows starts the gate over and unblocks a blocked service. Needs the same access as disconnect.",
+					"Change when a release of a service that follows GitHub Actions is deployed (the deploy gate). gateMode image deploys as soon as the image is accepted; checks waits until every check on the commit passes (the required checks of the branch, else the checks of the last green commit, else whatever the commit reports); workflows waits until the workflows named in gateWorkflows pass (by workflow name or file name without .yml, 1 to 20). gateTimeoutMinutes (5 to 720, default 60) is how long a check or workflow may take to report before the release is blocked. Changing the mode or the workflows starts the gate over and unblocks a service the gate blocked. A workflow entry ending in .yml or .yaml names a workflow file; any other entry names a workflow. Needs the same access as disconnect; a change that lets releases through on less (the gate off or swapped, a workflow removed, a longer wait) and any change while a release waits or is blocked need an organization owner or admin. Every change is audited with the settings before and after.",
 			},
 		})
 		.input(apiGhaUpdate)
 		.mutation(async ({ ctx, input }) => {
+			assertSelfHosted();
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
 				service: ["create"],
 				deployment: ["create"],
@@ -446,6 +449,36 @@ export const ghaConnectionRouter = createTRPCRouter({
 					message: "Name at least one workflow to wait for",
 				});
 			}
+			// Loosening the gate, or touching it while a release waits on it, is the
+			// owner's or an admin's call, like Deploy anyway: a member who may manage
+			// git providers must not be able to wave a release through.
+			const privileged = ctx.user.role === "owner" || ctx.user.role === "admin";
+			if (!privileged) {
+				const weakens = gateChangeWeakens(
+					{
+						gateMode: row.gateMode,
+						gateWorkflows: row.gateWorkflows ?? [],
+						gateTimeoutMinutes: row.gateTimeoutMinutes,
+					},
+					{
+						gateMode: mode,
+						gateWorkflows: workflows,
+						gateTimeoutMinutes:
+							input.gateTimeoutMinutes ?? row.gateTimeoutMinutes,
+					},
+				);
+				const gated = await findGatedRelease(row.ghaConnectionId);
+				const busy =
+					gated?.gateState === "waiting" || gated?.gateState === "blocked";
+				if (weakens || busy) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: busy
+							? "A release is waiting at the gate: only an organization owner or admin can change it now"
+							: "Only an organization owner or admin can loosen the gate",
+					});
+				}
+			}
 			const saved = await updateGateSettings(row.ghaConnectionId, {
 				gateMode: input.gateMode,
 				gateWorkflows: input.gateWorkflows,
@@ -461,7 +494,12 @@ export const ghaConnectionRouter = createTRPCRouter({
 				action: "update",
 				resourceType: input.serviceType,
 				resourceId: input.serviceId,
-				resourceName: `GitHub Actions: deploy when ${saved.gateMode}`,
+				resourceName: `GitHub Actions: deploy when ${saved.after.gateMode}`,
+				metadata: {
+					before: saved.before,
+					after: saved.after,
+					restarted: saved.restarted,
+				},
 			});
 			const fresh = await findGhaConnection(input.serviceType, input.serviceId);
 			return presentGhaConnection(fresh ?? row);
@@ -473,7 +511,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 				method: "POST",
 				path: "/ghaConnection.deployAnyway",
 				description:
-					"Deploy the release that is waiting at the deploy gate (or blocked by it) without waiting for its checks. Only an organization owner or admin may, with deploy access to the service. Who, when and why are kept on the release and in the audit log. Returns the decision, deploy, and the commit that goes out; the next poll deploys it.",
+					"Deploy the release that is waiting at the deploy gate (or blocked by it) without waiting for its checks. Name the release (releaseId, from ghaConnection.one); it is refused with a conflict when a newer release has arrived. Only an organization owner or admin may, with deploy access to the service. Who, when and why are kept on the release and in the audit log. Returns the decision, deploy, and the commit that goes out; the next poll deploys it.",
 			},
 		})
 		.input(apiGhaDeployAnyway)
@@ -496,15 +534,25 @@ export const ghaConnectionRouter = createTRPCRouter({
 					message: "This service does not follow GitHub Actions",
 				});
 			}
-			const released = await overrideGate(row.ghaConnectionId, {
-				by: ctx.user.email,
-				at: new Date().toISOString(),
-				reason: input.reason || null,
-			});
-			if (!released) {
+			const released = await overrideGate(
+				row.ghaConnectionId,
+				input.releaseId,
+				{
+					by: ctx.user.email,
+					at: new Date().toISOString(),
+					reason: input.reason || null,
+				},
+			);
+			if (released.kind === "none") {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
 					message: "No release is waiting to be deployed",
+				});
+			}
+			if (released.kind === "conflict") {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: `A newer release (${released.newestSha.slice(0, 7)}) has arrived. Look at it first.`,
 				});
 			}
 			await audit(ctx, {

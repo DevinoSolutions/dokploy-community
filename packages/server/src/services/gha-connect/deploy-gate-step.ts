@@ -42,6 +42,10 @@ export interface GateConnection {
 	ghaConnectionId: string;
 	/** The connection's own state, to block and unblock it. */
 	state: string;
+	/** True while the connection is Blocked by the gate (not by something else). */
+	gateBlocked: boolean;
+	/** `owner/name` of the repository: runs must come from it to count. */
+	repoFullName: string;
 	trackedBranch: string;
 	/** The release workflow file, `.github/workflows/dokploy.yml`. */
 	workflowPath: string;
@@ -60,26 +64,39 @@ export interface GateRelease {
 	createdAt: Date;
 	gateState: GhaGateState | null;
 	gateExpected: GhaGateExpected | null;
+	/** `gateCheckedAt` as read with the release at the start of this tick. */
+	gateCheckedAt: Date | null;
 }
 
 export interface GateOutcome {
 	gateState: GhaGateState;
 	gateReason: string | null;
 	checkedAt: Date;
+	/** What `gateCheckedAt` was when the release was read: the write happens only if it still is. */
+	previousCheckedAt: Date | null;
 	/** Saved with the release the first time the expected set is learned. */
 	gateExpected?: ExpectedCheckSet;
+	/** The start of the wait: set now, cleared, or left. */
+	gateStart: "mark" | "clear" | "keep";
+	/** The connection: block it (with the reason), lift the gate's block, or leave it. */
+	connection: "block" | "unblock" | "keep";
+	/** For `unblock`: whether a release was ever deployed (Connected) or not (Waiting). */
+	hasRelease: boolean;
 }
 
 /** What the step writes. The database implementation is in deploy-gate-store.ts. */
 export interface DeployGateStore {
-	markGateStarted(ghaConnectionId: string, at: Date): Promise<void>;
 	clearGateStart(ghaConnectionId: string): Promise<void>;
-	recordGateOutcome(releaseId: string, outcome: GateOutcome): Promise<void>;
-	blockConnection(ghaConnectionId: string, reason: string): Promise<void>;
-	unblockConnection(
+	/**
+	 * Record one evaluation and its effects in one transaction. Writes nothing
+	 * and answers false when the release is no longer accepted, was overridden
+	 * (Deploy anyway) or was evaluated by someone else since it was read.
+	 */
+	recordGateOutcome(
 		ghaConnectionId: string,
-		hasRelease: boolean,
-	): Promise<void>;
+		releaseId: string,
+		outcome: GateOutcome,
+	): Promise<boolean>;
 }
 
 export interface RunDeployGateInput {
@@ -97,32 +114,35 @@ export interface RunDeployGateInput {
 
 const MINUTE = 60_000;
 
+const blockedBy = (reason: string): GateDecision => ({
+	state: "blocked",
+	reason,
+	failedNames: [],
+	neverReported: [],
+	unfinished: [],
+});
+
+/** GitHub could not be read: wait and try again, but never guess a pass. */
 const failureDecision = (
 	failure: ApiFailure,
+	stage: string | undefined,
 	timedOut: boolean,
 	minutes: number,
 ): GateDecision => {
 	if (failure.kind === "unauthorized" || failure.kind === "forbidden") {
-		return {
-			state: "blocked",
-			reason: "GitHub did not let Dokploy read the checks. Reconnect GitHub.",
-			failedNames: [],
-			neverReported: [],
-			unfinished: [],
-		};
+		return blockedBy(
+			"GitHub did not let Dokploy read the checks. Reconnect GitHub.",
+		);
 	}
 	if (timedOut) {
-		return {
-			state: "blocked",
-			reason: `GitHub could not be read for ${minutes} minutes`,
-			failedNames: [],
-			neverReported: [],
-			unfinished: [],
-		};
+		return blockedBy(`GitHub could not be read for ${minutes} minutes`);
 	}
 	return {
 		state: "waiting",
-		reason: "GitHub could not be read, trying again",
+		reason:
+			stage === "protection"
+				? "could not read branch protection, retrying"
+				: "GitHub could not be read, trying again",
 		pendingNames: [],
 	};
 };
@@ -159,6 +179,15 @@ export const runDeployGate = async ({
 	const timeoutMs = connection.gateTimeoutMinutes * MINUTE;
 	const timedOut =
 		startedAt !== null && nowMs - startedAt.getTime() >= timeoutMs;
+	const failed = (
+		read: Extract<GateRead<unknown>, { kind: "failed" }>,
+	): GateDecision =>
+		failureDecision(
+			read.failure,
+			read.stage,
+			timedOut,
+			connection.gateTimeoutMinutes,
+		);
 
 	let expected: ExpectedCheckSet | null = release.gateExpected;
 	let learned: ExpectedCheckSet | undefined;
@@ -170,11 +199,7 @@ export const runDeployGate = async ({
 		release.sha,
 	);
 	if (runsRead.kind === "failed") {
-		decision = failureDecision(
-			runsRead.failure,
-			timedOut,
-			connection.gateTimeoutMinutes,
-		);
+		decision = failed(runsRead);
 	} else {
 		workflowRuns = runsRead.value;
 	}
@@ -189,11 +214,8 @@ export const runDeployGate = async ({
 				isExcluded,
 			});
 			if (expectedRead.kind === "failed") {
-				decision = failureDecision(
-					expectedRead.failure,
-					timedOut,
-					connection.gateTimeoutMinutes,
-				);
+				// Not saved: a set learned from a failed read would be a guess.
+				decision = failed(expectedRead);
 			} else {
 				expected = expectedRead.value;
 				learned = expectedRead.value;
@@ -202,11 +224,7 @@ export const runDeployGate = async ({
 		if (!decision) {
 			const checksRead = await github.loadCommitChecks(release.sha);
 			if (checksRead.kind === "failed") {
-				decision = failureDecision(
-					checksRead.failure,
-					timedOut,
-					connection.gateTimeoutMinutes,
-				);
+				decision = failed(checksRead);
 			} else {
 				checks = checksRead.value;
 			}
@@ -228,6 +246,10 @@ export const runDeployGate = async ({
 			workflows: connection.gateWorkflows,
 			workflowRuns,
 			excludedRunIds,
+			trust: {
+				branch: connection.trackedBranch,
+				repository: connection.repoFullName,
+			},
 			appSlug,
 			isExcluded:
 				isExcluded ?? createDefaultExclusion({ appSlug, excludedRunIds }),
@@ -235,31 +257,40 @@ export const runDeployGate = async ({
 		decision = evaluateDeployGate(input);
 	}
 
-	if (decision.state === "waiting" && !startedAt) {
-		await store.markGateStarted(connection.ghaConnectionId, new Date(nowMs));
-	}
-	if (decision.state === "deploy") {
-		await store.clearGateStart(connection.ghaConnectionId);
-	}
-	await store.recordGateOutcome(release.releaseId, {
-		gateState: GATE_STATE_OF[decision.state],
-		gateReason: decision.state === "deploy" ? null : decision.reason,
-		checkedAt: new Date(nowMs),
-		...(learned ? { gateExpected: learned } : {}),
-	});
-	// Blocked shows on the connection; a pass that follows a block lifts it again.
-	if (decision.state === "blocked" && connection.state !== "blocked") {
-		await store.blockConnection(connection.ghaConnectionId, decision.reason);
-	}
-	if (
-		decision.state === "deploy" &&
-		release.gateState === "blocked" &&
-		connection.state === "blocked"
-	) {
-		await store.unblockConnection(
-			connection.ghaConnectionId,
-			connection.deployedSha !== null,
-		);
+	// A block the gate did not set (a refused release, say) is not the gate's to
+	// replace or to lift.
+	const foreignBlock =
+		connection.state === "blocked" && !connection.gateBlocked;
+	const recorded = await store.recordGateOutcome(
+		connection.ghaConnectionId,
+		release.releaseId,
+		{
+			gateState: GATE_STATE_OF[decision.state],
+			gateReason: decision.state === "deploy" ? null : decision.reason,
+			checkedAt: new Date(nowMs),
+			previousCheckedAt: release.gateCheckedAt,
+			...(learned ? { gateExpected: learned } : {}),
+			gateStart:
+				decision.state === "deploy"
+					? "clear"
+					: decision.state === "waiting" && !startedAt
+						? "mark"
+						: "keep",
+			connection:
+				decision.state === "blocked"
+					? foreignBlock
+						? "keep"
+						: "block"
+					: connection.gateBlocked
+						? "unblock"
+						: "keep",
+			hasRelease: connection.deployedSha !== null,
+		},
+	);
+	// The release changed under this evaluation (Deploy anyway, or another
+	// evaluation): do not act on it, the next tick reads it again.
+	if (!recorded) {
+		return { state: "waiting", reason: "Checking again", pendingNames: [] };
 	}
 	return decision;
 };

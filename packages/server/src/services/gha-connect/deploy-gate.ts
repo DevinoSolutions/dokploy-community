@@ -10,14 +10,25 @@ import {
  * deploy-gate-step.ts) and deploys it only when the answer is `deploy`.
  *
  *   image      always deploy
- *   checks     every check on the commit passes: the expected set is the
- *              required checks of the branch, else the checks of the last green
- *              commit, else whatever the commit reports (the fallback)
+ *   checks     every check on the commit passes: the expected set (required
+ *              checks of the branch, else the checks of the last green commit)
+ *              decides what is WAITED for; any other check that failed blocks
+ *              too. With no expected set (the fallback) the gate waits for
+ *              whatever the commit reports.
  *   workflows  the named workflows pass on the commit
  *
- * The latest attempt per name decides (a re-run replaces a failure), and a name
- * that has not reported when the timeout is over blocks the release. The
- * pass/fail rule itself is build-policy's `evaluateRequiredChecks`.
+ * What counts as a result of the commit (the sources are not equal):
+ *   - a workflow run counts only when it is a push or a manual dispatch of the
+ *     tracked branch from the connection's own repository. A pull request from
+ *     a fork, or any other event that happens to carry this sha, never counts.
+ *   - the latest run of each workflow (by file) decides, not the latest result
+ *     of a name across workflows, so two workflows sharing a job name cannot
+ *     hide each other's failure.
+ *   - a check run of a workflow counts only through such a run (its details URL
+ *     or check suite). A check run of another app counts as that app's.
+ *   - a commit status counts only for a name no check run reports, and never
+ *     overrides a check run.
+ * The pass/fail rule itself is build-policy's `evaluateRequiredChecks`.
  */
 
 /** One check run or commit status of the release commit, as GitHub reports it. */
@@ -31,8 +42,12 @@ export interface GateCheck {
 	startedAt: string | null;
 	/** Slug of the GitHub App that created the check run. */
 	appSlug: string | null;
+	/** Id of that App (branch protection can pin a required check to one). */
+	appId: number | null;
 	/** The workflow run behind a check run (from its details URL). */
 	runId: number | null;
+	/** The check suite of the check run (a workflow run has one). */
+	checkSuiteId: number | null;
 }
 
 /** A workflow run of the release commit. */
@@ -45,6 +60,19 @@ export interface GateWorkflowRun {
 	status: string;
 	conclusion: string | null;
 	startedAt: string | null;
+	/** `push`, `workflow_dispatch`, `pull_request`, ... */
+	event: string;
+	headBranch: string | null;
+	/** `owner/name` of the repository the run's commit was pushed to. */
+	headRepository: string | null;
+	checkSuiteId: number | null;
+}
+
+/** The branch and repository a run must come from to count. */
+export interface GateTrust {
+	branch: string;
+	/** `owner/name`. */
+	repository: string;
 }
 
 export type ExpectedCheckSet = GhaGateExpected;
@@ -69,6 +97,12 @@ export type GateExclusion = (
 /** Status contexts Dokploy posts to GitHub itself start with this. */
 export const DOKPLOY_STATUS_PREFIX = "dokploy/";
 
+/** Events whose runs are results of the tracked branch. */
+export const TRUSTED_RUN_EVENTS: readonly string[] = [
+	"push",
+	"workflow_dispatch",
+];
+
 /**
  * What the gate never waits for: the release run itself (and the other runs of
  * the release workflow), Dokploy's own statuses (`dokploy/...`) and the checks
@@ -85,7 +119,8 @@ export const createDefaultExclusion =
 	}): GateExclusion =>
 	(check) => {
 		const runs = new Set(excludedRunIds ?? []);
-		if (check.name.toLowerCase().startsWith(DOKPLOY_STATUS_PREFIX)) return true;
+		if (check.name.toLowerCase().startsWith(DOKPLOY_STATUS_PREFIX))
+			return true;
 		if (appSlug && check.appSlug === appSlug) return true;
 		return check.runId !== null && runs.has(check.runId);
 	};
@@ -100,11 +135,13 @@ export interface DeployGateInput {
 	/** `checks`: the expected set. Null or the fallback: wait for whatever the commit reports. */
 	expected: ExpectedCheckSet | null;
 	checks: GateCheck[];
-	/** `workflows`: the names (or file names) to wait for. */
+	/** `workflows`: the workflow names (or `.yml` file names) to wait for. */
 	workflows: string[];
 	workflowRuns: GateWorkflowRun[];
 	/** Runs that are never waited for: the release run and the other runs of its workflow. */
 	excludedRunIds: number[];
+	/** Where a run must come from to count. */
+	trust: GateTrust;
 	/** The GitHub App Dokploy acts as. */
 	appSlug?: string | null;
 	/** Replaces the default exclusion of checks. */
@@ -115,210 +152,446 @@ const minutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
 const list = (names: string[]) => names.join(", ");
 const checkWord = (names: string[], noun: string) =>
 	names.length === 1 ? noun : `${noun}s`;
+const unique = (names: string[]) => [...new Set(names)];
+const time = (value: string | null) => {
+	const parsed = value ? Date.parse(value) : Number.NaN;
+	return Number.isNaN(parsed) ? null : parsed;
+};
 
 /** Is `a` a later attempt than `b`? By start time when both have one, else by id. */
 const isLater = (
 	a: { id: number; startedAt: string | null },
 	b: { id: number; startedAt: string | null },
 ) => {
-	const ta = a.startedAt ? Date.parse(a.startedAt) : Number.NaN;
-	const tb = b.startedAt ? Date.parse(b.startedAt) : Number.NaN;
-	if (!Number.isNaN(ta) && !Number.isNaN(tb) && ta !== tb) return ta > tb;
+	const ta = time(a.startedAt);
+	const tb = time(b.startedAt);
+	if (ta !== null && tb !== null && ta !== tb) return ta > tb;
 	return a.id > b.id;
 };
 
-const toLike = (
-	name: string,
-	item: { status: string; conclusion: string | null },
-): CheckRunLike => ({
-	name,
-	status: item.status,
-	conclusion: item.conclusion,
+/** A re-run keeps the run id and raises the attempt, so id alone cannot order attempts of one run. */
+const withAttempt = (run: GateWorkflowRun) => ({
+	id: run.id * 1000 + Math.min(run.runAttempt, 999),
+	startedAt: run.startedAt,
 });
 
-/** The latest attempt of every check name, oldest first (the order `evaluateRequiredChecks` reads). */
-export const latestChecksByName = (
-	checks: GateCheck[],
-	isExcluded: GateExclusion,
-): GateCheck[] => {
-	const latest = new Map<string, GateCheck>();
-	for (const check of checks) {
-		if (isExcluded(check)) continue;
-		const known = latest.get(check.name);
-		if (!known || isLater(check, known)) latest.set(check.name, check);
+export type Verdict = "passed" | "failed" | "running";
+
+/** The pass/fail rule of build-policy applied to one result. */
+export const verdictOf = (item: {
+	status: string;
+	conclusion: string | null;
+}): Verdict => {
+	const like: CheckRunLike = {
+		name: "x",
+		status: item.status,
+		conclusion: item.conclusion,
+	};
+	const result = evaluateRequiredChecks(["x"], [like]);
+	return result.state === "satisfied"
+		? "passed"
+		: result.state === "failed"
+			? "failed"
+			: "running";
+};
+
+const isTrustedRun = (run: GateWorkflowRun, trust: GateTrust) =>
+	TRUSTED_RUN_EVENTS.includes(run.event) &&
+	run.headBranch === trust.branch &&
+	run.headRepository !== null &&
+	run.headRepository.toLowerCase() === trust.repository.toLowerCase();
+
+const workflowKey = (run: GateWorkflowRun) => run.path || run.name;
+
+/** The latest run of each workflow among the runs that count (trusted, not excluded). */
+export const latestTrustedRuns = (
+	runs: GateWorkflowRun[],
+	trust: GateTrust,
+	excludedRunIds: Iterable<number>,
+): GateWorkflowRun[] => {
+	const excluded = new Set(excludedRunIds);
+	const latest = new Map<string, GateWorkflowRun>();
+	for (const run of runs) {
+		if (excluded.has(run.id) || !isTrustedRun(run, trust)) continue;
+		const known = latest.get(workflowKey(run));
+		if (!known || isLater(withAttempt(run), withAttempt(known))) {
+			latest.set(workflowKey(run), run);
+		}
 	}
-	return [...latest.values()].sort((a, b) => (isLater(a, b) ? 1 : -1));
+	return [...latest.values()];
+};
+
+/** One result that counts, after the sources were sorted out. */
+export interface ResolvedCheck {
+	name: string;
+	kind: "check-run" | "status";
+	verdict: Verdict;
+	appId: number | null;
+	/** Epoch ms the result started, when known. */
+	since: number | null;
+}
+
+export interface ResolveInput {
+	checks: GateCheck[];
+	workflowRuns: GateWorkflowRun[];
+	trust: GateTrust;
+	excludedRunIds: number[];
+	isExcluded: GateExclusion;
+}
+
+/**
+ * The results of a commit that count (see the header): one per workflow and
+ * check name for the latest run of each workflow, one per app and name for
+ * check runs of other apps, and one per context for the commit statuses of a
+ * name that no check run reports.
+ */
+export const resolveChecks = (input: ResolveInput): ResolvedCheck[] => {
+	const latestRuns = latestTrustedRuns(
+		input.workflowRuns,
+		input.trust,
+		input.excludedRunIds,
+	);
+	const latestIds = new Set(latestRuns.map((run) => run.id));
+	const runBySuite = new Map<number, GateWorkflowRun>();
+	const runById = new Map<number, GateWorkflowRun>();
+	for (const run of input.workflowRuns) {
+		runById.set(run.id, run);
+		if (run.checkSuiteId !== null) runBySuite.set(run.checkSuiteId, run);
+	}
+
+	const latest = new Map<string, GateCheck & { key: string }>();
+	for (const check of input.checks) {
+		if (input.isExcluded(check)) continue;
+		let key: string;
+		if (check.kind === "status") {
+			key = `status::${check.name}`;
+		} else if (check.runId !== null || check.checkSuiteId !== null) {
+			const run =
+				(check.runId !== null ? runById.get(check.runId) : undefined) ??
+				(check.checkSuiteId !== null
+					? runBySuite.get(check.checkSuiteId)
+					: undefined);
+			// A run that is not listed cannot be verified; one that does not count
+			// (fork pull request, another branch, an old run of the workflow) is not a result.
+			if (!run || !latestIds.has(run.id)) continue;
+			key = `wf:${workflowKey(run)}::${check.name}`;
+		} else if (check.appSlug === "github-actions") {
+			continue;
+		} else {
+			key = `app:${check.appSlug ?? check.appId ?? ""}::${check.name}`;
+		}
+		const known = latest.get(key);
+		if (!known || isLater(check, known)) latest.set(key, { ...check, key });
+	}
+
+	const checkRunNames = new Set(
+		[...latest.values()].filter((c) => c.kind === "check-run").map((c) => c.name),
+	);
+	const resolved: ResolvedCheck[] = [];
+	for (const check of latest.values()) {
+		if (check.kind === "status" && checkRunNames.has(check.name)) continue;
+		resolved.push({
+			name: check.name,
+			kind: check.kind,
+			verdict: verdictOf(check),
+			appId: check.appId,
+			since: time(check.startedAt),
+		});
+	}
+	return resolved;
 };
 
 /**
  * The names of the check runs of a commit, when that commit is green: it has
- * check runs and the latest attempt of each has passed. Null otherwise. Used to
- * learn what "all checks" means from the last good commit of a branch.
+ * check runs, every one that counts passed, and no workflow run that counts
+ * failed or is still running. Null otherwise. Used to learn what "all checks"
+ * means from the last good commit of a branch.
  */
 export const greenCheckRunNames = (
-	checks: GateCheck[],
-	isExcluded: GateExclusion,
+	input: ResolveInput,
 ): string[] | null => {
-	const latest = latestChecksByName(
-		checks.filter((c) => c.kind === "check-run"),
-		isExcluded,
+	const resolved = resolveChecks({
+		...input,
+		checks: input.checks.filter((c) => c.kind === "check-run"),
+	});
+	if (resolved.length === 0) return null;
+	if (resolved.some((r) => r.verdict !== "passed")) return null;
+	const runs = latestTrustedRuns(
+		input.workflowRuns,
+		input.trust,
+		input.excludedRunIds,
 	);
-	if (latest.length === 0) return null;
-	const names = latest.map((c) => c.name);
-	const result = evaluateRequiredChecks(
-		names,
-		latest.map((c) => toLike(c.name, c)),
-	);
-	return result.state === "satisfied" ? names.sort() : null;
-};
-
-interface Outcome {
-	failed: string[];
-	missing: string[];
-	running: string[];
-}
-
-/** Partition the verdict of `evaluateRequiredChecks`: a name that never appeared is not one that is still running. */
-const outcomeOf = (
-	names: string[],
-	seen: Set<string>,
-	likes: CheckRunLike[],
-): Outcome => {
-	const result = evaluateRequiredChecks(names, likes);
-	if (result.state === "failed") {
-		return { failed: result.failed, missing: [], running: [] };
-	}
-	if (result.state === "pending") {
-		return {
-			failed: [],
-			missing: result.waitingOn.filter((n) => !seen.has(n)),
-			running: result.waitingOn.filter((n) => seen.has(n)),
-		};
-	}
-	return { failed: [], missing: [], running: [] };
+	if (runs.some((run) => verdictOf(run) !== "passed")) return null;
+	return unique(resolved.map((r) => r.name)).sort();
 };
 
 type Noun = "check" | "workflow";
 
-const decide = (
-	outcome: Outcome,
-	noun: Noun,
-	timedOut: boolean,
-	timeoutMs: number,
-): GateDecision => {
-	const { failed, missing, running } = outcome;
-	const label = noun === "check" ? "Check" : "Workflow";
+interface Pending {
+	name: string;
+	/** Epoch ms it started; null: it has not started (or we cannot tell). */
+	since: number | null;
+}
+
+interface Group {
+	noun: Noun;
+	failed: string[];
+	missing: string[];
+	running: Pending[];
+}
+
+interface Clock {
+	now: number;
+	/** When the gate began waiting. */
+	gateStart: number;
+	timeoutMs: number;
+}
+
+const label = (noun: Noun) => (noun === "check" ? "Check" : "Workflow");
+
+const decide = (groups: Group[], clock: Clock): GateDecision => {
+	const failed = groups.filter((g) => g.failed.length > 0);
 	if (failed.length > 0) {
 		return {
 			state: "blocked",
-			reason: `${checkWord(failed, label)} ${list(failed)} failed`,
-			failedNames: failed,
+			reason: failed
+				.map((g) => `${checkWord(g.failed, label(g.noun))} ${list(g.failed)} failed`)
+				.join("; "),
+			failedNames: unique(failed.flatMap((g) => g.failed)),
 			neverReported: [],
 			unfinished: [],
 		};
 	}
-	const pending = [...missing, ...running];
-	if (pending.length === 0) return { state: "deploy" };
-	if (!timedOut) {
+	const gateTimedOut = clock.now - clock.gateStart >= clock.timeoutMs;
+	const pendingNames = unique(
+		groups.flatMap((g) => [...g.missing, ...g.running.map((r) => r.name)]),
+	);
+	if (pendingNames.length === 0) return { state: "deploy" };
+
+	// A running result is measured from its own start, so a fresh re-run gets its
+	// full time even when the gate has been waiting longer.
+	const stuck = (g: Group) =>
+		g.running.filter(
+			(r) => clock.now - (r.since ?? clock.gateStart) >= clock.timeoutMs,
+		);
+	const parts: string[] = [];
+	const neverReported: string[] = [];
+	const unfinished: string[] = [];
+	for (const g of groups) {
+		if (gateTimedOut && g.missing.length > 0) {
+			neverReported.push(...g.missing);
+			parts.push(
+				`${checkWord(g.missing, label(g.noun))} ${list(g.missing)} ${g.noun === "check" ? "never reported" : "never ran"}`,
+			);
+		}
+		const late = stuck(g).map((r) => r.name);
+		if (late.length > 0) {
+			unfinished.push(...late);
+			parts.push(
+				`${checkWord(late, label(g.noun))} ${list(late)} did not finish in ${minutes(clock.timeoutMs)} minutes`,
+			);
+		}
+	}
+	if (parts.length === 0) {
 		return {
 			state: "waiting",
-			reason: `Waiting for ${list(pending)}`,
-			pendingNames: pending,
+			reason: `Waiting for ${list(pendingNames)}`,
+			pendingNames,
 		};
-	}
-	const parts: string[] = [];
-	if (missing.length > 0) {
-		parts.push(
-			`${checkWord(missing, label)} ${list(missing)} ${noun === "check" ? "never reported" : "never ran"}`,
-		);
-	}
-	if (running.length > 0) {
-		parts.push(
-			`${checkWord(running, label)} ${list(running)} did not finish in ${minutes(timeoutMs)} minutes`,
-		);
 	}
 	return {
 		state: "blocked",
 		reason: parts.join("; "),
 		failedNames: [],
-		neverReported: missing,
-		unfinished: running,
+		neverReported: unique(neverReported),
+		unfinished: unique(unfinished),
 	};
 };
 
 const baseName = (path: string) =>
 	(path.split("@")[0] ?? "").split("/").pop() ?? "";
-const withoutExtension = (file: string) => file.replace(/\.ya?ml$/i, "");
 
-/** Does the workflow run answer to `wanted`: its name, or its file name with or without `.yml`? */
+/**
+ * Does the workflow run answer to `wanted`? An entry ending in `.yml` or
+ * `.yaml` is a file name and matches the workflow file only; any other entry
+ * is a workflow name and matches the run's name only.
+ */
 const runMatches = (run: GateWorkflowRun, wanted: string) =>
-	run.name === wanted ||
-	baseName(run.path) === wanted ||
-	withoutExtension(baseName(run.path)) === wanted;
+	/\.ya?ml$/i.test(wanted)
+		? baseName(run.path) === wanted || run.path === wanted
+		: run.name === wanted;
 
-const evaluateChecks = (input: DeployGateInput, timedOut: boolean) => {
+const worst = (verdicts: Verdict[]): Verdict =>
+	verdicts.includes("failed")
+		? "failed"
+		: verdicts.includes("running")
+			? "running"
+			: "passed";
+
+const asLike = (name: string, verdict: Verdict): CheckRunLike => ({
+	name,
+	status: verdict === "running" ? "in_progress" : "completed",
+	conclusion: verdict === "failed" ? "failure" : verdict === "passed" ? "success" : null,
+});
+
+/** Wait for `names` (each judged by the worst of its results), via build-policy's rule. */
+const waitFor = (
+	names: string[],
+	results: (name: string) => Array<{ verdict: Verdict; since: number | null }>,
+	noun: Noun,
+): Group => {
+	const likes: CheckRunLike[] = [];
+	const missing: string[] = [];
+	const sinceOf = new Map<string, number | null>();
+	for (const name of names) {
+		const found = results(name);
+		if (found.length === 0) {
+			missing.push(name);
+			continue;
+		}
+		likes.push(asLike(name, worst(found.map((f) => f.verdict))));
+		// The most recent start of what is still running: a fresh re-run restarts the clock.
+		const starts = found
+			.filter((f) => f.verdict === "running")
+			.map((f) => f.since)
+			.filter((s): s is number => s !== null);
+		sinceOf.set(name, starts.length > 0 ? Math.max(...starts) : null);
+	}
+	const verdict = evaluateRequiredChecks(
+		names.filter((n) => !missing.includes(n)),
+		likes,
+	);
+	return {
+		noun,
+		failed: verdict.state === "failed" ? verdict.failed : [],
+		missing,
+		running:
+			verdict.state === "pending"
+				? verdict.waitingOn.map((name) => ({
+						name,
+						since: sinceOf.get(name) ?? null,
+					}))
+				: [],
+	};
+};
+
+const evaluateChecks = (input: DeployGateInput, clock: Clock): GateDecision => {
 	const isExcluded =
 		input.isExcluded ??
 		createDefaultExclusion({
 			appSlug: input.appSlug,
 			excludedRunIds: input.excludedRunIds,
 		});
-	const latest = latestChecksByName(input.checks, isExcluded);
-	const seen = new Set(latest.map((c) => c.name));
-	const likes = latest.map((c) => toLike(c.name, c));
+	const resolved = resolveChecks({
+		checks: input.checks,
+		workflowRuns: input.workflowRuns,
+		trust: input.trust,
+		excludedRunIds: input.excludedRunIds,
+		isExcluded,
+	});
+	const runs = latestTrustedRuns(
+		input.workflowRuns,
+		input.trust,
+		input.excludedRunIds,
+	);
+	const runResults = runs.map((run) => ({
+		name: run.name,
+		verdict: verdictOf(run),
+		since: time(run.startedAt),
+	}));
 
+	const appIds = input.expected?.appIds ?? {};
 	const expectedNames =
 		input.expected && input.expected.source !== "fallback"
-			? [...new Set(input.expected.names)].filter(
+			? unique(input.expected.names).filter(
 					(name) =>
 						!isExcluded({ name, kind: "status", appSlug: null, runId: null }),
 				)
 			: [];
 
 	if (expectedNames.length > 0) {
-		return decide(
-			outcomeOf(expectedNames, seen, likes),
+		// The expected set decides what is waited for. Anything else that counts
+		// and has failed blocks too.
+		const checkGroup = waitFor(
+			expectedNames,
+			(name) =>
+				resolved.filter(
+					(r) =>
+						r.name === name &&
+						(appIds[name] === undefined ||
+							(r.kind === "check-run" && r.appId === appIds[name])),
+				),
 			"check",
-			timedOut,
-			input.timeoutMs,
 		);
+		const expected = new Set(expectedNames);
+		const otherFailed = unique(
+			resolved
+				.filter((r) => r.verdict === "failed" && !expected.has(r.name))
+				.map((r) => r.name),
+		);
+		checkGroup.failed = unique([...checkGroup.failed, ...otherFailed]);
+		const workflowGroup: Group = {
+			noun: "workflow",
+			failed: unique(
+				runResults.filter((r) => r.verdict === "failed").map((r) => r.name),
+			),
+			missing: [],
+			running: [],
+		};
+		return decide([checkGroup, workflowGroup], clock);
 	}
 
 	// The fallback: no expected set, so wait until the commit reports something
-	// and nothing it reports is still queued or running.
-	if (latest.length === 0) {
-		if (timedOut) {
+	// and nothing it reports (checks or workflow runs) is queued or running, and
+	// block on anything that failed.
+	if (resolved.length === 0 && runResults.length === 0) {
+		if (clock.now - clock.gateStart >= clock.timeoutMs) {
 			return {
 				state: "blocked",
-				reason: `No checks reported on this commit in ${minutes(input.timeoutMs)} minutes`,
+				reason: `No checks reported on this commit in ${minutes(clock.timeoutMs)} minutes`,
 				failedNames: [],
 				neverReported: [],
 				unfinished: [],
-			} satisfies GateDecision;
+			};
 		}
 		return {
 			state: "waiting",
 			reason: "Waiting for the first check to start",
 			pendingNames: [],
-		} satisfies GateDecision;
+		};
 	}
+	const pendingOf = (items: Array<{ name: string; verdict: Verdict; since: number | null }>) =>
+		items
+			.filter((i) => i.verdict === "running")
+			.map((i) => ({ name: i.name, since: i.since }));
 	return decide(
-		outcomeOf(
-			latest.map((c) => c.name),
-			seen,
-			likes,
-		),
-		"check",
-		timedOut,
-		input.timeoutMs,
+		[
+			{
+				noun: "check",
+				failed: unique(
+					resolved.filter((r) => r.verdict === "failed").map((r) => r.name),
+				),
+				missing: [],
+				running: pendingOf(resolved),
+			},
+			{
+				noun: "workflow",
+				failed: unique(
+					runResults.filter((r) => r.verdict === "failed").map((r) => r.name),
+				),
+				missing: [],
+				running: pendingOf(runResults),
+			},
+		],
+		clock,
 	);
 };
 
 const evaluateWorkflows = (
 	input: DeployGateInput,
-	timedOut: boolean,
+	clock: Clock,
 ): GateDecision => {
-	const wanted = [...new Set(input.workflows)];
+	const wanted = unique(input.workflows);
 	if (wanted.length === 0) {
 		return {
 			state: "blocked",
@@ -328,43 +601,32 @@ const evaluateWorkflows = (
 			unfinished: [],
 		};
 	}
-	const excluded = new Set(input.excludedRunIds);
-	const runs = input.workflowRuns.filter((run) => !excluded.has(run.id));
-	const seen = new Set<string>();
-	const likes: CheckRunLike[] = [];
-	for (const name of wanted) {
-		let latest: GateWorkflowRun | null = null;
-		for (const run of runs) {
-			if (!runMatches(run, name)) continue;
-			if (!latest || isLater(withAttempt(run), withAttempt(latest)))
-				latest = run;
-		}
-		if (latest) {
-			seen.add(name);
-			likes.push(toLike(name, latest));
-		}
-	}
-	return decide(
-		outcomeOf(wanted, seen, likes),
-		"workflow",
-		timedOut,
-		input.timeoutMs,
+	const runs = latestTrustedRuns(
+		input.workflowRuns,
+		input.trust,
+		input.excludedRunIds,
 	);
+	const group = waitFor(
+		wanted,
+		(name) =>
+			runs
+				.filter((run) => runMatches(run, name))
+				.map((run) => ({ verdict: verdictOf(run), since: time(run.startedAt) })),
+		"workflow",
+	);
+	return decide([group], clock);
 };
-
-/** A re-run keeps the run id and raises the attempt, so id alone cannot order attempts of one run. */
-const withAttempt = (run: GateWorkflowRun) => ({
-	id: run.id * 1000 + Math.min(run.runAttempt, 999),
-	startedAt: run.startedAt,
-});
 
 export const evaluateDeployGate = (input: DeployGateInput): GateDecision => {
 	if (input.mode === "image") return { state: "deploy" };
-	const startedAt = input.startedAt ?? input.now;
-	const timedOut = input.now - startedAt >= input.timeoutMs;
+	const clock: Clock = {
+		now: input.now,
+		gateStart: input.startedAt ?? input.now,
+		timeoutMs: input.timeoutMs,
+	};
 	return input.mode === "workflows"
-		? evaluateWorkflows(input, timedOut)
-		: evaluateChecks(input, timedOut);
+		? evaluateWorkflows(input, clock)
+		: evaluateChecks(input, clock);
 };
 
 const STATUS_DESCRIPTION_MAX = 140;

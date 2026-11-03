@@ -3,6 +3,7 @@ export * from "./connect";
 export * from "./connect-service";
 export * from "./deploy-gate";
 export * from "./deploy-gate-github";
+export * from "./deploy-gate-settings";
 export * from "./deploy-gate-step";
 export * from "./deploy-gate-store";
 export * from "./environment-policy";

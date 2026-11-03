@@ -25,7 +25,12 @@ import {
 /** A read that worked, or the reason it did not. */
 export type GateRead<T> =
 	| { kind: "ok"; value: T }
-	| { kind: "failed"; failure: ApiFailure };
+	| {
+			kind: "failed";
+			failure: ApiFailure;
+			/** Which read of the expected set failed, when it was one. */
+			stage?: "protection" | "history";
+	  };
 
 const asObject = (value: unknown): Record<string, unknown> | null =>
 	value !== null && typeof value === "object" && !Array.isArray(value)
@@ -47,46 +52,64 @@ const encodeBranch = (branch: string) =>
 const SHA = /^[0-9a-f]{7,64}$/i;
 const MAX_PAGES = 5;
 
-/** Required status check names out of a branch's protection object. */
-export const namesFromProtection = (json: unknown): string[] => {
+/** A required check: its name and, when branch protection pins it to one GitHub App, that App's id. */
+export interface RequiredCheckEntry {
+	name: string;
+	appId: number | null;
+}
+
+/** GitHub uses null or -1 for "any app". */
+const appIdOf = (value: unknown): number | null => {
+	const id = int(value);
+	return id !== null && id > 0 ? id : null;
+};
+
+/** Required status checks out of a branch's protection object. */
+export const entriesFromProtection = (json: unknown): RequiredCheckEntry[] => {
 	const required = asObject(
 		asObject(asObject(json)?.protection)?.required_status_checks,
 	);
 	if (!required) return [];
-	const names: string[] = [];
-	if (Array.isArray(required.contexts)) {
-		for (const context of required.contexts) {
-			if (typeof context === "string") names.push(context);
-		}
-	}
+	const entries: RequiredCheckEntry[] = [];
 	if (Array.isArray(required.checks)) {
 		for (const check of required.checks) {
-			const context = str(asObject(check)?.context);
-			if (context) names.push(context);
+			const o = asObject(check);
+			const context = str(o?.context);
+			if (context) entries.push({ name: context, appId: appIdOf(o?.app_id) });
 		}
 	}
-	return names;
+	if (Array.isArray(required.contexts)) {
+		for (const context of required.contexts) {
+			if (typeof context === "string") entries.push({ name: context, appId: null });
+		}
+	}
+	return entries;
 };
 
-/** Required status check names out of the rules that apply to a branch (rulesets). */
-export const namesFromRules = (json: unknown): string[] => {
+/** Required status checks out of the rules that apply to a branch (rulesets). */
+export const entriesFromRules = (json: unknown): RequiredCheckEntry[] => {
 	if (!Array.isArray(json)) return [];
-	const names: string[] = [];
+	const entries: RequiredCheckEntry[] = [];
 	for (const rule of json) {
 		const o = asObject(rule);
 		if (o?.type !== "required_status_checks") continue;
 		const checks = asObject(o.parameters)?.required_status_checks;
 		if (!Array.isArray(checks)) continue;
 		for (const check of checks) {
-			const context = str(asObject(check)?.context);
-			if (context) names.push(context);
+			const c = asObject(check);
+			const context = str(c?.context);
+			if (context) {
+				entries.push({ name: context, appId: appIdOf(c?.integration_id) });
+			}
 		}
 	}
-	return names;
+	return entries;
 };
 
 export interface RequiredChecksRead {
 	names: string[];
+	/** Required checks pinned to one GitHub App: name to app id. */
+	appIds: Record<string, number>;
 	/** False when neither source could be read (403/404): the next source applies. */
 	readable: boolean;
 }
@@ -94,36 +117,56 @@ export interface RequiredChecksRead {
 /**
  * Required checks of the branch: branch protection
  * (`GET .../branches/{branch}`, `protection.required_status_checks`) and
- * rulesets (`GET .../rules/branches/{branch}`). A source the token cannot read
- * is skipped, not an error.
+ * rulesets (`GET .../rules/branches/{branch}`). A source GitHub refuses (403) or
+ * does not know (404) is skipped; any other failure (a 5xx, a rate limit, a
+ * network error, an expired token) is a failure of the read, never "no required
+ * checks": the caller waits and tries again.
  */
 export const loadRequiredChecks = async (
 	deps: ApiDeps,
 	token: string,
 	ref: RepoRef,
 	branch: string,
-): Promise<RequiredChecksRead> => {
+): Promise<GateRead<RequiredChecksRead>> => {
 	const base = apiRepoPath(ref);
-	if (!base) return { names: [], readable: false };
+	if (!base) {
+		return { kind: "ok", value: { names: [], appIds: {}, readable: false } };
+	}
 	const [protection, rules] = await Promise.all([
 		apiGet(deps, token, `${base}/branches/${encodeBranch(branch)}`, (json) =>
-			asObject(json) ? namesFromProtection(json) : null,
+			asObject(json) ? entriesFromProtection(json) : null,
 		),
 		apiGet(
 			deps,
 			token,
 			`${base}/rules/branches/${encodeBranch(branch)}?per_page=100`,
-			(json) => (Array.isArray(json) ? namesFromRules(json) : null),
+			(json) => (Array.isArray(json) ? entriesFromRules(json) : null),
 		),
 	]);
-	const names = new Set<string>();
+	const entries: RequiredCheckEntry[] = [];
 	let readable = false;
 	for (const result of [protection, rules]) {
-		if (result.kind !== "ok") continue;
-		readable = true;
-		for (const name of result.value) names.add(name);
+		if (result.kind === "ok") {
+			readable = true;
+			entries.push(...result.value);
+		} else if (result.kind !== "forbidden" && result.kind !== "not-found") {
+			return { kind: "failed", failure: result as ApiFailure };
+		}
 	}
-	return { names: [...names], readable };
+	const appIds: Record<string, number> = {};
+	for (const entry of entries) {
+		if (entry.appId !== null && appIds[entry.name] === undefined) {
+			appIds[entry.name] = entry.appId;
+		}
+	}
+	return {
+		kind: "ok",
+		value: {
+			names: [...new Set(entries.map((e) => e.name))],
+			appIds,
+			readable,
+		},
+	};
 };
 
 /** The last `limit` commits of a branch, newest first. */
@@ -169,7 +212,9 @@ const mapCheckRun = (json: unknown): GateCheck | null => {
 		id,
 		startedAt: str(o.started_at) ?? str(o.created_at),
 		appSlug: str(asObject(o.app)?.slug),
+		appId: int(asObject(o.app)?.id),
 		runId: run?.[1] ? Number(run[1]) : null,
+		checkSuiteId: int(asObject(o.check_suite)?.id),
 	};
 };
 
@@ -189,7 +234,9 @@ const mapStatus = (json: unknown): GateCheck | null => {
 		id,
 		startedAt: str(o.updated_at) ?? str(o.created_at),
 		appSlug: null,
+		appId: null,
 		runId: null,
+		checkSuiteId: null,
 	};
 };
 
@@ -231,6 +278,11 @@ export const loadCommitChecks = async (
 			if (all.length >= result.value.total || result.value.runs.length === 0) {
 				break;
 			}
+			if (page === MAX_PAGES) {
+				console.warn(
+					`[gha-gate] check runs of ${ref.owner}/${ref.repo}@${sha.slice(0, 7)} truncated at ${all.length} of ${result.value.total}`,
+				);
+			}
 		}
 		return { kind: "ok", value: all };
 	};
@@ -242,6 +294,11 @@ export const loadCommitChecks = async (
 			(json) => {
 				const o = asObject(json);
 				if (!o || !Array.isArray(o.statuses)) return null;
+				if ((int(o.total_count) ?? 0) > o.statuses.length) {
+					console.warn(
+						`[gha-gate] statuses of ${ref.owner}/${ref.repo}@${sha.slice(0, 7)} truncated at ${o.statuses.length} of ${int(o.total_count)}`,
+					);
+				}
 				return o.statuses
 					.map(mapStatus)
 					.filter((c): c is GateCheck => c !== null);
@@ -272,6 +329,10 @@ const mapWorkflowRun = (json: unknown): GateWorkflowRun | null => {
 		status,
 		conclusion: str(o.conclusion),
 		startedAt: str(o.run_started_at) ?? str(o.created_at),
+		event: str(o.event) ?? "",
+		headBranch: str(o.head_branch),
+		headRepository: str(asObject(o.head_repository)?.full_name),
+		checkSuiteId: int(o.check_suite_id),
 	};
 };
 
@@ -307,6 +368,11 @@ export const loadWorkflowRuns = async (
 		all.push(...result.value.runs);
 		if (all.length >= result.value.total || result.value.runs.length === 0) {
 			break;
+		}
+		if (page === MAX_PAGES) {
+			console.warn(
+				`[gha-gate] workflow runs of ${ref.owner}/${ref.repo}@${sha.slice(0, 7)} truncated at ${all.length} of ${result.value.total}`,
+			);
 		}
 	}
 	return { kind: "ok", value: all };
@@ -351,12 +417,29 @@ export const loadExpectedCheckSet = async (
 	const ownName = (name: string) =>
 		exclusionFor([])({ name, kind: "status", appSlug: null, runId: null });
 
-	const required = await loadRequiredChecks(deps, token, ref, input.branch);
+	const trust = {
+		branch: input.branch,
+		repository: `${ref.owner}/${ref.repo}`,
+	};
+	const requiredRead = await loadRequiredChecks(deps, token, ref, input.branch);
+	if (requiredRead.kind === "failed") {
+		return { ...requiredRead, stage: "protection" };
+	}
+	const required = requiredRead.value;
 	const requiredNames = required.names.filter((name) => !ownName(name));
 	if (requiredNames.length > 0) {
+		const appIds: Record<string, number> = {};
+		for (const name of requiredNames) {
+			const id = required.appIds[name];
+			if (id !== undefined) appIds[name] = id;
+		}
 		return {
 			kind: "ok",
-			value: { source: "required", names: requiredNames.sort() },
+			value: {
+				source: "required",
+				names: requiredNames.sort(),
+				...(Object.keys(appIds).length > 0 ? { appIds } : {}),
+			},
 		};
 	}
 
@@ -367,7 +450,7 @@ export const loadExpectedCheckSet = async (
 		if (recent.failure.kind === "not-found") {
 			return { kind: "ok", value: { source: "fallback", names: [] } };
 		}
-		return recent;
+		return { ...recent, stage: "history" };
 	}
 	for (const sha of recent.value) {
 		if (sha === input.sha) continue;
@@ -378,18 +461,22 @@ export const loadExpectedCheckSet = async (
 		// A commit that is gone is skipped; any other failure is the caller's to retry.
 		if (checks.kind === "failed") {
 			if (checks.failure.kind === "not-found") continue;
-			return checks;
+			return { ...checks, stage: "history" };
 		}
-		if (runs.kind === "failed" && runs.failure.kind !== "not-found")
-			return runs;
-		const excludedRunIds =
-			runs.kind === "ok"
-				? releaseWorkflowRunIds(runs.value, input.workflowPath)
-				: [];
-		const names = greenCheckRunNames(
-			checks.value,
-			exclusionFor(excludedRunIds),
-		);
+		if (runs.kind === "failed") {
+			// Without the runs of that commit the release workflow's jobs cannot be told
+			// from the others: skip the commit, never let them into the set.
+			if (runs.failure.kind === "not-found") continue;
+			return { ...runs, stage: "history" };
+		}
+		const excludedRunIds = releaseWorkflowRunIds(runs.value, input.workflowPath);
+		const names = greenCheckRunNames({
+			checks: checks.value,
+			workflowRuns: runs.value,
+			trust,
+			excludedRunIds,
+			isExcluded: exclusionFor(excludedRunIds),
+		});
 		if (names) return { kind: "ok", value: { source: "last-green", names } };
 	}
 	return { kind: "ok", value: { source: "fallback", names: [] } };

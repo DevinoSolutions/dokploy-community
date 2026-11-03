@@ -97,7 +97,11 @@ export const GhaDeployGate = ({ id, type }: Props) => {
 		workflows: effectiveWorkflows,
 		timeout,
 	});
-	const status = gateStatusLine(connection.releases[0]);
+	const newest = connection.releases[0];
+	const status = gateStatusLine(newest);
+	const runUrl = newest
+		? `https://github.com/${connection.repository}/actions/runs/${newest.runId}`
+		: null;
 	const canOverride = user?.role === "owner" || user?.role === "admin";
 	const option = GATE_OPTIONS.find((o) => o.value === mode);
 
@@ -126,9 +130,11 @@ export const GhaDeployGate = ({ id, type }: Props) => {
 
 	const onDeployAnyway = async () => {
 		try {
+			if (!newest) return;
 			await deployAnyway({
 				serviceType: type,
 				serviceId: id,
+				releaseId: newest.releaseId,
 				...(reason.trim() ? { reason: reason.trim() } : {}),
 			});
 			setReason("");
@@ -167,8 +173,20 @@ export const GhaDeployGate = ({ id, type }: Props) => {
 									<AlertDialogHeader>
 										<AlertDialogTitle>Deploy without waiting?</AlertDialogTitle>
 										<AlertDialogDescription>
-											The release goes live now, whatever its checks say. This
-											is logged with your name.
+											Commit{" "}
+											<span className="font-mono">{newest?.sha.slice(0, 7)}</span>{" "}
+											goes live now, whatever its checks say.{" "}
+											{runUrl && (
+												<a
+													href={runUrl}
+													target="_blank"
+													rel="noreferrer"
+													className="underline"
+												>
+													See the run
+												</a>
+											)}{" "}
+											This is logged with your name.
 										</AlertDialogDescription>
 									</AlertDialogHeader>
 									<Input

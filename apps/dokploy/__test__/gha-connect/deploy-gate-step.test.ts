@@ -24,6 +24,8 @@ const connection = (
 ): GateConnection => ({
 	ghaConnectionId: "gc-1",
 	state: "waiting",
+	gateBlocked: false,
+	repoFullName: "acme/shop",
 	trackedBranch: "main",
 	workflowPath: WORKFLOW,
 	gateMode: "checks",
@@ -41,10 +43,12 @@ const release = (overrides: Partial<GateRelease> = {}): GateRelease => ({
 	createdAt: new Date(NOW - 10 * MINUTE),
 	gateState: null,
 	gateExpected: null,
+	gateCheckedAt: null,
 	...overrides,
 });
 
 let nextId = 1;
+/** A check run of an app that is not GitHub Actions: it needs no workflow run to count. */
 const check = (
 	name: string,
 	status: string,
@@ -57,13 +61,15 @@ const check = (
 	conclusion,
 	id: nextId++,
 	startedAt: null,
-	appSlug: "github-actions",
+	appSlug: "ci-app",
+	appId: 999,
 	runId: null,
+	checkSuiteId: null,
 	...extra,
 });
 
 const ok = <T>(value: T): GateRead<T> => ({ kind: "ok", value });
-const releaseRun: GateWorkflowRun = {
+const run = (overrides: Partial<GateWorkflowRun> = {}): GateWorkflowRun => ({
 	id: 777,
 	name: "Dokploy",
 	path: WORKFLOW,
@@ -71,7 +77,13 @@ const releaseRun: GateWorkflowRun = {
 	status: "in_progress",
 	conclusion: null,
 	startedAt: null,
-};
+	event: "push",
+	headBranch: "main",
+	headRepository: "acme/shop",
+	checkSuiteId: 50_777,
+	...overrides,
+});
+const releaseRun = run();
 
 const fakeGithub = (parts: Partial<GateGithub> = {}) => {
 	const github = {
@@ -85,20 +97,20 @@ const fakeGithub = (parts: Partial<GateGithub> = {}) => {
 	return github as typeof github & GateGithub;
 };
 
-const fakeStore = () => {
+const fakeStore = (recorded = true) => {
 	const store = {
-		markGateStarted: vi.fn(async () => {}),
 		clearGateStart: vi.fn(async () => {}),
 		recordGateOutcome: vi.fn(
-			async (_releaseId: string, _outcome: GateOutcome) => {},
+			async (_connectionId: string, _releaseId: string, _o: GateOutcome) =>
+				recorded,
 		),
-		blockConnection: vi.fn(async () => {}),
-		unblockConnection: vi.fn(async () => {}),
 	};
 	return store satisfies DeployGateStore;
 };
+const outcomeOf = (store: ReturnType<typeof fakeStore>) =>
+	store.recordGateOutcome.mock.calls[0]?.[2] as GateOutcome;
 
-const run = (
+const runGate = (
 	parts: {
 		connection?: Partial<GateConnection>;
 		release?: Partial<GateRelease>;
@@ -120,7 +132,7 @@ describe("runDeployGate", () => {
 	it("image mode deploys without reading GitHub or writing anything", async () => {
 		const github = fakeGithub();
 		const store = fakeStore();
-		const decision = await run({
+		const decision = await runGate({
 			connection: { gateMode: "image" },
 			github,
 			store,
@@ -128,12 +140,13 @@ describe("runDeployGate", () => {
 		expect(decision).toEqual({ state: "deploy" });
 		expect(github.loadWorkflowRuns).not.toHaveBeenCalled();
 		expect(github.loadCommitChecks).not.toHaveBeenCalled();
-		for (const fn of Object.values(store)) expect(fn).not.toHaveBeenCalled();
+		expect(store.recordGateOutcome).not.toHaveBeenCalled();
+		expect(store.clearGateStart).not.toHaveBeenCalled();
 	});
 
 	it("an overridden release deploys at once, without reading GitHub", async () => {
 		const github = fakeGithub();
-		const decision = await run({
+		const decision = await runGate({
 			release: { gateState: "overridden" },
 			github,
 		});
@@ -141,7 +154,7 @@ describe("runDeployGate", () => {
 		expect(github.loadCommitChecks).not.toHaveBeenCalled();
 	});
 
-	it("the first waiting evaluation sets gateStartedAt and records the waiting state", async () => {
+	it("the first waiting evaluation marks the start and records the waiting state with the learned set", async () => {
 		const github = fakeGithub({
 			loadCommitChecks: vi.fn(async () =>
 				ok([
@@ -151,47 +164,44 @@ describe("runDeployGate", () => {
 			),
 		});
 		const store = fakeStore();
-		const decision = await run({ github, store });
-		expect(decision).toMatchObject({
-			state: "waiting",
-			pendingNames: ["test"],
-		});
-		expect(store.markGateStarted).toHaveBeenCalledWith("gc-1", new Date(NOW));
-		expect(store.recordGateOutcome).toHaveBeenCalledWith("rel-1", {
+		const decision = await runGate({ github, store });
+		expect(decision).toMatchObject({ state: "waiting", pendingNames: ["test"] });
+		expect(store.recordGateOutcome).toHaveBeenCalledWith("gc-1", "rel-1", {
 			gateState: "waiting",
 			gateReason: "Waiting for test",
 			checkedAt: new Date(NOW),
+			previousCheckedAt: null,
 			gateExpected: { source: "required", names: ["build", "test"] },
+			gateStart: "mark",
+			connection: "keep",
+			hasRelease: false,
 		});
-		expect(store.clearGateStart).not.toHaveBeenCalled();
+	});
+
+	it("hands the compare-and-set value (the gateCheckedAt it read) to the store", async () => {
+		const seen = new Date(NOW - MINUTE);
+		const store = fakeStore();
+		await runGate({ release: { gateCheckedAt: seen }, store });
+		expect(outcomeOf(store).previousCheckedAt).toEqual(seen);
 	});
 
 	it("a later evaluation keeps the start it has", async () => {
-		const github = fakeGithub({
-			loadCommitChecks: vi.fn(async () =>
-				ok([check("build", "completed", "success")]),
-			),
-		});
 		const store = fakeStore();
-		await run({
+		await runGate({
 			connection: { gateStartedAt: new Date(NOW - 5 * MINUTE) },
-			github,
 			store,
 		});
-		expect(store.markGateStarted).not.toHaveBeenCalled();
+		expect(outcomeOf(store).gateStart).toBe("keep");
 	});
 
 	it("a start from before this release belongs to an older release: it starts over", async () => {
-		const github = fakeGithub();
 		const store = fakeStore();
-		// Started 3 hours ago for an older release; this release is 10 minutes old.
-		const decision = await run({
+		const decision = await runGate({
 			connection: { gateStartedAt: new Date(NOW - 180 * MINUTE) },
-			github,
 			store,
 		});
 		expect(decision.state).toBe("waiting");
-		expect(store.markGateStarted).toHaveBeenCalledWith("gc-1", new Date(NOW));
+		expect(outcomeOf(store).gateStart).toBe("mark");
 	});
 
 	it("a name that never reports blocks after the timeout and blocks the connection", async () => {
@@ -201,12 +211,11 @@ describe("runDeployGate", () => {
 			),
 		});
 		const store = fakeStore();
-		const decision = await run({
+		const decision = await runGate({
 			connection: {
 				gateStartedAt: new Date(NOW - 5 * MINUTE),
 				gateTimeoutMinutes: 5,
 			},
-			release: { createdAt: new Date(NOW - 10 * MINUTE) },
 			github,
 			store,
 		});
@@ -214,37 +223,63 @@ describe("runDeployGate", () => {
 			state: "blocked",
 			reason: "Check test never reported",
 		});
-		expect(store.blockConnection).toHaveBeenCalledWith(
-			"gc-1",
-			"Check test never reported",
-		);
-		expect(store.recordGateOutcome).toHaveBeenCalledWith(
-			"rel-1",
-			expect.objectContaining({
-				gateState: "blocked",
-				gateReason: "Check test never reported",
-			}),
-		);
+		expect(outcomeOf(store)).toMatchObject({
+			gateState: "blocked",
+			gateReason: "Check test never reported",
+			connection: "block",
+			gateStart: "keep",
+		});
 		expect(store.clearGateStart).not.toHaveBeenCalled();
 	});
 
-	it("a block is not written again to a connection that is already blocked", async () => {
+	it("keeps a block the gate did not set: it neither replaces nor lifts it", async () => {
+		const failing = fakeGithub({
+			loadCommitChecks: vi.fn(async () =>
+				ok([check("build", "completed", "failure")]),
+			),
+		});
+		const store = fakeStore();
+		await runGate({
+			connection: { state: "blocked", gateBlocked: false },
+			github: failing,
+			store,
+		});
+		expect(outcomeOf(store).connection).toBe("keep");
+		const passing = fakeGithub({
+			loadCommitChecks: vi.fn(async () =>
+				ok([
+					check("build", "completed", "success"),
+					check("test", "completed", "success"),
+				]),
+			),
+		});
+		const store2 = fakeStore();
+		await runGate({
+			connection: { state: "blocked", gateBlocked: false },
+			release: { gateState: "blocked" },
+			github: passing,
+			store: store2,
+		});
+		expect(outcomeOf(store2).connection).toBe("keep");
+	});
+
+	it("the gate's own block is refreshed when it blocks again", async () => {
 		const github = fakeGithub({
 			loadCommitChecks: vi.fn(async () =>
 				ok([check("build", "completed", "failure")]),
 			),
 		});
 		const store = fakeStore();
-		await run({
-			connection: { state: "blocked" },
+		await runGate({
+			connection: { state: "blocked", gateBlocked: true },
 			release: { gateState: "blocked" },
 			github,
 			store,
 		});
-		expect(store.blockConnection).not.toHaveBeenCalled();
+		expect(outcomeOf(store).connection).toBe("block");
 	});
 
-	it("a passing re-run deploys, clears the start and lifts the block", async () => {
+	it("a passing re-run deploys, clears the start and lifts the gate's block", async () => {
 		const github = fakeGithub({
 			loadCommitChecks: vi.fn(async () =>
 				ok([
@@ -255,9 +290,10 @@ describe("runDeployGate", () => {
 			),
 		});
 		const store = fakeStore();
-		const decision = await run({
+		const decision = await runGate({
 			connection: {
 				state: "blocked",
+				gateBlocked: true,
 				gateStartedAt: new Date(NOW - 5 * MINUTE),
 				deployedSha: "d".repeat(40),
 			},
@@ -266,15 +302,42 @@ describe("runDeployGate", () => {
 			store,
 		});
 		expect(decision).toEqual({ state: "deploy" });
-		expect(store.clearGateStart).toHaveBeenCalledWith("gc-1");
-		expect(store.unblockConnection).toHaveBeenCalledWith("gc-1", true);
-		expect(store.recordGateOutcome).toHaveBeenCalledWith(
-			"rel-1",
-			expect.objectContaining({ gateState: "passed", gateReason: null }),
-		);
+		expect(outcomeOf(store)).toMatchObject({
+			gateState: "passed",
+			gateReason: null,
+			gateStart: "clear",
+			connection: "unblock",
+			hasRelease: true,
+		});
 	});
 
-	it("a pass does not unblock a connection the gate did not block", async () => {
+	it("a re-run that is only waiting also lifts the gate's block", async () => {
+		const github = fakeGithub({
+			loadCommitChecks: vi.fn(async () =>
+				ok([
+					check("build", "completed", "success"),
+					check("test", "in_progress", null),
+				]),
+			),
+		});
+		const store = fakeStore();
+		await runGate({
+			connection: {
+				state: "blocked",
+				gateBlocked: true,
+				gateStartedAt: new Date(NOW - 5 * MINUTE),
+			},
+			release: { gateState: "blocked" },
+			github,
+			store,
+		});
+		expect(outcomeOf(store)).toMatchObject({
+			gateState: "waiting",
+			connection: "unblock",
+		});
+	});
+
+	it("does nothing and does not deploy when the store says the release changed meanwhile", async () => {
 		const github = fakeGithub({
 			loadCommitChecks: vi.fn(async () =>
 				ok([
@@ -283,14 +346,8 @@ describe("runDeployGate", () => {
 				]),
 			),
 		});
-		const store = fakeStore();
-		await run({
-			connection: { state: "blocked" },
-			release: { gateState: null },
-			github,
-			store,
-		});
-		expect(store.unblockConnection).not.toHaveBeenCalled();
+		const decision = await runGate({ github, store: fakeStore(false) });
+		expect(decision).toMatchObject({ state: "waiting", reason: "Checking again" });
 	});
 
 	it("learns the expected set once and reuses the saved one", async () => {
@@ -300,40 +357,70 @@ describe("runDeployGate", () => {
 			),
 		});
 		const store = fakeStore();
-		await run({
+		await runGate({
 			release: { gateExpected: { source: "last-green", names: ["build"] } },
 			github,
 			store,
 		});
 		expect(github.loadExpectedCheckSet).not.toHaveBeenCalled();
-		const outcome = store.recordGateOutcome.mock.calls[0]?.[1];
-		expect(outcome).not.toHaveProperty("gateExpected");
+		expect(outcomeOf(store)).not.toHaveProperty("gateExpected");
 	});
 
 	it("never waits for the release run or other runs of the release workflow", async () => {
+		const other = run({
+			id: 778,
+			status: "completed",
+			conclusion: "failure",
+			checkSuiteId: 50_778,
+		});
 		const github = fakeGithub({
-			loadWorkflowRuns: vi.fn(async () =>
-				ok<GateWorkflowRun[]>([
-					releaseRun,
-					{
-						...releaseRun,
-						id: 778,
-						status: "completed",
-						conclusion: "failure",
-					},
-				]),
-			),
+			loadWorkflowRuns: vi.fn(async () => ok([releaseRun, other])),
 			loadCommitChecks: vi.fn(async () =>
 				ok([
 					check("build", "completed", "success"),
 					check("test", "completed", "success"),
-					check("publish", "in_progress", null, { runId: 777 }),
-					check("publish", "completed", "failure", { runId: 778 }),
-					check("dokploy/production", "in_progress", null, { runId: null }),
+					check("publish", "in_progress", null, {
+						appSlug: "github-actions",
+						runId: 777,
+					}),
+					check("publish", "completed", "failure", {
+						appSlug: "github-actions",
+						runId: 778,
+					}),
+					check("dokploy/production", "in_progress", null),
 				]),
 			),
 		});
-		expect(await run({ github })).toEqual({ state: "deploy" });
+		expect(await runGate({ github })).toEqual({ state: "deploy" });
+	});
+
+	it("passes where runs must come from: the tracked branch of this repository", async () => {
+		const ci = run({
+			id: 5,
+			name: "CI",
+			path: ".github/workflows/ci.yml",
+			status: "completed",
+			conclusion: "success",
+			checkSuiteId: 50_005,
+		});
+		const fork = { ...ci, id: 6, event: "pull_request", headRepository: "evil/shop" };
+		const github = fakeGithub({
+			loadWorkflowRuns: vi.fn(async () => ok([releaseRun, fork])),
+		});
+		const decision = await runGate({
+			connection: { gateMode: "workflows", gateWorkflows: ["CI"] },
+			github,
+		});
+		expect(decision.state).toBe("waiting");
+		const github2 = fakeGithub({
+			loadWorkflowRuns: vi.fn(async () => ok([releaseRun, ci])),
+		});
+		expect(
+			await runGate({
+				connection: { gateMode: "workflows", gateWorkflows: ["CI"] },
+				github: github2,
+			}),
+		).toEqual({ state: "deploy" });
 	});
 
 	it("skips the check runs of the GitHub App when told its slug", async () => {
@@ -344,13 +431,11 @@ describe("runDeployGate", () => {
 			loadCommitChecks: vi.fn(async () =>
 				ok([
 					check("test", "completed", "success"),
-					check("Deploy", "in_progress", null, {
-						appSlug: "dokploy-community",
-					}),
+					check("Deploy", "in_progress", null, { appSlug: "dokploy-community" }),
 				]),
 			),
 		});
-		expect(await run({ github, appSlug: "dokploy-community" })).toEqual({
+		expect(await runGate({ github, appSlug: "dokploy-community" })).toEqual({
 			state: "deploy",
 		});
 		expect(github.loadExpectedCheckSet).toHaveBeenCalledWith(
@@ -368,15 +453,15 @@ describe("runDeployGate", () => {
 			status: string,
 			conclusion: string | null,
 			id: number,
-		): GateWorkflowRun => ({
-			id,
-			name,
-			path: `.github/workflows/${name.toLowerCase()}.yml`,
-			runAttempt: 1,
-			status,
-			conclusion,
-			startedAt: null,
-		});
+		): GateWorkflowRun =>
+			run({
+				id,
+				name,
+				path: `.github/workflows/${name.toLowerCase()}.yml`,
+				status,
+				conclusion,
+				checkSuiteId: id + 50_000,
+			});
 
 		it("reads workflow runs only and passes when the named workflows pass", async () => {
 			const github = fakeGithub({
@@ -384,7 +469,7 @@ describe("runDeployGate", () => {
 					ok([releaseRun, wf("CI", "completed", "success", 5)]),
 				),
 			});
-			const decision = await run({
+			const decision = await runGate({
 				connection: { gateMode: "workflows", gateWorkflows: ["CI"] },
 				github,
 			});
@@ -396,7 +481,7 @@ describe("runDeployGate", () => {
 		it("a listed workflow with no run waits, then blocks 'Workflow X never ran'", async () => {
 			const github = fakeGithub();
 			const store = fakeStore();
-			const early = await run({
+			const early = await runGate({
 				connection: { gateMode: "workflows", gateWorkflows: ["Security"] },
 				github,
 				store,
@@ -405,8 +490,8 @@ describe("runDeployGate", () => {
 				state: "waiting",
 				pendingNames: ["Security"],
 			});
-			expect(store.markGateStarted).toHaveBeenCalled();
-			const late = await run({
+			expect(outcomeOf(store).gateStart).toBe("mark");
+			const late = await runGate({
 				connection: {
 					gateMode: "workflows",
 					gateWorkflows: ["Security"],
@@ -431,12 +516,12 @@ describe("runDeployGate", () => {
 				})),
 			});
 			const store = fakeStore();
-			const decision = await run({ github, store });
+			const decision = await runGate({ github, store });
 			expect(decision).toMatchObject({
 				state: "waiting",
 				reason: "GitHub could not be read, trying again",
 			});
-			expect(store.markGateStarted).toHaveBeenCalled();
+			expect(outcomeOf(store).gateStart).toBe("mark");
 		});
 
 		it("a refused token blocks at once, with a way out", async () => {
@@ -446,8 +531,7 @@ describe("runDeployGate", () => {
 					failure: { kind: "forbidden" as const, message: "no" },
 				})),
 			});
-			const decision = await run({ github });
-			expect(decision).toMatchObject({
+			expect(await runGate({ github })).toMatchObject({
 				state: "blocked",
 				reason: "GitHub did not let Dokploy read the checks. Reconnect GitHub.",
 			});
@@ -460,31 +544,49 @@ describe("runDeployGate", () => {
 					failure: { kind: "error" as const, status: 502 },
 				})),
 			});
-			const decision = await run({
-				connection: {
-					gateStartedAt: new Date(NOW - 5 * MINUTE),
-					gateTimeoutMinutes: 5,
-				},
-				github,
-			});
-			expect(decision).toMatchObject({
+			expect(
+				await runGate({
+					connection: {
+						gateStartedAt: new Date(NOW - 5 * MINUTE),
+						gateTimeoutMinutes: 5,
+					},
+					github,
+				}),
+			).toMatchObject({
 				state: "blocked",
 				reason: "GitHub could not be read for 5 minutes",
 			});
 		});
 
-		it("a failure to learn the expected set is retried, not guessed", async () => {
+		it("branch protection that cannot be read waits and is not guessed or saved", async () => {
 			const github = fakeGithub({
 				loadExpectedCheckSet: vi.fn(async () => ({
 					kind: "failed" as const,
 					failure: { kind: "error" as const, status: 500 },
+					stage: "protection" as const,
 				})),
 			});
 			const store = fakeStore();
-			const decision = await run({ github, store });
-			expect(decision.state).toBe("waiting");
-			const outcome = store.recordGateOutcome.mock.calls[0]?.[1];
-			expect(outcome).not.toHaveProperty("gateExpected");
+			const decision = await runGate({ github, store });
+			expect(decision).toMatchObject({
+				state: "waiting",
+				reason: "could not read branch protection, retrying",
+			});
+			expect(github.loadCommitChecks).not.toHaveBeenCalled();
+			expect(outcomeOf(store)).not.toHaveProperty("gateExpected");
+		});
+
+		it("history that cannot be read waits with the general reason", async () => {
+			const github = fakeGithub({
+				loadExpectedCheckSet: vi.fn(async () => ({
+					kind: "failed" as const,
+					failure: { kind: "error" as const, status: 500 },
+					stage: "history" as const,
+				})),
+			});
+			expect(await runGate({ github })).toMatchObject({
+				reason: "GitHub could not be read, trying again",
+			});
 		});
 	});
 });

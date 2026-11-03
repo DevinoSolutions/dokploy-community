@@ -61,6 +61,8 @@ export type GhaGateState = (typeof GHA_GATE_STATES)[number];
 export interface GhaGateExpected {
 	source: "required" | "last-green" | "fallback";
 	names: string[];
+	/** Required checks pinned to one GitHub App by branch protection: name to app id. */
+	appIds?: Record<string, number>;
 }
 
 /** Who deployed a gated release anyway, when and why. */
@@ -140,6 +142,8 @@ export const ghaConnection = pgTable(
 		/** How long a check or workflow may take to report before the release is blocked. */
 		gateTimeoutMinutes: integer("gateTimeoutMinutes").notNull().default(60),
 		gateStartedAt: timestamp("gateStartedAt"),
+		/** True while the connection is Blocked by the deploy gate (and not by something else). */
+		gateBlocked: boolean("gateBlocked").notNull().default(false),
 		state: text("state")
 			.$type<GhaConnectionState>()
 			.notNull()
@@ -391,6 +395,12 @@ export const apiGhaUpdate = apiGhaConnectionOne.extend({
 });
 
 export const apiGhaDeployAnyway = apiGhaConnectionOne.extend({
+	releaseId: z
+		.string()
+		.min(1)
+		.describe(
+			"The release to deploy (releaseId from ghaConnection.one). Refused when it is not the newest accepted release.",
+		),
 	reason: z
 		.string()
 		.trim()

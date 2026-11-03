@@ -6,8 +6,8 @@ import {
 	loadRecentCommits,
 	loadRequiredChecks,
 	loadWorkflowRuns,
-	namesFromProtection,
-	namesFromRules,
+	entriesFromProtection,
+	entriesFromRules,
 	releaseWorkflowRunIds,
 } from "@dokploy/server/services/gha-connect/deploy-gate-github";
 import { describe, expect, it } from "vitest";
@@ -38,7 +38,8 @@ const checkRun = (
 	status,
 	conclusion,
 	started_at: "2026-11-03T11:00:00Z",
-	app: { slug: "github-actions" },
+	app: { slug: "github-actions", id: 15368 },
+	check_suite: { id: 9000 + id },
 	details_url: `https://github.com/acme/shop/actions/runs/${1000 + id}/job/${id}`,
 	...extra,
 });
@@ -54,6 +55,10 @@ const runListing = (
 	total_count: runs.length,
 	workflow_runs: runs.map((run) => ({
 		...run,
+		event: "push",
+		head_branch: "main",
+		head_repository: { full_name: "acme/shop" },
+		check_suite_id: run.id + 9000,
 		status: "completed",
 		conclusion: "success",
 		run_attempt: 1,
@@ -61,40 +66,58 @@ const runListing = (
 	})),
 });
 
+const RUN_URL = (runId: number) =>
+	`https://github.com/acme/shop/actions/runs/${runId}/job/1`;
+
 const noStatuses = { total_count: 0, state: "pending", statuses: [] };
 
 describe("required checks of the branch", () => {
-	it("reads branch protection contexts and checks", () => {
+	it("reads branch protection contexts and checks, with the app a check is pinned to", () => {
 		expect(
-			namesFromProtection({
+			entriesFromProtection({
 				protection: {
 					required_status_checks: {
 						contexts: ["build"],
-						checks: [{ context: "build", app_id: 1 }, { context: "lint" }],
+						checks: [
+							{ context: "build", app_id: 15368 },
+							{ context: "lint", app_id: -1 },
+							{ context: "e2e", app_id: null },
+						],
 					},
 				},
 			}),
-		).toEqual(["build", "build", "lint"]);
-		expect(namesFromProtection({ protected: false })).toEqual([]);
-		expect(namesFromProtection(null)).toEqual([]);
+		).toEqual([
+			{ name: "build", appId: 15368 },
+			{ name: "lint", appId: null },
+			{ name: "e2e", appId: null },
+			{ name: "build", appId: null },
+		]);
+		expect(entriesFromProtection({ protected: false })).toEqual([]);
+		expect(entriesFromProtection(null)).toEqual([]);
 	});
 
 	it("reads required_status_checks rules of a ruleset and ignores the others", () => {
 		expect(
-			namesFromRules([
+			entriesFromRules([
 				{ type: "pull_request", parameters: {} },
 				{
 					type: "required_status_checks",
 					parameters: {
-						required_status_checks: [{ context: "ci" }, { context: "e2e" }],
+						required_status_checks: [
+							{ context: "ci", integration_id: 15368 },
+							{ context: "e2e" },
+						],
 					},
 				},
 			]),
-		).toEqual(["ci", "e2e"]);
-		expect(namesFromRules({ message: "no" })).toEqual([]);
+		).toEqual([
+			{ name: "ci", appId: 15368 },
+			{ name: "e2e", appId: null },
+		]);
+		expect(entriesFromRules({ message: "no" })).toEqual([]);
 	});
 
-	it("unions protection and ruleset, deduplicated", async () => {
+	it("unions protection and ruleset, deduplicated, keeping the app a check is pinned to", async () => {
 		const { apiDeps } = deps([
 			[
 				"/rules/branches/main",
@@ -105,7 +128,7 @@ describe("required checks of the branch", () => {
 							parameters: {
 								required_status_checks: [
 									{ context: "e2e" },
-									{ context: "build" },
+									{ context: "build", integration_id: 15368 },
 								],
 							},
 						},
@@ -122,19 +145,66 @@ describe("required checks of the branch", () => {
 			],
 		]);
 		const read = await loadRequiredChecks(apiDeps, TOKEN, REF, "main");
-		expect(read.readable).toBe(true);
-		expect(read.names.sort()).toEqual(["build", "e2e"]);
+		expect(read.kind).toBe("ok");
+		if (read.kind !== "ok") return;
+		expect(read.value.readable).toBe(true);
+		expect(read.value.names.sort()).toEqual(["build", "e2e"]);
+		expect(read.value.appIds).toEqual({ build: 15368 });
 	});
 
-	it("a 403 on both is 'unreadable', not an error", async () => {
+	it("a 403 or 404 on both is 'unreadable', not an error", async () => {
 		const { apiDeps } = deps([
 			["/rules/branches/main", { status: 404 }],
 			["/branches/main", { status: 403 }],
 		]);
 		expect(await loadRequiredChecks(apiDeps, TOKEN, REF, "main")).toEqual({
-			names: [],
-			readable: false,
+			kind: "ok",
+			value: { names: [], appIds: {}, readable: false },
 		});
+	});
+
+	it.each([
+		["a 500", { status: 500 }, "error"],
+		["a 502", { status: 502 }, "error"],
+		["a 401", { status: 401 }, "unauthorized"],
+		[
+			"a rate limit",
+			{
+				status: 403,
+				text: "rate limit exceeded",
+				headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2000" },
+			},
+			"rate-limited",
+		],
+	])("%s on either source is a failure, never 'no required checks'", async (_label, reply, kind) => {
+		for (const failing of ["/branches/main", "/rules/branches/main"]) {
+			const other = failing === "/branches/main" ? "/rules/branches/main" : "/branches/main";
+			const routes: Array<[string, Reply]> =
+				failing === "/rules/branches/main"
+					? [
+							["/rules/branches/main", reply],
+							["/branches/main", { json: {} }],
+						]
+					: [
+							["/rules/branches/main", { json: [] }],
+							["/branches/main", reply],
+						];
+			const { apiDeps } = deps(routes);
+			const read = await loadRequiredChecks(apiDeps, TOKEN, REF, "main");
+			expect(read.kind, `${failing} (other ${other})`).toBe("failed");
+			if (read.kind === "failed") expect(read.failure.kind).toBe(kind);
+		}
+	});
+
+	it("a network error is a failure too", async () => {
+		const apiDeps: ApiDeps = {
+			fetch: async () => {
+				throw new Error("socket hang up");
+			},
+			now: () => 1_000,
+		};
+		const read = await loadRequiredChecks(apiDeps, TOKEN, REF, "main");
+		expect(read).toMatchObject({ kind: "failed" });
 	});
 
 	it("encodes a branch with a slash segment by segment", async () => {
@@ -208,6 +278,8 @@ describe("commit checks", () => {
 		expect(read.value[0]).toMatchObject({
 			runId: 1001,
 			appSlug: "github-actions",
+			appId: 15368,
+			checkSuiteId: 9001,
 			id: 1,
 		});
 	});
@@ -314,6 +386,10 @@ describe("workflow runs of a commit", () => {
 								status: "completed",
 								conclusion: "failure",
 								run_started_at: "2026-11-03T11:00:00Z",
+								event: "pull_request",
+								head_branch: "feature",
+								head_repository: { full_name: "evil/shop" },
+								check_suite_id: 77,
 							},
 						],
 					},
@@ -333,6 +409,10 @@ describe("workflow runs of a commit", () => {
 					status: "completed",
 					conclusion: "failure",
 					startedAt: "2026-11-03T11:00:00Z",
+					event: "pull_request",
+					headBranch: "feature",
+					headRepository: "evil/shop",
+					checkSuiteId: 77,
 				},
 			],
 		});
@@ -350,6 +430,10 @@ describe("workflow runs of a commit", () => {
 						status: "completed",
 						conclusion: "success",
 						startedAt: null,
+						event: "push",
+						headBranch: "main",
+						headRepository: "acme/shop",
+						checkSuiteId: null,
 					},
 					{
 						id: 2,
@@ -359,6 +443,10 @@ describe("workflow runs of a commit", () => {
 						status: "completed",
 						conclusion: "success",
 						startedAt: null,
+						event: "push",
+						headBranch: "main",
+						headRepository: "acme/shop",
+						checkSuiteId: null,
 					},
 				],
 				WORKFLOW,
@@ -404,8 +492,8 @@ describe("the expected check set", () => {
 				`/commits/${PREV}/check-runs`,
 				{
 					json: checkRuns(
-						checkRun(1, "build", "completed", "success"),
-						checkRun(2, "test", "completed", "failure"),
+						checkRun(1, "build", "completed", "success", { details_url: RUN_URL(5001) }),
+						checkRun(2, "test", "completed", "failure", { details_url: RUN_URL(5001) }),
 					),
 				},
 			],
@@ -413,8 +501,8 @@ describe("the expected check set", () => {
 				`/commits/${OLDER}/check-runs`,
 				{
 					json: checkRuns(
-						checkRun(3, "build", "completed", "success"),
-						checkRun(4, "test", "completed", "success"),
+						checkRun(3, "build", "completed", "success", { details_url: RUN_URL(5000) }),
+						checkRun(4, "test", "completed", "success", { details_url: RUN_URL(5000) }),
 						// The release workflow of that commit: its jobs are not part of "all checks".
 						checkRun(5, "publish", "completed", "success", {
 							details_url:
@@ -427,9 +515,23 @@ describe("the expected check set", () => {
 			[`/commits/${OLDER}/status`, { json: noStatuses }],
 			[
 				`/actions/runs?head_sha=${OLDER}`,
-				{ json: runListing({ id: 4242, name: "Dokploy", path: WORKFLOW }) },
+				{
+					json: runListing(
+						{ id: 4242, name: "Dokploy", path: WORKFLOW },
+						{ id: 5000, name: "CI", path: ".github/workflows/ci.yml" },
+					),
+				},
 			],
-			[`/actions/runs?head_sha=${PREV}`, { json: runListing() }],
+			[
+				`/actions/runs?head_sha=${PREV}`,
+				{
+					json: runListing({
+						id: 5001,
+						name: "CI",
+						path: ".github/workflows/ci.yml",
+					}),
+				},
+			],
 		]);
 		const set = await loadExpectedCheckSet(apiDeps, TOKEN, REF, input);
 		expect(set).toEqual({
@@ -516,6 +618,115 @@ describe("the expected check set", () => {
 		]);
 		const set = await loadExpectedCheckSet(apiDeps, TOKEN, REF, input);
 		expect(set).toEqual({
+			kind: "ok",
+			value: { source: "fallback", names: [] },
+		});
+	});
+});
+
+describe("the expected set when branch protection cannot be read", () => {
+	const input = { branch: "main", sha: SHA, workflowPath: WORKFLOW };
+
+	it("a 5xx on protection is a failure at the protection stage, not a fall through to history", async () => {
+		const { apiDeps, calls } = deps([
+			["/rules/branches/main", { json: [] }],
+			["/branches/main", { status: 503 }],
+			["/commits?sha=main", { json: [{ sha: PREV }] }],
+		]);
+		const set = await loadExpectedCheckSet(apiDeps, TOKEN, REF, input);
+		expect(set).toMatchObject({
+			kind: "failed",
+			stage: "protection",
+			failure: { kind: "error", status: 503 },
+		});
+		expect(calls.some((c) => c.url.includes("/commits?sha=main"))).toBe(false);
+	});
+
+	it("keeps the app a required check is pinned to", async () => {
+		const { apiDeps } = deps([
+			["/rules/branches/main", { json: [] }],
+			[
+				"/branches/main",
+				{
+					json: {
+						protection: {
+							required_status_checks: {
+								checks: [{ context: "build", app_id: 15368 }, { context: "lint" }],
+							},
+						},
+					},
+				},
+			],
+		]);
+		expect(await loadExpectedCheckSet(apiDeps, TOKEN, REF, input)).toEqual({
+			kind: "ok",
+			value: {
+				source: "required",
+				names: ["build", "lint"],
+				appIds: { build: 15368 },
+			},
+		});
+	});
+
+	it("an older commit whose workflow runs cannot be read is skipped: the release workflow jobs never enter the set", async () => {
+		const { apiDeps } = deps([
+			["/rules/branches/main", { status: 404 }],
+			["/branches/main", { status: 404 }],
+			["/commits?sha=main", { json: [{ sha: PREV }] }],
+			[
+				`/commits/${PREV}/check-runs`,
+				{
+					json: checkRuns(
+						checkRun(1, "publish", "completed", "success", { details_url: RUN_URL(4242) }),
+					),
+				},
+			],
+			[`/commits/${PREV}/status`, { json: noStatuses }],
+			[`/actions/runs?head_sha=${PREV}`, { status: 404 }],
+		]);
+		expect(await loadExpectedCheckSet(apiDeps, TOKEN, REF, input)).toEqual({
+			kind: "ok",
+			value: { source: "fallback", names: [] },
+		});
+	});
+
+	it("a check run of a pull request from a fork on an older commit is not part of the last green set", async () => {
+		const { apiDeps } = deps([
+			["/rules/branches/main", { status: 404 }],
+			["/branches/main", { status: 404 }],
+			["/commits?sha=main", { json: [{ sha: PREV }] }],
+			[
+				`/commits/${PREV}/check-runs`,
+				{
+					json: checkRuns(
+						checkRun(1, "build", "completed", "success", { details_url: RUN_URL(6000) }),
+					),
+				},
+			],
+			[`/commits/${PREV}/status`, { json: noStatuses }],
+			[
+				`/actions/runs?head_sha=${PREV}`,
+				{
+					json: {
+						total_count: 1,
+						workflow_runs: [
+							{
+								id: 6000,
+								name: "CI",
+								path: ".github/workflows/ci.yml",
+								event: "pull_request",
+								head_branch: "feature",
+								head_repository: { full_name: "evil/shop" },
+								status: "completed",
+								conclusion: "success",
+								run_attempt: 1,
+							},
+						],
+					},
+				},
+			],
+		]);
+		expect(await loadExpectedCheckSet(apiDeps, TOKEN, REF, input)).toEqual({
 			kind: "ok",
 			value: { source: "fallback", names: [] },
 		});
