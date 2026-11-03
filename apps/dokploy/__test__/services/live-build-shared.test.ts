@@ -172,13 +172,22 @@ describe("describeLiveGithubBuild", () => {
 		).toBe(
 			"GitHub Actions build finished · deploy waiting in the Dokploy queue",
 		);
-		// A deploy that took the row over is a deploy row: nothing more to say.
+		// A deploy that took the row over is a deploy row: Dokploy pulls the image and starts it.
 		expect(
 			describeLiveGithubBuild({
 				...live,
 				buildRunStatus: "completed",
 				externalBuildOnly: false,
 				deployQueuedAt: "2026-11-02T10:30:00.000Z",
+			}),
+		).toBe("Deploying · Dokploy is pulling the image and starting it");
+		// Once that deploy ended, the row says nothing live.
+		expect(
+			describeLiveGithubBuild({
+				...live,
+				status: "done",
+				buildRunStatus: "completed",
+				externalBuildOnly: false,
 			}),
 		).toBeNull();
 	});

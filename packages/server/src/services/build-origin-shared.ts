@@ -137,7 +137,7 @@ const WAITING_JOB_SUFFIX = " · waiting to start";
  * "Building on GitHub Actions" is true even before the poller has read the first step. The poller's step label says
  * more: "build · Build image (3/7)" while a job runs; "<job> · waiting to start" when no job runs and one waits
  * (the deploy job, once the build is done, or any job waiting for a runner); and the unreadable marker when Dokploy
- * has no access to the run's steps. `now` (epoch ms) adds how long the run builds once that is long.
+ * has no access to the run's steps. Once the workflow's deploy call took the row over, it is "Deploying". `now` (epoch ms) adds how long the run builds once that is long.
  */
 export const describeLiveGithubBuild = (
 	row: {
@@ -169,6 +169,16 @@ export const describeLiveGithubBuild = (
 		row.buildRunStatus === "completed"
 	) {
 		return "GitHub Actions run finished · waiting for the deploy";
+	}
+	// The deploy call took the row over (`externalBuildOnly` false, the run marked `completed`): Dokploy pulls the
+	// image and starts it now.
+	if (
+		row.status === "running" &&
+		row.buildOrigin === "github-actions" &&
+		row.buildRunStatus === "completed" &&
+		row.externalBuildOnly === false
+	) {
+		return "Deploying · Dokploy is pulling the image and starting it";
 	}
 	if (!isLiveGithubBuild(row)) return null;
 	const step = row.buildRunStep?.trim();
@@ -606,7 +616,13 @@ export const describeGithubActionsRunState = (
 	now?: number,
 ): { label: string; tone: GithubActionsRunTone; detail: string | null } => {
 	const detail = describeLiveGithubBuild(row, now);
-	if (detail) return { label: "In progress", tone: "running", detail };
+	if (detail) {
+		return {
+			label: detail.startsWith("Deploying") ? "Deploying" : "In progress",
+			tone: "running",
+			detail,
+		};
+	}
 	switch (row.status) {
 		case "done":
 			return row.externalBuildOnly

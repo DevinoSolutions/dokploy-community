@@ -857,6 +857,17 @@ describe("describeGithubActionsRunState", () => {
 		).toMatchObject({ label: "Build finished", tone: "success" });
 	});
 
+	test("a row the deploy call took over is Deploying", () => {
+		expect(
+			describeGithubActionsRunState({
+				...base,
+				status: "running",
+				buildRunStatus: "completed",
+				externalBuildOnly: false,
+			}),
+		).toMatchObject({ label: "Deploying", tone: "running" });
+	});
+
 	test("a row that still waits for its run carries the live step", () => {
 		expect(
 			describeGithubActionsRunState({
