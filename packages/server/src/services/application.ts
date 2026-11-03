@@ -43,6 +43,10 @@ import { parseDeployHooks, runDeployHook } from "../utils/docker/hooks";
 import { removeStagedFiles } from "../utils/docker/staging";
 import { encodeBase64, waitForSwarmServiceStable } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
+import {
+	inferBuildOriginFromSource,
+	resolveDeploymentBuildOrigin,
+} from "./build-origin-shared";
 // Fork module: enforced remote builds. See services/build-policy/README.md.
 import {
 	type BuildPolicyPlan,
@@ -59,6 +63,7 @@ import {
 	getDeploymentErrorMessage,
 	updateDeployment,
 	updateDeploymentStatus,
+	writeDeploymentErrorLog,
 } from "./deployment";
 import {
 	appendLogLine,
@@ -66,6 +71,7 @@ import {
 	CANCELLED_THEN_FAILED_NOTE,
 	CANCELLED_TOO_LATE_NOTE,
 	DeploymentCancelledError,
+	getDeploymentWallLimitMinutes,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
 	isDeploymentStillRunning,
@@ -81,6 +87,7 @@ import {
 } from "./deployment-heartbeat";
 import { type Domain, getDomainHost } from "./domain";
 import { getIssueComment } from "./github";
+import { claimLiveGithubBuild } from "./live-build-claim";
 import { generateApplyPatchesCommand } from "./patch";
 import {
 	ensurePreviewComment,
@@ -268,16 +275,25 @@ const withBuildHeartbeat = <T>(
 	withDeployLogHeartbeat(target, APPLICATION_BUILD_STEP_LABEL, work, {
 		startsAfterLogLine: getBuildStartLine(deploymentId),
 		isRunning: () => isDeploymentStillRunning(deploymentId),
+		wallLimitMinutes: () => getDeploymentWallLimitMinutes(deploymentId),
 	});
 
 export const deployApplication = async ({
 	applicationId,
 	titleLog = "Manual deployment",
 	descriptionLog = "",
+	buildOrigin,
+	buildRunUrl,
+	deploymentId,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const application = await findApplicationById(applicationId);
 	// >>> build-policy hook 1/4: enforced remote builds. Runs before
@@ -308,15 +324,40 @@ export const deployApplication = async ({
 	};
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
-	const deployment = await createDeployment(
-		{
-			applicationId: applicationId,
-			title: titleLog,
-			description: descriptionLog,
-		},
-		// build-policy hook: create the log on the host that will build.
-		{ buildServerId: buildPolicy.buildServerId },
-	);
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
+					kind: "application",
+					serviceId: applicationId,
+					logHost: serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeployment(
+			{
+				applicationId: applicationId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			// build-policy hook: create the log on the host that will build.
+			{
+				buildServerId: buildPolicy.buildServerId,
+				...resolveDeploymentBuildOrigin({
+					requestedOrigin: buildOrigin,
+					requestedRunUrl: buildRunUrl,
+					title: titleLog,
+					inferred: inferBuildOriginFromSource({
+						kind: "application",
+						sourceType: application.sourceType,
+					}),
+				}),
+			},
+		));
 
 	const stagedBuildFiles: string[] = [];
 	try {
@@ -487,29 +528,16 @@ export const deployApplication = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let cancelNote = "";
 		if (
 			deployment.buildServerId &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");
@@ -518,6 +546,7 @@ export const deployApplication = async ({
 			logPath: deployment.logPath,
 			serverId,
 			fallback: "Error building, check the logs for details.",
+			error,
 		});
 
 		await sendBuildErrorNotifications({
@@ -554,10 +583,18 @@ export const rebuildApplication = async ({
 	applicationId,
 	titleLog = "Rebuild deployment",
 	descriptionLog = "",
+	buildOrigin,
+	buildRunUrl,
+	deploymentId,
 }: {
 	applicationId: string;
 	titleLog: string;
 	descriptionLog: string;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const application = await findApplicationById(applicationId);
 	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
@@ -580,15 +617,40 @@ export const rebuildApplication = async ({
 	// <<< build-policy hook 1/4
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 
-	const deployment = await createDeployment(
-		{
-			applicationId: applicationId,
-			title: titleLog,
-			description: descriptionLog,
-		},
-		// build-policy hook: create the log on the host that will build.
-		{ buildServerId: buildPolicy.buildServerId },
-	);
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
+					kind: "application",
+					serviceId: applicationId,
+					logHost: serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeployment(
+			{
+				applicationId: applicationId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			// build-policy hook: create the log on the host that will build.
+			{
+				buildServerId: buildPolicy.buildServerId,
+				...resolveDeploymentBuildOrigin({
+					requestedOrigin: buildOrigin,
+					requestedRunUrl: buildRunUrl,
+					title: titleLog,
+					inferred: inferBuildOriginFromSource({
+						kind: "application",
+						sourceType: application.sourceType,
+					}),
+				}),
+			},
+		));
 
 	const stagedBuildFiles: string[] = [];
 	try {
@@ -726,29 +788,16 @@ export const rebuildApplication = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let cancelNote = "";
 		if (
 			deployment.buildServerId &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			cancelNote = `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await writeDeploymentErrorLog(deployment, serverId, error, cancelNote);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		await updateApplicationStatus(applicationId, "error");
@@ -1356,23 +1405,9 @@ export const rebuildPreviewApplication = async ({
 		});
 	} catch (error) {
 		void removeStagedFiles(stagedBuildServerId, stagedBuildFiles);
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
 		// The log lives where the deployment was built; the row records it.
 		const serverId = deployment.buildServerId || deployment.serverId;
-		if (serverId) {
-			await execAsyncRemote(serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		await writeDeploymentErrorLog(deployment, serverId, error);
 
 		// Never let a failing status comment hide the actual build error.
 		if (!referenceRefusal) {

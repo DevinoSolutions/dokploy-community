@@ -114,6 +114,9 @@ const BACKUP_ROUTERS = new Set([
 /** `router.procedure` → scope, checked before every pattern. Keep small. */
 const OVERRIDES: Record<string, DokployMcpScope> = {
 	"deployment.removeDeployment": "dokploy:deploy",
+	// A GitHub Actions workflow opens and ends the deployment of its own build; gated by deployment:create like deploy.
+	"deployment.registerExternalBuild": "dokploy:deploy",
+	"deployment.finishExternalBuild": "dokploy:deploy",
 	"deployment.killProcess": "dokploy:deploy",
 	// Moves a waiting deploy ahead of the queue; gated by deployment:priority.
 	"deployment.prioritizeQueued": "dokploy:deploy",

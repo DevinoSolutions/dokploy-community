@@ -1,7 +1,13 @@
+import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
 import { formatDistanceToNow } from "date-fns";
 import { ArrowRight, Rocket, Server } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
+import {
+	DokployDeploymentMark,
+	GithubActionsDeploymentMark,
+	LiveGithubBuildStatus,
+} from "@/components/shared/build-origin-badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api } from "@/utils/api";
@@ -43,6 +49,10 @@ function getServiceInfo(d: any) {
 			environment: app.environment.name as string,
 			projectName: app.environment.project.name as string,
 			serverName,
+			service: {
+				type: "application" as const,
+				id: app.applicationId as string,
+			},
 			href: `/dashboard/project/${app.environment.project.projectId}/environment/${app.environment.environmentId}/services/application/${app.applicationId}`,
 		};
 	}
@@ -52,6 +62,7 @@ function getServiceInfo(d: any) {
 			environment: comp.environment.name as string,
 			projectName: comp.environment.project.name as string,
 			serverName,
+			service: { type: "compose" as const, id: comp.composeId as string },
 			href: `/dashboard/project/${comp.environment.project.projectId}/environment/${comp.environment.environmentId}/services/compose/${comp.composeId}`,
 		};
 	}
@@ -135,7 +146,9 @@ export const ShowHome = () => {
 		undefined,
 		{
 			enabled: canReadDeployments,
-			refetchInterval: 10000,
+			// Faster while something runs, so a live GitHub Actions step moves along.
+			refetchInterval: (query) =>
+				query.state.data?.some((d) => d.status === "running") ? 5000 : 10000,
 		},
 	);
 
@@ -282,10 +295,13 @@ export const ShowHome = () => {
 									const status = (d.status ?? "idle") as DeploymentStatus;
 									const commitMeta = getDeploymentCommitMeta(d);
 									return (
-										<li key={d.deploymentId}>
+										<li
+											key={d.deploymentId}
+											className="flex items-center hover:bg-muted/40 transition-colors"
+										>
 											<Link
 												href={info.href}
-												className="flex items-center gap-4 px-5 py-4 hover:bg-muted/40 transition-colors"
+												className="flex min-w-0 flex-1 items-center gap-4 py-4 pl-5 pr-3"
 											>
 												<span
 													className={`size-2 rounded-full shrink-0 ${statusDotClass[status] ?? statusDotClass.idle}`}
@@ -298,6 +314,7 @@ export const ShowHome = () => {
 															.filter(Boolean)
 															.join(" · ")}
 													</span>
+													<LiveGithubBuildStatus row={d} />
 												</div>
 												<span className="text-xs text-muted-foreground w-36 hidden lg:flex items-center justify-end gap-1.5 truncate">
 													<Server className="size-3 shrink-0" />
@@ -315,6 +332,16 @@ export const ShowHome = () => {
 													logs →
 												</span>
 											</Link>
+											<span className="flex shrink-0 items-center pr-5 text-xs">
+												{isGithubActionsDeployment(d) ? (
+													<GithubActionsDeploymentMark
+														service={info.service}
+														deployment={d}
+													/>
+												) : (
+													<DokployDeploymentMark />
+												)}
+											</span>
 										</li>
 									);
 								})}

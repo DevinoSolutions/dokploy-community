@@ -20,16 +20,19 @@ import {
 	APP_NAME_REGEX,
 	isPlainAppName,
 } from "@dokploy/server/db/schema/utils";
+import { encodeBase64 } from "@dokploy/server/utils/docker/utils";
 import { removeDirectoryIfExistsContent } from "@dokploy/server/utils/filesystem/directory";
 import {
+	ExecError,
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
 import { skipWriteOfReleasedJob } from "@dokploy/server/utils/process/job-context";
+import { redactSecrets } from "@dokploy/server/utils/process/redactSecrets";
 import { resolveVolumeBackupHost } from "@dokploy/server/utils/volume-backups/binding";
 import { TRPCError } from "@trpc/server";
 import { format } from "date-fns";
-import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
 import {
@@ -38,6 +41,11 @@ import {
 	updateApplicationStatus,
 } from "./application";
 import { findBackupById } from "./backup";
+import {
+	type BuildOrigin,
+	isBuildOrigin,
+	normalizeBuildRunUrl,
+} from "./build-origin-shared";
 import { type Compose, findComposeById, updateCompose } from "./compose";
 import { resolveDeploymentLogHost } from "./deployment-log-host";
 import {
@@ -73,12 +81,24 @@ export const getDeploymentErrorMessage = async ({
 	serverId,
 	fallback,
 	maxLines = 50,
+	error,
 }: {
 	logPath: string;
 	serverId: string | null;
 	fallback: string;
 	maxLines?: number;
+	/** The failure being reported; lets an SSH connection error speak for itself. */
+	error?: unknown;
 }): Promise<string> => {
+	// No exit code: the SSH connection failed, so the host can't serve the log.
+	if (
+		error instanceof ExecError &&
+		error.serverId &&
+		error.exitCode === undefined
+	) {
+		return error.message;
+	}
+
 	try {
 		if (!logPath || logPath === ".") return fallback;
 
@@ -178,6 +198,20 @@ export const findDeploymentByApplicationId = async (applicationId: string) => {
 	return deployment;
 };
 
+/** The two columns for an insert; a value that is not a build origin is not stored. */
+const buildOriginColumns = (
+	options?: { buildOrigin?: string | null; buildRunUrl?: string | null } | null,
+) =>
+	isBuildOrigin(options?.buildOrigin)
+		? {
+				buildOrigin: options.buildOrigin,
+				buildRunUrl:
+					options.buildOrigin === "github-actions"
+						? normalizeBuildRunUrl(options.buildRunUrl)
+						: null,
+			}
+		: {};
+
 export const createDeployment = async (
 	deployment: Omit<
 		z.infer<typeof apiCreateDeployment>,
@@ -187,10 +221,16 @@ export const createDeployment = async (
 	// has to be created on THAT host, because that is where the build script
 	// appends to it. Omitted everywhere else, so upstream behaviour is unchanged.
 	// See packages/server/src/services/build-policy/README.md
-	options?: { buildServerId?: string | null },
+	options?: {
+		buildServerId?: string | null;
+		/** Where the image was built (T-12149); see build-origin-shared.ts. Null/omitted = not recorded. */
+		buildOrigin?: BuildOrigin | null;
+		buildRunUrl?: string | null;
+	},
 ) => {
 	const application = await findApplicationById(deployment.applicationId);
 	await removeLastTenDeployments(deployment.applicationId, "application");
+	const origin = buildOriginColumns(options);
 	try {
 		const buildServerId = options?.buildServerId ?? application.buildServerId;
 		const serverId = buildServerId || application.serverId;
@@ -228,6 +268,7 @@ export const createDeployment = async (
 				description: deployment.description || "",
 				startedAt: new Date().toISOString(),
 				...(buildServerId && { buildServerId }),
+				...origin,
 			})
 			.returning();
 		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
@@ -250,6 +291,7 @@ export const createDeployment = async (
 				errorMessage: `An error have occurred: ${error instanceof Error ? error.message : error}`,
 				startedAt: new Date().toISOString(),
 				finishedAt: new Date().toISOString(),
+				...origin,
 			})
 			.returning();
 		await updateApplicationStatus(application.applicationId, "error");
@@ -360,9 +402,12 @@ export const createDeploymentCompose = async (
 		z.infer<typeof apiCreateDeploymentCompose>,
 		"deploymentId" | "createdAt" | "status" | "logPath"
 	>,
+	// Where the image was built (T-12149); see build-origin-shared.ts.
+	options?: { buildOrigin?: BuildOrigin | null; buildRunUrl?: string | null },
 ) => {
 	const compose = await findComposeById(deployment.composeId);
 	await removeLastTenDeployments(deployment.composeId, "compose");
+	const origin = buildOriginColumns(options);
 	try {
 		const { LOGS_PATH } = paths(!!compose.serverId);
 		const formattedDateTime = format(new Date(), "yyyy-MM-dd:HH:mm:ss");
@@ -395,6 +440,7 @@ echo "Initializing deployment\n" >> ${logFilePath};
 				status: "running",
 				logPath: logFilePath,
 				startedAt: new Date().toISOString(),
+				...origin,
 			})
 			.returning();
 		if (deploymentCreate.length === 0 || !deploymentCreate[0]) {
@@ -417,6 +463,7 @@ echo "Initializing deployment\n" >> ${logFilePath};
 				errorMessage: `An error have occurred: ${error instanceof Error ? error.message : error}`,
 				startedAt: new Date().toISOString(),
 				finishedAt: new Date().toISOString(),
+				...origin,
 			})
 			.returning();
 		await updateCompose(compose.composeId, {
@@ -788,7 +835,7 @@ const logHostForRemoval = async (row: LogHostRow) => {
 // must not fail (or block) the deployment that triggered the cleanup.
 // A compose also keeps its latest row that recorded a rebuild pin (T-7960),
 // however old: rows without a record must not push it out of the window.
-const removeLastTenDeployments = async (
+export const removeLastTenDeployments = async (
 	id: string,
 	type:
 		| "application"
@@ -1118,6 +1165,76 @@ export const updateDeploymentStatus = async (
 		.returning();
 
 	return application;
+};
+
+/**
+ * Appends the failure to the deployment log on the host that holds it. When
+ * that host cannot be reached (a server that died mid-build), the write fails
+ * and the reason is stored on the deployment row instead, so the caller can
+ * still mark the deployment `error` and never leaves it `running`.
+ * `extraCommand` is shell run between the error text and the closing line.
+ */
+export const writeDeploymentErrorLog = async (
+	deployment: Pick<Deployment, "deploymentId" | "logPath">,
+	serverId: string | null | undefined,
+	error: unknown,
+	extraCommand = "",
+) => {
+	const message = error instanceof Error ? error.message : String(error);
+	let command = "";
+	// Only log details for non-ExecError errors
+	if (!(error instanceof ExecError)) {
+		command += `echo "${encodeBase64(message)}" | base64 -d >> "${deployment.logPath}";`;
+	}
+
+	command += extraCommand;
+	command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
+	try {
+		if (serverId) {
+			await execAsyncRemote(serverId, command);
+		} else {
+			await execAsync(command);
+		}
+	} catch (logError) {
+		console.error("Failed to write the deployment error log", logError);
+		await recordUnwrittenErrorLog(deployment.deploymentId, message);
+	}
+};
+
+/**
+ * Keeps the reason on the deployment row when the log could not be written.
+ * Never throws (it must not mask the deploy error the caller rethrows), leaves
+ * a job the watchdog released alone, and does not replace a message that is
+ * already there (a cancel warning or the watchdog's).
+ */
+const recordUnwrittenErrorLog = async (
+	deploymentId: string,
+	message: string,
+) => {
+	if (
+		skipWriteOfReleasedJob(
+			`the error message of deployment ${deploymentId}`,
+			deploymentId,
+		)
+	) {
+		return;
+	}
+	try {
+		await db
+			.update(deployments)
+			.set({ errorMessage: redactSecrets(message) })
+			.where(
+				and(
+					eq(deployments.deploymentId, deploymentId),
+					isNull(deployments.errorMessage),
+				),
+			);
+	} catch (writeError) {
+		console.error(
+			"Could not record the error log failure on the deployment",
+			writeError,
+		);
+	}
 };
 
 export const createServerDeployment = async (

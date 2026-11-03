@@ -88,6 +88,7 @@ vi.mock("@dokploy/server/services/deployment", () => ({
 	// real deploy failure is reported as "No getDeploymentErrorMessage export is
 	// defined on the mock" and the actual build error is lost.
 	getDeploymentErrorMessage: vi.fn().mockResolvedValue("Error building"),
+	writeDeploymentErrorLog: vi.fn(),
 }));
 
 vi.mock("@dokploy/server/utils/notifications/build-success", () => ({

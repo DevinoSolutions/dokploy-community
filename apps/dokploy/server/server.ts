@@ -183,6 +183,10 @@ void app
 					"./queues/deployment-control"
 				);
 				startDeploymentWatchdog();
+				// Follows the GitHub Actions runs behind the live deployment rows
+				// (deployment.registerExternalBuild): one loop, one cheap query when none.
+				const { startGithubRunPoller } = await import("@dokploy/server");
+				startGithubRunPoller();
 				// Services that follow GitHub Deployments (T-12166): one poll every
 				// 20s, started after the restore so a restart never replays a deploy
 				// it already queued.

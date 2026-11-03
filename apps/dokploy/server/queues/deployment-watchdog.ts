@@ -103,6 +103,7 @@ export interface WatchdogDeps {
 		Array<{
 			status: string | null;
 			createdAt: string;
+			deployStartedAt?: string | null;
 			finishedAt: string | null;
 		}>
 	>;
@@ -197,14 +198,23 @@ export const jobsOfService = (
  * same service is a leftover and belongs to no job.
  */
 export const findJobOf = (
-	row: DeployRow & { createdAt?: string },
+	row: DeployRow & { createdAt?: string; deployStartedAt?: string | null },
 	jobs: InMemoryJob[],
 ): InMemoryJob | null =>
 	jobsOfService(row, jobs).find((job) => {
 		if (job.processedOn === undefined) return true;
-		const createdAt = timeOf(row.createdAt);
+		// A row registered while GitHub built is older than the job that took it over: match on the takeover.
+		const createdAt = timeOf(row.deployStartedAt) ?? timeOf(row.createdAt);
 		return createdAt === null || createdAt >= job.processedOn - MINUTE_MS;
 	}) ?? null;
+
+/** When the deploy of this row began on Dokploy: the takeover of a registered row, else its own start. */
+const deployStartOf = (row: {
+	startedAt?: string | null;
+	deployStartedAt?: string | null;
+	createdAt?: string;
+}) =>
+	timeOf(row.deployStartedAt) ?? timeOf(row.startedAt) ?? timeOf(row.createdAt);
 
 export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 	const releaseGraceMs = deps.releaseGraceMs ?? STOP_RELEASE_GRACE_MS;
@@ -248,9 +258,11 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 	) => {
 		const { row, trigger } = stopped;
 		const reason = watchdogTriggerLine(trigger);
+		// The wall line is two sentences and ends in a full stop already.
+		const reasonText = reason.replace(/\.$/, "");
 		const outcome = await deps.markFailed(
 			row.deploymentId,
-			`${reason}. The deployment was stopped and marked failed by the watchdog.`,
+			`${reasonText}. The deployment was stopped and marked failed by the watchdog.`,
 			{ claimedCancel: stopped.stop.claimedCancelled },
 		);
 		if (outcome === "unchanged") {
@@ -284,10 +296,17 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 		const flipped = outcome === "flipped";
 		// A deploy flow that failed on its own after the stop already told people.
 		if (flipped) {
-			await deps.notify(row, stopped.host, context, `${reason}; marked failed`);
+			await deps.notify(
+				row,
+				stopped.host,
+				context,
+				`${reasonText}; marked failed`,
+			);
 		}
 		await audit(row, context, {
 			reason: trigger.kind,
+			// The same words as the log: which limit fired, and by how much.
+			message: reason,
 			thresholdMinutes: trigger.minutes,
 			observedMinutes: trigger.observedMinutes,
 			stop: stopped.stop.method,
@@ -324,7 +343,7 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 		if ((await deps.readStatus(row.deploymentId)) !== "running") return;
 		let confirmed = trigger;
 		if (trigger.kind === "idle") {
-			const startedAt = timeOf(row.startedAt) ?? timeOf(row.createdAt);
+			const startedAt = deployStartOf(row);
 			const again = evaluateWatchdog(config, {
 				runningMs: startedAt === null ? 0 : deps.now() - startedAt,
 				idleMs: await deps.readLogIdleMs(row),
@@ -519,7 +538,9 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 			const startedAt = job.processedOn;
 			const latest = await deps.latestDeploys(service);
 			const mine = latest.find(
-				(row) => (timeOf(row.createdAt) ?? 0) >= startedAt - MINUTE_MS,
+				(row) =>
+					(timeOf(row.deployStartedAt) ?? timeOf(row.createdAt) ?? 0) >=
+					startedAt - MINUTE_MS,
 			);
 			const endedAt = timeOf(mine?.finishedAt);
 			const hung = mine
@@ -597,7 +618,7 @@ export const createDeploymentWatchdog = (deps: WatchdogDeps) => {
 					if (!findJobOf(row, jobs) && jobsOfService(row, jobs).length > 0) {
 						return;
 					}
-					const startedAt = timeOf(row.startedAt) ?? timeOf(row.createdAt);
+					const startedAt = deployStartOf(row);
 					const runningMs = startedAt === null ? 0 : now - startedAt;
 					// The wall limit needs no host call; the log is only read when the
 					// deployment is not already past it.

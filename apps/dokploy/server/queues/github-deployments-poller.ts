@@ -15,12 +15,12 @@ import {
 	decideApplicationImage,
 	deleteGithubWatch,
 	describeError,
+	GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS,
 	type GithubDeployment,
 	type InflightState,
 	listEnabledGithubWatches,
 	loadConnectionToken,
 	markGithubConnectionRevoked,
-	POLL_INTERVAL_MS,
 	type PollDeps,
 	patchGithubWatch,
 	pinComposeImage,
@@ -426,7 +426,7 @@ export const runGithubDeploymentsTick = async (
  */
 export const startGithubDeploymentsPoller = (
 	deps: PollDeps = createGithubDeploymentsPollDeps(),
-	intervalMs: number = POLL_INTERVAL_MS,
+	intervalMs: number = GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS,
 ): (() => void) => {
 	if (IS_CLOUD) return () => {};
 	let running = false;

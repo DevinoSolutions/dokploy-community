@@ -174,6 +174,8 @@ vi.mock("@dokploy/server", () => {
 		"resyncNetwork",
 	];
 	for (const name of names) mocks.services[name] = vi.fn(async () => []);
+	// The prune guard: no build runs on the host.
+	mocks.services.countActiveDeploymentsOnHost = vi.fn(async () => 0);
 	mocks.services.getRemoteDocker = vi.fn(async () => ({
 		listNodes: async () => [],
 		swarmInspect: async () => ({
@@ -368,7 +370,9 @@ describe("dockerDiskUsage routes", () => {
 		await disk(role).getBuildCache({});
 		await disk(role).pruneBuildCache({});
 		expect(mocks.services.getBuildCache).toHaveBeenCalledTimes(1);
-		expect(mocks.services.cleanupBuilders).toHaveBeenCalledWith(undefined);
+		expect(mocks.services.cleanupBuilders).toHaveBeenCalledWith(undefined, {
+			all: false,
+		});
 	});
 
 	it("refuses a server the caller cannot reach, member or owner", async () => {

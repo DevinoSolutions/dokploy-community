@@ -19,6 +19,10 @@ vi.mock("@dokploy/server/utils/process/execAsync", () => ({
 }));
 
 import {
+	BUILD_START_MARKER_PATTERN,
+	renderBuildStartMarker,
+} from "@dokploy/server/services/build-origin-shared";
+import {
 	appendDeployLogLine,
 	DEPLOY_HEARTBEAT_INTERVAL_MS,
 	DEPLOY_HEARTBEAT_SETTLE_MS,
@@ -76,6 +80,54 @@ describe("withDeployHeartbeat", () => {
 		await vi.advanceTimersByTimeAsync(10 * DEPLOY_HEARTBEAT_INTERVAL_MS);
 		expect(write).toHaveBeenCalledTimes(3);
 		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("names the wall limit in every mark, and reads it once for the whole step", async () => {
+		const write = vi.fn();
+		const wallLimitMinutes = vi.fn().mockResolvedValue(180);
+		const step = withDeployHeartbeat(
+			() => new Promise<void>((resolve) => setTimeout(resolve, 20 * MIN)),
+			{ label: "The push", write, wallLimitMinutes },
+		);
+
+		await vi.advanceTimersByTimeAsync(15 * MIN);
+		expect(write).toHaveBeenCalledTimes(3);
+		expect(write.mock.calls[0]?.[0]).toBe(
+			"⏳ The push is still running (5 min so far, no output yet; wall limit 180 min)",
+		);
+		expect(write.mock.calls[2]?.[0]).toBe(
+			"⏳ The push is still running (15 min so far, no output yet; wall limit 180 min)",
+		);
+		// Not a lookup per tick.
+		expect(wallLimitMinutes).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(5 * MIN);
+		await step;
+	});
+
+	it("keeps the plain mark when no wall limit applies or it cannot be read", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const plain = "⏳ The push is still running (5 min so far, no output yet)";
+		for (const wallLimitMinutes of [
+			() => null,
+			async () => null,
+			async () => {
+				throw new Error("settings unreachable");
+			},
+		]) {
+			const write = vi.fn();
+			const step = withDeployHeartbeat(
+				() => new Promise<void>((resolve) => setTimeout(resolve, 6 * MIN)),
+				{ label: "The push", write, wallLimitMinutes },
+			);
+
+			await vi.advanceTimersByTimeAsync(6 * MIN);
+			await step;
+			expect(write).toHaveBeenCalledTimes(1);
+			expect(write).toHaveBeenCalledWith(plain);
+		}
+		expect(getDeployHeartbeatLine("The push", 5 * MIN)).toBe(plain);
+		expect(getDeployHeartbeatLine("The push", 5 * MIN, null)).toBe(plain);
 	});
 
 	it("hands back the failure of the step and stops marking", async () => {
@@ -347,6 +399,20 @@ describe("deployLogHasLine", () => {
 	it("names the deployment, so another deployment's line is a different line", () => {
 		expect(getBuildStartLine("dep-1")).toContain("dep-1");
 		expect(getBuildStartLine("dep-1")).not.toBe(getBuildStartLine("dep-2"));
+	});
+
+	// T-12502: the log dialog shows the stored line without the internal id, so it has to recognise it.
+	it("is a line the log dialog recognises and renders without the deployment id", () => {
+		for (const id of [
+			"dep-1",
+			"k3Xz_9-AbCdEfGhIjKlM",
+			"2f6c1e0a-77aa-4d1b-9c55-0a1b2c3d4e5f",
+		]) {
+			const line = getBuildStartLine(id);
+			expect(BUILD_START_MARKER_PATTERN.test(line)).toBe(true);
+			expect(renderBuildStartMarker(line, false)).not.toContain(id);
+			expect(renderBuildStartMarker(line, true)).not.toContain(id);
+		}
 	});
 });
 

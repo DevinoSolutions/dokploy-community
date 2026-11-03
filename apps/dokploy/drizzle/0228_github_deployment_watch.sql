@@ -2,7 +2,7 @@
 -- device flow (token encrypted at rest by the application, like other provider secrets), and the services that
 -- follow a repository's GitHub Deployments. A table of its own: the application table sits at the Drizzle /
 -- Postgres 100-argument cap (error 54023), so nothing is added to it. Additive only; every statement is guarded
--- so a re-run is a no-op. Numbered after 0225 (PR #576, T-12149): renumber if the order changes.
+-- so a re-run is a no-op. Numbered after 0227 (canary); renumber if the order changes.
 CREATE TABLE IF NOT EXISTS "github_deployment_connection" (
 	"connectionId" text PRIMARY KEY NOT NULL,
 	"organizationId" text NOT NULL,

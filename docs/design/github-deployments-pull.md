@@ -128,10 +128,10 @@ error 54023).
 `github_deployment_connection` holds the encrypted token, the login, the scopes
 and a `status` (`active`, or `revoked` after GitHub answers 401).
 
-Migration `0226_github_deployment_watch` is additive and idempotent
+Migration `0228_github_deployment_watch` is additive and idempotent
 (`CREATE TABLE IF NOT EXISTS`, constraints in `DO $$ ... EXCEPTION` blocks), so it
-passes `__test__/db/migration-idempotency.test.ts`. PR #576 (T-12149) already
-uses 0225; if the merge order differs, renumber (the file name, the journal entry
+passes `__test__/db/migration-idempotency.test.ts`. Canary already uses 0225 to 0227
+(PR #576 and later); if the merge order differs, renumber (the file name, the journal entry
 and the snapshot).
 
 Changing the repository, environment or account, or turning a disabled watch
@@ -144,9 +144,9 @@ the watch before it was disabled and enabled again cannot write its stale cursor
 ETag or progress over the reset, and stops its pass. Owner and repository names
 may not be `.` or `..` (they would walk out of `/repos/` in the API URL).
 
-The column `postLogUrl` is part of migration 0226 (the PR is unmerged, so the
+The column `postLogUrl` is part of migration 0228 (the PR is unmerged, so the
 migration is edited in place; an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` makes
-it safe on a database that already ran an earlier 0226).
+it safe on a database that already ran an earlier 0226 of this branch).
 
 ## 3. The poller
 
@@ -510,7 +510,7 @@ Inputs: `service-id`, `image` (digest reference, required), `environment`
 
 ## Open questions
 
-- Migration number: 0226 assumes PR #576 lands first as 0225 (0223 is unused in
+- Migration number: 0228 follows canary's 0227 (0223 is unused in
   canary). Renumber if the order changes.
 - The poller deploys at most one GitHub deployment per service at a time and in id
   order; a burst is deployed one after another rather than collapsed to the

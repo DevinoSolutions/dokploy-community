@@ -219,9 +219,49 @@ describe("when it fires", () => {
 		await watchdog.sweep();
 
 		expect(deps.stop).toHaveBeenCalledTimes(1);
-		expect(logLines()[0]).toBe("Watchdog: exceeded 90 min");
+		expect(logLines()[0]).toContain(
+			"stopped after 91 min, over the wall limit of 90 min",
+		);
 		// The wall limit needs no look at the log.
 		expect(deps.readLogIdleMs).not.toHaveBeenCalled();
+	});
+
+	it("names the wall limit in the log, the failure message, the notification and the trail", async () => {
+		config = { ...config, maxMinutes: 180 };
+		clock = START + 181 * MIN;
+		// A fresh log: the deploy is still printing progress when it is stopped.
+		idleMs = 1_000;
+		const watchdog = createDeploymentWatchdog(asDeps);
+
+		await watchdog.sweep();
+		jobs = [];
+		running = [];
+		clock += MIN;
+		await watchdog.sweep();
+
+		const wallLine =
+			"Deployment watchdog: stopped after 181 min, over the wall limit of 180 min (Settings > Deployments > Stuck Deployment Watchdog). The wall limit applies even while a deploy keeps printing progress; raise it if long builds are expected.";
+		expect(logLines()[0]).toBe(wallLine);
+		expect(deps.markFailed.mock.calls[0]?.[1]).toBe(
+			`${wallLine.replace(/\.$/, "")}. The deployment was stopped and marked failed by the watchdog.`,
+		);
+		expect(deps.notify).toHaveBeenCalledWith(
+			expect.objectContaining({ deploymentId: "dep-1" }),
+			null,
+			expect.anything(),
+			`${wallLine.replace(/\.$/, "")}; marked failed`,
+		);
+		expect(deps.recordAudit).toHaveBeenCalledWith(
+			expect.objectContaining({
+				action: "watchdog_fail",
+				metadata: expect.objectContaining({
+					reason: "wall",
+					message: wallLine,
+					thresholdMinutes: 180,
+					observedMinutes: 181,
+				}),
+			}),
+		);
 	});
 
 	it("leaves a deployment alone while its log keeps growing", async () => {
@@ -1531,7 +1571,9 @@ describe("a log host that cannot be reached", () => {
 
 		await watchdog.sweep();
 
-		expect(logLines()[0]).toBe("Watchdog: exceeded 90 min");
+		expect(logLines()[0]).toContain(
+			"stopped after 91 min, over the wall limit of 90 min",
+		);
 		expect(deps.stop).toHaveBeenCalledTimes(1);
 		expect(deps.readLogIdleMs).not.toHaveBeenCalled();
 	});

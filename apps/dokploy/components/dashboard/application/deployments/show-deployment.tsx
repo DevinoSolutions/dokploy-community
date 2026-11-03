@@ -1,7 +1,10 @@
+import { renderBuildStartMarker } from "@dokploy/server/services/build-origin-shared";
+import { GITHUB_LOG_PREFIX } from "@dokploy/server/services/github-run-progress";
 import copy from "copy-to-clipboard";
 import { Check, Copy, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { AnalyzeLogs } from "@/components/dashboard/docker/logs/analyze-logs";
+import { GithubActionsLogBanner } from "@/components/shared/build-origin-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -23,6 +26,9 @@ interface Props {
 	errorMessage?: string;
 	// Set when the log no longer exists on any server: shown in place of the log.
 	unavailableMessage?: string;
+	// Set when the deployment was built in GitHub Actions: Dokploy has no build output, so the log gets a link.
+	// `live`: the run still builds, and its steps stream into this log.
+	githubActions?: { runUrl: string | null; live?: boolean };
 }
 export const ShowDeployment = ({
 	logPath,
@@ -31,6 +37,7 @@ export const ShowDeployment = ({
 	serverId,
 	errorMessage,
 	unavailableMessage,
+	githubActions,
 }: Props) => {
 	const [data, setData] = useState("");
 	const [showExtraLogs, setShowExtraLogs] = useState(false);
@@ -84,8 +91,16 @@ export const ShowDeployment = ({
 		};
 	}, [logPath, open, unavailableMessage]);
 
+	const isGithubActions = Boolean(githubActions);
+	// A log that carries the run's steps already has Dokploy's own part marked inside it.
+	const hasGithubSection = data.includes(GITHUB_LOG_PREFIX);
+
 	useEffect(() => {
-		const logs = parseLogs(data);
+		// The line that marks where the build starts names the deployment; the dialog shows it without the id.
+		const logs = parseLogs(data).map((log) => ({
+			...log,
+			message: renderBuildStartMarker(log.message, isGithubActions),
+		}));
 		let filteredLogsResult = logs;
 		if (serverId) {
 			let hideSubsequentLogs = false;
@@ -103,7 +118,7 @@ export const ShowDeployment = ({
 		}
 
 		setFilteredLogs(filteredLogsResult);
-	}, [data, showExtraLogs]);
+	}, [data, showExtraLogs, isGithubActions]);
 
 	useEffect(() => {
 		scrollToBottom();
@@ -191,6 +206,19 @@ export const ShowDeployment = ({
 					</DialogDescription>
 				</DialogHeader>
 
+				{githubActions && (
+					<>
+						<GithubActionsLogBanner
+							buildRunUrl={githubActions.runUrl}
+							live={githubActions.live}
+						/>
+						{!githubActions.live && !hasGithubSection && (
+							<p className="text-sm font-medium text-muted-foreground">
+								Dokploy: pull and start
+							</p>
+						)}
+					</>
+				)}
 				<div
 					ref={scrollRef}
 					onScroll={handleScroll}

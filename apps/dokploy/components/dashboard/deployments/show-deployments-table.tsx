@@ -1,5 +1,6 @@
 "use client";
 
+import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
 import {
 	type ColumnFiltersState,
 	flexRender,
@@ -25,6 +26,11 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import {
+	DokployDeploymentMark,
+	GithubActionsDeploymentMark,
+	LiveGithubBuildStatus,
+} from "@/components/shared/build-origin-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -398,10 +404,38 @@ export function ShowDeploymentsTable() {
 					</Button>
 				),
 				cell: ({ row }: { row: { original: DeploymentRow } }) => (
-					<span className="text-sm truncate max-w-[200px] block">
-						{row.original.title || "—"}
-					</span>
+					<div className="flex max-w-[260px] flex-col gap-0.5">
+						<span className="text-sm truncate block">
+							{row.original.title || "—"}
+						</span>
+						<LiveGithubBuildStatus row={row.original} />
+					</div>
 				),
+			},
+			{
+				id: "source",
+				header: "Source",
+				enableSorting: false,
+				cell: ({ row }: { row: { original: DeploymentRow } }) => {
+					const d = row.original;
+					const info = getServiceInfo(d);
+					return isGithubActionsDeployment(d) ? (
+						<GithubActionsDeploymentMark
+							service={
+								info
+									? {
+											type:
+												info.type === "Application" ? "application" : "compose",
+											id: info.serviceId,
+										}
+									: null
+							}
+							deployment={d}
+						/>
+					) : (
+						<DokployDeploymentMark />
+					);
+				},
 			},
 			{
 				accessorKey: "status",

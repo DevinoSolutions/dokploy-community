@@ -103,6 +103,13 @@ import { eq, sql } from "drizzle-orm";
 import { parse, stringify } from "yaml";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
+import {
+	assertBuilderPruneAllowed,
+	auditBuilderPrune,
+	builderPruneInput,
+	checkBuilderPrune,
+	cleanAllInput,
+} from "@/server/api/utils/builder-prune";
 import { auditCancel } from "@/server/api/utils/cancel-audit";
 import {
 	assertLocalHostAccess,
@@ -439,7 +446,7 @@ export const settingsRouter = createTRPCRouter({
 			return true;
 		}),
 	cleanDockerBuilder: adminProcedure
-		.input(apiServerSchema)
+		.input(builderPruneInput.optional())
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
 				input?.serverId,
@@ -449,15 +456,29 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
-			await cleanupBuilders(input?.serverId);
-			await audit(ctx, {
-				action: "delete",
-				resourceType: "settings",
-				resourceName: "clean-docker-builder",
+			const force = input?.force ?? false;
+			const all = input?.all ?? false;
+			const { hostName, activeBuilds } = await assertBuilderPruneAllowed({
+				serverId: input?.serverId,
+				force,
 			});
+			// Before the prune: it can run for hours and the request may never return.
+			await auditBuilderPrune(
+				ctx,
+				{
+					operation: "settings.cleanDockerBuilder",
+					serverId: input?.serverId,
+					hostName,
+					force,
+					all,
+					activeBuilds,
+				},
+				audit,
+			);
+			await cleanupBuilders(input?.serverId, { all });
 		}),
 	cleanDockerPrune: adminProcedure
-		.input(apiServerSchema)
+		.input(builderPruneInput.optional())
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
 				input?.serverId,
@@ -467,17 +488,31 @@ export const settingsRouter = createTRPCRouter({
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
 			);
-			await cleanupSystem(input?.serverId);
-			await cleanupBuilders(input?.serverId);
-			await audit(ctx, {
-				action: "delete",
-				resourceType: "settings",
-				resourceName: "clean-docker-prune",
+			const force = input?.force ?? false;
+			const all = input?.all ?? false;
+			// `system prune` prunes the build cache too, so it takes the same guard.
+			const { hostName, activeBuilds } = await assertBuilderPruneAllowed({
+				serverId: input?.serverId,
+				force,
 			});
+			await auditBuilderPrune(
+				ctx,
+				{
+					operation: "settings.cleanDockerPrune",
+					serverId: input?.serverId,
+					hostName,
+					force,
+					all,
+					activeBuilds,
+				},
+				audit,
+			);
+			await cleanupSystem(input?.serverId, { all });
+			await cleanupBuilders(input?.serverId, { all });
 			return true;
 		}),
 	cleanAll: adminProcedure
-		.input(apiServerSchema)
+		.input(cleanAllInput.optional())
 		.mutation(async ({ input, ctx }) => {
 			await assertServerInOrganization(
 				input?.serverId,
@@ -486,21 +521,50 @@ export const settingsRouter = createTRPCRouter({
 			await assertLocalHostAccess(
 				input?.serverId,
 				ctx.session?.activeOrganizationId,
+			);
+			const force = input?.force ?? false;
+			const all = input?.all ?? false;
+			const guard = await checkBuilderPrune({
+				serverId: input?.serverId,
+				force,
+			});
+			// `system prune` prunes the build cache too, and `image prune --all` can
+			// remove layers a running build still uses: when builds run on the host
+			// (or they cannot be counted), all three are left out and the rest of
+			// the cleanup still runs.
+			const skipped = guard.allowed
+				? []
+				: (["images", "builders", "system"] as const);
+			await auditBuilderPrune(
+				ctx,
+				{
+					operation: "settings.cleanAll",
+					serverId: input?.serverId,
+					hostName: guard.hostName,
+					force,
+					all,
+					activeBuilds: guard.activeBuilds,
+					checkFailed: guard.checkFailed,
+					skipped: [...skipped],
+				},
+				audit,
 			);
 			// Execute cleanup in background and return immediately to avoid gateway timeouts
 			void runBackgroundJob(
 				"settings.cleanAll background",
-				() => cleanupAll(input?.serverId),
+				() => cleanupAll(input?.serverId, { skip: [...skipped], all }),
 				{ serverId: input?.serverId ?? null },
 			);
-			await audit(ctx, {
-				action: "delete",
-				resourceType: "settings",
-				resourceName: "clean-all",
-			});
 			return {
 				status: "scheduled",
-				message: "Docker cleanup has been initiated in the background",
+				message: skipped.length
+					? `Docker cleanup has been initiated in the background. The image, builder cache and system prunes were skipped: ${
+							guard.checkFailed
+								? `could not check the builds running on ${guard.hostName}`
+								: `${guard.activeBuilds} build(s) run on ${guard.hostName}`
+						}. Retry when the server is idle.`
+					: "Docker cleanup has been initiated in the background",
+				skipped: [...skipped],
 			};
 		}),
 	cleanMonitoring: adminProcedure.mutation(async ({ ctx }) => {

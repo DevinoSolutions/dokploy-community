@@ -44,7 +44,6 @@ import type { ComposeSpecification } from "@dokploy/server/utils/docker/types";
 import { sendBuildErrorNotifications } from "@dokploy/server/utils/notifications/build-error";
 import { sendBuildSuccessNotifications } from "@dokploy/server/utils/notifications/build-success";
 import {
-	ExecError,
 	execAsync,
 	execAsyncRemote,
 } from "@dokploy/server/utils/process/execAsync";
@@ -62,8 +61,12 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { quote } from "shell-quote";
 import type { z } from "zod";
-import { encodeBase64 } from "../utils/docker/utils";
 import { getDokployUrl } from "./admin";
+import {
+	composeFileHasBuildSection,
+	inferBuildOriginFromSource,
+	resolveDeploymentBuildOrigin,
+} from "./build-origin-shared";
 // Fork module: build-policy required checks for compose units.
 // See services/build-policy/README.md.
 import { waitForComposeRequiredChecks } from "./build-policy/compose-checks";
@@ -81,6 +84,7 @@ import {
 	getDeploymentErrorMessage,
 	updateDeployment,
 	updateDeploymentStatus,
+	writeDeploymentErrorLog,
 } from "./deployment";
 import {
 	appendLogLine,
@@ -88,6 +92,7 @@ import {
 	CANCELLED_THEN_FAILED_NOTE,
 	CANCELLED_TOO_LATE_NOTE,
 	DeploymentCancelledError,
+	getDeploymentWallLimitMinutes,
 	isDeploymentCancelled,
 	isDeploymentCancelledError,
 	isDeploymentStillRunning,
@@ -98,6 +103,7 @@ import {
 import { recordVaultFailureReason } from "./deployment-error-message";
 import { withDeployLogHeartbeat } from "./deployment-heartbeat";
 import { loginGhcrForCompose } from "./github-deployments/registry-auth";
+import { claimLiveGithubBuild } from "./live-build-claim";
 import {
 	findPatchesByEntityId,
 	generateApplyPatchesCommand,
@@ -640,7 +646,11 @@ export const runComposeBuild = async (
 				await runStep(command);
 			}
 		},
-		{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
+		{
+			isRunning: () => isDeploymentStillRunning(deployment.deploymentId),
+			wallLimitMinutes: () =>
+				getDeploymentWallLimitMinutes(deployment.deploymentId),
+		},
 	);
 
 	// What a later rebuild must still find (T-7960), recorded only once this
@@ -894,22 +904,56 @@ export const deployCompose = async ({
 	titleLog = "Manual deployment",
 	descriptionLog = "",
 	freshVolumes = false,
+	buildOrigin,
+	buildRunUrl,
+	deploymentId,
 }: {
 	composeId: string;
 	titleLog: string;
 	descriptionLog: string;
 	freshVolumes?: boolean;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const compose = await findComposeById(composeId);
 
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${
 		compose.environment.projectId
 	}/environment/${compose.environmentId}/services/compose/${compose.composeId}?tab=deployments`;
-	const deployment = await createDeploymentCompose({
-		composeId: composeId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
+					kind: "compose",
+					serviceId: composeId,
+					logHost: compose.serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeploymentCompose(
+			{
+				composeId: composeId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			resolveDeploymentBuildOrigin({
+				requestedOrigin: buildOrigin,
+				requestedRunUrl: buildRunUrl,
+				title: titleLog,
+				inferred: inferBuildOriginFromSource({
+					kind: "compose",
+					sourceType: compose.sourceType,
+					hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+				}),
+			}),
+		));
 
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
@@ -976,30 +1020,22 @@ export const deployCompose = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let extraLog = "";
 		if (
 			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			extraLog += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += phases.failedCommand(deployStartedAt);
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		extraLog += phases.failedCommand(deployStartedAt);
+		await writeDeploymentErrorLog(
+			deployment,
+			compose.serverId,
+			error,
+			extraLog,
+		);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		// The deployment itself always records the failure; the *service* is only
@@ -1016,6 +1052,7 @@ export const deployCompose = async ({
 			logPath: deployment.logPath,
 			serverId: compose.serverId,
 			fallback: "Error building, check the logs for details.",
+			error,
 		});
 
 		await sendBuildErrorNotifications({
@@ -1049,19 +1086,53 @@ export const rebuildCompose = async ({
 	titleLog = "Rebuild deployment",
 	descriptionLog = "",
 	freshVolumes = false,
+	buildOrigin,
+	buildRunUrl,
+	deploymentId,
 }: {
 	composeId: string;
 	titleLog: string;
 	descriptionLog: string;
 	freshVolumes?: boolean;
+	/** Where the caller says the image was built (T-12149); inferred when omitted. */
+	buildOrigin?: string | null;
+	buildRunUrl?: string | null;
+	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
+	deploymentId?: string | null;
 }) => {
 	const compose = await findComposeById(composeId);
 
-	const deployment = await createDeploymentCompose({
-		composeId: composeId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	// The row the workflow registered while GitHub built the image (T-12686), when this deploy continues it.
+	const liveDeployment = deploymentId
+		? await claimLiveGithubBuild(
+				{
+					deploymentId,
+					kind: "compose",
+					serviceId: composeId,
+					logHost: compose.serverId ?? null,
+				},
+				{ title: titleLog, description: descriptionLog },
+			)
+		: null;
+	const deployment =
+		liveDeployment ??
+		(await createDeploymentCompose(
+			{
+				composeId: composeId,
+				title: titleLog,
+				description: descriptionLog,
+			},
+			resolveDeploymentBuildOrigin({
+				requestedOrigin: buildOrigin,
+				requestedRunUrl: buildRunUrl,
+				title: titleLog,
+				inferred: inferBuildOriginFromSource({
+					kind: "compose",
+					sourceType: compose.sourceType,
+					hasBuildSection: composeFileHasBuildSection(compose.composeFile),
+				}),
+			}),
+		));
 	const phases = createComposePhaseLogger(compose, deployment.logPath);
 	const deployStartedAt = Date.now();
 	const checkpoint = createCancelCheckpoint(compose, deployment, {
@@ -1245,7 +1316,11 @@ export const rebuildCompose = async ({
 					await execAsync(commandWithLog);
 				}
 			},
-			{ isRunning: () => isDeploymentStillRunning(deployment.deploymentId) },
+			{
+				isRunning: () => isDeploymentStillRunning(deployment.deploymentId),
+				wallLimitMinutes: () =>
+					getDeploymentWallLimitMinutes(deployment.deploymentId),
+			},
 		);
 
 		// Carries the record of the deploy forward on this row (T-7960), once the
@@ -1288,30 +1363,22 @@ export const rebuildCompose = async ({
 		);
 		if (cancelled) throw cancelled;
 
-		let command = "";
-
-		// Only log details for non-ExecError errors
-		if (!(error instanceof ExecError)) {
-			const message = error instanceof Error ? error.message : String(error);
-			const encodedMessage = encodeBase64(message);
-			command += `echo "${encodedMessage}" | base64 -d >> "${deployment.logPath}";`;
-		}
-
 		// A cancel that came too late, followed by a real failure: say so, the
 		// deployment ends as `error` (it did fail), not `cancelled`.
+		let extraLog = "";
 		if (
 			usesDeploymentCancel(compose) &&
 			(await isDeploymentCancelled(deployment.deploymentId))
 		) {
-			command += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
+			extraLog += `echo "\n${CANCELLED_THEN_FAILED_NOTE}" >> ${deployment.logPath};`;
 		}
-		command += phases.failedCommand(deployStartedAt);
-		command += `echo "\nError occurred ❌, check the logs for details." >> ${deployment.logPath};`;
-		if (compose.serverId) {
-			await execAsyncRemote(compose.serverId, command);
-		} else {
-			await execAsync(command);
-		}
+		extraLog += phases.failedCommand(deployStartedAt);
+		await writeDeploymentErrorLog(
+			deployment,
+			compose.serverId,
+			error,
+			extraLog,
+		);
 		await updateDeploymentStatus(deployment.deploymentId, "error");
 		await recordVaultFailureReason(deployment.deploymentId, error);
 		// A rebuild the pin refused touched nothing: the compose keeps the status

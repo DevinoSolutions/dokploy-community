@@ -1,3 +1,4 @@
+import { GithubActionsAdvanced } from "@/components/shared/github-actions-panel";
 import { Badge } from "@/components/ui/badge";
 import {
 	Card,
@@ -21,6 +22,8 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 			enabled: !!composeId,
 		},
 	);
+	// Built in GitHub Actions: Dokploy only pulls and starts the image (T-12424).
+	const isGithubActions = data?.buildOrigin === "github-actions";
 
 	return (
 		<>
@@ -34,14 +37,22 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 					</div>
 
 					<CardDescription>
-						Create a compose file to deploy your compose
+						{isGithubActions
+							? "Redeploy the image that is running now. New versions come from GitHub Actions."
+							: "Create a compose file to deploy your compose"}
 					</CardDescription>
 				</CardHeader>
 				<CardContent className="flex flex-col gap-4 flex-wrap">
 					<ComposeActions composeId={composeId} />
 				</CardContent>
 			</Card>
-			<ShowProviderFormCompose composeId={composeId} />
+			{isGithubActions ? (
+				<GithubActionsAdvanced description="The compose file and where it comes from. Rebuild and autodeploy are hidden because GitHub Actions builds this service.">
+					<ShowProviderFormCompose composeId={composeId} />
+				</GithubActionsAdvanced>
+			) : (
+				<ShowProviderFormCompose composeId={composeId} />
+			)}
 		</>
 	);
 };

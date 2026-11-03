@@ -19,15 +19,15 @@ import { describe, expect, it } from "vitest";
 const MIN = 60_000;
 
 describe("defaults", () => {
-	it("is on, 20 minutes idle, 90 minutes wall, nothing excluded", () => {
+	it("is on, 20 minutes idle, 180 minutes wall, nothing excluded", () => {
 		expect(resolveWatchdogConfig(null)).toEqual({
 			enabled: true,
 			idleMinutes: 20,
-			maxMinutes: 90,
+			maxMinutes: 180,
 			exclusions: [],
 		});
 		expect(DEFAULT_WATCHDOG_IDLE_MINUTES).toBe(20);
-		expect(DEFAULT_WATCHDOG_MAX_MINUTES).toBe(90);
+		expect(DEFAULT_WATCHDOG_MAX_MINUTES).toBe(180);
 	});
 
 	it("reads the stored row", () => {
@@ -220,10 +220,21 @@ describe("log lines", () => {
 		expect(
 			watchdogTriggerLine({ kind: "idle", minutes: 20, observedMinutes: 25 }),
 		).toBe("Watchdog: no log output for 20 min");
-		expect(
-			watchdogTriggerLine({ kind: "wall", minutes: 90, observedMinutes: 95 }),
-		).toBe("Watchdog: exceeded 90 min");
 		expect(WATCHDOG_FAILED_LINE).toBe("Watchdog: marked failed");
+	});
+
+	it("names the limit, how far past it, and where to change it, when the wall limit fires", () => {
+		const line = watchdogTriggerLine({
+			kind: "wall",
+			minutes: 180,
+			observedMinutes: 181,
+		});
+
+		expect(line).toBe(
+			"Deployment watchdog: stopped after 181 min, over the wall limit of 180 min (Settings > Deployments > Stuck Deployment Watchdog). The wall limit applies even while a deploy keeps printing progress; raise it if long builds are expected.",
+		);
+		// Not the idle wording: nothing says the log was silent.
+		expect(line).not.toContain("no log output");
 	});
 });
 

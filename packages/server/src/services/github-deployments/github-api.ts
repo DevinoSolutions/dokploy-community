@@ -41,7 +41,7 @@ const num = (value: string | null): number | null => {
 /** Fallback wait when GitHub says "slow down" without telling us how long. */
 export const DEFAULT_SECONDARY_BACKOFF_MS = 60_000;
 /** Longest we ever sleep on a rate limit answer. */
-export const MAX_BACKOFF_MS = 60 * 60 * 1000;
+export const GITHUB_DEPLOYMENTS_MAX_BACKOFF_MS = 60 * 60 * 1000;
 
 /**
  * When may the next request go out, given a 403 or 429?
@@ -57,14 +57,20 @@ export const rateLimitRetryAt = (
 	if (status !== 403 && status !== 429) return null;
 	const retryAfter = num(h.get("retry-after"));
 	if (retryAfter !== null) {
-		return now + Math.min(MAX_BACKOFF_MS, Math.max(1, retryAfter) * 1000);
+		return (
+			now +
+			Math.min(
+				GITHUB_DEPLOYMENTS_MAX_BACKOFF_MS,
+				Math.max(1, retryAfter) * 1000,
+			)
+		);
 	}
 	const remaining = num(h.get("x-ratelimit-remaining"));
 	const reset = num(h.get("x-ratelimit-reset"));
 	if (remaining === 0 && reset !== null) {
 		// +1s: the reset second itself is still inside the old window.
 		return Math.min(
-			now + MAX_BACKOFF_MS,
+			now + GITHUB_DEPLOYMENTS_MAX_BACKOFF_MS,
 			Math.max(now + 1000, reset * 1000 + 1000),
 		);
 	}

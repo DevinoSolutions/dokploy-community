@@ -9,6 +9,12 @@ import {
 } from "../filesystem/directory";
 import type { ApplicationNested } from ".";
 import {
+	getNixpacksTempEnvAssignment,
+	getNixpacksTempSetupCommand,
+	getNixpacksTempSweepCommand,
+	NIXPACKS_TEMP_CLEANUP_FUNCTION,
+} from "./nixpacks-temp";
+import {
 	type BuildStageOptions,
 	getCommitInfoEnvArgs,
 	getEnvFlagArgs,
@@ -71,16 +77,23 @@ export const getNixpacksCommand = async (
 		? `rm -f ${quote(extraStaged)};`
 		: "";
 
+	// nixpacks keeps its plan in a temp directory that it only removes when it
+	// exits by itself. It gets a directory of ours instead, which goes away on
+	// every exit of this script, and orphans of killed builds are swept first.
 	let bashCommand = `
+		${getNixpacksTempSweepCommand()}
+		${getNixpacksTempSetupCommand()}
 		${getGitCommitInfoCommands()}
 		echo "Starting nixpacks build..." ;
-		${staged.envFile.loader}${command} ${getCommitInfoEnvArgs()} || {
+		${getNixpacksTempEnvAssignment()}${staged.envFile.loader}${command} ${getCommitInfoEnvArgs()} || {
 			${staged.envFile.cleanup}
 			${removeExtra}
+			${NIXPACKS_TEMP_CLEANUP_FUNCTION};
 			echo "❌ Nixpacks build failed" ;
 			exit 1;
 		}
 		${staged.envFile.cleanup}
+		${NIXPACKS_TEMP_CLEANUP_FUNCTION};
 		echo "✅ Nixpacks build completed." ;
 		`;
 

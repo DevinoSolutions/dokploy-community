@@ -7,6 +7,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
 	isRootOrganization: vi.fn(),
 	findServerById: vi.fn(),
+	// The prune guard: no build runs on the host.
+	countActiveDeploymentsOnHost: vi.fn(async () => 0),
 	cancelDockerCleanup: vi.fn(),
 	checkGPUStatus: vi.fn(),
 	cleanAllDeploymentQueue: vi.fn(),

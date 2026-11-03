@@ -12,6 +12,7 @@ import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { and, desc, eq, inArray, isNotNull, isNull, ne, or } from "drizzle-orm";
 import { quote } from "shell-quote";
 import { getDeploymentErrorMessage } from "./deployment";
+import { notWaitingForGithubRun } from "./live-build-claim";
 
 /**
  * Database and host access of the stuck-deployment watchdog. The decisions
@@ -31,6 +32,8 @@ export interface WatchdogDeployment {
 	composeId: string | null;
 	previewDeploymentId: string | null;
 	startedAt: string | null;
+	/** When the queue job took over a row registered while GitHub built (null on every other row). */
+	deployStartedAt?: string | null;
 	createdAt: string;
 }
 
@@ -45,6 +48,7 @@ const WATCHDOG_COLUMNS = {
 	composeId: true,
 	previewDeploymentId: true,
 	startedAt: true,
+	deployStartedAt: true,
 	createdAt: true,
 } as const;
 
@@ -65,10 +69,17 @@ const deployRowsOnly = and(
 	isNull(deployments.volumeBackupId),
 );
 
-/** The deploys that are still `running`, oldest first. */
+/**
+ * The deploys that are still `running`, oldest first. A row that still waits for its GitHub Actions run is not
+ * one of them (see `notWaitingForGithubRun`): this list feeds the watchdog and the cancel of a running deploy.
+ */
 export const listRunningDeployDeployments = (): Promise<WatchdogDeployment[]> =>
 	db.query.deployments.findMany({
-		where: and(eq(deployments.status, "running"), deployRowsOnly),
+		where: and(
+			eq(deployments.status, "running"),
+			deployRowsOnly,
+			notWaitingForGithubRun,
+		),
 		columns: WATCHDOG_COLUMNS,
 		orderBy: deployments.createdAt,
 	});
@@ -88,12 +99,13 @@ export const listLatestDeploysOf = async (service: {
 				: null;
 	if (!owner) return [];
 	return db.query.deployments.findMany({
-		where: and(owner, deployRowsOnly),
+		where: and(owner, deployRowsOnly, notWaitingForGithubRun),
 		columns: {
 			deploymentId: true,
 			status: true,
 			createdAt: true,
 			startedAt: true,
+			deployStartedAt: true,
 			finishedAt: true,
 		},
 		orderBy: desc(deployments.createdAt),
@@ -115,6 +127,7 @@ export const countOtherRunningDeploys = async (
 			eq(deployments.status, "running"),
 			ne(deployments.deploymentId, row.deploymentId),
 			deployRowsOnly,
+			notWaitingForGithubRun,
 			row.serverId
 				? eq(deployments.serverId, row.serverId)
 				: isNull(deployments.serverId),

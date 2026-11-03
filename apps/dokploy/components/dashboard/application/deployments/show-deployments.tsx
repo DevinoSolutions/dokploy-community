@@ -1,3 +1,7 @@
+import {
+	isGithubActionsDeployment,
+	isLiveGithubBuild,
+} from "@dokploy/server/services/build-origin-shared";
 import copy from "copy-to-clipboard";
 import {
 	ChevronDown,
@@ -16,6 +20,11 @@ import {
 import React, { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AlertBlock } from "@/components/shared/alert-block";
+import {
+	DokployDeploymentMark,
+	GithubActionsDeploymentMark,
+	LiveGithubBuildStatus,
+} from "@/components/shared/build-origin-badge";
 import { DateTooltip } from "@/components/shared/date-tooltip";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
@@ -90,6 +99,13 @@ export const ShowDeployments = ({
 
 	const { data: isCloud } = api.settings.isCloud.useQuery();
 
+	// The open log follows its row: a live GitHub Actions row changes under the dialog (live, then handed over).
+	const openLog = activeLog
+		? (deployments?.find(
+				(deployment) => deployment.deploymentId === activeLog.deploymentId,
+			) ?? activeLog)
+		: null;
+
 	// Who cancelled a deployment: only asked for once one is listed as
 	// cancelled, and re-read only while a recent cancellation has no entry yet,
 	// as the entry is written just after the status changes.
@@ -142,6 +158,20 @@ export const ShowDeployments = ({
 		{ composeId: id },
 		{ enabled: !!id && type === "compose" },
 	);
+	// Service-level origin, to tell old "GHA " rows (no stored origin) from a git service's.
+	const serviceBuildOrigin =
+		type === "application"
+			? application?.buildOrigin
+			: type === "compose"
+				? composeService?.buildOrigin
+				: null;
+	// Built in GitHub Actions: the workflow starts every deployment and drives the rollbacks, and Dokploy builds
+	// nothing, so the webhook URL, Kill Build and the rollback settings have no use here (T-12502).
+	const isGithubActionsService = serviceBuildOrigin === "github-actions";
+	// For a service, wait for its origin before showing the webhook box, so it does not flash up and vanish.
+	const serviceOriginKnown =
+		(type !== "application" && type !== "compose") ||
+		serviceBuildOrigin !== undefined;
 	const snapvisorProjectName =
 		type === "application"
 			? application?.snapvisorProjectName
@@ -226,9 +256,11 @@ export const ShowDeployments = ({
 		const mostRecentDeployment = deployments[0];
 
 		if (
-			!mostRecentDeployment ||
-			mostRecentDeployment.status !== "running" ||
-			!mostRecentDeployment.startedAt
+			mostRecentDeployment?.status !== "running" ||
+			!mostRecentDeployment.startedAt ||
+			// Waiting for GitHub is not a stuck Dokploy build.
+			mostRecentDeployment.externalBuildOnly ||
+			isLiveGithubBuild(mostRecentDeployment)
 		) {
 			return null;
 		}
@@ -255,13 +287,12 @@ export const ShowDeployments = ({
 					{(type === "application" || type === "compose") && (
 						<ClearDeployments id={id} type={type} />
 					)}
-					{(type === "application" || type === "compose") && (
-						<KillBuild id={id} type={type} />
-					)}
+					{(type === "application" || type === "compose") &&
+						!isGithubActionsService && <KillBuild id={id} type={type} />}
 					{(type === "application" || type === "compose") && (
 						<CancelQueues id={id} type={type} />
 					)}
-					{type === "application" && (
+					{type === "application" && !isGithubActionsService && (
 						<ShowRollbackSettings applicationId={id}>
 							<Button variant="outline">
 								Configure Rollbacks <Settings className="size-4" />
@@ -319,7 +350,12 @@ export const ShowDeployments = ({
 						</div>
 					</AlertBlock>
 				)}
-				{refreshToken && (
+				{isGithubActionsService && (
+					<p className="text-sm text-muted-foreground">
+						Deployments are triggered by your GitHub Actions workflow.
+					</p>
+				)}
+				{refreshToken && serviceOriginKnown && !isGithubActionsService && (
 					<div className="flex flex-col gap-2 text-sm">
 						<span>
 							To redeploy automatically, add this webhook URL to your Git
@@ -504,6 +540,7 @@ export const ShowDeployments = ({
 														</button>
 													);
 												})()}
+											<LiveGithubBuildStatus row={deployment} />
 											{cancelledBy && (
 												<span className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
 													{describeCancelledBy(cancelledBy)}
@@ -529,6 +566,23 @@ export const ShowDeployments = ({
 									<div className="flex w-full flex-col items-start gap-2 sm:w-auto sm:max-w-[300px] sm:items-end sm:justify-start">
 										<div className="text-sm capitalize text-muted-foreground flex flex-wrap items-center gap-2">
 											<DateTooltip date={deployment.createdAt} />
+											{isGithubActionsDeployment(
+												deployment,
+												serviceBuildOrigin,
+											) ? (
+												<GithubActionsDeploymentMark
+													service={
+														type === "application" || type === "compose"
+															? { type, id }
+															: null
+													}
+													deployment={deployment}
+												/>
+											) : (
+												(type === "application" || type === "compose") && (
+													<DokployDeploymentMark />
+												)
+											)}
 											{deployment.startedAt && deployment.finishedAt && (
 												<Badge
 													variant="outline"
@@ -696,8 +750,16 @@ export const ShowDeployments = ({
 					)}
 					onClose={() => setActiveLog(null)}
 					logPath={activeLog?.logPath || ""}
-					errorMessage={activeLog?.errorMessage || ""}
+					errorMessage={openLog?.errorMessage || ""}
 					unavailableMessage={needsLogHost ? logHost?.unavailable : undefined}
+					githubActions={
+						openLog && isGithubActionsDeployment(openLog, serviceBuildOrigin)
+							? {
+									runUrl: openLog.buildRunUrl ?? null,
+									live: isLiveGithubBuild(openLog),
+								}
+							: undefined
+					}
 				/>
 			</CardContent>
 		</Card>

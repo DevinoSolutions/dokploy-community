@@ -11,6 +11,7 @@ import {
 } from "@dokploy/server/utils/process/execAsync";
 import { getDokployUrl } from "../admin";
 import { findApplicationById, updateApplicationStatus } from "../application";
+import { resolveDeploymentBuildOrigin } from "../build-origin-shared";
 import {
 	createDeployment,
 	updateDeployment,
@@ -56,11 +57,15 @@ export const deployPinnedApplicationImage = async ({
 	const organizationId = application.environment.project.organizationId;
 	const buildLink = `${await getDokployUrl()}/dashboard/project/${application.environment.projectId}/environment/${application.environmentId}/services/application/${application.applicationId}?tab=deployments`;
 
-	const deployment = await createDeployment({
-		applicationId,
-		title: titleLog,
-		description: descriptionLog,
-	});
+	// The image came with the request and is not built here (T-12149).
+	const deployment = await createDeployment(
+		{
+			applicationId,
+			title: titleLog,
+			description: descriptionLog,
+		},
+		resolveDeploymentBuildOrigin({ title: titleLog, inferred: "external" }),
+	);
 
 	const log = async (message: string) => {
 		const command = `echo "${encodeBase64(message)}" | base64 -d >> "${deployment.logPath}";`;

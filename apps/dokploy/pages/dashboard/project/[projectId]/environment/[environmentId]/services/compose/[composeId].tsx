@@ -54,6 +54,7 @@ import { GithubDeploymentsWatch } from "@/components/dashboard/shared/github-dep
 import { WatchdogExclusion } from "@/components/dashboard/shared/watchdog-exclusion";
 import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 import { AdvanceBreadcrumb } from "@/components/shared/advance-breadcrumb";
+import { BuildOriginBadge } from "@/components/shared/build-origin-badge";
 import { StatusTooltip } from "@/components/shared/status-tooltip";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -267,6 +268,10 @@ const Service = (
 										>
 											{data?.server?.name || "Dokploy Server"}
 										</Badge>
+										<BuildOriginBadge
+											buildOrigin={data?.buildOrigin}
+											service={{ type: "compose", id: composeId }}
+										/>
 										{data?.server?.serverStatus === "inactive" && (
 											<TooltipProvider>
 												<Tooltip>
@@ -590,7 +595,9 @@ const Service = (
 													currentServerId={data?.serverId}
 												/>
 												<PullImagesCompose composeId={composeId} />
-												<ShowComposeBuildServer composeId={composeId} />
+												{data?.buildOrigin !== "github-actions" && (
+													<ShowComposeBuildServer composeId={composeId} />
+												)}
 												<DeployGuardrailsCompose composeId={composeId} />
 												<RollingReplaceCompose composeId={composeId} />
 												<GithubDeploymentsWatch id={composeId} type="compose" />

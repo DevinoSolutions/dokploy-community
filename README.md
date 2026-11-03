@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.40**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.46**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.40 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.46 \
   --with-registry-auth \
   dokploy
 ```
@@ -117,14 +117,15 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 - **Opt-in rolling replace for Compose services** (off by default): the new replica must pass its healthcheck before the old container is stopped, so a redeploy of a selected service does not leave a window with no backend
 - **Docker Compose auto-rollback**, native AWS ECR registries, pre/post-deploy command hooks, and `DOKPLOY_*` environment variables plus the git commit hash and message as build args
 - **Project icons and export**, bulk invitations, and 30-day login sessions (configurable with `DOKPLOY_SESSION_DAYS`)
+- **Live GitHub Actions deployments**: a workflow can register its build with `deployment.registerExternalBuild` before it starts, so the Deployments tab, the Deployments page and the home list show the run while GitHub builds it: a GitHub mark, the step that runs now, the commit and an "Open run" link. The later deploy call (with the returned `deploymentId`) continues the same deployment and log, however long it waits in the queue, and a build that fails before deploying ends it with `deployment.finishExternalBuild`. Every deployment row is marked GitHub Actions or Dokploy.
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.40
+## What's new in v0.30.8-community.46
 
-- Deploys are no longer failed by the no-output limit (20 minutes by default) during a long silent build, push or release step. Dokploy now writes a "still running" line to the deployment log every 5 minutes while such a step runs; on applications a hung git clone or image pull is still caught.
-- When a deployment fails because a vault secret reference cannot be resolved, the deployment's error message now shows the reason, with no secret values.
-- No new database migrations. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- The GitHub Actions pill on a service, in the Deployments tab, the Deployments page and the home list is now a button that opens a modal with the whole run: status, run and attempt, repository, environment, branch, commit, the Dokploy deployment, the image, and buttons to open the run on GitHub, view the deployment logs and redeploy the current version. The "Deployed from GitHub Actions" panel on the General tab is gone, so the tab uses no extra space.
+- Live GitHub Actions rows show the real phase of the run (starting, building with the current step, image built and waiting for the deploy job, or a note that Dokploy cannot read the steps) instead of "waiting to start".
+- No database migrations; an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -139,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.40
+export DOKPLOY_VERSION=v0.30.8-community.46
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -152,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.40      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.46      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -195,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.40` is the 40th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.46` is the 46th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 

@@ -1,3 +1,4 @@
+import { githubActionsPushTarget } from "@dokploy/server/services/build-origin-shared";
 import {
 	Ban,
 	CheckCircle2,
@@ -12,6 +13,10 @@ import { toast } from "sonner";
 import { ShowBuildChooseForm } from "@/components/dashboard/application/build/show";
 import { ShowProviderForm } from "@/components/dashboard/application/general/generic/show";
 import { DialogAction } from "@/components/shared/dialog-action";
+import {
+	GithubActionsAdvanced,
+	GithubActionsRedeployHint,
+} from "@/components/shared/github-actions-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -52,6 +57,49 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 
 	const { mutateAsync: redeploy } = api.application.redeploy.useMutation();
 
+	// Built in GitHub Actions: Dokploy only pulls and starts the image (T-12424).
+	const isGithubActions = data?.buildOrigin === "github-actions";
+
+	const rebuildAction = canDeploy && (
+		<DialogAction
+			title="Rebuild Application"
+			description="Are you sure you want to rebuild this application?"
+			type="default"
+			onClick={async () => {
+				await redeploy({
+					applicationId: applicationId,
+				})
+					.then(() => {
+						toast.success("Application rebuilt successfully");
+						refetch();
+					})
+					.catch(() => {
+						toast.error("Error rebuilding application");
+					});
+			}}
+		>
+			<Button
+				variant="secondary"
+				isLoading={data?.applicationStatus === "running"}
+				className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+			>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<div className="flex items-center">
+							<Hammer className="size-4 mr-1" />
+							Rebuild
+						</div>
+					</TooltipTrigger>
+					<TooltipPrimitive.Portal>
+						<TooltipContent sideOffset={5} className="z-60">
+							<p>Only rebuilds the application without downloading new code</p>
+						</TooltipContent>
+					</TooltipPrimitive.Portal>
+				</Tooltip>
+			</Button>
+		</DialogAction>
+	);
+
 	return (
 		<>
 			<Card className="bg-background">
@@ -61,49 +109,81 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 				<CardContent className="grid grid-cols-2 lg:flex lg:flex-row lg:flex-wrap gap-4">
 					<TooltipProvider delayDuration={0} disableHoverableContent={false}>
 						{canDeploy && (
-							<DialogAction
-								title="Deploy Application"
-								description="Are you sure you want to deploy this application?"
-								type="default"
-								onClick={async () => {
-									await deploy({
-										applicationId: applicationId,
-									})
-										.then(() => {
-											toast.success("Application deployed successfully");
-											refetch();
-											router.push(
-												`/dashboard/project/${data?.environment.projectId}/environment/${data?.environmentId}/services/application/${applicationId}?tab=deployments`,
-											);
-										})
-										.catch(() => {
-											toast.error("Error deploying application");
-										});
-								}}
+							<div
+								className={
+									isGithubActions
+										? "col-span-2 flex flex-col items-start gap-2 lg:basis-full"
+										: "contents"
+								}
 							>
-								<Button
-									variant="default"
-									isLoading={data?.applicationStatus === "running"}
-									className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+								<DialogAction
+									title={
+										isGithubActions
+											? "Redeploy current version"
+											: "Deploy Application"
+									}
+									description={
+										isGithubActions
+											? "Dokploy will pull the current image again and restart this application. Nothing is built."
+											: "Are you sure you want to deploy this application?"
+									}
+									type="default"
+									onClick={async () => {
+										await deploy({
+											applicationId: applicationId,
+										})
+											.then(() => {
+												toast.success(
+													isGithubActions
+														? "Redeploying the current version"
+														: "Application deployed successfully",
+												);
+												refetch();
+												router.push(
+													`/dashboard/project/${data?.environment.projectId}/environment/${data?.environmentId}/services/application/${applicationId}?tab=deployments`,
+												);
+											})
+											.catch(() => {
+												toast.error("Error deploying application");
+											});
+									}}
 								>
-									<Tooltip>
-										<TooltipTrigger asChild>
-											<div className="flex items-center">
-												<Rocket className="size-4 mr-1" />
-												Deploy
-											</div>
-										</TooltipTrigger>
-										<TooltipPrimitive.Portal>
-											<TooltipContent sideOffset={5} className="z-60">
-												<p>
-													Downloads the source code and performs a complete
-													build
-												</p>
-											</TooltipContent>
-										</TooltipPrimitive.Portal>
-									</Tooltip>
-								</Button>
-							</DialogAction>
+									<Button
+										variant="default"
+										isLoading={data?.applicationStatus === "running"}
+										className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
+									>
+										<Tooltip>
+											<TooltipTrigger asChild>
+												<div className="flex items-center">
+													<Rocket className="size-4 mr-1" />
+													{isGithubActions
+														? "Redeploy current version"
+														: "Deploy"}
+												</div>
+											</TooltipTrigger>
+											<TooltipPrimitive.Portal>
+												<TooltipContent sideOffset={5} className="z-60">
+													<p>
+														{isGithubActions
+															? "Pulls the current image again and restarts the application"
+															: "Downloads the source code and performs a complete build"}
+													</p>
+												</TooltipContent>
+											</TooltipPrimitive.Portal>
+										</Tooltip>
+									</Button>
+								</DialogAction>
+								{isGithubActions && (
+									<GithubActionsRedeployHint
+										target={githubActionsPushTarget({
+											branch: data?.branch,
+											sourceType: data?.sourceType,
+											buildRepository: data?.buildRepository,
+										})}
+									/>
+								)}
+							</div>
 						)}
 						{canDeploy && (
 							<DialogAction
@@ -145,48 +225,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 								</Button>
 							</DialogAction>
 						)}
-						{canDeploy && (
-							<DialogAction
-								title="Rebuild Application"
-								description="Are you sure you want to rebuild this application?"
-								type="default"
-								onClick={async () => {
-									await redeploy({
-										applicationId: applicationId,
-									})
-										.then(() => {
-											toast.success("Application rebuilt successfully");
-											refetch();
-										})
-										.catch(() => {
-											toast.error("Error rebuilding application");
-										});
-								}}
-							>
-								<Button
-									variant="secondary"
-									isLoading={data?.applicationStatus === "running"}
-									className="flex items-center gap-1.5 group focus-visible:ring-2 focus-visible:ring-offset-2"
-								>
-									<Tooltip>
-										<TooltipTrigger asChild>
-											<div className="flex items-center">
-												<Hammer className="size-4 mr-1" />
-												Rebuild
-											</div>
-										</TooltipTrigger>
-										<TooltipPrimitive.Portal>
-											<TooltipContent sideOffset={5} className="z-60">
-												<p>
-													Only rebuilds the application without downloading new
-													code
-												</p>
-											</TooltipContent>
-										</TooltipPrimitive.Portal>
-									</Tooltip>
-								</Button>
-							</DialogAction>
-						)}
+						{!isGithubActions && rebuildAction}
 
 						{canDeploy && data?.applicationStatus === "idle" ? (
 							<DialogAction
@@ -281,7 +320,8 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 							Open Terminal
 						</Button>
 					</DockerTerminalModal>
-					{canUpdateService && (
+					{/* GitHub Actions starts every deploy and Dokploy builds and caches nothing here (T-12502). */}
+					{canUpdateService && !isGithubActions && (
 						<div className="flex flex-row items-center gap-2 justify-between rounded-md px-4 py-2 border col-span-2 md:col-span-1">
 							<span className="text-sm font-medium">Autodeploy</span>
 							<Switch
@@ -305,7 +345,7 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 						</div>
 					)}
 
-					{canUpdateService && (
+					{canUpdateService && !isGithubActions && (
 						<div className="flex flex-row items-center gap-2 justify-between rounded-md px-4 py-2 border col-span-2 md:col-span-1">
 							<span className="text-sm font-medium">Clean Cache</span>
 							<Switch
@@ -330,8 +370,16 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 					)}
 				</CardContent>
 			</Card>
-			<ShowProviderForm applicationId={applicationId} />
-			<ShowBuildChooseForm applicationId={applicationId} />
+			{isGithubActions ? (
+				<GithubActionsAdvanced description="The image and where it comes from. Build, cache and autodeploy settings are hidden because GitHub Actions builds this service.">
+					<ShowProviderForm applicationId={applicationId} />
+				</GithubActionsAdvanced>
+			) : (
+				<>
+					<ShowProviderForm applicationId={applicationId} />
+					<ShowBuildChooseForm applicationId={applicationId} />
+				</>
+			)}
 		</>
 	);
 };

@@ -14,7 +14,7 @@ import { type ParsedPayload, parseDeploymentPayload } from "./payload";
  * See docs/design/github-deployments-pull.md.
  */
 
-export const POLL_INTERVAL_MS = 20_000;
+export const GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS = 20_000;
 /** A Dokploy deployment that never ends is reported to GitHub as failed after this. */
 export const INFLIGHT_TIMEOUT_MS = 90 * 60 * 1000;
 /** How long a queued job may take to show up as a deployment row. */
@@ -403,7 +403,10 @@ const pollWatchInner = async (
 			await deps.patchWatch(watch.watchId, {
 				lastError: `GitHub answered with an error${listed.status ? ` (HTTP ${listed.status})` : ""}.`,
 			});
-			deps.block(watchKey(watch.watchId), now + POLL_INTERVAL_MS * 3);
+			deps.block(
+				watchKey(watch.watchId),
+				now + GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS * 3,
+			);
 			return;
 		case "ok":
 			break;
