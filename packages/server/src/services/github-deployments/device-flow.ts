@@ -107,6 +107,7 @@ export const startDeviceFlow = async (deps: {
 	fetch: FetchLike;
 	now: () => number;
 	clientId?: string;
+	scope?: string;
 }): Promise<StartResult> => {
 	let response: Awaited<ReturnType<FetchLike>>;
 	try {
@@ -115,7 +116,7 @@ export const startDeviceFlow = async (deps: {
 			headers: GITHUB_HEADERS,
 			body: formBody({
 				client_id: deps.clientId ?? getDeviceClientId(),
-				scope: GITHUB_DEVICE_SCOPE,
+				scope: deps.scope ?? GITHUB_DEVICE_SCOPE,
 			}),
 		});
 	} catch {

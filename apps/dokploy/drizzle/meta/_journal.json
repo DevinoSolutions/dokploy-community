@@ -1597,6 +1597,13 @@
       "when": 1793777205783,
       "tag": "0228_github_deployment_watch",
       "breakpoints": true
+    },
+    {
+      "idx": 229,
+      "version": "7",
+      "when": 1793863605783,
+      "tag": "0229_gha_connection",
+      "breakpoints": true
     }
   ]
 }

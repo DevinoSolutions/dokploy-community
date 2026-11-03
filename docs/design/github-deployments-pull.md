@@ -75,7 +75,10 @@ public, so it is a constant in code, overridable with the environment variable
 app has no client secret and its tokens do not expire.
 
 1. `POST https://github.com/login/device/code` with `client_id` and
-   `scope=repo_deployment read:packages`. GitHub answers `device_code`,
+   `scope=repo_deployment public_repo` (`repo_deployment repo` when the user says
+   the repositories are private; `read:packages` is added only when the user
+   ticks "also pull private GHCR packages", T-13719).
+   GitHub answers `device_code`,
    `user_code`, `verification_uri`, `expires_in`, `interval`.
 2. The UI shows `user_code` and a link to `verification_uri`. The `device_code`
    never leaves the server: the browser holds only an opaque `flowId`.
@@ -386,9 +389,16 @@ is cut off after 15 seconds.
 
 ## Security model
 
-- **Narrow scopes.** `repo_deployment` (read and write deployment statuses and
-  create deployments, no code access) and `read:packages` (pull private GHCR
-  images). Nothing else is requested; the OAuth App cannot read code.
+- **Scopes (not narrow, and said so).** `repo_deployment` (read and write
+  deployment statuses and create deployments) plus `public_repo`, which GitHub
+  grants as **read and write** on the account's public repositories, or `repo`
+  for private repositories: **full control of the account's private repositories,
+  including their code**. Classic OAuth has no narrower scope for either.
+  `read:packages` (pull private GHCR packages) is opt-in since T-13719, a
+  checkbox on the settings card; without it `loadGhcrCredentials` is null and a
+  private GHCR image fails to pull, with a log line that names the missing scope.
+  Connections made before the change keep their scopes. A reconnect replaces a
+  connection's scopes with the ones chosen then.
 - **No Dokploy credential in GitHub.** The old flow keeps a Dokploy API key as a
   GitHub secret. Here GitHub holds nothing that can reach Dokploy; Dokploy only
   makes outbound calls.
@@ -416,12 +426,17 @@ is cut off after 15 seconds.
   runs").
 - **Whose token.** A member can bind only a connection they own, or one its
   owner shared; owners and admins any. Binding is checked on every `watchSet`.
+  A shared connection lets every member act as the account with the scopes
+  above, so share only an account the whole organization may use that way.
 - **Token handling.** Encrypted at rest; never returned by tRPC or MCP, never in
   a log line, argv, status or URL (tests assert it). Read only by the poller, the
   GHCR pull and the `docker login` helper. Disconnect deletes it.
-- **Blast radius of a leaked token.** `repo_deployment` + `read:packages` of one
-  GitHub account: it can post deployment statuses and read packages that account
-  can read. It cannot read code or reach Dokploy.
+- **Blast radius of a leaked token.** `repo_deployment` + `public_repo` (or
+  `repo`) of one GitHub account: it can post deployment statuses and read and
+  write the repositories that scope reaches (public ones for `public_repo`). `repo` is GitHub's classic
+  full-control scope for private repositories (it includes reading and writing
+  their code), so a leaked token of a private-repository connection is far more
+  sensitive than a `public_repo` one. It cannot reach Dokploy.
 - **Self-hosted only.** The poller, the connect flow and the watch mutation are
   refused on Dokploy Cloud.
 

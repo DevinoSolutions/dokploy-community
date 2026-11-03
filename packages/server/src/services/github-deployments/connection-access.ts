@@ -1,8 +1,10 @@
 /**
  * Who may use a GitHub connection (the device-flow token of one person).
  *
- * The token can pull the connecting person's private GHCR packages, so a
- * connection is not an organization-wide resource. The model is the one Git
+ * The token acts as the connecting person on GitHub (`repo` is full control of
+ * their private repositories, `public_repo` read and write on their public
+ * ones, `read:packages` their private GHCR packages), so a connection is not an
+ * organization-wide resource. The model is the one Git
  * providers have (services/git-provider.ts):
  *
  * - the person who connected it (`createdByUserId`) owns it;

@@ -236,7 +236,14 @@ describe("the ghcr credentials", () => {
 		// findGithubWatch, then the connection row
 		mocks.selectQueue = [
 			[existing()],
-			[{ githubLogin: "amin", accessToken: "gho_x", status: "active" }],
+			[
+				{
+					githubLogin: "amin",
+					accessToken: "gho_x",
+					status: "active",
+					scopes: "repo_deployment,read:packages",
+				},
+			],
 		];
 		const credentials = await loadGhcrCredentials("application", "app-1");
 		expect(credentials).toMatchObject({
@@ -245,6 +252,21 @@ describe("the ghcr credentials", () => {
 			registryUrl: "ghcr.io",
 			username: "amin",
 		});
+	});
+
+	it("are null for a connection without read:packages, so prod holds no GHCR token", async () => {
+		mocks.selectQueue = [
+			[existing()],
+			[
+				{
+					githubLogin: "amin",
+					accessToken: "gho_x",
+					status: "active",
+					scopes: "repo_deployment,public_repo",
+				},
+			],
+		];
+		expect(await loadGhcrCredentials("application", "app-1")).toBeNull();
 	});
 });
 

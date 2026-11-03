@@ -43,9 +43,13 @@ export interface ConnectDeps {
 export const beginGithubConnect = async (
 	deps: ConnectDeps,
 	owner: { organizationId: string; userId: string },
+	options: { scope?: string } = {},
 ) => {
 	prune(deps.now());
-	const started = await startDeviceFlow(deps);
+	const started = await startDeviceFlow({
+		...deps,
+		...(options.scope ? { scope: options.scope } : {}),
+	});
 	if (!started.ok) return started;
 	const flowId = randomBytes(18).toString("base64url");
 	flows.set(flowId, { ...owner, state: started.state });

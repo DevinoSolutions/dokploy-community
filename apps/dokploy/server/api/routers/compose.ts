@@ -57,6 +57,7 @@ import {
 	updateDeploymentStatus,
 	withdrawLiveBuildDeploy,
 } from "@dokploy/server";
+import { removeGhaConnectionsForServices } from "@dokploy/server/services/gha-connect/store";
 import { db } from "@dokploy/server/db";
 import { getBuildOriginsByService } from "@dokploy/server/services/build-origin";
 import {
@@ -536,10 +537,19 @@ export const composeRouter = createTRPCRouter({
 			const composeDomains = await findDomainsByComposeId(input.composeId);
 			await deprovisionCloudflareForDomains(composeDomains);
 
-			const result = await db
-				.delete(composeTable)
-				.where(eq(composeTable.composeId, input.composeId))
-				.returning();
+			// A service that follows GitHub Actions releases owns a connection row and
+			// a watch: they go with it, in the same transaction.
+			const result = await db.transaction(async (tx) => {
+				const deleted = await tx
+					.delete(composeTable)
+					.where(eq(composeTable.composeId, input.composeId))
+					.returning();
+				await removeGhaConnectionsForServices(
+					[{ serviceType: "compose", serviceId: input.composeId }],
+					tx,
+				);
+				return deleted;
+			});
 
 			await removeUptimelyServiceRows([
 				{ serviceType: "compose", serviceId: input.composeId },

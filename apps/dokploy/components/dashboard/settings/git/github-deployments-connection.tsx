@@ -12,6 +12,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Dialog,
 	DialogContent,
@@ -58,6 +59,8 @@ export const GithubDeploymentsConnection = () => {
 	const [open, setOpen] = useState(false);
 	const [flow, setFlow] = useState<Flow | null>(null);
 	const [message, setMessage] = useState<string | null>(null);
+	const [privateRepositories, setPrivateRepositories] = useState(false);
+	const [pullPackages, setPullPackages] = useState(false);
 	const stopped = useRef(true);
 
 	// Poll the server at the interval GitHub gave; the server never calls GitHub
@@ -111,7 +114,16 @@ export const GithubDeploymentsConnection = () => {
 	const begin = async () => {
 		setMessage(null);
 		try {
-			setFlow(await startConnect());
+			setFlow(
+				await startConnect(
+					privateRepositories || pullPackages
+						? {
+								repositoryAccess: privateRepositories ? "private" : "public",
+								pullPrivatePackages: pullPackages,
+							}
+						: undefined,
+				),
+			);
 		} catch (error) {
 			setMessage(
 				error instanceof Error
@@ -134,8 +146,13 @@ export const GithubDeploymentsConnection = () => {
 							Connect a GitHub account so services can deploy from GitHub
 							Deployments, even when Dokploy is behind Tailscale or a private
 							network that GitHub Actions cannot reach. Dokploy asks GitHub for
-							new deployments; nothing connects inbound. Only the
-							repo_deployment and read:packages scopes are requested.
+							new deployments; nothing connects inbound. The connection asks
+							for repo_deployment plus public_repo, which GitHub grants as read
+							and write access to the account's public repositories (classic
+							OAuth cannot narrow it). Private repositories need the repo
+							scope instead: full control of the account's private repositories,
+							including their code. You choose which when you connect. Anyone
+							you share a connection with can use it as that account.
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="space-y-2 py-8 border-t">
@@ -267,6 +284,35 @@ export const GithubDeploymentsConnection = () => {
 													{message}
 												</span>
 											)}
+											<label
+												htmlFor="github-private-repositories"
+												className="flex flex-row items-center gap-2 text-sm"
+											>
+												<Checkbox
+													id="github-private-repositories"
+													checked={privateRepositories}
+													onCheckedChange={(value) =>
+														setPrivateRepositories(value === true)
+													}
+												/>
+												This account's repositories are private (asks for the repo
+												scope)
+											</label>
+											<label
+												htmlFor="github-pull-packages"
+												className="flex flex-row items-center gap-2 text-sm"
+											>
+												<Checkbox
+													id="github-pull-packages"
+													checked={pullPackages}
+													onCheckedChange={(value) =>
+														setPullPackages(value === true)
+													}
+												/>
+												Also pull private GHCR packages (asks for read:packages;
+												needed by services that follow plain GitHub Deployments
+												with a private image)
+											</label>
 											<Button onClick={begin} isLoading={isStarting}>
 												Get a code
 											</Button>

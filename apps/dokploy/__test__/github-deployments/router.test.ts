@@ -17,6 +17,9 @@ const mocks = vi.hoisted(() => ({
 	deleteGithubWatch: vi.fn(),
 	findApplicationById: vi.fn(),
 	findComposeById: vi.fn(),
+	countGhaConnectionsForGithubConnection: vi.fn(),
+	pruneOrphanedGhaConnections: vi.fn(),
+	findGhaConnection: vi.fn(),
 	findGithubConnectionInOrganization: vi.fn(),
 	findGithubWatch: vi.fn(),
 	findRecentOtherGithubDeployer: vi.fn(),
@@ -31,6 +34,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@dokploy/server/db", () => ({ db: {} }));
+vi.mock("@dokploy/server/services/gha-connect", () => ({
+	countGhaConnectionsForGithubConnection:
+		mocks.countGhaConnectionsForGithubConnection,
+	findGhaConnection: mocks.findGhaConnection,
+	pruneOrphanedGhaConnections: mocks.pruneOrphanedGhaConnections,
+}));
 vi.mock("@dokploy/server/lib/auth", () => ({ validateRequest: vi.fn() }));
 vi.mock("@/server/api/utils/audit", () => ({
 	audit: vi.fn(async () => undefined),
@@ -197,6 +206,9 @@ beforeEach(() => {
 	mocks.deleteGithubConnection.mockResolvedValue(true);
 	mocks.removeGhcrWatchConfigDirs.mockResolvedValue(undefined);
 	mocks.findGithubWatch.mockResolvedValue(watchRow());
+	mocks.findGhaConnection.mockResolvedValue(null);
+	mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(0);
+	mocks.pruneOrphanedGhaConnections.mockResolvedValue(0);
 });
 
 describe("watchSet and watchRemove need to be allowed to manage git providers AND to deploy", () => {
@@ -661,5 +673,145 @@ describe("disconnect", () => {
 		).rejects.toMatchObject({ code: "NOT_FOUND" });
 		expect(mocks.deleteGithubConnection).not.toHaveBeenCalled();
 		expect(mocks.removeGhcrWatchConfigDirs).not.toHaveBeenCalled();
+	});
+});
+
+describe("startConnect asks GitHub for the scopes the caller chose", () => {
+	const started = {
+		ok: true as const,
+		flowId: "f1",
+		userCode: "ABCD-1234",
+		verificationUri: "https://github.com/login/device",
+		intervalSeconds: 5,
+		expiresInSeconds: 900,
+	};
+
+	it("asks for the default scopes (public_repo) when nothing is said", async () => {
+		mocks.beginGithubConnect.mockResolvedValue(started);
+		await callerFor("owner").startConnect();
+		expect(mocks.beginGithubConnect).toHaveBeenCalledWith(
+			expect.anything(),
+			{ organizationId: "org-a", userId: "user-1" },
+			{ scope: "repo_deployment public_repo" },
+		);
+		await callerFor("owner").startConnect({ repositoryAccess: "public" });
+		expect(mocks.beginGithubConnect.mock.calls[1]?.[2]).toEqual({
+			scope: "repo_deployment public_repo",
+		});
+	});
+
+	it("asks for the repo scope for private repositories", async () => {
+		mocks.beginGithubConnect.mockResolvedValue(started);
+		await callerFor("admin").startConnect({ repositoryAccess: "private" });
+		expect(mocks.beginGithubConnect.mock.calls[0]?.[2]).toEqual({
+			scope: "repo_deployment repo",
+		});
+	});
+
+	it("adds read:packages only when the caller opts in", async () => {
+		mocks.beginGithubConnect.mockResolvedValue(started);
+		await callerFor("owner").startConnect({ pullPrivatePackages: true });
+		await callerFor("owner").startConnect({
+			repositoryAccess: "private",
+			pullPrivatePackages: true,
+		});
+		expect(mocks.beginGithubConnect.mock.calls[0]?.[2]).toEqual({
+			scope: "repo_deployment public_repo read:packages",
+		});
+		expect(mocks.beginGithubConnect.mock.calls[1]?.[2]).toEqual({
+			scope: "repo_deployment repo read:packages",
+		});
+	});
+
+	it("never returns the device code", async () => {
+		mocks.beginGithubConnect.mockResolvedValue({
+			...started,
+			deviceCode: "secret-device-code",
+		});
+		const out = await callerFor("owner").startConnect();
+		expect(JSON.stringify(out)).not.toContain("secret-device-code");
+	});
+
+	it("a plain member cannot start a connection", async () => {
+		await expect(callerFor("member").startConnect()).rejects.toMatchObject({
+			code: "UNAUTHORIZED",
+		});
+		expect(mocks.beginGithubConnect).not.toHaveBeenCalled();
+	});
+});
+
+describe("a service that follows GitHub Actions releases keeps its watch", () => {
+	beforeEach(() => {
+		mocks.findGhaConnection.mockResolvedValue({ ghaConnectionId: "gc-1" });
+	});
+
+	it.each([true, false])(
+		"watchSet refuses to edit it or turn it %s and writes nothing",
+		async (enabled) => {
+			await expect(
+				callerFor("admin").watchSet({ ...setInput, enabled }),
+			).rejects.toMatchObject({ code: "CONFLICT" });
+			expect(mocks.upsertGithubWatch).not.toHaveBeenCalled();
+			expect(mocks.removeGhcrWatchConfigDirs).not.toHaveBeenCalled();
+		},
+	);
+
+	it("watchRemove refuses to delete it", async () => {
+		await expect(
+			callerFor("admin").watchRemove({
+				serviceType: "application",
+				serviceId: "app-1",
+			}),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		expect(mocks.deleteGithubWatch).not.toHaveBeenCalled();
+	});
+});
+
+describe("disconnect refuses an account that services follow GitHub Actions through", () => {
+	it("is a conflict that names how many, and removes nothing", async () => {
+		mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(2);
+		await expect(
+			callerFor("owner").disconnect({ connectionId: "conn-1" }),
+		).rejects.toMatchObject({
+			code: "CONFLICT",
+			message: expect.stringContaining("Disconnect the 2 services"),
+		});
+		expect(mocks.deleteGithubConnection).not.toHaveBeenCalled();
+		expect(mocks.removeGhcrWatchConfigDirs).not.toHaveBeenCalled();
+	});
+
+	it("drops the connections of deleted services first, so they never block the removal", async () => {
+		const order: string[] = [];
+		mocks.pruneOrphanedGhaConnections.mockImplementation(async () => {
+			order.push("prune");
+			return 1;
+		});
+		mocks.countGhaConnectionsForGithubConnection.mockImplementation(
+			async () => {
+				order.push("count");
+				return 0;
+			},
+		);
+		await callerFor("owner").disconnect({ connectionId: "conn-1" });
+		expect(order).toEqual(["prune", "count"]);
+		expect(mocks.pruneOrphanedGhaConnections).toHaveBeenCalledWith("conn-1");
+	});
+
+	it("says service for a single one", async () => {
+		mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(1);
+		await expect(
+			callerFor("owner").disconnect({ connectionId: "conn-1" }),
+		).rejects.toMatchObject({
+			message: expect.stringContaining("Disconnect the 1 service "),
+		});
+	});
+
+	it("still removes an account no service uses", async () => {
+		mocks.countGhaConnectionsForGithubConnection.mockResolvedValue(0);
+		await callerFor("owner").disconnect({ connectionId: "conn-1" });
+		expect(mocks.deleteGithubConnection).toHaveBeenCalledWith(
+			"conn-1",
+			"org-a",
+		);
 	});
 });

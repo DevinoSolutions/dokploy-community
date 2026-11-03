@@ -541,6 +541,7 @@ make sure the regenerated migration does not `DROP` them.
 | Table | Schema file | Feature | Landed in |
 |---|---|---|---|
 | `oauth_application`, `oauth_access_token`, `oauth_consent` | `packages/server/src/db/schema/mcp-oauth.ts` | remote MCP server OAuth (better-auth `mcp` plugin storage) | `0198` |
+| `gha_connection`, `gha_release` | `packages/server/src/db/schema/gha-connection.ts` | native "Build on GitHub Actions" connection and release history (T-13719) | `0229` |
 
 ### Migrator ordering gotcha (drizzle `postgres-js` migrator)
 

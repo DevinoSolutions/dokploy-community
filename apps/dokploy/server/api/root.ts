@@ -24,10 +24,11 @@ import { dockerVolumeRouter } from "./routers/docker-volume";
 import { dodomainRouter } from "./routers/dodomain";
 import { domainRouter } from "./routers/domain";
 import { environmentRouter } from "./routers/environment";
+import { ghaConnectionRouter } from "./routers/gha-connection";
 import { gitProviderRouter } from "./routers/git-provider";
-import { githubDeploymentRouter } from "./routers/github-deployment";
 import { giteaRouter } from "./routers/gitea";
 import { githubRouter } from "./routers/github";
+import { githubDeploymentRouter } from "./routers/github-deployment";
 import { gitlabRouter } from "./routers/gitlab";
 import { libsqlRouter } from "./routers/libsql";
 import { mariadbRouter } from "./routers/mariadb";
@@ -127,6 +128,7 @@ export const appRouter = createTRPCRouter({
 	user: userRouter,
 	vaultProvider: vaultProviderRouter,
 	githubDeployment: githubDeploymentRouter,
+	ghaConnection: ghaConnectionRouter,
 	ai: aiRouter,
 	organization: organizationRouter,
 	licenseKey: licenseKeyRouter,
