@@ -5,6 +5,7 @@ import {
 	extractLogManifest,
 	JOB_LOG_MAX_BYTES,
 	type JobHint,
+	MAX_LOG_JOBS,
 	releaseJobs,
 } from "./log-manifest";
 import {
@@ -280,16 +281,21 @@ const readArtifactManifest = async (
 
 type LogRead =
 	| { kind: "found"; text: string }
-	/** No manifest line was found. `unreachable`: a job or its log could not be found at all. */
-	| { kind: "none"; unreachable: boolean }
+	/**
+	 * No manifest line was found. `incomplete`: some log could not be found, or more jobs exist than
+	 * were read, so the absence proves nothing and the answer must not be final.
+	 */
+	| { kind: "none"; incomplete: boolean }
 	| { kind: "result"; result: AcceptanceResult };
 
 /**
  * The same manifest from the logs of the successful jobs of THIS run attempt (jobs are listed per
- * attempt, so an older or newer attempt's log is never read). The wake-up hint (runner, job) only
- * narrows which jobs are read. Not finding the line is not a verdict (the caller decides, by the
- * age of the run); a log that carries a masked, broken or a second, different manifest is one,
- * because the run is proven to be the connection's own release run.
+ * attempt, so an older or newer attempt's log is never read). The connection's job name and the
+ * wake-up hint (runner, job) only decide which logs are read FIRST: when those yield no marker the
+ * other successful jobs are read too (at most ten logs in all), because the hint comes from a
+ * Deployment anyone with write access can create. Not finding the line is not a verdict (the
+ * caller decides, by the age of the run); a log that carries a masked, broken or a second,
+ * different manifest is one, because the run is proven to be the connection's own release run.
  */
 const readJobLogManifest = async (
 	api: ActionsApi,
@@ -299,11 +305,11 @@ const readJobLogManifest = async (
 	hint: JobHint | null,
 ): Promise<LogRead> => {
 	const listing = await api.runJobs(run.id, runAttempt);
-	if (listing.kind === "not-found") return { kind: "none", unreachable: true };
+	if (listing.kind === "not-found") return { kind: "none", incomplete: true };
 	if (listing.kind !== "ok") {
 		return { kind: "result", result: { kind: "retry", cause: listing } };
 	}
-	const jobs = releaseJobs({
+	const { preferred, rest, overCap } = releaseJobs({
 		jobs: listing.value,
 		runId: run.id,
 		attempt: runAttempt,
@@ -311,33 +317,46 @@ const readJobLogManifest = async (
 		releaseJobName: c.releaseJobName,
 		hint,
 	});
-	let unreachable = jobs.length === 0;
-	const logs: string[] = [];
-	for (const job of jobs) {
-		const log = await api.jobLog(job.id, JOB_LOG_MAX_BYTES);
-		if (log.kind === "ok") {
-			logs.push(log.value);
-		} else if (log.kind === "error" && log.status === 413) {
-			// Too large to be the small release job: not the one.
-		} else if (log.kind === "not-found") {
-			unreachable = true;
-		} else {
-			return { kind: "result", result: { kind: "retry", cause: log } };
+	let incomplete = preferred.length + rest.length === 0 || overCap;
+	let budget = MAX_LOG_JOBS;
+	// A group of jobs is read whole, so two different markers inside it are seen.
+	const readGroup = async (
+		jobs: typeof preferred,
+	): Promise<LogRead | { kind: "continue" }> => {
+		const logs: string[] = [];
+		for (const job of jobs) {
+			if (budget === 0) {
+				incomplete = true;
+				break;
+			}
+			budget -= 1;
+			const log = await api.jobLog(job.id, JOB_LOG_MAX_BYTES);
+			if (log.kind === "ok") {
+				logs.push(log.value);
+			} else if (log.kind === "error" && log.status === 413) {
+				// Too large to be the small release job: not the one.
+			} else if (log.kind === "not-found") {
+				incomplete = true;
+			} else {
+				return { kind: "result", result: { kind: "retry", cause: log } };
+			}
 		}
-	}
-	const extracted = extractLogManifest(logs);
-	if (extracted.ok) return { kind: "found", text: extracted.text };
-	if (extracted.code === "none") return { kind: "none", unreachable };
-	if (extracted.code === "masked") {
+		const extracted = extractLogManifest(logs);
+		if (extracted.ok) return { kind: "found", text: extracted.text };
+		if (extracted.code === "none") return { kind: "continue" };
 		return {
 			kind: "result",
-			result: refuse("manifest-masked", extracted.message),
+			result: refuse(
+				extracted.code === "masked" ? "manifest-masked" : "manifest-invalid",
+				extracted.message,
+			),
 		};
-	}
-	return {
-		kind: "result",
-		result: refuse("manifest-invalid", extracted.message),
 	};
+	for (const group of [preferred, rest]) {
+		const read = await readGroup(group);
+		if (read.kind !== "continue") return read;
+	}
+	return { kind: "none", incomplete };
 };
 
 export const acceptRelease = async (
@@ -436,8 +455,9 @@ export const acceptRelease = async (
 			if (Number.isFinite(updated) && now() - updated < LOG_GRACE_MS) {
 				return { kind: "retry", cause: { kind: "error", status: 404 } };
 			}
-			if (fromLog.unreachable && unavailable.kind === "refused") {
-				// The log itself could not be found: fixing that (or GitHub catching up) can clear it.
+			if (fromLog.incomplete && unavailable.kind === "refused") {
+				// A log could not be found, or not every job was read: the absence is not final,
+				// so the caller asks again later and does not record the run as handled.
 				return refuse(unavailable.code, unavailable.message, true);
 			}
 			return unavailable;
@@ -533,9 +553,11 @@ export const acceptRelease = async (
 		if (head.kind === "denied") {
 			// The registry answered but will not let Dokploy read the image: asking again changes
 			// nothing until a login is saved or fixed, so this is a refusal that names it.
+			// Saving or fixing a login is a setup change, not a re-run: ask again later.
 			return refuse(
 				"image-unverified",
 				`The registry would not show ${image.repository}@${image.digest.slice(0, 19)}: ${head.reason}`,
+				true,
 			);
 		}
 		if (head.kind === "not-found" || head.digest !== image.digest) {

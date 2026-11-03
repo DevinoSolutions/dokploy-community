@@ -8,18 +8,26 @@ import { MANIFEST_MAX_BYTES } from "./manifest";
  * upload of the organization. The action therefore also writes the manifest to
  * its job log, on ONE line of its own:
  *
- *   dokploy-release/v1 <lowercase hex of the UTF-8 bytes of the compact manifest JSON>
+ *   dokploy-release/v1 <payload>
  *
- * Why hex and why no leading "::": the runner masks the values of secrets in
- * logs, and also their base64 forms (all three alignments), so a base64 payload
- * can be corrupted by a secret whose value happens to occur in the manifest
- * (an organization has already seen image digests masked this way). The runner
- * has no hex masking. And the prefix does not start with "::", so the runner's
- * workflow-command parser is never involved. A "*" in the payload means the
- * runner masked something anyway; that is reported as such, never guessed at.
+ * The payload is the UTF-8 bytes of the compact manifest JSON, one letter per
+ * nibble: nibble 0 is "g", nibble 15 is "v", high nibble of a byte first. So it
+ * only ever contains the letters g to v: no digit and no a-f.
+ *
+ * Why not base64 or hex: the runner masks the values of secrets in logs, and
+ * also their base64 forms (all three alignments), so a base64 payload can be
+ * corrupted by a secret whose value happens to occur in the manifest (an
+ * organization has already seen image digests masked this way). Hex is not
+ * masked as such, but a short secret made only of 0-9a-f (a port, a PIN) occurs
+ * by chance inside hex text. A letters-only alphabet has no digits, so such a
+ * secret cannot match; a secret that is letters g-v only and long enough to
+ * occur in the payload is not a thing a manifest is encoded around. And the
+ * prefix does not start with "::", so the runner's workflow-command parser is
+ * never involved. A "*" in the payload means the runner masked something
+ * anyway; that is reported as such, never guessed at.
  *
  * Size: the manifest is capped at 64 KiB, so a line is at most ~128 KiB (two
- * hex digits per byte) plus the prefix and GitHub's timestamp.
+ * letters per byte) plus the prefix and GitHub's timestamp.
  *
  * Dokploy reads the line back through the Actions API (a job of the same run
  * and attempt), so it carries exactly the trust of the artifact: both are
@@ -42,8 +50,8 @@ export const MAX_LOG_JOBS = 10;
 const BOM = String.fromCharCode(0xfeff);
 /** `2026-11-03T12:34:56.1234567Z ` in front of every line GitHub serves. */
 const TIMESTAMP = /^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z )?/;
-const HEX = /^[0-9a-f]+$/;
-const MASKED = /^[0-9a-f*]+$/;
+const NIBBLES = /^[g-v]+$/;
+const MASKED = /^[g-v*]+$/;
 const MAX_ENCODED = MANIFEST_MAX_BYTES * 2;
 
 export type LogManifest =
@@ -56,7 +64,33 @@ export type LogManifest =
 
 type Line = { kind: "text"; text: string } | { kind: "masked" } | null;
 
-/** Marker lines of a log, in order: decoded JSON text, or null for one that is not valid hex. */
+const A = "g".charCodeAt(0);
+
+/** The payload for a manifest text: one letter per nibble, g (0) to v (15). */
+export const encodeMarkerPayload = (text: string): string => {
+	let out = "";
+	for (const byte of Buffer.from(text, "utf8")) {
+		out += String.fromCharCode(A + (byte >> 4), A + (byte & 15));
+	}
+	return out;
+};
+
+/** The text of a payload, or null when it is not exactly what encodeMarkerPayload writes. */
+export const decodeMarkerPayload = (payload: string): string | null => {
+	if (payload.length === 0 || payload.length % 2 !== 0) return null;
+	if (!NIBBLES.test(payload)) return null;
+	const bytes = Buffer.alloc(payload.length / 2);
+	for (let i = 0; i < bytes.length; i += 1) {
+		bytes[i] =
+			((payload.charCodeAt(2 * i) - A) << 4) |
+			(payload.charCodeAt(2 * i + 1) - A);
+	}
+	const text = bytes.toString("utf8");
+	// Strict: the text must encode back to the same payload (rejects invalid UTF-8).
+	return encodeMarkerPayload(text) === payload ? text : null;
+};
+
+/** Marker lines of a log, in order: decoded JSON text, or null for one that is not a valid payload. */
 const markerLines = (log: string): Line[] => {
 	const found: Line[] = [];
 	for (const raw of log.split("\n")) {
@@ -72,18 +106,8 @@ const markerLines = (log: string): Line[] => {
 			found.push({ kind: "masked" });
 			continue;
 		}
-		if (encoded.length % 2 !== 0 || !HEX.test(encoded)) {
-			found.push(null);
-			continue;
-		}
-		const bytes = Buffer.from(encoded, "hex");
-		// Strict: the text must encode back to the same bytes (rejects invalid UTF-8).
-		const text = bytes.toString("utf8");
-		found.push(
-			Buffer.from(text, "utf8").toString("hex") === encoded
-				? { kind: "text", text }
-				: null,
-		);
+		const text = decodeMarkerPayload(encoded);
+		found.push(text === null ? null : { kind: "text", text });
 	}
 	return found;
 };
@@ -91,7 +115,7 @@ const markerLines = (log: string): Line[] => {
 /**
  * The one manifest the logs of the release job(s) carry. The same manifest
  * printed twice is one manifest; two different ones, or a marker line that is
- * not valid hex, make the source unusable rather than a guess.
+ * not a valid payload, make the source unusable rather than a guess.
  */
 export const extractLogManifest = (logs: string[]): LogManifest => {
 	const texts = new Set<string>();
@@ -110,14 +134,15 @@ export const extractLogManifest = (logs: string[]): LogManifest => {
 			code: "masked",
 			message:
 				"The runner masked part of the manifest in the job log: a repository, environment or organization secret has a value that appears in it. " +
-				"Move values that are image digests, registry hosts, repository names or service keys out of secrets (keep only real credentials there), then run the release again.",
+				"That includes a short secret (a port, a PIN, a word) that happens to occur in the encoded text. " +
+				"Move values that are image digests, registry hosts, repository names or service keys out of secrets, and avoid very short secrets (keep only real credentials there), then run the release again.",
 		};
 	}
 	if (malformed) {
 		return {
 			ok: false,
 			code: "invalid",
-			message: "A manifest marker line of the job log is not valid hex",
+			message: "A manifest marker line of the job log is not a valid payload",
 		};
 	}
 	if (texts.size === 0) {
@@ -146,12 +171,18 @@ export interface JobHint {
 	runner?: string | null;
 }
 
+const RELEASE_LIKE = /dokploy|release/i;
+
 /**
  * The jobs whose log may hold the marker: completed with success, of this run
- * and attempt, on the run's commit. Narrowed, in order, by the connection's
- * exact `releaseJobName`, else by the runner named in the wake-up hint, else by
- * the hinted job name; with no match every successful job of the attempt is a
- * candidate. At most MAX_LOG_JOBS.
+ * and attempt, on the run's commit. Narrowing only ORDERS them, it never
+ * excludes: `preferred` are the jobs the connection's exact `releaseJobName`
+ * names, else those that ran on the runner the wake-up hint names, else those
+ * with the hinted job name (the hint comes from a Deployment anyone with write
+ * access can create, so a wrong one must cost a few reads, never the release).
+ * `rest` are all the other successful jobs, those whose name or any step name
+ * mentions dokploy or release first. The caller reads preferred, then rest, at
+ * most MAX_LOG_JOBS logs in all; `overCap` says more jobs exist than that.
  */
 export const releaseJobs = (input: {
 	jobs: JobInfo[];
@@ -160,7 +191,7 @@ export const releaseJobs = (input: {
 	headSha: string;
 	releaseJobName?: string | null;
 	hint?: JobHint | null;
-}): JobInfo[] => {
+}): { preferred: JobInfo[]; rest: JobInfo[]; overCap: boolean } => {
 	const successful = input.jobs.filter(
 		(job) =>
 			job.status === "completed" &&
@@ -169,18 +200,31 @@ export const releaseJobs = (input: {
 			(job.attempt === null || job.attempt === input.attempt) &&
 			(job.headSha === null || job.headSha === input.headSha),
 	);
-	let pool = successful;
+	let preferred: JobInfo[] = [];
 	if (input.releaseJobName) {
-		pool = successful.filter((job) => job.name === input.releaseJobName);
+		preferred = successful.filter((job) => job.name === input.releaseJobName);
 	} else {
 		const runner = input.hint?.runner;
-		const byRunner = runner
+		const name = input.hint?.job;
+		preferred = runner
 			? successful.filter((job) => job.runnerName === runner)
 			: [];
-		const name = input.hint?.job;
-		const byName = name ? successful.filter((job) => job.name === name) : [];
-		if (byRunner.length > 0) pool = byRunner;
-		else if (byName.length > 0) pool = byName;
+		if (preferred.length === 0 && name) {
+			preferred = successful.filter((job) => job.name === name);
+		}
 	}
-	return pool.slice(0, MAX_LOG_JOBS);
+	const chosen = new Set(preferred.map((job) => job.id));
+	const others = successful.filter((job) => !chosen.has(job.id));
+	const releaseLike = (job: JobInfo) =>
+		RELEASE_LIKE.test(job.name) ||
+		job.stepNames.some((step) => RELEASE_LIKE.test(step));
+	const rest = [
+		...others.filter(releaseLike),
+		...others.filter((job) => !releaseLike(job)),
+	];
+	return {
+		preferred: preferred.slice(0, MAX_LOG_JOBS),
+		rest,
+		overCap: successful.length > MAX_LOG_JOBS,
+	};
 };

@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+	decodeMarkerPayload,
+	encodeMarkerPayload,
 	extractLogManifest,
 	LOG_MARKER,
 	MAX_LOG_JOBS,
@@ -12,7 +14,7 @@ import {
 } from "@dokploy/server/services/gha-connect/manifest";
 import { describe, expect, it } from "vitest";
 
-const hex = (text: string) => Buffer.from(text, "utf8").toString("hex");
+const hex = (text: string) => encodeMarkerPayload(text);
 const TS = "2026-11-03T12:00:02.1234567Z ";
 const BOM = String.fromCharCode(0xfeff);
 
@@ -61,15 +63,16 @@ describe("extractLogManifest", () => {
 	});
 
 	it.each([
-		["a character that is not hex", `${LOG_MARKER}zz`],
-		["an uppercase digit (the round trip must be exact)", `${LOG_MARKER}7B7D`],
+		["a character outside g-v", `${LOG_MARKER}zz`],
+		["a hex digit (the alphabet has no digits)", `${LOG_MARKER}7b7d`],
+		["an uppercase letter", `${LOG_MARKER}NR`],
 		["an empty payload", LOG_MARKER],
-		["an odd number of digits", `${LOG_MARKER}7b7`],
+		["an odd number of letters", `${LOG_MARKER}nrn`],
 		["trailing garbage", `${LOG_MARKER}${hex("{}")} extra`],
-		["bytes that are not UTF-8", `${LOG_MARKER}ff`],
+		["bytes that are not UTF-8", `${LOG_MARKER}vv`],
 		[
 			"an oversize payload",
-			`${LOG_MARKER}${"aa".repeat(MANIFEST_MAX_BYTES + 1)}`,
+			`${LOG_MARKER}${"gg".repeat(MANIFEST_MAX_BYTES + 1)}`,
 		],
 	])("calls %s invalid, never a miss", (_name, line) => {
 		expect(extractLogManifest([`${TS}${line}`])).toMatchObject({
@@ -89,7 +92,7 @@ describe("extractLogManifest", () => {
 	it("says a masked payload was masked, whatever else is in the log", () => {
 		const good = `${TS}${LOG_MARKER}${hex("{}")}`;
 		for (const masked of [
-			`${LOG_MARKER}7b22***7d`,
+			`${LOG_MARKER}nrii***ng`,
 			`${LOG_MARKER}***`,
 			`${LOG_MARKER}${hex("{}")}***`,
 		]) {
@@ -99,6 +102,7 @@ describe("extractLogManifest", () => {
 				expect(result.message).toMatch(/masked/);
 				expect(result.message).toMatch(/secret/);
 				expect(result.message).toMatch(/digests/);
+				expect(result.message).toMatch(/short secret/);
 			}
 		}
 	});
@@ -130,17 +134,40 @@ describe("extractLogManifest", () => {
 	});
 });
 
+describe("the payload alphabet", () => {
+	it("writes one letter per nibble, g for 0 to v for 15, high nibble first", () => {
+		expect(encodeMarkerPayload("{")).toBe("nr"); // 0x7b
+		expect(encodeMarkerPayload("ÿ")).toBe("sjrv"); // 0xc3 0xbf
+	});
+	it("never contains a digit or a letter a-f, whatever the manifest says", () => {
+		const text = JSON.stringify({
+			port: 5000,
+			pin: "0123456789abcdef",
+			u: "é✓",
+		});
+		expect(encodeMarkerPayload(text)).toMatch(/^[g-v]+$/);
+	});
+	it("round-trips text, and refuses anything the encoder would not write", () => {
+		const text = 'az AZ 09 {}"\\ é✓\u{1f600}';
+		expect(decodeMarkerPayload(encodeMarkerPayload(text))).toBe(text);
+		expect(decodeMarkerPayload("")).toBeNull();
+		expect(decodeMarkerPayload("n")).toBeNull();
+		expect(decodeMarkerPayload("NR")).toBeNull();
+		expect(decodeMarkerPayload("vv")).toBeNull();
+	});
+});
+
 describe("releaseJobs", () => {
 	const job = (patch: Record<string, unknown> = {}) => ({
 		id: 1,
 		runId: 10 as number | null,
 		attempt: 1 as number | null,
-		name: "release",
+		name: "ship",
 		status: "completed",
 		conclusion: "success" as string | null,
 		headSha: "a".repeat(40) as string | null,
 		runnerName: "runner-1" as string | null,
-		stepNames: ["Run DevinoSolutions/dokploy-release@v1"],
+		stepNames: ["Run actions/checkout"],
 		...patch,
 	});
 	const pick = (
@@ -149,48 +176,74 @@ describe("releaseJobs", () => {
 			releaseJobName?: string | null;
 			hint?: { job?: string; runner?: string };
 		} = {},
-	) =>
-		releaseJobs({
+	) => {
+		const result = releaseJobs({
 			jobs,
 			runId: 10,
 			attempt: 1,
 			headSha: "a".repeat(40),
 			...extra,
-		}).map((j) => j.id);
+		});
+		return {
+			preferred: result.preferred.map((j) => j.id),
+			rest: result.rest.map((j) => j.id),
+			overCap: result.overCap,
+		};
+	};
 
-	it("takes every successful job of the attempt, not only ones named for dokploy", () => {
-		expect(
-			pick([
-				job({ id: 1 }),
-				job({ id: 2, name: "build", stepNames: ["docker build"] }),
-			]),
-		).toEqual([1, 2]);
+	it("with no hint and no job name, every successful job is a candidate, release-like ones first", () => {
+		const result = pick([
+			job({ id: 1, name: "build" }),
+			job({ id: 2, name: "test" }),
+			job({
+				id: 3,
+				name: "ship",
+				stepNames: ["Run DevinoSolutions/dokploy-release@v1"],
+			}),
+			job({ id: 4, name: "Release prod" }),
+		]);
+		expect(result).toEqual({
+			preferred: [],
+			rest: [3, 4, 1, 2],
+			overCap: false,
+		});
 	});
 
-	it("narrows to the runner the wake-up hint names, else to the hinted job name", () => {
+	it("narrowing only orders: the runner a hint names comes first, the others still follow", () => {
 		const jobs = [
 			job({ id: 1, runnerName: "r1" }),
 			job({ id: 2, runnerName: "r2", name: "ship" }),
 			job({ id: 3, runnerName: "r3", name: "other" }),
 		];
-		expect(pick(jobs, { hint: { runner: "r2" } })).toEqual([2]);
-		expect(pick(jobs, { hint: { job: "other" } })).toEqual([3]);
-		expect(pick(jobs, { hint: { runner: "r2", job: "other" } })).toEqual([2]);
+		expect(pick(jobs, { hint: { runner: "r2" } })).toMatchObject({
+			preferred: [2],
+			rest: [1, 3],
+		});
+		expect(pick(jobs, { hint: { job: "other" } })).toMatchObject({
+			preferred: [3],
+			rest: [1, 2],
+		});
+		expect(pick(jobs, { hint: { runner: "r2", job: "other" } })).toMatchObject({
+			preferred: [2],
+		});
 		// A hint that matches nothing narrows nothing.
-		expect(pick(jobs, { hint: { runner: "nope", job: "nope" } })).toEqual([
-			1, 2, 3,
-		]);
+		expect(pick(jobs, { hint: { runner: "nope", job: "nope" } })).toMatchObject(
+			{ preferred: [], rest: [1, 2, 3] },
+		);
 	});
 
-	it("an exact job name of the connection wins over the hint", () => {
+	it("an exact job name of the connection comes before the hint, and excludes nothing", () => {
 		const jobs = [
 			job({ id: 1, runnerName: "r1" }),
-			job({ id: 2, name: "ship", runnerName: "r2" }),
+			job({ id: 2, name: "publish", runnerName: "r2" }),
 		];
 		expect(
-			pick(jobs, { releaseJobName: "ship", hint: { runner: "r1" } }),
-		).toEqual([2]);
-		expect(pick(jobs, { releaseJobName: "none" })).toEqual([]);
+			pick(jobs, { releaseJobName: "publish", hint: { runner: "r1" } }),
+		).toMatchObject({ preferred: [2], rest: [1] });
+		expect(pick(jobs, { releaseJobName: "none" })).toMatchObject({
+			preferred: [],
+			rest: [1, 2],
+		});
 	});
 
 	it("drops jobs of another run, attempt or commit and jobs that did not succeed", () => {
@@ -202,15 +255,17 @@ describe("releaseJobs", () => {
 				job({ id: 4, conclusion: "failure" }),
 				job({ id: 5, status: "queued", conclusion: null }),
 			]),
-		).toEqual([]);
+		).toEqual({ preferred: [], rest: [], overCap: false });
 	});
 
-	it("keeps jobs whose run fields GitHub left out, and reads at most ten", () => {
+	it("keeps jobs whose run fields GitHub left out, and says when there are more than ten", () => {
 		const jobs = Array.from({ length: 12 }, (_, i) =>
 			job({ id: i + 1, runId: null, attempt: null, headSha: null }),
 		);
 		expect(MAX_LOG_JOBS).toBe(10);
-		expect(pick(jobs)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+		const result = pick(jobs);
+		expect(result.rest).toHaveLength(12);
+		expect(result.overCap).toBe(true);
 	});
 });
 
@@ -241,7 +296,7 @@ describe("the line the patched dokploy-release action prints", () => {
 		);
 	});
 
-	it("is the compact JSON of the manifest, in lowercase hex", () => {
+	it("is the compact JSON of the manifest, one letter g-v per nibble", () => {
 		const extracted = extractLogManifest([log]);
 		if (!extracted.ok) throw new Error("no marker");
 		expect(extracted.text).toBe(JSON.stringify(JSON.parse(extracted.text)));
@@ -252,7 +307,7 @@ describe("the line the patched dokploy-release action prints", () => {
 	});
 
 	it("never yields a manifest when the line is damaged", () => {
-		const tampered = log.replace(`${LOG_MARKER}7b22`, `${LOG_MARKER}7b23`);
+		const tampered = log.replace(`${LOG_MARKER}nrii`, `${LOG_MARKER}nrij`);
 		expect(tampered).not.toBe(log);
 		const extracted = extractLogManifest([tampered]);
 		expect(extracted.ok ? parseReleaseManifest(extracted.text).ok : false).toBe(
