@@ -21,6 +21,8 @@ export interface PresentableConnection {
 	registryPrefix: string | null;
 	registryId: string | null;
 	gateMode: string;
+	gateWorkflows?: string[];
+	gateTimeoutMinutes?: number;
 	state: string;
 	stateDetail: string | null;
 	stateSince: Date;
@@ -52,6 +54,8 @@ export const presentGhaConnection = (
 	registryPrefix: row.registryPrefix,
 	registryId: row.registryId,
 	gateMode: row.gateMode,
+	gateWorkflows: row.gateWorkflows ?? [],
+	gateTimeoutMinutes: row.gateTimeoutMinutes ?? 60,
 	state: row.state,
 	stateSince: row.stateSince,
 	/** The sentence the service shows, from the design's state table. */

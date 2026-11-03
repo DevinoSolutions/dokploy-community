@@ -21,6 +21,8 @@ export interface ConnectServiceInput extends ConnectRequest {
 	serviceKey: string;
 	registryId: string | null;
 	gateMode: "image" | "checks" | "workflows";
+	gateWorkflows: string[];
+	gateTimeoutMinutes: number;
 }
 
 export type ConnectServiceError = {
@@ -66,7 +68,9 @@ export const registryHostOf = (registryUrl: string): string | null => {
 	const raw = registryUrl.trim();
 	if (raw === "") return null;
 	try {
-		const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+		const url = new URL(
+			/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`,
+		);
 		if (url.protocol !== "https:" && url.protocol !== "http:") return null;
 		if (url.username !== "" || url.password !== "") return null;
 		return url.host === "" ? null : url.host.toLowerCase();

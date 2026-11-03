@@ -21,15 +21,19 @@ import {
 	connectGhaService,
 	createGhaConnection,
 	deleteGhaConnection,
+	findGatedRelease,
 	findGhaConnection,
+	gateChangeWeakens,
 	getBranchHead,
 	getEnvironmentPolicy,
 	getRepositoryByName,
 	listReleases,
+	overrideGate,
 	presentGhaConnection,
-	serviceRowExists,
 	type ServiceFacts,
+	serviceRowExists,
 	touchConnectionActivity,
+	updateGateSettings,
 } from "@dokploy/server/services/gha-connect";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
@@ -38,9 +42,11 @@ import { createTRPCRouter, withPermission } from "@/server/api/trpc";
 import { audit } from "@/server/api/utils/audit";
 import {
 	apiGhaCheckNow,
-	apiGhaConnect,
+	apiGhaConnectInput,
 	apiGhaConnectionOne,
+	apiGhaDeployAnyway,
 	apiGhaDisconnect,
+	apiGhaUpdate,
 } from "@/server/db/schema";
 
 /**
@@ -159,6 +165,8 @@ const persistConnection = async (
 				registryId: input.registryId,
 				registryProbeHost: mirror.registryProbeHost,
 				gateMode: input.gateMode,
+				gateWorkflows: input.gateWorkflows,
+				gateTimeoutMinutes: input.gateTimeoutMinutes,
 				state: "waiting",
 				expectedSha: plan.expectedSha,
 				previousSource: plan.previousSource,
@@ -205,6 +213,8 @@ export const ghaConnectionRouter = createTRPCRouter({
 					runAttempt: release.runAttempt,
 					delivery: release.delivery,
 					status: release.status,
+					gateState: release.gateState,
+					gateReason: release.gateReason,
 					createdAt: release.createdAt,
 					settledAt: release.settledAt,
 				})),
@@ -220,7 +230,7 @@ export const ghaConnectionRouter = createTRPCRouter({
 					"Make an application or compose stack follow the GitHub Actions releases of a repository. Dokploy never receives a call from GitHub: it polls GitHub for GitHub Deployments whose task is dokploy:<serviceKey>, reads the run artifact dokploy-release, checks it against the run, the registry and the environment's deployment branch policy, and deploys the image digest. Needs the service's create access, a GitHub connection (githubDeployment-connections) authorized with repo_deployment plus public_repo (public repositories) or repo (private ones), and a GitHub environment whose deployment branches allow only the tracked branch. An application built from git keeps its settings and has git autodeploy turned off now; it moves to the image at the first release (a public GHCR image only). For images mirrored to a private registry give registryPrefix (host[:port][/path] exactly as in the release, for example localhost:5000/registry.devino.ca) and registryId, the Dokploy registry whose URL and login check the digests; a compose stack stored in Dokploy (raw) is the supported shape. The workflow file is not created: copy the one the dashboard shows. Refuses a service that already follows GitHub Deployments.",
 			},
 		})
-		.input(apiGhaConnect)
+		.input(apiGhaConnectInput)
 		.mutation(async ({ ctx, input }) => {
 			assertSelfHosted();
 			await checkServicePermissionAndAccess(ctx, input.serviceId, {
@@ -396,5 +406,169 @@ export const ghaConnectionRouter = createTRPCRouter({
 				);
 			}
 			return true;
+		}),
+
+	update: withPermission("gitProviders", "create")
+		.meta({
+			openapi: {
+				method: "POST",
+				path: "/ghaConnection.update",
+				description:
+					"Change when a release of a service that follows GitHub Actions is deployed (the deploy gate). gateMode image deploys as soon as the image is accepted; checks waits until every check on the commit passes (the required checks of the branch, else the checks of the last green commit, else whatever the commit reports); workflows waits until the workflows named in gateWorkflows pass (by workflow name or file name without .yml, 1 to 20). gateTimeoutMinutes (5 to 720, default 60) is how long a check or workflow may take to report before the release is blocked. Changing the mode or the workflows starts the gate over and unblocks a service the gate blocked. A workflow entry ending in .yml or .yaml names a workflow file; any other entry names a workflow. Needs the same access as disconnect; a change that lets releases through on less (the gate off or swapped, a workflow removed, a longer wait) and any change while a release waits or is blocked need an organization owner or admin. Every change is audited with the settings before and after.",
+			},
+		})
+		.input(apiGhaUpdate)
+		.mutation(async ({ ctx, input }) => {
+			assertSelfHosted();
+			await checkServicePermissionAndAccess(ctx, input.serviceId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const row = await findGhaConnection(input.serviceType, input.serviceId);
+			if (!row || row.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "This service does not follow GitHub Actions",
+				});
+			}
+			if (
+				input.gateMode === undefined &&
+				input.gateWorkflows === undefined &&
+				input.gateTimeoutMinutes === undefined
+			) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Nothing to change",
+				});
+			}
+			const mode = input.gateMode ?? row.gateMode;
+			const workflows = input.gateWorkflows ?? row.gateWorkflows ?? [];
+			if (mode === "workflows" && workflows.length === 0) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "Name at least one workflow to wait for",
+				});
+			}
+			// Loosening the gate, or touching it while a release waits on it, is the
+			// owner's or an admin's call, like Deploy anyway: a member who may manage
+			// git providers must not be able to wave a release through.
+			const privileged = ctx.user.role === "owner" || ctx.user.role === "admin";
+			if (!privileged) {
+				const weakens = gateChangeWeakens(
+					{
+						gateMode: row.gateMode,
+						gateWorkflows: row.gateWorkflows ?? [],
+						gateTimeoutMinutes: row.gateTimeoutMinutes,
+					},
+					{
+						gateMode: mode,
+						gateWorkflows: workflows,
+						gateTimeoutMinutes:
+							input.gateTimeoutMinutes ?? row.gateTimeoutMinutes,
+					},
+				);
+				const gated = await findGatedRelease(row.ghaConnectionId);
+				// An accepted release not yet looked at is just as much in flight.
+				const busy =
+					gated != null &&
+					(gated.gateState === null ||
+						gated.gateState === "waiting" ||
+						gated.gateState === "blocked");
+				if (weakens || busy) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: busy
+							? "A release is waiting at the gate: only an organization owner or admin can change it now"
+							: "Only an organization owner or admin can loosen the gate",
+					});
+				}
+			}
+			const saved = await updateGateSettings(row.ghaConnectionId, {
+				gateMode: input.gateMode,
+				gateWorkflows: input.gateWorkflows,
+				gateTimeoutMinutes: input.gateTimeoutMinutes,
+			});
+			if (!saved) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "This service does not follow GitHub Actions",
+				});
+			}
+			await audit(ctx, {
+				action: "update",
+				resourceType: input.serviceType,
+				resourceId: input.serviceId,
+				resourceName: `GitHub Actions: deploy when ${saved.after.gateMode}`,
+				metadata: {
+					before: saved.before,
+					after: saved.after,
+					restarted: saved.restarted,
+				},
+			});
+			const fresh = await findGhaConnection(input.serviceType, input.serviceId);
+			return presentGhaConnection(fresh ?? row);
+		}),
+
+	deployAnyway: withPermission("gitProviders", "create")
+		.meta({
+			openapi: {
+				method: "POST",
+				path: "/ghaConnection.deployAnyway",
+				description:
+					"Deploy the release that is waiting at the deploy gate (or blocked by it) without waiting for its checks. Name the release (releaseId, from ghaConnection.one); it is refused with a conflict when a newer release has arrived. Only an organization owner or admin may, with deploy access to the service. Who, when and why are kept on the release and in the audit log. Returns the decision, deploy, and the commit that goes out; the next poll deploys it.",
+			},
+		})
+		.input(apiGhaDeployAnyway)
+		.mutation(async ({ ctx, input }) => {
+			assertSelfHosted();
+			if (ctx.user.role !== "owner" && ctx.user.role !== "admin") {
+				throw new TRPCError({
+					code: "FORBIDDEN",
+					message: "Only an organization owner or admin can deploy anyway",
+				});
+			}
+			await checkServicePermissionAndAccess(ctx, input.serviceId, {
+				service: ["create"],
+				deployment: ["create"],
+			});
+			const row = await findGhaConnection(input.serviceType, input.serviceId);
+			if (!row || row.organizationId !== ctx.session.activeOrganizationId) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "This service does not follow GitHub Actions",
+				});
+			}
+			const released = await overrideGate(
+				row.ghaConnectionId,
+				input.releaseId,
+				{
+					by: ctx.user.email,
+					at: new Date().toISOString(),
+					reason: input.reason || null,
+				},
+			);
+			if (released.kind === "none") {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "No release is waiting to be deployed",
+				});
+			}
+			if (released.kind === "conflict") {
+				throw new TRPCError({
+					code: "CONFLICT",
+					message: `A newer release (${released.newestSha.slice(0, 7)}) has arrived. Look at it first.`,
+				});
+			}
+			await audit(ctx, {
+				action: "deploy",
+				resourceType: input.serviceType,
+				resourceId: input.serviceId,
+				resourceName: `GitHub Actions: deploy anyway ${released.sha.slice(0, 7)}`,
+				metadata: {
+					reason: input.reason || null,
+					releaseId: released.releaseId,
+				},
+			});
+			return { decision: "deploy" as const, sha: released.sha };
 		}),
 });
