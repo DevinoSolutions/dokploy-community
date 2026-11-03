@@ -2,7 +2,7 @@
 
 > **This is a community fork of [Dokploy](https://github.com/Dokploy/dokploy).** We are **not** affiliated with or competing against the Dokploy project. This fork exists to make new features available faster.
 
-Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.45**
+Based on **Dokploy v0.30.8** | Fork version **v0.30.8-community.46**
 
 Everything in upstream Dokploy **v0.30.8**, plus features that upstream does not have and fixes ported from open upstream PRs, each ported **1:1 with credit to its original author**. When a port merges upstream later, you lose nothing by switching back.
 
@@ -21,7 +21,7 @@ One command. Keeps every app, database, domain, and setting — the extra migrat
 
 ```bash
 docker service update \
-  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.45 \
+  --image ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.46 \
   --with-registry-auth \
   dokploy
 ```
@@ -121,11 +121,11 @@ Only what upstream Dokploy does not ship. The **[changelog](https://github.com/D
 
 > Concurrent deployments and Docker network management started as fork features and now ship in official Dokploy, so this fork uses the official implementations.
 
-## What's new in v0.30.8-community.45
+## What's new in v0.30.8-community.46
 
-- A GitHub Actions build can now show up in Dokploy while it runs. A workflow that registers its build gets a deployment row from the start, marked GitHub Actions, with an "Open run" link and the live step, in the Deployments tab, the Deployments page and the home list. The deploy that follows continues that row, however long it waits in the queue. This needs the updated shared build workflow, which is released separately, and only step transitions are written to the log, not the full GitHub job logs.
-- Ported upstream fixes: untagged GitHub Container Registry events are skipped instead of deploying (answered with 200), a server that dies during a deploy no longer leaves the deployment stuck as running, and the build error notification names the lost SSH connection, and the remote Docker client shares the SSH keepalive.
-- One additive database migration (0227); an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
+- The GitHub Actions pill on a service, in the Deployments tab, the Deployments page and the home list is now a button that opens a modal with the whole run: status, run and attempt, repository, environment, branch, commit, the Dokploy deployment, the image, and buttons to open the run on GitHub, view the deployment logs and redeploy the current version. The "Deployed from GitHub Actions" panel on the General tab is gone, so the tab uses no extra space.
+- Live GitHub Actions rows show the real phase of the run (starting, building with the current step, image built and waiting for the deploy job, or a note that Dokploy cannot read the steps) instead of "waiting to start".
+- No database migrations; an image-only rollback to the previous release keeps working. Full notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)**.
 
 Older notes are in the **[changelog](https://github.com/DevinoSolutions/dokploy-community/blob/canary/CHANGELOG.md)** and on **[GitHub Releases](https://github.com/DevinoSolutions/dokploy-community/releases)**.
 
@@ -140,7 +140,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 Install a specific version:
 
 ```bash
-export DOKPLOY_VERSION=v0.30.8-community.45
+export DOKPLOY_VERSION=v0.30.8-community.46
 curl -sSL https://dokploy-community.devino.ca/install.sh | sh
 ```
 
@@ -153,7 +153,7 @@ curl -sSL https://dokploy-community.devino.ca/install.sh | sh -s update
 ## Docker Image
 
 ```
-ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.45      # versioned (recommended)
+ghcr.io/devinosolutions/dokploy-community:v0.30.8-community.46      # versioned (recommended)
 ghcr.io/devinosolutions/dokploy-community:latest                  # latest release
 ghcr.io/devinosolutions/dokploy-community:canary                  # latest build
 ```
@@ -196,7 +196,7 @@ Replays are stored by the servers you point it at. Roughly 10% session sampling 
 
 ## Versioning
 
-Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.45` is the 45th fork release on top of Dokploy v0.30.8.
+Tags follow `v<upstream-version>-community.<n>`: the upstream Dokploy release the fork is based on, then a counter that restarts at 1 for each new upstream version. For example, `v0.30.8-community.46` is the 46th fork release on top of Dokploy v0.30.8.
 
 ## Contributing
 
