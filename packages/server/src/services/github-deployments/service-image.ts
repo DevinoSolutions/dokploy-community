@@ -111,3 +111,52 @@ export const pinComposeImage = (
 		changed: true,
 	};
 };
+
+/**
+ * Pin several images of one compose file (a release that built more than one
+ * image). Every repository must appear on exactly one `image:` line, as for
+ * `pinComposeImage`, and each repository may be named once.
+ */
+export const pinComposeImages = (
+	composeFile: string,
+	images: Array<{ repository: string; digest: string }>,
+): ComposePin => {
+	const seen = new Set<string>();
+	let file = composeFile;
+	let changed = false;
+	let previousDigest = "";
+	for (const image of images) {
+		const key = lower(image.repository);
+		if (seen.has(key)) {
+			return {
+				ok: false,
+				reason: `The release names ${image.repository} twice.`,
+			};
+		}
+		seen.add(key);
+		const pinned = pinComposeImage(file, image.repository, image.digest);
+		if (!pinned.ok) return pinned;
+		file = pinned.composeFile;
+		changed = changed || pinned.changed;
+		if (previousDigest === "") previousDigest = pinned.previousDigest;
+	}
+	return { ok: true, composeFile: file, previousDigest, changed };
+};
+
+/**
+ * The repositories a compose file pins by digest (`image: <repository>@sha256:...`),
+ * each once. Before the first release there are none.
+ */
+export const listPinnedComposeRepositories = (
+	composeFile: string,
+): string[] => {
+	const line =
+		/^[ \t]*(?:-[ \t]*)?image:[ \t]*["']?([^\s"'#@]+)@sha256:[0-9a-f]{64}(?=["'\s#]|$)/gm;
+	return [
+		...new Set(
+			[...composeFile.matchAll(line)].map((match) =>
+				repositoryOfReference(match[1] as string),
+			),
+		),
+	];
+};

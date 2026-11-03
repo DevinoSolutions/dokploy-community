@@ -116,6 +116,12 @@ vi.mock(
 	}),
 );
 
+// The tick also lists the GitHub Actions connections; these tests have none.
+vi.mock("@dokploy/server/services/gha-connect", async (importOriginal) => ({
+	...(await importOriginal<object>()),
+	listGhaConnections: async () => [],
+}));
+
 const poller = await import("@/server/queues/github-deployments-poller");
 
 const DIGEST_OLD = `sha256:${"a".repeat(64)}`;
