@@ -269,8 +269,7 @@ const Service = (
 										</Badge>
 										<BuildOriginBadge
 											buildOrigin={data?.buildOrigin}
-											buildRunUrl={data?.buildRunUrl}
-											linkToRun
+											service={{ type: "compose", id: composeId }}
 										/>
 										{data?.server?.serverStatus === "inactive" && (
 											<TooltipProvider>

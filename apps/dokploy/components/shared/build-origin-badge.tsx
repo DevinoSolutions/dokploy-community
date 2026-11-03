@@ -1,12 +1,16 @@
 import {
 	BUILD_ORIGIN_LABELS,
 	describeLiveGithubBuild,
-	githubCommitUrl,
 	isBuildOrigin,
 	normalizeBuildRunUrl,
 } from "@dokploy/server/services/build-origin-shared";
 import { ExternalLink, Hammer, Loader2, Package } from "lucide-react";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
+import {
+	GithubActionsRunPill,
+	type GithubActionsRunRow,
+	type GithubActionsRunService,
+} from "@/components/shared/github-actions-run-dialog";
 import { OpensInNewTab } from "@/components/shared/opens-in-new-tab";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,65 +24,40 @@ import { cn } from "@/lib/utils";
 
 interface Props {
 	buildOrigin?: string | null;
-	buildRunUrl?: string | null;
 	/**
-	 * Make the badge a link to the GitHub Actions run when there is one. Leave it
-	 * off where the badge sits inside another link (the service cards).
+	 * The service the badge belongs to. For a GitHub Actions build the badge then becomes the button that opens the
+	 * run modal. Leave it off where the badge sits inside another link (the service cards): it stays a plain badge.
 	 */
-	linkToRun?: boolean;
+	service?: GithubActionsRunService;
 	className?: string;
 }
 
 /**
  * Where the image of an application or compose was built: Dokploy, GitHub
- * Actions (with the run link when known) or a prebuilt image. Renders nothing
+ * Actions (a button that opens the run modal when the service is known) or a prebuilt image. Renders nothing
  * until the API has a value.
  */
 export const BuildOriginBadge = ({
 	buildOrigin,
-	buildRunUrl,
-	linkToRun = false,
+	service,
 	className,
 }: Props) => {
 	if (!isBuildOrigin(buildOrigin)) return null;
+	if (buildOrigin === "github-actions" && service) {
+		return <GithubActionsRunPill service={service} className={className} />;
+	}
 	const { label, description } = BUILD_ORIGIN_LABELS[buildOrigin];
-	const runUrl =
-		buildOrigin === "github-actions" ? normalizeBuildRunUrl(buildRunUrl) : null;
-
-	const content = (
-		<>
-			{buildOrigin === "github-actions" && <GithubIcon />}
-			{buildOrigin === "dokploy" && <Hammer />}
-			{buildOrigin === "external" && <Package />}
-			{label}
-		</>
-	);
 
 	return (
 		<TooltipProvider delayDuration={0}>
 			<Tooltip>
 				<TooltipTrigger asChild>
-					{runUrl && linkToRun ? (
-						<Badge
-							variant="outline"
-							className={cn("cursor-pointer", className)}
-							asChild
-						>
-							<a
-								href={runUrl}
-								target="_blank"
-								rel="noopener noreferrer"
-								onClick={(e) => e.stopPropagation()}
-							>
-								{content}
-								<OpensInNewTab />
-							</a>
-						</Badge>
-					) : (
-						<Badge variant="outline" className={className}>
-							{content}
-						</Badge>
-					)}
+					<Badge variant="outline" className={className}>
+						{buildOrigin === "github-actions" && <GithubIcon />}
+						{buildOrigin === "dokploy" && <Hammer />}
+						{buildOrigin === "external" && <Package />}
+						{label}
+					</Badge>
 				</TooltipTrigger>
 				<TooltipContent className="z-999 max-w-[320px]">
 					<span>{description}</span>
@@ -114,10 +93,12 @@ export const LiveGithubBuildStatus = ({
 		buildRunStep?: string | null;
 		externalBuildOnly?: boolean | null;
 		deployQueuedAt?: string | null;
+		startedAt?: string | null;
+		createdAt?: string | null;
 	};
 	className?: string;
 }) => {
-	const label = describeLiveGithubBuild(row);
+	const label = describeLiveGithubBuild(row, Date.now());
 	if (!label) return null;
 	return (
 		<span
@@ -136,61 +117,32 @@ export const LiveGithubBuildStatus = ({
 };
 
 /**
- * A Deployments row built in GitHub Actions: the GitHub mark with its name, the commit (linked when the
- * repository is known) and "Open run". The duration sits next to it in the row itself.
+ * A Deployments row built in GitHub Actions: the "GitHub Actions" pill. A click opens the run modal with the
+ * commit, the run link, the deployment and its logs; the duration sits next to it in the row itself. Without the
+ * service (a row whose service is unknown) it is a plain badge.
  */
 export const GithubActionsDeploymentMark = ({
-	buildRunUrl,
-	buildRepository,
-	buildCommitSha,
-	buildRunId,
+	service,
+	deployment,
 }: {
-	buildRunUrl?: string | null;
-	buildRepository?: string | null;
-	buildCommitSha?: string | null;
-	buildRunId?: string | null;
-}) => {
-	const runUrl = normalizeBuildRunUrl(buildRunUrl);
-	const commitUrl = githubCommitUrl(buildRepository, buildCommitSha);
-	const shortSha = buildCommitSha?.slice(0, 7) ?? null;
-	return (
-		<span className="flex flex-wrap items-center gap-2 normal-case">
+	service?: GithubActionsRunService | null;
+	deployment: GithubActionsRunRow;
+}) => (
+	<span className="flex flex-wrap items-center gap-2 normal-case">
+		{service ? (
+			<GithubActionsRunPill
+				service={service}
+				deployment={deployment}
+				className="text-[10px]"
+			/>
+		) : (
 			<Badge variant="outline" className="gap-1 text-[10px]">
 				<GithubIcon />
 				GitHub Actions
 			</Badge>
-			{shortSha &&
-				(commitUrl ? (
-					<a
-						href={commitUrl}
-						target="_blank"
-						rel="noopener noreferrer"
-						className="font-mono text-xs text-muted-foreground hover:underline"
-					>
-						{shortSha}
-						<OpensInNewTab />
-					</a>
-				) : (
-					<span className="font-mono text-xs text-muted-foreground">
-						{shortSha}
-					</span>
-				))}
-			{runUrl && (
-				<a
-					href={runUrl}
-					target="_blank"
-					rel="noopener noreferrer"
-					title={buildRunId ? `Run #${buildRunId}` : undefined}
-					className="flex items-center gap-1 text-xs text-primary hover:underline"
-				>
-					Open run
-					<ExternalLink className="size-3" />
-					<OpensInNewTab />
-				</a>
-			)}
-		</span>
-	);
-};
+		)}
+	</span>
+);
 
 /**
  * Shown above the log of a deployment built in GitHub Actions. The build output is on GitHub, so the way there is

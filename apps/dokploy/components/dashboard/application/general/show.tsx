@@ -15,7 +15,6 @@ import { ShowProviderForm } from "@/components/dashboard/application/general/gen
 import { DialogAction } from "@/components/shared/dialog-action";
 import {
 	GithubActionsAdvanced,
-	GithubActionsPanel,
 	GithubActionsRedeployHint,
 } from "@/components/shared/github-actions-panel";
 import { Button } from "@/components/ui/button";
@@ -103,20 +102,6 @@ export const ShowGeneralApplication = ({ applicationId }: Props) => {
 
 	return (
 		<>
-			{isGithubActions && (
-				<GithubActionsPanel
-					images={data?.dockerImage ? [data.dockerImage] : []}
-					buildRunUrl={data?.buildRunUrl}
-					buildRepository={data?.buildRepository}
-					buildCommitSha={data?.buildCommitSha}
-					buildEnvironment={data?.buildEnvironment}
-					buildRunId={data?.buildRunId}
-					buildDeployedAt={data?.buildDeployedAt}
-					buildRolledBack={data?.buildRolledBack}
-					buildRollbackRunId={data?.buildRollbackRunId}
-					buildRollbackFailure={data?.buildRollbackFailure}
-				/>
-			)}
 			<Card className="bg-background">
 				<CardHeader>
 					<CardTitle className="text-xl">Deploy Settings</CardTitle>

@@ -1778,7 +1778,6 @@ const EnvironmentPage = (
 																				service.type === "compose") && (
 																				<BuildOriginBadge
 																					buildOrigin={service.buildOrigin}
-																					buildRunUrl={service.buildRunUrl}
 																					className="mb-1"
 																				/>
 																			)}

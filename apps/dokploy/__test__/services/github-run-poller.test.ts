@@ -1,3 +1,4 @@
+import { GITHUB_RUN_STEP_UNREADABLE } from "@dokploy/server/services/build-origin-shared";
 import {
 	createGithubRunPoller,
 	DEPLOY_TAKEOVER_GRACE_MS,
@@ -225,6 +226,30 @@ describe("following a run", () => {
 		expect(fetchRun).toHaveBeenCalledTimes(2);
 		expect(writtenLines()).toEqual([RUN_UNREADABLE_LINE]);
 		expect(endRow).not.toHaveBeenCalled();
+	});
+
+	it("marks a row whose run cannot be read as building with hidden steps, not as waiting to start", async () => {
+		fetchRun.mockResolvedValue({ kind: "unreadable" });
+		rows = [row({ buildRunStatus: "queued" })];
+		const poller = makePoller();
+		await poller.poll();
+		expect(setProgress).toHaveBeenCalledTimes(1);
+		expect(setProgress).toHaveBeenCalledWith("dep-1", {
+			buildRunStatus: "in_progress",
+			buildRunStep: GITHUB_RUN_STEP_UNREADABLE,
+		});
+		// Asked again later: the marker is written once.
+		clock += UNREADABLE_POLL_INTERVAL_MS;
+		await poller.poll();
+		expect(setProgress).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a step already shown when the run turns unreadable", async () => {
+		fetchRun.mockResolvedValue({ kind: "unreadable" });
+		rows = [row({ buildRunStep: "build · Build image (3/7)" })];
+		const poller = makePoller();
+		await poller.poll();
+		expect(setProgress).not.toHaveBeenCalled();
 	});
 
 	it("lets go of a row a deploy took over", async () => {

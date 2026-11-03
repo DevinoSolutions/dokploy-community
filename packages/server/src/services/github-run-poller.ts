@@ -1,3 +1,4 @@
+import { GITHUB_RUN_STEP_UNREADABLE } from "./build-origin-shared";
 import {
 	type ExternalBuildConclusion,
 	externalBuildOutcome,
@@ -265,6 +266,20 @@ export const createGithubRunPoller = (deps: PollerDeps) => {
 			const logged = await loggedLines(row, state);
 			if (!logged.has(RUN_UNREADABLE_LINE)) {
 				await writeLines(row, state, [RUN_UNREADABLE_LINE]);
+			}
+			// The row is registered by a running job, so it builds; only its steps are hidden. Without this the row
+			// stays "queued" and says the run waits to start, which is false. A step already shown is kept.
+			if (state.lastStep === null) {
+				const stillWaiting = await deps.setProgress(row.deploymentId, {
+					buildRunStatus: "in_progress",
+					buildRunStep: GITHUB_RUN_STEP_UNREADABLE,
+				});
+				if (!stillWaiting) {
+					states.delete(row.deploymentId);
+					return;
+				}
+				state.lastStatus = "in_progress";
+				state.lastStep = GITHUB_RUN_STEP_UNREADABLE;
 			}
 			return;
 		}

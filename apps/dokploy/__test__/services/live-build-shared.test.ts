@@ -4,6 +4,7 @@ import {
 	describeGithubActionsRun,
 	describeLiveGithubBuild,
 	describeServiceBuild,
+	GITHUB_RUN_STEP_UNREADABLE,
 	isGithubActionsDeployment,
 	isLiveGithubBuild,
 	parseBuildRunUrl,
@@ -96,7 +97,61 @@ describe("describeLiveGithubBuild", () => {
 				buildRunStatus: "queued",
 				buildRunStep: "  ",
 			}),
-		).toBe("Waiting for GitHub Actions to start");
+		).toBe("Building on GitHub Actions · starting");
+	});
+
+	it("never says the run waits to start: the build job that registered the row runs", () => {
+		for (const buildRunStep of [null, "", "  "]) {
+			for (const buildRunStatus of ["queued", "in_progress"]) {
+				expect(
+					describeLiveGithubBuild({ ...live, buildRunStatus, buildRunStep }),
+				).not.toMatch(/Waiting for GitHub Actions/);
+			}
+		}
+	});
+
+	it("names the job that waits when no job runs", () => {
+		expect(
+			describeLiveGithubBuild({
+				...live,
+				buildRunStatus: "queued",
+				buildRunStep: "deploy · waiting to start",
+			}),
+		).toBe("Image built · waiting for the deploy job to start");
+		expect(
+			describeLiveGithubBuild({
+				...live,
+				buildRunStatus: "queued",
+				buildRunStep: "test · waiting to start",
+			}),
+		).toBe("Queued on GitHub Actions · test has not started yet");
+	});
+
+	it("says Dokploy cannot read the steps, and that the run builds", () => {
+		expect(
+			describeLiveGithubBuild({
+				...live,
+				buildRunStep: GITHUB_RUN_STEP_UNREADABLE,
+			}),
+		).toBe("Building on GitHub Actions · Dokploy cannot read the steps");
+	});
+
+	it("adds how long a run builds once that is long, never before", () => {
+		const startedAt = "2026-11-02T10:00:00.000Z";
+		const at = (minutes: number) => Date.parse(startedAt) + minutes * 60_000;
+		expect(describeLiveGithubBuild({ ...live, startedAt }, at(59))).toBe(
+			"Building on GitHub Actions · build · Build image (3/7)",
+		);
+		expect(describeLiveGithubBuild({ ...live, startedAt }, at(75))).toBe(
+			"Building on GitHub Actions · build · Build image (3/7) · running for 1h 15m, check the run",
+		);
+		// Without a clock, or a start time, nothing is added.
+		expect(describeLiveGithubBuild({ ...live, startedAt })).toBe(
+			"Building on GitHub Actions · build · Build image (3/7)",
+		);
+		expect(describeLiveGithubBuild({ ...live }, at(500))).toBe(
+			"Building on GitHub Actions · build · Build image (3/7)",
+		);
 	});
 
 	it("says nothing for a row that does not wait for its run", () => {
@@ -117,13 +172,22 @@ describe("describeLiveGithubBuild", () => {
 		).toBe(
 			"GitHub Actions build finished · deploy waiting in the Dokploy queue",
 		);
-		// A deploy that took the row over is a deploy row: nothing more to say.
+		// A deploy that took the row over is a deploy row: Dokploy pulls the image and starts it.
 		expect(
 			describeLiveGithubBuild({
 				...live,
 				buildRunStatus: "completed",
 				externalBuildOnly: false,
 				deployQueuedAt: "2026-11-02T10:30:00.000Z",
+			}),
+		).toBe("Deploying · Dokploy is pulling the image and starting it");
+		// Once that deploy ended, the row says nothing live.
+		expect(
+			describeLiveGithubBuild({
+				...live,
+				status: "done",
+				buildRunStatus: "completed",
+				externalBuildOnly: false,
 			}),
 		).toBeNull();
 	});

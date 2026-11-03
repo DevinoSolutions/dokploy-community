@@ -176,8 +176,7 @@ const Service = (
 									</Badge>
 									<BuildOriginBadge
 										buildOrigin={data?.buildOrigin}
-										buildRunUrl={data?.buildRunUrl}
-										linkToRun
+										service={{ type: "application", id: applicationId }}
 									/>
 									{data?.server?.serverStatus === "inactive" && (
 										<TooltipProvider delayDuration={0}>

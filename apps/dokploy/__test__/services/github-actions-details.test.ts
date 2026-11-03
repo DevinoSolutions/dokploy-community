@@ -1,13 +1,23 @@
 import {
 	type BuildOriginDeploymentRow,
+	canRedeployFromGithubActionsRun,
+	deploymentImageReference,
+	describeDeploymentDuration,
+	describeGithubActionsAttempt,
 	describeGithubActionsRollback,
 	describeGithubActionsRun,
+	describeGithubActionsRunState,
+	describeGithubActionsSource,
+	describeGithubActionsTitle,
 	describeImageReference,
 	describeServiceBuild,
 	extractComposeImages,
+	githubActionsBranch,
 	githubActionsPushTarget,
 	githubCommitUrl,
 	parseGithubActionsTitle,
+	pickNewerLiveGithubDeployment,
+	pickServingDeployment,
 	renderBuildStartMarker,
 	withGithubActionsRunDetails,
 } from "@dokploy/server/services/build-origin";
@@ -787,5 +797,390 @@ describe("extractComposeImages", () => {
 		expect(extractComposeImages("services:\n  web:\n    build: .\n")).toEqual(
 			[],
 		);
+	});
+});
+
+describe("describeGithubActionsTitle", () => {
+	test("reads the commit subject and the run attempt", () => {
+		expect(
+			describeGithubActionsTitle(
+				"GHA production b4f509d2: fix: login redirect [run 41376332164.2]",
+			),
+		).toEqual({ subject: "fix: login redirect", attempt: "2" });
+	});
+
+	test("has no subject for a bare title and no attempt without one", () => {
+		expect(describeGithubActionsTitle(TITLE)).toEqual({
+			subject: null,
+			attempt: null,
+		});
+		expect(
+			describeGithubActionsTitle("GHA production b4f509d2: ship it"),
+		).toEqual({ subject: "ship it", attempt: null });
+	});
+
+	test("reads only the first line", () => {
+		expect(
+			describeGithubActionsTitle("GHA staging aaaaaaaa: first\nsecond: line"),
+		).toEqual({ subject: "first", attempt: null });
+	});
+
+	test("is empty for a title without the marker and for no title", () => {
+		const none = { subject: null, attempt: null };
+		expect(describeGithubActionsTitle("Manual deployment: x")).toEqual(none);
+		expect(describeGithubActionsTitle(null)).toEqual(none);
+		expect(describeGithubActionsTitle(undefined)).toEqual(none);
+	});
+});
+
+describe("describeGithubActionsRunState", () => {
+	const base = { buildOrigin: "github-actions" };
+
+	test("names the outcome of a finished row", () => {
+		expect(
+			describeGithubActionsRunState({ ...base, status: "done" }),
+		).toMatchObject({ label: "Deployed", tone: "success", detail: null });
+		expect(
+			describeGithubActionsRunState({ ...base, status: "error" }),
+		).toMatchObject({ label: "Failed", tone: "failed" });
+		expect(
+			describeGithubActionsRunState({ ...base, status: "cancelled" }),
+		).toMatchObject({ label: "Cancelled", tone: "cancelled" });
+		expect(
+			describeGithubActionsRunState({ ...base, status: "running" }),
+		).toMatchObject({ label: "Deploying", tone: "running" });
+	});
+
+	test("a finished row nothing deployed is a finished build, not a deploy", () => {
+		expect(
+			describeGithubActionsRunState({
+				...base,
+				status: "done",
+				externalBuildOnly: true,
+			}),
+		).toMatchObject({ label: "Build finished", tone: "success" });
+	});
+
+	test("a row the deploy call took over is Deploying", () => {
+		expect(
+			describeGithubActionsRunState({
+				...base,
+				status: "running",
+				buildRunStatus: "completed",
+				externalBuildOnly: false,
+			}),
+		).toMatchObject({ label: "Deploying", tone: "running" });
+	});
+
+	test("a row that still waits for its run carries the live step", () => {
+		expect(
+			describeGithubActionsRunState({
+				...base,
+				status: "running",
+				buildRunStatus: "in_progress",
+				buildRunStep: "build · Build image (3/7)",
+			}),
+		).toEqual({
+			label: "In progress",
+			tone: "running",
+			detail: "Building on GitHub Actions · build · Build image (3/7)",
+		});
+	});
+
+	test("keeps an unknown status readable", () => {
+		expect(describeGithubActionsRunState({ status: "weird" })).toMatchObject({
+			label: "weird",
+			tone: "unknown",
+		});
+		expect(describeGithubActionsRunState({})).toMatchObject({
+			label: "Unknown",
+			tone: "unknown",
+		});
+	});
+});
+
+describe("pickServingDeployment", () => {
+	test("is the newest finished deployment, a rollback included", () => {
+		const rows = [
+			row({
+				title: "GHA rollback production to 1111111",
+				createdAt: "2026-11-02T12:00:00.000Z",
+			}),
+			row({
+				title: "newest, failed",
+				status: "error",
+				createdAt: "2026-11-02T13:00:00.000Z",
+			}),
+			row({ title: "older", createdAt: "2026-11-02T09:00:00.000Z" }),
+		];
+		expect(pickServingDeployment(rows)?.title).toBe(
+			"GHA rollback production to 1111111",
+		);
+	});
+
+	test("ignores rows that only follow a GitHub build and non-deploy runs", () => {
+		const rows = [
+			row({
+				title: "following",
+				externalBuildOnly: true,
+				createdAt: "2026-11-02T13:00:00.000Z",
+			}),
+			row({
+				title: "backup",
+				backupId: "b1",
+				createdAt: "2026-11-02T12:00:00.000Z",
+			}),
+			row({ title: "deploy", createdAt: "2026-11-02T10:00:00.000Z" }),
+		];
+		expect(pickServingDeployment(rows)?.title).toBe("deploy");
+	});
+
+	test("is null when nothing finished", () => {
+		expect(pickServingDeployment([])).toBeNull();
+		expect(pickServingDeployment([row({ status: "running" })])).toBeNull();
+	});
+});
+
+describe("deploymentImageReference", () => {
+	const digest = `sha256:${"a".repeat(64)}`;
+
+	test("joins the repository of the pushed tag with the pinned digest", () => {
+		expect(
+			deploymentImageReference({
+				imageTag: "localhost:5000/devino/app:abc123",
+				imageDigest: digest,
+			}),
+		).toBe(`localhost:5000/devino/app@${digest}`);
+		expect(
+			deploymentImageReference({ imageTag: "app", imageDigest: digest }),
+		).toBe(`app@${digest}`);
+	});
+
+	test("is null without a valid digest or without a tag", () => {
+		expect(
+			deploymentImageReference({ imageTag: "app:1", imageDigest: null }),
+		).toBeNull();
+		expect(
+			deploymentImageReference({ imageTag: "app:1", imageDigest: "latest" }),
+		).toBeNull();
+		expect(
+			deploymentImageReference({ imageTag: null, imageDigest: digest }),
+		).toBeNull();
+	});
+});
+
+describe("githubActionsBranch", () => {
+	test("is the branch only for a git provider source", () => {
+		expect(
+			githubActionsBranch({ branch: " main ", sourceType: "github" }),
+		).toBe("main");
+		expect(
+			githubActionsBranch({ branch: "main", sourceType: "docker" }),
+		).toBeNull();
+		expect(githubActionsBranch({ branch: "", sourceType: "git" })).toBeNull();
+		expect(githubActionsBranch({})).toBeNull();
+	});
+});
+
+describe("describeDeploymentDuration", () => {
+	test("reads seconds and minutes", () => {
+		expect(
+			describeDeploymentDuration(
+				"2026-11-02T10:00:00.000Z",
+				"2026-11-02T10:00:45.900Z",
+			),
+		).toBe("45s");
+		expect(
+			describeDeploymentDuration(
+				"2026-11-02T10:00:00.000Z",
+				"2026-11-02T10:03:12.000Z",
+			),
+		).toBe("3m 12s");
+	});
+
+	test("is null until the deployment finished and for bad times", () => {
+		expect(
+			describeDeploymentDuration("2026-11-02T10:00:00.000Z", null),
+		).toBeNull();
+		expect(
+			describeDeploymentDuration(null, "2026-11-02T10:00:00.000Z"),
+		).toBeNull();
+		expect(
+			describeDeploymentDuration("nope", "2026-11-02T10:00:00.000Z"),
+		).toBeNull();
+		expect(
+			describeDeploymentDuration(
+				"2026-11-02T10:05:00.000Z",
+				"2026-11-02T10:00:00.000Z",
+			),
+		).toBeNull();
+	});
+});
+
+describe("canRedeployFromGithubActionsRun", () => {
+	const base = {
+		canDeploy: true,
+		isServing: true,
+		serviceBuildOrigin: "github-actions",
+	};
+
+	test("is offered on the serving row of a GitHub Actions service for a user who may deploy", () => {
+		expect(canRedeployFromGithubActionsRun(base)).toBe(true);
+	});
+
+	test("is not offered once the service is built by Dokploy again, whatever its old rows say", () => {
+		// A service switched back to a git provider keeps its finished GitHub Actions rows.
+		expect(
+			canRedeployFromGithubActionsRun({
+				...base,
+				serviceBuildOrigin: "dokploy",
+			}),
+		).toBe(false);
+		expect(
+			canRedeployFromGithubActionsRun({
+				...base,
+				serviceBuildOrigin: "external",
+			}),
+		).toBe(false);
+		expect(
+			canRedeployFromGithubActionsRun({ ...base, serviceBuildOrigin: null }),
+		).toBe(false);
+		expect(
+			canRedeployFromGithubActionsRun({
+				...base,
+				serviceBuildOrigin: undefined,
+			}),
+		).toBe(false);
+	});
+
+	test("is not offered without deploy permission or on an older row", () => {
+		expect(canRedeployFromGithubActionsRun({ ...base, canDeploy: false })).toBe(
+			false,
+		);
+		expect(canRedeployFromGithubActionsRun({ ...base, isServing: false })).toBe(
+			false,
+		);
+	});
+});
+
+describe("describeGithubActionsAttempt", () => {
+	test("names only a re-run", () => {
+		expect(describeGithubActionsAttempt("2")).toBe(" · attempt 2");
+		expect(describeGithubActionsAttempt("12")).toBe(" · attempt 12");
+		expect(describeGithubActionsAttempt("1")).toBe("");
+		expect(describeGithubActionsAttempt(null)).toBe("");
+		expect(describeGithubActionsAttempt(undefined)).toBe("");
+		expect(describeGithubActionsAttempt("x")).toBe("");
+	});
+});
+
+describe("describeGithubActionsSource", () => {
+	test("says what happened to the image by how the row stands", () => {
+		const text = (
+			label: string,
+			tone: Parameters<typeof describeGithubActionsSource>[0]["tone"],
+		) => describeGithubActionsSource({ label, tone });
+		expect(text("Deployed", "success")).toBe(
+			"Built by GitHub Actions. Dokploy pulled the image and started it.",
+		);
+		expect(text("In progress", "running")).toBe(
+			"Built by GitHub Actions. Dokploy will pull the image when the run finishes.",
+		);
+		expect(text("Deploying", "running")).toBe(
+			"Built by GitHub Actions. Dokploy is pulling the image and starting it.",
+		);
+		expect(text("Failed", "failed")).toBe(
+			"Built by GitHub Actions. The deployment ended in error.",
+		);
+		expect(text("Cancelled", "cancelled")).toBe(
+			"Built by GitHub Actions. The deployment was cancelled.",
+		);
+		expect(text("Build finished", "success")).toBe(
+			"Built by GitHub Actions. No deploy took this run over.",
+		);
+		expect(text("weird", "unknown")).toBe("Built by GitHub Actions.");
+		expect(
+			describeGithubActionsSource({
+				label: "In progress",
+				tone: "running",
+				externalBuildOnly: true,
+				deployQueuedAt: "2026-11-02T10:30:00.000Z",
+			}),
+		).toBe(
+			"Build finished. Dokploy will pull the image when the deploy reaches the front of the queue.",
+		);
+		expect(
+			describeGithubActionsSource({
+				label: "In progress",
+				tone: "running",
+				externalBuildOnly: true,
+				buildRunStatus: "completed",
+			}),
+		).toBe(
+			"Build finished. Dokploy is waiting for the workflow's deploy call.",
+		);
+		// Still building: the run has not finished.
+		expect(
+			describeGithubActionsSource({
+				label: "In progress",
+				tone: "running",
+				externalBuildOnly: true,
+				buildRunStatus: "in_progress",
+			}),
+		).toBe(
+			"Built by GitHub Actions. Dokploy will pull the image when the run finishes.",
+		);
+	});
+});
+
+describe("pickNewerLiveGithubDeployment", () => {
+	const live = (id: string, createdAt: string) => ({
+		deploymentId: id,
+		createdAt,
+		status: "running",
+		buildOrigin: "github-actions",
+		buildRunStatus: "in_progress",
+		buildRunStep: "build",
+	});
+	const serving = {
+		deploymentId: "serving",
+		createdAt: "2026-11-02T10:00:00.000Z",
+	};
+
+	test("is a live row created after what runs now", () => {
+		const rows = [
+			live("newer", "2026-11-02T11:00:00.000Z"),
+			{ ...serving, status: "done" },
+		];
+		expect(pickNewerLiveGithubDeployment(rows, serving)?.deploymentId).toBe(
+			"newer",
+		);
+	});
+
+	test("is not a live row older than what runs now, nor the row itself", () => {
+		const rows = [
+			live("older", "2026-11-02T09:00:00.000Z"),
+			live("serving", "2026-11-02T10:00:00.000Z"),
+		];
+		expect(pickNewerLiveGithubDeployment(rows, serving)).toBeNull();
+	});
+
+	test("takes the newest of several, and any live row when nothing runs yet", () => {
+		const rows = [
+			live("a", "2026-11-02T11:00:00.000Z"),
+			live("b", "2026-11-02T12:00:00.000Z"),
+		];
+		expect(pickNewerLiveGithubDeployment(rows, serving)?.deploymentId).toBe(
+			"b",
+		);
+		// The modal passes the row it shows: a service whose only deployment is that live run has no newer one.
+		const only = { deploymentId: "b", createdAt: "2026-11-02T12:00:00.000Z" };
+		expect(pickNewerLiveGithubDeployment(rows, only)).toBeNull();
+		expect(pickNewerLiveGithubDeployment(rows, null)?.deploymentId).toBe("b");
+	});
+
+	test("skips rows that are not live", () => {
+		const rows = [{ ...live("x", "2026-11-02T12:00:00.000Z"), status: "done" }];
+		expect(pickNewerLiveGithubDeployment(rows, serving)).toBeNull();
 	});
 });

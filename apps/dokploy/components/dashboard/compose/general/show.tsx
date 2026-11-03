@@ -1,8 +1,4 @@
-import { extractComposeImages } from "@dokploy/server/services/build-origin-shared";
-import {
-	GithubActionsAdvanced,
-	GithubActionsPanel,
-} from "@/components/shared/github-actions-panel";
+import { GithubActionsAdvanced } from "@/components/shared/github-actions-panel";
 import { Badge } from "@/components/ui/badge";
 import {
 	Card,
@@ -31,20 +27,6 @@ export const ShowGeneralCompose = ({ composeId }: Props) => {
 
 	return (
 		<>
-			{isGithubActions && (
-				<GithubActionsPanel
-					images={extractComposeImages(data?.composeFile)}
-					buildRunUrl={data?.buildRunUrl}
-					buildRepository={data?.buildRepository}
-					buildCommitSha={data?.buildCommitSha}
-					buildEnvironment={data?.buildEnvironment}
-					buildRunId={data?.buildRunId}
-					buildDeployedAt={data?.buildDeployedAt}
-					buildRolledBack={data?.buildRolledBack}
-					buildRollbackRunId={data?.buildRollbackRunId}
-					buildRollbackFailure={data?.buildRollbackFailure}
-				/>
-			)}
 			<Card className="bg-background">
 				<CardHeader>
 					<div className="flex flex-row gap-2 justify-between flex-wrap">

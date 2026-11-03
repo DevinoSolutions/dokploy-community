@@ -120,17 +120,38 @@ export const isLiveGithubBuild = (row: {
 	);
 
 /**
- * What a live row says about itself: "Building on GitHub Actions · build · Build image (3/7)". Null for any row
- * that is not waiting for its run. The step is the label the run poller keeps on the row.
+ * The step the poller stores when it cannot read the run (a private repository with no GitHub connection that
+ * covers it). The row then says what is known, that the run builds, and that Dokploy cannot show its steps.
  */
-export const describeLiveGithubBuild = (row: {
-	status?: string | null;
-	buildOrigin?: string | null;
-	buildRunStatus?: string | null;
-	buildRunStep?: string | null;
-	externalBuildOnly?: boolean | null;
-	deployQueuedAt?: string | null;
-}): string | null => {
+export const GITHUB_RUN_STEP_UNREADABLE = "steps not readable";
+
+/** How long a run may build before its row says so: a registered build normally ends well within this. */
+export const GITHUB_RUN_LONG_AFTER_MS = 60 * 60_000;
+
+const WAITING_JOB_SUFFIX = " · waiting to start";
+
+/**
+ * What a live row says about itself, by phase. Null for any row that is not waiting for its run.
+ *
+ * A row is registered by the build job of the run (deployment.registerExternalBuild), so a job runs from the start:
+ * "Building on GitHub Actions" is true even before the poller has read the first step. The poller's step label says
+ * more: "build · Build image (3/7)" while a job runs; "<job> · waiting to start" when no job runs and one waits
+ * (the deploy job, once the build is done, or any job waiting for a runner); and the unreadable marker when Dokploy
+ * has no access to the run's steps. Once the workflow's deploy call took the row over, it is "Deploying". `now` (epoch ms) adds how long the run builds once that is long.
+ */
+export const describeLiveGithubBuild = (
+	row: {
+		status?: string | null;
+		buildOrigin?: string | null;
+		buildRunStatus?: string | null;
+		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
+		startedAt?: string | null;
+		createdAt?: string | null;
+	},
+	now?: number,
+): string | null => {
 	// The workflow's deploy call was accepted and waits in Dokploy's queue for a free slot.
 	if (
 		row.externalBuildOnly &&
@@ -149,12 +170,43 @@ export const describeLiveGithubBuild = (row: {
 	) {
 		return "GitHub Actions run finished · waiting for the deploy";
 	}
+	// The deploy call took the row over (`externalBuildOnly` false, the run marked `completed`): Dokploy pulls the
+	// image and starts it now.
+	if (
+		row.status === "running" &&
+		row.buildOrigin === "github-actions" &&
+		row.buildRunStatus === "completed" &&
+		row.externalBuildOnly === false
+	) {
+		return "Deploying · Dokploy is pulling the image and starting it";
+	}
 	if (!isLiveGithubBuild(row)) return null;
 	const step = row.buildRunStep?.trim();
-	if (step) return `Building on GitHub Actions · ${step}`;
-	return row.buildRunStatus === "queued"
-		? "Waiting for GitHub Actions to start"
-		: "Building on GitHub Actions";
+	let label: string;
+	if (step === GITHUB_RUN_STEP_UNREADABLE) {
+		label = "Building on GitHub Actions · Dokploy cannot read the steps";
+	} else if (step?.endsWith(WAITING_JOB_SUFFIX)) {
+		const job = step.slice(0, -WAITING_JOB_SUFFIX.length);
+		label = /deploy/i.test(job)
+			? "Image built · waiting for the deploy job to start"
+			: `Queued on GitHub Actions · ${job} has not started yet`;
+	} else if (step) {
+		label = `Building on GitHub Actions · ${step}`;
+	} else {
+		label =
+			row.buildRunStatus === "queued"
+				? "Building on GitHub Actions · starting"
+				: "Building on GitHub Actions";
+	}
+	if (now !== undefined) {
+		const started = Date.parse(row.startedAt ?? row.createdAt ?? "");
+		if (!Number.isNaN(started) && now - started > GITHUB_RUN_LONG_AFTER_MS) {
+			const minutes = Math.floor((now - started) / 60_000);
+			const elapsed = `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+			label += ` · running for ${elapsed}, check the run`;
+		}
+	}
+	return label;
 };
 
 /**
@@ -515,6 +567,216 @@ export const withGithubActionsRunDetails = <
 			: describeGithubActionsRun(row)),
 	}));
 
+/**
+ * What the action's deployment title says besides the environment, commit and run id: the commit subject
+ * ("GHA production b4f509d2: fix login [run 41376332164.2]" gives "fix login") and the run attempt ("2").
+ * Both null when the title has none, and for a title without the action's "GHA " marker.
+ */
+export const describeGithubActionsTitle = (
+	title: string | null | undefined,
+): { subject: string | null; attempt: string | null } => {
+	const none = { subject: null, attempt: null };
+	if (typeof title !== "string" || !hasGithubActionsTitleMarker(title)) {
+		return none;
+	}
+	const attempt = /\[run\s+\d{1,20}\.(\d{1,6})\]/i.exec(title)?.[1] ?? null;
+	const firstLine = title.split("\n", 1)[0] ?? "";
+	const subject =
+		/^GHA\s+[^:]*?:\s*(.+?)\s*(?:\[run\s+\d{1,20}(?:\.\d{1,6})?\])?\s*$/i
+			.exec(firstLine)?.[1]
+			?.trim() || null;
+	return { subject, attempt };
+};
+
+export type GithubActionsRunTone =
+	| "running"
+	| "success"
+	| "failed"
+	| "cancelled"
+	| "unknown";
+
+/**
+ * One word and a colour for a GitHub Actions deployment row, and the live detail line while GitHub still builds.
+ * GitHub's own conclusion is not stored, so "Failed" means the row ended in error (the run, or the deploy that
+ * followed it, failed) and "Deployed" means Dokploy pulled the image and started it.
+ */
+export const describeGithubActionsRunState = (
+	row: {
+		status?: string | null;
+		buildOrigin?: string | null;
+		buildRunStatus?: string | null;
+		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
+		startedAt?: string | null;
+		createdAt?: string | null;
+	},
+	now?: number,
+): { label: string; tone: GithubActionsRunTone; detail: string | null } => {
+	const detail = describeLiveGithubBuild(row, now);
+	if (detail) {
+		return {
+			label: detail.startsWith("Deploying") ? "Deploying" : "In progress",
+			tone: "running",
+			detail,
+		};
+	}
+	switch (row.status) {
+		case "done":
+			return row.externalBuildOnly
+				? { label: "Build finished", tone: "success", detail: null }
+				: { label: "Deployed", tone: "success", detail: null };
+		case "error":
+			return { label: "Failed", tone: "failed", detail: null };
+		case "cancelled":
+			return { label: "Cancelled", tone: "cancelled", detail: null };
+		case "running":
+			return { label: "Deploying", tone: "running", detail: null };
+		default:
+			return { label: row.status || "Unknown", tone: "unknown", detail: null };
+	}
+};
+
+/** " · attempt 2" for a re-run; empty for the first attempt, which every run has and says nothing. */
+export const describeGithubActionsAttempt = (
+	attempt: string | null | undefined,
+): string => {
+	const number = Number(attempt);
+	return Number.isInteger(number) && number > 1 ? ` · attempt ${number}` : "";
+};
+
+/**
+ * What the modal's Source line says, by how the row stands: a finished deploy, a build that still runs, the deploy
+ * that runs now, or a row that ended in error or was cancelled.
+ */
+export const describeGithubActionsSource = (state: {
+	label: string;
+	tone: GithubActionsRunTone;
+	/** The row's own fields, to tell a build that still runs from one that finished and waits for its deploy. */
+	externalBuildOnly?: boolean | null;
+	deployQueuedAt?: string | null;
+	buildRunStatus?: string | null;
+}): string => {
+	const built = "Built by GitHub Actions.";
+	if (state.tone === "running" && state.externalBuildOnly) {
+		if (state.deployQueuedAt) {
+			return "Build finished. Dokploy will pull the image when the deploy reaches the front of the queue.";
+		}
+		if (state.buildRunStatus === "completed") {
+			return "Build finished. Dokploy is waiting for the workflow's deploy call.";
+		}
+	}
+	if (state.label === "Deploying") {
+		return `${built} Dokploy is pulling the image and starting it.`;
+	}
+	switch (state.tone) {
+		case "running":
+			return `${built} Dokploy will pull the image when the run finishes.`;
+		case "success":
+			return state.label === "Build finished"
+				? `${built} No deploy took this run over.`
+				: `${built} Dokploy pulled the image and started it.`;
+		case "failed":
+			return `${built} The deployment ended in error.`;
+		case "cancelled":
+			return `${built} The deployment was cancelled.`;
+		default:
+			return built;
+	}
+};
+
+/**
+ * Whether the run modal offers "Redeploy current version": the user may deploy, the row is the one that runs now and
+ * the service is built by GitHub Actions now. A service switched back to a git provider keeps old GitHub Actions
+ * rows, and redeploying it would run a full Dokploy build.
+ */
+export const canRedeployFromGithubActionsRun = (input: {
+	canDeploy: boolean;
+	isServing: boolean;
+	serviceBuildOrigin?: string | null;
+}): boolean =>
+	input.canDeploy &&
+	input.isServing &&
+	input.serviceBuildOrigin === "github-actions";
+
+/**
+ * The newest live GitHub Actions row that is newer than the deployment shown (the one that runs now), so the modal
+ * can say a newer run is going. Null when none is newer; a live row older than what runs is a leftover, not news.
+ */
+export const pickNewerLiveGithubDeployment = <
+	T extends {
+		deploymentId: string;
+		createdAt: string;
+		status?: string | null;
+		buildOrigin?: string | null;
+		buildRunStatus?: string | null;
+		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
+	},
+>(
+	deployments: readonly T[],
+	current: { deploymentId: string; createdAt: string } | null,
+): T | null => {
+	const currentMs = current ? createdAtMs(current) : Number.NEGATIVE_INFINITY;
+	let newest: T | null = null;
+	for (const row of deployments) {
+		if (row.deploymentId === current?.deploymentId) continue;
+		if (describeLiveGithubBuild(row) === null) continue;
+		if (createdAtMs(row) <= currentMs) continue;
+		if (!newest || createdAtMs(row) > createdAtMs(newest)) newest = row;
+	}
+	return newest;
+};
+
+/**
+ * The deployment of a service that runs now: the newest finished one, a rollback deploy included, ignoring rows
+ * that only follow a GitHub build and schedule, backup and preview runs. Null when nothing finished.
+ */
+export const pickServingDeployment = <T extends BuildOriginDeploymentRow>(
+	deployments: readonly T[],
+): T | null =>
+	[...deployments.filter(isServiceDeployment)]
+		.sort((a, b) => createdAtMs(b) - createdAtMs(a))
+		.find((row) => row.status === "done") ?? null;
+
+/**
+ * The image reference a deployment row pinned (`repository@sha256:...`), from the tag it pushed and the digest the
+ * service was pinned to. Null when the row recorded no digest (most GitHub Actions rows: the service's image is
+ * the reference there).
+ */
+export const deploymentImageReference = (row: {
+	imageTag?: string | null;
+	imageDigest?: string | null;
+}): string | null => {
+	const digest = row.imageDigest?.trim();
+	if (!digest || !/^sha256:[0-9a-f]{12,64}$/i.test(digest)) return null;
+	const tag = row.imageTag?.trim();
+	if (!tag) return null;
+	const at = tag.indexOf("@");
+	const base = at === -1 ? tag : tag.slice(0, at);
+	const lastSlash = base.lastIndexOf("/");
+	const colon = base.indexOf(":", lastSlash + 1);
+	const repository = colon === -1 ? base : base.slice(0, colon);
+	return repository ? `${repository}@${digest}` : null;
+};
+
+/**
+ * How long a deployment ran, "45s" or "3m 12s", from its start and finish times. Null while it has not finished
+ * and for times that do not parse or run backwards.
+ */
+export const describeDeploymentDuration = (
+	startedAt: string | null | undefined,
+	finishedAt: string | null | undefined,
+): string | null => {
+	if (!startedAt || !finishedAt) return null;
+	const ms = new Date(finishedAt).getTime() - new Date(startedAt).getTime();
+	if (!Number.isFinite(ms) || ms < 0) return null;
+	const seconds = Math.floor(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+};
+
 export type ServiceBuildDescription = ResolvedBuildOrigin &
 	GithubActionsRunDetails & {
 		/** When the deployment the value was read from finished (else was created); null for none. */
@@ -643,7 +905,7 @@ export const describeServiceBuild = (
 };
 
 /**
- * The one plain line the "Deployed from GitHub Actions" panel shows after the action's rollback deploy. The commit
+ * The one plain line the GitHub Actions run modal shows after the action's rollback deploy. The commit
  * part is left out when the rollback title names none, the run part says "the latest run" when the id is unknown,
  * and the reason is "failed its checks" for a run that deployed, else "failed to deploy".
  */
@@ -673,22 +935,27 @@ const GIT_PROVIDER_SOURCE_TYPES: readonly string[] = [
 ];
 
 /**
+ * The branch of a service set up with a git provider, else null: a docker-source service can still carry the
+ * branch of an earlier git setup, and that is not what GitHub Actions deploys from.
+ */
+export const githubActionsBranch = (input: {
+	branch?: string | null;
+	sourceType?: string | null;
+}) =>
+	(input.sourceType && GIT_PROVIDER_SOURCE_TYPES.includes(input.sourceType)
+		? input.branch?.trim()
+		: null) || null;
+
+/**
  * What "push to ..." names in the hint under the deploy button: the branch the service was set up with, else
  * the repository (`owner/repo`). An environment name is never a branch, so it is not used. The branch counts only
- * while the source is a git provider: a docker-source service can still carry the branch of an earlier git setup,
- * and that must not win over the repository. Null when neither is known.
+ * while the source is a git provider (see `githubActionsBranch`). Null when neither is known.
  */
 export const githubActionsPushTarget = (input: {
 	branch?: string | null;
 	sourceType?: string | null;
 	buildRepository?: string | null;
-}) => {
-	const branch =
-		input.sourceType && GIT_PROVIDER_SOURCE_TYPES.includes(input.sourceType)
-			? input.branch?.trim()
-			: null;
-	return branch || input.buildRepository?.trim() || null;
-};
+}) => githubActionsBranch(input) || input.buildRepository?.trim() || null;
 
 /** The commit page of a GitHub repository, or null when the repository or the sha is unknown. */
 export const githubCommitUrl = (
