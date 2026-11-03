@@ -1,10 +1,13 @@
 import {
 	type BuildOriginDeploymentRow,
+	canRedeployFromGithubActionsRun,
 	deploymentImageReference,
 	describeDeploymentDuration,
+	describeGithubActionsAttempt,
 	describeGithubActionsRollback,
 	describeGithubActionsRun,
 	describeGithubActionsRunState,
+	describeGithubActionsSource,
 	describeGithubActionsTitle,
 	describeImageReference,
 	describeServiceBuild,
@@ -13,6 +16,7 @@ import {
 	githubActionsPushTarget,
 	githubCommitUrl,
 	parseGithubActionsTitle,
+	pickNewerLiveGithubDeployment,
 	pickServingDeployment,
 	renderBuildStartMarker,
 	withGithubActionsRunDetails,
@@ -1010,5 +1014,139 @@ describe("describeDeploymentDuration", () => {
 				"2026-11-02T10:00:00.000Z",
 			),
 		).toBeNull();
+	});
+});
+
+describe("canRedeployFromGithubActionsRun", () => {
+	const base = {
+		canDeploy: true,
+		isServing: true,
+		serviceBuildOrigin: "github-actions",
+	};
+
+	test("is offered on the serving row of a GitHub Actions service for a user who may deploy", () => {
+		expect(canRedeployFromGithubActionsRun(base)).toBe(true);
+	});
+
+	test("is not offered once the service is built by Dokploy again, whatever its old rows say", () => {
+		// A service switched back to a git provider keeps its finished GitHub Actions rows.
+		expect(
+			canRedeployFromGithubActionsRun({
+				...base,
+				serviceBuildOrigin: "dokploy",
+			}),
+		).toBe(false);
+		expect(
+			canRedeployFromGithubActionsRun({
+				...base,
+				serviceBuildOrigin: "external",
+			}),
+		).toBe(false);
+		expect(
+			canRedeployFromGithubActionsRun({ ...base, serviceBuildOrigin: null }),
+		).toBe(false);
+		expect(
+			canRedeployFromGithubActionsRun({
+				...base,
+				serviceBuildOrigin: undefined,
+			}),
+		).toBe(false);
+	});
+
+	test("is not offered without deploy permission or on an older row", () => {
+		expect(canRedeployFromGithubActionsRun({ ...base, canDeploy: false })).toBe(
+			false,
+		);
+		expect(canRedeployFromGithubActionsRun({ ...base, isServing: false })).toBe(
+			false,
+		);
+	});
+});
+
+describe("describeGithubActionsAttempt", () => {
+	test("names only a re-run", () => {
+		expect(describeGithubActionsAttempt("2")).toBe(" · attempt 2");
+		expect(describeGithubActionsAttempt("12")).toBe(" · attempt 12");
+		expect(describeGithubActionsAttempt("1")).toBe("");
+		expect(describeGithubActionsAttempt(null)).toBe("");
+		expect(describeGithubActionsAttempt(undefined)).toBe("");
+		expect(describeGithubActionsAttempt("x")).toBe("");
+	});
+});
+
+describe("describeGithubActionsSource", () => {
+	test("says what happened to the image by how the row stands", () => {
+		const text = (
+			label: string,
+			tone: Parameters<typeof describeGithubActionsSource>[0]["tone"],
+		) => describeGithubActionsSource({ label, tone });
+		expect(text("Deployed", "success")).toBe(
+			"Built by GitHub Actions. Dokploy pulled the image and started it.",
+		);
+		expect(text("In progress", "running")).toBe(
+			"Built by GitHub Actions. Dokploy will pull the image when the run finishes.",
+		);
+		expect(text("Deploying", "running")).toBe(
+			"Built by GitHub Actions. Dokploy is pulling the image and starting it.",
+		);
+		expect(text("Failed", "failed")).toBe(
+			"Built by GitHub Actions. The deployment ended in error.",
+		);
+		expect(text("Cancelled", "cancelled")).toBe(
+			"Built by GitHub Actions. The deployment was cancelled.",
+		);
+		expect(text("Build finished", "success")).toBe(
+			"Built by GitHub Actions. No deploy took this run over.",
+		);
+		expect(text("weird", "unknown")).toBe("Built by GitHub Actions.");
+	});
+});
+
+describe("pickNewerLiveGithubDeployment", () => {
+	const live = (id: string, createdAt: string) => ({
+		deploymentId: id,
+		createdAt,
+		status: "running",
+		buildOrigin: "github-actions",
+		buildRunStatus: "in_progress",
+		buildRunStep: "build",
+	});
+	const serving = {
+		deploymentId: "serving",
+		createdAt: "2026-11-02T10:00:00.000Z",
+	};
+
+	test("is a live row created after what runs now", () => {
+		const rows = [
+			live("newer", "2026-11-02T11:00:00.000Z"),
+			{ ...serving, status: "done" },
+		];
+		expect(pickNewerLiveGithubDeployment(rows, serving)?.deploymentId).toBe(
+			"newer",
+		);
+	});
+
+	test("is not a live row older than what runs now, nor the row itself", () => {
+		const rows = [
+			live("older", "2026-11-02T09:00:00.000Z"),
+			live("serving", "2026-11-02T10:00:00.000Z"),
+		];
+		expect(pickNewerLiveGithubDeployment(rows, serving)).toBeNull();
+	});
+
+	test("takes the newest of several, and any live row when nothing runs yet", () => {
+		const rows = [
+			live("a", "2026-11-02T11:00:00.000Z"),
+			live("b", "2026-11-02T12:00:00.000Z"),
+		];
+		expect(pickNewerLiveGithubDeployment(rows, serving)?.deploymentId).toBe(
+			"b",
+		);
+		expect(pickNewerLiveGithubDeployment(rows, null)?.deploymentId).toBe("b");
+	});
+
+	test("skips rows that are not live", () => {
+		const rows = [{ ...live("x", "2026-11-02T12:00:00.000Z"), status: "done" }];
+		expect(pickNewerLiveGithubDeployment(rows, serving)).toBeNull();
 	});
 });

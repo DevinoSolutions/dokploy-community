@@ -143,7 +143,7 @@ describe("describeLiveGithubBuild", () => {
 			"Building on GitHub Actions · build · Build image (3/7)",
 		);
 		expect(describeLiveGithubBuild({ ...live, startedAt }, at(75))).toBe(
-			"Building on GitHub Actions · build · Build image (3/7) · running for 75m 0s, check the run",
+			"Building on GitHub Actions · build · Build image (3/7) · running for 1h 15m, check the run",
 		);
 		// Without a clock, or a start time, nothing is added.
 		expect(describeLiveGithubBuild({ ...live, startedAt })).toBe(

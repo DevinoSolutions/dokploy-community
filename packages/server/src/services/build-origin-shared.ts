@@ -201,11 +201,9 @@ export const describeLiveGithubBuild = (
 	if (now !== undefined) {
 		const started = Date.parse(row.startedAt ?? row.createdAt ?? "");
 		if (!Number.isNaN(started) && now - started > GITHUB_RUN_LONG_AFTER_MS) {
-			const elapsed = describeDeploymentDuration(
-				new Date(started).toISOString(),
-				new Date(now).toISOString(),
-			);
-			if (elapsed) label += ` · running for ${elapsed}, check the run`;
+			const minutes = Math.floor((now - started) / 60_000);
+			const elapsed = `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+			label += ` · running for ${elapsed}, check the run`;
 		}
 	}
 	return label;
@@ -637,6 +635,86 @@ export const describeGithubActionsRunState = (
 		default:
 			return { label: row.status || "Unknown", tone: "unknown", detail: null };
 	}
+};
+
+/** " · attempt 2" for a re-run; empty for the first attempt, which every run has and says nothing. */
+export const describeGithubActionsAttempt = (
+	attempt: string | null | undefined,
+): string => {
+	const number = Number(attempt);
+	return Number.isInteger(number) && number > 1 ? ` · attempt ${number}` : "";
+};
+
+/**
+ * What the modal's Source line says, by how the row stands: a finished deploy, a build that still runs, the deploy
+ * that runs now, or a row that ended in error or was cancelled.
+ */
+export const describeGithubActionsSource = (state: {
+	label: string;
+	tone: GithubActionsRunTone;
+}): string => {
+	const built = "Built by GitHub Actions.";
+	if (state.label === "Deploying") {
+		return `${built} Dokploy is pulling the image and starting it.`;
+	}
+	switch (state.tone) {
+		case "running":
+			return `${built} Dokploy will pull the image when the run finishes.`;
+		case "success":
+			return state.label === "Build finished"
+				? `${built} No deploy took this run over.`
+				: `${built} Dokploy pulled the image and started it.`;
+		case "failed":
+			return `${built} The deployment ended in error.`;
+		case "cancelled":
+			return `${built} The deployment was cancelled.`;
+		default:
+			return built;
+	}
+};
+
+/**
+ * Whether the run modal offers "Redeploy current version": the user may deploy, the row is the one that runs now and
+ * the service is built by GitHub Actions now. A service switched back to a git provider keeps old GitHub Actions
+ * rows, and redeploying it would run a full Dokploy build.
+ */
+export const canRedeployFromGithubActionsRun = (input: {
+	canDeploy: boolean;
+	isServing: boolean;
+	serviceBuildOrigin?: string | null;
+}): boolean =>
+	input.canDeploy &&
+	input.isServing &&
+	input.serviceBuildOrigin === "github-actions";
+
+/**
+ * The newest live GitHub Actions row that is newer than the deployment shown (the one that runs now), so the modal
+ * can say a newer run is going. Null when none is newer; a live row older than what runs is a leftover, not news.
+ */
+export const pickNewerLiveGithubDeployment = <
+	T extends {
+		deploymentId: string;
+		createdAt: string;
+		status?: string | null;
+		buildOrigin?: string | null;
+		buildRunStatus?: string | null;
+		buildRunStep?: string | null;
+		externalBuildOnly?: boolean | null;
+		deployQueuedAt?: string | null;
+	},
+>(
+	deployments: readonly T[],
+	current: { deploymentId: string; createdAt: string } | null,
+): T | null => {
+	const currentMs = current ? createdAtMs(current) : Number.NEGATIVE_INFINITY;
+	let newest: T | null = null;
+	for (const row of deployments) {
+		if (row.deploymentId === current?.deploymentId) continue;
+		if (describeLiveGithubBuild(row) === null) continue;
+		if (createdAtMs(row) <= currentMs) continue;
+		if (!newest || createdAtMs(row) > createdAtMs(newest)) newest = row;
+	}
+	return newest;
 };
 
 /**

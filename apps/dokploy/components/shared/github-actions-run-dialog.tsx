@@ -1,9 +1,12 @@
 import {
+	canRedeployFromGithubActionsRun,
 	deploymentImageReference,
 	describeDeploymentDuration,
+	describeGithubActionsAttempt,
 	describeGithubActionsRollback,
 	describeGithubActionsRun,
 	describeGithubActionsRunState,
+	describeGithubActionsSource,
 	describeGithubActionsTitle,
 	describeImageReference,
 	extractComposeImages,
@@ -12,6 +15,7 @@ import {
 	githubRepositoryUrl,
 	isLiveGithubBuild,
 	normalizeBuildRunUrl,
+	pickNewerLiveGithubDeployment,
 	pickServingDeployment,
 } from "@dokploy/server/services/build-origin-shared";
 import copy from "copy-to-clipboard";
@@ -194,7 +198,11 @@ const RunDialogBody = ({
 	);
 	const { data: deployments } = api.deployment.allByType.useQuery(
 		{ id: service.id, type: service.type },
-		{ refetchInterval: 5000 },
+		{
+			// Only while something runs: a finished run does not change under the modal.
+			refetchInterval: (query) =>
+				query.state.data?.some((d) => d.status === "running") ? 5000 : false,
+		},
 	);
 	const { mutateAsync: deployApplication, isPending: isDeployingApplication } =
 		api.application.deploy.useMutation();
@@ -233,12 +241,8 @@ const RunDialogBody = ({
 	// From the service pill the modal describes what runs now. A newer run that is still going has a phase worth
 	// seeing there, so it gets its own line and its own link to GitHub.
 	const newerLive = !given
-		? deployments?.find(
-				(d) =>
-					d.deploymentId !== row?.deploymentId &&
-					describeGithubActionsRunState(d, Date.now()).detail !== null,
-			)
-		: undefined;
+		? pickNewerLiveGithubDeployment(deployments ?? [], serving)
+		: null;
 	const newerLiveDetail = newerLive
 		? describeGithubActionsRunState(newerLive, Date.now()).detail
 		: null;
@@ -262,7 +266,13 @@ const RunDialogBody = ({
 	const rolledBack = Boolean(isServing && svc?.buildRolledBack);
 	const isDeploying = isDeployingApplication || isDeployingCompose;
 	// Redeploying pulls the image that runs now, so it is offered only on the row that describes that image.
-	const canRedeploy = canDeploy && isServing && Boolean(svc);
+	const canRedeploy =
+		Boolean(svc) &&
+		canRedeployFromGithubActionsRun({
+			canDeploy,
+			isServing,
+			serviceBuildOrigin: svc?.buildOrigin,
+		});
 	const logPath = row?.logPath ?? null;
 
 	const redeploy = async () => {
@@ -359,10 +369,10 @@ const RunDialogBody = ({
 								{runUrl ? (
 									<ExternalLinkText href={runUrl}>
 										{run.buildRunId ? `Run #${run.buildRunId}` : "Open run"}
-										{attempt ? ` · attempt ${attempt}` : ""}
+										{describeGithubActionsAttempt(attempt)}
 									</ExternalLinkText>
 								) : run.buildRunId ? (
-									`Run #${run.buildRunId}${attempt ? ` · attempt ${attempt}` : ""}`
+									`Run #${run.buildRunId}${describeGithubActionsAttempt(attempt)}`
 								) : (
 									<span className="font-normal text-muted-foreground">
 										Not recorded
@@ -409,8 +419,7 @@ const RunDialogBody = ({
 									</Row>
 								)}
 								<Row label="Source">
-									Built by GitHub Actions. Dokploy pulled the image and started
-									it.
+									{state ? describeGithubActionsSource(state) : null}
 								</Row>
 								{row.startedAt && (
 									<Row label="Started">
@@ -476,7 +485,7 @@ const RunDialogBody = ({
 				</div>
 			)}
 
-			<DialogFooter className="sm:flex-wrap sm:justify-start">
+			<DialogFooter className="flex-col sm:flex-row sm:flex-wrap sm:justify-start">
 				{runUrl ? (
 					<Button asChild>
 						<a href={runUrl} target="_blank" rel="noopener noreferrer">
