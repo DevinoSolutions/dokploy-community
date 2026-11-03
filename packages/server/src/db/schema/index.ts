@@ -21,6 +21,7 @@ export * from "./dodomain";
 export * from "./domain";
 export * from "./environment";
 export * from "./forward-auth";
+export * from "./gha-connection";
 export * from "./git-provider";
 export * from "./gitea";
 export * from "./github";

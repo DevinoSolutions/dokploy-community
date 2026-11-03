@@ -11,6 +11,12 @@ import {
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { organization } from "./account";
+import {
+	apiGithubDeploymentEnvironment,
+	apiGithubOwnerRepo,
+	GITHUB_WATCH_SERVICE_TYPES,
+	type GithubWatchServiceType,
+} from "./github-deployment-shared";
 import { encryptedText } from "./utils";
 
 /**
@@ -22,12 +28,9 @@ import { encryptedText } from "./utils";
 /** Public OAuth App "Dokploy Community". Public by design; there is no secret. */
 export const GITHUB_DEVICE_DEFAULT_CLIENT_ID = "Ov23liBkg97sIGx9nKb6";
 
-/** Scopes asked for in the device flow. Narrow on purpose. */
-export const GITHUB_DEVICE_SCOPE = "repo_deployment read:packages";
-
-export const GITHUB_WATCH_SERVICE_TYPES = ["application", "compose"] as const;
-export type GithubWatchServiceType =
-	(typeof GITHUB_WATCH_SERVICE_TYPES)[number];
+/** Scopes asked for in the device flow. `public_repo` reads public repositories; `repo` is needed for private ones. */
+export const GITHUB_DEVICE_SCOPE = "repo_deployment public_repo";
+export const GITHUB_DEVICE_SCOPE_PRIVATE = "repo_deployment repo";
 
 export const GITHUB_CONNECTION_STATUSES = ["active", "revoked"] as const;
 export type GithubConnectionStatus =
@@ -158,33 +161,21 @@ export const githubDeploymentWatchRelations = relations(
 	}),
 );
 
-const GITHUB_NAME = /^[A-Za-z0-9._-]{1,100}$/;
-/** "." and ".." match GITHUB_NAME, and encodeURIComponent leaves dots alone: /repos/../x would walk out of /repos. */
-const isDotSegment = (name: string) => /^\.{1,2}$/.test(name);
+export {
+	apiGithubDeploymentEnvironment,
+	apiGithubOwnerRepo,
+	GITHUB_WATCH_SERVICE_TYPES,
+	type GithubWatchServiceType,
+};
 
-export const apiGithubOwnerRepo = z.object({
-	owner: z
-		.string()
-		.trim()
-		.regex(GITHUB_NAME, "Not a valid GitHub owner")
-		.refine((name) => !isDotSegment(name), "Not a valid GitHub owner")
-		.describe("GitHub user or organization that owns the repository."),
-	repo: z
-		.string()
-		.trim()
-		.regex(GITHUB_NAME, "Not a valid GitHub repository name")
-		.refine((name) => !isDotSegment(name), "Not a valid GitHub repository name")
-		.describe("GitHub repository name, without the owner."),
+export const apiGithubDeploymentStartConnect = z.object({
+	repositoryAccess: z
+		.enum(["public", "private"])
+		.default("public")
+		.describe(
+			"public asks GitHub for the public_repo scope, private for the broader repo scope that private repositories need. Classic OAuth has no read-only Actions scope.",
+		),
 });
-
-export const apiGithubDeploymentEnvironment = z
-	.string()
-	.trim()
-	.min(1)
-	.max(255)
-	.describe(
-		'GitHub Deployments environment name to follow (default "production").',
-	);
 
 export const apiGithubDeploymentCompleteConnect = z.object({
 	flowId: z
