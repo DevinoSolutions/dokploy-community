@@ -241,7 +241,12 @@ const RunDialogBody = ({
 	// From the service pill the modal describes what runs now. A newer run that is still going has a phase worth
 	// seeing there, so it gets its own line and its own link to GitHub.
 	const newerLive = !given
-		? pickNewerLiveGithubDeployment(deployments ?? [], serving)
+		? pickNewerLiveGithubDeployment(
+				deployments ?? [],
+				row
+					? { deploymentId: row.deploymentId, createdAt: row.createdAt ?? "" }
+					: null,
+			)
 		: null;
 	const newerLiveDetail = newerLive
 		? describeGithubActionsRunState(newerLive, Date.now()).detail
@@ -419,7 +424,14 @@ const RunDialogBody = ({
 									</Row>
 								)}
 								<Row label="Source">
-									{state ? describeGithubActionsSource(state) : null}
+									{state
+										? describeGithubActionsSource({
+												...state,
+												externalBuildOnly: row.externalBuildOnly,
+												deployQueuedAt: row.deployQueuedAt,
+												buildRunStatus: row.buildRunStatus,
+											})
+										: null}
 								</Row>
 								{row.startedAt && (
 									<Row label="Started">

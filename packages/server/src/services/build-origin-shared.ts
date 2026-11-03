@@ -652,8 +652,20 @@ export const describeGithubActionsAttempt = (
 export const describeGithubActionsSource = (state: {
 	label: string;
 	tone: GithubActionsRunTone;
+	/** The row's own fields, to tell a build that still runs from one that finished and waits for its deploy. */
+	externalBuildOnly?: boolean | null;
+	deployQueuedAt?: string | null;
+	buildRunStatus?: string | null;
 }): string => {
 	const built = "Built by GitHub Actions.";
+	if (state.tone === "running" && state.externalBuildOnly) {
+		if (state.deployQueuedAt) {
+			return "Build finished. Dokploy will pull the image when the deploy reaches the front of the queue.";
+		}
+		if (state.buildRunStatus === "completed") {
+			return "Build finished. Dokploy is waiting for the workflow's deploy call.";
+		}
+	}
 	if (state.label === "Deploying") {
 		return `${built} Dokploy is pulling the image and starting it.`;
 	}

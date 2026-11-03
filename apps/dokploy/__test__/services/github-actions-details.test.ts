@@ -1099,6 +1099,37 @@ describe("describeGithubActionsSource", () => {
 			"Built by GitHub Actions. No deploy took this run over.",
 		);
 		expect(text("weird", "unknown")).toBe("Built by GitHub Actions.");
+		expect(
+			describeGithubActionsSource({
+				label: "In progress",
+				tone: "running",
+				externalBuildOnly: true,
+				deployQueuedAt: "2026-11-02T10:30:00.000Z",
+			}),
+		).toBe(
+			"Build finished. Dokploy will pull the image when the deploy reaches the front of the queue.",
+		);
+		expect(
+			describeGithubActionsSource({
+				label: "In progress",
+				tone: "running",
+				externalBuildOnly: true,
+				buildRunStatus: "completed",
+			}),
+		).toBe(
+			"Build finished. Dokploy is waiting for the workflow's deploy call.",
+		);
+		// Still building: the run has not finished.
+		expect(
+			describeGithubActionsSource({
+				label: "In progress",
+				tone: "running",
+				externalBuildOnly: true,
+				buildRunStatus: "in_progress",
+			}),
+		).toBe(
+			"Built by GitHub Actions. Dokploy will pull the image when the run finishes.",
+		);
 	});
 });
 
@@ -1142,6 +1173,9 @@ describe("pickNewerLiveGithubDeployment", () => {
 		expect(pickNewerLiveGithubDeployment(rows, serving)?.deploymentId).toBe(
 			"b",
 		);
+		// The modal passes the row it shows: a service whose only deployment is that live run has no newer one.
+		const only = { deploymentId: "b", createdAt: "2026-11-02T12:00:00.000Z" };
+		expect(pickNewerLiveGithubDeployment(rows, only)).toBeNull();
 		expect(pickNewerLiveGithubDeployment(rows, null)?.deploymentId).toBe("b");
 	});
 
