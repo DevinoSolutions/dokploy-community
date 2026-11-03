@@ -1,6 +1,6 @@
 # Build on GitHub Actions, connected natively (T-13719, gate T-13720)
 
-Status: design, revision 3, 2026-11-03. Builds on c42 to c46 (provenance pill, live GitHub Actions rows, run modal, `github-run-poller`) and on open PR #577 (GitHub Deployments pull, device flow, poller; head 7a4c11d0). Nothing here is implemented.
+Status: design, revision 4, 2026-11-03. Builds on c42 to c46 (provenance pill, live GitHub Actions rows, run modal, `github-run-poller`) and on open PR #577 (GitHub Deployments pull, device flow, poller; head 7a4c11d0). Nothing here is implemented.
 
 ## Goal
 A user turns any GitHub-sourced application or compose into a GitHub Actions-built service from the dashboard. The repository gets one short workflow. It holds no Dokploy API key and no Dokploy address. It builds, pushes by digest and uploads a release manifest as a run artifact. Dokploy reads that artifact and deploys. Until phase 3 a workflow may hold up to two secrets for us: a push-only registry credential scoped to that repository (from phase 2) and the SSH-tunnel key of the existing mirror step (adopters, until the server-side mirror lands). Both live in a GitHub Environment limited to the tracked branch where the plan supports environments.
@@ -35,17 +35,18 @@ Dokploy accepts a release only when all of these hold:
 1. Run (`GET /repos/{o}/{r}/actions/runs/{run_id}`): `path` equals `.github/workflows/dokploy.yml` (or the connection's recorded path, any `@ref` suffix removed); `head_branch` equals the tracked branch; `event` is `push` or `workflow_dispatch`, never `pull_request` and never `workflow_run`; `status` is `completed` and `conclusion` is `success`.
 2. Artifact (`GET .../runs/{run_id}/artifacts`): named `dokploy-release`, `expired` false, `workflow_run.id` equals the run, `workflow_run.repository_id` and `head_repository_id` equal the connection's repo id.
 3. The manifest's `sha` equals the run's `head_sha`.
-4. Each image digest answers a registry v2 `HEAD /v2/<name>/manifests/<digest>` with the same `Docker-Content-Digest`. The Packages API is never used. The repository must sit in the connection's registry namespace (`<repo>/*` on our registry, or the owner's public GHCR), and after the first release must equal the repository the service runs.
-5. Ordering (below).
+4. Each image digest answers a registry v2 `HEAD /v2/<name>/manifests/<digest>` with the same `Docker-Content-Digest`. The Packages API is never used. The repository must sit in the connection's registry namespace (`<repo>/*` on our registry, or the owner's public GHCR), and after the first release must equal the repository the service runs. Repositories under `<repo>/preview/*` are always refused here, including for the first release.
+5. The connection's GitHub Environment branch policy still allows only the tracked branch. It is re-read at every acceptance, not only at Connect. A read error, a missing environment or a wider policy refuses the release and sets the connection Blocked. This rule is skipped only in confirmed repository-secret mode (see poisoning controls).
+6. Ordering (below).
 
 `workflow_run` is not accepted at all. In a `workflow_run` run `github.sha` is the default-branch tip, which can be a newer commit than the one CI tested, and CI runs of fork pull requests can trigger it. The deploy gate is the supported way to wait for CI.
 
 Optional on top: a Sigstore attestation (certificate workflow ref and run id) shows an "attested" badge. It never blocks.
 
-**Ordering and replay.** After Connected, a release whose commit is an ancestor of the deployed commit is refused (`compare` status `behind` or `identical`) unless the user triggers Rollback explicitly. A candidate must also be reachable from the tracked branch head. For two releases of one commit, the higher `run_attempt` of the same run wins and the lower is refused; between different runs of one commit the later run id wins. An identical digest set is a no-op. Re-running an old run therefore cannot regress prod.
+**Ordering and replay.** After Connected, a release whose commit is an ancestor of the deployed commit is refused (`compare` status `behind` or `identical`) unless the user triggers Rollback explicitly. A candidate must also be reachable from the tracked branch head. For two releases of one commit, the higher `run_attempt` wins, an identical digest set is a no-op, and a lower attempt is refused; between different runs of one commit the later run id wins. Re-running an old run therefore cannot regress prod.
 
 ## Deployment contract
-One Deployment per service per release: `ref` is the 40-character sha, `required_contexts: []`, `auto_merge: false`, `environment` is the environment name, `task: dokploy:<key>`, `transient_environment: true` for previews, `payload` is `{"schema","run_id","run_attempt","artifact":"dokploy-release"}` (under 2 KiB). Statuses use `auto_inactive: false`; `description` and `log_url` carry the instance id. A Deployment whose run fails the rules above is ignored and logged on the row.
+One Deployment per service per release: `ref` is the 40-character sha, `required_contexts: []`, `auto_merge: false`, `environment` is the environment name, `task: dokploy:<key>`, `transient_environment: true` for previews, `payload` is `{"schema","run_id","run_attempt","artifact":"dokploy-release"}` (under 2 KiB). Statuses use `auto_inactive: false`; `description` and `log_url` carry the instance id. A Deployment whose run fails the rules above is ignored and logged on the row. Deployments are wake-ups, so spam is bounded: they are deduplicated by (run id, attempt), a pair already processed costs no request, and at most 5 verifications run per poll tick per repository, newest first, the rest deferred to the next tick.
 
 ## Release manifest (artifact)
 ```json
@@ -92,10 +93,10 @@ Webhook events: push, pull_request, plus deployment, check_run and workflow_run 
 A branch or same-repo pull request run can run any code the repository allows. Four controls keep it from influencing what the tracked-branch run publishes:
 1. **Credential in an environment.** The registry credential and the tunnel key live in a GitHub Environment whose deployment branch policy allows only the tracked branch. The generated build job declares `environment: <env>` (an expression chain when several branches map to several environments). Copy-the-file mode instructs the same. Dokploy reads `GET /repos/{o}/{r}/environments/{env}` and its deployment-branch-policies (repository read access; `actions: read` for the App) and refuses Connect while the policy allows more than the tracked branch. Jobs that start an environment make Actions create its own Deployment; Dokploy ignores any Deployment whose `task` does not start with `dokploy:`.
 2. **Digest from the same run.** `existing-image` takes `name@sha256:<digest>` from an output of a job in the same run. The action refuses a tag.
-3. **Cache scope.** `cache: gha` is the default. A branch's GitHub cache cannot write the default branch's scope. `cache: registry` is opt-in, needs the environment-scoped credential, and the action refuses it with the repository-wide `GITHUB_TOKEN` on GHCR.
+3. **Cache scope.** `cache: gha` is the default. A branch's GitHub cache cannot write the default branch's scope. `cache: registry` is opt-in, needs the environment-scoped credential, and the action refuses it with the repository-wide `GITHUB_TOKEN` on GHCR. `existing-image` mode inherits the cache trust of the user's own build job, which Dokploy cannot see. The advisory scan therefore requires, and the cutover lanes require for own-workflow adopters (SuperBooks, upAPI, Caly, Postify), that the build job uses `cache: gha` or an environment-scoped credential; a registry cache written with a repository-wide credential is refused in the wizard and in cutover review.
 4. **Namespace and order.** Digests must sit in the connection's namespace and arrive in commit order.
 
-Environments on private repositories need a paid GitHub plan, so the Devino organization on GitHub Free may not have them. Where Dokploy cannot read an environment policy, the mode is "repository secret": controls 2 to 4 still hold, `cache: registry` is refused, and the wizard says in plain words what protects the build. Verify on the first adopter.
+**Fail closed.** Repository-secret mode exists only for repositories where GitHub explicitly reports environments unavailable (a plan limit) and the user confirms in the wizard, in plain words, what then protects the build: controls 2 to 4 hold, `cache: registry` is refused, and acceptance rule 5 is skipped. A read error, a missing environment or a policy wider than the tracked branch is never a downgrade: Connect stays blocked and acceptance refuses.
 
 ## Generated workflow
 ```yaml
@@ -203,14 +204,14 @@ Per repository:
 1. Bump to the wrapper with `push_deploy: true` (today's behavior) and manifest publishing on (`delivery: push`). Dokploy verifies the manifest, advances the recorded deployed commit, and does not deploy.
 2. The instance reaches Connected on a real release (the digest equals what the push deploy ran: no-op).
 3. Set `push_deploy: false`, through a repository variable the wrapper reads so no file edit is needed. Manifests become `delivery: pull`.
+For SuperBooks, upAPI, Caly and Postify, review of the cutover PR checks the cache trust rule from the poisoning controls.
 Both deployers are never active at once: Dokploy deploys only `pull` manifests, and the wrapper makes the API call only while `push_deploy` is true.
 
 ## Open questions
 1. **Scoped registry credentials.** Our registry needs token auth to scope push to `<repo>/*`, and GitHub-hosted runners must reach it. Recommend the Dokploy token service (PR 7), with self-hosted runners for private networks. It could also issue credentials by exchanging the run's GitHub OIDC token, so no secret is stored and private repositories without environments are covered. Store a secret (decided) or exchange OIDC (recommended once the service exists)?
 2. **Action namespace.** `dokploy-community` is an existing organization we do not control. Recommend `DevinoSolutions/dokploy-release`, public.
 3. **App model.** Per-instance App (no shared private key) or one shared official App. Recommend per-instance.
-4. **Environments on Free.** If private repositories on the Devino plan cannot use environments, is "repository secret" mode acceptable for them, or do those repositories wait for the OIDC exchange? Recommend accept, since controls 2 to 4 hold.
-5. **Phase 1 token breadth.** Accept the `repo` scope as an interim until the App, or hold phase 1 for the App? Recommend accept, with the scope shown in the connect dialog.
+4. **Phase 1 token breadth.** Accept the `repo` scope as an interim until the App, or hold phase 1 for the App? Recommend accept, with the scope shown in the connect dialog.
 
 ## Phased delivery
 **Phase 1: manifest, acceptance, connection** (on #577, no App change). Limited to adopters already on the SSH-tunnel mirror and to public GHCR images; no registry credential is provisioned.
