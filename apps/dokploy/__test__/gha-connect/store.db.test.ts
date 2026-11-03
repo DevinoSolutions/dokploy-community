@@ -57,7 +57,9 @@ beforeAll(async () => {
 	holder.db = drizzle(pg as never, { schema });
 	await pg.exec('CREATE TABLE "organization" ("id" text PRIMARY KEY)');
 	// Only the key of each service table: the store asks whether a service exists.
-	await pg.exec('CREATE TABLE "application" ("applicationId" text PRIMARY KEY)');
+	await pg.exec(
+		'CREATE TABLE "application" ("applicationId" text PRIMARY KEY)',
+	);
 	await pg.exec('CREATE TABLE "compose" ("composeId" text PRIMARY KEY)');
 	for (const file of ALL_FILES) {
 		for (const statement of migrationStatements(file)) await pg.exec(statement);
@@ -334,7 +336,9 @@ const insertWatch = (serviceType: string, serviceId: string) =>
 
 describe.skipIf(!ready)("services that are deleted", () => {
 	it("removeGhaConnectionsForServices removes the connection and its watch, in the transaction that deletes the service", async () => {
-		await client?.exec(`INSERT INTO "compose" ("composeId") VALUES ('compose-1'), ('compose-2')`);
+		await client?.exec(
+			`INSERT INTO "compose" ("composeId") VALUES ('compose-1'), ('compose-2')`,
+		);
 		await store.createGhaConnection(baseRow());
 		await store.createGhaConnection(
 			baseRow({ serviceId: "compose-2", serviceKey: "other" }),
@@ -344,7 +348,9 @@ describe.skipIf(!ready)("services that are deleted", () => {
 		const db = holder.db as {
 			transaction: (
 				fn: (tx: {
-					delete: (table: unknown) => { where: (clause: unknown) => Promise<unknown> };
+					delete: (table: unknown) => {
+						where: (clause: unknown) => Promise<unknown>;
+					};
 				}) => Promise<void>,
 			) => Promise<void>;
 		};
@@ -364,8 +370,30 @@ describe.skipIf(!ready)("services that are deleted", () => {
 		expect(left?.serviceId).toBe("compose-2");
 	});
 
+	it("leaves a plain GitHub Deployments watch to the poller's service-gone path, and removes only connection-owned ones", async () => {
+		await client?.exec(
+			`INSERT INTO "compose" ("composeId") VALUES ('compose-1'), ('compose-plain')`,
+		);
+		await store.createGhaConnection(baseRow());
+		await insertWatch("compose", "compose-1");
+		await insertWatch("compose", "compose-plain");
+		await store.removeGhaConnectionsForServices([
+			{ serviceType: "compose", serviceId: "compose-1" },
+			{ serviceType: "compose", serviceId: "compose-plain" },
+		]);
+		const left = (
+			await client?.query(
+				`SELECT "serviceId" FROM github_deployment_watch ORDER BY 1`,
+			)
+		)?.rows.map((row) => row.serviceId);
+		expect(left).toEqual(["compose-plain"]);
+		expect(await count("gha_connection")).toBe(0);
+	});
+
 	it("a failure rolls the connection removal back with the service delete", async () => {
-		await client?.exec(`INSERT INTO "compose" ("composeId") VALUES ('compose-1')`);
+		await client?.exec(
+			`INSERT INTO "compose" ("composeId") VALUES ('compose-1')`,
+		);
 		await store.createGhaConnection(baseRow());
 		await insertWatch("compose", "compose-1");
 		const db = holder.db as {
@@ -385,14 +413,18 @@ describe.skipIf(!ready)("services that are deleted", () => {
 	});
 
 	it("serviceRowExists tells applications and compose stacks apart", async () => {
-		await client?.exec(`INSERT INTO "application" ("applicationId") VALUES ('app-1')`);
+		await client?.exec(
+			`INSERT INTO "application" ("applicationId") VALUES ('app-1')`,
+		);
 		expect(await store.serviceRowExists("application", "app-1")).toBe(true);
 		expect(await store.serviceRowExists("compose", "app-1")).toBe(false);
 		expect(await store.serviceRowExists("application", "nope")).toBe(false);
 	});
 
 	it("pruneOrphanedGhaConnections drops only the connections whose service is gone, so the account can be removed", async () => {
-		await client?.exec(`INSERT INTO "compose" ("composeId") VALUES ('compose-live')`);
+		await client?.exec(
+			`INSERT INTO "compose" ("composeId") VALUES ('compose-live')`,
+		);
 		await store.createGhaConnection(baseRow({ serviceId: "compose-gone" }));
 		await store.createGhaConnection(
 			baseRow({ serviceId: "compose-live", serviceKey: "live" }),
