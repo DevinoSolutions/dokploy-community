@@ -116,6 +116,8 @@ export const snippetProblem = (form: ConnectForm): string | null => {
 	if (!KEY.test(effectiveServiceKey(form)))
 		return "The service key needs lowercase letters, digits, dots, dashes or underscores.";
 	if (effectiveMode(form) === "build") {
+		if (!parseRepository(form.repository))
+			return "Enter the repository as owner/name.";
 		if (!SAFE.test(form.dockerfile.trim()))
 			return "Enter the path of the Dockerfile.";
 		if (!SAFE.test(form.context.trim()))
@@ -182,11 +184,13 @@ export const toSnippetInput = (form: ConnectForm) => {
 		serviceKey: effectiveServiceKey(form),
 		trackedBranch: form.trackedBranch.trim(),
 		environment: form.environment.trim(),
+		delivery: "pull" as const,
 	};
 	return effectiveMode(form) === "build"
 		? {
 				...base,
 				mode: "build" as const,
+				repository: form.repository.trim(),
 				dockerfile: form.dockerfile.trim(),
 				context: form.context.trim(),
 			}
@@ -286,15 +290,31 @@ export type DetailRow = {
 	mono: boolean;
 };
 
-const when = (value: Date | string | null): string | null => {
+/** "just now", "5 minutes ago", "3 hours ago", "2 days ago"; null for no date or one that does not parse. */
+export const relativeTime = (
+	value: Date | string | null,
+	now: Date = new Date(),
+): string | null => {
 	if (!value) return null;
 	const date = value instanceof Date ? value : new Date(value);
-	return Number.isNaN(date.getTime()) ? null : date.toISOString();
+	if (Number.isNaN(date.getTime())) return null;
+	const seconds = Math.max(
+		0,
+		Math.round((now.getTime() - date.getTime()) / 1000),
+	);
+	if (seconds < 45) return "just now";
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 48) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+	const days = Math.round(hours / 24);
+	return `${days} days ago`;
 };
 
 /** The facts under the pill, in reading order. A row is left out when the value is not known. */
 export const providerDetailRows = (
 	connection: ProviderConnection,
+	now: Date = new Date(),
 ): DetailRow[] => {
 	const rows: DetailRow[] = [
 		{
@@ -338,7 +358,7 @@ export const providerDetailRows = (
 			mono: true,
 		});
 	}
-	const checked = when(connection.lastActivityAt);
+	const checked = relativeTime(connection.lastActivityAt, now);
 	if (checked) {
 		rows.push({
 			label: "Last checked",

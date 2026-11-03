@@ -20,6 +20,7 @@ import {
 	GITHUB_DEPLOYMENTS_POLL_INTERVAL_MS,
 	type GithubDeployment,
 	type InflightState,
+	isStoredComposeSource,
 	listEnabledGithubWatches,
 	loadConnectionToken,
 	markGithubConnectionRevoked,
@@ -216,7 +217,7 @@ const startDeploy = async (
 				reason: "The compose stack belongs to another organization.",
 			} as const;
 		}
-		if (stack.sourceType !== "raw") {
+		if (!isStoredComposeSource(stack.sourceType)) {
 			return {
 				kind: "rejected",
 				reason:

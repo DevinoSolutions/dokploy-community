@@ -42,7 +42,14 @@ const forkEntries = journal.entries.filter((e) => e.idx >= FORK_DELTA_START);
 const splitStatements = (sql: string): string[] =>
 	sql
 		.split("--> statement-breakpoint")
-		.map((s) => s.trim())
+		// A comment is not DDL: "IF NOT EXISTS" in a header must not make an unguarded statement pass.
+		.map((s) =>
+			s
+				.split("\n")
+				.filter((line) => !line.trimStart().startsWith("--"))
+				.join("\n")
+				.trim(),
+		)
 		.filter(Boolean);
 
 /**

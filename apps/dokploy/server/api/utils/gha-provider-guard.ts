@@ -3,6 +3,7 @@ import {
 	checkRedeployable,
 	checkSourceTypeChange,
 	isGhaSourceType,
+	keepsProvider,
 } from "@dokploy/server/services/gha-connect/provider";
 import { findGhaConnection } from "@dokploy/server/services/gha-connect/store";
 import { TRPCError } from "@trpc/server";
@@ -15,22 +16,38 @@ import { TRPCError } from "@trpc/server";
 
 type Kind = "application" | "compose";
 
+/**
+ * Refuses an edit that would move a connected service off GitHub Actions (or onto it without Connect). Returns true
+ * when the call only repeats the provider the service already has (the compose file editor sends `raw` back), so the
+ * caller must leave the source type out of the write.
+ *
+ * `strict` is for calls that replace the service's content (a template, an import, a zip): even the equivalent
+ * stored-file type is refused there, because the call would overwrite what GitHub Actions releases pinned.
+ */
 export const assertSourceChangeAllowed = async (input: {
 	serviceType: Kind;
 	serviceId: string;
 	/** The source type the call would set; undefined when it does not set one. */
 	nextSourceType: string | undefined;
-}) => {
-	if (input.nextSourceType === undefined) return;
+	strict?: boolean;
+}): Promise<boolean> => {
+	if (input.nextSourceType === undefined) return false;
 	const current =
 		input.serviceType === "application"
 			? await findApplicationById(input.serviceId).catch(() => null)
 			: await findComposeById(input.serviceId).catch(() => null);
 	const currentSourceType = current?.sourceType;
-	if (!currentSourceType) return;
+	if (!currentSourceType) return false;
 	const connected = isGhaSourceType(currentSourceType)
 		? (await findGhaConnection(input.serviceType, input.serviceId)) !== null
 		: false;
+	if (
+		!input.strict &&
+		connected &&
+		keepsProvider(input.serviceType, currentSourceType, input.nextSourceType)
+	) {
+		return true;
+	}
 	const refusal = checkSourceTypeChange({
 		currentSourceType,
 		connected,
@@ -39,6 +56,7 @@ export const assertSourceChangeAllowed = async (input: {
 	if (refusal) {
 		throw new TRPCError({ code: refusal.code, message: refusal.message });
 	}
+	return false;
 };
 
 /** A manual deploy of a GitHub Actions application with no release yet: say what to do instead of queueing it. */

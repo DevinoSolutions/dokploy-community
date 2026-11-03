@@ -1,9 +1,12 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
 	buildWorkflowSnippet,
 	githubNewFileUrl,
 	WORKFLOW_PATH,
 } from "@dokploy/server/services/gha-connect/workflow-snippet";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const base = {
 	branch: "dev",
@@ -11,74 +14,195 @@ const base = {
 	serviceKey: "web",
 };
 
-describe("buildWorkflowSnippet, build mode", () => {
-	const build = {
-		...base,
-		mode: "build" as const,
-		dockerfile: "apps/web/Dockerfile",
-		context: ".",
-	};
+const build = {
+	...base,
+	mode: "build" as const,
+	repository: "Acme/Shop",
+	dockerfile: "apps/web/Dockerfile",
+	context: ".",
+};
 
-	it("renders the whole workflow the dashboard offers as .github/workflows/dokploy.yml", () => {
+const existing = {
+	...base,
+	mode: "existing" as const,
+	buildJob: "compose",
+	imageOutput: "image",
+};
+
+/** The action as published (vendored at efafd804): the only truth about which inputs a step may send. */
+const action = parse(
+	readFileSync(
+		resolve(__dirname, "action-fixture/dokploy-release-action.yml"),
+		"utf8",
+	),
+) as {
+	inputs: Record<string, { description: string; required?: boolean }>;
+};
+const declared = Object.keys(action.inputs);
+const reserved = declared.filter((name) =>
+	action.inputs[name]?.description.startsWith("Reserved"),
+);
+
+type Step = { uses?: string; with?: Record<string, unknown> };
+type Job = {
+	needs?: string;
+	environment?: string;
+	permissions?: Record<string, string>;
+	outputs?: Record<string, string>;
+	steps?: Step[];
+};
+type Workflow = { jobs: Record<string, Job>; permissions?: object };
+
+const releaseSteps = (jobs: Record<string, Job>) =>
+	Object.values(jobs)
+		.flatMap((job) => job.steps ?? [])
+		.filter((step) =>
+			step.uses?.startsWith("DevinoSolutions/dokploy-release@"),
+		);
+
+const generated = () => {
+	const whole = buildWorkflowSnippet(build);
+	const job = buildWorkflowSnippet(existing);
+	if (!whole.ok || !job.ok) throw new Error("unreachable");
+	return {
+		whole: parse(whole.yaml) as Workflow,
+		// The job text is indented to sit under `jobs:`; parse it as that.
+		job: parse(`jobs:\n${job.yaml}`) as Workflow,
+		wholeYaml: whole.yaml,
+		jobYaml: job.yaml,
+	};
+};
+
+describe("what the generated text sends to dokploy-release", () => {
+	it("sends only inputs the action declares, none of them reserved", () => {
+		const { whole, job } = generated();
+		for (const workflow of [whole, job]) {
+			const steps = releaseSteps(workflow.jobs);
+			expect(steps).toHaveLength(1);
+			for (const key of Object.keys(steps[0]?.with ?? {})) {
+				expect(declared, `input ${key}`).toContain(key);
+				expect(reserved, `input ${key} is reserved in v1`).not.toContain(key);
+			}
+		}
+	});
+
+	it("sends every required input of the action", () => {
+		const { whole, job } = generated();
+		const required = declared.filter((name) => action.inputs[name]?.required);
+		expect(required.sort()).toEqual(["environment", "existing-image"]);
+		for (const workflow of [whole, job]) {
+			const sent = Object.keys(releaseSteps(workflow.jobs)[0]?.with ?? {});
+			for (const name of required) expect(sent).toContain(name);
+			// A service is named with `service` or `services`, one of them.
+			expect(sent).toContain("service");
+		}
+	});
+
+	it("takes the image from a job output of the same run, never builds in the action", () => {
+		const { whole, job } = generated();
+		expect(releaseSteps(whole.jobs)[0]?.with?.["existing-image"]).toBe(
+			"${{ needs.build.outputs.image }}",
+		);
+		expect(releaseSteps(job.jobs)[0]?.with?.["existing-image"]).toBe(
+			"${{ needs.compose.outputs.image }}",
+		);
+	});
+});
+
+describe("buildWorkflowSnippet, build mode (the whole workflow)", () => {
+	it("is .github/workflows/dokploy.yml with a build job and a release job after it", () => {
 		const result = buildWorkflowSnippet(build);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.kind).toBe("file");
 		expect(result.path).toBe(WORKFLOW_PATH);
+		const { whole } = generated();
+		expect(Object.keys(whole.jobs)).toEqual(["build", "release"]);
+		expect(whole.jobs.release?.needs).toBe("build");
+		expect(whole.jobs.release?.environment).toBe("development");
 		expect(result.yaml).toContain("branches: [dev]");
-		expect(result.yaml).toContain("environment: development");
-		expect(result.yaml).toContain("uses: DevinoSolutions/dokploy-release@v1");
-		expect(result.yaml).toContain('environments: "dev=development"');
-		expect(result.yaml).toContain("service: web");
-		expect(result.yaml).toContain("dockerfile: apps/web/Dockerfile");
 		expect(result.yaml).toContain("workflow_dispatch:");
-		expect(result.yaml).not.toContain("context:");
-		expect(result.yaml).toContain("persist-credentials: false");
 		expect(result.yaml.endsWith("\n")).toBe(true);
 	});
 
-	it("asks for the least: contents read, packages write, deployments write, actions read", () => {
-		const result = buildWorkflowSnippet(build);
-		if (!result.ok) throw new Error("unreachable");
-		const permissions = result.yaml.split("jobs:")[0] ?? "";
-		for (const line of [
-			"contents: read",
-			"packages: write",
-			"deployments: write",
-			"actions: read",
-		]) {
-			expect(permissions).toContain(line);
-		}
-		expect(result.yaml).not.toMatch(/DOKPLOY_(API_KEY|URL)|secrets\./);
+	it("builds with buildx, pushes to GHCR with the run's token, and caches in GitHub's cache", () => {
+		const { whole, wholeYaml } = generated();
+		const steps = whole.jobs.build?.steps ?? [];
+		const uses = steps.map((step) => step.uses?.split("@")[0]);
+		expect(uses).toEqual([
+			"actions/checkout",
+			"docker/login-action",
+			"docker/setup-buildx-action",
+			"docker/build-push-action",
+		]);
+		const login = steps[1]?.with;
+		expect(login).toMatchObject({
+			registry: "ghcr.io",
+			password: "${{ secrets.GITHUB_TOKEN }}",
+		});
+		const push = steps[3]?.with;
+		expect(push).toMatchObject({
+			context: ".",
+			file: "apps/web/Dockerfile",
+			push: true,
+			"cache-from": "type=gha",
+			"cache-to": "type=gha,mode=max",
+		});
+		expect(push?.tags).toBe("ghcr.io/acme/shop/web:${{ github.sha }}");
+		expect(wholeYaml).not.toMatch(
+			/DOKPLOY_(API_KEY|URL)|secrets\.(?!GITHUB_TOKEN)/,
+		);
 	});
 
-	it("names a build directory only when it is not the repository root", () => {
-		const result = buildWorkflowSnippet({ ...build, context: "apps/web" });
+	it("names the image by the digest the push returns, in the namespace the connection allows", () => {
+		const { whole } = generated();
+		expect(whole.jobs.build?.outputs?.image).toBe(
+			"ghcr.io/acme/shop/web@${{ steps.build.outputs.digest }}",
+		);
+	});
+
+	it("asks for the least: contents read, packages write for the build, deployments write for the release", () => {
+		const { whole } = generated();
+		expect(whole.permissions).toEqual({ contents: "read" });
+		expect(whole.jobs.build?.permissions).toEqual({
+			contents: "read",
+			packages: "write",
+		});
+		expect(whole.jobs.release?.permissions).toEqual({
+			contents: "read",
+			deployments: "write",
+		});
+	});
+
+	it("names a build directory as written, and delivery when it is push", () => {
+		const result = buildWorkflowSnippet({
+			...build,
+			context: "apps/web",
+			delivery: "push",
+		});
 		if (!result.ok) throw new Error("unreachable");
-		expect(result.yaml).toContain("context: apps/web");
+		const workflow = parse(result.yaml) as Workflow;
+		expect(workflow.jobs.build?.steps?.[3]?.with?.context).toBe("apps/web");
+		expect(releaseSteps(workflow.jobs)[0]?.with?.delivery).toBe("push");
 	});
 });
 
-describe("buildWorkflowSnippet, existing mode", () => {
-	const existing = {
-		...base,
-		mode: "existing" as const,
-		buildJob: "compose",
-		imageOutput: "image",
-	};
-
+describe("buildWorkflowSnippet, existing mode (one job)", () => {
 	it("renders one job that publishes the release from the build job's output", () => {
 		const result = buildWorkflowSnippet(existing);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.kind).toBe("job");
 		expect(result.path).toBeNull();
-		expect(result.yaml).toContain("needs: compose");
+		const { job } = generated();
+		const release = job.jobs["dokploy-release"];
+		expect(release?.needs).toBe("compose");
+		expect(release?.environment).toBe("development");
+		expect(release?.permissions).toEqual({
+			contents: "read",
+			deployments: "write",
+		});
 		expect(result.yaml).toContain("if: github.ref == 'refs/heads/dev'");
-		expect(result.yaml).toContain("environment: development");
-		expect(result.yaml).toContain(
-			"existing-image: ${{ needs.compose.outputs.image }}",
-		);
 		expect(result.yaml).not.toMatch(/DOKPLOY_(API_KEY|URL)/);
 	});
 });
@@ -90,45 +214,18 @@ describe("buildWorkflowSnippet refuses what could change the workflow", () => {
 		["environment", { environment: "prod uction" }],
 		["service key", { serviceKey: "Web" }],
 		["action ref", { actionRef: "v1 # x" }],
-	])("a %s", (_name, patch) => {
-		const result = buildWorkflowSnippet({
-			...base,
-			...patch,
-			mode: "build",
-			dockerfile: "Dockerfile",
-			context: ".",
-		});
-		expect(result.ok).toBe(false);
-	});
-
-	it.each([
+		["repository", { repository: "acme" }],
 		["dockerfile", { dockerfile: "Dockerfile\nrun: x" }],
 		["context", { context: "../outside" }],
 	])("a %s", (_name, patch) => {
-		expect(
-			buildWorkflowSnippet({
-				...base,
-				mode: "build",
-				dockerfile: "Dockerfile",
-				context: ".",
-				...patch,
-			}).ok,
-		).toBe(false);
+		expect(buildWorkflowSnippet({ ...build, ...patch }).ok).toBe(false);
 	});
 
 	it.each([
 		["build job", { buildJob: "1bad" }],
 		["output", { imageOutput: "a b" }],
 	])("a %s", (_name, patch) => {
-		expect(
-			buildWorkflowSnippet({
-				...base,
-				mode: "existing",
-				buildJob: "build",
-				imageOutput: "image",
-				...patch,
-			}).ok,
-		).toBe(false);
+		expect(buildWorkflowSnippet({ ...existing, ...patch }).ok).toBe(false);
 	});
 });
 

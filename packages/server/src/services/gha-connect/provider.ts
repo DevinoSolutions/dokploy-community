@@ -42,6 +42,16 @@ export const asDeployable = <T extends { sourceType: string }>(
 			} as T)
 		: service;
 
+/**
+ * The source type a copy of a service gets (a duplicated project, a copied service): a copy has no GitHub Actions
+ * connection, so it keeps what the original runs, a Docker image or a stored compose file.
+ */
+export const copiedSourceType = <S extends string>(
+	kind: ServiceKind,
+	sourceType: S,
+): Exclude<S, typeof GHA_SOURCE_TYPE> =>
+	deploySourceTypeOf(kind, sourceType) as Exclude<S, typeof GHA_SOURCE_TYPE>;
+
 export const REDEPLOY_LABEL = "Redeploy current image";
 
 export const redeployHint = (branch: string | null | undefined): string =>
@@ -78,6 +88,20 @@ export type ProviderRefusal = {
 };
 
 /**
+ * A client that edits the compose file (the file editor) sends the stored-file source type back with it. For a stack
+ * that follows GitHub Actions that is the same provider, not a change: the update goes through without the source type.
+ */
+export const keepsProvider = (
+	kind: ServiceKind,
+	currentSourceType: string,
+	nextSourceType: string | undefined,
+): boolean =>
+	kind === "compose" &&
+	isGhaSourceType(currentSourceType) &&
+	nextSourceType !== undefined &&
+	deploySourceTypeOf(kind, currentSourceType) === nextSourceType;
+
+/**
  * Whether an edit that sets a source type may go through. A connected service is moved off GitHub Actions only by
  * Disconnect (which also removes the connection and restores the source it had), and a service is moved onto it only
  * by Connect (which checks the repository and the environment). Setting the type it already has is fine, because a
@@ -109,6 +133,24 @@ export const checkSourceTypeChange = (input: {
 	return null;
 };
 
+/** Fields of the saved source that Disconnect leaves alone: what the service runs now is not part of the provider. */
+const KEPT_ON_RESTORE = [
+	"dockerImage",
+	"registryId",
+	"username",
+	"password",
+	"registryUrl",
+] as const;
+
+/** Fields of the saved source that point at another record; a record deleted since must not break Disconnect. */
+export const RESTORE_REFERENCES = [
+	"githubId",
+	"gitlabId",
+	"bitbucketId",
+	"giteaId",
+	"customGitSSHKeyId",
+] as const;
+
 export type SourceRestore = {
 	values: Record<string, unknown>;
 	/** True when the write is only the fallback and must touch a service still on github-actions, nothing else. */
@@ -116,9 +158,11 @@ export type SourceRestore = {
 };
 
 /**
- * What Disconnect writes back to the service. With a saved source and the caller's wish to restore it, that source;
- * otherwise (nothing saved, or the caller asked to stay on what runs) the service goes to the image or stored file it
- * runs now, so no service is left on a source type that has no connection.
+ * What Disconnect writes back to the service. With a saved source and the caller's wish to restore it, the provider
+ * fields of that source (the repository, branch, build path, trigger, git provider); the image the service runs now
+ * stays (it is the digest the last release deployed, not the tag it had before). Otherwise (nothing saved, or the
+ * caller asked to stay on what runs) the service goes to the image or stored file it runs now, so no service is left
+ * on a source type that has no connection.
  */
 export const planSourceRestore = (input: {
 	kind: ServiceKind;
@@ -133,17 +177,41 @@ export const planSourceRestore = (input: {
 		typeof previousType === "string" &&
 		!isGhaSourceType(previousType)
 	) {
-		// A compose keeps just its type; an application gets its git settings back whole.
-		return {
-			values:
-				kind === "application"
-					? { ...previousSource }
-					: { sourceType: previousType },
-			onlyWhenGha: false,
-		};
+		// A compose keeps just its type; an application gets its provider settings back.
+		const values: Record<string, unknown> = {};
+		if (kind === "application") {
+			for (const [field, value] of Object.entries(previousSource)) {
+				if ((KEPT_ON_RESTORE as readonly string[]).includes(field)) continue;
+				values[field] = value;
+			}
+		} else {
+			values.sourceType = previousType;
+		}
+		return { values, onlyWhenGha: false };
 	}
 	return {
 		values: { sourceType: deploySourceTypeOf(kind, GHA_SOURCE_TYPE) },
 		onlyWhenGha: true,
 	};
+};
+
+/**
+ * The values with every reference to a record that no longer exists set to null, so the write cannot fail on a
+ * foreign key (a Git provider, registry or SSH key deleted while the service was connected).
+ */
+export const withoutMissingReferences = async (
+	values: Record<string, unknown>,
+	exists: (
+		field: (typeof RESTORE_REFERENCES)[number],
+		id: string,
+	) => Promise<boolean>,
+): Promise<Record<string, unknown>> => {
+	const out = { ...values };
+	for (const field of RESTORE_REFERENCES) {
+		const id = out[field];
+		if (typeof id === "string" && id !== "" && !(await exists(field, id))) {
+			out[field] = null;
+		}
+	}
+	return out;
 };

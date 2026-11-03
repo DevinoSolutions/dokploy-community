@@ -1,12 +1,15 @@
 import { Container, GitBranch, Loader2, UploadCloud } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { SaveDockerProvider } from "@/components/dashboard/application/general/generic/save-docker-provider";
 import { SaveGitProvider } from "@/components/dashboard/application/general/generic/save-git-provider";
 import { SaveGiteaProvider } from "@/components/dashboard/application/general/generic/save-gitea-provider";
 import { SaveGithubProvider } from "@/components/dashboard/application/general/generic/save-github-provider";
-import { GhaProviderPanel } from "@/components/dashboard/shared/gha-provider-panel";
+import {
+	GhaProviderPanel,
+	useHasGhaConnection,
+} from "@/components/dashboard/shared/gha-provider-panel";
 import {
 	BitbucketIcon,
 	DockerIcon,
@@ -69,6 +72,11 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 	};
 
 	const [tab, setSab] = useState<TabState>(getDefaultTab);
+	// A service with a GitHub Actions connection opens on it, whatever its source type still says.
+	const hasGhaConnection = useHasGhaConnection(applicationId, "application");
+	useEffect(() => {
+		if (hasGhaConnection) setSab("github-actions");
+	}, [hasGhaConnection]);
 
 	const isLoading =
 		isLoadingGithub || isLoadingGitlab || isLoadingBitbucket || isLoadingGitea;
@@ -121,7 +129,8 @@ export const ShowProviderForm = ({ applicationId }: Props) => {
 		!application.hasGitProviderAccess &&
 		application.sourceType !== "docker" &&
 		application.sourceType !== "drop" &&
-		application.sourceType !== "github-actions"
+		application.sourceType !== "github-actions" &&
+		!hasGhaConnection
 	) {
 		return (
 			<Card className="group relative w-full bg-transparent">

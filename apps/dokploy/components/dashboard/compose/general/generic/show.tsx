@@ -1,9 +1,12 @@
 import { CodeIcon, GitBranch, Loader2 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { UnauthorizedGitProvider } from "@/components/dashboard/application/general/generic/unauthorized-git-provider";
-import { GhaProviderPanel } from "@/components/dashboard/shared/gha-provider-panel";
+import {
+	GhaProviderPanel,
+	useHasGhaConnection,
+} from "@/components/dashboard/shared/gha-provider-panel";
 import {
 	BitbucketIcon,
 	GiteaIcon,
@@ -49,6 +52,11 @@ export const ShowProviderFormCompose = ({ composeId }: Props) => {
 
 	const { data: compose, refetch } = api.compose.one.useQuery({ composeId });
 	const [tab, setSab] = useState<TabState>(compose?.sourceType || "github");
+	// A stack with a GitHub Actions connection opens on it, whatever its source type still says.
+	const hasGhaConnection = useHasGhaConnection(composeId, "compose");
+	useEffect(() => {
+		if (hasGhaConnection) setSab("github-actions");
+	}, [hasGhaConnection]);
 
 	const isLoading =
 		isLoadingGithub || isLoadingGitlab || isLoadingBitbucket || isLoadingGitea;
@@ -100,7 +108,8 @@ export const ShowProviderFormCompose = ({ composeId }: Props) => {
 		compose &&
 		!compose.hasGitProviderAccess &&
 		compose.sourceType !== "raw" &&
-		compose.sourceType !== "github-actions"
+		compose.sourceType !== "github-actions" &&
+		!hasGhaConnection
 	) {
 		return (
 			<Card className="group relative w-full bg-transparent">

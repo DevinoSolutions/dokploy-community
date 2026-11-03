@@ -1,5 +1,6 @@
 export * from "./acceptance";
 export * from "./actions-api";
+export * from "./adopt";
 export * from "./connect";
 export * from "./connect-service";
 export * from "./deploy-gate";

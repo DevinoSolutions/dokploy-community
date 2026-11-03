@@ -1569,6 +1569,11 @@ export const applicationRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, applicationId, {
 				deployment: ["create"],
 			});
+			await assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: applicationId,
+				nextSourceType: "drop",
+			});
 			const app = await findApplicationById(applicationId);
 
 			await updateApplication(applicationId, {

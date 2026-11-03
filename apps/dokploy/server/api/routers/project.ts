@@ -38,6 +38,7 @@ import {
 	updateUser,
 } from "@dokploy/server";
 import { db } from "@dokploy/server/db";
+import { copiedSourceType } from "@dokploy/server/services/gha-connect/provider";
 import {
 	addNewEnvironment,
 	addNewProject,
@@ -1275,6 +1276,11 @@ export const projectRouter = createTRPCRouter({
 
 								const newApplication = await createApplication({
 									...application,
+									// A copy has no GitHub Actions connection (T-13879).
+									sourceType: copiedSourceType(
+										"application",
+										application.sourceType,
+									),
 									appName: newAppName,
 									name: input.duplicateInSameProject
 										? `${application.name} (copy)`
@@ -1358,6 +1364,8 @@ export const projectRouter = createTRPCRouter({
 
 								const newCompose = await createCompose({
 									...compose,
+									// A copy has no GitHub Actions connection (T-13879).
+									sourceType: copiedSourceType("compose", compose.sourceType),
 									appName: newAppName,
 									name: input.duplicateInSameProject
 										? `${compose.name} (copy)`

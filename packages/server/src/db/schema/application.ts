@@ -465,14 +465,21 @@ const createSchema = createInsertSchema(applications, {
 		.optional(),
 });
 
-export const apiCreateApplication = createSchema.pick({
-	name: true,
-	appName: true,
-	description: true,
-	environmentId: true,
-	serverId: true,
-	sourceType: true,
-});
+export const apiCreateApplication = createSchema
+	.pick({
+		name: true,
+		appName: true,
+		description: true,
+		environmentId: true,
+		serverId: true,
+		sourceType: true,
+	})
+	.extend({
+		// Only Connect makes a service follow GitHub Actions (T-13879).
+		sourceType: z
+			.enum(["github", "docker", "git", "gitlab", "bitbucket", "gitea", "drop"])
+			.optional(),
+	});
 
 export const apiFindOneApplication = z.object({
 	applicationId: z.string().min(1),

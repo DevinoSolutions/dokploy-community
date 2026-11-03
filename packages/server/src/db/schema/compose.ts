@@ -348,16 +348,23 @@ const createSchema = createInsertSchema(compose, {
 	rollingReplace: composeRollingReplaceSchema.nullable().optional(),
 });
 
-export const apiCreateCompose = createSchema.pick({
-	name: true,
-	description: true,
-	environmentId: true,
-	composeType: true,
-	appName: true,
-	serverId: true,
-	composeFile: true,
-	sourceType: true,
-});
+export const apiCreateCompose = createSchema
+	.pick({
+		name: true,
+		description: true,
+		environmentId: true,
+		composeType: true,
+		appName: true,
+		serverId: true,
+		composeFile: true,
+		sourceType: true,
+	})
+	.extend({
+		// Only Connect makes a stack follow GitHub Actions (T-13879).
+		sourceType: z
+			.enum(["git", "github", "gitlab", "bitbucket", "gitea", "raw"])
+			.optional(),
+	});
 
 export const apiCreateComposeByTemplate = createSchema
 	.pick({

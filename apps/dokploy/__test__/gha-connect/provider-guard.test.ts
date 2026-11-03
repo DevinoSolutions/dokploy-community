@@ -81,7 +81,44 @@ describe("assertSourceChangeAllowed", () => {
 				serviceId: "app-1",
 				nextSourceType: "github-actions",
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toBe(false);
+	});
+
+	it("lets the compose file editor send raw back, and says the source type is to be left out", async () => {
+		mocks.findComposeById.mockResolvedValue(GHA);
+		mocks.findGhaConnection.mockResolvedValue({ ghaConnectionId: "gc-1" });
+		await expect(
+			assertSourceChangeAllowed({
+				serviceType: "compose",
+				serviceId: "c-1",
+				nextSourceType: "raw",
+			}),
+		).resolves.toBe(true);
+	});
+
+	it("refuses raw from a template or an import even for that stack (strict)", async () => {
+		mocks.findComposeById.mockResolvedValue(GHA);
+		mocks.findGhaConnection.mockResolvedValue({ ghaConnectionId: "gc-1" });
+		await expect(
+			assertSourceChangeAllowed({
+				serviceType: "compose",
+				serviceId: "c-1",
+				nextSourceType: "raw",
+				strict: true,
+			}),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+	});
+
+	it("refuses a zip drop on a connected application", async () => {
+		mocks.findApplicationById.mockResolvedValue(GHA);
+		mocks.findGhaConnection.mockResolvedValue({ ghaConnectionId: "gc-1" });
+		await expect(
+			assertSourceChangeAllowed({
+				serviceType: "application",
+				serviceId: "app-1",
+				nextSourceType: "drop",
+			}),
+		).rejects.toMatchObject({ code: "CONFLICT" });
 	});
 
 	it("does not read anything when the call sets no source type", async () => {
@@ -102,7 +139,7 @@ describe("assertSourceChangeAllowed", () => {
 				serviceId: "app-1",
 				nextSourceType: "docker",
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toBe(false);
 		expect(mocks.findGhaConnection).not.toHaveBeenCalled();
 	});
 
@@ -129,7 +166,7 @@ describe("assertSourceChangeAllowed", () => {
 				serviceId: "app-1",
 				nextSourceType: "docker",
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toBe(false);
 	});
 
 	it("leaves a missing service to the procedure's own lookup", async () => {
@@ -140,7 +177,7 @@ describe("assertSourceChangeAllowed", () => {
 				serviceId: "gone",
 				nextSourceType: "docker",
 			}),
-		).resolves.toBeUndefined();
+		).resolves.toBe(false);
 	});
 });
 

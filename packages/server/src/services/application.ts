@@ -284,11 +284,24 @@ const withBuildHeartbeat = <T>(
  * set, so for the deploy it is a Docker image source: a manual deploy pulls that image again and builds nothing. With
  * no release yet there is no image, and the deploy is refused before it creates a deployment.
  */
-const loadDeployableApplication = async (applicationId: string) => {
+const loadDeployableApplication = async (
+	applicationId: string,
+	log: { titleLog: string; descriptionLog: string },
+) => {
 	const loaded = await findApplicationById(applicationId);
 	const redeploy = checkRedeployable("application", loaded);
 	if (!redeploy.ok) {
-		throw new TRPCError({ code: "BAD_REQUEST", message: redeploy.message });
+		const refusal = new TRPCError({
+			code: "BAD_REQUEST",
+			message: redeploy.message,
+		});
+		// A queued deploy that cannot run leaves a failed deployment with the sentence, not only a worker error.
+		await reportBuildPolicyPlanFailure({
+			application: loaded,
+			...log,
+			error: refusal,
+		});
+		throw refusal;
 	}
 	return asDeployable("application", loaded);
 };
@@ -310,7 +323,10 @@ export const deployApplication = async ({
 	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
 	deploymentId?: string | null;
 }) => {
-	const application = await loadDeployableApplication(applicationId);
+	const application = await loadDeployableApplication(applicationId, {
+		titleLog,
+		descriptionLog,
+	});
 	// >>> build-policy hook 1/4: enforced remote builds. Runs before
 	// `createDeployment` because the deployment log has to be created on the
 	// host that will build. A refusal still produces a deployment row, an error
@@ -611,7 +627,10 @@ export const rebuildApplication = async ({
 	/** The live GitHub Actions row this deploy continues (T-12686); used only when it still fits. */
 	deploymentId?: string | null;
 }) => {
-	const application = await loadDeployableApplication(applicationId);
+	const application = await loadDeployableApplication(applicationId, {
+		titleLog,
+		descriptionLog,
+	});
 	// >>> build-policy hook 1/4 (rebuild). See services/build-policy/README.md
 	let buildPolicy: BuildPolicyPlan;
 	try {

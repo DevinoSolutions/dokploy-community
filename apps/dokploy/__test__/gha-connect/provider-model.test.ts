@@ -13,6 +13,7 @@ import {
 	type ProviderConnection,
 	providerDetailRows,
 	redeployCopy,
+	relativeTime,
 	snippetProblem,
 	toConnectInput,
 	toSnippetInput,
@@ -87,8 +88,10 @@ describe("the connect form", () => {
 			serviceKey: "shop-web",
 			trackedBranch: "dev",
 			environment: "production",
+			repository: "acme/Shop-Web",
 			dockerfile: "Dockerfile",
 			context: ".",
+			delivery: "pull",
 		});
 		const own = filled({
 			mode: "existing",
@@ -260,6 +263,21 @@ describe("the status panel", () => {
 			"https://github.com/acme/shop/blob/dev/.github/workflows/dokploy.yml",
 		);
 		expect(byLabel.Repository?.href).toBe("https://github.com/acme/shop");
+	});
+
+	it("says when it last looked in words", () => {
+		const now = new Date("2026-11-03T10:30:00Z");
+		const rows = providerDetailRows(conn(), now);
+		expect(rows.find((row) => row.label === "Last checked")?.value).toBe(
+			"25 minutes ago",
+		);
+		expect(relativeTime(new Date("2026-11-03T10:29:50Z"), now)).toBe(
+			"just now",
+		);
+		expect(relativeTime("2026-11-03T09:30:00Z", now)).toBe("1 hour ago");
+		expect(relativeTime("2026-11-01T10:30:00Z", now)).toBe("2 days ago");
+		expect(relativeTime("nonsense", now)).toBeNull();
+		expect(relativeTime(null, now)).toBeNull();
 	});
 
 	it("leaves out what is not known yet", () => {

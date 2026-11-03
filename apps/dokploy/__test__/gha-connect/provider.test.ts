@@ -2,11 +2,14 @@ import {
 	asDeployable,
 	checkRedeployable,
 	checkSourceTypeChange,
+	copiedSourceType,
 	deploySourceTypeOf,
 	isGhaSourceType,
+	keepsProvider,
 	planSourceRestore,
 	REDEPLOY_LABEL,
 	redeployHint,
+	withoutMissingReferences,
 } from "@dokploy/server/services/gha-connect/provider";
 import { describe, expect, it } from "vitest";
 
@@ -157,11 +160,12 @@ describe("changing the source type of a service", () => {
 });
 
 describe("Disconnect", () => {
-	it("restores the saved source of an application whole", () => {
+	it("restores the provider settings of an application", () => {
 		const previousSource = {
 			sourceType: "github",
 			autoDeploy: true,
 			branch: "dev",
+			githubId: "gh-1",
 		};
 		expect(
 			planSourceRestore({
@@ -170,6 +174,22 @@ describe("Disconnect", () => {
 				restoreSource: true,
 			}),
 		).toEqual({ values: previousSource, onlyWhenGha: false });
+	});
+
+	it("keeps the image the service runs now, and its registry login, instead of the tag it had before", () => {
+		const restore = planSourceRestore({
+			kind: "application",
+			previousSource: {
+				sourceType: "docker",
+				dockerImage: "ghcr.io/acme/shop:latest",
+				registryId: "reg-1",
+				username: "u",
+				registryUrl: "ghcr.io",
+				autoDeploy: false,
+			},
+			restoreSource: true,
+		});
+		expect(restore.values).toEqual({ sourceType: "docker", autoDeploy: false });
 	});
 
 	it("restores only the type of a compose stack", () => {
@@ -198,5 +218,72 @@ describe("Disconnect", () => {
 				onlyWhenGha: true,
 			});
 		}
+	});
+});
+
+describe("Disconnect and records deleted meanwhile", () => {
+	it("nulls the references that no longer exist and keeps the others", async () => {
+		const checked: string[] = [];
+		const values = await withoutMissingReferences(
+			{
+				sourceType: "github",
+				branch: "dev",
+				githubId: "gh-gone",
+				gitlabId: "gl-1",
+				customGitSSHKeyId: "key-gone",
+				bitbucketId: null,
+			},
+			async (field, id) => {
+				checked.push(`${field}:${id}`);
+				return id !== "gh-gone" && id !== "key-gone";
+			},
+		);
+		expect(values).toEqual({
+			sourceType: "github",
+			branch: "dev",
+			githubId: null,
+			gitlabId: "gl-1",
+			customGitSSHKeyId: null,
+			bitbucketId: null,
+		});
+		expect(checked.sort()).toEqual([
+			"customGitSSHKeyId:key-gone",
+			"githubId:gh-gone",
+			"gitlabId:gl-1",
+		]);
+	});
+
+	it("does not look anything up when nothing is referenced", async () => {
+		let calls = 0;
+		const values = await withoutMissingReferences(
+			{ sourceType: "docker" },
+			async () => {
+				calls += 1;
+				return true;
+			},
+		);
+		expect(values).toEqual({ sourceType: "docker" });
+		expect(calls).toBe(0);
+	});
+});
+
+describe("keepsProvider (the compose file editor sends raw back)", () => {
+	it("is true only for a github-actions stack and its stored-file type", () => {
+		expect(keepsProvider("compose", "github-actions", "raw")).toBe(true);
+		expect(keepsProvider("compose", "github-actions", "git")).toBe(false);
+		expect(keepsProvider("compose", "github-actions", undefined)).toBe(false);
+		expect(keepsProvider("compose", "raw", "raw")).toBe(false);
+		expect(keepsProvider("application", "github-actions", "docker")).toBe(
+			false,
+		);
+	});
+});
+
+describe("copiedSourceType (a duplicated service has no connection)", () => {
+	it("turns github-actions into the image or the stored file, and leaves every other type", () => {
+		expect(copiedSourceType("application", "github-actions")).toBe("docker");
+		expect(copiedSourceType("compose", "github-actions")).toBe("raw");
+		expect(copiedSourceType("application", "github")).toBe("github");
+		expect(copiedSourceType("compose", "raw")).toBe("raw");
 	});
 });

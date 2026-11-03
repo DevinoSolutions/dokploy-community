@@ -717,6 +717,48 @@ describe("disconnect", () => {
 		);
 	});
 
+	it("keeps the image the service runs and drops a provider deleted while it was connected", async () => {
+		mocks.findGhaConnection.mockResolvedValue(
+			storedRow({
+				serviceType: "application",
+				serviceId: "app-1",
+				previousSource: {
+					sourceType: "github",
+					autoDeploy: true,
+					githubId: "gh-deleted",
+					dockerImage: "ghcr.io/acme/shop:latest",
+				},
+			}),
+		);
+		// The provider row is gone: the lookup finds nothing.
+		mocks.registryRows = [];
+		await callerFor("owner").disconnect({
+			serviceType: "application",
+			serviceId: "app-1",
+			restoreSource: true,
+		});
+		expect(mocks.updates).toEqual([
+			{ sourceType: "github", autoDeploy: true, githubId: null },
+		]);
+	});
+
+	it("keeps the provider reference when the record still exists", async () => {
+		mocks.findGhaConnection.mockResolvedValue(
+			storedRow({
+				serviceType: "application",
+				serviceId: "app-1",
+				previousSource: { sourceType: "github", githubId: "gh-1" },
+			}),
+		);
+		mocks.registryRows = [{ registryUrl: "row-exists" }];
+		await callerFor("owner").disconnect({
+			serviceType: "application",
+			serviceId: "app-1",
+			restoreSource: true,
+		});
+		expect(mocks.updates).toEqual([{ sourceType: "github", githubId: "gh-1" }]);
+	});
+
 	it("leaves the service as it is when asked not to restore", async () => {
 		mocks.findGhaConnection.mockResolvedValue(
 			storedRow({
@@ -1427,6 +1469,7 @@ describe("testConnection (Test connection in the Connect flow)", () => {
 describe("snippet", () => {
 	const input = {
 		mode: "build" as const,
+		repository: "acme/shop",
 		serviceKey: "web",
 		trackedBranch: "dev",
 		environment: "development",
@@ -1438,6 +1481,10 @@ describe("snippet", () => {
 		expect(result.kind).toBe("file");
 		expect(result.path).toBe(".github/workflows/dokploy.yml");
 		expect(result.yaml).toContain("dokploy-release@v1");
+		expect(result.yaml).toContain(
+			"existing-image: ${{ needs.build.outputs.image }}",
+		);
+		expect(result.yaml).not.toContain("environments:");
 		nothingWritten();
 	});
 
@@ -1452,6 +1499,22 @@ describe("snippet", () => {
 		});
 		expect(result.kind).toBe("job");
 		expect(result.yaml).toContain("needs: compose");
+		expect(result.yaml).toContain("environment: development");
+	});
+
+	it("asks for what the mode needs", async () => {
+		await expect(
+			callerFor("owner").snippet({ ...input, repository: undefined }),
+		).rejects.toBeInstanceOf(TRPCError);
+		await expect(
+			callerFor("owner").snippet({
+				mode: "existing",
+				serviceKey: "web",
+				trackedBranch: "dev",
+				environment: "development",
+				buildJob: "compose",
+			}),
+		).rejects.toBeInstanceOf(TRPCError);
 	});
 
 	it("is refused as bad input when a value could change the workflow", async () => {

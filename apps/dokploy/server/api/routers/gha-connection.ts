@@ -13,8 +13,13 @@ import {
 import { db } from "@dokploy/server/db";
 import {
 	applications,
+	bitbucket,
 	compose as composeTable,
+	gitea,
+	github,
+	gitlab,
 	registry,
+	sshKeys,
 } from "@dokploy/server/db/schema";
 import {
 	applyConnectionEvent,
@@ -41,6 +46,7 @@ import {
 	serviceRowExists,
 	touchConnectionActivity,
 	updateGateSettings,
+	withoutMissingReferences,
 } from "@dokploy/server/services/gha-connect";
 import { checkServicePermissionAndAccess } from "@dokploy/server/services/permission";
 import { TRPCError } from "@trpc/server";
@@ -61,33 +67,69 @@ import {
 const JOB_ID = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const SAFE_PATH = /^[A-Za-z0-9._/-]+$/;
 
-/** The input of `snippet`: which file to generate, and the few facts it needs. */
-const apiGhaSnippetInput = z.discriminatedUnion("mode", [
-	z.object({
-		mode: z.literal("build"),
+/**
+ * The input of `snippet`: which file to generate, and the few facts it needs. One flat object (an OpenAPI GET input
+ * has to be a plain z.object; a discriminated union makes the whole Swagger document fail), checked as a whole after.
+ */
+const apiGhaSnippetInput = z
+	.object({
+		mode: z
+			.enum(["build", "existing"])
+			.describe(
+				"build: a whole workflow that builds the image from a Dockerfile. existing: one job to add to the workflow that already builds it.",
+			),
 		serviceKey: apiGhaConnect.shape.serviceKey,
 		trackedBranch: apiGhaConnect.shape.trackedBranch,
 		environment: apiGhaConnect.shape.environment,
+		repository: z
+			.string()
+			.regex(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/, "Use owner/name")
+			.optional()
+			.describe("owner/name. Needed for mode build."),
 		dockerfile: z
 			.string()
 			.trim()
 			.regex(SAFE_PATH, "Not a valid file path")
-			.default("Dockerfile"),
+			.default("Dockerfile")
+			.describe("Mode build: path of the Dockerfile."),
 		context: z
 			.string()
 			.trim()
 			.regex(SAFE_PATH, "Not a valid directory")
-			.default("."),
-	}),
-	z.object({
-		mode: z.literal("existing"),
-		serviceKey: apiGhaConnect.shape.serviceKey,
-		trackedBranch: apiGhaConnect.shape.trackedBranch,
-		environment: apiGhaConnect.shape.environment,
-		buildJob: z.string().regex(JOB_ID, "Not a valid job id"),
-		imageOutput: z.string().regex(JOB_ID, "Not a valid output name"),
-	}),
-]);
+			.default(".")
+			.describe("Mode build: the build directory, . for the repository root."),
+		buildJob: z
+			.string()
+			.regex(JOB_ID, "Not a valid job id")
+			.optional()
+			.describe(
+				"Mode existing: id of the job that builds and pushes the image.",
+			),
+		imageOutput: z
+			.string()
+			.regex(JOB_ID, "Not a valid output name")
+			.optional()
+			.describe(
+				"Mode existing: output of that job holding repository@sha256:digest.",
+			),
+		delivery: z.enum(["pull", "push"]).default("pull"),
+	})
+	.superRefine((value, ctx) => {
+		const need = (field: "repository" | "buildJob" | "imageOutput") => {
+			if (!value[field]) {
+				ctx.addIssue({
+					code: "custom",
+					path: [field],
+					message: `${field} is needed for mode ${value.mode}`,
+				});
+			}
+		};
+		if (value.mode === "build") need("repository");
+		else {
+			need("buildJob");
+			need("imageOutput");
+		}
+	});
 
 /**
  * "Build on GitHub Actions", connected natively (T-13719). The GitHub token is
@@ -288,6 +330,30 @@ const connectDeps = <Saved>(
 	};
 };
 
+/** Whether the record a saved source points at still exists (it may have been deleted while connected). */
+const referenceExists = async (
+	field:
+		| "githubId"
+		| "gitlabId"
+		| "bitbucketId"
+		| "giteaId"
+		| "customGitSSHKeyId",
+	id: string,
+): Promise<boolean> => {
+	const [column, table] = {
+		githubId: [github.githubId, github],
+		gitlabId: [gitlab.gitlabId, gitlab],
+		bitbucketId: [bitbucket.bitbucketId, bitbucket],
+		giteaId: [gitea.giteaId, gitea],
+		customGitSSHKeyId: [sshKeys.sshKeyId, sshKeys],
+	}[field] as [typeof github.githubId, typeof github];
+	const rows = await db
+		.select({ id: column })
+		.from(table)
+		.where(eq(column, id));
+	return rows.length > 0;
+};
+
 const trpcCode = (code: ConnectServiceError["code"]) =>
 	code === "not-found"
 		? "NOT_FOUND"
@@ -413,23 +479,26 @@ export const ghaConnectionRouter = createTRPCRouter({
 		})
 		.input(apiGhaSnippetInput)
 		.query(({ input }) => {
+			const common = {
+				branch: input.trackedBranch,
+				environment: input.environment,
+				serviceKey: input.serviceKey,
+				delivery: input.delivery,
+			};
 			const built = buildWorkflowSnippet(
 				input.mode === "build"
 					? {
+							...common,
 							mode: "build",
-							branch: input.trackedBranch,
-							environment: input.environment,
-							serviceKey: input.serviceKey,
+							repository: input.repository ?? "",
 							dockerfile: input.dockerfile,
 							context: input.context,
 						}
 					: {
+							...common,
 							mode: "existing",
-							branch: input.trackedBranch,
-							environment: input.environment,
-							serviceKey: input.serviceKey,
-							buildJob: input.buildJob,
-							imageOutput: input.imageOutput,
+							buildJob: input.buildJob ?? "",
+							imageOutput: input.imageOutput ?? "",
 						},
 			);
 			if (!built.ok) {
@@ -477,11 +546,18 @@ export const ghaConnectionRouter = createTRPCRouter({
 			const watch = await findGithubWatch(input.serviceType, input.serviceId);
 			await db.transaction(async (tx) => {
 				if (!serviceGone) {
-					const restore = planSourceRestore({
+					const planned = planSourceRestore({
 						kind: input.serviceType,
 						previousSource: row.previousSource,
 						restoreSource: input.restoreSource,
 					});
+					const restore = {
+						...planned,
+						values: await withoutMissingReferences(
+							planned.values,
+							referenceExists,
+						),
+					};
 					if (input.serviceType === "application") {
 						await tx
 							.update(applications)

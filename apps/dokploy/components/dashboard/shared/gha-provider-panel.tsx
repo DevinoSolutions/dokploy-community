@@ -1,7 +1,7 @@
 import { githubNewFileUrl } from "@dokploy/server/services/gha-connect/workflow-snippet";
 import { Check, Copy, ExternalLink, Loader2 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { createContext, useContext, useId, useState } from "react";
 import { toast } from "sonner";
 import { DialogAction } from "@/components/shared/dialog-action";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +53,21 @@ const PILL_VARIANT: Record<PillTone, "green" | "yellow" | "red" | "blank"> = {
 };
 
 const NOTE = "text-sm text-muted-foreground";
+
+/**
+ * Whether the service has a GitHub Actions connection, whatever its source type says (a connection made before the
+ * provider existed is adopted at the next start; until then the tab still has to show it).
+ */
+export const useHasGhaConnection = (id: string, type: ServiceKind): boolean => {
+	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const enabled = isCloud === false && !!permissions?.gitProviders.read;
+	const { data } = api.ghaConnection.one.useQuery(
+		{ serviceType: type, serviceId: id },
+		{ enabled: enabled && !!id },
+	);
+	return !!data;
+};
 
 /**
  * The "GitHub Actions" option of a service's Provider tab. Not connected: the Connect flow (Copy the file).
@@ -359,9 +374,9 @@ const ConnectFlow = ({
 						value={form.githubConnectionId}
 						onValueChange={(value) => set("githubConnectionId", value)}
 					>
-						<SelectTrigger>
+						<FieldSelectTrigger>
 							<SelectValue placeholder="Choose an account" />
-						</SelectTrigger>
+						</FieldSelectTrigger>
 						<SelectContent>
 							{(accounts ?? []).map((account) => (
 								<SelectItem
@@ -375,20 +390,20 @@ const ConnectFlow = ({
 					</Select>
 				</Field>
 				<Field label="Repository">
-					<Input
+					<FieldInput
 						placeholder="acme/shop"
 						value={form.repository}
 						onChange={(event) => set("repository", event.target.value)}
 					/>
 				</Field>
 				<Field label="Branch" hint="A push to it publishes a release.">
-					<Input
+					<FieldInput
 						value={form.trackedBranch}
 						onChange={(event) => set("trackedBranch", event.target.value)}
 					/>
 				</Field>
 				<Field label="GitHub environment">
-					<Input
+					<FieldInput
 						value={form.environment}
 						onChange={(event) => set("environment", event.target.value)}
 					/>
@@ -397,7 +412,7 @@ const ConnectFlow = ({
 					label="Service key"
 					hint="Names this service in the release. The repository name by default."
 				>
-					<Input
+					<FieldInput
 						placeholder={effectiveServiceKey(form)}
 						value={form.serviceKey}
 						onChange={(event) => set("serviceKey", event.target.value)}
@@ -411,9 +426,9 @@ const ConnectFlow = ({
 						value={form.registryId}
 						onValueChange={(value) => set("registryId", value)}
 					>
-						<SelectTrigger>
+						<FieldSelectTrigger>
 							<SelectValue />
-						</SelectTrigger>
+						</FieldSelectTrigger>
 						<SelectContent>
 							<SelectItem value="none">No, public GHCR images</SelectItem>
 							{(registries ?? []).map((entry) => (
@@ -429,7 +444,7 @@ const ConnectFlow = ({
 						label="How the images are named in a release"
 						hint="Host and path exactly as the release writes them."
 					>
-						<Input
+						<FieldInput
 							placeholder="localhost:5000/registry.devino.ca"
 							value={form.registryPrefix}
 							onChange={(event) => set("registryPrefix", event.target.value)}
@@ -440,15 +455,15 @@ const ConnectFlow = ({
 
 			<div className="flex flex-col gap-3 rounded-md border p-4">
 				<div className="flex flex-col gap-2 md:max-w-md">
-					<Label>Who builds the image</Label>
+					<Label htmlFor="gha-who-builds">Who builds the image</Label>
 					<Select
 						value={mode}
 						disabled={mirrored}
 						onValueChange={(value) => set("mode", value as ConnectMode)}
 					>
-						<SelectTrigger>
+						<FieldSelectTrigger id="gha-who-builds">
 							<SelectValue />
-						</SelectTrigger>
+						</FieldSelectTrigger>
 						<SelectContent>
 							<SelectItem value="build">
 								The Dokploy action builds it from a Dockerfile
@@ -462,13 +477,13 @@ const ConnectFlow = ({
 				{mode === "build" ? (
 					<div className="grid gap-4 md:grid-cols-2">
 						<Field label="Dockerfile">
-							<Input
+							<FieldInput
 								value={form.dockerfile}
 								onChange={(event) => set("dockerfile", event.target.value)}
 							/>
 						</Field>
 						<Field label="Build directory">
-							<Input
+							<FieldInput
 								value={form.context}
 								onChange={(event) => set("context", event.target.value)}
 							/>
@@ -477,19 +492,22 @@ const ConnectFlow = ({
 				) : (
 					<div className="grid gap-4 md:grid-cols-3">
 						<Field label="Your workflow file">
-							<Input
+							<FieldInput
 								value={form.workflowPath}
 								onChange={(event) => set("workflowPath", event.target.value)}
 							/>
 						</Field>
-						<Field label="Id of your build job">
-							<Input
+						<Field label="Your build job (its id)">
+							<FieldInput
 								value={form.buildJob}
 								onChange={(event) => set("buildJob", event.target.value)}
 							/>
 						</Field>
-						<Field label="Output with repository@sha256:digest">
-							<Input
+						<Field
+							label="The image your workflow built"
+							hint="The name of that job's output that holds it."
+						>
+							<FieldInput
 								value={form.imageOutput}
 								onChange={(event) => set("imageOutput", event.target.value)}
 							/>
@@ -541,14 +559,14 @@ const ConnectFlow = ({
 			</div>
 
 			<div className="flex flex-col gap-2 md:max-w-md">
-				<Label>Deploy when</Label>
+				<Label htmlFor="gha-deploy-when">Deploy when</Label>
 				<Select
 					value={form.gateMode}
 					onValueChange={(value) => set("gateMode", value as GateMode)}
 				>
-					<SelectTrigger>
+					<FieldSelectTrigger id="gha-deploy-when">
 						<SelectValue />
-					</SelectTrigger>
+					</FieldSelectTrigger>
 					<SelectContent>
 						{GATE_OPTIONS.map((option) => (
 							<SelectItem key={option.value} value={option.value}>
@@ -561,7 +579,7 @@ const ConnectFlow = ({
 					{GATE_OPTIONS.find((option) => option.value === form.gateMode)?.hint}
 				</span>
 				{form.gateMode === "workflows" && (
-					<Input
+					<FieldInput
 						placeholder="Workflow names, separated by commas"
 						value={form.gateWorkflows}
 						onChange={(event) => set("gateWorkflows", event.target.value)}
@@ -605,6 +623,21 @@ const ConnectFlow = ({
 	);
 };
 
+const FieldIdContext = createContext<string | undefined>(undefined);
+
+/** An input that belongs to the label of the Field around it (click the label, focus the input). */
+const FieldInput = (props: React.ComponentProps<typeof Input>) => {
+	const id = useContext(FieldIdContext);
+	return <Input id={props.id ?? id} {...props} />;
+};
+
+const FieldSelectTrigger = (
+	props: React.ComponentProps<typeof SelectTrigger>,
+) => {
+	const id = useContext(FieldIdContext);
+	return <SelectTrigger id={props.id ?? id} {...props} />;
+};
+
 const Field = ({
 	label,
 	hint,
@@ -613,10 +646,15 @@ const Field = ({
 	label: string;
 	hint?: string;
 	children: React.ReactNode;
-}) => (
-	<div className="flex flex-col gap-2">
-		<Label>{label}</Label>
-		{children}
-		{hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-	</div>
-);
+}) => {
+	const id = useId();
+	return (
+		<FieldIdContext.Provider value={id}>
+			<div className="flex flex-col gap-2">
+				<Label htmlFor={id}>{label}</Label>
+				{children}
+				{hint && <span className="text-xs text-muted-foreground">{hint}</span>}
+			</div>
+		</FieldIdContext.Provider>
+	);
+};

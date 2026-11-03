@@ -335,7 +335,8 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
-			await assertSourceChangeAllowed({
+			// The file editor sends the stored-file source type back; for a stack on GitHub Actions that is no change.
+			const keepProvider = await assertSourceChangeAllowed({
 				serviceType: "compose",
 				serviceId: input.composeId,
 				nextSourceType: input.sourceType,
@@ -486,10 +487,13 @@ export const composeRouter = createTRPCRouter({
 			}
 
 			// The status is written by deploys only (the schema omits it too).
-			const { composeStatus: _composeStatus, ...update } =
+			const { composeStatus: _composeStatus, ...withStatusOut } =
 				input as typeof input & {
 					composeStatus?: unknown;
 				};
+			// A stack that stays on GitHub Actions keeps its source type: the editor's "raw" is not a change.
+			const { sourceType: _kept, ...withoutSourceType } = withStatusOut;
+			const update = keepProvider ? withoutSourceType : withStatusOut;
 			const updated = await updateCompose(input.composeId, update);
 			await audit(ctx, {
 				action: "update",
@@ -1261,6 +1265,13 @@ export const composeRouter = createTRPCRouter({
 			await checkServicePermissionAndAccess(ctx, input.composeId, {
 				service: ["create"],
 			});
+			// It replaces the compose file, which GitHub Actions releases pin.
+			await assertSourceChangeAllowed({
+				serviceType: "compose",
+				serviceId: input.composeId,
+				nextSourceType: "raw",
+				strict: true,
+			});
 			const compose = await findComposeById(input.composeId);
 			if (
 				compose.environment.project.organizationId !==
@@ -1780,6 +1791,13 @@ export const composeRouter = createTRPCRouter({
 			try {
 				await checkServicePermissionAndAccess(ctx, input.composeId, {
 					service: ["create"],
+				});
+				// It replaces the compose file, which GitHub Actions releases pin.
+				await assertSourceChangeAllowed({
+					serviceType: "compose",
+					serviceId: input.composeId,
+					nextSourceType: "raw",
+					strict: true,
 				});
 				const compose = await findComposeById(input.composeId);
 				const decodedData = Buffer.from(input.base64, "base64").toString(

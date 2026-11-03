@@ -20,6 +20,7 @@ import {
 import { withResolvedVaultRefs } from "@dokploy/server/utils/vault";
 import { TRPCError } from "@trpc/server";
 import { findComposeById } from "./compose";
+import { asDeployable } from "./gha-connect/provider";
 
 export interface ComposeRollingServiceReport {
 	name: string;
@@ -44,7 +45,7 @@ export type ComposeRollingReport =
  * `fetch` clones the source first, `cache` reads what is on disk.
  */
 const loadRenderedSpec = async (composeId: string, type: "fetch" | "cache") => {
-	const compose = await findComposeById(composeId);
+	const compose = asDeployable("compose", await findComposeById(composeId));
 	if (type === "fetch") {
 		const command = await cloneCompose(compose);
 		if (compose.serverId) {

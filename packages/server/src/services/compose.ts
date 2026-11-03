@@ -799,7 +799,7 @@ export const loadServices = async (
 	composeId: string,
 	type: "fetch" | "cache" = "fetch",
 ) => {
-	const compose = await findComposeById(composeId);
+	const compose = asDeployable("compose", await findComposeById(composeId));
 
 	if (type === "fetch") {
 		const command = await cloneCompose(compose);
