@@ -1,6 +1,9 @@
 "use client";
 
-import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
+import {
+	displayDeploymentTitle,
+	isGithubActionsDeployment,
+} from "@dokploy/server/services/build-origin-shared";
 import {
 	type ColumnFiltersState,
 	flexRender,
@@ -406,7 +409,7 @@ export function ShowDeploymentsTable() {
 				cell: ({ row }: { row: { original: DeploymentRow } }) => (
 					<div className="flex max-w-[260px] flex-col gap-0.5">
 						<span className="text-sm truncate block">
-							{row.original.title || "—"}
+							{displayDeploymentTitle(row.original.title) || "—"}
 						</span>
 						<LiveGithubBuildStatus row={row.original} />
 					</div>

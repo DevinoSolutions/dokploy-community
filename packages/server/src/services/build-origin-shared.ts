@@ -588,6 +588,55 @@ export const describeGithubActionsTitle = (
 	return { subject, attempt };
 };
 
+// "GHA <env> <sha>[:] <subject> [run N.A] [deployment #N] (prev: ...)|(Built ...)": the plumbing the action and
+// the poller put in the stored title (T-13877). Applied to the first line only.
+const LEGACY_GHA_TITLE =
+	/^GHA (\S+) ([0-9a-f]{7,}):?\s*(.*?)\s*(\[run [^\]]*\])?\s*(\[deployment #\d+\])?\s*(\((?:prev|Built)[^)]*\))?$/;
+
+export type PresentedGithubActionsTitle = {
+	/** What a list shows: the commit subject and ` (<sha8>)`, like a Dokploy row's `subject (sha)`. */
+	text: string;
+	subject: string | null;
+	environment: string;
+	sha: string;
+	/** `[run N.A]` as sent, kept for the run modal and tooltips. */
+	run: string | null;
+	/** `(prev: ...)` or `(Built ...)` as sent. */
+	note: string | null;
+};
+
+/**
+ * Reads a stored GitHub Actions deployment title (old and new rows alike) into its parts and the clean text a list
+ * shows. Null when the title is not in the action's shape (a manual deployment, a rollback title), so callers
+ * keep showing it as it is. Nothing is removed from the stored title; only the display drops the plumbing.
+ */
+export const presentGithubActionsTitle = (
+	title: string | null | undefined,
+): PresentedGithubActionsTitle | null => {
+	if (typeof title !== "string") return null;
+	const firstLine = title.split("\n", 1)[0]?.trim() ?? "";
+	const match = LEGACY_GHA_TITLE.exec(firstLine);
+	if (!match) return null;
+	const [, environment = "", sha = "", rest = "", run, handle, note] = match;
+	const subject = rest.trim() || null;
+	const shortSha = sha.slice(0, 8).toLowerCase();
+	return {
+		text: subject
+			? `${subject} (${shortSha})`
+			: `Deployed from GitHub Actions (${shortSha})`,
+		subject,
+		environment,
+		sha: shortSha,
+		run: run ?? handle ?? null,
+		note: note ?? null,
+	};
+};
+
+/** The title a list should show: the clean GitHub Actions text, else the stored title unchanged. */
+export const displayDeploymentTitle = <T extends string | null | undefined>(
+	title: T,
+): T | string => presentGithubActionsTitle(title)?.text ?? title;
+
 export type GithubActionsRunTone =
 	| "running"
 	| "success"

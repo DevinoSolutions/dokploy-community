@@ -1,4 +1,7 @@
-import { isGithubActionsDeployment } from "@dokploy/server/services/build-origin-shared";
+import {
+	isGithubActionsDeployment,
+	presentGithubActionsTitle,
+} from "@dokploy/server/services/build-origin-shared";
 import { formatDistanceToNow } from "date-fns";
 import { ArrowRight, Rocket, Server } from "lucide-react";
 import Link from "next/link";
@@ -25,6 +28,9 @@ function getDeploymentCommitMeta(d: {
 	title?: string | null;
 	description?: string | null;
 }) {
+	// A GitHub Actions title carries the run and the previous image; the list shows the commit and its sha only.
+	const github = presentGithubActionsTitle(d.title);
+	if (github) return github.text;
 	const commitMessage = d.title
 		?.split("\n")
 		.map((line) => line.trim())
@@ -316,23 +322,23 @@ export const ShowHome = () => {
 													</span>
 													<LiveGithubBuildStatus row={d} />
 												</div>
-												<span className="text-xs text-muted-foreground w-36 hidden lg:flex items-center justify-end gap-1.5 truncate">
+												<span className="text-xs text-muted-foreground w-36 shrink-0 hidden lg:flex items-center justify-end gap-1.5">
 													<Server className="size-3 shrink-0" />
 													<span className="truncate">{info.serverName}</span>
 												</span>
-												<span className="text-xs text-muted-foreground w-20 text-right hidden sm:inline">
+												<span className="text-xs text-muted-foreground w-20 shrink-0 text-right hidden sm:inline">
 													{status}
 												</span>
-												<span className="text-xs text-muted-foreground w-24 text-right hidden md:inline">
+												<span className="text-xs text-muted-foreground w-24 shrink-0 text-right hidden md:inline">
 													{formatDistanceToNow(new Date(d.createdAt), {
 														addSuffix: true,
 													})}
 												</span>
-												<span className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+												<span className="w-12 shrink-0 text-right text-xs text-muted-foreground hover:text-foreground transition-colors">
 													logs →
 												</span>
 											</Link>
-											<span className="flex shrink-0 items-center pr-5 text-xs">
+											<span className="flex w-32 shrink-0 items-center justify-end pr-5 text-xs">
 												{isGithubActionsDeployment(d) ? (
 													<GithubActionsDeploymentMark
 														service={info.service}
