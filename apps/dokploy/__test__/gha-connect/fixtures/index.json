@@ -1,0 +1,92 @@
+[
+  {
+    "file": "valid/multi-service-pull.json",
+    "ok": true
+  },
+  {
+    "file": "valid/single-service-push.json",
+    "ok": true
+  },
+  {
+    "file": "valid/multi-image-compose.json",
+    "ok": true
+  },
+  {
+    "file": "valid/tunnel-mirror.json",
+    "ok": true
+  },
+  {
+    "file": "valid/minor-version-and-unknown-fields.json",
+    "ok": true
+  },
+  {
+    "file": "invalid/not-an-object.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/unknown-major.json",
+    "ok": false,
+    "code": "unknown-schema"
+  },
+  {
+    "file": "invalid/no-schema.json",
+    "ok": false,
+    "code": "unknown-schema"
+  },
+  {
+    "file": "invalid/short-sha.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/uppercase-sha.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/bad-delivery.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/tag-instead-of-digest.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/tag-next-to-digest.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/tag-ref-source.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/run-attempt-zero.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/services-do-not-match-release.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/duplicate-compose-service.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/compose-path-traversal.json",
+    "ok": false,
+    "code": "invalid"
+  },
+  {
+    "file": "invalid/asks-for-migrations.json",
+    "ok": false,
+    "code": "migrations-unsupported"
+  }
+]

@@ -164,6 +164,9 @@ export const GHA_RELEASE_STATUSES = [
 ] as const;
 export type GhaReleaseStatus = (typeof GHA_RELEASE_STATUSES)[number];
 
+export const GHA_MANIFEST_SOURCES = ["artifact", "job-log"] as const;
+export type GhaManifestSource = (typeof GHA_MANIFEST_SOURCES)[number];
+
 /** Every release a connection accepted: the history rollback and retention read. */
 export const ghaRelease = pgTable(
 	"gha_release",
@@ -184,6 +187,11 @@ export const ghaRelease = pgTable(
 		runAttempt: integer("runAttempt").notNull(),
 		delivery: text("delivery").$type<"pull" | "push">().notNull(),
 		status: text("status").$type<GhaReleaseStatus>().notNull(),
+		/** Where the manifest was read from: the run artifact, or the release job's log when uploads are blocked. */
+		manifestSource: text("manifestSource")
+			.$type<GhaManifestSource>()
+			.notNull()
+			.default("artifact"),
 		/** The GitHub Deployment that woke Dokploy up; its statuses are the record. */
 		githubDeploymentId: bigint("githubDeploymentId", { mode: "number" }),
 		images: jsonb("images")

@@ -45,9 +45,11 @@ const ready = PGliteClass !== null;
 const ALL_FILES = [
 	"0228_github_deployment_watch.sql",
 	"0229_gha_connection.sql",
+	"0231_gha_release_source.sql",
 	// A second run of each: every statement is guarded, a replay is a no-op.
 	"0228_github_deployment_watch.sql",
 	"0229_gha_connection.sql",
+	"0231_gha_release_source.sql",
 ];
 
 beforeAll(async () => {
@@ -445,3 +447,56 @@ describe.skipIf(!ready)("services that are deleted", () => {
 		expect(await store.pruneOrphanedGhaConnections("gh-1")).toBe(0);
 	});
 });
+
+describe.skipIf(!ready)(
+	"migration 0231: where the manifest was read from",
+	() => {
+		const release = (overrides: Record<string, unknown> = {}) => ({
+			manifestReleaseId: "gh-1.1",
+			sha: "b".repeat(40),
+			runId: 55,
+			runAttempt: 1,
+			delivery: "pull" as const,
+			status: "accepted" as const,
+			githubDeploymentId: 77,
+			images: [
+				{
+					name: "web",
+					composeService: "web",
+					ref: `x@sha256:${"c".repeat(64)}`,
+				},
+			],
+			digests: [`sha256:${"c".repeat(64)}`],
+			...overrides,
+		});
+
+		it("defaults to the artifact and stores the job log when told", async () => {
+			const row = await store.createGhaConnection(baseRow());
+			await store.recordRelease({
+				...release(),
+				ghaConnectionId: row.ghaConnectionId,
+			});
+			await store.recordRelease({
+				...release({ runId: 56, manifestSource: "job-log" }),
+				ghaConnectionId: row.ghaConnectionId,
+			});
+			const rows = await client?.query(
+				'SELECT "runId", "manifestSource" FROM "gha_release" ORDER BY "runId"',
+			);
+			expect(rows?.rows).toEqual([
+				{ runId: 55, manifestSource: "artifact" },
+				{ runId: 56, manifestSource: "job-log" },
+			]);
+		});
+
+		it("is NOT NULL with an artifact default, so rows from before the column read as artifact", async () => {
+			const column = (
+				await client?.query(
+					`SELECT is_nullable, column_default FROM information_schema.columns WHERE table_name = 'gha_release' AND column_name = 'manifestSource'`,
+				)
+			)?.rows[0];
+			expect(column).toMatchObject({ is_nullable: "NO" });
+			expect(String(column?.column_default)).toContain("'artifact'");
+		});
+	},
+);

@@ -17,3 +17,5 @@ patches/*.patch text eol=lf
 
 # Shell scripts must stay LF so they run on Linux/macOS from Windows checkouts.
 *.sh text eol=lf
+apps/dokploy/__test__/gha-connect/fixtures/** text eol=lf
+apps/dokploy/__test__/gha-connect/job-log-fixture/** text eol=lf

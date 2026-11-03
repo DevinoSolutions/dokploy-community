@@ -1,0 +1,18 @@
+2026-11-03T14:02:01.1234567Z Current runner version: '2.330.0'
+2026-11-03T14:02:02.2469134Z ##[group]Run DevinoSolutions/dokploy-release@v1
+2026-11-03T14:02:02.2469134Z with:
+2026-11-03T14:02:02.2469134Z   service: voicekit-web
+2026-11-03T14:02:02.2469134Z   environment: development
+2026-11-03T14:02:02.2469134Z ##[endgroup]
+2026-11-03T14:02:03.3703701Z ##[group]Run node "$ACTION_PATH/scripts/cli.mjs" manifest
+2026-11-03T14:02:03.3703701Z node "$ACTION_PATH/scripts/cli.mjs" manifest
+2026-11-03T14:02:03.3703701Z shell: /usr/bin/bash -e {0}
+2026-11-03T14:02:03.3703701Z ##[endgroup]
+2026-11-03T14:02:04.4938268Z Release gh-9876543210.1: voicekit-web (pull)
+2026-11-03T14:02:05.6172835Z ::dokploy-release::eyJzY2hlbWEiOiJkb2twbG95LnJlbGVhc2UvdjEiLCJzaGEiOiIzZjljMmExZTViN2Q5YzBhMWIyYzNkNGU1ZjYwNzE4MjkzYTRiNWM2IiwiZGVsaXZlcnkiOiJwdWxsIiwicmVsZWFzZSI6eyJpZCI6ImdoLTk4NzY1NDMyMTAuMSIsInNlcnZpY2VzIjpbInZvaWNla2l0LXdlYiJdfSwic291cmNlIjp7ImZvcmdlIjoiZ2l0aHViIiwicmVmIjoicmVmcy9oZWFkcy9kZXYiLCJydW5JZCI6Ijk4NzY1NDMyMTAiLCJydW5BdHRlbXB0IjoxfSwiZW52aXJvbm1lbnQiOiJkZXZlbG9wbWVudCIsInNlcnZpY2VzIjpbeyJrZXkiOiJ2b2ljZWtpdC13ZWIiLCJpbWFnZXMiOlt7Im5hbWUiOiJ2b2ljZWtpdC13ZWIiLCJjb21wb3NlU2VydmljZSI6InZvaWNla2l0LXdlYiIsInJlZiI6ImxvY2FsaG9zdDo1MDAwL3JlZ2lzdHJ5LmRldmluby5jYS92b2ljZWxhYnMvd2ViQHNoYTI1NjozMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzIn1dLCJjb21wb3NlIjp7InBhdGgiOiJkb2NrZXItY29tcG9zZS5wcm9kLnltbCJ9LCJtaWdyYXRpb25zIjpudWxsfV19
+2026-11-03T14:02:09.1111110Z ##[group]Run actions/upload-artifact@v7.0.2
+2026-11-03T14:02:09.1111110Z ##[endgroup]
+2026-11-03T14:02:10.1234567Z ##[error]Failed to CreateArtifact: Artifact storage quota has been hit. Unable to upload any new artifacts.
+2026-11-03T14:02:11.1358023Z ##[warning]The artifact upload failed; Dokploy reads the manifest from this job's log instead.
+2026-11-03T14:02:12.1481480Z GitHub Deployment 4242 for voicekit-web
+2026-11-03T14:02:13.1604937Z Cleaning up orphan processes

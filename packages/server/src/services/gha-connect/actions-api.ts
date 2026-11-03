@@ -361,6 +361,115 @@ export const downloadArtifactZip = async (
 	return { kind: "ok", value: bytes, etag: null };
 };
 
+export interface JobInfo {
+	id: number;
+	runId: number | null;
+	/** `run_attempt` of the job; null when GitHub did not say. */
+	attempt: number | null;
+	name: string;
+	status: string;
+	conclusion: string | null;
+	headSha: string | null;
+	/** Names of the job's steps (an action's own steps are not listed, only its `uses` step). */
+	stepNames: string[];
+}
+
+/** `GET .../actions/runs/{id}/attempts/{n}/jobs`: the jobs of that attempt (and no other). */
+export const listRunJobs = (
+	deps: ApiDeps,
+	token: string,
+	ref: RepoRef,
+	runId: number,
+	attempt: number,
+) => {
+	const base = repoPath(ref);
+	if (!base) return Promise.resolve(NOT_FOUND);
+	return get<JobInfo[]>(
+		deps,
+		token,
+		`${base}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`,
+		(json) => {
+			const list = asObject(json)?.jobs;
+			if (!Array.isArray(list)) return null;
+			const jobs: JobInfo[] = [];
+			for (const item of list) {
+				const o = asObject(item);
+				const id = int(o?.id);
+				const name = str(o?.name);
+				const status = str(o?.status);
+				if (!o || id === null || !name || !status) continue;
+				const steps = Array.isArray(o.steps) ? o.steps : [];
+				jobs.push({
+					id,
+					runId: int(o.run_id),
+					attempt: int(o.run_attempt),
+					name,
+					status,
+					conclusion: str(o.conclusion),
+					headSha: str(o.head_sha),
+					stepNames: steps
+						.map((step) => str(asObject(step)?.name))
+						.filter((n): n is string => n !== null),
+				});
+			}
+			return jobs;
+		},
+	);
+};
+
+/**
+ * `GET .../actions/jobs/{id}/logs`: the plain text log of one job. GitHub answers 302 to a
+ * signed URL; `fetch` follows it and drops the Authorization header on the other origin. A log
+ * larger than `maxBytes` is refused (status 413) rather than read.
+ */
+export const downloadJobLog = async (
+	deps: ApiDeps,
+	token: string,
+	ref: RepoRef,
+	jobId: number,
+	maxBytes: number,
+): Promise<ApiResult<string>> => {
+	const base = repoPath(ref);
+	if (!base || !Number.isSafeInteger(jobId) || jobId < 1) return NOT_FOUND;
+	let response: ApiResponse;
+	try {
+		response = await deps.fetch(`${base}/actions/jobs/${jobId}/logs`, {
+			method: "GET",
+			headers: headers(token),
+		});
+	} catch {
+		return { kind: "error", status: 0 };
+	}
+	if (response.status === 401) return { kind: "unauthorized" };
+	if (response.status === 404 || response.status === 410) return NOT_FOUND;
+	if (response.status === 403 || response.status === 429) {
+		const body = await response.text().catch(() => "");
+		const retryAt = rateLimitRetryAt(
+			response.status,
+			response.headers,
+			body,
+			deps.now(),
+		);
+		return retryAt !== null
+			? { kind: "rate-limited", retryAt }
+			: { kind: "forbidden", message: "GitHub refused access" };
+	}
+	if (!response.ok || !response.arrayBuffer) {
+		return { kind: "error", status: response.status };
+	}
+	const declared = Number(response.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > maxBytes) {
+		return { kind: "error", status: 413 };
+	}
+	const bytes = new Uint8Array(await response.arrayBuffer());
+	if (bytes.length > maxBytes) return { kind: "error", status: 413 };
+	return {
+		kind: "ok",
+		value: Buffer.from(bytes).toString("utf8"),
+		etag: null,
+	};
+};
+
 /** `GET .../compare/{base}...{head}`: how `head` relates to `base`. */
 export const compareCommits = (
 	deps: ApiDeps,
@@ -498,6 +607,10 @@ export interface ActionsApi {
 		artifactId: number,
 		maxBytes: number,
 	): Promise<ApiResult<Uint8Array>>;
+	/** The jobs of one attempt of a run (the source of the job-log manifest). */
+	runJobs(runId: number, attempt: number): Promise<ApiResult<JobInfo[]>>;
+	/** The text log of one job, refused above `maxBytes`. */
+	jobLog(jobId: number, maxBytes: number): Promise<ApiResult<string>>;
 	compare(base: string, head: string): Promise<ApiResult<CompareStatus>>;
 	environmentPolicy(environment: string): Promise<ApiResult<EnvironmentPolicy>>;
 }
@@ -513,6 +626,9 @@ export const createActionsApi = (
 	artifacts: (runId, name) => listRunArtifacts(deps, token, ref, runId, name),
 	downloadArtifact: (artifactId, maxBytes) =>
 		downloadArtifactZip(deps, token, ref, artifactId, maxBytes),
+	runJobs: (runId, attempt) => listRunJobs(deps, token, ref, runId, attempt),
+	jobLog: (jobId, maxBytes) =>
+		downloadJobLog(deps, token, ref, jobId, maxBytes),
 	compare: (base, head) => compareCommits(deps, token, ref, base, head),
 	environmentPolicy: (environment) =>
 		getEnvironmentPolicy(deps, token, ref, environment),
