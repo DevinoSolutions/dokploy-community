@@ -446,41 +446,7 @@ const RunDialogBody = ({
 				</div>
 			)}
 
-			<DialogFooter className="sm:flex-wrap sm:justify-between">
-				<div className="flex flex-col gap-2 sm:flex-row">
-					{canRedeploy && (
-						<DialogAction
-							title="Redeploy current version"
-							description={`Dokploy will pull the current image${
-								isApplication ? "" : "s"
-							} again and restart this ${service.type}. Nothing is built.`}
-							type="default"
-							onClick={redeploy}
-						>
-							<Button variant="outline" isLoading={isDeploying}>
-								<Rocket className="size-4" />
-								Redeploy current version
-							</Button>
-						</DialogAction>
-					)}
-					{logPath && row && (
-						<Button
-							variant="outline"
-							onClick={() =>
-								onOpenLogs({
-									logPath,
-									serverId: row.buildServerId || svc?.serverId || undefined,
-									errorMessage: row.errorMessage || undefined,
-									runUrl,
-									live: isLiveGithubBuild(row),
-								})
-							}
-						>
-							<ScrollText className="size-4" />
-							View deployment logs
-						</Button>
-					)}
-				</div>
+			<DialogFooter className="sm:flex-wrap sm:justify-start">
 				{runUrl ? (
 					<Button asChild>
 						<a href={runUrl} target="_blank" rel="noopener noreferrer">
@@ -494,6 +460,38 @@ const RunDialogBody = ({
 					<span className="self-center text-sm text-muted-foreground">
 						The run link was not recorded.
 					</span>
+				)}
+				{logPath && row && (
+					<Button
+						variant="outline"
+						onClick={() =>
+							onOpenLogs({
+								logPath,
+								serverId: row.buildServerId || svc?.serverId || undefined,
+								errorMessage: row.errorMessage || undefined,
+								runUrl,
+								live: isLiveGithubBuild(row),
+							})
+						}
+					>
+						<ScrollText className="size-4" />
+						View deployment logs
+					</Button>
+				)}
+				{canRedeploy && (
+					<DialogAction
+						title="Redeploy current version"
+						description={`Dokploy will pull the current image${
+							isApplication ? "" : "s"
+						} again and restart this ${service.type}. Nothing is built.`}
+						type="default"
+						onClick={redeploy}
+					>
+						<Button variant="outline" isLoading={isDeploying}>
+							<Rocket className="size-4" />
+							Redeploy current version
+						</Button>
+					</DialogAction>
 				)}
 			</DialogFooter>
 		</>
