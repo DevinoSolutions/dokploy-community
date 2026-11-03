@@ -75,7 +75,9 @@ public, so it is a constant in code, overridable with the environment variable
 app has no client secret and its tokens do not expire.
 
 1. `POST https://github.com/login/device/code` with `client_id` and
-   `scope=repo_deployment read:packages`. GitHub answers `device_code`,
+   `scope=repo_deployment public_repo` (`repo_deployment repo` when the user says
+   the repositories are private; `read:packages` is no longer asked, T-13719).
+   GitHub answers `device_code`,
    `user_code`, `verification_uri`, `expires_in`, `interval`.
 2. The UI shows `user_code` and a link to `verification_uri`. The `device_code`
    never leaves the server: the browser holds only an opaque `flowId`.
@@ -387,8 +389,11 @@ is cut off after 15 seconds.
 ## Security model
 
 - **Narrow scopes.** `repo_deployment` (read and write deployment statuses and
-  create deployments, no code access) and `read:packages` (pull private GHCR
-  images). Nothing else is requested; the OAuth App cannot read code.
+  create deployments) and `public_repo` (read public repositories and their
+  Actions runs), or `repo` for private repositories, which classic OAuth has no
+  narrower scope for. `read:packages` is not requested since T-13719: a connected
+  service never logs in to GHCR from prod (`loadGhcrCredentials` is null without
+  it; connections made before the change keep it and keep working).
 - **No Dokploy credential in GitHub.** The old flow keeps a Dokploy API key as a
   GitHub secret. Here GitHub holds nothing that can reach Dokploy; Dokploy only
   makes outbound calls.
@@ -419,9 +424,12 @@ is cut off after 15 seconds.
 - **Token handling.** Encrypted at rest; never returned by tRPC or MCP, never in
   a log line, argv, status or URL (tests assert it). Read only by the poller, the
   GHCR pull and the `docker login` helper. Disconnect deletes it.
-- **Blast radius of a leaked token.** `repo_deployment` + `read:packages` of one
-  GitHub account: it can post deployment statuses and read packages that account
-  can read. It cannot read code or reach Dokploy.
+- **Blast radius of a leaked token.** `repo_deployment` + `public_repo` (or
+  `repo`) of one GitHub account: it can post deployment statuses and read the
+  repositories and Actions runs that scope reaches. `repo` is GitHub's classic
+  full-control scope for private repositories (it includes reading and writing
+  their code), so a leaked token of a private-repository connection is far more
+  sensitive than a `public_repo` one. It cannot reach Dokploy.
 - **Self-hosted only.** The poller, the connect flow and the watch mutation are
   refused on Dokploy Cloud.
 

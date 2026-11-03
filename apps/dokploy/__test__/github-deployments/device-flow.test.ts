@@ -1,6 +1,7 @@
 import {
 	GITHUB_DEVICE_DEFAULT_CLIENT_ID,
 	GITHUB_DEVICE_SCOPE,
+	GITHUB_DEVICE_SCOPE_PRIVATE,
 } from "@dokploy/server/db/schema/github-deployment";
 import {
 	ACCESS_TOKEN_URL,
@@ -57,7 +58,7 @@ describe("startDeviceFlow", () => {
 		expect(calls[0]?.headers.Accept).toBe("application/json");
 		const body = new URLSearchParams(calls[0]?.body);
 		expect(body.get("client_id")).toBe(GITHUB_DEVICE_DEFAULT_CLIENT_ID);
-		expect(body.get("scope")).toBe("repo_deployment read:packages");
+		expect(body.get("scope")).toBe("repo_deployment public_repo");
 		expect(body.get("scope")).toBe(GITHUB_DEVICE_SCOPE);
 		expect(body.has("client_secret")).toBe(false);
 		if (result.ok) {
@@ -69,6 +70,17 @@ describe("startDeviceFlow", () => {
 			expect(result.state.expiresAt).toBe(T0 + 900_000);
 			expect(result.state.nextPollAt).toBe(T0 + 5_000);
 		}
+	});
+
+	it("asks for the repo scope when the caller names it", async () => {
+		const { fetch, calls } = scriptedFetch([{ json: started }]);
+		await startDeviceFlow({
+			fetch,
+			now: () => T0,
+			scope: GITHUB_DEVICE_SCOPE_PRIVATE,
+		});
+		const body = new URLSearchParams(calls[0]?.body);
+		expect(body.get("scope")).toBe("repo_deployment repo");
 	});
 
 	it("reports a network failure and an unexpected body without throwing", async () => {

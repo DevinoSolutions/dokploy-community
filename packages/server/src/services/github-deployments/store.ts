@@ -402,10 +402,14 @@ export const loadGhcrCredentials = async (
 			githubLogin: githubDeploymentConnection.githubLogin,
 			accessToken: githubDeploymentConnection.accessToken,
 			status: githubDeploymentConnection.status,
+			scopes: githubDeploymentConnection.scopes,
 		})
 		.from(githubDeploymentConnection)
 		.where(eq(githubDeploymentConnection.connectionId, watch.connectionId));
 	if (!row || row.status !== "active" || !row.accessToken) return null;
+	// Only a connection that was authorized for packages may log in to GHCR.
+	// A GitHub Actions connection never asks for it: prod holds no GHCR token.
+	if (!row.scopes.split(",").includes("read:packages")) return null;
 	return {
 		watchId: watch.watchId,
 		owner: watch.owner,

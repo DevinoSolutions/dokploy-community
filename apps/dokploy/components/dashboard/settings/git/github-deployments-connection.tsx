@@ -12,6 +12,7 @@ import {
 	CardHeader,
 	CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Dialog,
 	DialogContent,
@@ -58,6 +59,7 @@ export const GithubDeploymentsConnection = () => {
 	const [open, setOpen] = useState(false);
 	const [flow, setFlow] = useState<Flow | null>(null);
 	const [message, setMessage] = useState<string | null>(null);
+	const [privateRepositories, setPrivateRepositories] = useState(false);
 	const stopped = useRef(true);
 
 	// Poll the server at the interval GitHub gave; the server never calls GitHub
@@ -111,7 +113,11 @@ export const GithubDeploymentsConnection = () => {
 	const begin = async () => {
 		setMessage(null);
 		try {
-			setFlow(await startConnect());
+			setFlow(
+				await startConnect(
+					privateRepositories ? { repositoryAccess: "private" } : undefined,
+				),
+			);
 		} catch (error) {
 			setMessage(
 				error instanceof Error
@@ -135,7 +141,9 @@ export const GithubDeploymentsConnection = () => {
 							Deployments, even when Dokploy is behind Tailscale or a private
 							network that GitHub Actions cannot reach. Dokploy asks GitHub for
 							new deployments; nothing connects inbound. Only the
-							repo_deployment and read:packages scopes are requested.
+							repo_deployment and public_repo scopes are requested; private
+							repositories need the broader repo scope, which you choose when
+							you connect.
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="space-y-2 py-8 border-t">
@@ -267,6 +275,19 @@ export const GithubDeploymentsConnection = () => {
 													{message}
 												</span>
 											)}
+											<label
+												htmlFor="github-private-repositories"
+												className="flex flex-row items-center gap-2 text-sm"
+											>
+												<Checkbox
+													id="github-private-repositories"
+													checked={privateRepositories}
+													onCheckedChange={(value) =>
+														setPrivateRepositories(value === true)
+													}
+												/>
+												This account's repositories are private
+											</label>
 											<Button onClick={begin} isLoading={isStarting}>
 												Get a code
 											</Button>
