@@ -1,0 +1,34 @@
+{
+  "schema": "dokploy.release/v1",
+  "sha": "3f9c2a1e5b7d9c0a1b2c3d4e5f60718293a4b5c6",
+  "delivery": "pull",
+  "release": {
+    "id": "gh-9876543210.1",
+    "services": [
+      "voicekit-web"
+    ]
+  },
+  "source": {
+    "forge": "github",
+    "ref": "refs/heads/main",
+    "runId": "9876543210",
+    "runAttempt": 1
+  },
+  "environment": "production",
+  "services": [
+    {
+      "key": "voicekit-web",
+      "images": [
+        {
+          "name": "web",
+          "composeService": "web",
+          "ref": "localhost:5000/registry.devino.ca/voicelabs/web@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      ],
+      "compose": {
+        "path": "docker-compose.prod.yml"
+      },
+      "migrations": null
+    }
+  ]
+}

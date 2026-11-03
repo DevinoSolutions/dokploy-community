@@ -2,6 +2,7 @@ import { db } from "@dokploy/server/db";
 import {
 	applications,
 	compose,
+	type GhaManifestSource,
 	type GhaProcessedRun,
 	type GhaReleaseStatus,
 	type GithubWatchServiceType,
@@ -239,6 +240,8 @@ export interface ReleaseInput {
 	githubDeploymentId: number | null;
 	images: Array<{ name: string; composeService: string; ref: string }>;
 	digests: string[];
+	/** Where the manifest was read from (default: the run artifact). */
+	manifestSource?: GhaManifestSource;
 	/** The service as it was before this release changed it. */
 	sourceBackup?: Record<string, unknown> | null;
 }

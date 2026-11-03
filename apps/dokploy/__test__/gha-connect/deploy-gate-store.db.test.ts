@@ -73,8 +73,13 @@ beforeAll(async () => {
 	await pg.exec(
 		`INSERT INTO "gha_release" ("releaseId","ghaConnectionId","manifestReleaseId","sha","runId","runAttempt","delivery","status","images","digests") VALUES ('legacy-rel','legacy','gh-1.1','${"1".repeat(40)}',1,1,'pull','deployed','[]','[]')`,
 	);
-	// 0230, then again: every statement is guarded.
-	for (const file of ["0230_gha_deploy_gate.sql", "0230_gha_deploy_gate.sql"]) {
+	// 0230, then 0231 (the manifest source), each twice: every statement is guarded.
+	for (const file of [
+		"0230_gha_deploy_gate.sql",
+		"0230_gha_deploy_gate.sql",
+		"0231_gha_release_source.sql",
+		"0231_gha_release_source.sql",
+	]) {
 		for (const statement of migrationStatements(file)) await pg.exec(statement);
 	}
 }, 120_000);
