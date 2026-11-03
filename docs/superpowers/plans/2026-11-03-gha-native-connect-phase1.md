@@ -515,7 +515,7 @@ const valid = {
 					{
 						name: "web",
 						composeService: "web",
-						ref: `localhost:5000/registry.devino.ca/voicekit/web@${d("3")}`,
+						ref: `localhost:5000/registry.devino.ca/voicelabs/web@${d("3")}`,
 					},
 				],
 				compose: { path: "docker-compose.prod.yml" },
@@ -963,7 +963,7 @@ test("one Deployment per service, posted to the repository, with the token only 
 	const calls = [];
 	const created = await createDeployments(
 		{
-			repository: "DevinoSolutions/voicekit",
+			repository: "DevinoSolutions/voicelabs",
 			token: "ghs_secret",
 			fetch: async (url, init) => {
 				calls.push({ url, init });
@@ -976,7 +976,7 @@ test("one Deployment per service, posted to the repository, with the token only 
 		{ key: "web", id: 1001 },
 		{ key: "worker", id: 1002 },
 	]);
-	assert.equal(calls[0].url, "https://api.github.com/repos/DevinoSolutions/voicekit/deployments");
+	assert.equal(calls[0].url, "https://api.github.com/repos/DevinoSolutions/voicelabs/deployments");
 	assert.equal(calls[0].init.headers.Authorization, "Bearer ghs_secret");
 	assert.equal(JSON.parse(calls[1].init.body).task, "dokploy:worker");
 	assert.ok(!calls[0].init.body.includes("ghs_secret"));
@@ -1164,7 +1164,7 @@ const baseEnv = (dir, extra = {}) => ({
 	GITHUB_RUN_ATTEMPT: "1",
 	INPUT_ENVIRONMENT: "development",
 	INPUT_SERVICE: "web",
-	INPUT_EXISTING_IMAGE: `registry.devino.ca/voicekit/web@${D("e")}`,
+	INPUT_EXISTING_IMAGE: `registry.devino.ca/voicelabs/web@${D("e")}`,
 	...extra,
 });
 
@@ -1572,14 +1572,14 @@ import { describe, expect, it } from "vitest";
 describe("image namespace", () => {
 	const namespaces = allowedNamespaces({
 		owner: "DevinoSolutions",
-		repo: "VoiceKit",
+		repo: "VoiceLabs",
 		registryPrefix: "registry.devino.ca",
 	});
 
 	it("allows the owner's public GHCR path and the instance registry path, lower-cased", () => {
 		expect(namespaces).toEqual([
-			"ghcr.io/devinosolutions/voicekit/",
-			"registry.devino.ca/voicekit/",
+			"ghcr.io/devinosolutions/voicelabs/",
+			"registry.devino.ca/voicelabs/",
 		]);
 	});
 
@@ -1592,7 +1592,7 @@ describe("image namespace", () => {
 	it("accepts an image inside the namespace before the service runs anything", () => {
 		expect(
 			checkImageRepository({
-				repository: "registry.devino.ca/voicekit/web",
+				repository: "registry.devino.ca/voicelabs/web",
 				namespaces,
 				currentRepositories: [],
 			}),
@@ -1601,10 +1601,10 @@ describe("image namespace", () => {
 
 	it("refuses another registry, another repository path and a look-alike prefix", () => {
 		for (const repository of [
-			"evil.example.com/voicekit/web",
+			"evil.example.com/voicelabs/web",
 			"registry.devino.ca/other/web",
-			"registry.devino.ca/voicekit-extra/web",
-			"ghcr.io/devinosolutions/voicekit-other/web",
+			"registry.devino.ca/voicelabs-extra/web",
+			"ghcr.io/devinosolutions/voicelabs-other/web",
 		]) {
 			expect(
 				checkImageRepository({ repository, namespaces, currentRepositories: [] }),
@@ -1615,7 +1615,7 @@ describe("image namespace", () => {
 	it("refuses the preview namespace, even for the first release", () => {
 		expect(
 			checkImageRepository({
-				repository: "registry.devino.ca/voicekit/preview/pr-4/web",
+				repository: "registry.devino.ca/voicelabs/preview/pr-4/web",
 				namespaces,
 				currentRepositories: [],
 			}),
@@ -1623,17 +1623,17 @@ describe("image namespace", () => {
 	});
 
 	it("once the service runs an image, only that repository may move", () => {
-		const current = ["registry.devino.ca/voicekit/web"];
+		const current = ["registry.devino.ca/voicelabs/web"];
 		expect(
 			checkImageRepository({
-				repository: "registry.devino.ca/voicekit/web",
+				repository: "registry.devino.ca/voicelabs/web",
 				namespaces,
 				currentRepositories: current,
 			}),
 		).toEqual({ ok: true });
 		expect(
 			checkImageRepository({
-				repository: "registry.devino.ca/voicekit/worker",
+				repository: "registry.devino.ca/voicelabs/worker",
 				namespaces,
 				currentRepositories: current,
 			}),
@@ -1643,9 +1643,9 @@ describe("image namespace", () => {
 	it("compares case-insensitively", () => {
 		expect(
 			checkImageRepository({
-				repository: "Registry.Devino.CA/VoiceKit/Web",
+				repository: "Registry.Devino.CA/VoiceLabs/Web",
 				namespaces,
-				currentRepositories: ["registry.devino.ca/voicekit/web"],
+				currentRepositories: ["registry.devino.ca/voicelabs/web"],
 			}),
 		).toEqual({ ok: true });
 	});
@@ -1666,43 +1666,43 @@ describe("image namespace", () => {
 
 describe("the tunnel mirror prefix (localhost:5000/registry.devino.ca)", () => {
 	const registryPrefix = "localhost:5000/registry.devino.ca";
-	const namespaces = allowedNamespaces({ owner: "DevinoSolutions", repo: "voicekit", registryPrefix });
+	const namespaces = allowedNamespaces({ owner: "DevinoSolutions", repo: "voicelabs", registryPrefix });
 
 	it("builds the namespace from the prefix, with or without a trailing slash", () => {
 		expect(namespaces).toEqual([
-			"ghcr.io/devinosolutions/voicekit/",
-			"localhost:5000/registry.devino.ca/voicekit/",
+			"ghcr.io/devinosolutions/voicelabs/",
+			"localhost:5000/registry.devino.ca/voicelabs/",
 		]);
 		expect(
-			allowedNamespaces({ owner: "DevinoSolutions", repo: "voicekit", registryPrefix: `${registryPrefix}/` }),
+			allowedNamespaces({ owner: "DevinoSolutions", repo: "voicelabs", registryPrefix: `${registryPrefix}/` }),
 		).toEqual(namespaces);
 	});
 
 	it("accepts what the wrapper's mirror step writes and still refuses preview and foreign paths", () => {
 		const check = (repository: string) =>
 			checkImageRepository({ repository, namespaces, currentRepositories: [] });
-		expect(check("localhost:5000/registry.devino.ca/voicekit/web")).toEqual({ ok: true });
-		expect(check("localhost:5000/registry.devino.ca/voicekit/preview/pr-7")).toMatchObject({ ok: false, code: "image-namespace" });
+		expect(check("localhost:5000/registry.devino.ca/voicelabs/web")).toEqual({ ok: true });
+		expect(check("localhost:5000/registry.devino.ca/voicelabs/preview/pr-7")).toMatchObject({ ok: false, code: "image-namespace" });
 		expect(check("localhost:5000/registry.devino.ca/other/web")).toMatchObject({ ok: false, code: "image-namespace" });
-		expect(check("registry.devino.ca/voicekit/web")).toMatchObject({ ok: false, code: "image-namespace" });
+		expect(check("registry.devino.ca/voicelabs/web")).toMatchObject({ ok: false, code: "image-namespace" });
 	});
 
 	it("splits the image so the registry name keeps the mirrored host segment", () => {
-		expect(splitRepository("localhost:5000/registry.devino.ca/voicekit/web")).toEqual({
+		expect(splitRepository("localhost:5000/registry.devino.ca/voicelabs/web")).toEqual({
 			host: "localhost:5000",
-			name: "registry.devino.ca/voicekit/web",
+			name: "registry.devino.ca/voicelabs/web",
 		});
 	});
 
 	it("maps a mirrored image back to the GHCR image it was copied from", () => {
 		expect(
-			canonicalRepository({ repository: "localhost:5000/registry.devino.ca/voicekit/web", owner: "DevinoSolutions", registryPrefix }),
-		).toBe("ghcr.io/devinosolutions/voicekit/web");
+			canonicalRepository({ repository: "localhost:5000/registry.devino.ca/voicelabs/web", owner: "DevinoSolutions", registryPrefix }),
+		).toBe("ghcr.io/devinosolutions/voicelabs/web");
 		expect(
-			canonicalRepository({ repository: "ghcr.io/devinosolutions/voicekit/web", owner: "DevinoSolutions", registryPrefix }),
+			canonicalRepository({ repository: "ghcr.io/devinosolutions/voicelabs/web", owner: "DevinoSolutions", registryPrefix }),
 		).toBeNull();
 		expect(
-			canonicalRepository({ repository: "localhost:5000/registry.devino.ca/voicekit/web", owner: "x", registryPrefix: null }),
+			canonicalRepository({ repository: "localhost:5000/registry.devino.ca/voicelabs/web", owner: "x", registryPrefix: null }),
 		).toBeNull();
 	});
 });
@@ -2512,7 +2512,7 @@ describe("planApplicationFlip", () => {
 	const gitApp = {
 		sourceType: "github",
 		autoDeploy: true,
-		repository: "voicekit",
+		repository: "voicelabs",
 		owner: "DevinoSolutions",
 		branch: "dev",
 		githubId: "gh1",
@@ -2526,20 +2526,20 @@ describe("planApplicationFlip", () => {
 	});
 
 	it("flips a git application to the image and keeps the old source whole", () => {
-		const plan = planApplicationFlip(gitApp, `registry.devino.ca/voicekit/web@${D("e")}`);
+		const plan = planApplicationFlip(gitApp, `registry.devino.ca/voicelabs/web@${D("e")}`);
 		expect(plan.flip).toBe(true);
 		if (!plan.flip) return;
 		expect(plan.update).toMatchObject({
 			...APPLICATION_GIT_RESET,
 			sourceType: "docker",
-			dockerImage: `registry.devino.ca/voicekit/web@${D("e")}`,
+			dockerImage: `registry.devino.ca/voicelabs/web@${D("e")}`,
 			autoDeploy: false,
 			isPreviewDeploymentsActive: false,
 		});
 		expect(plan.previousSource).toMatchObject({
 			sourceType: "github",
 			autoDeploy: true,
-			repository: "voicekit",
+			repository: "voicelabs",
 			owner: "DevinoSolutions",
 			branch: "dev",
 			githubId: "gh1",
@@ -2819,7 +2819,7 @@ import { describe, expect, it } from "vitest";
 import { routedFetch } from "./gha-helpers";
 
 const NOW = 1_700_000_000_000;
-const REPO = { owner: "DevinoSolutions", repo: "voicekit" };
+const REPO = { owner: "DevinoSolutions", repo: "voicelabs" };
 const SHA = "a".repeat(40);
 const SHA2 = "b".repeat(40);
 
@@ -2900,8 +2900,8 @@ describe("repository and branch", () => {
 				{
 					json: {
 						id: 42,
-						name: "voicekit",
-						full_name: "DevinoSolutions/voicekit",
+						name: "voicelabs",
+						full_name: "DevinoSolutions/voicelabs",
 						owner: { login: "DevinoSolutions" },
 						default_branch: "main",
 						private: true,
@@ -2916,8 +2916,8 @@ describe("repository and branch", () => {
 			value: {
 				id: 42,
 				owner: "DevinoSolutions",
-				name: "voicekit",
-				fullName: "DevinoSolutions/voicekit",
+				name: "voicelabs",
+				fullName: "DevinoSolutions/voicelabs",
 				defaultBranch: "main",
 				isPrivate: true,
 			},
@@ -2960,7 +2960,7 @@ describe("runs", () => {
 		conclusion: "success",
 		repository: { id: 42 },
 		head_repository: { id: 42 },
-		html_url: "https://github.com/DevinoSolutions/voicekit/actions/runs/9876543210/attempts/2",
+		html_url: "https://github.com/DevinoSolutions/voicelabs/actions/runs/9876543210/attempts/2",
 	};
 
 	it("reads one attempt and strips the @ref from the path", async () => {
@@ -3168,7 +3168,7 @@ describe("file text and the bound api", () => {
 		const { deps: d, calls } = deps([["/branches/", { json: { commit: { sha: SHA } } }]]);
 		const api = createActionsApi(d, "gho_x", REPO);
 		await api.branchHead("main");
-		expect(calls[0]?.url).toContain("/repos/DevinoSolutions/voicekit/branches/main");
+		expect(calls[0]?.url).toContain("/repos/DevinoSolutions/voicelabs/branches/main");
 	});
 });
 ```
@@ -6122,19 +6122,19 @@ describe("parseReleaseManifest", () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		const image = result.manifest.services[0]?.images[0];
-		expect(image?.repository).toBe("localhost:5000/registry.devino.ca/voicekit/web");
+		expect(image?.repository).toBe("localhost:5000/registry.devino.ca/voicelabs/web");
 		const registryPrefix = "localhost:5000/registry.devino.ca";
-		const namespaces = allowedNamespaces({ owner: "DevinoSolutions", repo: "voicekit", registryPrefix });
+		const namespaces = allowedNamespaces({ owner: "DevinoSolutions", repo: "voicelabs", registryPrefix });
 		expect(namespaces).toEqual([
-			"ghcr.io/devinosolutions/voicekit/",
-			"localhost:5000/registry.devino.ca/voicekit/",
+			"ghcr.io/devinosolutions/voicelabs/",
+			"localhost:5000/registry.devino.ca/voicelabs/",
 		]);
 		expect(
 			checkImageRepository({ repository: image?.repository ?? "", namespaces, currentRepositories: [] }),
 		).toEqual({ ok: true });
 		expect(
 			canonicalRepository({ repository: image?.repository ?? "", owner: "DevinoSolutions", registryPrefix }),
-		).toBe("ghcr.io/devinosolutions/voicekit/web");
+		).toBe("ghcr.io/devinosolutions/voicelabs/web");
 	});
 
 	it("accepts a manifest object as well as its text", () => {
@@ -6928,8 +6928,8 @@ describe("registry probe", () => {
 					? { baseUrl: "https://registry.devino.ca/", username: "dokploy", password: "pw" }
 					: null,
 		});
-		await probe.headDigest({ ...INPUT, host: "registry.devino.ca", name: "voicekit/web" });
-		expect(calls[0]?.url).toBe(`https://registry.devino.ca/v2/voicekit/web/manifests/${DIGEST}`);
+		await probe.headDigest({ ...INPUT, host: "registry.devino.ca", name: "voicelabs/web" });
+		expect(calls[0]?.url).toBe(`https://registry.devino.ca/v2/voicelabs/web/manifests/${DIGEST}`);
 		expect(calls[0]?.headers.Authorization).toBe(
 			`Basic ${Buffer.from("dokploy:pw").toString("base64")}`,
 		);
@@ -7197,7 +7197,7 @@ const manifest = (overrides: Record<string, unknown> = {}) => ({
 				{
 					name: "web",
 					composeService: "web",
-					ref: `registry.devino.ca/voicekit/web@${DIGEST}`,
+					ref: `registry.devino.ca/voicelabs/web@${DIGEST}`,
 				},
 			],
 		},
@@ -7212,12 +7212,12 @@ const facts = (overrides: Partial<ConnectionFacts> = {}): ConnectionFacts => ({
 	environment: "development",
 	serviceKey: "web",
 	owner: "DevinoSolutions",
-	repo: "voicekit",
+	repo: "voicelabs",
 	protectionMode: "environment",
 	registryPrefix: "registry.devino.ca",
 	registryProbeHost: null,
 	deployed: null,
-	currentRepositories: ["registry.devino.ca/voicekit/web"],
+	currentRepositories: ["registry.devino.ca/voicelabs/web"],
 	...overrides,
 });
 
@@ -7235,7 +7235,7 @@ const world = () => {
 			conclusion: "success",
 			repositoryId: REPO_ID,
 			headRepositoryId: REPO_ID,
-			htmlUrl: `https://github.com/DevinoSolutions/voicekit/actions/runs/${RUN_ID}`,
+			htmlUrl: `https://github.com/DevinoSolutions/voicelabs/actions/runs/${RUN_ID}`,
 			runStartedAt: null,
 			updatedAt: null,
 		} as RunInfo,
@@ -7474,17 +7474,17 @@ describe("rule 4: the images", () => {
 	};
 	it("blocks on an image outside the namespace", async () => {
 		const w = world();
-		w.state.zip = zipOf(withRef(`evil.example.com/voicekit/web@${DIGEST}`));
+		w.state.zip = zipOf(withRef(`evil.example.com/voicelabs/web@${DIGEST}`));
 		expectRefused(await run(w), "image-namespace", true);
 	});
 	it("blocks on a preview image, even before the service runs anything", async () => {
 		const w = world();
-		w.state.zip = zipOf(withRef(`registry.devino.ca/voicekit/preview/pr-1/web@${DIGEST}`));
+		w.state.zip = zipOf(withRef(`registry.devino.ca/voicelabs/preview/pr-1/web@${DIGEST}`));
 		expectRefused(await run(w, facts({ currentRepositories: [] })), "image-namespace", true);
 	});
 	it("blocks on a repository the service does not run", async () => {
 		const w = world();
-		w.state.zip = zipOf(withRef(`registry.devino.ca/voicekit/other@${DIGEST}`));
+		w.state.zip = zipOf(withRef(`registry.devino.ca/voicelabs/other@${DIGEST}`));
 		expectRefused(await run(w), "image-repository", true);
 	});
 	it("blocks when the registry serves another digest, none, or nothing", async () => {
@@ -7614,7 +7614,7 @@ describe("transient failures never decide", () => {
 });
 
 describe("the tunnel mirror (localhost:5000/registry.devino.ca)", () => {
-	const MIRROR = "localhost:5000/registry.devino.ca/voicekit/web";
+	const MIRROR = "localhost:5000/registry.devino.ca/voicelabs/web";
 	const mirrored = (attempt = 1) =>
 		manifest({
 			source: { forge: "github", ref: "refs/heads/dev", runId: String(RUN_ID), runAttempt: attempt },
@@ -7640,9 +7640,9 @@ describe("the tunnel mirror (localhost:5000/registry.devino.ca)", () => {
 		expect(result.kind).toBe("accepted");
 		if (result.kind !== "accepted") return;
 		expect(w.state.probeCalls).toEqual([
-			{ host: "registry.devino.ca", name: "registry.devino.ca/voicekit/web", digest: DIGEST },
+			{ host: "registry.devino.ca", name: "registry.devino.ca/voicelabs/web", digest: DIGEST },
 		]);
-		expect(result.release.canonical).toEqual({ [MIRROR]: "ghcr.io/devinosolutions/voicekit/web" });
+		expect(result.release.canonical).toEqual({ [MIRROR]: "ghcr.io/devinosolutions/voicelabs/web" });
 	});
 
 	it("refuses the same image when the connection names no mirror prefix", async () => {
@@ -9337,7 +9337,7 @@ const watch = (overrides: Partial<WatchRow> = {}): WatchRow => ({
 	serviceId: "svc1",
 	connectionId: "gh1",
 	owner: "DevinoSolutions",
-	repo: "voicekit",
+	repo: "voicelabs",
 	environment: "development",
 	enabled: true,
 	lastSeenDeploymentId: 10,
@@ -9356,12 +9356,12 @@ const facts: ConnectionFacts = {
 	environment: "development",
 	serviceKey: "web",
 	owner: "DevinoSolutions",
-	repo: "voicekit",
+	repo: "voicelabs",
 	protectionMode: "environment",
 	registryPrefix: "registry.devino.ca",
 	registryProbeHost: null,
 	deployed: null,
-	currentRepositories: ["registry.devino.ca/voicekit/web"],
+	currentRepositories: ["registry.devino.ca/voicelabs/web"],
 };
 
 const wake = (id: number, runId: number, attempt = 1, task = "dokploy:web") => ({
@@ -9378,7 +9378,7 @@ const wake = (id: number, runId: number, attempt = 1, task = "dokploy:web") => (
 const release = (runId: number, delivery: "pull" | "push" = "pull"): AcceptedRelease => ({
 	runId,
 	runAttempt: 1,
-	runUrl: `https://github.com/DevinoSolutions/voicekit/actions/runs/${runId}`,
+	runUrl: `https://github.com/DevinoSolutions/voicelabs/actions/runs/${runId}`,
 	sha: "a".repeat(40),
 	releaseId: `gh-${runId}.1`,
 	delivery,
@@ -9388,8 +9388,8 @@ const release = (runId: number, delivery: "pull" | "push" = "pull"): AcceptedRel
 		{
 			name: "web",
 			composeService: "web",
-			ref: `registry.devino.ca/voicekit/web@${DIGEST}`,
-			repository: "registry.devino.ca/voicekit/web",
+			ref: `registry.devino.ca/voicelabs/web@${DIGEST}`,
+			repository: "registry.devino.ca/voicelabs/web",
 			digest: DIGEST,
 		},
 	],
@@ -9508,10 +9508,10 @@ describe("pollConnectionWatch", () => {
 			id: 11,
 			payload: {
 				kind: "deploy",
-				image: `registry.devino.ca/voicekit/web@${DIGEST}`,
-				repository: "registry.devino.ca/voicekit/web",
+				image: `registry.devino.ca/voicelabs/web@${DIGEST}`,
+				repository: "registry.devino.ca/voicelabs/web",
 				digest: DIGEST,
-				buildRunUrl: "https://github.com/DevinoSolutions/voicekit/actions/runs/100",
+				buildRunUrl: "https://github.com/DevinoSolutions/voicelabs/actions/runs/100",
 				release: { connectionId: "c1", serviceKey: "web", runId: 100, delivery: "pull" },
 			},
 		});
@@ -9527,14 +9527,14 @@ describe("pollConnectionWatch", () => {
 		two.images.push({
 			name: "docs",
 			composeService: "docs",
-			ref: `registry.devino.ca/voicekit/docs@${DIGEST}`,
-			repository: "registry.devino.ca/voicekit/docs",
+			ref: `registry.devino.ca/voicelabs/docs@${DIGEST}`,
+			repository: "registry.devino.ca/voicelabs/docs",
 			digest: DIGEST,
 		});
 		const h = harness([wake(11, 100)], { 100: { kind: "accepted", release: two } });
 		await pollConnectionWatch(watch(), h.deps);
 		expect(h.started[0]?.payload).toMatchObject({
-			extraImages: [{ repository: "registry.devino.ca/voicekit/docs", digest: DIGEST }],
+			extraImages: [{ repository: "registry.devino.ca/voicelabs/docs", digest: DIGEST }],
 		});
 	});
 
@@ -11949,6 +11949,16 @@ The proof uses real releases published by the voicekit repository itself (`Devin
 Part A, on a test instance with this build and the connection made in PR 2's proof, before PR 6 is merged: wait three ticks. Expected: `ghaConnection.one` stays `waiting`, `lastError` is empty, no Deployment is answered, and the GitHub rate-limit headers show the polling budget is respected (one Deployments request per 20 seconds per repository, one upkeep every two minutes). Press "Check now" and confirm the next tick runs the upkeep at once.
 
 Part B, after PR 6 and Task 6.2 steps 1 and 2 (it is the same sequence as Task 6.2 Step 4; this list names what PR 4 owes):
+0. **The digest check works against the real registry.** After the first push-mode run, take one image digest from the release (`ghaConnection.one` shows the run; the artifact lists `localhost:5000/registry.devino.ca/voicelabs/web@sha256:<digest>`) and ask the registry the way Dokploy does, with the login of the Dokploy registry record, keeping the password out of the shell history and the transcript (set `REGISTRY_USER` to the record's user name first):
+
+```bash
+read -rs REGISTRY_PASSWORD   # paste the password from Resync; nothing is echoed
+printf 'user = "%s:%s"\n' "$REGISTRY_USER" "$REGISTRY_PASSWORD" | curl -sS -K - -I -o /dev/null -w '%{http_code}\n' \
+  -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+  "https://registry.devino.ca/v2/registry.devino.ca/voicelabs/web/manifests/sha256:<digest>"
+```
+
+Expected: `200` (and the `Docker-Content-Digest` header equals the digest if you print headers instead). The runner pushed through the tunnel to `localhost:5000/registry.devino.ca/voicelabs/web` and Dokploy asks `registry.devino.ca` for the name `registry.devino.ca/voicelabs/web`; these are the same storage only if that request answers. A `404` means every release of this service would be refused `image-unverified` (a blocking refusal), so stop and fix the naming before any other step.
 1. A `delivery: push` release from a push to `dev`. Expected within one minute: the GitHub Deployment gets a `success` status "Verified, not deployed" and `ghaConnection.one` shows the new deployed commit, still without a deploy.
 2. A `delivery: pull` release whose digest equals what runs (set `DOKPLOY_PUSH_DEPLOY=false` and re-run the workflow of the same commit). Expected: `success` "Already deployed", state Connected, no deploy.
 3. Before the first pull release with a new digest, take a fresh dump of the stack's database with the standing recipe and note it on the PR; if the compose has a Backups schedule, expect Dokploy to have run it first (the release shows "waiting" until the backup finishes). Then push a change to `dev`. Expected for voicekit (a raw compose): a live GitHub Actions row while the run builds, then one Dokploy deployment that continues that row, the compose still raw with the new digests pinned in its stored file (the file text before the change is saved in the release row's `sourceBackup`), a `success` Deployment status carrying the service's domain as `environment_url`, and state Connected with the sentence "Deployed from GitHub Actions." (An application built from git, which is not voicekit, would here move from git to the image and keep its old source; prove that on a scratch application.)
@@ -12637,7 +12647,7 @@ Release keys are unique per repository and GitHub environment on the Dokploy sid
 
 ```yaml
       - name: Refuse push-deploy=false without a release
-        if: ${{ !inputs.mirror-only && !(inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false') && inputs.release-key == 'none' }}
+        if: ${{ !inputs.mirror-only && !inputs.dry-run && !(inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false') && inputs.release-key == 'none' }}
         run: |
           printf '::error title=dokploy-compose::push-deploy is false (or DOKPLOY_PUSH_DEPLOY is false) and release-key is none: this workflow would neither deploy the commit nor publish a release for Dokploy. Set a release-key, or set push-deploy back to true.\n'
           exit 1
@@ -12653,12 +12663,12 @@ Release keys are unique per repository and GitHub environment on the Dokploy sid
       # A release needs a GitHub environment (acceptance rule 5 reads its branch policy); a caller without github-environment
       # publishes nothing and is told so.
       - name: Explain why no release is published
-        if: ${{ inputs.release-key != 'none' && inputs.github-environment == '' }}
+        if: ${{ inputs.release-key != 'none' && inputs.github-environment == '' && !inputs.dry-run && !inputs.mirror-only }}
         run: printf '::notice title=dokploy-compose::no release published: this caller passes no github-environment, and Dokploy only accepts a release made under a GitHub environment whose deployment branch policy allows the tracked branch.\n'
 
       - name: List the mirrored images for the release
         id: release-images
-        if: ${{ inputs.release-key != 'none' && inputs.github-environment != '' }}
+        if: ${{ inputs.release-key != 'none' && inputs.github-environment != '' && !inputs.dry-run && !inputs.mirror-only }}
         env:
           DIGESTS: ${{ steps.collect.outputs.digests }}
           PREFIX: ${{ steps.mirror.outputs.image-prefix }}
@@ -12705,7 +12715,7 @@ The mirror's image prefix is `localhost:5000/registry.devino.ca/<repo>/` with a 
 - [ ] **Step 6: Gate the Dokploy API call** on the same expression. On the existing step `Render the compose and deploy it` (`id: deploy`) add
 
 ```yaml
-        if: ${{ inputs.mirror-only || (inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false') }}
+        if: ${{ inputs.mirror-only || inputs.dry-run || (inputs.push-deploy && vars.DOKPLOY_PUSH_DEPLOY != 'false') }}
 ```
 
 and give the job output a value when the step is skipped, but only when the release really was published:
@@ -12717,6 +12727,8 @@ and give the job output a value when the step is skipped, but only when the rele
 ```
 
 Document the new value in the header comment: `deploy-result` is now `deployed | skipped | dry-run | rendered | published` (`published` = the release was handed to Dokploy, which deploys it; it is never reported when the publish step did not succeed).
+
+**A dry run or a mirror-only call publishes nothing.** A release is a statement that this commit is built and may be deployed. `dry-run` (plan against Dokploy, change nothing) and `mirror-only` (build, mirror and render only) must never make that statement: in pull mode Dokploy would really deploy it, and in push mode Dokploy would record a deploy that never happened. So the release steps carry `!inputs.dry-run && !inputs.mirror-only`, and the Dokploy call keeps running for `dry-run` (its planning is unchanged) even when `push-deploy` is false.
 
 **Backward compatibility, in one place.** (1) With the defaults a caller behaves as before plus one publish step whose failure only warns. (2) `push-deploy: false` with `release-key: none` fails the job at once with a clear error. (3) If the `vars` context is not visible inside the called workflow, `vars.DOKPLOY_PUSH_DEPLOY` is empty, the condition reads "push", and the caller keeps deploying through the API. That is the safe failure, and the proof in Task 6.2 detects it (the run still calls the Dokploy API) and gives the one-line caller edit that fixes it.
 
@@ -12736,7 +12748,7 @@ In the header comment of `dokploy-compose.yml` add a section "THE RELEASE (Dokpl
 
 - [ ] **Step 9: Add one case to the self-test**
 
-In `selftest-dokploy-compose.yml` add a case that calls the wrapper with `mirror-only: true` and `release-key: none`, and asserts that the job summary and `deploy-result` are `rendered` as before. Add a second case that calls the wrapper with `push-deploy: false` and `release-key: none` and expects the job to fail with the message of Step 3 (use the repository's existing negative-case pattern for the self-test, or assert it in a `continue-on-error` job whose next step checks the `needs` result). This protects every existing caller: with `mirror-only` or the default `push-deploy`, the behavior is unchanged, and the one invalid combination is refused instead of silently publishing nothing.
+In `selftest-dokploy-compose.yml` add a case that calls the wrapper with `mirror-only: true` and `release-key: none`, and asserts that the job summary and `deploy-result` are `rendered` as before. Add two cases that call the wrapper with a `release-key` set (for example `selftest-dry`) and, once, `dry-run: true` and, once, `mirror-only: true`; after each, a step asserts that nothing was published: `gh api "repos/${GITHUB_REPOSITORY}/deployments?task=dokploy:selftest-dry&sha=${GITHUB_SHA}"` returns an empty array and `gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" --jq '[.artifacts[] | select(.name == "dokploy-release")] | length'` prints 0. Add one more case that calls the wrapper with `push-deploy: false` and `release-key: none` and expects the job to fail with the message of Step 3 (use the repository's existing negative-case pattern for the self-test, or assert it in a `continue-on-error` job whose next step checks the `needs` result). This protects every existing caller: with `mirror-only` or the default `push-deploy`, the behavior is unchanged, and the one invalid combination is refused instead of silently publishing nothing.
 
 - [ ] **Step 10: Validate the YAML**
 
@@ -12754,7 +12766,7 @@ gh pr create --repo DevinoSolutions/.github --base main --title "feat: dokploy-c
 
 - [ ] **Step 12: Review gate**
 
-One review of the PR head (opus5-worker at high effort). Check: with the defaults a caller behaves exactly as before plus one non-blocking publish step (`continue-on-error` while `push-deploy` is true, a hard failure in pull mode); `push-deploy: false` with `release-key: none` fails with a clear error and `deploy-result` is never `published` unless the publish step succeeded; `existing-image` carries digests only (no tag) and no double slash in the image names; the release key is unique per repository and environment (explicit for a multi-service repository); the job still holds no extra secret; the live-row registration is off in pull mode; every sibling action is pinned by sha.
+One review of the PR head (opus5-worker at high effort). Check: with the defaults a caller behaves exactly as before plus one non-blocking publish step (`continue-on-error` while `push-deploy` is true, a hard failure in pull mode); `dry-run` and `mirror-only` publish no artifact and no Deployment (the self-test cases assert it); `push-deploy: false` with `release-key: none` fails with a clear error and `deploy-result` is never `published` unless the publish step succeeded; `existing-image` carries digests only (no tag) and no double slash in the image names; the release key is unique per repository and environment (explicit for a multi-service repository); the job still holds no extra secret; the live-row registration is off in pull mode; every sibling action is pinned by sha.
 
 ### Task 6.2: Cut over voicekit web (the proof adopter)
 
